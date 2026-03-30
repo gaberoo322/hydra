@@ -1,0 +1,17 @@
+{
+  "name": "hydra-orchestrator",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Hydra autonomous multi-agent development framework — data plane orchestrator",
+  "main": "src/index.mjs",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "dev": "node --watch src/index.mjs"
+  },
+  "author": "Gabe",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "express": "^5.2.1",
+    "ioredis": "^5.10.1"
+  }
+}

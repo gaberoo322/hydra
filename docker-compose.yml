@@ -1,0 +1,64 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --appendfsync everysec
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+
+  vikingdb:
+    image: ghcr.io/volcengine/openviking:main
+    command: python3 -m uvicorn openviking.storage.vectordb.service.server_fastapi:app --host 0.0.0.0 --port 5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - vikingdb-data:/app/vikingdb_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 2G
+
+  openviking:
+    image: ghcr.io/volcengine/openviking:main
+    ports:
+      - "1933:1933"
+    volumes:
+      - openviking-data:/app/workspace
+      - ./docker/ov.conf:/app/ov.conf:ro
+      - /home/gabe/obsidian-vault:/vault:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - OPENVIKING_CONFIG_FILE=/app/ov.conf
+    depends_on:
+      - redis
+      - vikingdb
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+
+volumes:
+  redis-data:
+    driver: local
+  openviking-data:
+    driver: local
+  vikingdb-data:
+    driver: local
