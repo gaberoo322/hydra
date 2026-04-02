@@ -7,6 +7,7 @@
 
 import { readdir, rename, mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { archiveApprovedProposals } from "./proposals.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
 const HYDRA_PATH = join(VAULT_PATH, "hydra");
@@ -44,10 +45,14 @@ async function archiveOldReports() {
 function startCleanupSchedule() {
   // Run immediately on startup
   archiveOldReports();
+  archiveApprovedProposals();
 
-  // Then daily at midnight
-  setInterval(archiveOldReports, 24 * 60 * 60 * 1000);
-  console.log("[Cleanup] Report archival scheduled (daily, 7-day retention)");
+  // Then daily
+  setInterval(() => {
+    archiveOldReports();
+    archiveApprovedProposals();
+  }, 24 * 60 * 60 * 1000);
+  console.log("[Cleanup] Report + proposal archival scheduled (daily, 7-day retention)");
 }
 
 export { startCleanupSchedule, archiveOldReports };

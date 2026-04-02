@@ -1,7 +1,6 @@
-import { readFile, writeFile, readdir, rename, mkdir } from "node:fs/promises";
+import { readFile, writeFile, readdir, rename, unlink, mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
-import { EventBus, STREAMS } from "./event-bus.mjs";
+import { STREAMS } from "./event-bus.mjs";
 import { runAgent, findPersonality } from "./codex-runner.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
@@ -9,10 +8,23 @@ const HYDRA_PATH = join(VAULT_PATH, "hydra");
 const ORCHESTRATOR_PATH = process.env.HYDRA_ORCHESTRATOR_PATH || resolve(process.env.HOME, "hydra");
 const PROPOSALS_DIR = join(HYDRA_PATH, "reports", "proposals");
 const APPROVED_DIR = join(PROPOSALS_DIR, "approved");
+const ARCHIVE_DIR = join(PROPOSALS_DIR, "archive");
+const APPROVED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-// In-memory proposal registry
+// In-memory proposal registry — keyed by proposalId string (not numeric)
 const proposals = new Map();
-let proposalCounter = 0;
+
+/**
+ * Generate a unique proposal ID using timestamp + random suffix.
+ * No collisions across restarts.
+ */
+function generateProposalId() {
+  const now = new Date();
+  const date = now.toISOString().split("T")[0].replace(/-/g, "");
+  const time = String(now.getHours()).padStart(2, "0") + String(now.getMinutes()).padStart(2, "0");
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `proposal-${date}-${time}-${rand}`;
+}
 
 /**
  * Run the Meta agent to analyze cycle reports and generate proposals.
@@ -36,30 +48,7 @@ async function runMetaAnalysis(eventBus, event) {
     } catch {}
   }
 
-  // Load orchestrator source for Meta to understand the system
-  let orchestratorSource = "";
-  const srcFiles = ["index.mjs", "event-bus.mjs", "cycle.mjs", "pipeline.mjs", "codex-runner.mjs"];
-  for (const file of srcFiles) {
-    try {
-      const content = await readFile(join(ORCHESTRATOR_PATH, "src", file), "utf-8");
-      orchestratorSource += `\n### ${file}\n\`\`\`javascript\n${content.substring(0, 3000)}\n\`\`\`\n`;
-    } catch {}
-  }
-
-  // Load agent personalities
-  let personalities = "";
-  const configDir = join(HYDRA_PATH, "agent-config");
-  try {
-    const configFiles = await readdir(configDir);
-    for (const file of configFiles.filter((f) => f.endsWith(".md"))) {
-      try {
-        const content = await readFile(join(configDir, file), "utf-8");
-        personalities += `\n### ${file}\n${content.substring(0, 500)}\n`;
-      } catch {}
-    }
-  } catch {}
-
-  // Load hard metrics instead of raw agent reports (V2 redesign: Meta analyzes numbers, not prose)
+  // Load hard metrics
   let metricsContext = "";
   try {
     const { getMetricsTrend, getAggregateStats } = await import("./metrics.mjs");
@@ -77,7 +66,7 @@ async function runMetaAnalysis(eventBus, event) {
       ...trend.map((m) => `- ${m.cycleId}: ${m.tasksMerged ? "merged" : m.tasksFailed ? "failed" : "abandoned"} | "${m.taskTitle}" | tests:${m.testsBefore}→${m.testsAfter} | anchor:${m.anchorType} | risk:${m.rollbackRisk || "?"} | ${m.totalDurationMs}ms`),
     ].join("\n");
   } catch {
-    metricsContext = "(No metrics available — system may be using legacy pipeline)";
+    metricsContext = "(No metrics available)";
   }
 
   const prompt = [
@@ -125,8 +114,8 @@ async function runMetaAnalysis(eventBus, event) {
 
     // Auto-approve low-risk personality proposals
     if (created.type === "personality" && created.risk === "low") {
-      console.log(`[Meta] Auto-approving low-risk personality proposal #${created.id}: ${created.title}`);
-      await approveProposal(created.id, eventBus);
+      console.log(`[Meta] Auto-approving low-risk personality proposal ${created.proposalId}: ${created.title}`);
+      await approveProposal(created.proposalId, eventBus);
     }
   }
 
@@ -138,12 +127,9 @@ async function runMetaAnalysis(eventBus, event) {
  * Create a proposal and write it to the vault.
  */
 async function createProposal(proposal, correlationId, eventBus) {
-  proposalCounter++;
-  const id = proposalCounter;
-  const proposalId = `proposal-${id}`;
+  const proposalId = generateProposalId();
 
   const record = {
-    id,
     proposalId,
     title: proposal.title,
     type: proposal.type || "personality",
@@ -155,14 +141,13 @@ async function createProposal(proposal, correlationId, eventBus) {
     correlationId,
   };
 
-  proposals.set(id, record);
+  proposals.set(proposalId, record);
 
   // Write proposal to vault
   await mkdir(PROPOSALS_DIR, { recursive: true });
   const filename = `${proposalId}.md`;
   const content = [
     "---",
-    `id: ${id}`,
     `proposalId: ${proposalId}`,
     `title: "${proposal.title}"`,
     `type: ${record.type}`,
@@ -172,7 +157,7 @@ async function createProposal(proposal, correlationId, eventBus) {
     `correlationId: ${correlationId || "manual"}`,
     "---",
     "",
-    `# Proposal #${id}: ${proposal.title}`,
+    `# ${proposalId}: ${proposal.title}`,
     "",
     `## Type: ${record.type}`,
     "",
@@ -188,7 +173,7 @@ async function createProposal(proposal, correlationId, eventBus) {
     ...(proposal.evidence || []).map((e) => `- ${e}`),
     "",
     `## How to Approve`,
-    `- Via API: \`curl -X POST http://localhost:4000/proposals/${id}/approve\``,
+    `- Via API: \`curl -X POST http://localhost:4000/proposals/${proposalId}/approve\``,
     `- Via Obsidian: Move this file to \`reports/proposals/approved/\``,
   ].join("\n");
 
@@ -202,7 +187,6 @@ async function createProposal(proposal, correlationId, eventBus) {
       correlationId,
       payload: {
         proposalId,
-        id,
         title: proposal.title,
         type: record.type,
         risk: record.risk,
@@ -211,23 +195,23 @@ async function createProposal(proposal, correlationId, eventBus) {
     });
   }
 
-  console.log(`[Proposals] Created #${id}: ${proposal.title} (${record.type}, ${record.risk} risk)`);
+  console.log(`[Proposals] Created ${proposalId}: ${proposal.title} (${record.type}, ${record.risk} risk)`);
   return record;
 }
 
 /**
- * Approve a proposal.
+ * Approve a proposal by its proposalId string.
  */
-async function approveProposal(id, eventBus) {
-  const record = proposals.get(id);
-  if (!record) return { error: `Proposal #${id} not found` };
-  if (record.status !== "pending") return { error: `Proposal #${id} is already ${record.status}` };
+async function approveProposal(proposalId, eventBus) {
+  const record = proposals.get(proposalId);
+  if (!record) return { error: `Proposal ${proposalId} not found` };
+  if (record.status !== "pending") return { error: `Proposal ${proposalId} is already ${record.status}` };
 
   record.status = "approved";
   record.approvedAt = new Date().toISOString();
 
-  // Move file to approved directory
-  const filename = `${record.proposalId}.md`;
+  // Move file to approved directory and delete the pending copy
+  const filename = `${proposalId}.md`;
   try {
     await mkdir(APPROVED_DIR, { recursive: true });
     await rename(join(PROPOSALS_DIR, filename), join(APPROVED_DIR, filename));
@@ -239,40 +223,45 @@ async function approveProposal(id, eventBus) {
       type: "proposal:approved",
       source: "orchestrator",
       correlationId: record.correlationId,
-      payload: { proposalId: record.proposalId, id, title: record.title },
+      payload: { proposalId, title: record.title },
     });
     await eventBus.publish(STREAMS.NOTIFICATIONS, {
       type: "proposal:approved",
       source: "orchestrator",
-      payload: { id, title: record.title },
+      payload: { proposalId, title: record.title },
     });
   }
 
-  console.log(`[Proposals] Approved #${id}: ${record.title}`);
+  console.log(`[Proposals] Approved ${proposalId}: ${record.title}`);
   return { approved: true, proposal: record };
 }
 
 /**
  * Reject a proposal.
  */
-async function rejectProposal(id, reason, eventBus) {
-  const record = proposals.get(id);
-  if (!record) return { error: `Proposal #${id} not found` };
-  if (record.status !== "pending") return { error: `Proposal #${id} is already ${record.status}` };
+async function rejectProposal(proposalId, reason, eventBus) {
+  const record = proposals.get(proposalId);
+  if (!record) return { error: `Proposal ${proposalId} not found` };
+  if (record.status !== "pending") return { error: `Proposal ${proposalId} is already ${record.status}` };
 
   record.status = "rejected";
   record.rejectedAt = new Date().toISOString();
   record.rejectionReason = reason || "No reason given";
 
+  // Delete the pending file
+  try {
+    await unlink(join(PROPOSALS_DIR, `${proposalId}.md`));
+  } catch {}
+
   if (eventBus) {
     await eventBus.publish(STREAMS.PROPOSALS, {
       type: "proposal:rejected",
       source: "orchestrator",
-      payload: { id, title: record.title, reason: record.rejectionReason },
+      payload: { proposalId, title: record.title, reason: record.rejectionReason },
     });
   }
 
-  console.log(`[Proposals] Rejected #${id}: ${record.title}`);
+  console.log(`[Proposals] Rejected ${proposalId}: ${record.title}`);
   return { rejected: true, proposal: record };
 }
 
@@ -305,19 +294,46 @@ async function watchApprovals(eventBus) {
         if (knownApproved.has(file)) continue;
         knownApproved.add(file);
 
-        // Extract proposal ID from filename
-        const match = file.match(/proposal-(\d+)\.md/);
-        if (match) {
-          const id = parseInt(match[1]);
-          const record = proposals.get(id);
-          if (record && record.status === "pending") {
-            console.log(`[Proposals] Detected Obsidian approval for #${id}`);
-            await approveProposal(id, eventBus);
-          }
+        // Extract proposal ID from filename (strip .md)
+        const proposalId = file.replace(/\.md$/, "");
+        const record = proposals.get(proposalId);
+        if (record && record.status === "pending") {
+          console.log(`[Proposals] Detected Obsidian approval for ${proposalId}`);
+          await approveProposal(proposalId, eventBus);
         }
       }
     } catch {}
   }, 30000);
+}
+
+/**
+ * Archive approved proposals older than 7 days.
+ * Called by the cleanup schedule.
+ */
+async function archiveApprovedProposals() {
+  try {
+    await mkdir(ARCHIVE_DIR, { recursive: true });
+    const files = await readdir(APPROVED_DIR);
+    const now = Date.now();
+    let archived = 0;
+
+    for (const file of files) {
+      if (!file.endsWith(".md")) continue;
+      try {
+        const fileStat = await stat(join(APPROVED_DIR, file));
+        if (now - fileStat.mtimeMs > APPROVED_MAX_AGE_MS) {
+          await rename(join(APPROVED_DIR, file), join(ARCHIVE_DIR, file));
+          archived++;
+        }
+      } catch {}
+    }
+
+    if (archived > 0) {
+      console.log(`[Proposals] Archived ${archived} approved proposals older than 7 days`);
+    }
+  } catch (err) {
+    console.error(`[Proposals] Archive failed:`, err.message);
+  }
 }
 
 export {
@@ -327,4 +343,5 @@ export {
   rejectProposal,
   listProposals,
   watchApprovals,
+  archiveApprovedProposals,
 };

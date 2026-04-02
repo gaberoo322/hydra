@@ -291,10 +291,10 @@ function createApi(eventBus) {
     res.json(listProposals(status));
   });
 
-  // POST /proposals/:id/approve — Approve a proposal
+  // POST /proposals/:id/approve — Approve a proposal (id is the full proposalId string)
   app.post("/proposals/:id/approve", async (req, res) => {
-    const id = parseInt(req.params.id);
-    const result = await approveProposal(id, eventBus);
+    const proposalId = req.params.id;
+    const result = await approveProposal(proposalId, eventBus);
     if (result.error) {
       res.status(404).json(result);
     } else {
@@ -304,9 +304,9 @@ function createApi(eventBus) {
 
   // POST /proposals/:id/reject — Reject a proposal
   app.post("/proposals/:id/reject", async (req, res) => {
-    const id = parseInt(req.params.id);
+    const proposalId = req.params.id;
     const reason = req.body?.reason;
-    const result = await rejectProposal(id, reason, eventBus);
+    const result = await rejectProposal(proposalId, reason, eventBus);
     if (result.error) {
       res.status(404).json(result);
     } else {
