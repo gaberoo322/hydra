@@ -104,8 +104,14 @@ stateDiagram-v2
     failed --> [*]
     abandoned --> [*]
 
-    note right of verified : Evidence stored at\nhydra:task:{id}:evidence:{state}
-    note right of failed : Stored as prior-failure\nfor retry in next cycle
+    note right of verified
+        Evidence stored at
+        hydra:task:ID:evidence:STATE
+    end note
+    note right of failed
+        Stored as prior-failure
+        for retry in next cycle
+    end note
 ```
 
 Every transition stores evidence in Redis at `hydra:task:{id}:evidence:{state}` — verification output, test results, diffs, skeptic verdicts.
