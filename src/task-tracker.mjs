@@ -178,10 +178,11 @@ class TaskTracker {
   /**
    * Log an agent execution to the cycle's agent run list.
    */
-  async logAgentRun(cycleId, agentName, taskId, duration, verdict, usage) {
+  async logAgentRun(cycleId, agentName, taskId, duration, verdict, usage, costUsd) {
     await this.redis.rpush(agentsKey(cycleId), JSON.stringify({
       agent: agentName, task: taskId, duration,
       verdict: verdict || "completed",
+      costUsd: costUsd || 0,
       timestamp: new Date().toISOString(),
     }));
     if (usage) {
@@ -189,6 +190,8 @@ class TaskTracker {
       pipe.hincrby(costsKey(cycleId), "inputTokens", usage.inputTokens || 0);
       pipe.hincrby(costsKey(cycleId), "outputTokens", usage.outputTokens || 0);
       pipe.hincrby(costsKey(cycleId), "cachedInputTokens", usage.cachedInputTokens || 0);
+      // Store cost as integer microdollars to avoid floating point in Redis hincrby
+      pipe.hincrby(costsKey(cycleId), "costMicrodollars", Math.round((costUsd || 0) * 1_000_000));
       await pipe.exec();
     }
   }

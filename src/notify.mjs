@@ -64,6 +64,15 @@ function formatMessage(event) {
     case "fix:created":
       return `🔧 *Fix Task Created*\n\`${payload.fixTaskId}\`\nFailure: ${payload.failureType}\nAttempt: ${payload.attempt}/${payload.maxAttempts}`;
 
+    case "cycle:rollback":
+      return `⏪ *Auto-Rollback*\nCycle: \`${payload.cycleId}\`\nTask: ${payload.title}\nReverted: \`${payload.revertedCommit?.slice(0, 7)}\`\nTests: ${payload.testsBefore} → ${payload.testsAfter} passing`;
+
+    case "cycle:rollback_failed":
+      return `🚨 *Rollback FAILED*\nCycle: \`${payload.cycleId}\`\nTask: ${payload.title}\nCommit: \`${payload.commitSha?.slice(0, 7)}\`\nError: ${payload.error}\nTests: ${payload.testsBefore} → ${payload.testsAfter}\n⚠️ Manual intervention required`;
+
+    case "scheduler:stopped":
+      return `⏹️ *Scheduler Stopped*\nReason: ${payload.reason}\nCycles run: ${payload.cyclesRun}`;
+
     case "deploy:completed":
       return `🚀 *Deployed*\n\`${payload.taskId}\``;
 

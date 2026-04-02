@@ -20,25 +20,20 @@ test("composePrompt includes personality, workspace, task prompt, and feedback",
   assert.match(prompt, /Keep tests small/);
 });
 
-test("buildCodexArgs forces explicit workspace and non-sandbox execution flags", () => {
+test("buildCodexArgs produces correct exec command with model and workspace", () => {
   const args = buildCodexArgs({
     prompt: "Do the work",
     model: MODEL_TIERS.codex,
     workDir: "/repo",
   });
 
-  assert.deepEqual(args.slice(0, 9), [
+  assert.deepEqual(args, [
     "exec",
     "--json",
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
-    "--sandbox",
-    "danger-full-access",
-    "--ask-for-approval",
-    "never",
-    "--model",
+    "--model", MODEL_TIERS.codex,
+    "--cd", "/repo",
+    "Do the work",
   ]);
-  assert.equal(args[9], MODEL_TIERS.codex);
-  assert.deepEqual(args.slice(10, 12), ["--cd", "/repo"]);
-  assert.equal(args.at(-1), "Do the work");
 });

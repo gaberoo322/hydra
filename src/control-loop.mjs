@@ -451,8 +451,48 @@ export async function runControlLoop(eventBus, opts = {}) {
   const finalGrounding = await groundProject(PROJECT_WORKSPACE);
   const regressionIntroduced = finalGrounding.testReport.passed < grounding.testReport.passed;
 
-  if (regressionIntroduced) {
-    console.error(`[ControlLoop] REGRESSION: Tests went from ${grounding.testReport.passed} → ${finalGrounding.testReport.passed} passing`);
+  // Auto-rollback: if tests regressed after merge, revert the merge commit
+  let rolledBack = false;
+  if (regressionIntroduced && commitSha) {
+    console.error(`[ControlLoop] REGRESSION: Tests went from ${grounding.testReport.passed} → ${finalGrounding.testReport.passed} passing — auto-reverting`);
+    try {
+      await execFileAsync("git", ["revert", "--no-edit", commitSha], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
+      await execFileAsync("git", ["push", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
+      rolledBack = true;
+      console.log(`[ControlLoop] Reverted merge commit ${commitSha.slice(0, 7)} and pushed`);
+
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
+        type: "cycle:rollback",
+        source: "control-loop",
+        correlationId: cycleId,
+        payload: {
+          cycleId,
+          taskId,
+          title: task.title,
+          revertedCommit: commitSha,
+          testsBefore: grounding.testReport.passed,
+          testsAfter: finalGrounding.testReport.passed,
+        },
+      });
+    } catch (err) {
+      console.error(`[ControlLoop] Auto-rollback failed: ${err.message}`);
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
+        type: "cycle:rollback_failed",
+        source: "control-loop",
+        correlationId: cycleId,
+        payload: {
+          cycleId,
+          taskId,
+          title: task.title,
+          commitSha,
+          error: err.message,
+          testsBefore: grounding.testReport.passed,
+          testsAfter: finalGrounding.testReport.passed,
+        },
+      });
+    }
+  } else if (regressionIntroduced) {
+    console.error(`[ControlLoop] REGRESSION: Tests went from ${grounding.testReport.passed} → ${finalGrounding.testReport.passed} passing (no commit to revert)`);
   }
 
   // Compute unresolved uncertainty and rollback risk
@@ -489,18 +529,28 @@ export async function runControlLoop(eventBus, opts = {}) {
     filesChanged: verification.filesChanged,
     unresolvedUncertainty,
     rollbackRisk,
+    rolledBack,
     durationMs: Date.now() - startTime,
     durations: {
       grounding: grounding.groundingDurationMs,
       planning: 0, // filled by caller if needed
       verification: verification.totalDurationMs,
     },
-    recommendedNext: regressionIntroduced
-      ? "URGENT: Fix regression — tests went from passing to failing"
+    recommendedNext: rolledBack
+      ? "Regression auto-reverted — investigate root cause before retrying"
+      : regressionIntroduced
+      ? "URGENT: Fix regression — auto-rollback failed, manual intervention needed"
       : unresolvedUncertainty.length > 0
       ? `Resolve uncertainty: ${unresolvedUncertainty[0]}`
       : "Continue with next priority",
   };
+
+  // If rolled back, update task state and store as prior-failure
+  if (rolledBack) {
+    report.task.finalState = "rolled-back";
+    await tracker.transitionTask(taskId, "failed", { reason: "Regression detected — auto-reverted", rolledBack: true, revertedCommit: commitSha });
+    await storePriorFailure(taskId, `Regression: tests ${grounding.testReport.passed} → ${finalGrounding.testReport.passed}`, verification);
+  }
 
   // Write reality report to vault
   const reportDir = join(HYDRA_PATH, "reports", "reality-reports");
@@ -524,8 +574,9 @@ export async function runControlLoop(eventBus, opts = {}) {
   await recordCycleMetrics(cycleId, {
     tasksAttempted: 1,
     tasksVerified: commitSha ? 1 : 0,
-    tasksMerged: commitSha ? 1 : 0,
-    tasksFailed: 0,
+    tasksMerged: (commitSha && !rolledBack) ? 1 : 0,
+    tasksFailed: rolledBack ? 1 : 0,
+    tasksRolledBack: rolledBack ? 1 : 0,
     tasksAbandoned: 0,
     testsBefore: grounding.testReport.passed,
     testsAfter: finalGrounding.testReport.passed,
@@ -536,6 +587,7 @@ export async function runControlLoop(eventBus, opts = {}) {
     groundingDurationMs: grounding.groundingDurationMs,
     verificationDurationMs: verification.totalDurationMs,
     regressionIntroduced,
+    rolledBack,
     rollbackRisk,
     unresolvedUncertaintyCount: unresolvedUncertainty.length,
     taskTitle: task.title,
@@ -659,7 +711,7 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
   // Handle explicit "no work" response
   if (task?.noWork) {
     console.log(`[ControlLoop] Planner says no work needed: ${task.reason || "all priorities addressed"}`);
-    await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "no-work", result.usage);
+    await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "no-work", result.usage, result.costUsd);
     return null;
   }
 
@@ -669,7 +721,7 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     return null;
   }
 
-  await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "completed", result.usage);
+  await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "completed", result.usage, result.costUsd);
   return task;
 }
 
@@ -737,7 +789,7 @@ async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
     }
   }
 
-  await getTracker().logAgentRun(cycleId, "skeptic", "skeptic", result.duration, verdict.verdict, result.usage);
+  await getTracker().logAgentRun(cycleId, "skeptic", "skeptic", result.duration, verdict.verdict, result.usage, result.costUsd);
   return verdict;
 }
 
@@ -805,7 +857,7 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary) {
     }
   }
 
-  await getTracker().logAgentRun(cycleId, "executor", task.taskId, result.duration, "completed", result.usage);
+  await getTracker().logAgentRun(cycleId, "executor", task.taskId, result.duration, "completed", result.usage, result.costUsd);
   return { ...output, exitCode: result.exitCode, duration: result.duration };
 }
 

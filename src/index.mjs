@@ -6,6 +6,7 @@ import { initMetrics } from "./metrics.mjs";
 import { watchApprovals } from "./proposals.mjs";
 import { sendNotification } from "./notify.mjs";
 import { startCleanupSchedule } from "./cleanup.mjs";
+import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler.mjs";
 
 const PORT = parseInt(process.env.HYDRA_PORT) || 4000;
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
@@ -31,12 +32,7 @@ async function main() {
   watchApprovals(eventBus);
   console.log("[Hydra] Proposal approval watcher started");
 
-  // Log control loop mode
-  if (process.env.HYDRA_LEGACY_PIPELINE === "1") {
-    console.log("[Hydra] LEGACY PIPELINE MODE — set HYDRA_LEGACY_PIPELINE=0 or unset for V2");
-  } else {
-    console.log("[Hydra] V2 CONTROL LOOP — ground→plan→skeptic→execute→verify→merge");
-  }
+  console.log("[Hydra] V2 CONTROL LOOP — ground→plan→skeptic→execute→verify→merge");
 
   // Create and start API server
   const app = createApi(eventBus);
@@ -93,9 +89,16 @@ async function main() {
   }, 15 * 60 * 1000); // Check every 15 minutes
   console.log("[Hydra] Cycle watchdog started (checks every 15min, TTL " + (CYCLE_TTL_MS / 60000) + "min)");
 
+  // Auto-start scheduler if HYDRA_AUTO_CYCLE_INTERVAL_MS is set
+  const schedulerResult = autoStartScheduler(eventBus);
+  if (schedulerResult) {
+    console.log(`[Hydra] Scheduler auto-started (interval: ${schedulerResult.intervalHuman})`);
+  }
+
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[Hydra] Received ${signal}, shutting down...`);
+    stopScheduler();
     stopPipeline(eventBus);
     server.close();
     await getTracker().close();

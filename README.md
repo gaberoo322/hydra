@@ -120,6 +120,10 @@ Every transition stores evidence in Redis at `hydra:task:{id}:evidence:{state}` 
 
 Before execution, the system checks whether the proposed task duplicates recent work by comparing anchor references (exact match) and task titles (>70% word overlap). Duplicates are abandoned with a notification.
 
+### Automatic Rollback
+
+If the REPORT step detects that tests regressed after a merge (fewer passing tests than before), Hydra automatically reverts the merge commit and pushes to main. The task is stored as a prior-failure for the next cycle to retry. If the revert itself fails, an urgent notification is sent for manual intervention.
+
 ### Self-Improvement
 
 A **Meta agent** analyzes cycle metrics every 5 cycles (when failures are present). It proposes concrete changes — personality tweaks, config adjustments, orchestrator improvements — based on measured outcomes like merge rate, failure rate, and regression rate. Low-risk personality changes are auto-approved; everything else requires operator approval via the API or by moving the proposal file in Obsidian.
@@ -163,7 +167,7 @@ HYDRA_VAULT_PATH=/path/to/obsidian-vault    # Where reports and agent output go
 
 # Optional
 HYDRA_CYCLE_TTL_MS=5400000                  # Cycle timeout (default: 90 minutes)
-HYDRA_LEGACY_PIPELINE=0                     # Set to 1 to use old 7-agent pipeline
+HYDRA_AUTO_CYCLE_INTERVAL_MS=300000         # Auto-run cycles every N ms (0 = disabled)
 HYDRA_AGENTS_PATH=/path/to/agency-agents    # Agent personality base files
 HYDRA_ORCHESTRATOR_PATH=/path/to/hydra      # Path to this repo (for Meta agent)
 OPENAI_PROXY_PORT=4001                      # OpenAI API proxy port
@@ -423,16 +427,36 @@ curl 'http://localhost:4000/openviking/search?q=authentication' | jq .
 
 ### Running continuous cycles
 
-To run Hydra continuously (start a new cycle as soon as the previous one finishes):
+Use the built-in scheduler to run cycles automatically:
 
 ```bash
-while true; do
-  echo "$(date) — Starting cycle..."
-  curl -s -X POST http://localhost:4000/cycle/start | jq -r '.cycleId // .error'
-  echo "$(date) — Cycle complete. Waiting 30s..."
-  sleep 30
-done
+# Start the scheduler (5 minute interval between cycles)
+curl -X POST http://localhost:4000/scheduler/start \
+  -H 'Content-Type: application/json' \
+  -d '{"intervalMs": 300000}'
+
+# Check scheduler status
+curl http://localhost:4000/scheduler/status | jq .
+
+# Stop the scheduler
+curl -X POST http://localhost:4000/scheduler/stop
 ```
+
+Or auto-start on boot by setting `HYDRA_AUTO_CYCLE_INTERVAL_MS=300000` in `.env`.
+
+The scheduler runs cycles back-to-back with the configured interval between them. It backs off automatically on repeated errors and stops after 5 consecutive failures.
+
+### Cost tracking
+
+```bash
+# View token usage and dollar costs across recent cycles
+curl http://localhost:4000/spending | jq .
+
+# Limit to last 5 cycles
+curl 'http://localhost:4000/spending?count=5' | jq .
+```
+
+Returns per-cycle token counts, cost in USD (computed from model pricing), and aggregate totals.
 
 ## Ideal Workflow
 
@@ -491,8 +515,11 @@ This is the recommended way to operate Hydra for maximum effectiveness:
 | `GET` | `/health` | System health (Redis, kill status, uptime) |
 | `GET` | `/agents/status` | Agent states in current cycle |
 | `POST` | `/agents/:id/pause` | Pause a specific agent |
-| `GET` | `/spending` | Total agent time across recent cycles |
+| `GET` | `/spending` | Token usage and dollar costs. Optional: `?count=N` |
 | `POST` | `/kill` | Emergency stop |
+| `POST` | `/scheduler/start` | Start auto-scheduling. Optional body: `{"intervalMs": 300000}` |
+| `POST` | `/scheduler/stop` | Stop auto-scheduling |
+| `GET` | `/scheduler/status` | Scheduler state, cycle counts, merge rate |
 | `GET` | `/proposals` | List proposals. Optional: `?status=pending` |
 | `POST` | `/proposals/:id/approve` | Approve a proposal |
 | `POST` | `/proposals/:id/reject` | Reject a proposal. Body: `{"reason": "..."}` |

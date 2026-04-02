@@ -3,9 +3,9 @@ import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { startCycle, getCycleStatus, getCycleHistory, killCycle } from "./cycle.mjs";
 import { listProposals, approveProposal, rejectProposal, runMetaAnalysis } from "./proposals.mjs";
-// getCycleReport is now served directly from the tracker
 import { getTracker } from "./task-tracker.mjs";
 import { getMetricsTrend, getAggregateStats } from "./metrics.mjs";
+import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "./scheduler.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
 const KILL_FILE = resolve(VAULT_PATH, ".kill");
@@ -188,15 +188,53 @@ function createApi(eventBus) {
     }
   });
 
-  // GET /spending — Token consumption from cycle metrics
+  // GET /spending — Token consumption and dollar costs from Redis
   app.get("/spending", async (req, res) => {
     try {
-      const trend = await getMetricsTrend(20);
-      const totalTokens = trend.reduce((s, m) => s + (m.totalDurationMs || 0), 0);
+      const count = parseInt(req.query.count) || 20;
+      const tracker = getTracker();
+      const trend = await getMetricsTrend(count);
+
+      let totalInputTokens = 0;
+      let totalOutputTokens = 0;
+      let totalCostUsd = 0;
+      let totalAgentTimeMs = 0;
+      const perCycle = [];
+
+      for (const m of trend) {
+        const costs = await tracker.redis.hgetall(`hydra:cycle:${m.cycleId}:costs`);
+        const input = parseInt(costs.inputTokens) || 0;
+        const output = parseInt(costs.outputTokens) || 0;
+        const costMicro = parseInt(costs.costMicrodollars) || 0;
+        const costUsd = costMicro / 1_000_000;
+
+        totalInputTokens += input;
+        totalOutputTokens += output;
+        totalCostUsd += costUsd;
+        totalAgentTimeMs += m.totalDurationMs || 0;
+
+        perCycle.push({
+          cycleId: m.cycleId,
+          inputTokens: input,
+          outputTokens: output,
+          costUsd: Math.round(costUsd * 1_000_000) / 1_000_000,
+          durationMs: m.totalDurationMs || 0,
+          task: m.taskTitle,
+        });
+      }
+
       res.json({
         recentCycles: trend.length,
-        totalAgentTimeMs: totalTokens,
-        totalAgentTimeHuman: `${Math.round(totalTokens / 1000)}s`,
+        totalInputTokens,
+        totalOutputTokens,
+        totalTokens: totalInputTokens + totalOutputTokens,
+        totalCostUsd: Math.round(totalCostUsd * 100) / 100,
+        totalAgentTimeMs,
+        totalAgentTimeHuman: `${Math.round(totalAgentTimeMs / 1000)}s`,
+        avgCostPerCycle: trend.length > 0
+          ? Math.round((totalCostUsd / trend.length) * 100) / 100
+          : 0,
+        perCycle,
       });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -281,6 +319,32 @@ function createApi(eventBus) {
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // POST /scheduler/start — Start automatic cycle scheduling
+  app.post("/scheduler/start", (req, res) => {
+    const intervalMs = req.body?.intervalMs;
+    const result = startScheduler(eventBus, { intervalMs });
+    if (result.error) {
+      res.status(409).json(result);
+    } else {
+      res.json(result);
+    }
+  });
+
+  // POST /scheduler/stop — Stop automatic cycle scheduling
+  app.post("/scheduler/stop", (req, res) => {
+    const result = stopScheduler();
+    if (result.error) {
+      res.status(409).json(result);
+    } else {
+      res.json(result);
+    }
+  });
+
+  // GET /scheduler/status — Scheduler state and stats
+  app.get("/scheduler/status", (req, res) => {
+    res.json(getSchedulerStatus());
   });
 
   // GET /events/:stream — Read recent events from a stream (for debugging)

@@ -18,6 +18,23 @@ const MODEL_TIERS = {
   efficiency: "gpt-5.4-nano",    // Alias for nano (replaces gpt-5.4-mini)
 };
 
+// Pricing per million tokens (USD) — used for cost tracking
+const MODEL_PRICING = {
+  "gpt-5.4":             { input: 2.50, output: 15.00 },
+  "gpt-5.3-codex":       { input: 1.75, output: 14.00 },
+  "gpt-5.3-codex-spark": { input: 1.75, output: 14.00 },  // same price, faster
+  "gpt-5.4-mini":        { input: 0.75, output: 4.50 },
+  "gpt-5.4-nano":        { input: 0.20, output: 1.25 },
+};
+
+function computeCost(modelId, usage) {
+  const pricing = MODEL_PRICING[modelId];
+  if (!pricing || !usage) return 0;
+  const inputCost = (usage.inputTokens || 0) / 1_000_000 * pricing.input;
+  const outputCost = (usage.outputTokens || 0) / 1_000_000 * pricing.output;
+  return Math.round((inputCost + outputCost) * 1_000_000) / 1_000_000; // 6 decimal places
+}
+
 // Per-agent timeout in ms
 const AGENT_TIMEOUTS = {
   planner: 120_000,
@@ -205,12 +222,16 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
         console.error(`[CodexRunner] Failed to write output:`, err.message);
       }
 
+      const costUsd = computeCost(resolvedModel, usage);
+
       resolve({
         output: finalMessage,
         exitCode,
         duration,
         outputFile,
         usage,
+        costUsd,
+        model: resolvedModel,
         stderr: stderr.trim(),
       });
     });
@@ -256,4 +277,4 @@ async function findPersonality(agentName) {
   return null;
 }
 
-export { runAgent, findPersonality, MODEL_TIERS, composePrompt, buildCodexArgs };
+export { runAgent, findPersonality, MODEL_TIERS, MODEL_PRICING, composePrompt, buildCodexArgs, computeCost };
