@@ -73,6 +73,12 @@ function formatMessage(event) {
     case "scheduler:stopped":
       return `⏹️ *Scheduler Stopped*\nReason: ${payload.reason}\nCycles run: ${payload.cyclesRun}`;
 
+    case "research:completed":
+      return `🔬 *Research Complete*\nProject: ${payload.projectName}\nOpportunities: ${payload.opportunityCount} found, ${payload.autoQueued} auto-queued\nDuration: ${payload.duration} | Cost: ${payload.cost}\n\nTop picks:\n${(payload.topOpportunities || []).join("\n")}${payload.summary ? `\n\n${payload.summary}` : ""}`;
+
+    case "architect:review_completed":
+      return `🏗️ *Architect Review*\nResearch cycles reviewed: ${payload.researchCyclesReviewed}\nExecution cycles reviewed: ${payload.executionCyclesReviewed}\nMethodology updates: ${payload.updatesApplied}\nCalibration: ${payload.calibration}`;
+
     case "deploy:completed":
       return `🚀 *Deployed*\n\`${payload.taskId}\``;
 

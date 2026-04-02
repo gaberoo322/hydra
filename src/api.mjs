@@ -6,6 +6,9 @@ import { listProposals, approveProposal, rejectProposal, runMetaAnalysis } from 
 import { getTracker } from "./task-tracker.mjs";
 import { getMetricsTrend, getAggregateStats } from "./metrics.mjs";
 import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "./scheduler.mjs";
+import { runResearchLoop, getLatestResearch, listResearchReports, vetoOpportunity } from "./research-loop.mjs";
+import { runArchitectReview } from "./research-architect.mjs";
+import { loadProjectGoals, summarizeGoalsForPrompt } from "./project-goals.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
 const KILL_FILE = resolve(VAULT_PATH, ".kill");
@@ -345,6 +348,115 @@ function createApi(eventBus) {
   // GET /scheduler/status — Scheduler state and stats
   app.get("/scheduler/status", (req, res) => {
     res.json(getSchedulerStatus());
+  });
+
+  // =========================================================================
+  // Research endpoints
+  // =========================================================================
+
+  // POST /research/start — Run a research cycle
+  app.post("/research/start", async (req, res) => {
+    try {
+      const opts = {};
+      if (req.body?.focusOverride) opts.focusOverride = req.body.focusOverride;
+      const result = await runResearchLoop(eventBus, opts);
+      if (result.error) {
+        res.status(400).json(result);
+      } else {
+        res.json({
+          researchId: result.researchId,
+          opportunityCount: result.opportunityCount,
+          autoQueued: result.autoQueued,
+          summary: result.synthesis?.summary,
+          topOpportunities: (result.synthesis?.opportunities || []).slice(0, 5).map(o => ({
+            rank: o.rank,
+            title: o.title,
+            adjustedScore: o.adjustedScore,
+            confidence: o.confidence,
+            autoQueue: o.autoQueue,
+            category: o.category,
+          })),
+          duration: result.duration?.totalHuman,
+          cost: result.cost?.totalUsd,
+        });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /research/latest — Most recent research report
+  app.get("/research/latest", async (req, res) => {
+    try {
+      const report = await getLatestResearch();
+      if (!report) {
+        res.status(404).json({ error: "No research reports found. Run POST /research/start first." });
+      } else {
+        res.json(report);
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /research/history — List recent research reports (metadata)
+  app.get("/research/history", async (req, res) => {
+    try {
+      const count = parseInt(req.query.count) || 10;
+      const reports = await listResearchReports(count);
+      res.json(reports);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /research/veto — Remove a research-recommended item from the queue
+  app.post("/research/veto", async (req, res) => {
+    try {
+      const { title } = req.body || {};
+      if (!title) {
+        return res.status(400).json({ error: "Missing 'title' — which opportunity to veto?" });
+      }
+      const result = await vetoOpportunity(title);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /goals — Current project goals
+  app.get("/goals", async (req, res) => {
+    try {
+      const goals = await loadProjectGoals();
+      if (!goals) {
+        res.status(404).json({ error: "No goals file found. Create direction/goals.md in the vault." });
+      } else {
+        res.json(goals);
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /goals/summary — Goals formatted for prompts (useful for debugging)
+  app.get("/goals/summary", async (req, res) => {
+    try {
+      const goals = await loadProjectGoals();
+      const summary = summarizeGoalsForPrompt(goals);
+      res.type("text/plain").send(summary);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /architect/review — Manually trigger Research Architect review
+  app.post("/architect/review", async (req, res) => {
+    try {
+      const result = await runArchitectReview(eventBus);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // GET /events/:stream — Read recent events from a stream (for debugging)

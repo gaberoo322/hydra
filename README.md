@@ -124,6 +124,21 @@ Before execution, the system checks whether the proposed task duplicates recent 
 
 If the REPORT step detects that tests regressed after a merge (fewer passing tests than before), Hydra automatically reverts the merge commit and pushes to main. The task is stored as a prior-failure for the next cycle to retry. If the revert itself fails, an urgent notification is sent for manual intervention.
 
+### Research System
+
+Hydra includes an autonomous research system that determines what to build next. Instead of a flat priority list, you define **project goals** with success metrics and focus weights, and the research system figures out the highest-leverage work.
+
+A research cycle runs three parallel agents:
+- **Domain Researcher** — web searches for strategies, best practices, competitive intelligence
+- **Technical Researcher** — deep codebase analysis, architecture assessment, tech debt inventory
+- **Market Researcher** — external API capabilities, platform changes, market conditions, new integrations
+
+A **Research Strategist** synthesizes all findings into a ranked opportunity report, scoring each opportunity against your focus weights. High-confidence items auto-queue for execution; everything else is reported for your review.
+
+A **Research Architect** periodically reviews whether research recommendations led to good execution outcomes and updates the researcher methodology files to improve quality over time. This creates a feedback loop: Research → Execute → Measure → Architect Reviews → Better Research.
+
+See [Research Workflow](#research-workflow) for setup and usage.
+
 ### Self-Improvement
 
 A **Meta agent** analyzes cycle metrics every 5 cycles (when failures are present). It proposes concrete changes — personality tweaks, config adjustments, orchestrator improvements — based on measured outcomes like merge rate, failure rate, and regression rate. Low-risk personality changes are auto-approved; everything else requires operator approval via the API or by moving the proposal file in Obsidian.
@@ -458,6 +473,108 @@ curl 'http://localhost:4000/spending?count=5' | jq .
 
 Returns per-cycle token counts, cost in USD (computed from model pricing), and aggregate totals.
 
+### Research Workflow
+
+#### 1. Create project goals
+
+Create `direction/goals.md` in your vault:
+
+```markdown
+---
+name: Algorithmic Betting Platform
+---
+
+## Success Metrics
+
+| Metric | Target | Category | Source |
+|--------|--------|----------|--------|
+| Monthly ROI | >15% | profitability | app-metrics.json |
+| Win rate | >55% | profitability | app-metrics.json |
+| Uptime | 99.9% | reliability | process monitor |
+| Bet execution latency | <500ms | reliability | app logs |
+| Error rate | <0.1% | reliability | error logs |
+| Test coverage | >80% | architecture | npm test |
+
+## Focus Weights
+
+- profitability: 35
+- reliability: 25
+- architecture: 20
+- ui_ux: 10
+- risk_management: 10
+
+## Constraints
+
+- Must support Kalshi and Polymarket APIs
+- Never risk more than 2% of bankroll per single bet
+- All bets must be logged with full audit trail
+- System must be recoverable from any crash state
+
+## Pain Points
+
+- Polymarket API drops connections silently
+- No visibility into why specific bets were placed
+- Position sizing is hardcoded, not adaptive
+```
+
+#### 2. Run a research cycle
+
+```bash
+# Run research with current goals
+curl -X POST http://localhost:4000/research/start | jq .
+
+# Run research with temporary focus override (e.g., reliability sprint)
+curl -X POST http://localhost:4000/research/start \
+  -H 'Content-Type: application/json' \
+  -d '{"focusOverride": {"reliability": 60, "profitability": 15, "architecture": 15, "ui_ux": 5, "risk_management": 5}}'
+```
+
+#### 3. Review findings
+
+```bash
+# Full latest research report
+curl http://localhost:4000/research/latest | jq .
+
+# Research history (metadata)
+curl http://localhost:4000/research/history | jq .
+
+# Current project goals
+curl http://localhost:4000/goals | jq .
+```
+
+#### 4. Veto auto-queued items you disagree with
+
+```bash
+curl -X POST http://localhost:4000/research/veto \
+  -H 'Content-Type: application/json' \
+  -d '{"title": "Add WebSocket support for real-time pricing"}'
+```
+
+#### 5. Let the architect improve research quality over time
+
+```bash
+# Manually trigger architect review (also runs automatically)
+curl -X POST http://localhost:4000/architect/review | jq .
+```
+
+#### 6. Optionally provide app metrics
+
+Create `hydra/metrics/app-metrics.json` in the vault, or set `HYDRA_APP_METRICS_URL` to an endpoint on your app:
+
+```json
+{
+  "roi_30d": 0.12,
+  "win_rate": 0.54,
+  "uptime_pct": 98.5,
+  "avg_latency_ms": 340,
+  "error_rate": 0.015,
+  "total_bets": 1247,
+  "last_updated": "2026-04-02T12:00:00Z"
+}
+```
+
+The researchers use this data to ground their recommendations in reality rather than just analyzing code.
+
 ## Ideal Workflow
 
 This is the recommended way to operate Hydra for maximum effectiveness:
@@ -524,6 +641,13 @@ This is the recommended way to operate Hydra for maximum effectiveness:
 | `POST` | `/proposals/:id/approve` | Approve a proposal |
 | `POST` | `/proposals/:id/reject` | Reject a proposal. Body: `{"reason": "..."}` |
 | `POST` | `/meta/analyze` | Manually trigger Meta analysis |
+| `POST` | `/research/start` | Run a research cycle. Optional body: `{"focusOverride": {...}}` |
+| `GET` | `/research/latest` | Full latest research report |
+| `GET` | `/research/history` | Recent research reports (metadata). Optional: `?count=N` |
+| `POST` | `/research/veto` | Remove auto-queued item. Body: `{"title": "..."}` |
+| `GET` | `/goals` | Current project goals |
+| `GET` | `/goals/summary` | Goals formatted as text (debugging) |
+| `POST` | `/architect/review` | Trigger Research Architect methodology review |
 | `GET` | `/openviking/search` | Search knowledge base. Required: `?q=query` |
 | `GET` | `/events/:stream` | Debug: recent events from a Redis stream |
 
@@ -611,6 +735,9 @@ hydra/
 │   ├── proposals.mjs        # Meta agent + proposal system (create, approve, reject)
 │   ├── notify.mjs           # Telegram notifications via OpenClaw CLI
 │   ├── metrics.mjs          # Cycle analytics — recording, trends, drift detection
+│   ├── research-loop.mjs     # Research cycle (3 researchers → strategist → auto-queue)
+│   ├── research-architect.mjs # Self-improving methodology review
+│   ├── project-goals.mjs    # Project goals document parser
 │   ├── cleanup.mjs          # Report archival (7-day retention)
 │   ├── vault-watcher.mjs    # File watcher — indexes vault into OpenViking
 │   └── openai-proxy.mjs     # Bridges OpenViking to Codex subscription for embeddings
@@ -622,7 +749,12 @@ hydra/
 │   ├── tester.md
 │   ├── researcher.md
 │   ├── meta.md
-│   └── devops.md
+│   ├── devops.md
+│   ├── domain-researcher.md  # Domain/strategy research personality
+│   ├── technical-researcher.md # Codebase/architecture analysis
+│   ├── market-researcher.md  # External APIs/market intelligence
+│   ├── research-strategist.md # Synthesis and opportunity ranking
+│   └── research-architect.md # Methodology self-improvement
 ├── docker/
 │   ├── ov.conf              # OpenViking server configuration
 │   └── ov-entrypoint.sh     # OpenViking entrypoint script
