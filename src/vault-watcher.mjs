@@ -25,7 +25,7 @@ const DEBOUNCE_MS = parseInt(process.env.WATCHER_DEBOUNCE_MS) || 2000;
 const INDEXABLE_EXTS = new Set([".md", ".txt", ".json", ".yaml", ".yml", ".csv"]);
 
 // Directories to skip
-const SKIP_DIRS = new Set([".obsidian", ".git", "node_modules", ".trash", "orchestrator/node_modules"]);
+const SKIP_DIRS = new Set([".obsidian", ".git", "node_modules", ".trash"]);
 
 const pending = new Map(); // path -> timeout
 

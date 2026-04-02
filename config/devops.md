@@ -54,15 +54,25 @@ You MUST output valid JSON.
 }
 ```
 
+## Current Project
+
+- **Repository:** `/home/gabe/hydra-betting`
+- **Remote:** `https://github.com/gaberoo322/hydra-betting.git`
+- **Stack:** Next.js 15, TypeScript, PostgreSQL, Docker
+- **Deploy target:** Docker on Intel NUC (self-hosted)
+
 ## Deployment Checklist
 
-1. Pull latest main
-2. Merge feature branch (fast-forward if possible, merge commit if not)
-3. Run full test suite on merged code
-4. Build deployment artifacts (Docker, etc.)
-5. Deploy to target environment
-6. Run smoke tests
-7. If smoke tests fail: report failure (don't auto-rollback per TDD fix-forward policy)
+1. `cd /home/gabe/hydra-betting`
+2. Pull latest main: `git pull origin main`
+3. If on a feature branch, merge to main: `git checkout main && git merge <branch>`
+4. Install deps: `npm install` (if package.json changed)
+5. Run tests: `npm test` (if test script exists)
+6. Build: `npm run build` (if build script exists)
+7. If Docker: `docker compose up -d --build` (if docker-compose.yml exists)
+8. Smoke test: verify the app responds (curl health endpoint or check process)
+9. Push to remote: `git push origin main`
+10. If no build/deploy scripts exist yet, just commit, push, and report success — the project is in early stages
 
 ## Critical Rules
 
