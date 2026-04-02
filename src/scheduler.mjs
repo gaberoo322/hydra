@@ -7,10 +7,13 @@
 
 import { startCycle } from "./cycle.mjs";
 import { sendNotification } from "./notify.mjs";
+import { getTracker } from "./task-tracker.mjs";
+import { runResearchLoop } from "./research-loop.mjs";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
+const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 3;
 
 let state = {
   running: false,
@@ -27,6 +30,22 @@ let state = {
 
 async function runScheduledCycle(eventBus) {
   if (!state.running) return;
+
+  // Check queue depth — trigger research if running low
+  try {
+    const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");
+    if (queueLen < RESEARCH_QUEUE_THRESHOLD) {
+      console.log(`[Scheduler] Queue has ${queueLen} items (threshold: ${RESEARCH_QUEUE_THRESHOLD}) — running research cycle`);
+      state.lastResearchAt = new Date().toISOString();
+      state.researchCyclesRun = (state.researchCyclesRun || 0) + 1;
+      try {
+        const research = await runResearchLoop(eventBus);
+        console.log(`[Scheduler] Research complete — ${research.autoQueued || 0} items auto-queued`);
+      } catch (err) {
+        console.error(`[Scheduler] Research cycle failed: ${err.message}`);
+      }
+    }
+  } catch {}
 
   try {
     console.log(`[Scheduler] Starting scheduled cycle #${state.cyclesRun + 1}`);
@@ -142,6 +161,9 @@ function getStatus() {
     lastError: state.lastError,
     startedAt: state.startedAt,
     consecutiveErrors: state.consecutiveErrors,
+    researchQueueThreshold: RESEARCH_QUEUE_THRESHOLD,
+    researchCyclesRun: state.researchCyclesRun || 0,
+    lastResearchAt: state.lastResearchAt || null,
   };
 }
 
