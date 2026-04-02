@@ -1,29 +1,22 @@
 import Redis from "ioredis";
 import { randomUUID } from "node:crypto";
 
-// Stream topology from TDD §7.2
+// Stream topology — V2 control loop
 const STREAMS = {
-  CYCLE: "hydra:cycle",
-  TASKS: "hydra:tasks",
-  CODE: "hydra:code",
-  REVIEW: "hydra:review",
-  TEST: "hydra:test",
+  CYCLE: "hydra:cycle",   // cycle start events (used by cycle.mjs)
+  TASKS: "hydra:tasks",   // task events (used by legacy pipeline if HYDRA_LEGACY_PIPELINE=1)
   META: "hydra:meta",
   PROPOSALS: "hydra:proposals",
   NOTIFICATIONS: "hydra:notifications",
   DLQ: "hydra:dlq",
 };
 
-// Consumer groups per stream
+// Consumer groups — only streams with active consumers
 const CONSUMER_GROUPS = {
-  [STREAMS.CYCLE]: ["strategist"],
-  [STREAMS.TASKS]: ["researcher", "architect", "builder"],
-  [STREAMS.CODE]: ["reviewer"],
-  [STREAMS.REVIEW]: ["tester"],
-  [STREAMS.TEST]: ["devops"],
   [STREAMS.META]: ["meta"],
   [STREAMS.PROPOSALS]: ["orchestrator"],
   [STREAMS.NOTIFICATIONS]: ["openclaw"],
+  [STREAMS.DLQ]: ["dlq-processor"],
 };
 
 class EventBus {
@@ -82,22 +75,36 @@ class EventBus {
   async consume(stream, group, consumer, handler, opts = {}) {
     const { count = 1, blockMs = 5000 } = opts;
 
-    // First, reclaim any pending messages from previous crashes
-    const pending = await this.subscriber.xreadgroup(
-      "GROUP", group, consumer,
-      "COUNT", count,
-      "STREAMS", stream, "0"
-    );
-    if (pending?.[0]?.[1]?.length) {
-      for (const [msgId, fields] of pending[0][1]) {
-        const event = this._parseFields(fields);
-        try {
-          await handler(event);
-          await this.subscriber.xack(stream, group, msgId);
-        } catch (err) {
-          await this._handleFailure(stream, group, msgId, event, err);
+    // First, reclaim pending messages from dead consumers via XAUTOCLAIM.
+    // XREADGROUP with "0" only returns messages owned by THIS consumer,
+    // missing messages orphaned by old consumers (e.g., after a restart).
+    const MIN_IDLE_MS = 60_000; // claim messages idle > 1 minute
+    try {
+      let startId = "0-0";
+      while (true) {
+        const result = await this.subscriber.xautoclaim(
+          stream, group, consumer, MIN_IDLE_MS, startId, "COUNT", 10
+        );
+        // result: [nextStartId, [[msgId, fields], ...], deletedIds]
+        const [nextId, claimed] = result;
+        if (claimed.length === 0) break;
+
+        for (const [msgId, fields] of claimed) {
+          if (!fields || fields.length === 0) continue; // deleted message
+          const event = this._parseFields(fields);
+          try {
+            console.log(`[EventBus] Reclaimed orphan ${event.type} on ${stream}/${group} (msg ${msgId})`);
+            await handler(event);
+            await this.subscriber.xack(stream, group, msgId);
+          } catch (err) {
+            await this._handleFailure(stream, group, msgId, event, err);
+          }
         }
+        if (nextId === "0-0") break;
+        startId = nextId;
       }
+    } catch (err) {
+      console.error(`[EventBus] XAUTOCLAIM failed on ${stream}/${group}:`, err.message);
     }
 
     // Then listen for new messages

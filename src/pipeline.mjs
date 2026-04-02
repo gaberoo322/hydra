@@ -1,284 +1,75 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+/**
+ * Pipeline consumers — notification, DLQ, and meta agent consumers.
+ *
+ * The V2 control loop (control-loop.mjs) handles all agent execution directly.
+ * This module only provides background stream consumers for:
+ * - Notifications (Telegram via OpenClaw)
+ * - Dead-letter queue (alert + mark tasks failed)
+ * - Meta agent (process improvement from hard metrics)
+ */
+
 import { STREAMS } from "./event-bus.mjs";
-import { runAgent, findPersonality } from "./codex-runner.mjs";
+import { getTracker } from "./task-tracker.mjs";
 import { runMetaAnalysis } from "./proposals.mjs";
-import { handleFailure } from "./fix-forward.mjs";
+import { sendNotification } from "./notify.mjs";
 
-const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
+// ---------------------------------------------------------------------------
+// Consumer crash recovery — restart consumers with backoff on fatal errors
+// ---------------------------------------------------------------------------
 
-// Agent pipeline definition from TDD §6.1
-// Maps: agent -> { subscribes: [stream, eventTypes], publishes: [stream, eventType] }
-const AGENT_PIPELINE = {
-  researcher: {
-    stream: STREAMS.TASKS,
-    group: "researcher",
-    filter: (evt) => evt.type === "task:created" && evt.payload?.taskType === "research",
-    publishStream: STREAMS.TASKS,
-    publishType: "research:completed",
-    model: "frontier",
-    outputDir: "reports/research-findings",
-  },
-  architect: {
-    stream: STREAMS.TASKS,
-    group: "architect",
-    filter: (evt) => evt.type === "task:created" && evt.payload?.taskType === "design",
-    publishStream: STREAMS.TASKS,
-    publishType: "design:completed",
-    model: "frontier",
-    outputDir: "reports/decisions",
-  },
-  builder: {
-    stream: STREAMS.TASKS,
-    group: "builder",
-    filter: (evt) =>
-      (evt.type === "task:created" && evt.payload?.taskType === "build") ||
-      evt.type === "spec:published",
-    publishStream: STREAMS.CODE,
-    publishType: "code:ready",
-    model: "codex",
-    outputDir: "reports/cycle-summaries",
-  },
-  reviewer: {
-    stream: STREAMS.CODE,
-    group: "reviewer",
-    filter: (evt) => evt.type === "code:ready",
-    publishStream: STREAMS.REVIEW,
-    publishType: null, // determined by verdict: review:passed or review:failed
-    model: "frontier",
-    outputDir: "reports/cycle-summaries",
-  },
-  tester: {
-    stream: STREAMS.REVIEW,
-    group: "tester",
-    filter: (evt) => evt.type === "review:passed",
-    publishStream: STREAMS.TEST,
-    publishType: null, // test:passed or test:failed
-    model: "codex",
-    outputDir: "reports/cycle-summaries",
-  },
-  devops: {
-    stream: STREAMS.TEST,
-    group: "devops",
-    filter: (evt) => evt.type === "test:passed",
-    publishStream: STREAMS.NOTIFICATIONS,
-    publishType: null, // deploy:completed or deploy:failed
-    model: "codex",
-    outputDir: "reports/cycle-summaries",
-  },
-};
+const MAX_CONSUMER_RESTARTS = 5;
+const BACKOFF_BASE_MS = 5000;
 
-/**
- * Build the task prompt for an agent, injecting context from OpenViking and the vault.
- */
-async function buildPrompt(agentName, event) {
-  const payload = event.payload || {};
-  const parts = [];
+async function startConsumerWithRecovery(name, startFn) {
+  let restarts = 0;
 
-  parts.push(`You are the ${agentName} agent. Process the following event.`);
-  parts.push(`\n## Event\n- Type: ${event.type}\n- Source: ${event.source}\n- Correlation ID: ${event.correlationId}`);
+  while (true) {
+    try {
+      await startFn();
+      break; // normal exit via stopConsuming
+    } catch (err) {
+      restarts++;
+      console.error(`[Pipeline] ${name} consumer crashed (restart ${restarts}/${MAX_CONSUMER_RESTARTS}):`, err.message);
 
-  if (payload.title) parts.push(`\n## Task: ${payload.title}`);
-  if (payload.description) parts.push(`\n${payload.description}`);
-  if (payload.acceptanceCriteria?.length) {
-    parts.push(`\n## Acceptance Criteria`);
-    payload.acceptanceCriteria.forEach((c, i) => parts.push(`${i + 1}. ${c}`));
-  }
+      if (restarts > MAX_CONSUMER_RESTARTS) {
+        console.error(`[Pipeline] ${name} consumer exceeded max restarts — giving up`);
+        await sendNotification({
+          type: "consumer:dead",
+          payload: { consumer: name, error: err.message, restarts },
+        });
+        break;
+      }
 
-  // Load upstream agent output if referenced
-  if (payload.upstreamOutput) {
-    parts.push(`\n## Upstream Agent Output\n${payload.upstreamOutput}`);
-  }
-
-  // Load north star for context (L0 summary)
-  try {
-    const northStar = await readFile(join(VAULT_PATH, "north-star.md"), "utf-8");
-    // Just include the first few lines as context
-    const brief = northStar.split("\n").slice(0, 15).join("\n");
-    parts.push(`\n## North Star (Summary)\n${brief}`);
-  } catch {}
-
-  parts.push(`\n## Instructions\nFollow your personality file. Output ONLY valid JSON as specified in your personality. No markdown fences, no explanation outside the JSON.`);
-
-  return parts.join("\n");
-}
-
-/**
- * Process a single event for an agent.
- */
-async function processEvent(agentName, config, event, eventBus) {
-  console.log(`[Pipeline] ${agentName} processing ${event.type} (${event.id})`);
-
-  const personality = await findPersonality(agentName);
-  const prompt = await buildPrompt(agentName, event);
-
-  const result = await runAgent({
-    agentName,
-    personality,
-    prompt,
-    model: config.model,
-    taskId: event.payload?.taskId || event.id,
-    correlationId: event.correlationId,
-  });
-
-  console.log(`[Pipeline] ${agentName} completed in ${result.duration}ms (exit: ${result.exitCode})`);
-
-  // Parse agent JSON output
-  let agentOutput = {};
-  try {
-    agentOutput = JSON.parse(result.output);
-  } catch {
-    const match = result.output.match(/\{[\s\S]*\}/);
-    if (match) {
-      try { agentOutput = JSON.parse(match[0]); } catch {}
+      const delay = BACKOFF_BASE_MS * restarts;
+      console.log(`[Pipeline] Restarting ${name} consumer in ${delay}ms...`);
+      await new Promise((r) => setTimeout(r, delay));
     }
   }
-
-  // Write agent output to vault
-  const outputDir = join(VAULT_PATH, config.outputDir);
-  await mkdir(outputDir, { recursive: true });
-  const outputFile = join(outputDir, `${event.correlationId || "manual"}-${agentName}-${event.payload?.taskId || "output"}.md`);
-  const outputContent = [
-    "---",
-    `agent: ${agentName}`,
-    `event: ${event.type}`,
-    `task: ${event.payload?.taskId || "unknown"}`,
-    `duration: ${result.duration}ms`,
-    `timestamp: ${new Date().toISOString()}`,
-    `correlationId: ${event.correlationId || "manual"}`,
-    "---",
-    "",
-    result.output,
-  ].join("\n");
-  await writeFile(outputFile, outputContent);
-
-  // Write agent memory
-  await extractMemory(agentName, event, agentOutput, result);
-
-  // Determine what to publish downstream
-  let publishType = config.publishType;
-  if (!publishType) {
-    // Agent-specific verdict logic
-    const verdict = agentOutput.verdict || agentOutput.status;
-    if (agentName === "reviewer") {
-      publishType = verdict === "pass" ? "review:passed" : "review:failed";
-    } else if (agentName === "tester") {
-      publishType = verdict === "pass" ? "test:passed" : "test:failed";
-    } else if (agentName === "devops") {
-      publishType = verdict === "deployed" || agentOutput.status === "deployed"
-        ? "deploy:completed" : "deploy:failed";
-    }
-  }
-
-  // Publish downstream event
-  if (publishType && config.publishStream) {
-    await eventBus.publish(config.publishStream, {
-      type: publishType,
-      source: agentName,
-      correlationId: event.correlationId,
-      payload: {
-        taskId: event.payload?.taskId,
-        upstreamOutput: result.output.slice(0, 4000), // Truncate for event size
-        ...agentOutput,
-      },
-    });
-    console.log(`[Pipeline] ${agentName} published ${publishType} to ${config.publishStream}`);
-  }
-
-  // Handle failures: notify and trigger fix-forward
-  if (publishType?.includes("failed")) {
-    await eventBus.publish(STREAMS.NOTIFICATIONS, {
-      type: `${agentName}:failed`,
-      source: agentName,
-      correlationId: event.correlationId,
-      payload: {
-        taskId: event.payload?.taskId,
-        reason: agentOutput.summary || "Agent reported failure",
-        issues: agentOutput.issues,
-      },
-    });
-
-    // Fix-forward: create a fix task for the failing step
-    await handleFailure(
-      { type: publishType, correlationId: event.correlationId, payload: { taskId: event.payload?.taskId, summary: agentOutput.summary, issues: agentOutput.issues } },
-      eventBus
-    );
-  }
-
-  // After DevOps completes (success or fail), publish cycle:report to trigger Meta analysis
-  if (agentName === "devops") {
-    await eventBus.publish(STREAMS.META, {
-      type: "cycle:report",
-      source: "orchestrator",
-      correlationId: event.correlationId,
-      payload: { trigger: "pipeline_complete" },
-    });
-  }
-
-  return { agentOutput, publishType, result };
 }
 
-/**
- * Extract learnings from agent output and write to memories/{agent}/
- */
-async function extractMemory(agentName, event, agentOutput, result) {
-  const memoryDir = join(VAULT_PATH, "memories", agentName);
-  await mkdir(memoryDir, { recursive: true });
+// ---------------------------------------------------------------------------
+// Notification consumer — sends events to Telegram via OpenClaw
+// ---------------------------------------------------------------------------
 
-  // Only write memory if the agent produced meaningful output
-  if (!result.output || result.output.length < 50) return;
-
-  const date = new Date().toISOString().split("T")[0];
-  const memoryFile = join(memoryDir, `${date}-${event.correlationId || "manual"}.md`);
-
-  const memoryContent = [
-    "---",
-    `agent: ${agentName}`,
-    `date: ${date}`,
-    `event: ${event.type}`,
-    `task: ${event.payload?.taskId || "unknown"}`,
-    `duration: ${result.duration}ms`,
-    `exitCode: ${result.exitCode}`,
-    "---",
-    "",
-    `## Summary`,
-    agentOutput.summary || "(no summary)",
-    "",
-    `## Key Decisions`,
-    agentOutput.reasoning || agentOutput.recommendation || "(none recorded)",
-    "",
-    `## Outcome`,
-    agentOutput.verdict || agentOutput.status || "completed",
-  ].join("\n");
-
-  await writeFile(memoryFile, memoryContent);
+async function consumeNotifications(eventBus) {
+  const consumer = `notify-${process.pid}`;
+  await eventBus.consume(
+    STREAMS.NOTIFICATIONS,
+    "openclaw",
+    consumer,
+    async (event) => {
+      await sendNotification(event);
+    },
+    { count: 1, blockMs: 5000 },
+  );
 }
 
-/**
- * Start the agent pipeline. Each agent runs as a consumer on its Redis stream.
- * Agents process events sequentially within their consumer group.
- */
-async function startPipeline(eventBus) {
-  console.log("[Pipeline] Starting agent pipeline...");
-
-  for (const [agentName, config] of Object.entries(AGENT_PIPELINE)) {
-    // Start each agent's consumer loop (non-blocking)
-    consumeForAgent(agentName, config, eventBus).catch((err) => {
-      console.error(`[Pipeline] Fatal error in ${agentName} consumer:`, err);
-    });
-    console.log(`[Pipeline] ${agentName} listening on ${config.stream} (group: ${config.group})`);
-  }
-
-  // Start Meta agent consumer on hydra:meta stream
-  consumeMetaAgent(eventBus).catch((err) => {
-    console.error(`[Pipeline] Fatal error in meta consumer:`, err);
-  });
-  console.log(`[Pipeline] meta listening on ${STREAMS.META} (group: meta)`);
-}
+// ---------------------------------------------------------------------------
+// Meta agent consumer — process improvement from measured failures
+// ---------------------------------------------------------------------------
 
 async function consumeMetaAgent(eventBus) {
   const consumer = `meta-${process.pid}`;
-
   await eventBus.consume(
     STREAMS.META,
     "meta",
@@ -289,34 +80,74 @@ async function consumeMetaAgent(eventBus) {
         await runMetaAnalysis(eventBus, event);
       }
     },
-    { count: 1, blockMs: 10000 }
+    { count: 1, blockMs: 10000 },
   );
 }
 
-async function consumeForAgent(agentName, config, eventBus) {
-  const consumer = `${agentName}-${process.pid}`;
+// ---------------------------------------------------------------------------
+// DLQ consumer — process dead-letter entries, alert, and mark tasks failed
+// ---------------------------------------------------------------------------
 
+async function consumeDLQ(eventBus) {
+  const consumer = `dlq-${process.pid}`;
   await eventBus.consume(
-    config.stream,
-    config.group,
+    STREAMS.DLQ,
+    "dlq-processor",
     consumer,
     async (event) => {
-      // Apply event type filter
-      if (!config.filter(event)) {
-        return; // ACK and skip — this event isn't for us
+      const { originalStream, originalGroup, originalEvent, error, deliveryCount } = event.payload || {};
+      console.error(`[DLQ] Failed event from ${originalStream}/${originalGroup}: ${originalEvent?.type} — ${error} (${deliveryCount} attempts)`);
+
+      await sendNotification({
+        type: "dlq:alert",
+        payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
+      });
+
+      const taskId = originalEvent?.payload?.taskId;
+      if (taskId) {
+        const trackingTaskId = originalEvent?.payload?.originalTaskId || taskId;
+        await getTracker().markTaskDone(trackingTaskId, "failed", eventBus);
       }
-      await processEvent(agentName, config, event, eventBus);
     },
-    { count: 1, blockMs: 5000 }
+    { count: 1, blockMs: 10000 },
   );
 }
 
+// ---------------------------------------------------------------------------
+// Startup
+// ---------------------------------------------------------------------------
+
 /**
- * Stop the pipeline.
+ * Start background consumers for notifications, DLQ, and meta.
+ * The V2 control loop handles agent execution — no agent consumers needed.
  */
-function stopPipeline(eventBus) {
-  eventBus.stopConsuming();
-  console.log("[Pipeline] Pipeline stopped");
+async function startPipeline(eventBus) {
+  console.log("[Pipeline] Starting background consumers...");
+
+  // Recover held tasks from Redis (from previous cycle's dependency holds)
+  try {
+    const recovered = await getTracker().recoverHeldTasks();
+    if (recovered.length > 0) {
+      console.log(`[Pipeline] Recovered ${recovered.length} held task(s) from Redis`);
+    }
+  } catch (err) {
+    console.error(`[Pipeline] Failed to recover held tasks:`, err.message);
+  }
+
+  // Start consumers with crash recovery
+  startConsumerWithRecovery("meta", () => consumeMetaAgent(eventBus));
+  console.log(`[Pipeline] meta listening on ${STREAMS.META}`);
+
+  startConsumerWithRecovery("notifications", () => consumeNotifications(eventBus));
+  console.log(`[Pipeline] notifications → Telegram bridge started`);
+
+  startConsumerWithRecovery("dlq", () => consumeDLQ(eventBus));
+  console.log(`[Pipeline] dlq-processor listening on ${STREAMS.DLQ}`);
 }
 
-export { startPipeline, stopPipeline, processEvent, AGENT_PIPELINE };
+function stopPipeline(eventBus) {
+  eventBus.stopConsuming();
+  console.log("[Pipeline] Consumers stopped");
+}
+
+export { startPipeline, stopPipeline };

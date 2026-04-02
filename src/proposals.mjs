@@ -5,7 +5,9 @@ import { EventBus, STREAMS } from "./event-bus.mjs";
 import { runAgent, findPersonality } from "./codex-runner.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
-const PROPOSALS_DIR = join(VAULT_PATH, "reports", "proposals");
+const HYDRA_PATH = join(VAULT_PATH, "hydra");
+const ORCHESTRATOR_PATH = process.env.HYDRA_ORCHESTRATOR_PATH || resolve(process.env.HOME, "hydra");
+const PROPOSALS_DIR = join(HYDRA_PATH, "reports", "proposals");
 const APPROVED_DIR = join(PROPOSALS_DIR, "approved");
 
 // In-memory proposal registry
@@ -19,7 +21,7 @@ async function runMetaAnalysis(eventBus, event) {
   console.log("[Meta] Analyzing cycle reports for improvement opportunities...");
 
   // Gather recent cycle reports
-  const reportsDir = join(VAULT_PATH, "reports", "cycle-summaries");
+  const reportsDir = join(HYDRA_PATH, "reports", "cycle-summaries");
   let reportFiles = [];
   try {
     const files = await readdir(reportsDir);
@@ -39,14 +41,14 @@ async function runMetaAnalysis(eventBus, event) {
   const srcFiles = ["index.mjs", "event-bus.mjs", "cycle.mjs", "pipeline.mjs", "codex-runner.mjs"];
   for (const file of srcFiles) {
     try {
-      const content = await readFile(join(VAULT_PATH, "orchestrator", "src", file), "utf-8");
+      const content = await readFile(join(ORCHESTRATOR_PATH, "src", file), "utf-8");
       orchestratorSource += `\n### ${file}\n\`\`\`javascript\n${content.substring(0, 3000)}\n\`\`\`\n`;
     } catch {}
   }
 
   // Load agent personalities
   let personalities = "";
-  const configDir = join(VAULT_PATH, "orchestrator", "config");
+  const configDir = join(HYDRA_PATH, "agent-config");
   try {
     const configFiles = await readdir(configDir);
     for (const file of configFiles.filter((f) => f.endsWith(".md"))) {
@@ -57,24 +59,42 @@ async function runMetaAnalysis(eventBus, event) {
     }
   } catch {}
 
+  // Load hard metrics instead of raw agent reports (V2 redesign: Meta analyzes numbers, not prose)
+  let metricsContext = "";
+  try {
+    const { getMetricsTrend, getAggregateStats } = await import("./metrics.mjs");
+    const trend = await getMetricsTrend(10);
+    const stats = await getAggregateStats(10);
+    metricsContext = [
+      `## Measured Cycle Metrics (last ${trend.length} cycles)`,
+      `Merged rate: ${stats.mergedRate}%`,
+      `Failed rate: ${stats.failedRate}%`,
+      `Abandoned rate: ${stats.abandonedRate}%`,
+      `Regression rate: ${stats.regressionRate}%`,
+      `Average cycle duration: ${stats.avgDurationHuman}`,
+      "",
+      "### Per-cycle detail:",
+      ...trend.map((m) => `- ${m.cycleId}: ${m.tasksMerged ? "merged" : m.tasksFailed ? "failed" : "abandoned"} | "${m.taskTitle}" | tests:${m.testsBefore}→${m.testsAfter} | anchor:${m.anchorType} | risk:${m.rollbackRisk || "?"} | ${m.totalDurationMs}ms`),
+    ].join("\n");
+  } catch {
+    metricsContext = "(No metrics available — system may be using legacy pipeline)";
+  }
+
   const prompt = [
-    "You are the Meta agent. Analyze the following cycle reports, orchestrator source code, and agent personalities.",
-    "Identify patterns in failures, inefficiencies, or quality issues. Propose specific, conservative improvements.",
+    "You are the Meta agent. You analyze MEASURED OUTCOMES only — not agent prose, not self-reported summaries.",
+    "You receive hard metrics from recent cycles. Propose improvements based ONLY on these numbers.",
     "",
-    "## Recent Cycle Reports",
-    reportContent || "(No cycle reports found)",
+    metricsContext,
     "",
-    "## Orchestrator Source Code",
-    orchestratorSource.substring(0, 8000) || "(Not available)",
-    "",
-    "## Agent Personalities",
-    personalities.substring(0, 4000) || "(Not available)",
+    reportContent ? `## Raw Cycle Reports (for context only — trust the metrics above, not these summaries)\n${reportContent.substring(0, 3000)}` : "",
     "",
     "## Instructions",
-    "1. Identify 1-3 specific patterns worth improving",
-    "2. For each, propose a concrete change with expected impact",
-    "3. Output ONLY valid JSON as specified in your personality",
-  ].join("\n");
+    "1. Identify 1-3 patterns from the METRICS that suggest real problems",
+    "2. For each, propose a concrete change with expected measurable impact",
+    "3. Do NOT propose speculative process changes without metric evidence",
+    "4. Do NOT propose changes that add ceremony without reducing failure rate or regression rate",
+    "5. Output ONLY valid JSON as specified in your personality",
+  ].filter(Boolean).join("\n");
 
   const personality = await findPersonality("meta");
   const result = await runAgent({
@@ -97,14 +117,20 @@ async function runMetaAnalysis(eventBus, event) {
     }
   }
 
-  // Create proposals from Meta's output
+  // Create proposals from Meta's output, auto-triage low-risk ones
   const createdProposals = [];
   for (const proposal of metaOutput.proposals || []) {
     const created = await createProposal(proposal, event?.correlationId, eventBus);
     createdProposals.push(created);
+
+    // Auto-approve low-risk personality proposals
+    if (created.type === "personality" && created.risk === "low") {
+      console.log(`[Meta] Auto-approving low-risk personality proposal #${created.id}: ${created.title}`);
+      await approveProposal(created.id, eventBus);
+    }
   }
 
-  console.log(`[Meta] Created ${createdProposals.length} proposals`);
+  console.log(`[Meta] Created ${createdProposals.length} proposals (${createdProposals.filter(p => p.status === "approved").length} auto-approved)`);
   return { metaOutput, proposals: createdProposals };
 }
 
