@@ -6,36 +6,41 @@ Hydra uses [Codex CLI](https://github.com/openai/codex) as its agent runtime and
 
 ## Architecture
 
-```
-                        ┌──────────────────────────────────────────────────────┐
-                        │                  V2 CONTROL LOOP                     │
-                        │                                                      │
-  POST /cycle/start ──► │  GROUND ─► ANCHOR ─► PLAN ─► SKEPTIC ─► EXECUTE     │
-                        │     │                   │        │          │         │
-                        │     │    (project        │   (codex agent)  │         │
-                        │     │     inspection)    │        │     (codex agent) │
-                        │     │                    │        ▼          │         │
-                        │     │              (codex agent)  approve    │         │
-                        │     │                    │        or reject  │         │
-                        │     ▼                    ▼          │       ▼         │
-                        │   tests, types,       1 bounded     │    feature      │
-                        │   git state,          task with     │    branch       │
-                        │   TODO markers        verification  │    with code    │
-                        │                       plan          │    changes      │
-                        │                                     │                 │
-                        │  ◄────────────────────────────────  │                 │
-                        │                                     ▼                 │
-                        │  REPORT ◄── MERGE ◄── VERIFY                         │
-                        │     │         │          │                            │
-                        │     │     (git merge     │    (command execution,     │
-                        │     │      --no-ff)      │     NOT an agent)          │
-                        │     │         │          │                            │
-                        │     ▼         ▼          ▼                            │
-                        │  reality    merged     npm test,                      │
-                        │  report     to main    npm run typecheck,             │
-                        │  + metrics             npm run build                  │
-                        │                                                      │
-                        └──────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    trigger["POST /cycle/start"] --> ground
+
+    subgraph loop["V2 Control Loop"]
+        direction LR
+
+        ground["1. GROUND\n\nRun tests\nTypecheck\nGit state\nTODO markers"]
+        anchor["2. ANCHOR\n\nSelect what\nto work on"]
+        plan["3. PLAN\n\nCodex agent\n1 bounded task\n+ verification plan"]
+        skeptic{"4. SKEPTIC\n\nCodex agent\nChallenge\nassumptions"}
+        execute["5. EXECUTE\n\nCodex agent\nFeature branch\nCode changes"]
+        verify["6. VERIFY\n\nnpm test\nnpm run typecheck\nnpm run build"]
+        merge["7. MERGE\n\ngit merge --no-ff\ngit push origin main"]
+        report["8. REPORT\n\nReality report\nMetrics to Redis\nNotification"]
+
+        ground --> anchor --> plan --> skeptic
+        skeptic -- "approve" --> execute --> verify
+        verify -- "all passed" --> merge --> report
+        skeptic -- "reject" --> abandoned1["Task abandoned"]
+        verify -- "failed" --> retry["Store as\nprior-failure\nfor next cycle"]
+    end
+
+    style ground fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
+    style anchor fill:#2d3a4a,stroke:#60a5fa,color:#e2e8f0
+    style plan fill:#3d2d4a,stroke:#a78bfa,color:#e2e8f0
+    style skeptic fill:#4a3d2d,stroke:#fbbf24,color:#e2e8f0
+    style execute fill:#3d2d4a,stroke:#a78bfa,color:#e2e8f0
+    style verify fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
+    style merge fill:#2d3a4a,stroke:#60a5fa,color:#e2e8f0
+    style report fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
+    style abandoned1 fill:#4a2d2d,stroke:#f87171,color:#e2e8f0
+    style retry fill:#4a3d2d,stroke:#fbbf24,color:#e2e8f0
+    style trigger fill:#1e293b,stroke:#94a3b8,color:#e2e8f0
+    style loop fill:#0f172a,stroke:#334155,color:#e2e8f0
 ```
 
 Only three Codex agent calls per cycle: **Planner**, **Skeptic**, and **Executor**. Verification and merge are deterministic command execution — not agents making claims.
@@ -71,14 +76,36 @@ Each cycle follows an 8-step evidence-driven pipeline:
 
 ### Task State Machine
 
-```
-proposed ──► approved ──► in-progress ──► changed-code ──► verified ──► merged
-    │              │                                              │
-    ▼              ▼                                              ▼
-abandoned     abandoned                                        failed
-                                                                  │
-                                                                  ▼
-                                                            abandoned
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> proposed
+    proposed --> approved : skeptic approves
+    proposed --> abandoned : skeptic rejects
+
+    approved --> in_progress : execution starts
+    approved --> abandoned
+
+    in_progress --> changed_code : diff exists
+    in_progress --> failed : no changes / error
+    in_progress --> blocked
+
+    blocked --> approved : unblocked
+    blocked --> abandoned
+
+    changed_code --> verified : verification passes
+    changed_code --> failed : verification fails
+
+    verified --> merged : git merge + push
+    verified --> failed : merge conflict
+
+    merged --> [*]
+    failed --> [*]
+    abandoned --> [*]
+
+    note right of verified : Evidence stored at\nhydra:task:{id}:evidence:{state}
+    note right of failed : Stored as prior-failure\nfor retry in next cycle
 ```
 
 Every transition stores evidence in Redis at `hydra:task:{id}:evidence:{state}` — verification output, test results, diffs, skeptic verdicts.
