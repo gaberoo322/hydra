@@ -101,7 +101,7 @@ async function runMetaAnalysis(eventBus, event) {
     agentName: "meta",
     personality,
     prompt,
-    model: "frontier",
+    model: "nano",
     taskId: `meta-analysis-${Date.now()}`,
     correlationId: event?.correlationId || "manual",
   });

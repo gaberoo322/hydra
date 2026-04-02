@@ -9,11 +9,13 @@ const AGENTS_PATH = process.env.HYDRA_AGENTS_PATH || resolve(process.env.HOME, "
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
 const CODEX_BIN = process.env.CODEX_BIN || "codex";
 
-// Model routing table from TDD §13
+// Model routing table
 const MODEL_TIERS = {
-  frontier: "gpt-5.4",
-  codex: "gpt-5.3-codex",
-  efficiency: "gpt-5.4-mini",
+  frontier: "gpt-5.4",           // Planner, Skeptic — best reasoning
+  codex: "gpt-5.3-codex",        // Executor — specialist coding
+  rapid: "gpt-5.3-codex-spark",  // ~15x faster, lower accuracy — quick fixes, frontend iteration
+  nano: "gpt-5.4-nano",          // Ultra-cheap analysis — Meta agent, classification
+  efficiency: "gpt-5.4-nano",    // Alias for nano (replaces gpt-5.4-mini)
 };
 
 // Per-agent timeout in ms

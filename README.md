@@ -502,12 +502,21 @@ This is the recommended way to operate Hydra for maximum effectiveness:
 
 ## Agent Model Routing
 
-| Agent | Model | Timeout | Purpose |
-|-------|-------|---------|---------|
-| Planner | `gpt-5.4` (frontier) | 2 min | Decompose anchor into a bounded task |
-| Skeptic | `gpt-5.4` (frontier) | 2 min | Challenge task assumptions, veto bad proposals |
-| Executor | `gpt-5.3-codex` (codex) | 10 min | Make code changes on a feature branch |
-| Meta | `gpt-5.4` (frontier) | 3 min | Analyze metrics, propose improvements |
+| Agent | Model | Tier | Timeout | Purpose |
+|-------|-------|------|---------|---------|
+| Planner | `gpt-5.4` | frontier | 2 min | Decompose anchor into a bounded task |
+| Skeptic | `gpt-5.4` | frontier | 2 min | Challenge task assumptions, veto bad proposals |
+| Executor | `gpt-5.3-codex` | codex | 10 min | Make code changes on a feature branch |
+| Meta | `gpt-5.4-nano` | nano | 3 min | Analyze metrics, propose improvements |
+
+### Available Model Tiers
+
+| Tier | Model | Context | Price (in/out per MTok) | Best For |
+|------|-------|---------|------------------------|----------|
+| `frontier` | `gpt-5.4` | 1,050K | $2.50 / $15.00 | Planning, reasoning, critical decisions |
+| `codex` | `gpt-5.3-codex` | 400K | $1.75 / $14.00 | Specialist coding, implementation |
+| `rapid` | `gpt-5.3-codex-spark` | 128K | Pro sub | ~15x faster, quick fixes, frontend iteration |
+| `nano` | `gpt-5.4-nano` | 400K | $0.20 / $1.25 | Analysis, classification, cheap high-volume tasks |
 
 ## Redis Data Model
 
