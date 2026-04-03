@@ -850,12 +850,12 @@ async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
     agentName: "skeptic",
     personality,
     prompt,
-    model: "nano",
+    model: "codex",
     taskId: "skeptic",
     correlationId: cycleId,
   });
 
-  let verdict = { verdict: "approve", reason: "Skeptic produced no parseable output — defaulting to approve" };
+  let verdict = { verdict: "reject", reason: "Skeptic produced no parseable output — fail safe" };
   try {
     verdict = JSON.parse(result.output);
   } catch {
