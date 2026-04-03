@@ -2,6 +2,9 @@
  * Cycle Scheduler
  *
  * Runs development cycles on a configurable interval.
+ * Auto-triggers research when the work queue runs low (throttled).
+ * Auto-triggers architect review every N research cycles.
+ *
  * Controlled via API: POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status
  */
 
@@ -9,11 +12,15 @@ import { startCycle } from "./cycle.mjs";
 import { sendNotification } from "./notify.mjs";
 import { getTracker } from "./task-tracker.mjs";
 import { runResearchLoop } from "./research-loop.mjs";
+import { runArchitectReview } from "./research-architect.mjs";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
+
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 3;
+const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 12 * 60 * 60 * 1000; // 12 hours
+const ARCHITECT_EVERY_N_RESEARCH = parseInt(process.env.HYDRA_ARCHITECT_EVERY_N_RESEARCH) || 3;
 
 let state = {
   running: false,
@@ -26,25 +33,59 @@ let state = {
   lastError: null,
   startedAt: null,
   consecutiveErrors: 0,
+  researchCyclesRun: 0,
+  lastResearchAt: null,
+  lastArchitectAt: null,
+  researchSinceLastArchitect: 0,
 };
+
+async function maybeRunResearch(eventBus) {
+  // Check queue depth
+  const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");
+  if (queueLen >= RESEARCH_QUEUE_THRESHOLD) return;
+
+  // Check throttle — don't run research more often than the minimum interval
+  if (state.lastResearchAt) {
+    const elapsed = Date.now() - new Date(state.lastResearchAt).getTime();
+    if (elapsed < RESEARCH_MIN_INTERVAL_MS) {
+      const remaining = Math.round((RESEARCH_MIN_INTERVAL_MS - elapsed) / 60_000);
+      console.log(`[Scheduler] Queue low (${queueLen}) but research throttled — next research in ~${remaining}min`);
+      return;
+    }
+  }
+
+  console.log(`[Scheduler] Queue has ${queueLen} items (threshold: ${RESEARCH_QUEUE_THRESHOLD}) — running research cycle`);
+  try {
+    const research = await runResearchLoop(eventBus);
+    state.researchCyclesRun++;
+    state.lastResearchAt = new Date().toISOString();
+    state.researchSinceLastArchitect++;
+    console.log(`[Scheduler] Research complete — ${research.autoQueued || 0} items auto-queued`);
+
+    // Auto-trigger architect review every N research cycles
+    if (state.researchSinceLastArchitect >= ARCHITECT_EVERY_N_RESEARCH) {
+      console.log(`[Scheduler] ${state.researchSinceLastArchitect} research cycles since last architect review — triggering`);
+      try {
+        const review = await runArchitectReview(eventBus);
+        state.lastArchitectAt = new Date().toISOString();
+        state.researchSinceLastArchitect = 0;
+        const updates = review.updatesApplied || review.review?.methodologyUpdates?.length || 0;
+        console.log(`[Scheduler] Architect review complete — ${updates} methodology updates`);
+      } catch (err) {
+        console.error(`[Scheduler] Architect review failed: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.error(`[Scheduler] Research cycle failed: ${err.message}`);
+  }
+}
 
 async function runScheduledCycle(eventBus) {
   if (!state.running) return;
 
-  // Check queue depth — trigger research if running low
+  // Check if research is needed (throttled)
   try {
-    const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");
-    if (queueLen < RESEARCH_QUEUE_THRESHOLD) {
-      console.log(`[Scheduler] Queue has ${queueLen} items (threshold: ${RESEARCH_QUEUE_THRESHOLD}) — running research cycle`);
-      state.lastResearchAt = new Date().toISOString();
-      state.researchCyclesRun = (state.researchCyclesRun || 0) + 1;
-      try {
-        const research = await runResearchLoop(eventBus);
-        console.log(`[Scheduler] Research complete — ${research.autoQueued || 0} items auto-queued`);
-      } catch (err) {
-        console.error(`[Scheduler] Research cycle failed: ${err.message}`);
-      }
-    }
+    await maybeRunResearch(eventBus);
   } catch {}
 
   try {
@@ -112,7 +153,7 @@ function start(eventBus, opts = {}) {
   state.startedAt = new Date().toISOString();
   state.consecutiveErrors = 0;
 
-  console.log(`[Scheduler] Started — running cycles every ${intervalMs / 1000}s`);
+  console.log(`[Scheduler] Started — cycles every ${intervalMs / 1000}s, research throttle ${RESEARCH_MIN_INTERVAL_MS / 3600_000}h, architect every ${ARCHITECT_EVERY_N_RESEARCH} research cycles`);
 
   // Run first cycle immediately
   runScheduledCycle(eventBus);
@@ -161,9 +202,15 @@ function getStatus() {
     lastError: state.lastError,
     startedAt: state.startedAt,
     consecutiveErrors: state.consecutiveErrors,
-    researchQueueThreshold: RESEARCH_QUEUE_THRESHOLD,
-    researchCyclesRun: state.researchCyclesRun || 0,
-    lastResearchAt: state.lastResearchAt || null,
+    research: {
+      queueThreshold: RESEARCH_QUEUE_THRESHOLD,
+      minIntervalHuman: formatDuration(RESEARCH_MIN_INTERVAL_MS),
+      cyclesRun: state.researchCyclesRun,
+      lastResearchAt: state.lastResearchAt,
+      architectEveryN: ARCHITECT_EVERY_N_RESEARCH,
+      researchSinceLastArchitect: state.researchSinceLastArchitect,
+      lastArchitectAt: state.lastArchitectAt,
+    },
   };
 }
 

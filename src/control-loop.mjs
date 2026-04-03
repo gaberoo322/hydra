@@ -41,16 +41,21 @@ async function selectAnchor(grounding, opts = {}) {
     return { ...opts.anchor, whyNow: "Explicit operator request" };
   }
 
-  // 2. Queued work items (from POST /queue)
+  // 2. Queued work items (from POST /queue or research auto-queue)
   const queued = await getTracker().redis.lpop("hydra:anchors:work-queue");
   if (queued) {
     try {
       const item = JSON.parse(queued);
+      // Parse research context if present
+      let parsedContext = item.context;
+      if (typeof parsedContext === "string") {
+        try { parsedContext = JSON.parse(parsedContext); } catch {}
+      }
       return {
-        type: "user-request",
+        type: item.source === "research" ? "research" : "user-request",
         reference: item.reference || item.description,
-        whyNow: `Queued by operator: ${item.reason || "from work queue"}`,
-        context: item.context,
+        whyNow: `Queued by ${item.source === "research" ? "research system" : "operator"}: ${item.reason || "from work queue"}`,
+        context: parsedContext,
       };
     } catch {}
   }
@@ -620,6 +625,30 @@ export async function runControlLoop(eventBus, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Research context formatter — gives the planner rich context from research
+// ---------------------------------------------------------------------------
+
+function buildResearchContext(ctx) {
+  if (!ctx || typeof ctx !== "object") return "";
+  const parts = ["\n## RESEARCH CONTEXT (from research system — use this to guide your task)"];
+  if (ctx.description) parts.push(`\n### What to build\n${ctx.description}`);
+  if (ctx.rationale) parts.push(`\n### Why (research rationale)\n${ctx.rationale}`);
+  if (ctx.acceptanceCriteria?.length > 0) {
+    parts.push("\n### Acceptance Criteria (from research — incorporate into your task)");
+    for (const c of ctx.acceptanceCriteria) parts.push(`- ${c}`);
+  }
+  if (ctx.complexity) parts.push(`\n### Estimated complexity: ${ctx.complexity}`);
+  if (ctx.prerequisites?.length > 0) {
+    parts.push(`\n### Prerequisites: ${ctx.prerequisites.join(", ")}`);
+  }
+  if (ctx.category) parts.push(`\n### Focus category: ${ctx.category}`);
+  if (ctx.confidence) parts.push(`### Research confidence: ${ctx.confidence}`);
+  if (ctx.adjustedScore) parts.push(`### Research score: ${ctx.adjustedScore}`);
+  if (ctx.sources?.length > 0) parts.push(`### Identified by: ${ctx.sources.join(", ")} researchers`);
+  return parts.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Agent runners — each calls codex exec with a specific personality + prompt
 // ---------------------------------------------------------------------------
 
@@ -648,7 +677,8 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     `Type: ${anchor.type}`,
     `Reference: ${anchor.reference}`,
     `Why now: ${anchor.whyNow}`,
-    anchor.context ? `\nContext:\n${typeof anchor.context === "string" ? anchor.context.slice(0, 2000) : JSON.stringify(anchor.context).slice(0, 2000)}` : "",
+    anchor.context && anchor.type === "research" ? buildResearchContext(anchor.context) : "",
+    anchor.context && anchor.type !== "research" ? `\nContext:\n${typeof anchor.context === "string" ? anchor.context.slice(0, 2000) : JSON.stringify(anchor.context).slice(0, 2000)}` : "",
     "",
     groundingSummary,
     "",
