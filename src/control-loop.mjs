@@ -9,6 +9,7 @@ import { groundProject, summarizeForPrompt, getDiff, getDiffStat } from "./groun
 import { runVerification, validateDiffExists, summarizeVerification, defaultVerificationPlan } from "./verifier.mjs";
 import { sendNotification } from "./notify.mjs";
 import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.mjs";
+import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson } from "./agent-memory.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -258,10 +259,10 @@ export async function runControlLoop(eventBus, opts = {}) {
     "total", 1,
     "completed", 0,
     "failed", 0,
+    "abandoned", 0,
     "timedOut", 0,
   );
   await tracker.initTaskV2(cycleId, task);
-  await tracker.transitionTask(taskId, "proposed", { anchor });
 
   console.log(`[ControlLoop] Task: "${task.title}" (anchor: ${task.anchorType}, confidence: ${task.confidence})`);
 
@@ -304,6 +305,11 @@ export async function runControlLoop(eventBus, opts = {}) {
       payload: { taskId, title: task.title, reason: skepticResult.reason },
     });
 
+    try {
+      await recordPlannerLesson(cycleId, task, "abandoned", { reason: `Skeptic rejected: ${skepticResult.reason}` });
+      await recordSkepticLesson(cycleId, task, "reject", "abandoned");
+    } catch {}
+
     return {
       cycleId,
       tasks: [{ taskId, finalState: "abandoned", reason: skepticResult.reason }],
@@ -328,6 +334,10 @@ export async function runControlLoop(eventBus, opts = {}) {
     console.log(`[ControlLoop] Executor produced no code changes — failing task`);
     await tracker.transitionTask(taskId, "failed", { reason: "No code changes produced", execResult: { exitCode: execResult.exitCode, duration: execResult.duration } });
     await storePriorFailure(taskId, "No code changes produced", null);
+    try {
+      await recordPlannerLesson(cycleId, task, "failed", { failReason: "Executor produced no code changes" });
+      await recordExecutorLesson(cycleId, task, "failed", { noDiff: true });
+    } catch {}
     return {
       cycleId,
       tasks: [{ taskId, finalState: "failed", reason: "No code changes" }],
@@ -379,6 +389,14 @@ export async function runControlLoop(eventBus, opts = {}) {
       regressionIntroduced: false, taskTitle: task.title,
       anchorType: task.anchorType, anchorReference: task.anchorReference,
     });
+
+    // Record failure lessons for agents
+    const failedStderr = verification.steps.find(s => !s.passed)?.stderr || "";
+    try {
+      await recordPlannerLesson(cycleId, task, "failed", { failReason: `Verification failed: ${failedSteps.join(", ")}`, failedSteps });
+      await recordExecutorLesson(cycleId, task, "failed", { failedSteps, verificationStderr: failedStderr });
+      await recordSkepticLesson(cycleId, task, "approve", "failed");
+    } catch {}
 
     // Discard the broken branch to leave the repo clean for the next cycle
     try {
@@ -600,6 +618,21 @@ export async function runControlLoop(eventBus, opts = {}) {
     anchorReference: task.anchorReference,
   });
 
+  // Record agent lessons from this cycle's outcome
+  const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
+  try {
+    await recordPlannerLesson(cycleId, task, finalState, {
+      filesChanged: verification.filesChanged.length,
+    });
+    await recordExecutorLesson(cycleId, task, finalState, {
+      testsBefore: grounding.testReport.passed,
+      testsAfter: finalGrounding.testReport.passed,
+    });
+    await recordSkepticLesson(cycleId, task, "approve", finalState);
+  } catch (err) {
+    console.error(`[ControlLoop] Failed to record agent lessons: ${err.message}`);
+  }
+
   // Complete the cycle in tracker
   await tracker.redis.hset(`hydra:cycle:${cycleId}`, "status", "completed", "completedAt", new Date().toISOString());
   await tracker.redis.set("hydra:cycle:last", cycleId);
@@ -653,10 +686,11 @@ function buildResearchContext(ctx) {
 // ---------------------------------------------------------------------------
 
 async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, continuityContext = "") {
-  // Load context documents
-  const [priorities, feedback] = await Promise.all([
+  // Load context documents and agent memory
+  const [priorities, feedback, plannerMemory] = await Promise.all([
     readFile(join(HYDRA_PATH, "direction", "priorities.md"), "utf-8").catch(() => ""),
     readFile(join(HYDRA_PATH, "agent-feedback", "to-strategist.md"), "utf-8").catch(() => ""),
+    loadAgentMemory("planner"),
   ]);
 
   const confidence = grounding.testReport.failed > 0 ? "low"
@@ -690,6 +724,9 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     "",
     // Cumulative accomplishments — prevent re-proposing completed work
     accomplishmentsContext,
+    "",
+    // Agent memory — learn from past outcomes
+    formatMemoryForPrompt(plannerMemory, "planner"),
     "",
     `## INSTRUCTIONS`,
     `Confidence: ${confidence.toUpperCase()}. Produce exactly 1 task, or null if no actionable work exists.`,
@@ -756,7 +793,8 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
 }
 
 async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
-  // Load recent cycle history for duplicate detection
+  // Load skeptic memory and recent cycle history
+  const skepticMemory = await loadAgentMemory("skeptic");
   let recentHistory = "";
   try {
     const reportDir = join(HYDRA_PATH, "reports", "reality-reports");
@@ -786,6 +824,8 @@ async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
     groundingSummary.slice(0, 4000),
     "",
     recentHistory ? `## RECENT CYCLE HISTORY (check for duplicates)\n${recentHistory}` : "",
+    "",
+    formatMemoryForPrompt(skepticMemory, "skeptic"),
     "",
     `## YOUR CHALLENGE CHECKLIST`,
     `1. Is this task ANCHORED to real evidence? (not inferred strategy)`,
@@ -824,6 +864,9 @@ async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
 }
 
 async function runExecutorAgent(cycleId, task, grounding, groundingSummary) {
+  // Load executor memory
+  const executorMemory = await loadAgentMemory("executor");
+
   // Find a representative test file so executor can match the project's test patterns
   let testPatternHint = "";
   try {
@@ -852,6 +895,8 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary) {
     "",
     testPatternHint,
     groundingSummary.slice(0, 3000),
+    "",
+    formatMemoryForPrompt(executorMemory, "executor"),
     "",
     `## RULES`,
     `1. FIRST: \`git checkout main && git pull origin main\` then create feature branch: \`git checkout -b feature/${cycleId}-slug\``,
