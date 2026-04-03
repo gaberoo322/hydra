@@ -37,47 +37,109 @@ function formatMessage(event) {
   const payload = event.payload || {};
 
   switch (type) {
-    case "cycle:tasks_created":
-      return `🔄 *Hydra Cycle Started*\nCycle: \`${payload.cycleId}\`${payload.goal ? `\nGoal: ${payload.goal}` : ""}\nTasks: ${payload.taskCount}\n${(payload.tasks || []).map(t => `• ${t}`).join("\n")}`;
+    // --- Cycle lifecycle ---
 
-    case "cycle:constraint_warning":
-      return `⚠️ *Constraint Warning*\n${payload.taskCount} tasks created, but ${(payload.flagged || []).length} may violate constraints:\n${(payload.flagged || []).map(f => `• "${f.task}" → ${f.constraint}`).join("\n")}`;
+    case "cycle:start":
+      return `🔄 *Cycle Started*\n\`${payload.cycleId}\``;
 
-    case "cycle:completed":
-      return `✅ *Cycle Complete*\nTasks: ${payload.total} total, ${payload.completed} succeeded, ${payload.failed} failed`;
+    case "cycle:completed": {
+      // V2 control loop sends the full reality report as payload
+      const task = payload.task;
+      const g = payload.grounding;
+      if (task) {
+        const icon = task.finalState === "merged" ? "✅" : task.finalState === "rolled-back" ? "⏪" : "📋";
+        const lines = [
+          `${icon} *Cycle Complete — ${task.finalState}*`,
+          `\`${payload.cycleId}\``,
+          `Task: ${task.title}`,
+        ];
+        if (g) lines.push(`Tests: ${g.before?.passed ?? "?"} → ${g.after?.passed ?? "?"} passing`);
+        if (payload.commitSha) lines.push(`Commit: \`${payload.commitSha.slice(0, 7)}\``);
+        if (payload.filesChanged?.length > 0) lines.push(`Files: ${payload.filesChanged.length} changed`);
+        if (payload.rolledBack) lines.push(`⚠️ Regression detected — auto-reverted`);
+        if (payload.rollbackRisk === "high") lines.push(`Risk: HIGH`);
+        const dur = payload.durationMs ? `${Math.round(payload.durationMs / 1000)}s` : "?";
+        lines.push(`Duration: ${dur}`);
+        return lines.join("\n");
+      }
+      // Fallback for task-tracker format
+      const total = payload.total ?? "?";
+      const completed = payload.completed ?? "?";
+      const failed = payload.failed ?? 0;
+      return `✅ *Cycle Complete*\n${completed}/${total} tasks succeeded${failed > 0 ? `, ${failed} failed` : ""}`;
+    }
 
     case "cycle:stalled":
-      return `🐢 *Cycle Stalled*\nCycle: \`${payload.cycleId}\`\nElapsed: ${payload.elapsed}\nTasks still in progress: ${payload.inProgress}`;
+      return `🐢 *Cycle Stalled*\n\`${payload.cycleId}\`\nElapsed: ${payload.elapsed}\n${payload.inProgress} tasks still active`;
 
     case "cycle:failed":
-      return `❌ *Cycle Failed*\nCycle: \`${payload.cycleId}\`\nError: ${payload.error}`;
+      return `❌ *Cycle Failed*\n\`${payload.cycleId}\`\nError: ${payload.error}`;
 
-    case "proposal:created":
-      return `💡 *New Proposal #${payload.id}*\nTitle: ${payload.title}\nType: ${payload.type} | Risk: ${payload.risk}\nImpact: ${payload.impact || "unspecified"}`;
+    case "cycle:auto_killed":
+      return `💀 *Cycle Auto-Killed*\n\`${payload.cycleId}\`\nExceeded TTL (${payload.elapsed} > ${payload.ttl})\n${payload.tasksTimedOut} tasks timed out`;
 
-    case "proposal:approved":
-      return `✅ *Proposal #${payload.id} Approved*\n${payload.title}`;
+    case "cycle:stale_priorities":
+      return `📝 *Stale Priorities*\n${payload.message}`;
+
+    // --- Task events ---
+
+    case "task:rejected":
+      return `🚫 *Task Rejected by Skeptic*\n\`${payload.taskId}\`\n"${payload.title}"\nReason: ${payload.reason}`;
+
+    case "task:verification_failed":
+      return `❌ *Verification Failed*\n\`${payload.taskId}\`\n"${payload.title}"\nFailed: ${(payload.failedSteps || []).join(", ")}`;
+
+    case "task:drift_detected":
+      return `🔁 *Drift Detected*\n\`${payload.taskId}\`\n"${payload.title}"\n${payload.drift?.reason || "Duplicate of recent work"}`;
+
+    case "task:merge_failed":
+      return `⚠️ *Merge Failed*\n\`${payload.taskId}\`\n"${payload.title}"\nError: ${payload.error}`;
 
     case "task:shelved":
       return `📦 *Task Shelved*\n\`${payload.taskId}\`\nReason: ${payload.reason}`;
 
-    case "fix:created":
-      return `🔧 *Fix Task Created*\n\`${payload.fixTaskId}\`\nFailure: ${payload.failureType}\nAttempt: ${payload.attempt}/${payload.maxAttempts}`;
+    // --- Rollback ---
 
     case "cycle:rollback":
-      return `⏪ *Auto-Rollback*\nCycle: \`${payload.cycleId}\`\nTask: ${payload.title}\nReverted: \`${payload.revertedCommit?.slice(0, 7)}\`\nTests: ${payload.testsBefore} → ${payload.testsAfter} passing`;
+      return `⏪ *Auto-Rollback*\n\`${payload.cycleId}\`\nTask: ${payload.title}\nReverted: \`${payload.revertedCommit?.slice(0, 7)}\`\nTests: ${payload.testsBefore} → ${payload.testsAfter} passing`;
 
     case "cycle:rollback_failed":
-      return `🚨 *Rollback FAILED*\nCycle: \`${payload.cycleId}\`\nTask: ${payload.title}\nCommit: \`${payload.commitSha?.slice(0, 7)}\`\nError: ${payload.error}\nTests: ${payload.testsBefore} → ${payload.testsAfter}\n⚠️ Manual intervention required`;
+      return `🚨 *Rollback FAILED — Manual Fix Needed*\n\`${payload.cycleId}\`\nTask: ${payload.title}\nCommit: \`${payload.commitSha?.slice(0, 7)}\`\nError: ${payload.error}\nTests: ${payload.testsBefore} → ${payload.testsAfter}`;
+
+    // --- Scheduler ---
 
     case "scheduler:stopped":
       return `⏹️ *Scheduler Stopped*\nReason: ${payload.reason}\nCycles run: ${payload.cyclesRun}`;
 
-    case "research:completed":
-      return `🔬 *Research Complete*\nProject: ${payload.projectName}\nOpportunities: ${payload.opportunityCount} found, ${payload.autoQueued} auto-queued\nDuration: ${payload.duration} | Cost: ${payload.cost}\n\nTop picks:\n${(payload.topOpportunities || []).join("\n")}${payload.summary ? `\n\n${payload.summary}` : ""}`;
+    // --- Research ---
+
+    case "research:completed": {
+      const lines = [
+        `🔬 *Research Complete*`,
+        `Project: ${payload.projectName}`,
+        `${payload.opportunityCount} opportunities found, ${payload.autoQueued} auto-queued`,
+        `Duration: ${payload.duration} | Cost: ${payload.cost}`,
+      ];
+      if (payload.topOpportunities?.length > 0) {
+        lines.push("", "Top picks:");
+        for (const opp of payload.topOpportunities) lines.push(`• ${opp}`);
+      }
+      if (payload.summary) lines.push("", payload.summary);
+      return lines.join("\n");
+    }
 
     case "architect:review_completed":
-      return `🏗️ *Architect Review*\nResearch cycles reviewed: ${payload.researchCyclesReviewed}\nExecution cycles reviewed: ${payload.executionCyclesReviewed}\nMethodology updates: ${payload.updatesApplied}\nCalibration: ${payload.calibration}`;
+      return `🏗️ *Architect Review*\n${payload.researchCyclesReviewed} research + ${payload.executionCyclesReviewed} execution cycles reviewed\n${payload.updatesApplied} methodology updates\nCalibration: ${payload.calibration}`;
+
+    // --- Proposals ---
+
+    case "proposal:created":
+      return `💡 *New Proposal*\n${payload.proposalId || `#${payload.id}`}\nTitle: ${payload.title}\nType: ${payload.type} | Risk: ${payload.risk}`;
+
+    case "proposal:approved":
+      return `✅ *Proposal Approved*\n${payload.proposalId || `#${payload.id}`}: ${payload.title}`;
+
+    // --- Deploy ---
 
     case "deploy:completed":
       return `🚀 *Deployed*\n\`${payload.taskId}\``;
@@ -85,12 +147,16 @@ function formatMessage(event) {
     case "deploy:failed":
       return `⚠️ *Deploy Failed*\n\`${payload.taskId}\`\nReason: ${payload.reason || "unknown"}`;
 
+    // --- DLQ ---
+
+    case "dlq:alert":
+      return `🔴 *Dead Letter*\nStream: ${payload.originalStream}\nEvent: ${payload.eventType}\nError: ${payload.error}\nAttempts: ${payload.deliveryCount}`;
+
     default:
-      // Generic format for unhandled types
       if (type.includes("failed")) {
-        return `⚠️ *${type}*\n${payload.reason || payload.summary || JSON.stringify(payload).slice(0, 200)}`;
+        return `⚠️ *${type}*\n${payload.reason || payload.summary || JSON.stringify(payload).slice(0, 300)}`;
       }
-      return `📋 *${type}*\n${payload.summary || payload.title || JSON.stringify(payload).slice(0, 200)}`;
+      return `📋 *${type}*\n${payload.summary || payload.title || JSON.stringify(payload).slice(0, 300)}`;
   }
 }
 
