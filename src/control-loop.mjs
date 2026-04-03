@@ -290,9 +290,15 @@ export async function runControlLoop(eventBus, opts = {}) {
 
   // =========================================================================
   // Step 4: SKEPTIC GATE — challenge assumptions (codex agent call)
+  // Skip for research-sourced items (already vetted by research strategist)
   // =========================================================================
-  console.log(`[ControlLoop] Step 4: Skeptic gate...`);
-  const skepticResult = await runSkepticAgent(cycleId, task, grounding, groundingSummary);
+  const skipSkeptic = anchor.type === "research";
+  const skepticResult = skipSkeptic
+    ? { verdict: "approve", reason: "Skipped — research-vetted item", skipped: true }
+    : await (() => {
+        console.log(`[ControlLoop] Step 4: Skeptic gate...`);
+        return runSkepticAgent(cycleId, task, grounding, groundingSummary);
+      })();
 
   if (skepticResult.verdict === "reject") {
     console.log(`[ControlLoop] Skeptic REJECTED: ${skepticResult.reason}`);
@@ -714,13 +720,13 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     anchor.context && anchor.type === "research" ? buildResearchContext(anchor.context) : "",
     anchor.context && anchor.type !== "research" ? `\nContext:\n${typeof anchor.context === "string" ? anchor.context.slice(0, 2000) : JSON.stringify(anchor.context).slice(0, 2000)}` : "",
     "",
-    groundingSummary,
+    groundingSummary.slice(0, 4000),
     "",
     // Continuity contract — what the last cycle did, what changed since
-    continuityContext || "",
+    continuityContext ? continuityContext.slice(0, 1500) : "",
     "",
-    priorities ? `## PRIORITIES\n${priorities}\n` : "",
-    feedback ? `## OPERATOR FEEDBACK\n${feedback}\n` : "",
+    priorities ? `## PRIORITIES\n${priorities.slice(0, 3000)}\n` : "",
+    feedback ? `## OPERATOR FEEDBACK\n${feedback.slice(0, 1000)}\n` : "",
     "",
     // Cumulative accomplishments — prevent re-proposing completed work
     accomplishmentsContext,
@@ -821,7 +827,7 @@ async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
     `Acceptance Criteria: ${JSON.stringify(task.acceptanceCriteria || [])}`,
     `Verification Plan: ${JSON.stringify(task.verificationPlan || [])}`,
     "",
-    groundingSummary.slice(0, 4000),
+    groundingSummary.slice(0, 2000),
     "",
     recentHistory ? `## RECENT CYCLE HISTORY (check for duplicates)\n${recentHistory}` : "",
     "",
@@ -844,7 +850,7 @@ async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
     agentName: "skeptic",
     personality,
     prompt,
-    model: "frontier",
+    model: "nano",
     taskId: "skeptic",
     correlationId: cycleId,
   });

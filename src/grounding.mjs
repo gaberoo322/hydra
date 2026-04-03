@@ -225,7 +225,7 @@ export async function getDiffStat(projectDir, ref = "HEAD~1") {
  * Summarize a grounding report into a concise string for agent prompts.
  * This replaces the old getProjectState() output.
  */
-export function summarizeForPrompt(report) {
+export function summarizeForPrompt(report, opts = {}) {
   const parts = [];
 
   parts.push(`## Current Repository State (grounded at ${new Date(report.timestamp).toISOString()})`);
@@ -278,24 +278,26 @@ export function summarizeForPrompt(report) {
     parts.push(`  ${c}`);
   }
 
-  // File tree (truncated)
+  // File tree (truncated — keep short for planner/skeptic, executor reads files directly)
   const files = report.fileTree.split("\n").filter(Boolean);
+  const fileLimit = opts?.compact ? 15 : 30;
   parts.push(`\n### File tree (${files.length} files):`);
-  for (const f of files.slice(0, 50)) {
+  for (const f of files.slice(0, fileLimit)) {
     parts.push(`  ${f}`);
   }
-  if (files.length > 50) {
-    parts.push(`  ... (${files.length - 50} more)`);
+  if (files.length > fileLimit) {
+    parts.push(`  ... (${files.length - fileLimit} more)`);
   }
 
   // TODO/FIXME markers — known gaps
   if (report.todoMarkers?.length > 0) {
+    const todoLimit = opts?.compact ? 5 : 10;
     parts.push(`\n### TODO/FIXME markers (${report.todoMarkers.length} found):`);
-    for (const t of report.todoMarkers.slice(0, 10)) {
+    for (const t of report.todoMarkers.slice(0, todoLimit)) {
       parts.push(`  ${t}`);
     }
-    if (report.todoMarkers.length > 10) {
-      parts.push(`  ... (${report.todoMarkers.length - 10} more)`);
+    if (report.todoMarkers.length > todoLimit) {
+      parts.push(`  ... (${report.todoMarkers.length - todoLimit} more)`);
     }
   }
 
