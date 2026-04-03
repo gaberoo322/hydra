@@ -54,7 +54,7 @@ function formatMessage(event) {
           `Task: ${task.title}`,
         ];
         if (g) lines.push(`Tests: ${g.before?.passed ?? "?"} → ${g.after?.passed ?? "?"} passing`);
-        if (payload.commitSha) lines.push(`Commit: \`${payload.commitSha.slice(0, 7)}\``);
+        if (payload.commitSha) lines.push(`Commit: \`${payload.commitSha.slice(0, 7)}\` — https://github.com/gaberoo322/hydra-betting/commit/${payload.commitSha}`);
         if (payload.filesChanged?.length > 0) lines.push(`Files: ${payload.filesChanged.length} changed`);
         if (payload.rolledBack) lines.push(`⚠️ Regression detected — auto-reverted`);
         if (payload.rollbackRisk === "high") lines.push(`Risk: HIGH`);
