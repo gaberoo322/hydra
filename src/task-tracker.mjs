@@ -58,6 +58,7 @@ class TaskTracker {
       "total", tasks.length,
       "completed", 0,
       "failed", 0,
+      "abandoned", 0,
       "timedOut", 0,
     );
     for (const task of tasks) {
@@ -136,24 +137,21 @@ class TaskTracker {
     await this.redis.set(KEY_LAST, cycleId);
     await this.redis.del(KEY_ACTIVE);
 
-    const completed = parseInt(cycle.completed);
-    const failed = parseInt(cycle.failed);
-    const timedOut = parseInt(cycle.timedOut);
-    const total = parseInt(cycle.total);
-    console.log(`[TaskTracker] Cycle ${cycleId} completed — ${completed} ok, ${failed} failed, ${timedOut} timed out`);
+    const completed = parseInt(cycle.completed || 0);
+    const failed = parseInt(cycle.failed || 0);
+    const abandoned = parseInt(cycle.abandoned || 0);
+    const timedOut = parseInt(cycle.timedOut || 0);
+    const total = parseInt(cycle.total || 0);
+    console.log(`[TaskTracker] Cycle ${cycleId} completed — ${completed} ok, ${failed} failed, ${abandoned} abandoned, ${timedOut} timed out`);
 
+    // Only publish to Meta stream — the V2 control loop handles notifications
+    // with the full reality report payload (task title, grounding, commit, etc.)
     if (eventBus) {
       await eventBus.publish(STREAMS.META, {
         type: "cycle:report",
         source: "orchestrator",
         correlationId: cycleId,
-        payload: { trigger: "all_tasks_complete", total, completed, failed, timedOut },
-      });
-      await eventBus.publish(STREAMS.NOTIFICATIONS, {
-        type: "cycle:completed",
-        source: "orchestrator",
-        correlationId: cycleId,
-        payload: { total, completed, failed, timedOut },
+        payload: { trigger: "all_tasks_complete", total, completed, failed, abandoned, timedOut },
       });
     }
   }
@@ -214,9 +212,10 @@ class TaskTracker {
       cycleId,
       status: cycle.status,
       startedAt: cycle.startedAt,
-      total: parseInt(cycle.total),
-      completed: parseInt(cycle.completed),
-      failed: parseInt(cycle.failed),
+      total: parseInt(cycle.total || 0),
+      completed: parseInt(cycle.completed || 0),
+      failed: parseInt(cycle.failed || 0),
+      abandoned: parseInt(cycle.abandoned || 0),
       timedOut: parseInt(cycle.timedOut || 0),
       tasks,
     };
@@ -237,11 +236,19 @@ class TaskTracker {
     const total = parseInt(cycle.total || 0);
     const completed = parseInt(cycle.completed || 0);
     const failed = parseInt(cycle.failed || 0);
+    const abandoned = parseInt(cycle.abandoned || 0);
     const timedOut = parseInt(cycle.timedOut || 0);
 
     return {
       cycleId: id,
-      tasks: { total, completed, failed, timedOut, inProgress: Math.max(0, total - completed - failed - timedOut) },
+      tasks: {
+        total,
+        completed,
+        failed,
+        abandoned,
+        timedOut,
+        inProgress: Math.max(0, total - completed - failed - abandoned - timedOut),
+      },
       agents,
       costs: {
         inputTokens: parseInt(costs.inputTokens || 0),
@@ -343,12 +350,19 @@ class TaskTracker {
 
     // If terminal, update cycle counters
     if (TERMINAL_V2.has(newState)) {
-      const field = newState === "merged" || newState === "verified" ? "completed" : "failed";
-      await this.redis.hincrby(cycleKey(task.cycleId), field, 1);
+      const shouldCountTerminal = !TERMINAL_V2.has(currentState);
+      if (shouldCountTerminal) {
+        const field = newState === "merged" || newState === "verified"
+          ? "completed"
+          : newState === "abandoned"
+            ? "abandoned"
+            : "failed";
+        await this.redis.hincrby(cycleKey(task.cycleId), field, 1);
+      }
 
       const cycle = await this.redis.hgetall(cycleKey(task.cycleId));
       const total = parseInt(cycle.total);
-      const done = parseInt(cycle.completed || 0) + parseInt(cycle.failed || 0) + parseInt(cycle.timedOut || 0);
+      const done = parseInt(cycle.completed || 0) + parseInt(cycle.failed || 0) + parseInt(cycle.abandoned || 0) + parseInt(cycle.timedOut || 0);
       console.log(`[TaskTracker] Cycle progress: ${done}/${total}`);
 
       if (done >= total && cycle.status === "running") {
