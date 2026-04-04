@@ -8,11 +8,25 @@ import { sendNotification } from "./notify.mjs";
 import { startCleanupSchedule } from "./cleanup.mjs";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler.mjs";
 
+import { createServer } from "node:net";
+
 const PORT = parseInt(process.env.HYDRA_PORT) || 4000;
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const CYCLE_TTL_MS = parseInt(process.env.HYDRA_CYCLE_TTL_MS) || 90 * 60 * 1000; // 90 minutes
 
 async function main() {
+  // Guard: abort if another Hydra instance is already running on the same port
+  const portFree = await new Promise((resolve) => {
+    const tester = createServer();
+    tester.once("error", () => resolve(false));
+    tester.listen(PORT, () => { tester.close(); resolve(true); });
+  });
+  if (!portFree) {
+    console.error(`[Hydra] ABORT: Port ${PORT} is already in use. Another Hydra instance is running.`);
+    console.error(`[Hydra] Use 'systemctl --user restart hydra' to manage the service — do not run 'node src/index.mjs' directly.`);
+    process.exit(1);
+  }
+
   console.log("[Hydra] Starting orchestrator...");
 
   // Initialize event bus and task tracker
