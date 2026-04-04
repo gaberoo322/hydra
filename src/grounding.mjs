@@ -49,15 +49,25 @@ async function runCmd(cmd, args, opts = {}) {
  */
 function parseTestCounts(stdout, stderr) {
   const combined = (stdout || "") + "\n" + (stderr || "");
-
-  // Vitest: "Tests  42 passed (42)" or "✓ 42 passed | ✗ 2 failed"
   let passed = 0, failed = 0, total = 0;
 
-  // Try vitest format: "Tests  N passed" / "N failed"
-  const passMatch = combined.match(/(\d+)\s+passed/);
-  const failMatch = combined.match(/(\d+)\s+failed/);
-  if (passMatch) passed = parseInt(passMatch[1]);
-  if (failMatch) failed = parseInt(failMatch[1]);
+  // Vitest outputs two lines: "Test Files  43 passed (43)" and "Tests  352 passed (352)"
+  // We want the "Tests" line (individual test count), not "Test Files" (file count)
+  const testsLineMatch = combined.match(/^\s*Tests\s+(\d+)\s+passed/m);
+  const testsFailMatch = combined.match(/^\s*Tests\s+.*?(\d+)\s+failed/m);
+  if (testsLineMatch) passed = parseInt(testsLineMatch[1]);
+  if (testsFailMatch) failed = parseInt(testsFailMatch[1]);
+
+  // Fallback: generic "N passed" if the vitest-specific pattern didn't match
+  if (passed === 0) {
+    const genericPass = combined.match(/(\d+)\s+passed/);
+    if (genericPass) passed = parseInt(genericPass[1]);
+  }
+  if (failed === 0) {
+    const genericFail = combined.match(/(\d+)\s+failed/);
+    if (genericFail) failed = parseInt(genericFail[1]);
+  }
+
   total = passed + failed;
 
   // Try "Test Suites: X passed, Y total" (jest)

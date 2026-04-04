@@ -10,6 +10,7 @@
 
 import { startCycle } from "./cycle.mjs";
 import { sendNotification } from "./notify.mjs";
+import { getMetricsTrend } from "./metrics.mjs";
 import { getTracker } from "./task-tracker.mjs";
 import { runResearchLoop } from "./research-loop.mjs";
 import { runArchitectReview } from "./research-architect.mjs";
@@ -19,8 +20,10 @@ const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
 
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 3;
-const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 12 * 60 * 60 * 1000; // 12 hours
+const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 6 * 60 * 60 * 1000; // 6 hours
 const ARCHITECT_EVERY_N_RESEARCH = parseInt(process.env.HYDRA_ARCHITECT_EVERY_N_RESEARCH) || 3;
+const REPETITION_WINDOW = parseInt(process.env.HYDRA_REPETITION_WINDOW) || 5; // Check last N cycles
+const REPETITION_THRESHOLD = parseFloat(process.env.HYDRA_REPETITION_THRESHOLD) || 0.5; // Pause if >50% of recent titles are similar
 
 let state = {
   running: false,
@@ -38,6 +41,61 @@ let state = {
   lastArchitectAt: null,
   researchSinceLastArchitect: 0,
 };
+
+/**
+ * Detect if recent cycles are producing repetitive work.
+ * Compares task titles using word overlap — if too many recent cycles
+ * look similar, pauses the scheduler and notifies the operator.
+ *
+ * Returns true if the scheduler was paused.
+ */
+async function detectRepetition(eventBus) {
+  try {
+    const trend = await getMetricsTrend(REPETITION_WINDOW);
+    if (trend.length < REPETITION_WINDOW) return false; // not enough data
+
+    const titles = trend.map(m => m.taskTitle).filter(Boolean);
+    if (titles.length < REPETITION_WINDOW) return false;
+
+    // Count pairwise similarities — how many pairs of titles are >60% similar?
+    let similarPairs = 0;
+    let totalPairs = 0;
+    for (let i = 0; i < titles.length; i++) {
+      for (let j = i + 1; j < titles.length; j++) {
+        totalPairs++;
+        const wordsA = new Set(titles[i].toLowerCase().split(/\s+/).filter(w => w.length > 3));
+        const wordsB = new Set(titles[j].toLowerCase().split(/\s+/).filter(w => w.length > 3));
+        if (wordsA.size === 0 || wordsB.size === 0) continue;
+        const overlap = [...wordsA].filter(w => wordsB.has(w)).length;
+        const similarity = overlap / Math.max(wordsA.size, wordsB.size);
+        if (similarity > 0.6) similarPairs++;
+      }
+    }
+
+    const repetitionRate = totalPairs > 0 ? similarPairs / totalPairs : 0;
+
+    if (repetitionRate >= REPETITION_THRESHOLD) {
+      console.log(`[Scheduler] REPETITION DETECTED: ${Math.round(repetitionRate * 100)}% of last ${REPETITION_WINDOW} cycle pairs are similar — pausing for operator direction`);
+      console.log(`[Scheduler] Recent titles: ${titles.map(t => `"${t.slice(0, 60)}"`).join(", ")}`);
+
+      await sendNotification({
+        type: "scheduler:paused_repetition",
+        payload: {
+          reason: `${Math.round(repetitionRate * 100)}% of the last ${REPETITION_WINDOW} cycles produced similar tasks. Hydra needs new direction.`,
+          recentTitles: titles.slice(0, 5),
+          suggestion: "Update priorities.md, run a research cycle, or queue specific work. Then restart the scheduler.",
+          cyclesRun: state.cyclesRun,
+        },
+      });
+
+      stop();
+      return true;
+    }
+  } catch (err) {
+    console.error(`[Scheduler] Repetition detection error: ${err.message}`);
+  }
+  return false;
+}
 
 async function maybeRunResearch(eventBus) {
   // Check queue depth
@@ -105,6 +163,9 @@ async function runScheduledCycle(eventBus) {
                      result.task?.finalState === "merged";
       if (merged) state.cyclesMerged++;
       state.lastError = null;
+
+      // Check for repetitive work pattern
+      if (await detectRepetition(eventBus)) return; // scheduler was paused
     }
   } catch (err) {
     state.cyclesRun++;
@@ -210,6 +271,11 @@ function getStatus() {
       architectEveryN: ARCHITECT_EVERY_N_RESEARCH,
       researchSinceLastArchitect: state.researchSinceLastArchitect,
       lastArchitectAt: state.lastArchitectAt,
+    },
+    repetition: {
+      window: REPETITION_WINDOW,
+      threshold: `${Math.round(REPETITION_THRESHOLD * 100)}%`,
+      pausedForRepetition: state.pausedForRepetition || false,
     },
   };
 }
