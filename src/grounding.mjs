@@ -112,6 +112,17 @@ function parseFailingTests(stdout, stderr) {
 export async function groundProject(projectDir, opts = {}) {
   const timestamp = Date.now();
   const testCmd = opts.testCmd || "npm";
+
+  // Cleanup: ensure we're on main and delete stale feature branches
+  try {
+    await runCmd("git", ["checkout", "main"], { cwd: projectDir, timeout: 5000 });
+    const { stdout: branches } = await runCmd("git", ["branch", "--list", "feature/*"], { cwd: projectDir, timeout: 5000 });
+    const stale = branches.trim().split("\n").map(b => b.trim()).filter(Boolean);
+    for (const branch of stale) {
+      await runCmd("git", ["branch", "-D", branch], { cwd: projectDir, timeout: 5000 });
+    }
+    if (stale.length > 0) console.log(`[Grounding] Cleaned up ${stale.length} stale feature branches`);
+  } catch {}
   const testArgs = opts.testArgs || ["test"];
 
   // Detect app directory — some projects have code in a subdirectory (e.g., web/)
