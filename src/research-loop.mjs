@@ -23,6 +23,7 @@ import { getTracker } from "./task-tracker.mjs";
 import { getCumulativeAccomplishments } from "./metrics.mjs";
 import { sendNotification } from "./notify.mjs";
 import { STREAMS } from "./event-bus.mjs";
+import { addToBacklog } from "./backlog.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
 const HYDRA_PATH = join(VAULT_PATH, "hydra");
@@ -315,10 +316,21 @@ export async function runResearchLoop(eventBus, opts = {}) {
   const totalCost = (domainResult.costUsd || 0) + (technicalResult.costUsd || 0) +
                     (marketResult.costUsd || 0) + (synthesisResult.costUsd || 0);
 
-  // Step 6: Auto-queue high-confidence opportunities
+  // Step 6: Populate backlog with ALL opportunities, auto-queue high-confidence ones
   let autoQueued = 0;
   if (synthesis?.opportunities) {
     for (const opp of synthesis.opportunities) {
+      // Add every opportunity to the Kanban backlog
+      await addToBacklog({
+        title: opp.title,
+        category: opp.category,
+        source: "research",
+        adjustedScore: opp.adjustedScore,
+        confidence: opp.confidence,
+        complexity: opp.complexity,
+      });
+
+      // Auto-queue high-confidence items into Redis for immediate execution
       if (opp.autoQueue) {
         await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify({
           reference: opp.title,

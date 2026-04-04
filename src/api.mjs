@@ -9,6 +9,7 @@ import { start as startScheduler, stop as stopScheduler, getStatus as getSchedul
 import { runResearchLoop, getLatestResearch, listResearchReports, vetoOpportunity } from "./research-loop.mjs";
 import { runArchitectReview } from "./research-architect.mjs";
 import { loadProjectGoals, summarizeGoalsForPrompt } from "./project-goals.mjs";
+import { loadBacklog, getBacklogCounts, addToBacklog } from "./backlog.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
 const KILL_FILE = resolve(VAULT_PATH, ".kill");
@@ -37,14 +38,22 @@ function createApi(eventBus) {
   });
 
   // GET /cycle/status — Current cycle state
-  app.get("/cycle/status", (req, res) => {
-    res.json(getCycleStatus());
+  app.get("/cycle/status", async (req, res) => {
+    try {
+      res.json(await getCycleStatus());
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // GET /cycle/history — Recent cycle results
-  app.get("/cycle/history", (req, res) => {
-    const limit = parseInt(req.query.limit) || 10;
-    res.json(getCycleHistory(limit));
+  app.get("/cycle/history", async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit) || 10;
+      res.json(await getCycleHistory(limit));
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // GET /cycle/report — Structured cycle report with agent runs and costs
@@ -418,6 +427,38 @@ function createApi(eventBus) {
         return res.status(400).json({ error: "Missing 'title' — which opportunity to veto?" });
       }
       const result = await vetoOpportunity(title);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /backlog — Full Kanban backlog with all lanes
+  app.get("/backlog", async (req, res) => {
+    try {
+      const lanes = await loadBacklog();
+      const counts = await getBacklogCounts();
+      res.json({ ...lanes, counts });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /backlog/counts — Just the counts per lane
+  app.get("/backlog/counts", async (req, res) => {
+    try {
+      res.json(await getBacklogCounts());
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /backlog — Manually add an item to the backlog
+  app.post("/backlog", async (req, res) => {
+    try {
+      const { title, category } = req.body || {};
+      if (!title) return res.status(400).json({ error: "Missing 'title'" });
+      const result = await addToBacklog({ title, category: category || "uncategorized", source: "operator" });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });

@@ -11,6 +11,7 @@
 import { startCycle } from "./cycle.mjs";
 import { sendNotification } from "./notify.mjs";
 import { getMetricsTrend } from "./metrics.mjs";
+import { getBacklogCounts, promoteToQueued, pruneOldDoneItems } from "./backlog.mjs";
 import { getTracker } from "./task-tracker.mjs";
 import { runResearchLoop } from "./research-loop.mjs";
 import { runArchitectReview } from "./research-architect.mjs";
@@ -98,9 +99,49 @@ async function detectRepetition(eventBus) {
 }
 
 async function maybeRunResearch(eventBus) {
+  // Prune old done items from backlog
+  try { await pruneOldDoneItems(); } catch {}
+
   // Check queue depth
   const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");
   if (queueLen >= RESEARCH_QUEUE_THRESHOLD) return;
+
+  // If queue is low but backlog has items, promote from backlog first
+  try {
+    const counts = await getBacklogCounts();
+    if (counts.backlog > 0) {
+      const needed = RESEARCH_QUEUE_THRESHOLD - queueLen;
+      const promoted = await promoteToQueued(needed);
+      if (promoted.length > 0) {
+        // Push promoted items into Redis queue
+        for (const item of promoted) {
+          await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify({
+            reference: item.title,
+            reason: `Promoted from backlog (score: ${item.meta?.score || "?"}, ${item.meta?.confidence || "?"} confidence)`,
+            context: JSON.stringify(item.meta || {}),
+            queuedAt: new Date().toISOString(),
+            source: "backlog",
+          }));
+        }
+        console.log(`[Scheduler] Promoted ${promoted.length} items from backlog to queue`);
+        return; // Queue is now filled, no need for research
+      }
+    }
+
+    // Alert if backlog AND queue are both empty
+    if (counts.total === 0 && counts.inProgress === 0) {
+      console.log(`[Scheduler] Backlog and queue are both empty`);
+      await sendNotification({
+        type: "scheduler:backlog_empty",
+        payload: {
+          message: "Backlog and work queue are both empty. Hydra needs new direction or a research cycle.",
+          suggestion: "Update priorities.md, run POST /research/start, or queue work with POST /queue.",
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`[Scheduler] Backlog check failed: ${err.message}`);
+  }
 
   // Check throttle — don't run research more often than the minimum interval
   if (state.lastResearchAt) {

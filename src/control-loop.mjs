@@ -10,6 +10,7 @@ import { runVerification, validateDiffExists, summarizeVerification, defaultVeri
 import { sendNotification } from "./notify.mjs";
 import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.mjs";
 import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson } from "./agent-memory.mjs";
+import { moveToInProgress, moveToDone, returnToBacklog } from "./backlog.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -331,6 +332,7 @@ export async function runControlLoop(eventBus, opts = {}) {
   // =========================================================================
   console.log(`[ControlLoop] Step 5: Executing...`);
   await tracker.transitionTask(taskId, "in-progress", {});
+  try { await moveToInProgress(task.title); } catch {}
 
   const execResult = await runExecutorAgent(cycleId, task, grounding, groundingSummary);
 
@@ -395,6 +397,9 @@ export async function runControlLoop(eventBus, opts = {}) {
       regressionIntroduced: false, taskTitle: task.title,
       anchorType: task.anchorType, anchorReference: task.anchorReference,
     });
+
+    // Return to backlog on failure
+    try { await returnToBacklog(task.title, "verification failed"); } catch {}
 
     // Record failure lessons for agents
     const failedStderr = verification.steps.find(s => !s.passed)?.stderr || "";
@@ -624,8 +629,17 @@ export async function runControlLoop(eventBus, opts = {}) {
     anchorReference: task.anchorReference,
   });
 
-  // Record agent lessons from this cycle's outcome
+  // Update Kanban backlog
   const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
+  try {
+    if (finalState === "merged") {
+      await moveToDone(task.title, "merged");
+    } else {
+      await returnToBacklog(task.title, finalState);
+    }
+  } catch {}
+
+  // Record agent lessons from this cycle's outcome
   try {
     await recordPlannerLesson(cycleId, task, finalState, {
       filesChanged: verification.filesChanged.length,

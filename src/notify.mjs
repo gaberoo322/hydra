@@ -111,6 +111,9 @@ function formatMessage(event) {
     case "scheduler:stopped":
       return `⏹️ *Scheduler Stopped*\nReason: ${payload.reason}\nCycles run: ${payload.cyclesRun}`;
 
+    case "scheduler:backlog_empty":
+      return `📭 *Backlog Empty*\n${payload.message}\n\n${payload.suggestion}`;
+
     case "scheduler:paused_repetition":
       return `🔁 *Scheduler Paused — Repetitive Work Detected*\n${payload.reason}\n\nRecent tasks:\n${(payload.recentTitles || []).map(t => `• ${t.slice(0, 70)}`).join("\n")}\n\n${payload.suggestion}`;
 
