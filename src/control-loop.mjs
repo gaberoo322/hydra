@@ -926,6 +926,8 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary) {
     `5. Commit to the feature branch with clear commit messages`,
     `6. NEVER merge into main — the control loop handles merging after verification`,
     `7. Push your branch when done`,
+    `8. NEVER delete or remove files in src/lib/providers/ — these are foundational venue adapters even if not yet imported elsewhere`,
+    `9. NEVER create "cleanup" or "remove unused" commits — if code exists with tests, it is intentional`,
     "",
     `Output ONLY valid JSON:`,
     `{ "summary": "...", "filesChanged": [...], "commits": [...], "branch": "...", "testsRun": { "passed": N, "failed": N } }`,
