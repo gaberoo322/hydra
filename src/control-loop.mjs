@@ -928,6 +928,7 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary) {
     `7. Push your branch when done`,
     `8. NEVER delete or remove files in src/lib/providers/ — these are foundational venue adapters even if not yet imported elsewhere`,
     `9. NEVER create "cleanup" or "remove unused" commits — if code exists with tests, it is intentional`,
+    `10. If you create or modify database migrations (drizzle SQL files), you MUST also update drizzle/meta/_journal.json with the new entry. Migration SQL without a journal entry will silently fail.`,
     "",
     `Output ONLY valid JSON:`,
     `{ "summary": "...", "filesChanged": [...], "commits": [...], "branch": "...", "testsRun": { "passed": N, "failed": N } }`,

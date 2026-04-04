@@ -29,6 +29,21 @@ async function main() {
 
   console.log("[Hydra] Starting orchestrator...");
 
+  // Startup cleanup: delete stale feature branches in the target project
+  const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || "/home/gabe/hydra-betting";
+  try {
+    const { execFile: ef } = await import("node:child_process");
+    const { promisify: p } = await import("node:util");
+    const run = p(ef);
+    await run("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 5000 }).catch(() => {});
+    const { stdout } = await run("git", ["branch", "--list", "feature/*"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
+    const stale = stdout.trim().split("\n").map(b => b.trim()).filter(Boolean);
+    for (const branch of stale) {
+      await run("git", ["branch", "-D", branch], { cwd: PROJECT_WORKSPACE, timeout: 5000 }).catch(() => {});
+    }
+    if (stale.length > 0) console.log(`[Hydra] Startup cleanup: deleted ${stale.length} stale feature branches`);
+  } catch {}
+
   // Initialize event bus and task tracker
   const eventBus = new EventBus(REDIS_URL);
   await eventBus.init();
