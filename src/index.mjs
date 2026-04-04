@@ -7,6 +7,7 @@ import { watchApprovals } from "./proposals.mjs";
 import { sendNotification } from "./notify.mjs";
 import { startCleanupSchedule } from "./cleanup.mjs";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler.mjs";
+import { startDigest, stopDigest } from "./digest.mjs";
 
 import { createServer } from "node:net";
 
@@ -56,6 +57,9 @@ async function main() {
   // Start the agent pipeline (consumers listening on Redis streams)
   await startPipeline(eventBus);
   console.log("[Hydra] Background consumers started (meta, notifications, dlq)");
+
+  // Start digest notifications (4h summaries instead of per-event messages)
+  startDigest();
 
   // Start the proposal approval watcher (polls reports/proposals/approved/)
   watchApprovals(eventBus);
@@ -127,6 +131,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\n[Hydra] Received ${signal}, shutting down...`);
+    stopDigest();
     stopScheduler();
     stopPipeline(eventBus);
     server.close();

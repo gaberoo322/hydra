@@ -9,6 +9,7 @@ import { start as startScheduler, stop as stopScheduler, getStatus as getSchedul
 import { runResearchLoop, getLatestResearch, listResearchReports, vetoOpportunity } from "./research-loop.mjs";
 import { runArchitectReview } from "./research-architect.mjs";
 import { loadProjectGoals, summarizeGoalsForPrompt } from "./project-goals.mjs";
+import { sendDigestNow } from "./digest.mjs";
 import { loadBacklog, getBacklogCounts, addToBacklog } from "./backlog.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
@@ -485,6 +486,16 @@ function createApi(eventBus) {
       const goals = await loadProjectGoals();
       const summary = summarizeGoalsForPrompt(goals);
       res.type("text/plain").send(summary);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /digest/send — Manually trigger a digest summary now
+  app.post("/digest/send", async (req, res) => {
+    try {
+      await sendDigestNow();
+      res.json({ sent: true });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

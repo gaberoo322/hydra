@@ -12,6 +12,7 @@ import { STREAMS } from "./event-bus.mjs";
 import { getTracker } from "./task-tracker.mjs";
 import { runMetaAnalysis } from "./proposals.mjs";
 import { sendNotification } from "./notify.mjs";
+import { recordEvent } from "./digest.mjs";
 
 // ---------------------------------------------------------------------------
 // Consumer crash recovery — restart consumers with backoff on fatal errors
@@ -58,7 +59,8 @@ async function consumeNotifications(eventBus) {
     "openclaw",
     consumer,
     async (event) => {
-      await sendNotification(event);
+      // Route to digest system instead of sending per-event
+      recordEvent(event);
     },
     { count: 1, blockMs: 5000 },
   );
