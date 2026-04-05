@@ -113,11 +113,11 @@ export async function groundProject(projectDir, opts = {}) {
   const timestamp = Date.now();
   const testCmd = opts.testCmd || "npm";
 
-  // Cleanup: ensure we're on main, discard local changes, and delete stale feature branches
+  // Cleanup: ensure we're on main, discard modified tracked files, and delete stale feature branches
+  // NOTE: Do NOT run git clean -fd here — it deletes untracked new files before they can be committed
   try {
     await runCmd("git", ["checkout", "main"], { cwd: projectDir, timeout: 5000 });
     await runCmd("git", ["checkout", "."], { cwd: projectDir, timeout: 5000 });
-    await runCmd("git", ["clean", "-fd"], { cwd: projectDir, timeout: 5000 });
     const { stdout: branches } = await runCmd("git", ["branch", "--list", "feature/*"], { cwd: projectDir, timeout: 5000 });
     const stale = branches.trim().split("\n").map(b => b.trim()).filter(Boolean);
     for (const branch of stale) {
