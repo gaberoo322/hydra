@@ -7,7 +7,7 @@ import { runAgent, findPersonality } from "./codex-runner.mjs";
 import { getTracker } from "./task-tracker.mjs";
 import { groundProject, summarizeForPrompt, getDiff, getDiffStat } from "./grounding.mjs";
 import { runVerification, validateDiffExists, summarizeVerification, defaultVerificationPlan } from "./verifier.mjs";
-import { sendNotification } from "./notify.mjs";
+// sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.mjs";
 import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson } from "./agent-memory.mjs";
 import { moveToInProgress, moveToDone, returnToBacklog } from "./backlog.mjs";
@@ -120,8 +120,9 @@ async function selectAnchor(grounding, opts = {}) {
 
     if (recentDocCycles >= 5) {
       console.log(`[ControlLoop] Priorities doc used ${recentDocCycles} times in last 10 cycles — may be stale. Consider updating priorities.`);
-      await sendNotification({
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type: "cycle:stale_priorities",
+        source: "control-loop",
         payload: {
           message: `Priorities doc has been the anchor for ${recentDocCycles} of the last 10 cycles. The operator should update priorities or provide a specific anchor.`,
           recentDocCycles,
