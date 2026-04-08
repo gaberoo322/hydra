@@ -333,7 +333,7 @@ export async function runControlLoop(eventBus, opts = {}) {
   // =========================================================================
   console.log(`[ControlLoop] Step 5: Executing...`);
   await tracker.transitionTask(taskId, "in-progress", {});
-  try { await moveToInProgress(task.title); } catch {}
+  try { await moveToInProgress(anchor.reference); } catch {}
 
   const execResult = await runExecutorAgent(cycleId, task, grounding, groundingSummary);
 
@@ -630,13 +630,16 @@ export async function runControlLoop(eventBus, opts = {}) {
     anchorReference: task.anchorReference,
   });
 
-  // Update Kanban backlog
+  // Update Kanban backlog — use anchor.reference (not planner-generated task.title)
+  // so the row in Kanban's Queued lane matches for the move. The planner's title
+  // almost never matches the original backlog entry, which was leaving rows stuck
+  // in Queued forever (2026-04-08 debug session).
   const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
   try {
     if (finalState === "merged") {
-      await moveToDone(task.title, "merged");
+      await moveToDone(anchor.reference, "merged");
     } else {
-      await returnToBacklog(task.title, finalState);
+      await returnToBacklog(anchor.reference, finalState);
     }
   } catch {}
 

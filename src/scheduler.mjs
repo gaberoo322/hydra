@@ -43,6 +43,62 @@ let state = {
   researchSinceLastArchitect: 0,
 };
 
+// ---------------------------------------------------------------------------
+// Scheduler state persistence
+// ---------------------------------------------------------------------------
+//
+// The scheduler's in-memory `state` was being reset on every orchestrator
+// restart, which silently cleared the research-throttle (`lastResearchAt`)
+// and the architect counter (`researchSinceLastArchitect`). On the next
+// scheduler tick after restart, an empty queue + null lastResearchAt
+// triggered an immediate, unwanted research cycle costing ~$3-8 in Codex.
+//
+// We now persist the research-related fields to Redis under
+// SCHEDULER_STATE_KEY. On startup, loadSchedulerState() merges the stored
+// values into `state` before the first tick. After every research cycle
+// and architect review, saveSchedulerState() writes the updated fields
+// back to Redis. Non-research counters (cyclesRun, cyclesMerged, etc.)
+// still reset on restart — they're per-session metrics, not throttle state.
+
+const SCHEDULER_STATE_KEY = "hydra:scheduler:state";
+
+async function loadSchedulerState() {
+  try {
+    const raw = await getTracker().redis.get(SCHEDULER_STATE_KEY);
+    if (!raw) {
+      console.log("[Scheduler] No persisted state in Redis — starting fresh");
+      return;
+    }
+    const stored = JSON.parse(raw);
+    if (stored.lastResearchAt) state.lastResearchAt = stored.lastResearchAt;
+    if (stored.lastArchitectAt) state.lastArchitectAt = stored.lastArchitectAt;
+    if (typeof stored.researchSinceLastArchitect === "number") {
+      state.researchSinceLastArchitect = stored.researchSinceLastArchitect;
+    }
+    if (typeof stored.researchCyclesRun === "number") {
+      state.researchCyclesRun = stored.researchCyclesRun;
+    }
+    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, researchSinceLastArchitect=${state.researchSinceLastArchitect}, lastArchitectAt=${state.lastArchitectAt}`);
+  } catch (err) {
+    console.error(`[Scheduler] Failed to load persisted state: ${err.message}`);
+  }
+}
+
+async function saveSchedulerState() {
+  try {
+    const payload = {
+      lastResearchAt: state.lastResearchAt,
+      lastArchitectAt: state.lastArchitectAt,
+      researchSinceLastArchitect: state.researchSinceLastArchitect,
+      researchCyclesRun: state.researchCyclesRun,
+      savedAt: new Date().toISOString(),
+    };
+    await getTracker().redis.set(SCHEDULER_STATE_KEY, JSON.stringify(payload));
+  } catch (err) {
+    console.error(`[Scheduler] Failed to save state: ${err.message}`);
+  }
+}
+
 /**
  * Detect if recent cycles are producing repetitive work.
  * Compares task titles using word overlap — if too many recent cycles
@@ -159,6 +215,7 @@ async function maybeRunResearch(eventBus) {
     state.researchCyclesRun++;
     state.lastResearchAt = new Date().toISOString();
     state.researchSinceLastArchitect++;
+    await saveSchedulerState();
     console.log(`[Scheduler] Research complete — ${research.autoQueued || 0} items auto-queued`);
 
     // Auto-trigger architect review every N research cycles
@@ -166,10 +223,19 @@ async function maybeRunResearch(eventBus) {
       console.log(`[Scheduler] ${state.researchSinceLastArchitect} research cycles since last architect review — triggering`);
       try {
         const review = await runArchitectReview(eventBus);
-        state.lastArchitectAt = new Date().toISOString();
-        state.researchSinceLastArchitect = 0;
-        const updates = review.updatesApplied || review.review?.methodologyUpdates?.length || 0;
-        console.log(`[Scheduler] Architect review complete — ${updates} methodology updates`);
+        // Only advance state if the architect actually produced a usable review.
+        // runArchitectReview returns { error } or { skipped } on failure without throwing —
+        // without this guard, quota/parse failures silently reset the counter and
+        // leave the operator thinking the architect ran.
+        if (review?.error || review?.skipped) {
+          console.error(`[Scheduler] Architect review did not complete: ${review.error || review.reason}`);
+        } else {
+          state.lastArchitectAt = new Date().toISOString();
+          state.researchSinceLastArchitect = 0;
+          await saveSchedulerState();
+          const updates = review.updatesApplied || review.review?.methodologyUpdates?.length || 0;
+          console.log(`[Scheduler] Architect review complete — ${updates} methodology updates`);
+        }
       } catch (err) {
         console.error(`[Scheduler] Architect review failed: ${err.message}`);
       }
@@ -240,10 +306,14 @@ async function runScheduledCycle(eventBus) {
   }
 }
 
-function start(eventBus, opts = {}) {
+async function start(eventBus, opts = {}) {
   if (state.running) {
     return { error: "Scheduler is already running" };
   }
+
+  // Hydrate throttle state from Redis so restarts don't trigger an
+  // unwanted research cycle by losing lastResearchAt.
+  await loadSchedulerState();
 
   const intervalMs = opts.intervalMs || state.intervalMs || DEFAULT_INTERVAL_MS;
   if (intervalMs < MIN_INTERVAL_MS) {
@@ -330,11 +400,11 @@ function formatDuration(ms) {
 /**
  * Auto-start the scheduler if HYDRA_AUTO_CYCLE_INTERVAL_MS is set.
  */
-function autoStart(eventBus) {
+async function autoStart(eventBus) {
   const interval = parseInt(process.env.HYDRA_AUTO_CYCLE_INTERVAL_MS);
   if (interval && interval >= MIN_INTERVAL_MS) {
     console.log(`[Scheduler] Auto-starting from HYDRA_AUTO_CYCLE_INTERVAL_MS=${interval}`);
-    return start(eventBus, { intervalMs: interval });
+    return await start(eventBus, { intervalMs: interval });
   }
   return null;
 }

@@ -122,8 +122,10 @@ async function main() {
   }, 15 * 60 * 1000); // Check every 15 minutes
   console.log("[Hydra] Cycle watchdog started (checks every 15min, TTL " + (CYCLE_TTL_MS / 60000) + "min)");
 
-  // Auto-start scheduler if HYDRA_AUTO_CYCLE_INTERVAL_MS is set
-  const schedulerResult = autoStartScheduler(eventBus);
+  // Auto-start scheduler if HYDRA_AUTO_CYCLE_INTERVAL_MS is set.
+  // Must await — scheduler's start() is now async so it can load persisted
+  // research-throttle state from Redis before the first tick.
+  const schedulerResult = await autoStartScheduler(eventBus);
   if (schedulerResult) {
     console.log(`[Hydra] Scheduler auto-started (interval: ${schedulerResult.intervalHuman})`);
   }
