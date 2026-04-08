@@ -199,6 +199,8 @@ async function runMarketResearcher(researchId, goals, goalsPrompt, groundingSumm
 // ---------------------------------------------------------------------------
 
 async function runStrategistSynthesis(researchId, goals, goalsPrompt, domainFindings, technicalFindings, marketFindings, appMetrics, accomplishments) {
+  const methodology = await loadMethodologyOverrides("research-strategist");
+
   const prompt = [
     goalsPrompt,
     "",
@@ -213,6 +215,7 @@ async function runStrategistSynthesis(researchId, goals, goalsPrompt, domainFind
     "",
     appMetrics ? `## Current App Metrics\n${JSON.stringify(appMetrics.data, null, 2).slice(0, 2000)}\n` : "",
     accomplishments ? `## Already Accomplished (do not re-recommend)\n${accomplishments}\n` : "",
+    methodology ? `## Methodology Updates (from Research Architect)\n${methodology}\n` : "",
     "",
     `## Instructions`,
     `Research cycle ID: ${researchId}`,
@@ -316,22 +319,33 @@ export async function runResearchLoop(eventBus, opts = {}) {
   const totalCost = (domainResult.costUsd || 0) + (technicalResult.costUsd || 0) +
                     (marketResult.costUsd || 0) + (synthesisResult.costUsd || 0);
 
-  // Step 6: Populate backlog with ALL opportunities, auto-queue high-confidence ones
+  // Step 6: Route opportunities per the kanban-scope decision (2026-04-08).
+  //
+  // Research-auto-queued items (opp.autoQueue === true) go DIRECTLY to the
+  // Redis work queue and skip the Kanban entirely. Research-suggested items
+  // (opp.autoQueue === false) go to the Kanban ## Backlog lane where an
+  // operator can review and promote them.
+  //
+  // This eliminates the double-write drift that caused the 2026-04-08 stale-
+  // Kanban incident. See: hydra/reports/decisions/kanban-scope.md.
   let autoQueued = 0;
   if (synthesis?.opportunities) {
     for (const opp of synthesis.opportunities) {
-      // Add every opportunity to the Kanban backlog
-      await addToBacklog({
-        title: opp.title,
-        category: opp.category,
-        source: "research",
-        adjustedScore: opp.adjustedScore,
-        confidence: opp.confidence,
-        complexity: opp.complexity,
-      });
+      if (!opp.autoQueue) {
+        // Not auto-queued — surface as a suggestion in the Kanban for operator review.
+        await addToBacklog({
+          title: opp.title,
+          category: opp.category,
+          source: "research",
+          adjustedScore: opp.adjustedScore,
+          confidence: opp.confidence,
+          complexity: opp.complexity,
+        });
+        continue;
+      }
 
-      // Auto-queue high-confidence items into Redis for immediate execution
-      if (opp.autoQueue) {
+      // Auto-queued — push directly to Redis, skip the Kanban entirely.
+      {
         await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify({
           reference: opp.title,
           reason: `Research ${researchId}: ${opp.rationale?.slice(0, 200) || "auto-queued from research"}`,
