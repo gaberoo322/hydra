@@ -226,16 +226,49 @@ describe("shouldCleanWorkingTree", () => {
       { stdout: " M web/src/lib/execution/polymarket-executor.ts" },
     );
     assert.equal(decision.ok, false);
-    assert.match(decision.reason, /uncommitted change/);
+    assert.match(decision.reason, /tracked modification/);
   });
 
-  test("multiple dirty files on main → skip with count", () => {
+  test("mixed tracked + untracked on main → skip, only tracked counted", () => {
+    // ?? file3.md is untracked and not at risk from `git checkout main`.
+    // Only the 2 tracked modifications should count toward the skip reason.
     const decision = shouldCleanWorkingTree(
       { stdout: "main" },
       { stdout: " M file1.ts\n M file2.ts\n?? file3.md" },
     );
     assert.equal(decision.ok, false);
-    assert.match(decision.reason, /3 uncommitted/);
+    assert.match(decision.reason, /2 tracked modification/);
+  });
+
+  test("untracked files only on main → ok (safe to clean)", () => {
+    // Untracked files are not touched by `git checkout main && git checkout .`
+    // so they shouldn't trigger the safety gate. The original cleanup code
+    // explicitly preserved them by avoiding `git clean -fd`.
+    const decision = shouldCleanWorkingTree(
+      { stdout: "main\n" },
+      { stdout: "?? reports/decisions/polymarket-execution-contract.md\n?? reports/decisions/kalshi-execution-contract.md" },
+    );
+    assert.equal(decision.ok, true, "untracked-only should not trigger skip");
+  });
+
+  test("regression (2026-04-08): untracked decision contracts don't block cleanup", () => {
+    // This is the exact state we saw in ~/hydra-betting after the grounding
+    // fix landed: 4 decision contract .md files written during the Monday
+    // debug session that were never committed. The initial safety gate
+    // incorrectly treated them as "dirty" and skipped cleanup forever, which
+    // would have made all subsequent orchestrator cycles skip cleanup even
+    // though there was nothing at risk.
+    const decision = shouldCleanWorkingTree(
+      { stdout: "main" },
+      {
+        stdout:
+          "?? reports/decisions/cross-venue-arbitrage-contract.md\n" +
+          "?? reports/decisions/kalshi-execution-contract.md\n" +
+          "?? reports/decisions/polymarket-execution-contract.md\n" +
+          "?? reports/decisions/sportsbook-prediction-market-matcher-contract.md",
+      },
+    );
+    assert.equal(decision.ok, true);
   });
 
   test("cycle branch (non-feature prefix) with clean tree → still skips", () => {

@@ -175,9 +175,20 @@ export function shouldCleanWorkingTree(branchResult, statusResult) {
     return { ok: false, reason: `on feature branch "${branch}" — operator-driven work, not auto-cleaning` };
   }
 
-  if (status) {
-    const changeCount = status.split("\n").length;
-    return { ok: false, reason: `working tree has ${changeCount} uncommitted change(s) — operator-driven work, not auto-cleaning` };
+  // Filter out untracked files (lines starting with "?? "). Untracked files
+  // are safe — `git checkout main && git checkout .` doesn't touch them, and
+  // the original cleanup code explicitly avoided `git clean -fd` for this
+  // exact reason. Only TRACKED modifications (M, A, D, R, etc.) signal that
+  // the operator is editing and we should defer.
+  const trackedChanges = status
+    ? status.split("\n").filter((line) => line && !line.startsWith("?? "))
+    : [];
+
+  if (trackedChanges.length > 0) {
+    return {
+      ok: false,
+      reason: `working tree has ${trackedChanges.length} tracked modification(s) — operator-driven work, not auto-cleaning`,
+    };
   }
 
   return { ok: true };
