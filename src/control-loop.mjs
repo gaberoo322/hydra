@@ -6,6 +6,8 @@ import { STREAMS } from "./event-bus.mjs";
 import { runAgent, findPersonality } from "./codex-runner.mjs";
 import { getTracker } from "./task-tracker.mjs";
 import { groundProject, summarizeForPrompt, getDiff, getDiffStat } from "./grounding.mjs";
+import { prepareWorkspace } from "./prepare-workspace.mjs";
+import { mergeToMain } from "./merge.mjs";
 import { runVerification, validateDiffExists, summarizeVerification, defaultVerificationPlan } from "./verifier.mjs";
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.mjs";
@@ -221,9 +223,21 @@ export async function runControlLoop(eventBus, opts = {}) {
   });
 
   // =========================================================================
-  // Step 1: GROUND — know the truth before planning
+  // Step 1a: PREPARE WORKSPACE — explicit, observable cleanup step
+  // (gated on operator safety: skips if on feature branch or has tracked edits)
   // =========================================================================
-  console.log(`[ControlLoop] Step 1: Grounding...`);
+  console.log(`[ControlLoop] Step 1a: Preparing workspace...`);
+  const prep = await prepareWorkspace(PROJECT_WORKSPACE);
+  if (!prep.cleaned) {
+    console.log(`[ControlLoop] Workspace prep skipped: ${prep.reason}`);
+  } else if (prep.staleBranchesDeleted > 0) {
+    console.log(`[ControlLoop] Workspace prep deleted ${prep.staleBranchesDeleted} stale feature branches`);
+  }
+
+  // =========================================================================
+  // Step 1b: GROUND — know the truth before planning (read-only)
+  // =========================================================================
+  console.log(`[ControlLoop] Step 1b: Grounding...`);
   const grounding = await groundProject(PROJECT_WORKSPACE);
   const groundingSummary = summarizeForPrompt(grounding);
   console.log(`[ControlLoop] Grounded: ${grounding.testReport.passed} tests passing, ${grounding.testReport.failed} failing (${grounding.groundingDurationMs}ms)`);
@@ -477,52 +491,28 @@ export async function runControlLoop(eventBus, opts = {}) {
   console.log(`[ControlLoop] Verification PASSED (${verification.totalDurationMs}ms)`);
 
   // =========================================================================
-  // Step 7: MERGE — git operation, NOT an agent
+  // Step 7: MERGE — git operation, NOT an agent (extracted to merge.mjs)
   // =========================================================================
   console.log(`[ControlLoop] Step 7: Merging to main...`);
+  const mergeResult = await mergeToMain(PROJECT_WORKSPACE, cycleId);
   let commitSha = "";
-  try {
-    // Get current branch
-    const { stdout: branch } = await execFileAsync("git", ["branch", "--show-current"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
-    const featureBranch = branch.trim();
-
-    if (featureBranch && featureBranch !== "main") {
-      await execFileAsync("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
-      await execFileAsync("git", ["pull", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 }).catch((err) => {
-        console.error(`[ControlLoop] git pull before merge failed (continuing with local main): ${err.message}`);
-      });
-      await execFileAsync("git", ["merge", "--no-ff", featureBranch, "-m", `merge: ${featureBranch} into main for ${cycleId}`], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
-      await execFileAsync("git", ["push", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
-      const { stdout: sha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
-      commitSha = sha.trim();
-      console.log(`[ControlLoop] Merged ${featureBranch} → main (${commitSha.slice(0, 7)})`);
+  if (mergeResult.ok) {
+    commitSha = mergeResult.commitSha;
+    if (mergeResult.featureBranch) {
+      console.log(`[ControlLoop] Merged ${mergeResult.featureBranch} → main (${commitSha.slice(0, 7)})`);
     } else {
-      // Already on main — push (let errors throw so outer catch reports merge_failed)
-      await execFileAsync("git", ["push", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
-      const { stdout: sha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
-      commitSha = sha.trim();
       console.log(`[ControlLoop] Already on main, pushed (${commitSha.slice(0, 7)})`);
     }
-
     await tracker.transitionTask(taskId, "merged", { commitSha });
-
-    // Clean up the merged feature branch
-    if (featureBranch && featureBranch !== "main") {
-      try {
-        await execFileAsync("git", ["branch", "-d", featureBranch], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
-        console.log(`[ControlLoop] Deleted merged branch ${featureBranch}`);
-      } catch (err) {
-        console.error(`[ControlLoop] Failed to delete merged branch ${featureBranch}: ${err.message}`);
-      }
-    }
-  } catch (err) {
-    console.error(`[ControlLoop] Merge failed: ${err.message}`);
-    // Verification passed but merge failed — still mark as verified, report the merge failure
+  } else {
+    console.error(`[ControlLoop] Merge failed: ${mergeResult.error}`);
+    // Verification passed but merge failed — stays "verified" in tracker state;
+    // publish notification so digest surfaces the merge failure.
     await eventBus.publish(STREAMS.NOTIFICATIONS, {
       type: "task:merge_failed",
       source: "control-loop",
       correlationId: cycleId,
-      payload: { taskId, title: task.title, error: err.message },
+      payload: { taskId, title: task.title, error: mergeResult.error },
     });
   }
 
