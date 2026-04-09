@@ -51,7 +51,7 @@ async function selectAnchor(grounding, opts = {}) {
       // Parse research context if present
       let parsedContext = item.context;
       if (typeof parsedContext === "string") {
-        try { parsedContext = JSON.parse(parsedContext); } catch {}
+        try { parsedContext = JSON.parse(parsedContext); } catch { /* intentional: context stays as string */ }
       }
       return {
         type: item.source === "research" ? "research" : "user-request",
@@ -59,7 +59,9 @@ async function selectAnchor(grounding, opts = {}) {
         whyNow: `Queued by ${item.source === "research" ? "research system" : "operator"}: ${item.reason || "from work queue"}`,
         context: parsedContext,
       };
-    } catch {}
+    } catch (err) {
+      console.error(`[ControlLoop] Corrupt work-queue item dropped: ${err.message} — data: ${queued.slice(0, 200)}`);
+    }
   }
 
   // 3. Failing tests are the highest-priority automatic anchor
@@ -92,7 +94,9 @@ async function selectAnchor(grounding, opts = {}) {
         whyNow: `Prior task ${failure.taskId} failed: ${failure.reason || "unknown"}`,
         context: failure,
       };
-    } catch {}
+    } catch (err) {
+      console.error(`[ControlLoop] Corrupt prior-failure at head of queue (blocking retries): ${err.message}. Fix with: redis-cli LPOP hydra:anchors:prior-failures`);
+    }
   }
 
   // 5. TODO/FIXME markers in code — developer-written signals of known gaps
@@ -115,7 +119,10 @@ async function selectAnchor(grounding, opts = {}) {
         const { getMetricsTrend } = await import("./metrics.mjs");
         const trend = await getMetricsTrend(10);
         return trend.filter((m) => m.anchorType === "doc" && m.anchorReference === "direction/priorities.md").length;
-      } catch { return 0; }
+      } catch (err) {
+        console.error(`[ControlLoop] Failed to check recent doc-cycle trend: ${err.message}`);
+        return 0;
+      }
     })();
 
     if (recentDocCycles >= 5) {
@@ -138,7 +145,10 @@ async function selectAnchor(grounding, opts = {}) {
         : "Next priority from operator direction document",
       context: priorities,
     };
-  } catch {
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error(`[ControlLoop] selectAnchor: failed to read priorities.md: ${err.message}`);
+    }
     return null;
   }
 }
@@ -146,6 +156,29 @@ async function selectAnchor(grounding, opts = {}) {
 // ---------------------------------------------------------------------------
 // Store a prior-failure anchor for the next cycle
 // ---------------------------------------------------------------------------
+
+/**
+ * Run a Kanban update (moveToInProgress / moveToDone / returnToBacklog) with
+ * loud failure handling. Silent failure here caused incident #5 (6 days of
+ * drift): log to journald AND publish an event so the digest sees it.
+ */
+async function safeKanban(eventBus, cycleId, op, reference, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`[ControlLoop] Kanban ${op} failed for "${reference}": ${err.message}`);
+    try {
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
+        type: "kanban:update_failed",
+        source: "control-loop",
+        correlationId: cycleId,
+        payload: { op, reference, error: err.message },
+      });
+    } catch (publishErr) {
+      console.error(`[ControlLoop] Failed to publish kanban:update_failed: ${publishErr.message}`);
+    }
+  }
+}
 
 async function storePriorFailure(taskId, reason, verificationResult) {
   await getTracker().redis.rpush("hydra:anchors:prior-failures", JSON.stringify({
@@ -211,7 +244,8 @@ export async function runControlLoop(eventBus, opts = {}) {
         if (diffLines > 0 && diffLines < 200) {
           continuityContext += `Diff stat:\n${await getDiffStat(PROJECT_WORKSPACE, lastCycleReport.commitSha)}\n`;
         }
-      } catch {
+      } catch (err) {
+        console.error(`[ControlLoop] Continuity diff failed, using simpler context: ${err.message}`);
         continuityContext = `## CONTINUITY\n${lastReport}\n`;
       }
     } else {
@@ -316,7 +350,9 @@ export async function runControlLoop(eventBus, opts = {}) {
     try {
       await recordPlannerLesson(cycleId, task, "abandoned", { reason: `Skeptic rejected: ${skepticResult.reason}` });
       await recordSkepticLesson(cycleId, task, "reject", "abandoned");
-    } catch {}
+    } catch (err) {
+      console.error(`[ControlLoop] Failed to record rejection lessons: ${err.message}`);
+    }
 
     return {
       cycleId,
@@ -333,7 +369,7 @@ export async function runControlLoop(eventBus, opts = {}) {
   // =========================================================================
   console.log(`[ControlLoop] Step 5: Executing...`);
   await tracker.transitionTask(taskId, "in-progress", {});
-  try { await moveToInProgress(anchor.reference); } catch {}
+  await safeKanban(eventBus, cycleId, "moveToInProgress", anchor.reference, () => moveToInProgress(anchor.reference));
 
   const execResult = await runExecutorAgent(cycleId, task, grounding, groundingSummary);
 
@@ -346,7 +382,9 @@ export async function runControlLoop(eventBus, opts = {}) {
     try {
       await recordPlannerLesson(cycleId, task, "failed", { failReason: "Executor produced no code changes" });
       await recordExecutorLesson(cycleId, task, "failed", { noDiff: true });
-    } catch {}
+    } catch (err) {
+      console.error(`[ControlLoop] Failed to record no-diff lessons: ${err.message}`);
+    }
     return {
       cycleId,
       tasks: [{ taskId, finalState: "failed", reason: "No code changes" }],
@@ -399,8 +437,9 @@ export async function runControlLoop(eventBus, opts = {}) {
       anchorType: task.anchorType, anchorReference: task.anchorReference,
     });
 
-    // Return to backlog on failure
-    try { await returnToBacklog(task.title, "verification failed"); } catch {}
+    // Return to backlog on failure — use anchor.reference to match Kanban row
+    // (task.title is planner-generated and doesn't match; see incident #5)
+    await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "verification failed"));
 
     // Record failure lessons for agents
     const failedStderr = verification.steps.find(s => !s.passed)?.stderr || "";
@@ -408,7 +447,9 @@ export async function runControlLoop(eventBus, opts = {}) {
       await recordPlannerLesson(cycleId, task, "failed", { failReason: `Verification failed: ${failedSteps.join(", ")}`, failedSteps });
       await recordExecutorLesson(cycleId, task, "failed", { failedSteps, verificationStderr: failedStderr });
       await recordSkepticLesson(cycleId, task, "approve", "failed");
-    } catch {}
+    } catch (err) {
+      console.error(`[ControlLoop] Failed to record verification-failure lessons: ${err.message}`);
+    }
 
     // Discard the broken branch to leave the repo clean for the next cycle
     try {
@@ -421,7 +462,9 @@ export async function runControlLoop(eventBus, opts = {}) {
         await execFileAsync("git", ["branch", "-D", broken], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
         console.log(`[ControlLoop] Deleted broken branch ${broken}`);
       }
-    } catch {}
+    } catch (err) {
+      console.error(`[ControlLoop] Broken branch cleanup failed (may leave stale branch): ${err.message}`);
+    }
 
     return {
       cycleId,
@@ -445,15 +488,17 @@ export async function runControlLoop(eventBus, opts = {}) {
 
     if (featureBranch && featureBranch !== "main") {
       await execFileAsync("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
-      await execFileAsync("git", ["pull", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 }).catch(() => {});
+      await execFileAsync("git", ["pull", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 }).catch((err) => {
+        console.error(`[ControlLoop] git pull before merge failed (continuing with local main): ${err.message}`);
+      });
       await execFileAsync("git", ["merge", "--no-ff", featureBranch, "-m", `merge: ${featureBranch} into main for ${cycleId}`], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
       await execFileAsync("git", ["push", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
       const { stdout: sha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
       commitSha = sha.trim();
       console.log(`[ControlLoop] Merged ${featureBranch} → main (${commitSha.slice(0, 7)})`);
     } else {
-      // Already on main — just push
-      await execFileAsync("git", ["push", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 }).catch(() => {});
+      // Already on main — push (let errors throw so outer catch reports merge_failed)
+      await execFileAsync("git", ["push", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
       const { stdout: sha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
       commitSha = sha.trim();
       console.log(`[ControlLoop] Already on main, pushed (${commitSha.slice(0, 7)})`);
@@ -466,7 +511,9 @@ export async function runControlLoop(eventBus, opts = {}) {
       try {
         await execFileAsync("git", ["branch", "-d", featureBranch], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
         console.log(`[ControlLoop] Deleted merged branch ${featureBranch}`);
-      } catch {}
+      } catch (err) {
+        console.error(`[ControlLoop] Failed to delete merged branch ${featureBranch}: ${err.message}`);
+      }
     }
   } catch (err) {
     console.error(`[ControlLoop] Merge failed: ${err.message}`);
@@ -635,13 +682,11 @@ export async function runControlLoop(eventBus, opts = {}) {
   // almost never matches the original backlog entry, which was leaving rows stuck
   // in Queued forever (2026-04-08 debug session).
   const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
-  try {
-    if (finalState === "merged") {
-      await moveToDone(anchor.reference, "merged");
-    } else {
-      await returnToBacklog(anchor.reference, finalState);
-    }
-  } catch {}
+  if (finalState === "merged") {
+    await safeKanban(eventBus, cycleId, "moveToDone", anchor.reference, () => moveToDone(anchor.reference, "merged"));
+  } else {
+    await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, finalState));
+  }
 
   // Record agent lessons from this cycle's outcome
   try {
@@ -676,7 +721,9 @@ export async function runControlLoop(eventBus, opts = {}) {
         payload: { trigger: "periodic_with_failures", recentFailures },
       });
     }
-  } catch {}
+  } catch (err) {
+    console.error(`[ControlLoop] Meta trigger check failed: ${err.message}`);
+  }
 
   return report;
 }
@@ -728,7 +775,9 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     if (acc.length > 0) {
       accomplishmentsContext = `## ALREADY ACCOMPLISHED (do NOT re-propose these)\n${acc.map((a) => `- "${a.title}"`).join("\n")}\n`;
     }
-  } catch {}
+  } catch (err) {
+    console.error(`[ControlLoop] Failed to load cumulative accomplishments: ${err.message}`);
+  }
 
   const prompt = [
     `## ANCHOR (this is what you are working on)`,
@@ -788,14 +837,20 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     correlationId: cycleId,
   });
 
-  // Parse output
+  // Parse output — try direct parse, then regex fallback, then fail loud
   let task = null;
   try {
     task = JSON.parse(result.output);
   } catch {
     const match = result.output.match(/\{[\s\S]*\}/);
     if (match) {
-      try { task = JSON.parse(match[0]); } catch {}
+      try {
+        task = JSON.parse(match[0]);
+      } catch (err) {
+        console.error(`[ControlLoop] Planner output unparseable even after regex extraction: ${err.message}`);
+      }
+    } else {
+      console.error(`[ControlLoop] Planner output contained no JSON object`);
     }
   }
 
@@ -829,7 +884,11 @@ async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
       const report = JSON.parse(content);
       recentHistory += `- ${report.cycleId}: "${report.task?.title}" (${report.task?.finalState})\n`;
     }
-  } catch {}
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error(`[ControlLoop] Skeptic failed to load recent cycle history: ${err.message}`);
+    }
+  }
 
   const prompt = [
     `You are the Skeptic. Your job is to CHALLENGE this proposed task. You have VETO power.`,
@@ -879,7 +938,13 @@ async function runSkepticAgent(cycleId, task, grounding, groundingSummary) {
   } catch {
     const match = result.output.match(/\{[\s\S]*\}/);
     if (match) {
-      try { verdict = JSON.parse(match[0]); } catch {}
+      try {
+        verdict = JSON.parse(match[0]);
+      } catch (err) {
+        console.error(`[ControlLoop] Skeptic output unparseable even after regex — failing safe to reject: ${err.message}`);
+      }
+    } else {
+      console.error(`[ControlLoop] Skeptic output contained no JSON object — failing safe to reject`);
     }
   }
 
@@ -900,7 +965,7 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary) {
       const content = await readFile(join(PROJECT_WORKSPACE, sampleTest), "utf-8");
       testPatternHint = `\n## TEST PATTERN (follow this pattern for new tests)\nFile: ${sampleTest}\n\`\`\`\n${content.slice(0, 1500)}\n\`\`\`\n`;
     }
-  } catch {}
+  } catch { /* intentional: test pattern hint is optional context for the executor */ }
 
   const prompt = [
     `## TASK`,
@@ -955,7 +1020,13 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary) {
   } catch {
     const match = result.output.match(/\{[\s\S]*\}/);
     if (match) {
-      try { output = JSON.parse(match[0]); } catch {}
+      try {
+        output = JSON.parse(match[0]);
+      } catch (err) {
+        console.error(`[ControlLoop] Executor output unparseable even after regex extraction: ${err.message}`);
+      }
+    } else {
+      console.error(`[ControlLoop] Executor output contained no JSON object`);
     }
   }
 
@@ -980,7 +1051,8 @@ async function loadLastCycleReport() {
       report.rollbackRisk ? `Rollback risk: ${report.rollbackRisk}` : "",
       report.filesChanged?.length > 0 ? `Files changed: ${report.filesChanged.join(", ")}` : "",
     ].filter(Boolean).join("\n");
-  } catch {
+  } catch (err) {
+    console.error(`[ControlLoop] loadLastCycleReport failed: ${err.message}`);
     return null;
   }
 }
@@ -997,7 +1069,10 @@ async function loadLastCycleReportFull() {
     if (files.length === 0) return null;
     const content = await readFile(join(reportDir, files[0]), "utf-8");
     return JSON.parse(content);
-  } catch {
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error(`[ControlLoop] loadLastCycleReportFull failed: ${err.message}`);
+    }
     return null;
   }
 }
