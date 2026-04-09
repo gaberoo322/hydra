@@ -13,28 +13,32 @@ flowchart LR
     subgraph loop["V2 Control Loop"]
         direction LR
 
-        ground["1. GROUND\n\nRun tests\nTypecheck\nGit state\nTODO markers"]
+        prep["1a. PREPARE\n\nCleanup workspace\n(gated on safety)"]
+        ground["1b. GROUND\n\nRun tests\nTypecheck\nGit state\nTODO markers"]
         anchor["2. ANCHOR\n\nSelect what\nto work on"]
-        plan["3. PLAN\n\nCodex agent\n1 bounded task\n+ verification plan"]
-        skeptic{"4. SKEPTIC\n\nCodex agent\nChallenge\nassumptions"}
+        plan["3. PLAN\n\nCodex agent\n1 bounded task\n+ classify complexity"]
+        skeptic{"4. SKEPTIC\n\nCodex agent\n(skipped for\nquick-fix)"}
         execute["5. EXECUTE\n\nCodex agent\nFeature branch\nCode changes"]
-        verify["6. VERIFY\n\nnpm test\nnpm run typecheck\nnpm run build"]
+        verify["6. VERIFY\n\nnpm test\nnpm run typecheck"]
+        reconcile["6.5 RECONCILE\n\nPlan vs actual\nscope diff"]
         merge["7. MERGE\n\ngit merge --no-ff\ngit push origin main"]
-        report["8. REPORT\n\nReality report\nMetrics to Redis\nNotification"]
+        report["8. REPORT\n\nReality report\nMetrics\nCompound learnings"]
 
-        ground --> anchor --> plan --> skeptic
+        prep --> ground --> anchor --> plan --> skeptic
         skeptic -- "approve" --> execute --> verify
-        verify -- "all passed" --> merge --> report
+        verify -- "all passed" --> reconcile --> merge --> report
         skeptic -- "reject" --> abandoned1["Task abandoned"]
-        verify -- "failed" --> retry["Store as\nprior-failure\nfor next cycle"]
+        verify -- "failed" --> retry["Store as\nprior-failure\nor Blocked"]
     end
 
+    style prep fill:#1e293b,stroke:#94a3b8,color:#e2e8f0
     style ground fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
     style anchor fill:#2d3a4a,stroke:#60a5fa,color:#e2e8f0
     style plan fill:#3d2d4a,stroke:#a78bfa,color:#e2e8f0
     style skeptic fill:#4a3d2d,stroke:#fbbf24,color:#e2e8f0
     style execute fill:#3d2d4a,stroke:#a78bfa,color:#e2e8f0
     style verify fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
+    style reconcile fill:#2d3a4a,stroke:#60a5fa,color:#e2e8f0
     style merge fill:#2d3a4a,stroke:#60a5fa,color:#e2e8f0
     style report fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
     style abandoned1 fill:#4a2d2d,stroke:#f87171,color:#e2e8f0
@@ -49,11 +53,13 @@ Only three Codex agent calls per cycle: **Planner**, **Skeptic**, and **Executor
 
 ### The Control Loop
 
-Each cycle follows an 8-step evidence-driven pipeline:
+Each cycle follows a 10-step evidence-driven pipeline:
 
-1. **GROUND** — Inspects the target project: runs tests, typechecks, reads git state, finds TODO/FIXME markers. Produces a structured `GroundingReport` with real numbers.
+1. **PREPARE WORKSPACE** — Cleans the target project's working tree (checkout main, discard tracked changes, delete stale feature branches). Gated on safety: skips if the operator is on a feature branch or has uncommitted edits.
 
-2. **ANCHOR** — Selects what to work on, using a strict priority order:
+2. **GROUND** — Inspects the target project: runs tests, typechecks, reads git state, finds TODO/FIXME markers. Produces a structured `GroundingReport` with real numbers. This step is read-only — it never mutates the repo.
+
+3. **ANCHOR** — Selects what to work on, using a strict priority order:
    - Explicit operator request (passed via API or queue)
    - Work queue items (`POST /queue`)
    - Failing tests (highest-priority automatic anchor)
@@ -62,17 +68,19 @@ Each cycle follows an 8-step evidence-driven pipeline:
    - TODO/FIXME markers in code
    - Priorities document (fallback to operator direction)
 
-3. **PLAN** — A Codex agent (Planner) proposes exactly one bounded task anchored to the selected work. The task includes scope boundaries, acceptance criteria, and a verification plan with shell commands that prove completion.
+4. **PLAN** — A Codex agent (Planner) proposes exactly one bounded task anchored to the selected work. The task includes scope boundaries, acceptance criteria, and a verification plan with shell commands that prove completion. After planning, the task is classified by complexity: **quick-fix** (≤2 files, ≤3 criteria), **standard**, or **complex** (>5 files or >8 criteria).
 
-4. **SKEPTIC GATE** — A second Codex agent (Skeptic) challenges the task. It checks for duplicate work, achievability, hidden blockers, and whether the scope is appropriately bounded. It can veto the task.
+5. **SKEPTIC GATE** — A Codex agent (Skeptic) challenges the task. It checks for duplicate work, achievability, hidden blockers, and whether the scope is appropriately bounded. It can veto the task. Skipped for quick-fix tasks and research-sourced items (scope-adaptive routing).
 
-5. **EXECUTE** — A Codex agent (Executor) creates a feature branch, makes the code changes, runs tests, and commits. It never merges to main — the loop handles that after verification.
+6. **EXECUTE** — A Codex agent (Executor) creates a feature branch, makes the code changes, runs tests, and commits. It never merges to main — the loop handles that after verification.
 
-6. **VERIFY** — Runs the verification plan from step 3 as shell commands (e.g., `npm test`, `npm run typecheck`, `npm run build`). Each step checks exit codes or output patterns. This is command execution, not an agent. If verification fails, the feature branch is discarded and the task is stored as a prior-failure for the next cycle.
+7. **VERIFY** — Runs the verification plan from step 4 as shell commands (e.g., `npm test`, `npm run typecheck`). Each step checks exit codes or output patterns. This is command execution, not an agent. If verification fails and the error suggests operator intervention (missing API keys, auth failures), the task is moved to the Blocked lane; otherwise it's stored as a prior-failure for retry.
 
-7. **MERGE** — Checks out main, pulls latest, runs `git merge --no-ff`, pushes to remote, and deletes the feature branch.
+8. **RECONCILE** — Compares the planner's `scopeBoundary.in` (planned files) against `verification.filesChanged` (actual files). Flags scope creep (executor touched out-of-scope files) and scope gaps (planned files not modified). Informational only — doesn't block merge.
 
-8. **REPORT** — Runs grounding again to detect regressions, computes rollback risk, writes a reality report to the vault, records structured metrics in Redis, and sends a notification.
+9. **MERGE** — Checks out main, pulls latest, runs `git merge --no-ff`, pushes to remote, and deletes the feature branch.
+
+10. **REPORT + COMPOUND** — Runs grounding again to detect regressions, computes rollback risk, writes a reality report to the vault, records structured metrics in Redis. Then extracts WHEN/CHECK/BECAUSE prevention rules from the outcome (Sage-inspired learning) — only from failures and surprises, not routine successes.
 
 ### Task State Machine
 
@@ -233,19 +241,22 @@ Hydra expects this structure in your vault path (directories are created automat
 your-vault/
 └── hydra/
     ├── direction/
-    │   └── priorities.md        # What Hydra should work on (you write this)
+    │   ├── priorities.md        # What Hydra should work on (you write this)
+    │   └── goals.md             # Project goals with success metrics and focus weights
     ├── agent-feedback/
-    │   ├── to-strategist.md     # Feedback for the planner agent
-    │   ├── to-builder.md        # Feedback for the executor agent
+    │   ├── to-planner.md        # Feedback for the planner agent
+    │   ├── to-executor.md       # Feedback for the executor agent
     │   └── to-skeptic.md        # Feedback for the skeptic agent
-    ├── agent-config/            # Custom personality overrides (optional)
-    ├── reports/
-    │   ├── cycle-summaries/     # Agent output per cycle (auto-generated)
-    │   ├── reality-reports/     # Structured cycle reports (auto-generated)
-    │   ├── proposals/           # Meta agent proposals (auto-generated)
-    │   │   └── approved/        # Move proposals here to approve via Obsidian
-    │   └── archive/             # Reports older than 7 days (auto-archived)
-    └── north-star.md            # Product vision (optional, used by legacy pipeline)
+    ├── agent-config/            # Agent personality files (planner, executor, skeptic, meta)
+    ├── agent-memory/            # Auto-generated WHEN/CHECK/BECAUSE prevention rules
+    ├── backlog.md               # Obsidian Kanban board (Backlog→Queued→Blocked→InProgress→Done)
+    ├── research-methodology/    # Research agent methodology configs
+    └── reports/
+        ├── cycle-summaries/     # Raw agent output (auto-deleted after 2 days)
+        ├── reality-reports/     # Structured cycle reports (last 50 kept)
+        ├── research/            # Research findings (auto-generated)
+        └── proposals/           # Meta agent proposals
+            └── approved/        # Move proposals here to approve via Obsidian
 ```
 
 Create the minimum required files:
@@ -302,7 +313,7 @@ You should see:
 [Hydra] REST API listening on port 4000
 [Hydra] Health check: http://localhost:4000/health
 [Hydra] Cycle watchdog started (checks every 15min, TTL 90min)
-[Cleanup] Report archival scheduled (daily, 7-day retention)
+[Cleanup] Scheduled (daily): cycle-summaries 2d, reality-reports keep 50, archive 7d
 ```
 
 For development with auto-restart:
@@ -388,7 +399,7 @@ Hydra's behavior is driven by files in the vault:
 
 **`direction/priorities.md`** — What Hydra should work on. Update this to redirect effort. Hydra will warn you if the priorities doc has been the anchor for 5+ of the last 10 cycles (sign it's stale).
 
-**`agent-feedback/to-strategist.md`** — Direct feedback to the planner. Example:
+**`agent-feedback/to-planner.md`** — Direct feedback to the planner. Example:
 
 ```markdown
 - Focus on fixing tests before adding new features
@@ -396,13 +407,15 @@ Hydra's behavior is driven by files in the vault:
 - Don't create architecture design tasks — just build
 ```
 
-**`agent-feedback/to-builder.md`** — Direct feedback to the executor. Example:
+**`agent-feedback/to-executor.md`** — Direct feedback to the executor. Example:
 
 ```markdown
 - Always run tests before committing
 - Follow the existing code style exactly
-- Don't add console.log debugging statements
+- Never delete files in src/lib/providers/
 ```
+
+**`backlog.md`** — Obsidian Kanban board. Drag items between lanes (Backlog, Queued, Blocked, In Progress, Done). Items in the **Blocked** lane require your intervention (API keys, credentials, etc.) — Hydra skips them and works on other things.
 
 ### Managing proposals
 
@@ -596,7 +609,7 @@ This is the recommended way to operate Hydra for maximum effectiveness:
 
 ### When things go wrong
 
-- **Verification fails repeatedly**: Check the agent feedback. The executor might be making the same mistake. Add specific guidance to `to-builder.md`.
+- **Verification fails repeatedly**: Check the agent feedback. The executor might be making the same mistake. Add specific guidance to `agent-feedback/to-executor.md`. Also check `agent-memory/executor.md` for existing WHEN/CHECK/BECAUSE prevention rules.
 - **Skeptic rejects everything**: Lower the bar by adjusting the priorities to be more specific about what you want.
 - **Cycles produce no work**: The anchor system found nothing to do. Either all priorities are addressed, or the priorities doc is too vague. Update it.
 - **Regressions introduced**: Hydra detects these in the REPORT step and flags them. The next cycle will automatically anchor to the failing test.
@@ -655,8 +668,8 @@ This is the recommended way to operate Hydra for maximum effectiveness:
 
 | Agent | Model | Tier | Timeout | Purpose |
 |-------|-------|------|---------|---------|
-| Planner | `gpt-5.4` | frontier | 2 min | Decompose anchor into a bounded task |
-| Skeptic | `gpt-5.4` | frontier | 2 min | Challenge task assumptions, veto bad proposals |
+| Planner | `gpt-5.4` | frontier | 2 min | Decompose anchor into a bounded task (codex model for quick-fix anchors) |
+| Skeptic | `gpt-5.3-codex` | codex | 2 min | Challenge task assumptions, veto bad proposals (skipped for quick-fix) |
 | Executor | `gpt-5.3-codex` | codex | 10 min | Make code changes on a feature branch |
 | Meta | `gpt-5.4-nano` | nano | 3 min | Analyze metrics, propose improvements |
 
@@ -696,6 +709,8 @@ This is the recommended way to operate Hydra for maximum effectiveness:
 | `hydra:metrics:{id}` | Hash | Cycle metrics (tasks, tests, durations, regression) |
 | `hydra:anchors:work-queue` | List | Operator-queued work items |
 | `hydra:anchors:prior-failures` | List | Failed tasks for retry in next cycle |
+| `hydra:scheduler:state` | Hash | Persisted scheduler throttle state (survives restarts) |
+| `hydra:scheduler:daily-spend` | Hash | Daily codex spend counter (resets at local midnight) |
 
 ## Infrastructure
 
@@ -722,49 +737,41 @@ This is the recommended way to operate Hydra for maximum effectiveness:
 ```
 hydra/
 ├── src/
-│   ├── index.mjs            # Entry point — starts server, watchdog, consumers
-│   ├── control-loop.mjs     # V2 control loop (ground→plan→skeptic→execute→verify→merge)
-│   ├── cycle.mjs            # Cycle orchestration (delegates to control-loop or legacy pipeline)
-│   ├── event-bus.mjs        # Redis Streams — publish, consume, consumer groups, DLQ
-│   ├── task-tracker.mjs     # Redis-backed task state machine with evidence tracking
-│   ├── codex-runner.mjs     # Codex CLI wrapper — model routing, personalities, timeouts
-│   ├── grounding.mjs        # Project inspection — tests, types, git, TODOs
-│   ├── verifier.mjs         # Verification — runs shell commands, checks expectations
-│   ├── api.mjs              # Express REST API (all endpoints)
-│   ├── pipeline.mjs         # Background consumers (meta, notifications, DLQ)
-│   ├── proposals.mjs        # Meta agent + proposal system (create, approve, reject)
-│   ├── notify.mjs           # Telegram notifications via OpenClaw CLI
-│   ├── metrics.mjs          # Cycle analytics — recording, trends, drift detection
-│   ├── research-loop.mjs     # Research cycle (3 researchers → strategist → auto-queue)
+│   ├── index.mjs              # Entry point — starts server, watchdog, consumers
+│   ├── control-loop.mjs       # Control loop (prepare→ground→plan→skeptic→execute→verify→reconcile→merge→report→compound)
+│   ├── cycle.mjs              # Cycle orchestration wrapper (delegates to control-loop)
+│   ├── merge.mjs              # Git merge + push operations (extracted from control-loop)
+│   ├── prepare-workspace.mjs  # Workspace cleanup before grounding (safety-gated)
+│   ├── grounding.mjs          # Read-only project inspection — tests, types, git, TODOs
+│   ├── verifier.mjs           # Hard verification — runs shell commands, checks exit codes
+│   ├── agent-memory.mjs       # WHEN/CHECK/BECAUSE prevention rules (Sage pattern)
+│   ├── backlog.mjs            # Obsidian Kanban board (Backlog→Queued→Blocked→InProgress→Done)
+│   ├── task-tracker.mjs       # Redis-backed 9-state task machine with evidence tracking
+│   ├── codex-runner.mjs       # Codex CLI wrapper — model routing, personalities, timeouts
+│   ├── scheduler.mjs          # Auto-cycle scheduler, research throttle, daily spend cap
+│   ├── metrics.mjs            # Cycle analytics — recording, trends, drift detection
+│   ├── api.mjs                # Express REST API (all endpoints)
+│   ├── event-bus.mjs          # Redis Streams — publish, consume, consumer groups, DLQ
+│   ├── pipeline.mjs           # Background consumers (meta, notifications, DLQ)
+│   ├── proposals.mjs          # Meta agent + proposal system (create, approve, reject)
+│   ├── notify.mjs             # Telegram notifications via OpenClaw CLI
+│   ├── digest.mjs             # 4-hour digest summaries (replaces per-event notifications)
+│   ├── research-loop.mjs      # Research cycle (3 researchers → strategist → auto-queue)
 │   ├── research-architect.mjs # Self-improving methodology review
-│   ├── project-goals.mjs    # Project goals document parser
-│   ├── cleanup.mjs          # Report archival (7-day retention)
-│   ├── vault-watcher.mjs    # File watcher — indexes vault into OpenViking
-│   └── openai-proxy.mjs     # Bridges OpenViking to Codex subscription for embeddings
-├── config/                   # Agent personality files
-│   ├── strategist.md
-│   ├── builder.md
-│   ├── architect.md
-│   ├── reviewer.md
-│   ├── tester.md
-│   ├── researcher.md
-│   ├── meta.md
-│   ├── devops.md
-│   ├── domain-researcher.md  # Domain/strategy research personality
-│   ├── technical-researcher.md # Codebase/architecture analysis
-│   ├── market-researcher.md  # External APIs/market intelligence
-│   ├── research-strategist.md # Synthesis and opportunity ranking
-│   └── research-architect.md # Methodology self-improvement
-├── docker/
-│   ├── ov.conf              # OpenViking server configuration
-│   └── ov-entrypoint.sh     # OpenViking entrypoint script
+│   ├── project-goals.mjs      # Project goals document parser
+│   ├── cleanup.mjs            # Report cleanup (cycle-summaries: 2d, reality-reports: keep 50)
+│   ├── vault-watcher.mjs      # File watcher — indexes vault into OpenViking
+│   └── openai-proxy.mjs       # Bridges OpenViking to Codex subscription for embeddings
 ├── test/
-│   ├── codex-runner.test.mjs
-│   └── fix-forward.test.mjs
-├── openclaw-skill/
-│   └── SKILL.md             # Claude Code skill for controlling Hydra
+│   ├── backlog.test.mjs       # Kanban state machine regression tests
+│   ├── codex-runner.test.mjs  # Agent runner regression tests
+│   └── grounding.test.mjs     # Test parsing + cleanup safety regression tests
+├── docker/
+│   ├── ov.conf                # OpenViking server configuration
+│   └── ov-entrypoint.sh       # OpenViking entrypoint script
 ├── docker-compose.yml
 ├── package.json
+├── CLAUDE.md                  # Claude Code guidance for working with this repo
 ├── .env.example
 └── .gitignore
 ```
