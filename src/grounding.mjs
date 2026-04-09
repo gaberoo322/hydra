@@ -10,7 +10,32 @@ const OUTPUT_LIMIT = 10_000; // truncate stdout/stderr to 10KB
 
 function truncate(str, limit = OUTPUT_LIMIT) {
   if (!str || str.length <= limit) return str || "";
-  return str.slice(0, limit) + `\n... (truncated, ${str.length} total chars)`;
+  // Keep HEAD + TAIL rather than just head. For test and build commands the
+  // signal we care about (vitest's "Tests N passed" summary, tsc's final
+  // error counts, webpack build results) lives at the END of stdout — not
+  // the start. A pure head-truncate at 10KB hides it and caused every
+  // orchestrator cycle to report "0 tests passing" from 2026-04-06 onward.
+  // This head+tail bias preserves both early errors and final summaries.
+  const headLen = Math.floor(limit / 2);
+  const tailLen = limit - headLen - 100; // reserve ~100 chars for the divider
+  return (
+    str.slice(0, headLen) +
+    `\n... (truncated, ${str.length} total chars, keeping head + tail) ...\n` +
+    str.slice(-tailLen)
+  );
+}
+
+/**
+ * Strip ANSI escape sequences from a string. Defense in depth for any child
+ * process that ignores the NO_COLOR env var and emits colored output anyway.
+ * See the 2026-04-08 debug session for the full backstory — npm was passing
+ * FORCE_COLOR=1 through to vitest under systemd even with TERM unset.
+ */
+function stripAnsi(str) {
+  if (!str) return "";
+  // Match CSI (control sequence introducer) ANSI codes: ESC [ ... final byte
+  // eslint-disable-next-line no-control-regex
+  return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 }
 
 /**
@@ -20,11 +45,26 @@ function truncate(str, limit = OUTPUT_LIMIT) {
 async function runCmd(cmd, args, opts = {}) {
   const start = Date.now();
   const timeout = opts.timeout || CMD_TIMEOUT;
+  // Force NO_COLOR in the child env so vitest/tsc/etc. don't emit ANSI escape
+  // codes that break the stdout parsers below (parseTestCounts, parseFailingTests).
+  //
+  // When the orchestrator runs as a systemd service, TERM is unset, and npm
+  // passes FORCE_COLOR=1 through to child processes by default — which makes
+  // vitest render "Tests 633 passed" as "\x1b[2m Tests \x1b[22m \x1b[1m\x1b[32m633 passed"
+  // and the regex `^\s*Tests\s+(\d+)\s+passed` fails to match.
+  //
+  // This caused every cycle since 2026-04-06 to report "0 tests passing" and
+  // feed that garbage into the planner/skeptic/executor prompts. Fixed 2026-04-08.
+  const childEnv = {
+    ...(opts.env || process.env),
+    NO_COLOR: "1",
+    FORCE_COLOR: "0",
+  };
   try {
     const { stdout, stderr } = await execFileAsync(cmd, args, {
       cwd: opts.cwd,
       timeout,
-      env: opts.env || process.env,
+      env: childEnv,
       maxBuffer: 1024 * 1024 * 5, // 5MB
     });
     return {
@@ -48,7 +88,8 @@ async function runCmd(cmd, args, opts = {}) {
  * Looks for patterns like "Tests  42 passed (42)" or "42 passed | 2 failed".
  */
 function parseTestCounts(stdout, stderr) {
-  const combined = (stdout || "") + "\n" + (stderr || "");
+  // Strip ANSI codes first — see stripAnsi() docs above.
+  const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   let passed = 0, failed = 0, total = 0;
 
   // Vitest outputs two lines: "Test Files  43 passed (43)" and "Tests  352 passed (352)"
@@ -87,7 +128,8 @@ function parseTestCounts(stdout, stderr) {
  * Extract failing test names from vitest/jest output.
  */
 function parseFailingTests(stdout, stderr) {
-  const combined = (stdout || "") + "\n" + (stderr || "");
+  // Strip ANSI codes first — see stripAnsi() docs above.
+  const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   const failures = [];
 
   // Vitest: "FAIL  src/foo.test.ts > suite > test name"
