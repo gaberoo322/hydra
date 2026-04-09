@@ -327,6 +327,83 @@ export async function runResearchLoop(eventBus, opts = {}) {
   console.log(`[Research] Synthesis: ${synthesisResult.parsed ? "OK" : "FAILED TO PARSE"} (${synthesisResult.duration}ms)`);
 
   const synthesis = synthesisResult.parsed;
+
+  // Step 5.5: Strategist refreshes priorities.md from its synthesis + operator north star
+  //
+  // The strategist has the richest context at this point (all 3 researcher
+  // outputs + goals + accomplishments + synthesis). It writes priorities.md
+  // so the planner's next cycle gets direction informed by real research.
+  let prioritiesRefreshed = false;
+  if (userPriorities && synthesis?.opportunities) {
+    try {
+      console.log("[Research] Strategist refreshing priorities from synthesis + operator north star...");
+      const { writeFile: wf } = await import("node:fs/promises");
+
+      const prioritiesPrompt = [
+        `## YOUR JOB`,
+        `You just completed a research synthesis. Now write an updated priorities.md for the planner agent.`,
+        `The planner reads this file to decide what to work on each cycle.`,
+        ``,
+        `## OPERATOR'S NORTH STAR (this governs everything — follow it)`,
+        userPriorities.slice(0, 3000),
+        ``,
+        `## YOUR RESEARCH SYNTHESIS (use this to inform specific priorities)`,
+        `Top opportunities from this research cycle:`,
+        ...(synthesis.opportunities || []).slice(0, 10).map((o, i) =>
+          `${i + 1}. [${o.confidence}] ${o.title} (score: ${o.adjustedScore}, category: ${o.category})${o.autoQueue ? " — AUTO-QUEUED" : ""}`
+        ),
+        synthesis.topInsight ? `\nTop insight: ${synthesis.topInsight}` : "",
+        ``,
+        accomplishments ? `## ALREADY ACCOMPLISHED (do NOT re-propose)\n${accomplishments}\n` : "",
+        groundingSummary.slice(0, 1500),
+        ``,
+        `## INSTRUCTIONS`,
+        `Write the COMPLETE content of priorities.md. Requirements:`,
+        `1. Start with a "Current state" summary so the planner knows where things stand`,
+        `2. List 5-10 specific, actionable priority items ordered by importance to the operator's goals`,
+        `3. Each item should be a concrete task the planner can propose (not vague direction)`,
+        `4. Mark items that need operator intervention as BLOCKED with the reason`,
+        `5. Include "What's been completed" section so the planner skips done work`,
+        `6. Include "What NOT to work on" based on the operator's north star`,
+        `7. Keep it under 120 lines — concise and actionable`,
+        `8. Do NOT wrap in code fences or JSON — output raw markdown`,
+      ].filter(Boolean).join("\n");
+
+      const prioritiesResult = await runAgent({
+        agentName: "research-strategist",
+        personality: pjoin(process.cwd(), "config", "research-strategist.md"),
+        prompt: prioritiesPrompt,
+        model: "nano",
+        taskId: "priorities-refresh",
+        correlationId: researchId,
+      });
+
+      if (prioritiesResult.output && prioritiesResult.output.trim().length > 50) {
+        let content = prioritiesResult.output.trim();
+        if (content.startsWith("```")) {
+          content = content.replace(/^```\w*\n?/, "").replace(/\n?```$/, "").trim();
+        }
+        const date = new Date().toISOString().split("T")[0];
+        const header = content.startsWith("---") ? "" : [
+          `---`,
+          `updated: ${date}`,
+          `refreshedBy: research-strategist`,
+          `researchCycle: ${researchId}`,
+          `tags: [hydra, hydra/direction]`,
+          `---`,
+          ``,
+        ].join("\n");
+        await wf(pjoin(vaultPath, "hydra", "direction", "priorities.md"), header + content + "\n");
+        prioritiesRefreshed = true;
+        console.log(`[Research] Priorities refreshed by strategist (${content.split("\n").length} lines)`);
+      } else {
+        console.error("[Research] Strategist produced empty priorities output — skipping refresh");
+      }
+    } catch (err) {
+      console.error(`[Research] Priorities refresh failed: ${err.message}`);
+    }
+  }
+
   const totalDuration = Date.now() - startTime;
   const totalCost = (domainResult.costUsd || 0) + (technicalResult.costUsd || 0) +
                     (marketResult.costUsd || 0) + (synthesisResult.costUsd || 0);
@@ -423,6 +500,7 @@ export async function runResearchLoop(eventBus, opts = {}) {
     marketResearch: marketResult.parsed,
     synthesis,
     autoQueued,
+    prioritiesRefreshed,
     opportunityCount: synthesis?.opportunities?.length || 0,
   };
 

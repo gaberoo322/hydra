@@ -15,7 +15,6 @@ import { getBacklogCounts, promoteToQueued, pruneOldDoneItems } from "./backlog.
 import { getTracker } from "./task-tracker.mjs";
 import { runResearchLoop } from "./research-loop.mjs";
 import { runArchitectReview } from "./research-architect.mjs";
-import { refreshPriorities } from "./priorities-refresh.mjs";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
@@ -311,18 +310,8 @@ async function maybeRunResearch(eventBus) {
       }
     }
     console.log(`[Scheduler] Research complete — ${research.autoQueued || 0} items auto-queued`);
-
-    // Refresh priorities after research (new findings inform direction)
-    try {
-      const refresh = await refreshPriorities({ trigger: "research" });
-      if (refresh.ok) {
-        console.log(`[Scheduler] Priorities refreshed (${refresh.duration}ms)`);
-      } else if (refresh.error) {
-        console.error(`[Scheduler] Priorities refresh failed: ${refresh.error}`);
-      }
-    } catch (err) {
-      console.error(`[Scheduler] Priorities refresh failed: ${err.message}`);
-    }
+    // Priorities refresh is handled inside the research loop by the
+    // research-strategist (Step 5.5) — it has the richest context.
 
     // Auto-trigger architect review every N research cycles
     if (state.researchSinceLastArchitect >= ARCHITECT_EVERY_N_RESEARCH) {
