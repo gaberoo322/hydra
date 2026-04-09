@@ -949,7 +949,7 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     ? ["", "", []]
     : await Promise.all([
         readFile(join(HYDRA_PATH, "direction", "priorities.md"), "utf-8").catch(() => ""),
-        readFile(join(HYDRA_PATH, "agent-feedback", "to-strategist.md"), "utf-8").catch(() => ""),
+        readFile(join(HYDRA_PATH, "agent-feedback", "to-planner.md"), "utf-8").catch(() => ""),
         loadAgentMemory("planner"),
       ]);
 
@@ -1047,7 +1047,7 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     ].filter(Boolean).join("\n");
   }
 
-  const personality = await findPersonality("planner") || await findPersonality("strategist");
+  const personality = await findPersonality("planner");
   const result = await runAgent({
     agentName: "planner",
     personality,
@@ -1223,7 +1223,7 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary) {
     `{ "summary": "...", "filesChanged": [...], "commits": [...], "branch": "...", "testsRun": { "passed": N, "failed": N } }`,
   ].join("\n");
 
-  const personality = await findPersonality("executor") || await findPersonality("builder");
+  const personality = await findPersonality("executor");
   const result = await runAgent({
     agentName: "executor",
     personality,
