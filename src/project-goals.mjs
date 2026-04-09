@@ -178,6 +178,12 @@ export function summarizeGoalsForPrompt(goals) {
     }
   }
 
+  // Include operator's north star if loaded (from user-priorities.md)
+  if (goals.userPriorities) {
+    parts.push("\n### Operator's North Star (from user-priorities.md — this overrides other direction)");
+    parts.push(goals.userPriorities.slice(0, 2000));
+  }
+
   return parts.join("\n");
 }
 

@@ -11,6 +11,7 @@ import { runArchitectReview } from "./research-architect.mjs";
 import { loadProjectGoals, summarizeGoalsForPrompt } from "./project-goals.mjs";
 import { sendDigestNow } from "./digest.mjs";
 import { loadBacklog, getBacklogCounts, addToBacklog } from "./backlog.mjs";
+import { refreshPriorities } from "./priorities-refresh.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
 const KILL_FILE = resolve(VAULT_PATH, ".kill");
@@ -460,6 +461,16 @@ function createApi(eventBus) {
       const { title, category } = req.body || {};
       if (!title) return res.status(400).json({ error: "Missing 'title'" });
       const result = await addToBacklog({ title, category: category || "uncategorized", source: "operator" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /priorities/refresh — Manually trigger priorities refresh from user-priorities.md
+  app.post("/priorities/refresh", async (req, res) => {
+    try {
+      const result = await refreshPriorities({ trigger: "manual" });
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });

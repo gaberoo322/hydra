@@ -15,6 +15,7 @@ import { getBacklogCounts, promoteToQueued, pruneOldDoneItems } from "./backlog.
 import { getTracker } from "./task-tracker.mjs";
 import { runResearchLoop } from "./research-loop.mjs";
 import { runArchitectReview } from "./research-architect.mjs";
+import { refreshPriorities } from "./priorities-refresh.mjs";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
@@ -23,7 +24,7 @@ const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 3;
 const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 6 * 60 * 60 * 1000; // 6 hours
 const ARCHITECT_EVERY_N_RESEARCH = parseInt(process.env.HYDRA_ARCHITECT_EVERY_N_RESEARCH) || 3;
-const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || 30;
+const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || 50;
 const REPETITION_WINDOW = parseInt(process.env.HYDRA_REPETITION_WINDOW) || 5; // Check last N cycles
 const REPETITION_THRESHOLD = parseFloat(process.env.HYDRA_REPETITION_THRESHOLD) || 0.5; // Pause if >50% of recent titles are similar
 
@@ -310,6 +311,18 @@ async function maybeRunResearch(eventBus) {
       }
     }
     console.log(`[Scheduler] Research complete — ${research.autoQueued || 0} items auto-queued`);
+
+    // Refresh priorities after research (new findings inform direction)
+    try {
+      const refresh = await refreshPriorities({ trigger: "research" });
+      if (refresh.ok) {
+        console.log(`[Scheduler] Priorities refreshed (${refresh.duration}ms)`);
+      } else if (refresh.error) {
+        console.error(`[Scheduler] Priorities refresh failed: ${refresh.error}`);
+      }
+    } catch (err) {
+      console.error(`[Scheduler] Priorities refresh failed: ${err.message}`);
+    }
 
     // Auto-trigger architect review every N research cycles
     if (state.researchSinceLastArchitect >= ARCHITECT_EVERY_N_RESEARCH) {

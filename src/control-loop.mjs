@@ -12,6 +12,7 @@ import { runVerification, validateDiffExists, summarizeVerification, defaultVeri
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.mjs";
 import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, compoundLearnings } from "./agent-memory.mjs";
+import { refreshPriorities } from "./priorities-refresh.mjs";
 import { moveToInProgress, moveToDone, returnToBacklog, moveToBlocked } from "./backlog.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -128,21 +129,27 @@ async function selectAnchor(grounding, opts = {}, eventBus = null) {
     })();
 
     if (recentDocCycles >= 5) {
-      console.log(`[ControlLoop] Priorities doc used ${recentDocCycles} times in last 10 cycles — may be stale. Consider updating priorities.`);
-      if (eventBus) {
-        try {
-          await eventBus.publish(STREAMS.NOTIFICATIONS, {
-            type: "cycle:stale_priorities",
-            source: "control-loop",
-            payload: {
-              message: `Priorities doc has been the anchor for ${recentDocCycles} of the last 10 cycles. The operator should update priorities or provide a specific anchor.`,
-              recentDocCycles,
-            },
-          });
-        } catch (err) {
-          console.error(`[ControlLoop] Failed to publish stale_priorities notification: ${err.message}`);
+      console.log(`[ControlLoop] Priorities doc used ${recentDocCycles} times in last 10 cycles — auto-refreshing from user-priorities.md`);
+      // Auto-refresh priorities from the operator's north star instead of
+      // just warning. This keeps the system moving toward the operator's
+      // goals even when the priorities doc becomes stale.
+      try {
+        const refresh = await refreshPriorities({ trigger: "stale", grounding });
+        if (refresh.ok) {
+          console.log(`[ControlLoop] Priorities refreshed — re-reading`);
+          // Re-read the freshly generated priorities
+          const freshPriorities = await readFile(join(HYDRA_PATH, "direction", "priorities.md"), "utf-8");
+          return {
+            type: "doc",
+            reference: "direction/priorities.md",
+            whyNow: "Freshly refreshed priorities (was stale)",
+            context: freshPriorities,
+          };
         }
+      } catch (err) {
+        console.error(`[ControlLoop] Priorities refresh failed: ${err.message}`);
       }
+      // Fall through to stale priorities if refresh failed
     }
 
     return {

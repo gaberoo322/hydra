@@ -276,7 +276,19 @@ export async function runResearchLoop(eventBus, opts = {}) {
   const groundingSummary = summarizeForPrompt(grounding);
   console.log(`[Research] Grounded: ${grounding.testReport.passed} tests passing, ${grounding.fileCount} files`);
 
-  // Step 3: Load context
+  // Step 3: Load context (including operator's north star for research focus)
+  const { readFile: rf } = await import("node:fs/promises");
+  const { join: pjoin, resolve: presolve } = await import("node:path");
+  const vaultPath = process.env.HYDRA_VAULT_PATH || presolve(process.env.HOME, "obsidian-vault");
+  let userPriorities = "";
+  try {
+    userPriorities = await rf(pjoin(vaultPath, "hydra", "direction", "user-priorities.md"), "utf-8");
+    if (userPriorities) {
+      goals.userPriorities = userPriorities;
+      console.log("[Research] Loaded operator north star (user-priorities.md)");
+    }
+  } catch { /* no user-priorities file is fine */ }
+
   const [appMetrics, lastReport, accomplishmentsRaw] = await Promise.all([
     loadAppMetrics(),
     loadLastResearchReport(),
