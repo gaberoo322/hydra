@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -7,7 +8,8 @@ const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "ob
 const HYDRA_PATH = join(VAULT_PATH, "hydra");
 const AGENTS_PATH = process.env.HYDRA_AGENTS_PATH || resolve(process.env.HOME, "agency-agents");
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
-const CODEX_BIN = process.env.CODEX_BIN || "codex";
+const DEFAULT_CODEX_BIN = resolve(process.env.HOME || "/home/gabe", ".npm-global", "bin", "codex");
+const CODEX_BIN = process.env.CODEX_BIN || DEFAULT_CODEX_BIN;
 
 // Model routing table
 const MODEL_TIERS = {
@@ -43,6 +45,10 @@ const AGENT_TIMEOUTS = {
   strategist: 120_000,  // alias for planner (legacy personality fallback)
   builder: 600_000,     // alias for executor (legacy personality fallback)
   meta: 180_000,
+  "domain-researcher": 600_000,
+  "technical-researcher": 420_000,
+  "market-researcher": 600_000,
+  "research-strategist": 240_000,
 };
 
 function composePrompt({ prompt, systemPrompt, feedback, workDir }) {
@@ -88,6 +94,22 @@ function buildCodexArgs({ prompt, model, workDir }) {
   args.push(prompt);
 
   return args;
+}
+
+async function validateCodexBin(codexBin) {
+  try {
+    await access(codexBin, fsConstants.X_OK);
+    return { ok: true, exists: true, executable: true };
+  } catch (err) {
+    const missing = err?.code === "ENOENT";
+    return {
+      ok: false,
+      exists: !missing,
+      executable: false,
+      error: err?.message || String(err),
+      code: err?.code || null,
+    };
+  }
 }
 
 /**
@@ -144,6 +166,20 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   const env = { ...process.env };
 
   const timeout = AGENT_TIMEOUTS[agentName] || 300_000;
+  const codexBinCheck = await validateCodexBin(CODEX_BIN);
+  if (!codexBinCheck.ok) {
+    const diagnostic = [
+      `[CodexRunner] Codex binary check failed`,
+      `  CODEX_BIN=${CODEX_BIN}`,
+      `  cwd=${workspaceDir}`,
+      `  PATH=${env.PATH || ""}`,
+      `  exists=${codexBinCheck.exists}`,
+      `  executable=${codexBinCheck.executable}`,
+      `  error=${codexBinCheck.error || "unknown"}`,
+    ].join("\n");
+    console.error(diagnostic);
+    throw new Error(diagnostic);
+  }
 
   return new Promise((resolve, reject) => {
     const child = spawn(CODEX_BIN, args, {
@@ -152,12 +188,18 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
       stdio: ["ignore", "pipe", "pipe"],
     });
 
+    let timedOut = false;
+    let killSignal = null;
+
     // Kill if agent exceeds timeout — SIGTERM first, SIGKILL after 10s if still alive
     const timer = setTimeout(() => {
+      timedOut = true;
+      killSignal = "SIGTERM";
       console.error(`[CodexRunner] ${agentName} timed out after ${timeout / 1000}s — sending SIGTERM`);
       child.kill("SIGTERM");
       setTimeout(() => {
         if (!child.killed) {
+          killSignal = "SIGKILL";
           console.error(`[CodexRunner] ${agentName} did not exit after SIGTERM — sending SIGKILL`);
           child.kill("SIGKILL");
         }
@@ -170,7 +212,7 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
 
-    child.on("close", async (exitCode) => {
+    child.on("close", async (exitCode, signal) => {
       clearTimeout(timer);
       const duration = Date.now() - startTime;
 
@@ -209,6 +251,10 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
         `model: ${resolvedModel}`,
         `duration: ${duration}ms`,
         `exitCode: ${exitCode}`,
+        `signal: ${signal || ""}`,
+        `timedOut: ${timedOut}`,
+        `timeoutMs: ${timeout}`,
+        `killSignal: ${killSignal || ""}`,
         `timestamp: ${new Date().toISOString()}`,
         `correlationId: ${correlationId || "manual"}`,
         "---",
@@ -227,6 +273,10 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
       resolve({
         output: finalMessage,
         exitCode,
+        signal: signal || null,
+        timedOut,
+        timeout,
+        killSignal,
         duration,
         outputFile,
         usage,
@@ -237,7 +287,15 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     });
 
     child.on("error", (err) => {
-      reject(new Error(`[CodexRunner] Failed to spawn codex: ${err.message}`));
+      const diagnostic = [
+        `[CodexRunner] Failed to spawn codex`,
+        `  CODEX_BIN=${CODEX_BIN}`,
+        `  cwd=${workspaceDir}`,
+        `  PATH=${env.PATH || ""}`,
+        `  error=${err.message}`,
+        `  code=${err.code || "unknown"}`,
+      ].join("\n");
+      reject(new Error(diagnostic));
     });
   });
 }
