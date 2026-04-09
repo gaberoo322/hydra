@@ -8,7 +8,7 @@ const execFileAsync = promisify(execFile);
 const CMD_TIMEOUT = 120_000; // 2 min per command
 const OUTPUT_LIMIT = 10_000; // truncate stdout/stderr to 10KB
 
-function truncate(str, limit = OUTPUT_LIMIT) {
+export function truncate(str, limit = OUTPUT_LIMIT) {
   if (!str || str.length <= limit) return str || "";
   // Keep HEAD + TAIL rather than just head. For test and build commands the
   // signal we care about (vitest's "Tests N passed" summary, tsc's final
@@ -31,7 +31,7 @@ function truncate(str, limit = OUTPUT_LIMIT) {
  * See the 2026-04-08 debug session for the full backstory — npm was passing
  * FORCE_COLOR=1 through to vitest under systemd even with TERM unset.
  */
-function stripAnsi(str) {
+export function stripAnsi(str) {
   if (!str) return "";
   // Match CSI (control sequence introducer) ANSI codes: ESC [ ... final byte
   // eslint-disable-next-line no-control-regex
@@ -87,7 +87,7 @@ async function runCmd(cmd, args, opts = {}) {
  * Parse vitest/jest output for pass/fail counts.
  * Looks for patterns like "Tests  42 passed (42)" or "42 passed | 2 failed".
  */
-function parseTestCounts(stdout, stderr) {
+export function parseTestCounts(stdout, stderr) {
   // Strip ANSI codes first — see stripAnsi() docs above.
   const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   let passed = 0, failed = 0, total = 0;
@@ -127,7 +127,7 @@ function parseTestCounts(stdout, stderr) {
 /**
  * Extract failing test names from vitest/jest output.
  */
-function parseFailingTests(stdout, stderr) {
+export function parseFailingTests(stdout, stderr) {
   // Strip ANSI codes first — see stripAnsi() docs above.
   const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   const failures = [];

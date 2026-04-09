@@ -2,12 +2,12 @@
   "name": "hydra-orchestrator",
   "version": "1.0.0",
   "type": "module",
-  "description": "Hydra autonomous multi-agent development framework — data plane orchestrator",
+  "description": "Hydra autonomous multi-agent development framework \u2014 data plane orchestrator",
   "main": "src/index.mjs",
   "scripts": {
     "start": "node src/index.mjs",
     "dev": "node --watch src/index.mjs",
-    "test": "node --test"
+    "test": "node --test test/*.test.mjs"
   },
   "author": "Gabe",
   "license": "UNLICENSED",
