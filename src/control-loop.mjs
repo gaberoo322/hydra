@@ -381,6 +381,11 @@ export async function runControlLoop(eventBus, opts = {}) {
       correlationId: cycleId,
       payload: { taskId, title: task.title, drift },
     });
+    try {
+      await recordPlannerLesson(cycleId, task, "abandoned", { reason: `Drift: ${drift.reason}` });
+    } catch (err) {
+      console.error(`[ControlLoop] Failed to record drift lesson: ${err.message}`);
+    }
     return {
       cycleId,
       tasks: [{ taskId, finalState: "abandoned", reason: `Drift: ${drift.reason}` }],
