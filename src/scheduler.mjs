@@ -23,6 +23,7 @@ const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 3;
 const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 6 * 60 * 60 * 1000; // 6 hours
 const ARCHITECT_EVERY_N_RESEARCH = parseInt(process.env.HYDRA_ARCHITECT_EVERY_N_RESEARCH) || 3;
+const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || 30;
 const REPETITION_WINDOW = parseInt(process.env.HYDRA_REPETITION_WINDOW) || 5; // Check last N cycles
 const REPETITION_THRESHOLD = parseFloat(process.env.HYDRA_REPETITION_THRESHOLD) || 0.5; // Pause if >50% of recent titles are similar
 
@@ -96,6 +97,69 @@ async function saveSchedulerState() {
     await getTracker().redis.set(SCHEDULER_STATE_KEY, JSON.stringify(payload));
   } catch (err) {
     console.error(`[Scheduler] Failed to save state: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Daily Codex spend cap
+// ---------------------------------------------------------------------------
+//
+// Hydra's Codex usage is bucketed on a weekly quota (ChatGPT subscription),
+// and in practice the bucket has been exhausted in ~3 days of unconstrained
+// research runs. The 2026-04-02/04 window saw $118+ of research spend and
+// then locked the quota until 2026-04-08 01:03 PDT, during which every
+// research cycle and every architect review failed silently.
+//
+// To prevent that recurrence: track daily research spend in Redis under
+// SCHEDULER_SPEND_KEY. Before each research cycle, check against
+// DAILY_COST_CAP_USD. If exceeded, skip research and notify the operator.
+// After each research cycle, add the reported cost to the counter. Counter
+// resets automatically when the date rolls over (in local time).
+//
+// Control-loop agents (planner / skeptic / executor) don't self-report cost,
+// so they aren't counted — this cap gates the largest single cost driver
+// (research) rather than trying to be a perfect budget. Accept the
+// incompleteness in exchange for no changes to the control-loop hot path.
+
+const SCHEDULER_SPEND_KEY = "hydra:scheduler:daily-spend";
+
+function todayLocalDate() {
+  // Use local date so the counter resets at local midnight, not UTC midnight.
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+async function getDailySpend() {
+  try {
+    const raw = await getTracker().redis.get(SCHEDULER_SPEND_KEY);
+    if (!raw) return { date: todayLocalDate(), usd: 0 };
+    const stored = JSON.parse(raw);
+    if (stored.date !== todayLocalDate()) {
+      // Roll over — return a fresh zero for today
+      return { date: todayLocalDate(), usd: 0 };
+    }
+    return stored;
+  } catch {
+    return { date: todayLocalDate(), usd: 0 };
+  }
+}
+
+async function recordSpend(amountUsd) {
+  try {
+    const current = await getDailySpend();
+    const updated = {
+      date: current.date,
+      usd: (current.usd || 0) + (amountUsd || 0),
+      updatedAt: new Date().toISOString(),
+    };
+    await getTracker().redis.set(SCHEDULER_SPEND_KEY, JSON.stringify(updated));
+    return updated;
+  } catch (err) {
+    console.error(`[Scheduler] Failed to record spend: ${err.message}`);
+    return null;
   }
 }
 
@@ -209,13 +273,42 @@ async function maybeRunResearch(eventBus) {
     }
   }
 
-  console.log(`[Scheduler] Queue has ${queueLen} items (threshold: ${RESEARCH_QUEUE_THRESHOLD}) — running research cycle`);
+  // Check daily spend cap — refuse to start research if today's budget is exhausted.
+  // Reason: the Codex weekly quota caught us on 2026-04-02/08. See kanban-scope
+  // decision + Spending dashboard in the vault.
+  const spend = await getDailySpend();
+  if (spend.usd >= DAILY_COST_CAP_USD) {
+    console.log(`[Scheduler] Daily spend cap reached — $${spend.usd.toFixed(2)} >= $${DAILY_COST_CAP_USD.toFixed(2)}, skipping research`);
+    try {
+      await sendNotification({
+        type: "scheduler:spend_cap_reached",
+        payload: {
+          message: `Daily research spend cap reached: $${spend.usd.toFixed(2)} of $${DAILY_COST_CAP_USD.toFixed(2)}. Research paused until local midnight.`,
+          date: spend.date,
+          spentUsd: spend.usd,
+          capUsd: DAILY_COST_CAP_USD,
+        },
+      });
+    } catch {}
+    return;
+  }
+
+  console.log(`[Scheduler] Queue has ${queueLen} items (threshold: ${RESEARCH_QUEUE_THRESHOLD}) — running research cycle (daily spend: $${spend.usd.toFixed(2)} of $${DAILY_COST_CAP_USD.toFixed(2)})`);
   try {
     const research = await runResearchLoop(eventBus);
     state.researchCyclesRun++;
     state.lastResearchAt = new Date().toISOString();
     state.researchSinceLastArchitect++;
     await saveSchedulerState();
+
+    // Track research spend against the daily cap.
+    const researchCost = research?.cost?.totalUsd || 0;
+    if (researchCost > 0) {
+      const updated = await recordSpend(researchCost);
+      if (updated) {
+        console.log(`[Scheduler] Daily research spend: $${updated.usd.toFixed(2)} of $${DAILY_COST_CAP_USD.toFixed(2)}`);
+      }
+    }
     console.log(`[Scheduler] Research complete — ${research.autoQueued || 0} items auto-queued`);
 
     // Auto-trigger architect review every N research cycles
@@ -361,7 +454,8 @@ function stop() {
   };
 }
 
-function getStatus() {
+async function getStatus() {
+  const spend = await getDailySpend();
   return {
     running: state.running,
     intervalMs: state.intervalMs,
@@ -382,6 +476,9 @@ function getStatus() {
       architectEveryN: ARCHITECT_EVERY_N_RESEARCH,
       researchSinceLastArchitect: state.researchSinceLastArchitect,
       lastArchitectAt: state.lastArchitectAt,
+      dailyCostCapUsd: DAILY_COST_CAP_USD,
+      dailySpendUsd: spend.usd,
+      dailySpendDate: spend.date,
     },
     repetition: {
       window: REPETITION_WINDOW,

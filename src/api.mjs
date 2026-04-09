@@ -356,8 +356,8 @@ function createApi(eventBus) {
   });
 
   // GET /scheduler/status — Scheduler state and stats
-  app.get("/scheduler/status", (req, res) => {
-    res.json(getSchedulerStatus());
+  app.get("/scheduler/status", async (req, res) => {
+    res.json(await getSchedulerStatus());
   });
 
   // =========================================================================
