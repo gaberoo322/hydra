@@ -162,6 +162,64 @@ async function selectAnchor(grounding, opts = {}, eventBus = null) {
 }
 
 // ---------------------------------------------------------------------------
+// Plan-vs-actual reconciliation (PAUL UNIFY pattern)
+// ---------------------------------------------------------------------------
+//
+// After verification passes, diff the planned scope (task.scopeBoundary.in)
+// against the actual files changed (verification.filesChanged). This catches:
+//   - Scope creep: executor touched files outside the plan
+//   - Scope gaps: planned files that weren't modified (potentially incomplete)
+//
+// Test files (.test.) are excluded from both checks: test creation is always
+// expected and test gaps are benign (test files may not need modification).
+//
+// Results are informational (logged + included in reality report), not
+// blocking — the merge proceeds regardless. If scope creep is detected,
+// a prevention rule is recorded for the planner.
+
+function reconcilePlanVsActual(task, verification) {
+  const plannedFiles = new Set(task.scopeBoundary?.in || []);
+  const actualFiles = new Set(verification.filesChanged || []);
+
+  const result = {
+    scopeCreep: [],
+    scopeGaps: [],
+    aligned: true,
+    warnings: [],
+  };
+
+  // Skip reconciliation if planner didn't specify a scope (nothing to compare)
+  if (plannedFiles.size === 0) {
+    return result;
+  }
+
+  // Scope creep: actual files not in planned scope (test files excluded — always OK)
+  for (const f of actualFiles) {
+    if (plannedFiles.has(f)) continue;
+    if (f.includes(".test.")) continue;
+    result.scopeCreep.push(f);
+  }
+
+  // Scope gaps: planned source files (not test files) that weren't changed
+  for (const f of plannedFiles) {
+    if (actualFiles.has(f)) continue;
+    if (f.includes(".test.")) continue;
+    result.scopeGaps.push(f);
+  }
+
+  if (result.scopeCreep.length > 0) {
+    result.warnings.push(`Scope creep: ${result.scopeCreep.length} file(s) changed outside planned scope: ${result.scopeCreep.join(", ")}`);
+    result.aligned = false;
+  }
+  if (result.scopeGaps.length > 0) {
+    result.warnings.push(`Potentially incomplete: ${result.scopeGaps.length} planned file(s) not modified: ${result.scopeGaps.join(", ")}`);
+    result.aligned = false;
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Scope-adaptive planning — classify task complexity (PAUL pattern)
 // ---------------------------------------------------------------------------
 //
@@ -548,6 +606,31 @@ export async function runControlLoop(eventBus, opts = {}) {
   console.log(`[ControlLoop] Verification PASSED (${verification.totalDurationMs}ms)`);
 
   // =========================================================================
+  // Step 6.5: RECONCILE — plan vs actual diff (PAUL UNIFY pattern)
+  // Informational only — does not block merge. Findings go into the reality
+  // report and trigger prevention rules for future cycles.
+  // =========================================================================
+  const reconciliation = reconcilePlanVsActual(task, verification);
+  if (!reconciliation.aligned) {
+    for (const w of reconciliation.warnings) {
+      console.log(`[ControlLoop] RECONCILE: ${w}`);
+    }
+    // Record scope creep as a planner prevention rule
+    if (reconciliation.scopeCreep.length > 0) {
+      try {
+        await recordPlannerLesson(cycleId, task, "merged", {
+          filesChanged: verification.filesChanged.length,
+          scopeCreep: reconciliation.scopeCreep,
+        });
+      } catch (err) {
+        console.error(`[ControlLoop] Failed to record scope-creep lesson: ${err.message}`);
+      }
+    }
+  } else if (task.scopeBoundary?.in?.length > 0) {
+    console.log(`[ControlLoop] RECONCILE: plan-vs-actual aligned (${verification.filesChanged.length} files)`);
+  }
+
+  // =========================================================================
   // Step 7: MERGE — git operation, NOT an agent (extracted to merge.mjs)
   // =========================================================================
   console.log(`[ControlLoop] Step 7: Merging to main...`);
@@ -656,6 +739,12 @@ export async function runControlLoop(eventBus, opts = {}) {
     },
     commitSha,
     filesChanged: verification.filesChanged,
+    reconciliation: {
+      aligned: reconciliation.aligned,
+      scopeCreep: reconciliation.scopeCreep,
+      scopeGaps: reconciliation.scopeGaps,
+      warnings: reconciliation.warnings,
+    },
     unresolvedUncertainty,
     rollbackRisk,
     rolledBack,

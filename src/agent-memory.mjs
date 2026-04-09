@@ -96,9 +96,18 @@ export async function recordLesson(agentName, entry) {
  */
 export async function recordPlannerLesson(cycleId, task, finalState, context = {}) {
   if (finalState === "merged") {
-    // Only record merge lessons for surprising outcomes
+    // Scope creep detected by reconciliation — record prevention rule
+    if (context.scopeCreep?.length > 0) {
+      await recordRule("planner", {
+        when: `Proposing tasks anchored to "${task.anchorReference || "similar work"}"`,
+        check: `Does scopeBoundary.in include ALL files the executor will need to touch? The executor went outside scope last time: ${context.scopeCreep.join(", ")}`,
+        because: `${cycleId}: "${task.title}" merged but executor modified ${context.scopeCreep.length} file(s) outside planned scope`,
+        cycleId,
+        severity: "prevent",
+      });
+    }
+    // Complex task succeeded — that's noteworthy
     if (task.scopeBoundary?.in?.length > 4) {
-      // Complex task succeeded — that's noteworthy
       await recordRule("planner", {
         when: `Proposing a task touching ${task.scopeBoundary.in.length}+ files`,
         check: `This scope size has worked before — but verify each file is actually needed`,
@@ -107,7 +116,7 @@ export async function recordPlannerLesson(cycleId, task, finalState, context = {
         severity: "reinforce",
       });
     }
-    // Normal merges: skip (noise)
+    // Normal merges without scope creep: skip (noise)
     return;
   }
 
