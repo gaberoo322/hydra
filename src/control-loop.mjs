@@ -722,7 +722,10 @@ export async function runControlLoop(eventBus, opts = {}) {
   if (regressionIntroduced && commitSha) {
     console.error(`[ControlLoop] REGRESSION: Tests went from ${grounding.testReport.passed} → ${finalGrounding.testReport.passed} passing — auto-reverting`);
     try {
-      await execFileAsync("git", ["revert", "--no-edit", commitSha], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
+      // -m 1 is required because Hydra always merges with --no-ff, making
+      // every merge commit a two-parent commit. Without -m 1, git revert
+      // fails with "commit is a merge but no -m option was given."
+      await execFileAsync("git", ["revert", "--no-edit", "-m", "1", commitSha], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
       await execFileAsync("git", ["push", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
       rolledBack = true;
       console.log(`[ControlLoop] Reverted merge commit ${commitSha.slice(0, 7)} and pushed`);
