@@ -11,7 +11,7 @@ import { mergeToMain } from "./merge.mjs";
 import { runVerification, validateDiffExists, summarizeVerification, defaultVerificationPlan } from "./verifier.mjs";
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.mjs";
-import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson } from "./agent-memory.mjs";
+import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, compoundLearnings } from "./agent-memory.mjs";
 import { moveToInProgress, moveToDone, returnToBacklog } from "./backlog.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -731,18 +731,14 @@ export async function runControlLoop(eventBus, opts = {}) {
     await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, finalState));
   }
 
-  // Record agent lessons from this cycle's outcome
+  // =========================================================================
+  // Step 8.5: COMPOUND — extract structured prevention rules (Sage pattern)
+  // Only records failures, surprises, and pattern violations. Skips noise.
+  // =========================================================================
   try {
-    await recordPlannerLesson(cycleId, task, finalState, {
-      filesChanged: verification.filesChanged.length,
-    });
-    await recordExecutorLesson(cycleId, task, finalState, {
-      testsBefore: grounding.testReport.passed,
-      testsAfter: finalGrounding.testReport.passed,
-    });
-    await recordSkepticLesson(cycleId, task, "approve", finalState);
+    await compoundLearnings(report, task, anchor);
   } catch (err) {
-    console.error(`[ControlLoop] Failed to record agent lessons: ${err.message}`);
+    console.error(`[ControlLoop] Compound learning extraction failed: ${err.message}`);
   }
 
   // Complete the cycle in tracker
