@@ -162,6 +162,41 @@ async function selectAnchor(grounding, opts = {}, eventBus = null) {
 }
 
 // ---------------------------------------------------------------------------
+// Scope-adaptive planning — classify task complexity (PAUL pattern)
+// ---------------------------------------------------------------------------
+//
+// PAUL auto-routes by complexity: quick-fix gets compressed ceremony (skip
+// skeptic, lighter planner prompt), standard gets full ceremony, complex
+// logs a warning. The classification runs AFTER the planner outputs a task
+// so we have scopeBoundary and acceptanceCriteria to measure.
+//
+// Anchor-level pre-routing: failing-test and prior-failure anchors are
+// inherently quick-fix (narrow scope, known target). These also get a
+// cheaper planner model and compressed prompt (see runPlannerAgent).
+
+function classifyTaskComplexity(task, anchor) {
+  // Anchor types that are inherently targeted
+  if (anchor.type === "failing-test" || anchor.type === "prior-failure") {
+    return "quick-fix";
+  }
+
+  const filesInScope = task.scopeBoundary?.in?.length || 0;
+  const criteriaCount = task.acceptanceCriteria?.length || 0;
+
+  // Quick-fix: very small scope
+  if (filesInScope <= 2 && criteriaCount <= 3) {
+    return "quick-fix";
+  }
+
+  // Complex: large scope — warn, may benefit from splitting
+  if (filesInScope > 5 || criteriaCount > 8) {
+    return "complex";
+  }
+
+  return "standard";
+}
+
+// ---------------------------------------------------------------------------
 // Store a prior-failure anchor for the next cycle
 // ---------------------------------------------------------------------------
 
@@ -320,7 +355,16 @@ export async function runControlLoop(eventBus, opts = {}) {
   );
   await tracker.initTaskV2(cycleId, task);
 
-  console.log(`[ControlLoop] Task: "${task.title}" (anchor: ${task.anchorType}, confidence: ${task.confidence})`);
+  // =========================================================================
+  // Step 3.1: CLASSIFY COMPLEXITY — scope-adaptive routing (PAUL pattern)
+  // =========================================================================
+  const complexity = classifyTaskComplexity(task, anchor);
+  const filesInScope = task.scopeBoundary?.in?.length || 0;
+  const criteriaCount = task.acceptanceCriteria?.length || 0;
+  console.log(`[ControlLoop] Task: "${task.title}" (anchor: ${task.anchorType}, confidence: ${task.confidence}, complexity: ${complexity}, scope: ${filesInScope} files, ${criteriaCount} criteria)`);
+  if (complexity === "complex") {
+    console.log(`[ControlLoop] COMPLEX task detected (${filesInScope} files, ${criteriaCount} criteria) — consider splitting in future cycles`);
+  }
 
   // =========================================================================
   // Step 3.5: DRIFT DETECTION — reject duplicates (skip for prior-failure retries)
@@ -346,11 +390,12 @@ export async function runControlLoop(eventBus, opts = {}) {
 
   // =========================================================================
   // Step 4: SKEPTIC GATE — challenge assumptions (codex agent call)
-  // Skip for research-sourced items (already vetted by research strategist)
+  // Skip for: research-sourced items (already vetted by research strategist)
+  //           quick-fix tasks (small scope, low risk — ceremony not worth the cost)
   // =========================================================================
-  const skipSkeptic = anchor.type === "research";
+  const skipSkeptic = anchor.type === "research" || complexity === "quick-fix";
   const skepticResult = skipSkeptic
-    ? { verdict: "approve", reason: "Skipped — research-vetted item", skipped: true }
+    ? { verdict: "approve", reason: `Skipped — ${anchor.type === "research" ? "research-vetted item" : "quick-fix (scope-adaptive routing)"}`, skipped: true }
     : await (() => {
         console.log(`[ControlLoop] Step 4: Skeptic gate...`);
         return runSkepticAgent(cycleId, task, grounding, groundingSummary);
@@ -455,6 +500,7 @@ export async function runControlLoop(eventBus, opts = {}) {
       groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: verification.totalDurationMs,
       regressionIntroduced: false, taskTitle: task.title,
       anchorType: task.anchorType, anchorReference: task.anchorReference,
+      complexity, filesInScope: filesInScope, criteriaCount,
     });
 
     // Return to backlog on failure — use anchor.reference to match Kanban row
@@ -671,6 +717,7 @@ export async function runControlLoop(eventBus, opts = {}) {
     taskTitle: task.title,
     anchorType: task.anchorType,
     anchorReference: task.anchorReference,
+    complexity, filesInScope, criteriaCount,
   });
 
   // Update Kanban backlog — use anchor.reference (not planner-generated task.title)
@@ -753,57 +800,41 @@ function buildResearchContext(ctx) {
 // ---------------------------------------------------------------------------
 
 async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, continuityContext = "") {
-  // Load context documents and agent memory
-  const [priorities, feedback, plannerMemory] = await Promise.all([
-    readFile(join(HYDRA_PATH, "direction", "priorities.md"), "utf-8").catch(() => ""),
-    readFile(join(HYDRA_PATH, "agent-feedback", "to-strategist.md"), "utf-8").catch(() => ""),
-    loadAgentMemory("planner"),
-  ]);
+  // Scope-adaptive planner routing (PAUL pattern):
+  // Quick-fix anchors (failing-test, prior-failure) get a compressed prompt
+  // and cheaper model — they don't need priorities, accomplishments, or
+  // continuity because the anchor IS the entire scope.
+  const isQuickFixAnchor = anchor.type === "failing-test" || anchor.type === "prior-failure";
+  const plannerModel = isQuickFixAnchor ? "codex" : "frontier";
+
+  // Load context documents — skip for quick-fix (irrelevant noise)
+  const [priorities, feedback, plannerMemory] = isQuickFixAnchor
+    ? ["", "", []]
+    : await Promise.all([
+        readFile(join(HYDRA_PATH, "direction", "priorities.md"), "utf-8").catch(() => ""),
+        readFile(join(HYDRA_PATH, "agent-feedback", "to-strategist.md"), "utf-8").catch(() => ""),
+        loadAgentMemory("planner"),
+      ]);
 
   const confidence = grounding.testReport.failed > 0 ? "low"
     : (grounding.typecheckReport.exitCode !== 0 || grounding.dirtyFiles.length > 0) ? "medium"
     : "high";
 
-  // Load cumulative accomplishments to prevent re-proposing completed work
+  // Load cumulative accomplishments — skip for quick-fix
   let accomplishmentsContext = "";
-  try {
-    const acc = await getCumulativeAccomplishments(10);
-    if (acc.length > 0) {
-      accomplishmentsContext = `## ALREADY ACCOMPLISHED (do NOT re-propose these)\n${acc.map((a) => `- "${a.title}"`).join("\n")}\n`;
+  if (!isQuickFixAnchor) {
+    try {
+      const acc = await getCumulativeAccomplishments(10);
+      if (acc.length > 0) {
+        accomplishmentsContext = `## ALREADY ACCOMPLISHED (do NOT re-propose these)\n${acc.map((a) => `- "${a.title}"`).join("\n")}\n`;
+      }
+    } catch (err) {
+      console.error(`[ControlLoop] Failed to load cumulative accomplishments: ${err.message}`);
     }
-  } catch (err) {
-    console.error(`[ControlLoop] Failed to load cumulative accomplishments: ${err.message}`);
   }
 
-  const prompt = [
-    `## ANCHOR (this is what you are working on)`,
-    `Type: ${anchor.type}`,
-    `Reference: ${anchor.reference}`,
-    `Why now: ${anchor.whyNow}`,
-    anchor.context && anchor.type === "research" ? buildResearchContext(anchor.context) : "",
-    anchor.context && anchor.type !== "research" ? `\nContext:\n${typeof anchor.context === "string" ? anchor.context.slice(0, 2000) : JSON.stringify(anchor.context).slice(0, 2000)}` : "",
-    "",
-    groundingSummary.slice(0, 4000),
-    "",
-    // Continuity contract — what the last cycle did, what changed since
-    continuityContext ? continuityContext.slice(0, 1500) : "",
-    "",
-    priorities ? `## PRIORITIES\n${priorities.slice(0, 3000)}\n` : "",
-    feedback ? `## OPERATOR FEEDBACK\n${feedback.slice(0, 1000)}\n` : "",
-    "",
-    // Cumulative accomplishments — prevent re-proposing completed work
-    accomplishmentsContext,
-    "",
-    // Agent memory — learn from past outcomes
-    formatMemoryForPrompt(plannerMemory, "planner"),
-    "",
-    `## INSTRUCTIONS`,
-    `Confidence: ${confidence.toUpperCase()}. Produce exactly 1 task, or null if no actionable work exists.`,
-    `The task MUST be anchored to "${anchor.reference}".`,
-    `Prefer the SMALLEST code change that creates verifiable progress.`,
-    `Do NOT produce architecture docs, design contracts, or research tasks unless the anchor explicitly requires it.`,
-    `If the ALREADY ACCOMPLISHED list covers all priorities and you cannot find a genuine gap, output: { "noWork": true, "reason": "All current priorities appear addressed" }`,
-    "",
+  // JSON output schema (shared by both prompt paths)
+  const jsonSchema = [
     `Output ONLY valid JSON:`,
     `{`,
     `  "title": "...",`,
@@ -821,14 +852,70 @@ async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, con
     `  ]`,
     `  NOTE: Use simple "npm test" and "npm run typecheck" — the verifier runs them in the correct app directory automatically.`,
     `}`,
-  ].filter(Boolean).join("\n");
+  ].join("\n");
+
+  let prompt;
+  if (isQuickFixAnchor) {
+    // Compressed prompt for quick-fix: just anchor + compact grounding + fix instructions
+    const compactGrounding = summarizeForPrompt(grounding, { compact: true }).slice(0, 2000);
+    prompt = [
+      `## FIX THIS (quick-fix — targeted repair, minimal scope)`,
+      `Type: ${anchor.type}`,
+      `Reference: ${anchor.reference}`,
+      `Why now: ${anchor.whyNow}`,
+      anchor.context ? `\nContext:\n${typeof anchor.context === "string" ? anchor.context.slice(0, 1500) : JSON.stringify(anchor.context).slice(0, 1500)}` : "",
+      "",
+      compactGrounding,
+      "",
+      `## INSTRUCTIONS`,
+      `This is a targeted fix. Produce exactly 1 task with the SMALLEST change that resolves the issue.`,
+      `The task MUST be anchored to "${anchor.reference}".`,
+      `Keep scopeBoundary narrow — ideally 1-2 files.`,
+      "",
+      jsonSchema,
+    ].filter(Boolean).join("\n");
+    console.log(`[ControlLoop] Planner using quick-fix prompt (${plannerModel} model, ~${prompt.length} chars)`);
+  } else {
+    // Full prompt for standard/complex tasks
+    prompt = [
+      `## ANCHOR (this is what you are working on)`,
+      `Type: ${anchor.type}`,
+      `Reference: ${anchor.reference}`,
+      `Why now: ${anchor.whyNow}`,
+      anchor.context && anchor.type === "research" ? buildResearchContext(anchor.context) : "",
+      anchor.context && anchor.type !== "research" ? `\nContext:\n${typeof anchor.context === "string" ? anchor.context.slice(0, 2000) : JSON.stringify(anchor.context).slice(0, 2000)}` : "",
+      "",
+      groundingSummary.slice(0, 4000),
+      "",
+      // Continuity contract — what the last cycle did, what changed since
+      continuityContext ? continuityContext.slice(0, 1500) : "",
+      "",
+      priorities ? `## PRIORITIES\n${priorities.slice(0, 3000)}\n` : "",
+      feedback ? `## OPERATOR FEEDBACK\n${feedback.slice(0, 1000)}\n` : "",
+      "",
+      // Cumulative accomplishments — prevent re-proposing completed work
+      accomplishmentsContext,
+      "",
+      // Agent memory — learn from past outcomes
+      formatMemoryForPrompt(plannerMemory, "planner"),
+      "",
+      `## INSTRUCTIONS`,
+      `Confidence: ${confidence.toUpperCase()}. Produce exactly 1 task, or null if no actionable work exists.`,
+      `The task MUST be anchored to "${anchor.reference}".`,
+      `Prefer the SMALLEST code change that creates verifiable progress.`,
+      `Do NOT produce architecture docs, design contracts, or research tasks unless the anchor explicitly requires it.`,
+      `If the ALREADY ACCOMPLISHED list covers all priorities and you cannot find a genuine gap, output: { "noWork": true, "reason": "All current priorities appear addressed" }`,
+      "",
+      jsonSchema,
+    ].filter(Boolean).join("\n");
+  }
 
   const personality = await findPersonality("planner") || await findPersonality("strategist");
   const result = await runAgent({
     agentName: "planner",
     personality,
     prompt,
-    model: "frontier",
+    model: plannerModel,
     taskId: "planner",
     correlationId: cycleId,
   });
