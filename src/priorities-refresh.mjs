@@ -165,7 +165,7 @@ export async function refreshPriorities(opts = {}) {
       agentName: "planner",
       personality: await findPersonality("planner"),
       prompt,
-      model: "nano",
+      model: "codex",
       taskId: "priorities-refresh",
       correlationId: `priorities-refresh-${Date.now()}`,
     });
@@ -173,6 +173,12 @@ export async function refreshPriorities(opts = {}) {
     if (!result.output || result.output.trim().length < 50) {
       console.error(`[PrioritiesRefresh] Agent produced empty or too-short output`);
       return { ok: false, error: "Agent produced insufficient output" };
+    }
+
+    // Guard: reject raw Codex error streams that look like JSON events
+    if (result.output.includes('"type":"error"') || result.output.includes('"type":"turn.failed"')) {
+      console.error(`[PrioritiesRefresh] Agent returned error stream, not markdown: ${result.output.slice(0, 200)}`);
+      return { ok: false, error: "Agent returned error stream instead of markdown" };
     }
 
     // 10. Clean up the output — remove code fences if the agent wrapped it
