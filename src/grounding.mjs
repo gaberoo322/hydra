@@ -145,6 +145,45 @@ export function parseFailingTests(stdout, stderr) {
 }
 
 /**
+ * Decide whether it's safe to auto-clean the target project's working tree.
+ *
+ * Historically grounding.mjs unconditionally ran `git checkout main && git
+ * checkout . && git branch -D feature/*` at the start of every cycle. That
+ * wiped any in-progress manual work in ~/hydra-betting and deleted any
+ * feature branch matching the convention — the root cause of the Write-tool
+ * "file revert" mystery we debugged on 2026-04-07.
+ *
+ * The safe behavior: only clean when the repo is already on main/master
+ * with an empty working tree. If the operator is on a feature branch OR
+ * has uncommitted changes, we defer to them and skip cleanup silently
+ * (just log the reason). The orchestrator can still do its work — grounding
+ * will just reflect whatever state the repo is in.
+ *
+ * Pure function for testability: takes the captured runCmd output objects
+ * from `git branch --show-current` and `git status --short` and returns
+ * { ok, reason } without making any side effects.
+ */
+export function shouldCleanWorkingTree(branchResult, statusResult) {
+  const branch = (branchResult?.stdout || "").trim();
+  const status = (statusResult?.stdout || "").trim();
+
+  if (!branch) {
+    return { ok: false, reason: "no current branch (detached HEAD or fresh repo)" };
+  }
+
+  if (branch !== "main" && branch !== "master") {
+    return { ok: false, reason: `on feature branch "${branch}" — operator-driven work, not auto-cleaning` };
+  }
+
+  if (status) {
+    const changeCount = status.split("\n").length;
+    return { ok: false, reason: `working tree has ${changeCount} uncommitted change(s) — operator-driven work, not auto-cleaning` };
+  }
+
+  return { ok: true };
+}
+
+/**
  * Deep repo inspection. Returns structured evidence about the project.
  *
  * @param {string} projectDir - Path to the target project
@@ -155,17 +194,25 @@ export async function groundProject(projectDir, opts = {}) {
   const timestamp = Date.now();
   const testCmd = opts.testCmd || "npm";
 
-  // Cleanup: ensure we're on main, discard modified tracked files, and delete stale feature branches
+  // Cleanup: ensure we're on main, discard modified tracked files, and delete stale feature branches.
+  // GATED on shouldCleanWorkingTree so we don't clobber operator-driven manual work.
   // NOTE: Do NOT run git clean -fd here — it deletes untracked new files before they can be committed
   try {
-    await runCmd("git", ["checkout", "main"], { cwd: projectDir, timeout: 5000 });
-    await runCmd("git", ["checkout", "."], { cwd: projectDir, timeout: 5000 });
-    const { stdout: branches } = await runCmd("git", ["branch", "--list", "feature/*"], { cwd: projectDir, timeout: 5000 });
-    const stale = branches.trim().split("\n").map(b => b.trim()).filter(Boolean);
-    for (const branch of stale) {
-      await runCmd("git", ["branch", "-D", branch], { cwd: projectDir, timeout: 5000 });
+    const preBranch = await runCmd("git", ["branch", "--show-current"], { cwd: projectDir, timeout: 5000 });
+    const preStatus = await runCmd("git", ["status", "--short"], { cwd: projectDir, timeout: 5000 });
+    const decision = shouldCleanWorkingTree(preBranch, preStatus);
+    if (!decision.ok) {
+      console.log(`[Grounding] Skipping auto-cleanup: ${decision.reason}`);
+    } else {
+      await runCmd("git", ["checkout", "main"], { cwd: projectDir, timeout: 5000 });
+      await runCmd("git", ["checkout", "."], { cwd: projectDir, timeout: 5000 });
+      const { stdout: branches } = await runCmd("git", ["branch", "--list", "feature/*"], { cwd: projectDir, timeout: 5000 });
+      const stale = branches.trim().split("\n").map(b => b.trim()).filter(Boolean);
+      for (const branch of stale) {
+        await runCmd("git", ["branch", "-D", branch], { cwd: projectDir, timeout: 5000 });
+      }
+      if (stale.length > 0) console.log(`[Grounding] Cleaned up ${stale.length} stale feature branches`);
     }
-    if (stale.length > 0) console.log(`[Grounding] Cleaned up ${stale.length} stale feature branches`);
   } catch {}
   const testArgs = opts.testArgs || ["test"];
 

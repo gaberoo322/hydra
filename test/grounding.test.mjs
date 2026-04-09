@@ -14,6 +14,7 @@ import {
   truncate,
   parseTestCounts,
   parseFailingTests,
+  shouldCleanWorkingTree,
 } from "../src/grounding.mjs";
 
 describe("stripAnsi", () => {
@@ -190,5 +191,87 @@ describe("parseFailingTests", () => {
   test("returns empty for clean output", () => {
     assert.deepEqual(parseFailingTests("all good", ""), []);
     assert.deepEqual(parseFailingTests("", ""), []);
+  });
+});
+
+describe("shouldCleanWorkingTree", () => {
+  test("clean repo on main → ok", () => {
+    const decision = shouldCleanWorkingTree(
+      { stdout: "main\n" },
+      { stdout: "" },
+    );
+    assert.equal(decision.ok, true);
+  });
+
+  test("clean repo on master → ok", () => {
+    const decision = shouldCleanWorkingTree(
+      { stdout: "master" },
+      { stdout: "" },
+    );
+    assert.equal(decision.ok, true);
+  });
+
+  test("feature branch with clean tree → skip", () => {
+    const decision = shouldCleanWorkingTree(
+      { stdout: "feature/cycle-2026-04-08-1234-slug\n" },
+      { stdout: "" },
+    );
+    assert.equal(decision.ok, false);
+    assert.match(decision.reason, /feature branch/);
+  });
+
+  test("dirty working tree on main → skip", () => {
+    const decision = shouldCleanWorkingTree(
+      { stdout: "main\n" },
+      { stdout: " M web/src/lib/execution/polymarket-executor.ts" },
+    );
+    assert.equal(decision.ok, false);
+    assert.match(decision.reason, /uncommitted change/);
+  });
+
+  test("multiple dirty files on main → skip with count", () => {
+    const decision = shouldCleanWorkingTree(
+      { stdout: "main" },
+      { stdout: " M file1.ts\n M file2.ts\n?? file3.md" },
+    );
+    assert.equal(decision.ok, false);
+    assert.match(decision.reason, /3 uncommitted/);
+  });
+
+  test("cycle branch (non-feature prefix) with clean tree → still skips", () => {
+    // The branch-name safety rule is "must be main/master", not "must not be feature/*".
+    // Any branch other than main/master is treated as operator-driven.
+    const decision = shouldCleanWorkingTree(
+      { stdout: "cycle/lint-cleanup-2026-04-08-1355" },
+      { stdout: "" },
+    );
+    assert.equal(decision.ok, false);
+    assert.match(decision.reason, /cycle\/lint-cleanup/);
+  });
+
+  test("detached HEAD / no current branch → skip", () => {
+    const decision = shouldCleanWorkingTree(
+      { stdout: "" },
+      { stdout: "" },
+    );
+    assert.equal(decision.ok, false);
+    assert.match(decision.reason, /no current branch/);
+  });
+
+  test("null stdout handled safely (null branchResult)", () => {
+    const decision = shouldCleanWorkingTree(null, null);
+    assert.equal(decision.ok, false);
+  });
+
+  test("regression (2026-04-07): operator on feature/cycle-... branch is protected from branch deletion", () => {
+    // This is the exact scenario that blew up the polymarket clientOrderId cycle
+    // when the orchestrator's grounding step deleted the operator's in-progress
+    // feature branch mid-edit. With the safety gate, grounding must skip cleanup
+    // and log a reason instead of wiping the branch.
+    const decision = shouldCleanWorkingTree(
+      { stdout: "feature/cycle-2026-04-07-1115-polymarket-clientorderid" },
+      { stdout: " M web/src/lib/execution/polymarket-executor.ts\n M web/src/lib/execution/persist-venue-order.ts" },
+    );
+    assert.equal(decision.ok, false, "feature branches with dirty trees must be protected");
   });
 });
