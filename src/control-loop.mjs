@@ -12,7 +12,7 @@ import { runVerification, validateDiffExists, summarizeVerification, defaultVeri
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.mjs";
 import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, compoundLearnings } from "./agent-memory.mjs";
-import { moveToInProgress, moveToDone, returnToBacklog } from "./backlog.mjs";
+import { moveToInProgress, moveToDone, returnToBacklog, moveToBlocked } from "./backlog.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -159,6 +159,47 @@ async function selectAnchor(grounding, opts = {}, eventBus = null) {
     }
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Operator-blocked detection
+// ---------------------------------------------------------------------------
+//
+// When a cycle fails, check if the failure pattern suggests the operator
+// needs to intervene (missing API key, auth failure, etc.) rather than
+// retrying the same work. If detected, route to the Blocked lane instead
+// of returning to Backlog where it would just fail again.
+
+const BLOCKED_PATTERNS = [
+  /api[_ ]?key/i,
+  /unauthorized/i,
+  /authentication.*fail/i,
+  /EACCES/,
+  /permission denied/i,
+  /credentials/i,
+  /secret.*missing/i,
+  /token.*expired/i,
+  /env.*not set/i,
+  /missing.*env/i,
+  /CORS.*blocked/i,
+  /rate.*limit.*exceeded/i,
+  /quota.*exceeded/i,
+  /subscription.*required/i,
+];
+
+function looksOperatorBlocked(verification) {
+  if (!verification?.steps) return null;
+  for (const step of verification.steps) {
+    if (step.passed) continue;
+    const output = (step.stderr || "") + " " + (step.stdout || "");
+    for (const pattern of BLOCKED_PATTERNS) {
+      const match = output.match(pattern);
+      if (match) {
+        return `${step.label}: ${match[0]}`;
+      }
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -566,9 +607,15 @@ export async function runControlLoop(eventBus, opts = {}) {
       complexity, filesInScope: filesInScope, criteriaCount,
     });
 
-    // Return to backlog on failure — use anchor.reference to match Kanban row
-    // (task.title is planner-generated and doesn't match; see incident #5)
-    await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "verification failed"));
+    // Route to Blocked if the failure looks like it needs operator intervention
+    // (missing API keys, auth failures, etc.) — otherwise return to Backlog for retry.
+    const blockedReason = looksOperatorBlocked(verification);
+    if (blockedReason) {
+      console.log(`[ControlLoop] Detected operator-blocked failure: ${blockedReason}`);
+      await safeKanban(eventBus, cycleId, "moveToBlocked", anchor.reference, () => moveToBlocked(anchor.reference, blockedReason));
+    } else {
+      await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "verification failed"));
+    }
 
     // Record failure lessons for agents
     const failedStderr = verification.steps.find(s => !s.passed)?.stderr || "";

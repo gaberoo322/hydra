@@ -4,11 +4,13 @@
  * Maintains a Kanban-formatted markdown file in the Obsidian vault.
  * Compatible with the Obsidian Kanban plugin.
  *
- * Lanes: Backlog → Queued → In Progress → Done
+ * Lanes: Backlog → Queued → Blocked → In Progress → Done
  *
  * Research populates Backlog.
  * Scheduler moves items from Backlog → Queued (and into Redis work queue).
  * Control loop moves Queued → In Progress → Done.
+ * Blocked items require operator intervention (API keys, credentials, etc.)
+ *   — Hydra skips them; operator drags back to Queued when unblocked.
  * Done items are pruned after 7 days.
  *
  * File: {HYDRA_PATH}/backlog.md
@@ -30,10 +32,10 @@ async function loadBacklog() {
   try {
     raw = await readFile(BACKLOG_FILE, "utf-8");
   } catch {
-    return { backlog: [], queued: [], inProgress: [], done: [] };
+    return { backlog: [], queued: [], blocked: [], inProgress: [], done: [] };
   }
 
-  const lanes = { backlog: [], queued: [], inProgress: [], done: [] };
+  const lanes = { backlog: [], queued: [], blocked: [], inProgress: [], done: [] };
   let currentLane = null;
 
   for (const line of raw.split("\n")) {
@@ -42,6 +44,7 @@ async function loadBacklog() {
       const h = heading[1].toLowerCase();
       if (h.startsWith("backlog")) currentLane = "backlog";
       else if (h.startsWith("queued")) currentLane = "queued";
+      else if (h.startsWith("blocked")) currentLane = "blocked";
       else if (h.startsWith("in progress")) currentLane = "inProgress";
       else if (h.startsWith("done")) currentLane = "done";
       else currentLane = null;
@@ -113,6 +116,12 @@ async function saveBacklog(lanes) {
   for (const item of lanes.queued) lines.push(writeItem(item));
   lines.push("");
 
+  const blocked = lanes.blocked || [];
+  lines.push("## Blocked (operator action needed)");
+  if (blocked.length === 0) lines.push("*Nothing blocked*");
+  for (const item of blocked) lines.push(writeItem(item));
+  lines.push("");
+
   lines.push("## In Progress");
   if (lanes.inProgress.length === 0) lines.push("*No active cycle*");
   for (const item of lanes.inProgress) lines.push(writeItem(item));
@@ -137,6 +146,7 @@ export async function addToBacklog(item) {
   const allTitles = new Set([
     ...lanes.backlog.map(i => i.title),
     ...lanes.queued.map(i => i.title),
+    ...(lanes.blocked || []).map(i => i.title),
     ...lanes.inProgress.map(i => i.title),
     ...lanes.done.map(i => i.title),
   ]);
@@ -230,6 +240,43 @@ export async function moveToDone(title, outcome = "merged") {
 }
 
 /**
+ * Move an item to the Blocked lane — requires operator intervention.
+ * Called when a cycle fails due to missing credentials, API keys, or
+ * other conditions only the operator can resolve.
+ *
+ * Items in Blocked are skipped by the scheduler and control loop.
+ * The operator unblocks by dragging back to Queued in Obsidian Kanban.
+ */
+export async function moveToBlocked(title, reason) {
+  const lanes = await loadBacklog();
+
+  // Check In Progress first
+  let idx = lanes.inProgress.findIndex(i => i.title === title);
+  let source = "inProgress";
+  if (idx === -1) {
+    idx = lanes.queued.findIndex(i => i.title === title);
+    source = "queued";
+  }
+  if (idx === -1) {
+    idx = lanes.backlog.findIndex(i => i.title === title);
+    source = "backlog";
+  }
+  if (idx === -1) return false;
+
+  const item = lanes[source].splice(idx, 1)[0];
+  item.meta = {
+    ...item.meta,
+    blockedAt: new Date().toISOString().split("T")[0],
+    blockedReason: reason,
+  };
+  lanes.blocked.push(item);
+
+  await saveBacklog(lanes);
+  console.log(`[Backlog] Moved "${title}" to Blocked: ${reason}`);
+  return true;
+}
+
+/**
  * Remove a failed/abandoned item from In Progress back to Backlog.
  */
 export async function returnToBacklog(title, reason) {
@@ -254,9 +301,10 @@ export async function getBacklogCounts() {
   return {
     backlog: lanes.backlog.length,
     queued: lanes.queued.length,
+    blocked: (lanes.blocked || []).length,
     inProgress: lanes.inProgress.length,
     done: lanes.done.length,
-    total: lanes.backlog.length + lanes.queued.length,
+    total: lanes.backlog.length + lanes.queued.length, // blocked excluded from total (not actionable)
   };
 }
 
