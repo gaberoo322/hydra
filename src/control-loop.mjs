@@ -39,7 +39,7 @@ function generateCycleId() {
  * 3. Prior failures (stored in Redis)
  * 4. Priorities doc (fall back to operator direction)
  */
-async function selectAnchor(grounding, opts = {}) {
+async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // 1. Explicit user request
   if (opts.anchor) {
     return { ...opts.anchor, whyNow: "Explicit operator request" };
@@ -129,14 +129,20 @@ async function selectAnchor(grounding, opts = {}) {
 
     if (recentDocCycles >= 5) {
       console.log(`[ControlLoop] Priorities doc used ${recentDocCycles} times in last 10 cycles — may be stale. Consider updating priorities.`);
-      await eventBus.publish(STREAMS.NOTIFICATIONS, {
-        type: "cycle:stale_priorities",
-        source: "control-loop",
-        payload: {
-          message: `Priorities doc has been the anchor for ${recentDocCycles} of the last 10 cycles. The operator should update priorities or provide a specific anchor.`,
-          recentDocCycles,
-        },
-      });
+      if (eventBus) {
+        try {
+          await eventBus.publish(STREAMS.NOTIFICATIONS, {
+            type: "cycle:stale_priorities",
+            source: "control-loop",
+            payload: {
+              message: `Priorities doc has been the anchor for ${recentDocCycles} of the last 10 cycles. The operator should update priorities or provide a specific anchor.`,
+              recentDocCycles,
+            },
+          });
+        } catch (err) {
+          console.error(`[ControlLoop] Failed to publish stale_priorities notification: ${err.message}`);
+        }
+      }
     }
 
     return {
@@ -272,7 +278,7 @@ export async function runControlLoop(eventBus, opts = {}) {
   // Step 2: SELECT ANCHOR — what are we working on and why?
   // =========================================================================
   console.log(`[ControlLoop] Step 2: Selecting anchor...`);
-  const anchor = await selectAnchor(grounding, opts);
+  const anchor = await selectAnchor(grounding, opts, eventBus);
 
   if (!anchor) {
     console.log(`[ControlLoop] No actionable anchor found — cycle complete (no work needed)`);
