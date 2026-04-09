@@ -373,7 +373,7 @@ export async function runResearchLoop(eventBus, opts = {}) {
         agentName: "research-strategist",
         personality: pjoin(process.cwd(), "config", "research-strategist.md"),
         prompt: prioritiesPrompt,
-        model: "nano",
+        model: "frontier",
         taskId: "priorities-refresh",
         correlationId: researchId,
       });
