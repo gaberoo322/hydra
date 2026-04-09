@@ -44,12 +44,67 @@ async function startCycle(eventBus, opts = {}) {
   }
 }
 
-function getCycleStatus() {
-  return currentCycle || { status: "idle" };
+async function getCycleStatus() {
+  if (currentCycle) return currentCycle;
+
+  const tracker = getTracker();
+  const activeId = await tracker.redis.get("hydra:cycle:active");
+  if (!activeId) return { status: "idle" };
+
+  const cycle = await tracker.redis.hgetall(`hydra:cycle:${activeId}`);
+  if (!cycle || !cycle.status) return { status: "idle" };
+
+  return {
+    id: activeId,
+    status: cycle.status,
+    startedAt: cycle.startedAt || null,
+    completedAt: cycle.completedAt || null,
+    total: parseInt(cycle.total || 0),
+    completed: parseInt(cycle.completed || 0),
+    failed: parseInt(cycle.failed || 0),
+    abandoned: parseInt(cycle.abandoned || 0),
+    timedOut: parseInt(cycle.timedOut || 0),
+  };
 }
 
-function getCycleHistory(limit = 10) {
-  return cycleHistory.slice(-limit);
+async function getCycleHistory(limit = 10) {
+  const tracker = getTracker();
+  let ids = [];
+
+  try {
+    ids = await tracker.redis.keys("hydra:cycle:cycle-*");
+  } catch (err) {
+    console.error(`[Cycle] Failed to list cycle keys from Redis: ${err.message}`);
+  }
+
+  const seen = new Set();
+  const records = [];
+
+  for (const id of ids.filter((k) => !k.endsWith(":agents") && !k.endsWith(":costs") && !k.endsWith(":tasks")).sort().reverse()) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const cycleId = id.replace(/^hydra:cycle:/, "");
+    const cycle = await tracker.redis.hgetall(id);
+    if (!cycle || !cycle.status) continue;
+    records.push({
+      id: cycleId,
+      status: cycle.status,
+      startedAt: cycle.startedAt || null,
+      completedAt: cycle.completedAt || null,
+      total: parseInt(cycle.total || 0),
+      completed: parseInt(cycle.completed || 0),
+      failed: parseInt(cycle.failed || 0),
+      abandoned: parseInt(cycle.abandoned || 0),
+      timedOut: parseInt(cycle.timedOut || 0),
+    });
+    if (records.length >= limit) break;
+  }
+
+  if (records.length > 0) {
+    return records;
+  }
+
+  return [];
 }
 
 async function killCycle(eventBus) {
