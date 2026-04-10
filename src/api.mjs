@@ -7,11 +7,9 @@ import { getTracker } from "./task-tracker.mjs";
 import { getMetricsTrend, getAggregateStats } from "./metrics.mjs";
 import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "./scheduler.mjs";
 import { runResearchLoop, getLatestResearch, listResearchReports, vetoOpportunity } from "./research-loop.mjs";
-import { runArchitectReview } from "./research-architect.mjs";
 import { loadProjectGoals, summarizeGoalsForPrompt } from "./project-goals.mjs";
 import { sendDigestNow } from "./digest.mjs";
 import { loadBacklog, getBacklogCounts, addToBacklog } from "./backlog.mjs";
-import { refreshPriorities } from "./priorities-refresh.mjs";
 
 const VAULT_PATH = process.env.HYDRA_VAULT_PATH || resolve(process.env.HOME, "obsidian-vault");
 const KILL_FILE = resolve(VAULT_PATH, ".kill");
@@ -467,15 +465,6 @@ function createApi(eventBus) {
     }
   });
 
-  // POST /priorities/refresh — Manually trigger priorities refresh from user-priorities.md
-  app.post("/priorities/refresh", async (req, res) => {
-    try {
-      const result = await refreshPriorities({ trigger: "manual" });
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
 
   // GET /goals — Current project goals
   app.get("/goals", async (req, res) => {
@@ -512,15 +501,6 @@ function createApi(eventBus) {
     }
   });
 
-  // POST /architect/review — Manually trigger Research Architect review
-  app.post("/architect/review", async (req, res) => {
-    try {
-      const result = await runArchitectReview(eventBus);
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
 
   // GET /events/:stream — Read recent events from a stream (for debugging)
   app.get("/events/:stream", async (req, res) => {

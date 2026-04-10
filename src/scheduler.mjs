@@ -14,7 +14,7 @@ import { getMetricsTrend } from "./metrics.mjs";
 import { getBacklogCounts, promoteToQueued, pruneOldDoneItems } from "./backlog.mjs";
 import { getTracker } from "./task-tracker.mjs";
 import { runResearchLoop } from "./research-loop.mjs";
-import { runArchitectReview } from "./research-architect.mjs";
+// research-architect removed — methodology files are frozen at current state
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
@@ -22,7 +22,7 @@ const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
 
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 3;
 const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 6 * 60 * 60 * 1000; // 6 hours
-const ARCHITECT_EVERY_N_RESEARCH = parseInt(process.env.HYDRA_ARCHITECT_EVERY_N_RESEARCH) || 3;
+// ARCHITECT_EVERY_N_RESEARCH removed — research-architect module disconnected
 const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || 50;
 const REPETITION_WINDOW = parseInt(process.env.HYDRA_REPETITION_WINDOW) || 5; // Check last N cycles
 const REPETITION_THRESHOLD = parseFloat(process.env.HYDRA_REPETITION_THRESHOLD) || 0.5; // Pause if >50% of recent titles are similar
@@ -40,8 +40,6 @@ let state = {
   consecutiveErrors: 0,
   researchCyclesRun: 0,
   lastResearchAt: null,
-  lastArchitectAt: null,
-  researchSinceLastArchitect: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,14 +70,10 @@ async function loadSchedulerState() {
     }
     const stored = JSON.parse(raw);
     if (stored.lastResearchAt) state.lastResearchAt = stored.lastResearchAt;
-    if (stored.lastArchitectAt) state.lastArchitectAt = stored.lastArchitectAt;
-    if (typeof stored.researchSinceLastArchitect === "number") {
-      state.researchSinceLastArchitect = stored.researchSinceLastArchitect;
-    }
     if (typeof stored.researchCyclesRun === "number") {
       state.researchCyclesRun = stored.researchCyclesRun;
     }
-    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, researchSinceLastArchitect=${state.researchSinceLastArchitect}, lastArchitectAt=${state.lastArchitectAt}`);
+    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}`);
   } catch (err) {
     console.error(`[Scheduler] Failed to load persisted state: ${err.message}`);
   }
@@ -89,8 +83,6 @@ async function saveSchedulerState() {
   try {
     const payload = {
       lastResearchAt: state.lastResearchAt,
-      lastArchitectAt: state.lastArchitectAt,
-      researchSinceLastArchitect: state.researchSinceLastArchitect,
       researchCyclesRun: state.researchCyclesRun,
       savedAt: new Date().toISOString(),
     };
@@ -298,7 +290,7 @@ async function maybeRunResearch(eventBus) {
     const research = await runResearchLoop(eventBus);
     state.researchCyclesRun++;
     state.lastResearchAt = new Date().toISOString();
-    state.researchSinceLastArchitect++;
+    // research-architect counter removed
     await saveSchedulerState();
 
     // Track research spend against the daily cap.
@@ -312,29 +304,7 @@ async function maybeRunResearch(eventBus) {
     console.log(`[Scheduler] Research complete — ${research.autoQueued || 0} items auto-queued`);
     // Priorities refresh is handled inside the research loop by the
     // research-strategist (Step 5.5) — it has the richest context.
-
-    // Auto-trigger architect review every N research cycles
-    if (state.researchSinceLastArchitect >= ARCHITECT_EVERY_N_RESEARCH) {
-      console.log(`[Scheduler] ${state.researchSinceLastArchitect} research cycles since last architect review — triggering`);
-      try {
-        const review = await runArchitectReview(eventBus);
-        // Only advance state if the architect actually produced a usable review.
-        // runArchitectReview returns { error } or { skipped } on failure without throwing —
-        // without this guard, quota/parse failures silently reset the counter and
-        // leave the operator thinking the architect ran.
-        if (review?.error || review?.skipped) {
-          console.error(`[Scheduler] Architect review did not complete: ${review.error || review.reason}`);
-        } else {
-          state.lastArchitectAt = new Date().toISOString();
-          state.researchSinceLastArchitect = 0;
-          await saveSchedulerState();
-          const updates = review.updatesApplied || review.review?.methodologyUpdates?.length || 0;
-          console.log(`[Scheduler] Architect review complete — ${updates} methodology updates`);
-        }
-      } catch (err) {
-        console.error(`[Scheduler] Architect review failed: ${err.message}`);
-      }
-    }
+    // Research architect removed — methodology files are frozen at current state.
   } catch (err) {
     console.error(`[Scheduler] Research cycle failed: ${err.message}`);
   }
@@ -420,7 +390,7 @@ async function start(eventBus, opts = {}) {
   state.startedAt = new Date().toISOString();
   state.consecutiveErrors = 0;
 
-  console.log(`[Scheduler] Started — cycles every ${intervalMs / 1000}s, research throttle ${RESEARCH_MIN_INTERVAL_MS / 3600_000}h, architect every ${ARCHITECT_EVERY_N_RESEARCH} research cycles`);
+  console.log(`[Scheduler] Started — cycles every ${intervalMs / 1000}s, research throttle ${RESEARCH_MIN_INTERVAL_MS / 3600_000}h`);
 
   // Run first cycle immediately
   runScheduledCycle(eventBus);
@@ -475,9 +445,6 @@ async function getStatus() {
       minIntervalHuman: formatDuration(RESEARCH_MIN_INTERVAL_MS),
       cyclesRun: state.researchCyclesRun,
       lastResearchAt: state.lastResearchAt,
-      architectEveryN: ARCHITECT_EVERY_N_RESEARCH,
-      researchSinceLastArchitect: state.researchSinceLastArchitect,
-      lastArchitectAt: state.lastArchitectAt,
       dailyCostCapUsd: DAILY_COST_CAP_USD,
       dailySpendUsd: spend.usd,
       dailySpendDate: spend.date,

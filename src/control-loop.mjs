@@ -12,7 +12,8 @@ import { runVerification, validateDiffExists, summarizeVerification, defaultVeri
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.mjs";
 import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, compoundLearnings } from "./agent-memory.mjs";
-import { refreshPriorities } from "./priorities-refresh.mjs";
+// priorities-refresh removed — the research-strategist handles refresh inside
+// the research loop (Step 5.5). Stale-detection just warns now.
 import { moveToInProgress, moveToDone, returnToBacklog, moveToBlocked } from "./backlog.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -129,27 +130,10 @@ async function selectAnchor(grounding, opts = {}, eventBus = null) {
     })();
 
     if (recentDocCycles >= 5) {
-      console.log(`[ControlLoop] Priorities doc used ${recentDocCycles} times in last 10 cycles — auto-refreshing from user-priorities.md`);
-      // Auto-refresh priorities from the operator's north star instead of
-      // just warning. This keeps the system moving toward the operator's
-      // goals even when the priorities doc becomes stale.
-      try {
-        const refresh = await refreshPriorities({ trigger: "stale", grounding });
-        if (refresh.ok) {
-          console.log(`[ControlLoop] Priorities refreshed — re-reading`);
-          // Re-read the freshly generated priorities
-          const freshPriorities = await readFile(join(HYDRA_PATH, "direction", "priorities.md"), "utf-8");
-          return {
-            type: "doc",
-            reference: "direction/priorities.md",
-            whyNow: "Freshly refreshed priorities (was stale)",
-            context: freshPriorities,
-          };
-        }
-      } catch (err) {
-        console.error(`[ControlLoop] Priorities refresh failed: ${err.message}`);
-      }
-      // Fall through to stale priorities if refresh failed
+      // The research-strategist refreshes priorities after each research cycle
+      // (Step 5.5 in research-loop). Between research cycles, just warn and
+      // use the existing doc — it's bounded by the research interval (3-6h).
+      console.log(`[ControlLoop] Priorities doc used ${recentDocCycles} times in last 10 cycles — will refresh on next research cycle`);
     }
 
     return {
