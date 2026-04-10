@@ -362,11 +362,27 @@ async function runScheduledCycle(eventBus) {
     }
   }
 
-  // Schedule next cycle
+  // Schedule next cycle — immediate if there's work, delayed if idle
   if (state.running) {
-    const delay = state.consecutiveErrors > 0
-      ? COOLDOWN_ON_ERROR_MS * state.consecutiveErrors
-      : state.intervalMs;
+    let delay;
+    if (state.consecutiveErrors > 0) {
+      // Back off on errors
+      delay = COOLDOWN_ON_ERROR_MS * state.consecutiveErrors;
+    } else {
+      // Check if there's work waiting — if so, start immediately
+      const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue").catch(() => 0);
+      const hadWork = !result?.reason?.includes("No actionable anchor") &&
+                      !result?.reason?.includes("No work needed") &&
+                      !result?.reason?.includes("Planner produced no task");
+      if (queueLen > 0 || hadWork) {
+        delay = 0; // work available — no idle gap
+      } else {
+        delay = state.intervalMs; // queue empty — wait before trying again
+      }
+    }
+    if (delay === 0) {
+      console.log(`[Scheduler] Work available — starting next cycle immediately`);
+    }
     state.timer = setTimeout(() => runScheduledCycle(eventBus), delay);
   }
 }
