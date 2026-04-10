@@ -21,11 +21,11 @@ const HYDRA_PATH = join(VAULT_PATH, "hydra");
 
 const CYCLE_SUMMARIES_DIR = join(HYDRA_PATH, "reports", "cycle-summaries");
 const REALITY_REPORTS_DIR = join(HYDRA_PATH, "reports", "reality-reports");
-const ARCHIVE_DIR = join(HYDRA_PATH, "reports", "archive");
+const RESEARCH_DIR = join(HYDRA_PATH, "reports", "research");
 
 const CYCLE_SUMMARIES_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
-const ARCHIVE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const REALITY_REPORTS_KEEP = 50; // keep most recent 50
+const RESEARCH_REPORTS_KEEP = 20; // keep most recent 20
 
 /**
  * Delete files older than maxAgeMs from a directory.
@@ -98,10 +98,9 @@ async function runCleanup() {
   const reports = await keepRecentFiles(REALITY_REPORTS_DIR, REALITY_REPORTS_KEEP);
   if (reports > 0) results.push(`${reports} reality-reports`);
 
-  // Archive: delete after 7 days (anything here is already old)
-  await mkdir(ARCHIVE_DIR, { recursive: true });
-  const archived = await deleteOldFiles(ARCHIVE_DIR, ARCHIVE_MAX_AGE_MS);
-  if (archived > 0) results.push(`${archived} archived files`);
+  // Research reports: keep last 20 (strategist reads latest, ~46K each)
+  const research = await keepRecentFiles(RESEARCH_DIR, RESEARCH_REPORTS_KEEP, [".json", ".md"]);
+  if (research > 0) results.push(`${research} research-reports`);
 
   if (results.length > 0) {
     console.log(`[Cleanup] Deleted: ${results.join(", ")}`);
