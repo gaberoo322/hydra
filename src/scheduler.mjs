@@ -318,9 +318,10 @@ async function runScheduledCycle(eventBus) {
     await maybeRunResearch(eventBus);
   } catch {}
 
+  let result = null;
   try {
     console.log(`[Scheduler] Starting scheduled cycle #${state.cyclesRun + 1}`);
-    const result = await startCycle(eventBus);
+    result = await startCycle(eventBus);
 
     state.cyclesRun++;
     state.lastCycleAt = new Date().toISOString();
