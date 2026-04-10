@@ -16,14 +16,14 @@ import { getTracker } from "./task-tracker.mjs";
 import { runResearchLoop } from "./research-loop.mjs";
 // research-architect removed — methodology files are frozen at current state
 
-const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
 
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 3;
-const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 6 * 60 * 60 * 1000; // 6 hours
+const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 2 * 60 * 60 * 1000; // 2 hours
 // ARCHITECT_EVERY_N_RESEARCH removed — research-architect module disconnected
-const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || 50;
+const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || 75;
 const REPETITION_WINDOW = parseInt(process.env.HYDRA_REPETITION_WINDOW) || 5; // Check last N cycles
 const REPETITION_THRESHOLD = parseFloat(process.env.HYDRA_REPETITION_THRESHOLD) || 0.5; // Pause if >50% of recent titles are similar
 
