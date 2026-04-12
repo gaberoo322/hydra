@@ -1,792 +1,257 @@
 # Hydra
 
-Hydra is an autonomous software development orchestrator. It runs continuous development cycles against a target project — grounding itself in the project's real state, selecting what to work on, planning a bounded task, challenging it through a skeptic gate, executing the code change, verifying it with hard checks, and merging it to main. Every state transition is backed by evidence stored in Redis, and every cycle produces a structured reality report.
+Hydra is an autonomous software development orchestrator. It runs continuous development cycles against a target codebase — grounding itself in real project state, selecting work, planning a bounded task, challenging it through a skeptic gate, executing the change, verifying with hard checks, and merging to main. Every cycle produces a structured reality report backed by evidence in Redis.
 
-Hydra uses [Codex CLI](https://github.com/openai/codex) as its agent runtime and Redis Streams as its event bus. It sends notifications to Telegram, stores knowledge in an [OpenViking](https://github.com/volcengine/openviking) vector database, and continuously improves itself through a Meta agent that proposes changes based on measured cycle metrics.
+Hydra uses [Codex CLI](https://github.com/openai/codex) as its agent runtime. Three agent calls per cycle: **Planner**, **Skeptic**, **Executor**. Verification and merge are deterministic command execution — not agents making claims.
+
+> **Live instance**: [hydra.clawstreetbets.xyz](https://hydra.clawstreetbets.xyz) — dashboard for the [hydra-betting](https://github.com/gaberoo322/hydra-betting) project
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    trigger["POST /cycle/start"] --> ground
-
-    subgraph loop["V2 Control Loop"]
-        direction LR
-
-        prep["1a. PREPARE\n\nCleanup workspace\n(gated on safety)"]
-        ground["1b. GROUND\n\nRun tests\nTypecheck\nGit state\nTODO markers"]
-        anchor["2. ANCHOR\n\nSelect what\nto work on"]
-        plan["3. PLAN\n\nCodex agent\n1 bounded task\n+ classify complexity"]
-        skeptic{"4. SKEPTIC\n\nCodex agent\n(skipped for\nquick-fix)"}
-        execute["5. EXECUTE\n\nCodex agent\nFeature branch\nCode changes"]
-        verify["6. VERIFY\n\nnpm test\nnpm run typecheck"]
-        reconcile["6.5 RECONCILE\n\nPlan vs actual\nscope diff"]
-        merge["7. MERGE\n\ngit merge --no-ff\ngit push origin main"]
-        report["8. REPORT\n\nReality report\nMetrics\nCompound learnings"]
-
-        prep --> ground --> anchor --> plan --> skeptic
-        skeptic -- "approve" --> execute --> verify
-        verify -- "all passed" --> reconcile --> merge --> report
-        skeptic -- "reject" --> abandoned1["Task abandoned"]
-        verify -- "failed" --> retry["Store as\nprior-failure\nor Blocked"]
-    end
-
-    style prep fill:#1e293b,stroke:#94a3b8,color:#e2e8f0
-    style ground fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
-    style anchor fill:#2d3a4a,stroke:#60a5fa,color:#e2e8f0
-    style plan fill:#3d2d4a,stroke:#a78bfa,color:#e2e8f0
-    style skeptic fill:#4a3d2d,stroke:#fbbf24,color:#e2e8f0
-    style execute fill:#3d2d4a,stroke:#a78bfa,color:#e2e8f0
-    style verify fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
-    style reconcile fill:#2d3a4a,stroke:#60a5fa,color:#e2e8f0
-    style merge fill:#2d3a4a,stroke:#60a5fa,color:#e2e8f0
-    style report fill:#2d4a3e,stroke:#4ade80,color:#e2e8f0
-    style abandoned1 fill:#4a2d2d,stroke:#f87171,color:#e2e8f0
-    style retry fill:#4a3d2d,stroke:#fbbf24,color:#e2e8f0
-    style trigger fill:#1e293b,stroke:#94a3b8,color:#e2e8f0
-    style loop fill:#0f172a,stroke:#334155,color:#e2e8f0
+```
+                    ┌─────────────────────────────────────────┐
+                    │            V2 Control Loop               │
+                    │                                          │
+  POST /api/       │  1. PREPARE ──► 2. GROUND ──► 3. ANCHOR  │
+  cycle/start ────►│       │              │              │     │
+                    │       ▼              ▼              ▼     │
+                    │  Clean workspace  npm test     Pick work  │
+                    │  (safety-gated)   tsc          (priority  │
+                    │                   git state     order)    │
+                    │                                    │      │
+                    │  4. PLAN ◄─────────────────────────┘      │
+                    │     │  Codex agent: 1 bounded task        │
+                    │     ▼                                     │
+                    │  5. SKEPTIC ─── reject ──► abandoned      │
+                    │     │  (skip for quick-fix)               │
+                    │     ▼ approve                             │
+                    │  6. EXECUTE                               │
+                    │     │  Codex agent: feature branch        │
+                    │     ▼                                     │
+                    │  7. VERIFY ─── fail ──► prior-failure     │
+                    │     │  npm test + tsc + build             │
+                    │     ▼ pass                                │
+                    │  8. MERGE ──► 9. REPORT + LEARN           │
+                    │     git merge --no-ff + push              │
+                    └─────────────────────────────────────────┘
 ```
 
-Only three Codex agent calls per cycle: **Planner**, **Skeptic**, and **Executor**. Verification and merge are deterministic command execution — not agents making claims.
+## Key Concepts
 
-## How It Works
+**Anchor Selection** — Strict priority order determines what Hydra works on:
+1. Operator queue (`POST /api/queue`)
+2. Failing tests
+3. Typecheck errors
+4. Reframe queue (tasks failed 2+ times)
+5. Prior failures (retry)
+6. Priorities document
 
-### The Control Loop
+**Scope-Adaptive Routing** — Tasks are classified after planning: quick-fix (1-2 files) skips the skeptic and uses a cheaper model. Complex tasks (5+ files) get full ceremony.
 
-Each cycle follows a 10-step evidence-driven pipeline:
+**Evidence-Backed State** — Every task transition stores proof in Redis (`hydra:task:{id}:evidence:{state}`). Verification output, test results, diffs, skeptic verdicts.
 
-1. **PREPARE WORKSPACE** — Cleans the target project's working tree (checkout main, discard tracked changes, delete stale feature branches). Gated on safety: skips if the operator is on a feature branch or has uncommitted edits.
+**Automatic Rollback** — If tests regress after merge, Hydra reverts the commit, pushes, and stores the task as a prior-failure for the next cycle.
 
-2. **GROUND** — Inspects the target project: runs tests, typechecks, reads git state, finds TODO/FIXME markers. Produces a structured `GroundingReport` with real numbers. This step is read-only — it never mutates the repo.
+**Compound Learning** — After each cycle, Hydra extracts WHEN/CHECK/BECAUSE prevention rules from failures and surprises. These accumulate as agent memory and prevent repeated mistakes.
 
-3. **ANCHOR** — Selects what to work on, using a strict priority order:
-   - Explicit operator request (passed via API or queue)
-   - Work queue items (`POST /queue`)
-   - Failing tests (highest-priority automatic anchor)
-   - Typecheck errors
-   - Prior failures stored in Redis (retry from last cycle)
-   - TODO/FIXME markers in code
-   - Priorities document (fallback to operator direction)
+## Dashboard
 
-4. **PLAN** — A Codex agent (Planner) proposes exactly one bounded task anchored to the selected work. The task includes scope boundaries, acceptance criteria, and a verification plan with shell commands that prove completion. After planning, the task is classified by complexity: **quick-fix** (≤2 files, ≤3 criteria), **standard**, or **complex** (>5 files or >8 criteria).
+React + Vite + Tailwind operator UI at port 3000 (or via Cloudflare tunnel). Features:
 
-5. **SKEPTIC GATE** — A Codex agent (Skeptic) challenges the task. It checks for duplicate work, achievability, hidden blockers, and whether the scope is appropriately bounded. It can veto the task. Skipped for quick-fix tasks and research-sourced items (scope-adaptive routing).
+- **Overview** — system health, cycle status, scheduler controls, daily spend, recommended operator actions
+- **Cycles** — pipeline visualization, task introspection with evidence timeline
+- **Backlog** — 6-lane Kanban (Triage → Backlog → Queued → Blocked → In Progress → Done) with priority, labels, estimates, descriptions, and slide-in detail panel
+- **Config** — edit agent personalities, feedback files, and direction configs
+- **Proposals** — review and approve/reject Meta agent improvement suggestions
+- **Vision** — edit the operator north-star document
+- **Queue** — add work items, trigger research cycles
+- **Metrics** — 30-cycle charts (outcomes, test trends, costs)
+- **Health** — service status with latency probes for all infrastructure
+- **Search** — OpenViking knowledge base semantic search
 
-6. **EXECUTE** — A Codex agent (Executor) creates a feature branch, makes the code changes, runs tests, and commits. It never merges to main — the loop handles that after verification.
+## Backlog System
 
-7. **VERIFY** — Runs the verification plan from step 4 as shell commands (e.g., `npm test`, `npm run typecheck`). Each step checks exit codes or output patterns. This is command execution, not an agent. If verification fails and the error suggests operator intervention (missing API keys, auth failures), the task is moved to the Blocked lane; otherwise it's stored as a prior-failure for retry.
+Linear-inspired project management with priority-based promotion:
 
-8. **RECONCILE** — Compares the planner's `scopeBoundary.in` (planned files) against `verification.filesChanged` (actual files). Flags scope creep (executor touched out-of-scope files) and scope gaps (planned files not modified). Informational only — doesn't block merge.
+| Field | Description |
+|-------|-------------|
+| Priority | Urgent / High / Medium / Low / None — promotion picks highest first |
+| Description | Markdown with acceptance criteria, rationale, prerequisites |
+| Labels | Flexible tags (execution, scanner, infra, research, etc.) |
+| Estimate | T-shirt sizes: XS, S, M, L, XL |
+| Parent | Group related items under a parent |
 
-9. **MERGE** — Checks out main, pulls latest, runs `git merge --no-ff`, pushes to remote, and deletes the feature branch.
+**Triage lane** — Research suggestions land here for operator review before entering the backlog. Approve or reject from the dashboard.
 
-10. **REPORT + COMPOUND** — Runs grounding again to detect regressions, computes rollback risk, writes a reality report to the vault, records structured metrics in Redis. Then extracts WHEN/CHECK/BECAUSE prevention rules from the outcome (Sage-inspired learning) — only from failures and surprises, not routine successes.
+## Research System
 
-### Task State Machine
+Three parallel research agents discover what to build next:
 
-```mermaid
-stateDiagram-v2
-    direction LR
+- **Domain Researcher** — web search for strategies, competitive intelligence
+- **Technical Researcher** — codebase analysis, architecture assessment
+- **Market Researcher** — external API capabilities, platform changes
 
-    [*] --> proposed
-    proposed --> approved : skeptic approves
-    proposed --> abandoned : skeptic rejects
+A **Director** synthesizes findings into ranked opportunities. High-confidence items auto-queue; everything else goes to Triage for review.
 
-    approved --> in_progress : execution starts
-    approved --> abandoned
+## Self-Improvement
 
-    in_progress --> changed_code : diff exists
-    in_progress --> failed : no changes / error
-    in_progress --> blocked
+The **Meta agent** (frontier model) runs every 20 cycles as a strategic review, or immediately when 2+ of the last 5 cycles fail. It receives comprehensive context: 20 cycles of metrics, reality reports, spending data, backlog state, agent memory rules, current agent configs, and all recent proposals.
 
-    blocked --> approved : unblocked
-    blocked --> abandoned
-
-    changed_code --> verified : verification passes
-    changed_code --> failed : verification fails
-
-    verified --> merged : git merge + push
-    verified --> failed : merge conflict
-
-    merged --> [*]
-    failed --> [*]
-    abandoned --> [*]
-
-    note right of verified
-        Evidence stored at
-        hydra:task:ID:evidence:STATE
-    end note
-    note right of failed
-        Stored as prior-failure
-        for retry in next cycle
-    end note
-```
-
-Every transition stores evidence in Redis at `hydra:task:{id}:evidence:{state}` — verification output, test results, diffs, skeptic verdicts.
-
-### Drift Detection
-
-Before execution, the system checks whether the proposed task duplicates recent work by comparing anchor references (exact match) and task titles (>70% word overlap). Duplicates are abandoned with a notification.
-
-### Automatic Rollback
-
-If the REPORT step detects that tests regressed after a merge (fewer passing tests than before), Hydra automatically reverts the merge commit and pushes to main. The task is stored as a prior-failure for the next cycle to retry. If the revert itself fails, an urgent notification is sent for manual intervention.
-
-### Research System
-
-Hydra includes an autonomous research system that determines what to build next. Instead of a flat priority list, you define **project goals** with success metrics and focus weights, and the research system figures out the highest-leverage work.
-
-A research cycle runs three parallel agents:
-- **Domain Researcher** — web searches for strategies, best practices, competitive intelligence
-- **Technical Researcher** — deep codebase analysis, architecture assessment, tech debt inventory
-- **Market Researcher** — external API capabilities, platform changes, market conditions, new integrations
-
-A **Research Strategist** synthesizes all findings into a ranked opportunity report, scoring each opportunity against your focus weights. High-confidence items auto-queue for execution; everything else is reported for your review.
-
-A **Research Architect** periodically reviews whether research recommendations led to good execution outcomes and updates the researcher methodology files to improve quality over time. This creates a feedback loop: Research → Execute → Measure → Architect Reviews → Better Research.
-
-See [Research Workflow](#research-workflow) for setup and usage.
-
-### Self-Improvement
-
-A **Meta agent** analyzes cycle metrics every 5 cycles (when failures are present). It proposes concrete changes — personality tweaks, config adjustments, orchestrator improvements — based on measured outcomes like merge rate, failure rate, and regression rate. Low-risk personality changes are auto-approved; everything else requires operator approval via the API or by moving the proposal file in Obsidian.
+Proposals that target config files (personality tweaks, feedback updates) can be auto-applied via `appendLines`. Proposals that require code changes create a backlog item automatically. All proposals are visible on the dashboard for operator review.
 
 ## Prerequisites
 
-- **Node.js** >= 18 (ES modules)
-- **Docker** and **Docker Compose** (for Redis, VikingDB, OpenViking)
-- **Codex CLI** — installed and authenticated (`codex login --device-auth`)
-- **Git** — the target project must be a git repository with a `main` branch and a remote
-- **A target project** — a Node.js project with `npm test`, `npm run typecheck`, and `npm run build` scripts in package.json
-- **OpenClaw CLI** (optional) — for Telegram notifications. If not configured, notifications are skipped.
-- **An Obsidian vault** (optional) — Hydra writes reports, proposals, and agent output to `~/obsidian-vault/hydra/`. This works as plain files even without Obsidian.
+- **Node.js** >= 22
+- **Docker** + **Docker Compose** (Redis, VikingDB, OpenViking)
+- **Codex CLI** — installed and authenticated
+- **Git** — target project with `main` branch and remote
+- A target project with `npm test`, `npm run typecheck`, and `npm run build`
 
-## Setup
-
-### 1. Clone and install
+## Quick Start
 
 ```bash
+# Clone and install
 git clone https://github.com/gaberoo322/hydra.git
-cd hydra
-npm install
-```
+cd hydra && npm install
 
-### 2. Configure environment
-
-Copy the example and fill in your values:
-
-```bash
+# Configure
 cp .env.example .env
-```
+# Edit .env: set HYDRA_PROJECT_WORKSPACE to your target project path
 
-Edit `.env`:
-
-```bash
-# Required
-HYDRA_PORT=4000                             # REST API port
-REDIS_URL=redis://localhost:6379            # Redis connection
-HYDRA_PROJECT_WORKSPACE=/path/to/your/project  # Target project directory
-HYDRA_VAULT_PATH=/path/to/obsidian-vault    # Where reports and agent output go
-
-# Optional
-HYDRA_CYCLE_TTL_MS=5400000                  # Cycle timeout (default: 90 minutes)
-HYDRA_AUTO_CYCLE_INTERVAL_MS=300000         # Auto-run cycles every N ms (0 = disabled)
-HYDRA_AGENTS_PATH=/path/to/agency-agents    # Agent personality base files
-HYDRA_ORCHESTRATOR_PATH=/path/to/hydra      # Path to this repo (for Meta agent)
-OPENAI_PROXY_PORT=4001                      # OpenAI API proxy port
-CODEX_BIN=codex                             # Path to codex CLI binary
-
-# Notifications (optional — Telegram via OpenClaw)
-OPENCLAW_TELEGRAM_TARGET=your_chat_id       # Telegram chat ID for notifications
-OPENCLAW_GATEWAY_TOKEN=your_token           # OpenClaw gateway auth token
-```
-
-### 3. Start infrastructure
-
-```bash
+# Start infrastructure
 docker compose up -d
-```
 
-This starts:
-- **Redis** (port 6379) — event bus, task tracking, metrics storage
-- **VikingDB** (port 5000) — vector database backend
-- **OpenViking** (port 1933) — knowledge base with embedding and retrieval
-
-Verify services are healthy:
-
-```bash
-docker compose ps
-curl http://localhost:6379 2>&1 | head -1  # Redis
-curl http://localhost:5000/health           # VikingDB
-curl http://localhost:1933/api/v1/health    # OpenViking
-```
-
-### 4. Start the OpenAI proxy (required for OpenViking embeddings)
-
-The proxy bridges OpenViking to your Codex subscription for embeddings:
-
-```bash
-node src/openai-proxy.mjs &
-```
-
-This runs on port 4001 and handles:
-- `/v1/embeddings` — forwarded to api.openai.com with Codex OAuth token
-- `/v1/chat/completions` — routed through `codex exec` (Codex OAuth token lacks `model.request` scope)
-
-### 5. Prepare the vault directory structure
-
-Hydra expects this structure in your vault path (directories are created automatically on first run, but the direction files need manual setup):
-
-```
-your-vault/
-└── hydra/
-    ├── direction/
-    │   ├── priorities.md        # What Hydra should work on (you write this)
-    │   └── goals.md             # Project goals with success metrics and focus weights
-    ├── agent-feedback/
-    │   ├── to-planner.md        # Feedback for the planner agent
-    │   ├── to-executor.md       # Feedback for the executor agent
-    │   └── to-skeptic.md        # Feedback for the skeptic agent
-    ├── agent-config/            # Agent personality files (planner, executor, skeptic, meta)
-    ├── agent-memory/            # Auto-generated WHEN/CHECK/BECAUSE prevention rules
-    ├── backlog.md               # Obsidian Kanban board (Backlog→Queued→Blocked→InProgress→Done)
-    ├── research-methodology/    # Research agent methodology configs
-    └── reports/
-        ├── cycle-summaries/     # Raw agent output (auto-deleted after 2 days)
-        ├── reality-reports/     # Structured cycle reports (last 50 kept)
-        ├── research/            # Research findings (auto-generated)
-        └── proposals/           # Meta agent proposals
-            └── approved/        # Move proposals here to approve via Obsidian
-```
-
-Create the minimum required files:
-
-```bash
-mkdir -p ~/obsidian-vault/hydra/direction
-mkdir -p ~/obsidian-vault/hydra/agent-feedback
-
-cat > ~/obsidian-vault/hydra/direction/priorities.md << 'EOF'
-# Priorities
-
-- Fix any failing tests
-- Add input validation to API endpoints
-- Improve error handling in the payment flow
-EOF
-```
-
-### 6. Prepare the target project
-
-Your target project must:
-
-1. Be a git repository with a `main` branch
-2. Have a remote configured (`git remote -v` should show origin)
-3. Have these npm scripts in package.json:
-   - `test` — runs the test suite (vitest, jest, etc.)
-   - `typecheck` — runs TypeScript type checking (e.g., `tsc --noEmit`)
-   - `build` — builds the project (optional but used by default verification)
-
-```bash
-cd /path/to/your/project
-git checkout main
-git pull origin main
-npm install
-npm test          # should work
-npm run typecheck # should work
-```
-
-### 7. Start Hydra
-
-```bash
-cd /path/to/hydra
+# Start Hydra
 npm start
+
+# Open dashboard
+open http://localhost:3000
 ```
 
-You should see:
+## Configuration
 
-```
-[Hydra] Starting orchestrator...
-[Hydra] Event bus initialized (Redis Streams ready)
-[Hydra] Task tracker + metrics initialized (Redis-backed)
-[Hydra] Background consumers started (meta, notifications, dlq)
-[Hydra] Proposal approval watcher started
-[Hydra] V2 CONTROL LOOP — ground→plan→skeptic→execute→verify→merge
-[Hydra] REST API listening on port 4000
-[Hydra] Health check: http://localhost:4000/health
-[Hydra] Cycle watchdog started (checks every 15min, TTL 90min)
-[Cleanup] Scheduled (daily): cycle-summaries 2d, reality-reports keep 50, archive 7d
-```
-
-For development with auto-restart:
+### Environment
 
 ```bash
-npm run dev
+HYDRA_PORT=4000                    # REST API port
+REDIS_URL=redis://localhost:6379   # Redis connection
+HYDRA_PROJECT_WORKSPACE=~/project  # Target project directory
+HYDRA_CONFIG_PATH=~/hydra/config   # Agent configs and direction files
 ```
 
-### 8. (Optional) Start the vault watcher
+### Config Directory
 
-Indexes vault files into OpenViking for semantic search:
-
-```bash
-node src/vault-watcher.mjs &
 ```
-
-## Workflow
-
-### Starting a cycle
-
-Trigger a cycle via the API:
-
-```bash
-# Let Hydra choose what to work on (auto-anchoring)
-curl -X POST http://localhost:4000/cycle/start
-
-# Direct Hydra to specific work
-curl -X POST http://localhost:4000/cycle/start \
-  -H 'Content-Type: application/json' \
-  -d '{"anchor": {"type": "user-request", "reference": "Add rate limiting to the login endpoint"}}'
-```
-
-The cycle runs synchronously and returns the full result when done. Typical cycle duration is 2-10 minutes depending on task complexity.
-
-### Queuing work
-
-Queue items for upcoming cycles. Queued work takes priority over automatic anchoring:
-
-```bash
-# Add work to the queue
-curl -X POST http://localhost:4000/queue \
-  -H 'Content-Type: application/json' \
-  -d '{"reference": "Add dark mode toggle", "reason": "customer request", "context": "Use CSS custom properties"}'
-
-# View the queue
-curl http://localhost:4000/queue | jq .
-```
-
-### Monitoring
-
-```bash
-# Health check
-curl http://localhost:4000/health | jq .
-
-# Current cycle status
-curl http://localhost:4000/cycle/status | jq .
-
-# Recent cycle history
-curl http://localhost:4000/cycle/history | jq .
-
-# Human-readable summary (cycles, rates, queue, accomplishments)
-curl http://localhost:4000/summary
-
-# Task state from Redis
-curl http://localhost:4000/tasks | jq .
-
-# Full evidence chain for a task
-curl http://localhost:4000/tasks/task-cycle-2026-04-02-0634-1/evidence | jq .
-
-# Cycle metrics (merge rate, failure rate, regression rate, durations)
-curl http://localhost:4000/metrics | jq .
-
-# Full cycle report with agent runs
-curl http://localhost:4000/cycle/report | jq .
-
-# Run grounding independently (see current project state)
-curl http://localhost:4000/grounding/latest | jq .
+config/
+├── agents/           # Agent system prompts
+│   ├── planner.md
+│   ├── executor.md
+│   ├── skeptic.md
+│   └── meta.md
+├── feedback/         # Operator guidance to agents
+│   ├── to-planner.md
+│   ├── to-executor.md
+│   └── to-skeptic.md
+├── direction/        # Strategic direction
+│   ├── vision.md     # Operator north star (you write this)
+│   ├── priorities.md # Auto-generated from vision + system state
+│   ├── goals.md      # Project goals with success metrics
+│   └── tech-preferences.md
+└── research/         # Research agent configs
 ```
 
 ### Steering Hydra
 
-Hydra's behavior is driven by files in the vault:
-
-**`direction/priorities.md`** — What Hydra should work on. Update this to redirect effort. Hydra will warn you if the priorities doc has been the anchor for 5+ of the last 10 cycles (sign it's stale).
-
-**`agent-feedback/to-planner.md`** — Direct feedback to the planner. Example:
-
-```markdown
-- Focus on fixing tests before adding new features
-- Keep tasks to single-file changes when possible
-- Don't create architecture design tasks — just build
-```
-
-**`agent-feedback/to-executor.md`** — Direct feedback to the executor. Example:
-
-```markdown
-- Always run tests before committing
-- Follow the existing code style exactly
-- Never delete files in src/lib/providers/
-```
-
-**`backlog.md`** — Obsidian Kanban board. Drag items between lanes (Backlog, Queued, Blocked, In Progress, Done). Items in the **Blocked** lane require your intervention (API keys, credentials, etc.) — Hydra skips them and works on other things.
-
-### Managing proposals
-
-The Meta agent generates proposals for framework improvements:
-
-```bash
-# View pending proposals
-curl 'http://localhost:4000/proposals?status=pending' | jq .
-
-# Approve a proposal
-curl -X POST http://localhost:4000/proposals/1/approve
-
-# Reject with reason
-curl -X POST http://localhost:4000/proposals/1/reject \
-  -H 'Content-Type: application/json' \
-  -d '{"reason": "Too risky for this phase"}'
-
-# Manually trigger Meta analysis
-curl -X POST http://localhost:4000/meta/analyze | jq .
-```
-
-You can also approve proposals by moving the `.md` file from `reports/proposals/` to `reports/proposals/approved/` in your vault — Hydra polls for this every 30 seconds.
-
-### Emergency stop
-
-```bash
-curl -X POST http://localhost:4000/kill
-```
-
-This creates a kill file in the vault and times out all running tasks.
-
-### Searching the knowledge base
-
-```bash
-curl 'http://localhost:4000/openviking/search?q=authentication' | jq .
-```
-
-### Running continuous cycles
-
-Use the built-in scheduler to run cycles automatically:
-
-```bash
-# Start the scheduler (5 minute interval between cycles)
-curl -X POST http://localhost:4000/scheduler/start \
-  -H 'Content-Type: application/json' \
-  -d '{"intervalMs": 300000}'
-
-# Check scheduler status
-curl http://localhost:4000/scheduler/status | jq .
-
-# Stop the scheduler
-curl -X POST http://localhost:4000/scheduler/stop
-```
-
-Or auto-start on boot by setting `HYDRA_AUTO_CYCLE_INTERVAL_MS=300000` in `.env`.
-
-The scheduler runs cycles back-to-back with the configured interval between them. It backs off automatically on repeated errors and stops after 5 consecutive failures.
-
-### Cost tracking
-
-```bash
-# View token usage and dollar costs across recent cycles
-curl http://localhost:4000/spending | jq .
-
-# Limit to last 5 cycles
-curl 'http://localhost:4000/spending?count=5' | jq .
-```
-
-Returns per-cycle token counts, cost in USD (computed from model pricing), and aggregate totals.
-
-### Research Workflow
-
-#### 1. Create project goals
-
-Create `direction/goals.md` in your vault:
-
-```markdown
----
-name: Algorithmic Betting Platform
----
-
-## Success Metrics
-
-| Metric | Target | Category | Source |
-|--------|--------|----------|--------|
-| Monthly ROI | >15% | profitability | app-metrics.json |
-| Win rate | >55% | profitability | app-metrics.json |
-| Uptime | 99.9% | reliability | process monitor |
-| Bet execution latency | <500ms | reliability | app logs |
-| Error rate | <0.1% | reliability | error logs |
-| Test coverage | >80% | architecture | npm test |
-
-## Focus Weights
-
-- profitability: 35
-- reliability: 25
-- architecture: 20
-- ui_ux: 10
-- risk_management: 10
-
-## Constraints
-
-- Must support Kalshi and Polymarket APIs
-- Never risk more than 2% of bankroll per single bet
-- All bets must be logged with full audit trail
-- System must be recoverable from any crash state
-
-## Pain Points
-
-- Polymarket API drops connections silently
-- No visibility into why specific bets were placed
-- Position sizing is hardcoded, not adaptive
-```
-
-#### 2. Run a research cycle
-
-```bash
-# Run research with current goals
-curl -X POST http://localhost:4000/research/start | jq .
-
-# Run research with temporary focus override (e.g., reliability sprint)
-curl -X POST http://localhost:4000/research/start \
-  -H 'Content-Type: application/json' \
-  -d '{"focusOverride": {"reliability": 60, "profitability": 15, "architecture": 15, "ui_ux": 5, "risk_management": 5}}'
-```
-
-#### 3. Review findings
-
-```bash
-# Full latest research report
-curl http://localhost:4000/research/latest | jq .
-
-# Research history (metadata)
-curl http://localhost:4000/research/history | jq .
-
-# Current project goals
-curl http://localhost:4000/goals | jq .
-```
-
-#### 4. Veto auto-queued items you disagree with
-
-```bash
-curl -X POST http://localhost:4000/research/veto \
-  -H 'Content-Type: application/json' \
-  -d '{"title": "Add WebSocket support for real-time pricing"}'
-```
-
-#### 5. Let the architect improve research quality over time
-
-```bash
-# Manually trigger architect review (also runs automatically)
-curl -X POST http://localhost:4000/architect/review | jq .
-```
-
-#### 6. Optionally provide app metrics
-
-Create `hydra/metrics/app-metrics.json` in the vault, or set `HYDRA_APP_METRICS_URL` to an endpoint on your app:
-
-```json
-{
-  "roi_30d": 0.12,
-  "win_rate": 0.54,
-  "uptime_pct": 98.5,
-  "avg_latency_ms": 340,
-  "error_rate": 0.015,
-  "total_bets": 1247,
-  "last_updated": "2026-04-02T12:00:00Z"
-}
-```
-
-The researchers use this data to ground their recommendations in reality rather than just analyzing code.
-
-## Ideal Workflow
-
-This is the recommended way to operate Hydra for maximum effectiveness:
-
-### Initial setup
-
-1. Set up your target project with passing tests and clean typecheck
-2. Write a clear `priorities.md` that describes what you want built, ordered by importance
-3. Start Hydra and run your first cycle manually to verify everything works
-4. Review the cycle output — check the reality report, verify the code change makes sense
-
-### Daily operation
-
-1. **Morning**: Review overnight results. Check `GET /summary` for accomplishments and `GET /metrics` for health. Review and approve any pending Meta proposals.
-2. **Steer**: Update `priorities.md` if you want to redirect Hydra's focus. Add agent feedback if you see patterns you want corrected.
-3. **Queue specific work**: Use `POST /queue` for anything you want Hydra to build next. Queued items take priority over auto-anchoring.
-4. **Run cycles**: Start cycles manually or set up a continuous loop. Each cycle is independent and self-contained.
-5. **Evening**: Review the day's merged code. Pull the latest main branch and spot-check changes. Update priorities for tomorrow.
-
-### When things go wrong
-
-- **Verification fails repeatedly**: Check the agent feedback. The executor might be making the same mistake. Add specific guidance to `agent-feedback/to-executor.md`. Also check `agent-memory/executor.md` for existing WHEN/CHECK/BECAUSE prevention rules.
-- **Skeptic rejects everything**: Lower the bar by adjusting the priorities to be more specific about what you want.
-- **Cycles produce no work**: The anchor system found nothing to do. Either all priorities are addressed, or the priorities doc is too vague. Update it.
-- **Regressions introduced**: Hydra detects these in the REPORT step and flags them. The next cycle will automatically anchor to the failing test.
-- **Drift detected**: Hydra is re-proposing completed work. This means the priorities doc needs updating to reflect what's already done.
-- **Cycle times out**: The 90-minute watchdog auto-kills stale cycles. If this happens repeatedly, the tasks are too large — add feedback to keep scope smaller.
-
-### Best practices
-
-- **Keep priorities concrete**: "Add input validation to POST /users" is better than "Improve API quality"
-- **One concept per priority**: Don't bundle "add auth and rate limiting and logging" — make them separate items
-- **Review merged code**: Hydra verifies tests pass but can't judge code quality. Periodic human review catches subtle issues
-- **Use the queue for urgent work**: Queue items skip the auto-anchor system and get picked up immediately
-- **Update agent feedback regularly**: This is the most direct way to improve Hydra's output quality
-- **Trust the metrics**: If the merge rate drops, check what's failing. The Meta agent will propose fixes but you should verify they make sense
-- **Don't fight the skeptic**: If the skeptic keeps rejecting tasks, the tasks are probably too broad or duplicative. Make priorities more specific.
-
-## REST API Reference
+- **Vision** — Edit `config/direction/vision.md` (or via dashboard) to set high-level direction
+- **Feedback** — Edit `config/feedback/to-*.md` to correct agent behavior
+- **Queue** — `POST /api/queue` for specific work items (highest priority)
+- **Backlog** — Add/prioritize items via dashboard Kanban board
+
+## Services
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| Hydra API | 4000 | REST API + WebSocket + cycle engine |
+| Dashboard | 3000 | React operator UI (Vite dev server) |
+| OpenAI Proxy | 4001 | Bridges Codex OAuth → OpenAI API for embeddings |
+| Redis | 6379 | Event bus, state, metrics, backlog |
+| VikingDB | 5000 | Vector database backend |
+| OpenViking | 1933 | Knowledge base with semantic retrieval |
+
+## API
+
+All endpoints are under `/api/`. Full list:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/cycle/start` | Start a new cycle. Optional body: `{"anchor": {"type": "...", "reference": "..."}}` |
-| `GET` | `/cycle/status` | Current cycle state |
-| `GET` | `/cycle/history` | Recent completed cycles |
-| `GET` | `/cycle/report` | Structured cycle report with agent runs |
-| `GET` | `/tasks` | All tasks in current cycle |
-| `GET` | `/tasks/:id` | Single task detail |
-| `GET` | `/tasks/:id/evidence` | Full evidence chain for a task |
-| `GET` | `/grounding/latest` | Run grounding and return the report |
-| `POST` | `/queue` | Queue a work item. Body: `{"reference": "...", "reason": "...", "context": "..."}` |
-| `GET` | `/queue` | View queued work items |
-| `GET` | `/summary` | Human-readable system summary |
-| `GET` | `/metrics` | Cycle metrics (merge rate, failure rate, etc.) |
-| `GET` | `/health` | System health (Redis, kill status, uptime) |
-| `GET` | `/agents/status` | Agent states in current cycle |
-| `POST` | `/agents/:id/pause` | Pause a specific agent |
-| `GET` | `/spending` | Token usage and dollar costs. Optional: `?count=N` |
-| `POST` | `/kill` | Emergency stop |
-| `POST` | `/scheduler/start` | Start auto-scheduling. Optional body: `{"intervalMs": 300000}` |
-| `POST` | `/scheduler/stop` | Stop auto-scheduling |
-| `GET` | `/scheduler/status` | Scheduler state, cycle counts, merge rate |
-| `GET` | `/proposals` | List proposals. Optional: `?status=pending` |
-| `POST` | `/proposals/:id/approve` | Approve a proposal |
-| `POST` | `/proposals/:id/reject` | Reject a proposal. Body: `{"reason": "..."}` |
-| `POST` | `/meta/analyze` | Manually trigger Meta analysis |
-| `POST` | `/research/start` | Run a research cycle. Optional body: `{"focusOverride": {...}}` |
-| `GET` | `/research/latest` | Full latest research report |
-| `GET` | `/research/history` | Recent research reports (metadata). Optional: `?count=N` |
-| `POST` | `/research/veto` | Remove auto-queued item. Body: `{"title": "..."}` |
-| `GET` | `/goals` | Current project goals |
-| `GET` | `/goals/summary` | Goals formatted as text (debugging) |
-| `POST` | `/architect/review` | Trigger Research Architect methodology review |
-| `GET` | `/openviking/search` | Search knowledge base. Required: `?q=query` |
-| `GET` | `/events/:stream` | Debug: recent events from a Redis stream |
+| `POST` | `/api/cycle/start` | Start a cycle. Body: `{"anchor": {"type": "...", "reference": "..."}}` |
+| `GET` | `/api/cycle/status` | Current cycle state |
+| `GET` | `/api/cycle/history` | Recent completed cycles |
+| `GET` | `/api/cycle/report` | Structured report with agent runs and costs |
+| `GET` | `/api/tasks` | All tasks in current cycle |
+| `GET` | `/api/tasks/:id/evidence` | Full evidence chain |
+| `POST` | `/api/queue` | Queue work. Body: `{"reference": "...", "reason": "..."}` |
+| `GET` | `/api/backlog` | Full Kanban state (all lanes) |
+| `POST` | `/api/backlog` | Add item with priority, description, labels, estimate |
+| `PATCH` | `/api/backlog/:id` | Update item fields |
+| `POST` | `/api/backlog/:id/approve` | Move triage item → backlog |
+| `GET` | `/api/recommendations` | Operator action items from system state |
+| `GET` | `/api/metrics` | Cycle metrics. `?count=N` |
+| `GET` | `/api/spending` | Token usage and costs. `?count=N` |
+| `GET` | `/api/health` | System health |
+| `GET` | `/api/health/services` | Probe all infrastructure services |
+| `POST` | `/api/scheduler/start` | Start auto-scheduling |
+| `POST` | `/api/scheduler/stop` | Stop auto-scheduling |
+| `GET` | `/api/proposals` | List proposals. `?status=pending` |
+| `POST` | `/api/proposals/:id/approve` | Approve (auto-applies if possible, else creates backlog item) |
+| `POST` | `/api/proposals/:id/reject` | Reject. Body: `{"reason": "..."}` |
+| `POST` | `/api/research/start` | Run research cycle |
+| `POST` | `/api/kill` | Emergency stop |
+| `GET` | `/api/config/:section` | List config files in section |
+| `GET` | `/api/config/:section/:name` | Read config file |
+| `PUT` | `/api/config/:section/:name` | Update config file |
 
 ## Agent Model Routing
 
-| Agent | Model | Tier | Timeout | Purpose |
-|-------|-------|------|---------|---------|
-| Planner | `gpt-5.4` | frontier | 2 min | Decompose anchor into a bounded task (codex model for quick-fix anchors) |
-| Skeptic | `gpt-5.3-codex` | codex | 2 min | Challenge task assumptions, veto bad proposals (skipped for quick-fix) |
-| Executor | `gpt-5.3-codex` | codex | 10 min | Make code changes on a feature branch |
-| Meta | `gpt-5.4-nano` | nano | 3 min | Analyze metrics, propose improvements |
+| Agent | Model | Purpose |
+|-------|-------|---------|
+| Planner | gpt-5.4 (frontier) | Decompose anchor into bounded task. Codex model for quick-fix/low-risk. |
+| Skeptic | gpt-5.3-codex | Challenge assumptions, veto bad proposals. Skipped for quick-fix. |
+| Executor | gpt-5.3-codex | Code changes on feature branch. |
+| Meta | gpt-5.4 (frontier) | Strategic analysis every 20 cycles. Comprehensive system context. |
 
-### Available Model Tiers
+## Systemd Services
 
-| Tier | Model | Context | Price (in/out per MTok) | Best For |
-|------|-------|---------|------------------------|----------|
-| `frontier` | `gpt-5.4` | 1,050K | $2.50 / $15.00 | Planning, reasoning, critical decisions |
-| `codex` | `gpt-5.3-codex` | 400K | $1.75 / $14.00 | Specialist coding, implementation |
-| `rapid` | `gpt-5.3-codex-spark` | 128K | Pro sub | ~15x faster, quick fixes, frontend iteration |
-| `nano` | `gpt-5.4-nano` | 400K | $0.20 / $1.25 | Analysis, classification, cheap high-volume tasks |
+Production deployment uses systemd user services:
 
-## Redis Data Model
-
-### Streams
-
-| Stream | Purpose |
-|--------|---------|
-| `hydra:cycle` | Cycle start events |
-| `hydra:tasks` | Task lifecycle events (legacy pipeline) |
-| `hydra:meta` | Triggers Meta agent analysis |
-| `hydra:proposals` | Proposal approval/rejection events |
-| `hydra:notifications` | All events for Telegram bridge |
-| `hydra:dlq` | Dead-letter queue (events that failed 3x) |
-
-### Keys
-
-| Key Pattern | Type | Purpose |
-|-------------|------|---------|
-| `hydra:cycle:active` | String | Current running cycle ID |
-| `hydra:cycle:last` | String | Most recent completed cycle ID |
-| `hydra:cycle:{id}` | Hash | Cycle state (status, startedAt, total, completed, failed) |
-| `hydra:cycle:{id}:tasks` | Set | Task IDs in this cycle |
-| `hydra:task:{id}` | Hash | Task state (cycleId, state, title, stage) |
-| `hydra:task:{id}:evidence:{state}` | Hash | Evidence for each state transition |
-| `hydra:metrics:index` | Sorted Set | Cycle IDs ordered by timestamp |
-| `hydra:metrics:{id}` | Hash | Cycle metrics (tasks, tests, durations, regression) |
-| `hydra:anchors:work-queue` | List | Operator-queued work items |
-| `hydra:anchors:prior-failures` | List | Failed tasks for retry in next cycle |
-| `hydra:scheduler:state` | Hash | Persisted scheduler throttle state (survives restarts) |
-| `hydra:scheduler:daily-spend` | Hash | Daily codex spend counter (resets at local midnight) |
-
-## Infrastructure
-
-### Docker services
-
-| Service | Image | Port | Resources | Purpose |
-|---------|-------|------|-----------|---------|
-| Redis | `redis:7-alpine` | 6379 | 1 CPU, 1GB | Event bus, task tracking, metrics |
-| VikingDB | `ghcr.io/volcengine/openviking:main` | 5000 | 1 CPU, 2GB | Vector database backend |
-| OpenViking | `ghcr.io/volcengine/openviking:main` | 1933 | 2 CPU, 4GB | Knowledge base (embeddings + retrieval) |
-
-### Ports
-
-| Port | Service |
-|------|---------|
-| 4000 | Hydra REST API |
-| 4001 | OpenAI API proxy |
-| 6379 | Redis |
-| 5000 | VikingDB |
-| 1933 | OpenViking |
-
-## Project Structure
-
-```
-hydra/
-├── src/
-│   ├── index.mjs              # Entry point — starts server, watchdog, consumers
-│   ├── control-loop.mjs       # Control loop (prepare→ground→plan→skeptic→execute→verify→reconcile→merge→report→compound)
-│   ├── cycle.mjs              # Cycle orchestration wrapper (delegates to control-loop)
-│   ├── merge.mjs              # Git merge + push operations (extracted from control-loop)
-│   ├── prepare-workspace.mjs  # Workspace cleanup before grounding (safety-gated)
-│   ├── grounding.mjs          # Read-only project inspection — tests, types, git, TODOs
-│   ├── verifier.mjs           # Hard verification — runs shell commands, checks exit codes
-│   ├── agent-memory.mjs       # WHEN/CHECK/BECAUSE prevention rules (Sage pattern)
-│   ├── backlog.mjs            # Obsidian Kanban board (Backlog→Queued→Blocked→InProgress→Done)
-│   ├── task-tracker.mjs       # Redis-backed 9-state task machine with evidence tracking
-│   ├── codex-runner.mjs       # Codex CLI wrapper — model routing, personalities, timeouts
-│   ├── scheduler.mjs          # Auto-cycle scheduler, research throttle, daily spend cap
-│   ├── metrics.mjs            # Cycle analytics — recording, trends, drift detection
-│   ├── api.mjs                # Express REST API (all endpoints)
-│   ├── event-bus.mjs          # Redis Streams — publish, consume, consumer groups, DLQ
-│   ├── pipeline.mjs           # Background consumers (meta, notifications, DLQ)
-│   ├── proposals.mjs          # Meta agent + proposal system (create, approve, reject)
-│   ├── notify.mjs             # Telegram notifications via OpenClaw CLI
-│   ├── digest.mjs             # 4-hour digest summaries (replaces per-event notifications)
-│   ├── research-loop.mjs      # Research cycle (3 researchers → strategist → auto-queue)
-│   ├── research-architect.mjs # Self-improving methodology review
-│   ├── project-goals.mjs      # Project goals document parser
-│   ├── cleanup.mjs            # Report cleanup (cycle-summaries: 2d, reality-reports: keep 50)
-│   ├── vault-watcher.mjs      # File watcher — indexes vault into OpenViking
-│   └── openai-proxy.mjs       # Bridges OpenViking to Codex subscription for embeddings
-├── test/
-│   ├── backlog.test.mjs       # Kanban state machine regression tests
-│   ├── codex-runner.test.mjs  # Agent runner regression tests
-│   └── grounding.test.mjs     # Test parsing + cleanup safety regression tests
-├── docker/
-│   ├── ov.conf                # OpenViking server configuration
-│   └── ov-entrypoint.sh       # OpenViking entrypoint script
-├── docker-compose.yml
-├── package.json
-├── CLAUDE.md                  # Claude Code guidance for working with this repo
-├── .env.example
-└── .gitignore
-```
+| Service | Description |
+|---------|-------------|
+| `hydra-orchestrator` | Main API + cycle engine |
+| `hydra-dashboard` | Vite dev server for operator UI |
+| `hydra-openai-proxy` | Embedding proxy for OpenViking |
+| `hydra-docker` | Docker Compose infrastructure |
+| `hydra-vault-watcher` | Knowledge indexer for OpenViking |
+| `hydra-tunnel` | Cloudflare tunnel for external access |
+| `hydra-cycle.timer` | Cycle trigger (every 4 hours) |
+| `hydra-orchestrator-watchdog.timer` | Health check (every 2 minutes) |
+| `hydra-deploy.timer` | Vercel production deploy (hourly) |
 
 ## Design Principles
 
-1. **Evidence over claims** — Every state transition is backed by proof (test results, diffs, verification output). Agents don't self-report success; the system verifies it.
-2. **Single task per cycle** — Keeps cycles bounded and predictable. One thing at a time, done properly.
-3. **Grounded in reality** — The grounding phase establishes baseline truth before any planning. Agents see real test results, not stale assumptions.
-4. **Skepticism by default** — The skeptic agent exists to veto bad proposals before they waste execution time.
-5. **Hard verification, not soft promises** — Verification runs real commands and checks real output. If tests fail, the task fails.
-6. **Fail forward** — Failed tasks are stored as prior-failures and retried in the next cycle with additional context.
-7. **Operator in the loop** — Priorities document, feedback files, manual queue, proposal approvals. The human steers; Hydra executes.
-8. **Self-improvement from measured outcomes** — The Meta agent proposes changes based on cycle metrics (merge rate, failure rate, regression rate), not on vibes.
+1. **Evidence over claims** — Every state transition is backed by proof. Agents don't self-report success; the system verifies it.
+2. **Single task per cycle** — One thing at a time, done properly, with full audit trail.
+3. **Hard verification** — Real commands, real output, real exit codes. Not an agent claiming tests pass.
+4. **Fail forward** — Failed tasks become prior-failures with context for the next cycle.
+5. **Operator in the loop** — Vision, feedback, queue, proposal approvals. The human steers; Hydra executes.
+6. **Self-improvement from measurement** — Meta agent proposes changes from cycle metrics, not vibes.
+
+## Stats
+
+- 10,155 lines across 32 source files
+- 50 regression tests (node:test, zero dependencies beyond express + ioredis)
+- 100% merge rate over last 30 cycles on hydra-betting
+- ~$3.40 average cost per cycle
 
 ## License
 
-UNLICENSED — Private project.
+UNLICENSED
