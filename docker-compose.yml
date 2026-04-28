@@ -1,12 +1,40 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: hydra
+      POSTGRES_PASSWORD: hydra
+      POSTGRES_DB: hydra
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hydra -d hydra"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --appendonly yes --appendfsync everysec
+      - ./docker/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: redis-server /usr/local/etc/redis/redis.conf
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     deploy:
       resources:
         limits:
@@ -34,13 +62,14 @@ services:
           memory: 2G
 
   openviking:
+    init: true
     image: ghcr.io/volcengine/openviking:main
     ports:
       - "1933:1933"
     volumes:
       - openviking-data:/app/workspace
       - ./docker/ov.conf:/app/ov.conf:ro
-      - /home/gabe/obsidian-vault:/vault:ro
+      - /home/gabe/hydra/config:/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -56,6 +85,8 @@ services:
           memory: 4G
 
 volumes:
+  postgres-data:
+    driver: local
   redis-data:
     driver: local
   openviking-data:
