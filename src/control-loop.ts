@@ -44,6 +44,20 @@ function generateCycleId() {
  * 4. Priorities doc (fall back to operator direction)
  */
 async function selectAnchor(grounding, opts = {}, eventBus = null) {
+  // 0. Recover items stuck in processing queue from a prior crash
+  try {
+    const stuckItems = await getTracker().redis.lrange(PROCESSING_QUEUE, 0, -1);
+    if (stuckItems.length > 0) {
+      console.log(`[ControlLoop] Recovering ${stuckItems.length} items from processing queue`);
+      for (const item of stuckItems) {
+        await getTracker().redis.rpush(WORK_QUEUE, item);
+      }
+      await getTracker().redis.del(PROCESSING_QUEUE);
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Processing queue recovery failed: ${err.message}`);
+  }
+
   // 1. Explicit user request
     // @ts-expect-error — migrate to proper types
   if (opts.anchor) {
@@ -94,7 +108,9 @@ async function selectAnchor(grounding, opts = {}, eventBus = null) {
 
   // 2.5. Work queue items (from POST /queue or research auto-queue)
   //      GATED by WIP limit: skip if too many items already in-progress.
-  const queued = wipBlocked ? null : await getTracker().redis.lpop("hydra:anchors:work-queue");
+  //      Uses LMOVE to atomically move the item to a processing list so it can
+  //      be recovered if the cycle crashes before completing.
+  const queued = wipBlocked ? null : await getTracker().redis.lmove(WORK_QUEUE, PROCESSING_QUEUE, "LEFT", "RIGHT");
   if (queued) {
     try {
       const item = JSON.parse(queued);
@@ -117,9 +133,12 @@ async function selectAnchor(grounding, opts = {}, eventBus = null) {
         whyNow: `Queued by ${item.source === "research" ? "research system" : "operator"}: ${item.reason || "from work queue"}`,
         context: contextWithDescription,
         description,
+        _workQueueRaw: queued,
       };
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt work-queue item dropped: ${err.message} — data: ${queued.slice(0, 200)}`);
+      // Remove corrupt item from processing queue — it cannot be recovered
+      await getTracker().redis.lrem(PROCESSING_QUEUE, 1, queued);
     }
   }
 
@@ -433,6 +452,8 @@ async function safeKanban(eventBus, cycleId, op, reference, fn) {
 
 const MAX_PRIOR_FAILURE_RETRIES = 2;
 const REFRAME_QUEUE = "hydra:anchors:reframe-queue";
+const WORK_QUEUE = "hydra:anchors:work-queue";
+const PROCESSING_QUEUE = "hydra:anchors:processing";
 
 async function storePriorFailure(taskId, reason, verificationResult) {
   const r = getTracker().redis;
@@ -498,6 +519,21 @@ async function storePriorFailure(taskId, reason, verificationResult) {
  * @param {object} opts - { anchor?: { type, reference }, maxRetries?: number }
  * @returns {LoopResult}
  */
+/**
+ * Remove a work-queue item from the processing list after a cycle completes
+ * (success, failure, or abandon). No-op if the anchor didn't come from the
+ * work queue. Idempotent — safe to call multiple times.
+ */
+async function clearProcessingItem(anchor) {
+  if (anchor?._workQueueRaw) {
+    try {
+      await getTracker().redis.lrem(PROCESSING_QUEUE, 1, anchor._workQueueRaw);
+    } catch (err: any) {
+      console.error(`[ControlLoop] Failed to clear processing queue item: ${err.message}`);
+    }
+  }
+}
+
 export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) {
   const cycleId = generateCycleId();
   const startTime = Date.now();
@@ -589,6 +625,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // Check for usage-limit sentinel — pause scheduler instead of retrying
   if (task?.__usageLimitHit) {
     console.error(`[ControlLoop] Codex usage limit reached — pausing scheduler for 30 minutes`);
+    await clearProcessingItem(anchor);
     await ovSession.logOutcome("usage-limit", "Codex usage limit hit — scheduler paused");
     await ovSession.commit();
     return {
@@ -602,6 +639,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
 
   if (!task) {
     console.log(`[ControlLoop] Planner produced no valid task — cycle complete`);
+    await clearProcessingItem(anchor);
     await ovSession.logPlanner(anchor, null);
     await ovSession.logOutcome("no-work", "Planner produced no task");
     await ovSession.commit();
@@ -613,6 +651,17 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // Initialize task in Redis with v2 schema
   const taskId = `task-${cycleId}-1`;
   task.taskId = taskId;
+
+  // Acquire exclusive cycle lock — prevents concurrent cycles from Claude Code and Codex
+  const CYCLE_LOCK_KEY = "hydra:cycle:lock";
+  const CYCLE_LOCK_TTL = 900; // 15 minutes — auto-release if cycle crashes
+  const lockAcquired = await tracker.redis.set(CYCLE_LOCK_KEY, cycleId, "EX", CYCLE_LOCK_TTL, "NX");
+  if (!lockAcquired) {
+    const existingCycle = await tracker.redis.get(CYCLE_LOCK_KEY);
+    console.log(`[ControlLoop] Cycle lock held by ${existingCycle} — skipping this cycle`);
+    await clearProcessingItem(anchor);
+    return { cycleId, tasks: [], reason: `Cycle lock held by ${existingCycle}`, durationMs: Date.now() - startTime };
+  }
 
   // Init cycle tracking
   await tracker.redis.set("hydra:cycle:active", cycleId);
@@ -627,6 +676,10 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   );
   await tracker.redis.expire(`hydra:cycle:${cycleId}`, CYCLE_KEY_TTL);
   await tracker.initTaskV2(cycleId, task);
+
+  // All code after lock acquisition is wrapped in try/finally to guarantee
+  // the distributed lock is released on every exit path (success, failure, error).
+  try {
 
   // =========================================================================
   // Step 3.1: CLASSIFY COMPLEXITY — scope-adaptive routing (PAUL pattern)
@@ -661,6 +714,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     } catch (err: any) {
       console.error(`[ControlLoop] Failed to record drift lesson: ${err.message}`);
     }
+    await clearProcessingItem(anchor);
     return {
       cycleId,
     // @ts-expect-error — migrate to proper types
@@ -703,6 +757,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       console.error(`[ControlLoop] Failed to record rejection lessons: ${err.message}`);
     }
 
+    await clearProcessingItem(anchor);
     await ovSession.logOutcome("abandoned", `Skeptic rejected: ${skepticResult.reason}`);
     await ovSession.commit();
     return {
@@ -738,6 +793,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       console.error(`[ControlLoop] Failed to record no-diff lessons: ${err.message}`);
     }
     await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "no code changes"));
+    await clearProcessingItem(anchor);
     await ovSession.logOutcome("failed", "Executor produced no code changes");
     await ovSession.commit();
     return {
@@ -919,6 +975,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       console.error(`[ControlLoop] Broken branch cleanup failed (may leave stale branch): ${err.message}`);
     }
 
+    await clearProcessingItem(anchor);
     await ovSession.logOutcome("failed", `Verification failed: ${failedSteps.join(", ")}`);
     await ovSession.commit();
     return {
@@ -1246,6 +1303,13 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   await ovSession.commit();
 
   return report;
+
+  } finally {
+    // Release the distributed cycle lock on every exit path
+    await tracker.redis.del(CYCLE_LOCK_KEY).catch((err: any) =>
+      console.error(`[ControlLoop] Failed to release cycle lock: ${err.message}`)
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
