@@ -1302,6 +1302,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   await ovSession.logOutcome(cycleOutcome, `${task.title} — ${report.durationMs}ms`);
   await ovSession.commit();
 
+  await clearProcessingItem(anchor);
   return report;
 
   } finally {

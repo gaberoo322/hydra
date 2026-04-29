@@ -1,10 +1,10 @@
 # Hydra Orchestrator
 
-Autonomous multi-agent development framework. Runs a control loop that grounds → plans → challenges → executes → verifies → merges code changes in ~/hydra-betting, using Codex CLI agents for planning and execution, hard verification (npm test, tsc), and Obsidian vault for state.
+Autonomous multi-agent development framework. Runs a control loop that grounds → plans → challenges → executes → verifies → merges code changes in ~/hydra-betting, using Codex CLI agents for planning and execution, hard verification (npm test, tsc), Redis for state, and OpenViking for knowledge search.
 
 ## Architecture
 
-Three codex agent calls per cycle: **planner** (frontier model), **skeptic** (codex model, skipped for quick-fix/research tasks), **executor** (codex model). Everything else is command execution or file I/O.
+Three codex agent calls per cycle: **planner** (frontier model), **skeptic** (codex model, skipped for quick-fix/research tasks), **executor** (codex model). All runtime state in Redis; configs git-tracked in `~/hydra/config/`; agents query OpenViking for semantic knowledge context.
 
 ```
 Control loop (src/control-loop.mjs):
@@ -19,7 +19,7 @@ Control loop (src/control-loop.mjs):
   6.  runVerification()      — npm test + tsc (NOT an agent)
   6.5 reconcilePlanVsActual() — diff planned scope vs actual files changed
   7.  mergeToMain()          — git merge --no-ff + push (extracted to merge.mjs)
-  8.  report + metrics       — reality report to vault, metrics to Redis
+  8.  report + metrics       — reality report to Redis, metrics to Redis
   8.5 compoundLearnings()    — extract WHEN/CHECK/BECAUSE prevention rules
 ```
 
@@ -34,7 +34,7 @@ Control loop (src/control-loop.mjs):
 | grounding.mjs | 370 | Read-only repo inspection. Runs npm test, tsc, git. |
 | verifier.mjs | 266 | Hard verification. Runs command plans, captures output. |
 | agent-memory.mjs | 325 | WHEN/CHECK/BECAUSE prevention rules (Sage pattern). |
-| backlog.mjs | 331 | Obsidian Kanban backlog. Lanes: Backlog→Queued→Blocked→InProgress→Done. |
+| backlog.mjs | ~280 | Redis-backed Kanban backlog. Lanes: Backlog→Queued→Blocked→InProgress→Done. |
 | merge.mjs | 112 | Git merge + push. Never throws — returns result object. |
 | prepare-workspace.mjs | 116 | Cleanup before grounding. Gated on shouldCleanWorkingTree(). |
 | metrics.mjs | 197 | Cycle metrics in Redis. Drift detection. |
@@ -67,25 +67,34 @@ Tests are regression tests — each corresponds to a real bug. Located in `test/
 
 Always run `node --check src/<file>.mjs` after editing and `npm test` before committing.
 
-## Obsidian Vault (~/obsidian-vault/hydra/)
+## Config (~/hydra/config/) — git-tracked
 
-**Operator edits these:**
-- `direction/priorities.md` — what Hydra should work on next
-- `direction/goals.md` — high-level project goals
-- `agent-feedback/to-planner.md` — correct planner behavior
-- `agent-feedback/to-executor.md` — correct executor behavior  
-- `agent-feedback/to-skeptic.md` — correct skeptic behavior
-- `backlog.md` — Kanban board (drag items between lanes in Obsidian)
-
-**Auto-generated (don't edit):**
-- `agent-memory/` — WHEN/CHECK/BECAUSE prevention rules from cycle outcomes
-- `reports/reality-reports/` — cycle outcome JSON (control loop reads latest for continuity)
-- `reports/cycle-summaries/` — raw agent outputs (auto-deleted after 2 days)
-- `reports/research/` — research findings
+**Operator edits these (or uses dashboard):**
+- `config/direction/priorities.md` — what Hydra should work on next
+- `config/direction/goals.md` — high-level project goals
+- `config/feedback/to-planner.md` — correct planner behavior
+- `config/feedback/to-executor.md` — correct executor behavior  
+- `config/feedback/to-skeptic.md` — correct skeptic behavior
 
 **Agent personalities:**
-- `agent-config/{planner,executor,skeptic,meta}.md` — system prompts loaded by codex-runner
-- `research-methodology/` — research agent configs
+- `config/agents/{planner,executor,skeptic,meta}.md` — system prompts loaded by codex-runner
+- `config/research/` — research agent configs
+
+**Runtime state (all in Redis):**
+- Backlog — `hydra:backlog:*` (Redis sorted sets + hashes, stable IDs)
+- Agent memory — `hydra:memory:{agent}:rules` (Redis lists, WHEN/CHECK/BECAUSE JSON)
+- Reality reports — `hydra:reports:reality:*` (Redis keys, kept 50)
+- Cycle summaries — `hydra:reports:summary:*` (Redis keys, 2-day TTL)
+- Research reports — `hydra:reports:research:*` (Redis keys, kept 20)
+- Proposals — `hydra:proposals:*` (Redis hashes)
+
+**Dashboard:** React + Vite + Tailwind on port 3000 (`~/hydra/dashboard/`)
+- `npm run dev` in dashboard/ for development
+- Proxies API calls to orchestrator on port 4000
+- WebSocket for real-time cycle events
+
+**Knowledge:** OpenViking (port 1933) — agents query via `searchKnowledge()` in codex-runner.mjs
+- `knowledge-indexer.mjs` watches config files and polls Redis for new reports to index
 
 ## Redis Keys
 
@@ -95,11 +104,21 @@ Always run `node --check src/<file>.mjs` after editing and `npm test` before com
 | `hydra:cycle:last` | Last completed cycle ID |
 | `hydra:cycle:{id}` | Cycle hash (status, timestamps, counts) |
 | `hydra:task:{id}` | Task hash (state, evidence, scope) |
-| `hydra:anchors:work-queue` | Redis list — items to work on (LPOP) |
+| `hydra:anchors:work-queue` | Redis list — items to work on (LMOVE to processing) |
+| `hydra:anchors:processing` | Redis list — items being processed (crash recovery) |
 | `hydra:anchors:prior-failures` | Redis list — failed tasks for retry |
 | `hydra:metrics:{id}` | Cycle metrics hash |
 | `hydra:metrics:index` | Sorted set of cycle IDs by timestamp |
 | `hydra:scheduler:state` | Persisted scheduler throttle state |
+| `hydra:backlog:items` | Hash — backlog item data |
+| `hydra:backlog:lane:{lane}` | Sorted set — items per Kanban lane |
+| `hydra:memory:{agent}:rules` | List — WHEN/CHECK/BECAUSE prevention rules |
+| `hydra:reports:reality:{id}` | String — reality report JSON |
+| `hydra:reports:reality:index` | Sorted set — reality report IDs |
+| `hydra:reports:summary:*` | String — cycle summary (2-day TTL) |
+| `hydra:reports:research:*` | String — research report JSON |
+| `hydra:proposals:{id}` | Hash — proposal data |
+| `hydra:proposals:index` | Sorted set — proposal IDs |
 | `hydra:scheduler:daily-spend` | Daily codex spend counter |
 
 ## Model Tiers
