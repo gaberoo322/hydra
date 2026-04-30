@@ -109,7 +109,7 @@ async function sweepStalePromotions(agentName: string) {
 // Core: record a pattern (replaces recordRule)
 // ---------------------------------------------------------------------------
 
-async function recordPattern(
+export async function recordPattern(
   agentName: string,
   category: string,
   details: {

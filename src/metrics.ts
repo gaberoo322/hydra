@@ -29,6 +29,7 @@ export async function recordCycleMetrics(cycleId, metrics) {
   }
   flat.cycleId = cycleId;
   flat.recordedAt = new Date().toISOString();
+  if (!flat.source) flat.source = "codex"; // default source for Codex orchestrator cycles
 
   await r.hset(metricsKey(cycleId), ...Object.entries(flat).flat());
   await r.expire(metricsKey(cycleId), CYCLE_KEY_TTL);

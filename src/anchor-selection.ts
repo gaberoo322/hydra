@@ -9,7 +9,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getTracker } from "./task-tracker.ts";
-import { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, moveToBlocked } from "./backlog.ts";
+import { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, moveToBlocked, claimNextQueuedItem } from "./backlog.ts";
 import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
@@ -80,13 +80,15 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
     console.error(`[ControlLoop] WIP limit check failed: ${err.message}`);
   }
 
-  // 2. Kanban queued lane — priority-sorted backlog items take precedence
-  //    GATED by WIP limit: skip if too many items already in-progress.
+  // 2. Kanban queued lane — priority-sorted backlog items take precedence.
+  //    Uses atomic claim (Lua script) so concurrent Claude Code cycles can't
+  //    grab the same item. GATED by WIP limit (checked inside the Lua script).
   if (!wipBlocked) {
     try {
-      const queuedItem = await peekNextQueuedItem();
-      if (queuedItem) {
-        console.log(`[ControlLoop] Picking queued backlog item: ${queuedItem.id} (priority ${queuedItem.priority || 0}) — "${queuedItem.title}"`);
+      const claimResult = await claimNextQueuedItem("codex");
+      if (claimResult.claimed && claimResult.item) {
+        const queuedItem = claimResult.item;
+        console.log(`[ControlLoop] Claimed queued backlog item: ${queuedItem.id} (priority ${queuedItem.priority || 0}) — "${queuedItem.title}"`);
         return {
           type: "user-request",
           reference: queuedItem.title,
@@ -95,8 +97,12 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
           description: queuedItem.description || null,
         };
       }
+      if (claimResult.reason === "wip-limit") {
+        wipBlocked = true;
+        console.log(`[ControlLoop] WIP limit reached via atomic claim (${claimResult.count} in-progress)`);
+      }
     } catch (err: any) {
-      console.error(`[ControlLoop] Failed to check queued backlog: ${err.message}`);
+      console.error(`[ControlLoop] Failed to claim queued backlog: ${err.message}`);
     }
   }
 

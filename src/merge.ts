@@ -57,10 +57,29 @@ export async function mergeToMain(projectDir, cycleId) {
         ],
         { cwd: projectDir, timeout: 30000 },
       );
-      await execFileAsync("git", ["push", "origin", "main"], {
-        cwd: projectDir,
-        timeout: 30000,
-      });
+      try {
+        await execFileAsync("git", ["push", "origin", "main"], {
+          cwd: projectDir,
+          timeout: 30000,
+        });
+      } catch (pushErr) {
+        // Push rejected (likely non-fast-forward from a concurrent merge).
+        // Pull --rebase to rebase our merge on top of the new main, then retry once.
+        const msg = pushErr?.message || "";
+        if (msg.includes("non-fast-forward") || msg.includes("rejected") || msg.includes("failed to push")) {
+          console.log(`[Merge] Push rejected — pulling and retrying once`);
+          await execFileAsync("git", ["pull", "--rebase", "origin", "main"], {
+            cwd: projectDir,
+            timeout: 30000,
+          });
+          await execFileAsync("git", ["push", "origin", "main"], {
+            cwd: projectDir,
+            timeout: 30000,
+          });
+        } else {
+          throw pushErr;
+        }
+      }
       const { stdout: sha } = await execFileAsync(
         "git",
         ["rev-parse", "HEAD"],

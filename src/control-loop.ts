@@ -254,22 +254,20 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   const taskId = `task-${cycleId}-1`;
   task.taskId = taskId;
 
-  // Acquire exclusive cycle lock — prevents concurrent cycles from Claude Code and Codex
-  const CYCLE_LOCK_KEY = "hydra:cycle:lock";
-  const CYCLE_LOCK_TTL = 900; // 15 minutes — auto-release if cycle crashes
-  const lockAcquired = await tracker.redis.set(CYCLE_LOCK_KEY, cycleId, "EX", CYCLE_LOCK_TTL, "NX");
-  if (!lockAcquired) {
-    const existingCycle = await tracker.redis.get(CYCLE_LOCK_KEY);
-    console.log(`[ControlLoop] Cycle lock held by ${existingCycle} — skipping this cycle`);
-    await clearProcessingItem(anchor);
-    return { cycleId, tasks: [], reason: `Cycle lock held by ${existingCycle}`, durationMs: Date.now() - startTime };
-  }
+  // Register this Codex cycle — informational, not a blocking mutex.
+  // Claude Code cycles register under hydra:cycle:active:claude via the API.
+  // The old global hydra:cycle:lock is replaced by a short-lived merge lock
+  // (hydra:merge:lock, 60s TTL) acquired only during git merge+push.
+  const CYCLE_SOURCE_KEY = "hydra:cycle:active:codex";
+  const CYCLE_SOURCE_TTL = 900; // 15-minute auto-expire (crash safety)
+  await tracker.redis.set(CYCLE_SOURCE_KEY, cycleId, "EX", CYCLE_SOURCE_TTL);
 
   // Init cycle tracking
   await tracker.redis.set("hydra:cycle:active", cycleId);
   await tracker.redis.hset(`hydra:cycle:${cycleId}`,
     "status", "running",
     "startedAt", new Date().toISOString(),
+    "source", "codex",
     "total", 1,
     "completed", 0,
     "failed", 0,
@@ -885,7 +883,39 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // Step 7: MERGE — git operation, NOT an agent (extracted to merge.mjs)
   // =========================================================================
   console.log(`[ControlLoop] Step 7: Merging to main...`);
-  const mergeResult = await mergeToMain(PROJECT_WORKSPACE, cycleId);
+
+  // Acquire short-lived merge lock — serializes merges across Codex and Claude Code.
+  // Retry up to 3 times with backoff (5s, 10s, 15s) if another merge is in progress.
+  const MERGE_LOCK_KEY = "hydra:merge:lock";
+  const MERGE_LOCK_TTL = 60; // 60 seconds — auto-release if merge crashes
+  let mergeLockAcquired = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const acquired = await tracker.redis.set(MERGE_LOCK_KEY, cycleId, "EX", MERGE_LOCK_TTL, "NX");
+    if (acquired) {
+      mergeLockAcquired = true;
+      break;
+    }
+    const holder = await tracker.redis.get(MERGE_LOCK_KEY);
+    console.log(`[ControlLoop] Merge lock held by ${holder} — retry ${attempt + 1}/3`);
+    await new Promise(r => setTimeout(r, 5000 * (attempt + 1)));
+  }
+
+  if (!mergeLockAcquired) {
+    console.error(`[ControlLoop] Failed to acquire merge lock after 3 attempts`);
+    await eventBus.publish(STREAMS.NOTIFICATIONS, {
+      type: "task:merge_failed",
+      source: "control-loop",
+      correlationId: cycleId,
+      payload: { taskId, title: task.title, error: "Merge lock contention — another merge in progress" },
+    });
+  }
+
+  const mergeResult = mergeLockAcquired
+    ? await mergeToMain(PROJECT_WORKSPACE, cycleId)
+    : { ok: false, commitSha: "", featureBranch: null, error: "Merge lock not acquired" };
+
+  // Always release merge lock after merge attempt
+  await tracker.redis.del(MERGE_LOCK_KEY).catch(() => {});
   let commitSha = "";
   if (mergeResult.ok) {
     commitSha = mergeResult.commitSha;
@@ -1272,9 +1302,12 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
         console.error(`[ControlLoop] OV session crash-commit failed: ${err.message}`)
       );
     }
-    // Release the distributed cycle lock on every exit path
-    await tracker.redis.del(CYCLE_LOCK_KEY).catch((err: any) =>
-      console.error(`[ControlLoop] Failed to release cycle lock: ${err.message}`)
+    // Release per-source cycle registration + safety-net merge lock cleanup
+    await tracker.redis.del("hydra:cycle:active:codex").catch((err: any) =>
+      console.error(`[ControlLoop] Failed to release codex cycle registration: ${err.message}`)
+    );
+    await tracker.redis.del("hydra:merge:lock").catch((err: any) =>
+      console.error(`[ControlLoop] Failed to release merge lock (safety net): ${err.message}`)
     );
   }
 }
