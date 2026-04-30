@@ -4,7 +4,8 @@ Hydra is an autonomous software development orchestrator. It runs continuous dev
 
 Hydra uses [Codex CLI](https://github.com/openai/codex) as its agent runtime. Three agent calls per cycle: **Planner**, **Skeptic**, **Executor**. Verification and merge are deterministic command execution — not agents making claims.
 
-> **Live instance**: [hydra.clawstreetbets.xyz](https://hydra.clawstreetbets.xyz) — dashboard for the [hydra-betting](https://github.com/gaberoo322/hydra-betting) project
+> **Dashboard**: [admin.clawstreetbets.xyz](https://admin.clawstreetbets.xyz) — orchestrator dashboard
+> **App**: [hydra.clawstreetbets.xyz](https://hydra.clawstreetbets.xyz) — the [hydra-betting](https://github.com/gaberoo322/hydra-betting) web app
 
 ## Architecture
 

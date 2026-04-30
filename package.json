@@ -2,17 +2,26 @@
   "name": "hydra-orchestrator",
   "version": "1.0.0",
   "type": "module",
-  "description": "Hydra autonomous multi-agent development framework \u2014 data plane orchestrator",
-  "main": "src/index.mjs",
+  "description": "Hydra autonomous multi-agent development framework — data plane orchestrator",
+  "main": "dist/index.js",
   "scripts": {
-    "start": "node src/index.mjs",
-    "dev": "node --watch src/index.mjs",
-    "test": "node --test test/*.test.mjs"
+    "build": "tsc",
+    "start": "tsc && node dist/index.js",
+    "dev": "node --watch --experimental-strip-types src/index.ts",
+    "test": "node --experimental-strip-types --test test/*.test.mts",
+    "typecheck": "tsc --noEmit"
   },
   "author": "Gabe",
   "license": "UNLICENSED",
   "dependencies": {
+    "@openai/codex-sdk": "^0.125.0",
+    "@sentry/node": "^10.48.0",
     "express": "^5.2.1",
-    "ioredis": "^5.10.1"
+    "ioredis": "^5.10.1",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "typescript": "^6.0.2"
   }
 }

@@ -10,18 +10,23 @@ import { groundProject, summarizeForPrompt, getDiff, getDiffStat } from "./groun
 import { prepareWorkspace } from "./prepare-workspace.ts";
 import { mergeToMain } from "./merge.ts";
 import { runVerification, validateDiffExists, summarizeVerification, defaultVerificationPlan } from "./verifier.ts";
+import { runMutationTests } from "./mutation-testing.ts";
+import { runAdversarialValidation, findingsToQueueItems, trackMergedCommit, checkRevertCorrelation } from "./adversarial-validation.ts";
 // sendNotification removed — all notifications go through eventBus → digest system
-import { recordCycleMetrics, detectDrift, getCumulativeAccomplishments } from "./metrics.ts";
+import { recordCycleMetrics, detectDrift } from "./metrics.ts";
 import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson } from "./agent-memory.ts";
+import { runPlannerAgent } from "./planner-prompt.ts";
 // priorities-refresh removed — the research-strategist handles refresh inside
 // the research loop (Step 5.5). Stale-detection just warns now.
-import { moveToInProgress, moveToDone, returnToBacklog, moveToBlocked, peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems } from "./backlog.ts";
+import { moveToInProgress, moveToDone, returnToBacklog, moveToBlocked } from "./backlog.ts";
 import { detectPatterns } from "./pattern-detector.ts";
 import { createCycleSession } from "./ov-session.ts";
+import { markTaskComplete } from "./specs.ts";
+import { selectAnchor, trackAbandonment, clearAbandonmentCounter, storePriorFailure, clearProcessingItem } from "./anchor-selection.ts";
+import { looksOperatorBlocked, reconcilePlanVsActual, classifyTaskComplexity, preflightCheck, runHighRiskReview } from "./preflight.ts";
 
 const execFileAsync = promisify(execFile);
 
-const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
 
 function generateCycleId() {
@@ -31,401 +36,6 @@ function generateCycleId() {
   const min = String(now.getMinutes()).padStart(2, "0");
   return `cycle-${date}-${hour}${min}`;
 }
-
-// ---------------------------------------------------------------------------
-// Anchor selection — choose what to work on from explicit truth sources
-// ---------------------------------------------------------------------------
-
-/**
- * Select the next anchor based on priority:
- * 1. Explicit user request (passed in opts)
- * 2. Failing tests (from grounding)
- * 3. Prior failures (stored in Redis)
- * 4. Priorities doc (fall back to operator direction)
- */
-async function selectAnchor(grounding, opts = {}, eventBus = null) {
-  // 0. Recover items stuck in processing queue from a prior crash
-  try {
-    const stuckItems = await getTracker().redis.lrange(PROCESSING_QUEUE, 0, -1);
-    if (stuckItems.length > 0) {
-      console.log(`[ControlLoop] Recovering ${stuckItems.length} items from processing queue`);
-      for (const item of stuckItems) {
-        await getTracker().redis.rpush(WORK_QUEUE, item);
-      }
-      await getTracker().redis.del(PROCESSING_QUEUE);
-    }
-  } catch (err: any) {
-    console.error(`[ControlLoop] Processing queue recovery failed: ${err.message}`);
-  }
-
-  // 1. Explicit user request
-    // @ts-expect-error — migrate to proper types
-  if (opts.anchor) {
-    // @ts-expect-error — migrate to proper types
-    return { ...opts.anchor, whyNow: "Explicit operator request" };
-  }
-
-  // 1.5. WIP limit enforcement — requeue stale items, then check limit
-  // When too many items are in-progress, skip picking NEW work from the
-  // queue/backlog. Fixes (failing tests, prior failures, reframes) still
-  // proceed because they address existing work, not start new work.
-  let wipBlocked = false;
-  try {
-    // First, requeue any items that have been in-progress too long
-    const requeued = await requeueStaleInProgressItems();
-    if (requeued.length > 0) {
-      console.log(`[ControlLoop] Requeued ${requeued.length} stale in-progress items`);
-    }
-
-    const wip = await isWipLimitReached();
-    if (wip.atLimit) {
-      wipBlocked = true;
-      console.log(`[ControlLoop] WIP limit reached (${wip.count}/${wip.limit} in-progress) — skipping new work from queue/backlog`);
-    }
-  } catch (err: any) {
-    console.error(`[ControlLoop] WIP limit check failed: ${err.message}`);
-  }
-
-  // 2. Kanban queued lane — priority-sorted backlog items take precedence
-  //    GATED by WIP limit: skip if too many items already in-progress.
-  if (!wipBlocked) {
-    try {
-      const queuedItem = await peekNextQueuedItem();
-      if (queuedItem) {
-        console.log(`[ControlLoop] Picking queued backlog item: ${queuedItem.id} (priority ${queuedItem.priority || 0}) — "${queuedItem.title}"`);
-        return {
-          type: "user-request",
-          reference: queuedItem.title,
-          whyNow: `Queued backlog item ${queuedItem.id} (priority ${queuedItem.priority || 0})`,
-          context: queuedItem.description || null,
-          description: queuedItem.description || null,
-        };
-      }
-    } catch (err: any) {
-      console.error(`[ControlLoop] Failed to check queued backlog: ${err.message}`);
-    }
-  }
-
-  // 2.5. Work queue items (from POST /queue or research auto-queue)
-  //      GATED by WIP limit: skip if too many items already in-progress.
-  //      Uses LMOVE to atomically move the item to a processing list so it can
-  //      be recovered if the cycle crashes before completing.
-  const queued = wipBlocked ? null : await getTracker().redis.lmove(WORK_QUEUE, PROCESSING_QUEUE, "LEFT", "RIGHT");
-  if (queued) {
-    try {
-      const item = JSON.parse(queued);
-      // Parse research context if present
-      let parsedContext = item.context;
-      if (typeof parsedContext === "string") {
-        try { parsedContext = JSON.parse(parsedContext); } catch { /* intentional: context stays as string */ }
-      }
-      // Include description from backlog item context if available
-      const description = typeof parsedContext === "object" ? parsedContext?.description : null;
-      const contextWithDescription = description
-        ? (typeof parsedContext === "object"
-          ? { ...parsedContext, _description: description }
-          : parsedContext)
-        : parsedContext;
-
-      return {
-        type: item.source === "research" ? "research" : "user-request",
-        reference: item.reference || item.description,
-        whyNow: `Queued by ${item.source === "research" ? "research system" : "operator"}: ${item.reason || "from work queue"}`,
-        context: contextWithDescription,
-        description,
-        _workQueueRaw: queued,
-      };
-    } catch (err: any) {
-      console.error(`[ControlLoop] Corrupt work-queue item dropped: ${err.message} — data: ${queued.slice(0, 200)}`);
-      // Remove corrupt item from processing queue — it cannot be recovered
-      await getTracker().redis.lrem(PROCESSING_QUEUE, 1, queued);
-    }
-  }
-
-  // 3. Failing tests are the highest-priority automatic anchor
-  if (grounding.failingTests.length > 0) {
-    return {
-      type: "failing-test",
-      reference: grounding.failingTests[0],
-      whyNow: `${grounding.testReport.failed} test(s) currently failing`,
-    };
-  }
-
-  // 3. Typecheck errors
-  if (grounding.typecheckReport.exitCode !== 0) {
-    return {
-      type: "failing-test",
-      reference: "typecheck",
-      whyNow: "TypeScript typecheck has errors",
-    };
-  }
-
-  // 4.5. Reframe queue — tasks that failed repeatedly and need a fresh approach
-  const reframeItems = await getTracker().redis.lrange(REFRAME_QUEUE, 0, 0);
-  if (reframeItems.length > 0) {
-    try {
-      const item = JSON.parse(reframeItems[0]);
-      await getTracker().redis.lpop(REFRAME_QUEUE);
-      return {
-        type: "reframe",
-        reference: item.originalTitle,
-        whyNow: `Task "${item.originalTitle}" failed ${item.totalAttempts} times. Needs diagnosis and a new approach.`,
-        context: item,
-      };
-    } catch (err: any) {
-      console.error(`[ControlLoop] Corrupt reframe item: ${err.message}`);
-      await getTracker().redis.lpop(REFRAME_QUEUE);
-    }
-  }
-
-  // 5. Prior failures from Redis
-  const priorFailures = await getTracker().redis.lrange("hydra:anchors:prior-failures", 0, 0);
-  if (priorFailures.length > 0) {
-    try {
-      const failure = JSON.parse(priorFailures[0]);
-      await getTracker().redis.lpop("hydra:anchors:prior-failures");
-      return {
-        type: "prior-failure",
-        reference: failure.taskId,
-        whyNow: `Prior task ${failure.taskId} failed: ${failure.reason || "unknown"}`,
-        context: failure,
-      };
-    } catch (err: any) {
-      console.error(`[ControlLoop] Corrupt prior-failure at head of queue (blocking retries): ${err.message}. Fix with: redis-cli LPOP hydra:anchors:prior-failures`);
-    }
-  }
-
-  // 5. TODO/FIXME markers in code — developer-written signals of known gaps
-  if (grounding.todoMarkers?.length > 0) {
-    return {
-      type: "issue",
-      reference: grounding.todoMarkers[0],
-      whyNow: `${grounding.todoMarkers.length} TODO/FIXME marker(s) found in codebase`,
-      context: grounding.todoMarkers.slice(0, 5).join("\n"),
-    };
-  }
-
-  // 6. Codebase health — reductive improvements (split, consolidate, document)
-  try {
-    const { analyzeCodebaseHealth } = await import("./codebase-health.ts");
-    const healthReport = await analyzeCodebaseHealth(grounding.fileTree || "", undefined);
-    if (healthReport.topIssue) {
-      console.log(`[ControlLoop] Codebase health anchor: ${healthReport.topIssue.category} — ${healthReport.topIssue.file} (${healthReport.topIssue.metric})`);
-      return {
-        type: "codebase-health",
-        reference: `codebase-health: ${healthReport.topIssue.category} in ${healthReport.topIssue.file}`,
-        whyNow: healthReport.summary,
-        context: healthReport.topIssue.suggestion,
-        description: healthReport.topIssue.suggestion,
-      };
-    }
-  } catch (err: any) {
-    console.error(`[ControlLoop] Codebase health analysis failed: ${err.message}`);
-  }
-
-  // 7. Fall back to priorities doc — but check if it's stale
-  try {
-    const priorities = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
-
-    // Check how many recent cycles used this same anchor
-    const recentDocCycles = await (async () => {
-      try {
-        const { getMetricsTrend } = await import("./metrics.ts");
-        const trend = await getMetricsTrend(10);
-        return trend.filter((m) => m.anchorType === "doc" && m.anchorReference === "direction/priorities.md").length;
-      } catch (err: any) {
-        console.error(`[ControlLoop] Failed to check recent doc-cycle trend: ${err.message}`);
-        return 0;
-      }
-    })();
-
-    if (recentDocCycles >= 5) {
-      // Priorities doc is stale — too many cycles using the same doc.
-      // Trigger a lightweight refresh using accomplishments + vision.
-      console.log(`[ControlLoop] Priorities doc used ${recentDocCycles}x in last 10 — triggering inline refresh`);
-      try {
-        const { refreshPriorities } = await import("./priorities-refresh.ts");
-        const refreshResult = await refreshPriorities({ grounding, trigger: "stale" });
-        if (refreshResult.ok) {
-          console.log(`[ControlLoop] Priorities refreshed inline (${refreshResult.priorities?.split("\n").length || 0} lines)`);
-          // Re-read the updated file
-          const updated = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
-          return {
-            type: "doc",
-            reference: "direction/priorities.md",
-            whyNow: "Freshly refreshed priorities (stale doc detected)",
-            context: updated,
-          };
-        }
-      } catch (err: any) {
-        console.error(`[ControlLoop] Inline priorities refresh failed: ${err.message}`);
-      }
-    }
-
-    return {
-      type: "doc",
-      reference: "direction/priorities.md",
-      whyNow: recentDocCycles >= 5
-        ? `Priorities doc (used ${recentDocCycles}x recently)`
-        : "Next priority from operator direction document",
-      context: priorities,
-    };
-  } catch (err: any) {
-    if (err.code !== "ENOENT") {
-      console.error(`[ControlLoop] selectAnchor: failed to read priorities.md: ${err.message}`);
-    }
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Operator-blocked detection
-// ---------------------------------------------------------------------------
-//
-// When a cycle fails, check if the failure pattern suggests the operator
-// needs to intervene (missing API key, auth failure, etc.) rather than
-// retrying the same work. If detected, route to the Blocked lane instead
-// of returning to Backlog where it would just fail again.
-
-const BLOCKED_PATTERNS = [
-  /api[_ ]?key/i,
-  /unauthorized/i,
-  /authentication.*fail/i,
-  /EACCES/,
-  /permission denied/i,
-  /credentials/i,
-  /secret.*missing/i,
-  /token.*expired/i,
-  /env.*not set/i,
-  /missing.*env/i,
-  /CORS.*blocked/i,
-  /rate.*limit.*exceeded/i,
-  /quota.*exceeded/i,
-  /subscription.*required/i,
-  /DATABASE_URL/,
-  /KALSHI_API/,
-  /POLYMARKET_API/,
-  /ODDS_API/,
-  /expected string.*received undefined/i,
-  /Invalid input.*expected.*string/i,
-  /ECONNREFUSED.*5432/,  // Postgres connection refused
-  /connection.*refused.*database/i,
-];
-
-function looksOperatorBlocked(verification) {
-  if (!verification?.steps) return null;
-  for (const step of verification.steps) {
-    if (step.passed) continue;
-    const output = (step.stderr || "") + " " + (step.stdout || "");
-    for (const pattern of BLOCKED_PATTERNS) {
-      const match = output.match(pattern);
-      if (match) {
-        return `${step.label}: ${match[0]}`;
-      }
-    }
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Plan-vs-actual reconciliation (PAUL UNIFY pattern)
-// ---------------------------------------------------------------------------
-//
-// After verification passes, diff the planned scope (task.scopeBoundary.in)
-// against the actual files changed (verification.filesChanged). This catches:
-//   - Scope creep: executor touched files outside the plan
-//   - Scope gaps: planned files that weren't modified (potentially incomplete)
-//
-// Test files (.test.) are excluded from both checks: test creation is always
-// expected and test gaps are benign (test files may not need modification).
-//
-// Results are informational (logged + included in reality report), not
-// blocking — the merge proceeds regardless. If scope creep is detected,
-// a prevention rule is recorded for the planner.
-
-function reconcilePlanVsActual(task, verification) {
-  const plannedFiles = new Set(task.scopeBoundary?.in || []);
-  const actualFiles = new Set(verification.filesChanged || []);
-
-  const result = {
-    scopeCreep: [],
-    scopeGaps: [],
-    aligned: true,
-    warnings: [],
-  };
-
-  // Skip reconciliation if planner didn't specify a scope (nothing to compare)
-  if (plannedFiles.size === 0) {
-    return result;
-  }
-
-  // Scope creep: actual files not in planned scope (test files excluded — always OK)
-  for (const f of actualFiles) {
-    if (plannedFiles.has(f)) continue;
-    // @ts-expect-error — migrate to proper types
-    if (f.includes(".test.")) continue;
-    result.scopeCreep.push(f);
-  }
-
-  // Scope gaps: planned source files (not test files) that weren't changed
-  for (const f of plannedFiles) {
-    if (actualFiles.has(f)) continue;
-    // @ts-expect-error — migrate to proper types
-    if (f.includes(".test.")) continue;
-    result.scopeGaps.push(f);
-  }
-
-  if (result.scopeCreep.length > 0) {
-    result.warnings.push(`Scope creep: ${result.scopeCreep.length} file(s) changed outside planned scope: ${result.scopeCreep.join(", ")}`);
-    result.aligned = false;
-  }
-  if (result.scopeGaps.length > 0) {
-    result.warnings.push(`Potentially incomplete: ${result.scopeGaps.length} planned file(s) not modified: ${result.scopeGaps.join(", ")}`);
-    result.aligned = false;
-  }
-
-  return result;
-}
-
-// ---------------------------------------------------------------------------
-// Scope-adaptive planning — classify task complexity (PAUL pattern)
-// ---------------------------------------------------------------------------
-//
-// PAUL auto-routes by complexity: quick-fix gets compressed ceremony (skip
-// skeptic, lighter planner prompt), standard gets full ceremony, complex
-// logs a warning. The classification runs AFTER the planner outputs a task
-// so we have scopeBoundary and acceptanceCriteria to measure.
-//
-// Anchor-level pre-routing: only failing-test anchors are inherently
-// quick-fix (narrow scope, known target, deterministic fix). Prior-failure
-// anchors get full ceremony since the previous approach already failed.
-// These also get a cheaper planner model and compressed prompt (see runPlannerAgent).
-
-function classifyTaskComplexity(task, anchor) {
-  // Only genuinely targeted anchors skip ceremony
-  if (anchor.type === "failing-test") {
-    return "quick-fix";
-  }
-
-  const filesInScope = task.scopeBoundary?.in?.length || 0;
-  const criteriaCount = task.acceptanceCriteria?.length || 0;
-
-  // Quick-fix: single-file, minimal criteria only
-  if (filesInScope <= 1 && criteriaCount <= 2) {
-    return "quick-fix";
-  }
-
-  // Complex: large scope — warn, may benefit from splitting
-  if (filesInScope > 5 || criteriaCount > 8) {
-    return "complex";
-  }
-
-  return "standard";
-}
-
-// ---------------------------------------------------------------------------
-// Store a prior-failure anchor for the next cycle
-// ---------------------------------------------------------------------------
 
 /**
  * Run a Kanban update (moveToInProgress / moveToDone / returnToBacklog) with
@@ -450,59 +60,6 @@ async function safeKanban(eventBus, cycleId, op, reference, fn) {
   }
 }
 
-const MAX_PRIOR_FAILURE_RETRIES = 2;
-const REFRAME_QUEUE = "hydra:anchors:reframe-queue";
-const WORK_QUEUE = "hydra:anchors:work-queue";
-const PROCESSING_QUEUE = "hydra:anchors:processing";
-
-async function storePriorFailure(taskId, reason, verificationResult) {
-  const r = getTracker().redis;
-
-  // Count how many times this task (or its anchor) has already been retried
-  const existing = await r.lrange("hydra:anchors:prior-failures", 0, -1);
-  const priorAttempts = existing.filter(raw => {
-    try { return JSON.parse(raw).taskId === taskId; } catch { return false; }
-  }).length;
-
-  if (priorAttempts >= MAX_PRIOR_FAILURE_RETRIES) {
-    // Escalate to reframe queue — planner will diagnose and rewrite the task
-    console.log(`[ControlLoop] Escalating ${taskId} to reframe queue after ${priorAttempts + 1} failures`);
-
-    // Gather failure history for context
-    const task = await r.hgetall(`hydra:task:${taskId}`);
-    const failureHistory = existing
-      .map(raw => { try { return JSON.parse(raw); } catch { return null; } })
-      .filter(f => f?.taskId === taskId);
-
-    await r.rpush(REFRAME_QUEUE, JSON.stringify({
-      originalTaskId: taskId,
-      originalTitle: task?.title || taskId,
-      originalDescription: task?.description || "",
-      anchorType: task?.anchorType || "unknown",
-      anchorReference: task?.anchorReference || "",
-      scopeBoundary: task?.scopeBoundary ? JSON.parse(task.scopeBoundary) : null,
-      totalAttempts: priorAttempts + 1,
-      lastReason: reason,
-      failedSteps: verificationResult?.steps?.filter((s) => !s.passed).map((s) => s.label) || [],
-      failureHistory: failureHistory.map(f => ({ reason: f.reason, failedSteps: f.failedSteps, timestamp: f.timestamp })),
-      verificationStderr: verificationResult?.steps
-        ?.filter(s => !s.passed)
-        .map(s => `${s.label}: ${(s.stderr || "").slice(0, 300)}`)
-        .join("\n") || "",
-      escalatedAt: new Date().toISOString(),
-    }));
-    return;
-  }
-
-  await r.rpush("hydra:anchors:prior-failures", JSON.stringify({
-    taskId,
-    reason,
-    failedSteps: verificationResult?.steps?.filter((s) => !s.passed).map((s) => s.label) || [],
-    retryCount: priorAttempts + 1,
-    timestamp: new Date().toISOString(),
-  }));
-}
-
 // ---------------------------------------------------------------------------
 // The control loop — replaces the 7-agent pipeline
 // ---------------------------------------------------------------------------
@@ -519,21 +76,6 @@ async function storePriorFailure(taskId, reason, verificationResult) {
  * @param {object} opts - { anchor?: { type, reference }, maxRetries?: number }
  * @returns {LoopResult}
  */
-/**
- * Remove a work-queue item from the processing list after a cycle completes
- * (success, failure, or abandon). No-op if the anchor didn't come from the
- * work queue. Idempotent — safe to call multiple times.
- */
-async function clearProcessingItem(anchor) {
-  if (anchor?._workQueueRaw) {
-    try {
-      await getTracker().redis.lrem(PROCESSING_QUEUE, 1, anchor._workQueueRaw);
-    } catch (err: any) {
-      console.error(`[ControlLoop] Failed to clear processing queue item: ${err.message}`);
-    }
-  }
-}
-
 export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) {
   const cycleId = generateCycleId();
   const startTime = Date.now();
@@ -639,10 +181,34 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
 
   if (!task) {
     console.log(`[ControlLoop] Planner produced no valid task — cycle complete`);
+
+    // Circuit breaker: planner null counts as an abandonment for this anchor.
+    // Without this, Kanban queued items loop forever when the planner can't
+    // produce valid output (e.g. keeps omitting required fields).
+    try {
+      const escalated = await trackAbandonment(anchor.reference, { title: anchor.reference, taskId: "none" }, "Planner produced no valid task (schema validation or parse failure)");
+      if (escalated) {
+        console.log(`[ControlLoop] Anchor "${anchor.reference}" escalated to reframe queue after repeated planner failures`);
+      }
+    } catch (err: any) {
+      console.error(`[ControlLoop] Circuit breaker tracking failed on null task: ${err.message}`);
+    }
+
     await clearProcessingItem(anchor);
     await ovSession.logPlanner(anchor, null);
     await ovSession.logOutcome("no-work", "Planner produced no task");
     await ovSession.commit();
+    await recordCycleMetrics(cycleId, {
+      tasksAttempted: 0, tasksFailed: 0, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 1,
+      testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
+      testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
+      filesChanged: 0, totalDurationMs: Date.now() - startTime,
+      groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: 0,
+      regressionIntroduced: false, taskTitle: "Planner produced no task",
+      anchorType: anchor.type, anchorReference: anchor.reference,
+      plannerModel: "unknown", planCacheHit: "false",
+      abandonReason: "Planner produced no task",
+    });
     return { cycleId, tasks: [], reason: "Planner produced no task", durationMs: Date.now() - startTime };
   }
 
@@ -714,7 +280,25 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     } catch (err: any) {
       console.error(`[ControlLoop] Failed to record drift lesson: ${err.message}`);
     }
+    // Circuit breaker: drift counts as an abandonment too
+    try {
+      // @ts-expect-error — migrate to proper types
+      await trackAbandonment(anchor.reference, task, `Drift: ${drift.reason}`);
+    } catch { /* intentional: best-effort tracking */ }
     await clearProcessingItem(anchor);
+    await recordCycleMetrics(cycleId, {
+      tasksAttempted: 1, tasksFailed: 0, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 1,
+      testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
+      testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
+      filesChanged: 0, totalDurationMs: Date.now() - startTime,
+      groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: 0,
+      regressionIntroduced: false, taskTitle: task.title,
+      anchorType: task.anchorType, anchorReference: task.anchorReference,
+      plannerModel: task.__plannerModel || "unknown",
+      planCacheHit: task.__planCacheHit ? "true" : "false",
+      // @ts-expect-error — migrate to proper types
+      abandonReason: `Drift: ${drift.reason}`,
+    });
     return {
       cycleId,
     // @ts-expect-error — migrate to proper types
@@ -724,23 +308,41 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
 
   // =========================================================================
-  // Step 4: SKEPTIC GATE — challenge assumptions (codex agent call)
-  // Skip only for quick-fix tasks (single-file, deterministic fixes).
-  // Research items now go through the skeptic — research vets the *what*,
-  // the skeptic vets the *how* (scope, feasibility, duplication).
+  // Step 4: PREFLIGHT GATE — deterministic checks + nano-model review for high-risk
+  //
+  // Replaces the full skeptic agent call with:
+  //   a) Deterministic preflight checklist (free, instant) for all tasks
+  //   b) Lightweight nano-model review for high-risk tasks only ($0.20/1M tokens)
+  //   c) Quick-fix tasks skip both (existing behavior)
+  //
+  // Schema validation (risk, scope, anchor, criteria) is already handled by
+  // validateTaskSchema() in the planner return path — tasks that reach here
+  // are structurally valid.
   // =========================================================================
-  const skipSkeptic = complexity === "quick-fix";
-  const skepticResult = skipSkeptic
-    ? { verdict: "approve", reason: "Skipped — quick-fix (scope-adaptive routing)", skipped: true }
-    : await (() => {
-        console.log(`[ControlLoop] Step 4: Skeptic gate...`);
-        return runSkepticAgent(cycleId, task, grounding, groundingSummary, ovSession);
-      })();
+  let skepticResult;
+  if (complexity === "quick-fix") {
+    skepticResult = { verdict: "approve", reason: "Skipped — quick-fix (scope-adaptive routing)", skipped: true };
+  } else {
+    console.log(`[ControlLoop] Step 4: Preflight gate...`);
+
+    // 4a. Deterministic checklist — catches duplicates, scope issues, grounding contradictions
+    const preflight = await preflightCheck(task, grounding, groundingSummary);
+    if (!preflight.pass) {
+      skepticResult = { verdict: "reject", reason: `Preflight: ${preflight.flags.join("; ")}` };
+    } else if (task.risk === "high") {
+      // 4b. High-risk tasks get a lightweight nano-model review
+      console.log(`[ControlLoop] High-risk task — running nano-model review...`);
+      skepticResult = await runHighRiskReview(cycleId, task, grounding, groundingSummary, ovSession);
+    } else {
+      // Low/medium risk with passing preflight — approve without agent call
+      skepticResult = { verdict: "approve", reason: `Preflight passed (${preflight.flags.length} flags, risk: ${task.risk})` };
+    }
+  }
 
   await ovSession.logSkeptic(skepticResult.verdict, skepticResult.reason);
 
   if (skepticResult.verdict === "reject") {
-    console.log(`[ControlLoop] Skeptic REJECTED: ${skepticResult.reason}`);
+    console.log(`[ControlLoop] Preflight REJECTED: ${skepticResult.reason}`);
     await tracker.transitionTask(taskId, "abandoned", { skepticVerdict: skepticResult });
 
     await eventBus.publish(STREAMS.NOTIFICATIONS, {
@@ -750,16 +352,38 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       payload: { taskId, title: task.title, reason: skepticResult.reason },
     });
 
+    // Record lesson only for judgment-based rejections (nano-model), not preflight structural ones
+    const isJudgmentRejection = !skepticResult.reason.startsWith("Preflight:");
     try {
-      await recordPlannerLesson(cycleId, task, "abandoned", { reason: `Skeptic rejected: ${skepticResult.reason}` });
-      await recordSkepticLesson(cycleId, task, "reject", "abandoned");
+      if (isJudgmentRejection) {
+        await recordPlannerLesson(cycleId, task, "abandoned", { reason: `Review rejected: ${skepticResult.reason}` });
+      }
     } catch (err: any) {
       console.error(`[ControlLoop] Failed to record rejection lessons: ${err.message}`);
     }
 
+    // Circuit breaker: track consecutive abandonments for this anchor
+    try {
+      await trackAbandonment(anchor.reference, task, skepticResult.reason);
+    } catch (err: any) {
+      console.error(`[ControlLoop] Circuit breaker tracking failed: ${err.message}`);
+    }
+
     await clearProcessingItem(anchor);
-    await ovSession.logOutcome("abandoned", `Skeptic rejected: ${skepticResult.reason}`);
+    await ovSession.logOutcome("abandoned", `Rejected: ${skepticResult.reason}`);
     await ovSession.commit();
+    await recordCycleMetrics(cycleId, {
+      tasksAttempted: 1, tasksFailed: 0, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 1,
+      testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
+      testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
+      filesChanged: 0, totalDurationMs: Date.now() - startTime,
+      groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: 0,
+      regressionIntroduced: false, taskTitle: task.title,
+      anchorType: task.anchorType, anchorReference: task.anchorReference,
+      plannerModel: task.__plannerModel || "unknown",
+      planCacheHit: task.__planCacheHit ? "true" : "false",
+      abandonReason: skepticResult.reason,
+    });
     return {
       cycleId,
       tasks: [{ taskId, finalState: "abandoned", reason: skepticResult.reason }],
@@ -768,7 +392,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
 
   await tracker.transitionTask(taskId, "approved", { skepticVerdict: skepticResult });
-  console.log(`[ControlLoop] Skeptic APPROVED: ${skepticResult.reason || "no objections"}`);
+  console.log(`[ControlLoop] APPROVED: ${skepticResult.reason || "no objections"}`);
 
   // =========================================================================
   // Step 5: EXECUTE — make the smallest change (codex agent call)
@@ -777,7 +401,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   await tracker.transitionTask(taskId, "in-progress", {});
   await safeKanban(eventBus, cycleId, "moveToInProgress", anchor.reference, () => moveToInProgress(anchor.reference));
 
-  const execResult = await runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSession);
+  const execResult = await runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSession, complexity);
   await ovSession.logExecutor(execResult);
 
   // Validate a diff exists
@@ -880,11 +504,8 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       workDir: PROJECT_WORKSPACE,
     });
 
-    // @ts-expect-error — migrate to proper types
     await ovSession.logExecutor({ summary: `[Fixer] ${fixerResult.output?.slice(0, 200)}`, filesChanged: [] });
-    // @ts-expect-error — migrate to proper types
     await tracker.logAgentRun(cycleId, "fixer", taskId, fixerResult.duration, fixerResult.exitCode === 0 ? "fix-attempted" : "fix-failed", fixerResult.usage, fixerResult.costUsd);
-    // @ts-expect-error — migrate to proper types
     console.log(`[ControlLoop] Fixer completed (${Math.round(fixerResult.duration / 1000)}s, exit ${fixerResult.exitCode})`);
 
     // Re-verify after fixer
@@ -931,6 +552,9 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       regressionIntroduced: false, taskTitle: task.title,
       anchorType: task.anchorType, anchorReference: task.anchorReference,
       complexity, filesInScope: filesInScope, criteriaCount,
+      plannerModel: task.__plannerModel || "unknown",
+      planCacheHit: task.__planCacheHit ? "true" : "false",
+      executorModel: execResult?.__executorModel || "unknown",
     });
 
     // Route to Blocked if the failure looks like it needs operator intervention
@@ -1014,6 +638,79 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
 
   // =========================================================================
+  // Step 6.7: MUTATION TESTING — lightweight coverage check
+  // Informational only — does not block merge. Survivors feed into the
+  // reality report and planner memory so future cycles improve coverage.
+  // =========================================================================
+  let mutationReport: any = null;
+  if (verification.filesChanged?.length > 0) {
+    console.log(`[ControlLoop] Step 6.7: Running mutation tests on ${verification.filesChanged.length} changed files...`);
+    try {
+      mutationReport = await runMutationTests(PROJECT_WORKSPACE, verification.filesChanged, {
+        timeBudgetMs: 60_000,
+        testCommand: "npm test",
+      });
+      const killRate = mutationReport.totalMutants > 0
+        ? Math.round((mutationReport.killed / (mutationReport.totalMutants - mutationReport.skipped)) * 100)
+        : 100;
+      console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${mutationReport.totalMutants - mutationReport.skipped} killed, ${mutationReport.survived} survived)`);
+      if (mutationReport.survived > 0) {
+        console.log(`[ControlLoop] ⚠ ${mutationReport.survived} surviving mutants — executor's tests may not cover changed behavior`);
+        for (const s of mutationReport.survivors.slice(0, 3)) {
+          console.log(`[ControlLoop]   ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]`);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[ControlLoop] Mutation testing failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  // =========================================================================
+  // Step 6.9: SCOPE ENFORCEMENT — hard gate on out-of-scope changes
+  // If >80% of changed files are outside planned scope, reject the merge.
+  // =========================================================================
+  if (task.scopeBoundary?.in?.length > 0 && verification.filesChanged?.length > 0) {
+    const inScope = new Set((task.scopeBoundary.in as string[]).map((f: string) => f.replace(/^web\//, "")));
+    const outOfScope = verification.filesChanged.filter((f: string) => {
+      const normalized = f.replace(/^web\//, "");
+      return !inScope.has(normalized) && ![...inScope].some((s: string) => normalized.startsWith(s) || normalized.endsWith(s));
+    });
+    const outOfScopeRatio = outOfScope.length / verification.filesChanged.length;
+    if (outOfScopeRatio > 0.8 && outOfScope.length > 3) {
+      console.error(`[ControlLoop] SCOPE GATE: ${outOfScope.length}/${verification.filesChanged.length} files (${Math.round(outOfScopeRatio * 100)}%) outside scope — blocking merge`);
+      console.error(`[ControlLoop] Out-of-scope files: ${outOfScope.slice(0, 5).join(", ")}${outOfScope.length > 5 ? ` (+${outOfScope.length - 5} more)` : ""}`);
+
+      await tracker.transitionTask(taskId, "failed", { reason: `Scope gate: ${outOfScope.length}/${verification.filesChanged.length} files outside planned scope` });
+      await storePriorFailure(taskId, `Scope gate blocked merge: ${Math.round(outOfScopeRatio * 100)}% out of scope`, verification);
+      await recordPlannerLesson(cycleId, task, "failed", { failReason: `Scope gate: ${outOfScope.length} files outside scope`, failedSteps: ["scope-enforcement"] });
+      await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "scope gate blocked merge"));
+
+      // Clean up the branch
+      try {
+        const { stdout: branchName } = await execFileAsync("git", ["branch", "--show-current"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
+        const broken = branchName.trim();
+        await execFileAsync("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+        await execFileAsync("git", ["clean", "-fd"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+        await execFileAsync("git", ["checkout", "."], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+        if (broken && broken !== "main") {
+          await execFileAsync("git", ["branch", "-D", broken], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
+        }
+      } catch (cleanErr: any) {
+        console.error(`[ControlLoop] Scope-gate branch cleanup failed: ${cleanErr.message}`);
+      }
+
+      await clearProcessingItem(anchor);
+      await ovSession.logOutcome("failed", `Scope gate: ${outOfScope.length} files outside scope`);
+      await ovSession.commit();
+      return {
+        cycleId,
+        tasks: [{ taskId, finalState: "failed", reason: `Scope gate: ${Math.round(outOfScopeRatio * 100)}% out of scope` }],
+        durationMs: Date.now() - startTime,
+      };
+    }
+  }
+
+  // =========================================================================
   // Step 7: MERGE — git operation, NOT an agent (extracted to merge.mjs)
   // =========================================================================
   console.log(`[ControlLoop] Step 7: Merging to main...`);
@@ -1027,6 +724,16 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       console.log(`[ControlLoop] Already on main, pushed (${commitSha.slice(0, 7)})`);
     }
     await tracker.transitionTask(taskId, "merged", { commitSha });
+
+    // Restart the web service so it picks up the new build artifacts.
+    // Without this, `next start` serves stale HTML referencing CSS/JS chunk
+    // hashes from the previous build, causing 404s on every asset.
+    try {
+      await execFileAsync("systemctl", ["--user", "restart", "hydra-betting-web.service"], { timeout: 120_000 });
+      console.log(`[ControlLoop] Restarted hydra-betting-web.service after merge`);
+    } catch (restartErr: any) {
+      console.error(`[ControlLoop] Failed to restart hydra-betting-web.service: ${restartErr.message}`);
+    }
   } else {
     console.error(`[ControlLoop] Merge failed: ${mergeResult.error}`);
 
@@ -1150,6 +857,22 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       scopeGaps: reconciliation.scopeGaps,
       warnings: reconciliation.warnings,
     },
+    mutationTesting: mutationReport ? {
+      totalMutants: mutationReport.totalMutants,
+      killed: mutationReport.killed,
+      survived: mutationReport.survived,
+      killRate: mutationReport.totalMutants > 0
+        ? Math.round((mutationReport.killed / (mutationReport.totalMutants - mutationReport.skipped)) * 100)
+        : 100,
+      timedOut: mutationReport.timedOut,
+      durationMs: mutationReport.durationMs,
+      survivors: mutationReport.survivors.slice(0, 5).map((s) => ({
+        file: s.mutation.file,
+        line: s.mutation.line,
+        type: s.mutation.type,
+      })),
+    } : null,
+    adversarialValidation: null as any,
     unresolvedUncertainty,
     rollbackRisk,
     rolledBack,
@@ -1229,6 +952,8 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     anchorType: task.anchorType,
     anchorReference: task.anchorReference,
     complexity, filesInScope, criteriaCount,
+    plannerModel: task.__plannerModel || "unknown",
+    executorModel: execResult?.__executorModel || "unknown",
   });
 
   // Step 8.1: Pattern detection — check for systemic issues across recent cycles
@@ -1248,6 +973,18 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // in Queued forever (2026-04-08 debug session).
   const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
   if (finalState === "merged") {
+    // Clear abandonment counter on success — this anchor is no longer stuck
+    try { await clearAbandonmentCounter(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
+
+    // If this task came from a spec, mark the spec task complete
+    if (anchor.context?.specSlug && anchor.context?.specTaskId) {
+      try {
+        await markTaskComplete(anchor.context.specSlug, anchor.context.specTaskId, cycleId);
+      } catch (err: any) {
+        console.error(`[ControlLoop] Failed to update spec "${anchor.context.specSlug}": ${err.message}`);
+      }
+    }
+
     await safeKanban(eventBus, cycleId, "moveToDone", anchor.reference, () => moveToDone(anchor.reference, "merged"));
   } else {
     await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, finalState));
@@ -1259,6 +996,53 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // from the full cycle conversation. This replaces manual compoundLearnings.
   // Redis prevention rules are kept as a bootstrap fallback via loadAgentMemory.
   // =========================================================================
+
+  // =========================================================================
+  // Step 8.7: ADVERSARIAL VALIDATION — self-play quality gate
+  // After a successful merge (no rollback), run a nano-model adversary to
+  // find edge cases and untested code paths. Findings are queued as work.
+  // =========================================================================
+  if (commitSha && !rolledBack && verification.filesChanged?.length > 0) {
+    try {
+      console.log(`[ControlLoop] Step 8.7: Running adversarial validation...`);
+      const advReport = await runAdversarialValidation(cycleId, task.title, verification.filesChanged, commitSha);
+      if (advReport.findings.length > 0) {
+        console.log(`[ControlLoop] Adversarial: ${advReport.findings.length} finding(s) — ${advReport.findings.filter(f => f.severity === "high").length} high, ${advReport.findings.filter(f => f.severity === "medium").length} medium`);
+        // Queue medium+ findings as work items
+        const queueItems = findingsToQueueItems(advReport);
+        if (queueItems.length > 0) {
+          const Redis = (await import("ioredis")).default;
+          const advRedis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
+          for (const item of queueItems.slice(0, 3)) { // max 3 per cycle
+            await advRedis.rpush("hydra:anchors:work-queue", JSON.stringify(item));
+            console.log(`[ControlLoop] Adversarial: queued fix — ${item.reference.slice(0, 80)}`);
+          }
+          advRedis.disconnect();
+        }
+        report.adversarialValidation = {
+          findings: advReport.findings.length,
+          high: advReport.findings.filter(f => f.severity === "high").length,
+          medium: advReport.findings.filter(f => f.severity === "medium").length,
+          queued: queueItems.length,
+          durationMs: advReport.durationMs,
+        };
+      } else {
+        console.log(`[ControlLoop] Adversarial: no findings (${advReport.durationMs}ms)`);
+      }
+    } catch (err: any) {
+      console.error(`[ControlLoop] Adversarial validation failed (non-fatal): ${err.message}`);
+    }
+
+    // Track this merge for revert correlation
+    try {
+      await trackMergedCommit(cycleId, commitSha, []);
+    } catch { /* intentional: tracking is best-effort */ }
+  }
+
+  // Check revert correlation on merged cycles (updates adversarial precision stats)
+  try {
+    await checkRevertCorrelation(PROJECT_WORKSPACE);
+  } catch { /* intentional: correlation check is best-effort */ }
 
   // Complete the cycle in tracker
   await tracker.redis.hset(`hydra:cycle:${cycleId}`, "status", "completed", "completedAt", new Date().toISOString());
@@ -1306,6 +1090,16 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   return report;
 
   } finally {
+    // Commit OV session on crash paths — without this, any unhandled
+    // exception loses the cycle's agent conversation and OV never
+    // extracts memories from it. The happy path commits above, so
+    // this is a no-op (session already inactive) in the normal case.
+    if (ovSession.active) {
+      await ovSession.logOutcome("crashed", "Cycle terminated by unhandled exception").catch(() => {});
+      await ovSession.commit().catch((err: any) =>
+        console.error(`[ControlLoop] OV session crash-commit failed: ${err.message}`)
+      );
+    }
     // Release the distributed cycle lock on every exit path
     await tracker.redis.del(CYCLE_LOCK_KEY).catch((err: any) =>
       console.error(`[ControlLoop] Failed to release cycle lock: ${err.message}`)
@@ -1314,377 +1108,29 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
 }
 
 // ---------------------------------------------------------------------------
-// Research context formatter — gives the planner rich context from research
+// Planner agent extracted to planner-prompt.ts
+// runPlannerAgent, buildResearchContext, validateTaskSchema, PLANNER_OUTPUT_SCHEMA
+// are imported from ./planner-prompt.ts above.
 // ---------------------------------------------------------------------------
 
-function buildResearchContext(ctx) {
-  if (!ctx || typeof ctx !== "object") return "";
-  const parts = ["\n## RESEARCH CONTEXT (from research system — use this to guide your task)"];
-  if (ctx.description) parts.push(`\n### What to build\n${ctx.description}`);
-  if (ctx.rationale) parts.push(`\n### Why (research rationale)\n${ctx.rationale}`);
-  if (ctx.acceptanceCriteria?.length > 0) {
-    parts.push("\n### Acceptance Criteria (from research — incorporate into your task)");
-    for (const c of ctx.acceptanceCriteria) parts.push(`- ${c}`);
-  }
-  if (ctx.complexity) parts.push(`\n### Estimated complexity: ${ctx.complexity}`);
-  if (ctx.prerequisites?.length > 0) {
-    parts.push(`\n### Prerequisites: ${ctx.prerequisites.join(", ")}`);
-  }
-  if (ctx.category) parts.push(`\n### Focus category: ${ctx.category}`);
-  if (ctx.confidence) parts.push(`### Research confidence: ${ctx.confidence}`);
-  if (ctx.adjustedScore) parts.push(`### Research score: ${ctx.adjustedScore}`);
-  if (ctx.sources?.length > 0) parts.push(`### Identified by: ${ctx.sources.join(", ")} researchers`);
-  return parts.join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// Agent runners — each calls codex exec with a specific personality + prompt
-// ---------------------------------------------------------------------------
-
-async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, continuityContext = "", ovSession = null) {
-  // Scope-adaptive planner routing (PAUL pattern):
-  // Quick-fix anchors (failing-test, prior-failure) get a compressed prompt
-  // and cheaper model — they don't need priorities, accomplishments, or
-  // continuity because the anchor IS the entire scope.
-  const isQuickFixAnchor = anchor.type === "failing-test" || anchor.type === "prior-failure";
-  const isReframe = anchor.type === "reframe";
-  const plannerModel = isQuickFixAnchor ? "codex" : "frontier";
-
-  // Load context — OV compiled context + file fallbacks
-  let priorities = "", feedback = "", plannerMemory = "", ovContext = "";
-
-  if (!isQuickFixAnchor) {
-    const results = await Promise.all([
-      readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8").catch(() => ""),
-      readFile(join(CONFIG_PATH, "feedback", "to-planner.md"), "utf-8").catch(() => ""),
-      loadAgentMemory("planner"),
-      ovSession?.getAgentContext?.("planner", anchor) || Promise.resolve({ formatted: "" }),
-    ]);
-    priorities = results[0];
-    feedback = results[1];
-    plannerMemory = results[2];
-    ovContext = results[3].formatted || "";
-  }
-
-  const confidence = grounding.testReport.failed > 0 ? "low"
-    : (grounding.typecheckReport.exitCode !== 0 || grounding.dirtyFiles.length > 0) ? "medium"
-    : "high";
-
-  // Load milestone progress — skip for quick-fix
-  let milestoneContext = "";
-  if (!isQuickFixAnchor) {
-    try {
-      const { getCurrentMilestoneProgress } = await import("./backlog.ts");
-      const milestone = await getCurrentMilestoneProgress();
-      if (milestone) {
-        const remaining = milestone.remainingTitles.slice(0, 5).join(", ");
-        milestoneContext = `## CURRENT MILESTONE\n${milestone.name} — ${milestone.pctComplete}% complete (${milestone.done}/${milestone.total} epics done, ${milestone.blocked} blocked)\nRemaining epics: ${remaining}\nFocus your task on completing this milestone's remaining epics.\n`;
-      }
-    } catch {}
-  }
-
-  // Load cumulative accomplishments — skip for quick-fix
-  let accomplishmentsContext = "";
-  if (!isQuickFixAnchor) {
-    try {
-      const acc = await getCumulativeAccomplishments(10);
-      if (acc.length > 0) {
-        accomplishmentsContext = `## ALREADY ACCOMPLISHED (do NOT re-propose these)\n${acc.map((a) => `- "${a.title}"`).join("\n")}\n`;
-      }
-    } catch (err: any) {
-      console.error(`[ControlLoop] Failed to load cumulative accomplishments: ${err.message}`);
-    }
-  }
-
-  // JSON output schema (shared by both prompt paths)
-  const jsonSchema = [
-    `Output ONLY valid JSON:`,
-    `{`,
-    `  "title": "...",`,
-    `  "description": "...",`,
-    `  "taskType": "build",`,
-    `  "anchorType": "${anchor.type}",`,
-    `  "anchorReference": "${anchor.reference}",`,
-    `  "whyNow": "...",`,
-    `  "confidence": "${confidence}",`,
-    `  "scopeBoundary": { "in": ["file1.ts", "file2.ts"], "out": ["unrelated/"] },`,
-    `  "acceptanceCriteria": ["criterion 1", "criterion 2"],`,
-    `  "verificationPlan": [`,
-    `    { "command": "npm test", "expected": "exit code 0", "label": "tests pass" },`,
-    `    { "command": "npm run typecheck", "expected": "exit code 0", "label": "typecheck" }`,
-    `  ]`,
-    `  NOTE: Use simple "npm test" and "npm run typecheck" — the verifier runs them in the correct app directory automatically.`,
-    `}`,
-  ].join("\n");
-
-  let prompt;
-  if (isReframe) {
-    // Reframe prompt — a task failed multiple times, planner must diagnose and rewrite
-    const ctx = anchor.context || {};
-    const compactGrounding = summarizeForPrompt(grounding, { compact: true }).slice(0, 2000);
-    prompt = [
-      `## REFRAME THIS TASK (previous approach failed ${ctx.totalAttempts || "multiple"} times)`,
-      "",
-      `### Original task that kept failing`,
-      `Title: ${ctx.originalTitle || anchor.reference}`,
-      ctx.originalDescription ? `Description: ${ctx.originalDescription}` : "",
-      ctx.scopeBoundary ? `Scope: ${JSON.stringify(ctx.scopeBoundary)}` : "",
-      "",
-      `### Failure history`,
-      `Total attempts: ${ctx.totalAttempts || "unknown"}`,
-      `Last failure reason: ${ctx.lastReason || "unknown"}`,
-      ctx.failedSteps?.length > 0 ? `Failed verification steps: ${ctx.failedSteps.join(", ")}` : "",
-      ctx.verificationStderr ? `\nVerification error output:\n\`\`\`\n${ctx.verificationStderr.slice(0, 1000)}\n\`\`\`` : "",
-      ctx.failureHistory?.length > 0 ? `\nAll attempts:\n${ctx.failureHistory.map((f, i) => `  ${i + 1}. ${f.reason} (${f.failedSteps?.join(", ") || "no details"})`).join("\n")}` : "",
-      "",
-      compactGrounding,
-      "",
-      `## INSTRUCTIONS`,
-      `The previous task kept failing verification. You must DIAGNOSE why and propose a DIFFERENT approach.`,
-      ``,
-      `Possible root causes to consider:`,
-      `- The original scope was too broad or touched files that interact in unexpected ways`,
-      `- There was a pre-existing test failure unrelated to the task`,
-      `- The acceptance criteria were impossible to satisfy with the verification plan`,
-      `- The executor's approach was correct but a different file or test needed updating`,
-      ``,
-      `Your job:`,
-      `1. Analyze the failure pattern — what specifically went wrong each time?`,
-      `2. Propose a REFRAMED task with a different scope, approach, or decomposition`,
-      `3. If the original goal is still valid, find a smaller or different path to achieve it`,
-      `4. If the original goal is blocked by something outside the executor's control (e.g. pre-existing test failures, missing credentials), output { "noWork": true, "reason": "..." } explaining what the operator needs to fix`,
-      ``,
-      `The reframed task must be meaningfully different from the original — not just a retry with the same scope.`,
-      "",
-      jsonSchema,
-    ].filter(Boolean).join("\n");
-    console.log(`[ControlLoop] Planner using REFRAME prompt for "${ctx.originalTitle}" (${ctx.totalAttempts} prior failures)`);
-  } else if (isQuickFixAnchor) {
-    // Compressed prompt for quick-fix: just anchor + compact grounding + fix instructions
-    const compactGrounding = summarizeForPrompt(grounding, { compact: true }).slice(0, 2000);
-    prompt = [
-      `## FIX THIS (quick-fix — targeted repair, minimal scope)`,
-      `Type: ${anchor.type}`,
-      `Reference: ${anchor.reference}`,
-      `Why now: ${anchor.whyNow}`,
-      anchor.description ? `\nDescription:\n${anchor.description.slice(0, 1500)}` : "",
-      anchor.context ? `\nContext:\n${typeof anchor.context === "string" ? anchor.context.slice(0, 1500) : JSON.stringify(anchor.context).slice(0, 1500)}` : "",
-      "",
-      compactGrounding,
-      "",
-      `## INSTRUCTIONS`,
-      `This is a targeted fix. Produce exactly 1 task with the SMALLEST change that resolves the issue.`,
-      `The task MUST be anchored to "${anchor.reference}".`,
-      `Keep scopeBoundary narrow — ideally 1-2 files.`,
-      "",
-      jsonSchema,
-    ].filter(Boolean).join("\n");
-    console.log(`[ControlLoop] Planner using quick-fix prompt (${plannerModel} model, ~${prompt.length} chars)`);
-  } else {
-    // Full prompt for standard/complex tasks
-    prompt = [
-      `## ANCHOR (this is what you are working on)`,
-      `Type: ${anchor.type}`,
-      `Reference: ${anchor.reference}`,
-      `Why now: ${anchor.whyNow}`,
-      anchor.description ? `\nDescription:\n${anchor.description.slice(0, 2000)}` : "",
-      anchor.context && anchor.type === "research" ? buildResearchContext(anchor.context) : "",
-      anchor.context && anchor.type !== "research" ? `\nContext:\n${typeof anchor.context === "string" ? anchor.context.slice(0, 2000) : JSON.stringify(anchor.context).slice(0, 2000)}` : "",
-      anchor.type === "codebase-health" ? [
-        "",
-        "## CODEBASE HEALTH GUIDELINES",
-        "This is a maintainability task. Your goal is REDUCTIVE — make the codebase smaller, more modular, and better documented.",
-        "Rules:",
-        "- Split large files into focused modules with clear single responsibilities",
-        "- Add a brief JSDoc header to every new module explaining: what it does, what depends on it, key constraints",
-        "- Use index.ts re-exports to maintain existing import paths (no breaking changes)",
-        "- Do NOT add new functionality, features, or abstractions beyond what exists",
-        "- Do NOT add error handling, validation, or defensive code that wasn't there before",
-        "- The test count should stay the same or decrease (consolidate redundant tests, don't add new ones)",
-        "- Keep every existing import path working — consumers should not need to change",
-      ].join("\n") : "",
-      "",
-      groundingSummary.slice(0, 4000),
-      "",
-      // Continuity contract — what the last cycle did, what changed since
-      continuityContext ? continuityContext.slice(0, 1500) : "",
-      "",
-      priorities ? `## PRIORITIES\n${priorities.slice(0, 3000)}\n` : "",
-      feedback ? `## OPERATOR FEEDBACK\n${feedback.slice(0, 1000)}\n` : "",
-      "",
-      // Milestone context — focus on active milestone epics
-      milestoneContext,
-      // Cumulative accomplishments — prevent re-proposing completed work
-      accomplishmentsContext,
-      "",
-      // Agent memory — learn from past outcomes
-      formatMemoryForPrompt(plannerMemory, "planner"),
-      "",
-      // OpenViking compiled context (resources + memories relevant to this anchor)
-      ovContext,
-      "",
-      `## INSTRUCTIONS`,
-      `Confidence: ${confidence.toUpperCase()}. Produce exactly 1 task, or null if no actionable work exists.`,
-      `The task MUST be anchored to "${anchor.reference}".`,
-      `Prefer the SMALLEST code change that creates verifiable progress.`,
-      `Do NOT produce architecture docs, design contracts, or research tasks unless the anchor explicitly requires it.`,
-      `If the ALREADY ACCOMPLISHED list covers all priorities and you cannot find a genuine gap, output: { "noWork": true, "reason": "All current priorities appear addressed" }`,
-      "",
-      jsonSchema,
-    ].filter(Boolean).join("\n");
-  }
-
-  const personality = await findPersonality("planner");
-
-  const result = await runAgent({
-    agentName: "planner",
-    personality,
-    prompt,
-    model: plannerModel,
-    taskId: "planner",
-    correlationId: cycleId,
-  });
-
-  // Detect Codex usage-limit errors — signal the caller to pause instead of retrying
-  // @ts-expect-error — migrate to proper types
-  if (result.usageLimitHit) {
-    console.error(`[ControlLoop] Codex usage limit hit during planning — signaling pause`);
-    // Return a sentinel object that the caller can detect
-    return { __usageLimitHit: true } as any;
-  }
-
-  // Parse output — try direct parse, then regex fallback, then fail loud
-  let task = null;
+async function runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSession = null, complexity = "standard") {
+  // Create an isolated worktree for the executor to prevent scope creep
+  // from shared workspace state (formatting artifacts, operator changes).
+  const branchName = `feature/${cycleId}-slug`;
+  const worktreePath = join(PROJECT_WORKSPACE, "..", `hydra-betting-worktree-${cycleId}`);
+  let useWorktree = false;
   try {
-    // @ts-expect-error — migrate to proper types
-    task = JSON.parse(result.output);
-  } catch {
-    // @ts-expect-error — migrate to proper types
-    const match = result.output.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        task = JSON.parse(match[0]);
-      } catch (err: any) {
-        console.error(`[ControlLoop] Planner output unparseable even after regex extraction: ${err.message}`);
-      }
-    } else {
-      console.error(`[ControlLoop] Planner output contained no JSON object`);
-    }
-  }
-
-  // Handle explicit "no work" response
-  if (task?.noWork) {
-    console.log(`[ControlLoop] Planner says no work needed: ${task.reason || "all priorities addressed"}`);
-    // @ts-expect-error — migrate to proper types
-    await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "no-work", result.usage, result.costUsd);
-    return null;
-  }
-
-  // Validate required fields
-  if (task && (!task.verificationPlan || !Array.isArray(task.verificationPlan) || task.verificationPlan.length === 0)) {
-    console.log(`[ControlLoop] Planner task rejected — missing verificationPlan`);
-    return null;
-  }
-
-    // @ts-expect-error — migrate to proper types
-  await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "completed", result.usage, result.costUsd);
-  return task;
-}
-
-async function runSkepticAgent(cycleId, task, grounding, groundingSummary, ovSession = null) {
-  // Load skeptic memory + OV context in parallel
-  const [skepticMemory, ovCtx] = await Promise.all([
-    loadAgentMemory("skeptic"),
-    ovSession?.getAgentContext?.("skeptic", { reference: task.title, whyNow: task.anchorReference }) || Promise.resolve({ formatted: "" }),
-  ]);
-  const skepticKnowledge = ovCtx.formatted || "";
-  let recentHistory = "";
-  try {
-    const Redis = (await import("ioredis")).default;
-    const rConn = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-    const recentIds = await rConn.zrevrange("hydra:reports:reality:index", 0, 4);
-    for (const id of recentIds) {
-      const raw = await rConn.get(`hydra:reports:reality:${id}`);
-      if (raw) {
-        const report = JSON.parse(raw);
-        recentHistory += `- ${report.cycleId}: "${report.task?.title}" (${report.task?.finalState})\n`;
-      }
-    }
-    rConn.disconnect();
+    await execFileAsync("git", ["worktree", "add", "-b", branchName, worktreePath, "main"], {
+      cwd: PROJECT_WORKSPACE,
+      timeout: 15000,
+    });
+    useWorktree = true;
+    console.log(`[ControlLoop] Created worktree at ${worktreePath} on branch ${branchName}`);
   } catch (err: any) {
-    console.error(`[ControlLoop] Skeptic failed to load recent cycle history: ${err.message}`);
+    console.error(`[ControlLoop] Worktree creation failed (falling back to shared workspace): ${err.message}`);
   }
+  const executorWorkDir = useWorktree ? worktreePath : PROJECT_WORKSPACE;
 
-  const prompt = [
-    `You are the Skeptic. Your job is to CHALLENGE this proposed task. You have VETO power.`,
-    "",
-    `## PROPOSED TASK`,
-    `Title: ${task.title}`,
-    `Description: ${task.description}`,
-    `Anchor: [${task.anchorType}] ${task.anchorReference}`,
-    task.anchorType === "doc" ? `(NOTE: This is a config document maintained by the operator. It exists outside the workspace but IS a valid anchor.)` : "",
-    task.anchorType === "codebase-health" ? `(NOTE: This is a codebase health task. The goal is REDUCTIVE — make the codebase smaller, more modular, or better documented. Do NOT add new functionality. Validate that the proposed change genuinely improves maintainability.)` : "",
-    `Why now: ${task.whyNow}`,
-    `Confidence: ${task.confidence}`,
-    `Scope: IN=${JSON.stringify(task.scopeBoundary?.in || [])} OUT=${JSON.stringify(task.scopeBoundary?.out || [])}`,
-    `Acceptance Criteria: ${JSON.stringify(task.acceptanceCriteria || [])}`,
-    `Verification Plan: ${JSON.stringify(task.verificationPlan || [])}`,
-    "",
-    groundingSummary.slice(0, 2000),
-    "",
-    recentHistory ? `## RECENT CYCLE HISTORY (check for duplicates)\n${recentHistory}` : "",
-    "",
-    formatMemoryForPrompt(skepticMemory, "skeptic"),
-    "",
-    skepticKnowledge,
-    "",
-    `## YOUR CHALLENGE CHECKLIST`,
-    `1. Is this task ANCHORED to real evidence? (not inferred strategy)`,
-    `2. Is this a DUPLICATE of recent work? (check history above)`,
-    `3. Is the scope BOUNDED? (not too broad, not architecture theater)`,
-    `4. Does the verificationPlan actually PROVE completion?`,
-    `5. Is this the SMALLEST useful task? (could it be narrower?)`,
-    `6. Does the grounding report support this being needed?`,
-    "",
-    `Output ONLY valid JSON:`,
-    `{ "verdict": "approve" | "reject", "reason": "..." }`,
-  ].filter(Boolean).join("\n");
-
-  const personality = await findPersonality("skeptic");
-
-  const result = await runAgent({
-    agentName: "skeptic",
-    personality,
-    prompt,
-    model: "codex",
-    taskId: "skeptic",
-    correlationId: cycleId,
-  });
-
-  let verdict = { verdict: "reject", reason: "Skeptic produced no parseable output — fail safe" };
-  try {
-    // @ts-expect-error — migrate to proper types
-    verdict = JSON.parse(result.output);
-  } catch {
-    // @ts-expect-error — migrate to proper types
-    const match = result.output.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        verdict = JSON.parse(match[0]);
-      } catch (err: any) {
-        console.error(`[ControlLoop] Skeptic output unparseable even after regex — failing safe to reject: ${err.message}`);
-      }
-    } else {
-      console.error(`[ControlLoop] Skeptic output contained no JSON object — failing safe to reject`);
-    }
-  }
-
-    // @ts-expect-error — migrate to proper types
-  await getTracker().logAgentRun(cycleId, "skeptic", "skeptic", result.duration, verdict.verdict, result.usage, result.costUsd);
-  return verdict;
-}
-
-async function runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSession = null) {
   // Load executor memory + OV context in parallel
   const [executorMemory, ovCtx] = await Promise.all([
     loadAgentMemory("executor"),
@@ -1726,16 +1172,28 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSe
     executorKnowledge,
     "",
     `## RULES`,
-    `1. FIRST: \`git checkout main && git pull origin main\` then create feature branch: \`git checkout -b feature/${cycleId}-slug\``,
-    `2. Make the SMALLEST change that satisfies the acceptance criteria`,
-    `3. Write or update tests for your changes — RUN THEM before committing: \`npm test\``,
-    `4. If tests FAIL, fix your code until they pass. Do not commit failing code.`,
-    `5. Commit to the feature branch with clear commit messages`,
-    `6. NEVER merge into main — the control loop handles merging after verification`,
-    `7. Push your branch when done`,
-    `8. NEVER delete or remove files in src/lib/providers/ — these are foundational venue adapters even if not yet imported elsewhere`,
-    `9. NEVER create "cleanup" or "remove unused" commits — if code exists with tests, it is intentional`,
-    `10. If you create or modify database migrations (drizzle SQL files), you MUST also update drizzle/meta/_journal.json with the new entry. Migration SQL without a journal entry will silently fail.`,
+    ...(useWorktree ? [
+      `1. You are in an isolated worktree on branch \`${branchName}\`. The workspace is clean. Start working immediately — do NOT run git checkout or create branches.`,
+    ] : [
+      `1. FIRST: \`git checkout main && git pull origin main\` then create feature branch: \`git checkout -b ${branchName}\``,
+    ]),
+    ...(complexity !== "quick-fix" ? [
+      `2. **TEST-FIRST**: Before writing any implementation code, write failing tests that verify each acceptance criterion. Run \`npm test\` to confirm they fail for the right reason.`,
+      `3. Then implement the SMALLEST change that makes all tests pass.`,
+      `4. Run \`npm test\` again — all tests (old and new) must pass before committing.`,
+      `4b. **MUTATION SELF-CHECK**: Pick one key condition or return value in your implementation. Temporarily negate it (e.g. change \`===\` to \`!==\`, \`true\` to \`false\`). Run \`npm test\`. If tests STILL PASS, your tests don't cover that behavior — improve them. Restore the original code after.`,
+    ] : [
+      `2. Make the SMALLEST change that satisfies the acceptance criteria`,
+      `3. Write or update tests for your changes — RUN THEM before committing: \`npm test\``,
+      `4. If tests FAIL, fix your code until they pass. Do not commit failing code.`,
+    ]),
+    `5. **SCOPE CLEANUP**: Before committing, run \`git diff --name-only main\` and \`git checkout main -- <file>\` for ANY file NOT listed in your scopeBoundary.in. Do NOT commit formatting, linting, or other changes to files outside your scope.`,
+    `6. Commit to the feature branch with clear commit messages`,
+    `7. NEVER merge into main — the control loop handles merging after verification`,
+    `8. Push your branch when done`,
+    `9. NEVER delete or remove files in src/lib/providers/ — these are foundational venue adapters even if not yet imported elsewhere`,
+    `10. NEVER create "cleanup" or "remove unused" commits — if code exists with tests, it is intentional`,
+    `11. If you create or modify database migrations (drizzle SQL files), you MUST also update drizzle/meta/_journal.json with the new entry. Migration SQL without a journal entry will silently fail.`,
     "",
     `Output ONLY valid JSON:`,
     `{ "summary": "...", "filesChanged": [...], "commits": [...], "branch": "...", "testsRun": { "passed": N, "failed": N } }`,
@@ -1749,15 +1207,49 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSe
     model: "codex",
     taskId: task.taskId,
     correlationId: cycleId,
-    workDir: PROJECT_WORKSPACE,
+    workDir: executorWorkDir,
   });
+
+  // If using worktree, push the branch and clean up the worktree
+  if (useWorktree) {
+    try {
+      // Push the branch from the worktree so it's available in the main repo
+      await execFileAsync("git", ["push", "origin", branchName], {
+        cwd: executorWorkDir,
+        timeout: 30000,
+      }).catch(() => { /* intentional: push may fail if no commits */ });
+
+      // Fetch the branch into the main repo
+      await execFileAsync("git", ["fetch", "origin", branchName], {
+        cwd: PROJECT_WORKSPACE,
+        timeout: 15000,
+      }).catch(() => {});
+
+      // Checkout the executor's branch in the main workspace for verification
+      await execFileAsync("git", ["checkout", branchName], {
+        cwd: PROJECT_WORKSPACE,
+        timeout: 10000,
+      }).catch(() => {});
+    } catch (err: any) {
+      console.error(`[ControlLoop] Worktree branch sync failed: ${err.message}`);
+    }
+
+    // Remove the worktree
+    try {
+      await execFileAsync("git", ["worktree", "remove", "--force", worktreePath], {
+        cwd: PROJECT_WORKSPACE,
+        timeout: 15000,
+      });
+      console.log(`[ControlLoop] Cleaned up worktree at ${worktreePath}`);
+    } catch (err: any) {
+      console.error(`[ControlLoop] Worktree cleanup failed (manual cleanup needed): ${err.message}`);
+    }
+  }
 
   let output: Record<string, any> = {};
   try {
-    // @ts-expect-error — migrate to proper types
     output = JSON.parse(result.output);
   } catch {
-    // @ts-expect-error — migrate to proper types
     const match = result.output.match(/\{[\s\S]*\}/);
     if (match) {
       try {
@@ -1770,10 +1262,8 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSe
     }
   }
 
-    // @ts-expect-error — migrate to proper types
   await getTracker().logAgentRun(cycleId, "executor", task.taskId, result.duration, "completed", result.usage, result.costUsd);
-    // @ts-expect-error — migrate to proper types
-  return { ...output, exitCode: result.exitCode, duration: result.duration };
+  return { ...output, exitCode: result.exitCode, duration: result.duration, __executorModel: result.model, __worktreeUsed: useWorktree };
 }
 
 // ---------------------------------------------------------------------------

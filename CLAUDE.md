@@ -4,23 +4,27 @@ Autonomous multi-agent development framework. Runs a control loop that grounds �
 
 ## Architecture
 
-Three codex agent calls per cycle: **planner** (frontier model), **skeptic** (codex model, skipped for quick-fix/research tasks), **executor** (codex model). All runtime state in Redis; configs git-tracked in `~/hydra/config/`; agents query OpenViking for semantic knowledge context.
+Two codex agent calls per cycle (three for high-risk): **planner** (frontier model), **executor** (codex model). The former skeptic agent is replaced by a deterministic preflight gate + nano-model review for high-risk tasks only. All runtime state in Redis; configs git-tracked in `~/hydra/config/`; agents query OpenViking for semantic knowledge context.
 
 ```
-Control loop (src/control-loop.mjs):
-  1a. prepareWorkspace()    — git cleanup (gated on safety checks)
-  1b. groundProject()       — npm test, tsc, git status (READ-ONLY)
-  2.  selectAnchor()        — pick work: queue > failing-test > prior-failure > TODO > priorities doc
-  3.  runPlannerAgent()      — propose 1 bounded task (scope-adaptive: quick-fix uses codex model)
-  3.1 classifyComplexity()   — quick-fix / standard / complex based on scope
-  3.5 detectDrift()          — reject near-duplicates of recent work
-  4.  runSkepticAgent()      — challenge task (skipped for quick-fix + research)
-  5.  runExecutorAgent()     — write code on feature branch
-  6.  runVerification()      — npm test + tsc (NOT an agent)
-  6.5 reconcilePlanVsActual() — diff planned scope vs actual files changed
-  7.  mergeToMain()          — git merge --no-ff + push (extracted to merge.mjs)
-  8.  report + metrics       — reality report to Redis, metrics to Redis
-  8.5 compoundLearnings()    — extract WHEN/CHECK/BECAUSE prevention rules
+Control loop (src/control-loop.ts):
+  1a. prepareWorkspace()      — git cleanup (gated on safety checks)
+  1b. groundProject()         — npm test, tsc, git status (READ-ONLY)
+  2.  selectAnchor()          — pick work: queue > failing-test > prior-failure > reframe > TODO > priorities
+  3.  runPlannerAgent()        — propose 1 bounded task (scope-adaptive: quick-fix uses codex model)
+  3.1 classifyComplexity()     — quick-fix / standard / complex based on scope
+  3.2 validateTaskSchema()     — deterministic schema check (risk, scope, anchor, criteria)
+  3.5 detectDrift()            — reject near-duplicates of recent work
+  4.  preflightCheck()         — deterministic 4-point checklist (duplicate, scope, grounding, verification)
+  4b. runHighRiskReview()      — nano-model safety review (HIGH-RISK TASKS ONLY)
+  5.  runExecutorAgent()       — write code on feature branch
+  6.  runVerification()        — npm test + tsc (NOT an agent)
+  6.5 reconcilePlanVsActual()  — diff planned scope vs actual files changed
+  7.  mergeToMain()            — git merge --no-ff + push
+  8.  report + metrics         — reality report to Redis, metrics to Redis
+  8.5 compoundLearnings()      — extract WHEN/CHECK/BECAUSE prevention rules
+
+Circuit breaker: if same anchor is abandoned 3x consecutively, auto-escalate to reframe queue.
 ```
 
 ## Key Files
@@ -41,6 +45,7 @@ Control loop (src/control-loop.mjs):
 | research-loop.mjs | 510 | Multi-agent research (domain/technical/market researchers). |
 | api.mjs | 529 | Express REST API on port 4000. |
 | cleanup.mjs | 105 | Delete cycle-summaries >2d, keep 50 reality-reports. |
+| specs.ts | ~230 | Persistent multi-cycle task decomposition. Redis-backed spec lifecycle. |
 
 ## Running
 
@@ -87,6 +92,14 @@ Always run `node --check src/<file>.mjs` after editing and `npm test` before com
 - Cycle summaries — `hydra:reports:summary:*` (Redis keys, 2-day TTL)
 - Research reports — `hydra:reports:research:*` (Redis keys, kept 20)
 - Proposals — `hydra:proposals:*` (Redis hashes)
+- Specs — `hydra:specs:*` (Redis hashes, 30-day TTL) + `hydra:specs:index` (sorted set)
+
+**Specs (multi-cycle task decomposition):**
+- Created by research loop (complex opportunities) or operator (POST /specs)
+- Each spec has a slug, title, rationale, and ordered task list
+- `selectAnchor()` picks the next unchecked task from the oldest active spec (priority 2.5)
+- On merge, the spec task is marked complete; when all tasks done, spec status → "completed"
+- API: GET /specs, GET /specs/:slug, POST /specs, POST /specs/:slug/archive
 
 **Dashboard:** React + Vite + Tailwind on port 3000 (`~/hydra/dashboard/`)
 - `npm run dev` in dashboard/ for development
@@ -132,9 +145,10 @@ Always run `node --check src/<file>.mjs` after editing and `npm test` before com
 ## Scope-Adaptive Planning
 
 Tasks are classified post-planner based on `scopeBoundary.in` and `acceptanceCriteria`:
-- **quick-fix** (≤2 files, ≤3 criteria, or failing-test/prior-failure anchor): skip skeptic, use codex model for planner, compressed prompt
-- **standard** (default): full ceremony
-- **complex** (>5 files or >8 criteria): log warning, proceed
+- **quick-fix** (≤2 files, ≤3 criteria, or failing-test/prior-failure anchor): skip all gates, use codex model for planner, compressed prompt
+- **standard** (default): deterministic preflight check, no agent call
+- **complex** (>5 files or >8 criteria): deterministic preflight + log warning
+- **high-risk** (any complexity with `risk: high`): deterministic preflight + nano-model safety review
 
 ## Coding Conventions
 
