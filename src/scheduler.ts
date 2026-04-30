@@ -214,9 +214,17 @@ async function maybeRunResearch(eventBus) {
   // Prune old done items from backlog
   try { await pruneOldDoneItems(); } catch {}
 
-  // Check queue depth
+  // Check queue depth — skip research when there's enough work to build
   const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");
   if (queueLen >= RESEARCH_QUEUE_THRESHOLD) return;
+
+  // Ratio throttle: if queue still has items, prefer building over researching.
+  // Research should only run when the queue is nearly empty (< 3 items).
+  const RESEARCH_QUEUE_LOW_WATERMARK = Math.min(3, Math.floor(RESEARCH_QUEUE_THRESHOLD / 2));
+  if (queueLen >= RESEARCH_QUEUE_LOW_WATERMARK) {
+    console.log(`[Scheduler] Queue has ${queueLen} items (>= ${RESEARCH_QUEUE_LOW_WATERMARK}) — prefer building over researching`);
+    return;
+  }
 
   // If queue is low but backlog has items, promote from backlog first
   try {

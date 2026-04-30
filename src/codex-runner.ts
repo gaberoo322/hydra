@@ -374,7 +374,7 @@ async function findPersonality(agentName) {
 async function searchKnowledge(query, limit = 5, sessionId = null) {
   const ovUrl = process.env.OPENVIKING_URL || "http://localhost:1933";
   try {
-    const ovKey = process.env.OPENVIKING_API_KEY || "1080bb34205409e58aa433512cb5e5d6344560adce963c442543001808181115";
+    const ovKey = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
     const body: Record<string, any> = { query, limit };
     if (sessionId) body.session_id = sessionId;
 

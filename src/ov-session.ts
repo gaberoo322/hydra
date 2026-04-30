@@ -16,7 +16,7 @@
  */
 
 const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
-const OV_KEY = process.env.OPENVIKING_API_KEY || "1080bb34205409e58aa433512cb5e5d6344560adce963c442543001808181115";
+const OV_KEY = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
 
 const HEADERS = {
   "Content-Type": "application/json",

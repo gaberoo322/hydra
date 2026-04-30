@@ -14,7 +14,7 @@ import { runMutationTests } from "./mutation-testing.ts";
 import { runAdversarialValidation, findingsToQueueItems, trackMergedCommit, checkRevertCorrelation } from "./adversarial-validation.ts";
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift } from "./metrics.ts";
-import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson } from "./agent-memory.ts";
+import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, recordReflection, loadReflections, clearReflections } from "./agent-memory.ts";
 import { runPlannerAgent } from "./planner-prompt.ts";
 // priorities-refresh removed — the research-strategist handles refresh inside
 // the research loop (Step 5.5). Stale-detection just warns now.
@@ -158,6 +158,36 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
   console.log(`[ControlLoop] Anchor: [${anchor.type}] ${anchor.reference}`);
 
+  // Load episodic reflections — inject past failures as context for the planner
+  const reflectionContext = await loadReflections(anchor.reference).catch(() => "");
+  if (reflectionContext) {
+    continuityContext += "\n" + reflectionContext;
+    console.log(`[ControlLoop] Loaded ${reflectionContext.split("### Attempt").length - 1} prior failure reflections for this anchor`);
+  }
+
+  // =========================================================================
+  // Step 2.5: PRE-VALIDATE ANCHOR — skip stale/completed items before planner
+  // Saves frontier-model inference cost on anchors that will produce no task.
+  // =========================================================================
+  const anchorStale = await isAnchorStale(anchor);
+  if (anchorStale) {
+    console.log(`[ControlLoop] Anchor pre-validation SKIPPED: ${anchorStale}`);
+    await clearProcessingItem(anchor);
+    await ovSession.logOutcome("skipped", `Anchor stale: ${anchorStale}`);
+    await ovSession.commit();
+    await recordCycleMetrics(cycleId, {
+      tasksAttempted: 0, tasksFailed: 0, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 0,
+      testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
+      testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
+      filesChanged: 0, totalDurationMs: Date.now() - startTime,
+      groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: 0,
+      regressionIntroduced: false, taskTitle: `Skipped: ${anchorStale}`,
+      anchorType: anchor.type, anchorReference: anchor.reference,
+      plannerModel: "none", planCacheHit: "false",
+    });
+    return { cycleId, tasks: [], reason: `Anchor stale: ${anchorStale}`, durationMs: Date.now() - startTime };
+  }
+
   // =========================================================================
   // Step 3: PLAN — propose one bounded task (codex agent call)
   // =========================================================================
@@ -198,6 +228,12 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     await ovSession.logPlanner(anchor, null);
     await ovSession.logOutcome("no-work", "Planner produced no task");
     await ovSession.commit();
+    // Record episodic reflection for future retries
+    await recordReflection({
+      cycleId, anchorRef: anchor.reference, taskTitle: "Planner produced no task",
+      outcome: "no-task", reason: "Planner could not produce a valid task from this anchor",
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
+
     await recordCycleMetrics(cycleId, {
       tasksAttempted: 0, tasksFailed: 0, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 1,
       testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
@@ -409,6 +445,10 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   if (!hasDiff) {
     console.log(`[ControlLoop] Executor produced no code changes — failing task`);
     await tracker.transitionTask(taskId, "failed", { reason: "No code changes produced", execResult: { exitCode: execResult.exitCode, duration: execResult.duration } });
+    await recordReflection({
+      cycleId, anchorRef: anchor.reference, taskTitle: task.title,
+      outcome: "no-diff", reason: "Executor ran but produced no code changes",
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
     await storePriorFailure(taskId, "No code changes produced", null);
     try {
       await recordPlannerLesson(cycleId, task, "failed", { failReason: "Executor produced no code changes" });
@@ -527,6 +567,13 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     });
     await tracker.transitionTask(taskId, "failed", { verification });
 
+    // Record episodic reflection for future retries
+    await recordReflection({
+      cycleId, anchorRef: anchor.reference, taskTitle: task.title,
+      outcome: "verification-failed", reason: `Verification failed: ${failedSteps.join(", ")}`,
+      verificationErrors: failedSteps,
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
+
     // Store as prior-failure for retry in next cycle
     await storePriorFailure(taskId, `Verification failed: ${failedSteps.join(", ")}`, verification);
 
@@ -638,9 +685,10 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
 
   // =========================================================================
-  // Step 6.7: MUTATION TESTING — lightweight coverage check
-  // Informational only — does not block merge. Survivors feed into the
-  // reality report and planner memory so future cycles improve coverage.
+  // Step 6.7: MUTATION TESTING — coverage quality gate
+  // For standard/complex tasks: block merge when kill rate < 30%.
+  // For quick-fix: informational only (skip gate).
+  // Survivors feed into the reality report and planner memory.
   // =========================================================================
   let mutationReport: any = null;
   if (verification.filesChanged?.length > 0) {
@@ -650,18 +698,141 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
         timeBudgetMs: 60_000,
         testCommand: "npm test",
       });
-      const killRate = mutationReport.totalMutants > 0
-        ? Math.round((mutationReport.killed / (mutationReport.totalMutants - mutationReport.skipped)) * 100)
+      const testable = mutationReport.totalMutants - mutationReport.skipped;
+      const killRate = testable > 0
+        ? Math.round((mutationReport.killed / testable) * 100)
         : 100;
-      console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${mutationReport.totalMutants - mutationReport.skipped} killed, ${mutationReport.survived} survived)`);
+      console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${testable} killed, ${mutationReport.survived} survived)`);
       if (mutationReport.survived > 0) {
-        console.log(`[ControlLoop] ⚠ ${mutationReport.survived} surviving mutants — executor's tests may not cover changed behavior`);
+        console.log(`[ControlLoop] ${mutationReport.survived} surviving mutants — executor's tests may not cover changed behavior`);
         for (const s of mutationReport.survivors.slice(0, 3)) {
           console.log(`[ControlLoop]   ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]`);
         }
       }
+
+      // Hard gate: block merge when kill rate is critically low on non-trivial tasks
+      const MUTATION_KILL_THRESHOLD = 30;
+      if (complexity !== "quick-fix" && testable >= 3 && killRate < MUTATION_KILL_THRESHOLD) {
+        console.error(`[ControlLoop] MUTATION GATE: kill rate ${killRate}% < ${MUTATION_KILL_THRESHOLD}% threshold — blocking merge`);
+        await tracker.transitionTask(taskId, "failed", { reason: `Mutation gate: ${killRate}% kill rate (${mutationReport.survived} survivors)` });
+        await storePriorFailure(taskId, `Mutation gate: tests don't cover changed behavior (${killRate}% kill rate)`, verification);
+        await recordPlannerLesson(cycleId, task, "failed", { failReason: `Mutation gate: ${killRate}% kill rate`, failedSteps: ["mutation-testing"] });
+        await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "mutation gate blocked merge"));
+
+        try {
+          const { stdout: branchName } = await execFileAsync("git", ["branch", "--show-current"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
+          const broken = branchName.trim();
+          await execFileAsync("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+          await execFileAsync("git", ["clean", "-fd"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+          await execFileAsync("git", ["checkout", "."], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+          if (broken && broken !== "main") {
+            await execFileAsync("git", ["branch", "-D", broken], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
+          }
+        } catch (cleanErr: any) {
+          console.error(`[ControlLoop] Mutation-gate branch cleanup failed: ${cleanErr.message}`);
+        }
+
+        await clearProcessingItem(anchor);
+        await ovSession.logOutcome("failed", `Mutation gate: ${killRate}% kill rate`);
+        await ovSession.commit();
+        await recordCycleMetrics(cycleId, {
+          tasksAttempted: 1, tasksFailed: 1, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 0,
+          testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
+          testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
+          filesChanged: verification.filesChanged.length, totalDurationMs: Date.now() - startTime,
+          groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: verification.totalDurationMs,
+          regressionIntroduced: false, taskTitle: task.title,
+          anchorType: task.anchorType, anchorReference: task.anchorReference,
+          complexity, filesInScope, criteriaCount,
+          plannerModel: task.__plannerModel || "unknown",
+          executorModel: execResult?.__executorModel || "unknown",
+          mutationKillRate: killRate,
+        });
+        return {
+          cycleId,
+          tasks: [{ taskId, finalState: "failed", reason: `Mutation gate: ${killRate}% kill rate` }],
+          durationMs: Date.now() - startTime,
+        };
+      }
     } catch (err: any) {
       console.error(`[ControlLoop] Mutation testing failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  // =========================================================================
+  // Step 6.8: DIFF-AWARE TEST GENERATION (JIT testing pattern)
+  // When mutation testing found survivors on standard/complex tasks, generate
+  // targeted tests for the uncovered code paths. Uses codex-tier model.
+  // Only runs when: survivors > 0, complexity != quick-fix, kill rate < 80%.
+  // =========================================================================
+  if (mutationReport?.survived > 0 && complexity !== "quick-fix") {
+    const testable = mutationReport.totalMutants - mutationReport.skipped;
+    const killRate = testable > 0 ? Math.round((mutationReport.killed / testable) * 100) : 100;
+
+    if (killRate < 80) {
+      console.log(`[ControlLoop] Step 6.8: Generating diff-aware tests for ${mutationReport.survived} surviving mutants...`);
+      try {
+        const survivorDetails = mutationReport.survivors.slice(0, 5).map((s) =>
+          `- ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]: ${s.mutation.description || "mutation survived"}`
+        ).join("\n");
+
+        const jitPrompt = [
+          `## GENERATE TESTS FOR UNCOVERED CODE`,
+          ``,
+          `The executor just implemented: "${task.title}"`,
+          `Mutation testing found ${mutationReport.survived} surviving mutants — the existing tests don't cover these code paths.`,
+          ``,
+          `### Surviving mutants (tests needed for these):`,
+          survivorDetails,
+          ``,
+          `### Changed files:`,
+          verification.filesChanged.map((f: string) => `- ${f}`).join("\n"),
+          ``,
+          `## YOUR JOB`,
+          `Write tests that would FAIL if these mutations were applied. Each test should:`,
+          `1. Target a specific surviving mutant`,
+          `2. Assert the correct behavior that the mutation would break`,
+          `3. Follow the project's existing test patterns`,
+          ``,
+          `Do NOT modify implementation code. Only add/modify test files.`,
+          `Run \`npm test\` after writing tests to verify they pass.`,
+          `Commit with message: "test: add diff-aware tests for [description]"`,
+          ``,
+          `Output JSON: { "summary": "what tests you added", "filesChanged": [...], "testsAdded": N }`,
+        ].join("\n");
+
+        const jitPersonality = await findPersonality("executor");
+        const jitResult = await runAgent({
+          agentName: "jit-tester",
+          personality: jitPersonality,
+          prompt: jitPrompt,
+          model: "codex",
+          taskId: `${taskId}-jit`,
+          correlationId: cycleId,
+          workDir: PROJECT_WORKSPACE,
+        });
+
+        await tracker.logAgentRun(cycleId, "jit-tester", taskId, jitResult.duration, jitResult.exitCode === 0 ? "tests-generated" : "generation-failed", jitResult.usage, jitResult.costUsd);
+        console.log(`[ControlLoop] JIT test generation: ${Math.round(jitResult.duration / 1000)}s, exit ${jitResult.exitCode}`);
+
+        // Re-verify after adding tests — don't merge if new tests break
+        if (jitResult.exitCode === 0) {
+          console.log(`[ControlLoop] Re-verifying after JIT test generation...`);
+          const jitVerification = await runVerification(PROJECT_WORKSPACE, verificationPlan);
+          if (!jitVerification.allPassed) {
+            console.log(`[ControlLoop] JIT tests introduced failures — reverting test changes`);
+            try {
+              await execFileAsync("git", ["checkout", "HEAD~1", "--", "."], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+            } catch { /* intentional: revert best-effort */ }
+          } else {
+            console.log(`[ControlLoop] JIT tests pass — included in merge`);
+            // Update verification and filesChanged for the report
+            verification = jitVerification;
+          }
+        }
+      } catch (err: any) {
+        console.error(`[ControlLoop] JIT test generation failed (non-fatal): ${err.message}`);
+      }
     }
   }
 
@@ -973,8 +1144,9 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // in Queued forever (2026-04-08 debug session).
   const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
   if (finalState === "merged") {
-    // Clear abandonment counter on success — this anchor is no longer stuck
+    // Clear abandonment counter and failure reflections on success
     try { await clearAbandonmentCounter(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
+    try { await clearReflections(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
 
     // If this task came from a spec, mark the spec task complete
     if (anchor.context?.specSlug && anchor.context?.specTaskId) {
@@ -1269,6 +1441,75 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSe
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Pre-validate an anchor before invoking the planner. Returns a skip reason
+ * string if the anchor is stale/completed, or null if it should proceed.
+ *
+ * Checks:
+ * 1. Reference matches a completed item in priorities.md
+ * 2. Queue item is marked COMPLETED: in its reference
+ * 3. Reference is a duplicate of another item already in the work queue
+ */
+async function isAnchorStale(anchor): Promise<string | null> {
+  const ref = (anchor.reference || "").toLowerCase().trim();
+  if (!ref) return null;
+
+  // Check for COMPLETED: prefix in queue items
+  if (ref.startsWith("completed:")) {
+    return "Queue item already marked as completed";
+  }
+
+  // Check against completed items in priorities.md
+  try {
+    const CONFIG_DIR = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
+    const priorities = await readFile(join(CONFIG_DIR, "direction", "priorities.md"), "utf-8");
+
+    // Extract the "What's been completed" section
+    const completedMatch = priorities.match(/# What's been completed[^\n]*\n([\s\S]*?)(?=\n#|$)/i);
+    if (completedMatch) {
+      const completedLines = completedMatch[1]
+        .split("\n")
+        .map(l => l.replace(/^[-*]\s*/, "").trim().toLowerCase())
+        .filter(l => l.length > 10);
+
+      for (const completed of completedLines) {
+        const refWords = new Set<string>(ref.split(/\s+/).filter(w => w.length > 3));
+        const compWords = new Set<string>(completed.split(/\s+/).filter(w => w.length > 3));
+        if (refWords.size === 0 || compWords.size === 0) continue;
+        const overlap = Array.from(refWords).filter((w: string) => compWords.has(w)).length;
+        const similarity = overlap / Math.min(refWords.size, compWords.size);
+        if (similarity > 0.6) {
+          return `Matches completed item: "${completed.slice(0, 80)}"`;
+        }
+      }
+    }
+
+    // Also check "What NOT to work on" section
+    const notWorkMatch = priorities.match(/# What NOT to work on[^\n]*\n([\s\S]*?)(?=\n#|$)/i);
+    if (notWorkMatch) {
+      const notWorkLines = notWorkMatch[1]
+        .split("\n")
+        .map(l => l.replace(/^[-*]\s*/, "").trim().toLowerCase())
+        .filter(l => l.length > 10);
+
+      for (const blocked of notWorkLines) {
+        const refWords = new Set<string>(ref.split(/\s+/).filter(w => w.length > 3));
+        const blockWords = new Set<string>(blocked.split(/\s+/).filter(w => w.length > 3));
+        if (refWords.size === 0 || blockWords.size === 0) continue;
+        const overlap = Array.from(refWords).filter((w: string) => blockWords.has(w)).length;
+        const similarity = overlap / Math.min(refWords.size, blockWords.size);
+        if (similarity > 0.6) {
+          return `Matches 'do not work on': "${blocked.slice(0, 80)}"`;
+        }
+      }
+    }
+  } catch {
+    // priorities.md not readable — proceed without this check
+  }
+
+  return null;
+}
 
 async function loadLastCycleReport() {
   try {

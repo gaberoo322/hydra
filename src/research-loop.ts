@@ -647,30 +647,43 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
         }
       }
 
-      // Simple opportunity or spec creation failed — push to work queue
+      // Simple opportunity or spec creation failed — push to work queue (with dedup)
       {
-        await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify({
-          reference: opp.title,
-          reason: `Research ${researchId}: ${opp.rationale?.slice(0, 200) || "auto-queued from research"}`,
-          context: JSON.stringify({
-            researchId,
-            rank: opp.rank,
-            adjustedScore: opp.adjustedScore,
-            confidence: opp.confidence,
-            category: opp.category,
-            complexity: opp.complexity,
-            description: opp.description,
-            rationale: opp.rationale,
-            acceptanceCriteria: opp.acceptanceCriteria,
-            prerequisites: opp.prerequisites,
-            estimatedCycles: opp.estimatedCycles,
-            sources: opp.sources,
-          }),
-          queuedAt: new Date().toISOString(),
-          source: "research",
-        }));
-        autoQueued++;
-        console.log(`[Research] Auto-queued #${opp.rank}: "${opp.title}" (score: ${opp.adjustedScore}, confidence: ${opp.confidence})`);
+        const titleLower = (opp.title || "").toLowerCase().trim();
+        const existingQueue = await getTracker().redis.lrange("hydra:anchors:work-queue", 0, -1);
+        const isDup = existingQueue.some(raw => {
+          try {
+            const item = JSON.parse(raw);
+            return (item.reference || "").toLowerCase().trim() === titleLower;
+          } catch { return false; }
+        });
+
+        if (isDup) {
+          console.log(`[Research] Skipping duplicate #${opp.rank}: "${opp.title}" (already in queue)`);
+        } else {
+          await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify({
+            reference: opp.title,
+            reason: `Research ${researchId}: ${opp.rationale?.slice(0, 200) || "auto-queued from research"}`,
+            context: JSON.stringify({
+              researchId,
+              rank: opp.rank,
+              adjustedScore: opp.adjustedScore,
+              confidence: opp.confidence,
+              category: opp.category,
+              complexity: opp.complexity,
+              description: opp.description,
+              rationale: opp.rationale,
+              acceptanceCriteria: opp.acceptanceCriteria,
+              prerequisites: opp.prerequisites,
+              estimatedCycles: opp.estimatedCycles,
+              sources: opp.sources,
+            }),
+            queuedAt: new Date().toISOString(),
+            source: "research",
+          }));
+          autoQueued++;
+          console.log(`[Research] Auto-queued #${opp.rank}: "${opp.title}" (score: ${opp.adjustedScore}, confidence: ${opp.confidence})`);
+        }
       }
     }
   }

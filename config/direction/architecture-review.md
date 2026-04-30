@@ -1,151 +1,164 @@
 ---
 date: 2026-04-30
 reviewer: claude-architect
-focus: full system review (third in session, post-implementation)
-overall_score: 7.1
-prior_score: 7.4
-prior_date: 2026-04-30
+focus: general
+overall_score: 6.1
 ---
 
-# Hydra Architecture Review — 2026-04-30 (Evening)
+# Hydra Architecture Review — 2026-04-30
 
 ## Executive Summary
 
-This is the third review in the current session. Since the 7.4 review earlier today, 8 recommendations were implemented: executor scope creep fix, scope enforcement gate (Step 6.9), planner reframe with priorities.md, executor mutation self-check, adversarial validation precision tracking, worktree isolation, periodic regression hunt anchor, and a full build cycle that fixed 19 failing tests + 37 typecheck errors. Despite these implementations, the evidence shows several have not yet taken effect. The merge rate dropped from 78% to 56% (28/50), "Planner produced no task" failures surged to 28% (14/50), scope creep remains at 14-15 files per merge because the planner emits empty `scopeBoundary.in` (bypassing the gate entirely), and the scheduler is currently stopped. The revert rate remains ~1.6/day (11 in 7 days). The system has more safety gates than ever but key ones are not wired correctly, and the planner is struggling to find work despite 7 priority items.
-
-**Score adjustment: 7.4 -> 7.1 (-0.3).** The drop reflects degraded merge rate, planner starvation, and scope gate bypass — partially offset by improved test health and architecture maturity.
+Hydra is a working autonomous development system that has produced 2,810 merges with a 1.0% all-time revert rate, growing the target project from 154 to 3,041 tests. The core control loop (plan -> execute -> verify -> merge) is sound and produces correctly-scoped, tested code. However, **28% of cycles are wasted on "Planner produced no task"**, the knowledge system (OpenViking) returns zero results, the scheduler is stopped (not running autonomously), and research outpaces build capacity 3:1. The agent memory system works well (patterns auto-promote to feedback files) but the specs and Kanban systems are unused. Fixing the no-task waste alone would raise the effective merge rate from 56% to ~78%.
 
 ## Scorecard
 
-| # | Dimension | Score | Delta | Key Finding |
-|---|-----------|-------|-------|-------------|
-| 1 | Control Loop | 6.5/10 | -1.0 | Merge rate dropped 78%->56%. 14 "no task" cycles. Scope gate bypassed. |
-| 2 | Research Pipeline | 8/10 | +0 | 74% conversion, 62 opportunities, 46 auto-queued. Stable and productive. |
-| 3 | Grounding & Verification | 7.5/10 | +0 | 71 orchestrator tests pass. MT live but AV absent from recent merges. 11 reverts/7d. |
-| 4 | Agent Quality | 5/10 | -1.0 | 28% of cycles produce no task. Planner emits empty scopeBoundary. Repeated tasks. |
-| 5 | Autonomy | 7/10 | -0.5 | Scheduler stopped. No failed services. 1450 commits/7d shows high throughput when running. |
-| 6 | Knowledge & Learning | 6.5/10 | +0.5 | 9 patterns, 188 total hits (up from 170). Pattern system active and growing. |
-| 7 | Architecture Fitness | 8.5/10 | +0.5 | 41 source files, 71 tests, 34 config files. Worktree isolation added. Clean modules. |
-| 8 | Cost Efficiency | 7/10 | -1.0 | $1.60/cycle avg but 45% of recent spend is on "no task" cycles ($0.71-$1.64 each wasted). |
+| # | Dimension | Score | Key Finding |
+|---|-----------|-------|-------------|
+| 1 | Control Loop | 7 | 56% merge rate, 1.8% revert rate, but 28% no-task waste |
+| 2 | Research Pipeline | 6 | 74% conversion rate, but 164 research cycles vs ~50 builds (3:1 imbalance) |
+| 3 | Grounding & Verification | 8 | npm test + tsc gates work; 3,041 tests; worktree isolation active |
+| 4 | Agent Quality | 6 | Good feedback files, but planner fails to produce a task 28% of the time |
+| 5 | Autonomy | 4 | Scheduler stopped; only 1 scheduled cycle ever run; system is manual |
+| 6 | Knowledge & Learning | 5 | Pattern memory works (91-hit scope-creep rule), but OpenViking returns empty |
+| 7 | Architecture Fitness | 7 | Clean stack (37 files, 2 deps, Redis+systemd), manageable and testable |
+| 8 | Cost Efficiency | 6 | $1.55/cycle avg, but 28% waste; $2.21 estimated per merged feature |
 
-**Overall: 7.1/10** (down from 7.4)
+**Overall: 6.1/10**
 
 ## Key Findings
 
 ### What's Working
 
-1. **Architecture is the strongest dimension.** 41 TypeScript source files across well-separated concerns, 71 regression tests (all passing), 34 config files for operator control. The control loop at 1299 lines is manageable with clear step numbering. Worktree isolation, mutation testing, adversarial validation, scope enforcement, and preflight gates are all structurally present.
+1. **Hard verification gates** -- npm test + tsc as non-negotiable merge gates is the right architecture. The 1.8% revert rate (24/1,353 in 14 days) proves it catches nearly all regressions before merge.
 
-2. **Research pipeline is reliable.** 10 recent research cycles found 62 opportunities and auto-queued 46 (74% conversion). priorities.md was updated by the research cycle with Polymarket CLOB V2 urgency, regulatory awareness, and well-structured priority items. The "DO NOT re-propose" section prevents churn.
+2. **Test growth is massive** -- From 154 to 3,041 passing tests. The executor is writing real, meaningful tests alongside features. This is rare in autonomous systems.
 
-3. **Test health recovered.** The build cycle fixed all 19 failing tests and 37 typecheck errors. The target project has 3037 tests (up from 2997 — delta +40 in the window). Orchestrator has 71 tests, all green.
+3. **Agent memory pattern system** -- The two-tier architecture (Redis patterns -> feedback file promotion at 5 hits) is well-designed and actively working. The planner's `scope-creep` pattern at 91 hits with auto-promotion to `to-planner.md` shows the system learning from real failures. Executor's `no-diff` (14 hits) and `verification-failure` (25 hits) patterns are similarly valuable.
 
-4. **Learning system is growing.** 9 patterns across 3 agents with 188 cumulative hits (up from 170). The pattern-to-feedback auto-promotion is working. Planner has 5 patterns (119 hits), executor 2 (39 hits), skeptic 2 (30 hits).
+4. **Scope-adaptive planning** -- Classifying tasks as quick-fix/standard/complex/high-risk and adjusting the pipeline (skip gates for quick-fix, add nano-model review for high-risk) is smart resource allocation.
 
-5. **Cost per productive cycle is reasonable.** Merged cycles cost ~$1.60 avg. The recent architecture improvements (scope-adaptive planning, model routing) keep per-cycle costs controlled.
+5. **Deterministic preflight replacing full skeptic** -- Removing the Codex-powered skeptic agent in favor of a deterministic 4-point checklist was a good efficiency move. The old skeptic had a rubber-stamping problem; deterministic checks are more reliable.
+
+6. **Research-to-queue conversion** -- 74% of research opportunities become queued work items. The research loop is productive at finding real work.
 
 ### What's Not Working
 
-1. **Scope enforcement gate is completely bypassed.** The Step 6.9 gate requires `task.scopeBoundary.in.length > 0`, but the planner is emitting empty `scopeBoundary` objects. All 10 recent reality reports show `0 planned` files. The gate literally never fires. This is the most critical finding — a safety gate was implemented but is structurally inert because the planner doesn't populate the field it depends on.
+1. **"Planner produced no task" -- 28% of all cycles (14/50)**
+   This is the single biggest efficiency problem. The planner is called with an anchor, spends ~61 seconds of frontier-model inference, and produces nothing. Most are `user-request` anchors. Root causes likely include:
+   - Queue items that are already completed or too vague for the planner to act on
+   - Anchors that reference completed priorities (the "completed" items in priorities.md)
+   - Insufficient pre-validation of anchor actionability before invoking the planner
 
-2. **Planner starvation is the dominant failure mode.** 14 of 50 cycles (28%) end with "Planner produced no task" — up from 8/50 (16%) in the prior review. The planner reframe prompt now includes priorities.md and accomplishments, but this may have paradoxically made the planner *more* conservative (seeing the completed list and concluding work is done). 9 of the last 20 cycles (45%) produced no task.
+2. **OpenViking knowledge system is inert**
+   `searchKnowledge()` in `codex-runner.ts` calls `/api/v1/search/find` -- it returns empty results every time. OpenViking's `/health` says it's healthy, but the search index appears empty. The `knowledge-indexer.ts` (208 lines) exists but isn't populating data that agents can find. This means **agents operate without any accumulated knowledge context** -- they only see the current grounding snapshot and their personality/feedback files.
 
-3. **Merge rate declined significantly.** 56% (28/50) vs 78% (39/50) in the prior review. The 20 abandoned cycles are almost entirely planner starvation, not execution failures (only 1 failed, 1 rolled back).
+3. **Scheduler is effectively unused**
+   The scheduler shows `stopped` with only 1 cycle ever run. Despite 164 research cycles running, the build scheduler is not driving autonomous execution. The system requires manual `POST /cycle/start` to build anything. This undermines the core value proposition of an autonomous dev system.
 
-4. **Repeated task thrashing.** "Publish KXNBA first-live-run reconciliation proof fixture" was attempted 3 times. This suggests either the task is poorly specified, the executor can't complete it, or the drift detection isn't catching near-duplicates.
+4. **Research outpaces execution 3:1**
+   164 research cycles have produced opportunities, but only ~50 build cycles have consumed them. The work queue has 6 items including 3 duplicates of the same task. Research is producing faster than execution can consume, leading to stale queue items.
 
-5. **Adversarial validation is absent from recent merges.** All 5 recent reality reports show "no-AV". Only 1 of 5 shows mutation testing (100% kill rate). The gates exist but aren't consistently executing.
+5. **Specs and Kanban are hollow**
+   Zero active specs. All Kanban lanes (queued, inProgress, blocked, triage, done) are at 0 items. These systems exist architecturally but aren't being used. Work flows through the queue and research loop, bypassing the Kanban entirely.
 
-6. **Revert rate unchanged.** 11 reverts in 7 days (~1.6/day). The new safety gates (scope enforcement, worktree isolation, MT, AV) haven't had enough runtime to impact this, but the scope gate bypass means the most common issue type (scope creep) remains unguarded.
-
-## Comparison to State of the Art (2026)
-
-### vs. Hermes Agent (Nous Research)
-Hermes Agent's learning loop distills successful procedures into reusable skill documents, achieving 40% faster task completion with self-created skills vs fresh instances. Hydra's WHEN/CHECK/BECAUSE pattern system is functionally similar but less sophisticated — it records failure patterns rather than successful procedures. The key gap: Hydra learns what NOT to do (188 prevention hits) but doesn't encode what WORKS (no "skill" equivalent).
-
-### vs. Meta JiT Testing
-Meta's Just-in-Time testing achieves 4x bug detection through mutation testing integrated into the code review loop. Hydra's mutation testing is architecturally present but inconsistently executed (1 of 5 recent merges had MT). The executor mutation self-check instruction was added but isn't producing visible results in reality reports.
-
-### vs. Industry Mutation Testing Thresholds
-Gartner recommends 70% mutation score for critical paths, 50% for standard features. Hydra's single observed cycle achieved 100% kill rate, but the sample size (1 cycle, 2 mutants) is too small to draw conclusions. The threshold should be set and enforced once more data accumulates.
-
-### vs. Anthropic Agentic Coding Trends
-The 2026 Agentic Coding Trends Report emphasizes context engineering over prompt design. Hydra's planner starvation problem is fundamentally a context engineering failure — the planner has the priorities.md content but lacks sufficient context about what remains undone vs what was completed. The "completed" list may be crowding out the "todo" list in the context window.
+6. **Work queue has duplicates**
+   "Add stream freshness route-quality scoring" appears 3 times in the queue. There's also a "COMPLETED:" item still in the queue. Queue hygiene is poor.
 
 ## Recommendations
 
 ### Quick Wins (< 1 day)
 
-**1. Fix scope gate bypass: planner must emit scopeBoundary.in** (CRITICAL)
-- **What**: In `planner-prompt.ts`, make `scopeBoundary.in` a required field in the task schema and add a post-planner validation that rejects tasks with empty `scopeBoundary.in`. If the planner doesn't specify files, synthesize from the task description.
-- **Why**: The Step 6.9 scope gate was built but never fires because `task.scopeBoundary.in` is always empty. This is a wiring defect, not a design defect.
-- **Evidence**: All 10 recent reality reports show `scopeBoundary: {}` and 14-15 files of scope creep per merge.
-- **Impact**: Would immediately activate the scope enforcement gate for future cycles.
+**1. Pre-validate anchors before calling the planner**
+- **What**: Before invoking the frontier-model planner, check if the anchor reference matches a completed item in `priorities.md` (the "What's been completed" section) or if the queue item is stale/duplicate. Skip the cycle with a fast abort instead of burning $1.55 on a no-task result.
+- **Why**: Eliminates 28% waste -> improves effective merge rate from 56% to ~78%. Saves ~$21/50 cycles.
+- **Evidence**: 14/50 cycles produced "Planner produced no task", all consuming ~61s of frontier inference.
+- **Files**: `control-loop.ts` (before `runPlannerAgent`), `anchor-selection.ts` (add staleness check)
+- **Risk**: Low -- worst case is skipping a legitimate anchor, which circuit-breaker already handles via reframe.
+- **Dependency**: None.
 
-**2. Fix planner starvation by restructuring prompt context** (HIGH)
-- **What**: In the planner prompt, put the priority TODO items BEFORE the completed list. Limit the completed list to the last 5 items (not all 17). Add an explicit instruction: "If priorities.md has uncompleted items, you MUST propose work on one of them."
-- **Why**: 45% of recent cycles produce no task. The completed list (17 items) may be anchoring the planner to believe work is done. Priority ordering in the prompt matters for LLM attention.
-- **Evidence**: "Planner produced no task" is the #1 repeated title (14 of 50 cycles).
-- **Impact**: Could recover 10+ cycles per 50 from "no task" to productive.
+**2. Deduplicate work queue on insertion**
+- **What**: Add a dedup check in `POST /queue` and in the research loop's auto-queue path. Compare `reference` field against existing queue items before inserting.
+- **Why**: Prevents wasted cycles on duplicate work. Currently 3/6 queue items are the same task.
+- **Evidence**: "Add stream freshness route-quality scoring" appears 3 times in the queue.
+- **Files**: `api.ts` (POST /queue handler), `research-loop.ts` (auto-queue logic)
+- **Risk**: None -- dedup is purely additive.
+- **Dependency**: None.
 
-**3. Restart the scheduler** (IMMEDIATE)
-- **What**: `curl -X POST http://localhost:4000/api/scheduler/start`
-- **Why**: Scheduler is stopped. 0 errors, so this is a clean restart.
-- **Evidence**: Scheduler status shows `running: false`, `cyclesRun: 13`, `consecutiveErrors: 0`.
+**3. Diagnose and fix OpenViking search**
+- **What**: Check if the knowledge indexer is actually running and indexing documents. Verify the search endpoint `/api/v1/search/find` works. The indexer may have a configuration or API version mismatch.
+- **Why**: Agents currently operate without knowledge context. Fixing this means planners and executors get relevant prior work, reducing redundant proposals and improving code quality.
+- **Evidence**: `searchKnowledge()` returns empty; OpenViking `/health` is ok but search yields 0 results.
+- **Files**: `knowledge-indexer.ts`, `codex-runner.ts:374-406`
+- **Risk**: Low -- OpenViking is a separate service; fixing its integration doesn't affect the core loop.
+- **Dependency**: OpenViking must be running (it is).
 
 ### Medium Efforts (1-5 days)
 
-**4. Add positive skill memory (not just failure patterns)**
-- **What**: When a cycle merges successfully with zero scope creep and no operator revert within 24h, extract a "SKILL" pattern: WHEN [task type] / DO [approach] / BECAUSE [it worked]. Inject these into the planner prompt alongside WHEN/CHECK/BECAUSE prevention rules.
-- **Why**: Hermes Agent achieves 40% faster completion with procedural skill memory. Hydra only learns from failures (188 prevention hits) but never encodes what works. This is a structural gap vs state-of-art.
-- **Evidence**: 28 merged cycles in 50 — each is a potential skill source that's currently discarded.
-- **Dependency**: `trackMergedCommit` + `checkRevertCorrelation` (already implemented) can gate skill creation on "no revert within 24h."
+**4. Throttle research-to-build ratio**
+- **What**: Add a ratio constraint to the scheduler: don't run another research cycle until the build queue is below a threshold (e.g., 3 items). Currently research runs unthrottled while builds are manual.
+- **Why**: 164 research cycles vs ~50 builds creates a growing backlog of stale opportunities. Research should feed execution, not outrun it.
+- **Evidence**: 3:1 research-to-build ratio, duplicate queue items from repeated research.
+- **Files**: `scheduler.ts` (cycle selection logic), `research-loop.ts`
+- **Risk**: Could slow research discovery during active build periods. Mitigate with operator override.
+- **Dependency**: Queue dedup (recommendation #2) should land first.
 
-**5. Enforce mutation testing and adversarial validation execution**
-- **What**: Add a reality report check: if `mutationTesting` is null for a merged standard/complex task, log a warning and investigate why the gate was skipped. Add a metric for MT/AV execution rate.
-- **Why**: Only 1 of 5 recent merges had mutation testing. 0 of 5 had adversarial validation. These gates exist but aren't consistently firing — the system has verification theater.
-- **Evidence**: Reality reports show "no-MT" and "no-AV" for 4 of 5 recent merges.
+**5. Wire mutation testing into the verification step**
+- **What**: `mutation-testing.ts` exists but it's unclear if it's actually called during cycles. Wire it into `runVerification()` for standard and complex tasks: after tests pass, inject a mutation into the changed files and verify tests catch it.
+- **Why**: Meta's JIT testing shows 4x higher bug detection with mutation-validated tests. This would catch the category of regressions that cause the 1.8% revert rate -- cases where tests pass but don't actually validate the change.
+- **Evidence**: Meta's paper (arXiv 2601.22832), Hydra's existing module, 24 reverts in 14 days.
+- **Files**: `mutation-testing.ts`, `verifier.ts`, `control-loop.ts` (verification step)
+- **Risk**: Medium -- mutation testing adds latency. Only run on standard/complex tasks, not quick-fix.
+- **Dependency**: None.
 
-**6. Add task-level deduplication for the repeated KXNBA fixture task**
-- **What**: The drift detection should check not just title similarity but also the specific files/modules involved. "Publish KXNBA first-live-run reconciliation proof fixture" was attempted 3 times — drift detection should have caught attempts 2 and 3.
-- **Evidence**: 3 attempts at the same task title in recent cycles.
+**6. Activate the scheduler with build cycles**
+- **What**: Start the scheduler and configure it to alternate between research and build cycles based on queue depth. Build when queue > 0, research when queue <= 2.
+- **Why**: The system's autonomous value comes from running continuously. With fixes #1-#3 in place, the loop is reliable enough to run unattended.
+- **Evidence**: Scheduler has run only 1 cycle. All execution is manual POST /cycle/start.
+- **Files**: `scheduler.ts`
+- **Risk**: Medium -- need confidence in the pre-validation (fix #1) before auto-running. Start with a low cadence (15-min intervals).
+- **Dependency**: Fixes #1, #2, #3.
 
 ### Strategic Shifts (1-2 weeks)
 
-**7. Restructure planner from "find work" to "select from menu"**
-- **What**: Instead of having the planner read priorities.md and decide what to do, present it with a structured menu of ready-to-start tasks (from the work queue + priorities). The planner's job becomes "pick the best one and scope it" rather than "find something to work on." This is the difference between a generator and a selector.
-- **Why**: The "find work" model fails 28% of the time. A menu-based approach eliminates "no work" cycles entirely — if the menu is empty, the system knows to run research instead of wasting a planner call.
-- **Impact**: Could eliminate all "no task" abandonments and save ~$1/cycle * 14 cycles = $14 per 50 cycles.
-- **Risk**: Medium — requires restructuring the anchor selection to pre-build task candidates.
+**7. Adopt Reflexion-style episodic memory for failed cycles**
+- **What**: When a cycle fails (no-task, abandoned, verification failure), generate a natural-language reflection: what was attempted, why it failed, what should be different next time. Store these reflections and inject them as context when the same anchor is retried.
+- **Why**: The Darwin Godel Machine improved from 20% to 50% on SWE-bench by adding "a history of what has been tried before and why it failed." Princeton's Reflexion framework shows that natural-language self-critique outperforms random retry. Hydra's current circuit-breaker escalates after 3 failures, but doesn't carry forward WHY something failed.
+- **Evidence**: 28% no-task rate, 12% other-abandoned rate. DGM paper (arXiv 2505.22954), Reflexion framework.
+- **Files**: New module or extension to `agent-memory.ts`, integration in `control-loop.ts`
+- **Risk**: Reflection quality depends on the model. Use nano-tier for cost efficiency.
+- **Dependency**: None, but benefits from fix #3 (knowledge system) for storage.
 
-**8. Implement operator revert feedback loop**
-- **What**: When `checkRevertCorrelation` detects a revert of a Hydra-merged commit, automatically: (a) extract the commit diff, (b) classify the revert reason (scope creep, semantic error, test gap, formatting), (c) create a WHEN/CHECK/BECAUSE pattern, (d) queue a follow-up task to write a test that would have caught the issue.
-- **Why**: 11 reverts in 7 days. Each revert is a learning opportunity that's currently wasted. The adversarial validation precision tracking was added but the upstream signal (what was the revert actually about?) isn't being captured.
-- **Evidence**: `trackMergedCommit` and `checkRevertCorrelation` are implemented but don't close the loop back to agent memory or test generation.
+**8. Implement diff-aware test generation at verification time**
+- **What**: Following Meta's JIT testing pattern: when the executor produces a diff, generate additional tests specifically targeting the changed code paths. Use mutation testing to validate these tests actually catch faults.
+- **Why**: The current verification only runs existing tests. Diff-aware generation ensures new code is tested for the specific behaviors it introduces, not just that it doesn't break existing tests. Meta reports 4x bug detection improvement.
+- **Evidence**: Meta's JIT testing (Engineering at Meta, Feb 2026), 22,126 tests evaluated with 4x catch rate.
+- **Files**: New module integrating `mutation-testing.ts` + `verifier.ts` + executor prompt
+- **Risk**: High cost per cycle (additional LLM call for test generation). Use codex-tier model. Only for standard/complex tasks.
+- **Dependency**: Fix #5 (mutation testing integration).
 
-## Delta from Prior Review (2026-04-30 earlier)
+## Comparison to State of the Art
 
-| Recommendation | Status | Impact |
-|---------------|--------|--------|
-| #1 Fix executor scope creep with git checkout | Implemented | Not measurable yet — scope creep persists because scopeBoundary.in is empty |
-| #2 Fix failed prediction-market-cron | Resolved | No failed services |
-| #3 Improve planner "no work" rate | Implemented (priorities.md in reframe) | **Backfired** — no-task rate rose from 16% to 28% |
-| #4 Integrate mutation testing in executor loop | Implemented (rule 4b) | Not visible in reality reports yet |
-| #5 Add scope-enforcement gate | Implemented (Step 6.9) | **Bypassed** — planner emits empty scopeBoundary |
-| #6 Add adversarial validation tracking | Implemented (trackMergedCommit) | Too early to measure |
-| #7 Executor workspace isolation (worktrees) | Implemented | Too early to measure scope creep impact |
-| #8 Self-play regression hunt | Implemented (every 10 merges) | Not yet triggered |
+| Dimension | Hydra | State of Art | Gap |
+|-----------|-------|-------------|-----|
+| Merge rate | 56% (effective) | Aider 49.2%, OpenHands 77.6% (SWE-bench) | Comparable but different benchmarks |
+| Architecture | Planner/Executor/Verifier | Same triad pattern | Aligned |
+| Model routing | 3-tier (frontier/codex/nano) | 90/10 cascade (87% savings) | Hydra does this |
+| Verification | npm test + tsc | Meta JIT + mutation (4x detection) | Gap: no JIT testing |
+| Self-improvement | Pattern memory + promotion | Reflexion + DGM (episodic memory) | Gap: no episodic failure memory |
+| Knowledge | OpenViking (broken) | Continuum Memory / editable RAG | Gap: system is inert |
+| Research -> Code | 74% conversion | GROUNDING.md / epistemic docs | Hydra has priorities.md (similar) |
+| Autonomy | Manual (scheduler stopped) | Long-running autonomous loops | Gap: not running autonomously |
+| Cost | $1.55/cycle, $2.21/merge | 60-80% reduction possible with caching | Gap: no prompt caching |
 
-**Score change: 7.4 -> 7.1 (-0.3)**
-
-The score drop is driven by three factors: (1) merge rate declined from 78% to 56%, (2) planner starvation worsened from 16% to 28%, and (3) the scope enforcement gate — the most impactful recommendation from the prior review — is structurally bypassed. The architectural improvements are real and well-implemented, but two of them need wiring fixes before they can produce results.
+**Hydra's architectural choices are sound** -- the Planner/Executor/Verifier triad, model routing, deterministic preflight, and pattern memory all align with industry best practices. The gaps are primarily in **operational activation** (scheduler stopped, OpenViking dead, specs unused) rather than architectural design. The system has been carefully engineered but is underutilized.
 
 ## Next Review Triggers
 
-Re-run this assessment when any of these occur:
-1. Scope gate fires for the first time (scopeBoundary.in populated by planner)
-2. Planner starvation drops below 10% (prompt restructuring working)
-3. 3+ consecutive merges with mutation testing results (MT gate consistent)
-4. Revert rate drops below 5 per 7-day window
-5. 50 cycles with scheduler running continuously
-6. 14 days from this review (2026-05-14)
+Re-run this assessment when:
+1. The scheduler has been running for 7+ continuous days
+2. 100+ additional build cycles have completed
+3. OpenViking is fixed and agents are getting knowledge context
+4. Mutation testing is wired into the verification loop
+5. The no-task rate drops below 10%
+6. Major architectural changes are proposed (new agent types, new model tiers, etc.)

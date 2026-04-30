@@ -144,6 +144,20 @@ function createApi(eventBus) {
       if (!reference) {
         return res.status(400).json({ error: "Missing 'reference' field — what should Hydra work on?" });
       }
+
+      // Dedup: check if an item with the same reference already exists in the queue
+      const existing = await getTracker().redis.lrange("hydra:anchors:work-queue", 0, -1);
+      const refLower = reference.toLowerCase().trim();
+      const duplicate = existing.some(raw => {
+        try {
+          const item = JSON.parse(raw);
+          return (item.reference || "").toLowerCase().trim() === refLower;
+        } catch { return false; }
+      });
+      if (duplicate) {
+        return res.json({ queued: false, reason: "Duplicate — item with same reference already in queue", reference });
+      }
+
       const item = { reference, reason: reason || "queued by operator", context, queuedAt: new Date().toISOString() };
       await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify(item));
       const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");

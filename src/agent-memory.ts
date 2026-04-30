@@ -25,7 +25,7 @@ import { join, resolve } from "node:path";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
-const OV_KEY = process.env.OPENVIKING_API_KEY || "1080bb34205409e58aa433512cb5e5d6344560adce963c442543001808181115";
+const OV_KEY = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
 const MAX_PATTERNS = 15;
@@ -499,5 +499,136 @@ export async function consolidateMemory() {
       console.log(`[Memory] Consolidated ${agent}: ${before} → ${kept.length} patterns (${before - kept.length} stale pruned)`);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Episodic failure reflections (Reflexion pattern)
+//
+// When a cycle fails, store a natural-language reflection about what was
+// attempted, why it failed, and what should be different next time. When the
+// same anchor is retried, inject these reflections as context so the planner
+// can avoid repeating the same mistakes.
+//
+// Redis key: hydra:reflections:{normalizedRef} — list of JSON reflections
+// TTL: 7 days — old reflections auto-expire
+// ---------------------------------------------------------------------------
+
+const REFLECTION_PREFIX = "hydra:reflections:";
+const REFLECTION_TTL = 7 * 24 * 60 * 60; // 7 days
+const MAX_REFLECTIONS_PER_ANCHOR = 5;
+
+function reflectionKey(anchorRef: string): string {
+  return REFLECTION_PREFIX + (anchorRef || "unknown").replace(/\s+/g, "-").toLowerCase().slice(0, 120);
+}
+
+type Reflection = {
+  cycleId: string;
+  anchorRef: string;
+  taskTitle: string;
+  outcome: string;
+  reason: string;
+  whatWasAttempted: string;
+  whyItFailed: string;
+  whatShouldChange: string;
+  timestamp: string;
+};
+
+/**
+ * Record a failure reflection after a cycle fails or produces no task.
+ */
+export async function recordReflection(opts: {
+  cycleId: string;
+  anchorRef: string;
+  taskTitle: string;
+  outcome: string;
+  reason: string;
+  filesChanged?: string[];
+  verificationErrors?: string[];
+}) {
+  const r = getRedis();
+  const key = reflectionKey(opts.anchorRef);
+
+  // Generate a structured reflection
+  const reflection: Reflection = {
+    cycleId: opts.cycleId,
+    anchorRef: opts.anchorRef,
+    taskTitle: opts.taskTitle,
+    outcome: opts.outcome,
+    reason: opts.reason,
+    whatWasAttempted: opts.taskTitle || "Unknown task",
+    whyItFailed: opts.reason || "Unknown reason",
+    whatShouldChange: generateAdvice(opts),
+    timestamp: new Date().toISOString(),
+  };
+
+  await r.rpush(key, JSON.stringify(reflection));
+  await r.expire(key, REFLECTION_TTL);
+
+  // Trim to keep only the most recent reflections
+  const len = await r.llen(key);
+  if (len > MAX_REFLECTIONS_PER_ANCHOR) {
+    await r.ltrim(key, len - MAX_REFLECTIONS_PER_ANCHOR, -1);
+  }
+
+  console.log(`[Memory] Recorded reflection for "${opts.anchorRef.slice(0, 60)}" (${opts.outcome})`);
+}
+
+function generateAdvice(opts: { outcome: string; reason: string; filesChanged?: string[]; verificationErrors?: string[] }): string {
+  if (opts.outcome === "no-task") {
+    return "The planner could not produce a task for this anchor. The anchor may be too vague, already completed, or blocked by an external dependency. Consider: is there a more specific, actionable formulation?";
+  }
+  if (opts.outcome === "no-diff") {
+    return "The executor ran but produced no code changes. The task may have been unclear, already implemented, or blocked by missing context. Consider: provide more specific scope boundary and acceptance criteria.";
+  }
+  if (opts.verificationErrors?.length) {
+    return `Verification failed on: ${opts.verificationErrors.join(", ")}. The next attempt should address these specific failures. Consider: narrower scope, or fix the verification errors before adding new behavior.`;
+  }
+  if (opts.outcome === "abandoned") {
+    return `Task was abandoned: ${opts.reason}. Consider: different approach, narrower scope, or verify prerequisites are met.`;
+  }
+  return `Previous attempt failed: ${opts.reason}. The next attempt should take a different approach.`;
+}
+
+/**
+ * Load reflections for an anchor reference and format them for the planner.
+ * Returns empty string if no reflections exist.
+ */
+export async function loadReflections(anchorRef: string): Promise<string> {
+  const r = getRedis();
+  const key = reflectionKey(anchorRef);
+  const raw = await r.lrange(key, 0, -1);
+  if (raw.length === 0) return "";
+
+  const reflections: Reflection[] = raw.map(r => {
+    try { return JSON.parse(r); } catch { return null; }
+  }).filter(Boolean);
+
+  if (reflections.length === 0) return "";
+
+  const lines = [
+    `## PRIOR ATTEMPTS (${reflections.length} previous failures for this anchor)`,
+    ``,
+    `IMPORTANT: This anchor has been tried before and FAILED. Do NOT repeat the same approach.`,
+    ``,
+  ];
+
+  for (const ref of reflections) {
+    lines.push(`### Attempt: ${ref.cycleId}`);
+    lines.push(`- **Task**: ${ref.taskTitle}`);
+    lines.push(`- **Outcome**: ${ref.outcome}`);
+    lines.push(`- **Why it failed**: ${ref.whyItFailed}`);
+    lines.push(`- **Advice**: ${ref.whatShouldChange}`);
+    lines.push(``);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Clear reflections for an anchor after a successful merge.
+ */
+export async function clearReflections(anchorRef: string) {
+  const r = getRedis();
+  await r.del(reflectionKey(anchorRef));
 }
 

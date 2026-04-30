@@ -87,10 +87,11 @@ Deliver real-money cross-venue proof, route-level execution evidence, and operat
 - [x] Persist Kalshi batch orderbook timestamp evidence in run packets
 - [x] Add Kalshi RFQ visible-book route quality comparator
 - [ ] Validate Polymarket CLOB V2 execution end-to-end (V2 went live April 28)
-- [ ] Persist dynamic Kalshi and Polymarket fee evidence in sports arbitrage run packets
+- [ ] Persist Polymarket V2 per-sport fee evidence and pUSD collateral lifecycle
+- [ ] Instrument execution latency tracking end-to-end
 - [ ] Track sports arbitrage opportunity half-life from first detection through expiry
 - [ ] Wire Polymarket US preview, slippage, and AUTOMATIC proof into live sports legs
-- [ ] Persist Kalshi account limit and endpoint-cost snapshots in live run packets
+- [ ] Persist Kalshi account limits, rate-limit token buckets, and fractional trading fields
 
 ## M7: Sports Forecast Trust & Sizing Compounding
 status: planned
@@ -130,3 +131,18 @@ Address the collapsing arb half-life (2.7s avg, 3.6s NBA) by optimizing executio
 - [ ] Add parallel first-leg and second-leg pre-positioning for near-simultaneous execution
 - [ ] Implement WebSocket-based price monitoring for sub-second opportunity detection
 - [ ] Add execution-speed metrics to run packets (time-to-first-fill, total-round-trip)
+- [ ] Consume Kalshi order_group_updates WebSocket channel for real-time lifecycle events
+- [ ] Consume Kalshi fractional trading and settlement_value fields for precision sizing
+
+## M10: Sharp-Line Benchmarking & Multi-Venue Expansion
+status: planned
+started:
+completed:
+
+Replace restricted Pinnacle API with aggregated sharp-line data and explore new venue opportunities.
+
+- [ ] Wire OpticOdds unified odds API as sharp-line benchmark
+- [ ] Exploit FIFA World Cup 2026 Kalshi-Polymarket spreads (June 11 - July 19)
+- [ ] Add MLB Polymarket-Sportradar official data advantage to scanner pair matching
+- [ ] Model Kalshi combo contracts for multi-leg correlation arbitrage
+- [ ] Evaluate FanDuel Predicts (CME Group) and Hyperliquid HIP-4 as future venues
