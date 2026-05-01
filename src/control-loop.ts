@@ -11,6 +11,7 @@ import { prepareWorkspace } from "./prepare-workspace.ts";
 import { mergeToMain } from "./merge.ts";
 import { runVerification, validateDiffExists, summarizeVerification, defaultVerificationPlan } from "./verifier.ts";
 import { runMutationTests } from "./mutation-testing.ts";
+import { runJitTests } from "./jit-testing.ts";
 import { runAdversarialValidation, findingsToQueueItems, trackMergedCommit, checkRevertCorrelation } from "./adversarial-validation.ts";
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift } from "./metrics.ts";
@@ -835,6 +836,95 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
 
   // =========================================================================
+  // Step 6.85: JIT TEST GENERATION — adversarial regression tests from diff
+  // For standard/complex tasks, generate tests targeting the diff itself.
+  // Independent of mutation testing — runs on every non-quick-fix diff.
+  // Tests that pass are kept; failing ones discarded; bug-catchers block merge.
+  // =========================================================================
+  let jitReport: any = null;
+  if (complexity !== "quick-fix" && diff && verification.filesChanged?.length > 0) {
+    console.log(`[ControlLoop] Step 6.85: Running JiT test generation on diff...`);
+    try {
+      jitReport = await runJitTests(
+        PROJECT_WORKSPACE,
+        diff,
+        verification.filesChanged,
+        task.title,
+        cycleId,
+        taskId,
+      );
+      console.log(`[ControlLoop] JiT tests: ${jitReport.generated} generated, ${jitReport.kept} kept, ${jitReport.discarded} discarded${jitReport.caughtBug ? " — BUG DETECTED" : ""}`);
+
+      if (jitReport.caughtBug) {
+        console.error(`[ControlLoop] JIT GATE: generated test caught a bug — blocking merge`);
+        console.error(`[ControlLoop] Bug details: ${jitReport.bugDetails?.slice(0, 300)}`);
+        await tracker.transitionTask(taskId, "failed", { reason: `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}` });
+        await storePriorFailure(taskId, `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}`, verification);
+        await recordPlannerLesson(cycleId, task, "failed", { failReason: "JiT test caught a regression bug", failedSteps: ["jit-testing"] });
+        await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "JiT test caught bug"));
+
+        try {
+          const { stdout: branchName } = await execFileAsync("git", ["branch", "--show-current"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
+          const broken = branchName.trim();
+          await execFileAsync("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+          await execFileAsync("git", ["clean", "-fd"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+          await execFileAsync("git", ["checkout", "."], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+          if (broken && broken !== "main") {
+            await execFileAsync("git", ["branch", "-D", broken], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
+          }
+        } catch (cleanErr: any) {
+          console.error(`[ControlLoop] JiT-gate branch cleanup failed: ${cleanErr.message}`);
+        }
+
+        await clearProcessingItem(anchor);
+        await ovSession.logOutcome("failed", `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}`);
+        await ovSession.commit();
+        await recordCycleMetrics(cycleId, {
+          tasksAttempted: 1, tasksFailed: 1, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 0,
+          testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
+          testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
+          filesChanged: verification.filesChanged.length, totalDurationMs: Date.now() - startTime,
+          groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: verification.totalDurationMs,
+          regressionIntroduced: false, taskTitle: task.title,
+          anchorType: task.anchorType, anchorReference: task.anchorReference,
+          complexity, filesInScope, criteriaCount,
+          plannerModel: task.__plannerModel || "unknown",
+          executorModel: execResult?.__executorModel || "unknown",
+          jitTestsGenerated: jitReport.generated,
+          jitTestsKept: jitReport.kept,
+          jitTestsCaughtBug: 1,
+        });
+        return {
+          cycleId,
+          tasks: [{ taskId, finalState: "failed", reason: `JiT test caught bug` }],
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      // If JiT tests were kept, re-verify to make sure full test suite still passes
+      if (jitReport.kept > 0) {
+        console.log(`[ControlLoop] Re-verifying after JiT test generation (${jitReport.kept} tests added)...`);
+        const jitVerification = await runVerification(PROJECT_WORKSPACE, verificationPlan);
+        if (!jitVerification.allPassed) {
+          console.log(`[ControlLoop] JiT tests caused verification failure — reverting JiT test commits`);
+          // Revert the JiT test commits
+          for (let i = 0; i < jitReport.kept; i++) {
+            try {
+              await execFileAsync("git", ["revert", "--no-edit", "HEAD"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
+            } catch { /* intentional: revert best-effort */ }
+          }
+          jitReport.kept = 0;
+          jitReport.discarded = jitReport.generated;
+        } else {
+          verification = jitVerification;
+        }
+      }
+    } catch (err: any) {
+      console.error(`[ControlLoop] JiT test generation failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  // =========================================================================
   // Step 6.9: SCOPE ENFORCEMENT — hard gate on out-of-scope changes
   // If >80% of changed files are outside planned scope, reject the merge.
   // =========================================================================
@@ -1073,6 +1163,13 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
         type: s.mutation.type,
       })),
     } : null,
+    jitTesting: jitReport ? {
+      generated: jitReport.generated,
+      kept: jitReport.kept,
+      discarded: jitReport.discarded,
+      caughtBug: jitReport.caughtBug,
+      durationMs: jitReport.durationMs,
+    } : null,
     adversarialValidation: null as any,
     unresolvedUncertainty,
     rollbackRisk,
@@ -1155,6 +1252,9 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     complexity, filesInScope, criteriaCount,
     plannerModel: task.__plannerModel || "unknown",
     executorModel: execResult?.__executorModel || "unknown",
+    jitTestsGenerated: jitReport?.generated || 0,
+    jitTestsKept: jitReport?.kept || 0,
+    jitTestsCaughtBug: jitReport?.caughtBug ? 1 : 0,
   });
 
   // Step 8.1: Pattern detection — check for systemic issues across recent cycles
