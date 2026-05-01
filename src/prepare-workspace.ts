@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { getTracker } from "./task-tracker.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -97,7 +98,7 @@ export async function prepareWorkspace(projectDir) {
 
   // Acquire workspace lock — prevents concurrent git operations from
   // Claude Code and Codex stepping on each other's workspace state
-  const WORKSPACE_LOCK_KEY = "hydra:workspace:lock";
+  const WORKSPACE_LOCK_KEY = redisKeys.workspaceLock();
   const redis = getTracker().redis;
   const locked = await redis.set(WORKSPACE_LOCK_KEY, `${process.pid}`, "NX", "EX", 60);
   if (!locked) {

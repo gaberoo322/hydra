@@ -1,13 +1,14 @@
 import Redis from "ioredis";
 import { STREAMS } from "./event-bus.ts";
+import { redisKeys } from "./redis-keys.ts";
 
-const KEY_ACTIVE = "hydra:cycle:active";
-const KEY_LAST = "hydra:cycle:last";
-const cycleKey = (id) => `hydra:cycle:${id}`;
-const tasksKey = (id) => `hydra:cycle:${id}:tasks`;
-const taskKey = (id) => `hydra:task:${id}`;
-const agentsKey = (id) => `hydra:cycle:${id}:agents`;
-const costsKey = (id) => `hydra:cycle:${id}:costs`;
+const KEY_ACTIVE = redisKeys.cycleActive();
+const KEY_LAST = redisKeys.cycleLast();
+const cycleKey = (id) => redisKeys.cycle(id);
+const tasksKey = (id) => redisKeys.cycleTasks(id);
+const taskKey = (id) => redisKeys.task(id);
+const agentsKey = (id) => redisKeys.cycleAgents(id);
+const costsKey = (id) => redisKeys.cycleCosts(id);
 
 /** TTL for cycle-related Redis keys: 7 days in seconds */
 const CYCLE_KEY_TTL = 7 * 24 * 60 * 60; // 604800
@@ -29,12 +30,12 @@ const VALID_TRANSITIONS = {
   merged:         [],
 };
 
-const evidenceKey = (taskId, state) => `hydra:task:${taskId}:evidence:${state}`;
+const evidenceKey = (taskId, state) => redisKeys.taskEvidence(taskId, state);
 
 // Dependency tracking keys
-const DEPS_COMPLETED = "hydra:deps:completed";
-const DEPS_INDEX = "hydra:deps:index";
-const heldKey = (id) => `hydra:deps:held:${id}`;
+const DEPS_COMPLETED = redisKeys.depsCompleted();
+const DEPS_INDEX = redisKeys.depsIndex();
+const heldKey = (id) => redisKeys.depsHeld(id);
 
 class TaskTracker {
   redis: any;

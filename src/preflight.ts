@@ -6,6 +6,7 @@
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { loadAgentMemory, formatMemoryForPrompt } from "./agent-memory.ts";
 import { getTracker } from "./task-tracker.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 // ---------------------------------------------------------------------------
 // Operator-blocked detection
@@ -163,9 +164,9 @@ export async function preflightCheck(task, grounding, groundingSummary) {
   // 1. Duplicate check — compare against recent cycle history in Redis
   try {
     const r = getTracker().redis;
-    const recentIds = await r.zrevrange("hydra:reports:reality:index", 0, 9);
+    const recentIds = await r.zrevrange(redisKeys.realityReportIndex(), 0, 9);
     for (const id of recentIds) {
-      const raw = await r.get(`hydra:reports:reality:${id}`);
+      const raw = await r.get(redisKeys.realityReport(id));
       if (!raw) continue;
       const report = JSON.parse(raw);
       const priorTitle = report.task?.title || "";
@@ -197,13 +198,16 @@ export async function preflightCheck(task, grounding, groundingSummary) {
   }
 
   // 3. Grounding contradiction — tests are failing but task is not fixing them
-  //    Also allow tasks that look like test fixes even if they came from the
-  //    work queue (anchorType "user-request") — the operator queued them to fix tests.
+  //    WARNING ONLY — do not block. Verification will catch real regressions.
+  //    Blocking all work on transient test failures caused a cascade where 6+
+  //    cycles were rejected before the failure self-healed (2026-04-30 incident).
   const testFixAnchorTypes = new Set(["failing-test", "prior-failure", "reframe"]);
   const looksLikeTestFix = /\b(fix|repair|isolat|failing|broken)\b.*\btest/i.test(task.title || "")
     || /\btest.*\b(fix|repair|isolat|failing|broken)\b/i.test(task.title || "");
   if (grounding.testReport.failed > 0 && !testFixAnchorTypes.has(task.anchorType) && !looksLikeTestFix) {
-    flags.push(`${grounding.testReport.failed} test(s) currently failing but task is not fixing them — fix tests first`);
+    console.log(`[Preflight] WARNING: ${grounding.testReport.failed} test(s) currently failing — proceeding anyway (verification will catch regressions)`);
+    // Intentionally NOT pushing to flags — this is a warning, not a blocker.
+    // The executor will run, and if it makes things worse, verification catches it.
   }
 
   // 4. Verification plan sanity — each step must have a command
@@ -294,9 +298,9 @@ export async function runSkepticAgent(cycleId, task, grounding, groundingSummary
   try {
     const Redis = (await import("ioredis")).default;
     const rConn = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-    const recentIds = await rConn.zrevrange("hydra:reports:reality:index", 0, 4);
+    const recentIds = await rConn.zrevrange(redisKeys.realityReportIndex(), 0, 4);
     for (const id of recentIds) {
-      const raw = await rConn.get(`hydra:reports:reality:${id}`);
+      const raw = await rConn.get(redisKeys.realityReport(id));
       if (raw) {
         const report = JSON.parse(raw);
         recentHistory += `- ${report.cycleId}: "${report.task?.title}" (${report.task?.finalState})\n`;

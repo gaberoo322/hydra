@@ -18,13 +18,14 @@
  */
 
 import Redis from "ioredis";
+import { redisKeys } from "./redis-keys.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const WINDOW = 10; // look at last N cycles
 const COOLDOWN_MS = 60 * 60 * 1000; // 1 hour between same alert type
 
-const ALERTS_KEY = "hydra:alerts";
-const COOLDOWN_KEY = "hydra:pattern-detector:cooldowns";
+const ALERTS_KEY = redisKeys.alerts();
+const COOLDOWN_KEY = redisKeys.patternDetectorCooldowns();
 
 let redis = null;
 function getRedis() {

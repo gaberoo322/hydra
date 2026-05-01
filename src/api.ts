@@ -19,6 +19,7 @@ import { listSpecs, getSpec, createSpec, archiveSpec } from "./specs.ts";
 import { sendDigestNow } from "./digest.ts";
 import { loadBacklog, getBacklogCounts, addToBacklog, moveItemToLane, deleteItem, updateItem, getItemsByParent, isWipLimitReached, claimNextQueuedItem } from "./backlog.ts";
 import { getAllReflections } from "./reflections.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -91,6 +92,29 @@ function createApi(eventBus) {
     }
   });
 
+  // GET /cycle/report/:cycleId — Report for a specific cycle (agents, costs, tasks)
+  api.get("/cycle/report/:cycleId", async (req, res) => {
+    try {
+      res.json(await getTracker().getCycleReport(req.params.cycleId));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /cycle/:cycleId/reality — Reality report for a specific cycle
+  api.get("/cycle/:cycleId/reality", async (req, res) => {
+    try {
+      const Redis = (await import("ioredis")).default;
+      const r = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
+      const raw = await r.get(redisKeys.realityReport(req.params.cycleId));
+      r.disconnect();
+      if (!raw) return res.status(404).json({ error: "Reality report not found" });
+      res.json(JSON.parse(raw));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // GET /tasks — Per-task state from Redis (shows exactly where each task is)
   api.get("/tasks", async (req, res) => {
     try {
@@ -151,7 +175,7 @@ function createApi(eventBus) {
       }
 
       // Dedup: check if an item with the same reference already exists in the queue
-      const existing = await getTracker().redis.lrange("hydra:anchors:work-queue", 0, -1);
+      const existing = await getTracker().redis.lrange(redisKeys.anchorWorkQueue(), 0, -1);
       const refLower = reference.toLowerCase().trim();
       const duplicate = existing.some(raw => {
         try {
@@ -164,8 +188,8 @@ function createApi(eventBus) {
       }
 
       const item = { reference, reason: reason || "queued by operator", context, queuedAt: new Date().toISOString() };
-      await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify(item));
-      const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");
+      await getTracker().redis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify(item));
+      const queueLen = await getTracker().redis.llen(redisKeys.anchorWorkQueue());
       res.json({ queued: true, item, position: queueLen });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -175,7 +199,7 @@ function createApi(eventBus) {
   // GET /queue — View queued work items
   api.get("/queue", async (req, res) => {
     try {
-      const items = await getTracker().redis.lrange("hydra:anchors:work-queue", 0, -1);
+      const items = await getTracker().redis.lrange(redisKeys.anchorWorkQueue(), 0, -1);
       res.json(items.map((i) => { try { return JSON.parse(i); } catch { return i; } }));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -188,8 +212,8 @@ function createApi(eventBus) {
       const { getMetricsTrend: gmt, getAggregateStats: gas, getCumulativeAccomplishments: gca } = await import("./metrics.ts");
       const stats = await gas(20);
       const acc = await gca(20);
-      const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");
-      const priorFails = await getTracker().redis.llen("hydra:anchors:prior-failures");
+      const queueLen = await getTracker().redis.llen(redisKeys.anchorWorkQueue());
+      const priorFails = await getTracker().redis.llen(redisKeys.anchorPriorFailures());
 
       const lines = [
         `Hydra V2 — ${stats.cycles} cycles completed`,
@@ -260,7 +284,7 @@ function createApi(eventBus) {
       const perCycle = [];
 
       for (const m of trend) {
-        const costs = await tracker.redis.hgetall(`hydra:cycle:${m.cycleId}:costs`);
+        const costs = await tracker.redis.hgetall(redisKeys.cycleCosts(m.cycleId));
         const input = parseInt(costs.inputTokens) || 0;
         const output = parseInt(costs.outputTokens) || 0;
         const costMicro = parseInt(costs.costMicrodollars) || 0;
@@ -393,8 +417,8 @@ function createApi(eventBus) {
       })(),
       /* 2 */ getSchedulerStatus(),
       /* 3 */ getCycleStatus(),
-      /* 4 */ getTracker().redis.llen("hydra:anchors:work-queue"),
-      /* 5 */ getTracker().redis.llen("hydra:anchors:prior-failures"),
+      /* 4 */ getTracker().redis.llen(redisKeys.anchorWorkQueue()),
+      /* 5 */ getTracker().redis.llen(redisKeys.anchorPriorFailures()),
       /* 6 */ getBacklogCounts(),
       /* 7 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
       /* 8 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
@@ -404,13 +428,13 @@ function createApi(eventBus) {
       /* 12 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-betting-web.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 13 */ (async () => {
         const r = getTracker().redis;
-        const [p, e, s] = await Promise.all([r.get("hydra:memory:planner:patterns"), r.get("hydra:memory:executor:patterns"), r.get("hydra:memory:skeptic:patterns")]);
+        const [p, e, s] = await Promise.all([r.get(redisKeys.memoryPatterns("planner")), r.get(redisKeys.memoryPatterns("executor")), r.get(redisKeys.memoryPatterns("skeptic"))]);
         const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };
         return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
       })(),
       /* 14 */ (async () => {
         const r = getTracker().redis; let count = 0, cursor = "0";
-        do { const [next, keys] = await r.scan(cursor, "MATCH", "hydra:reflections:*", "COUNT", 100); cursor = next; count += keys.length; } while (cursor !== "0");
+        do { const [next, keys] = await r.scan(cursor, "MATCH", redisKeys.reflection("*"), "COUNT", 100); cursor = next; count += keys.length; } while (cursor !== "0");
         return count;
       })(),
       /* 15 */ (async () => {
@@ -1042,7 +1066,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
 
   // GET /events/:stream — Read recent events from a stream (for debugging)
   api.get("/events/:stream", async (req, res) => {
-    const stream = `hydra:${req.params.stream}`;
+    const stream = redisKeys.stream(req.params.stream);
     // @ts-expect-error — migrate to proper types
     const count = parseInt(req.query.count) || 10;
     try {
@@ -1111,7 +1135,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   // Alerts — persisted notifications for the dashboard
   // -----------------------------------------------------------------------
 
-  const ALERTS_KEY = "hydra:alerts";
+  const ALERTS_KEY = redisKeys.alerts();
   const ALERTS_MAX = 100;
 
   // GET /alerts — List recent alerts
@@ -1186,7 +1210,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
 
       // Queue as work for the next cycle
       const tracker = getTracker();
-      await tracker.redis.rpush("hydra:anchors:work-queue", JSON.stringify({
+      await tracker.redis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
         reference: `Fix Sentry ${level}: ${title}`,
         reason: `Sentry issue in ${project}${culprit ? ` at ${culprit}` : ""}${url ? ` — ${url}` : ""}`,
         context: JSON.stringify({
@@ -1205,7 +1229,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
 
       // Also create a dashboard alert
       const r = eventBus.publisher;
-      await r.lpush("hydra:alerts", JSON.stringify({
+      await r.lpush(redisKeys.alerts(), JSON.stringify({
         id: `sentry-${Date.now()}`,
         type: "sentry:issue",
         timestamp: new Date().toISOString(),
@@ -1214,7 +1238,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
         dismissed: false,
         payload: { project, title, culprit, url },
       }));
-      await r.ltrim("hydra:alerts", 0, 99);
+      await r.ltrim(redisKeys.alerts(), 0, 99);
 
       console.log(`[Sentry Webhook] Queued: "${title}" from ${project}`);
       res.json({ queued: true, title });
@@ -1491,8 +1515,8 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
         return res.status(400).json({ error: "Missing cycleId or source" });
       }
       const r = getTracker().redis;
-      await r.set(`hydra:cycle:active:${source}`, cycleId, "EX", 900);
-      await r.hset(`hydra:cycle:${cycleId}`,
+      await r.set(redisKeys.cycleActiveSource(source), cycleId, "EX", 900);
+      await r.hset(redisKeys.cycle(cycleId),
         "status", "running",
         "startedAt", new Date().toISOString(),
         "source", source,
@@ -1501,7 +1525,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
         "failed", 0,
         "abandoned", 0,
       );
-      await r.expire(`hydra:cycle:${cycleId}`, 604800); // 7 days
+      await r.expire(redisKeys.cycle(cycleId), 604800); // 7 days
       res.json({ ok: true, cycleId });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1516,8 +1540,8 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
         return res.status(400).json({ error: "Missing cycleId" });
       }
       const r = getTracker().redis;
-      await r.del(`hydra:cycle:active:${source || "claude"}`);
-      await r.hset(`hydra:cycle:${cycleId}`,
+      await r.del(redisKeys.cycleActiveSource(source || "claude"));
+      await r.hset(redisKeys.cycle(cycleId),
         "status", status || "completed",
         "completedAt", new Date().toISOString(),
       );
@@ -1543,9 +1567,9 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
     try {
       const { cycleId } = req.body || {};
       const r = getTracker().redis;
-      const acquired = await r.set("hydra:merge:lock", cycleId || "unknown", "EX", 60, "NX");
+      const acquired = await r.set(redisKeys.mergeLock(), cycleId || "unknown", "EX", 60, "NX");
       if (!acquired) {
-        const holder = await r.get("hydra:merge:lock");
+        const holder = await r.get(redisKeys.mergeLock());
         return res.status(409).json({ locked: true, holder });
       }
       res.json({ acquired: true });
@@ -1557,7 +1581,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   // Release merge lock
   api.post("/merge/unlock", async (_req, res) => {
     try {
-      await getTracker().redis.del("hydra:merge:lock");
+      await getTracker().redis.del(redisKeys.mergeLock());
       res.json({ released: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1617,7 +1641,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
       if (!type) {
         return res.status(400).json({ error: "Missing type" });
       }
-      await eventBus.publish("hydra:notifications", {
+      await eventBus.publish(redisKeys.streamNotifications(), {
         type,
         source: "claude-build",
         correlationId: correlationId || null,

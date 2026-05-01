@@ -14,6 +14,7 @@
 import { archiveApprovedProposals } from "./proposals.ts";
 import { pruneOldDoneItems } from "./backlog.ts";
 import { getTracker } from "./task-tracker.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 const STALE_KEY_RETENTION_DAYS = 7;
 const STALE_IN_PROGRESS_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -26,16 +27,16 @@ async function pruneStaleRedisKeys() {
 
   // Prune old metrics from sorted index, then delete orphaned metric keys
   try {
-    const removed = await redis.zremrangebyscore("hydra:metrics:index", "-inf", cutoffMs);
+    const removed = await redis.zremrangebyscore(redisKeys.metricsIndex(), "-inf", cutoffMs);
     if (removed > 0) {
       totalPruned += removed;
       console.log(`[Cleanup] Pruned ${removed} old metrics index entries`);
     }
     // Trim to max entries as a safety cap
-    const indexSize = await redis.zcard("hydra:metrics:index");
+    const indexSize = await redis.zcard(redisKeys.metricsIndex());
     if (indexSize > METRICS_INDEX_MAX_ENTRIES) {
       const excess = indexSize - METRICS_INDEX_MAX_ENTRIES;
-      await redis.zremrangebyrank("hydra:metrics:index", 0, excess - 1);
+      await redis.zremrangebyrank(redisKeys.metricsIndex(), 0, excess - 1);
       console.log(`[Cleanup] Trimmed metrics index by ${excess} (cap: ${METRICS_INDEX_MAX_ENTRIES})`);
     }
   } catch (err: any) {
@@ -50,7 +51,7 @@ async function pruneStaleRedisKeys() {
   // For non-hash keys and hashes without a timestamp field, extract the date from
   // the key name pattern (YYYY-MM-DD) and use that as the age indicator.
   const dateInKeyPattern = /(\d{4}-\d{2}-\d{2})/;
-  for (const prefix of ["hydra:cycle:", "hydra:task:", "hydra:metrics:"]) {
+  for (const prefix of [redisKeys.cycle(""), redisKeys.task(""), redisKeys.metrics("")]) {
     try {
       let cursor = "0";
       const toDelete: string[] = [];
@@ -59,7 +60,7 @@ async function pruneStaleRedisKeys() {
         cursor = nextCursor;
         for (const key of keys) {
           // Skip index/counter keys and active/last pointers
-          if (key.endsWith(":index") || key.endsWith(":counter") || key === "hydra:cycle:active" || key === "hydra:cycle:last") continue;
+          if (key.endsWith(":index") || key.endsWith(":counter") || key === redisKeys.cycleActive() || key === redisKeys.cycleLast()) continue;
           const ttl = await redis.ttl(key);
           if (ttl !== -1) continue; // Already has TTL, skip
 
@@ -111,7 +112,7 @@ async function pruneStaleRedisKeys() {
 async function returnStaleInProgressItems() {
   try {
     const redis = getTracker().redis;
-    const ids = await redis.zrange("hydra:backlog:lane:inProgress", 0, -1, "WITHSCORES");
+    const ids = await redis.zrange(redisKeys.backlogLane("inProgress"), 0, -1, "WITHSCORES");
     const now = Date.now();
     let returned = 0;
 
@@ -120,14 +121,14 @@ async function returnStaleInProgressItems() {
       const id = ids[i];
       const score = Number(ids[i + 1]);
       if (now - score > STALE_IN_PROGRESS_MS) {
-        const raw = await redis.hget("hydra:backlog:items", id);
+        const raw = await redis.hget(redisKeys.backlogItems(), id);
         if (!raw) continue;
         const item = JSON.parse(raw);
         item.lane = "queued";
         item.meta = { ...item.meta, returnedReason: "stale_in_progress", returnedAt: new Date().toISOString() };
-        await redis.hset("hydra:backlog:items", id, JSON.stringify(item));
-        await redis.zrem("hydra:backlog:lane:inProgress", id);
-        await redis.zadd("hydra:backlog:lane:queued", now, id);
+        await redis.hset(redisKeys.backlogItems(), id, JSON.stringify(item));
+        await redis.zrem(redisKeys.backlogLane("inProgress"), id);
+        await redis.zadd(redisKeys.backlogLane("queued"), now, id);
         returned++;
         console.log(`[Cleanup] Returned stale inProgress item ${id} ("${item.title?.slice(0, 60)}") to queued`);
       }

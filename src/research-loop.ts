@@ -24,6 +24,7 @@ import { getTracker } from "./task-tracker.ts";
 import { getCumulativeAccomplishments, getMetricsTrend } from "./metrics.ts";
 import { STREAMS } from "./event-bus.ts";
 import { addToBacklog } from "./backlog.ts";
+import { redisKeys } from "./redis-keys.ts";
 import { createSpec } from "./specs.ts";
 
 import Redis from "ioredis";
@@ -33,8 +34,8 @@ const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process
 const METHODOLOGY_DIR = join(CONFIG_PATH, "research");
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
-const RESEARCH_INDEX_KEY = "hydra:reports:research:index";
-const researchKey = (id) => `hydra:reports:research:${id}`;
+const RESEARCH_INDEX_KEY = redisKeys.researchReportIndex();
+const researchKey = (id) => redisKeys.researchReport(id);
 let _researchRedis = null;
 function getResearchRedis() {
   if (!_researchRedis) _researchRedis = new Redis(REDIS_URL);
@@ -408,6 +409,13 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
     console.log("[Research] Loaded research-journal.md");
   } catch { /* no journal file is fine — first run */ }
 
+  // Load data assets manifest — what data is available for features
+  let dataAssetsContent = "";
+  try {
+    dataAssetsContent = await readFile(join(CONFIG_PATH, "direction", "data-assets.md"), "utf-8");
+    console.log("[Research] Loaded data-assets.md");
+  } catch { /* no data-assets file is fine */ }
+
   const [appMetrics, lastReport, accomplishmentsRaw, researchScorecard] = await Promise.all([
     loadAppMetrics(),
     loadLastResearchReport(),
@@ -458,6 +466,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
     JSON.stringify(marketResult.parsed || { error: "No output" }, null, 2).slice(0, 4000),
     "",
     appMetrics ? `## APP METRICS\n${JSON.stringify(appMetrics.data, null, 2).slice(0, 2000)}\n` : "",
+    dataAssetsContent ? `## DATA ASSETS (what data is available for features)\n${dataAssetsContent.slice(0, 2000)}\n` : "",
     accomplishments ? `## ALREADY ACCOMPLISHED (do NOT re-recommend)\n${accomplishments}\n` : "",
     researchScorecard || "",
     "",
@@ -650,7 +659,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
       // Simple opportunity or spec creation failed — push to work queue (with dedup)
       {
         const titleLower = (opp.title || "").toLowerCase().trim();
-        const existingQueue = await getTracker().redis.lrange("hydra:anchors:work-queue", 0, -1);
+        const existingQueue = await getTracker().redis.lrange(redisKeys.anchorWorkQueue(), 0, -1);
         const isDup = existingQueue.some(raw => {
           try {
             const item = JSON.parse(raw);
@@ -661,7 +670,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
         if (isDup) {
           console.log(`[Research] Skipping duplicate #${opp.rank}: "${opp.title}" (already in queue)`);
         } else {
-          await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify({
+          await getTracker().redis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
             reference: opp.title,
             reason: `Research ${researchId}: ${opp.rationale?.slice(0, 200) || "auto-queued from research"}`,
             context: JSON.stringify({
@@ -814,14 +823,14 @@ export async function listResearchReports(count = 10) {
  */
 export async function vetoOpportunity(title) {
   const tracker = getTracker();
-  const items = await tracker.redis.lrange("hydra:anchors:work-queue", 0, -1);
+  const items = await tracker.redis.lrange(redisKeys.anchorWorkQueue(), 0, -1);
   let removed = 0;
 
   for (let i = items.length - 1; i >= 0; i--) {
     try {
       const item = JSON.parse(items[i]);
       if (item.reference === title && item.source === "research") {
-        await tracker.redis.lrem("hydra:anchors:work-queue", 1, items[i]);
+        await tracker.redis.lrem(redisKeys.anchorWorkQueue(), 1, items[i]);
         removed++;
       }
     } catch {}

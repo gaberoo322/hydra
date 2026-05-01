@@ -22,6 +22,7 @@
 import Redis from "ioredis";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { redisKeys } from "./redis-keys.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
@@ -33,8 +34,8 @@ const PROMOTION_THRESHOLD = 5;
 const MAX_EXAMPLES = 3;
 
 // Redis key patterns
-const patternsKey = (agent) => `hydra:memory:${agent}:patterns`;
-const oldRulesKey = (agent) => `hydra:memory:${agent}:rules`;
+const patternsKey = (agent) => redisKeys.memoryPatterns(agent);
+const oldRulesKey = (agent) => redisKeys.memoryRules(agent);
 
 type MemoryPattern = {
   category: string;
@@ -513,7 +514,7 @@ export async function consolidateMemory() {
 // TTL: 7 days — old reflections auto-expire
 // ---------------------------------------------------------------------------
 
-const REFLECTION_PREFIX = "hydra:reflections:";
+const REFLECTION_PREFIX = redisKeys.reflectionPrefix();
 const REFLECTION_TTL = 7 * 24 * 60 * 60; // 7 days
 const MAX_REFLECTIONS_PER_ANCHOR = 5;
 

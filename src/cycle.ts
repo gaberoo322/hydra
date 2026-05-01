@@ -1,5 +1,6 @@
 import { getTracker } from "./task-tracker.ts";
 import { runControlLoop } from "./control-loop.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 interface CycleRecord {
   id: string;
@@ -57,10 +58,10 @@ async function getCycleStatus(): Promise<CycleRecord | { status: string }> {
   if (currentCycle) return currentCycle;
 
   const tracker = getTracker();
-  const activeId = await tracker.redis.get("hydra:cycle:active");
+  const activeId = await tracker.redis.get(redisKeys.cycleActive());
   if (!activeId) return { status: "idle" };
 
-  const cycle = await tracker.redis.hgetall(`hydra:cycle:${activeId}`);
+  const cycle = await tracker.redis.hgetall(redisKeys.cycle(activeId));
   if (!cycle || !cycle.status) return { status: "idle" };
 
   return {
@@ -81,7 +82,7 @@ async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
   let ids: string[] = [];
 
   try {
-    ids = await tracker.redis.keys("hydra:cycle:cycle-*");
+    ids = await tracker.redis.keys(redisKeys.cycle("cycle-*"));
   } catch (err: any) {
     console.error(`[Cycle] Failed to list cycle keys from Redis: ${err.message}`);
   }
@@ -92,7 +93,7 @@ async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
   for (const id of ids.filter((k: string) => !k.endsWith(":agents") && !k.endsWith(":costs") && !k.endsWith(":tasks")).sort().reverse()) {
     if (seen.has(id)) continue;
     seen.add(id);
-    const cycleId = id.replace(/^hydra:cycle:/, "");
+    const cycleId = id.replace(new RegExp(`^${redisKeys.cycle("")}`), "");
     const cycle = await tracker.redis.hgetall(id);
     if (!cycle || !cycle.status) continue;
     records.push({

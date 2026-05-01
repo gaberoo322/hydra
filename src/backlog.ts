@@ -16,14 +16,15 @@
  */
 
 import Redis from "ioredis";
+import { redisKeys } from "./redis-keys.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const DONE_RETENTION_DAYS = 7;
 const LANES = ["triage", "backlog", "queued", "blocked", "inProgress", "done"];
 
-const ITEMS_KEY = "hydra:backlog:items";
-const COUNTER_KEY = "hydra:backlog:counter";
-const laneKey = (lane) => `hydra:backlog:lane:${lane}`;
+const ITEMS_KEY = redisKeys.backlogItems();
+const COUNTER_KEY = redisKeys.backlogCounter();
+const laneKey = (lane) => redisKeys.backlogLane(lane);
 
 let redis = null;
 

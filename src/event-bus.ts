@@ -1,14 +1,16 @@
 import Redis from "ioredis";
 import { randomUUID } from "node:crypto";
 
+import { redisKeys } from "./redis-keys.ts";
+
 // Stream topology — V2 control loop
 const STREAMS = {
-  CYCLE: "hydra:cycle",   // cycle start events (used by cycle.mjs)
-  TASKS: "hydra:tasks",   // task events (used by legacy pipeline if HYDRA_LEGACY_PIPELINE=1)
-  META: "hydra:meta",
-  PROPOSALS: "hydra:proposals",
-  NOTIFICATIONS: "hydra:notifications",
-  DLQ: "hydra:dlq",
+  CYCLE: redisKeys.streamCycle(),        // cycle start events (used by cycle.mjs)
+  TASKS: redisKeys.streamTasks(),        // task events (used by legacy pipeline if HYDRA_LEGACY_PIPELINE=1)
+  META: redisKeys.streamMeta(),
+  PROPOSALS: redisKeys.streamProposals(),
+  NOTIFICATIONS: redisKeys.streamNotifications(),
+  DLQ: redisKeys.streamDlq(),
 };
 
 // Consumer groups — only streams with active consumers

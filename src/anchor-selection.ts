@@ -11,6 +11,7 @@ import { join, resolve } from "node:path";
 import { getTracker } from "./task-tracker.ts";
 import { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, moveToBlocked, claimNextQueuedItem } from "./backlog.ts";
 import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
@@ -20,10 +21,10 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "
 
 export const MAX_PRIOR_FAILURE_RETRIES = 2;
 export const MAX_CONSECUTIVE_ABANDONMENTS = 3;
-export const REFRAME_QUEUE = "hydra:anchors:reframe-queue";
-export const WORK_QUEUE = "hydra:anchors:work-queue";
-export const PROCESSING_QUEUE = "hydra:anchors:processing";
-export const ABANDONMENT_COUNTER_PREFIX = "hydra:anchors:abandonment-count:";
+export const REFRAME_QUEUE = redisKeys.anchorReframeQueue();
+export const WORK_QUEUE = redisKeys.anchorWorkQueue();
+export const PROCESSING_QUEUE = redisKeys.anchorProcessing();
+export const ABANDONMENT_COUNTER_PREFIX = redisKeys.anchorAbandonmentCount("");
 export const ABANDONMENT_COUNTER_TTL = 86400; // 24h — auto-expire stale counters
 
 // ---------------------------------------------------------------------------
@@ -213,11 +214,11 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   }
 
   // 5. Prior failures from Redis
-  const priorFailures = await getTracker().redis.lrange("hydra:anchors:prior-failures", 0, 0);
+  const priorFailures = await getTracker().redis.lrange(redisKeys.anchorPriorFailures(), 0, 0);
   if (priorFailures.length > 0) {
     try {
       const failure = JSON.parse(priorFailures[0]);
-      await getTracker().redis.lpop("hydra:anchors:prior-failures");
+      await getTracker().redis.lpop(redisKeys.anchorPriorFailures());
       return {
         type: "prior-failure",
         reference: failure.taskId,
@@ -243,14 +244,14 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   //      that tests recent features with edge cases instead of building new work.
   try {
     const r = getTracker().redis;
-    const recentMetrics = await r.zrevrange("hydra:metrics:index", 0, 9);
+    const recentMetrics = await r.zrevrange(redisKeys.metricsIndex(), 0, 9);
     let recentMergeCount = 0;
     let lastRegressionHunt: string | null = null;
     for (const id of recentMetrics) {
-      const raw = await r.hgetall(`hydra:metrics:${id}`);
+      const raw = await r.hgetall(redisKeys.metrics(id));
       if (parseInt(raw.tasksMerged || "0") > 0) recentMergeCount++;
     }
-    lastRegressionHunt = await r.get("hydra:regression-hunt:last");
+    lastRegressionHunt = await r.get(redisKeys.regressionHuntLast());
     const huntInterval = 10;
     if (recentMergeCount >= huntInterval && !lastRegressionHunt) {
       // Time for a regression hunt
@@ -258,9 +259,9 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
 
       // Get the last 10 merged task titles and files for context
       const mergedTasks: string[] = [];
-      const reportIds = await r.zrevrange("hydra:reports:reality:index", 0, 9);
+      const reportIds = await r.zrevrange(redisKeys.realityReportIndex(), 0, 9);
       for (const rid of reportIds) {
-        const raw = await r.get(`hydra:reports:reality:${rid}`);
+        const raw = await r.get(redisKeys.realityReport(rid));
         if (!raw) continue;
         try {
           const report = JSON.parse(raw);
@@ -270,7 +271,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
         } catch { /* intentional */ }
       }
 
-      await r.set("hydra:regression-hunt:last", new Date().toISOString(), "EX", 86400 * 3); // 3-day cooldown
+      await r.set(redisKeys.regressionHuntLast(), new Date().toISOString(), "EX", 86400 * 3); // 3-day cooldown
 
       return {
         type: "regression-hunt",
@@ -285,18 +286,21 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   }
 
   // 6. Codebase health — reductive improvements (split, consolidate, document)
-  //    Skip issues that were already abandoned — they loop endlessly when the
-  //    planner sees them as resolved but the health analyzer keeps re-detecting.
+  //    Skip issues that have been permanently deprioritized (failed 2+ times).
+  //    Uses a separate permanent counter that doesn't reset on reframe escalation.
   try {
     const { analyzeCodebaseHealth } = await import("./codebase-health.ts");
     const healthReport = await analyzeCodebaseHealth(grounding.fileTree || "", undefined);
     for (const issue of healthReport.issues) {
       const ref = `codebase-health: ${issue.category} in ${issue.file}`;
+      // Check both the circuit-breaker counter AND a permanent skip counter
       const abandonCount = parseInt(
         await getTracker().redis.get(anchorKey(ref)) || "0",
       );
-      if (abandonCount > 0) {
-        console.log(`[ControlLoop] Skipping codebase-health issue "${ref}" (abandoned ${abandonCount}x) — falling through`);
+      const permSkipKey = redisKeys.anchorPermSkip(ref.replace(/\s+/g, "-").slice(0, 120));
+      const permSkipCount = parseInt(await getTracker().redis.get(permSkipKey) || "0");
+      if (abandonCount > 0 || permSkipCount >= 2) {
+        console.log(`[ControlLoop] Skipping codebase-health issue "${ref}" (abandoned=${abandonCount}, permSkip=${permSkipCount}) — falling through`);
         continue;
       }
       console.log(`[ControlLoop] Codebase health anchor: ${issue.category} — ${issue.file} (${issue.metric})`);
@@ -433,7 +437,7 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
   const r = getTracker().redis;
 
   // Count how many times this task (or its anchor) has already been retried
-  const existing = await r.lrange("hydra:anchors:prior-failures", 0, -1);
+  const existing = await r.lrange(redisKeys.anchorPriorFailures(), 0, -1);
   const priorAttempts = existing.filter(raw => {
     try { return JSON.parse(raw).taskId === taskId; } catch { return false; }
   }).length;
@@ -443,7 +447,7 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
     console.log(`[ControlLoop] Escalating ${taskId} to reframe queue after ${priorAttempts + 1} failures`);
 
     // Gather failure history for context
-    const task = await r.hgetall(`hydra:task:${taskId}`);
+    const task = await r.hgetall(redisKeys.task(taskId));
     const failureHistory = existing
       .map(raw => { try { return JSON.parse(raw); } catch { return null; } })
       .filter(f => f?.taskId === taskId);
@@ -468,7 +472,7 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
     return;
   }
 
-  await r.rpush("hydra:anchors:prior-failures", JSON.stringify({
+  await r.rpush(redisKeys.anchorPriorFailures(), JSON.stringify({
     taskId,
     reason,
     failedSteps: verificationResult?.steps?.filter((s) => !s.passed).map((s) => s.label) || [],

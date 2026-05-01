@@ -26,6 +26,7 @@ import { createCycleSession } from "./ov-session.ts";
 import { markTaskComplete } from "./specs.ts";
 import { selectAnchor, trackAbandonment, clearAbandonmentCounter, storePriorFailure, clearProcessingItem } from "./anchor-selection.ts";
 import { looksOperatorBlocked, reconcilePlanVsActual, classifyTaskComplexity, preflightCheck, runHighRiskReview } from "./preflight.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -273,13 +274,13 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // Claude Code cycles register under hydra:cycle:active:claude via the API.
   // The old global hydra:cycle:lock is replaced by a short-lived merge lock
   // (hydra:merge:lock, 60s TTL) acquired only during git merge+push.
-  const CYCLE_SOURCE_KEY = "hydra:cycle:active:codex";
+  const CYCLE_SOURCE_KEY = redisKeys.cycleActiveSource("codex");
   const CYCLE_SOURCE_TTL = 900; // 15-minute auto-expire (crash safety)
   await tracker.redis.set(CYCLE_SOURCE_KEY, cycleId, "EX", CYCLE_SOURCE_TTL);
 
   // Init cycle tracking
-  await tracker.redis.set("hydra:cycle:active", cycleId);
-  await tracker.redis.hset(`hydra:cycle:${cycleId}`,
+  await tracker.redis.set(redisKeys.cycleActive(), cycleId);
+  await tracker.redis.hset(redisKeys.cycle(cycleId),
     "status", "running",
     "startedAt", new Date().toISOString(),
     "source", "codex",
@@ -289,7 +290,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     "abandoned", 0,
     "timedOut", 0,
   );
-  await tracker.redis.expire(`hydra:cycle:${cycleId}`, CYCLE_KEY_TTL);
+  await tracker.redis.expire(redisKeys.cycle(cycleId), CYCLE_KEY_TTL);
   await tracker.initTaskV2(cycleId, task);
 
   // All code after lock acquisition is wrapped in try/finally to guarantee
@@ -1002,7 +1003,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
 
   // Acquire short-lived merge lock — serializes merges across Codex and Claude Code.
   // Retry up to 3 times with backoff (5s, 10s, 15s) if another merge is in progress.
-  const MERGE_LOCK_KEY = "hydra:merge:lock";
+  const MERGE_LOCK_KEY = redisKeys.mergeLock();
   const MERGE_LOCK_TTL = 60; // 60 seconds — auto-release if merge crashes
   let mergeLockAcquired = false;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -1226,15 +1227,15 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   const reportRedis = (await import("ioredis")).default;
   const reportConn = new reportRedis(process.env.REDIS_URL || "redis://localhost:6379");
   try {
-    await reportConn.set(`hydra:reports:reality:${cycleId}`, JSON.stringify(report), "EX", CYCLE_KEY_TTL);
-    await reportConn.zadd("hydra:reports:reality:index", Date.now(), cycleId);
+    await reportConn.set(redisKeys.realityReport(cycleId), JSON.stringify(report), "EX", CYCLE_KEY_TTL);
+    await reportConn.zadd(redisKeys.realityReportIndex(), Date.now(), cycleId);
     // Trim to 50 most recent
-    const count = await reportConn.zcard("hydra:reports:reality:index");
+    const count = await reportConn.zcard(redisKeys.realityReportIndex());
     if (count > 50) {
-      const old = await reportConn.zrange("hydra:reports:reality:index", 0, count - 51);
+      const old = await reportConn.zrange(redisKeys.realityReportIndex(), 0, count - 51);
       for (const id of old) {
-        await reportConn.del(`hydra:reports:reality:${id}`);
-        await reportConn.zrem("hydra:reports:reality:index", id);
+        await reportConn.del(redisKeys.realityReport(id));
+        await reportConn.zrem(redisKeys.realityReportIndex(), id);
       }
     }
   } finally {
@@ -1343,7 +1344,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
           const Redis = (await import("ioredis")).default;
           const advRedis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
           for (const item of queueItems.slice(0, 3)) { // max 3 per cycle
-            await advRedis.rpush("hydra:anchors:work-queue", JSON.stringify(item));
+            await advRedis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify(item));
             console.log(`[ControlLoop] Adversarial: queued fix — ${item.reference.slice(0, 80)}`);
           }
           advRedis.disconnect();
@@ -1374,11 +1375,11 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   } catch { /* intentional: correlation check is best-effort */ }
 
   // Complete the cycle in tracker
-  await tracker.redis.hset(`hydra:cycle:${cycleId}`, "status", "completed", "completedAt", new Date().toISOString());
+  await tracker.redis.hset(redisKeys.cycle(cycleId), "status", "completed", "completedAt", new Date().toISOString());
   // Refresh TTL so the 7-day window starts from cycle completion
-  await tracker.redis.expire(`hydra:cycle:${cycleId}`, CYCLE_KEY_TTL);
-  await tracker.redis.set("hydra:cycle:last", cycleId);
-  await tracker.redis.del("hydra:cycle:active");
+  await tracker.redis.expire(redisKeys.cycle(cycleId), CYCLE_KEY_TTL);
+  await tracker.redis.set(redisKeys.cycleLast(), cycleId);
+  await tracker.redis.del(redisKeys.cycleActive());
 
   // Trigger Meta analysis: every 20 cycles (strategic review) OR when failures detected (fast-path)
   try {
@@ -1430,10 +1431,10 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       );
     }
     // Release per-source cycle registration + safety-net merge lock cleanup
-    await tracker.redis.del("hydra:cycle:active:codex").catch((err: any) =>
+    await tracker.redis.del(redisKeys.cycleActiveSource("codex")).catch((err: any) =>
       console.error(`[ControlLoop] Failed to release codex cycle registration: ${err.message}`)
     );
-    await tracker.redis.del("hydra:merge:lock").catch((err: any) =>
+    await tracker.redis.del(redisKeys.mergeLock()).catch((err: any) =>
       console.error(`[ControlLoop] Failed to release merge lock (safety net): ${err.message}`)
     );
   }
@@ -1698,9 +1699,9 @@ async function loadLastCycleReportFull() {
   try {
     const Redis = (await import("ioredis")).default;
     const rConn = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-    const recentIds = await rConn.zrevrange("hydra:reports:reality:index", 0, 0);
+    const recentIds = await rConn.zrevrange(redisKeys.realityReportIndex(), 0, 0);
     if (recentIds.length === 0) { rConn.disconnect(); return null; }
-    const raw = await rConn.get(`hydra:reports:reality:${recentIds[0]}`);
+    const raw = await rConn.get(redisKeys.realityReport(recentIds[0]));
     rConn.disconnect();
     return raw ? JSON.parse(raw) : null;
   } catch (err: any) {

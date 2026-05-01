@@ -21,6 +21,7 @@ import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getCumulativeAccomplishments, getMetricsTrend } from "./metrics.ts";
 import { getBacklogCounts, loadBacklog, blockItemById, addToBacklog } from "./backlog.ts";
 import { groundProject, summarizeForPrompt } from "./grounding.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 const DIRECTION_DIR = join(CONFIG_PATH, "direction");
@@ -123,7 +124,7 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
   try {
     const { default: Redis } = await import("ioredis");
     const rConn = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-    const keys = await rConn.keys("hydra:reports:research:*");
+    const keys = await rConn.keys(redisKeys.researchReport("*"));
     if (keys.length > 0) {
       const latestKey = keys.sort().pop();
       const raw = await rConn.get(latestKey);
@@ -142,6 +143,13 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
     roadmapContext = await readFile(ROADMAP_FILE, "utf-8");
     console.log(`[PrioritiesRefresh] Loaded roadmap.md`);
   } catch { /* no roadmap file is fine */ }
+
+  // 7.6. Read data assets manifest (what data is available)
+  let dataAssetsContext = "";
+  try {
+    dataAssetsContext = await readFile(join(DIRECTION_DIR, "data-assets.md"), "utf-8");
+    console.log(`[PrioritiesRefresh] Loaded data-assets.md`);
+  } catch { /* no data-assets file is fine */ }
 
   // 8. Build the prompt
   const prompt = [
@@ -165,6 +173,7 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
     ``,
     researchContext ? `## LATEST RESEARCH FINDINGS\n${researchContext}\n` : "",
     ``,
+    dataAssetsContext ? `## DATA ASSETS (what data is available for features)\n${dataAssetsContext.slice(0, 2000)}\n` : "",
     `## CURRENT PRIORITIES.MD (may be stale)`,
     currentPriorities ? currentPriorities.slice(0, 2000) : "No existing priorities file.",
     ``,
