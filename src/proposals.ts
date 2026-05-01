@@ -12,10 +12,21 @@
 
 import { readFile, appendFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import Redis from "ioredis";
 import { STREAMS } from "./event-bus.ts";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { redisKeys } from "./redis-keys.ts";
+import {
+  getProposalHash,
+  saveProposalHash,
+  getProposalIdsDesc,
+  getProposalIdsAsc,
+  deleteProposal,
+  removeProposalFromIndex,
+  getRecentReportIdsDesc,
+  getRealityReport,
+  getRecentMetricIdsDesc,
+  getCycleCostMicrodollars,
+} from "./redis-adapter.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
@@ -26,17 +37,6 @@ const ALLOWED_TARGETS = new Set([
   "direction/goals", "direction/tech-preferences", "direction/proposal-policy",
 ]);
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-
-const INDEX_KEY = redisKeys.proposalsIndex();
-const proposalKey = (id) => redisKeys.proposal(id);
-
-let redis = null;
-function getRedis() {
-  if (!redis) redis = new Redis(REDIS_URL);
-  return redis;
-}
-
 function generateProposalId() {
   const now = new Date();
   const date = now.toISOString().split("T")[0].replace(/-/g, "");
@@ -46,7 +46,7 @@ function generateProposalId() {
 }
 
 async function getProposal(proposalId) {
-  const data = await getRedis().hgetall(proposalKey(proposalId));
+  const data = await getProposalHash(proposalId);
   if (!data || Object.keys(data).length === 0) return null;
   // Parse JSON fields
   if (data.evidence) try { data.evidence = JSON.parse(data.evidence); } catch { data.evidence = []; }
@@ -54,11 +54,9 @@ async function getProposal(proposalId) {
 }
 
 async function saveProposal(record) {
-  const r = getRedis();
   const toStore = { ...record };
   if (Array.isArray(toStore.evidence)) toStore.evidence = JSON.stringify(toStore.evidence);
-  await r.hset(proposalKey(record.proposalId), toStore);
-  await r.zadd(INDEX_KEY, Date.now(), record.proposalId);
+  await saveProposalHash(record.proposalId, toStore);
 }
 
 /**
@@ -70,7 +68,6 @@ async function runMetaAnalysis(eventBus, event) {
   const trigger = event?.payload?.trigger || "manual";
   console.log(`[Meta] Starting analysis (trigger: ${trigger})...`);
 
-  const r = getRedis();
   const contextSections = [];
 
   // 1. Hard metrics — 20 cycles of trend data + aggregate stats
@@ -90,10 +87,10 @@ async function runMetaAnalysis(eventBus, event) {
 
   // 2. Reality reports — detailed post-cycle reports with grounding, verification, merge info
   try {
-    const reportIds = await r.zrevrange(redisKeys.realityReportIndex(), 0, 9);
+    const reportIds = await getRecentReportIdsDesc(10);
     const reports = [];
     for (const id of reportIds) {
-      const raw = await r.get(redisKeys.realityReport(id));
+      const raw = await getRealityReport(id);
       if (raw) {
         const report = JSON.parse(raw);
         reports.push(`- **${report.cycleId || id}**: task="${report.task?.title || "?"}" state=${report.task?.finalState || "?"} | grounding: ${report.grounding?.before?.passed ?? "?"}→${report.grounding?.after?.passed ?? "?"} tests | verification: ${report.verification?.allPassed ? "PASS" : "FAIL"} | regression: ${report.regressionIntroduced ? "YES" : "no"}`);
@@ -106,11 +103,11 @@ async function runMetaAnalysis(eventBus, event) {
 
   // 3. Spending — cost trends
   try {
-    const cycleIds = await r.zrevrange(redisKeys.metricsIndex(), 0, 19);
+    const cycleIds = await getRecentMetricIdsDesc(20);
     let totalCost = 0;
     let cyclesWithCost = 0;
     for (const cid of cycleIds) {
-      const costMicro = parseInt(await r.hget(redisKeys.cycleCosts(cid), "costMicrodollars") || "0");
+      const costMicro = parseInt(await getCycleCostMicrodollars(cid) || "0");
       if (costMicro > 0) { totalCost += costMicro / 1_000_000; cyclesWithCost++; }
     }
     if (cyclesWithCost > 0) {
@@ -435,9 +432,8 @@ async function rejectProposal(proposalId, reason, eventBus) {
 /**
  * List proposals from Redis.
  */
-async function listProposals(status) {
-  const r = getRedis();
-  const ids = await r.zrevrange(INDEX_KEY, 0, -1);
+async function listProposals(status?) {
+  const ids = await getProposalIdsDesc();
   const all = [];
   for (const id of ids) {
     const p = await getProposal(id);
@@ -458,19 +454,17 @@ function watchApprovals() {
  * Clean up old proposals — delete rejected/archived proposals older than 30 days.
  */
 async function archiveApprovedProposals() {
-  const r = getRedis();
-  const ids = await r.zrange(INDEX_KEY, 0, -1);
+  const ids = await getProposalIdsAsc();
   const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
   let cleaned = 0;
 
   for (const id of ids) {
     const p = await getProposal(id);
-    if (!p) { await r.zrem(INDEX_KEY, id); continue; }
+    if (!p) { await removeProposalFromIndex(id); continue; }
     if (p.status === "rejected" || p.status === "approved") {
       const ts = new Date(p.rejectedAt || p.approvedAt || p.createdAt).getTime();
       if (ts < cutoff) {
-        await r.del(proposalKey(id));
-        await r.zrem(INDEX_KEY, id);
+        await deleteProposal(id);
         cleaned++;
       }
     }

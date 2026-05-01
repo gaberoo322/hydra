@@ -19,12 +19,21 @@
  *   5. → save patterns to Redis
  */
 
-import Redis from "ioredis";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { redisKeys } from "./redis-keys.ts";
+import {
+  loadPatternsRaw,
+  savePatternsRaw,
+  getOldRulesCount,
+  patternsExist,
+  getOldRules,
+  deleteOldRules,
+  pushAnchorReflection,
+  getAnchorReflections,
+  deleteReflectionKey,
+} from "./redis-adapter.ts";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
 const OV_KEY = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
@@ -35,7 +44,6 @@ const MAX_EXAMPLES = 3;
 
 // Redis key patterns
 const patternsKey = (agent) => redisKeys.memoryPatterns(agent);
-const oldRulesKey = (agent) => redisKeys.memoryRules(agent);
 
 type MemoryPattern = {
   category: string;
@@ -49,19 +57,12 @@ type MemoryPattern = {
   promoted: boolean;
 };
 
-let redis: any = null;
-function getRedis() {
-  if (!redis) redis = new Redis(REDIS_URL);
-  return redis;
-}
-
 // ---------------------------------------------------------------------------
 // Pattern storage
 // ---------------------------------------------------------------------------
 
 async function loadPatterns(agentName): Promise<MemoryPattern[]> {
-  const r = getRedis();
-  const raw = await r.get(patternsKey(agentName));
+  const raw = await loadPatternsRaw(agentName);
   if (!raw) return [];
   try {
     return JSON.parse(raw);
@@ -71,12 +72,11 @@ async function loadPatterns(agentName): Promise<MemoryPattern[]> {
 }
 
 async function savePatterns(agentName, patterns: MemoryPattern[]) {
-  const r = getRedis();
   // Keep only the most recent MAX_PATTERNS, sorted by lastSeen desc
   const sorted = patterns
     .sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime())
     .slice(0, MAX_PATTERNS);
-  await r.set(patternsKey(agentName), JSON.stringify(sorted));
+  await savePatternsRaw(agentName, JSON.stringify(sorted));
 }
 
 /**
@@ -432,15 +432,14 @@ function categorizeRule(rule): string {
 // ---------------------------------------------------------------------------
 
 export async function migrateRulesToPatterns() {
-  const r = getRedis();
   for (const agent of ["planner", "executor", "skeptic"]) {
     // Check if old rules exist and new patterns don't
-    const oldExists = await r.llen(oldRulesKey(agent));
-    const newExists = await r.exists(patternsKey(agent));
+    const oldExists = await getOldRulesCount(agent);
+    const newExists = await patternsExist(agent);
 
     if (oldExists > 0 && !newExists) {
       console.log(`[Memory] Migrating ${agent}: ${oldExists} rules → patterns`);
-      const rawRules = await r.lrange(oldRulesKey(agent), 0, -1);
+      const rawRules = await getOldRules(agent);
       const patterns: MemoryPattern[] = [];
 
       for (const raw of rawRules) {
@@ -471,7 +470,7 @@ export async function migrateRulesToPatterns() {
       }
 
       await savePatterns(agent, patterns);
-      await r.del(oldRulesKey(agent));
+      await deleteOldRules(agent);
       console.log(`[Memory] Migrated ${agent}: ${oldExists} rules → ${patterns.length} patterns`);
     }
   }
@@ -546,7 +545,6 @@ export async function recordReflection(opts: {
   filesChanged?: string[];
   verificationErrors?: string[];
 }) {
-  const r = getRedis();
   const key = reflectionKey(opts.anchorRef);
 
   // Generate a structured reflection
@@ -562,14 +560,7 @@ export async function recordReflection(opts: {
     timestamp: new Date().toISOString(),
   };
 
-  await r.rpush(key, JSON.stringify(reflection));
-  await r.expire(key, REFLECTION_TTL);
-
-  // Trim to keep only the most recent reflections
-  const len = await r.llen(key);
-  if (len > MAX_REFLECTIONS_PER_ANCHOR) {
-    await r.ltrim(key, len - MAX_REFLECTIONS_PER_ANCHOR, -1);
-  }
+  await pushAnchorReflection(key, JSON.stringify(reflection), REFLECTION_TTL, MAX_REFLECTIONS_PER_ANCHOR);
 
   console.log(`[Memory] Recorded reflection for "${opts.anchorRef.slice(0, 60)}" (${opts.outcome})`);
 }
@@ -595,9 +586,8 @@ function generateAdvice(opts: { outcome: string; reason: string; filesChanged?: 
  * Returns empty string if no reflections exist.
  */
 export async function loadReflections(anchorRef: string): Promise<string> {
-  const r = getRedis();
   const key = reflectionKey(anchorRef);
-  const raw = await r.lrange(key, 0, -1);
+  const raw = await getAnchorReflections(key);
   if (raw.length === 0) return "";
 
   const reflections: Reflection[] = raw.map(r => {
@@ -629,7 +619,5 @@ export async function loadReflections(anchorRef: string): Promise<string> {
  * Clear reflections for an anchor after a successful merge.
  */
 export async function clearReflections(anchorRef: string) {
-  const r = getRedis();
-  await r.del(reflectionKey(anchorRef));
+  await deleteReflectionKey(reflectionKey(anchorRef));
 }
-
