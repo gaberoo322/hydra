@@ -163,7 +163,7 @@ export async function preflightCheck(task, grounding, groundingSummary) {
 
   // 1. Duplicate check — compare against recent cycle history in Redis
   try {
-    const r = getTracker().redis;
+    const r = getTracker().getRedisClient();
     const recentIds = await r.zrevrange(redisKeys.realityReportIndex(), 0, 9);
     for (const id of recentIds) {
       const raw = await r.get(redisKeys.realityReport(id));

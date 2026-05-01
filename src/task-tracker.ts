@@ -1,6 +1,8 @@
 import Redis from "ioredis";
 import { STREAMS } from "./event-bus.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { canTransitionTo, isTerminal, TERMINAL_STATES, VALID_TARGETS } from "./task-machine.ts";
+import type { TaskState } from "./task-machine.ts";
 
 const KEY_ACTIVE = redisKeys.cycleActive();
 const KEY_LAST = redisKeys.cycleLast();
@@ -15,21 +17,6 @@ const CYCLE_KEY_TTL = 7 * 24 * 60 * 60; // 604800
 
 const TERMINAL = new Set(["completed", "failed", "timed_out", "shelved"]);
 
-// V2 state machine — evidence-backed transitions (used by control-loop.mjs)
-const TERMINAL_V2 = new Set(["verified", "merged", "failed", "abandoned"]);
-
-const VALID_TRANSITIONS = {
-  proposed:       ["approved", "abandoned"],
-  approved:       ["in-progress", "abandoned"],
-  "in-progress":  ["changed-code", "blocked", "failed", "abandoned"],
-  "changed-code": ["verified", "failed", "abandoned"],
-  verified:       ["merged", "failed"],
-  blocked:        ["approved", "abandoned"],
-  failed:         [],
-  abandoned:      [],
-  merged:         [],
-};
-
 const evidenceKey = (taskId, state) => redisKeys.taskEvidence(taskId, state);
 
 // Dependency tracking keys
@@ -38,9 +25,14 @@ const DEPS_INDEX = redisKeys.depsIndex();
 const heldKey = (id) => redisKeys.depsHeld(id);
 
 class TaskTracker {
-  redis: any;
+  private _redis: any;
   constructor(redisUrl: string) {
-    this.redis = new Redis(redisUrl);
+    this._redis = new Redis(redisUrl);
+  }
+
+  /** Redis client accessor — prefer dedicated methods over raw Redis calls. */
+  getRedisClient() {
+    return this._redis;
   }
 
   /**
@@ -49,13 +41,13 @@ class TaskTracker {
    */
   async initCycle(cycleId, tasks) {
     // Clear dependency state from previous cycle
-    const oldHeld = await this.redis.smembers(DEPS_INDEX);
-    const cleanPipe = this.redis.pipeline();
+    const oldHeld = await this._redis.smembers(DEPS_INDEX);
+    const cleanPipe = this._redis.pipeline();
     cleanPipe.del(DEPS_COMPLETED, DEPS_INDEX);
     for (const id of oldHeld) cleanPipe.del(heldKey(id));
     await cleanPipe.exec();
 
-    const pipe = this.redis.pipeline();
+    const pipe = this._redis.pipeline();
     pipe.set(KEY_ACTIVE, cycleId);
     pipe.hset(cycleKey(cycleId),
       "status", "running",
@@ -96,9 +88,9 @@ class TaskTracker {
    * Update a task's pipeline stage (e.g., "builder", "reviewer", "tester").
    */
   async updateTaskStage(taskId, stage, agent) {
-    const exists = await this.redis.exists(taskKey(taskId));
+    const exists = await this._redis.exists(taskKey(taskId));
     if (!exists) return;
-    await this.redis.hset(taskKey(taskId),
+    await this._redis.hset(taskKey(taskId),
       "stage", stage,
       "agent", agent,
       "status", "in_progress",
@@ -112,14 +104,14 @@ class TaskTracker {
    * Idempotent — skips if the task is already terminal.
    */
   async markTaskDone(taskId, status, eventBus) {
-    const task = await this.redis.hgetall(taskKey(taskId));
+    const task = await this._redis.hgetall(taskKey(taskId));
     if (!task.cycleId) return null;
     if (TERMINAL.has(task.status)) {
       console.log(`[TaskTracker] Task ${taskId} already ${task.status} — skipping`);
       return null;
     }
 
-    await this.redis.hset(taskKey(taskId),
+    await this._redis.hset(taskKey(taskId),
       "status", status,
       "stage", status,
       "completedAt", new Date().toISOString(),
@@ -127,14 +119,14 @@ class TaskTracker {
     );
 
     const field = status === "completed" ? "completed" : status === "timed_out" ? "timedOut" : "failed";
-    await this.redis.hincrby(cycleKey(task.cycleId), field, 1);
+    await this._redis.hincrby(cycleKey(task.cycleId), field, 1);
 
     // Cascade: block any held tasks that depend on this failed/shelved task
     if ((status === "shelved" || status === "failed") && task.title) {
       await this.blockDependentsOf(task.title, eventBus);
     }
 
-    const cycle = await this.redis.hgetall(cycleKey(task.cycleId));
+    const cycle = await this._redis.hgetall(cycleKey(task.cycleId));
     const total = parseInt(cycle.total);
     const done = parseInt(cycle.completed) + parseInt(cycle.failed) + parseInt(cycle.timedOut);
     console.log(`[TaskTracker] Task ${taskId} → ${status} | Cycle progress: ${done}/${total}`);
@@ -146,12 +138,12 @@ class TaskTracker {
   }
 
   async _completeCycle(cycleId, eventBus) {
-    const cycle = await this.redis.hgetall(cycleKey(cycleId));
-    await this.redis.hset(cycleKey(cycleId), "status", "completed", "completedAt", new Date().toISOString());
+    const cycle = await this._redis.hgetall(cycleKey(cycleId));
+    await this._redis.hset(cycleKey(cycleId), "status", "completed", "completedAt", new Date().toISOString());
     // Refresh TTL so the 7-day window starts from cycle completion
-    await this.redis.expire(cycleKey(cycleId), CYCLE_KEY_TTL);
-    await this.redis.set(KEY_LAST, cycleId);
-    await this.redis.del(KEY_ACTIVE);
+    await this._redis.expire(cycleKey(cycleId), CYCLE_KEY_TTL);
+    await this._redis.set(KEY_LAST, cycleId);
+    await this._redis.del(KEY_ACTIVE);
 
     const completed = parseInt(cycle.completed || 0);
     const failed = parseInt(cycle.failed || 0);
@@ -177,10 +169,10 @@ class TaskTracker {
    * Returns the number of tasks timed out.
    */
   async timeoutStaleTasks(cycleId, eventBus) {
-    const taskIds = await this.redis.smembers(tasksKey(cycleId));
+    const taskIds = await this._redis.smembers(tasksKey(cycleId));
     let count = 0;
     for (const taskId of taskIds) {
-      const task = await this.redis.hgetall(taskKey(taskId));
+      const task = await this._redis.hgetall(taskKey(taskId));
       if (!TERMINAL.has(task.status)) {
         await this.markTaskDone(taskId, "timed_out", eventBus);
         count++;
@@ -193,16 +185,16 @@ class TaskTracker {
    * Log an agent execution to the cycle's agent run list.
    */
   async logAgentRun(cycleId, agentName, taskId, duration, verdict, usage, costUsd) {
-    await this.redis.rpush(agentsKey(cycleId), JSON.stringify({
+    await this._redis.rpush(agentsKey(cycleId), JSON.stringify({
       agent: agentName, task: taskId, duration,
       verdict: verdict || "completed",
       costUsd: costUsd || 0,
       timestamp: new Date().toISOString(),
     }));
     // Ensure agents list has TTL (created on first rpush)
-    await this.redis.expire(agentsKey(cycleId), CYCLE_KEY_TTL);
+    await this._redis.expire(agentsKey(cycleId), CYCLE_KEY_TTL);
     if (usage) {
-      const pipe = this.redis.pipeline();
+      const pipe = this._redis.pipeline();
       pipe.hincrby(costsKey(cycleId), "inputTokens", usage.inputTokens || 0);
       pipe.hincrby(costsKey(cycleId), "outputTokens", usage.outputTokens || 0);
       pipe.hincrby(costsKey(cycleId), "cachedInputTokens", usage.cachedInputTokens || 0);
@@ -216,14 +208,14 @@ class TaskTracker {
    * Get full cycle state including per-task detail.
    */
   async getCycleState() {
-    const cycleId = await this.redis.get(KEY_ACTIVE);
+    const cycleId = await this._redis.get(KEY_ACTIVE);
     if (!cycleId) return { status: "idle" };
 
-    const cycle = await this.redis.hgetall(cycleKey(cycleId));
-    const taskIds = await this.redis.smembers(tasksKey(cycleId));
+    const cycle = await this._redis.hgetall(cycleKey(cycleId));
+    const taskIds = await this._redis.smembers(tasksKey(cycleId));
     const tasks = [];
     for (const id of taskIds) {
-      tasks.push({ taskId: id, ...(await this.redis.hgetall(taskKey(id))) });
+      tasks.push({ taskId: id, ...(await this._redis.hgetall(taskKey(id))) });
     }
 
     return {
@@ -243,14 +235,14 @@ class TaskTracker {
    * Get a structured cycle report (active or last completed).
    */
   async getCycleReport(cycleId) {
-    const id = cycleId || await this.redis.get(KEY_ACTIVE) || await this.redis.get(KEY_LAST);
+    const id = cycleId || await this._redis.get(KEY_ACTIVE) || await this._redis.get(KEY_LAST);
     if (!id) return { cycleId: null, tasks: {}, agents: [], costs: {} };
 
-    const cycle = await this.redis.hgetall(cycleKey(id));
-    const agents = (await this.redis.lrange(agentsKey(id), 0, -1))
+    const cycle = await this._redis.hgetall(cycleKey(id));
+    const agents = (await this._redis.lrange(agentsKey(id), 0, -1))
       .map((e) => { try { return JSON.parse(e); } catch { return null; } })
       .filter(Boolean);
-    const costs = await this.redis.hgetall(costsKey(id));
+    const costs = await this._redis.hgetall(costsKey(id));
     const total = parseInt(cycle.total || 0);
     const completed = parseInt(cycle.completed || 0);
     const failed = parseInt(cycle.failed || 0);
@@ -280,7 +272,7 @@ class TaskTracker {
    * Get a single task's state.
    */
   async getTaskState(taskId) {
-    return this.redis.hgetall(taskKey(taskId));
+    return this._redis.hgetall(taskKey(taskId));
   }
 
   // ---------------------------------------------------------------------------
@@ -293,7 +285,7 @@ class TaskTracker {
    */
   async initTaskV2(cycleId, task) {
     const taskId = task.taskId || task.id;
-    const pipe = this.redis.pipeline();
+    const pipe = this._redis.pipeline();
 
     pipe.sadd(tasksKey(cycleId), taskId);
     pipe.hset(taskKey(taskId),
@@ -331,19 +323,15 @@ class TaskTracker {
    * @returns {{ ok: boolean, error?: string }}
    */
   async transitionTask(taskId, newState, evidence = {}) {
-    const task = await this.redis.hgetall(taskKey(taskId));
+    const task = await this._redis.hgetall(taskKey(taskId));
     if (!task.cycleId) return { ok: false, error: `Task ${taskId} not found` };
 
-    const currentState = task.state || task.status || "proposed";
-    const allowed = VALID_TRANSITIONS[currentState];
+    const currentState = (task.state || task.status || "proposed") as TaskState;
+    const result = canTransitionTo(currentState, newState as TaskState);
 
-    if (!allowed) {
-      return { ok: false, error: `State "${currentState}" has no valid transitions (terminal)` };
-    }
-
-    if (!allowed.includes(newState)) {
-      console.log(`[TaskTracker] Illegal transition: ${taskId} ${currentState} → ${newState} (allowed: ${allowed.join(", ")})`);
-      return { ok: false, error: `Cannot transition from "${currentState}" to "${newState}"` };
+    if (!result.ok) {
+      console.log(`[TaskTracker] Illegal transition: ${taskId} ${currentState} → ${newState} (${result.reason})`);
+      return { ok: false, error: result.reason };
     }
 
     // Update task state
@@ -352,11 +340,11 @@ class TaskTracker {
       status: newState, // backward compat
       updatedAt: new Date().toISOString(),
     };
-    if (TERMINAL_V2.has(newState)) {
+    if (isTerminal(newState as TaskState)) {
     // @ts-expect-error — migrate to proper types
       updates.completedAt = new Date().toISOString();
     }
-    await this.redis.hset(taskKey(taskId), ...Object.entries(updates).flat());
+    await this._redis.hset(taskKey(taskId), ...Object.entries(updates).flat());
 
     // Store evidence
     if (Object.keys(evidence).length > 0) {
@@ -366,24 +354,24 @@ class TaskTracker {
         from: currentState,
         to: newState,
       });
-      await this.redis.set(evidenceKey(taskId, newState), evidenceJson, "EX", CYCLE_KEY_TTL);
+      await this._redis.set(evidenceKey(taskId, newState), evidenceJson, "EX", CYCLE_KEY_TTL);
     }
 
     console.log(`[TaskTracker] ${taskId}: ${currentState} → ${newState}`);
 
     // If terminal, update cycle counters
-    if (TERMINAL_V2.has(newState)) {
-      const shouldCountTerminal = !TERMINAL_V2.has(currentState);
+    if (isTerminal(newState as TaskState)) {
+      const shouldCountTerminal = !isTerminal(currentState);
       if (shouldCountTerminal) {
         const field = newState === "merged" || newState === "verified"
           ? "completed"
           : newState === "abandoned"
             ? "abandoned"
             : "failed";
-        await this.redis.hincrby(cycleKey(task.cycleId), field, 1);
+        await this._redis.hincrby(cycleKey(task.cycleId), field, 1);
       }
 
-      const cycle = await this.redis.hgetall(cycleKey(task.cycleId));
+      const cycle = await this._redis.hgetall(cycleKey(task.cycleId));
       const total = parseInt(cycle.total);
       const done = parseInt(cycle.completed || 0) + parseInt(cycle.failed || 0) + parseInt(cycle.abandoned || 0) + parseInt(cycle.timedOut || 0);
       console.log(`[TaskTracker] Cycle progress: ${done}/${total}`);
@@ -404,7 +392,7 @@ class TaskTracker {
     const evidence: Record<string, any> = {};
 
     for (const state of states) {
-      const data = await this.redis.get(evidenceKey(taskId, state));
+      const data = await this._redis.get(evidenceKey(taskId, state));
       if (data) {
         try { evidence[state] = JSON.parse(data); } catch { evidence[state] = data; }
       }
@@ -417,7 +405,7 @@ class TaskTracker {
    * Check if a state is terminal in the v2 state machine.
    */
   isTerminalV2(state) {
-    return TERMINAL_V2.has(state);
+    return isTerminal(state);
   }
 
   // ---------------------------------------------------------------------------
@@ -431,7 +419,7 @@ class TaskTracker {
   async checkDependenciesMet(dependencies) {
     if (!dependencies || dependencies.length === 0) return { proceed: true, unmet: [] };
 
-    const completed = await this.redis.smembers(DEPS_COMPLETED);
+    const completed = await this._redis.smembers(DEPS_COMPLETED);
     const completedSet = new Set(completed);
     const unmet = dependencies.filter((d) => !completedSet.has(d));
 
@@ -443,11 +431,11 @@ class TaskTracker {
    * The full event is stored so it can be re-published on release.
    */
   async holdTask(taskId, event, unmetDeps) {
-    await this.redis.hset(heldKey(taskId),
+    await this._redis.hset(heldKey(taskId),
       "event", JSON.stringify(event),
       "deps", JSON.stringify(unmetDeps),
     );
-    await this.redis.sadd(DEPS_INDEX, taskId);
+    await this._redis.sadd(DEPS_INDEX, taskId);
     console.log(`[TaskTracker] Holding ${taskId} — waiting for: ${unmetDeps.join(", ")}`);
   }
 
@@ -456,13 +444,13 @@ class TaskTracker {
    * dependencies are now fully met. Returns the events to re-publish.
    */
   async releaseByTitle(completedTitle) {
-    await this.redis.sadd(DEPS_COMPLETED, completedTitle);
+    await this._redis.sadd(DEPS_COMPLETED, completedTitle);
 
-    const heldIds = await this.redis.smembers(DEPS_INDEX);
+    const heldIds = await this._redis.smembers(DEPS_INDEX);
     const released = [];
 
     for (const taskId of heldIds) {
-      const held = await this.redis.hgetall(heldKey(taskId));
+      const held = await this._redis.hgetall(heldKey(taskId));
       if (!held.deps) continue;
 
       let deps;
@@ -474,11 +462,11 @@ class TaskTracker {
         let event;
         try { event = JSON.parse(held.event); } catch { continue; }
         released.push(event);
-        await this.redis.del(heldKey(taskId));
-        await this.redis.srem(DEPS_INDEX, taskId);
+        await this._redis.del(heldKey(taskId));
+        await this._redis.srem(DEPS_INDEX, taskId);
         console.log(`[TaskTracker] Released ${taskId} — all dependencies met`);
       } else {
-        await this.redis.hset(heldKey(taskId), "deps", JSON.stringify(remaining));
+        await this._redis.hset(heldKey(taskId), "deps", JSON.stringify(remaining));
       }
     }
 
@@ -490,10 +478,10 @@ class TaskTracker {
    * Cascade: blocked tasks trigger further blocks on their dependents.
    */
   async blockDependentsOf(failedTitle, eventBus) {
-    const heldIds = await this.redis.smembers(DEPS_INDEX);
+    const heldIds = await this._redis.smembers(DEPS_INDEX);
 
     for (const taskId of heldIds) {
-      const held = await this.redis.hgetall(heldKey(taskId));
+      const held = await this._redis.hgetall(heldKey(taskId));
       if (!held.deps) continue;
 
       let deps;
@@ -503,8 +491,8 @@ class TaskTracker {
         console.log(`[TaskTracker] Blocking ${taskId} — dependency "${failedTitle}" failed`);
 
         // Clean up held state before markTaskDone (which cascades recursively)
-        await this.redis.del(heldKey(taskId));
-        await this.redis.srem(DEPS_INDEX, taskId);
+        await this._redis.del(heldKey(taskId));
+        await this._redis.srem(DEPS_INDEX, taskId);
 
         // markTaskDone with "failed" will cascade to further dependents
         await this.markTaskDone(taskId, "failed", eventBus);
@@ -517,16 +505,16 @@ class TaskTracker {
    * Returns events that should be re-published to STREAMS.TASKS.
    */
   async recoverHeldTasks() {
-    const heldIds = await this.redis.smembers(DEPS_INDEX);
+    const heldIds = await this._redis.smembers(DEPS_INDEX);
     if (heldIds.length === 0) return [];
 
     console.log(`[TaskTracker] Checking ${heldIds.length} held tasks for recovery...`);
-    const completed = await this.redis.smembers(DEPS_COMPLETED);
+    const completed = await this._redis.smembers(DEPS_COMPLETED);
     const completedSet = new Set(completed);
     const released = [];
 
     for (const taskId of heldIds) {
-      const held = await this.redis.hgetall(heldKey(taskId));
+      const held = await this._redis.hgetall(heldKey(taskId));
       if (!held.deps) continue;
 
       let deps;
@@ -538,8 +526,8 @@ class TaskTracker {
         let event;
         try { event = JSON.parse(held.event); } catch { continue; }
         released.push(event);
-        await this.redis.del(heldKey(taskId));
-        await this.redis.srem(DEPS_INDEX, taskId);
+        await this._redis.del(heldKey(taskId));
+        await this._redis.srem(DEPS_INDEX, taskId);
         console.log(`[TaskTracker] Recovered held task ${taskId} — all dependencies now met`);
       }
     }
@@ -548,7 +536,7 @@ class TaskTracker {
   }
 
   async close() {
-    this.redis.disconnect();
+    this._redis.disconnect();
   }
 }
 

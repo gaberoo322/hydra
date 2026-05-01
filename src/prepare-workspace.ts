@@ -99,7 +99,7 @@ export async function prepareWorkspace(projectDir) {
   // Acquire workspace lock — prevents concurrent git operations from
   // Claude Code and Codex stepping on each other's workspace state
   const WORKSPACE_LOCK_KEY = redisKeys.workspaceLock();
-  const redis = getTracker().redis;
+  const redis = getTracker().getRedisClient();
   const locked = await redis.set(WORKSPACE_LOCK_KEY, `${process.pid}`, "NX", "EX", 60);
   if (!locked) {
     return { cleaned: false, reason: "Another process is modifying the workspace", staleBranchesDeleted: 0 };

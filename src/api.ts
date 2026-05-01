@@ -175,7 +175,7 @@ function createApi(eventBus) {
       }
 
       // Dedup: check if an item with the same reference already exists in the queue
-      const existing = await getTracker().redis.lrange(redisKeys.anchorWorkQueue(), 0, -1);
+      const existing = await getTracker().getRedisClient().lrange(redisKeys.anchorWorkQueue(), 0, -1);
       const refLower = reference.toLowerCase().trim();
       const duplicate = existing.some(raw => {
         try {
@@ -188,8 +188,8 @@ function createApi(eventBus) {
       }
 
       const item = { reference, reason: reason || "queued by operator", context, queuedAt: new Date().toISOString() };
-      await getTracker().redis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify(item));
-      const queueLen = await getTracker().redis.llen(redisKeys.anchorWorkQueue());
+      await getTracker().getRedisClient().rpush(redisKeys.anchorWorkQueue(), JSON.stringify(item));
+      const queueLen = await getTracker().getRedisClient().llen(redisKeys.anchorWorkQueue());
       res.json({ queued: true, item, position: queueLen });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -199,7 +199,7 @@ function createApi(eventBus) {
   // GET /queue — View queued work items
   api.get("/queue", async (req, res) => {
     try {
-      const items = await getTracker().redis.lrange(redisKeys.anchorWorkQueue(), 0, -1);
+      const items = await getTracker().getRedisClient().lrange(redisKeys.anchorWorkQueue(), 0, -1);
       res.json(items.map((i) => { try { return JSON.parse(i); } catch { return i; } }));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -212,8 +212,8 @@ function createApi(eventBus) {
       const { getMetricsTrend: gmt, getAggregateStats: gas, getCumulativeAccomplishments: gca } = await import("./metrics.ts");
       const stats = await gas(20);
       const acc = await gca(20);
-      const queueLen = await getTracker().redis.llen(redisKeys.anchorWorkQueue());
-      const priorFails = await getTracker().redis.llen(redisKeys.anchorPriorFailures());
+      const queueLen = await getTracker().getRedisClient().llen(redisKeys.anchorWorkQueue());
+      const priorFails = await getTracker().getRedisClient().llen(redisKeys.anchorPriorFailures());
 
       const lines = [
         `Hydra V2 — ${stats.cycles} cycles completed`,
@@ -284,7 +284,7 @@ function createApi(eventBus) {
       const perCycle = [];
 
       for (const m of trend) {
-        const costs = await tracker.redis.hgetall(redisKeys.cycleCosts(m.cycleId));
+        const costs = await tracker.getRedisClient().hgetall(redisKeys.cycleCosts(m.cycleId));
         const input = parseInt(costs.inputTokens) || 0;
         const output = parseInt(costs.outputTokens) || 0;
         const costMicro = parseInt(costs.costMicrodollars) || 0;
@@ -417,8 +417,8 @@ function createApi(eventBus) {
       })(),
       /* 2 */ getSchedulerStatus(),
       /* 3 */ getCycleStatus(),
-      /* 4 */ getTracker().redis.llen(redisKeys.anchorWorkQueue()),
-      /* 5 */ getTracker().redis.llen(redisKeys.anchorPriorFailures()),
+      /* 4 */ getTracker().getRedisClient().llen(redisKeys.anchorWorkQueue()),
+      /* 5 */ getTracker().getRedisClient().llen(redisKeys.anchorPriorFailures()),
       /* 6 */ getBacklogCounts(),
       /* 7 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
       /* 8 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
@@ -427,13 +427,13 @@ function createApi(eventBus) {
       /* 11 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 12 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-betting-web.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 13 */ (async () => {
-        const r = getTracker().redis;
+        const r = getTracker().getRedisClient();
         const [p, e, s] = await Promise.all([r.get(redisKeys.memoryPatterns("planner")), r.get(redisKeys.memoryPatterns("executor")), r.get(redisKeys.memoryPatterns("skeptic"))]);
         const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };
         return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
       })(),
       /* 14 */ (async () => {
-        const r = getTracker().redis; let count = 0, cursor = "0";
+        const r = getTracker().getRedisClient(); let count = 0, cursor = "0";
         do { const [next, keys] = await r.scan(cursor, "MATCH", redisKeys.reflection("*"), "COUNT", 100); cursor = next; count += keys.length; } while (cursor !== "0");
         return count;
       })(),
@@ -450,7 +450,7 @@ function createApi(eventBus) {
       })(),
       /* 16 */ (async () => {
         try {
-          const [info, clients, server] = await Promise.all([getTracker().redis.info("memory"), getTracker().redis.info("clients"), getTracker().redis.info("server")]);
+          const [info, clients, server] = await Promise.all([getTracker().getRedisClient().info("memory"), getTracker().getRedisClient().info("clients"), getTracker().getRedisClient().info("server")]);
           return { memoryHuman: info.match(/used_memory_human:(\S+)/)?.[1] || "unknown", connectedClients: parseInt(clients.match(/connected_clients:(\d+)/)?.[1] || "0"), uptimeSeconds: parseInt(server.match(/uptime_in_seconds:(\d+)/)?.[1] || "0") };
         } catch { return null; }
       })(),
@@ -1210,7 +1210,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
 
       // Queue as work for the next cycle
       const tracker = getTracker();
-      await tracker.redis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
+      await tracker.getRedisClient().rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
         reference: `Fix Sentry ${level}: ${title}`,
         reason: `Sentry issue in ${project}${culprit ? ` at ${culprit}` : ""}${url ? ` — ${url}` : ""}`,
         context: JSON.stringify({
@@ -1514,7 +1514,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
       if (!cycleId || !source) {
         return res.status(400).json({ error: "Missing cycleId or source" });
       }
-      const r = getTracker().redis;
+      const r = getTracker().getRedisClient();
       await r.set(redisKeys.cycleActiveSource(source), cycleId, "EX", 900);
       await r.hset(redisKeys.cycle(cycleId),
         "status", "running",
@@ -1539,7 +1539,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
       if (!cycleId) {
         return res.status(400).json({ error: "Missing cycleId" });
       }
-      const r = getTracker().redis;
+      const r = getTracker().getRedisClient();
       await r.del(redisKeys.cycleActiveSource(source || "claude"));
       await r.hset(redisKeys.cycle(cycleId),
         "status", status || "completed",
@@ -1566,7 +1566,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   api.post("/merge/lock", async (req, res) => {
     try {
       const { cycleId } = req.body || {};
-      const r = getTracker().redis;
+      const r = getTracker().getRedisClient();
       const acquired = await r.set(redisKeys.mergeLock(), cycleId || "unknown", "EX", 60, "NX");
       if (!acquired) {
         const holder = await r.get(redisKeys.mergeLock());
@@ -1581,7 +1581,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   // Release merge lock
   api.post("/merge/unlock", async (_req, res) => {
     try {
-      await getTracker().redis.del(redisKeys.mergeLock());
+      await getTracker().getRedisClient().del(redisKeys.mergeLock());
       res.json({ released: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

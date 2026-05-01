@@ -58,10 +58,10 @@ async function getCycleStatus(): Promise<CycleRecord | { status: string }> {
   if (currentCycle) return currentCycle;
 
   const tracker = getTracker();
-  const activeId = await tracker.redis.get(redisKeys.cycleActive());
+  const activeId = await tracker.getRedisClient().get(redisKeys.cycleActive());
   if (!activeId) return { status: "idle" };
 
-  const cycle = await tracker.redis.hgetall(redisKeys.cycle(activeId));
+  const cycle = await tracker.getRedisClient().hgetall(redisKeys.cycle(activeId));
   if (!cycle || !cycle.status) return { status: "idle" };
 
   return {
@@ -82,7 +82,7 @@ async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
   let ids: string[] = [];
 
   try {
-    ids = await tracker.redis.keys(redisKeys.cycle("cycle-*"));
+    ids = await tracker.getRedisClient().keys(redisKeys.cycle("cycle-*"));
   } catch (err: any) {
     console.error(`[Cycle] Failed to list cycle keys from Redis: ${err.message}`);
   }
@@ -94,7 +94,7 @@ async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
     if (seen.has(id)) continue;
     seen.add(id);
     const cycleId = id.replace(new RegExp(`^${redisKeys.cycle("")}`), "");
-    const cycle = await tracker.redis.hgetall(id);
+    const cycle = await tracker.getRedisClient().hgetall(id);
     if (!cycle || !cycle.status) continue;
     records.push({
       id: cycleId,
