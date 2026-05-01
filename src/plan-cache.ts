@@ -10,12 +10,17 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import Redis from "ioredis";
 import { redisKeys } from "./redis-keys.ts";
+import {
+  getPlanCacheEntry,
+  setPlanCacheEntry,
+  deletePlanCacheEntry,
+  findPlanCacheKeys,
+  deleteKeys,
+} from "./redis-adapter.ts";
 
 const execFileAsync = promisify(execFile);
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || "/home/gabe/hydra-betting";
 
 const CACHE_PREFIX = redisKeys.planCachePrefix();
@@ -25,13 +30,6 @@ const TTL_STANDARD = 12 * 60 * 60; // 12 hours
 const TTL_QUICK_FIX = 6 * 60 * 60; // 6 hours
 
 const CACHEABLE_TYPES = new Set(["user-request", "codebase-health", "failing-test", "research"]);
-
-let redis: InstanceType<typeof Redis> | null = null;
-
-function getRedis() {
-  if (!redis) redis = new Redis(REDIS_URL);
-  return redis;
-}
 
 type CacheEntry = {
   task: Record<string, any>;
@@ -102,7 +100,7 @@ export async function getCachedPlan(
 
   const key = cacheKey(anchor);
   try {
-    const raw = await getRedis().get(key);
+    const raw = await getPlanCacheEntry(key);
     if (!raw) {
       stats.misses++;
       return null;
@@ -116,7 +114,7 @@ export async function getCachedPlan(
       console.log(`[PlanCache] STALE: ${staleReason} — key ${key.slice(-12)}`);
       stats.stale++;
       stats.misses++;
-      await getRedis().del(key);
+      await deletePlanCacheEntry(key);
       return null;
     }
 
@@ -126,7 +124,7 @@ export async function getCachedPlan(
       console.log(`[PlanCache] STALE: scope files modified since cache — key ${key.slice(-12)}`);
       stats.stale++;
       stats.misses++;
-      await getRedis().del(key);
+      await deletePlanCacheEntry(key);
       return null;
     }
 
@@ -161,7 +159,7 @@ export async function cachePlan(
   };
 
   try {
-    await getRedis().set(key, JSON.stringify(entry), "EX", ttl);
+    await setPlanCacheEntry(key, JSON.stringify(entry), ttl);
     stats.stored++;
     console.log(`[PlanCache] STORED: "${task.title?.slice(0, 60)}" (TTL ${ttl / 3600}h)`);
   } catch (err: any) {
@@ -171,9 +169,9 @@ export async function cachePlan(
 
 export async function invalidatePlanCache(): Promise<number> {
   try {
-    const keys = await getRedis().keys(`${CACHE_PREFIX}*`);
+    const keys = await findPlanCacheKeys(CACHE_PREFIX);
     if (keys.length > 0) {
-      await getRedis().del(...keys);
+      await deleteKeys(keys);
       stats.invalidated += keys.length;
       console.log(`[PlanCache] INVALIDATED: ${keys.length} cached plans`);
     }

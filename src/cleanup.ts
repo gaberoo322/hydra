@@ -13,30 +13,41 @@
 
 import { archiveApprovedProposals } from "./proposals.ts";
 import { pruneOldDoneItems } from "./backlog.ts";
-import { getTracker } from "./task-tracker.ts";
 import { redisKeys } from "./redis-keys.ts";
+import {
+  pruneMetricsIndex,
+  getMetricsIndexSize,
+  trimMetricsIndex,
+  scanKeys,
+  getKeyTTL,
+  getKeyType,
+  hashGet,
+  deleteKeysBatch,
+  getBacklogLaneWithScores,
+  getBacklogItem,
+  moveBacklogItem,
+} from "./redis-adapter.ts";
 
 const STALE_KEY_RETENTION_DAYS = 7;
 const STALE_IN_PROGRESS_MS = 24 * 60 * 60 * 1000; // 24 hours
 const METRICS_INDEX_MAX_ENTRIES = 500;
 
 async function pruneStaleRedisKeys() {
-  const redis = getTracker().getRedisClient();
   const cutoffMs = Date.now() - STALE_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let totalPruned = 0;
 
   // Prune old metrics from sorted index, then delete orphaned metric keys
   try {
-    const removed = await redis.zremrangebyscore(redisKeys.metricsIndex(), "-inf", cutoffMs);
+    const removed = await pruneMetricsIndex(cutoffMs);
     if (removed > 0) {
       totalPruned += removed;
       console.log(`[Cleanup] Pruned ${removed} old metrics index entries`);
     }
     // Trim to max entries as a safety cap
-    const indexSize = await redis.zcard(redisKeys.metricsIndex());
+    const indexSize = await getMetricsIndexSize();
     if (indexSize > METRICS_INDEX_MAX_ENTRIES) {
       const excess = indexSize - METRICS_INDEX_MAX_ENTRIES;
-      await redis.zremrangebyrank(redisKeys.metricsIndex(), 0, excess - 1);
+      await trimMetricsIndex(excess);
       console.log(`[Cleanup] Trimmed metrics index by ${excess} (cap: ${METRICS_INDEX_MAX_ENTRIES})`);
     }
   } catch (err: any) {
@@ -53,49 +64,43 @@ async function pruneStaleRedisKeys() {
   const dateInKeyPattern = /(\d{4}-\d{2}-\d{2})/;
   for (const prefix of [redisKeys.cycle(""), redisKeys.task(""), redisKeys.metrics("")]) {
     try {
-      let cursor = "0";
+      const keys = await scanKeys(`${prefix}*`);
       const toDelete: string[] = [];
-      do {
-        const [nextCursor, keys] = await redis.scan(cursor, "MATCH", `${prefix}*`, "COUNT", 200);
-        cursor = nextCursor;
-        for (const key of keys) {
-          // Skip index/counter keys and active/last pointers
-          if (key.endsWith(":index") || key.endsWith(":counter") || key === redisKeys.cycleActive() || key === redisKeys.cycleLast()) continue;
-          const ttl = await redis.ttl(key);
-          if (ttl !== -1) continue; // Already has TTL, skip
 
-          let keyTime: number | null = null;
+      for (const key of keys) {
+        // Skip index/counter keys and active/last pointers
+        if (key.endsWith(":index") || key.endsWith(":counter") || key === redisKeys.cycleActive() || key === redisKeys.cycleLast()) continue;
+        const ttl = await getKeyTTL(key);
+        if (ttl !== -1) continue; // Already has TTL, skip
 
-          // Try hash timestamp fields first (original logic)
-          const type = await redis.type(key);
-          if (type === "hash") {
-            const ts = await redis.hget(key, "startedAt") || await redis.hget(key, "createdAt") || await redis.hget(key, "timestamp");
-            if (ts) {
-              const parsed = new Date(ts).getTime();
-              if (Number.isFinite(parsed)) keyTime = parsed;
-            }
-          }
+        let keyTime: number | null = null;
 
-          // Fallback: extract date from key name (handles sub-keys, strings, sets, lists)
-          if (keyTime === null) {
-            const match = key.match(dateInKeyPattern);
-            if (match) {
-              const parsed = new Date(match[1] + "T00:00:00Z").getTime();
-              if (Number.isFinite(parsed)) keyTime = parsed;
-            }
-          }
-
-          if (keyTime !== null && keyTime < cutoffMs) {
-            toDelete.push(key);
+        // Try hash timestamp fields first (original logic)
+        const type = await getKeyType(key);
+        if (type === "hash") {
+          const ts = await hashGet(key, "startedAt") || await hashGet(key, "createdAt") || await hashGet(key, "timestamp");
+          if (ts) {
+            const parsed = new Date(ts).getTime();
+            if (Number.isFinite(parsed)) keyTime = parsed;
           }
         }
-      } while (cursor !== "0");
+
+        // Fallback: extract date from key name (handles sub-keys, strings, sets, lists)
+        if (keyTime === null) {
+          const match = key.match(dateInKeyPattern);
+          if (match) {
+            const parsed = new Date(match[1] + "T00:00:00Z").getTime();
+            if (Number.isFinite(parsed)) keyTime = parsed;
+          }
+        }
+
+        if (keyTime !== null && keyTime < cutoffMs) {
+          toDelete.push(key);
+        }
+      }
+
       if (toDelete.length > 0) {
-        // Delete in batches of 500 to avoid huge DEL commands
-        for (let i = 0; i < toDelete.length; i += 500) {
-          const batch = toDelete.slice(i, i + 500);
-          await redis.del(...batch);
-        }
+        await deleteKeysBatch(toDelete);
         totalPruned += toDelete.length;
         console.log(`[Cleanup] Pruned ${toDelete.length} stale ${prefix}* keys`);
       }
@@ -111,8 +116,7 @@ async function pruneStaleRedisKeys() {
 
 async function returnStaleInProgressItems() {
   try {
-    const redis = getTracker().getRedisClient();
-    const ids = await redis.zrange(redisKeys.backlogLane("inProgress"), 0, -1, "WITHSCORES");
+    const ids = await getBacklogLaneWithScores("inProgress");
     const now = Date.now();
     let returned = 0;
 
@@ -121,14 +125,12 @@ async function returnStaleInProgressItems() {
       const id = ids[i];
       const score = Number(ids[i + 1]);
       if (now - score > STALE_IN_PROGRESS_MS) {
-        const raw = await redis.hget(redisKeys.backlogItems(), id);
+        const raw = await getBacklogItem(id);
         if (!raw) continue;
         const item = JSON.parse(raw);
         item.lane = "queued";
         item.meta = { ...item.meta, returnedReason: "stale_in_progress", returnedAt: new Date().toISOString() };
-        await redis.hset(redisKeys.backlogItems(), id, JSON.stringify(item));
-        await redis.zrem(redisKeys.backlogLane("inProgress"), id);
-        await redis.zadd(redisKeys.backlogLane("queued"), now, id);
+        await moveBacklogItem(id, JSON.stringify(item), "inProgress", "queued");
         returned++;
         console.log(`[Cleanup] Returned stale inProgress item ${id} ("${item.title?.slice(0, 60)}") to queued`);
       }

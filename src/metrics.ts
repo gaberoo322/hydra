@@ -1,20 +1,14 @@
-import Redis from "ioredis";
 import { CYCLE_KEY_TTL } from "./task-tracker.ts";
 import { redisKeys } from "./redis-keys.ts";
+import {
+  getCycleAgentRuns,
+  setCycleMetrics,
+  getRecentMetricIds,
+  getCycleMetrics,
+} from "./redis-adapter.ts";
 
 const METRICS_INDEX = redisKeys.metricsIndex();
 const metricsKey = (cycleId) => redisKeys.metrics(cycleId);
-
-let redis;
-
-function initMetrics(redisUrl) {
-  redis = new Redis(redisUrl);
-}
-
-function getRedis() {
-  if (!redis) throw new Error("Metrics not initialized — call initMetrics() first");
-  return redis;
-}
 
 /**
  * Record a cycle's outcome metrics.
@@ -24,12 +18,10 @@ function getRedis() {
  * @param {CycleMetrics} metrics
  */
 export async function recordCycleMetrics(cycleId, metrics) {
-  const r = getRedis();
-
   // Auto-compute cycle cost from logged agent runs if not provided
   if (metrics.costUsd === undefined) {
     try {
-      const agentRuns = await r.lrange(redisKeys.cycleAgents(cycleId), 0, -1);
+      const agentRuns = await getCycleAgentRuns(cycleId);
       let totalCost = 0;
       for (const raw of agentRuns) {
         try {
@@ -49,9 +41,7 @@ export async function recordCycleMetrics(cycleId, metrics) {
   flat.recordedAt = new Date().toISOString();
   if (!flat.source) flat.source = "codex"; // default source for Codex orchestrator cycles
 
-  await r.hset(metricsKey(cycleId), ...Object.entries(flat).flat());
-  await r.expire(metricsKey(cycleId), CYCLE_KEY_TTL);
-  await r.zadd(METRICS_INDEX, Date.now(), cycleId);
+  await setCycleMetrics(cycleId, flat, CYCLE_KEY_TTL);
 
   const costStr = metrics.costUsd > 0 ? `, cost=$${metrics.costUsd.toFixed(4)}` : "";
   console.log(`[Metrics] Recorded cycle ${cycleId}: ${metrics.tasksMerged || 0} merged, ${metrics.tasksFailed || 0} failed, regression=${metrics.regressionIntroduced || false}${costStr}`);
@@ -64,16 +54,15 @@ export async function recordCycleMetrics(cycleId, metrics) {
  * @returns {CycleMetrics[]}
  */
 export async function getMetricsTrend(count = 20) {
-  const r = getRedis();
-  const cycleIds = await r.zrevrange(METRICS_INDEX, 0, count - 1);
-  const results = [];
+  const cycleIds = await getRecentMetricIds(count);
+  const results: Record<string, any>[] = [];
 
   for (const cycleId of cycleIds) {
-    const raw = await r.hgetall(metricsKey(cycleId));
+    const raw = await getCycleMetrics(cycleId);
     if (!raw.cycleId) continue;
 
     // Parse numeric fields back from strings
-    const parsed = { ...raw };
+    const parsed: Record<string, any> = { ...raw };
     for (const key of [
       "tasksAttempted", "tasksVerified", "tasksMerged", "tasksFailed", "tasksAbandoned",
       "testsBefore", "testsAfter", "testsPassingBefore", "testsPassingAfter",
@@ -102,11 +91,10 @@ export async function getMetricsTrend(count = 20) {
  * @param {number} lookback - How many recent cycles to check (default 10)
  */
 export async function detectDrift(currentTask, lookback = 10) {
-  const r = getRedis();
-  const cycleIds = await r.zrevrange(METRICS_INDEX, 0, lookback - 1);
+  const cycleIds = await getRecentMetricIds(lookback);
 
   for (const cycleId of cycleIds) {
-    const raw = await r.hgetall(metricsKey(cycleId));
+    const raw = await getCycleMetrics(cycleId);
     if (!raw.taskTitle) continue;
 
     // Exact anchor match — but only for specific anchors (test names, issue IDs).
@@ -128,7 +116,7 @@ export async function detectDrift(currentTask, lookback = 10) {
     const priorWords = new Set(raw.taskTitle.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
 
     if (currentWords.size > 0 && priorWords.size > 0) {
-      const intersection = [...currentWords].filter((w) => priorWords.has(w));
+      const intersection = [...currentWords].filter((w: string) => priorWords.has(w));
       const similarity = intersection.length / Math.max(currentWords.size, priorWords.size);
 
       if (similarity > 0.7) {
@@ -234,5 +222,8 @@ export async function getFixFeatureRatio(count = 20) {
   }
   return { fixes, features, ratio: features > 0 ? +(fixes / features).toFixed(1) : 0, total: trend.length };
 }
+
+/** No-op — kept for backward compatibility. Connection is now managed by redis-adapter. */
+function initMetrics(_redisUrl?: string) {}
 
 export { initMetrics };

@@ -18,10 +18,13 @@
  * cross-anchor view for the API and for the planner's "Recent Failures" section.
  */
 
-import Redis from "ioredis";
+import {
+  getRedisConnection,
+  pushReflection,
+  getReflectionBuffer,
+  replaceReflectionBuffer,
+} from "./redis-adapter.ts";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const BUFFER_KEY = "hydra:reflections:buffer";
 const MAX_BUFFER_SIZE = 20;
 
 export type Reflection = {
@@ -34,12 +37,6 @@ export type Reflection = {
   whatToTryDifferently: string;
   timestamp: string;
 };
-
-let redis: any = null;
-function getRedis() {
-  if (!redis) redis = new Redis(REDIS_URL);
-  return redis;
-}
 
 /**
  * Store a structured reflection after a cycle failure.
@@ -54,7 +51,6 @@ export async function recordReflection(opts: {
   whyItFailed: string;
   whatToTryDifferently: string;
 }): Promise<void> {
-  const r = getRedis();
   const reflection: Reflection = {
     cycleId: opts.cycleId,
     anchorType: opts.anchorType,
@@ -66,13 +62,7 @@ export async function recordReflection(opts: {
     timestamp: new Date().toISOString(),
   };
 
-  await r.rpush(BUFFER_KEY, JSON.stringify(reflection));
-
-  // Cap the buffer at MAX_BUFFER_SIZE — keep the most recent entries
-  const len = await r.llen(BUFFER_KEY);
-  if (len > MAX_BUFFER_SIZE) {
-    await r.ltrim(BUFFER_KEY, len - MAX_BUFFER_SIZE, -1);
-  }
+  await pushReflection(JSON.stringify(reflection), MAX_BUFFER_SIZE);
 
   console.log(`[Reflections] Recorded reflection for cycle ${opts.cycleId}: ${opts.failureMode} — ${opts.whatFailed.slice(0, 80)}`);
 }
@@ -85,8 +75,7 @@ export async function loadRelevantReflections(
   anchor: { type: string; reference: string },
   limit = 3,
 ): Promise<Reflection[]> {
-  const r = getRedis();
-  const raw = await r.lrange(BUFFER_KEY, 0, -1);
+  const raw = await getReflectionBuffer();
   if (raw.length === 0) return [];
 
   const all: Reflection[] = [];
@@ -143,8 +132,7 @@ export function formatReflectionsForPrompt(reflections: Reflection[]): string {
  * Called after a successful merge to remove stale failure context.
  */
 export async function clearReflectionsForAnchor(anchorReference: string): Promise<number> {
-  const r = getRedis();
-  const raw = await r.lrange(BUFFER_KEY, 0, -1);
+  const raw = await getReflectionBuffer();
   if (raw.length === 0) return 0;
 
   const refLower = (anchorReference || "").toLowerCase();
@@ -167,13 +155,7 @@ export async function clearReflectionsForAnchor(anchorReference: string): Promis
   }
 
   if (removed > 0) {
-    // Replace the list atomically: delete + re-push
-    const pipeline = r.pipeline();
-    pipeline.del(BUFFER_KEY);
-    if (kept.length > 0) {
-      pipeline.rpush(BUFFER_KEY, ...kept);
-    }
-    await pipeline.exec();
+    await replaceReflectionBuffer(kept);
     console.log(`[Reflections] Cleared ${removed} reflection(s) for anchor "${anchorReference.slice(0, 60)}"`);
   }
 
@@ -185,8 +167,7 @@ export async function clearReflectionsForAnchor(anchorReference: string): Promis
  * Most recent first.
  */
 export async function getAllReflections(): Promise<Reflection[]> {
-  const r = getRedis();
-  const raw = await r.lrange(BUFFER_KEY, 0, -1);
+  const raw = await getReflectionBuffer();
 
   const reflections: Reflection[] = [];
   for (const entry of raw) {
@@ -203,8 +184,7 @@ export async function getAllReflections(): Promise<Reflection[]> {
  * Close the Redis connection — for test cleanup.
  */
 export function closeReflectionsRedis() {
-  if (redis) {
-    redis.disconnect();
-    redis = null;
-  }
+  // Connection is now managed by the shared redis-adapter singleton.
+  // This function is kept for backward compatibility with tests.
+  // The shared connection should not be closed per-module.
 }

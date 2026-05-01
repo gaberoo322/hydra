@@ -18,7 +18,13 @@ import { watch } from "node:fs";
 import { writeFile, unlink } from "node:fs/promises";
 import { resolve, extname, relative, join } from "node:path";
 import { tmpdir } from "node:os";
-import Redis from "ioredis";
+import {
+  getRedisConnection,
+  getReportIdsByScore,
+  getRealityReport,
+  getReportScore,
+  getMemoryPatterns,
+} from "./redis-adapter.ts";
 import { redisKeys } from "./redis-keys.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
@@ -27,7 +33,6 @@ const OV_KEY = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d9
 // Config path as seen from inside the OV Docker container
 const OV_CONFIG_MOUNT = process.env.OV_CONFIG_MOUNT || "/config";
 const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS) || 2000;
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const REDIS_POLL_MS = parseInt(process.env.INDEXER_POLL_MS) || 30000; // 30s
 
 const INDEXABLE_EXTS = new Set([".md", ".txt", ".json", ".yaml", ".yml"]);
@@ -139,12 +144,12 @@ function onFileChange(eventType, filename) {
 let lastReportIndex = 0;
 let lastRuleCounts = {};
 
-async function pollRedisContent(redis) {
+async function pollRedisContent() {
   try {
     // Index new reality reports
-    const reportIds = await redis.zrangebyscore(redisKeys.realityReportIndex(), lastReportIndex + 1, "+inf");
+    const reportIds = await getReportIdsByScore(lastReportIndex);
     for (const id of reportIds) {
-      const raw = await redis.get(redisKeys.realityReport(id));
+      const raw = await getRealityReport(id);
       if (raw) {
         const report = JSON.parse(raw);
         const summary = `Cycle ${report.cycleId}: ${report.task?.title} — ${report.task?.finalState}. Tests: ${report.grounding?.before?.passed}→${report.grounding?.after?.passed}`;
@@ -152,14 +157,13 @@ async function pollRedisContent(redis) {
       }
     }
     if (reportIds.length > 0) {
-      const latest = await redis.zscore(redisKeys.realityReportIndex(), reportIds[reportIds.length - 1]);
+      const latest = await getReportScore(reportIds[reportIds.length - 1]);
       lastReportIndex = parseInt(latest) || lastReportIndex;
     }
 
     // Index agent memory patterns (migrated from legacy rules)
     for (const agent of ["planner", "executor", "skeptic"]) {
-      const key = redisKeys.memoryPatterns(agent);
-      const raw = await redis.get(key);
+      const raw = await getMemoryPatterns(agent);
       if (!raw) continue;
       try {
         const patterns = JSON.parse(raw);
@@ -183,7 +187,8 @@ async function pollRedisContent(redis) {
 // Main
 // ---------------------------------------------------------------------------
 
-const redis = new Redis(REDIS_URL);
+// Ensure the shared Redis connection is initialized
+getRedisConnection();
 
 console.log(`[Indexer] Watching configs: ${CONFIG_PATH}`);
 console.log(`[Indexer] Polling Redis every ${REDIS_POLL_MS / 1000}s for reports/rules`);
@@ -193,17 +198,17 @@ console.log(`[Indexer] Debounce: ${DEBOUNCE_MS}ms`);
 watch(CONFIG_PATH, { recursive: true }, onFileChange);
 
 // Poll Redis for new content
-setInterval(() => pollRedisContent(redis), REDIS_POLL_MS);
+setInterval(() => pollRedisContent(), REDIS_POLL_MS);
 // Initial poll
-pollRedisContent(redis);
+pollRedisContent();
 
 process.on("SIGINT", () => {
   console.log("\n[Indexer] Shutting down...");
-  (redis as any).disconnect();
+  getRedisConnection().disconnect();
   process.exit(0);
 });
 process.on("SIGTERM", () => {
   console.log("[Indexer] Shutting down...");
-  (redis as any).disconnect();
+  getRedisConnection().disconnect();
   process.exit(0);
 });
