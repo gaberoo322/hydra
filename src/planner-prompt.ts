@@ -368,8 +368,9 @@ export async function runPlannerAgent(cycleId, anchor, grounding, groundingSumma
       "",
       groundingSummary.slice(0, 4000),
       "",
-      // Continuity contract — what the last cycle did, what changed since
-      continuityContext ? continuityContext.slice(0, 1500) : "",
+      // Continuity contract — what the last cycle did, what changed since.
+      // Increased from 1500 to 2500 to accommodate Recent Failures reflections.
+      continuityContext ? continuityContext.slice(0, 2500) : "",
       "",
       priorities ? formatPrioritiesForPlanner(priorities) : "",
       feedback ? `## OPERATOR FEEDBACK\n${feedback.slice(0, 1000)}\n` : "",
