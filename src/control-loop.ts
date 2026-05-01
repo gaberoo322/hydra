@@ -15,6 +15,7 @@ import { runAdversarialValidation, findingsToQueueItems, trackMergedCommit, chec
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift } from "./metrics.ts";
 import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, recordReflection, loadReflections, clearReflections } from "./agent-memory.ts";
+import { recordReflection as recordGlobalReflection, loadRelevantReflections, clearReflectionsForAnchor, formatReflectionsForPrompt } from "./reflections.ts";
 import { runPlannerAgent } from "./planner-prompt.ts";
 // priorities-refresh removed — the research-strategist handles refresh inside
 // the research loop (Step 5.5). Stale-detection just warns now.
@@ -165,6 +166,13 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     console.log(`[ControlLoop] Loaded ${reflectionContext.split("### Attempt").length - 1} prior failure reflections for this anchor`);
   }
 
+  // Load relevant reflections from the global buffer (Reflexion pattern)
+  const globalReflections = await loadRelevantReflections(anchor).catch(() => []);
+  if (globalReflections.length > 0) {
+    continuityContext += "\n" + formatReflectionsForPrompt(globalReflections);
+    console.log(`[ControlLoop] Loaded ${globalReflections.length} relevant reflections from global buffer`);
+  }
+
   // =========================================================================
   // Step 2.5: PRE-VALIDATE ANCHOR — skip stale/completed items before planner
   // Saves frontier-model inference cost on anchors that will produce no task.
@@ -228,11 +236,17 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     await ovSession.logPlanner(anchor, null);
     await ovSession.logOutcome("no-work", "Planner produced no task");
     await ovSession.commit();
-    // Record episodic reflection for future retries
+    // Record episodic reflection for future retries (per-anchor + global buffer)
     await recordReflection({
       cycleId, anchorRef: anchor.reference, taskTitle: "Planner produced no task",
       outcome: "no-task", reason: "Planner could not produce a valid task from this anchor",
     }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
+    await recordGlobalReflection({
+      cycleId, anchorType: anchor.type, anchorReference: anchor.reference,
+      failureMode: "no-task", whatFailed: "Planner produced no task",
+      whyItFailed: "Planner could not produce a valid task from this anchor",
+      whatToTryDifferently: "Anchor may be too vague, already completed, or blocked. Consider a more specific formulation.",
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record global reflection: ${err.message}`));
 
     await recordCycleMetrics(cycleId, {
       tasksAttempted: 0, tasksFailed: 0, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 1,
@@ -447,6 +461,12 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       cycleId, anchorRef: anchor.reference, taskTitle: task.title,
       outcome: "no-diff", reason: "Executor ran but produced no code changes",
     }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
+    await recordGlobalReflection({
+      cycleId, anchorType: anchor.type, anchorReference: anchor.reference,
+      failureMode: "no-diff", whatFailed: task.title,
+      whyItFailed: "Executor ran but produced no code changes",
+      whatToTryDifferently: "Provide more specific scope boundary and acceptance criteria. Ensure the task is actionable.",
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record global reflection: ${err.message}`));
     await storePriorFailure(taskId, "No code changes produced", null);
     try {
       await recordPlannerLesson(cycleId, task, "failed", { failReason: "Executor produced no code changes" });
@@ -565,12 +585,18 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     });
     await tracker.transitionTask(taskId, "failed", { verification });
 
-    // Record episodic reflection for future retries
+    // Record episodic reflection for future retries (per-anchor + global buffer)
     await recordReflection({
       cycleId, anchorRef: anchor.reference, taskTitle: task.title,
       outcome: "verification-failed", reason: `Verification failed: ${failedSteps.join(", ")}`,
       verificationErrors: failedSteps,
     }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
+    await recordGlobalReflection({
+      cycleId, anchorType: anchor.type, anchorReference: anchor.reference,
+      failureMode: "verification-failed", whatFailed: task.title,
+      whyItFailed: `Verification failed: ${failedSteps.join(", ")}`,
+      whatToTryDifferently: `Address these specific verification failures: ${failedSteps.join(", ")}. Consider narrower scope or fixing verification errors before adding new behavior.`,
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record global reflection: ${err.message}`));
 
     // Store as prior-failure for retry in next cycle
     await storePriorFailure(taskId, `Verification failed: ${failedSteps.join(", ")}`, verification);
@@ -1177,6 +1203,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     // Clear abandonment counter and failure reflections on success
     try { await clearAbandonmentCounter(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
     try { await clearReflections(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
+    try { await clearReflectionsForAnchor(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
 
     // If this task came from a spec, mark the spec task complete
     if (anchor.context?.specSlug && anchor.context?.specTaskId) {

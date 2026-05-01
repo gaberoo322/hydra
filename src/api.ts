@@ -18,6 +18,7 @@ import { getPlanCacheStats, invalidatePlanCache } from "./plan-cache.ts";
 import { listSpecs, getSpec, createSpec, archiveSpec } from "./specs.ts";
 import { sendDigestNow } from "./digest.ts";
 import { loadBacklog, getBacklogCounts, addToBacklog, moveItemToLane, deleteItem, updateItem, getItemsByParent, isWipLimitReached, claimNextQueuedItem } from "./backlog.ts";
+import { getAllReflections } from "./reflections.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -1234,6 +1235,20 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   api.post("/plan-cache/invalidate", async (req, res) => {
     const count = await invalidatePlanCache();
     res.json({ invalidated: count });
+  });
+
+  // -----------------------------------------------------------------------
+  // Reflections — Reflexion-style post-mortem buffer
+  // -----------------------------------------------------------------------
+
+  // GET /reflections — All reflections in the global buffer (most recent first)
+  api.get("/reflections", async (req, res) => {
+    try {
+      const reflections = await getAllReflections();
+      res.json({ reflections, count: reflections.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // -----------------------------------------------------------------------
