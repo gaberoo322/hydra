@@ -55,14 +55,14 @@ export async function recordCycleMetrics(cycleId, metrics) {
  */
 export async function getMetricsTrend(count = 20) {
   const cycleIds = await getRecentMetricIds(count);
-  const results = [];
+  const results: Record<string, any>[] = [];
 
   for (const cycleId of cycleIds) {
     const raw = await getCycleMetrics(cycleId);
     if (!raw.cycleId) continue;
 
     // Parse numeric fields back from strings
-    const parsed = { ...raw };
+    const parsed: Record<string, any> = { ...raw };
     for (const key of [
       "tasksAttempted", "tasksVerified", "tasksMerged", "tasksFailed", "tasksAbandoned",
       "testsBefore", "testsAfter", "testsPassingBefore", "testsPassingAfter",
@@ -116,7 +116,7 @@ export async function detectDrift(currentTask, lookback = 10) {
     const priorWords = new Set(raw.taskTitle.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
 
     if (currentWords.size > 0 && priorWords.size > 0) {
-      const intersection = [...currentWords].filter((w) => priorWords.has(w));
+      const intersection = [...currentWords].filter((w: string) => priorWords.has(w));
       const similarity = intersection.length / Math.max(currentWords.size, priorWords.size);
 
       if (similarity > 0.7) {

@@ -49,7 +49,7 @@ async function getProposal(proposalId) {
   const data = await getProposalHash(proposalId);
   if (!data || Object.keys(data).length === 0) return null;
   // Parse JSON fields
-  if (data.evidence) try { data.evidence = JSON.parse(data.evidence); } catch { data.evidence = []; }
+  if (data.evidence) try { data.evidence = JSON.parse(data.evidence); } catch { (data as any).evidence = []; }
   return data;
 }
 
@@ -173,7 +173,6 @@ async function runMetaAnalysis(eventBus, event) {
 
   // 8. Recent proposals — so Meta doesn't re-propose the same things
   try {
-    // @ts-expect-error — migrate to proper types
     const recent = await listProposals();
     if (recent.length > 0) {
       const proposalLines = recent.slice(0, 15).map(p =>

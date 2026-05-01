@@ -17,10 +17,10 @@ import { redisKeys } from "./redis-keys.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
-let _instance: Redis | null = null;
+let _instance: any = null;
 
 /** Shared Redis connection. Lazy-initialized on first call. */
-export function getRedisConnection(): Redis {
+export function getRedisConnection(): any {
   if (!_instance) _instance = new Redis(REDIS_URL);
   return _instance;
 }
