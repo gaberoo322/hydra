@@ -25,6 +25,7 @@ import { detectPatterns } from "./pattern-detector.ts";
 import { createCycleSession } from "./ov-session.ts";
 import { markTaskComplete } from "./specs.ts";
 import { selectAnchor, trackAbandonment, clearAbandonmentCounter, storePriorFailure, clearProcessingItem } from "./anchor-selection.ts";
+import { scoreAnchor, getMinConfidence, recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { looksOperatorBlocked, reconcilePlanVsActual, classifyTaskComplexity, preflightCheck, runHighRiskReview } from "./preflight.ts";
 import { redisKeys } from "./redis-keys.ts";
 
@@ -199,6 +200,43 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
 
   // =========================================================================
+  // Step 2.7: CONFIDENCE SCORING — predict whether this anchor will produce work
+  // Lightweight two-tier scorer: heuristic first, nano-model for ambiguous cases.
+  // Skips anchors below ANCHOR_MIN_CONFIDENCE to reduce empty cycles.
+  // =========================================================================
+  let anchorConfidence: { score: number; reason: string; tier: "heuristic" | "classifier" } | null = null;
+  let anchorSkipped = false;
+  try {
+    anchorConfidence = await scoreAnchor(anchor, grounding);
+    const minConf = getMinConfidence();
+    console.log(`[ControlLoop] Anchor confidence: ${anchorConfidence.score.toFixed(2)} (${anchorConfidence.tier}) — ${anchorConfidence.reason}`);
+
+    if (anchorConfidence.score < minConf) {
+      anchorSkipped = true;
+      console.log(`[ControlLoop] Anchor confidence ${anchorConfidence.score.toFixed(2)} < threshold ${minConf} — skipping`);
+      await clearProcessingItem(anchor);
+      await ovSession.logOutcome("skipped", `Low confidence: ${anchorConfidence.score.toFixed(2)} — ${anchorConfidence.reason}`);
+      await ovSession.commit();
+      await recordCalibrationOutcome(cycleId, anchor, anchorConfidence, "no-task");
+      await recordCycleMetrics(cycleId, {
+        tasksAttempted: 0, tasksFailed: 0, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 0,
+        testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
+        testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
+        filesChanged: 0, totalDurationMs: Date.now() - startTime,
+        groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: 0,
+        regressionIntroduced: false, taskTitle: `Skipped (low confidence): ${anchorConfidence.reason}`,
+        anchorType: anchor.type, anchorReference: anchor.reference,
+        plannerModel: "none", planCacheHit: "false",
+        anchorConfidence: anchorConfidence.score,
+        anchorSkipped: true,
+      });
+      return { cycleId, tasks: [], reason: `Anchor below confidence threshold (${anchorConfidence.score.toFixed(2)} < ${minConf})`, durationMs: Date.now() - startTime };
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Anchor scoring failed (proceeding anyway): ${err.message}`);
+  }
+
+  // =========================================================================
   // Step 3: PLAN — propose one bounded task (codex agent call)
   // =========================================================================
   console.log(`[ControlLoop] Step 3: Planning...`);
@@ -260,7 +298,12 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       anchorType: anchor.type, anchorReference: anchor.reference,
       plannerModel: "unknown", planCacheHit: "false",
       abandonReason: "Planner produced no task",
+      anchorConfidence: anchorConfidence?.score ?? null,
+      anchorSkipped: false,
     });
+    if (anchorConfidence) {
+      await recordCalibrationOutcome(cycleId, anchor, anchorConfidence, "no-task");
+    }
     return { cycleId, tasks: [], reason: "Planner produced no task", durationMs: Date.now() - startTime };
   }
 
@@ -1282,7 +1325,15 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     jitTestsGenerated: jitReport?.generated || 0,
     jitTestsKept: jitReport?.kept || 0,
     jitTestsCaughtBug: jitReport?.caughtBug ? 1 : 0,
+    anchorConfidence: anchorConfidence?.score ?? null,
+    anchorSkipped: false,
   });
+
+  // Step 8.0.5: Calibration — record predicted confidence vs actual outcome
+  if (anchorConfidence) {
+    const calOutcome = (commitSha && !rolledBack) ? "merged" : (rolledBack ? "failed" : "failed");
+    await recordCalibrationOutcome(cycleId, anchor, anchorConfidence, calOutcome);
+  }
 
   // Step 8.1: Pattern detection — check for systemic issues across recent cycles
   await detectPatterns(eventBus, cycleId);
