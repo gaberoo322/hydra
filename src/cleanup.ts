@@ -21,7 +21,7 @@ const STALE_IN_PROGRESS_MS = 24 * 60 * 60 * 1000; // 24 hours
 const METRICS_INDEX_MAX_ENTRIES = 500;
 
 async function pruneStaleRedisKeys() {
-  const redis = getTracker().redis;
+  const redis = getTracker().getRedisClient();
   const cutoffMs = Date.now() - STALE_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let totalPruned = 0;
 
@@ -111,7 +111,7 @@ async function pruneStaleRedisKeys() {
 
 async function returnStaleInProgressItems() {
   try {
-    const redis = getTracker().redis;
+    const redis = getTracker().getRedisClient();
     const ids = await redis.zrange(redisKeys.backlogLane("inProgress"), 0, -1, "WITHSCORES");
     const now = Date.now();
     let returned = 0;

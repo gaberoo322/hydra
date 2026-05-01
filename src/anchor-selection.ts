@@ -41,13 +41,13 @@ export const ABANDONMENT_COUNTER_TTL = 86400; // 24h — auto-expire stale count
 export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // 0. Recover items stuck in processing queue from a prior crash
   try {
-    const stuckItems = await getTracker().redis.lrange(PROCESSING_QUEUE, 0, -1);
+    const stuckItems = await getTracker().getRedisClient().lrange(PROCESSING_QUEUE, 0, -1);
     if (stuckItems.length > 0) {
       console.log(`[ControlLoop] Recovering ${stuckItems.length} items from processing queue`);
       for (const item of stuckItems) {
-        await getTracker().redis.rpush(WORK_QUEUE, item);
+        await getTracker().getRedisClient().rpush(WORK_QUEUE, item);
       }
-      await getTracker().redis.del(PROCESSING_QUEUE);
+      await getTracker().getRedisClient().del(PROCESSING_QUEUE);
     }
   } catch (err: any) {
     console.error(`[ControlLoop] Processing queue recovery failed: ${err.message}`);
@@ -163,7 +163,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   //    they represent heavier new-work intake.
   //    Uses LMOVE to atomically move the item to a processing list so it can
   //    be recovered if the cycle crashes before completing.
-  const queued = await getTracker().redis.lmove(WORK_QUEUE, PROCESSING_QUEUE, "LEFT", "RIGHT");
+  const queued = await getTracker().getRedisClient().lmove(WORK_QUEUE, PROCESSING_QUEUE, "LEFT", "RIGHT");
   if (queued) {
     try {
       const item = JSON.parse(queued);
@@ -191,16 +191,16 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt work-queue item dropped: ${err.message} — data: ${queued.slice(0, 200)}`);
       // Remove corrupt item from processing queue — it cannot be recovered
-      await getTracker().redis.lrem(PROCESSING_QUEUE, 1, queued);
+      await getTracker().getRedisClient().lrem(PROCESSING_QUEUE, 1, queued);
     }
   }
 
   // 4.5. Reframe queue — tasks that failed repeatedly and need a fresh approach
-  const reframeItems = await getTracker().redis.lrange(REFRAME_QUEUE, 0, 0);
+  const reframeItems = await getTracker().getRedisClient().lrange(REFRAME_QUEUE, 0, 0);
   if (reframeItems.length > 0) {
     try {
       const item = JSON.parse(reframeItems[0]);
-      await getTracker().redis.lpop(REFRAME_QUEUE);
+      await getTracker().getRedisClient().lpop(REFRAME_QUEUE);
       return {
         type: "reframe",
         reference: item.originalTitle,
@@ -209,16 +209,16 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
       };
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt reframe item: ${err.message}`);
-      await getTracker().redis.lpop(REFRAME_QUEUE);
+      await getTracker().getRedisClient().lpop(REFRAME_QUEUE);
     }
   }
 
   // 5. Prior failures from Redis
-  const priorFailures = await getTracker().redis.lrange(redisKeys.anchorPriorFailures(), 0, 0);
+  const priorFailures = await getTracker().getRedisClient().lrange(redisKeys.anchorPriorFailures(), 0, 0);
   if (priorFailures.length > 0) {
     try {
       const failure = JSON.parse(priorFailures[0]);
-      await getTracker().redis.lpop(redisKeys.anchorPriorFailures());
+      await getTracker().getRedisClient().lpop(redisKeys.anchorPriorFailures());
       return {
         type: "prior-failure",
         reference: failure.taskId,
@@ -243,7 +243,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // 5.5. Regression hunt — every 10 merges, run a self-play adversarial cycle
   //      that tests recent features with edge cases instead of building new work.
   try {
-    const r = getTracker().redis;
+    const r = getTracker().getRedisClient();
     const recentMetrics = await r.zrevrange(redisKeys.metricsIndex(), 0, 9);
     let recentMergeCount = 0;
     let lastRegressionHunt: string | null = null;
@@ -295,10 +295,10 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
       const ref = `codebase-health: ${issue.category} in ${issue.file}`;
       // Check both the circuit-breaker counter AND a permanent skip counter
       const abandonCount = parseInt(
-        await getTracker().redis.get(anchorKey(ref)) || "0",
+        await getTracker().getRedisClient().get(anchorKey(ref)) || "0",
       );
       const permSkipKey = redisKeys.anchorPermSkip(ref.replace(/\s+/g, "-").slice(0, 120));
-      const permSkipCount = parseInt(await getTracker().redis.get(permSkipKey) || "0");
+      const permSkipCount = parseInt(await getTracker().getRedisClient().get(permSkipKey) || "0");
       if (abandonCount > 0 || permSkipCount >= 2) {
         console.log(`[ControlLoop] Skipping codebase-health issue "${ref}" (abandoned=${abandonCount}, permSkip=${permSkipCount}) — falling through`);
         continue;
@@ -386,7 +386,7 @@ export function anchorKey(anchorRef) {
 }
 
 export async function trackAbandonment(anchorRef, task, reason) {
-  const r = getTracker().redis;
+  const r = getTracker().getRedisClient();
   const key = anchorKey(anchorRef);
   const count = await r.incr(key);
   await r.expire(key, ABANDONMENT_COUNTER_TTL);
@@ -429,12 +429,12 @@ export async function trackAbandonment(anchorRef, task, reason) {
 }
 
 export async function clearAbandonmentCounter(anchorRef) {
-  const r = getTracker().redis;
+  const r = getTracker().getRedisClient();
   await r.del(anchorKey(anchorRef));
 }
 
 export async function storePriorFailure(taskId, reason, verificationResult) {
-  const r = getTracker().redis;
+  const r = getTracker().getRedisClient();
 
   // Count how many times this task (or its anchor) has already been retried
   const existing = await r.lrange(redisKeys.anchorPriorFailures(), 0, -1);
@@ -489,7 +489,7 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
 export async function clearProcessingItem(anchor) {
   if (anchor?._workQueueRaw) {
     try {
-      await getTracker().redis.lrem(PROCESSING_QUEUE, 1, anchor._workQueueRaw);
+      await getTracker().getRedisClient().lrem(PROCESSING_QUEUE, 1, anchor._workQueueRaw);
     } catch (err: any) {
       console.error(`[ControlLoop] Failed to clear processing queue item: ${err.message}`);
     }

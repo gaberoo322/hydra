@@ -244,7 +244,7 @@ export async function recordCalibrationOutcome(
   actualOutcome: "merged" | "failed" | "abandoned" | "no-task",
 ): Promise<void> {
   try {
-    const r = getTracker().redis;
+    const r = getTracker().getRedisClient();
     const key = redisKeys.anchorCalibration(cycleId);
     await r.set(
       key,

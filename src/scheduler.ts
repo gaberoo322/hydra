@@ -64,7 +64,7 @@ const SCHEDULER_STATE_KEY = redisKeys.schedulerState();
 
 async function loadSchedulerState() {
   try {
-    const raw = await getTracker().redis.get(SCHEDULER_STATE_KEY);
+    const raw = await getTracker().getRedisClient().get(SCHEDULER_STATE_KEY);
     if (!raw) {
       console.log("[Scheduler] No persisted state in Redis — starting fresh");
       return;
@@ -87,7 +87,7 @@ async function saveSchedulerState() {
       researchCyclesRun: state.researchCyclesRun,
       savedAt: new Date().toISOString(),
     };
-    await getTracker().redis.set(SCHEDULER_STATE_KEY, JSON.stringify(payload));
+    await getTracker().getRedisClient().set(SCHEDULER_STATE_KEY, JSON.stringify(payload));
   } catch (err: any) {
     console.error(`[Scheduler] Failed to save state: ${err.message}`);
   }
@@ -127,7 +127,7 @@ function todayLocalDate() {
 
 async function getDailySpend() {
   try {
-    const raw = await getTracker().redis.get(SCHEDULER_SPEND_KEY);
+    const raw = await getTracker().getRedisClient().get(SCHEDULER_SPEND_KEY);
     if (!raw) return { date: todayLocalDate(), usd: 0 };
     const stored = JSON.parse(raw);
     if (stored.date !== todayLocalDate()) {
@@ -148,7 +148,7 @@ async function recordSpend(amountUsd) {
       usd: (current.usd || 0) + (amountUsd || 0),
       updatedAt: new Date().toISOString(),
     };
-    await getTracker().redis.set(SCHEDULER_SPEND_KEY, JSON.stringify(updated));
+    await getTracker().getRedisClient().set(SCHEDULER_SPEND_KEY, JSON.stringify(updated));
     return updated;
   } catch (err: any) {
     console.error(`[Scheduler] Failed to record spend: ${err.message}`);
@@ -224,7 +224,7 @@ async function maybeRunResearch(eventBus) {
   try { await pruneOldDoneItems(); } catch {}
 
   // Check queue depth — skip research when there's enough work to build
-  const queueLen = await getTracker().redis.llen(redisKeys.anchorWorkQueue());
+  const queueLen = await getTracker().getRedisClient().llen(redisKeys.anchorWorkQueue());
   if (queueLen >= RESEARCH_QUEUE_THRESHOLD) return;
 
   // Ratio throttle: if queue still has items, prefer building over researching.
@@ -244,7 +244,7 @@ async function maybeRunResearch(eventBus) {
       if (promoted.length > 0) {
         // Push promoted items into Redis queue with full context
         for (const item of promoted) {
-          await getTracker().redis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
+          await getTracker().getRedisClient().rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
             reference: item.title,
             reason: `Promoted from backlog (priority: ${item.priority || 0}, score: ${item.meta?.score || "?"}, ${item.meta?.confidence || "?"} confidence)`,
             context: JSON.stringify({
@@ -356,7 +356,7 @@ async function checkBlockedEscalation(eventBus) {
     const blocked = lanes.blocked || [];
     if (blocked.length === 0) return;
 
-    const r = getTracker().redis;
+    const r = getTracker().getRedisClient();
     const now = Date.now();
 
     for (const item of blocked) {
@@ -404,7 +404,7 @@ async function runScheduledCycle(eventBus) {
   try {
     const WEEKLY_KEY = redisKeys.digestLastWeekly();
     const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-    const r = getTracker().redis;
+    const r = getTracker().getRedisClient();
     const lastWeekly = await r.get(WEEKLY_KEY);
     if (!lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS) {
       const { buildWeeklySummary } = await import("./digest.ts");
@@ -422,7 +422,7 @@ async function runScheduledCycle(eventBus) {
   try {
     const MEMORY_CONSOLIDATION_KEY = redisKeys.memoryLastConsolidation();
     const DAY_MS = 24 * 60 * 60 * 1000;
-    const r = getTracker().redis;
+    const r = getTracker().getRedisClient();
     const lastConsolidation = await r.get(MEMORY_CONSOLIDATION_KEY);
     if (!lastConsolidation || Date.now() - parseInt(lastConsolidation) >= DAY_MS) {
       const { consolidateMemory } = await import("./agent-memory.ts");
@@ -526,7 +526,7 @@ async function runScheduledCycle(eventBus) {
       delay = COOLDOWN_ON_ERROR_MS * state.consecutiveErrors;
     } else {
       // Check if there's work waiting — if so, start immediately
-      const queueLen = await getTracker().redis.llen(redisKeys.anchorWorkQueue()).catch(() => 0);
+      const queueLen = await getTracker().getRedisClient().llen(redisKeys.anchorWorkQueue()).catch(() => 0);
       const hadWork = !result?.reason?.includes("No actionable anchor") &&
                       !result?.reason?.includes("No work needed") &&
                       !result?.reason?.includes("Planner produced no task");

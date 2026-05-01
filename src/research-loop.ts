@@ -659,7 +659,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
       // Simple opportunity or spec creation failed — push to work queue (with dedup)
       {
         const titleLower = (opp.title || "").toLowerCase().trim();
-        const existingQueue = await getTracker().redis.lrange(redisKeys.anchorWorkQueue(), 0, -1);
+        const existingQueue = await getTracker().getRedisClient().lrange(redisKeys.anchorWorkQueue(), 0, -1);
         const isDup = existingQueue.some(raw => {
           try {
             const item = JSON.parse(raw);
@@ -670,7 +670,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
         if (isDup) {
           console.log(`[Research] Skipping duplicate #${opp.rank}: "${opp.title}" (already in queue)`);
         } else {
-          await getTracker().redis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
+          await getTracker().getRedisClient().rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
             reference: opp.title,
             reason: `Research ${researchId}: ${opp.rationale?.slice(0, 200) || "auto-queued from research"}`,
             context: JSON.stringify({
@@ -823,14 +823,14 @@ export async function listResearchReports(count = 10) {
  */
 export async function vetoOpportunity(title) {
   const tracker = getTracker();
-  const items = await tracker.redis.lrange(redisKeys.anchorWorkQueue(), 0, -1);
+  const items = await tracker.getRedisClient().lrange(redisKeys.anchorWorkQueue(), 0, -1);
   let removed = 0;
 
   for (let i = items.length - 1; i >= 0; i--) {
     try {
       const item = JSON.parse(items[i]);
       if (item.reference === title && item.source === "research") {
-        await tracker.redis.lrem(redisKeys.anchorWorkQueue(), 1, items[i]);
+        await tracker.getRedisClient().lrem(redisKeys.anchorWorkQueue(), 1, items[i]);
         removed++;
       }
     } catch {}

@@ -319,11 +319,11 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // (hydra:merge:lock, 60s TTL) acquired only during git merge+push.
   const CYCLE_SOURCE_KEY = redisKeys.cycleActiveSource("codex");
   const CYCLE_SOURCE_TTL = 900; // 15-minute auto-expire (crash safety)
-  await tracker.redis.set(CYCLE_SOURCE_KEY, cycleId, "EX", CYCLE_SOURCE_TTL);
+  await tracker.getRedisClient().set(CYCLE_SOURCE_KEY, cycleId, "EX", CYCLE_SOURCE_TTL);
 
   // Init cycle tracking
-  await tracker.redis.set(redisKeys.cycleActive(), cycleId);
-  await tracker.redis.hset(redisKeys.cycle(cycleId),
+  await tracker.getRedisClient().set(redisKeys.cycleActive(), cycleId);
+  await tracker.getRedisClient().hset(redisKeys.cycle(cycleId),
     "status", "running",
     "startedAt", new Date().toISOString(),
     "source", "codex",
@@ -333,7 +333,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     "abandoned", 0,
     "timedOut", 0,
   );
-  await tracker.redis.expire(redisKeys.cycle(cycleId), CYCLE_KEY_TTL);
+  await tracker.getRedisClient().expire(redisKeys.cycle(cycleId), CYCLE_KEY_TTL);
   await tracker.initTaskV2(cycleId, task);
 
   // All code after lock acquisition is wrapped in try/finally to guarantee
@@ -1050,12 +1050,12 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   const MERGE_LOCK_TTL = 60; // 60 seconds — auto-release if merge crashes
   let mergeLockAcquired = false;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const acquired = await tracker.redis.set(MERGE_LOCK_KEY, cycleId, "EX", MERGE_LOCK_TTL, "NX");
+    const acquired = await tracker.getRedisClient().set(MERGE_LOCK_KEY, cycleId, "EX", MERGE_LOCK_TTL, "NX");
     if (acquired) {
       mergeLockAcquired = true;
       break;
     }
-    const holder = await tracker.redis.get(MERGE_LOCK_KEY);
+    const holder = await tracker.getRedisClient().get(MERGE_LOCK_KEY);
     console.log(`[ControlLoop] Merge lock held by ${holder} — retry ${attempt + 1}/3`);
     await new Promise(r => setTimeout(r, 5000 * (attempt + 1)));
   }
@@ -1075,7 +1075,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     : { ok: false, commitSha: "", featureBranch: null, error: "Merge lock not acquired" };
 
   // Always release merge lock after merge attempt
-  await tracker.redis.del(MERGE_LOCK_KEY).catch(() => {});
+  await tracker.getRedisClient().del(MERGE_LOCK_KEY).catch(() => {});
   let commitSha = "";
   if (mergeResult.ok) {
     commitSha = mergeResult.commitSha;
@@ -1426,11 +1426,11 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   } catch { /* intentional: correlation check is best-effort */ }
 
   // Complete the cycle in tracker
-  await tracker.redis.hset(redisKeys.cycle(cycleId), "status", "completed", "completedAt", new Date().toISOString());
+  await tracker.getRedisClient().hset(redisKeys.cycle(cycleId), "status", "completed", "completedAt", new Date().toISOString());
   // Refresh TTL so the 7-day window starts from cycle completion
-  await tracker.redis.expire(redisKeys.cycle(cycleId), CYCLE_KEY_TTL);
-  await tracker.redis.set(redisKeys.cycleLast(), cycleId);
-  await tracker.redis.del(redisKeys.cycleActive());
+  await tracker.getRedisClient().expire(redisKeys.cycle(cycleId), CYCLE_KEY_TTL);
+  await tracker.getRedisClient().set(redisKeys.cycleLast(), cycleId);
+  await tracker.getRedisClient().del(redisKeys.cycleActive());
 
   // Trigger Meta analysis: every 20 cycles (strategic review) OR when failures detected (fast-path)
   try {
@@ -1482,10 +1482,10 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       );
     }
     // Release per-source cycle registration + safety-net merge lock cleanup
-    await tracker.redis.del(redisKeys.cycleActiveSource("codex")).catch((err: any) =>
+    await tracker.getRedisClient().del(redisKeys.cycleActiveSource("codex")).catch((err: any) =>
       console.error(`[ControlLoop] Failed to release codex cycle registration: ${err.message}`)
     );
-    await tracker.redis.del(redisKeys.mergeLock()).catch((err: any) =>
+    await tracker.getRedisClient().del(redisKeys.mergeLock()).catch((err: any) =>
       console.error(`[ControlLoop] Failed to release merge lock (safety net): ${err.message}`)
     );
   }
