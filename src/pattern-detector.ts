@@ -17,21 +17,10 @@
  * issue within the cooldown window.
  */
 
-import Redis from "ioredis";
-import { redisKeys } from "./redis-keys.ts";
+import { getPatternCooldown, setPatternCooldown, pushAlert } from "./redis-adapter.ts";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const WINDOW = 10; // look at last N cycles
 const COOLDOWN_MS = 60 * 60 * 1000; // 1 hour between same alert type
-
-const ALERTS_KEY = redisKeys.alerts();
-const COOLDOWN_KEY = redisKeys.patternDetectorCooldowns();
-
-let redis = null;
-function getRedis() {
-  if (!redis) redis = new Redis(REDIS_URL);
-  return redis;
-}
 
 /**
  * Run pattern detection after a cycle completes.
@@ -180,16 +169,15 @@ export async function detectPatterns(eventBus, cycleId) {
     } catch {}
 
     // Publish alerts (with cooldown dedup)
-    const r = getRedis();
     for (const alert of alerts) {
       // Check cooldown
-      const lastAlerted = await r.hget(COOLDOWN_KEY, alert.pattern);
+      const lastAlerted = await getPatternCooldown(alert.pattern);
       if (lastAlerted && Date.now() - parseInt(lastAlerted) < COOLDOWN_MS) {
         continue; // skip — already alerted recently
       }
 
       // Record cooldown
-      await r.hset(COOLDOWN_KEY, alert.pattern, Date.now().toString());
+      await setPatternCooldown(alert.pattern, Date.now().toString());
 
       // Store alert
       const fullAlert = {
@@ -201,8 +189,7 @@ export async function detectPatterns(eventBus, cycleId) {
         dismissed: false,
         payload: { pattern: alert.pattern, cycleId, window: WINDOW },
       };
-      await r.lpush(ALERTS_KEY, JSON.stringify(fullAlert));
-      await r.ltrim(ALERTS_KEY, 0, 99);
+      await pushAlert(JSON.stringify(fullAlert), 100);
 
       // Also publish to notification stream for WebSocket broadcast
       const { STREAMS } = await import("./event-bus.ts");
