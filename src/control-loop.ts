@@ -556,7 +556,6 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
 
   const diff = await getDiff(PROJECT_WORKSPACE, "main");
-    // @ts-expect-error — migrate to proper types
   await tracker.transitionTask(taskId, "changed-code", { diffLength: diff.length, filesChanged: execResult.filesChanged || [] });
   console.log(`[ControlLoop] Code changed (${diff.split("\n").length} diff lines)`);
 
