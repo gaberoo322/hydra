@@ -15,6 +15,7 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
 
 import { getDailySpend, DAILY_COST_CAP_USD } from "./scheduler.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 // Model routing table — default tiers (used when under daily spend cap)
 const MODEL_TIERS = {
@@ -293,7 +294,7 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   const duration = Date.now() - startTime;
 
   // Write agent output to Redis (2-day TTL)
-  const summaryKey = `hydra:reports:summary:${correlationId || "manual"}-${agentName}-${taskId || randomUUID().slice(0, 8)}`;
+  const summaryKey = redisKeys.summaryReport(`${correlationId || "manual"}-${agentName}-${taskId || randomUUID().slice(0, 8)}`);
   const outputContent = JSON.stringify({
     agent: agentName,
     task: taskId || "manual",
@@ -319,6 +320,12 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   }
 
   const costUsd = computeCost(resolvedModel, usage);
+  const cacheRate = usage.inputTokens > 0
+    ? Math.round((usage.cachedInputTokens / usage.inputTokens) * 100)
+    : 0;
+  if (reused && cacheRate > 0) {
+    console.log(`[CodexRunner] ${agentName} prompt cache: ${cacheRate}% of input tokens cached (saved ~$${(costUsd * cacheRate / 100).toFixed(4)})`);
+  }
 
   return {
     output: finalMessage,
@@ -333,6 +340,8 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     model: resolvedModel,
     stderr: "",
     usageLimitHit,
+    threadReused: reused,
+    promptCacheRate: cacheRate,
   };
 }
 

@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import Redis from "ioredis";
 import { STREAMS } from "./event-bus.ts";
 import { runAgent, findPersonality } from "./codex-runner.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
@@ -27,8 +28,8 @@ const ALLOWED_TARGETS = new Set([
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
-const INDEX_KEY = "hydra:proposals:index";
-const proposalKey = (id) => `hydra:proposals:${id}`;
+const INDEX_KEY = redisKeys.proposalsIndex();
+const proposalKey = (id) => redisKeys.proposal(id);
 
 let redis = null;
 function getRedis() {
@@ -89,10 +90,10 @@ async function runMetaAnalysis(eventBus, event) {
 
   // 2. Reality reports — detailed post-cycle reports with grounding, verification, merge info
   try {
-    const reportIds = await r.zrevrange("hydra:reports:reality:index", 0, 9);
+    const reportIds = await r.zrevrange(redisKeys.realityReportIndex(), 0, 9);
     const reports = [];
     for (const id of reportIds) {
-      const raw = await r.get(`hydra:reports:reality:${id}`);
+      const raw = await r.get(redisKeys.realityReport(id));
       if (raw) {
         const report = JSON.parse(raw);
         reports.push(`- **${report.cycleId || id}**: task="${report.task?.title || "?"}" state=${report.task?.finalState || "?"} | grounding: ${report.grounding?.before?.passed ?? "?"}→${report.grounding?.after?.passed ?? "?"} tests | verification: ${report.verification?.allPassed ? "PASS" : "FAIL"} | regression: ${report.regressionIntroduced ? "YES" : "no"}`);
@@ -105,11 +106,11 @@ async function runMetaAnalysis(eventBus, event) {
 
   // 3. Spending — cost trends
   try {
-    const cycleIds = await r.zrevrange("hydra:metrics:index", 0, 19);
+    const cycleIds = await r.zrevrange(redisKeys.metricsIndex(), 0, 19);
     let totalCost = 0;
     let cyclesWithCost = 0;
     for (const cid of cycleIds) {
-      const costMicro = parseInt(await r.hget(`hydra:cycle:${cid}:costs`, "costMicrodollars") || "0");
+      const costMicro = parseInt(await r.hget(redisKeys.cycleCosts(cid), "costMicrodollars") || "0");
       if (costMicro > 0) { totalCost += costMicro / 1_000_000; cyclesWithCost++; }
     }
     if (cyclesWithCost > 0) {

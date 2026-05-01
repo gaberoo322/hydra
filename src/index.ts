@@ -13,6 +13,7 @@ import { startDigest, stopDigest, recordEvent } from "./digest.ts";
 import { registerSkills } from "./ov-skills.ts";
 import { setAgentStreamCallback } from "./codex-runner.ts";
 import { migrateRulesToPatterns } from "./agent-memory.ts";
+import { redisKeys } from "./redis-keys.ts";
 
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
@@ -80,7 +81,7 @@ function startConsumers(eventBus) {
     "pattern:recurring_regressions", "pattern:anchor_stuck",
     "pattern:test_decline", "pattern:high_abandonment",
   ]);
-  const ALERTS_KEY = "hydra:alerts";
+  const ALERTS_KEY = redisKeys.alerts();
 
   startConsumerWithRecovery("notifications", () =>
     eventBus.consume(STREAMS.NOTIFICATIONS, "openclaw", `notify-${process.pid}`, async (event) => {
@@ -209,7 +210,7 @@ async function main() {
 
   // Wire agent streaming — broadcast codex exec output to WebSocket clients in real-time
   setAgentStreamCallback((data) => {
-    eventBus._broadcastToClients("hydra:agent-stream", {
+    eventBus._broadcastToClients(redisKeys.streamAgentStream(), {
       type: "agent:stream",
       ...data,
       timestamp: new Date().toISOString(),

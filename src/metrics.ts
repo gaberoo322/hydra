@@ -1,8 +1,9 @@
 import Redis from "ioredis";
 import { CYCLE_KEY_TTL } from "./task-tracker.ts";
+import { redisKeys } from "./redis-keys.ts";
 
-const METRICS_INDEX = "hydra:metrics:index";
-const metricsKey = (cycleId) => `hydra:metrics:${cycleId}`;
+const METRICS_INDEX = redisKeys.metricsIndex();
+const metricsKey = (cycleId) => redisKeys.metrics(cycleId);
 
 let redis;
 
@@ -17,12 +18,29 @@ function getRedis() {
 
 /**
  * Record a cycle's outcome metrics.
+ * Auto-computes costUsd from logged agent runs if not already provided.
  *
  * @param {string} cycleId
  * @param {CycleMetrics} metrics
  */
 export async function recordCycleMetrics(cycleId, metrics) {
   const r = getRedis();
+
+  // Auto-compute cycle cost from logged agent runs if not provided
+  if (metrics.costUsd === undefined) {
+    try {
+      const agentRuns = await r.lrange(redisKeys.cycleAgents(cycleId), 0, -1);
+      let totalCost = 0;
+      for (const raw of agentRuns) {
+        try {
+          const run = JSON.parse(raw);
+          totalCost += run.costUsd || 0;
+        } catch { /* intentional: skip corrupt entries */ }
+      }
+      metrics.costUsd = Math.round(totalCost * 1_000_000) / 1_000_000;
+    } catch { /* intentional: cost tracking is best-effort */ }
+  }
+
   const flat: Record<string, string> = {};
   for (const [k, v] of Object.entries(metrics)) {
     flat[k] = typeof v === "object" ? JSON.stringify(v) : String(v);
@@ -35,7 +53,8 @@ export async function recordCycleMetrics(cycleId, metrics) {
   await r.expire(metricsKey(cycleId), CYCLE_KEY_TTL);
   await r.zadd(METRICS_INDEX, Date.now(), cycleId);
 
-  console.log(`[Metrics] Recorded cycle ${cycleId}: ${metrics.tasksMerged || 0} merged, ${metrics.tasksFailed || 0} failed, regression=${metrics.regressionIntroduced || false}`);
+  const costStr = metrics.costUsd > 0 ? `, cost=$${metrics.costUsd.toFixed(4)}` : "";
+  console.log(`[Metrics] Recorded cycle ${cycleId}: ${metrics.tasksMerged || 0} merged, ${metrics.tasksFailed || 0} failed, regression=${metrics.regressionIntroduced || false}${costStr}`);
 }
 
 /**
@@ -59,7 +78,7 @@ export async function getMetricsTrend(count = 20) {
       "tasksAttempted", "tasksVerified", "tasksMerged", "tasksFailed", "tasksAbandoned",
       "testsBefore", "testsAfter", "testsPassingBefore", "testsPassingAfter",
       "filesChanged", "totalDurationMs", "groundingDurationMs", "verificationDurationMs",
-      "planningDurationMs", "executionDurationMs", "tokenCost",
+      "planningDurationMs", "executionDurationMs", "tokenCost", "costUsd",
     ]) {
       if (parsed[key] !== undefined) parsed[key] = parseInt(parsed[key]) || 0;
     }

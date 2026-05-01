@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import Redis from "ioredis";
+import { redisKeys } from "./redis-keys.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -208,8 +209,8 @@ export function findingsToQueueItems(report: AdversarialReport): Array<{ referen
 // ---------------------------------------------------------------------------
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const TRACKING_KEY = "hydra:adversarial:tracking";
-const STATS_KEY = "hydra:adversarial:stats";
+const TRACKING_KEY = redisKeys.adversarialTracking();
+const STATS_KEY = redisKeys.adversarialStats();
 
 type TrackedMerge = {
   cycleId: string;

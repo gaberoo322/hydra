@@ -11,13 +11,14 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import Redis from "ioredis";
+import { redisKeys } from "./redis-keys.ts";
 
 const execFileAsync = promisify(execFile);
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || "/home/gabe/hydra-betting";
 
-const CACHE_PREFIX = "hydra:plans:cache:";
+const CACHE_PREFIX = redisKeys.planCachePrefix();
 
 // TTL by anchor type (seconds)
 const TTL_STANDARD = 12 * 60 * 60; // 12 hours

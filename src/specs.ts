@@ -14,11 +14,12 @@
  */
 
 import Redis from "ioredis";
+import { redisKeys } from "./redis-keys.ts";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
-const SPECS_INDEX = "hydra:specs:index";
-const specKey = (slug) => `hydra:specs:${slug}`;
+const SPECS_INDEX = redisKeys.specsIndex();
+const specKey = (slug) => redisKeys.spec(slug);
 
 // Specs auto-expire after 30 days to prevent unbounded growth
 const SPEC_TTL = 30 * 24 * 60 * 60;

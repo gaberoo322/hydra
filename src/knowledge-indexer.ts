@@ -19,6 +19,7 @@ import { writeFile, unlink } from "node:fs/promises";
 import { resolve, extname, relative, join } from "node:path";
 import { tmpdir } from "node:os";
 import Redis from "ioredis";
+import { redisKeys } from "./redis-keys.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
@@ -141,9 +142,9 @@ let lastRuleCounts = {};
 async function pollRedisContent(redis) {
   try {
     // Index new reality reports
-    const reportIds = await redis.zrangebyscore("hydra:reports:reality:index", lastReportIndex + 1, "+inf");
+    const reportIds = await redis.zrangebyscore(redisKeys.realityReportIndex(), lastReportIndex + 1, "+inf");
     for (const id of reportIds) {
-      const raw = await redis.get(`hydra:reports:reality:${id}`);
+      const raw = await redis.get(redisKeys.realityReport(id));
       if (raw) {
         const report = JSON.parse(raw);
         const summary = `Cycle ${report.cycleId}: ${report.task?.title} — ${report.task?.finalState}. Tests: ${report.grounding?.before?.passed}→${report.grounding?.after?.passed}`;
@@ -151,13 +152,13 @@ async function pollRedisContent(redis) {
       }
     }
     if (reportIds.length > 0) {
-      const latest = await redis.zscore("hydra:reports:reality:index", reportIds[reportIds.length - 1]);
+      const latest = await redis.zscore(redisKeys.realityReportIndex(), reportIds[reportIds.length - 1]);
       lastReportIndex = parseInt(latest) || lastReportIndex;
     }
 
     // Index agent memory patterns (migrated from legacy rules)
     for (const agent of ["planner", "executor", "skeptic"]) {
-      const key = `hydra:memory:${agent}:patterns`;
+      const key = redisKeys.memoryPatterns(agent);
       const raw = await redis.get(key);
       if (!raw) continue;
       try {

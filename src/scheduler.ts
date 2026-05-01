@@ -14,6 +14,7 @@ import { getMetricsTrend } from "./metrics.ts";
 import { getBacklogCounts, promoteToQueued, pruneOldDoneItems } from "./backlog.ts";
 import { getTracker } from "./task-tracker.ts";
 import { runResearchLoop } from "./research-loop.ts";
+import { redisKeys } from "./redis-keys.ts";
 // research-architect removed — methodology files are frozen at current state
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
@@ -59,7 +60,7 @@ let state = {
 // back to Redis. Non-research counters (cyclesRun, cyclesMerged, etc.)
 // still reset on restart — they're per-session metrics, not throttle state.
 
-const SCHEDULER_STATE_KEY = "hydra:scheduler:state";
+const SCHEDULER_STATE_KEY = redisKeys.schedulerState();
 
 async function loadSchedulerState() {
   try {
@@ -113,7 +114,7 @@ async function saveSchedulerState() {
 // (research) rather than trying to be a perfect budget. Accept the
 // incompleteness in exchange for no changes to the control-loop hot path.
 
-const SCHEDULER_SPEND_KEY = "hydra:scheduler:daily-spend";
+const SCHEDULER_SPEND_KEY = redisKeys.schedulerDailySpend();
 
 function todayLocalDate() {
   // Use local date so the counter resets at local midnight, not UTC midnight.
@@ -157,20 +158,19 @@ async function recordSpend(amountUsd) {
 
 /**
  * Detect if recent cycles are producing repetitive work.
- * Compares task titles using word overlap — if too many recent cycles
- * look similar, pauses the scheduler and notifies the operator.
+ * Alerts the operator but does NOT stop the scheduler.
+ * Instead, triggers a research cycle to find fresh work.
  *
- * Returns true if the scheduler was paused.
+ * Returns true if repetition was detected (caller should add delay).
  */
 async function detectRepetition(eventBus) {
   try {
     const trend = await getMetricsTrend(REPETITION_WINDOW);
-    if (trend.length < REPETITION_WINDOW) return false; // not enough data
+    if (trend.length < REPETITION_WINDOW) return false;
 
     const titles = trend.map(m => m.taskTitle).filter(Boolean);
     if (titles.length < REPETITION_WINDOW) return false;
 
-    // Count pairwise similarities — how many pairs of titles are >60% similar?
     let similarPairs = 0;
     let totalPairs = 0;
     for (let i = 0; i < titles.length; i++) {
@@ -188,21 +188,30 @@ async function detectRepetition(eventBus) {
     const repetitionRate = totalPairs > 0 ? similarPairs / totalPairs : 0;
 
     if (repetitionRate >= REPETITION_THRESHOLD) {
-      console.log(`[Scheduler] REPETITION DETECTED: ${Math.round(repetitionRate * 100)}% of last ${REPETITION_WINDOW} cycle pairs are similar — pausing for operator direction`);
+      console.log(`[Scheduler] REPETITION ALERT: ${Math.round(repetitionRate * 100)}% of last ${REPETITION_WINDOW} cycle pairs are similar — triggering research for fresh work`);
       console.log(`[Scheduler] Recent titles: ${titles.map(t => `"${t.slice(0, 60)}"`).join(", ")}`);
 
       await sendNotification({
-        type: "scheduler:paused_repetition",
+        type: "scheduler:repetition_alert",
         payload: {
-          reason: `${Math.round(repetitionRate * 100)}% of the last ${REPETITION_WINDOW} cycles produced similar tasks. Hydra needs new direction.`,
+          reason: `${Math.round(repetitionRate * 100)}% of the last ${REPETITION_WINDOW} cycles produced similar tasks. Triggering research for fresh work.`,
           recentTitles: titles.slice(0, 5),
-          suggestion: "Update priorities.md, run a research cycle, or queue specific work. Then restart the scheduler.",
           cyclesRun: state.cyclesRun,
         },
       });
 
-      stop();
-      return true;
+      // Trigger research instead of stopping — find fresh work
+      try {
+        console.log(`[Scheduler] Running research cycle to break repetition pattern`);
+        await runResearchLoop(eventBus);
+        state.researchCyclesRun++;
+        state.lastResearchAt = new Date().toISOString();
+        await saveSchedulerState();
+      } catch (err: any) {
+        console.error(`[Scheduler] Repetition-break research failed: ${err.message}`);
+      }
+
+      return true; // signal caller to add delay before next cycle
     }
   } catch (err: any) {
     console.error(`[Scheduler] Repetition detection error: ${err.message}`);
@@ -215,7 +224,7 @@ async function maybeRunResearch(eventBus) {
   try { await pruneOldDoneItems(); } catch {}
 
   // Check queue depth — skip research when there's enough work to build
-  const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue");
+  const queueLen = await getTracker().redis.llen(redisKeys.anchorWorkQueue());
   if (queueLen >= RESEARCH_QUEUE_THRESHOLD) return;
 
   // Ratio throttle: if queue still has items, prefer building over researching.
@@ -235,7 +244,7 @@ async function maybeRunResearch(eventBus) {
       if (promoted.length > 0) {
         // Push promoted items into Redis queue with full context
         for (const item of promoted) {
-          await getTracker().redis.rpush("hydra:anchors:work-queue", JSON.stringify({
+          await getTracker().redis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
             reference: item.title,
             reason: `Promoted from backlog (priority: ${item.priority || 0}, score: ${item.meta?.score || "?"}, ${item.meta?.confidence || "?"} confidence)`,
             context: JSON.stringify({
@@ -338,7 +347,7 @@ function generateUnblockCommands(blockedReason: string, title: string): string[]
 
 // Check for blocked items that need re-escalation (every 12h per item).
 const BLOCKED_REESCALATE_MS = 12 * 60 * 60 * 1000;
-const BLOCKED_COOLDOWN_KEY = "hydra:blocked:last-escalation";
+const BLOCKED_COOLDOWN_KEY = redisKeys.blockedLastEscalation();
 
 async function checkBlockedEscalation(eventBus) {
   try {
@@ -393,7 +402,7 @@ async function runScheduledCycle(eventBus) {
 
   // Weekly summary — send once per week
   try {
-    const WEEKLY_KEY = "hydra:digest:last-weekly";
+    const WEEKLY_KEY = redisKeys.digestLastWeekly();
     const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
     const r = getTracker().redis;
     const lastWeekly = await r.get(WEEKLY_KEY);
@@ -411,7 +420,7 @@ async function runScheduledCycle(eventBus) {
 
   // Daily memory consolidation — prune stale patterns
   try {
-    const MEMORY_CONSOLIDATION_KEY = "hydra:memory:last-consolidation";
+    const MEMORY_CONSOLIDATION_KEY = redisKeys.memoryLastConsolidation();
     const DAY_MS = 24 * 60 * 60 * 1000;
     const r = getTracker().redis;
     const lastConsolidation = await r.get(MEMORY_CONSOLIDATION_KEY);
@@ -427,22 +436,42 @@ async function runScheduledCycle(eventBus) {
     await maybeRunResearch(eventBus);
   } catch {}
 
+  // Test-fixer-first: if grounding shows failing tests, prioritize fixing them
+  // before processing queue items. This prevents the cascade where all queue
+  // items get rejected by preflight.
+  let cycleOpts: Record<string, any> = {};
+  try {
+    const { groundProject } = await import("./grounding.ts");
+    const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || (process.env.HOME + "/hydra-betting");
+    const grounding = await groundProject(PROJECT_WORKSPACE);
+    if (grounding.testReport.failed > 0 && grounding.failingTests.length > 0) {
+      console.log(`[Scheduler] ${grounding.testReport.failed} tests failing — injecting test-fix anchor before queue work`);
+      cycleOpts.anchor = {
+        type: "failing-test",
+        reference: grounding.failingTests[0],
+        whyNow: `${grounding.testReport.failed} test(s) currently failing — auto-fix before proceeding`,
+      };
+    }
+  } catch (err: any) {
+    console.error(`[Scheduler] Pre-cycle grounding check failed: ${err.message}`);
+  }
+
   let result = null;
   try {
-    console.log(`[Scheduler] Starting scheduled cycle #${state.cyclesRun + 1}`);
-    result = await startCycle(eventBus);
+    console.log(`[Scheduler] Starting scheduled cycle #${state.cyclesRun + 1}${cycleOpts.anchor ? ` (test-fix priority)` : ""}`);
+    result = await startCycle(eventBus, cycleOpts);
 
     state.cyclesRun++;
     state.lastCycleAt = new Date().toISOString();
     state.consecutiveErrors = 0;
 
-    // Detect Codex usage-limit — pause for 30 minutes instead of retrying every 3 min
+    // Codex usage-limit — alert + backoff, auto-resume after 10 minutes
     if (result.__usageLimitHit || result.result?.__usageLimitHit) {
-      const pauseMs = 30 * 60 * 1000;
-      console.error(`[Scheduler] Codex usage limit hit — pausing for 30 minutes`);
-      state.lastError = "Codex usage limit — paused until " + new Date(Date.now() + pauseMs).toISOString();
+      const pauseMs = 10 * 60 * 1000;
+      console.error(`[Scheduler] Codex usage limit hit — backing off for 10 minutes, then retrying`);
+      state.lastError = "Codex usage limit — retrying at " + new Date(Date.now() + pauseMs).toISOString();
       await sendNotification({
-        type: "scheduler:usage_limit_paused",
+        type: "scheduler:usage_limit_alert",
         payload: { pauseMs, resumeAt: new Date(Date.now() + pauseMs).toISOString() },
       });
       state.timer = setTimeout(() => runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`)), pauseMs);
@@ -459,8 +488,12 @@ async function runScheduledCycle(eventBus) {
       if (merged) state.cyclesMerged++;
       state.lastError = null;
 
-      // Check for repetitive work pattern
-      if (await detectRepetition(eventBus)) return; // scheduler was paused
+      // Check for repetitive work pattern — alert + research, don't stop
+      if (await detectRepetition(eventBus)) {
+        // Add extended delay after repetition detection to let research results populate
+        state.timer = setTimeout(() => runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`)), state.intervalMs * 2);
+        return;
+      }
     }
   } catch (err: any) {
     state.cyclesRun++;
@@ -470,18 +503,18 @@ async function runScheduledCycle(eventBus) {
     state.lastCycleAt = new Date().toISOString();
     console.error(`[Scheduler] Cycle error (${state.consecutiveErrors} consecutive):`, err.message);
 
-    // Back off after repeated errors
-    if (state.consecutiveErrors >= 5) {
-      console.error(`[Scheduler] 5 consecutive errors — stopping scheduler`);
+    // Alert on repeated errors but keep running with extended backoff
+    if (state.consecutiveErrors >= 5 && state.consecutiveErrors % 5 === 0) {
+      console.error(`[Scheduler] ${state.consecutiveErrors} consecutive errors — alerting operator, continuing with extended backoff`);
       await sendNotification({
-        type: "scheduler:stopped",
+        type: "scheduler:error_alert",
         payload: {
-          reason: `5 consecutive errors. Last: ${err.message}`,
+          reason: `${state.consecutiveErrors} consecutive errors. Last: ${err.message}`,
           cyclesRun: state.cyclesRun,
+          backoffMs: COOLDOWN_ON_ERROR_MS * state.consecutiveErrors,
+          suggestion: "Check journalctl --user -u hydra-orchestrator.service for root cause",
         },
       });
-      stop();
-      return;
     }
   }
 
@@ -493,7 +526,7 @@ async function runScheduledCycle(eventBus) {
       delay = COOLDOWN_ON_ERROR_MS * state.consecutiveErrors;
     } else {
       // Check if there's work waiting — if so, start immediately
-      const queueLen = await getTracker().redis.llen("hydra:anchors:work-queue").catch(() => 0);
+      const queueLen = await getTracker().redis.llen(redisKeys.anchorWorkQueue()).catch(() => 0);
       const hadWork = !result?.reason?.includes("No actionable anchor") &&
                       !result?.reason?.includes("No work needed") &&
                       !result?.reason?.includes("Planner produced no task");
