@@ -9,9 +9,8 @@
  * Never throws — returns a result object so callers decide how to handle.
  */
 
-import { getTracker } from "./task-tracker.ts";
-import { redisKeys } from "./redis-keys.ts";
 import { runAgent } from "./codex-runner.ts";
+import { setCalibrationOutcome } from "./redis-adapter.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -244,24 +243,17 @@ export async function recordCalibrationOutcome(
   actualOutcome: "merged" | "failed" | "abandoned" | "no-task",
 ): Promise<void> {
   try {
-    const r = getTracker().getRedisClient();
-    const key = redisKeys.anchorCalibration(cycleId);
-    await r.set(
-      key,
-      JSON.stringify({
-        cycleId,
-        anchorType: anchor?.type,
-        anchorReference: anchor?.reference,
-        predictedScore: scoreResult.score,
-        tier: scoreResult.tier,
-        reason: scoreResult.reason,
-        actualOutcome,
-        recordedAt: new Date().toISOString(),
-      }),
-      "EX",
-      30 * 24 * 60 * 60, // 30-day TTL
-    );
-    await r.zadd(redisKeys.anchorCalibrationIndex(), Date.now(), cycleId);
+    const data = JSON.stringify({
+      cycleId,
+      anchorType: anchor?.type,
+      anchorReference: anchor?.reference,
+      predictedScore: scoreResult.score,
+      tier: scoreResult.tier,
+      reason: scoreResult.reason,
+      actualOutcome,
+      recordedAt: new Date().toISOString(),
+    });
+    await setCalibrationOutcome(cycleId, data, 30 * 24 * 60 * 60);
   } catch (err: any) {
     console.error(`[AnchorScorer] Failed to record calibration outcome: ${err.message}`);
   }

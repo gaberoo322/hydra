@@ -6,7 +6,7 @@
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { loadAgentMemory, formatMemoryForPrompt } from "./agent-memory.ts";
 import { getTracker } from "./task-tracker.ts";
-import { redisKeys } from "./redis-keys.ts";
+import { getRecentReportIds, getRealityReport } from "./redis-adapter.ts";
 
 // ---------------------------------------------------------------------------
 // Operator-blocked detection
@@ -163,10 +163,9 @@ export async function preflightCheck(task, grounding, groundingSummary) {
 
   // 1. Duplicate check — compare against recent cycle history in Redis
   try {
-    const r = getTracker().getRedisClient();
-    const recentIds = await r.zrevrange(redisKeys.realityReportIndex(), 0, 9);
+    const recentIds = await getRecentReportIds(10);
     for (const id of recentIds) {
-      const raw = await r.get(redisKeys.realityReport(id));
+      const raw = await getRealityReport(id);
       if (!raw) continue;
       const report = JSON.parse(raw);
       const priorTitle = report.task?.title || "";
@@ -296,17 +295,14 @@ export async function runSkepticAgent(cycleId, task, grounding, groundingSummary
   const skepticKnowledge = ovCtx.formatted || "";
   let recentHistory = "";
   try {
-    const Redis = (await import("ioredis")).default;
-    const rConn = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-    const recentIds = await rConn.zrevrange(redisKeys.realityReportIndex(), 0, 4);
+    const recentIds = await getRecentReportIds(5);
     for (const id of recentIds) {
-      const raw = await rConn.get(redisKeys.realityReport(id));
+      const raw = await getRealityReport(id);
       if (raw) {
         const report = JSON.parse(raw);
         recentHistory += `- ${report.cycleId}: "${report.task?.title}" (${report.task?.finalState})\n`;
       }
     }
-    rConn.disconnect();
   } catch (err: any) {
     console.error(`[ControlLoop] Skeptic failed to load recent cycle history: ${err.message}`);
   }

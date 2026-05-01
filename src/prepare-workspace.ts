@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { getTracker } from "./task-tracker.ts";
-import { redisKeys } from "./redis-keys.ts";
+import { acquireWorkspaceLock, releaseWorkspaceLock } from "./redis-adapter.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -98,9 +97,7 @@ export async function prepareWorkspace(projectDir) {
 
   // Acquire workspace lock — prevents concurrent git operations from
   // Claude Code and Codex stepping on each other's workspace state
-  const WORKSPACE_LOCK_KEY = redisKeys.workspaceLock();
-  const redis = getTracker().getRedisClient();
-  const locked = await redis.set(WORKSPACE_LOCK_KEY, `${process.pid}`, "NX", "EX", 60);
+  const locked = await acquireWorkspaceLock(process.pid);
   if (!locked) {
     return { cleaned: false, reason: "Another process is modifying the workspace", staleBranchesDeleted: 0 };
   }
@@ -126,7 +123,7 @@ export async function prepareWorkspace(projectDir) {
 
     return { cleaned: true, reason: null, staleBranchesDeleted: stale.length };
   } finally {
-    await redis.del(WORKSPACE_LOCK_KEY).catch((err) =>
+    await releaseWorkspaceLock().catch((err) =>
       console.error(`[PrepareWorkspace] Failed to release workspace lock: ${err.message}`)
     );
   }

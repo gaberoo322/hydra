@@ -23,8 +23,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { runAgent, findPersonality } from "./codex-runner.ts";
-import Redis from "ioredis";
-import { redisKeys } from "./redis-keys.ts";
+import { pushTrackedMerge, getTrackedMerges, setAdversarialStats } from "./redis-adapter.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -208,10 +207,6 @@ export function findingsToQueueItems(report: AdversarialReport): Array<{ referen
 // Adversarial precision tracking
 // ---------------------------------------------------------------------------
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const TRACKING_KEY = redisKeys.adversarialTracking();
-const STATS_KEY = redisKeys.adversarialStats();
-
 type TrackedMerge = {
   cycleId: string;
   commitSha: string;
@@ -229,7 +224,6 @@ export async function trackMergedCommit(
   commitSha: string,
   findings: AdversarialFinding[],
 ): Promise<void> {
-  const r = new Redis(REDIS_URL);
   try {
     const entry: TrackedMerge = {
       cycleId,
@@ -239,12 +233,9 @@ export async function trackMergedCommit(
       mergedAt: new Date().toISOString(),
     };
     // Keep a rolling window of 50 tracked merges
-    await r.lpush(TRACKING_KEY, JSON.stringify(entry));
-    await r.ltrim(TRACKING_KEY, 0, 49);
+    await pushTrackedMerge(JSON.stringify(entry), 50);
   } catch (err: any) {
     console.error(`[Adversarial] Failed to track merge: ${err.message}`);
-  } finally {
-    r.disconnect();
   }
 }
 
@@ -260,10 +251,9 @@ export async function checkRevertCorrelation(projectDir: string): Promise<{
   totalReverts: number;
   precision: number | null;
 }> {
-  const r = new Redis(REDIS_URL);
   try {
     // Get tracked merges
-    const rawEntries = await r.lrange(TRACKING_KEY, 0, -1);
+    const rawEntries = await getTrackedMerges();
     if (rawEntries.length === 0) return { truePositives: 0, falseNegatives: 0, totalReverts: 0, precision: null };
 
     // Check each tracked merge against reverts
@@ -295,7 +285,7 @@ export async function checkRevertCorrelation(projectDir: string): Promise<{
     // Persist stats
     const stats = { truePositives, falseNegatives, totalReverts, checkedAt: new Date().toISOString() };
     const precision = totalReverts > 0 ? truePositives / totalReverts : null;
-    await r.set(STATS_KEY, JSON.stringify({ ...stats, precision }));
+    await setAdversarialStats(JSON.stringify({ ...stats, precision }));
 
     if (totalReverts > 0) {
       console.log(`[Adversarial] Revert correlation: ${truePositives} true positives, ${falseNegatives} false negatives out of ${totalReverts} reverts (precision: ${precision !== null ? Math.round(precision * 100) + "%" : "N/A"})`);
@@ -305,7 +295,5 @@ export async function checkRevertCorrelation(projectDir: string): Promise<{
   } catch (err: any) {
     console.error(`[Adversarial] Revert correlation check failed: ${err.message}`);
     return { truePositives: 0, falseNegatives: 0, totalReverts: 0, precision: null };
-  } finally {
-    r.disconnect();
   }
 }
