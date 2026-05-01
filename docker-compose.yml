@@ -18,8 +18,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
-          memory: 512M
+          cpus: "2"
+          memory: 2G
 
   redis:
     image: redis:7-alpine
@@ -38,7 +38,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
+          cpus: "2"
           memory: 1G
 
   vikingdb:
@@ -58,8 +58,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
-          memory: 2G
+          cpus: "2"
+          memory: 4G
 
   openviking:
     init: true
@@ -81,8 +81,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2"
-          memory: 4G
+          cpus: "4"
+          memory: 8G
 
 volumes:
   postgres-data:
