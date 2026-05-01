@@ -436,25 +436,10 @@ async function runScheduledCycle(eventBus) {
     await maybeRunResearch(eventBus);
   } catch {}
 
-  // Test-fixer-first: if grounding shows failing tests, prioritize fixing them
-  // before processing queue items. This prevents the cascade where all queue
-  // items get rejected by preflight.
+  // Anchor selection in the control loop already prioritizes failing tests
+  // (priority #4) — no need to pre-check here. Removing the redundant
+  // groundProject() call saves ~49s per cycle.
   let cycleOpts: Record<string, any> = {};
-  try {
-    const { groundProject } = await import("./grounding.ts");
-    const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || (process.env.HOME + "/hydra-betting");
-    const grounding = await groundProject(PROJECT_WORKSPACE);
-    if (grounding.testReport.failed > 0 && grounding.failingTests.length > 0) {
-      console.log(`[Scheduler] ${grounding.testReport.failed} tests failing — injecting test-fix anchor before queue work`);
-      cycleOpts.anchor = {
-        type: "failing-test",
-        reference: grounding.failingTests[0],
-        whyNow: `${grounding.testReport.failed} test(s) currently failing — auto-fix before proceeding`,
-      };
-    }
-  } catch (err: any) {
-    console.error(`[Scheduler] Pre-cycle grounding check failed: ${err.message}`);
-  }
 
   let result = null;
   try {

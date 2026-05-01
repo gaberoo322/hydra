@@ -330,8 +330,9 @@ class TaskTracker {
     const result = canTransitionTo(currentState, newState as TaskState);
 
     if (!result.ok) {
-      console.log(`[TaskTracker] Illegal transition: ${taskId} ${currentState} → ${newState} (${result.reason})`);
-      return { ok: false, error: result.reason };
+      const reason = (result as { ok: false; reason: string }).reason;
+      console.log(`[TaskTracker] Illegal transition: ${taskId} ${currentState} → ${newState} (${reason})`);
+      return { ok: false, error: reason };
     }
 
     // Update task state

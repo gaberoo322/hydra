@@ -33,6 +33,30 @@ const execFileAsync = promisify(execFile);
 
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
 
+// ---------------------------------------------------------------------------
+// Grounding cache — skip re-running 49s test suite if HEAD hasn't changed
+// ---------------------------------------------------------------------------
+let _groundingCache: { headCommit: string; result: any; cachedAt: number } | null = null;
+const GROUNDING_CACHE_MAX_AGE_MS = 5 * 60_000; // 5 min staleness limit
+
+async function groundProjectCached(projectDir: string): Promise<any> {
+  const { stdout } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: projectDir, timeout: 5000 });
+  const currentHead = stdout.trim();
+
+  if (
+    _groundingCache &&
+    _groundingCache.headCommit === currentHead &&
+    Date.now() - _groundingCache.cachedAt < GROUNDING_CACHE_MAX_AGE_MS
+  ) {
+    console.log(`[ControlLoop] Grounding cache HIT (HEAD ${currentHead.slice(0, 7)} unchanged)`);
+    return _groundingCache.result;
+  }
+
+  const result = await groundProject(projectDir);
+  _groundingCache = { headCommit: currentHead, result, cachedAt: Date.now() };
+  return result;
+}
+
 function generateCycleId() {
   const now = new Date();
   const date = now.toISOString().split("T")[0];
@@ -112,9 +136,10 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
 
   // =========================================================================
   // Step 1b: GROUND — know the truth before planning (read-only)
+  // Optimization: if HEAD hasn't changed since last grounding, reuse cached result
   // =========================================================================
   console.log(`[ControlLoop] Step 1b: Grounding...`);
-  const grounding = await groundProject(PROJECT_WORKSPACE);
+  const grounding = await groundProjectCached(PROJECT_WORKSPACE);
   const groundingSummary = summarizeForPrompt(grounding);
   console.log(`[ControlLoop] Grounded: ${grounding.testReport.passed} tests passing, ${grounding.testReport.failed} failing (${grounding.groundingDurationMs}ms)`);
 
@@ -1501,7 +1526,8 @@ async function runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSe
   // Create an isolated worktree for the executor to prevent scope creep
   // from shared workspace state (formatting artifacts, operator changes).
   const branchName = `feature/${cycleId}-slug`;
-  const worktreePath = join(PROJECT_WORKSPACE, "..", `hydra-betting-worktree-${cycleId}`);
+  const worktreeBase = process.env.HYDRA_WORKTREE_DIR || "/dev/shm/hydra-worktrees";
+  const worktreePath = join(worktreeBase, `hydra-betting-worktree-${cycleId}`);
   let useWorktree = false;
   try {
     await execFileAsync("git", ["worktree", "add", "-b", branchName, worktreePath, "main"], {
