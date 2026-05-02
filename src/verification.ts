@@ -26,7 +26,7 @@ import { runJitTests } from "./jit-testing.ts";
 import { recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, recordReflection } from "./agent-memory.ts";
 import { recordReflection as recordGlobalReflection } from "./reflections.ts";
 import { recordCycleMetrics } from "./metrics.ts";
-import { storePriorFailure, clearProcessingItem } from "./anchor-selection.ts";
+import { reportOutcome } from "./anchor-selection.ts";
 import { moveToBlocked, returnToBacklog } from "./backlog.ts";
 import { looksOperatorBlocked, reconcilePlanVsActual } from "./preflight.ts";
 import { safeKanban, cleanupBrokenBranch, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
@@ -277,7 +277,7 @@ async function handleVerificationFailure(
     whatToTryDifferently: `Address these specific verification failures: ${failedSteps.join(", ")}. Consider narrower scope or fixing verification errors before adding new behavior.`,
   }).catch((err: any) => console.error(`[ControlLoop] Failed to record global reflection: ${err.message}`));
 
-  await storePriorFailure(taskId, `Verification failed: ${failedSteps.join(", ")}`, verification);
+  await reportOutcome(anchor, { status: "failed", reason: `Verification failed: ${failedSteps.join(", ")}`, verification, taskId });
 
   await eventBus.publish(STREAMS.NOTIFICATIONS, {
     type: "task:verification_failed",
@@ -331,7 +331,6 @@ async function handleVerificationFailure(
   }
 
   await cleanupBrokenBranch(PROJECT_WORKSPACE);
-  await clearProcessingItem(anchor);
   await ovSession.logOutcome("failed", `Verification failed: ${failedSteps.join(", ")}`);
   await ovSession.commit();
 
@@ -372,12 +371,11 @@ async function runMutationGate(
     if (complexity !== "quick-fix" && testable >= 3 && killRate < MUTATION_KILL_THRESHOLD) {
       console.error(`[ControlLoop] MUTATION GATE: kill rate ${killRate}% < ${MUTATION_KILL_THRESHOLD}% threshold — blocking merge`);
       await tracker.transitionTask(taskId, "failed", { reason: `Mutation gate: ${killRate}% kill rate (${mutationReport.survived} survivors)` });
-      await storePriorFailure(taskId, `Mutation gate: tests don't cover changed behavior (${killRate}% kill rate)`, verification);
       await recordPlannerLesson(cycleId, task, "failed", { failReason: `Mutation gate: ${killRate}% kill rate`, failedSteps: ["mutation-testing"] });
       await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "mutation gate blocked merge"));
 
       await cleanupBrokenBranch(PROJECT_WORKSPACE);
-      await clearProcessingItem(anchor);
+      await reportOutcome(anchor, { status: "failed", reason: `Mutation gate: tests don't cover changed behavior (${killRate}% kill rate)`, verification, taskId });
       await ovSession.logOutcome("failed", `Mutation gate: ${killRate}% kill rate`);
       await ovSession.commit();
       await recordCycleMetrics(cycleId, {
@@ -512,12 +510,11 @@ async function runDiffAwareJitTests(
       console.error(`[ControlLoop] JIT GATE: generated test caught a bug — blocking merge`);
       console.error(`[ControlLoop] Bug details: ${jitReport.bugDetails?.slice(0, 300)}`);
       await tracker.transitionTask(taskId, "failed", { reason: `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}` });
-      await storePriorFailure(taskId, `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}`, verification);
       await recordPlannerLesson(cycleId, task, "failed", { failReason: "JiT test caught a regression bug", failedSteps: ["jit-testing"] });
       await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "JiT test caught bug"));
 
       await cleanupBrokenBranch(PROJECT_WORKSPACE);
-      await clearProcessingItem(anchor);
+      await reportOutcome(anchor, { status: "failed", reason: `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}`, verification, taskId });
       await ovSession.logOutcome("failed", `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}`);
       await ovSession.commit();
       await recordCycleMetrics(cycleId, {
@@ -587,12 +584,11 @@ async function runScopeEnforcement(
     console.error(`[ControlLoop] Out-of-scope files: ${outOfScope.slice(0, 5).join(", ")}${outOfScope.length > 5 ? ` (+${outOfScope.length - 5} more)` : ""}`);
 
     await tracker.transitionTask(taskId, "failed", { reason: `Scope gate: ${outOfScope.length}/${verification.filesChanged.length} files outside planned scope` });
-    await storePriorFailure(taskId, `Scope gate blocked merge: ${Math.round(outOfScopeRatio * 100)}% out of scope`, verification);
     await recordPlannerLesson(cycleId, task, "failed", { failReason: `Scope gate: ${outOfScope.length} files outside scope`, failedSteps: ["scope-enforcement"] });
     await safeKanban(ctx.eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "scope gate blocked merge"));
 
     await cleanupBrokenBranch(PROJECT_WORKSPACE);
-    await clearProcessingItem(anchor);
+    await reportOutcome(anchor, { status: "failed", reason: `Scope gate blocked merge: ${Math.round(outOfScopeRatio * 100)}% out of scope`, verification, taskId });
     await ovSession.logOutcome("failed", `Scope gate: ${outOfScope.length} files outside scope`);
     await ovSession.commit();
 

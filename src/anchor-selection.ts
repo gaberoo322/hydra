@@ -614,3 +614,53 @@ export async function clearProcessingItem(anchor) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// reportOutcome — unified post-cycle anchor bookkeeping (issue #69)
+// ---------------------------------------------------------------------------
+
+export interface OutcomeResult {
+  status: "merged" | "failed" | "abandoned";
+  reason?: string;
+  verification?: any;
+  task?: any;
+  taskId?: string;
+}
+
+/**
+ * Unified post-cycle anchor bookkeeping. Dispatches to the correct combination
+ * of trackAbandonment, clearAbandonmentCounter, storePriorFailure, and
+ * clearProcessingItem based on outcome status.
+ *
+ * - **merged**: clears abandonment counter + clears processing item
+ * - **failed**: stores prior failure (with escalation logic) + clears processing item
+ * - **abandoned**: tracks abandonment (circuit breaker) + clears processing item
+ */
+export async function reportOutcome(anchor: any, result: OutcomeResult): Promise<void> {
+  const { status, reason, verification, task, taskId } = result;
+
+  switch (status) {
+    case "merged":
+      await clearAbandonmentCounter(anchor.reference);
+      await clearProcessingItem(anchor);
+      break;
+
+    case "failed":
+      await storePriorFailure(
+        taskId ?? "unknown",
+        reason ?? "Unknown failure",
+        verification ?? null,
+      );
+      await clearProcessingItem(anchor);
+      break;
+
+    case "abandoned":
+      await trackAbandonment(
+        anchor.reference,
+        task ?? { title: anchor.reference, taskId: "none" },
+        reason ?? "Unknown abandonment",
+      );
+      await clearProcessingItem(anchor);
+      break;
+  }
+}

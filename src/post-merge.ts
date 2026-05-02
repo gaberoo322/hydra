@@ -29,7 +29,7 @@ import {
 } from "./redis-adapter.ts";
 import { recordCycleMetrics } from "./metrics.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
-import { clearAbandonmentCounter, storePriorFailure, clearProcessingItem } from "./anchor-selection.ts";
+import { clearProcessingItem, reportOutcome } from "./anchor-selection.ts";
 import { clearReflections } from "./agent-memory.ts";
 import { clearReflectionsForAnchor } from "./reflections.ts";
 import { moveToDone, returnToBacklog } from "./backlog.ts";
@@ -255,7 +255,7 @@ export async function runPostMerge(
   if (rolledBack) {
     report.task.finalState = "rolled-back";
     await tracker.transitionTask(taskId, "failed", { reason: "Regression detected — auto-reverted", rolledBack: true, revertedCommit: commitSha });
-    await storePriorFailure(taskId, `Regression: tests ${grounding.testReport.passed} → ${finalGrounding.testReport.passed}`, verification);
+    await reportOutcome(anchor, { status: "failed", reason: `Regression: tests ${grounding.testReport.passed} → ${finalGrounding.testReport.passed}`, verification, taskId });
   }
 
   // Write reality report to Redis
@@ -326,7 +326,7 @@ export async function runPostMerge(
   // Kanban updates
   const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
   if (finalState === "merged") {
-    try { await clearAbandonmentCounter(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
+    try { await reportOutcome(anchor, { status: "merged" }); } catch { /* intentional: best-effort cleanup */ }
     try { await clearReflections(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
     try { await clearReflectionsForAnchor(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
 
