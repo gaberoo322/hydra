@@ -1085,3 +1085,66 @@ export async function getCycleCosts(cycleId: string): Promise<Record<string, str
   const r = getRedisConnection();
   return r.hgetall(redisKeys.cycleCosts(cycleId));
 }
+
+// ---------------------------------------------------------------------------
+// Research-to-build ratio tracking (issue #84)
+// ---------------------------------------------------------------------------
+
+/** Record a research cycle event (timestamp-scored sorted set, rolling 24h). */
+export async function recordResearchEvent(): Promise<void> {
+  const r = getRedisConnection();
+  const now = Date.now();
+  const key = redisKeys.schedulerResearchEvents();
+  await r.zadd(key, now, `${now}`);
+  // Prune entries older than 24h
+  await r.zremrangebyscore(key, "-inf", now - 86400_000);
+}
+
+/** Record a build cycle event (timestamp-scored sorted set, rolling 24h). */
+export async function recordBuildEvent(): Promise<void> {
+  const r = getRedisConnection();
+  const now = Date.now();
+  const key = redisKeys.schedulerBuildEvents();
+  await r.zadd(key, now, `${now}`);
+  // Prune entries older than 24h
+  await r.zremrangebyscore(key, "-inf", now - 86400_000);
+}
+
+/** Get count of research events in the last 24h. */
+export async function getResearchEventCount24h(): Promise<number> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerResearchEvents();
+  const now = Date.now();
+  // Prune old entries first
+  await r.zremrangebyscore(key, "-inf", now - 86400_000);
+  return r.zcard(key);
+}
+
+/** Get count of build events in the last 24h. */
+export async function getBuildEventCount24h(): Promise<number> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerBuildEvents();
+  const now = Date.now();
+  // Prune old entries first
+  await r.zremrangebyscore(key, "-inf", now - 86400_000);
+  return r.zcard(key);
+}
+
+/** Set the force-research-once flag (consumed on next maybeRunResearch). */
+export async function setResearchForceOnce(): Promise<void> {
+  const r = getRedisConnection();
+  // TTL of 1 hour — if not consumed by then, it expires
+  await r.set(redisKeys.schedulerResearchForceOnce(), "1", "EX", 3600);
+}
+
+/** Consume the force-research-once flag. Returns true if it was set. */
+export async function consumeResearchForceOnce(): Promise<boolean> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerResearchForceOnce();
+  const val = await r.get(key);
+  if (val) {
+    await r.del(key);
+    return true;
+  }
+  return false;
+}
