@@ -15,6 +15,7 @@ import { setAgentStreamCallback } from "./codex-runner.ts";
 import { migrateRulesToPatterns } from "./agent-memory.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { startCodeReviewerLoop } from "./code-reviewer.ts";
+import { cleanWorkQueue } from "./redis-adapter.ts";
 
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
@@ -184,6 +185,13 @@ async function main() {
     await migrateRulesToPatterns();
   } catch (err: any) {
     console.error(`[Hydra] Memory migration failed: ${err.message}`);
+  }
+
+  // Clean work queue: remove COMPLETED: items and deduplicate
+  try {
+    await cleanWorkQueue();
+  } catch (err: any) {
+    console.error(`[Hydra] Work queue cleanup failed: ${err.message}`);
   }
 
   // Recover held tasks from Redis (from previous cycle's dependency holds)

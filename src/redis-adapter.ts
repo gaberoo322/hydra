@@ -979,6 +979,100 @@ export async function removeFromWorkQueue(value: string): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// Work queue dedup utilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a string for fuzzy comparison: lowercase, collapse whitespace, trim.
+ */
+export function normalizeForDedup(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Check if two references are fuzzy duplicates.
+ * Returns true if either is a case-insensitive substring of the other
+ * (after whitespace normalization).
+ */
+export function isFuzzyDuplicate(a: string, b: string): boolean {
+  const na = normalizeForDedup(a);
+  const nb = normalizeForDedup(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+/**
+ * Check if a reference already exists in the work queue (fuzzy match).
+ * Returns the matched reference if found, or null if no duplicate.
+ */
+export async function findWorkQueueDuplicate(reference: string): Promise<string | null> {
+  const items = await getWorkQueueItems();
+  for (const raw of items) {
+    try {
+      const item = JSON.parse(raw);
+      const existing = item.reference || "";
+      if (isFuzzyDuplicate(reference, existing)) {
+        return existing;
+      }
+    } catch { /* intentional: skip corrupt items */ }
+  }
+  return null;
+}
+
+/**
+ * Clean the work queue on startup:
+ * - Remove items with "COMPLETED:" prefix in their reference
+ * - Deduplicate remaining items (keep first occurrence)
+ */
+export async function cleanWorkQueue(): Promise<{ removedCompleted: number; removedDuplicates: number }> {
+  const r = getRedisConnection();
+  const items = await getWorkQueueItems();
+  let removedCompleted = 0;
+  let removedDuplicates = 0;
+
+  const toRemove: string[] = [];
+  const seen: string[] = []; // normalized references we've seen
+
+  for (const raw of items) {
+    let ref = "";
+    try {
+      const item = JSON.parse(raw);
+      ref = item.reference || "";
+    } catch {
+      ref = raw;
+    }
+
+    // Remove COMPLETED: items
+    if (ref.startsWith("COMPLETED:") || ref.startsWith("completed:")) {
+      toRemove.push(raw);
+      removedCompleted++;
+      continue;
+    }
+
+    // Dedup against previously seen items
+    const normalized = normalizeForDedup(ref);
+    const isDup = seen.some(s => isFuzzyDuplicate(ref, s));
+    if (isDup) {
+      toRemove.push(raw);
+      removedDuplicates++;
+    } else {
+      seen.push(normalized);
+    }
+  }
+
+  // Remove flagged items
+  for (const val of toRemove) {
+    await r.lrem(redisKeys.anchorWorkQueue(), 1, val);
+  }
+
+  if (removedCompleted > 0 || removedDuplicates > 0) {
+    console.log(`[WorkQueue] Cleanup: removed ${removedCompleted} completed, ${removedDuplicates} duplicates`);
+  }
+
+  return { removedCompleted, removedDuplicates };
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline support (used by task-tracker.ts for batched operations)
 // ---------------------------------------------------------------------------
 

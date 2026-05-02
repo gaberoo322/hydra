@@ -28,6 +28,7 @@ import {
   getRecentResearchIds, getResearchReport as getResearchReportAdapter,
   saveResearchReport, trimResearchReports,
   getWorkQueueItems, pushToWorkQueue, removeFromWorkQueue,
+  findWorkQueueDuplicate,
 } from "./redis-adapter.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
@@ -649,17 +650,10 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
 
       // Simple opportunity or spec creation failed — push to work queue (with dedup)
       {
-        const titleLower = (opp.title || "").toLowerCase().trim();
-        const existingQueue = await getWorkQueueItems();
-        const isDup = existingQueue.some(raw => {
-          try {
-            const item = JSON.parse(raw);
-            return (item.reference || "").toLowerCase().trim() === titleLower;
-          } catch { return false; }
-        });
+        const matchedRef = await findWorkQueueDuplicate(opp.title || "");
 
-        if (isDup) {
-          console.log(`[Research] Skipping duplicate #${opp.rank}: "${opp.title}" (already in queue)`);
+        if (matchedRef) {
+          console.log(`[Research] Dedup: skipping #${opp.rank}: "${opp.title}" (matches existing: "${matchedRef}")`);
         } else {
           await pushToWorkQueue(JSON.stringify({
             reference: opp.title,
