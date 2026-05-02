@@ -607,6 +607,125 @@ async function claimNextQueuedItem(claimedBy) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Facade API — claim/complete/fail/block with built-in error handling + events
+//
+// These wrap the existing lane transitions so callers don't need safeKanban().
+// Each function catches errors, logs with context, and publishes a notification
+// event on failure. Returns { ok: boolean } so callers can branch without try/catch.
+// ---------------------------------------------------------------------------
+
+interface FacadeEventBus {
+  publish(stream: string, message: Record<string, any>): Promise<void>;
+}
+
+let _facadeStreams: { NOTIFICATIONS: string } | null = null;
+
+/** Lazy-load STREAMS to avoid circular import with event-bus.ts */
+async function getFacadeStreams() {
+  if (!_facadeStreams) {
+    const { STREAMS } = await import("./event-bus.ts");
+    _facadeStreams = { NOTIFICATIONS: STREAMS.NOTIFICATIONS };
+  }
+  return _facadeStreams;
+}
+
+async function publishFacadeFailure(
+  eventBus: FacadeEventBus | null,
+  cycleId: string,
+  op: string,
+  reference: string,
+  error: string,
+) {
+  if (!eventBus) return;
+  try {
+    const streams = await getFacadeStreams();
+    await eventBus.publish(streams.NOTIFICATIONS, {
+      type: "kanban:update_failed",
+      source: "backlog-facade",
+      correlationId: cycleId,
+      payload: { op, reference, error },
+    });
+  } catch (publishErr: any) {
+    console.error(`[Backlog] Failed to publish kanban:update_failed for ${op}: ${publishErr.message}`);
+  }
+}
+
+/**
+ * Claim an anchor — move it to In Progress with built-in error handling.
+ * Wraps moveToInProgress() with loud failure logging and event publishing.
+ */
+async function claim(
+  reference: string,
+  opts: { eventBus?: FacadeEventBus | null; cycleId?: string } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await moveToInProgress(reference);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[Backlog] claim() failed for "${reference}": ${err.message}`);
+    await publishFacadeFailure(opts.eventBus || null, opts.cycleId || "", "claim", reference, err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Complete an anchor — move it to Done with built-in error handling.
+ * Wraps moveToDone() with loud failure logging and event publishing.
+ */
+async function complete(
+  reference: string,
+  evidence: string,
+  opts: { eventBus?: FacadeEventBus | null; cycleId?: string } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await moveToDone(reference, evidence);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[Backlog] complete() failed for "${reference}": ${err.message}`);
+    await publishFacadeFailure(opts.eventBus || null, opts.cycleId || "", "complete", reference, err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Fail an anchor — return it to Backlog with built-in error handling.
+ * Wraps returnToBacklog() with loud failure logging and event publishing.
+ */
+async function fail(
+  reference: string,
+  reason: string,
+  opts: { eventBus?: FacadeEventBus | null; cycleId?: string } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await returnToBacklog(reference, reason);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[Backlog] fail() failed for "${reference}": ${err.message}`);
+    await publishFacadeFailure(opts.eventBus || null, opts.cycleId || "", "fail", reference, err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Block an anchor — move it to Blocked with built-in error handling.
+ * Wraps moveToBlocked() with loud failure logging and event publishing.
+ */
+async function block(
+  reference: string,
+  reason: string,
+  opts: { eventBus?: FacadeEventBus | null; cycleId?: string } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    await moveToBlocked(reference, reason);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[Backlog] block() failed for "${reference}": ${err.message}`);
+    await publishFacadeFailure(opts.eventBus || null, opts.cycleId || "", "block", reference, err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 export {
   loadBacklog, getBacklogCounts, addToBacklog, promoteToQueued,
   moveToInProgress, moveToDone, moveToBlocked, blockItemById, returnToBacklog,
@@ -615,4 +734,6 @@ export {
   getInProgressCount, getInProgressItems, isWipLimitReached,
   requeueStaleInProgressItems, WIP_LIMIT, getCurrentMilestoneProgress,
   claimNextQueuedItem,
+  // Facade API (issue #71)
+  claim, complete, fail, block,
 };
