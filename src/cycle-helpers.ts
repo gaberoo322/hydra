@@ -17,6 +17,7 @@ import { promisify } from "node:util";
 import { groundProject } from "./grounding.ts";
 import { recordCycleMetrics } from "./metrics.ts";
 import { clearProcessingItem } from "./anchor-selection.ts";
+import { getRecentReportIds, getRealityReport } from "./redis-adapter.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -84,6 +85,33 @@ export async function isAnchorStale(anchor: any): Promise<string | null> {
   // Check for COMPLETED: prefix in queue items
   if (ref.startsWith("completed:")) {
     return "Queue item already marked as completed";
+  }
+
+  // Check for duplicate of recently-merged task (last 10 cycle reports)
+  try {
+    const reportIds = await getRecentReportIds(10);
+    for (const rid of reportIds) {
+      const raw = await getRealityReport(rid);
+      if (!raw) continue;
+      try {
+        const report = JSON.parse(raw);
+        if (report.task?.finalState !== "merged") continue;
+        const mergedTitle = (report.task?.title || "").toLowerCase().trim();
+        if (!mergedTitle || mergedTitle.length < 10) continue;
+
+        // Word-overlap similarity (same approach as priorities.md check)
+        const refWords = new Set<string>(ref.split(/\s+/).filter(w => w.length > 3));
+        const mergedWords = new Set<string>(mergedTitle.split(/\s+/).filter(w => w.length > 3));
+        if (refWords.size === 0 || mergedWords.size === 0) continue;
+        const overlap = Array.from(refWords).filter((w: string) => mergedWords.has(w)).length;
+        const similarity = overlap / Math.min(refWords.size, mergedWords.size);
+        if (similarity > 0.6) {
+          return `Duplicates recently merged task: "${mergedTitle.slice(0, 80)}"`;
+        }
+      } catch { /* intentional: skip unparseable reports */ }
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Recent-merge duplicate check failed (proceeding): ${err.message}`);
   }
 
   // Check against completed items in priorities.md
