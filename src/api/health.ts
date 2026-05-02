@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 import { getCycleStatus } from "../cycle.ts";
 import { getMetricsTrend, getAggregateStats } from "../metrics.ts";
+import { OLLAMA_HOST } from "../codex-runner.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler.ts";
 import { listProposals } from "../proposals.ts";
 import { getBacklogCounts } from "../backlog.ts";
@@ -56,13 +57,14 @@ export function createHealthRouter(eventBus: any) {
       }
     }
 
-    const [vikingdb, openviking, openaiProxy] = await Promise.all([
+    const [vikingdb, openviking, openaiProxy, ollama] = await Promise.all([
       probe("http://localhost:5000/health"),
       probe("http://localhost:1933/health"),
       probe("http://localhost:4001/v1/embeddings", true),
+      probe(`${OLLAMA_HOST}/api/tags`, true),
     ]);
 
-    res.json({ vikingdb, openviking, openaiProxy });
+    res.json({ vikingdb, openviking, openaiProxy, ollama });
   });
 
   // GET /health/deep — Comprehensive health with diagnostic reasoning

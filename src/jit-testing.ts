@@ -193,7 +193,7 @@ export async function runJitTests(
       agentName: "jit-tester",
       personality,
       prompt,
-      model: "mini",
+      model: "local",
       taskId: `${taskId}-jit`,
       correlationId: cycleId,
       workDir: projectDir,

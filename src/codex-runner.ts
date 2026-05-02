@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
+const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://100.125.108.68:11434";
 
 import { getDailySpend, DAILY_COST_CAP_USD } from "./scheduler.ts";
 import { redisKeys } from "./redis-keys.ts";
@@ -23,6 +24,7 @@ const MODEL_TIERS = {
   codex: "gpt-5.3-codex",
   rapid: "gpt-5.3-codex-spark",
   mini: "gpt-5.4-mini",
+  local: "gemma-4-26b",
 };
 
 // Fallback tiers — used when daily spend cap is exceeded.
@@ -40,6 +42,7 @@ const MODEL_PRICING = {
   "gpt-5.3-codex":       { input: 1.75, output: 14.00 },
   "gpt-5.3-codex-spark": { input: 1.75, output: 14.00 },
   "gpt-5.4-mini":        { input: 0.75, output: 4.50 },
+  "gemma-4-26b":         { input: 0, output: 0 },
 };
 
 async function resolveModel(tierOrModel: string): Promise<string> {
@@ -178,6 +181,116 @@ function setAgentStreamCallback(cb: ((data: any) => void) | null) {
   _globalStreamCallback = cb;
 }
 
+// ---------------------------------------------------------------------------
+// Ollama local model support — health-checked with fallback to mini
+// ---------------------------------------------------------------------------
+
+let _ollamaHealthy: boolean | null = null;
+let _ollamaHealthCheckedAt = 0;
+const OLLAMA_HEALTH_CACHE_MS = 60_000;
+const OLLAMA_MODEL_NAME = "gemma4:26b";
+
+async function isOllamaAvailable(): Promise<boolean> {
+  if (Date.now() - _ollamaHealthCheckedAt < OLLAMA_HEALTH_CACHE_MS && _ollamaHealthy !== null) {
+    return _ollamaHealthy;
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`${OLLAMA_HOST}/api/tags`, { signal: controller.signal });
+    clearTimeout(timer);
+    _ollamaHealthy = res.ok;
+  } catch {
+    _ollamaHealthy = false;
+  }
+  _ollamaHealthCheckedAt = Date.now();
+  if (!_ollamaHealthy) {
+    console.warn(`[CodexRunner] Ollama at ${OLLAMA_HOST} is unreachable — will fall back to mini`);
+  }
+  return _ollamaHealthy;
+}
+
+async function runLocalAgent({ agentName, personality, prompt, workDir, timeout: timeoutMs }: any) {
+  const startTime = Date.now();
+  const effectiveTimeout = timeoutMs || AGENT_TIMEOUTS[agentName] || 120_000;
+
+  // Load personality + feedback + core memory using existing composePrompt()
+  let systemPrompt = "";
+  if (personality) {
+    try { systemPrompt = await readFile(personality, "utf-8"); } catch { /* intentional */ }
+  }
+  const feedbackPath = join(CONFIG_PATH, "feedback", `to-${agentName}.md`);
+  let feedback = "";
+  try { feedback = await readFile(feedbackPath, "utf-8"); } catch { /* intentional */ }
+  const coreMemoryPath = join(CONFIG_PATH, "core-memory", `${agentName}.md`);
+  let coreMemory = "";
+  try { coreMemory = await readFile(coreMemoryPath, "utf-8"); } catch { /* intentional */ }
+
+  const fullPrompt = composePrompt({ prompt, systemPrompt, feedback, workDir, coreMemory });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+
+  let output = "";
+  let exitCode = 0;
+  let timedOut = false;
+
+  try {
+    const res = await fetch(`${OLLAMA_HOST}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL_NAME,
+        messages: [
+          ...(systemPrompt ? [{ role: "system" as const, content: systemPrompt }] : []),
+          { role: "user", content: fullPrompt },
+        ],
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`[CodexRunner] Ollama returned ${res.status}: ${errText.slice(0, 200)}`);
+      exitCode = 1;
+    } else {
+      const data = await res.json();
+      output = data.choices?.[0]?.message?.content || "";
+    }
+  } catch (err: any) {
+    if (controller.signal.aborted) {
+      timedOut = true;
+      console.error(`[CodexRunner] Local agent ${agentName} timed out after ${effectiveTimeout / 1000}s`);
+    } else {
+      console.error(`[CodexRunner] Local agent ${agentName} error: ${err.message}`);
+      exitCode = 1;
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const duration = Date.now() - startTime;
+  console.log(`[CodexRunner] Local agent ${agentName} completed in ${(duration / 1000).toFixed(1)}s (model: ${OLLAMA_MODEL_NAME}, output: ${output.length} chars)`);
+
+  return {
+    output,
+    exitCode,
+    signal: null,
+    timedOut,
+    timeout: effectiveTimeout,
+    killSignal: null,
+    duration,
+    usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 },
+    costUsd: 0,
+    model: "gemma-4-26b",
+    stderr: "",
+    usageLimitHit: false,
+    threadReused: false,
+    promptCacheRate: 0,
+  };
+}
+
 /**
  * Run a task using the Codex SDK.
  */
@@ -186,6 +299,18 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   const startTime = Date.now();
   const resolvedModel = await resolveModel(model || "frontier");
   const workspaceDir = workDir || PROJECT_WORKSPACE;
+
+  // Route to Ollama for local model tier (with fallback to mini if unavailable)
+  if (resolvedModel === "gemma-4-26b") {
+    const available = await isOllamaAvailable();
+    if (available) {
+      return runLocalAgent({ agentName, personality, prompt, model: resolvedModel, taskId, correlationId, workDir: workspaceDir });
+    }
+    console.log(`[CodexRunner] Ollama unavailable — falling back to mini for ${agentName}`);
+    // Fall through to Codex SDK path with mini model
+    const miniModel = MODEL_TIERS.mini;
+    return runAgent({ agentName, personality, prompt, model: miniModel, taskId, correlationId, workDir, onStream, outputSchema });
+  }
 
   // Load personality file
   let systemPrompt = "";
@@ -436,4 +561,4 @@ async function searchKnowledge(query, limit = 5, sessionId = null) {
   }
 }
 
-export { runAgent, findPersonality, searchKnowledge, MODEL_TIERS, MODEL_PRICING, composePrompt, buildCodexArgs, computeCost, setAgentStreamCallback };
+export { runAgent, runLocalAgent, isOllamaAvailable, findPersonality, searchKnowledge, MODEL_TIERS, MODEL_PRICING, composePrompt, buildCodexArgs, computeCost, setAgentStreamCallback, OLLAMA_HOST };

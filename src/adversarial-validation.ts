@@ -146,7 +146,7 @@ export async function runAdversarialValidation(
       agentName: "adversary",
       personality,
       prompt,
-      model: "mini",
+      model: "local",
       taskId: `adversary-${cycleId}`,
       correlationId: cycleId,
       workDir: PROJECT_WORKSPACE,

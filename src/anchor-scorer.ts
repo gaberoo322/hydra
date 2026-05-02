@@ -174,7 +174,7 @@ Respond with ONLY a JSON object (no markdown): {"score": <0.0-1.0>, "reason": "<
       agentName: "anchor-scorer",
       personality: null,
       prompt,
-      model: "mini",
+      model: "local",
       taskId: null,
       correlationId: null,
       workDir: null,

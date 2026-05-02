@@ -14,6 +14,7 @@ import { registerSkills } from "./ov-skills.ts";
 import { setAgentStreamCallback } from "./codex-runner.ts";
 import { migrateRulesToPatterns } from "./agent-memory.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { startCodeReviewerLoop } from "./code-reviewer.ts";
 
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
@@ -251,6 +252,9 @@ async function main() {
   // Report cleanup (cycle-summaries 2d, reality-reports keep 50)
   startCleanupSchedule();
 
+  // Continuous code reviewer — deep reviews via local Gemma model
+  const stopCodeReviewer = startCodeReviewerLoop(eventBus);
+
   // Cycle watchdog — auto-kill cycles past the TTL, alert on stalls
   setInterval(async () => {
     try {
@@ -305,6 +309,7 @@ async function main() {
     console.log(`\n[Hydra] Received ${signal}, shutting down...`);
     stopDigest();
     stopScheduler();
+    stopCodeReviewer();
     eventBus.stopConsuming();
     clearInterval(heartbeat);
     for (const ws of wss.clients) ws.close(1001, "server shutting down");
