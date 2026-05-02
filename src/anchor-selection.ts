@@ -27,6 +27,62 @@ export const PROCESSING_QUEUE = redisKeys.anchorProcessing();
 export const ABANDONMENT_COUNTER_PREFIX = redisKeys.anchorAbandonmentCount("");
 export const ABANDONMENT_COUNTER_TTL = 86400; // 24h — auto-expire stale counters
 
+// Prior-failure escalation thresholds (issue #18)
+export const PRIOR_FAILURE_AGE_LIMIT_MS = 24 * 60 * 60 * 1000; // 24h — items older than this are auto-escalated
+export const PRIOR_FAILURE_CAP = 20; // hard cap — oldest items escalated to reframe when exceeded
+
+// ---------------------------------------------------------------------------
+// Prior-failure escalation — prevent unbounded accumulation (issue #18)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan all prior-failure items and escalate any that exceed the age threshold
+ * to the reframe queue. Called from selectAnchor() before claiming a prior-failure
+ * item, so stale items are cleaned up every cycle.
+ */
+export async function escalateStalePriorFailures(): Promise<number> {
+  const r = getTracker().getRedisClient();
+  const key = redisKeys.anchorPriorFailures();
+  const all = await r.lrange(key, 0, -1);
+  if (all.length === 0) return 0;
+
+  const now = Date.now();
+  let escalated = 0;
+
+  for (const raw of all) {
+    try {
+      const item = JSON.parse(raw);
+      const age = now - new Date(item.timestamp).getTime();
+      if (age > PRIOR_FAILURE_AGE_LIMIT_MS) {
+        // Escalate to reframe queue with age reason
+        await r.rpush(REFRAME_QUEUE, JSON.stringify({
+          originalTaskId: item.taskId,
+          originalTitle: item.taskId,
+          originalDescription: "",
+          anchorType: "prior-failure",
+          anchorReference: item.taskId,
+          scopeBoundary: null,
+          totalAttempts: item.retryCount || 1,
+          lastReason: item.reason,
+          failedSteps: item.failedSteps || [],
+          failureHistory: [],
+          verificationStderr: "",
+          escalatedAt: new Date().toISOString(),
+          escalationSource: "prior-failure-age-limit",
+          escalationReason: `Auto-escalated: item aged ${Math.round(age / 3600000)}h, exceeds ${PRIOR_FAILURE_AGE_LIMIT_MS / 3600000}h limit`,
+        }));
+        await r.lrem(key, 1, raw);
+        escalated++;
+        console.log(`[ControlLoop] Prior-failure "${item.taskId}" auto-escalated to reframe (age: ${Math.round(age / 3600000)}h)`);
+      }
+    } catch (err: any) {
+      console.error(`[ControlLoop] Failed to parse prior-failure for age check: ${err.message}`);
+    }
+  }
+
+  return escalated;
+}
+
 // ---------------------------------------------------------------------------
 // Anchor selection
 // ---------------------------------------------------------------------------
@@ -214,6 +270,15 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   }
 
   // 5. Prior failures from Redis
+  //    First, escalate any stale items so the queue doesn't accumulate unbounded.
+  try {
+    const escalatedCount = await escalateStalePriorFailures();
+    if (escalatedCount > 0) {
+      console.log(`[ControlLoop] Escalated ${escalatedCount} stale prior-failure(s) to reframe queue`);
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Prior-failure age escalation failed: ${err.message}`);
+  }
   const priorFailures = await getTracker().getRedisClient().lrange(redisKeys.anchorPriorFailures(), 0, 0);
   if (priorFailures.length > 0) {
     try {
@@ -479,6 +544,42 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
     retryCount: priorAttempts + 1,
     timestamp: new Date().toISOString(),
   }));
+
+  // Enforce hard cap — escalate oldest items when queue exceeds limit (issue #18)
+  try {
+    const queueLen = await r.llen(redisKeys.anchorPriorFailures());
+    if (queueLen > PRIOR_FAILURE_CAP) {
+      const overflow = queueLen - PRIOR_FAILURE_CAP;
+      for (let i = 0; i < overflow; i++) {
+        const raw = await r.lpop(redisKeys.anchorPriorFailures());
+        if (!raw) break;
+        try {
+          const item = JSON.parse(raw);
+          await r.rpush(REFRAME_QUEUE, JSON.stringify({
+            originalTaskId: item.taskId,
+            originalTitle: item.taskId,
+            originalDescription: "",
+            anchorType: "prior-failure",
+            anchorReference: item.taskId,
+            scopeBoundary: null,
+            totalAttempts: item.retryCount || 1,
+            lastReason: item.reason,
+            failedSteps: item.failedSteps || [],
+            failureHistory: [],
+            verificationStderr: "",
+            escalatedAt: new Date().toISOString(),
+            escalationSource: "prior-failure-cap-overflow",
+            escalationReason: `Auto-escalated: prior-failures queue exceeded cap of ${PRIOR_FAILURE_CAP}`,
+          }));
+          console.log(`[ControlLoop] Prior-failure "${item.taskId}" escalated to reframe (cap overflow: ${queueLen}/${PRIOR_FAILURE_CAP})`);
+        } catch (parseErr: any) {
+          console.error(`[ControlLoop] Corrupt prior-failure dropped during cap enforcement: ${parseErr.message}`);
+        }
+      }
+    }
+  } catch (capErr: any) {
+    console.error(`[ControlLoop] Prior-failure cap enforcement failed: ${capErr.message}`);
+  }
 }
 
 /**
