@@ -18,7 +18,7 @@ import { promisify } from "node:util";
 import { STREAMS } from "./event-bus.ts";
 import { groundProject } from "./grounding.ts";
 import { recordCycleMetrics } from "./metrics.ts";
-import { clearProcessingItem } from "./anchor-selection.ts";
+import { reportOutcome, clearProcessingItem } from "./anchor-selection.ts";
 
 const execFileAsync = promisify(execFile);
 

@@ -22,7 +22,7 @@ import { recordPlannerLesson, recordExecutorLesson, recordReflection } from "./a
 import { recordReflection as recordGlobalReflection } from "./reflections.ts";
 import { recordCycleMetrics, detectDrift } from "./metrics.ts";
 import { moveToInProgress, returnToBacklog } from "./backlog.ts";
-import { trackAbandonment, clearProcessingItem, storePriorFailure } from "./anchor-selection.ts";
+import { reportOutcome, clearProcessingItem } from "./anchor-selection.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { preflightCheck, runHighRiskReview } from "./preflight.ts";
 import { runExecutorAgent } from "./executor-agent.ts";
@@ -75,13 +75,13 @@ export async function handlePlanResult(
     console.log(`[ControlLoop] Planner produced no valid task — cycle complete`);
 
     // Circuit breaker: planner null counts as an abandonment
-    try {
-      const escalated = await trackAbandonment(anchor.reference, { title: anchor.reference, taskId: "none" }, "Planner produced no valid task (schema validation or parse failure)");
-      if (escalated) {
-        console.log(`[ControlLoop] Anchor "${anchor.reference}" escalated to reframe queue after repeated planner failures`);
-      }
-    } catch (err: any) {
-      console.error(`[ControlLoop] Circuit breaker tracking failed on null task: ${err.message}`);
+    const { escalated } = await reportOutcome(anchor, {
+      status: "abandoned",
+      reason: "Planner produced no valid task (schema validation or parse failure)",
+      task: { title: anchor.reference, taskId: "none" },
+    });
+    if (escalated) {
+      console.log(`[ControlLoop] Anchor "${anchor.reference}" escalated to reframe queue after repeated planner failures`);
     }
 
     await ovSession.logPlanner(anchor, null);
@@ -148,11 +148,8 @@ export async function runDriftCheck(
   } catch (err: any) {
     console.error(`[ControlLoop] Failed to record drift lesson: ${err.message}`);
   }
-  try {
-    // @ts-expect-error — migrate to proper types
-    await trackAbandonment(anchor.reference, task, `Drift: ${drift.reason}`);
-  } catch { /* intentional: best-effort tracking */ }
-  await clearProcessingItem(anchor);
+  // @ts-expect-error — migrate to proper types
+  await reportOutcome(anchor, { status: "abandoned", reason: `Drift: ${drift.reason}`, task });
   await recordCycleMetrics(cycleId, {
     tasksAttempted: 1, tasksFailed: 0, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 1,
     testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
@@ -235,11 +232,7 @@ export async function runPreflightGate(
     console.error(`[ControlLoop] Failed to record rejection lessons: ${err.message}`);
   }
 
-  try {
-    await trackAbandonment(anchor.reference, task, skepticResult.reason);
-  } catch (err: any) {
-    console.error(`[ControlLoop] Circuit breaker tracking failed: ${err.message}`);
-  }
+  await reportOutcome(anchor, { status: "abandoned", reason: skepticResult.reason, task });
 
   await handleEarlyExit({
     cycleId, startTime, grounding, ovSession, anchor,
@@ -329,7 +322,7 @@ export async function runExecuteStep(
       whyItFailed: "Executor ran but produced no code changes",
       whatToTryDifferently: "Provide more specific scope boundary and acceptance criteria. Ensure the task is actionable.",
     }).catch((err: any) => console.error(`[ControlLoop] Failed to record global reflection: ${err.message}`));
-    await storePriorFailure(taskId, "No code changes produced", null);
+    await reportOutcome(anchor, { status: "failed", reason: "No code changes produced", taskId });
     try {
       await recordPlannerLesson(cycleId, task, "failed", { failReason: "Executor produced no code changes" });
       await recordExecutorLesson(cycleId, task, "failed", { noDiff: true });
@@ -337,7 +330,6 @@ export async function runExecuteStep(
       console.error(`[ControlLoop] Failed to record no-diff lessons: ${err.message}`);
     }
     await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "no code changes"));
-    await clearProcessingItem(anchor);
     await ovSession.logOutcome("failed", "Executor produced no code changes");
     await ovSession.commit();
     return {

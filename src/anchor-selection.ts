@@ -614,3 +614,64 @@ export async function clearProcessingItem(anchor) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// reportOutcome — unified post-cycle anchor bookkeeping (issue #69)
+// ---------------------------------------------------------------------------
+
+export interface OutcomeResult {
+  status: "merged" | "failed" | "abandoned";
+  reason?: string;
+  verification?: any;
+  task?: any;
+  taskId?: string;
+}
+
+/**
+ * Unified post-cycle anchor bookkeeping. Dispatches to the correct combination
+ * of trackAbandonment, storePriorFailure, clearAbandonmentCounter, and
+ * clearProcessingItem based on the outcome status.
+ *
+ * - "merged": clear abandonment counter + clear processing item
+ * - "failed": store prior failure (with escalation) + clear processing item
+ * - "abandoned": track abandonment (circuit breaker) + clear processing item
+ */
+export async function reportOutcome(anchor: any, result: OutcomeResult): Promise<{ escalated?: boolean }> {
+  const { status, reason, verification, task, taskId } = result;
+
+  switch (status) {
+    case "merged":
+      await clearAbandonmentCounter(anchor.reference);
+      await clearProcessingItem(anchor);
+      return {};
+
+    case "failed":
+      await storePriorFailure(
+        taskId || task?.taskId || anchor.reference,
+        reason || "unknown failure",
+        verification || null,
+      );
+      await clearProcessingItem(anchor);
+      return {};
+
+    case "abandoned": {
+      let escalated = false;
+      try {
+        escalated = await trackAbandonment(
+          anchor.reference,
+          task || { title: anchor.reference, taskId: taskId || "none" },
+          reason || "unknown abandonment",
+        );
+      } catch (err: any) {
+        console.error(`[ControlLoop] Circuit breaker tracking failed in reportOutcome: ${err.message}`);
+      }
+      await clearProcessingItem(anchor);
+      return { escalated };
+    }
+
+    default:
+      console.error(`[ControlLoop] reportOutcome called with unknown status: ${status}`);
+      await clearProcessingItem(anchor);
+      return {};
+  }
+}
