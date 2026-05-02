@@ -35,7 +35,7 @@ import {
   handleEarlyExit, PROJECT_WORKSPACE,
 } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
-import { runVerificationPipeline } from "./verification-pipeline.ts";
+import { runVerificationPipeline } from "./verification.ts";
 import { runPostMerge } from "./post-merge.ts";
 import {
   handlePlanResult,

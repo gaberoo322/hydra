@@ -13,6 +13,8 @@
  *   - runMergeStep — merge lock acquisition + merge to main
  */
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { STREAMS } from "./event-bus.ts";
 import { getTracker } from "./task-tracker.ts";
 import { getDiff } from "./grounding.ts";
@@ -24,7 +26,6 @@ import { trackAbandonment, clearProcessingItem, storePriorFailure } from "./anch
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { preflightCheck, runHighRiskReview } from "./preflight.ts";
 import { runExecutorAgent } from "./executor-agent.ts";
-import { validateDiffExists } from "./verifier.ts";
 import {
   acquireMergeLock, getMergeLockHolder, releaseMergeLock,
 } from "./redis-adapter.ts";
@@ -260,6 +261,36 @@ export async function runPreflightGate(
       durationMs: Date.now() - startTime,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// validateDiffExists — simple git check (moved from verifier.ts, issue #66)
+// ---------------------------------------------------------------------------
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Validate that a git diff exists (actual code changes were made).
+ * Used to gate the transition from in-progress to changed-code.
+ */
+async function validateDiffExists(projectDir: string, baseBranch = "main") {
+  try {
+    // Check for uncommitted changes
+    const { stdout: status } = await execFileAsync("git", ["status", "--short"], {
+      cwd: projectDir,
+      timeout: 5000,
+    });
+    if (status.trim()) return true;
+
+    // Check for committed changes vs base branch
+    const { stdout: diff } = await execFileAsync("git", ["diff", "--stat", baseBranch], {
+      cwd: projectDir,
+      timeout: 10000,
+    });
+    return diff.trim().length > 0;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
