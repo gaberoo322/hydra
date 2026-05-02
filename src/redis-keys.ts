@@ -41,6 +41,7 @@ export const redisKeys = {
   anchorReframeQueue: () => "hydra:anchors:reframe-queue",
   anchorAbandonmentCount: (ref: string) => `hydra:anchors:abandonment-count:${ref}`,
   anchorPermSkip: (ref: string) => `hydra:anchors:perm-skip:${ref}`,
+  anchorResolvedHealth: (ref: string) => `hydra:anchors:resolved-health:${ref}`,
   anchorCalibration: (cycleId: string) => `hydra:anchors:calibration:${cycleId}`,
   anchorCalibrationIndex: () => "hydra:anchors:calibration:index",
 
