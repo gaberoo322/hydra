@@ -99,6 +99,7 @@ export async function handlePlanResult(
     await handleEarlyExit({
       cycleId, startTime, grounding, ovSession, anchor,
       outcome: "no-work", reason: "Planner produced no task",
+      clearProcessing: false, // reportOutcome already called above
       metricsOverrides: {
         tasksAbandoned: 1, taskTitle: "Planner produced no task",
         anchorType: anchor.type, anchorReference: anchor.reference,
@@ -240,6 +241,7 @@ export async function runPreflightGate(
   await handleEarlyExit({
     cycleId, startTime, grounding, ovSession, anchor,
     outcome: "abandoned", reason: `Rejected: ${skepticResult.reason}`,
+    clearProcessing: false, // reportOutcome already called above
     metricsOverrides: {
       tasksAttempted: 1, tasksAbandoned: 1,
       taskTitle: task.title,
