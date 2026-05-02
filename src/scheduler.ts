@@ -31,6 +31,14 @@ const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || I
 const REPETITION_WINDOW = parseInt(process.env.HYDRA_REPETITION_WINDOW) || 5; // Check last N cycles
 const REPETITION_THRESHOLD = parseFloat(process.env.HYDRA_REPETITION_THRESHOLD) || 0.5; // Pause if >50% of recent titles are similar
 
+// Zero-output stall detection (issue #24): consecutive cycles that produce no
+// merge indicate the system is churning on work it cannot complete. At the
+// alert threshold we notify the operator and begin exponential backoff; at the
+// hard-stop threshold we pause the scheduler entirely.
+const STALL_ALERT_THRESHOLD = parseInt(process.env.HYDRA_STALL_ALERT_THRESHOLD) || 5;
+const ZERO_OUTPUT_THRESHOLD = parseInt(process.env.HYDRA_ZERO_OUTPUT_THRESHOLD) || 8;
+const MAX_STALL_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes max backoff
+
 let state = {
   running: false,
   intervalMs: parseInt(process.env.HYDRA_AUTO_CYCLE_INTERVAL_MS) || 0,
@@ -42,6 +50,7 @@ let state = {
   lastError: null,
   startedAt: null,
   consecutiveErrors: 0,
+  consecutiveNonMerges: 0,
   researchCyclesRun: 0,
   lastResearchAt: null,
 };
@@ -466,12 +475,73 @@ async function runScheduledCycle(eventBus) {
     if (result.error) {
       state.cyclesFailed++;
       state.lastError = result.error;
+      state.consecutiveNonMerges++;
       console.log(`[Scheduler] Cycle returned error: ${result.error}`);
     } else {
       const merged = result.tasks?.some(t => t.finalState === "merged") ||
                      result.task?.finalState === "merged";
-      if (merged) state.cyclesMerged++;
+      if (merged) {
+        state.cyclesMerged++;
+        state.consecutiveNonMerges = 0;
+      } else {
+        state.consecutiveNonMerges++;
+      }
       state.lastError = null;
+
+      // Zero-output stall detection (issue #24): hard-stop when the system has
+      // churned for too long without producing a merge.
+      if (state.consecutiveNonMerges >= ZERO_OUTPUT_THRESHOLD) {
+        console.error(`[Scheduler] ZERO-OUTPUT CIRCUIT BREAKER: ${state.consecutiveNonMerges} consecutive cycles without a merge — pausing scheduler`);
+        await sendNotification({
+          type: "scheduler:zero_output_breaker",
+          payload: {
+            reason: `${state.consecutiveNonMerges} consecutive cycles produced no merge. System may be stuck.`,
+            consecutiveNonMerges: state.consecutiveNonMerges,
+            cyclesRun: state.cyclesRun,
+            lastCycleReason: result.reason || "unknown",
+            suggestion: "Check work queue items, planner output, and executor behavior. Restart with POST /scheduler/start when resolved.",
+          },
+        });
+        // Pause but don't fully stop — allow operator to restart via API
+        state.running = false;
+        if (state.timer) {
+          clearTimeout(state.timer);
+          state.timer = null;
+        }
+        console.log(`[Scheduler] Paused after ${state.cyclesRun} cycles (${state.cyclesMerged} merged). Restart via POST /scheduler/start`);
+        return;
+      }
+
+      // Zero-output stall alert (issue #24): early warning with exponential
+      // backoff before the hard-stop threshold. Gives the operator time to
+      // intervene while slowing token burn.
+      if (state.consecutiveNonMerges >= STALL_ALERT_THRESHOLD) {
+        const backoffExponent = state.consecutiveNonMerges - STALL_ALERT_THRESHOLD;
+        const stallBackoffMs = Math.min(
+          COOLDOWN_ON_ERROR_MS * Math.pow(2, backoffExponent),
+          MAX_STALL_BACKOFF_MS,
+        );
+
+        console.log(`[Scheduler] STALL ALERT: ${state.consecutiveNonMerges} consecutive non-merge cycles — backing off ${formatDuration(stallBackoffMs)}`);
+
+        // Only send notification on the first hit (threshold) and every 5 after
+        if (backoffExponent === 0 || state.consecutiveNonMerges % 5 === 0) {
+          await sendNotification({
+            type: "scheduler:stall_alert",
+            payload: {
+              reason: `${state.consecutiveNonMerges} consecutive cycles produced no merge. Applying exponential backoff.`,
+              consecutiveNonMerges: state.consecutiveNonMerges,
+              cyclesRun: state.cyclesRun,
+              backoffMs: stallBackoffMs,
+              hardStopAt: ZERO_OUTPUT_THRESHOLD,
+              suggestion: "System may be stuck on work beyond executor capability. Check queue and planner output.",
+            },
+          });
+        }
+
+        state.timer = setTimeout(() => runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`)), stallBackoffMs);
+        return;
+      }
 
       // Check for repetitive work pattern — alert + research, don't stop
       if (await detectRepetition(eventBus)) {
@@ -484,6 +554,7 @@ async function runScheduledCycle(eventBus) {
     state.cyclesRun++;
     state.cyclesFailed++;
     state.consecutiveErrors++;
+    state.consecutiveNonMerges++;
     state.lastError = err.message;
     state.lastCycleAt = new Date().toISOString();
     console.error(`[Scheduler] Cycle error (${state.consecutiveErrors} consecutive):`, err.message);
@@ -546,6 +617,7 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   state.intervalMs = intervalMs;
   state.startedAt = new Date().toISOString();
   state.consecutiveErrors = 0;
+  state.consecutiveNonMerges = 0;
 
   console.log(`[Scheduler] Started — cycles every ${intervalMs / 1000}s, research throttle ${RESEARCH_MIN_INTERVAL_MS / 3600_000}h`);
 
@@ -597,6 +669,9 @@ async function getStatus() {
     lastError: state.lastError,
     startedAt: state.startedAt,
     consecutiveErrors: state.consecutiveErrors,
+    consecutiveNonMerges: state.consecutiveNonMerges,
+    stallAlertThreshold: STALL_ALERT_THRESHOLD,
+    zeroOutputThreshold: ZERO_OUTPUT_THRESHOLD,
     research: {
       queueThreshold: RESEARCH_QUEUE_THRESHOLD,
       minIntervalHuman: formatDuration(RESEARCH_MIN_INTERVAL_MS),
