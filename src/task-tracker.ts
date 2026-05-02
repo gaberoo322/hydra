@@ -139,11 +139,11 @@ class TaskTracker {
     await setString(KEY_LAST, cycleId);
     await delKey(KEY_ACTIVE);
 
-    const completed = parseInt(cycle.completed || 0);
-    const failed = parseInt(cycle.failed || 0);
-    const abandoned = parseInt(cycle.abandoned || 0);
-    const timedOut = parseInt(cycle.timedOut || 0);
-    const total = parseInt(cycle.total || 0);
+    const completed = parseInt(cycle.completed || '0');
+    const failed = parseInt(cycle.failed || '0');
+    const abandoned = parseInt(cycle.abandoned || '0');
+    const timedOut = parseInt(cycle.timedOut || '0');
+    const total = parseInt(cycle.total || '0');
     console.log(`[TaskTracker] Cycle ${cycleId} completed — ${completed} ok, ${failed} failed, ${abandoned} abandoned, ${timedOut} timed out`);
 
     // Only publish to Meta stream — the V2 control loop handles notifications
@@ -189,11 +189,11 @@ class TaskTracker {
     await expireKey(agentsKey(cycleId), CYCLE_KEY_TTL);
     if (usage) {
       const pipe = createPipeline();
-      pipe.hincrby(costsKey(cycleId), "inputTokens", usage.inputTokens || 0);
-      pipe.hincrby(costsKey(cycleId), "outputTokens", usage.outputTokens || 0);
-      pipe.hincrby(costsKey(cycleId), "cachedInputTokens", usage.cachedInputTokens || 0);
+      pipe.hincrby(costsKey(cycleId), "inputTokens", usage.inputTokens || '0');
+      pipe.hincrby(costsKey(cycleId), "outputTokens", usage.outputTokens || '0');
+      pipe.hincrby(costsKey(cycleId), "cachedInputTokens", usage.cachedInputTokens || '0');
       // Store cost as integer microdollars to avoid floating point in Redis hincrby
-      pipe.hincrby(costsKey(cycleId), "costMicrodollars", Math.round((costUsd || 0) * 1_000_000));
+      pipe.hincrby(costsKey(cycleId), "costMicrodollars", Math.round((costUsd || '0') * 1_000_000));
       await pipe.exec();
     }
   }
@@ -216,11 +216,11 @@ class TaskTracker {
       cycleId,
       status: cycle.status,
       startedAt: cycle.startedAt,
-      total: parseInt(cycle.total || 0),
-      completed: parseInt(cycle.completed || 0),
-      failed: parseInt(cycle.failed || 0),
-      abandoned: parseInt(cycle.abandoned || 0),
-      timedOut: parseInt(cycle.timedOut || 0),
+      total: parseInt(cycle.total || '0'),
+      completed: parseInt(cycle.completed || '0'),
+      failed: parseInt(cycle.failed || '0'),
+      abandoned: parseInt(cycle.abandoned || '0'),
+      timedOut: parseInt(cycle.timedOut || '0'),
       tasks,
     };
   }
@@ -237,11 +237,11 @@ class TaskTracker {
       .map((e) => { try { return JSON.parse(e); } catch { return null; } })
       .filter(Boolean);
     const costs = await hashGetAll(costsKey(id));
-    const total = parseInt(cycle.total || 0);
-    const completed = parseInt(cycle.completed || 0);
-    const failed = parseInt(cycle.failed || 0);
-    const abandoned = parseInt(cycle.abandoned || 0);
-    const timedOut = parseInt(cycle.timedOut || 0);
+    const total = parseInt(cycle.total || '0');
+    const completed = parseInt(cycle.completed || '0');
+    const failed = parseInt(cycle.failed || '0');
+    const abandoned = parseInt(cycle.abandoned || '0');
+    const timedOut = parseInt(cycle.timedOut || '0');
 
     return {
       cycleId: id,
@@ -255,9 +255,9 @@ class TaskTracker {
       },
       agents,
       costs: {
-        inputTokens: parseInt(costs.inputTokens || 0),
-        outputTokens: parseInt(costs.outputTokens || 0),
-        cachedInputTokens: parseInt(costs.cachedInputTokens || 0),
+        inputTokens: parseInt(costs.inputTokens || '0'),
+        outputTokens: parseInt(costs.outputTokens || '0'),
+        cachedInputTokens: parseInt(costs.cachedInputTokens || '0'),
       },
     };
   }
@@ -368,7 +368,7 @@ class TaskTracker {
 
       const cycle = await hashGetAll(cycleKey(task.cycleId));
       const total = parseInt(cycle.total);
-      const done = parseInt(cycle.completed || 0) + parseInt(cycle.failed || 0) + parseInt(cycle.abandoned || 0) + parseInt(cycle.timedOut || 0);
+      const done = parseInt(cycle.completed || '0') + parseInt(cycle.failed || '0') + parseInt(cycle.abandoned || '0') + parseInt(cycle.timedOut || '0');
       console.log(`[TaskTracker] Cycle progress: ${done}/${total}`);
 
       if (done >= total && cycle.status === "running") {
