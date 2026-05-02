@@ -12,16 +12,13 @@
  *             grounding (summarizeForPrompt), backlog (dynamic import)
  */
 
-import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
 import { runAgent, findPersonality } from "./codex-runner.ts";
-import { loadAgentMemory, formatMemoryForPrompt } from "./agent-memory.ts";
+import { formatMemoryForPrompt } from "./agent-memory.ts";
 import { getCachedPlan, cachePlan } from "./plan-cache.ts";
-import { getCumulativeAccomplishments } from "./metrics.ts";
 import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
-
-const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
+import { buildPlannerContext } from "./context-builder.ts";
+import type { PlannerContext } from "./context-builder.ts";
 
 // ---------------------------------------------------------------------------
 // Deterministic task schema validation — replaces LLM-based structural checks
@@ -187,7 +184,7 @@ function formatPrioritiesForPlanner(priorities: string, mode: "standard" | "refr
 // Planner agent — proposes 1 bounded task from an anchor
 // ---------------------------------------------------------------------------
 
-export async function runPlannerAgent(cycleId, anchor, grounding, groundingSummary, continuityContext = "", ovSession = null) {
+export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = null) {
   // Scope-adaptive planner routing (PAUL pattern):
   // Quick-fix anchors (failing-test, prior-failure) get a compressed prompt
   // and cheaper model — they don't need priorities, accomplishments, or
@@ -205,51 +202,16 @@ export async function runPlannerAgent(cycleId, anchor, grounding, groundingSumma
     return cachedTask;
   }
 
-  // Load context — OV compiled context + file fallbacks
-  let priorities = "", feedback = "", plannerMemory = "", ovContext = "";
-
-  if (!isQuickFixAnchor) {
-    const results = await Promise.all([
-      readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8").catch(() => ""),
-      readFile(join(CONFIG_PATH, "feedback", "to-planner.md"), "utf-8").catch(() => ""),
-      loadAgentMemory("planner"),
-      ovSession?.getAgentContext?.("planner", anchor) || Promise.resolve({ formatted: "" }),
-    ]);
-    priorities = results[0];
-    feedback = results[1];
-    plannerMemory = results[2];
-    ovContext = results[3].formatted || "";
+  // Load all context sources via context-builder (centralized, with graceful degradation)
+  const ctx = await buildPlannerContext(anchor, grounding, ovSession);
+  if (ctx.warnings.length > 0) {
+    console.log(`[ControlLoop] Planner context loaded with ${ctx.warnings.length} warning(s): ${ctx.warnings.join("; ")}`);
   }
+  const { priorities, feedback, plannerMemory, ovContext, milestoneContext, accomplishmentsContext, groundingSummary, continuityContext } = ctx;
 
   const confidence = grounding.testReport.failed > 0 ? "low"
     : (grounding.typecheckReport.exitCode !== 0 || grounding.dirtyFiles.length > 0) ? "medium"
     : "high";
-
-  // Load milestone progress — skip for quick-fix
-  let milestoneContext = "";
-  if (!isQuickFixAnchor) {
-    try {
-      const { getCurrentMilestoneProgress } = await import("./backlog.ts");
-      const milestone = await getCurrentMilestoneProgress();
-      if (milestone) {
-        const remaining = milestone.remainingTitles.slice(0, 5).join(", ");
-        milestoneContext = `## CURRENT MILESTONE\n${milestone.name} — ${milestone.pctComplete}% complete (${milestone.done}/${milestone.total} epics done, ${milestone.blocked} blocked)\nRemaining epics: ${remaining}\nFocus your task on completing this milestone's remaining epics.\n`;
-      }
-    } catch {}
-  }
-
-  // Load cumulative accomplishments — skip for quick-fix
-  let accomplishmentsContext = "";
-  if (!isQuickFixAnchor) {
-    try {
-      const acc = await getCumulativeAccomplishments(10);
-      if (acc.length > 0) {
-        accomplishmentsContext = `## ALREADY ACCOMPLISHED (do NOT re-propose these)\n${acc.map((a) => `- "${a.title}"`).join("\n")}\n`;
-      }
-    } catch (err: any) {
-      console.error(`[ControlLoop] Failed to load cumulative accomplishments: ${err.message}`);
-    }
-  }
 
   // JSON output schema (shared by both prompt paths)
   const jsonSchema = [
