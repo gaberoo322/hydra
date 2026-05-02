@@ -15,13 +15,14 @@ import { redisKeys } from "./redis-keys.ts";
 // Singleton connection
 // ---------------------------------------------------------------------------
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-
 let _instance: any = null;
 
 /** Shared Redis connection. Lazy-initialized on first call. */
 export function getRedisConnection(): any {
-  if (!_instance) _instance = new Redis(REDIS_URL);
+  if (!_instance) {
+    const url = process.env.REDIS_URL || "redis://localhost:6379";
+    _instance = new Redis(url);
+  }
   return _instance;
 }
 
@@ -975,4 +976,112 @@ export async function pushToWorkQueue(json: string): Promise<void> {
 export async function removeFromWorkQueue(value: string): Promise<number> {
   const r = getRedisConnection();
   return r.lrem(redisKeys.anchorWorkQueue(), 1, value);
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline support (used by task-tracker.ts for batched operations)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a Redis pipeline for batched commands.
+ * Caller must call `.exec()` on the returned pipeline.
+ */
+export function createPipeline(): any {
+  const r = getRedisConnection();
+  return r.pipeline();
+}
+
+// ---------------------------------------------------------------------------
+// Set operations (used by task-tracker.ts for dependency tracking)
+// ---------------------------------------------------------------------------
+
+/** Get all members of a set. */
+export async function setMembers(key: string): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.smembers(key);
+}
+
+/** Add member(s) to a set. */
+export async function setAdd(key: string, ...members: string[]): Promise<void> {
+  const r = getRedisConnection();
+  await r.sadd(key, ...members);
+}
+
+/** Remove member(s) from a set. */
+export async function setRem(key: string, ...members: string[]): Promise<void> {
+  const r = getRedisConnection();
+  await r.srem(key, ...members);
+}
+
+// ---------------------------------------------------------------------------
+// Hash numeric operations
+// ---------------------------------------------------------------------------
+
+/** Increment a hash field by an integer amount. */
+export async function hashIncrBy(key: string, field: string, increment: number): Promise<number> {
+  const r = getRedisConnection();
+  return r.hincrby(key, field, increment);
+}
+
+// ---------------------------------------------------------------------------
+// Key existence check
+// ---------------------------------------------------------------------------
+
+/** Check if a key exists. Returns true if the key exists. */
+export async function keyExists(key: string): Promise<boolean> {
+  const r = getRedisConnection();
+  const val = await r.exists(key);
+  return val === 1;
+}
+
+// ---------------------------------------------------------------------------
+// Keys pattern search (use sparingly — prefer SCAN for large keyspaces)
+// ---------------------------------------------------------------------------
+
+/** Find all keys matching a pattern. */
+export async function findKeys(pattern: string): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.keys(pattern);
+}
+
+// ---------------------------------------------------------------------------
+// Redis info (used by health checks)
+// ---------------------------------------------------------------------------
+
+/** Get Redis INFO for a section. */
+export async function redisInfo(section: string): Promise<string> {
+  const r = getRedisConnection();
+  return r.info(section);
+}
+
+// ---------------------------------------------------------------------------
+// List set-by-index (used by alert dismiss)
+// ---------------------------------------------------------------------------
+
+/** Set a list element at a given index. */
+export async function listSet(key: string, index: number, value: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.lset(key, index, value);
+}
+
+/** Push to the left end of a list. */
+export async function listLPush(key: string, ...values: string[]): Promise<void> {
+  const r = getRedisConnection();
+  await r.lpush(key, ...values);
+}
+
+/** Trim a list to the specified range. */
+export async function listTrim(key: string, start: number, stop: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.ltrim(key, start, stop);
+}
+
+// ---------------------------------------------------------------------------
+// Cycle cost operations (used by metrics spending endpoint)
+// ---------------------------------------------------------------------------
+
+/** Get all cost fields for a cycle. */
+export async function getCycleCosts(cycleId: string): Promise<Record<string, string>> {
+  const r = getRedisConnection();
+  return r.hgetall(redisKeys.cycleCosts(cycleId));
 }

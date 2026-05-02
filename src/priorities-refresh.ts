@@ -122,19 +122,17 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
   // 7. Read latest research findings from Redis (if any)
   let researchContext = "";
   try {
-    const { default: Redis } = await import("ioredis");
-    const rConn = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-    const keys = await rConn.keys(redisKeys.researchReport("*"));
+    const { findKeys: findRedisKeys, getString: getRedisString } = await import("./redis-adapter.ts");
+    const keys = await findRedisKeys(redisKeys.researchReport("*"));
     if (keys.length > 0) {
       const latestKey = keys.sort().pop();
-      const raw = await rConn.get(latestKey);
+      const raw = await getRedisString(latestKey);
       if (raw) {
         const content = typeof raw === "string" && raw.startsWith("{") ? JSON.parse(raw).content || raw : raw;
         const oppsMatch = content.match(/## (?:Ranked |Top )?Opportunities[\s\S]*?(?=##|$)/i);
         if (oppsMatch) researchContext = oppsMatch[0].slice(0, 1500);
       }
     }
-    rConn.disconnect();
   } catch {}
 
   // 7.5. Read current roadmap (milestone tracking)
