@@ -15,6 +15,7 @@ import {
   saveRealityReport, trimRealityReports,
   getRecentReportIds, getRealityReport,
   pushToWorkQueue,
+  markHealthAnchorResolved,
 } from "./redis-adapter.ts";
 import { prepareWorkspace } from "./prepare-workspace.ts";
 import { mergeToMain } from "./merge.ts";
@@ -1371,6 +1372,16 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     try { await clearAbandonmentCounter(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
     try { await clearReflections(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
     try { await clearReflectionsForAnchor(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
+
+    // Mark codebase-health anchors as resolved so they aren't re-selected (issue #25)
+    if (anchor.type === "codebase-health") {
+      try {
+        await markHealthAnchorResolved(anchor.reference);
+        console.log(`[ControlLoop] Marked codebase-health anchor as resolved: "${anchor.reference}"`);
+      } catch (err: any) {
+        console.error(`[ControlLoop] Failed to mark health anchor resolved: ${err.message}`);
+      }
+    }
 
     // If this task came from a spec, mark the spec task complete
     if (anchor.context?.specSlug && anchor.context?.specTaskId) {

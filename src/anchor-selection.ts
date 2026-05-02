@@ -16,6 +16,7 @@ import {
   getString, setString, delKey, incrKey, expireKey,
   hashGetAll, zRevRange, getRedisConnection,
   getRealityReport, getRecentReportIds, getCycleMetrics,
+  isHealthAnchorResolved,
 } from "./redis-adapter.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
@@ -361,6 +362,12 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
     const healthReport = await analyzeCodebaseHealth(grounding.fileTree || "", undefined);
     for (const issue of healthReport.issues) {
       const ref = `codebase-health: ${issue.category} in ${issue.file}`;
+      // Check if this health anchor was recently resolved (issue #25)
+      const resolved = await isHealthAnchorResolved(ref);
+      if (resolved) {
+        console.log(`[ControlLoop] Skipping resolved codebase-health issue "${ref}" — already merged within 24h`);
+        continue;
+      }
       // Check both the circuit-breaker counter AND a permanent skip counter
       const abandonCount = parseInt(
         await getString(anchorKey(ref)) || "0",
