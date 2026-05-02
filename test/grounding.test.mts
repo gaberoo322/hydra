@@ -9,13 +9,10 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import {
-  stripAnsi,
-  truncate,
-  parseTestCounts,
-  parseFailingTests,
-  shouldCleanWorkingTree,
-} from "../src/grounding.ts";
+import { _testing } from "../src/grounding.ts";
+import { shouldCleanWorkingTree } from "../src/prepare-workspace.ts";
+
+const { stripAnsi, truncate, parseTestCounts, parseFailingTests } = _testing;
 
 describe("stripAnsi", () => {
   test("removes simple ANSI color codes", () => {

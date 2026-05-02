@@ -319,7 +319,7 @@ export async function runExecuteStep(
     };
   }
 
-  const diff = await getDiff(PROJECT_WORKSPACE, "main");
+  const { diff } = await getDiff(PROJECT_WORKSPACE, "main");
   await tracker.transitionTask(taskId, "changed-code", { diffLength: diff.length, filesChanged: execResult.filesChanged || [] });
   console.log(`[ControlLoop] Code changed (${diff.split("\n").length} diff lines)`);
 
