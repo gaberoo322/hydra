@@ -311,10 +311,8 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   });
 
   try {
-    const Redis = (await import("ioredis")).default;
-    const summaryConn = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-    await (summaryConn as any).set(summaryKey, outputContent, "EX", 2 * 24 * 60 * 60);
-    (summaryConn as any).disconnect();
+    const { setString } = await import("./redis-adapter.ts");
+    await setString(summaryKey, outputContent, 2 * 24 * 60 * 60);
   } catch (err) {
     console.error(`[CodexRunner] Failed to write summary to Redis:`, err.message);
   }

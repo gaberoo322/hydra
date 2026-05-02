@@ -13,22 +13,17 @@
  *   hydra:specs:index      → Sorted Set: slug scored by creation timestamp
  */
 
-import Redis from "ioredis";
 import { redisKeys } from "./redis-keys.ts";
-
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
+import {
+  hashGetAll, hashSet, hashSetField, expireKey, zAdd, zRevRange,
+  keyExists,
+} from "./redis-adapter.ts";
 
 const SPECS_INDEX = redisKeys.specsIndex();
 const specKey = (slug) => redisKeys.spec(slug);
 
 // Specs auto-expire after 30 days to prevent unbounded growth
 const SPEC_TTL = 30 * 24 * 60 * 60;
-
-let redis = null;
-function getRedis() {
-  if (!redis) redis = new Redis(REDIS_URL);
-  return redis;
-}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,12 +73,11 @@ export async function createSpec(opts: {
   sourceId?: string;
   tasks: Array<{ title: string; description?: string }>;
 }): Promise<Spec | null> {
-  const r = getRedis();
   const slug = slugify(opts.title);
   const key = specKey(slug);
 
   // Don't overwrite existing specs
-  const exists = await r.exists(key);
+  const exists = await keyExists(key);
   if (exists) {
     console.log(`[Specs] Spec "${slug}" already exists — skipping creation`);
     return null;
@@ -107,7 +101,7 @@ export async function createSpec(opts: {
     createdAt: new Date().toISOString(),
   };
 
-  await r.hset(key,
+  await hashSet(key,
     "slug", spec.slug,
     "title", spec.title,
     "rationale", spec.rationale,
@@ -117,8 +111,8 @@ export async function createSpec(opts: {
     "status", spec.status,
     "createdAt", spec.createdAt,
   );
-  await r.expire(key, SPEC_TTL);
-  await r.zadd(SPECS_INDEX, Date.now(), slug);
+  await expireKey(key, SPEC_TTL);
+  await zAdd(SPECS_INDEX, Date.now(), slug);
 
   console.log(`[Specs] Created spec "${slug}" with ${tasks.length} tasks (source: ${opts.source})`);
   return spec;
@@ -128,8 +122,7 @@ export async function createSpec(opts: {
  * Get a spec by slug.
  */
 export async function getSpec(slug): Promise<Spec | null> {
-  const r = getRedis();
-  const raw = await r.hgetall(specKey(slug));
+  const raw = await hashGetAll(specKey(slug));
   if (!raw || !raw.slug) return null;
   return {
     ...raw,
@@ -141,8 +134,7 @@ export async function getSpec(slug): Promise<Spec | null> {
  * List all active specs (specs with pending tasks).
  */
 export async function getActiveSpecs(): Promise<Spec[]> {
-  const r = getRedis();
-  const slugs = await r.zrevrange(SPECS_INDEX, 0, -1);
+  const slugs = await zRevRange(SPECS_INDEX, 0, -1);
   const specs: Spec[] = [];
   for (const slug of slugs) {
     const spec = await getSpec(slug);
@@ -180,7 +172,6 @@ export async function getNextSpecTask(): Promise<{ spec: Spec; task: SpecTask } 
  * Returns the updated spec.
  */
 export async function markTaskComplete(slug, taskId, cycleId): Promise<Spec | null> {
-  const r = getRedis();
   const spec = await getSpec(slug);
   if (!spec) return null;
 
@@ -204,7 +195,7 @@ export async function markTaskComplete(slug, taskId, cycleId): Promise<Spec | nu
     console.log(`[Specs] Spec "${slug}" task ${taskId} complete — ${remaining} remaining`);
   }
 
-  await r.hset(specKey(slug),
+  await hashSet(specKey(slug),
     "tasks", JSON.stringify(spec.tasks),
     "status", spec.status,
     ...(spec.completedAt ? ["completedAt", spec.completedAt] : []),
@@ -217,11 +208,10 @@ export async function markTaskComplete(slug, taskId, cycleId): Promise<Spec | nu
  * Archive a completed spec (removes from active index).
  */
 export async function archiveSpec(slug): Promise<boolean> {
-  const r = getRedis();
   const spec = await getSpec(slug);
   if (!spec) return false;
 
-  await r.hset(specKey(slug), "status", "archived");
+  await hashSetField(specKey(slug), "status", "archived");
   // Keep in index for history but it won't show in getActiveSpecs
   console.log(`[Specs] Archived spec "${slug}"`);
   return true;
@@ -231,8 +221,7 @@ export async function archiveSpec(slug): Promise<boolean> {
  * List all specs (for dashboard/API).
  */
 export async function listSpecs(limit = 20): Promise<Spec[]> {
-  const r = getRedis();
-  const slugs = await r.zrevrange(SPECS_INDEX, 0, limit - 1);
+  const slugs = await zRevRange(SPECS_INDEX, 0, limit - 1);
   const specs: Spec[] = [];
   for (const slug of slugs) {
     const spec = await getSpec(slug);

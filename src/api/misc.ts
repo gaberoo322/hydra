@@ -7,8 +7,11 @@ import { loadProjectGoals, summarizeGoalsForPrompt } from "../project-goals.ts";
 import { getPlanCacheStats, invalidatePlanCache } from "../plan-cache.ts";
 import { sendDigestNow } from "../digest.ts";
 import { getAllReflections } from "../reflections.ts";
-import { getTracker } from "../task-tracker.ts";
 import { redisKeys } from "../redis-keys.ts";
+import {
+  pushToWorkQueue, acquireMergeLock, getMergeLockHolder,
+  releaseMergeLock, setNX,
+} from "../redis-adapter.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -276,8 +279,7 @@ export function createMiscRouter(eventBus: any) {
         return res.json({ skipped: true, reason: `level ${level}` });
       }
 
-      const tracker = getTracker();
-      await tracker.getRedisClient().rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
+      await pushToWorkQueue(JSON.stringify({
         reference: `Fix Sentry ${level}: ${title}`,
         reason: `Sentry issue in ${project}${culprit ? ` at ${culprit}` : ""}${url ? ` — ${url}` : ""}`,
         context: JSON.stringify({
@@ -481,10 +483,9 @@ export function createMiscRouter(eventBus: any) {
   router.post("/merge/lock", async (req, res) => {
     try {
       const { cycleId } = req.body || {};
-      const r = getTracker().getRedisClient();
-      const acquired = await r.set(redisKeys.mergeLock(), cycleId || "unknown", "EX", 60, "NX");
+      const acquired = await acquireMergeLock(cycleId || "unknown", 60);
       if (!acquired) {
-        const holder = await r.get(redisKeys.mergeLock());
+        const holder = await getMergeLockHolder();
         return res.status(409).json({ locked: true, holder });
       }
       res.json({ acquired: true });
@@ -495,7 +496,7 @@ export function createMiscRouter(eventBus: any) {
 
   router.post("/merge/unlock", async (_req, res) => {
     try {
-      await getTracker().getRedisClient().del(redisKeys.mergeLock());
+      await releaseMergeLock();
       res.json({ released: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

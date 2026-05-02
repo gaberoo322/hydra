@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getMetricsTrend, getAggregateStats, recordCycleMetrics } from "../metrics.ts";
-import { getTracker } from "../task-tracker.ts";
 import { redisKeys } from "../redis-keys.ts";
+import { getWorkQueueLen, getPriorFailuresLen, hashGetAll } from "../redis-adapter.ts";
 
 export function createMetricsRouter() {
   const router = Router();
@@ -12,8 +12,8 @@ export function createMetricsRouter() {
       const { getAggregateStats: gas, getCumulativeAccomplishments: gca } = await import("../metrics.ts");
       const stats = await gas(20);
       const acc = await gca(20);
-      const queueLen = await getTracker().getRedisClient().llen(redisKeys.anchorWorkQueue());
-      const priorFails = await getTracker().getRedisClient().llen(redisKeys.anchorPriorFailures());
+      const queueLen = await getWorkQueueLen();
+      const priorFails = await getPriorFailuresLen();
 
       const lines = [
         `Hydra V2 — ${stats.cycles} cycles completed`,
@@ -49,7 +49,6 @@ export function createMetricsRouter() {
     try {
     // @ts-expect-error — migrate to proper types
       const count = parseInt(req.query.count) || 20;
-      const tracker = getTracker();
       const trend = await getMetricsTrend(count);
 
       let totalInputTokens = 0;
@@ -59,7 +58,7 @@ export function createMetricsRouter() {
       const perCycle = [];
 
       for (const m of trend) {
-        const costs = await tracker.getRedisClient().hgetall(redisKeys.cycleCosts(m.cycleId));
+        const costs = await hashGetAll(redisKeys.cycleCosts(m.cycleId));
         const input = parseInt(costs.inputTokens) || 0;
         const output = parseInt(costs.outputTokens) || 0;
         const costMicro = parseInt(costs.costMicrodollars) || 0;

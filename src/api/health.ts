@@ -7,12 +7,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 import { getCycleStatus } from "../cycle.ts";
-import { getTracker } from "../task-tracker.ts";
 import { getMetricsTrend, getAggregateStats } from "../metrics.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler.ts";
 import { listProposals } from "../proposals.ts";
 import { getBacklogCounts } from "../backlog.ts";
 import { redisKeys } from "../redis-keys.ts";
+import {
+  getWorkQueueLen, getPriorFailuresLen, getMemoryPatterns,
+  scanKeys, redisInfo,
+} from "../redis-adapter.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -85,8 +88,8 @@ export function createHealthRouter(eventBus: any) {
       })(),
       /* 2 */ getSchedulerStatus(),
       /* 3 */ getCycleStatus(),
-      /* 4 */ getTracker().getRedisClient().llen(redisKeys.anchorWorkQueue()),
-      /* 5 */ getTracker().getRedisClient().llen(redisKeys.anchorPriorFailures()),
+      /* 4 */ getWorkQueueLen(),
+      /* 5 */ getPriorFailuresLen(),
       /* 6 */ getBacklogCounts(),
       /* 7 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
       /* 8 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
@@ -95,15 +98,13 @@ export function createHealthRouter(eventBus: any) {
       /* 11 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 12 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-betting-web.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 13 */ (async () => {
-        const r = getTracker().getRedisClient();
-        const [p, e, s] = await Promise.all([r.get(redisKeys.memoryPatterns("planner")), r.get(redisKeys.memoryPatterns("executor")), r.get(redisKeys.memoryPatterns("skeptic"))]);
+        const [p, e, s] = await Promise.all([getMemoryPatterns("planner"), getMemoryPatterns("executor"), getMemoryPatterns("skeptic")]);
         const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };
         return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
       })(),
       /* 14 */ (async () => {
-        const r = getTracker().getRedisClient(); let count = 0, cursor = "0";
-        do { const [next, keys] = await r.scan(cursor, "MATCH", redisKeys.reflection("*"), "COUNT", 100); cursor = next; count += keys.length; } while (cursor !== "0");
-        return count;
+        const keys = await scanKeys(redisKeys.reflection("*"));
+        return keys.length;
       })(),
       /* 15 */ (async () => {
         try {
@@ -118,7 +119,7 @@ export function createHealthRouter(eventBus: any) {
       })(),
       /* 16 */ (async () => {
         try {
-          const [info, clients, server] = await Promise.all([getTracker().getRedisClient().info("memory"), getTracker().getRedisClient().info("clients"), getTracker().getRedisClient().info("server")]);
+          const [info, clients, server] = await Promise.all([redisInfo("memory"), redisInfo("clients"), redisInfo("server")]);
           return { memoryHuman: info.match(/used_memory_human:(\S+)/)?.[1] || "unknown", connectedClients: parseInt(clients.match(/connected_clients:(\d+)/)?.[1] || "0"), uptimeSeconds: parseInt(server.match(/uptime_in_seconds:(\d+)/)?.[1] || "0") };
         } catch { return null; }
       })(),
@@ -136,7 +137,7 @@ export function createHealthRouter(eventBus: any) {
     const patterns = val(13) || { planner: 0, executor: 0, skeptic: 0 };
     const reflCount = val(14) || 0;
     const ovSearch = val(15) || { status: "failed", latencyMs: null, resultCount: 0 };
-    const redisInfo = val(16);
+    const redisInfoData = val(16);
 
     // Parse disk
     let disk = { availableGb: 0, totalGb: 0, usedPercent: 0 };
@@ -216,7 +217,7 @@ export function createHealthRouter(eventBus: any) {
       status, summary, checkedAt,
       services: {
         orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
-        redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },
+        redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfoData?.memoryHuman || null, connectedClients: redisInfoData?.connectedClients || null, uptimeSeconds: redisInfoData?.uptimeSeconds || null },
         scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt, research: { dailySpendUsd: sched.research?.dailySpendUsd || 0, dailyCostCapUsd: sched.research?.dailyCostCapUsd || 50, lastResearchAt: sched.research?.lastResearchAt || null } },
         vikingdb: svcProbes.vikingdb, openviking: svcProbes.openviking, openaiProxy: svcProbes.openaiProxy,
       },

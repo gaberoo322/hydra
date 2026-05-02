@@ -15,13 +15,14 @@ import { redisKeys } from "./redis-keys.ts";
 // Singleton connection
 // ---------------------------------------------------------------------------
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-
 let _instance: any = null;
 
 /** Shared Redis connection. Lazy-initialized on first call. */
 export function getRedisConnection(): any {
-  if (!_instance) _instance = new Redis(REDIS_URL);
+  if (!_instance) {
+    const url = process.env.REDIS_URL || "redis://localhost:6379";
+    _instance = new Redis(url);
+  }
   return _instance;
 }
 
@@ -975,4 +976,90 @@ export async function pushToWorkQueue(json: string): Promise<void> {
 export async function removeFromWorkQueue(value: string): Promise<number> {
   const r = getRedisConnection();
   return r.lrem(redisKeys.anchorWorkQueue(), 1, value);
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline support (for atomic multi-step operations)
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a Redis pipeline for batching commands.
+ * Callers must call `.exec()` on the returned pipeline.
+ */
+export function createPipeline(): any {
+  const r = getRedisConnection();
+  return r.pipeline();
+}
+
+// ---------------------------------------------------------------------------
+// Set operations
+// ---------------------------------------------------------------------------
+
+/** Add member(s) to a set. */
+export async function setAdd(key: string, ...members: string[]): Promise<number> {
+  const r = getRedisConnection();
+  return r.sadd(key, ...members);
+}
+
+/** Remove member(s) from a set. */
+export async function setRem(key: string, ...members: string[]): Promise<number> {
+  const r = getRedisConnection();
+  return r.srem(key, ...members);
+}
+
+/** Get all members of a set. */
+export async function setMembers(key: string): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.smembers(key);
+}
+
+// ---------------------------------------------------------------------------
+// Hash increment
+// ---------------------------------------------------------------------------
+
+/** Increment a hash field by an integer amount. */
+export async function hashIncrBy(key: string, field: string, increment: number): Promise<number> {
+  const r = getRedisConnection();
+  return r.hincrby(key, field, increment);
+}
+
+// ---------------------------------------------------------------------------
+// Key existence check
+// ---------------------------------------------------------------------------
+
+/** Check if a key exists. Returns true if it does. */
+export async function keyExists(key: string): Promise<boolean> {
+  const r = getRedisConnection();
+  const val = await r.exists(key);
+  return val === 1;
+}
+
+// ---------------------------------------------------------------------------
+// Redis info (for diagnostics)
+// ---------------------------------------------------------------------------
+
+/** Get Redis INFO for a specific section. */
+export async function redisInfo(section: string): Promise<string> {
+  const r = getRedisConnection();
+  return r.info(section);
+}
+
+// ---------------------------------------------------------------------------
+// Summary report operations (used by codex-runner.ts)
+// ---------------------------------------------------------------------------
+
+/** Store a cycle summary report with TTL. */
+export async function setSummaryReport(suffix: string, json: string, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.summaryReport(suffix), json, "EX", ttlSeconds);
+}
+
+// ---------------------------------------------------------------------------
+// Prior failures queue length
+// ---------------------------------------------------------------------------
+
+/** Get the length of the prior-failures queue. */
+export async function getPriorFailuresLen(): Promise<number> {
+  const r = getRedisConnection();
+  return r.llen(redisKeys.anchorPriorFailures());
 }
