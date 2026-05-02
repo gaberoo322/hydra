@@ -67,7 +67,7 @@ export async function runVerificationPipeline(
   criteriaCount: number,
   taskId: string,
 ): Promise<VerificationPipelineResult> {
-  const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
+  const { cycleId, ovSession } = ctx;
   const tracker = getTracker();
 
   // =========================================================================

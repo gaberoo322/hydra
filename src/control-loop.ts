@@ -15,8 +15,8 @@ import { getTracker, CYCLE_KEY_TTL } from "./task-tracker.ts";
 import { summarizeForPrompt, getDiff } from "./grounding.ts";
 import {
   registerCycleSource, releaseCycleSource,
-  setCycleActive, clearCycleActive,
-  initCycleHash, updateCycleHash,
+  setCycleActive,
+  initCycleHash,
   acquireMergeLock, getMergeLockHolder, releaseMergeLock,
 } from "./redis-adapter.ts";
 import { prepareWorkspace } from "./prepare-workspace.ts";
@@ -296,7 +296,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   // =========================================================================
   // Step 4: PREFLIGHT GATE
   // =========================================================================
-  let skepticResult;
+  let skepticResult: { verdict: string; reason: string; skipped?: boolean };
   if (complexity === "quick-fix") {
     skepticResult = { verdict: "approve", reason: "Skipped — quick-fix (scope-adaptive routing)", skipped: true };
   } else {

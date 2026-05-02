@@ -75,7 +75,7 @@ export function generateCycleId() {
  * loud failure handling. Silent failure here caused incident #5 (6 days of
  * drift): log to journald AND publish an event so the digest sees it.
  */
-export async function safeKanban(eventBus: any, cycleId: string, op: string, reference: string, fn: () => Promise<void>) {
+export async function safeKanban(eventBus: any, cycleId: string, op: string, reference: string, fn: () => Promise<unknown>) {
   try {
     await fn();
   } catch (err: any) {
