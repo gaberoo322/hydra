@@ -11,6 +11,7 @@ import { join, resolve } from "node:path";
 import { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, moveToBlocked, claimNextQueuedItem } from "./backlog.ts";
 import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
 import {
   listRange, listRPush, listRem, listLPop, listLen, listMove,
   getString, setString, delKey, incrKey, expireKey,
@@ -507,6 +508,17 @@ export async function clearAbandonmentCounter(anchorRef) {
 }
 
 export async function storePriorFailure(taskId, reason, verificationResult) {
+  // Invalidate plan cache — a plan that led to failure should not be reused.
+  // Try all cacheable anchor types since we don't know the original type here.
+  const cacheableTypes = ["user-request", "codebase-health", "failing-test", "research"];
+  for (const type of cacheableTypes) {
+    try {
+      await invalidatePlanCacheForAnchor({ type, reference: taskId });
+    } catch (err: any) {
+      console.error(`[ControlLoop] Plan cache invalidation failed for ${type}:${taskId}: ${err.message}`);
+    }
+  }
+
   // Count how many times this task (or its anchor) has already been retried
   const existing = await listRange(redisKeys.anchorPriorFailures(), 0, -1);
   const priorAttempts = existing.filter(raw => {

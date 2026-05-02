@@ -13,7 +13,7 @@
  */
 
 import { runAgent, findPersonality } from "./codex-runner.ts";
-import { formatMemoryForPrompt } from "./agent-memory.ts";
+import { formatMemoryForPrompt, loadReflections } from "./agent-memory.ts";
 import { getCachedPlan, cachePlan } from "./plan-cache.ts";
 import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
@@ -193,13 +193,20 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   const isReframe = anchor.type === "reframe";
   const plannerModel = isQuickFixAnchor ? "codex" : "frontier";
 
-  // Plan cache — skip LLM call for recurring task patterns
-  const cachedTask = await getCachedPlan(anchor, grounding);
-  if (cachedTask) {
-    cachedTask.__plannerModel = "cached";
-    cachedTask.__planCacheHit = true;
-    await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0);
-    return cachedTask;
+  // Plan cache — skip LLM call for recurring task patterns.
+  // Belt-and-suspenders: bypass cache when reflections exist for this anchor,
+  // so the planner is forced to re-plan with failure context (issue #22).
+  const hasReflections = await loadReflections(anchor.reference).then(r => r.length > 0).catch(() => false);
+  if (!hasReflections) {
+    const cachedTask = await getCachedPlan(anchor, grounding);
+    if (cachedTask) {
+      cachedTask.__plannerModel = "cached";
+      cachedTask.__planCacheHit = true;
+      await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0);
+      return cachedTask;
+    }
+  } else {
+    console.log(`[PlanCache] BYPASS: reflections exist for anchor "${anchor.reference.slice(0, 60)}" — forcing re-plan`);
   }
 
   // Load all context sources via centralized context builder
