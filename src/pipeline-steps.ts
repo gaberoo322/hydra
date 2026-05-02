@@ -15,14 +15,14 @@
 
 import { STREAMS } from "./event-bus.ts";
 import { getTracker } from "./task-tracker.ts";
-import { summarizeForPrompt, getDiff } from "./grounding.ts";
+import { getDiff } from "./grounding.ts";
 import { recordPlannerLesson, recordExecutorLesson, recordReflection } from "./agent-memory.ts";
 import { recordReflection as recordGlobalReflection } from "./reflections.ts";
 import { recordCycleMetrics, detectDrift } from "./metrics.ts";
 import { moveToInProgress, returnToBacklog } from "./backlog.ts";
 import { trackAbandonment, clearProcessingItem, storePriorFailure } from "./anchor-selection.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
-import { classifyTaskComplexity, preflightCheck, runHighRiskReview } from "./preflight.ts";
+import { preflightCheck, runHighRiskReview } from "./preflight.ts";
 import { runExecutorAgent } from "./executor-agent.ts";
 import { validateDiffExists } from "./verifier.ts";
 import {

@@ -26,7 +26,7 @@ import {
 } from "./redis-adapter.ts";
 import { prepareWorkspace } from "./prepare-workspace.ts";
 import { runPlannerAgent } from "./planner-prompt.ts";
-import { selectAnchor, clearProcessingItem } from "./anchor-selection.ts";
+import { selectAnchor } from "./anchor-selection.ts";
 import { scoreAnchor, getMinConfidence, recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { classifyTaskComplexity } from "./preflight.ts";
 import { createCycleSession } from "./ov-session.ts";
@@ -212,7 +212,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
 
   // Step 7: MERGE — git operation, NOT an agent
   const mergeStepResult = await runMergeStep(ctx, task, taskId);
-  const { mergeResult } = mergeStepResult;
+  const mergeResult = mergeStepResult.continue ? (mergeStepResult as any).mergeResult : { ok: false, commitSha: "", featureBranch: null, error: "Merge step stopped" };
 
   // Step 8+: POST-MERGE — report, metrics, learning, adversarial, cleanup
   const { report } = await runPostMerge(
