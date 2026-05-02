@@ -167,6 +167,30 @@ export async function cachePlan(
   }
 }
 
+/**
+ * Invalidate the cached plan for a specific anchor.
+ * Called when a task fails and is stored as a prior failure — a plan that
+ * produced a failure should never be served again for retries.
+ */
+export async function invalidatePlanCacheForAnchor(
+  anchor: { type: string; reference: string },
+): Promise<boolean> {
+  const key = cacheKey(anchor);
+  try {
+    const existed = await getPlanCacheEntry(key);
+    if (existed) {
+      await deletePlanCacheEntry(key);
+      stats.invalidated++;
+      console.log(`[PlanCache] INVALIDATED for anchor: "${anchor.reference.slice(0, 60)}" (type=${anchor.type})`);
+      return true;
+    }
+    return false;
+  } catch (err: any) {
+    console.error(`[PlanCache] Anchor invalidation failed: ${err.message}`);
+    return false;
+  }
+}
+
 export async function invalidatePlanCache(): Promise<number> {
   try {
     const keys = await findPlanCacheKeys(CACHE_PREFIX);
