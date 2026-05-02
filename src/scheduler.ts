@@ -39,6 +39,38 @@ const STALL_ALERT_THRESHOLD = parseInt(process.env.HYDRA_STALL_ALERT_THRESHOLD) 
 const ZERO_OUTPUT_THRESHOLD = parseInt(process.env.HYDRA_ZERO_OUTPUT_THRESHOLD) || 8;
 const MAX_STALL_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes max backoff
 
+/**
+ * Compute exponential backoff delay for stall detection.
+ * Exported for testability (issue #24 test coverage).
+ */
+function computeStallBackoffMs(consecutiveNonMerges: number): number {
+  const backoffExponent = consecutiveNonMerges - STALL_ALERT_THRESHOLD;
+  return Math.min(
+    COOLDOWN_ON_ERROR_MS * Math.pow(2, backoffExponent),
+    MAX_STALL_BACKOFF_MS,
+  );
+}
+
+/**
+ * Determine whether a stall alert notification should fire.
+ * Fires on the first hit (threshold) and every 5 non-merge cycles after.
+ */
+function shouldSendStallAlert(consecutiveNonMerges: number): boolean {
+  if (consecutiveNonMerges < STALL_ALERT_THRESHOLD) return false;
+  const backoffExponent = consecutiveNonMerges - STALL_ALERT_THRESHOLD;
+  return backoffExponent === 0 || consecutiveNonMerges % 5 === 0;
+}
+
+/**
+ * Classify the stall state based on consecutiveNonMerges.
+ * Returns "ok" | "alert" | "hard-stop".
+ */
+function classifyStallState(consecutiveNonMerges: number): "ok" | "alert" | "hard-stop" {
+  if (consecutiveNonMerges >= ZERO_OUTPUT_THRESHOLD) return "hard-stop";
+  if (consecutiveNonMerges >= STALL_ALERT_THRESHOLD) return "alert";
+  return "ok";
+}
+
 let state = {
   running: false,
   intervalMs: parseInt(process.env.HYDRA_AUTO_CYCLE_INTERVAL_MS) || 0,
@@ -516,16 +548,12 @@ async function runScheduledCycle(eventBus) {
       // backoff before the hard-stop threshold. Gives the operator time to
       // intervene while slowing token burn.
       if (state.consecutiveNonMerges >= STALL_ALERT_THRESHOLD) {
-        const backoffExponent = state.consecutiveNonMerges - STALL_ALERT_THRESHOLD;
-        const stallBackoffMs = Math.min(
-          COOLDOWN_ON_ERROR_MS * Math.pow(2, backoffExponent),
-          MAX_STALL_BACKOFF_MS,
-        );
+        const stallBackoffMs = computeStallBackoffMs(state.consecutiveNonMerges);
 
         console.log(`[Scheduler] STALL ALERT: ${state.consecutiveNonMerges} consecutive non-merge cycles — backing off ${formatDuration(stallBackoffMs)}`);
 
         // Only send notification on the first hit (threshold) and every 5 after
-        if (backoffExponent === 0 || state.consecutiveNonMerges % 5 === 0) {
+        if (shouldSendStallAlert(state.consecutiveNonMerges)) {
           await sendNotification({
             type: "scheduler:stall_alert",
             payload: {
@@ -708,4 +736,8 @@ async function autoStart(eventBus) {
   return null;
 }
 
-export { start, stop, getStatus, autoStart, getDailySpend, DAILY_COST_CAP_USD };
+export {
+  start, stop, getStatus, autoStart, getDailySpend, DAILY_COST_CAP_USD,
+  // Exported for test coverage (issue #24):
+  computeStallBackoffMs, shouldSendStallAlert, classifyStallState, formatDuration,
+};
