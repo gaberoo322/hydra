@@ -11,6 +11,9 @@ import {
   parseExports,
   parseImports,
   buildImportGraph,
+  computePageRank,
+  selectScopeNeighbors,
+  formatRepoMap,
 } from "../src/repo-map.ts";
 import type { ExportedSymbol, ImportEdge } from "../src/repo-map.ts";
 
@@ -310,5 +313,173 @@ describe("repo-map buildImportGraph()", () => {
     const graph = buildImportGraph(new Map());
     assert.equal(graph.exports.size, 0);
     assert.equal(graph.edges.size, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fixture graph for PageRank / scope / format tests
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a fixture graph:
+ *
+ *   src/index.ts  -->  src/api.ts  -->  src/handler.ts
+ *                  -->  src/utils.ts
+ *   src/api.ts    -->  src/utils.ts
+ *   src/handler.ts -->  src/utils.ts
+ *   src/cli.ts    -->  src/utils.ts
+ *
+ * utils.ts is the most imported (4 importers), then api.ts (1 importer).
+ */
+function buildFixtureGraph() {
+  const files = new Map<string, string>([
+    [
+      "src/index.ts",
+      `import { createApp } from './api';
+       import { log } from './utils';
+       export function main() {}`,
+    ],
+    [
+      "src/api.ts",
+      `import { handle } from './handler';
+       import { log } from './utils';
+       export function createApp() {}`,
+    ],
+    [
+      "src/handler.ts",
+      `import { log } from './utils';
+       export function handle() {}`,
+    ],
+    [
+      "src/utils.ts",
+      `export function log() {}
+       export function format() {}`,
+    ],
+    [
+      "src/cli.ts",
+      `import { log } from './utils';
+       export function runCli() {}`,
+    ],
+  ]);
+  return buildImportGraph(files);
+}
+
+// ---------------------------------------------------------------------------
+// computePageRank
+// ---------------------------------------------------------------------------
+
+describe("repo-map computePageRank()", () => {
+  test("ranks most-imported file highest", () => {
+    const graph = buildFixtureGraph();
+    const scores = computePageRank(graph);
+
+    // utils.ts is imported by 4 files — should have the highest score
+    const utilsScore = scores.get("src/utils.ts")!;
+    const cliScore = scores.get("src/cli.ts")!;
+    const indexScore = scores.get("src/index.ts")!;
+
+    assert.ok(utilsScore > cliScore, "utils should rank above cli");
+    assert.ok(utilsScore > indexScore, "utils should rank above index");
+  });
+
+  test("returns empty map for empty graph", () => {
+    const graph = buildImportGraph(new Map());
+    const scores = computePageRank(graph);
+    assert.equal(scores.size, 0);
+  });
+
+  test("all files get a positive score", () => {
+    const graph = buildFixtureGraph();
+    const scores = computePageRank(graph);
+
+    for (const [, score] of scores) {
+      assert.ok(score > 0, "every file should have a positive score");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectScopeNeighbors
+// ---------------------------------------------------------------------------
+
+describe("repo-map selectScopeNeighbors()", () => {
+  test("returns neighbors of scope files sorted by score", () => {
+    const graph = buildFixtureGraph();
+    // Scope = just api.ts; neighbors should include handler, utils, index
+    const result = selectScopeNeighbors(graph, ["src/api.ts"]);
+
+    const files = result.map((r) => r.file);
+    assert.ok(files.includes("src/utils.ts"), "utils should be a neighbor");
+    assert.ok(files.includes("src/handler.ts"), "handler should be a neighbor");
+    assert.ok(files.includes("src/index.ts"), "index should be a neighbor");
+    assert.ok(!files.includes("src/api.ts"), "scope file excluded from neighbors");
+  });
+
+  test("respects topN limit", () => {
+    const graph = buildFixtureGraph();
+    const result = selectScopeNeighbors(graph, ["src/api.ts"], 2);
+    assert.ok(result.length <= 2, "should return at most topN results");
+  });
+
+  test("highest-ranked neighbor is utils.ts", () => {
+    const graph = buildFixtureGraph();
+    const result = selectScopeNeighbors(graph, ["src/api.ts"]);
+    assert.equal(result[0].file, "src/utils.ts", "utils should rank first among neighbors");
+  });
+
+  test("returns empty for scope files not in graph", () => {
+    const graph = buildFixtureGraph();
+    const result = selectScopeNeighbors(graph, ["src/nonexistent.ts"]);
+    assert.equal(result.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatRepoMap
+// ---------------------------------------------------------------------------
+
+describe("repo-map formatRepoMap()", () => {
+  test("formats lines as file — export (imported by N files)", () => {
+    const graph = buildFixtureGraph();
+    const ranked = [{ file: "src/utils.ts", score: 1 }];
+    const output = formatRepoMap(graph, ranked);
+
+    assert.ok(output.includes("src/utils.ts"), "should include file path");
+    assert.ok(output.includes("log"), "should include export name");
+    assert.ok(output.includes("imported by 4 files"), "should include importer count");
+  });
+
+  test("enforces token budget", () => {
+    const graph = buildFixtureGraph();
+    const scores = computePageRank(graph);
+    const allFiles = [...scores.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([file, score]) => ({ file, score }));
+
+    // Very tight budget: ~25 tokens = ~100 chars — should fit only 1 line
+    const output = formatRepoMap(graph, allFiles, 25);
+    const lines = output.split("\n");
+    assert.ok(lines.length <= 2, `token budget should limit output, got ${lines.length} lines`);
+  });
+
+  test("always includes at least one line", () => {
+    const graph = buildFixtureGraph();
+    const ranked = [{ file: "src/utils.ts", score: 1 }];
+    // Budget of 1 token is impossibly small but should still include 1 line
+    const output = formatRepoMap(graph, ranked, 1);
+    assert.ok(output.length > 0, "should include at least one line");
+  });
+
+  test("default budget fits a reasonable number of files", () => {
+    const graph = buildFixtureGraph();
+    const scores = computePageRank(graph);
+    const allFiles = [...scores.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([file, score]) => ({ file, score }));
+
+    // Default 1500 token budget should fit all 5 files in our small fixture
+    const output = formatRepoMap(graph, allFiles);
+    const lines = output.split("\n");
+    assert.equal(lines.length, 5, "default budget should fit all 5 fixture files");
   });
 });

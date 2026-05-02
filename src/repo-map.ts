@@ -235,6 +235,188 @@ export function buildImportGraph(files: Map<string, string>): ImportGraph {
 }
 
 // ---------------------------------------------------------------------------
+// PageRank-style scoring
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute iterative weighted in-degree scores over the import graph.
+ *
+ * Simplified PageRank: each file distributes its score equally to its imports.
+ * After `iterations` rounds the scores converge to reflect transitive
+ * importance — files imported (directly or indirectly) by many others score
+ * higher.
+ *
+ * @param graph  - The import graph produced by buildImportGraph()
+ * @param iterations - Number of scoring iterations (default 10)
+ * @param damping    - Damping factor (default 0.85, same as classic PageRank)
+ * @returns Map of file path -> score (higher = more central)
+ */
+export function computePageRank(
+  graph: ImportGraph,
+  iterations = 10,
+  damping = 0.85,
+): Map<string, number> {
+  const files = [...graph.edges.keys()];
+  const n = files.length;
+  if (n === 0) return new Map();
+
+  const scores = new Map<string, number>();
+  const base = 1 / n;
+  for (const f of files) scores.set(f, base);
+
+  // Build reverse edges (who imports me?)
+  const reverseEdges = new Map<string, string[]>();
+  for (const f of files) reverseEdges.set(f, []);
+  for (const [src, targets] of graph.edges) {
+    for (const tgt of targets) {
+      reverseEdges.get(tgt)?.push(src);
+    }
+  }
+
+  for (let i = 0; i < iterations; i++) {
+    const next = new Map<string, number>();
+    for (const f of files) {
+      let incoming = 0;
+      for (const src of reverseEdges.get(f) ?? []) {
+        const outDegree = graph.edges.get(src)?.length ?? 1;
+        incoming += (scores.get(src) ?? 0) / outDegree;
+      }
+      next.set(f, (1 - damping) / n + damping * incoming);
+    }
+    for (const [k, v] of next) scores.set(k, v);
+  }
+
+  return scores;
+}
+
+// ---------------------------------------------------------------------------
+// Scope-aware selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Given a set of scope files (e.g. from scopeBoundary.in), BFS outward
+ * through the import graph to find the top-N most relevant neighbor files.
+ *
+ * Relevance = PageRank score, but only for files reachable within `maxDepth`
+ * hops from the scope set (via both incoming and outgoing edges).
+ *
+ * @param graph      - The import graph
+ * @param scopeFiles - Files that are in-scope for the current task
+ * @param topN       - Maximum number of neighbors to return (default 15)
+ * @param maxDepth   - BFS depth limit (default 2)
+ * @returns Sorted array of { file, score } for the top-N relevant neighbors
+ */
+export function selectScopeNeighbors(
+  graph: ImportGraph,
+  scopeFiles: string[],
+  topN = 15,
+  maxDepth = 2,
+): { file: string; score: number }[] {
+  const scores = computePageRank(graph);
+  const scopeSet = new Set(scopeFiles);
+
+  // Build undirected adjacency for BFS (import edge = connection either way)
+  const adj = new Map<string, Set<string>>();
+  for (const f of graph.edges.keys()) adj.set(f, new Set());
+  for (const [src, targets] of graph.edges) {
+    for (const tgt of targets) {
+      adj.get(src)?.add(tgt);
+      adj.get(tgt)?.add(src);
+    }
+  }
+
+  // BFS from scope files
+  const visited = new Set<string>();
+  let frontier = new Set<string>();
+  for (const f of scopeFiles) {
+    if (graph.edges.has(f)) {
+      visited.add(f);
+      frontier.add(f);
+    }
+  }
+
+  for (let depth = 0; depth < maxDepth; depth++) {
+    const nextFrontier = new Set<string>();
+    for (const f of frontier) {
+      for (const neighbor of adj.get(f) ?? []) {
+        if (!visited.has(neighbor)) {
+          visited.add(neighbor);
+          nextFrontier.add(neighbor);
+        }
+      }
+    }
+    frontier = nextFrontier;
+  }
+
+  // Filter to neighbors only (exclude scope files themselves)
+  const neighbors = [...visited].filter((f) => !scopeSet.has(f));
+
+  // Sort by score descending, take top N
+  neighbors.sort((a, b) => (scores.get(b) ?? 0) - (scores.get(a) ?? 0));
+  return neighbors.slice(0, topN).map((f) => ({
+    file: f,
+    score: scores.get(f) ?? 0,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Token-budgeted formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Format the repo map as a compact, human-readable string within a token budget.
+ *
+ * Output format per line: `file — exportName (imported by N files)`
+ *
+ * Estimates ~4 chars per token (conservative). Stops adding lines when the
+ * budget would be exceeded.
+ *
+ * @param graph       - The import graph
+ * @param rankedFiles - Ordered list of files to include (from selectScopeNeighbors or PageRank)
+ * @param tokenBudget - Maximum approximate tokens (default 1500)
+ * @returns Formatted string fitting within the token budget
+ */
+export function formatRepoMap(
+  graph: ImportGraph,
+  rankedFiles: { file: string; score: number }[],
+  tokenBudget = 1500,
+): string {
+  // Build in-degree count: how many files import each file?
+  const importedByCount = new Map<string, number>();
+  for (const [, targets] of graph.edges) {
+    for (const tgt of targets) {
+      importedByCount.set(tgt, (importedByCount.get(tgt) ?? 0) + 1);
+    }
+  }
+
+  const charsPerToken = 4;
+  const charBudget = tokenBudget * charsPerToken;
+  let totalChars = 0;
+  const lines: string[] = [];
+
+  for (const { file } of rankedFiles) {
+    const exports = graph.exports.get(file) ?? [];
+    const importers = importedByCount.get(file) ?? 0;
+
+    // Pick the most representative export name (first non-re-export, or first)
+    const mainExport =
+      exports.find((e) => e.kind !== "re-export") ?? exports[0];
+    const exportLabel = mainExport
+      ? mainExport.name
+      : "(no exports)";
+
+    const line = `${file} — ${exportLabel} (imported by ${importers} files)`;
+    const lineChars = line.length + 1; // +1 for newline
+
+    if (totalChars + lineChars > charBudget && lines.length > 0) break;
+    lines.push(line);
+    totalChars += lineChars;
+  }
+
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
