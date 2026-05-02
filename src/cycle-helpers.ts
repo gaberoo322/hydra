@@ -4,7 +4,6 @@
  * Extracted from control-loop.ts (issue #1, Module 6). Contains:
  *   - groundProjectCached() — grounding cache (skip re-running 49s test suite if HEAD unchanged)
  *   - generateCycleId() — deterministic cycle ID from current time
- *   - safeKanban() — loud-fail Kanban updates
  *   - isAnchorStale() — pre-validate anchor before planner
  *   - CycleContext — shared context threaded through all pipeline steps
  *   - handleEarlyExit() — encapsulates the metrics + OV session + cleanup pattern
@@ -15,7 +14,6 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { STREAMS } from "./event-bus.ts";
 import { groundProject } from "./grounding.ts";
 import { recordCycleMetrics } from "./metrics.ts";
 import { clearProcessingItem } from "./anchor-selection.ts";
@@ -68,29 +66,6 @@ export function generateCycleId() {
   const hour = String(now.getHours()).padStart(2, "0");
   const min = String(now.getMinutes()).padStart(2, "0");
   return `cycle-${date}-${hour}${min}`;
-}
-
-/**
- * Run a Kanban update (moveToInProgress / moveToDone / returnToBacklog) with
- * loud failure handling. Silent failure here caused incident #5 (6 days of
- * drift): log to journald AND publish an event so the digest sees it.
- */
-export async function safeKanban(eventBus: any, cycleId: string, op: string, reference: string, fn: () => Promise<unknown>) {
-  try {
-    await fn();
-  } catch (err: any) {
-    console.error(`[ControlLoop] Kanban ${op} failed for "${reference}": ${err.message}`);
-    try {
-      await eventBus.publish(STREAMS.NOTIFICATIONS, {
-        type: "kanban:update_failed",
-        source: "control-loop",
-        correlationId: cycleId,
-        payload: { op, reference, error: err.message },
-      });
-    } catch (publishErr: any) {
-      console.error(`[ControlLoop] Failed to publish kanban:update_failed: ${publishErr.message}`);
-    }
-  }
 }
 
 /**

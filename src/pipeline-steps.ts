@@ -21,7 +21,7 @@ import { getDiff } from "./grounding.ts";
 import { recordPlannerLesson, recordExecutorLesson, recordReflection } from "./agent-memory.ts";
 import { recordReflection as recordGlobalReflection } from "./reflections.ts";
 import { recordCycleMetrics, detectDrift } from "./metrics.ts";
-import { moveToInProgress, returnToBacklog } from "./backlog.ts";
+import { claim, fail } from "./backlog.ts";
 import { reportOutcome } from "./anchor-selection.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { preflightCheck, runHighRiskReview } from "./preflight.ts";
@@ -31,7 +31,7 @@ import {
 } from "./redis-adapter.ts";
 import { mergeToMain } from "./merge.ts";
 import {
-  safeKanban, handleEarlyExit, PROJECT_WORKSPACE,
+  handleEarlyExit, PROJECT_WORKSPACE,
 } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 
@@ -307,7 +307,7 @@ export async function runExecuteStep(
 
   console.log(`[ControlLoop] Step 5: Executing...`);
   await tracker.transitionTask(taskId, "in-progress", {});
-  await safeKanban(eventBus, cycleId, "moveToInProgress", anchor.reference, () => moveToInProgress(anchor.reference));
+  await claim(anchor.reference, { eventBus, cycleId });
 
   const execResult = await runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSession, complexity);
   await ovSession.logExecutor(execResult);
@@ -333,7 +333,7 @@ export async function runExecuteStep(
     } catch (err: any) {
       console.error(`[ControlLoop] Failed to record no-diff lessons: ${err.message}`);
     }
-    await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "no code changes"));
+    await fail(anchor.reference, "no code changes", { eventBus, cycleId });
     await reportOutcome(anchor, { status: "failed", reason: "No code changes produced", taskId });
     await ovSession.logOutcome("failed", "Executor produced no code changes");
     await ovSession.commit();
