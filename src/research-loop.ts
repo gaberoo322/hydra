@@ -20,27 +20,19 @@ import { runAgent, findPersonality } from "./codex-runner.ts";
 import { groundProject, summarizeForPrompt } from "./grounding.ts";
 import { loadProjectGoals, summarizeGoalsForPrompt, loadAppMetrics } from "./project-goals.ts";
 import { analyzeCodebase, formatStateForPrompt } from "./codebase-analyzer.ts";
-import { getTracker } from "./task-tracker.ts";
 import { getCumulativeAccomplishments, getMetricsTrend } from "./metrics.ts";
 import { STREAMS } from "./event-bus.ts";
 import { addToBacklog } from "./backlog.ts";
-import { redisKeys } from "./redis-keys.ts";
 import { createSpec } from "./specs.ts";
-
-import Redis from "ioredis";
+import {
+  getRecentResearchIds, getResearchReport as getResearchReportAdapter,
+  saveResearchReport, trimResearchReports,
+  getWorkQueueItems, pushToWorkQueue, removeFromWorkQueue,
+} from "./redis-adapter.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
 const METHODOLOGY_DIR = join(CONFIG_PATH, "research");
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-
-const RESEARCH_INDEX_KEY = redisKeys.researchReportIndex();
-const researchKey = (id) => redisKeys.researchReport(id);
-let _researchRedis = null;
-function getResearchRedis() {
-  if (!_researchRedis) _researchRedis = new Redis(REDIS_URL);
-  return _researchRedis;
-}
 
 function generateResearchId() {
   const now = new Date();
@@ -68,10 +60,9 @@ async function loadMethodologyOverrides(researcherName) {
  */
 async function loadLastResearchReport() {
   try {
-    const r = getResearchRedis();
-    const ids = await r.zrevrange(RESEARCH_INDEX_KEY, 0, 0);
+    const ids = await getRecentResearchIds(1);
     if (ids.length === 0) return null;
-    const raw = await r.get(researchKey(ids[0]));
+    const raw = await getResearchReportAdapter(ids[0]);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -659,7 +650,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
       // Simple opportunity or spec creation failed — push to work queue (with dedup)
       {
         const titleLower = (opp.title || "").toLowerCase().trim();
-        const existingQueue = await getTracker().getRedisClient().lrange(redisKeys.anchorWorkQueue(), 0, -1);
+        const existingQueue = await getWorkQueueItems();
         const isDup = existingQueue.some(raw => {
           try {
             const item = JSON.parse(raw);
@@ -670,7 +661,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
         if (isDup) {
           console.log(`[Research] Skipping duplicate #${opp.rank}: "${opp.title}" (already in queue)`);
         } else {
-          await getTracker().getRedisClient().rpush(redisKeys.anchorWorkQueue(), JSON.stringify({
+          await pushToWorkQueue(JSON.stringify({
             reference: opp.title,
             reason: `Research ${researchId}: ${opp.rationale?.slice(0, 200) || "auto-queued from research"}`,
             context: JSON.stringify({
@@ -742,18 +733,9 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
   };
 
   // Write report to Redis
-  const rr = getResearchRedis();
-  await rr.set(researchKey(researchId), JSON.stringify(report));
-  await rr.zadd(RESEARCH_INDEX_KEY, Date.now(), researchId);
+  await saveResearchReport(researchId, JSON.stringify(report));
   // Keep 20 most recent
-  const rCount = await rr.zcard(RESEARCH_INDEX_KEY);
-  if (rCount > 20) {
-    const old = await rr.zrange(RESEARCH_INDEX_KEY, 0, rCount - 21);
-    for (const id of old) {
-      await rr.del(researchKey(id));
-      await rr.zrem(RESEARCH_INDEX_KEY, id);
-    }
-  }
+  await trimResearchReports(20);
   console.log(`[Research] Report saved to Redis: ${researchId}`);
 
   // Step 8: Notify operator
@@ -793,11 +775,10 @@ export async function getLatestResearch() {
  */
 export async function listResearchReports(count = 10) {
   try {
-    const r = getResearchRedis();
-    const ids = await r.zrevrange(RESEARCH_INDEX_KEY, 0, count - 1);
+    const ids = await getRecentResearchIds(count);
     const reports = [];
     for (const id of ids) {
-      const raw = await r.get(researchKey(id));
+      const raw = await getResearchReportAdapter(id);
       if (raw) {
         const report = JSON.parse(raw);
         reports.push({
@@ -822,18 +803,17 @@ export async function listResearchReports(count = 10) {
  * Veto (remove from queue) a research-recommended item.
  */
 export async function vetoOpportunity(title) {
-  const tracker = getTracker();
-  const items = await tracker.getRedisClient().lrange(redisKeys.anchorWorkQueue(), 0, -1);
+  const items = await getWorkQueueItems();
   let removed = 0;
 
   for (let i = items.length - 1; i >= 0; i--) {
     try {
       const item = JSON.parse(items[i]);
       if (item.reference === title && item.source === "research") {
-        await tracker.getRedisClient().lrem(redisKeys.anchorWorkQueue(), 1, items[i]);
+        await removeFromWorkQueue(items[i]);
         removed++;
       }
-    } catch {}
+    } catch { /* intentional: skip corrupt items */ }
   }
 
   return { vetoed: removed > 0, title, removed };

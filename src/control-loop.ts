@@ -7,6 +7,15 @@ import { STREAMS } from "./event-bus.ts";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker, CYCLE_KEY_TTL } from "./task-tracker.ts";
 import { groundProject, summarizeForPrompt, getDiff, getDiffStat } from "./grounding.ts";
+import {
+  registerCycleSource, releaseCycleSource,
+  setCycleActive, clearCycleActive, setCycleLast,
+  initCycleHash, updateCycleHash, refreshCycleTTL,
+  acquireMergeLock, getMergeLockHolder, releaseMergeLock,
+  saveRealityReport, trimRealityReports,
+  getRecentReportIds, getRealityReport,
+  pushToWorkQueue,
+} from "./redis-adapter.ts";
 import { prepareWorkspace } from "./prepare-workspace.ts";
 import { mergeToMain } from "./merge.ts";
 import { runVerification, validateDiffExists, summarizeVerification, defaultVerificationPlan } from "./verifier.ts";
@@ -28,7 +37,6 @@ import { markTaskComplete } from "./specs.ts";
 import { selectAnchor, trackAbandonment, clearAbandonmentCounter, storePriorFailure, clearProcessingItem } from "./anchor-selection.ts";
 import { scoreAnchor, getMinConfidence, recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { looksOperatorBlocked, reconcilePlanVsActual, classifyTaskComplexity, preflightCheck, runHighRiskReview } from "./preflight.ts";
-import { redisKeys } from "./redis-keys.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -342,23 +350,21 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // Claude Code cycles register under hydra:cycle:active:claude via the API.
   // The old global hydra:cycle:lock is replaced by a short-lived merge lock
   // (hydra:merge:lock, 60s TTL) acquired only during git merge+push.
-  const CYCLE_SOURCE_KEY = redisKeys.cycleActiveSource("codex");
   const CYCLE_SOURCE_TTL = 900; // 15-minute auto-expire (crash safety)
-  await tracker.getRedisClient().set(CYCLE_SOURCE_KEY, cycleId, "EX", CYCLE_SOURCE_TTL);
+  await registerCycleSource("codex", cycleId, CYCLE_SOURCE_TTL);
 
   // Init cycle tracking
-  await tracker.getRedisClient().set(redisKeys.cycleActive(), cycleId);
-  await tracker.getRedisClient().hset(redisKeys.cycle(cycleId),
-    "status", "running",
-    "startedAt", new Date().toISOString(),
-    "source", "codex",
-    "total", 1,
-    "completed", 0,
-    "failed", 0,
-    "abandoned", 0,
-    "timedOut", 0,
-  );
-  await tracker.getRedisClient().expire(redisKeys.cycle(cycleId), CYCLE_KEY_TTL);
+  await setCycleActive(cycleId);
+  await initCycleHash(cycleId, {
+    status: "running",
+    startedAt: new Date().toISOString(),
+    source: "codex",
+    total: "1",
+    completed: "0",
+    failed: "0",
+    abandoned: "0",
+    timedOut: "0",
+  }, CYCLE_KEY_TTL);
   await tracker.initTaskV2(cycleId, task);
 
   // All code after lock acquisition is wrapped in try/finally to guarantee
@@ -1070,16 +1076,15 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
 
   // Acquire short-lived merge lock — serializes merges across Codex and Claude Code.
   // Retry up to 3 times with backoff (5s, 10s, 15s) if another merge is in progress.
-  const MERGE_LOCK_KEY = redisKeys.mergeLock();
   const MERGE_LOCK_TTL = 60; // 60 seconds — auto-release if merge crashes
   let mergeLockAcquired = false;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const acquired = await tracker.getRedisClient().set(MERGE_LOCK_KEY, cycleId, "EX", MERGE_LOCK_TTL, "NX");
+    const acquired = await acquireMergeLock(cycleId, MERGE_LOCK_TTL);
     if (acquired) {
       mergeLockAcquired = true;
       break;
     }
-    const holder = await tracker.getRedisClient().get(MERGE_LOCK_KEY);
+    const holder = await getMergeLockHolder();
     console.log(`[ControlLoop] Merge lock held by ${holder} — retry ${attempt + 1}/3`);
     await new Promise(r => setTimeout(r, 5000 * (attempt + 1)));
   }
@@ -1099,7 +1104,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     : { ok: false, commitSha: "", featureBranch: null, error: "Merge lock not acquired" };
 
   // Always release merge lock after merge attempt
-  await tracker.getRedisClient().del(MERGE_LOCK_KEY).catch(() => {});
+  await releaseMergeLock().catch(() => {});
   let commitSha = "";
   if (mergeResult.ok) {
     commitSha = mergeResult.commitSha;
@@ -1291,23 +1296,9 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   }
 
   // Write reality report to Redis
-  const reportRedis = (await import("ioredis")).default;
-  const reportConn = new reportRedis(process.env.REDIS_URL || "redis://localhost:6379");
-  try {
-    await reportConn.set(redisKeys.realityReport(cycleId), JSON.stringify(report), "EX", CYCLE_KEY_TTL);
-    await reportConn.zadd(redisKeys.realityReportIndex(), Date.now(), cycleId);
-    // Trim to 50 most recent
-    const count = await reportConn.zcard(redisKeys.realityReportIndex());
-    if (count > 50) {
-      const old = await reportConn.zrange(redisKeys.realityReportIndex(), 0, count - 51);
-      for (const id of old) {
-        await reportConn.del(redisKeys.realityReport(id));
-        await reportConn.zrem(redisKeys.realityReportIndex(), id);
-      }
-    }
-  } finally {
-    reportConn.disconnect();
-  }
+  await saveRealityReport(cycleId, JSON.stringify(report), CYCLE_KEY_TTL);
+  // Trim to 50 most recent
+  await trimRealityReports(50);
 
   // Publish notification
   await eventBus.publish(STREAMS.NOTIFICATIONS, {
@@ -1416,13 +1407,10 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
         // Queue medium+ findings as work items
         const queueItems = findingsToQueueItems(advReport);
         if (queueItems.length > 0) {
-          const Redis = (await import("ioredis")).default;
-          const advRedis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
           for (const item of queueItems.slice(0, 3)) { // max 3 per cycle
-            await advRedis.rpush(redisKeys.anchorWorkQueue(), JSON.stringify(item));
+            await pushToWorkQueue(JSON.stringify(item));
             console.log(`[ControlLoop] Adversarial: queued fix — ${item.reference.slice(0, 80)}`);
           }
-          advRedis.disconnect();
         }
         report.adversarialValidation = {
           findings: advReport.findings.length,
@@ -1450,11 +1438,11 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   } catch { /* intentional: correlation check is best-effort */ }
 
   // Complete the cycle in tracker
-  await tracker.getRedisClient().hset(redisKeys.cycle(cycleId), "status", "completed", "completedAt", new Date().toISOString());
+  await updateCycleHash(cycleId, { status: "completed", completedAt: new Date().toISOString() });
   // Refresh TTL so the 7-day window starts from cycle completion
-  await tracker.getRedisClient().expire(redisKeys.cycle(cycleId), CYCLE_KEY_TTL);
-  await tracker.getRedisClient().set(redisKeys.cycleLast(), cycleId);
-  await tracker.getRedisClient().del(redisKeys.cycleActive());
+  await refreshCycleTTL(cycleId, CYCLE_KEY_TTL);
+  await setCycleLast(cycleId);
+  await clearCycleActive();
 
   // Trigger Meta analysis: every 20 cycles (strategic review) OR when failures detected (fast-path)
   try {
@@ -1506,10 +1494,10 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
       );
     }
     // Release per-source cycle registration + safety-net merge lock cleanup
-    await tracker.getRedisClient().del(redisKeys.cycleActiveSource("codex")).catch((err: any) =>
+    await releaseCycleSource("codex").catch((err: any) =>
       console.error(`[ControlLoop] Failed to release codex cycle registration: ${err.message}`)
     );
-    await tracker.getRedisClient().del(redisKeys.mergeLock()).catch((err: any) =>
+    await releaseMergeLock().catch((err: any) =>
       console.error(`[ControlLoop] Failed to release merge lock (safety net): ${err.message}`)
     );
   }
@@ -1622,12 +1610,9 @@ async function loadLastCycleReport() {
  */
 async function loadLastCycleReportFull() {
   try {
-    const Redis = (await import("ioredis")).default;
-    const rConn = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-    const recentIds = await rConn.zrevrange(redisKeys.realityReportIndex(), 0, 0);
-    if (recentIds.length === 0) { rConn.disconnect(); return null; }
-    const raw = await rConn.get(redisKeys.realityReport(recentIds[0]));
-    rConn.disconnect();
+    const recentIds = await getRecentReportIds(1);
+    if (recentIds.length === 0) return null;
+    const raw = await getRealityReport(recentIds[0]);
     return raw ? JSON.parse(raw) : null;
   } catch (err: any) {
     console.error(`[ControlLoop] loadLastCycleReportFull failed: ${err.message}`);

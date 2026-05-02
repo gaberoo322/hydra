@@ -580,3 +580,373 @@ export async function deleteReflectionKey(key: string): Promise<void> {
   const r = getRedisConnection();
   await r.del(key);
 }
+
+// ---------------------------------------------------------------------------
+// Generic key operations (used by many modules)
+// ---------------------------------------------------------------------------
+
+/** Get a string value by key. */
+export async function getString(key: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(key);
+}
+
+/** Set a string value by key (optional EX ttl). */
+export async function setString(key: string, value: string, ttlSeconds?: number): Promise<void> {
+  const r = getRedisConnection();
+  if (ttlSeconds != null) {
+    await r.set(key, value, "EX", ttlSeconds);
+  } else {
+    await r.set(key, value);
+  }
+}
+
+/** Delete one or more keys. */
+export async function delKey(...keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
+  const r = getRedisConnection();
+  await r.del(...keys);
+}
+
+/** Set a key only if it does not exist (NX), with TTL. Returns true if set. */
+export async function setNX(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+  const r = getRedisConnection();
+  const result = await r.set(key, value, "EX", ttlSeconds, "NX");
+  return result === "OK";
+}
+
+/** Increment a key and return the new value. */
+export async function incrKey(key: string): Promise<number> {
+  const r = getRedisConnection();
+  return r.incr(key);
+}
+
+/** Set TTL on a key. */
+export async function expireKey(key: string, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.expire(key, ttlSeconds);
+}
+
+/** Get all fields of a hash. */
+export async function hashGetAll(key: string): Promise<Record<string, string>> {
+  const r = getRedisConnection();
+  return r.hgetall(key);
+}
+
+/** Set multiple fields on a hash. */
+export async function hashSet(key: string, ...fieldsAndValues: string[]): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(key, ...fieldsAndValues);
+}
+
+/** Set a single field on a hash. */
+export async function hashSetField(key: string, field: string, value: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(key, field, value);
+}
+
+/** Delete a field from a hash. */
+export async function hashDel(key: string, field: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.hdel(key, field);
+}
+
+// ---------------------------------------------------------------------------
+// List operations
+// ---------------------------------------------------------------------------
+
+/** Get the length of a list. */
+export async function listLen(key: string): Promise<number> {
+  const r = getRedisConnection();
+  return r.llen(key);
+}
+
+/** Get a range of list elements. */
+export async function listRange(key: string, start: number, stop: number): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.lrange(key, start, stop);
+}
+
+/** Push to the right end of a list. */
+export async function listRPush(key: string, ...values: string[]): Promise<void> {
+  const r = getRedisConnection();
+  await r.rpush(key, ...values);
+}
+
+/** Pop from the left end of a list. */
+export async function listLPop(key: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.lpop(key);
+}
+
+/** Remove count occurrences of value from list. */
+export async function listRem(key: string, count: number, value: string): Promise<number> {
+  const r = getRedisConnection();
+  return r.lrem(key, count, value);
+}
+
+/** Atomically move an element from source list to dest list. */
+export async function listMove(source: string, dest: string, srcDir: "LEFT" | "RIGHT", destDir: "LEFT" | "RIGHT"): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.lmove(source, dest, srcDir, destDir);
+}
+
+// ---------------------------------------------------------------------------
+// Sorted set operations
+// ---------------------------------------------------------------------------
+
+/** Get range of sorted set members. */
+export async function zRange(key: string, start: number, stop: number): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.zrange(key, start, stop);
+}
+
+/** Get reverse range of sorted set members. */
+export async function zRevRange(key: string, start: number, stop: number): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.zrevrange(key, start, stop);
+}
+
+/** Add a member to a sorted set. */
+export async function zAdd(key: string, score: number, member: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.zadd(key, score, member);
+}
+
+/** Remove a member from a sorted set. */
+export async function zRem(key: string, member: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.zrem(key, member);
+}
+
+/** Get sorted set cardinality. */
+export async function zCard(key: string): Promise<number> {
+  const r = getRedisConnection();
+  return r.zcard(key);
+}
+
+// ---------------------------------------------------------------------------
+// Backlog operations (used by backlog.ts)
+// ---------------------------------------------------------------------------
+
+/** Increment the backlog counter and return new ID. */
+export async function incrBacklogCounter(): Promise<string> {
+  const r = getRedisConnection();
+  const id = await r.incr(redisKeys.backlogCounter());
+  return `item-${id}`;
+}
+
+/** Get a backlog item by ID (raw JSON string). */
+export async function getBacklogItemRaw(id: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.hget(redisKeys.backlogItems(), id);
+}
+
+/** Save a backlog item. */
+export async function saveBacklogItem(id: string, json: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(redisKeys.backlogItems(), id, json);
+}
+
+/** Delete a backlog item from hash and all lane sorted sets. */
+export async function removeBacklogItem(id: string, lanes: string[]): Promise<void> {
+  const r = getRedisConnection();
+  await r.hdel(redisKeys.backlogItems(), id);
+  for (const lane of lanes) {
+    await r.zrem(redisKeys.backlogLane(lane), id);
+  }
+}
+
+/** Get all IDs in a backlog lane. */
+export async function getBacklogLaneIds(lane: string): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.zrange(redisKeys.backlogLane(lane), 0, -1);
+}
+
+/** Get cardinality of a backlog lane. */
+export async function getBacklogLaneCount(lane: string): Promise<number> {
+  const r = getRedisConnection();
+  return r.zcard(redisKeys.backlogLane(lane));
+}
+
+/** Add an item to a backlog lane sorted set. */
+export async function addToBacklogLane(lane: string, score: number, id: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.zadd(redisKeys.backlogLane(lane), score, id);
+}
+
+/** Remove an item from a backlog lane sorted set. */
+export async function removeFromBacklogLane(lane: string, id: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.zrem(redisKeys.backlogLane(lane), id);
+}
+
+/** Execute a Lua script (for atomic backlog operations). */
+export async function evalScript(script: string, numKeys: number, ...args: (string | number)[]): Promise<any> {
+  const r = getRedisConnection();
+  return r.eval(script, numKeys, ...args);
+}
+
+// ---------------------------------------------------------------------------
+// Cycle tracking operations (used by control-loop.ts)
+// ---------------------------------------------------------------------------
+
+/** Set the active cycle ID. */
+export async function setCycleActive(cycleId: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.cycleActive(), cycleId);
+}
+
+/** Clear the active cycle. */
+export async function clearCycleActive(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.cycleActive());
+}
+
+/** Set the last completed cycle ID. */
+export async function setCycleLast(cycleId: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.cycleLast(), cycleId);
+}
+
+/** Init cycle hash fields and set TTL. */
+export async function initCycleHash(cycleId: string, fields: Record<string, string>, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(redisKeys.cycle(cycleId), ...Object.entries(fields).flat());
+  await r.expire(redisKeys.cycle(cycleId), ttlSeconds);
+}
+
+/** Update cycle hash fields. */
+export async function updateCycleHash(cycleId: string, fields: Record<string, string>): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(redisKeys.cycle(cycleId), ...Object.entries(fields).flat());
+}
+
+/** Refresh cycle hash TTL. */
+export async function refreshCycleTTL(cycleId: string, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.expire(redisKeys.cycle(cycleId), ttlSeconds);
+}
+
+/** Register a cycle source (codex/claude) with TTL. */
+export async function registerCycleSource(source: string, cycleId: string, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.cycleActiveSource(source), cycleId, "EX", ttlSeconds);
+}
+
+/** Release a cycle source registration. */
+export async function releaseCycleSource(source: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.cycleActiveSource(source));
+}
+
+// ---------------------------------------------------------------------------
+// Merge lock operations (used by control-loop.ts)
+// ---------------------------------------------------------------------------
+
+/** Try to acquire the merge lock. Returns true if acquired. */
+export async function acquireMergeLock(cycleId: string, ttlSeconds: number): Promise<boolean> {
+  const r = getRedisConnection();
+  const result = await r.set(redisKeys.mergeLock(), cycleId, "EX", ttlSeconds, "NX");
+  return result === "OK";
+}
+
+/** Get current merge lock holder. */
+export async function getMergeLockHolder(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.mergeLock());
+}
+
+/** Release the merge lock. */
+export async function releaseMergeLock(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.mergeLock());
+}
+
+// ---------------------------------------------------------------------------
+// Reality report operations (used by control-loop.ts)
+// ---------------------------------------------------------------------------
+
+/** Save a reality report with TTL and add to index. */
+export async function saveRealityReport(cycleId: string, json: string, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.realityReport(cycleId), json, "EX", ttlSeconds);
+  await r.zadd(redisKeys.realityReportIndex(), Date.now(), cycleId);
+}
+
+/** Trim reality report index to keep only the most recent N entries. */
+export async function trimRealityReports(maxCount: number): Promise<void> {
+  const r = getRedisConnection();
+  const count = await r.zcard(redisKeys.realityReportIndex());
+  if (count > maxCount) {
+    const old = await r.zrange(redisKeys.realityReportIndex(), 0, count - maxCount - 1);
+    for (const id of old) {
+      await r.del(redisKeys.realityReport(id));
+      await r.zrem(redisKeys.realityReportIndex(), id);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Research report operations (used by research-loop.ts)
+// ---------------------------------------------------------------------------
+
+/** Save a research report and add to index. */
+export async function saveResearchReport(researchId: string, json: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.researchReport(researchId), json);
+  await r.zadd(redisKeys.researchReportIndex(), Date.now(), researchId);
+}
+
+/** Get a research report by ID. */
+export async function getResearchReport(researchId: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.researchReport(researchId));
+}
+
+/** Get the N most recent research report IDs (newest first). */
+export async function getRecentResearchIds(count: number): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.zrevrange(redisKeys.researchReportIndex(), 0, count - 1);
+}
+
+/** Trim research reports to keep only the most recent N. */
+export async function trimResearchReports(maxCount: number): Promise<void> {
+  const r = getRedisConnection();
+  const count = await r.zcard(redisKeys.researchReportIndex());
+  if (count > maxCount) {
+    const old = await r.zrange(redisKeys.researchReportIndex(), 0, count - maxCount - 1);
+    for (const id of old) {
+      await r.del(redisKeys.researchReport(id));
+      await r.zrem(redisKeys.researchReportIndex(), id);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Anchor queue operations (used by anchor-selection.ts, scheduler.ts)
+// ---------------------------------------------------------------------------
+
+/** Get the length of the work queue. */
+export async function getWorkQueueLen(): Promise<number> {
+  const r = getRedisConnection();
+  return r.llen(redisKeys.anchorWorkQueue());
+}
+
+/** Get all items from the work queue. */
+export async function getWorkQueueItems(): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.lrange(redisKeys.anchorWorkQueue(), 0, -1);
+}
+
+/** Push an item to the work queue. */
+export async function pushToWorkQueue(json: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.rpush(redisKeys.anchorWorkQueue(), json);
+}
+
+/** Remove an item from the work queue. */
+export async function removeFromWorkQueue(value: string): Promise<number> {
+  const r = getRedisConnection();
+  return r.lrem(redisKeys.anchorWorkQueue(), 1, value);
+}

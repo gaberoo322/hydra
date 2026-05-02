@@ -8,10 +8,15 @@
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { getTracker } from "./task-tracker.ts";
 import { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, moveToBlocked, claimNextQueuedItem } from "./backlog.ts";
 import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 import { redisKeys } from "./redis-keys.ts";
+import {
+  listRange, listRPush, listRem, listLPop, listLen, listMove,
+  getString, setString, delKey, incrKey, expireKey,
+  hashGetAll, zRevRange, getRedisConnection,
+  getRealityReport, getRecentReportIds, getCycleMetrics,
+} from "./redis-adapter.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
@@ -41,9 +46,8 @@ export const PRIOR_FAILURE_CAP = 20; // hard cap — oldest items escalated to r
  * item, so stale items are cleaned up every cycle.
  */
 export async function escalateStalePriorFailures(): Promise<number> {
-  const r = getTracker().getRedisClient();
   const key = redisKeys.anchorPriorFailures();
-  const all = await r.lrange(key, 0, -1);
+  const all = await listRange(key, 0, -1);
   if (all.length === 0) return 0;
 
   const now = Date.now();
@@ -55,7 +59,7 @@ export async function escalateStalePriorFailures(): Promise<number> {
       const age = now - new Date(item.timestamp).getTime();
       if (age > PRIOR_FAILURE_AGE_LIMIT_MS) {
         // Escalate to reframe queue with age reason
-        await r.rpush(REFRAME_QUEUE, JSON.stringify({
+        await listRPush(REFRAME_QUEUE, JSON.stringify({
           originalTaskId: item.taskId,
           originalTitle: item.taskId,
           originalDescription: "",
@@ -71,7 +75,7 @@ export async function escalateStalePriorFailures(): Promise<number> {
           escalationSource: "prior-failure-age-limit",
           escalationReason: `Auto-escalated: item aged ${Math.round(age / 3600000)}h, exceeds ${PRIOR_FAILURE_AGE_LIMIT_MS / 3600000}h limit`,
         }));
-        await r.lrem(key, 1, raw);
+        await listRem(key, 1, raw);
         escalated++;
         console.log(`[ControlLoop] Prior-failure "${item.taskId}" auto-escalated to reframe (age: ${Math.round(age / 3600000)}h)`);
       }
@@ -97,13 +101,13 @@ export async function escalateStalePriorFailures(): Promise<number> {
 export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // 0. Recover items stuck in processing queue from a prior crash
   try {
-    const stuckItems = await getTracker().getRedisClient().lrange(PROCESSING_QUEUE, 0, -1);
+    const stuckItems = await listRange(PROCESSING_QUEUE, 0, -1);
     if (stuckItems.length > 0) {
       console.log(`[ControlLoop] Recovering ${stuckItems.length} items from processing queue`);
       for (const item of stuckItems) {
-        await getTracker().getRedisClient().rpush(WORK_QUEUE, item);
+        await listRPush(WORK_QUEUE, item);
       }
-      await getTracker().getRedisClient().del(PROCESSING_QUEUE);
+      await delKey(PROCESSING_QUEUE);
     }
   } catch (err: any) {
     console.error(`[ControlLoop] Processing queue recovery failed: ${err.message}`);
@@ -219,7 +223,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   //    they represent heavier new-work intake.
   //    Uses LMOVE to atomically move the item to a processing list so it can
   //    be recovered if the cycle crashes before completing.
-  const queued = await getTracker().getRedisClient().lmove(WORK_QUEUE, PROCESSING_QUEUE, "LEFT", "RIGHT");
+  const queued = await listMove(WORK_QUEUE, PROCESSING_QUEUE, "LEFT", "RIGHT");
   if (queued) {
     try {
       const item = JSON.parse(queued);
@@ -247,16 +251,16 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt work-queue item dropped: ${err.message} — data: ${queued.slice(0, 200)}`);
       // Remove corrupt item from processing queue — it cannot be recovered
-      await getTracker().getRedisClient().lrem(PROCESSING_QUEUE, 1, queued);
+      await listRem(PROCESSING_QUEUE, 1, queued);
     }
   }
 
   // 4.5. Reframe queue — tasks that failed repeatedly and need a fresh approach
-  const reframeItems = await getTracker().getRedisClient().lrange(REFRAME_QUEUE, 0, 0);
+  const reframeItems = await listRange(REFRAME_QUEUE, 0, 0);
   if (reframeItems.length > 0) {
     try {
       const item = JSON.parse(reframeItems[0]);
-      await getTracker().getRedisClient().lpop(REFRAME_QUEUE);
+      await listLPop(REFRAME_QUEUE);
       return {
         type: "reframe",
         reference: item.originalTitle,
@@ -265,7 +269,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
       };
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt reframe item: ${err.message}`);
-      await getTracker().getRedisClient().lpop(REFRAME_QUEUE);
+      await listLPop(REFRAME_QUEUE);
     }
   }
 
@@ -279,11 +283,11 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   } catch (err: any) {
     console.error(`[ControlLoop] Prior-failure age escalation failed: ${err.message}`);
   }
-  const priorFailures = await getTracker().getRedisClient().lrange(redisKeys.anchorPriorFailures(), 0, 0);
+  const priorFailures = await listRange(redisKeys.anchorPriorFailures(), 0, 0);
   if (priorFailures.length > 0) {
     try {
       const failure = JSON.parse(priorFailures[0]);
-      await getTracker().getRedisClient().lpop(redisKeys.anchorPriorFailures());
+      await listLPop(redisKeys.anchorPriorFailures());
       return {
         type: "prior-failure",
         reference: failure.taskId,
@@ -308,15 +312,14 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // 5.5. Regression hunt — every 10 merges, run a self-play adversarial cycle
   //      that tests recent features with edge cases instead of building new work.
   try {
-    const r = getTracker().getRedisClient();
-    const recentMetrics = await r.zrevrange(redisKeys.metricsIndex(), 0, 9);
+    const recentMetrics = await zRevRange(redisKeys.metricsIndex(), 0, 9);
     let recentMergeCount = 0;
     let lastRegressionHunt: string | null = null;
     for (const id of recentMetrics) {
-      const raw = await r.hgetall(redisKeys.metrics(id));
+      const raw = await getCycleMetrics(id);
       if (parseInt(raw.tasksMerged || "0") > 0) recentMergeCount++;
     }
-    lastRegressionHunt = await r.get(redisKeys.regressionHuntLast());
+    lastRegressionHunt = await getString(redisKeys.regressionHuntLast());
     const huntInterval = 10;
     if (recentMergeCount >= huntInterval && !lastRegressionHunt) {
       // Time for a regression hunt
@@ -324,9 +327,9 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
 
       // Get the last 10 merged task titles and files for context
       const mergedTasks: string[] = [];
-      const reportIds = await r.zrevrange(redisKeys.realityReportIndex(), 0, 9);
+      const reportIds = await getRecentReportIds(10);
       for (const rid of reportIds) {
-        const raw = await r.get(redisKeys.realityReport(rid));
+        const raw = await getRealityReport(rid);
         if (!raw) continue;
         try {
           const report = JSON.parse(raw);
@@ -336,7 +339,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
         } catch { /* intentional */ }
       }
 
-      await r.set(redisKeys.regressionHuntLast(), new Date().toISOString(), "EX", 86400 * 3); // 3-day cooldown
+      await setString(redisKeys.regressionHuntLast(), new Date().toISOString(), 86400 * 3); // 3-day cooldown
 
       return {
         type: "regression-hunt",
@@ -360,10 +363,10 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
       const ref = `codebase-health: ${issue.category} in ${issue.file}`;
       // Check both the circuit-breaker counter AND a permanent skip counter
       const abandonCount = parseInt(
-        await getTracker().getRedisClient().get(anchorKey(ref)) || "0",
+        await getString(anchorKey(ref)) || "0",
       );
       const permSkipKey = redisKeys.anchorPermSkip(ref.replace(/\s+/g, "-").slice(0, 120));
-      const permSkipCount = parseInt(await getTracker().getRedisClient().get(permSkipKey) || "0");
+      const permSkipCount = parseInt(await getString(permSkipKey) || "0");
       if (abandonCount > 0 || permSkipCount >= 2) {
         console.log(`[ControlLoop] Skipping codebase-health issue "${ref}" (abandoned=${abandonCount}, permSkip=${permSkipCount}) — falling through`);
         continue;
@@ -451,14 +454,13 @@ export function anchorKey(anchorRef) {
 }
 
 export async function trackAbandonment(anchorRef, task, reason) {
-  const r = getTracker().getRedisClient();
   const key = anchorKey(anchorRef);
-  const count = await r.incr(key);
-  await r.expire(key, ABANDONMENT_COUNTER_TTL);
+  const count = await incrKey(key);
+  await expireKey(key, ABANDONMENT_COUNTER_TTL);
 
   if (count >= MAX_CONSECUTIVE_ABANDONMENTS) {
     console.log(`[ControlLoop] Circuit breaker: anchor "${anchorRef}" abandoned ${count}x — escalating to reframe queue`);
-    await r.rpush(REFRAME_QUEUE, JSON.stringify({
+    await listRPush(REFRAME_QUEUE, JSON.stringify({
       originalTaskId: task.taskId || "unknown",
       originalTitle: task.title || anchorRef,
       originalDescription: task.description || "",
@@ -487,22 +489,19 @@ export async function trackAbandonment(anchorRef, task, reason) {
       console.log(`[ControlLoop] No Kanban item to block for "${anchorRef}" (${err.message})`);
     }
     // Reset counter so the reframe gets one clean shot
-    await r.del(key);
+    await delKey(key);
     return true; // escalated
   }
   return false; // not yet escalated
 }
 
 export async function clearAbandonmentCounter(anchorRef) {
-  const r = getTracker().getRedisClient();
-  await r.del(anchorKey(anchorRef));
+  await delKey(anchorKey(anchorRef));
 }
 
 export async function storePriorFailure(taskId, reason, verificationResult) {
-  const r = getTracker().getRedisClient();
-
   // Count how many times this task (or its anchor) has already been retried
-  const existing = await r.lrange(redisKeys.anchorPriorFailures(), 0, -1);
+  const existing = await listRange(redisKeys.anchorPriorFailures(), 0, -1);
   const priorAttempts = existing.filter(raw => {
     try { return JSON.parse(raw).taskId === taskId; } catch { return false; }
   }).length;
@@ -512,12 +511,12 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
     console.log(`[ControlLoop] Escalating ${taskId} to reframe queue after ${priorAttempts + 1} failures`);
 
     // Gather failure history for context
-    const task = await r.hgetall(redisKeys.task(taskId));
+    const task = await hashGetAll(redisKeys.task(taskId));
     const failureHistory = existing
       .map(raw => { try { return JSON.parse(raw); } catch { return null; } })
       .filter(f => f?.taskId === taskId);
 
-    await r.rpush(REFRAME_QUEUE, JSON.stringify({
+    await listRPush(REFRAME_QUEUE, JSON.stringify({
       originalTaskId: taskId,
       originalTitle: task?.title || taskId,
       originalDescription: task?.description || "",
@@ -537,7 +536,7 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
     return;
   }
 
-  await r.rpush(redisKeys.anchorPriorFailures(), JSON.stringify({
+  await listRPush(redisKeys.anchorPriorFailures(), JSON.stringify({
     taskId,
     reason,
     failedSteps: verificationResult?.steps?.filter((s) => !s.passed).map((s) => s.label) || [],
@@ -547,15 +546,15 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
 
   // Enforce hard cap — escalate oldest items when queue exceeds limit (issue #18)
   try {
-    const queueLen = await r.llen(redisKeys.anchorPriorFailures());
+    const queueLen = await listLen(redisKeys.anchorPriorFailures());
     if (queueLen > PRIOR_FAILURE_CAP) {
       const overflow = queueLen - PRIOR_FAILURE_CAP;
       for (let i = 0; i < overflow; i++) {
-        const raw = await r.lpop(redisKeys.anchorPriorFailures());
+        const raw = await listLPop(redisKeys.anchorPriorFailures());
         if (!raw) break;
         try {
           const item = JSON.parse(raw);
-          await r.rpush(REFRAME_QUEUE, JSON.stringify({
+          await listRPush(REFRAME_QUEUE, JSON.stringify({
             originalTaskId: item.taskId,
             originalTitle: item.taskId,
             originalDescription: "",
@@ -590,7 +589,7 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
 export async function clearProcessingItem(anchor) {
   if (anchor?._workQueueRaw) {
     try {
-      await getTracker().getRedisClient().lrem(PROCESSING_QUEUE, 1, anchor._workQueueRaw);
+      await listRem(PROCESSING_QUEUE, 1, anchor._workQueueRaw);
     } catch (err: any) {
       console.error(`[ControlLoop] Failed to clear processing queue item: ${err.message}`);
     }
