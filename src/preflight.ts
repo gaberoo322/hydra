@@ -258,7 +258,7 @@ export async function runHighRiskReview(cycleId, task, grounding, groundingSumma
     agentName: "skeptic",
     personality,
     prompt,
-    model: "nano",
+    model: "mini",
     taskId: "high-risk-review",
     correlationId: cycleId,
   });

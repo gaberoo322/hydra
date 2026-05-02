@@ -55,43 +55,7 @@ Determined by `selectAnchor()` in `src/anchor-selection.ts`. Priority order:
 
 ## Key Files
 
-| File | Lines | Role |
-|---|---|---|
-| src/control-loop.ts | 1583 | The loop. Orchestrates all steps above. |
-| src/api.ts | 1620 | Express REST API on port 4000. Dashboard served from /api. |
-| src/research-loop.ts | 831 | Multi-agent research (domain/technical/market researchers + strategist). |
-| src/backlog.ts | 644 | Redis-backed Kanban backlog. Lanes: Triage→Backlog→Queued→Blocked→InProgress→Done. |
-| src/agent-memory.ts | 634 | Two-tier pattern learning: Redis patterns + auto-promote to feedback files. Episodic reflections. |
-| src/scheduler.ts | 618 | 5-min cycle timer, research throttle, daily spend cap. |
-| src/task-tracker.ts | 566 | 9-state task machine + Redis state. Fan-in: 7 modules. |
-| src/anchor-selection.ts | 493 | Anchor priority chain + circuit breaker + prior failure escalation. |
-| src/proposals.ts | 491 | Meta agent proposals. Approval/rejection workflow. |
-| src/planner-prompt.ts | 477 | Planner prompt assembly, schema validation, plan cache, OV context. |
-| src/priorities-refresh.ts | 426 | Inline refresh of priorities.md when stale. |
-| src/codex-runner.ts | 408 | Spawns `codex exec` with personalities. Model routing. |
-| src/preflight.ts | 374 | Deterministic 4-point preflight gate + nano-model high-risk review. |
-| src/grounding.ts | 370 | Read-only repo inspection. Runs npm test, tsc, git. |
-| src/index.ts | 324 | Entry point. Boots EventBus, API, scheduler, consumers, WebSocket. |
-| src/adversarial-validation.ts | 310 | Post-merge self-play: nano-model adversary finds edge cases. |
-| src/mutation-testing.ts | 295 | Zero-dep mutation testing. Negate booleans, swap comparisons, remove returns. |
-| src/digest.ts | 291 | Telegram digest: batches events, sends periodic summaries. |
-| src/specs.ts | 275 | Persistent multi-cycle task decomposition. Redis-backed spec lifecycle. |
-| src/ov-session.ts | 272 | OpenViking session manager. Per-cycle conversation tracking + memory extraction. |
-| src/verifier.ts | 266 | Hard verification. Runs command plans, captures output. |
-| src/event-bus.ts | 242 | Redis Streams event bus. Publish/subscribe + consumer groups + DLQ + WebSocket broadcast. |
-| src/codebase-analyzer.ts | 238 | Analyzes target project structure for research context. |
-| src/pattern-detector.ts | 220 | Detects systemic patterns across recent cycles. Publishes alerts. |
-| src/metrics.ts | 219 | Cycle metrics in Redis. Drift detection. Aggregate stats. |
-| src/codebase-health.ts | 218 | Identifies reductive improvement opportunities (large files, low coverage). |
-| src/project-goals.ts | 216 | Loads and formats project goals for agent prompts. |
-| src/notify.ts | 213 | Notification routing (Telegram). |
-| src/knowledge-indexer.ts | 208 | Watches config files + polls Redis. Indexes into OpenViking. |
-| src/plan-cache.ts | 184 | LRU plan cache to avoid re-planning identical anchors. |
-| src/cleanup.ts | 167 | Delete cycle-summaries >2d, keep 50 reality-reports, requeue stale in-progress. |
-| src/ov-skills.ts | 156 | Registers agent skills (planner, executor, skeptic, director) with OpenViking. |
-| src/merge.ts | 138 | Git merge + push. Never throws — returns result object. |
-| src/cycle.ts | 134 | Cycle lifecycle: start, status, history, kill. |
-| src/prepare-workspace.ts | 132 | Cleanup before grounding. Gated on shouldCleanWorkingTree(). |
+See `docs/reference.md` for full file inventory, Redis keys, event bus streams, and API endpoints.
 
 ## Running
 
@@ -102,7 +66,7 @@ journalctl --user -u hydra-orchestrator.service -f
 
 # Development
 npx tsx src/index.ts       # direct run (check port 4000 first!)
-npm test                    # 71 regression tests (node:test, zero deps)
+npm test                    # 246 regression tests (node:test, zero deps)
 
 # Health
 curl http://localhost:4000/api/health
@@ -167,69 +131,6 @@ Always run `npm test` before committing.
 
 3. **Episodic reflections:** When a cycle fails, a structured reflection (what was attempted, why it failed, what should change) is stored in `hydra:reflections:{anchor}` with 7-day TTL. When the same anchor is retried, reflections are injected as planner context.
 
-## Redis Keys
-
-| Pattern | Purpose |
-|---|---|
-| `hydra:cycle:active` | Currently running cycle ID |
-| `hydra:cycle:active:{source}` | Per-source cycle registration (codex, claude). 15-min TTL. |
-| `hydra:cycle:last` | Last completed cycle ID |
-| `hydra:cycle:{id}` | Cycle hash (status, timestamps, counts) |
-| `hydra:cycle:{id}:agents` | Agent runs for this cycle |
-| `hydra:cycle:{id}:costs` | Token costs for this cycle |
-| `hydra:task:{id}` | Task hash (state, evidence, scope) |
-| `hydra:task:{id}:evidence:{state}` | Evidence chain per state transition |
-| `hydra:anchors:work-queue` | Redis list -- items to work on (LMOVE to processing) |
-| `hydra:anchors:processing` | Redis list -- items being processed (crash recovery) |
-| `hydra:anchors:prior-failures` | Redis list -- failed tasks for retry |
-| `hydra:anchors:reframe-queue` | Redis list -- tasks needing diagnosis after repeated failure |
-| `hydra:anchors:abandonment-count:{ref}` | Counter per anchor, 24h TTL. Circuit breaker at 3. |
-| `hydra:merge:lock` | Short-lived merge serialization lock (60s TTL) |
-| `hydra:metrics:{id}` | Cycle metrics hash |
-| `hydra:metrics:index` | Sorted set of cycle IDs by timestamp |
-| `hydra:scheduler:state` | Persisted scheduler throttle state |
-| `hydra:scheduler:daily-spend` | Daily codex spend counter |
-| `hydra:backlog:items` | Hash -- backlog item data |
-| `hydra:backlog:lane:{lane}` | Sorted set -- items per Kanban lane |
-| `hydra:backlog:counter` | Monotonic ID counter for backlog items |
-| `hydra:memory:{agent}:patterns` | String -- consolidated JSON patterns (15-slot rolling buffer) |
-| `hydra:memory:last-consolidation` | Timestamp of last memory consolidation |
-| `hydra:reflections:{ref}` | List -- episodic failure reflections (7-day TTL) |
-| `hydra:reports:reality:{id}` | String -- reality report JSON |
-| `hydra:reports:reality:index` | Sorted set -- reality report IDs |
-| `hydra:reports:summary:*` | String -- cycle summary (2-day TTL) |
-| `hydra:reports:research:*` | String -- research report JSON |
-| `hydra:reports:research:index` | Sorted set -- research report IDs |
-| `hydra:proposals:{id}` | Hash -- proposal data |
-| `hydra:proposals:index` | Sorted set -- proposal IDs |
-| `hydra:specs:*` | Hash -- spec data (30-day TTL) |
-| `hydra:specs:index` | Sorted set -- spec IDs |
-| `hydra:plans:cache:{hash}` | Cached plan results (LRU) |
-| `hydra:alerts` | List -- dashboard alerts (kept 100) |
-| `hydra:adversarial:stats` | Adversarial validation statistics |
-| `hydra:adversarial:tracking` | Merge tracking for revert correlation |
-| `hydra:regression-hunt:last` | Timestamp of last regression hunt (3-day cooldown) |
-| `hydra:pattern-detector:cooldowns` | Pattern detector alert cooldowns |
-| `hydra:blocked:last-escalation` | Timestamp of last blocked-item escalation |
-| `hydra:deps:completed` | Completed dependency tracking |
-| `hydra:deps:index` | Dependency index |
-| `hydra:digest:last-weekly` | Timestamp of last weekly digest |
-| `hydra:workspace:lock` | Workspace access lock |
-
-## Event Bus
-
-Redis Streams-based event bus (`src/event-bus.ts`). Streams:
-
-| Stream | Purpose |
-|---|---|
-| `hydra:cycle` | Cycle start events |
-| `hydra:tasks` | Task events (legacy) |
-| `hydra:meta` | Meta analysis triggers |
-| `hydra:proposals` | Proposal lifecycle events |
-| `hydra:notifications` | All notifications (consumed by Telegram digest) |
-| `hydra:dlq` | Dead letter queue (after 3 failed deliveries) |
-
-Consumer groups: meta, orchestrator, telegram, dlq-processor. WebSocket broadcast to connected dashboard clients.
 
 ## Model Tiers
 
@@ -237,7 +138,7 @@ Consumer groups: meta, orchestrator, telegram, dlq-processor. WebSocket broadcas
 |---|---|---|---|
 | frontier | gpt-5.4 | Planner (standard tasks) | $2.50 / $15.00 |
 | codex | gpt-5.3-codex | Executor, Fixer, JIT tester, Planner (quick-fix) | $1.75 / $14.00 |
-| nano | gpt-5.4-nano | Meta agent, classification, adversarial validation, high-risk review | $0.20 / $1.25 |
+| mini | gpt-5.4-mini | Meta agent, classification, adversarial validation, high-risk review | $0.75 / $4.50 |
 
 ## Scope-Adaptive Planning
 
@@ -250,10 +151,12 @@ Tasks are classified post-planner based on `scopeBoundary.in` and `acceptanceCri
 ## Coding Conventions
 
 - **TypeScript** (.ts, import/export). Source in `src/`, tests in `test/*.test.mts`.
-- **Three dependencies**: express, ioredis, ws. Plus @sentry/node for error tracking. Use Node.js stdlib for everything else.
+- **Four dependencies**: express, ioredis, ws, @openai/codex-sdk. Plus @sentry/node for error tracking. Use Node.js stdlib for everything else.
 - **Never throw from merge/grounding/verification** -- return result objects so callers decide how to report failures.
 - **Fail loud**: every `catch` must either log `console.error` with context or be annotated `/* intentional: reason */`. Silent catches caused every major incident in the 2026-04-07/08 debug session.
 - **Kanban updates go through `safeKanban()`** -- logs errors AND publishes events. Never call moveToInProgress/moveToDone/returnToBacklog directly without error handling.
+- **Redis access through redis-adapter.ts** -- new code should use adapter methods instead of creating `new Redis()` connections or importing redis-keys.ts directly. Migration in progress; some modules still have legacy direct access.
+- **API routes in sub-routers** -- `src/api.ts` is a thin mount point. Route handlers live in `src/api/{domain}.ts`. Each sub-router is a factory function receiving `eventBus` if needed.
 - **grounding.ts is read-only** -- workspace mutation lives in prepare-workspace.ts.
 - **eventBus scope**: `eventBus` is a parameter of `runControlLoop()`, not a module global. Helper functions that need it must receive it as a parameter.
 
@@ -274,35 +177,6 @@ Tasks are classified post-planner based on `scopeBoundary.in` and `acceptanceCri
 
 Script: `~/.local/bin/hydra-orchestrator-watchdog.sh`
 
-## API Endpoints (port 4000, all under /api)
-
-**Cycles**: POST /cycle/start, GET /cycle/status, GET /cycle/history, GET /cycle/report, POST /cycle/register, POST /cycle/complete
-**Tasks**: GET /tasks, GET /tasks/:id, GET /tasks/:id/evidence
-**Queue**: POST /queue `{reference, reason, context}`, GET /queue
-**Grounding**: GET /grounding/latest
-**Scheduler**: POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status
-**Research**: POST /research/start, GET /research/latest, GET /research/history, POST /research/veto
-**Backlog**: GET /backlog, GET /backlog/counts, POST /backlog, POST /backlog/enhance, PATCH /backlog/:id, PATCH /backlog/:id/move, POST /backlog/:id/approve, GET /backlog/:id/children, DELETE /backlog/:id, POST /backlog/claim
-**Specs**: GET /specs, GET /specs/:slug, POST /specs, POST /specs/:slug/archive
-**Proposals**: GET /proposals, POST /proposals/:id/approve, POST /proposals/:id/reject
-**Meta**: POST /meta/analyze
-**Metrics**: GET /metrics, GET /spending, GET /summary
-**Goals**: GET /goals, GET /goals/summary
-**Config**: GET /config/:section, GET /config/:section/:name, PUT /config/:section/:name
-**Alerts**: GET /alerts, POST /alerts/:id/dismiss, POST /alerts/dismiss-all
-**Events**: GET /events/:stream, POST /events/publish
-**Memory**: GET /memory/:agent, POST /memory/:agent/pattern
-**Merge**: POST /merge/lock, POST /merge/unlock
-**Metrics (write)**: POST /metrics/record
-**Plan Cache**: GET /plan-cache/stats, POST /plan-cache/invalidate
-**Digest**: POST /digest/send
-**Health**: GET /health, GET /health/services, GET /health/deep, GET /recommendations
-**OpenViking**: GET /openviking/search
-**Calibration**: GET /calibration/outcomes, POST /calibration/outcomes/sync
-**Env**: GET /env/:project, PUT /env/:project, DELETE /env/:project/:key
-**OpenAI Proxy**: /openai-proxy/* (bearer token auth)
-**Webhooks**: POST /webhooks/sentry
-**Control**: POST /kill
 
 ## Agent skills
 
@@ -312,7 +186,7 @@ Issues are tracked in GitHub Issues on gaberoo322/hydra via the `gh` CLI. See `d
 
 ### Triage labels
 
-Default label vocabulary (needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix). See `docs/agents/triage-labels.md`.
+Default label vocabulary (needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix, target-backlog). `target-backlog` is for findings about the target project (~/hydra-betting) — sweep queues these to Hydra's work queue via `POST /api/queue` and closes the issue. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 

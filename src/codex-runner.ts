@@ -22,8 +22,7 @@ const MODEL_TIERS = {
   frontier: "gpt-5.5",
   codex: "gpt-5.3-codex",
   rapid: "gpt-5.3-codex-spark",
-  nano: "gpt-5.4-nano",
-  efficiency: "gpt-5.4-nano",
+  mini: "gpt-5.4-mini",
 };
 
 // Fallback tiers — used when daily spend cap is exceeded.
@@ -31,8 +30,7 @@ const MODEL_TIERS_FALLBACK = {
   frontier: "gpt-5.3-codex-spark",
   codex: "gpt-5.3-codex-spark",
   rapid: "gpt-5.3-codex-spark",
-  nano: "gpt-5.4-nano",
-  efficiency: "gpt-5.4-nano",
+  mini: "gpt-5.4-mini",
 };
 
 // Pricing per million tokens (USD)
@@ -42,7 +40,6 @@ const MODEL_PRICING = {
   "gpt-5.3-codex":       { input: 1.75, output: 14.00 },
   "gpt-5.3-codex-spark": { input: 1.75, output: 14.00 },
   "gpt-5.4-mini":        { input: 0.75, output: 4.50 },
-  "gpt-5.4-nano":        { input: 0.20, output: 1.25 },
 };
 
 async function resolveModel(tierOrModel: string): Promise<string> {
@@ -85,11 +82,17 @@ const AGENT_TIMEOUTS = {
 // Agents that only produce text/JSON and don't need file/shell access
 const READ_ONLY_AGENTS = new Set(["planner", "skeptic", "meta", "high-risk-review"]);
 
-function composePrompt({ prompt, systemPrompt, feedback, workDir }) {
+function composePrompt({ prompt, systemPrompt, feedback, workDir, coreMemory }: {
+  prompt: string; systemPrompt?: string; feedback?: string; workDir?: string; coreMemory?: string;
+}) {
   const parts = [];
   if (systemPrompt?.trim()) {
     parts.push("## Personality File");
     parts.push(systemPrompt.trim());
+  }
+  // Core memory — cardinal rules that apply to ALL tasks, injected before task context
+  if (coreMemory?.trim()) {
+    parts.push(coreMemory.trim());
   }
   if (workDir) {
     parts.push("## Workspace");
@@ -201,7 +204,14 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     feedback = await readFile(feedbackPath, "utf-8");
   } catch { /* intentional: no feedback file */ }
 
-  const fullPrompt = composePrompt({ prompt, systemPrompt, feedback, workDir: workspaceDir });
+  // Load core memory — cardinal rules that apply to all tasks for this agent
+  const coreMemoryPath = join(CONFIG_PATH, "core-memory", `${agentName}.md`);
+  let coreMemory = "";
+  try {
+    coreMemory = await readFile(coreMemoryPath, "utf-8");
+  } catch { /* intentional: no core memory file */ }
+
+  const fullPrompt = composePrompt({ prompt, systemPrompt, feedback, workDir: workspaceDir, coreMemory });
 
   // Configure thread based on agent type
   const isReadOnly = READ_ONLY_AGENTS.has(agentName);
@@ -251,12 +261,21 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
         streamFn({ agent: agentName, taskId, correlationId, event });
       }
 
-      // Collect usage and final message
+      // Collect usage and final message — try multiple event shapes for SDK compatibility
       if (event.type === "turn.completed") {
-        const u = event.usage;
-        usage.inputTokens += u.input_tokens || 0;
-        usage.outputTokens += u.output_tokens || 0;
-        usage.cachedInputTokens += u.cached_input_tokens || 0;
+        const u = (event as any).usage || (event as any).data?.usage || {};
+        usage.inputTokens += u.input_tokens || u.inputTokens || 0;
+        usage.outputTokens += u.output_tokens || u.outputTokens || 0;
+        usage.cachedInputTokens += u.cached_input_tokens || u.cachedInputTokens || 0;
+      }
+      // Fallback: some SDK versions report usage on response.completed
+      if ((event as any).type === "response.completed" && (event as any).response?.usage) {
+        const u = (event as any).response.usage;
+        if (usage.inputTokens === 0 && usage.outputTokens === 0) {
+          usage.inputTokens = u.input_tokens || u.inputTokens || 0;
+          usage.outputTokens = u.output_tokens || u.outputTokens || 0;
+          usage.cachedInputTokens = u.cached_input_tokens || u.cachedInputTokens || 0;
+        }
       }
 
       if (event.type === "item.completed" && event.item.type === "agent_message") {
@@ -292,6 +311,11 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   }
 
   const duration = Date.now() - startTime;
+
+  // Warn when agent ran but usage tracking failed — helps diagnose $0 cost cycles
+  if (finalMessage && usage.inputTokens === 0 && usage.outputTokens === 0) {
+    console.warn(`[CodexRunner] ${agentName} produced output but usage is zero — cost will be $0. SDK may not be reporting usage events.`);
+  }
 
   // Write agent output to Redis (2-day TTL)
   const summaryKey = redisKeys.summaryReport(`${correlationId || "manual"}-${agentName}-${taskId || randomUUID().slice(0, 8)}`);
