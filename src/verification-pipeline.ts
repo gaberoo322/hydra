@@ -23,9 +23,9 @@ import { recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, recordR
 import { recordReflection as recordGlobalReflection } from "./reflections.ts";
 import { recordCycleMetrics } from "./metrics.ts";
 import { storePriorFailure, clearProcessingItem } from "./anchor-selection.ts";
-import { moveToBlocked, returnToBacklog } from "./backlog.ts";
+import { block, fail } from "./backlog.ts";
 import { looksOperatorBlocked, reconcilePlanVsActual } from "./preflight.ts";
-import { safeKanban, cleanupBrokenBranch, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
+import { cleanupBrokenBranch, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 
 const execFileAsync = promisify(execFile);
@@ -305,7 +305,7 @@ async function handleVerificationFailure(
   const blockedReason = looksOperatorBlocked(verification);
   if (blockedReason) {
     console.log(`[ControlLoop] Detected operator-blocked failure: ${blockedReason}`);
-    await safeKanban(eventBus, cycleId, "moveToBlocked", anchor.reference, () => moveToBlocked(anchor.reference, blockedReason));
+    await block(eventBus, cycleId, anchor.reference, blockedReason);
     await eventBus.publish(STREAMS.NOTIFICATIONS, {
       type: "cycle:operator_blocked",
       source: "control-loop",
@@ -313,7 +313,7 @@ async function handleVerificationFailure(
       payload: { taskId, title: task.title, blockedReason },
     });
   } else {
-    await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "verification failed"));
+    await fail(eventBus, cycleId, anchor.reference, "verification failed");
   }
 
   // Record failure lessons
@@ -370,7 +370,7 @@ async function runMutationGate(
       await tracker.transitionTask(taskId, "failed", { reason: `Mutation gate: ${killRate}% kill rate (${mutationReport.survived} survivors)` });
       await storePriorFailure(taskId, `Mutation gate: tests don't cover changed behavior (${killRate}% kill rate)`, verification);
       await recordPlannerLesson(cycleId, task, "failed", { failReason: `Mutation gate: ${killRate}% kill rate`, failedSteps: ["mutation-testing"] });
-      await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "mutation gate blocked merge"));
+      await fail(eventBus, cycleId, anchor.reference, "mutation gate blocked merge");
 
       await cleanupBrokenBranch(PROJECT_WORKSPACE);
       await clearProcessingItem(anchor);
@@ -510,7 +510,7 @@ async function runDiffAwareJitTests(
       await tracker.transitionTask(taskId, "failed", { reason: `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}` });
       await storePriorFailure(taskId, `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}`, verification);
       await recordPlannerLesson(cycleId, task, "failed", { failReason: "JiT test caught a regression bug", failedSteps: ["jit-testing"] });
-      await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "JiT test caught bug"));
+      await fail(eventBus, cycleId, anchor.reference, "JiT test caught bug");
 
       await cleanupBrokenBranch(PROJECT_WORKSPACE);
       await clearProcessingItem(anchor);
@@ -585,7 +585,7 @@ async function runScopeEnforcement(
     await tracker.transitionTask(taskId, "failed", { reason: `Scope gate: ${outOfScope.length}/${verification.filesChanged.length} files outside planned scope` });
     await storePriorFailure(taskId, `Scope gate blocked merge: ${Math.round(outOfScopeRatio * 100)}% out of scope`, verification);
     await recordPlannerLesson(cycleId, task, "failed", { failReason: `Scope gate: ${outOfScope.length} files outside scope`, failedSteps: ["scope-enforcement"] });
-    await safeKanban(ctx.eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, "scope gate blocked merge"));
+    await fail(ctx.eventBus, cycleId, anchor.reference, "scope gate blocked merge");
 
     await cleanupBrokenBranch(PROJECT_WORKSPACE);
     await clearProcessingItem(anchor);

@@ -32,11 +32,11 @@ import { recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { clearAbandonmentCounter, storePriorFailure, clearProcessingItem } from "./anchor-selection.ts";
 import { clearReflections } from "./agent-memory.ts";
 import { clearReflectionsForAnchor } from "./reflections.ts";
-import { moveToDone, returnToBacklog } from "./backlog.ts";
+import { complete, fail } from "./backlog.ts";
 import { detectPatterns } from "./pattern-detector.ts";
 import { markTaskComplete } from "./specs.ts";
 import { runAdversarialValidation, findingsToQueueItems, trackMergedCommit, checkRevertCorrelation } from "./adversarial-validation.ts";
-import { safeKanban, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
+import { PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 
 const execFileAsync = promisify(execFile);
@@ -347,9 +347,9 @@ export async function runPostMerge(
       }
     }
 
-    await safeKanban(eventBus, cycleId, "moveToDone", anchor.reference, () => moveToDone(anchor.reference, "merged"));
+    await complete(eventBus, cycleId, anchor.reference, "merged");
   } else {
-    await safeKanban(eventBus, cycleId, "returnToBacklog", anchor.reference, () => returnToBacklog(anchor.reference, finalState));
+    await fail(eventBus, cycleId, anchor.reference, finalState);
   }
 
   // =========================================================================

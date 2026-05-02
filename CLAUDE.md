@@ -154,7 +154,7 @@ Tasks are classified post-planner based on `scopeBoundary.in` and `acceptanceCri
 - **Four dependencies**: express, ioredis, ws, @openai/codex-sdk. Plus @sentry/node for error tracking. Use Node.js stdlib for everything else.
 - **Never throw from merge/grounding/verification** -- return result objects so callers decide how to report failures.
 - **Fail loud**: every `catch` must either log `console.error` with context or be annotated `/* intentional: reason */`. Silent catches caused every major incident in the 2026-04-07/08 debug session.
-- **Kanban updates go through `safeKanban()`** -- logs errors AND publishes events. Never call moveToInProgress/moveToDone/returnToBacklog directly without error handling.
+- **Kanban updates go through backlog facade** -- use `claim()`, `complete()`, `fail()`, `block()` from `backlog.ts`. These wrap lane transitions with built-in error handling + event publishing. Old raw functions (moveToInProgress, etc.) are still exported for non-migrated callers.
 - **Redis access through redis-adapter.ts** -- new code should use adapter methods instead of creating `new Redis()` connections or importing redis-keys.ts directly. Migration in progress; some modules still have legacy direct access.
 - **API routes in sub-routers** -- `src/api.ts` is a thin mount point. Route handlers live in `src/api/{domain}.ts`. Each sub-router is a factory function receiving `eventBus` if needed.
 - **grounding.ts is read-only** -- workspace mutation lives in prepare-workspace.ts.

@@ -607,9 +607,144 @@ async function claimNextQueuedItem(claimedBy) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Facade API — claim/complete/fail/block
+//
+// These wrap the existing lane transitions with built-in error handling and
+// event publishing. Callers no longer need safeKanban().
+//
+// Each function:
+//   1. Calls the underlying lane transition
+//   2. On error: logs console.error AND publishes kanban:update_failed event
+//   3. Never throws — returns { ok, error? }
+// ---------------------------------------------------------------------------
+
+interface FacadeResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Claim an anchor: move it from queued/backlog to inProgress.
+ * Wraps moveToInProgress with error handling + event publishing.
+ */
+async function claim(
+  eventBus: any,
+  cycleId: string,
+  reference: string,
+): Promise<FacadeResult> {
+  try {
+    await moveToInProgress(reference);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[Backlog] claim failed for "${reference}": ${err.message}`);
+    try {
+      await eventBus.publish("hydra:stream:notifications", {
+        type: "kanban:update_failed",
+        source: "backlog-facade",
+        correlationId: cycleId,
+        payload: { op: "claim", reference, error: err.message },
+      });
+    } catch (publishErr: any) {
+      console.error(`[Backlog] Failed to publish claim failure event: ${publishErr.message}`);
+    }
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Complete an anchor: move it from inProgress to done.
+ * Wraps moveToDone with error handling + event publishing.
+ */
+async function complete(
+  eventBus: any,
+  cycleId: string,
+  reference: string,
+  evidence: string = "merged",
+): Promise<FacadeResult> {
+  try {
+    await moveToDone(reference, evidence);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[Backlog] complete failed for "${reference}": ${err.message}`);
+    try {
+      await eventBus.publish("hydra:stream:notifications", {
+        type: "kanban:update_failed",
+        source: "backlog-facade",
+        correlationId: cycleId,
+        payload: { op: "complete", reference, error: err.message },
+      });
+    } catch (publishErr: any) {
+      console.error(`[Backlog] Failed to publish complete failure event: ${publishErr.message}`);
+    }
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Fail an anchor: return it from inProgress to backlog.
+ * Wraps returnToBacklog with error handling + event publishing.
+ */
+async function fail(
+  eventBus: any,
+  cycleId: string,
+  reference: string,
+  reason: string,
+): Promise<FacadeResult> {
+  try {
+    await returnToBacklog(reference, reason);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[Backlog] fail failed for "${reference}": ${err.message}`);
+    try {
+      await eventBus.publish("hydra:stream:notifications", {
+        type: "kanban:update_failed",
+        source: "backlog-facade",
+        correlationId: cycleId,
+        payload: { op: "fail", reference, error: err.message },
+      });
+    } catch (publishErr: any) {
+      console.error(`[Backlog] Failed to publish fail failure event: ${publishErr.message}`);
+    }
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Block an anchor: move it to the blocked lane.
+ * Wraps moveToBlocked with error handling + event publishing.
+ */
+async function block(
+  eventBus: any,
+  cycleId: string,
+  reference: string,
+  reason: string,
+): Promise<FacadeResult> {
+  try {
+    await moveToBlocked(reference, reason);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[Backlog] block failed for "${reference}": ${err.message}`);
+    try {
+      await eventBus.publish("hydra:stream:notifications", {
+        type: "kanban:update_failed",
+        source: "backlog-facade",
+        correlationId: cycleId,
+        payload: { op: "block", reference, error: err.message },
+      });
+    } catch (publishErr: any) {
+      console.error(`[Backlog] Failed to publish block failure event: ${publishErr.message}`);
+    }
+    return { ok: false, error: err.message };
+  }
+}
+
 export {
   loadBacklog, getBacklogCounts, addToBacklog, promoteToQueued,
+  // Old exports — kept for backward compat (anchor-selection.ts, etc.)
   moveToInProgress, moveToDone, moveToBlocked, blockItemById, returnToBacklog,
+  // Facade API
+  claim, complete, fail, block,
   pruneOldDoneItems, moveItemToLane, deleteItem, closeBacklogRedis,
   updateItem, getItemsByParent, peekNextQueuedItem,
   getInProgressCount, getInProgressItems, isWipLimitReached,
