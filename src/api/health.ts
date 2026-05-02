@@ -7,12 +7,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 import { getCycleStatus } from "../cycle.ts";
-import { getTracker } from "../task-tracker.ts";
 import { getMetricsTrend, getAggregateStats } from "../metrics.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler.ts";
 import { listProposals } from "../proposals.ts";
 import { getBacklogCounts } from "../backlog.ts";
 import { redisKeys } from "../redis-keys.ts";
+import {
+  listLen, getMemoryPatterns, scanKeys, redisInfo as getRedisInfo,
+  getWorkQueueLen,
+} from "../redis-adapter.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -85,8 +88,8 @@ export function createHealthRouter(eventBus: any) {
       })(),
       /* 2 */ getSchedulerStatus(),
       /* 3 */ getCycleStatus(),
-      /* 4 */ getTracker().getRedisClient().llen(redisKeys.anchorWorkQueue()),
-      /* 5 */ getTracker().getRedisClient().llen(redisKeys.anchorPriorFailures()),
+      /* 4 */ getWorkQueueLen(),
+      /* 5 */ listLen(redisKeys.anchorPriorFailures()),
       /* 6 */ getBacklogCounts(),
       /* 7 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
       /* 8 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
@@ -95,15 +98,13 @@ export function createHealthRouter(eventBus: any) {
       /* 11 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 12 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-betting-web.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 13 */ (async () => {
-        const r = getTracker().getRedisClient();
-        const [p, e, s] = await Promise.all([r.get(redisKeys.memoryPatterns("planner")), r.get(redisKeys.memoryPatterns("executor")), r.get(redisKeys.memoryPatterns("skeptic"))]);
+        const [p, e, s] = await Promise.all([getMemoryPatterns("planner"), getMemoryPatterns("executor"), getMemoryPatterns("skeptic")]);
         const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };
         return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
       })(),
       /* 14 */ (async () => {
-        const r = getTracker().getRedisClient(); let count = 0, cursor = "0";
-        do { const [next, keys] = await r.scan(cursor, "MATCH", redisKeys.reflection("*"), "COUNT", 100); cursor = next; count += keys.length; } while (cursor !== "0");
-        return count;
+        const keys = await scanKeys(redisKeys.reflection("*"));
+        return keys.length;
       })(),
       /* 15 */ (async () => {
         try {
@@ -118,7 +119,7 @@ export function createHealthRouter(eventBus: any) {
       })(),
       /* 16 */ (async () => {
         try {
-          const [info, clients, server] = await Promise.all([getTracker().getRedisClient().info("memory"), getTracker().getRedisClient().info("clients"), getTracker().getRedisClient().info("server")]);
+          const [info, clients, server] = await Promise.all([getRedisInfo("memory"), getRedisInfo("clients"), getRedisInfo("server")]);
           return { memoryHuman: info.match(/used_memory_human:(\S+)/)?.[1] || "unknown", connectedClients: parseInt(clients.match(/connected_clients:(\d+)/)?.[1] || "0"), uptimeSeconds: parseInt(server.match(/uptime_in_seconds:(\d+)/)?.[1] || "0") };
         } catch { return null; }
       })(),

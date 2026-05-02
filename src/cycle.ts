@@ -1,6 +1,7 @@
 import { getTracker } from "./task-tracker.ts";
 import { runControlLoop } from "./control-loop.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { getString, hashGetAll, findKeys } from "./redis-adapter.ts";
 
 interface CycleRecord {
   id: string;
@@ -57,11 +58,10 @@ async function startCycle(eventBus: any, opts: any = {}) {
 async function getCycleStatus(): Promise<CycleRecord | { status: string }> {
   if (currentCycle) return currentCycle;
 
-  const tracker = getTracker();
-  const activeId = await tracker.getRedisClient().get(redisKeys.cycleActive());
+  const activeId = await getString(redisKeys.cycleActive());
   if (!activeId) return { status: "idle" };
 
-  const cycle = await tracker.getRedisClient().hgetall(redisKeys.cycle(activeId));
+  const cycle = await hashGetAll(redisKeys.cycle(activeId));
   if (!cycle || !cycle.status) return { status: "idle" };
 
   return {
@@ -78,11 +78,10 @@ async function getCycleStatus(): Promise<CycleRecord | { status: string }> {
 }
 
 async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
-  const tracker = getTracker();
   let ids: string[] = [];
 
   try {
-    ids = await tracker.getRedisClient().keys(redisKeys.cycle("cycle-*"));
+    ids = await findKeys(redisKeys.cycle("cycle-*"));
   } catch (err: any) {
     console.error(`[Cycle] Failed to list cycle keys from Redis: ${err.message}`);
   }
@@ -94,7 +93,7 @@ async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
     if (seen.has(id)) continue;
     seen.add(id);
     const cycleId = id.replace(new RegExp(`^${redisKeys.cycle("")}`), "");
-    const cycle = await tracker.getRedisClient().hgetall(id);
+    const cycle = await hashGetAll(id);
     if (!cycle || !cycle.status) continue;
     records.push({
       id: cycleId,

@@ -2,6 +2,10 @@ import { Router } from "express";
 import { startCycle, getCycleStatus, getCycleHistory, killCycle } from "../cycle.ts";
 import { getTracker } from "../task-tracker.ts";
 import { redisKeys } from "../redis-keys.ts";
+import {
+  getRealityReport, setString, delKey, hashSet, expireKey,
+  registerCycleSource, releaseCycleSource,
+} from "../redis-adapter.ts";
 
 export function createCyclesRouter(eventBus: any) {
   const router = Router();
@@ -65,10 +69,7 @@ export function createCyclesRouter(eventBus: any) {
   // GET /cycle/:cycleId/reality — Reality report for a specific cycle
   router.get("/cycle/:cycleId/reality", async (req, res) => {
     try {
-      const Redis = (await import("ioredis")).default;
-      const r = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
-      const raw = await r.get(redisKeys.realityReport(req.params.cycleId));
-      r.disconnect();
+      const raw = await getRealityReport(req.params.cycleId);
       if (!raw) return res.status(404).json({ error: "Reality report not found" });
       res.json(JSON.parse(raw));
     } catch (err: any) {
@@ -83,18 +84,17 @@ export function createCyclesRouter(eventBus: any) {
       if (!cycleId || !source) {
         return res.status(400).json({ error: "Missing cycleId or source" });
       }
-      const r = getTracker().getRedisClient();
-      await r.set(redisKeys.cycleActiveSource(source), cycleId, "EX", 900);
-      await r.hset(redisKeys.cycle(cycleId),
+      await registerCycleSource(source, cycleId, 900);
+      await hashSet(redisKeys.cycle(cycleId),
         "status", "running",
         "startedAt", new Date().toISOString(),
         "source", source,
-        "total", 1,
-        "completed", 0,
-        "failed", 0,
-        "abandoned", 0,
+        "total", "1",
+        "completed", "0",
+        "failed", "0",
+        "abandoned", "0",
       );
-      await r.expire(redisKeys.cycle(cycleId), 604800); // 7 days
+      await expireKey(redisKeys.cycle(cycleId), 604800); // 7 days
       res.json({ ok: true, cycleId });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -108,9 +108,8 @@ export function createCyclesRouter(eventBus: any) {
       if (!cycleId) {
         return res.status(400).json({ error: "Missing cycleId" });
       }
-      const r = getTracker().getRedisClient();
-      await r.del(redisKeys.cycleActiveSource(source || "claude"));
-      await r.hset(redisKeys.cycle(cycleId),
+      await releaseCycleSource(source || "claude");
+      await hashSet(redisKeys.cycle(cycleId),
         "status", status || "completed",
         "completedAt", new Date().toISOString(),
       );
