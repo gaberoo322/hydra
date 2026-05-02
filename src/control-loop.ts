@@ -6,14 +6,13 @@ import { promisify } from "node:util";
 import { STREAMS } from "./event-bus.ts";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker, CYCLE_KEY_TTL } from "./task-tracker.ts";
-import { groundProject, summarizeForPrompt, getDiff, getDiffStat } from "./grounding.ts";
+import { groundProject, summarizeForPrompt, getDiff } from "./grounding.ts";
 import {
   registerCycleSource, releaseCycleSource,
   setCycleActive, clearCycleActive, setCycleLast,
   initCycleHash, updateCycleHash, refreshCycleTTL,
   acquireMergeLock, getMergeLockHolder, releaseMergeLock,
   saveRealityReport, trimRealityReports,
-  getRecentReportIds, getRealityReport,
   pushToWorkQueue,
 } from "./redis-adapter.ts";
 import { prepareWorkspace } from "./prepare-workspace.ts";
@@ -24,8 +23,8 @@ import { runJitTests } from "./jit-testing.ts";
 import { runAdversarialValidation, findingsToQueueItems, trackMergedCommit, checkRevertCorrelation } from "./adversarial-validation.ts";
 // sendNotification removed — all notifications go through eventBus → digest system
 import { recordCycleMetrics, detectDrift } from "./metrics.ts";
-import { loadAgentMemory, formatMemoryForPrompt, recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, recordReflection, loadReflections, clearReflections } from "./agent-memory.ts";
-import { recordReflection as recordGlobalReflection, loadRelevantReflections, clearReflectionsForAnchor, formatReflectionsForPrompt } from "./reflections.ts";
+import { recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, recordReflection, clearReflections } from "./agent-memory.ts";
+import { recordReflection as recordGlobalReflection, clearReflectionsForAnchor } from "./reflections.ts";
 import { runPlannerAgent } from "./planner-prompt.ts";
 import { runExecutorAgent } from "./executor-agent.ts";
 // priorities-refresh removed — the research-strategist handles refresh inside
@@ -152,32 +151,6 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   console.log(`[ControlLoop] Grounded: ${grounding.testReport.passed} tests passing, ${grounding.testReport.failed} failing (${grounding.groundingDurationMs}ms)`);
 
   // =========================================================================
-  // Step 1.5: CONTINUITY — what happened last cycle? What changed since then?
-  // =========================================================================
-  let continuityContext = "";
-  const lastReport = await loadLastCycleReport();
-  if (lastReport) {
-    // Diff the repo since the last cycle's commit to show what's new
-    const lastCycleReport = await loadLastCycleReportFull();
-    if (lastCycleReport?.commitSha) {
-      try {
-        const diffSince = await getDiff(PROJECT_WORKSPACE, lastCycleReport.commitSha);
-        const diffLines = diffSince.split("\n").length;
-        continuityContext = `## CONTINUITY (what happened since last cycle)\n${lastReport}\n\nRepo changes since last cycle commit (${lastCycleReport.commitSha.slice(0, 7)}): ${diffLines} diff lines\n`;
-        if (diffLines > 0 && diffLines < 200) {
-          continuityContext += `Diff stat:\n${await getDiffStat(PROJECT_WORKSPACE, lastCycleReport.commitSha)}\n`;
-        }
-      } catch (err: any) {
-        console.error(`[ControlLoop] Continuity diff failed, using simpler context: ${err.message}`);
-        continuityContext = `## CONTINUITY\n${lastReport}\n`;
-      }
-    } else {
-      continuityContext = `## CONTINUITY\n${lastReport}\n`;
-    }
-    console.log(`[ControlLoop] Continuity loaded from last cycle`);
-  }
-
-  // =========================================================================
   // Step 2: SELECT ANCHOR — what are we working on and why?
   // =========================================================================
   console.log(`[ControlLoop] Step 2: Selecting anchor...`);
@@ -194,20 +167,6 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
     return { cycleId, tasks: [], reason: "No actionable anchor", durationMs: Date.now() - startTime };
   }
   console.log(`[ControlLoop] Anchor: [${anchor.type}] ${anchor.reference}`);
-
-  // Load episodic reflections — inject past failures as context for the planner
-  const reflectionContext = await loadReflections(anchor.reference).catch(() => "");
-  if (reflectionContext) {
-    continuityContext += "\n" + reflectionContext;
-    console.log(`[ControlLoop] Loaded ${reflectionContext.split("### Attempt").length - 1} prior failure reflections for this anchor`);
-  }
-
-  // Load relevant reflections from the global buffer (Reflexion pattern)
-  const globalReflections = await loadRelevantReflections(anchor).catch(() => []);
-  if (globalReflections.length > 0) {
-    continuityContext += "\n" + formatReflectionsForPrompt(globalReflections);
-    console.log(`[ControlLoop] Loaded ${globalReflections.length} relevant reflections from global buffer`);
-  }
 
   // =========================================================================
   // Step 2.5: PRE-VALIDATE ANCHOR — skip stale/completed items before planner
@@ -273,7 +232,7 @@ export async function runControlLoop(eventBus,  opts: Record<string, any> = {}) 
   // Step 3: PLAN — propose one bounded task (codex agent call)
   // =========================================================================
   console.log(`[ControlLoop] Step 3: Planning...`);
-  const task = await runPlannerAgent(cycleId, anchor, grounding, groundingSummary, continuityContext, ovSession);
+  const task = await runPlannerAgent(cycleId, anchor, grounding, ovSession);
 
   // Check for usage-limit sentinel — pause scheduler instead of retrying
   if (task?.__usageLimitHit) {
@@ -1585,37 +1544,4 @@ async function isAnchorStale(anchor): Promise<string | null> {
   return null;
 }
 
-async function loadLastCycleReport() {
-  try {
-    const report = await loadLastCycleReportFull();
-    if (!report) return null;
-    return [
-      `Last cycle: ${report.cycleId}`,
-      `Task: "${report.task?.title}" → ${report.task?.finalState}`,
-      `Tests: ${report.grounding?.before?.passed} → ${report.grounding?.after?.passed}`,
-      report.regressionIntroduced ? "WARNING: Regression introduced" : "No regression",
-      `Commit: ${report.commitSha || "none"}`,
-      report.rollbackRisk ? `Rollback risk: ${report.rollbackRisk}` : "",
-      report.filesChanged?.length > 0 ? `Files changed: ${report.filesChanged.join(", ")}` : "",
-    ].filter(Boolean).join("\n");
-  } catch (err: any) {
-    console.error(`[ControlLoop] loadLastCycleReport failed: ${err.message}`);
-    return null;
-  }
-}
-
-/**
- * Load the full JSON reality report from the last completed cycle.
- * Used by the continuity contract to diff the repo since the last commit.
- */
-async function loadLastCycleReportFull() {
-  try {
-    const recentIds = await getRecentReportIds(1);
-    if (recentIds.length === 0) return null;
-    const raw = await getRealityReport(recentIds[0]);
-    return raw ? JSON.parse(raw) : null;
-  } catch (err: any) {
-    console.error(`[ControlLoop] loadLastCycleReportFull failed: ${err.message}`);
-    return null;
-  }
-}
+// loadLastCycleReport and loadLastCycleReportFull extracted to context-builder.ts
