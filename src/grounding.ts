@@ -2,21 +2,12 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { shouldCleanWorkingTree } from "./prepare-workspace.ts";
-
 const execFileAsync = promisify(execFile);
-
-// Re-exported from prepare-workspace.mjs for backwards compatibility —
-// grounding.test.mjs and any external callers still import this from the
-// grounding module. The implementation moved so that grounding stays a
-// pure read of truth and the cleanup side-effect lives alongside
-// prepareWorkspace() where it belongs.
-export { shouldCleanWorkingTree };
 
 const CMD_TIMEOUT = 120_000; // 2 min per command (parallel tests complete in ~40s)
 const OUTPUT_LIMIT = 10_000; // truncate stdout/stderr to 10KB
 
-export function truncate(str, limit = OUTPUT_LIMIT) {
+function truncate(str, limit = OUTPUT_LIMIT) {
   if (!str || str.length <= limit) return str || "";
   // Keep HEAD + TAIL rather than just head. For test and build commands the
   // signal we care about (vitest's "Tests N passed" summary, tsc's final
@@ -39,7 +30,7 @@ export function truncate(str, limit = OUTPUT_LIMIT) {
  * See the 2026-04-08 debug session for the full backstory — npm was passing
  * FORCE_COLOR=1 through to vitest under systemd even with TERM unset.
  */
-export function stripAnsi(str) {
+function stripAnsi(str) {
   if (!str) return "";
   // Match CSI (control sequence introducer) ANSI codes: ESC [ ... final byte
   // eslint-disable-next-line no-control-regex
@@ -95,7 +86,7 @@ async function runCmd(cmd, args,  opts: Record<string, any> = {}) {
  * Parse vitest/jest output for pass/fail counts.
  * Looks for patterns like "Tests  42 passed (42)" or "42 passed | 2 failed".
  */
-export function parseTestCounts(stdout, stderr) {
+function parseTestCounts(stdout, stderr) {
   // Strip ANSI codes first — see stripAnsi() docs above.
   const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   let passed = 0, failed = 0, total = 0;
@@ -135,7 +126,7 @@ export function parseTestCounts(stdout, stderr) {
 /**
  * Extract failing test names from vitest/jest output.
  */
-export function parseFailingTests(stdout, stderr) {
+function parseFailingTests(stdout, stderr) {
   // Strip ANSI codes first — see stripAnsi() docs above.
   const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   const failures = [];
@@ -271,19 +262,15 @@ export async function groundProject(projectDir,  opts: Record<string, any> = {})
 }
 
 /**
- * Get the diff between current state and a reference.
+ * Get the diff and diff stat between current state and a reference.
+ * Returns { diff, stat } where diff is the full patch and stat is the summary.
  */
 export async function getDiff(projectDir, ref = "HEAD~1") {
-  const result = await runCmd("git", ["diff", ref], { cwd: projectDir, timeout: 15000 });
-  return result.stdout;
-}
-
-/**
- * Get the diff stat (summary) between current state and a reference.
- */
-export async function getDiffStat(projectDir, ref = "HEAD~1") {
-  const result = await runCmd("git", ["diff", "--stat", ref], { cwd: projectDir, timeout: 10000 });
-  return result.stdout;
+  const [diffResult, statResult] = await Promise.all([
+    runCmd("git", ["diff", ref], { cwd: projectDir, timeout: 15000 }),
+    runCmd("git", ["diff", "--stat", ref], { cwd: projectDir, timeout: 10000 }),
+  ]);
+  return { diff: diffResult.stdout, stat: statResult.stdout };
 }
 
 /**
@@ -368,3 +355,10 @@ export function summarizeForPrompt(report,  opts: Record<string, any> = {}) {
 
   return parts.join("\n");
 }
+
+/**
+ * Internal helpers exposed for regression tests only. Not part of the public
+ * API — external modules should use groundProject() / summarizeForPrompt() /
+ * getDiff() instead.
+ */
+export const _testing = { truncate, stripAnsi, parseTestCounts, parseFailingTests };

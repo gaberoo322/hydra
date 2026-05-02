@@ -17,7 +17,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { loadAgentMemory } from "./agent-memory.ts";
 import { getCumulativeAccomplishments } from "./metrics.ts";
-import { summarizeForPrompt, getDiff, getDiffStat } from "./grounding.ts";
+import { summarizeForPrompt, getDiff } from "./grounding.ts";
 import { loadReflections } from "./agent-memory.ts";
 import { loadRelevantReflections, formatReflectionsForPrompt } from "./reflections.ts";
 import { redisKeys } from "./redis-keys.ts";
@@ -147,11 +147,11 @@ async function loadContinuityContext(
   if (lastReport) {
     if (lastCycleReport?.commitSha) {
       try {
-        const diffSince = await getDiff(PROJECT_WORKSPACE, lastCycleReport.commitSha);
+        const { diff: diffSince, stat: diffStat } = await getDiff(PROJECT_WORKSPACE, lastCycleReport.commitSha);
         const diffLines = diffSince.split("\n").length;
         continuityContext = `## CONTINUITY (what happened since last cycle)\n${lastReport}\n\nRepo changes since last cycle commit (${lastCycleReport.commitSha.slice(0, 7)}): ${diffLines} diff lines\n`;
         if (diffLines > 0 && diffLines < 200) {
-          continuityContext += `Diff stat:\n${await getDiffStat(PROJECT_WORKSPACE, lastCycleReport.commitSha)}\n`;
+          continuityContext += `Diff stat:\n${diffStat}\n`;
         }
       } catch (err: any) {
         console.error(`[ContextBuilder] Continuity diff failed, using simpler context: ${err.message}`);
