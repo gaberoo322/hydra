@@ -3,7 +3,16 @@
  *
  * Builds an adjacency graph (file A imports file B) from .ts/.tsx source files.
  * Zero runtime dependencies — regex only.
+ *
+ * Also provides a cached project-level entry point: `generateRepoMap()` reads
+ * the file tree, builds the graph, and formats scope-aware context. Results are
+ * cached per file-tree hash so repeated calls within the same grounding cycle
+ * (unchanged project) are free.
  */
+
+import { readFile, readdir, stat } from "node:fs/promises";
+import { join, relative } from "node:path";
+import { createHash } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -461,4 +470,158 @@ function normalizePath(p: string): string {
     }
   }
   return out.join("/");
+}
+
+// ---------------------------------------------------------------------------
+// File-tree hashing + caching
+// ---------------------------------------------------------------------------
+
+interface RepoMapCache {
+  fileTreeHash: string;
+  graph: ImportGraph;
+}
+
+let _cache: RepoMapCache | null = null;
+
+/**
+ * Compute a SHA-256 hash of the sorted file-tree listing.
+ * Used as the cache key — if the set of files hasn't changed, the graph is
+ * still valid.
+ */
+export function hashFileTree(fileTree: string): string {
+  const sorted = fileTree
+    .split("\n")
+    .filter(Boolean)
+    .sort()
+    .join("\n");
+  return createHash("sha256").update(sorted).digest("hex");
+}
+
+/**
+ * Clear the repo-map cache (useful for testing).
+ */
+export function clearRepoMapCache(): void {
+  _cache = null;
+}
+
+// ---------------------------------------------------------------------------
+// Recursive TS file collector
+// ---------------------------------------------------------------------------
+
+async function collectTsFiles(
+  rootDir: string,
+  dir: string,
+  result: Map<string, string>,
+): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    /* intentional: directory may not exist or be unreadable */
+    return;
+  }
+
+  for (const entry of entries) {
+    const fullPath = join(dir, entry.name);
+
+    // Skip common non-source directories
+    if (entry.isDirectory()) {
+      if (
+        entry.name === "node_modules" ||
+        entry.name === ".git" ||
+        entry.name === "dist" ||
+        entry.name === "build" ||
+        entry.name === "coverage"
+      ) {
+        continue;
+      }
+      await collectTsFiles(rootDir, fullPath, result);
+    } else if (/\.tsx?$/.test(entry.name) && !entry.name.endsWith(".d.ts")) {
+      try {
+        const content = await readFile(fullPath, "utf-8");
+        const relPath = relative(rootDir, fullPath);
+        result.set(relPath, content);
+      } catch {
+        /* intentional: file may be unreadable */
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// generateRepoMap — cached project-level entry point
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a scope-aware repo-map string for the executor prompt.
+ *
+ * Reads all .ts/.tsx files under `projectRoot`, builds the import graph,
+ * selects neighbors of `scopeFiles`, and formats the result.
+ *
+ * Results are cached per file-tree hash (from grounding). If the file tree
+ * hasn't changed since the last call, the cached graph is reused and only
+ * the scope-aware selection + formatting is re-run (which is cheap).
+ *
+ * @param projectRoot - Absolute path to the project root
+ * @param fileTree    - The file-tree string from grounding (used for cache key)
+ * @param scopeFiles  - Files in-scope for the current task (from scopeBoundary.in)
+ * @param tokenBudget - Max approximate tokens for the formatted output (default 1500)
+ * @returns Formatted repo-map string, or empty string on error
+ */
+export async function generateRepoMap(
+  projectRoot: string,
+  fileTree: string,
+  scopeFiles: string[],
+  tokenBudget = 1500,
+): Promise<string> {
+  try {
+    const treeHash = hashFileTree(fileTree);
+
+    let graph: ImportGraph;
+    if (_cache && _cache.fileTreeHash === treeHash) {
+      graph = _cache.graph;
+    } else {
+      // Read all TS files and build the graph
+      const files = new Map<string, string>();
+      await collectTsFiles(projectRoot, join(projectRoot, "src"), files);
+      // Also check root-level .ts files (e.g. drizzle.config.ts)
+      try {
+        const rootEntries = await readdir(projectRoot, { withFileTypes: true });
+        for (const entry of rootEntries) {
+          if (entry.isFile() && /\.tsx?$/.test(entry.name) && !entry.name.endsWith(".d.ts")) {
+            try {
+              const content = await readFile(join(projectRoot, entry.name), "utf-8");
+              files.set(entry.name, content);
+            } catch {
+              /* intentional: file may be unreadable */
+            }
+          }
+        }
+      } catch {
+        /* intentional: root dir listing failure is non-fatal */
+      }
+
+      graph = buildImportGraph(files);
+
+      // Update cache
+      _cache = { fileTreeHash: treeHash, graph };
+    }
+
+    // Select scope-aware neighbors and format
+    const neighbors = selectScopeNeighbors(graph, scopeFiles);
+
+    // Also include scope files themselves (ranked first)
+    const scores = computePageRank(graph);
+    const scopeRanked = scopeFiles
+      .filter((f) => graph.edges.has(f))
+      .map((f) => ({ file: f, score: scores.get(f) ?? 0 }));
+
+    const allRanked = [...scopeRanked, ...neighbors];
+    if (allRanked.length === 0) return "";
+
+    return formatRepoMap(graph, allRanked, tokenBudget);
+  } catch (err: any) {
+    console.error(`[RepoMap] Failed to generate repo map: ${err.message}`);
+    return "";
+  }
 }

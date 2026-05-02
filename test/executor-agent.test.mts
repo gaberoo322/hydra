@@ -110,6 +110,30 @@ describe("buildExecutorPrompt", () => {
     assert.ok(prompt.includes("## ACCEPTANCE CRITERIA"));
   });
 
+  test("includes CODEBASE CONTEXT section when repoMapContext is provided", () => {
+    const repoMapContext = "src/utils.ts — log (imported by 4 files)\nsrc/api.ts — createApp (imported by 1 files)";
+    const prompt = buildExecutorPrompt(makeInput({ repoMapContext }));
+    assert.ok(prompt.includes("## CODEBASE CONTEXT"), "should have CODEBASE CONTEXT header");
+    assert.ok(prompt.includes("src/utils.ts"), "should include repo map content");
+    assert.ok(prompt.includes("imported by 4 files"), "should include importer count");
+    // Verify order: CODEBASE CONTEXT between ACCEPTANCE CRITERIA and VERIFICATION
+    const contextIdx = prompt.indexOf("## CODEBASE CONTEXT");
+    const criteriaIdx = prompt.indexOf("## ACCEPTANCE CRITERIA");
+    const verificationIdx = prompt.indexOf("## VERIFICATION");
+    assert.ok(criteriaIdx < contextIdx, "CODEBASE CONTEXT should come after ACCEPTANCE CRITERIA");
+    assert.ok(contextIdx < verificationIdx, "CODEBASE CONTEXT should come before VERIFICATION");
+  });
+
+  test("omits CODEBASE CONTEXT section when repoMapContext is empty", () => {
+    const prompt = buildExecutorPrompt(makeInput({ repoMapContext: "" }));
+    assert.ok(!prompt.includes("## CODEBASE CONTEXT"), "should NOT have CODEBASE CONTEXT when empty");
+  });
+
+  test("omits CODEBASE CONTEXT section when repoMapContext is undefined", () => {
+    const prompt = buildExecutorPrompt(makeInput());
+    assert.ok(!prompt.includes("## CODEBASE CONTEXT"), "should NOT have CODEBASE CONTEXT when undefined");
+  });
+
   test("truncates groundingSummary at 3000 chars", () => {
     const marker = "\u2603"; // snowman char not used elsewhere in prompt
     const longSummary = marker.repeat(5000);
