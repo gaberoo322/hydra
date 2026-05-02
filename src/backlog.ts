@@ -15,50 +15,36 @@
  *   hydra:backlog:counter       → Auto-increment ID counter
  */
 
-import Redis from "ioredis";
 import { redisKeys } from "./redis-keys.ts";
+import {
+  getBacklogItemRaw, saveBacklogItem, removeBacklogItem as removeBacklogItemAdapter,
+  getBacklogLaneIds, getBacklogLaneCount, addToBacklogLane, removeFromBacklogLane,
+  incrBacklogCounter, evalScript,
+} from "./redis-adapter.ts";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const DONE_RETENTION_DAYS = 7;
 const LANES = ["triage", "backlog", "queued", "blocked", "inProgress", "done"];
 
-const ITEMS_KEY = redisKeys.backlogItems();
-const COUNTER_KEY = redisKeys.backlogCounter();
-const laneKey = (lane) => redisKeys.backlogLane(lane);
-
-let redis = null;
-
-function getRedis() {
-  if (!redis) redis = new Redis(REDIS_URL);
-  return redis;
-}
-
 async function nextId() {
-  const id = await getRedis().incr(COUNTER_KEY);
-  return `item-${id}`;
+  return incrBacklogCounter();
 }
 
 async function getItem(id) {
-  const raw = await getRedis().hget(ITEMS_KEY, id);
+  const raw = await getBacklogItemRaw(id);
   if (!raw) return null;
   return JSON.parse(raw);
 }
 
 async function saveItem(item) {
-  await getRedis().hset(ITEMS_KEY, item.id, JSON.stringify(item));
+  await saveBacklogItem(item.id, JSON.stringify(item));
 }
 
 async function removeItem(id) {
-  const r = getRedis();
-  await r.hdel(ITEMS_KEY, id);
-  for (const lane of LANES) {
-    await r.zrem(laneKey(lane), id);
-  }
+  await removeBacklogItemAdapter(id, LANES);
 }
 
 async function getLaneItems(lane) {
-  const r = getRedis();
-  const ids = await r.zrange(laneKey(lane), 0, -1);
+  const ids = await getBacklogLaneIds(lane);
   if (ids.length === 0) return [];
   const items = [];
   for (const id of ids) {
@@ -83,10 +69,9 @@ async function loadBacklog() {
  * Get backlog depth counts for monitoring.
  */
 async function getBacklogCounts() {
-  const r = getRedis();
   const counts: Record<string, number> = {};
   for (const lane of LANES) {
-    counts[lane] = await r.zcard(laneKey(lane));
+    counts[lane] = await getBacklogLaneCount(lane);
   }
   counts.total = (counts.triage || 0) + counts.backlog + counts.queued;
   return counts;
@@ -146,7 +131,7 @@ async function addToBacklog(item) {
   };
 
   await saveItem(backlogItem);
-  await getRedis().zadd(laneKey(targetLane), Date.now(), id);
+  await addToBacklogLane(targetLane, Date.now(), id);
   return { added: true, id };
 }
 
@@ -155,8 +140,7 @@ async function addToBacklog(item) {
  * Priority 1 (urgent) first, 0 (none/unset) last. Ties broken by score then age.
  */
 async function promoteToQueued(count = 1) {
-  const r = getRedis();
-  const ids = await r.zrange(laneKey("backlog"), 0, -1);
+  const ids = await getBacklogLaneIds("backlog");
   if (ids.length === 0) return [];
 
   // Fetch all items and sort by priority
@@ -185,11 +169,11 @@ async function promoteToQueued(count = 1) {
   const moved = [];
 
   for (const item of toPromote) {
-    await r.zrem(laneKey("backlog"), item.id);
+    await removeFromBacklogLane("backlog", item.id);
     item.lane = "queued";
     item.meta = { ...item.meta, queuedAt: new Date().toISOString().split("T")[0] };
     await saveItem(item);
-    await r.zadd(laneKey("queued"), Date.now(), item.id);
+    await addToBacklogLane("queued", Date.now(), item.id);
     moved.push(item);
   }
 
@@ -200,19 +184,17 @@ async function promoteToQueued(count = 1) {
  * Move a queued item to In Progress by title.
  */
 async function moveToInProgress(title) {
-  const r = getRedis();
-
   // Search queued first, then backlog
   for (const sourceLane of ["queued", "backlog"]) {
-    const ids = await r.zrange(laneKey(sourceLane), 0, -1);
+    const ids = await getBacklogLaneIds(sourceLane);
     for (const id of ids) {
       const item = await getItem(id);
       if (item && item.title === title) {
-        await r.zrem(laneKey(sourceLane), id);
+        await removeFromBacklogLane(sourceLane, id);
         item.lane = "inProgress";
         item.meta = { ...item.meta, startedAt: new Date().toISOString().split("T")[0] };
         await saveItem(item);
-        await r.zadd(laneKey("inProgress"), Date.now(), id);
+        await addToBacklogLane("inProgress", Date.now(), id);
         return true;
       }
     }
@@ -224,13 +206,12 @@ async function moveToInProgress(title) {
  * Move an in-progress item to Done.
  */
 async function moveToDone(title, outcome = "merged") {
-  const r = getRedis();
-  const ids = await r.zrange(laneKey("inProgress"), 0, -1);
+  const ids = await getBacklogLaneIds("inProgress");
 
   for (const id of ids) {
     const item = await getItem(id);
     if (item && item.title === title) {
-      await r.zrem(laneKey("inProgress"), id);
+      await removeFromBacklogLane("inProgress", id);
       item.lane = "done";
       item.checked = outcome === "merged";
       item.meta = {
@@ -240,7 +221,7 @@ async function moveToDone(title, outcome = "merged") {
       };
       await saveItem(item);
       // Score with negative timestamp so newest is first in zrange
-      await r.zadd(laneKey("done"), -Date.now(), id);
+      await addToBacklogLane("done", -Date.now(), id);
       return true;
     }
   }
@@ -251,14 +232,12 @@ async function moveToDone(title, outcome = "merged") {
  * Move an item to the Blocked lane.
  */
 async function moveToBlocked(title, reason) {
-  const r = getRedis();
-
   for (const sourceLane of ["inProgress", "queued", "backlog"]) {
-    const ids = await r.zrange(laneKey(sourceLane), 0, -1);
+    const ids = await getBacklogLaneIds(sourceLane);
     for (const id of ids) {
       const item = await getItem(id);
       if (item && item.title === title) {
-        await r.zrem(laneKey(sourceLane), id);
+        await removeFromBacklogLane(sourceLane, id);
         item.lane = "blocked";
         item.meta = {
           ...item.meta,
@@ -266,7 +245,7 @@ async function moveToBlocked(title, reason) {
           blockedReason: reason,
         };
         await saveItem(item);
-        await r.zadd(laneKey("blocked"), Date.now(), id);
+        await addToBacklogLane("blocked", Date.now(), id);
         console.log(`[Backlog] Moved "${title}" to Blocked: ${reason}`);
         return true;
       }
@@ -279,17 +258,16 @@ async function moveToBlocked(title, reason) {
  * Remove a failed/abandoned item from In Progress back to Backlog.
  */
 async function returnToBacklog(title, reason) {
-  const r = getRedis();
-  const ids = await r.zrange(laneKey("inProgress"), 0, -1);
+  const ids = await getBacklogLaneIds("inProgress");
 
   for (const id of ids) {
     const item = await getItem(id);
     if (item && item.title === title) {
-      await r.zrem(laneKey("inProgress"), id);
+      await removeFromBacklogLane("inProgress", id);
       item.lane = "backlog";
       item.meta = { ...item.meta, returnedAt: new Date().toISOString().split("T")[0], returnReason: reason };
       await saveItem(item);
-      await r.zadd(laneKey("backlog"), Date.now(), id);
+      await addToBacklogLane("backlog", Date.now(), id);
       return true;
     }
   }
@@ -300,14 +278,13 @@ async function returnToBacklog(title, reason) {
  * Prune done items older than DONE_RETENTION_DAYS.
  */
 async function pruneOldDoneItems() {
-  const r = getRedis();
-  const ids = await r.zrange(laneKey("done"), 0, -1);
+  const ids = await getBacklogLaneIds("done");
   const cutoff = Date.now() - DONE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let pruned = 0;
 
   for (const id of ids) {
     const item = await getItem(id);
-    if (!item) { await r.zrem(laneKey("done"), id); continue; }
+    if (!item) { await removeFromBacklogLane("done", id); continue; }
     const completedAt = item.meta?.completedAt;
     if (completedAt && new Date(completedAt).getTime() < cutoff) {
       await removeItem(id);
@@ -325,14 +302,13 @@ async function pruneOldDoneItems() {
  * Used by priorities-refresh to sync [BLOCKED] items from priorities.md.
  */
 async function blockItemById(itemId, reason) {
-  const r = getRedis();
   const item = await getItem(itemId);
   if (!item) return false;
   if (item.lane === "blocked") return false; // already blocked
 
   // Remove from current lane
   for (const lane of LANES) {
-    await r.zrem(laneKey(lane), itemId);
+    await removeFromBacklogLane(lane, itemId);
   }
 
   item.lane = "blocked";
@@ -342,7 +318,7 @@ async function blockItemById(itemId, reason) {
     blockedReason: reason,
   };
   await saveItem(item);
-  await r.zadd(laneKey("blocked"), Date.now(), itemId);
+  await addToBacklogLane("blocked", Date.now(), itemId);
   console.log(`[Backlog] Blocked item "${item.title}" (${itemId}): ${reason}`);
   return true;
 }
@@ -352,19 +328,18 @@ async function blockItemById(itemId, reason) {
  */
 async function moveItemToLane(itemId, targetLane) {
   if (!LANES.includes(targetLane)) return { ok: false, error: `Invalid lane: ${targetLane}` };
-  const r = getRedis();
   const item = await getItem(itemId);
   if (!item) return { ok: false, error: "Item not found" };
 
   // Remove from current lane
   for (const lane of LANES) {
-    await r.zrem(laneKey(lane), itemId);
+    await removeFromBacklogLane(lane, itemId);
   }
 
   item.lane = targetLane;
   await saveItem(item);
   const score = targetLane === "done" ? -Date.now() : Date.now();
-  await r.zadd(laneKey(targetLane), score, itemId);
+  await addToBacklogLane(targetLane, score, itemId);
   return { ok: true };
 }
 
@@ -410,7 +385,7 @@ async function getItemsByParent(parentId) {
  * Close the Redis connection (for tests/cleanup).
  */
 async function closeBacklogRedis() {
-  if (redis) { redis.disconnect(); redis = null; }
+  // No-op: Redis connection is managed by the shared redis-adapter singleton
 }
 
 /**
@@ -448,7 +423,7 @@ const STALE_IN_PROGRESS_DAYS = parseInt(process.env.HYDRA_STALE_IN_PROGRESS_DAYS
  * Get the current number of items in the inProgress lane.
  */
 async function getInProgressCount() {
-  return await getRedis().zcard(laneKey("inProgress"));
+  return await getBacklogLaneCount("inProgress");
 }
 
 /**
@@ -475,8 +450,7 @@ async function isWipLimitReached() {
  * Returns the list of requeued items for logging/notification.
  */
 async function requeueStaleInProgressItems() {
-  const r = getRedis();
-  const ids = await r.zrange(laneKey("inProgress"), 0, -1);
+  const ids = await getBacklogLaneIds("inProgress");
   const now = Date.now();
   const cutoffMs = STALE_IN_PROGRESS_DAYS * 24 * 60 * 60 * 1000;
   const requeued = [];
@@ -493,7 +467,7 @@ async function requeueStaleInProgressItems() {
 
     const ageMs = now - startedMs;
     if (ageMs > cutoffMs) {
-      await r.zrem(laneKey("inProgress"), id);
+      await removeFromBacklogLane("inProgress", id);
       item.lane = "queued";
       item.meta = {
         ...item.meta,
@@ -501,7 +475,7 @@ async function requeueStaleInProgressItems() {
         requeueReason: `Stale in-progress for ${Math.round(ageMs / (24 * 60 * 60 * 1000))} days (WIP limit enforcement)`,
       };
       await saveItem(item);
-      await r.zadd(laneKey("queued"), Date.now(), id);
+      await addToBacklogLane("queued", Date.now(), id);
       requeued.push(item);
       console.log(`[Backlog] Requeued stale inProgress item ${id} ("${item.title?.slice(0, 60)}") — ${Math.round(ageMs / (24 * 60 * 60 * 1000))} days old`);
     }
@@ -600,13 +574,12 @@ return raw
  * @returns {Promise<{claimed: boolean, item?: object, reason?: string}>}
  */
 async function claimNextQueuedItem(claimedBy) {
-  const r = getRedis();
-  const result = await r.eval(
+  const result = await evalScript(
     LUA_CLAIM_NEXT_QUEUED,
     3,
-    laneKey("queued"),
-    ITEMS_KEY,
-    laneKey("inProgress"),
+    redisKeys.backlogLane("queued"),
+    redisKeys.backlogItems(),
+    redisKeys.backlogLane("inProgress"),
     Date.now(),
     WIP_LIMIT,
   );
