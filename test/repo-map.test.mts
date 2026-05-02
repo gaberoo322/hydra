@@ -14,6 +14,8 @@ import {
   computePageRank,
   selectScopeNeighbors,
   formatRepoMap,
+  hashFileTree,
+  clearRepoMapCache,
 } from "../src/repo-map.ts";
 import type { ExportedSymbol, ImportEdge } from "../src/repo-map.ts";
 
@@ -481,5 +483,51 @@ describe("repo-map formatRepoMap()", () => {
     const output = formatRepoMap(graph, allFiles);
     const lines = output.split("\n");
     assert.equal(lines.length, 5, "default budget should fit all 5 fixture files");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hashFileTree
+// ---------------------------------------------------------------------------
+
+describe("repo-map hashFileTree()", () => {
+  test("produces consistent hash for same file tree", () => {
+    const tree = "src/a.ts\nsrc/b.ts\nsrc/c.ts";
+    const h1 = hashFileTree(tree);
+    const h2 = hashFileTree(tree);
+    assert.equal(h1, h2);
+  });
+
+  test("produces same hash regardless of line order", () => {
+    const tree1 = "src/b.ts\nsrc/a.ts\nsrc/c.ts";
+    const tree2 = "src/a.ts\nsrc/c.ts\nsrc/b.ts";
+    assert.equal(hashFileTree(tree1), hashFileTree(tree2));
+  });
+
+  test("produces different hash when files change", () => {
+    const tree1 = "src/a.ts\nsrc/b.ts";
+    const tree2 = "src/a.ts\nsrc/b.ts\nsrc/c.ts";
+    assert.notEqual(hashFileTree(tree1), hashFileTree(tree2));
+  });
+
+  test("ignores empty lines", () => {
+    const tree1 = "src/a.ts\n\nsrc/b.ts\n";
+    const tree2 = "src/a.ts\nsrc/b.ts";
+    assert.equal(hashFileTree(tree1), hashFileTree(tree2));
+  });
+
+  test("returns a hex string", () => {
+    const hash = hashFileTree("src/a.ts");
+    assert.ok(/^[0-9a-f]{64}$/.test(hash), "should be a 64-char hex SHA-256");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// clearRepoMapCache
+// ---------------------------------------------------------------------------
+
+describe("repo-map clearRepoMapCache()", () => {
+  test("does not throw when called", () => {
+    assert.doesNotThrow(() => clearRepoMapCache());
   });
 });

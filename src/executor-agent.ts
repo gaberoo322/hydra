@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker } from "./task-tracker.ts";
 import { loadAgentMemory, formatMemoryForPrompt } from "./agent-memory.ts";
+import { generateRepoMap } from "./repo-map.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -65,10 +66,11 @@ export interface BuildPromptInput {
   useWorktree: boolean;
   branchName: string;
   complexity: string;
+  repoMapContext?: string;
 }
 
 export function buildExecutorPrompt(input: BuildPromptInput): string {
-  const { task, groundingSummary, executorMemory, executorKnowledge, testPatternHint, useWorktree, branchName, complexity } = input;
+  const { task, groundingSummary, executorMemory, executorKnowledge, testPatternHint, useWorktree, branchName, complexity, repoMapContext } = input;
 
   const prompt = [
     `## TASK`,
@@ -82,6 +84,12 @@ export function buildExecutorPrompt(input: BuildPromptInput): string {
     `## ACCEPTANCE CRITERIA`,
     ...(task.acceptanceCriteria || []).map((c, i) => `${i + 1}. ${c}`),
     "",
+    ...(repoMapContext ? [
+      `## CODEBASE CONTEXT`,
+      `The following files are most relevant to your task (ranked by import centrality):`,
+      repoMapContext,
+      "",
+    ] : []),
     `## VERIFICATION (these commands will be run AFTER you finish)`,
     ...(task.verificationPlan || []).map((s) => `- ${s.label}: \`${s.command}\` (expected: ${s.expected})`),
     "",
@@ -199,6 +207,24 @@ export async function runExecutorAgent(
   ]);
   const executorKnowledge = ovCtx.formatted || "";
 
+  // Generate scope-aware repo map (cached per file-tree hash)
+  let repoMapContext = "";
+  try {
+    const scopeFiles = task.scopeBoundary?.in || [];
+    if (scopeFiles.length > 0 && grounding.fileTree) {
+      repoMapContext = await generateRepoMap(
+        PROJECT_WORKSPACE,
+        grounding.fileTree,
+        scopeFiles,
+      );
+      if (repoMapContext) {
+        console.log(`[ExecutorAgent] Generated repo map context (${repoMapContext.split("\n").length} entries)`);
+      }
+    }
+  } catch (err: any) {
+    console.error(`[ExecutorAgent] Repo map generation failed (non-fatal): ${err.message}`);
+  }
+
   // Find a representative test file so executor can match the project's test patterns
   let testPatternHint = "";
   try {
@@ -219,6 +245,7 @@ export async function runExecutorAgent(
     useWorktree,
     branchName,
     complexity,
+    repoMapContext,
   });
 
   const personality = await findPersonality("executor");
