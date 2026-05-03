@@ -20,7 +20,9 @@ import {
   recordResearchEvent, recordBuildEvent,
   getResearchEventCount24h, getBuildEventCount24h,
   consumeResearchForceOnce,
+  listLPop, listLen,
 } from "./redis-adapter.ts";
+import { REFRAME_QUEUE, REFRAME_INTERLEAVE_INTERVAL } from "./anchor-selection.ts";
 // research-architect removed — methodology files are frozen at current state
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
@@ -516,6 +518,28 @@ async function runScheduledCycle(eventBus) {
   // (priority #4) — no need to pre-check here. Removing the redundant
   // groundProject() call saves ~49s per cycle.
   let cycleOpts: Record<string, any> = {};
+
+  // Reframe interleaving (issue #57): every Nth cycle, force a reframe anchor
+  // if the queue is non-empty. This ensures reframe items get scheduled more
+  // frequently instead of starving behind higher-priority sources.
+  try {
+    const reframeLen = await listLen(REFRAME_QUEUE);
+    if (reframeLen > 0 && state.cyclesRun > 0 && state.cyclesRun % REFRAME_INTERLEAVE_INTERVAL === 0) {
+      const raw = await listLPop(REFRAME_QUEUE);
+      if (raw) {
+        const item = JSON.parse(raw);
+        cycleOpts.anchor = {
+          type: "reframe",
+          reference: item.originalTitle,
+          whyNow: `Reframe interleave: queue has ${reframeLen} items, forcing drain every ${REFRAME_INTERLEAVE_INTERVAL} cycles`,
+          context: item,
+        };
+        console.log(`[Scheduler] Reframe interleave: forcing reframe anchor "${item.originalTitle}" (queue: ${reframeLen}, cycle: ${state.cyclesRun})`);
+      }
+    }
+  } catch (err: any) {
+    console.error(`[Scheduler] Reframe interleave check failed: ${err.message}`);
+  }
 
   let result = null;
   try {
