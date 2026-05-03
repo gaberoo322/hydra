@@ -23,8 +23,7 @@ import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker } from "./task-tracker.ts";
 import { runMutationTests } from "./mutation-testing.ts";
 import { runJitTests } from "./jit-testing.ts";
-import { recordPlannerLesson, recordExecutorLesson, recordSkepticLesson, recordReflection } from "./agent-memory.ts";
-import { recordReflection as recordGlobalReflection } from "./reflections.ts";
+import { recordOutcome } from "./learning.ts";
 import { recordCycleMetrics } from "./metrics.ts";
 import { reportOutcome } from "./anchor-selection.ts";
 import { fail, block } from "./backlog.ts";
@@ -116,14 +115,12 @@ export async function runVerificationPipeline(
       console.log(`[ControlLoop] RECONCILE: ${w}`);
     }
     if (reconciliation.scopeCreep.length > 0) {
-      try {
-        await recordPlannerLesson(cycleId, task, "merged", {
-          filesChanged: verification.filesChanged.length,
-          scopeCreep: reconciliation.scopeCreep,
-        });
-      } catch (err: any) {
-        console.error(`[ControlLoop] Failed to record scope-creep lesson: ${err.message}`);
-      }
+      await recordOutcome({
+        agents: ["planner"],
+        cycleId, task, finalState: "merged",
+        anchorRef: "", anchorType: "",
+        context: { filesChanged: verification.filesChanged.length, scopeCreep: reconciliation.scopeCreep },
+      });
     }
   } else if (task.scopeBoundary?.in?.length > 0) {
     console.log(`[ControlLoop] RECONCILE: plan-vs-actual aligned (${verification.filesChanged.length} files)`);
@@ -264,18 +261,21 @@ async function handleVerificationFailure(
   });
   await tracker.transitionTask(taskId, "failed", { verification });
 
-  // Record episodic reflections
-  await recordReflection({
-    cycleId, anchorRef: anchor.reference, taskTitle: task.title,
-    outcome: "verification-failed", reason: `Verification failed: ${failedSteps.join(", ")}`,
-    verificationErrors: failedSteps,
-  }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
-  await recordGlobalReflection({
-    cycleId, anchorType: anchor.type, anchorReference: anchor.reference,
-    failureMode: "verification-failed", whatFailed: task.title,
-    whyItFailed: `Verification failed: ${failedSteps.join(", ")}`,
-    whatToTryDifferently: `Address these specific verification failures: ${failedSteps.join(", ")}. Consider narrower scope or fixing verification errors before adding new behavior.`,
-  }).catch((err: any) => console.error(`[ControlLoop] Failed to record global reflection: ${err.message}`));
+  // Record episodic reflections + failure lessons via unified facade
+  const failedStderr = verification.steps.find((s: any) => !s.passed)?.stderr || "";
+  await recordOutcome({
+    agents: ["planner", "executor", "skeptic"],
+    cycleId, task, finalState: "failed",
+    anchorRef: anchor.reference, anchorType: anchor.type,
+    context: { failReason: `Verification failed: ${failedSteps.join(", ")}`, failedSteps, verificationStderr: failedStderr },
+    skepticVerdict: "approve",
+    reflection: {
+      failureMode: "verification-failed", whatFailed: task.title,
+      whyItFailed: `Verification failed: ${failedSteps.join(", ")}`,
+      whatToTryDifferently: `Address these specific verification failures: ${failedSteps.join(", ")}. Consider narrower scope or fixing verification errors before adding new behavior.`,
+      verificationErrors: failedSteps,
+    },
+  });
 
   await reportOutcome(anchor, { status: "failed", reason: `Verification failed: ${failedSteps.join(", ")}`, verification, taskId });
 
@@ -320,16 +320,6 @@ async function handleVerificationFailure(
     await fail(anchor.reference, "verification failed", { eventBus, cycleId });
   }
 
-  // Record failure lessons
-  const failedStderr = verification.steps.find((s: any) => !s.passed)?.stderr || "";
-  try {
-    await recordPlannerLesson(cycleId, task, "failed", { failReason: `Verification failed: ${failedSteps.join(", ")}`, failedSteps });
-    await recordExecutorLesson(cycleId, task, "failed", { failedSteps, verificationStderr: failedStderr });
-    await recordSkepticLesson(cycleId, task, "approve", "failed");
-  } catch (err: any) {
-    console.error(`[ControlLoop] Failed to record verification-failure lessons: ${err.message}`);
-  }
-
   await cleanupBrokenBranch(PROJECT_WORKSPACE);
   await ovSession.logOutcome("failed", `Verification failed: ${failedSteps.join(", ")}`);
   await ovSession.commit();
@@ -371,7 +361,12 @@ async function runMutationGate(
     if (complexity !== "quick-fix" && testable >= 3 && killRate < MUTATION_KILL_THRESHOLD) {
       console.error(`[ControlLoop] MUTATION GATE: kill rate ${killRate}% < ${MUTATION_KILL_THRESHOLD}% threshold — blocking merge`);
       await tracker.transitionTask(taskId, "failed", { reason: `Mutation gate: ${killRate}% kill rate (${mutationReport.survived} survivors)` });
-      await recordPlannerLesson(cycleId, task, "failed", { failReason: `Mutation gate: ${killRate}% kill rate`, failedSteps: ["mutation-testing"] });
+      await recordOutcome({
+        agents: ["planner"],
+        cycleId, task, finalState: "failed",
+        anchorRef: anchor.reference, anchorType: anchor.type,
+        context: { failReason: `Mutation gate: ${killRate}% kill rate`, failedSteps: ["mutation-testing"] },
+      });
       await fail(anchor.reference, "mutation gate blocked merge", { eventBus, cycleId });
 
       await cleanupBrokenBranch(PROJECT_WORKSPACE);
@@ -510,7 +505,12 @@ async function runDiffAwareJitTests(
       console.error(`[ControlLoop] JIT GATE: generated test caught a bug — blocking merge`);
       console.error(`[ControlLoop] Bug details: ${jitReport.bugDetails?.slice(0, 300)}`);
       await tracker.transitionTask(taskId, "failed", { reason: `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}` });
-      await recordPlannerLesson(cycleId, task, "failed", { failReason: "JiT test caught a regression bug", failedSteps: ["jit-testing"] });
+      await recordOutcome({
+        agents: ["planner"],
+        cycleId, task, finalState: "failed",
+        anchorRef: anchor.reference, anchorType: anchor.type,
+        context: { failReason: "JiT test caught a regression bug", failedSteps: ["jit-testing"] },
+      });
       await fail(anchor.reference, "JiT test caught bug", { eventBus, cycleId });
 
       await cleanupBrokenBranch(PROJECT_WORKSPACE);
@@ -584,7 +584,12 @@ async function runScopeEnforcement(
     console.error(`[ControlLoop] Out-of-scope files: ${outOfScope.slice(0, 5).join(", ")}${outOfScope.length > 5 ? ` (+${outOfScope.length - 5} more)` : ""}`);
 
     await tracker.transitionTask(taskId, "failed", { reason: `Scope gate: ${outOfScope.length}/${verification.filesChanged.length} files outside planned scope` });
-    await recordPlannerLesson(cycleId, task, "failed", { failReason: `Scope gate: ${outOfScope.length} files outside scope`, failedSteps: ["scope-enforcement"] });
+    await recordOutcome({
+      agents: ["planner"],
+      cycleId, task, finalState: "failed",
+      anchorRef: anchor.reference, anchorType: anchor.type,
+      context: { failReason: `Scope gate: ${outOfScope.length} files outside scope`, failedSteps: ["scope-enforcement"] },
+    });
     await fail(anchor.reference, "scope gate blocked merge", { eventBus: ctx.eventBus, cycleId });
 
     await cleanupBrokenBranch(PROJECT_WORKSPACE);
