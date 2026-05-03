@@ -13,7 +13,7 @@ import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
 import {
-  listRange, listRPush, listRem, listLPop, listLen, listMove,
+  listRange, listRPush, listRem, listLPop, listLen, listMove, listTrim,
   getString, setString, delKey, incrKey, expireKey,
   hashGetAll, zRevRange, getRedisConnection,
   getRealityReport, getRecentReportIds, getCycleMetrics,
@@ -37,6 +37,11 @@ export const ABANDONMENT_COUNTER_TTL = 86400; // 24h — auto-expire stale count
 // Prior-failure escalation thresholds (issue #18)
 export const PRIOR_FAILURE_AGE_LIMIT_MS = 24 * 60 * 60 * 1000; // 24h — items older than this are auto-escalated
 export const PRIOR_FAILURE_CAP = 20; // hard cap — oldest items escalated to reframe when exceeded
+
+// Reframe queue bounds (issue #57)
+export const REFRAME_QUEUE_CAP = 20; // hard cap — oldest items beyond this are dropped
+export const REFRAME_QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days — items older than this are pruned
+export const REFRAME_INTERLEAVE_INTERVAL = 5; // force a reframe anchor every N cycles if queue is non-empty
 
 // ---------------------------------------------------------------------------
 // Prior-failure escalation — prevent unbounded accumulation (issue #18)
@@ -87,6 +92,49 @@ export async function escalateStalePriorFailures(): Promise<number> {
   }
 
   return escalated;
+}
+
+// ---------------------------------------------------------------------------
+// Reframe queue maintenance — prevent unbounded accumulation (issue #57)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prune the reframe queue: remove items older than REFRAME_QUEUE_MAX_AGE_MS,
+ * then enforce REFRAME_QUEUE_CAP by dropping oldest items beyond the cap.
+ * Called from selectAnchor() before checking the reframe queue.
+ */
+export async function pruneReframeQueue(): Promise<{ aged: number; capped: number }> {
+  let aged = 0;
+  let capped = 0;
+
+  // 1. Age-based pruning — remove items older than 7 days
+  const all = await listRange(REFRAME_QUEUE, 0, -1);
+  const now = Date.now();
+  for (const raw of all) {
+    try {
+      const item = JSON.parse(raw);
+      const ts = item.escalatedAt || item.timestamp;
+      if (!ts) continue;
+      const age = now - new Date(ts).getTime();
+      if (age > REFRAME_QUEUE_MAX_AGE_MS) {
+        await listRem(REFRAME_QUEUE, 1, raw);
+        aged++;
+        console.log(`[ControlLoop] Reframe item "${item.originalTitle || item.originalTaskId}" pruned (age: ${Math.round(age / 86400000)}d, limit: ${REFRAME_QUEUE_MAX_AGE_MS / 86400000}d)`);
+      }
+    } catch (err: any) {
+      console.error(`[ControlLoop] Failed to parse reframe item for age check: ${err.message}`);
+    }
+  }
+
+  // 2. Cap enforcement — drop oldest items beyond the cap (LTRIM keeps indices 0..cap-1)
+  const currentLen = await listLen(REFRAME_QUEUE);
+  if (currentLen > REFRAME_QUEUE_CAP) {
+    capped = currentLen - REFRAME_QUEUE_CAP;
+    await listTrim(REFRAME_QUEUE, 0, REFRAME_QUEUE_CAP - 1);
+    console.log(`[ControlLoop] Reframe queue capped: dropped ${capped} oldest items (${currentLen} → ${REFRAME_QUEUE_CAP})`);
+  }
+
+  return { aged, capped };
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +305,50 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
     }
   }
 
+  // 4. Reframe interleaving (issue #57) — every Nth cycle, force a reframe
+  //    anchor if the queue is non-empty, regardless of normal priority ordering.
+  //    This prevents higher-priority sources from permanently starving reframes.
+  try {
+    const reframeQueueLen = await listLen(REFRAME_QUEUE);
+    if (reframeQueueLen > 0) {
+      const recentMetrics = await zRevRange(redisKeys.metricsIndex(), 0, REFRAME_INTERLEAVE_INTERVAL - 1);
+      let cyclesSinceReframe = 0;
+      for (const id of recentMetrics) {
+        const raw = await getCycleMetrics(id);
+        if (raw.anchorType === "reframe") break;
+        cyclesSinceReframe++;
+      }
+      if (cyclesSinceReframe >= REFRAME_INTERLEAVE_INTERVAL) {
+        // Force a reframe — prune first, then claim
+        try { await pruneReframeQueue(); } catch { /* intentional: pruning is best-effort */ }
+        const forced = await listRange(REFRAME_QUEUE, 0, 0);
+        if (forced.length > 0) {
+          const item = JSON.parse(forced[0]);
+          await listLPop(REFRAME_QUEUE);
+          console.log(`[ControlLoop] Forced reframe interleave after ${cyclesSinceReframe} non-reframe cycles (queue: ${reframeQueueLen})`);
+          return {
+            type: "reframe",
+            reference: item.originalTitle,
+            whyNow: `Forced reframe: ${cyclesSinceReframe} cycles since last reframe. Task "${item.originalTitle}" failed ${item.totalAttempts} times.`,
+            context: item,
+          };
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Reframe interleaving check failed: ${err.message}`);
+  }
+
   // 4.5. Reframe queue — tasks that failed repeatedly and need a fresh approach
+  //      First, prune stale/over-cap items so the queue stays bounded (issue #57).
+  try {
+    const pruned = await pruneReframeQueue();
+    if (pruned.aged > 0 || pruned.capped > 0) {
+      console.log(`[ControlLoop] Reframe queue pruned: ${pruned.aged} aged, ${pruned.capped} capped`);
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Reframe queue pruning failed: ${err.message}`);
+  }
   const reframeItems = await listRange(REFRAME_QUEUE, 0, 0);
   if (reframeItems.length > 0) {
     try {
