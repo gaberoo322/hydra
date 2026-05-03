@@ -18,8 +18,7 @@ import { promisify } from "node:util";
 import { STREAMS } from "./event-bus.ts";
 import { getTracker } from "./task-tracker.ts";
 import { getDiff } from "./grounding.ts";
-import { recordPlannerLesson, recordExecutorLesson, recordReflection } from "./agent-memory.ts";
-import { recordReflection as recordGlobalReflection } from "./reflections.ts";
+import { recordOutcome } from "./learning.ts";
 import { recordCycleMetrics, detectDrift } from "./metrics.ts";
 import { claim, fail } from "./backlog.ts";
 import { reportOutcome } from "./anchor-selection.ts";
@@ -82,16 +81,10 @@ export async function handlePlanResult(
     }
 
     await ovSession.logPlanner(anchor, null);
-    await recordReflection({
-      cycleId, anchorRef: anchor.reference, taskTitle: "Planner produced no task",
-      outcome: "no-task", reason: "Planner could not produce a valid task from this anchor",
-    }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
-    await recordGlobalReflection({
-      cycleId, anchorType: anchor.type, anchorReference: anchor.reference,
-      failureMode: "no-task", whatFailed: "Planner produced no task",
-      whyItFailed: "Planner could not produce a valid task from this anchor",
-      whatToTryDifferently: "Anchor may be too vague, already completed, or blocked. Consider a more specific formulation.",
-    }).catch((err: any) => console.error(`[ControlLoop] Failed to record global reflection: ${err.message}`));
+    await recordOutcome("planner", { title: "Planner produced no task" }, {
+      cycleId, finalState: "no-task", anchor,
+      context: { reason: "Planner could not produce a valid task from this anchor" },
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record outcome: ${err.message}`));
 
     if (anchorConfidence) {
       await recordCalibrationOutcome(cycleId, anchor, anchorConfidence, "no-task");
@@ -142,7 +135,7 @@ export async function runDriftCheck(
   });
   try {
     // @ts-expect-error — migrate to proper types
-    await recordPlannerLesson(cycleId, task, "abandoned", { reason: `Drift: ${drift.reason}` });
+    await recordOutcome("planner", task, { cycleId, finalState: "abandoned", anchor, context: { reason: `Drift: ${drift.reason}` } });
   } catch (err: any) {
     console.error(`[ControlLoop] Failed to record drift lesson: ${err.message}`);
   }
@@ -226,7 +219,7 @@ export async function runPreflightGate(
   const isJudgmentRejection = !skepticResult.reason.startsWith("Preflight:");
   try {
     if (isJudgmentRejection) {
-      await recordPlannerLesson(cycleId, task, "abandoned", { reason: `Review rejected: ${skepticResult.reason}` });
+      await recordOutcome("planner", task, { cycleId, finalState: "abandoned", anchor, context: { reason: `Review rejected: ${skepticResult.reason}` } });
     }
   } catch (err: any) {
     console.error(`[ControlLoop] Failed to record rejection lessons: ${err.message}`);
@@ -317,22 +310,14 @@ export async function runExecuteStep(
   if (!hasDiff) {
     console.log(`[ControlLoop] Executor produced no code changes — failing task`);
     await tracker.transitionTask(taskId, "failed", { reason: "No code changes produced", execResult: { exitCode: execResult.exitCode, duration: execResult.duration } });
-    await recordReflection({
-      cycleId, anchorRef: anchor.reference, taskTitle: task.title,
-      outcome: "no-diff", reason: "Executor ran but produced no code changes",
-    }).catch((err: any) => console.error(`[ControlLoop] Failed to record reflection: ${err.message}`));
-    await recordGlobalReflection({
-      cycleId, anchorType: anchor.type, anchorReference: anchor.reference,
-      failureMode: "no-diff", whatFailed: task.title,
-      whyItFailed: "Executor ran but produced no code changes",
-      whatToTryDifferently: "Provide more specific scope boundary and acceptance criteria. Ensure the task is actionable.",
-    }).catch((err: any) => console.error(`[ControlLoop] Failed to record global reflection: ${err.message}`));
-    try {
-      await recordPlannerLesson(cycleId, task, "failed", { failReason: "Executor produced no code changes" });
-      await recordExecutorLesson(cycleId, task, "failed", { noDiff: true });
-    } catch (err: any) {
-      console.error(`[ControlLoop] Failed to record no-diff lessons: ${err.message}`);
-    }
+    await recordOutcome("planner", task, {
+      cycleId, finalState: "no-diff", anchor,
+      context: { failReason: "Executor produced no code changes", reason: "Executor ran but produced no code changes" },
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record planner outcome: ${err.message}`));
+    await recordOutcome("executor", task, {
+      cycleId, finalState: "failed", anchor,
+      context: { noDiff: true },
+    }).catch((err: any) => console.error(`[ControlLoop] Failed to record executor outcome: ${err.message}`));
     await fail(anchor.reference, "no code changes", { eventBus, cycleId });
     await reportOutcome(anchor, { status: "failed", reason: "No code changes produced", taskId });
     await ovSession.logOutcome("failed", "Executor produced no code changes");

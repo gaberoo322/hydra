@@ -30,8 +30,7 @@ import {
 import { recordCycleMetrics } from "./metrics.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { clearProcessingItem, reportOutcome } from "./anchor-selection.ts";
-import { clearReflections } from "./agent-memory.ts";
-import { clearReflectionsForAnchor } from "./reflections.ts";
+import { clearOutcomes } from "./learning.ts";
 import { complete, fail } from "./backlog.ts";
 import { detectPatterns } from "./pattern-detector.ts";
 import { markTaskComplete } from "./specs.ts";
@@ -327,8 +326,7 @@ export async function runPostMerge(
   const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
   if (finalState === "merged") {
     try { await reportOutcome(anchor, { status: "merged" }); } catch { /* intentional: best-effort cleanup */ }
-    try { await clearReflections(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
-    try { await clearReflectionsForAnchor(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
+    try { await clearOutcomes(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
 
     if (anchor.type === "codebase-health") {
       try {
