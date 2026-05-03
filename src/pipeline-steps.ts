@@ -263,10 +263,137 @@ export async function runPreflightGate(
 }
 
 // ---------------------------------------------------------------------------
-// validateDiffExists — simple git check (moved from verifier.ts, issue #66)
+// Scope creep filter — reset out-of-scope files before verification (issue #58)
 // ---------------------------------------------------------------------------
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Identify files changed vs main that are outside the planned scope boundary.
+ *
+ * Pure function (testable without git). Test files (.test.) are excluded from
+ * cleanup — the executor is expected to create tests even if they weren't
+ * explicitly listed in scopeBoundary.in.
+ *
+ * @param changedFiles — list of files from `git diff --name-only main`
+ * @param scopeIn     — task.scopeBoundary.in (planned files to modify)
+ * @returns files that should be reset (outside scope, not test files)
+ */
+export function identifyOutOfScopeFiles(changedFiles: string[], scopeIn: string[]): string[] {
+  if (!scopeIn || scopeIn.length === 0) return [];
+
+  const scopeSet = new Set(scopeIn);
+  // Also normalize without leading "web/" to handle path prefix mismatches
+  const scopeNormalized = new Set(scopeIn.map((f) => f.replace(/^web\//, "")));
+
+  return changedFiles.filter((f) => {
+    // Test files are always allowed — executor is expected to create/modify tests
+    if (f.includes(".test.")) return false;
+
+    // Exact match against scope
+    if (scopeSet.has(f)) return false;
+
+    // Normalized match (handles web/ prefix mismatch)
+    const normalized = f.replace(/^web\//, "");
+    if (scopeNormalized.has(normalized)) return false;
+
+    // Partial match: scope entry is a directory prefix or vice versa
+    for (const s of scopeIn) {
+      const sNorm = s.replace(/^web\//, "");
+      if (normalized.startsWith(sNorm) || sNorm.startsWith(normalized)) return false;
+    }
+
+    return true;
+  });
+}
+
+/**
+ * Clean out-of-scope file changes from the working tree before verification.
+ *
+ * For each file outside the planned scope boundary, runs `git checkout main -- <file>`
+ * to discard the executor's changes. This prevents scope creep (auto-formatted files,
+ * dirty worktree artifacts, codegen side effects) from leaking into the merge.
+ *
+ * Never throws — logs errors and returns a result object.
+ */
+export async function cleanOutOfScopeChanges(
+  projectDir: string,
+  scopeIn: string[],
+): Promise<{ cleaned: string[]; errors: string[] }> {
+  if (!scopeIn || scopeIn.length === 0) {
+    return { cleaned: [], errors: [] };
+  }
+
+  // Get all files changed vs main
+  let changedFiles: string[] = [];
+  try {
+    const { stdout } = await execFileAsync("git", ["diff", "--name-only", "main"], {
+      cwd: projectDir,
+      timeout: 10000,
+    });
+    changedFiles = stdout.trim().split("\n").filter(Boolean);
+  } catch (err: any) {
+    console.error(`[ScopeFilter] Failed to get diff vs main: ${err.message}`);
+    return { cleaned: [], errors: [`diff failed: ${err.message}`] };
+  }
+
+  // Also include untracked files (new files not yet committed)
+  try {
+    const { stdout } = await execFileAsync("git", ["ls-files", "--others", "--exclude-standard"], {
+      cwd: projectDir,
+      timeout: 10000,
+    });
+    const untracked = stdout.trim().split("\n").filter(Boolean);
+    changedFiles = [...new Set([...changedFiles, ...untracked])];
+  } catch (err: any) {
+    console.error(`[ScopeFilter] Failed to list untracked files: ${err.message}`);
+  }
+
+  const outOfScope = identifyOutOfScopeFiles(changedFiles, scopeIn);
+  if (outOfScope.length === 0) {
+    return { cleaned: [], errors: [] };
+  }
+
+  console.log(`[ScopeFilter] Cleaning ${outOfScope.length} out-of-scope file(s): ${outOfScope.slice(0, 5).join(", ")}${outOfScope.length > 5 ? ` (+${outOfScope.length - 5} more)` : ""}`);
+
+  const cleaned: string[] = [];
+  const errors: string[] = [];
+
+  for (const file of outOfScope) {
+    try {
+      // Try to reset the file to main. If the file is new (not in main),
+      // this will fail — in that case, remove it from the index and working tree.
+      await execFileAsync("git", ["checkout", "main", "--", file], {
+        cwd: projectDir,
+        timeout: 5000,
+      });
+      cleaned.push(file);
+    } catch {
+      // File doesn't exist on main — it's a new file added by the executor outside scope.
+      // Remove it from the working tree.
+      try {
+        await execFileAsync("git", ["rm", "-f", "--", file], {
+          cwd: projectDir,
+          timeout: 5000,
+        });
+        cleaned.push(file);
+      } catch (rmErr: any) {
+        errors.push(`${file}: ${rmErr.message}`);
+        console.error(`[ScopeFilter] Failed to clean ${file}: ${rmErr.message}`);
+      }
+    }
+  }
+
+  if (cleaned.length > 0) {
+    console.log(`[ScopeFilter] Cleaned ${cleaned.length} out-of-scope file(s)`);
+  }
+
+  return { cleaned, errors };
+}
+
+// ---------------------------------------------------------------------------
+// validateDiffExists — simple git check (moved from verifier.ts, issue #66)
+// ---------------------------------------------------------------------------
 
 /**
  * Validate that a git diff exists (actual code changes were made).
@@ -312,6 +439,14 @@ export async function runExecuteStep(
 
   const execResult = await runExecutorAgent(cycleId, task, grounding, groundingSummary, ovSession, complexity);
   await ovSession.logExecutor(execResult);
+
+  // Step 5.5: SCOPE CREEP FILTER — reset out-of-scope changes before verification
+  if (task.scopeBoundary?.in?.length > 0) {
+    const scopeClean = await cleanOutOfScopeChanges(PROJECT_WORKSPACE, task.scopeBoundary.in);
+    if (scopeClean.cleaned.length > 0) {
+      console.log(`[ControlLoop] Step 5.5: Scope filter cleaned ${scopeClean.cleaned.length} out-of-scope file(s)`);
+    }
+  }
 
   // Validate a diff exists
   const hasDiff = await validateDiffExists(PROJECT_WORKSPACE);
