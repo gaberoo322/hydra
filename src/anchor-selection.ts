@@ -13,7 +13,7 @@ import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
 import {
-  listRange, listRPush, listRem, listLPop, listLen, listMove,
+  listRange, listRPush, listRem, listLPop, listLen, listMove, listTrim,
   getString, setString, delKey, incrKey, expireKey,
   hashGetAll, zRevRange, getRedisConnection,
   getRealityReport, getRecentReportIds, getCycleMetrics,
@@ -37,6 +37,81 @@ export const ABANDONMENT_COUNTER_TTL = 86400; // 24h — auto-expire stale count
 // Prior-failure escalation thresholds (issue #18, #93)
 export const PRIOR_FAILURE_AGE_LIMIT_MS = 24 * 60 * 60 * 1000; // 24h — items older than this are auto-escalated
 export const PRIOR_FAILURE_CAP = 10; // hard cap — oldest items escalated to reframe when exceeded
+
+// Reframe queue cap + TTL (issue #57)
+export const REFRAME_QUEUE_CAP = 20;
+export const REFRAME_QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const REFRAME_INTERLEAVE_INTERVAL = 5; // force reframe every Nth cycle when queue non-empty
+
+// ---------------------------------------------------------------------------
+// Reframe queue maintenance — prevent unbounded accumulation (issue #57)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prune stale items (older than 7 days) from the reframe queue and enforce
+ * a hard cap of REFRAME_QUEUE_CAP. Oldest items beyond the cap are dropped
+ * with a log entry. Called from selectAnchor() before consuming a reframe item.
+ *
+ * Returns { pruned: number, dropped: number }.
+ */
+export async function pruneReframeQueue(): Promise<{ pruned: number; dropped: number }> {
+  let pruned = 0;
+  let dropped = 0;
+
+  try {
+    const all = await listRange(REFRAME_QUEUE, 0, -1);
+    if (all.length === 0) return { pruned, dropped };
+
+    const now = Date.now();
+    const kept: string[] = [];
+
+    // Pass 1: filter out items older than 7 days
+    for (const raw of all) {
+      try {
+        const item = JSON.parse(raw);
+        const escalatedAt = item.escalatedAt ? new Date(item.escalatedAt).getTime() : 0;
+        if (escalatedAt > 0 && now - escalatedAt > REFRAME_QUEUE_MAX_AGE_MS) {
+          pruned++;
+          console.log(`[ControlLoop] Reframe queue: pruned stale item "${item.originalTitle || item.originalTaskId}" (age: ${Math.round((now - escalatedAt) / 86400000)}d)`);
+          continue;
+        }
+      } catch (err: any) {
+        // Corrupt item — drop it
+        pruned++;
+        console.error(`[ControlLoop] Reframe queue: dropped corrupt item: ${err.message}`);
+        continue;
+      }
+      kept.push(raw);
+    }
+
+    // Pass 2: enforce hard cap — drop oldest items beyond cap
+    if (kept.length > REFRAME_QUEUE_CAP) {
+      const overflow = kept.length - REFRAME_QUEUE_CAP;
+      for (let i = 0; i < overflow; i++) {
+        try {
+          const item = JSON.parse(kept[i]);
+          console.log(`[ControlLoop] Reframe queue: dropped overflow item "${item.originalTitle || item.originalTaskId}" (queue: ${kept.length}/${REFRAME_QUEUE_CAP})`);
+        } catch {
+          console.log(`[ControlLoop] Reframe queue: dropped overflow item (unparseable)`);
+        }
+        dropped++;
+      }
+      kept.splice(0, overflow);
+    }
+
+    // Only rewrite the list if something changed
+    if (pruned > 0 || dropped > 0) {
+      await delKey(REFRAME_QUEUE);
+      if (kept.length > 0) {
+        await listRPush(REFRAME_QUEUE, ...kept);
+      }
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Reframe queue pruning failed: ${err.message}`);
+  }
+
+  return { pruned, dropped };
+}
 
 // ---------------------------------------------------------------------------
 // Prior-failure escalation — prevent unbounded accumulation (issue #18)
@@ -258,6 +333,15 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   }
 
   // 4.5. Reframe queue — tasks that failed repeatedly and need a fresh approach
+  //      Prune stale (>7d) and overflow (>20) items before consuming (issue #57).
+  try {
+    const { pruned, dropped } = await pruneReframeQueue();
+    if (pruned > 0 || dropped > 0) {
+      console.log(`[ControlLoop] Reframe queue maintenance: pruned=${pruned}, dropped=${dropped}`);
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Reframe queue maintenance failed: ${err.message}`);
+  }
   const reframeItems = await listRange(REFRAME_QUEUE, 0, 0);
   if (reframeItems.length > 0) {
     try {
@@ -644,6 +728,14 @@ export async function clearProcessingItem(anchor) {
       console.error(`[ControlLoop] Failed to clear processing queue item: ${err.message}`);
     }
   }
+}
+
+/**
+ * Get the current length of the reframe queue.
+ * Used by the scheduler for interleaving logic (issue #57).
+ */
+export async function getReframeQueueLen(): Promise<number> {
+  return listLen(REFRAME_QUEUE);
 }
 
 // ---------------------------------------------------------------------------
