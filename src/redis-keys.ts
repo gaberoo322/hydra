@@ -97,6 +97,9 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   schedulerState: () => "hydra:scheduler:state",
   schedulerDailySpend: () => "hydra:scheduler:daily-spend",
+  schedulerResearchEvents: () => "hydra:scheduler:research-events",
+  schedulerBuildEvents: () => "hydra:scheduler:build-events",
+  schedulerResearchForceOnce: () => "hydra:scheduler:research-force-once",
 
   // ---------------------------------------------------------------------------
   // Locks

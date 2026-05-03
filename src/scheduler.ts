@@ -17,6 +17,9 @@ import { redisKeys } from "./redis-keys.ts";
 import {
   getString, setString, getWorkQueueLen, pushToWorkQueue,
   hashGet, hashSetField,
+  recordResearchEvent, recordBuildEvent,
+  getResearchEventCount24h, getBuildEventCount24h,
+  consumeResearchForceOnce,
 } from "./redis-adapter.ts";
 // research-architect removed — methodology files are frozen at current state
 
@@ -25,6 +28,7 @@ const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
 
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 6;
+const RESEARCH_BUILD_RATIO_MAX = parseFloat(process.env.HYDRA_RESEARCH_BUILD_RATIO_MAX) || 3;
 const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 2 * 60 * 60 * 1000; // 2 hours
 // ARCHITECT_EVERY_N_RESEARCH removed — research-architect module disconnected
 const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || Infinity;
@@ -267,9 +271,39 @@ async function maybeRunResearch(eventBus) {
   // Prune old done items from backlog
   try { await pruneOldDoneItems(); } catch {}
 
+  // Check if operator forced a research cycle (bypasses all throttles)
+  const forced = await consumeResearchForceOnce();
+  if (forced) {
+    console.log(`[Scheduler] Research FORCED by operator — bypassing all throttles`);
+    try {
+      const research = await runResearchLoop(eventBus);
+      state.researchCyclesRun++;
+      state.lastResearchAt = new Date().toISOString();
+      await recordResearchEvent();
+      await saveSchedulerState();
+      // @ts-expect-error — migrate to proper types
+      console.log(`[Scheduler] Forced research complete — ${research.autoQueued || 0} items auto-queued`);
+    } catch (err: any) {
+      console.error(`[Scheduler] Forced research cycle failed: ${err.message}`);
+    }
+    return;
+  }
+
   // Check queue depth — skip research when there's enough work to build
   const queueLen = await getWorkQueueLen();
-  if (queueLen >= RESEARCH_QUEUE_THRESHOLD) return;
+  if (queueLen >= RESEARCH_QUEUE_THRESHOLD) {
+    console.log(`[Scheduler] Research suppressed: queue depth ${queueLen} >= threshold ${RESEARCH_QUEUE_THRESHOLD}`);
+    return;
+  }
+
+  // Check research-to-build ratio (rolling 24h window)
+  const researchCount24h = await getResearchEventCount24h();
+  const buildCount24h = await getBuildEventCount24h();
+  const ratio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
+  if (researchCount24h > 0 && ratio > RESEARCH_BUILD_RATIO_MAX) {
+    console.log(`[Scheduler] Research suppressed: ratio ${ratio.toFixed(1)} exceeds max ${RESEARCH_BUILD_RATIO_MAX} (${researchCount24h} research / ${buildCount24h} builds in 24h)`);
+    return;
+  }
 
   // Ratio throttle: if queue still has items, prefer building over researching.
   // Research should only run when the queue is nearly empty (< 3 items).
@@ -351,6 +385,7 @@ async function maybeRunResearch(eventBus) {
     const research = await runResearchLoop(eventBus);
     state.researchCyclesRun++;
     state.lastResearchAt = new Date().toISOString();
+    await recordResearchEvent();
     // research-architect counter removed
     await saveSchedulerState();
 
@@ -490,6 +525,7 @@ async function runScheduledCycle(eventBus) {
     state.cyclesRun++;
     state.lastCycleAt = new Date().toISOString();
     state.consecutiveErrors = 0;
+    try { await recordBuildEvent(); } catch { /* intentional: non-critical ratio tracking */ }
 
     // Codex usage-limit — alert + backoff, auto-resume after 10 minutes
     if (result.__usageLimitHit || result.result?.__usageLimitHit) {
@@ -685,6 +721,9 @@ function stop() {
 
 async function getStatus() {
   const spend = await getDailySpend();
+  const researchCount24h = await getResearchEventCount24h().catch(() => 0);
+  const buildCount24h = await getBuildEventCount24h().catch(() => 0);
+  const currentRatio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
   return {
     running: state.running,
     intervalMs: state.intervalMs,
@@ -702,6 +741,10 @@ async function getStatus() {
     zeroOutputThreshold: ZERO_OUTPUT_THRESHOLD,
     research: {
       queueThreshold: RESEARCH_QUEUE_THRESHOLD,
+      buildRatioMax: RESEARCH_BUILD_RATIO_MAX,
+      currentRatio: Math.round(currentRatio * 10) / 10,
+      researchCount24h,
+      buildCount24h,
       minIntervalHuman: formatDuration(RESEARCH_MIN_INTERVAL_MS),
       cyclesRun: state.researchCyclesRun,
       lastResearchAt: state.lastResearchAt,
@@ -736,8 +779,43 @@ async function autoStart(eventBus) {
   return null;
 }
 
+/**
+ * Determine whether research should be suppressed based on queue depth and ratio.
+ * Pure function — exported for testability (issue #84).
+ *
+ * Returns { suppressed: true, reason: string } or { suppressed: false }.
+ */
+function shouldSuppressResearch(
+  queueLen: number,
+  researchCount24h: number,
+  buildCount24h: number,
+  opts?: { queueThreshold?: number; ratioMax?: number },
+): { suppressed: boolean; reason?: string } {
+  const threshold = opts?.queueThreshold ?? RESEARCH_QUEUE_THRESHOLD;
+  const ratioMax = opts?.ratioMax ?? RESEARCH_BUILD_RATIO_MAX;
+
+  if (queueLen >= threshold) {
+    return {
+      suppressed: true,
+      reason: `Research suppressed: queue depth ${queueLen} >= threshold ${threshold}`,
+    };
+  }
+
+  const ratio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
+  if (researchCount24h > 0 && ratio > ratioMax) {
+    return {
+      suppressed: true,
+      reason: `Research suppressed: ratio ${ratio.toFixed(1)} exceeds max ${ratioMax} (${researchCount24h} research / ${buildCount24h} builds in 24h)`,
+    };
+  }
+
+  return { suppressed: false };
+}
+
 export {
   start, stop, getStatus, autoStart, getDailySpend, DAILY_COST_CAP_USD,
+  RESEARCH_BUILD_RATIO_MAX, RESEARCH_QUEUE_THRESHOLD,
+  shouldSuppressResearch,
   // Exported for test coverage (issue #24):
   computeStallBackoffMs, shouldSendStallAlert, classifyStallState, formatDuration,
 };
