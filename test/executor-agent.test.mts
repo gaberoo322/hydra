@@ -30,7 +30,7 @@ describe("buildExecutorPrompt", () => {
         ],
       },
       groundingSummary: "Tests: 42 passed, 0 failed. Typecheck clean.",
-      executorMemory: null,
+      executorContext: "",
       executorKnowledge: "",
       testPatternHint: "",
       useWorktree: true,

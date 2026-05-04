@@ -15,7 +15,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker } from "./task-tracker.ts";
-import { loadAgentMemory, formatMemoryForPrompt } from "./agent-memory.ts";
+import { getContext } from "./learning.ts";
 import { generateRepoMap } from "./repo-map.ts";
 
 const execFileAsync = promisify(execFile);
@@ -60,7 +60,7 @@ interface GroundingReport {
 export interface BuildPromptInput {
   task: ExecutorTask;
   groundingSummary: string;
-  executorMemory: any;
+  executorContext: string;
   executorKnowledge: string;
   testPatternHint: string;
   useWorktree: boolean;
@@ -70,7 +70,7 @@ export interface BuildPromptInput {
 }
 
 export function buildExecutorPrompt(input: BuildPromptInput): string {
-  const { task, groundingSummary, executorMemory, executorKnowledge, testPatternHint, useWorktree, branchName, complexity, repoMapContext } = input;
+  const { task, groundingSummary, executorContext, executorKnowledge, testPatternHint, useWorktree, branchName, complexity, repoMapContext } = input;
 
   const prompt = [
     `## TASK`,
@@ -96,7 +96,7 @@ export function buildExecutorPrompt(input: BuildPromptInput): string {
     testPatternHint,
     groundingSummary.slice(0, 3000),
     "",
-    formatMemoryForPrompt(executorMemory, "executor"),
+    executorContext,
     "",
     executorKnowledge,
     "",
@@ -200,9 +200,9 @@ export async function runExecutorAgent(
   }
   const executorWorkDir = useWorktree ? worktreePath : PROJECT_WORKSPACE;
 
-  // Load executor memory + OV context in parallel
-  const [executorMemory, ovCtx] = await Promise.all([
-    loadAgentMemory("executor"),
+  // Load executor context (memory + reflections) + OV context in parallel
+  const [executorContext, ovCtx] = await Promise.all([
+    getContext("executor", { type: "task", reference: task.title }),
     ovSession?.getAgentContext?.("executor", { reference: task.title, whyNow: (task.scopeBoundary?.in || []).join(" ") }) || Promise.resolve({ formatted: "" }),
   ]);
   const executorKnowledge = ovCtx.formatted || "";
@@ -239,7 +239,7 @@ export async function runExecutorAgent(
   const prompt = buildExecutorPrompt({
     task,
     groundingSummary,
-    executorMemory,
+    executorContext,
     executorKnowledge,
     testPatternHint,
     useWorktree,
