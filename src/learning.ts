@@ -1,18 +1,15 @@
 /**
- * learning.ts — Unified learning facade (issue #73)
+ * learning.ts — Unified recording facade for the learning system
  *
- * Thin facade that replaces the 6 separate recording functions callers
- * currently coordinate:
- *   - recordPlannerLesson, recordExecutorLesson, recordSkepticLesson (agent-memory.ts)
- *   - recordReflection (agent-memory.ts — per-anchor)
- *   - recordReflection (reflections.ts — global buffer)
+ * Replaces direct calls to per-agent lesson recorders + both reflection
+ * systems with a single `recordOutcome()` entry point. Internally dispatches
+ * to:
+ *   - recordPlannerLesson / recordExecutorLesson / recordSkepticLesson (agent-memory.ts)
+ *   - recordReflection (agent-memory.ts — per-anchor episodic reflections)
+ *   - recordReflection (reflections.ts — global bounded buffer)
  *
- * `recordOutcome()` internally dispatches to the correct per-agent lesson
- * recorder and both reflection systems based on the agent and result.
- *
- * `clearOutcomes()` clears per-anchor and global reflections after merge.
- *
- * Old modules and their exports remain — this facade delegates to them.
+ * Also provides `clearOutcomes(anchor)` which delegates to both clear
+ * functions after a successful merge.
  */
 
 import {
@@ -20,7 +17,7 @@ import {
   recordExecutorLesson,
   recordSkepticLesson,
   recordReflection as recordAnchorReflection,
-  clearReflections as clearAnchorReflections,
+  clearReflections,
 } from "./agent-memory.ts";
 import {
   recordReflection as recordGlobalReflection,
@@ -33,23 +30,47 @@ import {
 
 export type OutcomeAgent = "planner" | "executor" | "skeptic";
 
-export interface OutcomeTask {
-  title: string;
-  scopeBoundary?: { in?: string[] };
-  risk?: string;
-  anchorType?: string;
-  anchorReference?: string;
-  [key: string]: any;
-}
+export interface OutcomeOpts {
+  /** Which agent(s) to record lessons for */
+  agents: OutcomeAgent[];
 
-export interface OutcomeResult {
+  /** Cycle ID */
   cycleId: string;
+
+  /** The planner task object */
+  task: any;
+
+  /** Final state: "merged" | "failed" | "abandoned" | "rolled-back" */
   finalState: string;
-  anchor: { type: string; reference: string };
-  /** Extra context passed to per-agent lesson recorders */
+
+  /** Anchor reference (for per-anchor reflections) */
+  anchorRef: string;
+
+  /** Anchor type (for global reflections) */
+  anchorType: string;
+
+  /** Per-agent lesson context — passed through to the lesson recorders */
   context?: any;
-  /** Skeptic verdict (only relevant for skeptic agent) */
+
+  /** Skeptic verdict — only needed when agents includes "skeptic" */
   skepticVerdict?: string;
+
+  /**
+   * Reflection details — if provided, both per-anchor and global reflections
+   * are recorded. If omitted, no reflections are recorded.
+   */
+  reflection?: {
+    /** e.g. "no-task", "no-diff", "verification-failed", "abandoned" */
+    failureMode: string;
+    /** Short description of what failed */
+    whatFailed: string;
+    /** Why it failed */
+    whyItFailed: string;
+    /** What to try differently */
+    whatToTryDifferently: string;
+    /** Verification errors (for per-anchor advice generation) */
+    verificationErrors?: string[];
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -57,113 +78,86 @@ export interface OutcomeResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Record a cycle outcome across all learning subsystems.
+ * Record outcome for one or more agents + optional reflections.
  *
- * Dispatches to the correct per-agent lesson recorder and both reflection
- * systems (per-anchor + global buffer) based on the agent and result.
- *
- * Never throws — logs errors and continues.
+ * Never throws — all errors are logged with context.
  */
-export async function recordOutcome(
-  agent: OutcomeAgent,
-  task: OutcomeTask,
-  result: OutcomeResult,
-  eventBus?: any,
-): Promise<void> {
-  const { cycleId, finalState, anchor, context = {}, skepticVerdict } = result;
+export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
+  const {
+    agents, cycleId, task, finalState, anchorRef, anchorType,
+    context = {}, skepticVerdict, reflection,
+  } = opts;
 
-  // 1. Per-agent lesson
-  try {
-    switch (agent) {
-      case "planner":
-        await recordPlannerLesson(cycleId, task, finalState, context);
-        break;
-      case "executor":
-        await recordExecutorLesson(cycleId, task, finalState, context);
-        break;
-      case "skeptic":
-        await recordSkepticLesson(cycleId, task, skepticVerdict, finalState);
-        break;
+  // Record per-agent lessons
+  for (const agent of agents) {
+    try {
+      switch (agent) {
+        case "planner":
+          await recordPlannerLesson(cycleId, task, finalState, context);
+          break;
+        case "executor":
+          await recordExecutorLesson(cycleId, task, finalState, context);
+          break;
+        case "skeptic":
+          await recordSkepticLesson(cycleId, task, skepticVerdict ?? "approve", finalState);
+          break;
+      }
+    } catch (err: any) {
+      console.error(`[Learning] Failed to record ${agent} lesson for ${cycleId}: ${err.message}`);
     }
-  } catch (err: any) {
-    console.error(`[Learning] Failed to record ${agent} lesson: ${err.message}`);
   }
 
-  // 2. Per-anchor reflection (only on failure-like states)
-  const reflectionStates = new Set(["failed", "no-task", "no-diff", "abandoned", "rolled-back", "verification-failed"]);
-  if (reflectionStates.has(finalState)) {
+  // Record reflections (both per-anchor and global) if provided
+  if (reflection) {
     try {
       await recordAnchorReflection({
         cycleId,
-        anchorRef: anchor.reference,
-        taskTitle: task.title || "Unknown task",
-        outcome: finalState,
-        reason: context.reason || context.failReason || `${finalState}`,
-        filesChanged: context.filesChanged,
-        verificationErrors: context.failedSteps || context.verificationErrors,
+        anchorRef,
+        taskTitle: reflection.whatFailed,
+        outcome: reflection.failureMode,
+        reason: reflection.whyItFailed,
+        verificationErrors: reflection.verificationErrors,
       });
     } catch (err: any) {
-      console.error(`[Learning] Failed to record anchor reflection: ${err.message}`);
+      console.error(`[Learning] Failed to record per-anchor reflection for ${cycleId}: ${err.message}`);
     }
 
-    // 3. Global reflection buffer
     try {
       await recordGlobalReflection({
         cycleId,
-        anchorType: anchor.type,
-        anchorReference: anchor.reference,
-        failureMode: finalState,
-        whatFailed: task.title || "Unknown task",
-        whyItFailed: context.reason || context.failReason || finalState,
-        whatToTryDifferently: context.whatToTryDifferently || generateDefaultAdvice(finalState, context),
+        anchorType,
+        anchorReference: anchorRef,
+        failureMode: reflection.failureMode,
+        whatFailed: reflection.whatFailed,
+        whyItFailed: reflection.whyItFailed,
+        whatToTryDifferently: reflection.whatToTryDifferently,
       });
     } catch (err: any) {
-      console.error(`[Learning] Failed to record global reflection: ${err.message}`);
+      console.error(`[Learning] Failed to record global reflection for ${cycleId}: ${err.message}`);
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// clearOutcomes — clear reflections after successful merge
+// clearOutcomes — clear both reflection stores after successful merge
 // ---------------------------------------------------------------------------
 
 /**
- * Clear per-anchor and global reflections for a given anchor reference.
- * Called after a successful merge to remove stale failure context.
+ * Clear per-anchor and global reflections for an anchor reference.
+ * Called after a successful merge.
  *
- * Never throws — logs errors and continues.
+ * Never throws — errors are logged.
  */
-export async function clearOutcomes(anchorReference: string): Promise<void> {
+export async function clearOutcomes(anchorRef: string): Promise<void> {
   try {
-    await clearAnchorReflections(anchorReference);
+    await clearReflections(anchorRef);
   } catch (err: any) {
-    console.error(`[Learning] Failed to clear anchor reflections: ${err.message}`);
+    console.error(`[Learning] Failed to clear per-anchor reflections for "${anchorRef}": ${err.message}`);
   }
 
   try {
-    await clearReflectionsForAnchor(anchorReference);
+    await clearReflectionsForAnchor(anchorRef);
   } catch (err: any) {
-    console.error(`[Learning] Failed to clear global reflections: ${err.message}`);
+    console.error(`[Learning] Failed to clear global reflections for "${anchorRef}": ${err.message}`);
   }
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-function generateDefaultAdvice(finalState: string, context: any): string {
-  if (finalState === "no-task") {
-    return "Anchor may be too vague, already completed, or blocked. Consider a more specific formulation.";
-  }
-  if (finalState === "no-diff") {
-    return "Provide more specific scope boundary and acceptance criteria. Ensure the task is actionable.";
-  }
-  if (finalState === "verification-failed") {
-    const steps = context.failedSteps || context.verificationErrors || [];
-    return `Address these specific verification failures: ${steps.join(", ")}. Consider narrower scope or fixing verification errors before adding new behavior.`;
-  }
-  if (finalState === "abandoned") {
-    return `Task was abandoned: ${context.reason || "unknown reason"}. Consider different approach, narrower scope, or verify prerequisites are met.`;
-  }
-  return `Previous attempt failed: ${context.reason || context.failReason || finalState}. The next attempt should take a different approach.`;
 }

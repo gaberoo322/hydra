@@ -979,6 +979,100 @@ export async function removeFromWorkQueue(value: string): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// Work queue dedup utilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a string for fuzzy comparison: lowercase, collapse whitespace, trim.
+ */
+export function normalizeForDedup(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Check if two references are fuzzy duplicates.
+ * Returns true if either is a case-insensitive substring of the other
+ * (after whitespace normalization).
+ */
+export function isFuzzyDuplicate(a: string, b: string): boolean {
+  const na = normalizeForDedup(a);
+  const nb = normalizeForDedup(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+/**
+ * Check if a reference already exists in the work queue (fuzzy match).
+ * Returns the matched reference if found, or null if no duplicate.
+ */
+export async function findWorkQueueDuplicate(reference: string): Promise<string | null> {
+  const items = await getWorkQueueItems();
+  for (const raw of items) {
+    try {
+      const item = JSON.parse(raw);
+      const existing = item.reference || "";
+      if (isFuzzyDuplicate(reference, existing)) {
+        return existing;
+      }
+    } catch { /* intentional: skip corrupt items */ }
+  }
+  return null;
+}
+
+/**
+ * Clean the work queue on startup:
+ * - Remove items with "COMPLETED:" prefix in their reference
+ * - Deduplicate remaining items (keep first occurrence)
+ */
+export async function cleanWorkQueue(): Promise<{ removedCompleted: number; removedDuplicates: number }> {
+  const r = getRedisConnection();
+  const items = await getWorkQueueItems();
+  let removedCompleted = 0;
+  let removedDuplicates = 0;
+
+  const toRemove: string[] = [];
+  const seen: string[] = []; // normalized references we've seen
+
+  for (const raw of items) {
+    let ref = "";
+    try {
+      const item = JSON.parse(raw);
+      ref = item.reference || "";
+    } catch {
+      ref = raw;
+    }
+
+    // Remove COMPLETED: items
+    if (ref.startsWith("COMPLETED:") || ref.startsWith("completed:")) {
+      toRemove.push(raw);
+      removedCompleted++;
+      continue;
+    }
+
+    // Dedup against previously seen items
+    const normalized = normalizeForDedup(ref);
+    const isDup = seen.some(s => isFuzzyDuplicate(ref, s));
+    if (isDup) {
+      toRemove.push(raw);
+      removedDuplicates++;
+    } else {
+      seen.push(normalized);
+    }
+  }
+
+  // Remove flagged items
+  for (const val of toRemove) {
+    await r.lrem(redisKeys.anchorWorkQueue(), 1, val);
+  }
+
+  if (removedCompleted > 0 || removedDuplicates > 0) {
+    console.log(`[WorkQueue] Cleanup: removed ${removedCompleted} completed, ${removedDuplicates} duplicates`);
+  }
+
+  return { removedCompleted, removedDuplicates };
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline support (used by task-tracker.ts for batched operations)
 // ---------------------------------------------------------------------------
 
@@ -1084,4 +1178,67 @@ export async function listTrim(key: string, start: number, stop: number): Promis
 export async function getCycleCosts(cycleId: string): Promise<Record<string, string>> {
   const r = getRedisConnection();
   return r.hgetall(redisKeys.cycleCosts(cycleId));
+}
+
+// ---------------------------------------------------------------------------
+// Research-to-build ratio tracking (issue #84)
+// ---------------------------------------------------------------------------
+
+/** Record a research cycle event (timestamp-scored sorted set, rolling 24h). */
+export async function recordResearchEvent(): Promise<void> {
+  const r = getRedisConnection();
+  const now = Date.now();
+  const key = redisKeys.schedulerResearchEvents();
+  await r.zadd(key, now, `${now}`);
+  // Prune entries older than 24h
+  await r.zremrangebyscore(key, "-inf", now - 86400_000);
+}
+
+/** Record a build cycle event (timestamp-scored sorted set, rolling 24h). */
+export async function recordBuildEvent(): Promise<void> {
+  const r = getRedisConnection();
+  const now = Date.now();
+  const key = redisKeys.schedulerBuildEvents();
+  await r.zadd(key, now, `${now}`);
+  // Prune entries older than 24h
+  await r.zremrangebyscore(key, "-inf", now - 86400_000);
+}
+
+/** Get count of research events in the last 24h. */
+export async function getResearchEventCount24h(): Promise<number> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerResearchEvents();
+  const now = Date.now();
+  // Prune old entries first
+  await r.zremrangebyscore(key, "-inf", now - 86400_000);
+  return r.zcard(key);
+}
+
+/** Get count of build events in the last 24h. */
+export async function getBuildEventCount24h(): Promise<number> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerBuildEvents();
+  const now = Date.now();
+  // Prune old entries first
+  await r.zremrangebyscore(key, "-inf", now - 86400_000);
+  return r.zcard(key);
+}
+
+/** Set the force-research-once flag (consumed on next maybeRunResearch). */
+export async function setResearchForceOnce(): Promise<void> {
+  const r = getRedisConnection();
+  // TTL of 1 hour — if not consumed by then, it expires
+  await r.set(redisKeys.schedulerResearchForceOnce(), "1", "EX", 3600);
+}
+
+/** Consume the force-research-once flag. Returns true if it was set. */
+export async function consumeResearchForceOnce(): Promise<boolean> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerResearchForceOnce();
+  const val = await r.get(key);
+  if (val) {
+    await r.del(key);
+    return true;
+  }
+  return false;
 }

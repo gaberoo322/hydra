@@ -13,7 +13,7 @@ import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
 import {
-  listRange, listRPush, listRem, listLPop, listLen, listMove,
+  listRange, listRPush, listRem, listLPop, listLen, listMove, listTrim,
   getString, setString, delKey, incrKey, expireKey,
   hashGetAll, zRevRange, getRedisConnection,
   getRealityReport, getRecentReportIds, getCycleMetrics,
@@ -34,9 +34,84 @@ export const PROCESSING_QUEUE = redisKeys.anchorProcessing();
 export const ABANDONMENT_COUNTER_PREFIX = redisKeys.anchorAbandonmentCount("");
 export const ABANDONMENT_COUNTER_TTL = 86400; // 24h — auto-expire stale counters
 
-// Prior-failure escalation thresholds (issue #18)
+// Prior-failure escalation thresholds (issue #18, #93)
 export const PRIOR_FAILURE_AGE_LIMIT_MS = 24 * 60 * 60 * 1000; // 24h — items older than this are auto-escalated
-export const PRIOR_FAILURE_CAP = 20; // hard cap — oldest items escalated to reframe when exceeded
+export const PRIOR_FAILURE_CAP = 10; // hard cap — oldest items escalated to reframe when exceeded
+
+// Reframe queue cap + TTL (issue #57)
+export const REFRAME_QUEUE_CAP = 20;
+export const REFRAME_QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const REFRAME_INTERLEAVE_INTERVAL = 5; // force reframe every Nth cycle when queue non-empty
+
+// ---------------------------------------------------------------------------
+// Reframe queue maintenance — prevent unbounded accumulation (issue #57)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prune stale items (older than 7 days) from the reframe queue and enforce
+ * a hard cap of REFRAME_QUEUE_CAP. Oldest items beyond the cap are dropped
+ * with a log entry. Called from selectAnchor() before consuming a reframe item.
+ *
+ * Returns { pruned: number, dropped: number }.
+ */
+export async function pruneReframeQueue(): Promise<{ pruned: number; dropped: number }> {
+  let pruned = 0;
+  let dropped = 0;
+
+  try {
+    const all = await listRange(REFRAME_QUEUE, 0, -1);
+    if (all.length === 0) return { pruned, dropped };
+
+    const now = Date.now();
+    const kept: string[] = [];
+
+    // Pass 1: filter out items older than 7 days
+    for (const raw of all) {
+      try {
+        const item = JSON.parse(raw);
+        const escalatedAt = item.escalatedAt ? new Date(item.escalatedAt).getTime() : 0;
+        if (escalatedAt > 0 && now - escalatedAt > REFRAME_QUEUE_MAX_AGE_MS) {
+          pruned++;
+          console.log(`[ControlLoop] Reframe queue: pruned stale item "${item.originalTitle || item.originalTaskId}" (age: ${Math.round((now - escalatedAt) / 86400000)}d)`);
+          continue;
+        }
+      } catch (err: any) {
+        // Corrupt item — drop it
+        pruned++;
+        console.error(`[ControlLoop] Reframe queue: dropped corrupt item: ${err.message}`);
+        continue;
+      }
+      kept.push(raw);
+    }
+
+    // Pass 2: enforce hard cap — drop oldest items beyond cap
+    if (kept.length > REFRAME_QUEUE_CAP) {
+      const overflow = kept.length - REFRAME_QUEUE_CAP;
+      for (let i = 0; i < overflow; i++) {
+        try {
+          const item = JSON.parse(kept[i]);
+          console.log(`[ControlLoop] Reframe queue: dropped overflow item "${item.originalTitle || item.originalTaskId}" (queue: ${kept.length}/${REFRAME_QUEUE_CAP})`);
+        } catch {
+          console.log(`[ControlLoop] Reframe queue: dropped overflow item (unparseable)`);
+        }
+        dropped++;
+      }
+      kept.splice(0, overflow);
+    }
+
+    // Only rewrite the list if something changed
+    if (pruned > 0 || dropped > 0) {
+      await delKey(REFRAME_QUEUE);
+      if (kept.length > 0) {
+        await listRPush(REFRAME_QUEUE, ...kept);
+      }
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Reframe queue pruning failed: ${err.message}`);
+  }
+
+  return { pruned, dropped };
+}
 
 // ---------------------------------------------------------------------------
 // Prior-failure escalation — prevent unbounded accumulation (issue #18)
@@ -258,6 +333,15 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   }
 
   // 4.5. Reframe queue — tasks that failed repeatedly and need a fresh approach
+  //      Prune stale (>7d) and overflow (>20) items before consuming (issue #57).
+  try {
+    const { pruned, dropped } = await pruneReframeQueue();
+    if (pruned > 0 || dropped > 0) {
+      console.log(`[ControlLoop] Reframe queue maintenance: pruned=${pruned}, dropped=${dropped}`);
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Reframe queue maintenance failed: ${err.message}`);
+  }
   const reframeItems = await listRange(REFRAME_QUEUE, 0, 0);
   if (reframeItems.length > 0) {
     try {
@@ -285,19 +369,46 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   } catch (err: any) {
     console.error(`[ControlLoop] Prior-failure age escalation failed: ${err.message}`);
   }
-  const priorFailures = await listRange(redisKeys.anchorPriorFailures(), 0, 0);
-  if (priorFailures.length > 0) {
+  // Scan prior-failure queue, skipping items that have exceeded the retry cap (issue #93).
+  // Items with retryCount >= MAX_PRIOR_FAILURE_RETRIES are escalated to reframe immediately
+  // instead of burning another cycle.
+  const allPriorFailures = await listRange(redisKeys.anchorPriorFailures(), 0, -1);
+  for (const raw of allPriorFailures) {
     try {
-      const failure = JSON.parse(priorFailures[0]);
-      await listLPop(redisKeys.anchorPriorFailures());
+      const failure = JSON.parse(raw);
+      if ((failure.retryCount || 0) >= MAX_PRIOR_FAILURE_RETRIES) {
+        // Exceeded retry cap — escalate to reframe, don't retry
+        await listRem(redisKeys.anchorPriorFailures(), 1, raw);
+        await listRPush(REFRAME_QUEUE, JSON.stringify({
+          originalTaskId: failure.taskId,
+          originalTitle: failure.taskId,
+          originalDescription: "",
+          anchorType: "prior-failure",
+          anchorReference: failure.taskId,
+          scopeBoundary: null,
+          totalAttempts: failure.retryCount || 1,
+          lastReason: failure.reason,
+          failedSteps: failure.failedSteps || [],
+          failureHistory: [],
+          verificationStderr: "",
+          escalatedAt: new Date().toISOString(),
+          escalationSource: "prior-failure-retry-cap",
+          escalationReason: `Auto-escalated: retryCount ${failure.retryCount} >= cap ${MAX_PRIOR_FAILURE_RETRIES}`,
+        }));
+        console.log(`[ControlLoop] Prior-failure "${failure.taskId}" escalated to reframe (retryCount ${failure.retryCount} >= cap ${MAX_PRIOR_FAILURE_RETRIES})`);
+        continue;
+      }
+      // Found a retryable item — pop it and return as anchor
+      await listRem(redisKeys.anchorPriorFailures(), 1, raw);
       return {
         type: "prior-failure",
         reference: failure.taskId,
-        whyNow: `Prior task ${failure.taskId} failed: ${failure.reason || "unknown"}`,
+        whyNow: `Prior task ${failure.taskId} failed: ${failure.reason || "unknown"} (retry ${(failure.retryCount || 0) + 1}/${MAX_PRIOR_FAILURE_RETRIES})`,
         context: failure,
       };
     } catch (err: any) {
-      console.error(`[ControlLoop] Corrupt prior-failure at head of queue (blocking retries): ${err.message}. Fix with: redis-cli LPOP hydra:anchors:prior-failures`);
+      console.error(`[ControlLoop] Corrupt prior-failure in queue: ${err.message}. Removing.`);
+      await listRem(redisKeys.anchorPriorFailures(), 1, raw);
     }
   }
 
@@ -507,7 +618,7 @@ export async function clearAbandonmentCounter(anchorRef) {
   await delKey(anchorKey(anchorRef));
 }
 
-export async function storePriorFailure(taskId, reason, verificationResult) {
+export async function storePriorFailure(taskId, reason, verificationResult, priorRetryCount = 0) {
   // Invalidate plan cache — a plan that led to failure should not be reused.
   // Try all cacheable anchor types since we don't know the original type here.
   const cacheableTypes = ["user-request", "codebase-health", "failing-test", "research"];
@@ -519,11 +630,15 @@ export async function storePriorFailure(taskId, reason, verificationResult) {
     }
   }
 
-  // Count how many times this task (or its anchor) has already been retried
+  // Count total attempts: prior retryCount (from popped item) + any still in queue (issue #93).
+  // Before issue #93, the popped item's retryCount was lost because selectAnchor removed it
+  // from the queue before storePriorFailure scanned. Now we accept priorRetryCount from the
+  // caller so the count accumulates correctly.
   const existing = await listRange(redisKeys.anchorPriorFailures(), 0, -1);
-  const priorAttempts = existing.filter(raw => {
+  const queueMatches = existing.filter(raw => {
     try { return JSON.parse(raw).taskId === taskId; } catch { return false; }
   }).length;
+  const priorAttempts = Math.max(priorRetryCount, queueMatches);
 
   if (priorAttempts >= MAX_PRIOR_FAILURE_RETRIES) {
     // Escalate to reframe queue — planner will diagnose and rewrite the task
@@ -615,6 +730,14 @@ export async function clearProcessingItem(anchor) {
   }
 }
 
+/**
+ * Get the current length of the reframe queue.
+ * Used by the scheduler for interleaving logic (issue #57).
+ */
+export async function getReframeQueueLen(): Promise<number> {
+  return listLen(REFRAME_QUEUE);
+}
+
 // ---------------------------------------------------------------------------
 // reportOutcome — unified post-cycle anchor bookkeeping (issue #69)
 // ---------------------------------------------------------------------------
@@ -645,14 +768,19 @@ export async function reportOutcome(anchor: any, result: OutcomeResult): Promise
       await clearProcessingItem(anchor);
       break;
 
-    case "failed":
+    case "failed": {
+      // Pass prior retryCount from the anchor context so storePriorFailure
+      // can accumulate correctly even though the item was already popped (issue #93).
+      const priorRetryCount = anchor?.context?.retryCount || 0;
       await storePriorFailure(
         taskId ?? "unknown",
         reason ?? "Unknown failure",
         verification ?? null,
+        priorRetryCount,
       );
       await clearProcessingItem(anchor);
       break;
+    }
 
     case "abandoned":
       await trackAbandonment(

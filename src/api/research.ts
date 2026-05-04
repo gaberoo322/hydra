@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { runResearchLoop, getLatestResearch, listResearchReports, vetoOpportunity } from "../research-loop.ts";
+import { setResearchForceOnce } from "../redis-adapter.ts";
 
 export function createResearchRouter(eventBus: any) {
   const router = Router();
@@ -63,6 +64,16 @@ export function createResearchRouter(eventBus: any) {
       const count = parseInt(req.query.count) || 10;
       const reports = await listResearchReports(count);
       res.json(reports);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /research/force — Force one research cycle on next scheduler tick (bypasses throttle)
+  router.post("/research/force", async (req, res) => {
+    try {
+      await setResearchForceOnce();
+      res.json({ ok: true, message: "Research force flag set — next scheduler tick will run research bypassing all throttles" });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

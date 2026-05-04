@@ -164,6 +164,35 @@ describe("prior-failure escalation (issue #18)", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Retry-cap enforcement in selectAnchor (issue #93)
+  // ---------------------------------------------------------------------------
+
+  test("storePriorFailure uses priorRetryCount param to escalate correctly", async () => {
+    // Simulate a task that was popped from the queue with retryCount=2
+    // (already retried twice). storePriorFailure should escalate it immediately.
+    await anchorSelection.storePriorFailure("task-retry-cap", "No code changes produced", null, 2);
+
+    const remaining = await redis.llen(PRIOR_FAILURES_KEY);
+    assert.equal(remaining, 0, "should not re-enqueue an item at the retry cap");
+
+    const reframed = await redis.lrange(REFRAME_QUEUE_KEY, 0, -1);
+    assert.equal(reframed.length, 1, "should escalate to reframe queue");
+    const item = JSON.parse(reframed[0]);
+    assert.equal(item.originalTaskId, "task-retry-cap");
+    assert.equal(item.lastReason, "No code changes produced");
+  });
+
+  test("storePriorFailure re-enqueues when priorRetryCount is below cap", async () => {
+    await anchorSelection.storePriorFailure("task-retry-ok", "build failed", null, 1);
+
+    const remaining = await redis.llen(PRIOR_FAILURES_KEY);
+    assert.equal(remaining, 1, "should re-enqueue an item below the retry cap");
+
+    const reframed = await redis.llen(REFRAME_QUEUE_KEY);
+    assert.equal(reframed, 0, "should not escalate");
+  });
+
+  // ---------------------------------------------------------------------------
   // Constants are exported and configurable
   // ---------------------------------------------------------------------------
 
