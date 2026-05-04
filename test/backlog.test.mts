@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 
 let backlog;
+let admin;
 let redis;
 
 async function cleanBacklogKeys() {
@@ -25,6 +26,7 @@ describe("backlog state machine", () => {
       redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379/1");
       process.env.REDIS_URL = "redis://localhost:6379/1";
       backlog = await import("../src/backlog.ts");
+      admin = backlog._admin;
     }
     await cleanBacklogKeys();
   });
@@ -39,25 +41,26 @@ describe("backlog state machine", () => {
     }
   });
 
-  test("addToBacklog → getBacklogCounts round-trip", async () => {
-    const result = await backlog.addToBacklog({
+  test("addItem → getStatus round-trip", async () => {
+    const result = await backlog.addItem({
       title: "Test item 1",
       category: "reliability",
     });
     assert.equal(result.added, true);
 
-    const counts = await backlog.getBacklogCounts();
-    assert.equal(counts.backlog, 1);
-    assert.equal(counts.queued, 0);
-    assert.equal(counts.total, 1);
+    const status = await backlog.getStatus();
+    assert.equal(status.backlog, 1);
+    assert.equal(status.queued, 0);
+    assert.equal(status.total, 1);
+    assert.equal(typeof status.wip, "object");
   });
 
-  test("addToBacklog dedups items with the same title", async () => {
-    const first = await backlog.addToBacklog({
+  test("addItem dedups items with the same title", async () => {
+    const first = await backlog.addItem({
       title: "Duplicate test",
       category: "test",
     });
-    const second = await backlog.addToBacklog({
+    const second = await backlog.addItem({
       title: "Duplicate test",
       category: "test",
     });
@@ -67,32 +70,32 @@ describe("backlog state machine", () => {
   });
 
   test("promoteToQueued moves items backlog → queued", async () => {
-    await backlog.addToBacklog({ title: "Promote me A", category: "test" });
-    await backlog.addToBacklog({ title: "Promote me B", category: "test" });
+    await admin.addToBacklog({ title: "Promote me A", category: "test" });
+    await admin.addToBacklog({ title: "Promote me B", category: "test" });
 
-    const promoted = await backlog.promoteToQueued(2);
+    const promoted = await admin.promoteToQueued(2);
     assert.equal(promoted.length, 2);
 
-    const counts = await backlog.getBacklogCounts();
+    const counts = await admin.getBacklogCounts();
     assert.equal(counts.backlog, 0);
     assert.equal(counts.queued, 2);
   });
 
   test("promoteToQueued with count > backlog length moves only what exists", async () => {
-    await backlog.addToBacklog({ title: "Only one", category: "test" });
-    const promoted = await backlog.promoteToQueued(5);
+    await admin.addToBacklog({ title: "Only one", category: "test" });
+    const promoted = await admin.promoteToQueued(5);
     assert.equal(promoted.length, 1);
   });
 
   test("regression (2026-04-08): moveToInProgress requires EXACT title match", async () => {
-    await backlog.addToBacklog({
+    await admin.addToBacklog({
       title: "Exact title required",
       category: "test",
     });
-    await backlog.promoteToQueued(1);
+    await admin.promoteToQueued(1);
 
     // Mismatched title → no-op, returns false
-    const mismatchResult = await backlog.moveToInProgress(
+    const mismatchResult = await admin.moveToInProgress(
       "Rephrased exact title required",
     );
     assert.equal(
@@ -102,80 +105,80 @@ describe("backlog state machine", () => {
     );
 
     // Exact title → succeeds, returns true
-    const exactResult = await backlog.moveToInProgress(
+    const exactResult = await admin.moveToInProgress(
       "Exact title required",
     );
     assert.equal(exactResult, true, "exact title must succeed");
 
-    const counts = await backlog.getBacklogCounts();
+    const counts = await admin.getBacklogCounts();
     assert.equal(counts.queued, 0);
     assert.equal(counts.inProgress, 1);
   });
 
   test("moveToInProgress can also pull directly from Backlog lane", async () => {
-    await backlog.addToBacklog({
+    await admin.addToBacklog({
       title: "Direct from backlog",
       category: "test",
     });
-    const result = await backlog.moveToInProgress("Direct from backlog");
+    const result = await admin.moveToInProgress("Direct from backlog");
     assert.equal(result, true);
-    const counts = await backlog.getBacklogCounts();
+    const counts = await admin.getBacklogCounts();
     assert.equal(counts.backlog, 0);
     assert.equal(counts.inProgress, 1);
   });
 
   test("moveToDone only moves items that are in-progress", async () => {
-    await backlog.addToBacklog({
+    await admin.addToBacklog({
       title: "Lifecycle item",
       category: "test",
     });
     // Not in in-progress yet — should return false
-    const tooEarly = await backlog.moveToDone("Lifecycle item", "merged");
+    const tooEarly = await admin.moveToDone("Lifecycle item", "merged");
     assert.equal(tooEarly, false);
 
     // Go through the full lifecycle
-    await backlog.promoteToQueued(1);
-    await backlog.moveToInProgress("Lifecycle item");
-    const done = await backlog.moveToDone("Lifecycle item", "merged");
+    await admin.promoteToQueued(1);
+    await admin.moveToInProgress("Lifecycle item");
+    const done = await admin.moveToDone("Lifecycle item", "merged");
     assert.equal(done, true);
 
-    const counts = await backlog.getBacklogCounts();
+    const counts = await admin.getBacklogCounts();
     assert.equal(counts.inProgress, 0);
     assert.equal(counts.done, 1);
   });
 
   test("returnToBacklog moves in-progress items back with reason", async () => {
-    await backlog.addToBacklog({ title: "Will fail", category: "test" });
-    await backlog.promoteToQueued(1);
-    await backlog.moveToInProgress("Will fail");
-    const result = await backlog.returnToBacklog(
+    await admin.addToBacklog({ title: "Will fail", category: "test" });
+    await admin.promoteToQueued(1);
+    await admin.moveToInProgress("Will fail");
+    const result = await admin.returnToBacklog(
       "Will fail",
       "rolled-back",
     );
     assert.equal(result, true);
 
-    const counts = await backlog.getBacklogCounts();
+    const counts = await admin.getBacklogCounts();
     assert.equal(counts.backlog, 1);
     assert.equal(counts.inProgress, 0);
   });
 
   test("full lifecycle: add → promote → inProgress → done", async () => {
     const title = "End-to-end item";
-    await backlog.addToBacklog({ title, category: "e2e" });
+    await admin.addToBacklog({ title, category: "e2e" });
 
-    let counts = await backlog.getBacklogCounts();
+    let counts = await admin.getBacklogCounts();
     assert.equal(counts.backlog, 1);
 
-    await backlog.promoteToQueued(1);
-    counts = await backlog.getBacklogCounts();
+    await admin.promoteToQueued(1);
+    counts = await admin.getBacklogCounts();
     assert.equal(counts.queued, 1);
 
-    await backlog.moveToInProgress(title);
-    counts = await backlog.getBacklogCounts();
+    await admin.moveToInProgress(title);
+    counts = await admin.getBacklogCounts();
     assert.equal(counts.inProgress, 1);
 
-    await backlog.moveToDone(title, "merged");
-    counts = await backlog.getBacklogCounts();
+    await admin.moveToDone(title, "merged");
+    counts = await admin.getBacklogCounts();
     assert.equal(counts.done, 1);
     assert.equal(counts.backlog, 0);
     assert.equal(counts.queued, 0);
@@ -185,7 +188,7 @@ describe("backlog state machine", () => {
   // --- Linear-inspired upgrade tests ---
 
   test("addToBacklog with priority and description populates fields", async () => {
-    await backlog.addToBacklog({
+    await admin.addToBacklog({
       title: "Urgent fix",
       category: "execution",
       priority: 1,
@@ -193,7 +196,7 @@ describe("backlog state machine", () => {
       labels: ["execution", "kalshi"],
       estimate: 3,
     });
-    const lanes = await backlog.loadBacklog();
+    const lanes = await admin.loadBacklog();
     const item = lanes.backlog[0];
     assert.equal(item.priority, 1);
     assert.equal(item.description, "## Fix\nThis is urgent");
@@ -203,8 +206,8 @@ describe("backlog state machine", () => {
   });
 
   test("existing items without new fields get defaults (backward compat)", async () => {
-    await backlog.addToBacklog({ title: "Legacy item", category: "test" });
-    const lanes = await backlog.loadBacklog();
+    await admin.addToBacklog({ title: "Legacy item", category: "test" });
+    const lanes = await admin.loadBacklog();
     const item = lanes.backlog[0];
     assert.equal(item.priority, 0);
     assert.equal(item.description, "");
@@ -214,46 +217,46 @@ describe("backlog state machine", () => {
   });
 
   test("promoteToQueued promotes by priority (urgent before low before none)", async () => {
-    await backlog.addToBacklog({ title: "No priority", category: "test" });
-    await backlog.addToBacklog({ title: "Low priority", category: "test", priority: 4 });
-    await backlog.addToBacklog({ title: "Urgent", category: "test", priority: 1 });
+    await admin.addToBacklog({ title: "No priority", category: "test" });
+    await admin.addToBacklog({ title: "Low priority", category: "test", priority: 4 });
+    await admin.addToBacklog({ title: "Urgent", category: "test", priority: 1 });
 
-    const promoted = await backlog.promoteToQueued(3);
+    const promoted = await admin.promoteToQueued(3);
     assert.equal(promoted[0].title, "Urgent");
     assert.equal(promoted[1].title, "Low priority");
     assert.equal(promoted[2].title, "No priority");
   });
 
   test("promoteToQueued falls back to score for equal priority", async () => {
-    await backlog.addToBacklog({ title: "Low score", category: "test", priority: 2, adjustedScore: 10 });
-    await backlog.addToBacklog({ title: "High score", category: "test", priority: 2, adjustedScore: 90 });
+    await admin.addToBacklog({ title: "Low score", category: "test", priority: 2, adjustedScore: 10 });
+    await admin.addToBacklog({ title: "High score", category: "test", priority: 2, adjustedScore: 90 });
 
-    const promoted = await backlog.promoteToQueued(2);
+    const promoted = await admin.promoteToQueued(2);
     assert.equal(promoted[0].title, "High score");
     assert.equal(promoted[1].title, "Low score");
   });
 
   test("triage lane in loadBacklog and getBacklogCounts", async () => {
-    await backlog.addToBacklog({ title: "Triage item", category: "test", lane: "triage" });
-    const lanes = await backlog.loadBacklog();
+    await admin.addToBacklog({ title: "Triage item", category: "test", lane: "triage" });
+    const lanes = await admin.loadBacklog();
     assert.equal(lanes.triage.length, 1);
     assert.equal(lanes.triage[0].title, "Triage item");
 
-    const counts = await backlog.getBacklogCounts();
+    const counts = await admin.getBacklogCounts();
     assert.equal(counts.triage, 1);
     assert.equal(counts.total, 1); // triage counts toward total
   });
 
   test("addToBacklog with lane: triage places item in triage", async () => {
-    await backlog.addToBacklog({ title: "Research finding", category: "research", lane: "triage" });
-    const counts = await backlog.getBacklogCounts();
+    await admin.addToBacklog({ title: "Research finding", category: "research", lane: "triage" });
+    const counts = await admin.getBacklogCounts();
     assert.equal(counts.triage, 1);
     assert.equal(counts.backlog, 0);
   });
 
   test("updateItem modifies allowed fields", async () => {
-    const { id } = await backlog.addToBacklog({ title: "Update me", category: "test" });
-    const result = await backlog.updateItem(id, { priority: 2, description: "Updated desc", labels: ["infra"] });
+    const { id } = await admin.addToBacklog({ title: "Update me", category: "test" });
+    const result = await admin.updateItem(id, { priority: 2, description: "Updated desc", labels: ["infra"] });
     assert.equal(result.ok, true);
     assert.equal(result.item.priority, 2);
     assert.equal(result.item.description, "Updated desc");
@@ -262,14 +265,14 @@ describe("backlog state machine", () => {
   });
 
   test("updateItem rejects unknown item IDs", async () => {
-    const result = await backlog.updateItem("item-99999", { priority: 1 });
+    const result = await admin.updateItem("item-99999", { priority: 1 });
     assert.equal(result.ok, false);
   });
 
   // --- WIP limit tests ---
 
   test("isWipLimitReached returns false when no items in-progress", async () => {
-    const wip = await backlog.isWipLimitReached();
+    const wip = await admin.isWipLimitReached();
     assert.equal(wip.atLimit, false);
     assert.equal(wip.count, 0);
     assert.equal(typeof wip.limit, "number");
@@ -277,62 +280,62 @@ describe("backlog state machine", () => {
 
   test("isWipLimitReached returns true when in-progress count >= WIP_LIMIT", async () => {
     // Move WIP_LIMIT items to in-progress
-    const limit = backlog.WIP_LIMIT;
+    const limit = admin.WIP_LIMIT;
     for (let i = 0; i < limit; i++) {
-      await backlog.addToBacklog({ title: `WIP item ${i}`, category: "test" });
-      await backlog.moveToInProgress(`WIP item ${i}`);
+      await admin.addToBacklog({ title: `WIP item ${i}`, category: "test" });
+      await admin.moveToInProgress(`WIP item ${i}`);
     }
 
-    const wip = await backlog.isWipLimitReached();
+    const wip = await admin.isWipLimitReached();
     assert.equal(wip.atLimit, true);
     assert.equal(wip.count, limit);
   });
 
   test("getInProgressCount returns correct count", async () => {
-    assert.equal(await backlog.getInProgressCount(), 0);
+    assert.equal(await admin.getInProgressCount(), 0);
 
-    await backlog.addToBacklog({ title: "Count test A", category: "test" });
-    await backlog.moveToInProgress("Count test A");
-    assert.equal(await backlog.getInProgressCount(), 1);
+    await admin.addToBacklog({ title: "Count test A", category: "test" });
+    await admin.moveToInProgress("Count test A");
+    assert.equal(await admin.getInProgressCount(), 1);
 
-    await backlog.addToBacklog({ title: "Count test B", category: "test" });
-    await backlog.moveToInProgress("Count test B");
-    assert.equal(await backlog.getInProgressCount(), 2);
+    await admin.addToBacklog({ title: "Count test B", category: "test" });
+    await admin.moveToInProgress("Count test B");
+    assert.equal(await admin.getInProgressCount(), 2);
   });
 
   test("requeueStaleInProgressItems requeues old items, leaves fresh ones", async () => {
     // Add two items to in-progress
-    await backlog.addToBacklog({ title: "Fresh item", category: "test" });
-    await backlog.moveToInProgress("Fresh item");
+    await admin.addToBacklog({ title: "Fresh item", category: "test" });
+    await admin.moveToInProgress("Fresh item");
 
-    await backlog.addToBacklog({ title: "Stale item", category: "test" });
-    await backlog.moveToInProgress("Stale item");
+    await admin.addToBacklog({ title: "Stale item", category: "test" });
+    await admin.moveToInProgress("Stale item");
 
     // Manually backdate the stale item's startedAt to 10 days ago
-    const raw = await redis.hget("hydra:backlog:items", (await backlog.getInProgressItems()).find(i => i.title === "Stale item").id);
+    const raw = await redis.hget("hydra:backlog:items", (await admin.getInProgressItems()).find(i => i.title === "Stale item").id);
     const staleItem = JSON.parse(raw);
     const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
     staleItem.meta.startedAt = tenDaysAgo;
     await redis.hset("hydra:backlog:items", staleItem.id, JSON.stringify(staleItem));
 
-    const requeued = await backlog.requeueStaleInProgressItems();
+    const requeued = await admin.requeueStaleInProgressItems();
     assert.equal(requeued.length, 1);
     assert.equal(requeued[0].title, "Stale item");
     assert.equal(requeued[0].lane, "queued");
 
     // Fresh item should still be in-progress
-    const counts = await backlog.getBacklogCounts();
+    const counts = await admin.getBacklogCounts();
     assert.equal(counts.inProgress, 1);
     assert.equal(counts.queued, 1);
   });
 
   test("getInProgressItems returns items sorted from inProgress lane", async () => {
-    await backlog.addToBacklog({ title: "IP item 1", category: "test", priority: 2 });
-    await backlog.moveToInProgress("IP item 1");
-    await backlog.addToBacklog({ title: "IP item 2", category: "test", priority: 1 });
-    await backlog.moveToInProgress("IP item 2");
+    await admin.addToBacklog({ title: "IP item 1", category: "test", priority: 2 });
+    await admin.moveToInProgress("IP item 1");
+    await admin.addToBacklog({ title: "IP item 2", category: "test", priority: 1 });
+    await admin.moveToInProgress("IP item 2");
 
-    const items = await backlog.getInProgressItems();
+    const items = await admin.getInProgressItems();
     assert.equal(items.length, 2);
     const titles = items.map(i => i.title);
     assert.ok(titles.includes("IP item 1"));

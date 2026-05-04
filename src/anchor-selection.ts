@@ -8,7 +8,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, moveToBlocked, claimNextQueuedItem } from "./backlog.ts";
+import { block, _admin } from "./backlog.ts";
 import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
 import {
@@ -210,12 +210,12 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   let wipBlocked = false;
   try {
     // First, requeue any items that have been in-progress too long
-    const requeued = await requeueStaleInProgressItems();
+    const requeued = await _admin.requeueStaleInProgressItems();
     if (requeued.length > 0) {
       console.log(`[ControlLoop] Requeued ${requeued.length} stale in-progress items`);
     }
 
-    const wip = await isWipLimitReached();
+    const wip = await _admin.isWipLimitReached();
     if (wip.atLimit) {
       wipBlocked = true;
       console.log(`[ControlLoop] WIP limit reached (${wip.count}/${wip.limit} in-progress) — skipping new work from queue/backlog`);
@@ -229,7 +229,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   //    grab the same item. GATED by WIP limit (checked inside the Lua script).
   if (!wipBlocked) {
     try {
-      const claimResult = await claimNextQueuedItem("codex");
+      const claimResult = await _admin.claimNextQueuedItem("codex");
       if (claimResult.claimed && claimResult.item) {
         const queuedItem = claimResult.item;
         console.log(`[ControlLoop] Claimed queued backlog item: ${queuedItem.id} (priority ${queuedItem.priority || 0}) — "${queuedItem.title}"`);
@@ -606,8 +606,12 @@ async function trackAbandonment(anchorRef, task, reason) {
     // Blocking it lets the reframe queue item (lower priority in selectAnchor)
     // get processed instead.
     try {
-      await moveToBlocked(anchorRef, `Circuit breaker: abandoned ${count}x — escalated to reframe queue`);
-      console.log(`[ControlLoop] Blocked Kanban item "${anchorRef}" to unblock reframe processing`);
+      const blockResult = await block(anchorRef, `Circuit breaker: abandoned ${count}x — escalated to reframe queue`);
+      if (blockResult.ok) {
+        console.log(`[ControlLoop] Blocked Kanban item "${anchorRef}" to unblock reframe processing`);
+      } else {
+        console.log(`[ControlLoop] No Kanban item to block for "${anchorRef}" (${blockResult.error || "not found"})`);
+      }
     } catch (err: any) {
       // Not all anchors have a Kanban item (e.g. work queue items, failing tests)
       // — this is expected and safe to ignore

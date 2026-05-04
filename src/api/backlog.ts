@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { loadBacklog, getBacklogCounts, addToBacklog, moveItemToLane, deleteItem, updateItem, getItemsByParent, isWipLimitReached, claimNextQueuedItem } from "../backlog.ts";
+import { getStatus, addItem, _admin } from "../backlog.ts";
 
 export function createBacklogRouter() {
   const router = Router();
@@ -7,8 +7,8 @@ export function createBacklogRouter() {
   // GET /backlog — Full Kanban backlog with all lanes
   router.get("/backlog", async (req, res) => {
     try {
-      const lanes = await loadBacklog();
-      const counts = await getBacklogCounts();
+      const lanes = await _admin.loadBacklog();
+      const counts = await _admin.getBacklogCounts();
       res.json({ ...lanes, counts });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -18,9 +18,8 @@ export function createBacklogRouter() {
   // GET /backlog/counts — Just the counts per lane (includes WIP limit status)
   router.get("/backlog/counts", async (req, res) => {
     try {
-      const counts = await getBacklogCounts();
-      const wip = await isWipLimitReached();
-      res.json({ ...counts, wip });
+      const status = await getStatus();
+      res.json({ ...status });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -31,7 +30,7 @@ export function createBacklogRouter() {
     try {
       const { title, category, priority, description, labels, estimate, parentId } = req.body || {};
       if (!title) return res.status(400).json({ error: "Missing 'title'" });
-      const result = await addToBacklog({
+      const result = await addItem({
         title, category: category || "uncategorized", source: "operator",
         priority, description, labels, estimate, parentId,
       });
@@ -106,7 +105,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
       }
 
       // Add the item to backlog with enhanced fields
-      const result = await addToBacklog({
+      const result = await addItem({
         title: structured.title,
         category: structured.category || "uncategorized",
         source: "operator",
@@ -126,7 +125,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   // PATCH /backlog/:id — Update item fields
   router.patch("/backlog/:id", async (req, res) => {
     try {
-      const result = await updateItem(req.params.id, req.body || {});
+      const result = await _admin.updateItem(req.params.id, req.body || {});
       if (!result.ok) return res.status(404).json(result);
       res.json(result);
     } catch (err: any) {
@@ -139,7 +138,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
     try {
       const { lane } = req.body || {};
       if (!lane) return res.status(400).json({ error: "Missing 'lane'" });
-      const result = await moveItemToLane(req.params.id, lane);
+      const result = await _admin.moveItemToLane(req.params.id, lane);
       if (!result.ok) return res.status(404).json(result);
       res.json(result);
     } catch (err: any) {
@@ -150,7 +149,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   // POST /backlog/:id/approve — Move item from triage to backlog
   router.post("/backlog/:id/approve", async (req, res) => {
     try {
-      const result = await moveItemToLane(req.params.id, "backlog");
+      const result = await _admin.moveItemToLane(req.params.id, "backlog");
       if (!result.ok) return res.status(404).json(result);
       res.json({ ...result, approved: true });
     } catch (err: any) {
@@ -161,7 +160,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   // GET /backlog/:id/children — List child items for a parent
   router.get("/backlog/:id/children", async (req, res) => {
     try {
-      const children = await getItemsByParent(req.params.id);
+      const children = await _admin.getItemsByParent(req.params.id);
       res.json(children);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -171,7 +170,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   // DELETE /backlog/:id — Remove an item
   router.delete("/backlog/:id", async (req, res) => {
     try {
-      const result = await deleteItem(req.params.id);
+      const result = await _admin.deleteItem(req.params.id);
       if (!result.ok) return res.status(404).json(result);
       res.json(result);
     } catch (err: any) {
@@ -183,7 +182,7 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   router.post("/backlog/claim", async (req, res) => {
     try {
       const { claimedBy } = req.body || {};
-      const result = await claimNextQueuedItem(claimedBy || "claude");
+      const result = await _admin.claimNextQueuedItem(claimedBy || "claude");
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });

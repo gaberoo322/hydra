@@ -22,7 +22,7 @@ import { loadProjectGoals, summarizeGoalsForPrompt, loadAppMetrics } from "./pro
 import { analyzeCodebase, formatStateForPrompt } from "./codebase-analyzer.ts";
 import { getCumulativeAccomplishments, getMetricsTrend } from "./metrics.ts";
 import { STREAMS } from "./event-bus.ts";
-import { addToBacklog } from "./backlog.ts";
+import { addItem } from "./backlog.ts";
 import { createSpec } from "./specs.ts";
 import {
   getRecentResearchIds, getResearchReport as getResearchReportAdapter,
@@ -604,7 +604,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
 
         const complexityToEstimate = { trivial: 1, low: 2, medium: 3, high: 5, extreme: 8 };
 
-        await addToBacklog({
+        await addItem({
           title: opp.title,
           category: opp.category,
           source: "research",

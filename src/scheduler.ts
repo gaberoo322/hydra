@@ -11,7 +11,7 @@
 import { startCycle } from "./cycle.ts";
 import { sendNotification } from "./notify.ts";
 import { getMetricsTrend } from "./metrics.ts";
-import { getBacklogCounts, promoteToQueued, pruneOldDoneItems } from "./backlog.ts";
+import { getStatus as getBacklogStatus, runMaintenance } from "./backlog.ts";
 import { runResearchLoop } from "./research-loop.ts";
 import { redisKeys } from "./redis-keys.ts";
 import {
@@ -273,7 +273,7 @@ async function detectRepetition(eventBus) {
 
 async function maybeRunResearch(eventBus) {
   // Prune old done items from backlog
-  try { await pruneOldDoneItems(); } catch {}
+  try { await runMaintenance(); } catch {}
 
   // Check if operator forced a research cycle (bypasses all throttles)
   const forced = await consumeResearchForceOnce();
@@ -319,10 +319,10 @@ async function maybeRunResearch(eventBus) {
 
   // If queue is low but backlog has items, promote from backlog first
   try {
-    const counts = await getBacklogCounts();
-    if (counts.backlog > 0) {
+    const status = await getBacklogStatus();
+    if (status.backlog > 0) {
       const needed = RESEARCH_QUEUE_THRESHOLD - queueLen;
-      const promoted = await promoteToQueued(needed);
+      const { promoted } = await runMaintenance({ promoteCount: needed });
       if (promoted.length > 0) {
         // Push promoted items into Redis queue with full context
         for (const item of promoted) {
@@ -347,7 +347,7 @@ async function maybeRunResearch(eventBus) {
     }
 
     // Log if backlog AND queue are both empty (no notification — too noisy)
-    if (counts.total === 0 && counts.inProgress === 0) {
+    if (status.total === 0 && status.inProgress === 0) {
       console.log(`[Scheduler] Backlog and queue are both empty — will pick from priorities doc`);
     }
   } catch (err: any) {
@@ -434,8 +434,8 @@ const BLOCKED_COOLDOWN_KEY = redisKeys.blockedLastEscalation();
 
 async function checkBlockedEscalation(eventBus) {
   try {
-    const { loadBacklog } = await import("./backlog.ts");
-    const lanes = await loadBacklog() as Record<string, any[]>;
+    const { _admin } = await import("./backlog.ts");
+    const lanes = await _admin.loadBacklog() as Record<string, any[]>;
     const blocked = lanes.blocked || [];
     if (blocked.length === 0) return;
 

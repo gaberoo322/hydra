@@ -19,7 +19,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getCumulativeAccomplishments, getMetricsTrend } from "./metrics.ts";
-import { getBacklogCounts, loadBacklog, blockItemById, addToBacklog } from "./backlog.ts";
+import { getStatus as getBacklogStatus, block, addItem, _admin } from "./backlog.ts";
 import { groundProject, summarizeForPrompt } from "./grounding.ts";
 import { redisKeys } from "./redis-keys.ts";
 
@@ -90,9 +90,9 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
   // 5. Get backlog state
   let backlogContext = "";
   try {
-    const counts = await getBacklogCounts();
-    const lanes = await loadBacklog();
-    backlogContext = `Triage: ${counts.triage || 0}, Backlog: ${counts.backlog} items, Queued: ${counts.queued}, Blocked: ${counts.blocked || 0}, In Progress: ${counts.inProgress}, Done: ${counts.done}`;
+    const status = await getBacklogStatus();
+    const lanes = await _admin.loadBacklog();
+    backlogContext = `Triage: ${status.triage || 0}, Backlog: ${status.backlog} items, Queued: ${status.queued}, Blocked: ${status.blocked || 0}, In Progress: ${status.inProgress}, Done: ${status.done}`;
     // @ts-expect-error — migrate to proper types
     if ((lanes.triage || []).length > 0) {
     // @ts-expect-error — migrate to proper types
@@ -329,7 +329,7 @@ async function syncBlockedItemsToBacklog(prioritiesContent: string) {
   // Load all backlog items across ALL lanes (including done — items may have
   // been prematurely completed when the infrastructure was built but the
   // operator action hasn't happened yet).
-  const lanes = await loadBacklog();
+  const lanes = await _admin.loadBacklog();
   const activeCandidates: Array<{ id: string; title: string; lane: string }> = [];
   const doneCandidates: Array<{ id: string; title: string; lane: string }> = [];
   for (const lane of ["triage", "backlog", "queued", "inProgress"]) {
@@ -356,8 +356,8 @@ async function syncBlockedItemsToBacklog(prioritiesContent: string) {
     // 2. Match in active lanes? Move to blocked.
     const activeMatch = findBestMatch(blocked.title, activeCandidates);
     if (activeMatch) {
-      const moved = await blockItemById(activeMatch.id, blocked.reason);
-      if (moved) {
+      const moved = await block({ id: activeMatch.id, reason: blocked.reason });
+      if (moved.ok) {
         console.log(`[PrioritiesRefresh] Synced blocked: "${activeMatch.title}" → blocked lane (reason: ${blocked.reason})`);
         const idx = activeCandidates.indexOf(activeMatch);
         if (idx !== -1) activeCandidates.splice(idx, 1);
@@ -368,8 +368,8 @@ async function syncBlockedItemsToBacklog(prioritiesContent: string) {
     // 3. Match in done lane? Move back to blocked (prematurely completed).
     const doneMatch = findBestMatch(blocked.title, doneCandidates);
     if (doneMatch) {
-      const moved = await blockItemById(doneMatch.id, blocked.reason);
-      if (moved) {
+      const moved = await block({ id: doneMatch.id, reason: blocked.reason });
+      if (moved.ok) {
         console.log(`[PrioritiesRefresh] Reopened done item as blocked: "${doneMatch.title}" (reason: ${blocked.reason})`);
         const idx = doneCandidates.indexOf(doneMatch);
         if (idx !== -1) doneCandidates.splice(idx, 1);
@@ -378,7 +378,7 @@ async function syncBlockedItemsToBacklog(prioritiesContent: string) {
     }
 
     // 4. No match anywhere — create a new blocked item.
-    const result = await addToBacklog({
+    const result = await addItem({
       title: blocked.title,
       source: "priorities-sync",
       category: "operator-blocked",
@@ -388,7 +388,7 @@ async function syncBlockedItemsToBacklog(prioritiesContent: string) {
     if (result.added) {
       console.log(`[PrioritiesRefresh] Created blocked item: "${blocked.title}" (${result.id}, reason: ${blocked.reason})`);
       // Also set the blocked metadata
-      await blockItemById(result.id, blocked.reason);
+      await block({ id: result.id, reason: blocked.reason });
     }
   }
 }

@@ -11,7 +11,7 @@ import { getMetricsTrend, getAggregateStats } from "../metrics.ts";
 import { OLLAMA_HOST } from "../codex-runner.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler.ts";
 import { listProposals } from "../proposals.ts";
-import { getBacklogCounts } from "../backlog.ts";
+import { getStatus as getBacklogStatus } from "../backlog.ts";
 import { redisKeys } from "../redis-keys.ts";
 import {
   listLen, getMemoryPatterns, scanKeys, redisInfo as getRedisInfo,
@@ -92,7 +92,7 @@ export function createHealthRouter(eventBus: any) {
       /* 3 */ getCycleStatus(),
       /* 4 */ getWorkQueueLen(),
       /* 5 */ listLen(redisKeys.anchorPriorFailures()),
-      /* 6 */ getBacklogCounts(),
+      /* 6 */ getBacklogStatus(),
       /* 7 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
       /* 8 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
       /* 9 */ execFileAsync("free", ["-b"], { timeout: 3000 }).catch(() => null),
@@ -249,7 +249,7 @@ export function createHealthRouter(eventBus: any) {
       }
 
       // 2. Triage items awaiting approval
-      const counts = await getBacklogCounts();
+      const counts = await getBacklogStatus();
       if (counts.triage > 0) {
         recs.push({
           type: "review",

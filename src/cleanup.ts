@@ -12,7 +12,7 @@
  */
 
 import { archiveApprovedProposals } from "./proposals.ts";
-import { pruneOldDoneItems } from "./backlog.ts";
+import { runMaintenance } from "./backlog.ts";
 import { redisKeys } from "./redis-keys.ts";
 import {
   pruneMetricsIndex,
@@ -146,7 +146,7 @@ async function returnStaleInProgressItems() {
 
 async function runCleanup() {
   try {
-    await pruneOldDoneItems();
+    await runMaintenance();
   } catch (err: any) {
     console.error(`[Cleanup] Backlog prune failed: ${err.message}`);
   }

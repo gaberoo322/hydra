@@ -710,30 +710,161 @@ async function fail(
 /**
  * Block an anchor — move it to Blocked with built-in error handling.
  * Wraps moveToBlocked() with loud failure logging and event publishing.
+ *
+ * Overload: pass an object { id, reason } to block by item ID instead of title.
  */
 async function block(
-  reference: string,
-  reason: string,
+  reference: string | { id: string | number; reason: string },
+  reason?: string,
   opts: { eventBus?: FacadeEventBus | null; cycleId?: string } = {},
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    await moveToBlocked(reference, reason);
+    if (typeof reference === "object" && reference !== null) {
+      // Block by item ID (used by priorities-refresh)
+      const result = await blockItemById(reference.id, reference.reason);
+      return { ok: result !== false };
+    }
+    await moveToBlocked(reference, reason || "");
     return { ok: true };
   } catch (err: any) {
-    console.error(`[Backlog] block() failed for "${reference}": ${err.message}`);
-    await publishFacadeFailure(opts.eventBus || null, opts.cycleId || "", "block", reference, err.message);
+    const ref = typeof reference === "string" ? reference : String((reference as any)?.id);
+    console.error(`[Backlog] block() failed for "${ref}": ${err.message}`);
+    await publishFacadeFailure(opts.eventBus || null, opts.cycleId || "", "block", ref, err.message);
     return { ok: false, error: err.message };
   }
 }
 
-export {
-  loadBacklog, getBacklogCounts, addToBacklog, promoteToQueued,
-  moveToInProgress, moveToDone, moveToBlocked, blockItemById, returnToBacklog,
-  pruneOldDoneItems, moveItemToLane, deleteItem, closeBacklogRedis,
-  updateItem, getItemsByParent, peekNextQueuedItem,
-  getInProgressCount, getInProgressItems, isWipLimitReached,
-  requeueStaleInProgressItems, WIP_LIMIT, getCurrentMilestoneProgress,
+// ---------------------------------------------------------------------------
+// getStatus() — facade for backlog depth counts + WIP status
+// ---------------------------------------------------------------------------
+
+/**
+ * Get a summary of backlog state: lane counts + WIP limit info.
+ * Replaces direct calls to getBacklogCounts() and isWipLimitReached().
+ */
+async function getStatus(): Promise<{
+  triage: number;
+  backlog: number;
+  queued: number;
+  blocked: number;
+  inProgress: number;
+  done: number;
+  total: number;
+  wip: { atLimit: boolean; count: number; limit: number };
+}> {
+  const counts = await getBacklogCounts();
+  const wip = await isWipLimitReached();
+  return { ...counts, wip } as any;
+}
+
+// ---------------------------------------------------------------------------
+// addItem() — facade for adding items to the backlog with error handling
+// ---------------------------------------------------------------------------
+
+/**
+ * Add an item to the backlog (triage or backlog lane).
+ * Wraps addToBacklog() with the same error handling pattern as claim/complete/fail/block.
+ */
+async function addItem(
+  item: {
+    title: string;
+    category?: string;
+    source?: string;
+    adjustedScore?: number;
+    confidence?: string;
+    complexity?: string;
+    lane?: string;
+    description?: string;
+    labels?: string[];
+    estimate?: number | null;
+    priority?: number;
+    parentId?: string | null;
+  },
+): Promise<{ ok: boolean; added?: boolean; id?: number; reason?: string; error?: string }> {
+  try {
+    const result = await addToBacklog(item);
+    return { ok: true, ...result };
+  } catch (err: any) {
+    console.error(`[Backlog] addItem() failed for "${item.title}": ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// runMaintenance() — internal promotion, pruning, stale-requeue
+// ---------------------------------------------------------------------------
+
+/**
+ * Run internal backlog maintenance tasks:
+ * - Prune done items older than retention period
+ * - Promote backlog items to queued lane (returns promoted items)
+ * - Requeue stale in-progress items
+ *
+ * Called by the scheduler instead of directly calling pruneOldDoneItems/promoteToQueued.
+ */
+async function runMaintenance(
+  opts: { promoteCount?: number } = {},
+): Promise<{ pruned: boolean; promoted: any[]; requeued: any[] }> {
+  let pruned = false;
+  let promoted: any[] = [];
+  let requeued: any[] = [];
+
+  try { await pruneOldDoneItems(); pruned = true; } catch (err: any) {
+    console.error(`[Backlog] maintenance pruneOldDoneItems failed: ${err.message}`);
+  }
+
+  if (opts.promoteCount && opts.promoteCount > 0) {
+    try { promoted = await promoteToQueued(opts.promoteCount); } catch (err: any) {
+      console.error(`[Backlog] maintenance promoteToQueued failed: ${err.message}`);
+    }
+  }
+
+  try { requeued = await requeueStaleInProgressItems(); } catch (err: any) {
+    console.error(`[Backlog] maintenance requeueStaleInProgressItems failed: ${err.message}`);
+  }
+
+  return { pruned, promoted, requeued };
+}
+
+// ---------------------------------------------------------------------------
+// _admin — richer access for the dashboard API (issue #72)
+// ---------------------------------------------------------------------------
+
+/**
+ * Admin-level access for the dashboard API routes.
+ * These are internal functions that need richer access than the public facade.
+ */
+const _admin = {
+  loadBacklog,
+  getBacklogCounts,
+  addToBacklog,
+  moveItemToLane,
+  deleteItem,
+  updateItem,
+  getItemsByParent,
+  isWipLimitReached,
   claimNextQueuedItem,
-  // Facade API (issue #71)
+  blockItemById,
+  promoteToQueued,
+  getLaneItems,
+  requeueStaleInProgressItems,
+  peekNextQueuedItem,
+  moveToBlocked,
+  moveToInProgress,
+  moveToDone,
+  returnToBacklog,
+  WIP_LIMIT,
+  getInProgressCount,
+  getInProgressItems,
+  pruneOldDoneItems,
+};
+
+export {
+  // Facade API (issue #71 + #72)
   claim, complete, fail, block,
+  getStatus, addItem, runMaintenance,
+  // Admin access for dashboard API
+  _admin,
+  // Still needed by callers during migration (internalized in spirit, exported for compat)
+  closeBacklogRedis, getCurrentMilestoneProgress,
 };
