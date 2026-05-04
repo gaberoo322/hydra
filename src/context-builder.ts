@@ -15,11 +15,9 @@
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { loadAgentMemory } from "./agent-memory.ts";
+import { getContext } from "./learning.ts";
 import { getCumulativeAccomplishments } from "./metrics.ts";
 import { summarizeForPrompt, getDiff } from "./grounding.ts";
-import { loadReflections } from "./agent-memory.ts";
-import { loadRelevantReflections, formatReflectionsForPrompt } from "./reflections.ts";
 import { redisKeys } from "./redis-keys.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
@@ -85,14 +83,14 @@ export async function buildPlannerContext(
     };
   }
 
-  // Load file-based context + agent memory + OV context in parallel
+  // Load file-based context + agent memory/reflections + OV context in parallel
   const [priorities, feedback, plannerMemory, ovResult] = await Promise.all([
     loadSource("priorities", () =>
       readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8"), warnings),
     loadSource("feedback", () =>
       readFile(join(CONFIG_PATH, "feedback", "to-planner.md"), "utf-8"), warnings),
-    loadSource("planner-memory", () =>
-      loadAgentMemory("planner"), warnings),
+    loadSource("planner-context", () =>
+      getContext("planner", anchor), warnings),
     loadSource("openviking-context", () =>
       ovSession?.getAgentContext?.("planner", anchor) || Promise.resolve({ formatted: "" }), warnings),
   ]);
@@ -162,19 +160,8 @@ async function loadContinuityContext(
     }
   }
 
-  // Episodic reflections (per-anchor)
-  const reflectionContext = await loadSource("episodic-reflections", () =>
-    loadReflections(anchor.reference), warnings);
-  if (reflectionContext) {
-    continuityContext += "\n" + reflectionContext;
-  }
-
-  // Global reflections (Reflexion pattern)
-  const globalReflections = await loadSource("global-reflections", () =>
-    loadRelevantReflections(anchor), warnings);
-  if (globalReflections && (globalReflections as any[]).length > 0) {
-    continuityContext += "\n" + formatReflectionsForPrompt(globalReflections as any[]);
-  }
+  // Episodic reflections and global reflections are now loaded via
+  // getContext() in buildPlannerContext() and included in plannerMemory.
 
   return continuityContext;
 }

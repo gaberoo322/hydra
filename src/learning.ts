@@ -18,11 +18,66 @@ import {
   recordSkepticLesson,
   recordReflection as recordAnchorReflection,
   clearReflections,
+  loadAgentMemory,
+  formatMemoryForPrompt,
+  loadReflections,
 } from "./agent-memory.ts";
 import {
   recordReflection as recordGlobalReflection,
   clearReflectionsForAnchor,
+  loadRelevantReflections,
+  formatReflectionsForPrompt,
 } from "./reflections.ts";
+
+// ---------------------------------------------------------------------------
+// getContext — unified context loader for agent prompts
+// ---------------------------------------------------------------------------
+
+/**
+ * Load all learning context for an agent + anchor in one call.
+ *
+ * Combines:
+ *   - Agent memory (loadAgentMemory + formatMemoryForPrompt)
+ *   - Per-anchor reflections (loadReflections from agent-memory)
+ *   - Global relevant reflections (loadRelevantReflections + formatReflectionsForPrompt)
+ *
+ * Returns a single formatted string ready for prompt injection.
+ * Never throws — individual sources degrade gracefully.
+ */
+export async function getContext(
+  agent: string,
+  anchor: { type: string; reference: string },
+): Promise<string> {
+  const parts: string[] = [];
+
+  // 1. Agent memory patterns (formatted for prompt)
+  try {
+    const memory = await loadAgentMemory(agent);
+    const formatted = formatMemoryForPrompt(memory, agent);
+    if (formatted) parts.push(formatted);
+  } catch (err: any) {
+    console.error(`[Learning] getContext: agent memory load failed for ${agent}: ${err.message}`);
+  }
+
+  // 2. Per-anchor episodic reflections
+  try {
+    const reflections = await loadReflections(anchor.reference);
+    if (reflections) parts.push(reflections);
+  } catch (err: any) {
+    console.error(`[Learning] getContext: per-anchor reflections failed for "${anchor.reference}": ${err.message}`);
+  }
+
+  // 3. Global relevant reflections (Reflexion pattern)
+  try {
+    const relevant = await loadRelevantReflections(anchor);
+    const formatted = formatReflectionsForPrompt(relevant);
+    if (formatted) parts.push(formatted);
+  } catch (err: any) {
+    console.error(`[Learning] getContext: global reflections failed for "${anchor.reference}": ${err.message}`);
+  }
+
+  return parts.join("\n\n");
+}
 
 // ---------------------------------------------------------------------------
 // Types

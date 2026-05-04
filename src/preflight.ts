@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { runAgent, findPersonality } from "./codex-runner.ts";
-import { loadAgentMemory, formatMemoryForPrompt } from "./agent-memory.ts";
+import { getContext } from "./learning.ts";
 import { getTracker } from "./task-tracker.ts";
 import { getRecentReportIds, getRealityReport } from "./redis-adapter.ts";
 
@@ -287,9 +287,9 @@ export async function runHighRiskReview(cycleId, task, grounding, groundingSumma
 // ---------------------------------------------------------------------------
 
 export async function runSkepticAgent(cycleId, task, grounding, groundingSummary, ovSession = null) {
-  // Load skeptic memory + OV context in parallel
-  const [skepticMemory, ovCtx] = await Promise.all([
-    loadAgentMemory("skeptic"),
+  // Load skeptic context (memory + reflections) + OV context in parallel
+  const [skepticContext, ovCtx] = await Promise.all([
+    getContext("skeptic", { type: "task", reference: task.title }),
     ovSession?.getAgentContext?.("skeptic", { reference: task.title, whyNow: task.anchorReference }) || Promise.resolve({ formatted: "" }),
   ]);
   const skepticKnowledge = ovCtx.formatted || "";
@@ -326,7 +326,7 @@ export async function runSkepticAgent(cycleId, task, grounding, groundingSummary
     "",
     recentHistory ? `## RECENT CYCLE HISTORY (check for duplicates)\n${recentHistory}` : "",
     "",
-    formatMemoryForPrompt(skepticMemory, "skeptic"),
+    skepticContext,
     "",
     skepticKnowledge,
     "",
