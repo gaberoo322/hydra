@@ -134,7 +134,7 @@ async function runMetaAnalysis(eventBus, event) {
 
   // 5. Agent memory — learned prevention rules (WHEN/CHECK/BECAUSE)
   try {
-    const { loadAgentMemory } = await import("./agent-memory.ts");
+    const { loadAgentMemory } = await import("./learning.ts");
     const agentRules = [];
     for (const agent of ["planner", "executor", "skeptic"]) {
       const memory = await loadAgentMemory(agent);

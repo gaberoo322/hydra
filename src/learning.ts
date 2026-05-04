@@ -678,7 +678,7 @@ async function promoteToFeedback(agentName: string, pattern: MemoryPattern) {
 // Section: Private — Agent memory loading + formatting
 // ===========================================================================
 
-async function loadAgentMemory(agentName: string): Promise<string> {
+export async function loadAgentMemory(agentName: string): Promise<string> {
   await sweepStalePromotions(agentName);
 
   const patterns = await loadPatterns(agentName);

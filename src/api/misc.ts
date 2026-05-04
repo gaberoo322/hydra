@@ -529,7 +529,7 @@ export function createMiscRouter(eventBus: any) {
 
   router.get("/memory/:agent", async (req, res) => {
     try {
-      const { loadAgentMemory } = await import("../agent-memory.ts");
+      const { loadAgentMemory } = await import("../learning.ts");
       const memory = await loadAgentMemory(req.params.agent);
       res.type("text/plain").send(memory);
     } catch (err: any) {
