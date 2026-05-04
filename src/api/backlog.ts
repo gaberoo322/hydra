@@ -1,5 +1,6 @@
 import { Router } from "express";
-import { loadBacklog, getBacklogCounts, addToBacklog, moveItemToLane, deleteItem, updateItem, getItemsByParent, isWipLimitReached, claimNextQueuedItem } from "../backlog.ts";
+import { _admin } from "../backlog.ts";
+const { loadBacklog, getBacklogCounts, addToBacklog, moveItemToLane, deleteItem, updateItem, getItemsByParent, isWipLimitReached, claimNextQueuedItem } = _admin;
 
 export function createBacklogRouter() {
   const router = Router();

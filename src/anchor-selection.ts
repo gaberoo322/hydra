@@ -8,7 +8,8 @@
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, moveToBlocked, claimNextQueuedItem } from "./backlog.ts";
+import { _admin, block } from "./backlog.ts";
+const { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, claimNextQueuedItem } = _admin;
 import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
 import {
@@ -606,7 +607,7 @@ async function trackAbandonment(anchorRef, task, reason) {
     // Blocking it lets the reframe queue item (lower priority in selectAnchor)
     // get processed instead.
     try {
-      await moveToBlocked(anchorRef, `Circuit breaker: abandoned ${count}x — escalated to reframe queue`);
+      await block(anchorRef, `Circuit breaker: abandoned ${count}x — escalated to reframe queue`);
       console.log(`[ControlLoop] Blocked Kanban item "${anchorRef}" to unblock reframe processing`);
     } catch (err: any) {
       // Not all anchors have a Kanban item (e.g. work queue items, failing tests)

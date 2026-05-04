@@ -237,7 +237,8 @@ export async function sendDigestNow() {
  */
 export async function buildWeeklySummary() {
   const { getMetricsTrend, getFixFeatureRatio } = await import("./metrics.ts");
-  const { getCurrentMilestoneProgress, getBacklogCounts } = await import("./backlog.ts");
+  const { _admin: backlogAdmin } = await import("./backlog.ts");
+  const { getCurrentMilestoneProgress, getBacklogCounts } = backlogAdmin;
 
   const trend = await getMetricsTrend(50);
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;

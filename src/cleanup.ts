@@ -12,7 +12,8 @@
  */
 
 import { archiveApprovedProposals } from "./proposals.ts";
-import { pruneOldDoneItems } from "./backlog.ts";
+import { _admin } from "./backlog.ts";
+const { pruneOldDoneItems } = _admin;
 import { redisKeys } from "./redis-keys.ts";
 import {
   pruneMetricsIndex,

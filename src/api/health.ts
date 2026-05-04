@@ -11,7 +11,8 @@ import { getMetricsTrend, getAggregateStats } from "../metrics.ts";
 import { OLLAMA_HOST } from "../codex-runner.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler.ts";
 import { listProposals } from "../proposals.ts";
-import { getBacklogCounts } from "../backlog.ts";
+import { _admin as backlogAdmin } from "../backlog.ts";
+const getBacklogCounts = backlogAdmin.getBacklogCounts;
 import { redisKeys } from "../redis-keys.ts";
 import {
   listLen, getMemoryPatterns, scanKeys, redisInfo as getRedisInfo,

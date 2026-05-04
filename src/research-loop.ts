@@ -22,7 +22,7 @@ import { loadProjectGoals, summarizeGoalsForPrompt, loadAppMetrics } from "./pro
 import { analyzeCodebase, formatStateForPrompt } from "./codebase-analyzer.ts";
 import { getCumulativeAccomplishments, getMetricsTrend } from "./metrics.ts";
 import { STREAMS } from "./event-bus.ts";
-import { addToBacklog } from "./backlog.ts";
+import { addItem as addToBacklog } from "./backlog.ts";
 import { createSpec } from "./specs.ts";
 import {
   getRecentResearchIds, getResearchReport as getResearchReportAdapter,
