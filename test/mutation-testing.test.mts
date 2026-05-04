@@ -1,45 +1,24 @@
 /**
- * Tests for src/mutation-testing.ts — the lightweight mutation testing module.
+ * Tests for mutation testing helpers, inlined into src/verification.ts (issue #67).
  *
- * These test the mutation generation logic (pure functions), not the full
- * test-runner integration which requires a real project directory.
+ * Tests the mutation generation logic and skip patterns via the _testing
+ * escape hatch. The full test-runner integration is tested by running
+ * a cycle with mutation testing enabled.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { _testing } from "../src/verification.ts";
 
-// We can't import the private functions directly, so we replicate the
-// mutator logic for testing. The actual integration is tested by running
-// a cycle with mutation testing enabled.
+const { MUTATORS, SKIP_PATTERNS, shouldSkipMutation } = _testing;
+
+// Extract individual mutator apply functions by type for direct testing
+const negateBoolean = MUTATORS.find((m) => m.type === "negate-boolean-return")!.apply;
+const swapComparison = MUTATORS.find((m) => m.type === "swap-comparison")!.apply;
+const negateCondition = MUTATORS.find((m) => m.type === "negate-condition")!.apply;
+const removeEarlyReturn = MUTATORS.find((m) => m.type === "remove-early-return")!.apply;
 
 describe("mutation generation", () => {
-  // Replicate the MUTATORS array logic for unit testing
-  const negateBoolean = (line: string) => {
-    if (/return\s+true\s*;/.test(line)) return line.replace(/return\s+true\s*;/, "return false;");
-    if (/return\s+false\s*;/.test(line)) return line.replace(/return\s+false\s*;/, "return true;");
-    return null;
-  };
-
-  const swapComparison = (line: string) => {
-    if (line.includes("===")) return line.replace("===", "!==");
-    if (line.includes("!==")) return line.replace("!==", "===");
-    return null;
-  };
-
-  const negateCondition = (line: string) => {
-    const match = line.match(/^(\s*if\s*\()(.+)(\)\s*\{?\s*)$/);
-    if (match) return `${match[1]}!(${match[2]})${match[3]}`;
-    return null;
-  };
-
-  const removeEarlyReturn = (line: string) => {
-    const match = line.match(/^(\s*)return\s+.+;/);
-    if (match && !line.includes("return;")) {
-      return `${match[1]}/* MUTANT: removed return */`;
-    }
-    return null;
-  };
-
   test("negates boolean returns", () => {
     assert.equal(negateBoolean("    return true;"), "    return false;");
     assert.equal(negateBoolean("    return false;"), "    return true;");
@@ -72,41 +51,27 @@ describe("mutation generation", () => {
 });
 
 describe("skip patterns", () => {
-  const SKIP_PATTERNS = [
-    /\.test\.[jt]sx?$/,
-    /\.spec\.[jt]sx?$/,
-    /\.config\.[jt]s$/,
-    /\.d\.ts$/,
-    /drizzle\//,
-    /migrations?\//,
-    /node_modules\//,
-  ];
-
-  function shouldSkip(filePath: string): boolean {
-    return SKIP_PATTERNS.some((pat) => pat.test(filePath));
-  }
-
   test("skips test files", () => {
-    assert.equal(shouldSkip("src/lib/foo.test.ts"), true);
-    assert.equal(shouldSkip("src/lib/foo.spec.tsx"), true);
+    assert.equal(shouldSkipMutation("src/lib/foo.test.ts"), true);
+    assert.equal(shouldSkipMutation("src/lib/foo.spec.tsx"), true);
   });
 
   test("skips config files", () => {
-    assert.equal(shouldSkip("vitest.config.ts"), true);
-    assert.equal(shouldSkip("next.config.js"), true);
+    assert.equal(shouldSkipMutation("vitest.config.ts"), true);
+    assert.equal(shouldSkipMutation("next.config.js"), true);
   });
 
   test("skips type declarations", () => {
-    assert.equal(shouldSkip("src/types/foo.d.ts"), true);
+    assert.equal(shouldSkipMutation("src/types/foo.d.ts"), true);
   });
 
   test("skips drizzle and migration dirs", () => {
-    assert.equal(shouldSkip("drizzle/0001_add_table.sql"), true);
-    assert.equal(shouldSkip("src/migrations/001.ts"), true);
+    assert.equal(shouldSkipMutation("drizzle/0001_add_table.sql"), true);
+    assert.equal(shouldSkipMutation("src/migrations/001.ts"), true);
   });
 
   test("does not skip regular source files", () => {
-    assert.equal(shouldSkip("src/lib/arb-scanner.ts"), false);
-    assert.equal(shouldSkip("src/app/page.tsx"), false);
+    assert.equal(shouldSkipMutation("src/lib/arb-scanner.ts"), false);
+    assert.equal(shouldSkipMutation("src/app/page.tsx"), false);
   });
 });

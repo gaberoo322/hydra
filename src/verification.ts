@@ -15,14 +15,12 @@
 
 import * as Sentry from "@sentry/node";
 import { execFile } from "node:child_process";
-import { access } from "node:fs/promises";
-import { join } from "node:path";
+import { access, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
+import { join, basename } from "node:path";
 import { promisify } from "node:util";
 import { STREAMS } from "./event-bus.ts";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker } from "./task-tracker.ts";
-import { runMutationTests } from "./mutation-testing.ts";
-import { runJitTests } from "./jit-testing.ts";
 import { recordOutcome } from "./learning.ts";
 import { recordCycleMetrics } from "./metrics.ts";
 import { reportOutcome } from "./anchor-selection.ts";
@@ -838,3 +836,615 @@ function summarizeVerification(result: any) {
 
   return parts.join("\n");
 }
+
+// ---------------------------------------------------------------------------
+// Mutation testing (inlined from mutation-testing.ts — issue #67)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TIME_BUDGET_MS = 120_000;
+const MT_TEST_TIMEOUT_MS = 45_000;
+
+// Files we never mutate
+const SKIP_PATTERNS = [
+  /\.test\.[jt]sx?$/,
+  /\.spec\.[jt]sx?$/,
+  /\.config\.[jt]s$/,
+  /\.d\.ts$/,
+  /drizzle\//,
+  /migrations?\//,
+  /__mocks__\//,
+  /node_modules\//,
+];
+
+type Mutation = {
+  file: string;
+  line: number;
+  original: string;
+  mutated: string;
+  type: string;
+};
+
+type MutationResult = {
+  mutation: Mutation;
+  survived: boolean; // true = tests still passed = bad coverage
+  skipped: boolean;
+  error?: string;
+};
+
+type MutationTestReport = {
+  totalMutants: number;
+  killed: number;
+  survived: number;
+  skipped: number;
+  timedOut: boolean;
+  durationMs: number;
+  survivors: MutationResult[]; // only the surviving mutants (uncovered code)
+};
+
+/**
+ * Mutators — each takes a line and returns a mutated version, or null if
+ * the mutation doesn't apply.
+ */
+const MUTATORS: { type: string; apply: (line: string) => string | null }[] = [
+  {
+    type: "negate-boolean-return",
+    apply: (line) => {
+      if (/return\s+true\s*;/.test(line)) return line.replace(/return\s+true\s*;/, "return false;");
+      if (/return\s+false\s*;/.test(line)) return line.replace(/return\s+false\s*;/, "return true;");
+      return null;
+    },
+  },
+  {
+    type: "swap-comparison",
+    apply: (line) => {
+      // Only swap the first occurrence to keep mutations atomic
+      if (line.includes("===")) return line.replace("===", "!==");
+      if (line.includes("!==")) return line.replace("!==", "===");
+      if (/[^=<>!]>[^=]/.test(line)) return line.replace(/([^=<>!])>([^=])/, "$1<$2");
+      if (/[^=<>!]<[^=]/.test(line)) return line.replace(/([^=<>!])<([^=])/, "$1>$2");
+      return null;
+    },
+  },
+  {
+    type: "negate-condition",
+    apply: (line) => {
+      // Match `if (...)` and negate the condition
+      const match = line.match(/^(\s*if\s*\()(.+)(\)\s*\{?\s*)$/);
+      if (match) return `${match[1]}!(${match[2]})${match[3]}`;
+      return null;
+    },
+  },
+  {
+    type: "remove-early-return",
+    apply: (line) => {
+      // Only remove returns that have a value (not bare `return;`)
+      const match = line.match(/^(\s*)return\s+.+;/);
+      if (match && !line.includes("return;")) {
+        return `${match[1]}/* MUTANT: removed return */`;
+      }
+      return null;
+    },
+  },
+];
+
+function shouldSkipMutation(filePath: string): boolean {
+  return SKIP_PATTERNS.some((pat) => pat.test(filePath));
+}
+
+/**
+ * Generate candidate mutations for a single file.
+ */
+function generateMutations(filePath: string, content: string): Mutation[] {
+  const mutations: Mutation[] = [];
+  const lines = content.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Skip comment-only lines and imports
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*") || trimmed.startsWith("import ") || trimmed.startsWith("export type") || trimmed.startsWith("export interface")) {
+      continue;
+    }
+
+    for (const mutator of MUTATORS) {
+      const mutated = mutator.apply(line);
+      if (mutated && mutated !== line) {
+        mutations.push({
+          file: filePath,
+          line: i + 1,
+          original: line,
+          mutated,
+          type: mutator.type,
+        });
+        break; // one mutation per line max
+      }
+    }
+  }
+
+  return mutations;
+}
+
+/**
+ * Run mutation testing on the changed files.
+ *
+ * @param projectDir - Project root (~/hydra-betting)
+ * @param changedFiles - List of changed file paths (from git diff)
+ * @param opts.timeBudgetMs - Max time for all mutations (default 60s)
+ * @param opts.testCommand - Command to run tests (default: npm test)
+ */
+async function runMutationTests(
+  projectDir: string,
+  changedFiles: string[],
+  opts: { timeBudgetMs?: number; testCommand?: string } = {},
+): Promise<MutationTestReport> {
+  const timeBudget = opts.timeBudgetMs || DEFAULT_TIME_BUDGET_MS;
+  const testCommand = opts.testCommand || "npm test";
+  const start = Date.now();
+
+  const results: MutationResult[] = [];
+  const allMutations: Mutation[] = [];
+
+  // Resolve app directory (same logic as verifier)
+  let appDir = projectDir;
+  try {
+    const { readFile: rf } = await import("node:fs/promises");
+    await rf(`${projectDir}/package.json`);
+  } catch {
+    for (const sub of ["web", "app"]) {
+      try {
+        const { readFile: rf } = await import("node:fs/promises");
+        await rf(`${projectDir}/${sub}/package.json`);
+        appDir = `${projectDir}/${sub}`;
+        break;
+      } catch {}
+    }
+  }
+
+  // Generate all candidate mutations
+  for (const file of changedFiles) {
+    if (shouldSkipMutation(file)) continue;
+
+    const fullPath = file.startsWith("/") ? file : `${projectDir}/${file}`;
+    try {
+      const content = await readFile(fullPath, "utf-8");
+      const mutations = generateMutations(fullPath, content);
+      allMutations.push(...mutations);
+    } catch {
+      // File might not exist (deleted in diff)
+    }
+  }
+
+  // Shuffle mutations to get a representative sample if we time out
+  for (let i = allMutations.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [allMutations[i], allMutations[j]] = [allMutations[j], allMutations[i]];
+  }
+
+  let timedOut = false;
+
+  for (const mutation of allMutations) {
+    if (Date.now() - start > timeBudget) {
+      timedOut = true;
+      break;
+    }
+
+    let originalContent: string;
+    try {
+      originalContent = await readFile(mutation.file, "utf-8");
+    } catch {
+      results.push({ mutation, survived: false, skipped: true, error: "cannot read file" });
+      continue;
+    }
+
+    // Apply the mutation
+    const lines = originalContent.split("\n");
+    lines[mutation.line - 1] = mutation.mutated;
+    const mutatedContent = lines.join("\n");
+
+    try {
+      await writeFile(mutation.file, mutatedContent);
+
+      // Run tests
+      const [cmd, ...args] = testCommand.split(/\s+/);
+      try {
+        await execFileAsync(cmd, args, {
+          cwd: appDir,
+          timeout: MT_TEST_TIMEOUT_MS,
+          env: process.env,
+          shell: true,
+          maxBuffer: 1024 * 1024 * 5,
+        });
+        // Tests passed with mutation = SURVIVED (bad)
+        results.push({ mutation, survived: true, skipped: false });
+      } catch {
+        // Tests failed with mutation = KILLED (good)
+        results.push({ mutation, survived: false, skipped: false });
+      }
+    } finally {
+      // Always restore the original file
+      await writeFile(mutation.file, originalContent);
+    }
+  }
+
+  const killed = results.filter((r) => !r.survived && !r.skipped).length;
+  const survived = results.filter((r) => r.survived).length;
+  const skipped = results.filter((r) => r.skipped).length;
+
+  return {
+    totalMutants: results.length,
+    killed,
+    survived,
+    skipped,
+    timedOut,
+    durationMs: Date.now() - start,
+    survivors: results.filter((r) => r.survived),
+  };
+}
+
+/**
+ * Format mutation test results for logging / reality report.
+ */
+function summarizeMutationTests(report: MutationTestReport): string {
+  const parts: string[] = [];
+  const score = report.totalMutants > 0
+    ? Math.round((report.killed / (report.totalMutants - report.skipped)) * 100)
+    : 100;
+
+  parts.push(`## Mutation Testing: ${score}% kill rate (${report.killed}/${report.totalMutants - report.skipped} killed)`);
+  if (report.timedOut) parts.push(`⚠ Time budget exceeded — ${report.totalMutants} of ${report.totalMutants} candidate mutants tested`);
+  parts.push(`Duration: ${report.durationMs}ms`);
+
+  if (report.survivors.length > 0) {
+    parts.push(`\n### Surviving Mutants (uncovered code):`);
+    for (const s of report.survivors.slice(0, 10)) {
+      parts.push(`- ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]`);
+      parts.push(`  Original: ${s.mutation.original.trim()}`);
+      parts.push(`  Mutated:  ${s.mutation.mutated.trim()}`);
+    }
+    if (report.survivors.length > 10) {
+      parts.push(`  ... and ${report.survivors.length - 10} more`);
+    }
+  }
+
+  return parts.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// JiT (Just-in-Time) test generation (inlined from jit-testing.ts — issue #67)
+// ---------------------------------------------------------------------------
+
+const JIT_TEST_TIMEOUT_MS = 60_000;
+
+type JitTestResult = {
+  generated: number;
+  kept: number;
+  discarded: number;
+  caughtBug: boolean;
+  bugDetails: string | null;
+  testFiles: string[];
+  durationMs: number;
+  error: string | null;
+};
+
+/**
+ * Build the prompt for the JiT test generation model.
+ *
+ * Takes the diff and file list, returns a structured prompt asking
+ * for 2-3 adversarial test cases.
+ */
+function buildJitPrompt(diff: string, changedFiles: string[], taskTitle: string): string {
+  // Truncate diff to avoid blowing up context window
+  const maxDiffLen = 8000;
+  const truncatedDiff = diff.length > maxDiffLen
+    ? diff.slice(0, maxDiffLen) + "\n... (diff truncated)"
+    : diff;
+
+  const fileList = changedFiles.map((f) => `- ${f}`).join("\n");
+
+  return [
+    `## GENERATE ADVERSARIAL REGRESSION TESTS`,
+    ``,
+    `Task: "${taskTitle}"`,
+    ``,
+    `### Changed files:`,
+    fileList,
+    ``,
+    `### Diff:`,
+    "```diff",
+    truncatedDiff,
+    "```",
+    ``,
+    `## YOUR JOB`,
+    `Generate 2-3 test cases that would FAIL if this diff were reverted.`,
+    `Each test must:`,
+    `1. Test a specific behavior introduced or changed by this diff`,
+    `2. Import the changed module and call the changed function/component`,
+    `3. Assert the NEW behavior (post-diff), so reverting the diff breaks the test`,
+    `4. Be a complete, runnable test using node:test and node:assert`,
+    `5. Follow ESM import syntax (.ts extensions for local imports)`,
+    ``,
+    `## OUTPUT FORMAT`,
+    `Return a JSON object with this exact shape:`,
+    `{`,
+    `  "tests": [`,
+    `    {`,
+    `      "filename": "test/jit-<descriptive-name>.test.mts",`,
+    `      "description": "what this test verifies",`,
+    `      "code": "import { test } from 'node:test';\\nimport assert from 'node:assert/strict';\\n..."`,
+    `    }`,
+    `  ]`,
+    `}`,
+    ``,
+    `RULES:`,
+    `- Use node:test and node:assert/strict (no jest, no vitest)`,
+    `- File extension must be .test.mts`,
+    `- Only test pure functions or exported behavior — do NOT mock Redis, file system, or network`,
+    `- If the diff only changes config/types/imports with no testable behavior, return { "tests": [] }`,
+    `- Do NOT generate tests for code you cannot import (private functions, side effects)`,
+  ].join("\n");
+}
+
+/**
+ * Parse the model's JSON response into a list of test file descriptors.
+ *
+ * Returns { tests, error }. On parse failure, returns empty tests with error message.
+ */
+function parseJitResult(output: string): { tests: Array<{ filename: string; description: string; code: string }>; error: string | null } {
+  if (!output || !output.trim()) {
+    return { tests: [], error: "Empty model output" };
+  }
+
+  // Try to extract JSON from the output
+  let parsed: any;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    // Try to find JSON in the output (model may include surrounding text)
+    const match = output.match(/\{[\s\S]*"tests"[\s\S]*\}/);
+    if (match) {
+      try {
+        parsed = JSON.parse(match[0]);
+      } catch (err: any) {
+        return { tests: [], error: `JSON parse failed after extraction: ${err.message}` };
+      }
+    } else {
+      return { tests: [], error: "No JSON object found in model output" };
+    }
+  }
+
+  if (!parsed || !Array.isArray(parsed.tests)) {
+    return { tests: [], error: "Model output missing 'tests' array" };
+  }
+
+  // Validate each test entry
+  const validTests = parsed.tests.filter((t: any) => {
+    if (!t.filename || !t.code) return false;
+    if (!t.filename.endsWith(".test.mts")) return false;
+    // Sanity check: must contain import from node:test
+    if (!t.code.includes("node:test")) return false;
+    return true;
+  });
+
+  return { tests: validTests, error: null };
+}
+
+/**
+ * Run JiT test generation for a diff.
+ *
+ * @param projectDir - Project root (~/hydra-betting)
+ * @param diff - git diff output (main..feature-branch)
+ * @param changedFiles - List of changed file paths
+ * @param taskTitle - Title of the task being built
+ * @param cycleId - Cycle ID for correlation
+ * @param taskId - Task ID for correlation
+ * @returns JitTestResult — never throws
+ */
+async function runJitTests(
+  projectDir: string,
+  diff: string,
+  changedFiles: string[],
+  taskTitle: string,
+  cycleId: string,
+  taskId: string,
+): Promise<JitTestResult> {
+  const start = Date.now();
+  const result: JitTestResult = {
+    generated: 0,
+    kept: 0,
+    discarded: 0,
+    caughtBug: false,
+    bugDetails: null,
+    testFiles: [],
+    durationMs: 0,
+    error: null,
+  };
+
+  try {
+    // Build the prompt
+    const prompt = buildJitPrompt(diff, changedFiles, taskTitle);
+
+    // Call the nano model — cheap and fast
+    const personality = await findPersonality("executor");
+    const agentResult = await runAgent({
+      agentName: "jit-tester",
+      personality,
+      prompt,
+      model: "local",
+      taskId: `${taskId}-jit`,
+      correlationId: cycleId,
+      workDir: projectDir,
+    });
+
+    if (agentResult.exitCode !== 0 && !agentResult.output) {
+      result.error = "JiT model call failed";
+      result.durationMs = Date.now() - start;
+      return result;
+    }
+
+    // Parse the model response
+    const { tests, error } = parseJitResult(agentResult.output);
+    if (error) {
+      result.error = `Parse error: ${error}`;
+      result.durationMs = Date.now() - start;
+      return result;
+    }
+
+    if (tests.length === 0) {
+      result.durationMs = Date.now() - start;
+      return result; // No testable behavior — valid outcome
+    }
+
+    result.generated = tests.length;
+
+    // Write each test file, run tests, keep or discard
+    const testDir = join(projectDir, "test");
+    try {
+      await mkdir(testDir, { recursive: true });
+    } catch { /* intentional: directory may already exist */ }
+
+    for (const testDef of tests) {
+      const testPath = join(testDir, basename(testDef.filename));
+
+      try {
+        // Write the test file
+        await writeFile(testPath, testDef.code, "utf-8");
+
+        // Run just this test file to check if it passes
+        try {
+          await execFileAsync("node", ["--experimental-strip-types", "--test", testPath], {
+            cwd: projectDir,
+            timeout: JIT_TEST_TIMEOUT_MS,
+            env: process.env,
+          });
+
+          // Test passed — keep it
+          result.kept++;
+          result.testFiles.push(testPath);
+
+          // Commit the test file to the branch
+          try {
+            await execFileAsync("git", ["add", testPath], { cwd: projectDir, timeout: 5000 });
+            await execFileAsync("git", ["commit", "-m", `test: add JiT regression test — ${testDef.description || basename(testDef.filename)}`], {
+              cwd: projectDir,
+              timeout: 10000,
+            });
+          } catch (commitErr: any) {
+            console.error(`[JiT] Failed to commit test ${testDef.filename}: ${commitErr.message}`);
+          }
+        } catch (testErr: any) {
+          // Test failed — check if it caught a real bug or is just bad generation
+          const stderr = testErr.stderr || testErr.message || "";
+          const stdout = testErr.stdout || "";
+          const output = stderr + stdout;
+
+          // Heuristic: if the error mentions assertion failure on expected vs actual,
+          // it might have caught a real bug. If it's a syntax/import error, it's bad gen.
+          const isAssertionFailure = output.includes("AssertionError") ||
+            output.includes("AssertionError") ||
+            output.includes("Expected") ||
+            output.includes("assert");
+          const isImportError = output.includes("Cannot find module") ||
+            output.includes("SyntaxError") ||
+            output.includes("ERR_MODULE_NOT_FOUND");
+
+          if (isAssertionFailure && !isImportError) {
+            // Potential real bug found
+            result.caughtBug = true;
+            result.bugDetails = `Test "${testDef.description}" failed with assertion error: ${output.slice(0, 500)}`;
+            result.kept++;
+            result.testFiles.push(testPath);
+            // Don't commit a failing test — keep it for the report but don't merge
+          } else {
+            // Bad generation — discard
+            result.discarded++;
+            try {
+              await unlink(testPath);
+            } catch { /* intentional: file may not exist */ }
+          }
+        }
+      } catch (writeErr: any) {
+        console.error(`[JiT] Failed to write test ${testDef.filename}: ${writeErr.message}`);
+        result.discarded++;
+      }
+    }
+
+    // If a bug was caught, clean up the failing test file so it doesn't break verification
+    if (result.caughtBug) {
+      for (const testPath of result.testFiles) {
+        // Check if this test file is the one that caught the bug (uncommitted)
+        try {
+          const { stdout } = await execFileAsync("git", ["status", "--porcelain", testPath], {
+            cwd: projectDir,
+            timeout: 5000,
+          });
+          if (stdout.trim().startsWith("?") || stdout.trim().startsWith("A")) {
+            // Uncommitted test that caught a bug — remove from disk
+            await unlink(testPath).catch(() => {});
+          }
+        } catch { /* intentional: status check best-effort */ }
+      }
+    }
+  } catch (err: any) {
+    result.error = `JiT testing failed: ${err.message}`;
+    console.error(`[JiT] ${result.error}`);
+  }
+
+  result.durationMs = Date.now() - start;
+  return result;
+}
+
+/**
+ * Format JiT test results for logging / reality report.
+ */
+function summarizeJitTests(result: JitTestResult): string {
+  const parts: string[] = [];
+
+  if (result.generated === 0 && !result.error) {
+    parts.push("JiT Testing: no testable behavior in diff (skipped)");
+    return parts.join("\n");
+  }
+
+  parts.push(`## JiT Test Generation: ${result.kept}/${result.generated} tests kept`);
+
+  if (result.caughtBug) {
+    parts.push(`BUG DETECTED: ${result.bugDetails}`);
+  }
+
+  if (result.discarded > 0) {
+    parts.push(`Discarded: ${result.discarded} tests (bad generation or import errors)`);
+  }
+
+  if (result.testFiles.length > 0) {
+    parts.push(`Kept test files:`);
+    for (const f of result.testFiles) {
+      parts.push(`  - ${f}`);
+    }
+  }
+
+  if (result.error) {
+    parts.push(`Error: ${result.error}`);
+  }
+
+  parts.push(`Duration: ${result.durationMs}ms`);
+
+  return parts.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Test escape hatch — expose internals needed by unit tests
+// ---------------------------------------------------------------------------
+
+/**
+ * Internal helpers exposed for unit testing only. Not part of the public API.
+ */
+export const _testing = {
+  buildJitPrompt,
+  parseJitResult,
+  summarizeJitTests,
+  summarizeMutationTests,
+  MUTATORS,
+  SKIP_PATTERNS,
+  shouldSkipMutation,
+  generateMutations,
+};

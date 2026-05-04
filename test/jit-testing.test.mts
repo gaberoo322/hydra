@@ -1,13 +1,16 @@
 /**
- * Tests for src/jit-testing.ts — the JiT test generation module.
+ * Tests for JiT test generation helpers (buildJitPrompt, parseJitResult),
+ * inlined into src/verification.ts (issue #67).
  *
- * Tests the pure functions (buildJitPrompt, parseJitResult) that can be
+ * Tests the pure functions via the _testing escape hatch that can be
  * unit tested without requiring a real project directory or model call.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { buildJitPrompt, parseJitResult } from "../src/jit-testing.ts";
+import { _testing } from "../src/verification.ts";
+
+const { buildJitPrompt, parseJitResult } = _testing;
 
 describe("buildJitPrompt", () => {
   test("includes task title in prompt", () => {
