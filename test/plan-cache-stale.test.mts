@@ -65,7 +65,7 @@ describe("plan cache invalidation on failure (issue #22)", () => {
     assert.equal(cached.title, "Fix widget render test");
 
     // Store a prior failure for the same task reference
-    await anchorSelection.storePriorFailure("test-widget-render", "No code changes produced", null);
+    await anchorSelection._testing.storePriorFailure("test-widget-render", "No code changes produced", null);
 
     // Plan cache should now be invalidated
     const afterFailure = await planCache.getCachedPlan(anchor, grounding);

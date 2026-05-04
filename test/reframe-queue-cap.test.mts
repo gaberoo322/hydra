@@ -61,7 +61,7 @@ describe("reframe queue cap (issue #57)", () => {
     });
     await redis.rpush(REFRAME_QUEUE_KEY, staleItem, freshItem);
 
-    const result = await anchorSelection.pruneReframeQueue();
+    const result = await anchorSelection._testing.pruneReframeQueue();
 
     assert.equal(result.pruned, 1, "should prune 1 stale item");
     const remaining = await redis.lrange(REFRAME_QUEUE_KEY, 0, -1);
@@ -79,7 +79,7 @@ describe("reframe queue cap (issue #57)", () => {
       }));
     }
 
-    const result = await anchorSelection.pruneReframeQueue();
+    const result = await anchorSelection._testing.pruneReframeQueue();
 
     assert.equal(result.dropped, 5, "should drop 5 overflow items");
     const remaining = await redis.lrange(REFRAME_QUEUE_KEY, 0, -1);
@@ -96,7 +96,7 @@ describe("reframe queue cap (issue #57)", () => {
       escalatedAt: new Date().toISOString(),
     }));
 
-    const result = await anchorSelection.pruneReframeQueue();
+    const result = await anchorSelection._testing.pruneReframeQueue();
 
     assert.equal(result.pruned, 1, "should prune 1 corrupt item");
     const remaining = await redis.lrange(REFRAME_QUEUE_KEY, 0, -1);
@@ -104,20 +104,20 @@ describe("reframe queue cap (issue #57)", () => {
   });
 
   test("pruneReframeQueue no-ops on empty queue", async () => {
-    const result = await anchorSelection.pruneReframeQueue();
+    const result = await anchorSelection._testing.pruneReframeQueue();
     assert.equal(result.pruned, 0);
     assert.equal(result.dropped, 0);
   });
 
   test("REFRAME_QUEUE_CAP is 20", () => {
-    assert.equal(anchorSelection.REFRAME_QUEUE_CAP, 20);
+    assert.equal(anchorSelection._testing.REFRAME_QUEUE_CAP, 20);
   });
 
   test("REFRAME_QUEUE_MAX_AGE_MS is 7 days", () => {
-    assert.equal(anchorSelection.REFRAME_QUEUE_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000);
+    assert.equal(anchorSelection._testing.REFRAME_QUEUE_MAX_AGE_MS, 7 * 24 * 60 * 60 * 1000);
   });
 
   test("REFRAME_INTERLEAVE_INTERVAL is 5", () => {
-    assert.equal(anchorSelection.REFRAME_INTERLEAVE_INTERVAL, 5);
+    assert.equal(anchorSelection._testing.REFRAME_INTERLEAVE_INTERVAL, 5);
   });
 });

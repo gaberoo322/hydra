@@ -29,7 +29,7 @@ import {
 } from "./redis-adapter.ts";
 import { recordCycleMetrics } from "./metrics.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
-import { clearProcessingItem, reportOutcome } from "./anchor-selection.ts";
+import { reportOutcome } from "./anchor-selection.ts";
 import { clearOutcomes } from "./learning.ts";
 import { complete, fail } from "./backlog.ts";
 import { detectPatterns } from "./pattern-detector.ts";
@@ -428,6 +428,6 @@ export async function runPostMerge(
   await ovSession.logOutcome(cycleOutcome, `${task.title} — ${report.durationMs}ms`);
   await ovSession.commit();
 
-  await clearProcessingItem(anchor);
+  await reportOutcome(anchor, { status: "skipped" });
   return { report };
 }
