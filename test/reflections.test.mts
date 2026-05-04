@@ -1,5 +1,5 @@
 /**
- * Regression tests for src/reflections.ts — Reflexion-style post-mortem buffer.
+ * Regression tests for learning.ts — Reflexion-style post-mortem buffer.
  *
  * Requires Redis running on localhost:6379 (default).
  * Uses Redis DB 1 for tests — never touches production (DB 0).
@@ -25,7 +25,7 @@ describe("reflections buffer", () => {
       // Use Redis DB 1 for tests — production uses DB 0
       redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379/1");
       process.env.REDIS_URL = "redis://localhost:6379/1";
-      reflections = await import("../src/reflections.ts");
+      reflections = await import("../src/learning.ts");
     }
     await cleanReflectionKeys();
   });

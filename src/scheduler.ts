@@ -505,8 +505,8 @@ async function runScheduledCycle(eventBus) {
     const DAY_MS = 24 * 60 * 60 * 1000;
     const lastConsolidation = await getString(MEMORY_CONSOLIDATION_KEY);
     if (!lastConsolidation || Date.now() - parseInt(lastConsolidation) >= DAY_MS) {
-      const { consolidateMemory } = await import("./agent-memory.ts");
-      await consolidateMemory();
+      const { consolidate } = await import("./learning.ts");
+      await consolidate();
       await setString(MEMORY_CONSOLIDATION_KEY, Date.now().toString());
     }
   } catch {}
