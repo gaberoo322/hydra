@@ -10,9 +10,8 @@ import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule } from "./cleanup.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler.ts";
 import { startDigest, stopDigest, recordEvent } from "./digest.ts";
-import { registerSkills } from "./ov-skills.ts";
+import { initLearning } from "./learning.ts";
 import { setAgentStreamCallback } from "./codex-runner.ts";
-import { migrateRulesToPatterns } from "./agent-memory.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { startCodeReviewerLoop } from "./code-reviewer.ts";
 import { cleanWorkQueue } from "./redis-adapter.ts";
@@ -180,12 +179,8 @@ async function main() {
   initMetrics(REDIS_URL);
   console.log("[Hydra] Task tracker + metrics initialized (Redis-backed)");
 
-  // Migrate old rules → patterns (one-time, on first startup after upgrade)
-  try {
-    await migrateRulesToPatterns();
-  } catch (err: any) {
-    console.error(`[Hydra] Memory migration failed: ${err.message}`);
-  }
+  // Initialize learning system (migrates rules, registers OV skills, starts indexer)
+  await initLearning();
 
   // Clean work queue: remove COMPLETED: items and deduplicate
   try {
@@ -214,8 +209,6 @@ async function main() {
   watchApprovals();
   console.log("[Hydra] Proposal approval watcher started");
 
-  // Register agent skills in OpenViking (non-blocking)
-  registerSkills().catch((err: any) => console.error(`[Hydra] Skill registration failed: ${err.message}`));
 
   // Wire agent streaming — broadcast codex exec output to WebSocket clients in real-time
   setAgentStreamCallback((data) => {

@@ -29,7 +29,7 @@ import { runPlannerAgent } from "./planner-prompt.ts";
 import { selectAnchor } from "./anchor-selection.ts";
 import { scoreAnchor, getMinConfidence, recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { classifyTaskComplexity } from "./preflight.ts";
-import { createCycleSession } from "./ov-session.ts";
+import { createCycleSession } from "./learning.ts";
 import {
   groundProjectCached, generateCycleId, isAnchorStale,
   handleEarlyExit, PROJECT_WORKSPACE,

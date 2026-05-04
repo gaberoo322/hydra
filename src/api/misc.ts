@@ -6,7 +6,7 @@ import { killCycle } from "../cycle.ts";
 import { loadProjectGoals, summarizeGoalsForPrompt } from "../project-goals.ts";
 import { getPlanCacheStats, invalidatePlanCache } from "../plan-cache.ts";
 import { sendDigestNow } from "../digest.ts";
-import { getAllReflections } from "../reflections.ts";
+import { getAllReflections } from "../learning.ts";
 import { redisKeys } from "../redis-keys.ts";
 import {
   pushToWorkQueue, pushAlert, setNX, getString, delKey,
@@ -514,7 +514,7 @@ export function createMiscRouter(eventBus: any) {
       if (!category || !action) {
         return res.status(400).json({ error: "Missing category or action" });
       }
-      const { recordPattern } = await import("../agent-memory.ts");
+      const { recordPattern } = await import("../learning.ts");
       await recordPattern(agentName, category, {
         severity: severity || "prevent",
         action,
@@ -529,7 +529,7 @@ export function createMiscRouter(eventBus: any) {
 
   router.get("/memory/:agent", async (req, res) => {
     try {
-      const { loadAgentMemory } = await import("../agent-memory.ts");
+      const { loadAgentMemory } = await import("../learning.ts");
       const memory = await loadAgentMemory(req.params.agent);
       res.type("text/plain").send(memory);
     } catch (err: any) {
