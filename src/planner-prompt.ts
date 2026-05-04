@@ -13,7 +13,7 @@
  */
 
 import { runAgent, findPersonality } from "./codex-runner.ts";
-import { formatMemoryForPrompt, loadReflections } from "./agent-memory.ts";
+import { hasReflections } from "./learning.ts";
 import { getCachedPlan, cachePlan } from "./plan-cache.ts";
 import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
@@ -196,8 +196,8 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   // Plan cache — skip LLM call for recurring task patterns.
   // Belt-and-suspenders: bypass cache when reflections exist for this anchor,
   // so the planner is forced to re-plan with failure context (issue #22).
-  const hasReflections = await loadReflections(anchor.reference).then(r => r.length > 0).catch(() => false);
-  if (!hasReflections) {
+  const reflectionsExist = await hasReflections(anchor.reference);
+  if (!reflectionsExist) {
     const cachedTask = await getCachedPlan(anchor, grounding);
     if (cachedTask) {
       cachedTask.__plannerModel = "cached";
@@ -350,7 +350,7 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
       accomplishmentsContext,
       "",
       // Agent memory — learn from past outcomes
-      formatMemoryForPrompt(plannerMemory, "planner"),
+      plannerMemory,
       "",
       // OpenViking compiled context (resources + memories relevant to this anchor)
       ovContext,

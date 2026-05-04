@@ -15,7 +15,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker } from "./task-tracker.ts";
-import { loadAgentMemory, formatMemoryForPrompt } from "./agent-memory.ts";
+import { getContext } from "./learning.ts";
 import { generateRepoMap } from "./repo-map.ts";
 
 const execFileAsync = promisify(execFile);
@@ -96,7 +96,7 @@ export function buildExecutorPrompt(input: BuildPromptInput): string {
     testPatternHint,
     groundingSummary.slice(0, 3000),
     "",
-    formatMemoryForPrompt(executorMemory, "executor"),
+    executorMemory || "",
     "",
     executorKnowledge,
     "",
@@ -200,9 +200,9 @@ export async function runExecutorAgent(
   }
   const executorWorkDir = useWorktree ? worktreePath : PROJECT_WORKSPACE;
 
-  // Load executor memory + OV context in parallel
+  // Load executor context (memory + reflections) + OV context in parallel
   const [executorMemory, ovCtx] = await Promise.all([
-    loadAgentMemory("executor"),
+    getContext("executor", { type: "task", reference: task.title }),
     ovSession?.getAgentContext?.("executor", { reference: task.title, whyNow: (task.scopeBoundary?.in || []).join(" ") }) || Promise.resolve({ formatted: "" }),
   ]);
   const executorKnowledge = ovCtx.formatted || "";

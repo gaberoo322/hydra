@@ -18,10 +18,15 @@ import {
   recordSkepticLesson,
   recordReflection as recordAnchorReflection,
   clearReflections,
+  loadAgentMemory,
+  formatMemoryForPrompt,
+  loadReflections,
 } from "./agent-memory.ts";
 import {
   recordReflection as recordGlobalReflection,
   clearReflectionsForAnchor,
+  loadRelevantReflections,
+  formatReflectionsForPrompt,
 } from "./reflections.ts";
 
 // ---------------------------------------------------------------------------
@@ -135,6 +140,78 @@ export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
     } catch (err: any) {
       console.error(`[Learning] Failed to record global reflection for ${cycleId}: ${err.message}`);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// getContext — unified context loader for agent prompts
+// ---------------------------------------------------------------------------
+
+/**
+ * Load and format all learning context for an agent + anchor combination.
+ *
+ * Combines:
+ *   1. Agent memory (loadAgentMemory + formatMemoryForPrompt)
+ *   2. Per-anchor episodic reflections (loadReflections from agent-memory)
+ *   3. Global relevant reflections (loadRelevantReflections + formatReflectionsForPrompt)
+ *
+ * Never throws — all errors are logged with context, and partial results are
+ * returned when individual sources fail.
+ */
+export async function getContext(
+  agent: string,
+  anchor: { type: string; reference: string },
+): Promise<string> {
+  const parts: string[] = [];
+
+  // 1. Agent memory — load + format
+  try {
+    const raw = await loadAgentMemory(agent);
+    const formatted = formatMemoryForPrompt(raw, agent);
+    if (formatted) parts.push(formatted);
+  } catch (err: any) {
+    console.error(`[Learning] getContext: agent memory failed for ${agent}: ${err.message}`);
+  }
+
+  // 2. Per-anchor episodic reflections
+  try {
+    const reflections = await loadReflections(anchor.reference);
+    if (reflections) parts.push(reflections);
+  } catch (err: any) {
+    console.error(`[Learning] getContext: per-anchor reflections failed for "${anchor.reference}": ${err.message}`);
+  }
+
+  // 3. Global relevant reflections
+  try {
+    const relevant = await loadRelevantReflections(anchor);
+    if (relevant.length > 0) {
+      const formatted = formatReflectionsForPrompt(relevant);
+      if (formatted) parts.push(formatted);
+    }
+  } catch (err: any) {
+    console.error(`[Learning] getContext: global reflections failed for "${anchor.reference}": ${err.message}`);
+  }
+
+  return parts.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// hasReflections — lightweight check for plan cache bypass
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether any per-anchor reflections exist for the given anchor.
+ * Used by the planner to bypass plan cache when failure context is present.
+ *
+ * Never throws — returns false on error.
+ */
+export async function hasReflections(anchorRef: string): Promise<boolean> {
+  try {
+    const text = await loadReflections(anchorRef);
+    return text.length > 0;
+  } catch {
+    /* intentional: reflections check is non-critical, default to no reflections */
+    return false;
   }
 }
 
