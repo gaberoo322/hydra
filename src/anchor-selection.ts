@@ -10,12 +10,11 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, moveToBlocked, claimNextQueuedItem } from "./backlog.ts";
 import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
-import { redisKeys } from "./redis-keys.ts";
 import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
 import {
   listRange, listRPush, listRem, listLPop, listLen, listMove, listTrim,
   getString, setString, delKey, incrKey, expireKey,
-  hashGetAll, zRevRange, getRedisConnection,
+  hashGetAll, zRevRange,
   getRealityReport, getRecentReportIds, getCycleMetrics,
   isHealthAnchorResolved,
 } from "./redis-adapter.ts";
@@ -26,22 +25,29 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "
 // Constants — Redis keys & thresholds
 // ---------------------------------------------------------------------------
 
-export const MAX_PRIOR_FAILURE_RETRIES = 2;
-export const MAX_CONSECUTIVE_ABANDONMENTS = 3;
-export const REFRAME_QUEUE = redisKeys.anchorReframeQueue();
-export const WORK_QUEUE = redisKeys.anchorWorkQueue();
-export const PROCESSING_QUEUE = redisKeys.anchorProcessing();
-export const ABANDONMENT_COUNTER_PREFIX = redisKeys.anchorAbandonmentCount("");
-export const ABANDONMENT_COUNTER_TTL = 86400; // 24h — auto-expire stale counters
+const MAX_PRIOR_FAILURE_RETRIES = 2;
+const MAX_CONSECUTIVE_ABANDONMENTS = 3;
+const REFRAME_QUEUE = "hydra:anchors:reframe-queue";
+const WORK_QUEUE = "hydra:anchors:work-queue";
+const PROCESSING_QUEUE = "hydra:anchors:processing";
+const PRIOR_FAILURES_KEY = "hydra:anchors:prior-failures";
+const ABANDONMENT_COUNTER_PREFIX = "hydra:anchors:abandonment-count:";
+const ABANDONMENT_COUNTER_TTL = 86400; // 24h — auto-expire stale counters
 
 // Prior-failure escalation thresholds (issue #18, #93)
-export const PRIOR_FAILURE_AGE_LIMIT_MS = 24 * 60 * 60 * 1000; // 24h — items older than this are auto-escalated
-export const PRIOR_FAILURE_CAP = 10; // hard cap — oldest items escalated to reframe when exceeded
+const PRIOR_FAILURE_AGE_LIMIT_MS = 24 * 60 * 60 * 1000; // 24h — items older than this are auto-escalated
+const PRIOR_FAILURE_CAP = 10; // hard cap — oldest items escalated to reframe when exceeded
 
 // Reframe queue cap + TTL (issue #57)
-export const REFRAME_QUEUE_CAP = 20;
-export const REFRAME_QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-export const REFRAME_INTERLEAVE_INTERVAL = 5; // force reframe every Nth cycle when queue non-empty
+const REFRAME_QUEUE_CAP = 20;
+const REFRAME_QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const REFRAME_INTERLEAVE_INTERVAL = 5; // force reframe every Nth cycle when queue non-empty
+
+// Key helpers
+const PERM_SKIP_PREFIX = "hydra:anchors:perm-skip:";
+const METRICS_INDEX_KEY = "hydra:metrics:index";
+const REGRESSION_HUNT_LAST_KEY = "hydra:regression-hunt:last";
+function taskKey(id: string) { return `hydra:task:${id}`; }
 
 // ---------------------------------------------------------------------------
 // Reframe queue maintenance — prevent unbounded accumulation (issue #57)
@@ -54,7 +60,7 @@ export const REFRAME_INTERLEAVE_INTERVAL = 5; // force reframe every Nth cycle w
  *
  * Returns { pruned: number, dropped: number }.
  */
-export async function pruneReframeQueue(): Promise<{ pruned: number; dropped: number }> {
+async function pruneReframeQueue(): Promise<{ pruned: number; dropped: number }> {
   let pruned = 0;
   let dropped = 0;
 
@@ -122,8 +128,8 @@ export async function pruneReframeQueue(): Promise<{ pruned: number; dropped: nu
  * to the reframe queue. Called from selectAnchor() before claiming a prior-failure
  * item, so stale items are cleaned up every cycle.
  */
-export async function escalateStalePriorFailures(): Promise<number> {
-  const key = redisKeys.anchorPriorFailures();
+async function escalateStalePriorFailures(): Promise<number> {
+  const key = PRIOR_FAILURES_KEY;
   const all = await listRange(key, 0, -1);
   if (all.length === 0) return 0;
 
@@ -372,13 +378,13 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // Scan prior-failure queue, skipping items that have exceeded the retry cap (issue #93).
   // Items with retryCount >= MAX_PRIOR_FAILURE_RETRIES are escalated to reframe immediately
   // instead of burning another cycle.
-  const allPriorFailures = await listRange(redisKeys.anchorPriorFailures(), 0, -1);
+  const allPriorFailures = await listRange(PRIOR_FAILURES_KEY, 0, -1);
   for (const raw of allPriorFailures) {
     try {
       const failure = JSON.parse(raw);
       if ((failure.retryCount || 0) >= MAX_PRIOR_FAILURE_RETRIES) {
         // Exceeded retry cap — escalate to reframe, don't retry
-        await listRem(redisKeys.anchorPriorFailures(), 1, raw);
+        await listRem(PRIOR_FAILURES_KEY, 1, raw);
         await listRPush(REFRAME_QUEUE, JSON.stringify({
           originalTaskId: failure.taskId,
           originalTitle: failure.taskId,
@@ -399,7 +405,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
         continue;
       }
       // Found a retryable item — pop it and return as anchor
-      await listRem(redisKeys.anchorPriorFailures(), 1, raw);
+      await listRem(PRIOR_FAILURES_KEY, 1, raw);
       return {
         type: "prior-failure",
         reference: failure.taskId,
@@ -408,7 +414,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
       };
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt prior-failure in queue: ${err.message}. Removing.`);
-      await listRem(redisKeys.anchorPriorFailures(), 1, raw);
+      await listRem(PRIOR_FAILURES_KEY, 1, raw);
     }
   }
 
@@ -425,14 +431,14 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // 5.5. Regression hunt — every 10 merges, run a self-play adversarial cycle
   //      that tests recent features with edge cases instead of building new work.
   try {
-    const recentMetrics = await zRevRange(redisKeys.metricsIndex(), 0, 9);
+    const recentMetrics = await zRevRange(METRICS_INDEX_KEY, 0, 9);
     let recentMergeCount = 0;
     let lastRegressionHunt: string | null = null;
     for (const id of recentMetrics) {
       const raw = await getCycleMetrics(id);
       if (parseInt(raw.tasksMerged || "0") > 0) recentMergeCount++;
     }
-    lastRegressionHunt = await getString(redisKeys.regressionHuntLast());
+    lastRegressionHunt = await getString(REGRESSION_HUNT_LAST_KEY);
     const huntInterval = 10;
     if (recentMergeCount >= huntInterval && !lastRegressionHunt) {
       // Time for a regression hunt
@@ -452,7 +458,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
         } catch { /* intentional */ }
       }
 
-      await setString(redisKeys.regressionHuntLast(), new Date().toISOString(), 86400 * 3); // 3-day cooldown
+      await setString(REGRESSION_HUNT_LAST_KEY, new Date().toISOString(), 86400 * 3); // 3-day cooldown
 
       return {
         type: "regression-hunt",
@@ -484,7 +490,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
       const abandonCount = parseInt(
         await getString(anchorKey(ref)) || "0",
       );
-      const permSkipKey = redisKeys.anchorPermSkip(ref.replace(/\s+/g, "-").slice(0, 120));
+      const permSkipKey = PERM_SKIP_PREFIX + (ref.replace(/\s+/g, "-").slice(0, 120));
       const permSkipCount = parseInt(await getString(permSkipKey) || "0");
       if (abandonCount > 0 || permSkipCount >= 2) {
         console.log(`[ControlLoop] Skipping codebase-health issue "${ref}" (abandoned=${abandonCount}, permSkip=${permSkipCount}) — falling through`);
@@ -567,12 +573,12 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
 // planner gets a fresh diagnostic prompt instead of looping forever.
 // ---------------------------------------------------------------------------
 
-export function anchorKey(anchorRef) {
+function anchorKey(anchorRef) {
   // Normalize anchor reference to a stable Redis key
   return ABANDONMENT_COUNTER_PREFIX + (anchorRef || "unknown").replace(/\s+/g, "-").slice(0, 120);
 }
 
-export async function trackAbandonment(anchorRef, task, reason) {
+async function trackAbandonment(anchorRef, task, reason) {
   const key = anchorKey(anchorRef);
   const count = await incrKey(key);
   await expireKey(key, ABANDONMENT_COUNTER_TTL);
@@ -614,11 +620,11 @@ export async function trackAbandonment(anchorRef, task, reason) {
   return false; // not yet escalated
 }
 
-export async function clearAbandonmentCounter(anchorRef) {
+async function clearAbandonmentCounter(anchorRef) {
   await delKey(anchorKey(anchorRef));
 }
 
-export async function storePriorFailure(taskId, reason, verificationResult, priorRetryCount = 0) {
+async function storePriorFailure(taskId, reason, verificationResult, priorRetryCount = 0) {
   // Invalidate plan cache — a plan that led to failure should not be reused.
   // Try all cacheable anchor types since we don't know the original type here.
   const cacheableTypes = ["user-request", "codebase-health", "failing-test", "research"];
@@ -634,7 +640,7 @@ export async function storePriorFailure(taskId, reason, verificationResult, prio
   // Before issue #93, the popped item's retryCount was lost because selectAnchor removed it
   // from the queue before storePriorFailure scanned. Now we accept priorRetryCount from the
   // caller so the count accumulates correctly.
-  const existing = await listRange(redisKeys.anchorPriorFailures(), 0, -1);
+  const existing = await listRange(PRIOR_FAILURES_KEY, 0, -1);
   const queueMatches = existing.filter(raw => {
     try { return JSON.parse(raw).taskId === taskId; } catch { return false; }
   }).length;
@@ -645,7 +651,7 @@ export async function storePriorFailure(taskId, reason, verificationResult, prio
     console.log(`[ControlLoop] Escalating ${taskId} to reframe queue after ${priorAttempts + 1} failures`);
 
     // Gather failure history for context
-    const task = await hashGetAll(redisKeys.task(taskId));
+    const task = await hashGetAll(taskKey(taskId));
     const failureHistory = existing
       .map(raw => { try { return JSON.parse(raw); } catch { return null; } })
       .filter(f => f?.taskId === taskId);
@@ -670,7 +676,7 @@ export async function storePriorFailure(taskId, reason, verificationResult, prio
     return;
   }
 
-  await listRPush(redisKeys.anchorPriorFailures(), JSON.stringify({
+  await listRPush(PRIOR_FAILURES_KEY, JSON.stringify({
     taskId,
     reason,
     failedSteps: verificationResult?.steps?.filter((s) => !s.passed).map((s) => s.label) || [],
@@ -680,11 +686,11 @@ export async function storePriorFailure(taskId, reason, verificationResult, prio
 
   // Enforce hard cap — escalate oldest items when queue exceeds limit (issue #18)
   try {
-    const queueLen = await listLen(redisKeys.anchorPriorFailures());
+    const queueLen = await listLen(PRIOR_FAILURES_KEY);
     if (queueLen > PRIOR_FAILURE_CAP) {
       const overflow = queueLen - PRIOR_FAILURE_CAP;
       for (let i = 0; i < overflow; i++) {
-        const raw = await listLPop(redisKeys.anchorPriorFailures());
+        const raw = await listLPop(PRIOR_FAILURES_KEY);
         if (!raw) break;
         try {
           const item = JSON.parse(raw);
@@ -720,7 +726,7 @@ export async function storePriorFailure(taskId, reason, verificationResult, prio
  * (success, failure, or abandon). No-op if the anchor didn't come from the
  * work queue. Idempotent — safe to call multiple times.
  */
-export async function clearProcessingItem(anchor) {
+async function clearProcessingItem(anchor) {
   if (anchor?._workQueueRaw) {
     try {
       await listRem(PROCESSING_QUEUE, 1, anchor._workQueueRaw);
@@ -734,7 +740,7 @@ export async function clearProcessingItem(anchor) {
  * Get the current length of the reframe queue.
  * Used by the scheduler for interleaving logic (issue #57).
  */
-export async function getReframeQueueLen(): Promise<number> {
+async function getReframeQueueLen(): Promise<number> {
   return listLen(REFRAME_QUEUE);
 }
 
@@ -743,7 +749,7 @@ export async function getReframeQueueLen(): Promise<number> {
 // ---------------------------------------------------------------------------
 
 export interface OutcomeResult {
-  status: "merged" | "failed" | "abandoned";
+  status: "merged" | "failed" | "abandoned" | "skipped";
   reason?: string;
   verification?: any;
   task?: any;
@@ -790,5 +796,38 @@ export async function reportOutcome(anchor: any, result: OutcomeResult): Promise
       );
       await clearProcessingItem(anchor);
       break;
+
+    case "skipped":
+      // Early-exit scenarios (no-work, skipped, usage-limit) — just clear processing
+      await clearProcessingItem(anchor);
+      break;
   }
 }
+
+// ---------------------------------------------------------------------------
+// _testing — escape hatch for tests that need access to internals
+// ---------------------------------------------------------------------------
+
+export const _testing = {
+  MAX_PRIOR_FAILURE_RETRIES,
+  MAX_CONSECUTIVE_ABANDONMENTS,
+  REFRAME_QUEUE,
+  WORK_QUEUE,
+  PROCESSING_QUEUE,
+  PRIOR_FAILURES_KEY,
+  ABANDONMENT_COUNTER_PREFIX,
+  ABANDONMENT_COUNTER_TTL,
+  PRIOR_FAILURE_AGE_LIMIT_MS,
+  PRIOR_FAILURE_CAP,
+  REFRAME_QUEUE_CAP,
+  REFRAME_QUEUE_MAX_AGE_MS,
+  REFRAME_INTERLEAVE_INTERVAL,
+  trackAbandonment,
+  clearAbandonmentCounter,
+  storePriorFailure,
+  clearProcessingItem,
+  anchorKey,
+  escalateStalePriorFailures,
+  pruneReframeQueue,
+  getReframeQueueLen,
+};

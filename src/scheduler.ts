@@ -22,7 +22,9 @@ import {
   consumeResearchForceOnce,
   listLPop, listLen,
 } from "./redis-adapter.ts";
-import { REFRAME_QUEUE, REFRAME_INTERLEAVE_INTERVAL } from "./anchor-selection.ts";
+// Reframe queue key + interleave interval (internalized in anchor-selection.ts, issue #70)
+const REFRAME_QUEUE = "hydra:anchors:reframe-queue";
+const REFRAME_INTERLEAVE_INTERVAL = 5;
 // research-architect removed — methodology files are frozen at current state
 
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes

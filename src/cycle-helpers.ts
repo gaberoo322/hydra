@@ -16,7 +16,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { groundProject } from "./grounding.ts";
 import { recordCycleMetrics } from "./metrics.ts";
-import { clearProcessingItem } from "./anchor-selection.ts";
+import { reportOutcome } from "./anchor-selection.ts";
 import { getRecentReportIds, getRealityReport } from "./redis-adapter.ts";
 
 const execFileAsync = promisify(execFile);
@@ -180,7 +180,7 @@ export interface EarlyExitOpts {
   reason: string;
   /** Extra fields merged into metrics */
   metricsOverrides?: Record<string, any>;
-  /** Whether to call clearProcessingItem (default true) */
+  /** Whether to clear processing queue item via reportOutcome (default true) */
   clearProcessing?: boolean;
   /** Task object if available (for metrics fields) */
   task?: any;
@@ -198,7 +198,7 @@ export async function handleEarlyExit(opts: EarlyExitOpts): Promise<void> {
   await ovSession.commit();
 
   if (clearProcessing) {
-    await clearProcessingItem(anchor);
+    await reportOutcome(anchor, { status: "skipped" });
   }
 
   await recordCycleMetrics(cycleId, {

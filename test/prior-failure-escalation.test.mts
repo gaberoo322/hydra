@@ -77,7 +77,7 @@ describe("prior-failure escalation (issue #18)", () => {
     });
     await redis.rpush(PRIOR_FAILURES_KEY, freshItem);
 
-    const escalated = await anchorSelection.escalateStalePriorFailures();
+    const escalated = await anchorSelection._testing.escalateStalePriorFailures();
 
     assert.equal(escalated, 1, "should escalate exactly 1 stale item");
 
@@ -105,7 +105,7 @@ describe("prior-failure escalation (issue #18)", () => {
     });
     await redis.rpush(PRIOR_FAILURES_KEY, freshItem);
 
-    const escalated = await anchorSelection.escalateStalePriorFailures();
+    const escalated = await anchorSelection._testing.escalateStalePriorFailures();
     assert.equal(escalated, 0);
 
     const remaining = await redis.lrange(PRIOR_FAILURES_KEY, 0, -1);
@@ -116,7 +116,7 @@ describe("prior-failure escalation (issue #18)", () => {
   });
 
   test("escalateStalePriorFailures is a no-op on empty queue", async () => {
-    const escalated = await anchorSelection.escalateStalePriorFailures();
+    const escalated = await anchorSelection._testing.escalateStalePriorFailures();
     assert.equal(escalated, 0);
   });
 
@@ -126,7 +126,7 @@ describe("prior-failure escalation (issue #18)", () => {
 
   test("storePriorFailure escalates oldest items when cap is exceeded", async () => {
     // Fill queue to exactly the cap
-    const cap = anchorSelection.PRIOR_FAILURE_CAP;
+    const cap = anchorSelection._testing.PRIOR_FAILURE_CAP;
     for (let i = 0; i < cap; i++) {
       await redis.rpush(PRIOR_FAILURES_KEY, JSON.stringify({
         taskId: `task-fill-${i.toString().padStart(3, "0")}`,
@@ -138,7 +138,7 @@ describe("prior-failure escalation (issue #18)", () => {
     }
 
     // Store one more — should trigger cap overflow, escalating the oldest
-    await anchorSelection.storePriorFailure("task-overflow-001", "new failure", null);
+    await anchorSelection._testing.storePriorFailure("task-overflow-001", "new failure", null);
 
     const remaining = await redis.llen(PRIOR_FAILURES_KEY);
     assert.equal(remaining, cap, `queue should be trimmed back to cap (${cap})`);
@@ -154,7 +154,7 @@ describe("prior-failure escalation (issue #18)", () => {
 
   test("storePriorFailure does not escalate when under the cap", async () => {
     // Store a single item — well under the cap
-    await anchorSelection.storePriorFailure("task-under-cap", "some failure", null);
+    await anchorSelection._testing.storePriorFailure("task-under-cap", "some failure", null);
 
     const remaining = await redis.llen(PRIOR_FAILURES_KEY);
     assert.equal(remaining, 1);
@@ -170,7 +170,7 @@ describe("prior-failure escalation (issue #18)", () => {
   test("storePriorFailure uses priorRetryCount param to escalate correctly", async () => {
     // Simulate a task that was popped from the queue with retryCount=2
     // (already retried twice). storePriorFailure should escalate it immediately.
-    await anchorSelection.storePriorFailure("task-retry-cap", "No code changes produced", null, 2);
+    await anchorSelection._testing.storePriorFailure("task-retry-cap", "No code changes produced", null, 2);
 
     const remaining = await redis.llen(PRIOR_FAILURES_KEY);
     assert.equal(remaining, 0, "should not re-enqueue an item at the retry cap");
@@ -183,7 +183,7 @@ describe("prior-failure escalation (issue #18)", () => {
   });
 
   test("storePriorFailure re-enqueues when priorRetryCount is below cap", async () => {
-    await anchorSelection.storePriorFailure("task-retry-ok", "build failed", null, 1);
+    await anchorSelection._testing.storePriorFailure("task-retry-ok", "build failed", null, 1);
 
     const remaining = await redis.llen(PRIOR_FAILURES_KEY);
     assert.equal(remaining, 1, "should re-enqueue an item below the retry cap");
@@ -197,12 +197,12 @@ describe("prior-failure escalation (issue #18)", () => {
   // ---------------------------------------------------------------------------
 
   test("PRIOR_FAILURE_AGE_LIMIT_MS is exported and positive", () => {
-    assert.ok(typeof anchorSelection.PRIOR_FAILURE_AGE_LIMIT_MS === "number");
-    assert.ok(anchorSelection.PRIOR_FAILURE_AGE_LIMIT_MS > 0);
+    assert.ok(typeof anchorSelection._testing.PRIOR_FAILURE_AGE_LIMIT_MS === "number");
+    assert.ok(anchorSelection._testing.PRIOR_FAILURE_AGE_LIMIT_MS > 0);
   });
 
   test("PRIOR_FAILURE_CAP is exported and positive", () => {
-    assert.ok(typeof anchorSelection.PRIOR_FAILURE_CAP === "number");
-    assert.ok(anchorSelection.PRIOR_FAILURE_CAP > 0);
+    assert.ok(typeof anchorSelection._testing.PRIOR_FAILURE_CAP === "number");
+    assert.ok(anchorSelection._testing.PRIOR_FAILURE_CAP > 0);
   });
 });
