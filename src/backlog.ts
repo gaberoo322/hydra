@@ -726,14 +726,65 @@ async function block(
   }
 }
 
-export {
-  loadBacklog, getBacklogCounts, addToBacklog, promoteToQueued,
-  moveToInProgress, moveToDone, moveToBlocked, blockItemById, returnToBacklog,
-  pruneOldDoneItems, moveItemToLane, deleteItem, closeBacklogRedis,
-  updateItem, getItemsByParent, peekNextQueuedItem,
-  getInProgressCount, getInProgressItems, isWipLimitReached,
-  requeueStaleInProgressItems, WIP_LIMIT, getCurrentMilestoneProgress,
+// ---------------------------------------------------------------------------
+// Public facade API — narrowed interface (issue #72)
+// ---------------------------------------------------------------------------
+
+/**
+ * Get backlog status: lane counts + WIP state + milestone progress.
+ * Replaces getBacklogCounts for external callers.
+ */
+async function getStatus() {
+  const counts = await getBacklogCounts();
+  const wip = await isWipLimitReached();
+  const milestone = await getCurrentMilestoneProgress();
+  return { counts, wip, milestone };
+}
+
+/**
+ * Add an item to the backlog (deduplicating by title).
+ * Thin wrapper over addToBacklog for the public API.
+ * Returns { added: boolean, id?: string | number, reason?: string }.
+ */
+async function addItem(item: Record<string, any>): Promise<{ added: boolean; id?: string | number; reason?: string; matchedId?: any; similarity?: number }> {
+  return addToBacklog(item);
+}
+
+/**
+ * _admin namespace — internal operations exposed ONLY for the dashboard API
+ * and orchestrator internals. Not part of the stable public contract.
+ */
+const _admin = {
+  loadBacklog,
+  getBacklogCounts,
+  addToBacklog,
+  promoteToQueued,
+  moveToInProgress,
+  moveToDone,
+  moveToBlocked,
+  blockItemById,
+  returnToBacklog,
+  pruneOldDoneItems,
+  moveItemToLane,
+  deleteItem,
+  updateItem,
+  getItemsByParent,
+  peekNextQueuedItem,
+  getInProgressCount,
+  getInProgressItems,
+  isWipLimitReached,
+  requeueStaleInProgressItems,
   claimNextQueuedItem,
-  // Facade API (issue #71)
+  closeBacklogRedis,
+  getCurrentMilestoneProgress,
+  WIP_LIMIT,
+};
+
+export {
+  // Public facade — narrow contract (issue #72)
+  getStatus,
+  addItem,
   claim, complete, fail, block,
+  // _admin for dashboard API + orchestrator internals
+  _admin,
 };

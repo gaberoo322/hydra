@@ -11,7 +11,8 @@
 import { startCycle } from "./cycle.ts";
 import { sendNotification } from "./notify.ts";
 import { getMetricsTrend } from "./metrics.ts";
-import { getBacklogCounts, promoteToQueued, pruneOldDoneItems } from "./backlog.ts";
+import { _admin } from "./backlog.ts";
+const { getBacklogCounts, promoteToQueued, pruneOldDoneItems } = _admin;
 import { runResearchLoop } from "./research-loop.ts";
 import { redisKeys } from "./redis-keys.ts";
 import {
@@ -434,8 +435,8 @@ const BLOCKED_COOLDOWN_KEY = redisKeys.blockedLastEscalation();
 
 async function checkBlockedEscalation(eventBus) {
   try {
-    const { loadBacklog } = await import("./backlog.ts");
-    const lanes = await loadBacklog() as Record<string, any[]>;
+    const { _admin: backlogAdmin } = await import("./backlog.ts");
+    const lanes = await backlogAdmin.loadBacklog() as Record<string, any[]>;
     const blocked = lanes.blocked || [];
     if (blocked.length === 0) return;
 

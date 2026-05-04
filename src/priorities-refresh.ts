@@ -19,7 +19,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getCumulativeAccomplishments, getMetricsTrend } from "./metrics.ts";
-import { getBacklogCounts, loadBacklog, blockItemById, addToBacklog } from "./backlog.ts";
+import { _admin, addItem } from "./backlog.ts";
+const { getBacklogCounts, loadBacklog, blockItemById } = _admin;
 import { groundProject, summarizeForPrompt } from "./grounding.ts";
 import { redisKeys } from "./redis-keys.ts";
 
@@ -378,7 +379,7 @@ async function syncBlockedItemsToBacklog(prioritiesContent: string) {
     }
 
     // 4. No match anywhere — create a new blocked item.
-    const result = await addToBacklog({
+    const result = await addItem({
       title: blocked.title,
       source: "priorities-sync",
       category: "operator-blocked",

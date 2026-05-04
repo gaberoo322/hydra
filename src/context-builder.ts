@@ -98,8 +98,8 @@ export async function buildPlannerContext(
 
   // Load milestone progress
   const milestoneContext = await loadSource("milestone-progress", async () => {
-    const { getCurrentMilestoneProgress } = await import("./backlog.ts");
-    const milestone = await getCurrentMilestoneProgress();
+    const { _admin: backlogAdmin } = await import("./backlog.ts");
+    const milestone = await backlogAdmin.getCurrentMilestoneProgress();
     if (!milestone) return "";
     const remaining = milestone.remainingTitles.slice(0, 5).join(", ");
     return `## CURRENT MILESTONE\n${milestone.name} — ${milestone.pctComplete}% complete (${milestone.done}/${milestone.total} epics done, ${milestone.blocked} blocked)\nRemaining epics: ${remaining}\nFocus your task on completing this milestone's remaining epics.\n`;

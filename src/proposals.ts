@@ -117,14 +117,13 @@ async function runMetaAnalysis(eventBus, event) {
 
   // 4. Backlog state — what's queued, blocked, in progress
   try {
-    const { loadBacklog } = await import("./backlog.ts");
-    const backlog = await loadBacklog();
+    const { _admin: backlogAdmin } = await import("./backlog.ts");
+    const backlog = await backlogAdmin.loadBacklog();
     const counts: Record<string, any> = {};
     for (const lane of ["backlog", "queued", "blocked", "inProgress", "done"]) {
-      counts[lane] = (backlog[lane] || []).length;
+      counts[lane] = ((backlog as any)[lane] || []).length;
     }
-    // @ts-expect-error — migrate to proper types
-    const blockedItems = (backlog.blocked || []).map(i => `"${i.title || i}"`).slice(0, 5);
+    const blockedItems = ((backlog as any).blocked || []).map((i: any) => `"${i.title || i}"`).slice(0, 5);
     contextSections.push([
       "## Backlog State",
       `Backlog: ${counts.backlog} | Queued: ${counts.queued} | Blocked: ${counts.blocked} | In Progress: ${counts.inProgress} | Done: ${counts.done}`,
@@ -355,10 +354,10 @@ async function approveProposal(proposalId, eventBus) {
 
   // If the proposal wasn't auto-applied (orchestrator changes, missing appendLines, etc.),
   // create a backlog item so Hydra can implement it as a code task.
-  let backlogItemId = null;
+  let backlogItemId: string | number | null = null;
   if (!applicationResult.applied) {
     try {
-      const { addToBacklog } = await import("./backlog.ts");
+      const { addItem: addToBacklog } = await import("./backlog.ts");
       const descParts = [`Approved proposal: ${record.proposalId}`];
       if (record.diff) descParts.push(`## What to change\n${record.diff}`);
       if (record.impact) descParts.push(`## Expected impact\n${record.impact}`);
@@ -373,8 +372,8 @@ async function approveProposal(proposalId, eventBus) {
         priority: record.risk === "low" ? 3 : 2,
       });
       if (result.added) {
-        backlogItemId = result.id;
-        record.backlogItemId = result.id;
+        backlogItemId = result.id ?? null;
+        record.backlogItemId = String(result.id);
         console.log(`[Proposals] Created backlog item ${result.id} for unapplied proposal ${proposalId}`);
       }
     } catch (err: any) {
