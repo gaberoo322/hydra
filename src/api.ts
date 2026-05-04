@@ -13,6 +13,7 @@ import { createSchedulerRouter } from "./api/scheduler.ts";
 import { createProposalsRouter } from "./api/proposals.ts";
 import { createMetricsRouter } from "./api/metrics.ts";
 import { createMiscRouter } from "./api/misc.ts";
+import { createArchitectureRouter } from "./api/architecture.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -45,6 +46,7 @@ function createApi(eventBus) {
   api.use(createSchedulerRouter(eventBus));
   api.use(createProposalsRouter(eventBus));
   api.use(createMetricsRouter());
+  api.use(createArchitectureRouter(eventBus));
   api.use(createMiscRouter(eventBus));
 
   // Sentry error handler — must be after all routes, before other error handlers
