@@ -34,7 +34,7 @@ import { clearOutcomes } from "./learning.ts";
 import { complete, fail } from "./backlog.ts";
 import { detectPatterns } from "./pattern-detector.ts";
 import { markTaskComplete } from "./specs.ts";
-import { runAdversarialValidation, findingsToQueueItems, trackMergedCommit, checkRevertCorrelation } from "./adversarial-validation.ts";
+import { trackMergedCommit, _internal as _verificationInternal } from "./verification.ts";
 import { PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 
@@ -356,10 +356,10 @@ export async function runPostMerge(
   if (commitSha && !rolledBack && verification.filesChanged?.length > 0) {
     try {
       console.log(`[ControlLoop] Step 8.7: Running adversarial validation...`);
-      const advReport = await runAdversarialValidation(cycleId, task.title, verification.filesChanged, commitSha);
+      const advReport = await _verificationInternal.runAdversarialValidation(cycleId, task.title, verification.filesChanged, commitSha);
       if (advReport.findings.length > 0) {
         console.log(`[ControlLoop] Adversarial: ${advReport.findings.length} finding(s) — ${advReport.findings.filter((f: any) => f.severity === "high").length} high, ${advReport.findings.filter((f: any) => f.severity === "medium").length} medium`);
-        const queueItems = findingsToQueueItems(advReport);
+        const queueItems = _verificationInternal.findingsToQueueItems(advReport);
         if (queueItems.length > 0) {
           for (const item of queueItems.slice(0, 3)) {
             await pushToWorkQueue(JSON.stringify(item));
@@ -386,7 +386,7 @@ export async function runPostMerge(
   }
 
   try {
-    await checkRevertCorrelation(PROJECT_WORKSPACE);
+    await _verificationInternal.checkRevertCorrelation(PROJECT_WORKSPACE);
   } catch { /* intentional: correlation check is best-effort */ }
 
   // Complete the cycle in tracker

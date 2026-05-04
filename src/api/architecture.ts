@@ -14,7 +14,7 @@ const GROUPS = [
   { id: "agents", label: "Agents", color: "blue",
     modules: ["codex-runner", "executor-agent", "planner-prompt", "context-builder", "preflight"] },
   { id: "quality", label: "Quality & Verification", color: "amber",
-    modules: ["verification", "adversarial-validation", "code-reviewer", "codebase-health", "codebase-analyzer"] },
+    modules: ["verification", "code-reviewer", "codebase-health", "codebase-analyzer"] },
   { id: "knowledge", label: "Knowledge & Learning", color: "purple",
     modules: ["knowledge-indexer", "learning", "reflections", "agent-memory", "pattern-detector", "prompt-evolution", "repo-map", "grounding", "ov-session", "ov-skills"] },
   { id: "state", label: "State & Data", color: "cyan",
