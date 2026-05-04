@@ -1,16 +1,18 @@
 /**
  * verification.ts — Steps 6 through 6.9 of the control loop
  *
- * Contains the full verification pipeline: verify → fixer → reconcile →
- * mutation gate → JIT test generation (mutation-aware) → JIT test generation
- * (diff-aware) → scope enforcement.
+ * Unified verification module. Contains:
+ *   - Verification pipeline (verify → fixer → reconcile → mutation gate →
+ *     JIT test generation → scope enforcement)
+ *   - Core verification runner (inlined from verifier.ts — issue #66)
+ *   - Mutation testing (inlined from mutation-testing.ts — issue #67)
+ *   - JiT test generation (inlined from jit-testing.ts — issue #67)
+ *   - Adversarial validation (inlined from adversarial-validation.ts — issue #68)
  *
- * Also contains the core verification runner (runVerification,
- * defaultVerificationPlan, summarizeVerification) — inlined from the former
- * verifier.ts (issue #66).
- *
- * Returns a VerificationPipelineResult that the caller uses to decide
- * whether to proceed to merge or abort.
+ * Public API (3 exports):
+ *   - verify()              — run the full verification pipeline
+ *   - VerificationResult    — result type
+ *   - trackMergedCommit()   — record a merge for revert-correlation (used by post-merge.ts)
  */
 
 import * as Sentry from "@sentry/node";
@@ -27,11 +29,16 @@ import { reportOutcome } from "./anchor-selection.ts";
 import { fail, block } from "./backlog.ts";
 import { looksOperatorBlocked, reconcilePlanVsActual } from "./preflight.ts";
 import { cleanupBrokenBranch, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
+import { pushTrackedMerge, getTrackedMerges, setAdversarialStats } from "./redis-adapter.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 
 const execFileAsync = promisify(execFile);
 
-export interface VerificationPipelineResult {
+// =========================================================================
+// Public types
+// =========================================================================
+
+export interface VerificationResult {
   /** Whether the pipeline passed all gates and is ready for merge */
   passed: boolean;
   /** The final verification result (may be updated by fixer/JIT) */
@@ -46,6 +53,13 @@ export interface VerificationPipelineResult {
   earlyReturn?: any;
 }
 
+/** @deprecated Use VerificationResult instead */
+export type VerificationPipelineResult = VerificationResult;
+
+// =========================================================================
+// Verification pipeline — public entry point
+// =========================================================================
+
 /**
  * Run the full verification pipeline (steps 6 through 6.9).
  *
@@ -58,7 +72,7 @@ export interface VerificationPipelineResult {
  * @param criteriaCount — number of acceptance criteria
  * @param taskId    — task identifier
  */
-export async function runVerificationPipeline(
+export async function verify(
   ctx: CycleContext,
   task: any,
   diff: string,
@@ -67,7 +81,7 @@ export async function runVerificationPipeline(
   filesInScope: number,
   criteriaCount: number,
   taskId: string,
-): Promise<VerificationPipelineResult> {
+): Promise<VerificationResult> {
   const { cycleId, ovSession } = ctx;
   const tracker = getTracker();
 
@@ -1432,6 +1446,296 @@ function summarizeJitTests(result: JitTestResult): string {
 }
 
 // ---------------------------------------------------------------------------
+// Adversarial validation (inlined from adversarial-validation.ts — issue #68)
+// ---------------------------------------------------------------------------
+
+type AdversarialFinding = {
+  file: string;
+  issue: string;
+  severity: "low" | "medium" | "high";
+  suggestedTest?: string;
+};
+
+type AdversarialReport = {
+  cycleId: string;
+  taskTitle: string;
+  findings: AdversarialFinding[];
+  durationMs: number;
+  error?: string;
+};
+
+/**
+ * Run adversarial validation on the files changed by a merged cycle.
+ *
+ * @param cycleId - The cycle that just merged
+ * @param taskTitle - Title of the merged task (for context)
+ * @param changedFiles - Files changed in the merge
+ * @param commitSha - The merge commit SHA
+ */
+async function runAdversarialValidation(
+  cycleId: string,
+  taskTitle: string,
+  changedFiles: string[],
+  commitSha: string,
+): Promise<AdversarialReport> {
+  const start = Date.now();
+
+  // Filter to source files only (skip tests, configs, migrations)
+  const sourceFiles = changedFiles.filter((f) =>
+    /\.[jt]sx?$/.test(f) &&
+    !/\.test\.[jt]sx?$/.test(f) &&
+    !/\.spec\.[jt]sx?$/.test(f) &&
+    !/\.config\.[jt]s$/.test(f) &&
+    !/drizzle\//.test(f) &&
+    !/\.d\.ts$/.test(f)
+  );
+
+  if (sourceFiles.length === 0) {
+    return {
+      cycleId,
+      taskTitle,
+      findings: [],
+      durationMs: Date.now() - start,
+    };
+  }
+
+  // Read the changed files' content (limit to first 5 files, 2000 chars each)
+  const fileContents: string[] = [];
+  for (const file of sourceFiles.slice(0, 5)) {
+    try {
+      const fullPath = file.startsWith("/") ? file : join(PROJECT_WORKSPACE, file);
+      const content = await readFile(fullPath, "utf-8");
+      fileContents.push(`### ${file}\n\`\`\`\n${content.slice(0, 2000)}\n\`\`\``);
+    } catch {
+      // File might not exist (deleted or moved)
+    }
+  }
+
+  if (fileContents.length === 0) {
+    return {
+      cycleId,
+      taskTitle,
+      findings: [],
+      durationMs: Date.now() - start,
+    };
+  }
+
+  // Get the diff for additional context
+  let diffContent = "";
+  try {
+    const { stdout } = await execFileAsync(
+      "git", ["diff", `${commitSha}~1`, commitSha, "--", ...sourceFiles.slice(0, 5)],
+      { cwd: PROJECT_WORKSPACE, timeout: 10000, maxBuffer: 1024 * 1024 },
+    );
+    diffContent = stdout.slice(0, 3000);
+  } catch { /* intentional: diff is supplementary context */ }
+
+  const prompt = [
+    `You are a code adversary. Your job is to find REAL bugs, edge cases, and uncovered error paths in recently merged code.`,
+    ``,
+    `## Merged Task: "${taskTitle}"`,
+    `## Commit: ${commitSha.slice(0, 7)}`,
+    ``,
+    `## Changed Files`,
+    ...fileContents,
+    ``,
+    diffContent ? `## Diff\n\`\`\`\n${diffContent}\n\`\`\`` : "",
+    ``,
+    `## Your Task`,
+    `Examine this code for:`,
+    `1. Edge cases that would cause runtime errors (null/undefined, empty arrays, division by zero)`,
+    `2. Missing error handling (unhandled promise rejections, uncaught exceptions)`,
+    `3. Logic errors (off-by-one, wrong operator, inverted condition)`,
+    `4. Type mismatches that TypeScript wouldn't catch (runtime shape assumptions)`,
+    `5. Integration issues (function called with wrong args, missing awaits)`,
+    ``,
+    `IMPORTANT: Only report REAL issues you are confident about. Do NOT report:`,
+    `- Style preferences or naming suggestions`,
+    `- "Could be improved" suggestions`,
+    `- Issues in code you can't see (imported modules)`,
+    `- Hypothetical issues that require knowing the full codebase`,
+    ``,
+    `Output ONLY valid JSON:`,
+    `{ "findings": [{ "file": "path", "issue": "description", "severity": "low|medium|high", "suggestedTest": "test code or null" }] }`,
+    `If no real issues found, output: { "findings": [] }`,
+  ].join("\n");
+
+  try {
+    const personality = await findPersonality("executor"); // reuse executor personality for code understanding
+    const result = await runAgent({
+      agentName: "adversary",
+      personality,
+      prompt,
+      model: "local",
+      taskId: `adversary-${cycleId}`,
+      correlationId: cycleId,
+      workDir: PROJECT_WORKSPACE,
+      timeout: 30_000,
+    });
+
+    let findings: AdversarialFinding[] = [];
+    try {
+      const parsed = JSON.parse(result.output);
+      findings = (parsed.findings || []).filter((f: any) =>
+        f.file && f.issue && ["low", "medium", "high"].includes(f.severity)
+      );
+    } catch {
+      const match = result.output.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          const parsed = JSON.parse(match[0]);
+          findings = (parsed.findings || []).filter((f: any) =>
+            f.file && f.issue && ["low", "medium", "high"].includes(f.severity)
+          );
+        } catch { /* intentional: unparseable output = no findings */ }
+      }
+    }
+
+    return {
+      cycleId,
+      taskTitle,
+      findings,
+      durationMs: Date.now() - start,
+    };
+  } catch (err: any) {
+    console.error(`[Adversarial] Agent call failed: ${err.message}`);
+    return {
+      cycleId,
+      taskTitle,
+      findings: [],
+      durationMs: Date.now() - start,
+      error: err.message,
+    };
+  }
+}
+
+/**
+ * Convert adversarial findings into work queue items for Hydra to fix.
+ * Only queues medium+ severity findings.
+ */
+function findingsToQueueItems(report: AdversarialReport): Array<{ reference: string; reason: string; source: string }> {
+  return report.findings
+    .filter((f) => f.severity === "medium" || f.severity === "high")
+    .map((f) => ({
+      reference: `Fix adversarial finding in ${f.file}: ${f.issue.slice(0, 100)}`,
+      reason: `Adversarial validation after ${report.cycleId}: ${f.issue}${f.suggestedTest ? ` (test hint: ${f.suggestedTest.slice(0, 200)})` : ""}`,
+      source: "adversarial-validation",
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial precision tracking
+// ---------------------------------------------------------------------------
+
+type TrackedMerge = {
+  cycleId: string;
+  commitSha: string;
+  findingsCount: number;
+  findings: AdversarialFinding[];
+  mergedAt: string;
+};
+
+/**
+ * Record a merged commit for later revert-correlation.
+ * Called after adversarial validation runs (whether findings or not).
+ */
+export async function trackMergedCommit(
+  cycleId: string,
+  commitSha: string,
+  findings: AdversarialFinding[],
+): Promise<void> {
+  try {
+    const entry: TrackedMerge = {
+      cycleId,
+      commitSha,
+      findingsCount: findings.length,
+      findings: findings.slice(0, 10),
+      mergedAt: new Date().toISOString(),
+    };
+    // Keep a rolling window of 50 tracked merges
+    await pushTrackedMerge(JSON.stringify(entry), 50);
+  } catch (err: any) {
+    console.error(`[Adversarial] Failed to track merge: ${err.message}`);
+  }
+}
+
+/**
+ * Check recent git history for reverts of tracked commits.
+ * Updates precision stats: true positives (findings + reverted),
+ * false negatives (no findings + reverted), true negatives (no findings + not reverted).
+ * Called once per cycle at startup or after merge.
+ */
+async function checkRevertCorrelation(projectDir: string): Promise<{
+  truePositives: number;
+  falseNegatives: number;
+  totalReverts: number;
+  precision: number | null;
+}> {
+  try {
+    // Get tracked merges
+    const rawEntries = await getTrackedMerges();
+    if (rawEntries.length === 0) return { truePositives: 0, falseNegatives: 0, totalReverts: 0, precision: null };
+
+    // Check each tracked merge against reverts
+    let truePositives = 0; // had findings AND was reverted
+    let falseNegatives = 0; // no findings AND was reverted
+    let totalReverts = 0;
+
+    for (const raw of rawEntries) {
+      try {
+        const entry: TrackedMerge = JSON.parse(raw);
+        // Check if this commit was reverted
+        const { stdout: revertCheck } = await execFileAsync(
+          "git", ["log", "--oneline", "--since=14 days ago", "--grep", `Revert.*${entry.commitSha.slice(0, 7)}`],
+          { cwd: projectDir, timeout: 5000 },
+        ).catch(() => ({ stdout: "" }));
+
+        const wasReverted = revertCheck.trim().length > 0;
+        if (wasReverted) {
+          totalReverts++;
+          if (entry.findingsCount > 0) {
+            truePositives++;
+          } else {
+            falseNegatives++;
+          }
+        }
+      } catch { /* intentional: skip unparseable entries */ }
+    }
+
+    // Persist stats
+    const stats = { truePositives, falseNegatives, totalReverts, checkedAt: new Date().toISOString() };
+    const precision = totalReverts > 0 ? truePositives / totalReverts : null;
+    await setAdversarialStats(JSON.stringify({ ...stats, precision }));
+
+    if (totalReverts > 0) {
+      console.log(`[Adversarial] Revert correlation: ${truePositives} true positives, ${falseNegatives} false negatives out of ${totalReverts} reverts (precision: ${precision !== null ? Math.round(precision * 100) + "%" : "N/A"})`);
+    }
+
+    return { truePositives, falseNegatives, totalReverts, precision };
+  } catch (err: any) {
+    console.error(`[Adversarial] Revert correlation check failed: ${err.message}`);
+    return { truePositives: 0, falseNegatives: 0, totalReverts: 0, precision: null };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers (used by post-merge.ts — not part of the public API)
+// ---------------------------------------------------------------------------
+
+export const _internal = {
+  runAdversarialValidation,
+  findingsToQueueItems,
+  checkRevertCorrelation,
+};
+
+// ---------------------------------------------------------------------------
+// Backward-compat alias
+// ---------------------------------------------------------------------------
+
+/** @deprecated Use verify() instead */
+export const runVerificationPipeline = verify;
+
+// ---------------------------------------------------------------------------
 // Test escape hatch — expose internals needed by unit tests
 // ---------------------------------------------------------------------------
 
@@ -1447,4 +1751,7 @@ export const _testing = {
   SKIP_PATTERNS,
   shouldSkipMutation,
   generateMutations,
+  runAdversarialValidation,
+  findingsToQueueItems,
+  checkRevertCorrelation,
 };
