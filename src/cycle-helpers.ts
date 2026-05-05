@@ -24,17 +24,89 @@ const execFileAsync = promisify(execFile);
 export const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME!, "hydra-betting");
 
 // ---------------------------------------------------------------------------
+// Shared types — contracts for pipeline step parameters
+// ---------------------------------------------------------------------------
+
+/** Anchor selected by selectAnchor() — the work item for this cycle */
+export interface Anchor {
+  type: string;
+  reference: string;
+  whyNow?: string;
+  [key: string]: any;
+}
+
+/** Grounding report from groundProject() — read-only snapshot of project state */
+export interface GroundingReport {
+  branch: string;
+  headCommit: string;
+  recentCommits: string[];
+  dirtyFiles: string[];
+  fileTree: string;
+  fileCount: number;
+  testReport: {
+    ran: boolean;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    passed: number;
+    failed: number;
+    total: number;
+    durationMs: number;
+  };
+  typecheckReport: {
+    ran: boolean;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    durationMs: number;
+  };
+  failingTests: string[];
+  recentDiffs: string;
+  todoMarkers: string[];
+  readme: string;
+  packageJson: any;
+  timestamp: number;
+  groundingDurationMs: number;
+}
+
+/** OV session interface — subset used by pipeline steps */
+export interface OVSession {
+  sessionId: string;
+  cycleId: string;
+  active: boolean;
+  logPlanner(anchor: Anchor, task: any): Promise<void>;
+  logSkeptic(verdict: string, reason: string): Promise<void>;
+  logExecutor(execResult: any): Promise<void>;
+  logVerification(verification: any, passed: boolean): Promise<void>;
+  logOutcome(finalState: string, details?: string): Promise<void>;
+  markUsed(uris: string[]): Promise<void>;
+  commit(): Promise<void>;
+}
+
+/** Event bus interface — subset used by pipeline steps */
+export interface EventBus {
+  publish(stream: string, event: any): Promise<void>;
+}
+
+/** Anchor confidence score from scoreAnchor() */
+export interface AnchorConfidence {
+  score: number;
+  reason: string;
+  tier: "heuristic" | "classifier";
+}
+
+// ---------------------------------------------------------------------------
 // CycleContext — threaded through all pipeline steps
 // ---------------------------------------------------------------------------
 export interface CycleContext {
   cycleId: string;
   startTime: number;
-  grounding: any;
+  grounding: GroundingReport;
   groundingSummary: string;
-  ovSession: any;
-  eventBus: any;
-  anchor: any;
-  anchorConfidence: { score: number; reason: string; tier: "heuristic" | "classifier" } | null;
+  ovSession: OVSession;
+  eventBus: EventBus;
+  anchor: Anchor;
+  anchorConfidence: AnchorConfidence | null;
 }
 
 // ---------------------------------------------------------------------------

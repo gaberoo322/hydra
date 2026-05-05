@@ -1161,7 +1161,7 @@ async function registerSkills() {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Api-Key": OV_KEY },
         body: JSON.stringify({ data: skill }),
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(60000),
       });
       if (res.ok) {
         registered++;

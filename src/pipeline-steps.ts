@@ -28,7 +28,6 @@ import { runExecutorAgent } from "./executor-agent.ts";
 import {
   acquireMergeLock, getMergeLockHolder, releaseMergeLock,
 } from "./redis-adapter.ts";
-import { mergeToMain } from "./merge.ts";
 import {
   handleEarlyExit, PROJECT_WORKSPACE,
 } from "./cycle-helpers.ts";
@@ -398,8 +397,10 @@ export async function cleanOutOfScopeChanges(
 /**
  * Validate that a git diff exists (actual code changes were made).
  * Used to gate the transition from in-progress to changed-code.
+ * When featureBranch is provided, also checks committed changes on that branch
+ * vs base — this handles the case where worktree checkout back to main workspace failed.
  */
-async function validateDiffExists(projectDir: string, baseBranch = "main") {
+async function validateDiffExists(projectDir: string, baseBranch = "main", featureBranch?: string) {
   try {
     // Check for uncommitted changes
     const { stdout: status } = await execFileAsync("git", ["status", "--short"], {
@@ -408,12 +409,30 @@ async function validateDiffExists(projectDir: string, baseBranch = "main") {
     });
     if (status.trim()) return true;
 
-    // Check for committed changes vs base branch
+    // Check for committed changes vs base branch (current HEAD)
     const { stdout: diff } = await execFileAsync("git", ["diff", "--stat", baseBranch], {
       cwd: projectDir,
       timeout: 10000,
     });
-    return diff.trim().length > 0;
+    if (diff.trim().length > 0) return true;
+
+    // If workspace checkout failed, check the feature branch directly
+    if (featureBranch) {
+      const { stdout: branchDiff } = await execFileAsync(
+        "git", ["diff", "--stat", `${baseBranch}...${featureBranch}`],
+        { cwd: projectDir, timeout: 10000 },
+      );
+      if (branchDiff.trim().length > 0) {
+        console.log(`[ControlLoop] Diff found on ${featureBranch} (workspace checkout may have failed — recovering)`);
+        // Attempt checkout recovery so verification can run against the branch
+        await execFileAsync("git", ["checkout", featureBranch], {
+          cwd: projectDir, timeout: 10000,
+        }).catch((err) => { console.warn(`[ControlLoop] Recovery checkout failed: ${err.message}`); });
+        return true;
+      }
+    }
+
+    return false;
   } catch {
     return false;
   }
@@ -449,7 +468,8 @@ export async function runExecuteStep(
   }
 
   // Validate a diff exists
-  const hasDiff = await validateDiffExists(PROJECT_WORKSPACE);
+  // Pass executor branch so we can detect changes even if worktree checkout failed
+  const hasDiff = await validateDiffExists(PROJECT_WORKSPACE, "main", execResult.branch || undefined);
   if (!hasDiff) {
     console.log(`[ControlLoop] Executor produced no code changes — failing task`);
     await tracker.transitionTask(taskId, "failed", { reason: "No code changes produced", execResult: { exitCode: execResult.exitCode, duration: execResult.duration } });
@@ -529,4 +549,62 @@ export async function runMergeStep(
   await releaseMergeLock().catch(() => {});
 
   return { continue: true, mergeResult };
+}
+
+// ---------------------------------------------------------------------------
+// mergeToMain — inlined from merge.ts
+// Git merge + push. Never throws — returns a result object.
+// ---------------------------------------------------------------------------
+
+async function mergeToMain(projectDir: string, cycleId: string) {
+  try {
+    const { stdout: branchOut } = await execFileAsync(
+      "git", ["branch", "--show-current"],
+      { cwd: projectDir, timeout: 5000 },
+    );
+    const featureBranch = branchOut.trim();
+
+    if (featureBranch && featureBranch !== "main") {
+      await execFileAsync("git", ["checkout", "main"], { cwd: projectDir, timeout: 10000 });
+      await execFileAsync("git", ["pull", "origin", "main"], { cwd: projectDir, timeout: 30000 })
+        .catch((err) => console.error(`[Merge] git pull before merge failed (continuing with local main): ${err.message}`));
+      await execFileAsync(
+        "git",
+        ["merge", "--no-ff", featureBranch, "-m", `merge: ${featureBranch} into main for ${cycleId}`],
+        { cwd: projectDir, timeout: 30000 },
+      );
+      try {
+        await execFileAsync("git", ["push", "origin", "main"], { cwd: projectDir, timeout: 30000 });
+      } catch (pushErr: any) {
+        const msg = pushErr?.message || "";
+        if (msg.includes("non-fast-forward") || msg.includes("rejected") || msg.includes("failed to push")) {
+          console.log(`[Merge] Push rejected — pulling and retrying once`);
+          await execFileAsync("git", ["pull", "--rebase", "origin", "main"], { cwd: projectDir, timeout: 30000 });
+          await execFileAsync("git", ["push", "origin", "main"], { cwd: projectDir, timeout: 30000 });
+        } else {
+          throw pushErr;
+        }
+      }
+      const { stdout: sha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: projectDir, timeout: 5000 });
+
+      // Delete merged feature branch (non-fatal)
+      try {
+        await execFileAsync("git", ["branch", "-d", featureBranch], { cwd: projectDir, timeout: 5000 });
+      } catch (err: any) {
+        console.error(`[Merge] Failed to delete local branch ${featureBranch}: ${err.message}`);
+      }
+      try {
+        await execFileAsync("git", ["push", "origin", "--delete", featureBranch], { cwd: projectDir, timeout: 15000 });
+      } catch { /* intentional: remote branch may not exist or already be deleted */ }
+
+      return { ok: true, commitSha: sha.trim(), featureBranch, error: null };
+    }
+
+    // Already on main — push
+    await execFileAsync("git", ["push", "origin", "main"], { cwd: projectDir, timeout: 30000 });
+    const { stdout: sha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: projectDir, timeout: 5000 });
+    return { ok: true, commitSha: sha.trim(), featureBranch: null, error: null };
+  } catch (err: any) {
+    return { ok: false, commitSha: "", featureBranch: null, error: err?.message || String(err) };
+  }
 }

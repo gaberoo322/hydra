@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Pre-commit hook: typecheck + test suite
+# Configured via: git config core.hooksPath .githooks
+
+set -e
+
+echo "[pre-commit] Running typecheck..."
+npm run typecheck
+
+echo "[pre-commit] Running tests..."
+npm test
+
+echo "[pre-commit] All checks passed."

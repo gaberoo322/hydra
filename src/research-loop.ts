@@ -35,6 +35,70 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "
 const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
 const METHODOLOGY_DIR = join(CONFIG_PATH, "research");
 
+/**
+ * Validate that an opportunity's prerequisites exist in the target codebase.
+ * Returns { valid: true } if all prerequisites map to real files/modules/functions,
+ * or { valid: false, missing: [...] } if some cannot be found.
+ *
+ * This prevents auto-queuing items that agents cannot implement because the
+ * foundational code doesn't exist yet.
+ */
+async function validatePrerequisites(prerequisites: string[]): Promise<{ valid: boolean; missing: string[] }> {
+  if (!prerequisites || prerequisites.length === 0) return { valid: true, missing: [] };
+
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const execFileAsync = promisify(execFile);
+
+  const missing: string[] = [];
+
+  for (const prereq of prerequisites) {
+    // Extract searchable terms: file paths, module names, function names, class names
+    // Strip common filler words to get the core concept
+    const searchTerms = extractSearchTerms(prereq);
+    if (searchTerms.length === 0) continue;
+
+    let found = false;
+    for (const term of searchTerms) {
+      try {
+        const { stdout } = await execFileAsync("grep", ["-rl", "--include=*.ts", term, PROJECT_WORKSPACE + "/web/src"], { timeout: 5000 });
+        if (stdout.trim().length > 0) {
+          found = true;
+          break;
+        }
+      } catch {
+        // grep returns exit 1 when no matches — that's expected
+      }
+    }
+    if (!found) missing.push(prereq);
+  }
+
+  return { valid: missing.length === 0, missing };
+}
+
+/**
+ * Extract grep-able search terms from a prerequisite description.
+ * Looks for camelCase identifiers, file paths, and hyphenated module names.
+ */
+function extractSearchTerms(prereq: string): string[] {
+  const terms: string[] = [];
+
+  // Match camelCase or PascalCase identifiers (e.g., "getAccountLimits", "ArbitrageRunPacket")
+  const identifiers = prereq.match(/[A-Z]?[a-z]+(?:[A-Z][a-z]+)+/g) || [];
+  terms.push(...identifiers);
+
+  // Match file-path-like segments (e.g., "kalshi-orderbooks/orderbooks.ts")
+  const paths = prereq.match(/[\w-]+(?:\/[\w-]+)*\.ts/g) || [];
+  terms.push(...paths);
+
+  // Match hyphenated module names (e.g., "arbitrage-replay-runner", "scanner-sizing")
+  const hyphenated = prereq.match(/[a-z]+-[a-z]+(?:-[a-z]+)*/g) || [];
+  terms.push(...hyphenated.filter(h => h.length > 5));
+
+  // Deduplicate
+  return [...new Set(terms)];
+}
+
 function generateResearchId() {
   const now = new Date();
   const date = now.toISOString().split("T")[0];
@@ -617,6 +681,41 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
           estimate: complexityToEstimate[opp.complexity?.toLowerCase()] ?? null,
         });
         continue;
+      }
+
+      // Prerequisite validation gate: verify that listed prerequisites exist
+      // in the target codebase before auto-queuing. Items with unmet prerequisites
+      // get downgraded to triage for operator review.
+      if (opp.prerequisites?.length > 0) {
+        const prereqCheck = await validatePrerequisites(opp.prerequisites);
+        if (!prereqCheck.valid) {
+          console.log(`[Research] Prerequisite gate: downgrading #${opp.rank} "${opp.title}" to triage — missing: ${prereqCheck.missing.join(", ")}`);
+          const descParts = [];
+          if (opp.rationale) descParts.push(`## Rationale\n${opp.rationale}`);
+          if (opp.acceptanceCriteria) {
+            const ac = Array.isArray(opp.acceptanceCriteria)
+              ? opp.acceptanceCriteria.map(c => `- [ ] ${c}`).join("\n")
+              : opp.acceptanceCriteria;
+            descParts.push(`## Acceptance Criteria\n${ac}`);
+          }
+          descParts.push(`## Prerequisites\n${opp.prerequisites.map(p => `- ${p}`).join("\n")}`);
+          descParts.push(`## Unmet Prerequisites (auto-detected)\n${prereqCheck.missing.map(m => `- ⚠️ ${m}`).join("\n")}`);
+
+          const complexityToEstimate = { trivial: 1, low: 2, medium: 3, high: 5, extreme: 8 };
+          await addToBacklog({
+            title: opp.title,
+            category: opp.category,
+            source: "research",
+            adjustedScore: opp.adjustedScore,
+            confidence: opp.confidence,
+            complexity: opp.complexity,
+            lane: "triage",
+            description: descParts.join("\n\n"),
+            labels: [opp.category, "unmet-prerequisites"].filter(Boolean),
+            estimate: complexityToEstimate[opp.complexity?.toLowerCase()] ?? null,
+          });
+          continue;
+        }
       }
 
       // Auto-queued — route based on complexity.

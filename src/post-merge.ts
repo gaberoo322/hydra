@@ -26,19 +26,50 @@ import {
   saveRealityReport, trimRealityReports,
   pushToWorkQueue,
   markHealthAnchorResolved,
+  getPatternCooldown, setPatternCooldown, pushAlert,
 } from "./redis-adapter.ts";
-import { recordCycleMetrics } from "./metrics.ts";
+import { recordCycleMetrics, getMetricsTrend } from "./metrics.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { reportOutcome } from "./anchor-selection.ts";
 import { clearOutcomes } from "./learning.ts";
 import { complete, fail } from "./backlog.ts";
-import { detectPatterns } from "./pattern-detector.ts";
 import { markTaskComplete } from "./specs.ts";
 import { trackMergedCommit, _internal as _verificationInternal } from "./verification.ts";
 import { PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 
 const execFileAsync = promisify(execFile);
+
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { resolve, dirname } from "node:path";
+
+const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
+const TARGET_PRIORITIES_PATH = resolve(PROJECT_WORKSPACE, "direction", "priorities.md");
+const SOURCE_PRIORITIES_PATH = resolve(CONFIG_PATH, "direction", "priorities.md");
+
+/**
+ * Sync the orchestrator's priorities.md to the target project's direction/ folder.
+ * This keeps ~/hydra-betting/direction/priorities.md current without requiring
+ * a separate refresh agent run.
+ */
+async function syncTargetPriorities(): Promise<void> {
+  const source = await readFile(SOURCE_PRIORITIES_PATH, "utf-8");
+  if (!source || source.trim().length < 50) return;
+
+  // Ensure target directory exists
+  await mkdir(dirname(TARGET_PRIORITIES_PATH), { recursive: true });
+
+  // Read current target to avoid unnecessary writes
+  let current = "";
+  try { current = await readFile(TARGET_PRIORITIES_PATH, "utf-8"); } catch { /* file may not exist */ }
+
+  // Only write if content has actually changed (ignore frontmatter timestamp diffs)
+  const stripFrontmatter = (s: string) => s.replace(/^---[\s\S]*?---\n*/m, "").trim();
+  if (stripFrontmatter(source) === stripFrontmatter(current)) return;
+
+  await writeFile(TARGET_PRIORITIES_PATH, source);
+  console.log(`[ControlLoop] Synced priorities.md to target project`);
+}
 
 export interface PostMergeResult {
   report: any;
@@ -351,6 +382,20 @@ export async function runPostMerge(
   }
 
   // =========================================================================
+  // Step 8.6: SYNC TARGET PRIORITIES
+  // Keep ~/hydra-betting/direction/priorities.md in sync with the orchestrator's
+  // canonical priorities after every merge. This ensures the target repo's
+  // direction doc stays current for operator visibility.
+  // =========================================================================
+  if (finalState === "merged") {
+    try {
+      await syncTargetPriorities();
+    } catch (err: any) {
+      console.error(`[ControlLoop] Target priorities sync failed (non-fatal): ${err.message}`);
+    }
+  }
+
+  // =========================================================================
   // Step 8.7: ADVERSARIAL VALIDATION
   // =========================================================================
   if (commitSha && !rolledBack && verification.filesChanged?.length > 0) {
@@ -430,4 +475,181 @@ export async function runPostMerge(
 
   await reportOutcome(anchor, { status: "skipped" });
   return { report };
+}
+
+// ---------------------------------------------------------------------------
+// Pattern detection — inlined from pattern-detector.ts
+// Runs after every cycle, checks for systemic issues across recent cycles.
+// Cooldown-deduped: won't re-alert for the same pattern within 1 hour.
+// ---------------------------------------------------------------------------
+
+const PATTERN_WINDOW = 10;
+const PATTERN_COOLDOWN_MS = 60 * 60 * 1000;
+
+async function detectPatterns(eventBus: any, cycleId: string) {
+  try {
+    const trend = await getMetricsTrend(PATTERN_WINDOW);
+    if (trend.length < 3) return;
+
+    const alerts: { pattern: string; severity: string; message: string }[] = [];
+
+    // 1. Low merge rate
+    const merged = trend.filter(m => parseInt(m.tasksMerged) > 0).length;
+    const mergeRate = Math.round(merged / trend.length * 100);
+    if (mergeRate < 50) {
+      alerts.push({
+        pattern: "low_merge_rate",
+        severity: "error",
+        message: `Merge rate is ${mergeRate}% over last ${trend.length} cycles (${merged}/${trend.length} merged). Something is systematically failing.`,
+      });
+    }
+
+    // 2. Consecutive failures (last 3+ cycles all non-merged)
+    let consecutive = 0;
+    for (let i = trend.length - 1; i >= 0; i--) {
+      if (parseInt(trend[i].tasksMerged) > 0) break;
+      consecutive++;
+    }
+    if (consecutive >= 3) {
+      alerts.push({
+        pattern: "consecutive_failures",
+        severity: "error",
+        message: `${consecutive} consecutive cycles without a merge. Last merged: ${trend.find(m => parseInt(m.tasksMerged) > 0)?.cycleId || "unknown"}.`,
+      });
+    }
+
+    // 3. Recurring regressions
+    const regressions = trend.filter(m => m.regressionIntroduced === "true" || m.regressionIntroduced === true).length;
+    if (regressions >= 2) {
+      alerts.push({
+        pattern: "recurring_regressions",
+        severity: "error",
+        message: `${regressions} regressions in last ${trend.length} cycles. The executor is introducing test failures that get auto-reverted.`,
+      });
+    }
+
+    // 4. Same anchor type failing repeatedly
+    const failedAnchors = trend
+      .filter(m => parseInt(m.tasksFailed) > 0 || parseInt(m.tasksAbandoned) > 0)
+      .map(m => m.anchorReference)
+      .filter(Boolean);
+    const anchorCounts: Record<string, number> = {};
+    for (const a of failedAnchors) {
+      anchorCounts[a] = (anchorCounts[a] || 0) + 1;
+    }
+    for (const [anchor, count] of Object.entries(anchorCounts)) {
+      if (count >= 3) {
+        alerts.push({
+          pattern: "anchor_stuck",
+          severity: "warning",
+          message: `Anchor "${anchor}" has failed ${count} times in last ${trend.length} cycles. The system may be stuck on this work item.`,
+        });
+      }
+    }
+
+    // 5. Test count declining
+    const recent = trend.slice(-10);
+    if (recent.length >= 5) {
+      const highWater = Math.max(...recent.map(m => parseInt(m.testsAfter) || 0));
+      const last = parseInt(recent[recent.length - 1].testsAfter) || 0;
+      if (highWater > 0 && last < highWater - 20) {
+        alerts.push({
+          pattern: "test_decline",
+          severity: "warning",
+          message: `Test count dropped ${highWater - last} below peak: ${highWater} → ${last} over last ${recent.length} cycles.`,
+        });
+      }
+    }
+
+    // 6. High abandonment rate
+    const abandoned = trend.filter(m => parseInt(m.tasksAbandoned) > 0).length;
+    if (abandoned >= 4) {
+      alerts.push({
+        pattern: "high_abandonment",
+        severity: "warning",
+        message: `${abandoned}/${trend.length} cycles abandoned. The planner may be proposing work the skeptic keeps rejecting, or drift detection is too aggressive.`,
+      });
+    }
+
+    // 7. File-level rework
+    const fileCounts: Record<string, number> = {};
+    for (const m of trend) {
+      let files = m.filesChangedList;
+      if (typeof files === "string") {
+        try { files = JSON.parse(files); } catch { files = []; }
+      }
+      if (!Array.isArray(files)) continue;
+      for (const f of files) {
+        if (typeof f !== "string" || f.includes(".test.")) continue;
+        fileCounts[f] = (fileCounts[f] || 0) + 1;
+      }
+    }
+    const hotFiles = Object.entries(fileCounts)
+      .filter(([, count]) => count >= 3)
+      .sort((a, b) => b[1] - a[1]);
+    if (hotFiles.length > 0) {
+      const top3 = hotFiles.slice(0, 3).map(([file, count]) => `${file} (${count}x)`).join(", ");
+      alerts.push({
+        pattern: "file_rework",
+        severity: "warning",
+        message: `Rework detected: ${hotFiles.length} file(s) touched in 3+ of last ${trend.length} cycles. Hotspots: ${top3}. Consider architectural review.`,
+      });
+    }
+
+    // 8. Rollback clustering
+    const rollbacks = trend.filter(m => m.rolledBack === true || m.rolledBack === "true").length;
+    if (rollbacks >= 3) {
+      alerts.push({
+        pattern: "rollback_cluster",
+        severity: "error",
+        message: `${rollbacks} rollbacks in last ${trend.length} cycles. The executor is repeatedly introducing regressions. Consider pausing and investigating.`,
+      });
+    }
+
+    // 9. Disk space check
+    try {
+      const { stdout: dfOut } = await execFileAsync("df", ["--output=avail", "-B1", "/"]);
+      const availBytes = parseInt(dfOut.trim().split("\n").pop() || "0");
+      const availGB = availBytes / (1024 ** 3);
+      if (availGB < 20) {
+        alerts.push({
+          pattern: "disk_low",
+          severity: "error",
+          message: `NVMe has only ${availGB.toFixed(1)}GB free (floor: 20GB). Move large files to /mnt/hydra-ssd or clean up.`,
+        });
+      }
+    } catch { /* intentional: disk check is best-effort */ }
+
+    // Publish alerts (with cooldown dedup)
+    for (const alert of alerts) {
+      const lastAlerted = await getPatternCooldown(alert.pattern);
+      if (lastAlerted && Date.now() - parseInt(lastAlerted) < PATTERN_COOLDOWN_MS) {
+        continue;
+      }
+
+      await setPatternCooldown(alert.pattern, Date.now().toString());
+
+      const fullAlert = {
+        id: `pattern-${alert.pattern}-${Date.now()}`,
+        type: `pattern:${alert.pattern}`,
+        timestamp: new Date().toISOString(),
+        message: alert.message,
+        severity: alert.severity,
+        dismissed: false,
+        payload: { pattern: alert.pattern, cycleId, window: PATTERN_WINDOW },
+      };
+      await pushAlert(JSON.stringify(fullAlert), 100);
+
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
+        type: `pattern:${alert.pattern}`,
+        source: "pattern-detector",
+        correlationId: cycleId,
+        payload: { message: alert.message, severity: alert.severity },
+      });
+
+      console.log(`[PatternDetector] ALERT: ${alert.message}`);
+    }
+  } catch (err: any) {
+    console.error(`[PatternDetector] Failed: ${err.message}`);
+  }
 }

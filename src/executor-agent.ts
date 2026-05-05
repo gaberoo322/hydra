@@ -266,19 +266,19 @@ export async function runExecutorAgent(
       await execFileAsync("git", ["push", "origin", branchName], {
         cwd: executorWorkDir,
         timeout: 30000,
-      }).catch(() => { /* intentional: push may fail if no commits */ });
+      }).catch((err) => { console.warn(`[ExecutorAgent] Push failed (may have no commits): ${err.message}`); });
 
       // Fetch the branch into the main repo
       await execFileAsync("git", ["fetch", "origin", branchName], {
         cwd: PROJECT_WORKSPACE,
         timeout: 15000,
-      }).catch(() => { /* intentional: fetch may fail if branch doesn't exist on remote */ });
+      }).catch((err) => { console.warn(`[ExecutorAgent] Fetch failed: ${err.message}`); });
 
       // Checkout the executor's branch in the main workspace for verification
       await execFileAsync("git", ["checkout", branchName], {
         cwd: PROJECT_WORKSPACE,
         timeout: 10000,
-      }).catch(() => { /* intentional: checkout may fail if branch doesn't exist */ });
+      }).catch((err) => { console.warn(`[ExecutorAgent] Checkout failed: ${err.message}`); });
     } catch (err: any) {
       console.error(`[ExecutorAgent] Worktree branch sync failed: ${err.message}`);
     }
