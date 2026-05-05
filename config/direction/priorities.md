@@ -1,49 +1,53 @@
 ---
-updated: 2026-04-29
+updated: 2026-05-05
 refreshedBy: claude-research
-researchCycle: claude-research-2026-04-29
+researchCycle: claude-research-2026-05-05
 tags: [hydra, hydra/direction]
 ---
 # Current state
-Hydra's sports-first arbitrage stack is architecturally complete through M6. Polymarket CLOB V2 went live April 28, 2026 with pUSD collateral, new order structs, and per-sport fee divergence (NHL zero-fee, NBA/MLB higher base). Kalshi now exposes fractional trading (per-market, _fp fields mandatory since March 12), per-fill `fee_cost`, `/account/limits` with tiered token-bucket rate limits, and `order_group_updates` WebSocket channel. The CFTC ANPRM comment period closes April 30; the Third/Ninth Circuit split makes a Supreme Court cert petition near-certain. NBA playoffs are in first round with peak liquidity. FIFA World Cup 2026 markets show sustained 5-8 cent Kalshi-Polymarket spreads. Arb half-lives collapsed to ~3.6s in NBA markets (SSRN 6624718). Polymarket is distributing $5M in April liquidity incentives. MLB season is underway with Polymarket as exclusive MLB prediction market partner via Sportradar data.
+Hydra's sports-first arbitrage stack is architecturally complete through M6. The test suite is green at 3614 passing tests with clean typecheck. The current scheduler session has 90% merge rate (18/20 merged, 0 rollbacks). Recent merges: structured Polymarket sports pair candidate mapper, slippage tolerance for Polymarket sports scanner sizing, Kalshi reconciliation mismatch fix, CLV sizing multiplier on prediction candidates, fill-adjusted EV delta to sports replay comparator, odds-only probability on prediction candidates.
 
-The test suite is green at 3045 passing tests with clean typecheck. Recent merges: scanner route ranking with stream freshness, Kalshi fill fee_cost persistence, verified-pairs test isolation fix, forecast_outcomes migration, collateralAsset evidence for Polymarket buying-power.
+Polymarket CLOB V2 went live April 28 with pUSD collateral, new order structs, and per-sport fee divergence. **Critical: v1/v2 API keys expire June 1, 2026 — v3 keys with Trading permission scope required.** Kalshi has fractional trading (mandatory since March 12), per-fill fee_cost, /account/limits with tiered rate limits, and order_group_updates WebSocket channel. Kalshi is also deprecating /portfolio/orders* endpoints no earlier than May 6.
+
+FIFA World Cup 2026 starts June 11 with $341M+ traded and sustained 5-8 cent Kalshi-Polymarket spreads. NBA second round active, Finals start June 3. MLB season underway with Polymarket as exclusive MLB prediction market partner via Sportradar data. Polymarket sports maker rebates at 25% create incentive for maker-side liquidity provision.
+
+Regulatory: CFTC ANPRM comment period closed April 30. Third/Ninth Circuit split headed to Supreme Court. Curtis-Schiff bill would reclassify sports contracts as gambling. 38 state AGs filed against prediction markets. Polymarket MLB-Sportradar MOU restricts certain market types.
 
 # Priority tasks
-## 1. Validate Polymarket CLOB V2 execution paths end-to-end
-The CLOB V2 exchange upgrade went live April 28. Order structures changed (removed nonce/feeRateBps, added timestamp/metadata/builder), collateral moved from USDC.e to pUSD, SDK migrated to `@polymarket/clob-client-v2`. Per-sport fee rates now diverge (NHL = 0, NBA/MLB = higher). The codebase has `sdk-v2-compat.ts` but production execution needs validation.
-- **Why now**: V1 orders fail post-cutover. V2 fee divergence means mispricing EV by 1-3% across sports. Blocking prerequisite for all Polymarket live execution.
-- **Done when**: Polymarket execution runner successfully places and tracks an order through V2 CLOB with pUSD collateral, per-sport fee rate consumed in route EV, reconciliation handles V2 fill structures, `sdk-v2-compat.ts` confirmed active in all execution modules.
+## 1. Migrate to Polymarket v3 API keys before June 1 deadline
+Polymarket's CLOB V2 migration deprecated v1/v2 API keys with a hard cutoff on June 1, 2026. v3 keys introduce explicit permission scopes (Read-Only vs Trading).
+- **Why now**: 27 days until v1/v2 keys stop working. Hard prerequisite for all Polymarket live trading.
+- **Done when**: v3 API keys generated and configured in all execution modules; health check validates key version on startup; auth error monitoring alerts on 401/403; v1/v2 key references removed.
 
-## 2. Instrument execution latency tracking end-to-end
-No systematic latency instrumentation exists for order submission-to-terminal-state flows. With NBA arb half-lives at 3.6s, latency attribution is critical for determining which opportunities are executable.
-- **Why now**: Without latency attribution, cannot diagnose whether missed fills are from price movement vs. execution delay. Dual-leg execution requires synchronized timing.
-- **Done when**: Track Kalshi submitOrder() latency, Polymarket createAndPostOrder() latency, polling interval vs. fill detection time. Persist executionLatency to venue_orders metadata. Dashboard can display latency distributions.
+## 2. Enforce daily loss limit and kill switch in the execution pipeline
+The daily loss limit and operator kill switch are only enforced at the API route layer (operator-preflights). executeArbitrage() has no awareness of either gate. Any caller that invokes it directly bypasses both safeguards.
+- **Why now**: Before the first real-money trade, every execution path must respect the kill switch and loss limit. A direct call from the scheduler without these gates could produce unbounded losses.
+- **Done when**: executeArbitrage() checks kill switch and daily loss limit before venue submission. Daily loss limit aggregates realized + unrealized exposure. Tests verify rejection regardless of caller.
 
-## 3. Wire OpticOdds unified odds API as sharp-line benchmark
-Pinnacle closed public API access July 2025, cutting off the primary CLV benchmark source. OpticOdds aggregates real-time odds from 200+ sportsbooks (including sharp books) in under 800ms, with built-in injury data, lineups, and game schedules.
-- **Why now**: Unblocks priority 5 (source trust weights need CLV data). NBA playoffs and MLB season generate daily CLV opportunities. Current Pinnacle pipeline is degraded.
-- **Done when**: OpticOdds API integration fetches real-time sharp odds for active sports; closing line snapshots captured at game start for CLV calculation; CLV values flow into source trust weight computation.
+## 3. Seed FIFA World Cup 2026 verified pair registry
+FIFA World Cup 2026 starts June 11 with 48 teams across 12 groups. Both Kalshi and Polymarket offer markets with $341M+ volume and sustained 5-8 cent spreads (2-3x wider than NBA).
+- **Why now**: June 11 start is 37 days away. Peak opportunity window is group stage (first 2 weeks) when uncertainty is highest.
+- **Done when**: Scanner discovers and matches Kalshi-Polymarket World Cup pairs for tournament winner and group winner markets; pair registry seeded with at least 48 tournament-winner outcomes; scanner prices spreads with per-sport fee rates.
 
-## 4. Add opportunity half-life tracking with NBA playoff calibration
-Track how long each verified sports spread remains executable. Research shows NBA arb windows average 3.6s. The scan-history module already has `topPairHalfLife` structure with firstSeenAt/lastSeenAt/seenCount/disappearedAt but the decay computation is missing.
-- **Why now**: NBA first-round playoffs provide the richest possible training set. Data decays in value once playoffs end. Half-life directly determines which opportunities are worth executing.
-- **Done when**: Spread observations timestamped at detection and re-sampled; per-market-type half-life curves computed; scanner uses half-life to prioritize; dashboard displays half-life distributions.
+## 4. Add execution alerting for partial_needs_unwind, circuit breaker trips, and stuck orders
+Zero alerting integration in the arbitrage execution path. When a run transitions to partial_needs_unwind (one leg exposed), the operator learns about it only if they check the dashboard.
+- **Why now**: A partial_needs_unwind means real money at risk with naked single-venue exposure. Without alerting, the operator could be asleep while the market moves against a naked position.
+- **Done when**: Telegram notifications fire for: partial_needs_unwind status, recovery unwind failure, circuit breaker opening, stuck orders exceeding threshold. Alert delivery is idempotent.
 
-## 5. Convert calibration outcomes and Pinnacle CLV into source trust weights
-Build a bounded source-trust module using settled forecast outcomes, sharp closing-line evidence, and Brier/log-loss to produce source-specific sizing multipliers.
-- **Why now**: Settlement sync is complete, fair-line edge flows into previews. The next alpha step is letting proven sources size larger. Depends on priority 3 for CLV data.
-- **Done when**: Run-cycle candidate previews include source trust weight, CLV/log-loss inputs, and adjusted size.
+## 5. Implement WebSocket-based Kalshi price monitoring via orderbook and ticker channels
+Kalshi's WebSocket API provides real-time orderbook, ticker, and market_lifecycle channels. Replace REST polling with WebSocket subscriptions for actively scanned sports markets.
+- **Why now**: With 3.6s NBA arb half-life, REST polling is too slow. WebSocket delivers sub-100ms updates — the single highest-leverage latency reduction available. NBA Finals (June 3) and World Cup (June 11) provide immediate calibration.
+- **Done when**: Kalshi WebSocket connection with auto-reconnect; subscribed to orderbook+ticker channels for active sports markets; scanner consumes WebSocket updates; scan-to-detection time under 500ms.
 
-## 6. Wire Kalshi account limits, rate-limit token buckets, and fractional trading
-Kalshi now provides `/account/limits` with tiered token-bucket rate limits (Basic 20r/10w through Prime 400/400), `order_group_updates` WebSocket channel, and per-market fractional trading with _fp fields (mandatory since March 12). All must be consumed for live execution.
-- **Why now**: Live dual-leg arb will spike submission velocity. Without rate limiting, 429s cascade across both legs. Fractional trading enables tighter leg matching (reducing residual exposure). Integer fields were removed March 12.
-- **Done when**: Live Kalshi run packets include parsed token bucket values and endpoint costs; all API interactions use _fp/_dollars fields; fractional sizing is used when market supports it; order_group_updates events logged.
+## 6. Add Polymarket ghost-fill detection and position reconciliation
+Polymarket V2 did not fully resolve the ghost fill problem (off-chain match confirmed but on-chain settlement fails). Undetected ghost fills corrupt position tracking and P&L.
+- **Why now**: V2 just launched and ghost fill behavior is not yet well-characterized. pUSD collateral migration adds another failure mode. Must be solved before live trading.
+- **Done when**: Position reconciliation checks on-chain settlement status for every fill; ghost fills detected and logged with alerts; retry/cancel logic handles unmatched fills.
 
-## 7. Persist Polymarket V2 per-sport fee evidence and pUSD collateral lifecycle
-Wire Polymarket V2 per-sport fee rates (from /fee-rate endpoint) and pUSD wrap/unwrap lifecycle into sports arbitrage run packets. NHL zero-fee legs should be correctly prioritized.
-- **Why now**: V2 fee divergence across sports is live. NHL playoffs at zero fee vs NBA/MLB with taker fees creates systematic mispricing in route EV if fees are uniform.
-- **Done when**: Route EV applies per-market fee rate; pUSD balance checked in buying-power readiness; automated wrap triggered when pUSD insufficient; fee evidence persisted in run packets.
+## 7. Validate Polymarket CLOB V2 execution paths end-to-end
+The CLOB V2 exchange upgrade went live April 28. Order structures changed, collateral moved to pUSD, SDK migrated to @polymarket/clob-client-v2. Per-sport fee rates diverge.
+- **Why now**: V1 orders fail post-cutover. V2 fee divergence means mispricing EV by 1-3% across sports.
+- **Done when**: Polymarket execution runner successfully places and tracks an order through V2 CLOB with pUSD collateral, per-sport fee rate consumed in route EV, reconciliation handles V2 fill structures.
 
 # What's been completed (DO NOT re-propose)
 - Add JSDoc header to Polymarket CLOB provider
@@ -86,6 +90,12 @@ Wire Polymarket V2 per-sport fee rates (from /fee-rate endpoint) and pUSD wrap/u
 - Persist pUSD collateralAsset in second-leg venue-sizing audit evidence
 - Add odds-fetching capability to OpticOdds provider (fetchOdds with Zod schemas)
 - Add OpticOdds sharp-line fair-value adapter for CLV benchmarking
+- Structured Polymarket sports pair candidate mapper
+- Slippage tolerance for Polymarket sports scanner sizing
+- Kalshi reconciliation mismatch fix
+- CLV sizing multiplier on prediction candidates
+- Fill-adjusted EV delta to sports replay comparator
+- Odds-only probability on prediction candidates
 
 # What NOT to work on
 - Do not re-propose completed items listed above.
@@ -95,6 +105,7 @@ Wire Polymarket V2 per-sport fee rates (from /fee-rate endpoint) and pUSD wrap/u
 - Do not propose OPENAI_API_KEY configuration tasks — it's already configured.
 - Do not propose V1 CLOB work — V2 is now live and V1 is deprecated.
 - Do not build Hyperliquid or FanDuel Predicts venue adapters until those platforms have confirmed mainnet/API availability.
+- Do not build DraftKings Predictions integration until API access is confirmed available.
 
 # Regulatory awareness
-The CFTC ANPRM comment period closes April 30. CFTC has sued 5 states (AZ, CT, IL, NY, WI) asserting CEA preemption. Third Circuit ruled 2-1 for Kalshi; Ninth Circuit panel appeared to lean Nevada's way in April 16 oral arguments — likely circuit split headed to Supreme Court. The Curtis-Schiff "Prediction Markets Are Gambling Act" would reclassify sports contracts as gambling. 38 state AGs filed against prediction markets April 28. Monitor weekly; no code changes needed unless platform rules change. Polymarket's MLB-exclusive deal with Sportradar/CFTC integrity MOU restricts certain market types (individual pitches, manager decisions, umpire performance) — scanner should filter these.
+The CFTC ANPRM comment period closed April 30. CFTC has sued 5 states (AZ, CT, IL, NY, WI) asserting CEA preemption. Third Circuit ruled 2-1 for Kalshi; Ninth Circuit panel leaned Nevada's way — likely circuit split headed to Supreme Court (64% market-implied cert probability by end of 2026). The Curtis-Schiff "Prediction Markets Are Gambling Act" (S.4160) would reclassify sports contracts as gambling with bipartisan support. 38 state AGs filed against prediction markets April 28. Arizona filed criminal charges against Kalshi in March. Monitor weekly; no code changes needed unless platform rules change. Polymarket's MLB-exclusive deal with Sportradar/CFTC integrity MOU restricts certain market types (individual pitches, manager decisions, umpire performance) — scanner should filter these.

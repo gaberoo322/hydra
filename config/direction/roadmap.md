@@ -86,8 +86,12 @@ Deliver real-money cross-venue proof, route-level execution evidence, and operat
 - [x] Add Polymarket reward price-distance discount evidence
 - [x] Persist Kalshi batch orderbook timestamp evidence in run packets
 - [x] Add Kalshi RFQ visible-book route quality comparator
+- [ ] Migrate to Polymarket v3 API keys before June 1 deadline
 - [ ] Validate Polymarket CLOB V2 execution end-to-end (V2 went live April 28)
+- [ ] Add Polymarket ghost-fill detection and position reconciliation
 - [ ] Persist Polymarket V2 per-sport fee evidence and pUSD collateral lifecycle
+- [ ] Enforce daily loss limit and kill switch in executeArbitrage() (not just API route)
+- [ ] Add execution alerting (Telegram) for partial_needs_unwind, circuit breaker trips, stuck orders
 - [ ] Instrument execution latency tracking end-to-end
 - [ ] Track sports arbitrage opportunity half-life from first detection through expiry
 - [ ] Wire Polymarket US preview, slippage, and AUTOMATIC proof into live sports legs
@@ -105,6 +109,7 @@ Use settled sports outcomes, CLV, and source reliability to compound sizing towa
 - [x] Persist sportsbook fair-line sizing basis on candidates
 - [x] Carry sportsbook fair-line edge into run-cycle sizing preview
 - [x] Expose sports replay summaries on calibration dashboard
+- [x] Add OpticOdds sharp-line fair-value adapter for CLV benchmarking
 - [ ] Convert calibration outcomes and Pinnacle CLV into source trust weights
 - [ ] Feed source trust weights into sports run-cycle sizing previews
 - [ ] Show calibration-backed sizing rationale on the calibration dashboard
@@ -116,7 +121,11 @@ completed:
 
 Improve operator throughput once the live proof and trust-weighted sizing loops are in place.
 
-- [ ] Add unified navigation across existing operator pages
+- [ ] Make kill switch, daily loss limit, and risk settings editable from dashboard
+- [ ] Add auto-refresh / live polling to dashboard pages
+- [ ] Surface circuit breaker state and recovery queue in dashboard
+- [ ] Add execution timeline / unified activity log page
+- [ ] Add venue maintenance window visibility and execution-blocking indicators
 - [ ] Add a compact live sports opportunity queue across arbitrage, markets, and venue orders
 - [ ] Optimize forecast outcome sync away from full-table terminal order scans when history grows
 
@@ -127,9 +136,10 @@ completed:
 
 Address the collapsing arb half-life (2.7s avg, 3.6s NBA) by optimizing execution latency.
 
+- [ ] Implement WebSocket-based Kalshi price monitoring via orderbook and ticker channels
 - [ ] Profile and benchmark dual-leg submission latency end-to-end
 - [ ] Add parallel first-leg and second-leg pre-positioning for near-simultaneous execution
-- [ ] Implement WebSocket-based price monitoring for sub-second opportunity detection
+- [ ] Add venue API timeout and retry budget enforcement for dual-leg execution
 - [ ] Add execution-speed metrics to run packets (time-to-first-fill, total-round-trip)
 - [ ] Consume Kalshi order_group_updates WebSocket channel for real-time lifecycle events
 - [ ] Consume Kalshi fractional trading and settlement_value fields for precision sizing
@@ -141,8 +151,13 @@ completed:
 
 Replace restricted Pinnacle API with aggregated sharp-line data and explore new venue opportunities.
 
+- [x] Add OpticOdds odds-fetching capability (fetchOdds with Zod schemas)
 - [ ] Wire OpticOdds unified odds API as sharp-line benchmark
-- [ ] Exploit FIFA World Cup 2026 Kalshi-Polymarket spreads (June 11 - July 19)
+- [ ] Seed FIFA World Cup 2026 verified pair registry (June 11 - July 19)
+- [ ] Build NBA Finals rapid pair seeding pipeline (Finals start June 3)
+- [ ] Integrate SportsDataIO injury and lineup feed for line-movement alpha
 - [ ] Add MLB Polymarket-Sportradar official data advantage to scanner pair matching
 - [ ] Model Kalshi combo contracts for multi-leg correlation arbitrage
+- [ ] Implement Polymarket builderCode attribution and maker rebate tracking
+- [ ] Integrate Oddpool cross-venue spread alerts as secondary scanner validation
 - [ ] Evaluate FanDuel Predicts (CME Group) and Hyperliquid HIP-4 as future venues
