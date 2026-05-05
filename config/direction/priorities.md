@@ -14,37 +14,32 @@ FIFA World Cup 2026 starts June 11 with $341M+ traded and sustained 5-8 cent Kal
 Regulatory: CFTC ANPRM comment period closed April 30. Third/Ninth Circuit split headed to Supreme Court. Curtis-Schiff bill would reclassify sports contracts as gambling. 38 state AGs filed against prediction markets. Polymarket MLB-Sportradar MOU restricts certain market types.
 
 # Priority tasks
-## 1. Migrate to Polymarket v3 API keys before June 1 deadline
-Polymarket's CLOB V2 migration deprecated v1/v2 API keys with a hard cutoff on June 1, 2026. v3 keys introduce explicit permission scopes (Read-Only vs Trading).
-- **Why now**: 27 days until v1/v2 keys stop working. Hard prerequisite for all Polymarket live trading.
-- **Done when**: v3 API keys generated and configured in all execution modules; health check validates key version on startup; auth error monitoring alerts on 401/403; v1/v2 key references removed.
-
-## 2. Enforce daily loss limit and kill switch in the execution pipeline
+## 1. Enforce daily loss limit and kill switch in the execution pipeline
 The daily loss limit and operator kill switch are only enforced at the API route layer (operator-preflights). executeArbitrage() has no awareness of either gate. Any caller that invokes it directly bypasses both safeguards.
 - **Why now**: Before the first real-money trade, every execution path must respect the kill switch and loss limit. A direct call from the scheduler without these gates could produce unbounded losses.
 - **Done when**: executeArbitrage() checks kill switch and daily loss limit before venue submission. Daily loss limit aggregates realized + unrealized exposure. Tests verify rejection regardless of caller.
 
-## 3. Seed FIFA World Cup 2026 verified pair registry
+## 2. Seed FIFA World Cup 2026 verified pair registry
 FIFA World Cup 2026 starts June 11 with 48 teams across 12 groups. Both Kalshi and Polymarket offer markets with $341M+ volume and sustained 5-8 cent spreads (2-3x wider than NBA).
 - **Why now**: June 11 start is 37 days away. Peak opportunity window is group stage (first 2 weeks) when uncertainty is highest.
 - **Done when**: Scanner discovers and matches Kalshi-Polymarket World Cup pairs for tournament winner and group winner markets; pair registry seeded with at least 48 tournament-winner outcomes; scanner prices spreads with per-sport fee rates.
 
-## 4. Add execution alerting for partial_needs_unwind, circuit breaker trips, and stuck orders
+## 3. Add execution alerting for partial_needs_unwind, circuit breaker trips, and stuck orders
 Zero alerting integration in the arbitrage execution path. When a run transitions to partial_needs_unwind (one leg exposed), the operator learns about it only if they check the dashboard.
 - **Why now**: A partial_needs_unwind means real money at risk with naked single-venue exposure. Without alerting, the operator could be asleep while the market moves against a naked position.
 - **Done when**: Telegram notifications fire for: partial_needs_unwind status, recovery unwind failure, circuit breaker opening, stuck orders exceeding threshold. Alert delivery is idempotent.
 
-## 5. Implement WebSocket-based Kalshi price monitoring via orderbook and ticker channels
+## 4. Implement WebSocket-based Kalshi price monitoring via orderbook and ticker channels
 Kalshi's WebSocket API provides real-time orderbook, ticker, and market_lifecycle channels. Replace REST polling with WebSocket subscriptions for actively scanned sports markets.
 - **Why now**: With 3.6s NBA arb half-life, REST polling is too slow. WebSocket delivers sub-100ms updates — the single highest-leverage latency reduction available. NBA Finals (June 3) and World Cup (June 11) provide immediate calibration.
 - **Done when**: Kalshi WebSocket connection with auto-reconnect; subscribed to orderbook+ticker channels for active sports markets; scanner consumes WebSocket updates; scan-to-detection time under 500ms.
 
-## 6. Add Polymarket ghost-fill detection and position reconciliation
+## 5. Add Polymarket ghost-fill detection and position reconciliation
 Polymarket V2 did not fully resolve the ghost fill problem (off-chain match confirmed but on-chain settlement fails). Undetected ghost fills corrupt position tracking and P&L.
 - **Why now**: V2 just launched and ghost fill behavior is not yet well-characterized. pUSD collateral migration adds another failure mode. Must be solved before live trading.
 - **Done when**: Position reconciliation checks on-chain settlement status for every fill; ghost fills detected and logged with alerts; retry/cancel logic handles unmatched fills.
 
-## 7. Validate Polymarket CLOB V2 execution paths end-to-end
+## 6. Validate Polymarket CLOB V2 execution paths end-to-end
 The CLOB V2 exchange upgrade went live April 28. Order structures changed, collateral moved to pUSD, SDK migrated to @polymarket/clob-client-v2. Per-sport fee rates diverge.
 - **Why now**: V1 orders fail post-cutover. V2 fee divergence means mispricing EV by 1-3% across sports.
 - **Done when**: Polymarket execution runner successfully places and tracks an order through V2 CLOB with pUSD collateral, per-sport fee rate consumed in route EV, reconciliation handles V2 fill structures.

@@ -86,7 +86,6 @@ Deliver real-money cross-venue proof, route-level execution evidence, and operat
 - [x] Add Polymarket reward price-distance discount evidence
 - [x] Persist Kalshi batch orderbook timestamp evidence in run packets
 - [x] Add Kalshi RFQ visible-book route quality comparator
-- [ ] Migrate to Polymarket v3 API keys before June 1 deadline
 - [ ] Validate Polymarket CLOB V2 execution end-to-end (V2 went live April 28)
 - [ ] Add Polymarket ghost-fill detection and position reconciliation
 - [ ] Persist Polymarket V2 per-sport fee evidence and pUSD collateral lifecycle
