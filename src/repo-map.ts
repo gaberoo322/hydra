@@ -299,6 +299,65 @@ export function computePageRank(
 }
 
 // ---------------------------------------------------------------------------
+// Test-file detection
+// ---------------------------------------------------------------------------
+
+const TEST_FILE_RE = /\.(?:test|spec)\.[cm]?[tj]sx?$/;
+
+/**
+ * Returns true if the file path matches common test-file naming conventions:
+ * *.test.ts, *.test.mts, *.spec.ts, etc.
+ */
+export function isTestFile(filePath: string): boolean {
+  return TEST_FILE_RE.test(filePath);
+}
+
+/**
+ * For each scope file, find the closest test file by filename heuristic.
+ *
+ * Heuristic: given `src/foo.ts`, look for files matching `foo.test.ts`,
+ * `foo.test.mts`, `foo.spec.ts` anywhere in the graph's file set.
+ * Also checks import edges: if a test file imports a scope file, it's
+ * considered an affinity match.
+ *
+ * @returns Set of test file paths that have affinity with the scope files
+ */
+export function findTestFileAffinity(
+  graph: ImportGraph,
+  scopeFiles: string[],
+): Set<string> {
+  const allFiles = new Set(graph.edges.keys());
+  const result = new Set<string>();
+
+  // 1. Filename heuristic: foo.ts -> foo.test.ts, foo.test.mts, foo.spec.ts
+  for (const scopeFile of scopeFiles) {
+    // Strip extension to get the base name stem
+    const stem = scopeFile.replace(/\.[cm]?[tj]sx?$/, "");
+    for (const candidate of allFiles) {
+      if (!isTestFile(candidate)) continue;
+      const candidateStem = candidate.replace(/\.(?:test|spec)\.[cm]?[tj]sx?$/, "");
+      if (candidateStem === stem) {
+        result.add(candidate);
+      }
+    }
+  }
+
+  // 2. Import-edge heuristic: test files that import any scope file
+  const scopeSet = new Set(scopeFiles);
+  for (const [file, targets] of graph.edges) {
+    if (!isTestFile(file)) continue;
+    for (const tgt of targets) {
+      if (scopeSet.has(tgt)) {
+        result.add(file);
+        break;
+      }
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Scope-aware selection
 // ---------------------------------------------------------------------------
 
@@ -309,18 +368,23 @@ export function computePageRank(
  * Relevance = PageRank score, but only for files reachable within `maxDepth`
  * hops from the scope set (via both incoming and outgoing edges).
  *
+ * Test files are detected and marked with `isTest: true` in the result.
+ * Additionally, test files with filename affinity to scope files (e.g.
+ * foo.ts -> foo.test.ts) are injected even if they fall outside the BFS
+ * frontier, so the executor always sees related test files.
+ *
  * @param graph      - The import graph
  * @param scopeFiles - Files that are in-scope for the current task
  * @param topN       - Maximum number of neighbors to return (default 15)
  * @param maxDepth   - BFS depth limit (default 2)
- * @returns Sorted array of { file, score } for the top-N relevant neighbors
+ * @returns Sorted array of { file, score, isTest } for the top-N relevant neighbors
  */
 export function selectScopeNeighbors(
   graph: ImportGraph,
   scopeFiles: string[],
   topN = 15,
   maxDepth = 2,
-): { file: string; score: number }[] {
+): { file: string; score: number; isTest: boolean }[] {
   const scores = computePageRank(graph);
   const scopeSet = new Set(scopeFiles);
 
@@ -360,11 +424,20 @@ export function selectScopeNeighbors(
   // Filter to neighbors only (exclude scope files themselves)
   const neighbors = [...visited].filter((f) => !scopeSet.has(f));
 
+  // Inject affinity test files that may be outside the BFS frontier
+  const affinityTests = findTestFileAffinity(graph, scopeFiles);
+  for (const testFile of affinityTests) {
+    if (!scopeSet.has(testFile) && !neighbors.includes(testFile)) {
+      neighbors.push(testFile);
+    }
+  }
+
   // Sort by score descending, take top N
   neighbors.sort((a, b) => (scores.get(b) ?? 0) - (scores.get(a) ?? 0));
   return neighbors.slice(0, topN).map((f) => ({
     file: f,
     score: scores.get(f) ?? 0,
+    isTest: isTestFile(f),
   }));
 }
 
@@ -381,13 +454,14 @@ export function selectScopeNeighbors(
  * budget would be exceeded.
  *
  * @param graph       - The import graph
- * @param rankedFiles - Ordered list of files to include (from selectScopeNeighbors or PageRank)
+ * @param rankedFiles - Ordered list of files to include (from selectScopeNeighbors or PageRank).
+ *                      If entries have `isTest: true`, they are prefixed with `[TEST]`.
  * @param tokenBudget - Maximum approximate tokens (default 1500)
  * @returns Formatted string fitting within the token budget
  */
 export function formatRepoMap(
   graph: ImportGraph,
-  rankedFiles: { file: string; score: number }[],
+  rankedFiles: { file: string; score: number; isTest?: boolean }[],
   tokenBudget = 1500,
 ): string {
   // Build in-degree count: how many files import each file?
@@ -403,7 +477,8 @@ export function formatRepoMap(
   let totalChars = 0;
   const lines: string[] = [];
 
-  for (const { file } of rankedFiles) {
+  for (const entry of rankedFiles) {
+    const { file } = entry;
     const exports = graph.exports.get(file) ?? [];
     const importers = importedByCount.get(file) ?? 0;
 
@@ -414,7 +489,10 @@ export function formatRepoMap(
       ? mainExport.name
       : "(no exports)";
 
-    const line = `${file} — ${exportLabel} (imported by ${importers} files)`;
+    // Determine test-file status: explicit flag, or fall back to filename detection
+    const testMarker = (entry.isTest ?? isTestFile(file)) ? "[TEST] " : "";
+
+    const line = `${testMarker}${file} — ${exportLabel} (imported by ${importers} files)`;
     const lineChars = line.length + 1; // +1 for newline
 
     if (totalChars + lineChars > charBudget && lines.length > 0) break;
@@ -614,7 +692,7 @@ export async function generateRepoMap(
     const scores = computePageRank(graph);
     const scopeRanked = scopeFiles
       .filter((f) => graph.edges.has(f))
-      .map((f) => ({ file: f, score: scores.get(f) ?? 0 }));
+      .map((f) => ({ file: f, score: scores.get(f) ?? 0, isTest: isTestFile(f) }));
 
     const allRanked = [...scopeRanked, ...neighbors];
     if (allRanked.length === 0) return "";
