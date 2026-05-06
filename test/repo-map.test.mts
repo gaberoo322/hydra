@@ -14,8 +14,11 @@ import {
   computePageRank,
   selectScopeNeighbors,
   formatRepoMap,
+  computeBlastRadiusWarnings,
   hashFileTree,
   clearRepoMapCache,
+  isTestFile,
+  findTestFileAffinity,
 } from "../src/repo-map.ts";
 import type { ExportedSymbol, ImportEdge, SymbolDetail } from "../src/repo-map.ts";
 
@@ -487,6 +490,91 @@ describe("repo-map formatRepoMap()", () => {
 });
 
 // ---------------------------------------------------------------------------
+// computeBlastRadiusWarnings
+// ---------------------------------------------------------------------------
+
+describe("repo-map computeBlastRadiusWarnings()", () => {
+  test("warns for scope file in top 10% by PageRank", () => {
+    const graph = buildFixtureGraph();
+    // utils.ts is imported by 4 files — highest centrality, top 10%
+    const warnings = computeBlastRadiusWarnings(graph, ["src/utils.ts"]);
+    assert.equal(warnings.length, 1);
+    assert.ok(
+      warnings[0].includes("src/utils.ts"),
+      "warning should name the file",
+    );
+    assert.ok(
+      warnings[0].includes("imported by 4 files"),
+      "warning should include importer count",
+    );
+    assert.ok(
+      warnings[0].includes("blast radius"),
+      "warning should mention blast radius",
+    );
+  });
+
+  test("no warning for leaf file with zero importers", () => {
+    const graph = buildFixtureGraph();
+    // cli.ts imports utils but nobody imports cli — low centrality
+    const warnings = computeBlastRadiusWarnings(graph, ["src/cli.ts"]);
+    assert.equal(warnings.length, 0, "leaf file should not trigger warning");
+  });
+
+  test("no warning when scope files are not in graph", () => {
+    const graph = buildFixtureGraph();
+    const warnings = computeBlastRadiusWarnings(graph, ["src/nonexistent.ts"]);
+    assert.equal(warnings.length, 0);
+  });
+
+  test("returns empty for empty graph", () => {
+    const graph = buildImportGraph(new Map());
+    const warnings = computeBlastRadiusWarnings(graph, ["src/a.ts"]);
+    assert.equal(warnings.length, 0);
+  });
+
+  test("warns for multiple high-centrality scope files", () => {
+    // Build a graph where two files are highly imported
+    const files = new Map<string, string>([
+      ["src/a.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/b.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/c.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/d.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/e.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/f.ts", "import { x } from './shared';"],
+      ["src/g.ts", "import { x } from './shared';"],
+      ["src/h.ts", "import { x } from './shared';"],
+      ["src/i.ts", "import { x } from './shared';"],
+      ["src/j.ts", "import { x } from './shared';"],
+      ["src/shared.ts", "export const x = 1;"],
+      ["src/core.ts", "export const y = 2;"],
+    ]);
+    const graph = buildImportGraph(files);
+    // Both shared.ts and core.ts are heavily imported
+    const warnings = computeBlastRadiusWarnings(graph, [
+      "src/shared.ts",
+      "src/core.ts",
+    ]);
+    assert.ok(warnings.length >= 1, "should warn for at least one high-centrality file");
+    const mentionsShared = warnings.some((w) => w.includes("src/shared.ts"));
+    assert.ok(mentionsShared, "should warn about shared.ts (imported by 10 files)");
+  });
+
+  test("custom percentile threshold narrows warnings", () => {
+    const graph = buildFixtureGraph();
+    // With 1% threshold, only the very top file qualifies
+    const warnings1 = computeBlastRadiusWarnings(graph, [
+      "src/utils.ts",
+      "src/handler.ts",
+    ], 0.01);
+    // utils.ts should still qualify at 1% threshold
+    assert.ok(
+      warnings1.some((w) => w.includes("src/utils.ts")),
+      "utils.ts should qualify at 1% threshold",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // hashFileTree
 // ---------------------------------------------------------------------------
 
@@ -519,6 +607,170 @@ describe("repo-map hashFileTree()", () => {
   test("returns a hex string", () => {
     const hash = hashFileTree("src/a.ts");
     assert.ok(/^[0-9a-f]{64}$/.test(hash), "should be a 64-char hex SHA-256");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isTestFile
+// ---------------------------------------------------------------------------
+
+describe("repo-map isTestFile()", () => {
+  test("detects .test.ts files", () => {
+    assert.ok(isTestFile("src/foo.test.ts"));
+  });
+
+  test("detects .test.mts files", () => {
+    assert.ok(isTestFile("test/bar.test.mts"));
+  });
+
+  test("detects .spec.ts files", () => {
+    assert.ok(isTestFile("src/baz.spec.ts"));
+  });
+
+  test("rejects regular .ts files", () => {
+    assert.ok(!isTestFile("src/foo.ts"));
+  });
+
+  test("rejects files with test in the name but not the extension pattern", () => {
+    assert.ok(!isTestFile("src/test-utils.ts"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findTestFileAffinity
+// ---------------------------------------------------------------------------
+
+describe("repo-map findTestFileAffinity()", () => {
+  function buildAffinityFixture() {
+    const files = new Map<string, string>([
+      ["src/scanner.ts", "export function scan() {}"],
+      ["src/parser.ts", "export function parse() {}"],
+      ["test/scanner.test.mts", "import { scan } from '../src/scanner';"],
+      ["test/parser.test.mts", "import { parse } from '../src/parser';"],
+      ["test/integration.test.mts", "import { scan } from '../src/scanner';\nimport { parse } from '../src/parser';"],
+    ]);
+    return buildImportGraph(files);
+  }
+
+  test("finds test file by filename heuristic (stem match)", () => {
+    // Build a graph where test files have matching stems
+    const files = new Map<string, string>([
+      ["src/scanner.ts", "export function scan() {}"],
+      ["src/scanner.test.ts", "import { scan } from './scanner';"],
+    ]);
+    const graph = buildImportGraph(files);
+    const affinity = findTestFileAffinity(graph, ["src/scanner.ts"]);
+    assert.ok(affinity.has("src/scanner.test.ts"), "should find scanner.test.ts by stem match");
+  });
+
+  test("finds test file by import edge", () => {
+    const graph = buildAffinityFixture();
+    const affinity = findTestFileAffinity(graph, ["src/scanner.ts"]);
+    assert.ok(affinity.has("test/scanner.test.mts"), "should find scanner.test.mts via import edge");
+    assert.ok(affinity.has("test/integration.test.mts"), "should find integration.test.mts via import edge");
+  });
+
+  test("does not return non-test files", () => {
+    const graph = buildAffinityFixture();
+    const affinity = findTestFileAffinity(graph, ["src/scanner.ts"]);
+    for (const f of affinity) {
+      assert.ok(isTestFile(f), `${f} should be a test file`);
+    }
+  });
+
+  test("returns empty set when no test files match", () => {
+    const files = new Map<string, string>([
+      ["src/orphan.ts", "export function orphan() {}"],
+      ["src/other.ts", "export function other() {}"],
+    ]);
+    const graph = buildImportGraph(files);
+    const affinity = findTestFileAffinity(graph, ["src/orphan.ts"]);
+    assert.equal(affinity.size, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectScopeNeighbors — test-file marking
+// ---------------------------------------------------------------------------
+
+describe("repo-map selectScopeNeighbors() test-file marking", () => {
+  function buildTestMarkingFixture() {
+    const files = new Map<string, string>([
+      ["src/index.ts", "import { greet } from './greet';\nexport function main() {}"],
+      ["src/greet.ts", "export function greet() {}"],
+      ["src/greet.test.ts", "import { greet } from './greet';"],
+      ["src/utils.ts", "export function util() {}"],
+    ]);
+    return buildImportGraph(files);
+  }
+
+  test("marks test-file neighbors with isTest: true", () => {
+    const graph = buildTestMarkingFixture();
+    const result = selectScopeNeighbors(graph, ["src/greet.ts"]);
+    const testEntry = result.find((r) => r.file === "src/greet.test.ts");
+    assert.ok(testEntry, "greet.test.ts should appear as a neighbor");
+    assert.equal(testEntry!.isTest, true, "greet.test.ts should be marked isTest");
+  });
+
+  test("marks non-test neighbors with isTest: false", () => {
+    const graph = buildTestMarkingFixture();
+    const result = selectScopeNeighbors(graph, ["src/greet.ts"]);
+    const nonTestEntry = result.find((r) => r.file === "src/index.ts");
+    assert.ok(nonTestEntry, "index.ts should appear as a neighbor");
+    assert.equal(nonTestEntry!.isTest, false, "index.ts should not be marked isTest");
+  });
+
+  test("injects affinity test files even if outside BFS frontier", () => {
+    // Build a graph where the test file is not connected by import edges
+    // but has a matching filename stem
+    const files = new Map<string, string>([
+      ["src/scanner.ts", "export function scan() {}"],
+      ["src/scanner.test.ts", "export function testScan() {}"],  // no import edge
+      ["src/other.ts", "import { scan } from './scanner';\nexport function other() {}"],
+    ]);
+    const graph = buildImportGraph(files);
+    // maxDepth=0 means no BFS expansion, but affinity should still inject
+    const result = selectScopeNeighbors(graph, ["src/scanner.ts"], 15, 0);
+    const testEntry = result.find((r) => r.file === "src/scanner.test.ts");
+    assert.ok(testEntry, "scanner.test.ts should be injected by filename affinity even with maxDepth=0");
+    assert.equal(testEntry!.isTest, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatRepoMap — [TEST] prefix
+// ---------------------------------------------------------------------------
+
+describe("repo-map formatRepoMap() [TEST] prefix", () => {
+  test("prefixes test files with [TEST]", () => {
+    const graph = buildFixtureGraph();
+    const ranked = [
+      { file: "src/utils.ts", score: 1, isTest: false },
+      { file: "test/utils.test.ts", score: 0.5, isTest: true },
+    ];
+    // Add the test file to the graph exports so formatRepoMap can find it
+    graph.exports.set("test/utils.test.ts", [{ name: "testUtils", kind: "function" as const }]);
+    const output = formatRepoMap(graph, ranked);
+    const lines = output.split("\n");
+    assert.ok(!lines[0].startsWith("[TEST]"), "non-test file should not have [TEST] prefix");
+    assert.ok(lines[1].startsWith("[TEST]"), "test file should have [TEST] prefix");
+  });
+
+  test("auto-detects test files by name when isTest is not provided", () => {
+    const files = new Map<string, string>([
+      ["src/foo.ts", "export function foo() {}"],
+      ["src/foo.test.ts", "export function testFoo() {}"],
+    ]);
+    const graph = buildImportGraph(files);
+    // Pass without isTest field — should detect from filename
+    const ranked = [
+      { file: "src/foo.ts", score: 1 },
+      { file: "src/foo.test.ts", score: 0.5 },
+    ];
+    const output = formatRepoMap(graph, ranked);
+    const lines = output.split("\n");
+    assert.ok(!lines[0].startsWith("[TEST]"), "foo.ts should not have [TEST] prefix");
+    assert.ok(lines[1].startsWith("[TEST]"), "foo.test.ts should have [TEST] prefix via auto-detect");
   });
 });
 
