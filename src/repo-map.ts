@@ -18,9 +18,19 @@ import { createHash } from "node:crypto";
 // Types
 // ---------------------------------------------------------------------------
 
+export interface SymbolDetail {
+  /** For functions: parameter count */
+  arity?: number;
+  /** For interfaces/types: top-level field names (first 5) */
+  fields?: string[];
+  /** For classes: method names */
+  methods?: string[];
+}
+
 export interface ExportedSymbol {
   name: string;
   kind: "function" | "class" | "const" | "let" | "var" | "type" | "interface" | "enum" | "default" | "re-export";
+  detail?: SymbolDetail;
 }
 
 export interface ImportEdge {
@@ -58,11 +68,11 @@ export function parseExports(source: string): ExportedSymbol[] {
   const results: ExportedSymbol[] = [];
   const seen = new Set<string>();
 
-  const add = (name: string, kind: ExportedSymbol["kind"]) => {
+  const add = (name: string, kind: ExportedSymbol["kind"], detail?: SymbolDetail) => {
     const key = `${kind}:${name}`;
     if (!seen.has(key)) {
       seen.add(key);
-      results.push({ name, kind });
+      results.push(detail ? { name, kind, detail } : { name, kind });
     }
   };
 
@@ -91,7 +101,21 @@ export function parseExports(source: string): ExportedSymbol[] {
         break;
       }
     }
-    add(m[1], kind);
+
+    let detail: SymbolDetail | undefined;
+    const afterMatch = source.slice(m.index + m[0].length);
+
+    if (kind === "function") {
+      detail = { arity: extractArity(afterMatch) };
+    } else if (kind === "interface" || kind === "type") {
+      const fields = extractFields(afterMatch, kind);
+      if (fields.length > 0) detail = { fields };
+    } else if (kind === "class") {
+      const methods = extractClassMethods(afterMatch);
+      if (methods.length > 0) detail = { methods };
+    }
+
+    add(m[1], kind, detail);
   }
 
   // export default — capture optional name
@@ -501,6 +525,10 @@ export function computeBlastRadiusWarnings(
  * Format the repo map as a compact, human-readable string within a token budget.
  *
  * Output format per line: `file — exportName (imported by N files)`
+ * For scope files, symbol detail is shown as indented sub-items:
+ *   `  fn symbolName(arity)`
+ *   `  fields: a, b, c`
+ *   `  methods: x, y, z`
  *
  * Estimates ~4 chars per token (conservative). Stops adding lines when the
  * budget would be exceeded.
@@ -508,13 +536,15 @@ export function computeBlastRadiusWarnings(
  * @param graph       - The import graph
  * @param rankedFiles - Ordered list of files to include (from selectScopeNeighbors or PageRank).
  *                      If entries have `isTest: true`, they are prefixed with `[TEST]`.
- * @param tokenBudget - Maximum approximate tokens (default 1500)
+ * @param tokenBudget - Maximum approximate tokens (default 2000)
+ * @param scopeFiles  - Files that are in-scope (symbol detail shown only for these)
  * @returns Formatted string fitting within the token budget
  */
 export function formatRepoMap(
   graph: ImportGraph,
   rankedFiles: { file: string; score: number; isTest?: boolean }[],
-  tokenBudget = 1500,
+  tokenBudget = 2000,
+  scopeFiles?: string[],
 ): string {
   // Build in-degree count: how many files import each file?
   const importedByCount = new Map<string, number>();
@@ -524,6 +554,7 @@ export function formatRepoMap(
     }
   }
 
+  const scopeSet = scopeFiles ? new Set(scopeFiles) : new Set<string>();
   const charsPerToken = 4;
   const charBudget = tokenBudget * charsPerToken;
   let totalChars = 0;
@@ -545,14 +576,164 @@ export function formatRepoMap(
     const testMarker = (entry.isTest ?? isTestFile(file)) ? "[TEST] " : "";
 
     const line = `${testMarker}${file} — ${exportLabel} (imported by ${importers} files)`;
-    const lineChars = line.length + 1; // +1 for newline
+    let blockChars = line.length + 1; // +1 for newline
 
-    if (totalChars + lineChars > charBudget && lines.length > 0) break;
+    // Build symbol detail lines for scope files
+    const detailLines: string[] = [];
+    if (scopeSet.has(file)) {
+      for (const exp of exports) {
+        if (!exp.detail) continue;
+        if (exp.detail.arity !== undefined && (exp.kind === "function" || exp.kind === "default")) {
+          const dl = `  fn ${exp.name}(${exp.detail.arity})`;
+          detailLines.push(dl);
+          blockChars += dl.length + 1;
+        }
+        if (exp.detail.fields && exp.detail.fields.length > 0) {
+          const dl = `  ${exp.name} fields: ${exp.detail.fields.join(", ")}`;
+          detailLines.push(dl);
+          blockChars += dl.length + 1;
+        }
+        if (exp.detail.methods && exp.detail.methods.length > 0) {
+          const dl = `  ${exp.name} methods: ${exp.detail.methods.join(", ")}`;
+          detailLines.push(dl);
+          blockChars += dl.length + 1;
+        }
+      }
+    }
+
+    if (totalChars + blockChars > charBudget && lines.length > 0) break;
     lines.push(line);
-    totalChars += lineChars;
+    for (const dl of detailLines) lines.push(dl);
+    totalChars += blockChars;
   }
 
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Symbol detail extraction helpers (regex-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Count parameters in a function's parameter list.
+ * Expects `afterMatch` to start right after the function name.
+ * Finds the first `(...)` and counts comma-separated params, ignoring
+ * commas inside nested parens/brackets/braces.
+ */
+function extractArity(afterMatch: string): number {
+  const parenStart = afterMatch.indexOf("(");
+  if (parenStart === -1) return 0;
+
+  let depth = 0;
+  let count = 0;
+  let hasContent = false;
+
+  for (let i = parenStart; i < afterMatch.length; i++) {
+    const ch = afterMatch[i];
+    if (ch === "(" || ch === "[" || ch === "{" || ch === "<") {
+      depth++;
+    } else if (ch === ")" || ch === "]" || ch === "}" || ch === ">") {
+      depth--;
+      if (depth === 0) break; // end of param list
+    } else if (depth === 1) {
+      if (ch === ",") {
+        count++;
+      } else if (!hasContent && /\S/.test(ch)) {
+        hasContent = true;
+      }
+    }
+  }
+
+  return hasContent ? count + 1 : 0;
+}
+
+/**
+ * Extract top-level field names from an interface or type body (first 5).
+ * For interfaces: looks for `{ fieldName: ... ; ... }`.
+ * For types: looks for `= { fieldName: ... ; ... }`.
+ */
+function extractFields(afterMatch: string, kind: "interface" | "type"): string[] {
+  // Find the opening brace
+  let startSearch = afterMatch;
+  if (kind === "type") {
+    // Type alias: skip past the `=` to find `{`
+    const eqIdx = afterMatch.indexOf("=");
+    if (eqIdx === -1) return [];
+    startSearch = afterMatch.slice(eqIdx + 1);
+  }
+
+  const braceIdx = startSearch.indexOf("{");
+  if (braceIdx === -1) return [];
+
+  // Extract the body between balanced braces (depth 1 only)
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  let depth = 0;
+
+  for (let i = braceIdx; i < startSearch.length && fields.length < 5; i++) {
+    const ch = startSearch[i];
+    if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) break;
+    }
+
+    // At depth 1, look for field names after statement boundaries
+    if (depth === 1 && (ch === "{" || ch === ";" || ch === "\n")) {
+      const rest = startSearch.slice(i + 1);
+      const fieldMatch = rest.match(/^\s*(?:readonly\s+)?(\w+)\s*\??:/);
+      if (fieldMatch && !seen.has(fieldMatch[1])) {
+        seen.add(fieldMatch[1]);
+        fields.push(fieldMatch[1]);
+      }
+    }
+  }
+
+  return fields;
+}
+
+/**
+ * Extract method names from a class body.
+ * Matches: public/private/protected, static, async, get/set, plus the method name
+ * followed by `(`. Only captures names at depth 1 (top-level class body).
+ */
+function extractClassMethods(afterMatch: string): string[] {
+  const braceIdx = afterMatch.indexOf("{");
+  if (braceIdx === -1) return [];
+
+  const methods: string[] = [];
+  const seen = new Set<string>();
+  let depth = 0;
+
+  for (let i = braceIdx; i < afterMatch.length; i++) {
+    const ch = afterMatch[i];
+    if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) break;
+    }
+
+    // At depth 1, look for method declarations
+    if (depth === 1 && (ch === "{" || ch === ";" || ch === "\n" || ch === "}")) {
+      const rest = afterMatch.slice(i + 1);
+      // Match method-like patterns: optional modifiers, then identifier, then (
+      const methodMatch = rest.match(
+        /^\s*(?:(?:public|private|protected|static|async|get|set|override|abstract)\s+)*(\w+)\s*(?:<[^>]*>)?\s*\(/,
+      );
+      if (methodMatch) {
+        const name = methodMatch[1];
+        // Skip constructor and common non-method keywords
+        if (name !== "constructor" && name !== "if" && name !== "for" && name !== "while" && name !== "switch" && !seen.has(name)) {
+          seen.add(name);
+          methods.push(name);
+        }
+      }
+    }
+  }
+
+  return methods;
 }
 
 // ---------------------------------------------------------------------------
@@ -750,7 +931,7 @@ export async function generateRepoMap(
     if (allRanked.length === 0) return "";
 
     const warnings = computeBlastRadiusWarnings(graph, scopeFiles);
-    const mapBody = formatRepoMap(graph, allRanked, tokenBudget);
+    const mapBody = formatRepoMap(graph, allRanked, tokenBudget, scopeFiles);
 
     if (warnings.length > 0) {
       return warnings.join("\n") + "\n\n" + mapBody;

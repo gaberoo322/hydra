@@ -20,7 +20,7 @@ import {
   isTestFile,
   findTestFileAffinity,
 } from "../src/repo-map.ts";
-import type { ExportedSymbol, ImportEdge } from "../src/repo-map.ts";
+import type { ExportedSymbol, ImportEdge, SymbolDetail } from "../src/repo-map.ts";
 
 // ---------------------------------------------------------------------------
 // parseExports
@@ -781,5 +781,206 @@ describe("repo-map formatRepoMap() [TEST] prefix", () => {
 describe("repo-map clearRepoMapCache()", () => {
   test("does not throw when called", () => {
     assert.doesNotThrow(() => clearRepoMapCache());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Symbol detail extraction (via parseExports)
+// ---------------------------------------------------------------------------
+
+describe("repo-map symbol detail — function arity", () => {
+  test("extracts arity for zero-param function", () => {
+    const result = parseExports("export function init() {}");
+    assert.equal(result[0].detail?.arity, 0);
+  });
+
+  test("extracts arity for single-param function", () => {
+    const result = parseExports("export function greet(name: string) {}");
+    assert.equal(result[0].detail?.arity, 1);
+  });
+
+  test("extracts arity for multi-param function", () => {
+    const result = parseExports("export function add(a: number, b: number, c: number) { return a + b + c; }");
+    assert.equal(result[0].detail?.arity, 3);
+  });
+
+  test("extracts arity for async function", () => {
+    const result = parseExports("export async function fetchData(url: string, opts: RequestInit) {}");
+    assert.equal(result[0].detail?.arity, 2);
+  });
+
+  test("handles params with default values and destructuring", () => {
+    const result = parseExports("export function configure({ port, host }: Config, retries = 3) {}");
+    assert.equal(result[0].detail?.arity, 2);
+  });
+});
+
+describe("repo-map symbol detail — interface fields", () => {
+  test("extracts field names from interface", () => {
+    const result = parseExports(`export interface Config {
+      port: number;
+      host: string;
+      debug: boolean;
+    }`);
+    assert.equal(result[0].name, "Config");
+    assert.deepEqual(result[0].detail?.fields, ["port", "host", "debug"]);
+  });
+
+  test("limits fields to first 5", () => {
+    const result = parseExports(`export interface Big {
+      a: number;
+      b: number;
+      c: number;
+      d: number;
+      e: number;
+      f: number;
+      g: number;
+    }`);
+    assert.equal(result[0].detail?.fields?.length, 5);
+    assert.deepEqual(result[0].detail?.fields, ["a", "b", "c", "d", "e"]);
+  });
+
+  test("handles optional fields", () => {
+    const result = parseExports(`export interface Opts {
+      timeout?: number;
+      retries?: number;
+    }`);
+    assert.deepEqual(result[0].detail?.fields, ["timeout", "retries"]);
+  });
+
+  test("handles readonly fields", () => {
+    const result = parseExports(`export interface State {
+      readonly id: string;
+      readonly name: string;
+    }`);
+    assert.deepEqual(result[0].detail?.fields, ["id", "name"]);
+  });
+});
+
+describe("repo-map symbol detail — type fields", () => {
+  test("extracts field names from type alias with object shape", () => {
+    const result = parseExports(`export type Options = {
+      verbose: boolean;
+      output: string;
+    };`);
+    assert.equal(result[0].name, "Options");
+    assert.deepEqual(result[0].detail?.fields, ["verbose", "output"]);
+  });
+
+  test("no fields for non-object type alias", () => {
+    const result = parseExports("export type ID = string;");
+    assert.equal(result[0].name, "ID");
+    assert.equal(result[0].detail, undefined);
+  });
+});
+
+describe("repo-map symbol detail — class methods", () => {
+  test("extracts method names from class", () => {
+    const result = parseExports(`export class Router {
+      addRoute(path: string) {}
+      removeRoute(path: string) {}
+      match(url: string) {}
+    }`);
+    assert.equal(result[0].name, "Router");
+    assert.deepEqual(result[0].detail?.methods, ["addRoute", "removeRoute", "match"]);
+  });
+
+  test("handles visibility modifiers", () => {
+    const result = parseExports(`export class Service {
+      public start() {}
+      private stop() {}
+      protected restart() {}
+    }`);
+    assert.deepEqual(result[0].detail?.methods, ["start", "stop", "restart"]);
+  });
+
+  test("handles async and static methods", () => {
+    const result = parseExports(`export class DB {
+      static create() {}
+      async query(sql: string) {}
+    }`);
+    assert.deepEqual(result[0].detail?.methods, ["create", "query"]);
+  });
+
+  test("skips constructor", () => {
+    const result = parseExports(`export class App {
+      constructor(opts: any) {}
+      run() {}
+    }`);
+    assert.deepEqual(result[0].detail?.methods, ["run"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatRepoMap with symbol detail
+// ---------------------------------------------------------------------------
+
+describe("repo-map formatRepoMap() symbol detail", () => {
+  function buildDetailFixtureGraph() {
+    const files = new Map<string, string>([
+      [
+        "src/handler.ts",
+        `export function handle(req: Request, res: Response) {}
+         export interface HandlerOpts {
+           timeout: number;
+           retries: number;
+           verbose: boolean;
+         }
+         export class HandlerClass {
+           process() {}
+           validate() {}
+         }`,
+      ],
+      [
+        "src/utils.ts",
+        `import { handle } from './handler';
+         export function log(msg: string) {}`,
+      ],
+    ]);
+    return buildImportGraph(files);
+  }
+
+  test("shows symbol detail for scope files", () => {
+    const graph = buildDetailFixtureGraph();
+    const ranked = [
+      { file: "src/handler.ts", score: 1 },
+      { file: "src/utils.ts", score: 0.5 },
+    ];
+    const output = formatRepoMap(graph, ranked, 2000, ["src/handler.ts"]);
+
+    // Scope file should have symbol sub-items
+    assert.ok(output.includes("  fn handle(2)"), "should show function arity for scope file");
+    assert.ok(output.includes("  HandlerOpts fields: timeout, retries, verbose"), "should show interface fields");
+    assert.ok(output.includes("  HandlerClass methods: process, validate"), "should show class methods");
+  });
+
+  test("does NOT show symbol detail for neighbor files", () => {
+    const graph = buildDetailFixtureGraph();
+    const ranked = [
+      { file: "src/handler.ts", score: 1 },
+      { file: "src/utils.ts", score: 0.5 },
+    ];
+    // Only handler.ts is in scope — utils.ts is a neighbor
+    const output = formatRepoMap(graph, ranked, 2000, ["src/handler.ts"]);
+
+    // utils.ts line should NOT have sub-items
+    const utilsLineIdx = output.split("\n").findIndex((l) => l.includes("src/utils.ts"));
+    assert.ok(utilsLineIdx >= 0, "utils.ts should appear in output");
+    const nextLine = output.split("\n")[utilsLineIdx + 1];
+    // Next line should either be undefined or not start with "  " (no sub-items)
+    assert.ok(
+      nextLine === undefined || !nextLine.startsWith("  "),
+      "neighbor file should not have symbol detail",
+    );
+  });
+
+  test("no symbol detail when scopeFiles is not provided", () => {
+    const graph = buildDetailFixtureGraph();
+    const ranked = [{ file: "src/handler.ts", score: 1 }];
+    const output = formatRepoMap(graph, ranked, 2000);
+
+    // Should not contain any indented sub-items
+    const hasSubItems = output.split("\n").some((l) => l.startsWith("  "));
+    assert.ok(!hasSubItems, "should not show symbol detail without scopeFiles");
   });
 });
