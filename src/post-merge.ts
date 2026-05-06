@@ -281,10 +281,13 @@ export async function runPostMerge(
       : "Continue with next priority",
   };
 
-  // If rolled back, update task state and store as prior-failure
+  // If rolled back, record in report and prior-failure queue — but do NOT
+  // transition the task state. "merged" is terminal in the task machine, so
+  // attempting merged → failed is an illegal transition (issue #112).
+  // The rollback is tracked via metrics (rolledBack: true, tasksRolledBack: 1)
+  // and the prior-failure queue via reportOutcome.
   if (rolledBack) {
     report.task.finalState = "rolled-back";
-    await tracker.transitionTask(taskId, "failed", { reason: "Regression detected — auto-reverted", rolledBack: true, revertedCommit: commitSha });
     await reportOutcome(anchor, { status: "failed", reason: `Regression: tests ${grounding.testReport.passed} → ${finalGrounding.testReport.passed}`, verification, taskId });
   }
 
