@@ -369,6 +369,58 @@ export function selectScopeNeighbors(
 }
 
 // ---------------------------------------------------------------------------
+// Blast radius warnings for high-centrality scope files
+// ---------------------------------------------------------------------------
+
+/**
+ * Identify scope files in the top 10% by PageRank and produce warning lines.
+ *
+ * For each high-centrality scope file, returns a warning string:
+ *   ⚠ scanner.ts is imported by N files — changes here have wide blast radius
+ *
+ * @param graph      - The import graph
+ * @param scopeFiles - Files in-scope for the current task
+ * @param percentile - Top percentile threshold (default 0.10 = top 10%)
+ * @returns Array of warning strings (empty if no scope file is high-centrality)
+ */
+export function computeBlastRadiusWarnings(
+  graph: ImportGraph,
+  scopeFiles: string[],
+  percentile = 0.10,
+): string[] {
+  const scores = computePageRank(graph);
+  if (scores.size === 0) return [];
+
+  // Determine the percentile threshold score
+  const allScores = [...scores.values()].sort((a, b) => b - a);
+  const thresholdIndex = Math.max(0, Math.ceil(allScores.length * percentile) - 1);
+  const thresholdScore = allScores[thresholdIndex];
+
+  // Build in-degree count (direct importers)
+  const importedByCount = new Map<string, number>();
+  for (const [, targets] of graph.edges) {
+    for (const tgt of targets) {
+      importedByCount.set(tgt, (importedByCount.get(tgt) ?? 0) + 1);
+    }
+  }
+
+  const warnings: string[] = [];
+  for (const file of scopeFiles) {
+    const score = scores.get(file);
+    if (score !== undefined && score >= thresholdScore) {
+      const importers = importedByCount.get(file) ?? 0;
+      if (importers > 0) {
+        warnings.push(
+          `\u26A0 ${file} is imported by ${importers} files \u2014 changes here have wide blast radius`,
+        );
+      }
+    }
+  }
+
+  return warnings;
+}
+
+// ---------------------------------------------------------------------------
 // Token-budgeted formatting
 // ---------------------------------------------------------------------------
 
@@ -619,7 +671,13 @@ export async function generateRepoMap(
     const allRanked = [...scopeRanked, ...neighbors];
     if (allRanked.length === 0) return "";
 
-    return formatRepoMap(graph, allRanked, tokenBudget);
+    const warnings = computeBlastRadiusWarnings(graph, scopeFiles);
+    const mapBody = formatRepoMap(graph, allRanked, tokenBudget);
+
+    if (warnings.length > 0) {
+      return warnings.join("\n") + "\n\n" + mapBody;
+    }
+    return mapBody;
   } catch (err: any) {
     console.error(`[RepoMap] Failed to generate repo map: ${err.message}`);
     return "";

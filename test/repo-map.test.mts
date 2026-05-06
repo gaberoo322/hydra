@@ -14,6 +14,7 @@ import {
   computePageRank,
   selectScopeNeighbors,
   formatRepoMap,
+  computeBlastRadiusWarnings,
   hashFileTree,
   clearRepoMapCache,
 } from "../src/repo-map.ts";
@@ -483,6 +484,91 @@ describe("repo-map formatRepoMap()", () => {
     const output = formatRepoMap(graph, allFiles);
     const lines = output.split("\n");
     assert.equal(lines.length, 5, "default budget should fit all 5 fixture files");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeBlastRadiusWarnings
+// ---------------------------------------------------------------------------
+
+describe("repo-map computeBlastRadiusWarnings()", () => {
+  test("warns for scope file in top 10% by PageRank", () => {
+    const graph = buildFixtureGraph();
+    // utils.ts is imported by 4 files — highest centrality, top 10%
+    const warnings = computeBlastRadiusWarnings(graph, ["src/utils.ts"]);
+    assert.equal(warnings.length, 1);
+    assert.ok(
+      warnings[0].includes("src/utils.ts"),
+      "warning should name the file",
+    );
+    assert.ok(
+      warnings[0].includes("imported by 4 files"),
+      "warning should include importer count",
+    );
+    assert.ok(
+      warnings[0].includes("blast radius"),
+      "warning should mention blast radius",
+    );
+  });
+
+  test("no warning for leaf file with zero importers", () => {
+    const graph = buildFixtureGraph();
+    // cli.ts imports utils but nobody imports cli — low centrality
+    const warnings = computeBlastRadiusWarnings(graph, ["src/cli.ts"]);
+    assert.equal(warnings.length, 0, "leaf file should not trigger warning");
+  });
+
+  test("no warning when scope files are not in graph", () => {
+    const graph = buildFixtureGraph();
+    const warnings = computeBlastRadiusWarnings(graph, ["src/nonexistent.ts"]);
+    assert.equal(warnings.length, 0);
+  });
+
+  test("returns empty for empty graph", () => {
+    const graph = buildImportGraph(new Map());
+    const warnings = computeBlastRadiusWarnings(graph, ["src/a.ts"]);
+    assert.equal(warnings.length, 0);
+  });
+
+  test("warns for multiple high-centrality scope files", () => {
+    // Build a graph where two files are highly imported
+    const files = new Map<string, string>([
+      ["src/a.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/b.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/c.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/d.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/e.ts", "import { x } from './shared';\nimport { y } from './core';"],
+      ["src/f.ts", "import { x } from './shared';"],
+      ["src/g.ts", "import { x } from './shared';"],
+      ["src/h.ts", "import { x } from './shared';"],
+      ["src/i.ts", "import { x } from './shared';"],
+      ["src/j.ts", "import { x } from './shared';"],
+      ["src/shared.ts", "export const x = 1;"],
+      ["src/core.ts", "export const y = 2;"],
+    ]);
+    const graph = buildImportGraph(files);
+    // Both shared.ts and core.ts are heavily imported
+    const warnings = computeBlastRadiusWarnings(graph, [
+      "src/shared.ts",
+      "src/core.ts",
+    ]);
+    assert.ok(warnings.length >= 1, "should warn for at least one high-centrality file");
+    const mentionsShared = warnings.some((w) => w.includes("src/shared.ts"));
+    assert.ok(mentionsShared, "should warn about shared.ts (imported by 10 files)");
+  });
+
+  test("custom percentile threshold narrows warnings", () => {
+    const graph = buildFixtureGraph();
+    // With 1% threshold, only the very top file qualifies
+    const warnings1 = computeBlastRadiusWarnings(graph, [
+      "src/utils.ts",
+      "src/handler.ts",
+    ], 0.01);
+    // utils.ts should still qualify at 1% threshold
+    assert.ok(
+      warnings1.some((w) => w.includes("src/utils.ts")),
+      "utils.ts should qualify at 1% threshold",
+    );
   });
 });
 
