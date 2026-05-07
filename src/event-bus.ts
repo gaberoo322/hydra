@@ -1,7 +1,7 @@
-import Redis from "ioredis";
 import { randomUUID } from "node:crypto";
 
 import { redisKeys } from "./redis-keys.ts";
+import { getRedisConnection, getRedisSubscriber, closeRedisConnections } from "./redis-adapter.ts";
 
 // Stream topology — V2 control loop
 const STREAMS = {
@@ -24,13 +24,11 @@ const CONSUMER_GROUPS = {
 class EventBus {
   publisher: any;
   subscriber: any;
-  redisUrl: string;
   _wsClients: Set<any>;
   _consuming: boolean;
-  constructor(redisUrl = process.env.REDIS_URL || "redis://localhost:6379") {
-    this.publisher = new Redis(redisUrl);
-    this.subscriber = new Redis(redisUrl);
-    this.redisUrl = redisUrl;
+  constructor() {
+    this.publisher = getRedisConnection();
+    this.subscriber = getRedisSubscriber();
     this._wsClients = new Set();
   }
 
@@ -236,8 +234,7 @@ class EventBus {
 
   async close() {
     this._consuming = false;
-    this.publisher.disconnect();
-    this.subscriber.disconnect();
+    closeRedisConnections();
   }
 }
 
