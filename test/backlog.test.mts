@@ -13,18 +13,19 @@ let backlog;
 let admin;
 let redis;
 
+const TEST_PREFIX = "hydra-test-backlog";
+
 async function cleanBacklogKeys() {
-  // Only clean keys in test DB (db 1) — never touch production (db 0)
-  const keys = await redis.keys("hydra:backlog:*");
+  const keys = await redis.keys(`${TEST_PREFIX}:*`);
   if (keys.length > 0) await redis.del(...keys);
 }
 
 describe("backlog state machine", () => {
   beforeEach(async () => {
     if (!redis) {
-      // Use Redis DB 1 for tests — production uses DB 0
-      redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379/1");
       process.env.REDIS_URL = "redis://localhost:6379/1";
+      process.env.HYDRA_KEY_PREFIX = TEST_PREFIX;
+      redis = new Redis(process.env.REDIS_URL);
       const mod = await import("../src/backlog.ts");
       backlog = mod;
       admin = mod._admin;
@@ -127,19 +128,28 @@ describe("backlog state machine", () => {
     assert.equal(counts.inProgress, 1);
   });
 
-  test("moveToDone only moves items that are in-progress", async () => {
+  test("moveToDone moves items from any lane", async () => {
     await admin.addToBacklog({
       title: "Lifecycle item",
       category: "test",
     });
-    // Not in in-progress yet — should return false
-    const tooEarly = await admin.moveToDone("Lifecycle item", "merged");
-    assert.equal(tooEarly, false);
+    // Can complete directly from backlog (e.g. merged while blocked/queued)
+    const fromBacklog = await admin.moveToDone("Lifecycle item", "merged");
+    assert.equal(fromBacklog, true);
 
-    // Go through the full lifecycle
+    const counts = await admin.getBacklogCounts();
+    assert.equal(counts.backlog, 0);
+    assert.equal(counts.done, 1);
+  });
+
+  test("moveToDone moves in-progress items to done", async () => {
+    await admin.addToBacklog({
+      title: "In-progress item",
+      category: "test",
+    });
     await admin.promoteToQueued(1);
-    await admin.moveToInProgress("Lifecycle item");
-    const done = await admin.moveToDone("Lifecycle item", "merged");
+    await admin.moveToInProgress("In-progress item");
+    const done = await admin.moveToDone("In-progress item", "merged");
     assert.equal(done, true);
 
     const counts = await admin.getBacklogCounts();
@@ -312,11 +322,11 @@ describe("backlog state machine", () => {
     await admin.moveToInProgress("Stale item");
 
     // Manually backdate the stale item's startedAt to 10 days ago
-    const raw = await redis.hget("hydra:backlog:items", (await admin.getInProgressItems()).find(i => i.title === "Stale item").id);
+    const raw = await redis.hget(`${TEST_PREFIX}:backlog:items`, (await admin.getInProgressItems()).find(i => i.title === "Stale item").id);
     const staleItem = JSON.parse(raw);
     const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
     staleItem.meta.startedAt = tenDaysAgo;
-    await redis.hset("hydra:backlog:items", staleItem.id, JSON.stringify(staleItem));
+    await redis.hset(`${TEST_PREFIX}:backlog:items`, staleItem.id, JSON.stringify(staleItem));
 
     const requeued = await admin.requeueStaleInProgressItems();
     assert.equal(requeued.length, 1);

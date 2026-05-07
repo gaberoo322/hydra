@@ -203,28 +203,32 @@ async function moveToInProgress(title) {
 }
 
 /**
- * Move an in-progress item to Done.
+ * Move an item to Done. Searches all non-done lanes so items in blocked
+ * or queued can also be completed (e.g. merged while blocked).
  */
 async function moveToDone(title, outcome = "merged") {
-  const ids = await getBacklogLaneIds("inProgress");
+  for (const sourceLane of ["inProgress", "blocked", "queued", "backlog"]) {
+    const ids = await getBacklogLaneIds(sourceLane);
 
-  for (const id of ids) {
-    const item = await getItem(id);
-    if (item && item.title === title) {
-      await removeFromBacklogLane("inProgress", id);
-      item.lane = "done";
-      item.checked = outcome === "merged";
-      item.meta = {
-        ...item.meta,
-        completedAt: new Date().toISOString().split("T")[0],
-        outcome,
-      };
-      await saveItem(item);
-      // Score with negative timestamp so newest is first in zrange
-      await addToBacklogLane("done", -Date.now(), id);
-      return true;
+    for (const id of ids) {
+      const item = await getItem(id);
+      if (item && item.title === title) {
+        await removeFromBacklogLane(sourceLane, id);
+        item.lane = "done";
+        item.checked = outcome === "merged";
+        item.meta = {
+          ...item.meta,
+          completedAt: new Date().toISOString().split("T")[0],
+          outcome,
+        };
+        await saveItem(item);
+        // Score with negative timestamp so newest is first in zrange
+        await addToBacklogLane("done", -Date.now(), id);
+        return true;
+      }
     }
   }
+  console.warn(`[Backlog] moveToDone: item "${title}" not found in any lane`);
   return false;
 }
 
@@ -679,7 +683,13 @@ async function complete(
   opts: { eventBus?: FacadeEventBus | null; cycleId?: string } = {},
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    await moveToDone(reference, evidence);
+    const moved = await moveToDone(reference, evidence);
+    if (!moved) {
+      const msg = `Item "${reference}" not found in any lane`;
+      console.error(`[Backlog] complete() failed: ${msg}`);
+      await publishFacadeFailure(opts.eventBus || null, opts.cycleId || "", "complete", reference, msg);
+      return { ok: false, error: msg };
+    }
     return { ok: true };
   } catch (err: any) {
     console.error(`[Backlog] complete() failed for "${reference}": ${err.message}`);
