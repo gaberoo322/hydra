@@ -161,14 +161,14 @@ async function main() {
     const { execFile: ef } = await import("node:child_process");
     const { promisify: p } = await import("node:util");
     const run = p(ef);
-    await run("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 5000 }).catch(() => {});
+    await run("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 5000 }).catch(() => { /* intentional: checkout may fail if already on main or dirty state */ });
     const { stdout } = await run("git", ["branch", "--list", "feature/*"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
     const stale = stdout.trim().split("\n").map(b => b.trim()).filter(Boolean);
     for (const branch of stale) {
-      await run("git", ["branch", "-D", branch], { cwd: PROJECT_WORKSPACE, timeout: 5000 }).catch(() => {});
+      await run("git", ["branch", "-D", branch], { cwd: PROJECT_WORKSPACE, timeout: 5000 }).catch(() => { /* intentional: best-effort stale branch cleanup */ });
     }
     if (stale.length > 0) console.log(`[Hydra] Startup cleanup: deleted ${stale.length} stale feature branches`);
-  } catch {}
+  } catch (err: any) { console.error(`[Hydra] Startup branch cleanup failed: ${err.message}`); }
 
   // Initialize event bus and task tracker
   const eventBus = new EventBus();

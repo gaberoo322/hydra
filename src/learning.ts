@@ -1260,7 +1260,7 @@ async function indexText(title: string, content: string) {
   } catch (err: any) {
     console.error(`[Learning:Indexer] Failed to index text "${title}": ${err.message}`);
   } finally {
-    await unlink(tmpFile).catch(() => {});
+    await unlink(tmpFile).catch(() => { /* intentional: best-effort temp file cleanup */ });
   }
 }
 

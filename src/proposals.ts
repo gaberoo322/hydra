@@ -236,7 +236,7 @@ async function runMetaAnalysis(eventBus, event) {
   } catch {
     const match = result.output.match(/\{[\s\S]*\}/);
     if (match) {
-      try { metaOutput = JSON.parse(match[0]); } catch {}
+      try { metaOutput = JSON.parse(match[0]); } catch { /* intentional: fallback JSON parse from regex match, proceed with empty metaOutput */ }
     }
   }
 
