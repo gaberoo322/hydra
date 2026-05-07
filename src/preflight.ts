@@ -126,22 +126,24 @@ export function reconcilePlanVsActual(task, verification) {
 // logs a warning. The classification runs AFTER the planner outputs a task
 // so we have scopeBoundary and acceptanceCriteria to measure.
 //
-// Anchor-level pre-routing: only failing-test anchors are inherently
-// quick-fix (narrow scope, known target, deterministic fix). Prior-failure
-// anchors get full ceremony since the previous approach already failed.
+// Anchor-level pre-routing: failing-test and codebase-health anchors are
+// inherently quick-fix (narrow scope, known target, deterministic fix).
+// Prior-failure anchors get full ceremony since the previous approach
+// already failed.
 // These also get a cheaper planner model and compressed prompt (see runPlannerAgent).
 
 export function classifyTaskComplexity(task, anchor) {
-  // Only genuinely targeted anchors skip ceremony
-  if (anchor.type === "failing-test") {
+  // Targeted anchors skip ceremony — failing-test and codebase-health
+  // are narrow-scope by design (single file fix or reductive improvement)
+  if (anchor.type === "failing-test" || anchor.type === "codebase-health") {
     return "quick-fix";
   }
 
   const filesInScope = task.scopeBoundary?.in?.length || 0;
   const criteriaCount = task.acceptanceCriteria?.length || 0;
 
-  // Quick-fix: single-file, minimal criteria only
-  if (filesInScope <= 1 && criteriaCount <= 2) {
+  // Quick-fix: small scope, few criteria — skip preflight overhead
+  if (filesInScope <= 2 && criteriaCount <= 3) {
     return "quick-fix";
   }
 
