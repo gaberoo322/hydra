@@ -19,7 +19,16 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      - name: Run tests and verify count
+        run: |
+          npm test 2>&1 | tee test-output.txt
+          PASS_COUNT=$(grep -oP '^# pass \K[0-9]+' test-output.txt)
+          echo "Tests passed: $PASS_COUNT"
+          MIN_TESTS=450
+          if [ "$PASS_COUNT" -lt "$MIN_TESTS" ]; then
+            echo "::error::Test count regression: $PASS_COUNT < $MIN_TESTS minimum"
+            exit 1
+          fi
 
   dashboard-build:
     runs-on: ubuntu-latest
