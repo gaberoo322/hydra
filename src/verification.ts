@@ -115,6 +115,37 @@ export async function verify(
     return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, earlyReturn };
   }
 
+  // =========================================================================
+  // Step 6.05: TEST DISCOVERY GUARD — reject if test count collapsed
+  // =========================================================================
+  const baselineTests = ctx.grounding.testReport?.passed ?? 0;
+  if (baselineTests > 0) {
+    const testStep = verification.steps.find((s: any) => s.label === "tests");
+    if (testStep) {
+      const discoveredTests = parseVerificationTestCount(testStep.stdout, testStep.stderr);
+      if (discoveredTests > 0 && discoveredTests < baselineTests * 0.9) {
+        console.error(`[ControlLoop] TEST DISCOVERY GUARD: test count collapsed ${baselineTests} → ${discoveredTests} (>${Math.round((1 - discoveredTests / baselineTests) * 100)}% drop) — blocking merge`);
+        // Treat as verification failure so the normal failure path handles cleanup
+        verification.allPassed = false;
+        (verification as any).testDiscoveryBlocked = true;
+        const syntheticStep = {
+          label: "test-discovery-guard",
+          command: "(internal check)",
+          passed: false,
+          exitCode: -1,
+          stdout: "",
+          stderr: `Test count collapsed: ${baselineTests} → ${discoveredTests}. Changes likely broke test discovery (config, package.json, import resolution). This is not a test failure — tests that were found still passed, but ${baselineTests - discoveredTests} tests were no longer discovered.`,
+          durationMs: 0,
+          expected: `>=${Math.floor(baselineTests * 0.9)} tests discovered`,
+          actual: `${discoveredTests} tests discovered`,
+        };
+        verification.steps.push(syntheticStep);
+        const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
+        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, earlyReturn };
+      }
+    }
+  }
+
   await tracker.transitionTask(taskId, "verified", { verification });
   console.log(`[ControlLoop] Verification PASSED (${verification.totalDurationMs}ms)`);
 
@@ -814,6 +845,31 @@ async function runVerification(projectDir: string, plan: any[], opts: { totalTim
     filesChanged,
     totalDurationMs: Date.now() - start,
   };
+}
+
+/**
+ * Parse test count from verification step output.
+ * Mirrors grounding.ts parseTestCounts() logic — kept inline to avoid
+ * importing _testing internals in production code.
+ */
+function parseVerificationTestCount(stdout: string, stderr: string): number {
+  const combined = (stdout || "") + "\n" + (stderr || "");
+  // Strip ANSI codes
+  const clean = combined.replace(/\x1B\[[0-9;]*[A-Za-z]/g, "");
+
+  // Vitest: "Tests  4291 passed (4291)"
+  const vitestMatch = clean.match(/^\s*Tests\s+(\d+)\s+passed/m);
+  if (vitestMatch) return parseInt(vitestMatch[1]);
+
+  // Generic: "4291 passed"
+  const genericMatch = clean.match(/(\d+)\s+passed/);
+  if (genericMatch) return parseInt(genericMatch[1]);
+
+  // Jest: "Tests: 4291 passed, 4291 total"
+  const jestMatch = clean.match(/Tests:\s+(\d+)\s+passed/);
+  if (jestMatch) return parseInt(jestMatch[1]);
+
+  return 0;
 }
 
 /**
@@ -1757,4 +1813,5 @@ export const _testing = {
   runAdversarialValidation,
   findingsToQueueItems,
   checkRevertCorrelation,
+  parseVerificationTestCount,
 };
