@@ -23,6 +23,9 @@ import {
   getResearchEventCount24h, getBuildEventCount24h,
   consumeResearchForceOnce,
   listLPop, listLen,
+  incrSchedulerCyclesRun, getSchedulerCyclesRun,
+  atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
+  saveSchedulerStateVersioned, getSchedulerStateVersion,
 } from "./redis-adapter.ts";
 // Reframe queue key + interleave interval (internalized in anchor-selection.ts, issue #70)
 const REFRAME_QUEUE = "hydra:anchors:reframe-queue";
@@ -95,6 +98,7 @@ let state = {
   consecutiveNonMerges: 0,
   researchCyclesRun: 0,
   lastResearchAt: null,
+  _stateVersion: 0, // optimistic locking version (issue #140 — AC3)
 };
 
 // ---------------------------------------------------------------------------
@@ -121,14 +125,28 @@ async function loadSchedulerState() {
     const raw = await getString(SCHEDULER_STATE_KEY);
     if (!raw) {
       console.log("[Scheduler] No persisted state in Redis — starting fresh");
-      return;
+    } else {
+      const stored = JSON.parse(raw);
+      if (stored.lastResearchAt) state.lastResearchAt = stored.lastResearchAt;
+      if (typeof stored.researchCyclesRun === "number") {
+        state.researchCyclesRun = stored.researchCyclesRun;
+      }
     }
-    const stored = JSON.parse(raw);
-    if (stored.lastResearchAt) state.lastResearchAt = stored.lastResearchAt;
-    if (typeof stored.researchCyclesRun === "number") {
-      state.researchCyclesRun = stored.researchCyclesRun;
+
+    // Load atomic counter for cyclesRun (issue #140 — AC1)
+    const atomicCyclesRun = await getSchedulerCyclesRun();
+    if (atomicCyclesRun > 0) state.cyclesRun = atomicCyclesRun;
+
+    // Load atomic lastResearchAt (issue #140 — AC2)
+    const lastResearchMs = await getLastResearchAtMs();
+    if (lastResearchMs) {
+      state.lastResearchAt = new Date(lastResearchMs).toISOString();
     }
-    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}`);
+
+    // Load state version for optimistic locking (issue #140 — AC3)
+    state._stateVersion = await getSchedulerStateVersion();
+
+    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, cyclesRun=${state.cyclesRun}, version=${state._stateVersion}`);
   } catch (err: any) {
     console.error(`[Scheduler] Failed to load persisted state: ${err.message}`);
   }
@@ -141,7 +159,22 @@ async function saveSchedulerState() {
       researchCyclesRun: state.researchCyclesRun,
       savedAt: new Date().toISOString(),
     };
-    await setString(SCHEDULER_STATE_KEY, JSON.stringify(payload));
+    const { saved, newVersion } = await saveSchedulerStateVersioned(
+      JSON.stringify(payload),
+      state._stateVersion,
+    );
+    if (saved) {
+      state._stateVersion = newVersion;
+    } else {
+      console.error(`[Scheduler] State version conflict — expected ${state._stateVersion}, found ${newVersion}. Retrying with fresh version.`);
+      // Retry once with the current version from Redis
+      const retry = await saveSchedulerStateVersioned(JSON.stringify(payload), newVersion);
+      if (retry.saved) {
+        state._stateVersion = retry.newVersion;
+      } else {
+        console.error(`[Scheduler] State save retry failed — version ${newVersion} vs ${retry.newVersion}`);
+      }
+    }
   } catch (err: any) {
     console.error(`[Scheduler] Failed to save state: ${err.message}`);
   }
@@ -260,6 +293,7 @@ async function detectRepetition(eventBus) {
         console.log(`[Scheduler] Running research cycle to break repetition pattern`);
         await runResearchLoop(eventBus);
         state.researchCyclesRun++;
+        await setLastResearchAt(); // AC2: atomic timestamp
         state.lastResearchAt = new Date().toISOString();
         await saveSchedulerState();
       } catch (err: any) {
@@ -288,6 +322,7 @@ async function maybeRunResearch(eventBus) {
     try {
       const research = await runResearchLoop(eventBus);
       state.researchCyclesRun++;
+      await setLastResearchAt(); // AC2: atomic timestamp
       state.lastResearchAt = new Date().toISOString();
       await recordResearchEvent();
       await saveSchedulerState();
@@ -361,13 +396,13 @@ async function maybeRunResearch(eventBus) {
   }
 
   // Check throttle — don't run research more often than the minimum interval
-  if (state.lastResearchAt) {
-    const elapsed = Date.now() - new Date(state.lastResearchAt).getTime();
-    if (elapsed < RESEARCH_MIN_INTERVAL_MS) {
-      const remaining = Math.round((RESEARCH_MIN_INTERVAL_MS - elapsed) / 60_000);
-      console.log(`[Scheduler] Queue low (${queueLen}) but research throttled — next research in ~${remaining}min`);
-      return;
-    }
+  // AC2 (issue #140): atomic check-then-set via Lua script in Redis
+  const researchClaimed = await atomicClaimResearch(RESEARCH_MIN_INTERVAL_MS);
+  if (!researchClaimed) {
+    const lastMs = await getLastResearchAtMs();
+    const remaining = lastMs ? Math.round((RESEARCH_MIN_INTERVAL_MS - (Date.now() - lastMs)) / 60_000) : 0;
+    console.log(`[Scheduler] Queue low (${queueLen}) but research throttled — next research in ~${remaining}min`);
+    return;
   }
 
   // Check daily spend cap — refuse to start research if today's budget is exhausted.
@@ -396,6 +431,7 @@ async function maybeRunResearch(eventBus) {
   try {
     const research = await runResearchLoop(eventBus);
     state.researchCyclesRun++;
+    // AC2: lastResearchAt already set atomically by atomicClaimResearch() above
     state.lastResearchAt = new Date().toISOString();
     await recordResearchEvent();
     // research-architect counter removed
@@ -444,7 +480,8 @@ async function checkBlockedEscalation(eventBus) {
   try {
     const { _admin: backlogAdmin } = await import("./backlog.ts");
     const lanes = await backlogAdmin.loadBacklog() as Record<string, any[]>;
-    const blocked = lanes.blocked || [];
+    // AC5 (issue #140): freeze snapshot so iteration doesn't see mutations
+    const blocked = [...(lanes.blocked || [])];
     if (blocked.length === 0) return;
 
     const now = Date.now();
@@ -567,7 +604,7 @@ async function runScheduledCycle(eventBus) {
     console.log(`[Scheduler] Starting scheduled cycle #${state.cyclesRun + 1}${cycleOpts.anchor ? ` (test-fix priority)` : ""}`);
     result = await startCycle(eventBus, cycleOpts);
 
-    state.cyclesRun++;
+    state.cyclesRun = await incrSchedulerCyclesRun(); // AC1: atomic Redis INCR
     state.lastCycleAt = new Date().toISOString();
     state.consecutiveErrors = 0;
     try { await recordBuildEvent(); } catch { /* intentional: non-critical ratio tracking */ }
@@ -660,7 +697,7 @@ async function runScheduledCycle(eventBus) {
       }
     }
   } catch (err: any) {
-    state.cyclesRun++;
+    state.cyclesRun = await incrSchedulerCyclesRun(); // AC1: atomic Redis INCR
     state.cyclesFailed++;
     state.consecutiveErrors++;
     state.consecutiveNonMerges++;

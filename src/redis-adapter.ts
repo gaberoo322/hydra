@@ -1271,3 +1271,108 @@ export async function consumeResearchForceOnce(): Promise<boolean> {
   }
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// Atomic scheduler operations (issue #140)
+// ---------------------------------------------------------------------------
+
+/** Atomically increment the scheduler cycles-run counter. Returns new value. */
+export async function incrSchedulerCyclesRun(): Promise<number> {
+  const r = getRedisConnection();
+  return r.incr(redisKeys.schedulerCyclesRun());
+}
+
+/** Get the current scheduler cycles-run counter value. */
+export async function getSchedulerCyclesRun(): Promise<number> {
+  const r = getRedisConnection();
+  const val = await r.get(redisKeys.schedulerCyclesRun());
+  return val ? parseInt(val, 10) : 0;
+}
+
+/**
+ * Atomically claim research eligibility: checks if lastResearchAt is old enough,
+ * and if so sets it to `now`. Returns true if claimed, false if throttled.
+ *
+ * Uses a Lua script so the check-then-set is atomic on the Redis server.
+ */
+const CLAIM_RESEARCH_LUA = `
+  local key = KEYS[1]
+  local now_ms = tonumber(ARGV[1])
+  local min_interval_ms = tonumber(ARGV[2])
+  local now_iso = ARGV[3]
+  local current = redis.call('GET', key)
+  if current then
+    local last_ms = tonumber(current)
+    if last_ms and (now_ms - last_ms) < min_interval_ms then
+      return 0
+    end
+  end
+  redis.call('SET', key, tostring(now_ms))
+  return 1
+`;
+
+/**
+ * Atomically check and claim research eligibility.
+ * Stores the timestamp as epoch ms for easy comparison.
+ * Returns true if claimed (caller should run research), false if throttled.
+ */
+export async function atomicClaimResearch(minIntervalMs: number): Promise<boolean> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerState() + ":lastResearchAt";
+  const nowMs = Date.now();
+  const result = await r.eval(CLAIM_RESEARCH_LUA, 1, key, nowMs, minIntervalMs, new Date().toISOString());
+  return result === 1;
+}
+
+/** Read the last research timestamp (epoch ms). Returns null if never set. */
+export async function getLastResearchAtMs(): Promise<number | null> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerState() + ":lastResearchAt";
+  const val = await r.get(key);
+  return val ? parseInt(val, 10) : null;
+}
+
+/** Unconditionally set the last research timestamp (for forced research). */
+export async function setLastResearchAt(): Promise<void> {
+  const r = getRedisConnection();
+  const key = redisKeys.schedulerState() + ":lastResearchAt";
+  await r.set(key, Date.now().toString());
+}
+
+/**
+ * Versioned save of scheduler state: uses WATCH/MULTI/EXEC for optimistic locking.
+ * Returns true if saved, false if version conflict (another writer).
+ */
+export async function saveSchedulerStateVersioned(
+  payload: string,
+  expectedVersion: number,
+): Promise<{ saved: boolean; newVersion: number }> {
+  const r = getRedisConnection();
+  const stateKey = redisKeys.schedulerState();
+  const versionKey = redisKeys.schedulerStateVersion();
+
+  // Use a Lua script for atomic check-and-set (avoids WATCH connection issues)
+  const LUA = `
+    local stateKey = KEYS[1]
+    local versionKey = KEYS[2]
+    local payload = ARGV[1]
+    local expectedVersion = tonumber(ARGV[2])
+    local currentVersion = tonumber(redis.call('GET', versionKey) or '0') or 0
+    if currentVersion ~= expectedVersion then
+      return {0, currentVersion}
+    end
+    local newVersion = currentVersion + 1
+    redis.call('SET', stateKey, payload)
+    redis.call('SET', versionKey, tostring(newVersion))
+    return {1, newVersion}
+  `;
+  const result = await r.eval(LUA, 2, stateKey, versionKey, payload, expectedVersion);
+  return { saved: result[0] === 1, newVersion: result[1] };
+}
+
+/** Get the current scheduler state version. */
+export async function getSchedulerStateVersion(): Promise<number> {
+  const r = getRedisConnection();
+  const val = await r.get(redisKeys.schedulerStateVersion());
+  return val ? parseInt(val, 10) : 0;
+}
