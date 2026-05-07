@@ -19,6 +19,7 @@ import {
   getRealityReport, getRecentReportIds, getCycleMetrics,
   isHealthAnchorResolved,
 } from "./redis-adapter.ts";
+import { scoreHeuristic } from "./anchor-scorer.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
@@ -43,6 +44,9 @@ const PRIOR_FAILURE_CAP = 10; // hard cap — oldest items escalated to reframe 
 const REFRAME_QUEUE_CAP = 20;
 const REFRAME_QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const REFRAME_INTERLEAVE_INTERVAL = 5; // force reframe every Nth cycle when queue non-empty
+
+// Confidence gate for codebase-health anchors (issue #147)
+const HEALTH_CONFIDENCE_THRESHOLD = 0.5;
 
 // Key helpers
 const PERM_SKIP_PREFIX = "hydra:anchors:perm-skip:";
@@ -497,14 +501,23 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
         console.log(`[ControlLoop] Skipping codebase-health issue "${ref}" (abandoned=${abandonCount}, permSkip=${permSkipCount}) — falling through`);
         continue;
       }
-      console.log(`[ControlLoop] Codebase health anchor: ${issue.category} — ${issue.file} (${issue.metric})`);
-      return {
-        type: "codebase-health",
+      // Confidence gate (issue #147): score the candidate anchor before returning.
+      // Low-confidence codebase-health anchors waste planner calls (~83% empty rate).
+      // Skip them so selectAnchor falls through to the next anchor type.
+      const candidateAnchor = {
+        type: "codebase-health" as const,
         reference: ref,
         whyNow: healthReport.summary,
         context: issue.suggestion,
         description: issue.suggestion,
       };
+      const confidenceResult = scoreHeuristic(candidateAnchor, grounding);
+      if (confidenceResult.score < HEALTH_CONFIDENCE_THRESHOLD) {
+        console.log(`[ControlLoop] low-confidence-skip: codebase-health anchor "${ref}" scored ${confidenceResult.score.toFixed(2)} < ${HEALTH_CONFIDENCE_THRESHOLD} — ${confidenceResult.reason}`);
+        continue;
+      }
+      console.log(`[ControlLoop] Codebase health anchor: ${issue.category} — ${issue.file} (${issue.metric}) [confidence=${confidenceResult.score.toFixed(2)}]`);
+      return candidateAnchor;
     }
     if (healthReport.issues.length > 0) {
       console.log(`[ControlLoop] All ${healthReport.issues.length} codebase-health issues previously abandoned — skipping to priorities doc`);
@@ -832,6 +845,7 @@ export async function markLowConfidenceSkip(anchor: any): Promise<void> {
 export const _testing = {
   MAX_PRIOR_FAILURE_RETRIES,
   MAX_CONSECUTIVE_ABANDONMENTS,
+  HEALTH_CONFIDENCE_THRESHOLD,
   REFRAME_QUEUE,
   WORK_QUEUE,
   PROCESSING_QUEUE,
