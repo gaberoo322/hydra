@@ -86,7 +86,7 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
     const merged = trend.filter(m => m.tasksMerged > 0).length;
     const failed = trend.filter(m => m.tasksFailed > 0).length;
     metricsContext = `Last 10 cycles: ${merged} merged, ${failed} failed.`;
-  } catch {}
+  } catch (err: any) { console.error(`[PrioritiesRefresh] Failed to load metrics trend: ${err.message}`); }
 
   // 5. Get backlog state
   let backlogContext = "";
@@ -109,7 +109,7 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
     // @ts-expect-error — migrate to proper types
       backlogContext += "\nBlocked items (need operator):\n" + (lanes.blocked || []).map(i => `- ${i.title} — ${i.meta?.blockedReason || "unknown"}`).join("\n");
     }
-  } catch {}
+  } catch (err: any) { console.error(`[PrioritiesRefresh] Failed to load backlog state: ${err.message}`); }
 
   // 6. Get compact grounding (use pre-computed if available to avoid re-running tests)
   let groundingContext = "";
@@ -134,7 +134,7 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
         if (oppsMatch) researchContext = oppsMatch[0].slice(0, 1500);
       }
     }
-  } catch {}
+  } catch (err: any) { console.error(`[PrioritiesRefresh] Failed to load research findings: ${err.message}`); }
 
   // 7.5. Read current roadmap (milestone tracking)
   let roadmapContext = "";

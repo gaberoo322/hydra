@@ -208,7 +208,8 @@ async function scoreLastResearchOutcomes(): Promise<string> {
     }
 
     return lines.join("\n");
-  } catch {
+  } catch (err: any) {
+    console.error(`[Research] Failed to build accomplishments context: ${err.message}`);
     return "";
   }
 }
@@ -218,18 +219,18 @@ async function scoreLastResearchOutcomes(): Promise<string> {
  */
 function parseAgentJson(output) {
   // Try direct parse
-  try { return JSON.parse(output); } catch {}
+  try { return JSON.parse(output); } catch { /* intentional: fallback parse — try fence/object extraction below */ }
 
   // Try extracting from markdown fences
   const fenceMatch = output.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenceMatch) {
-    try { return JSON.parse(fenceMatch[1]); } catch {}
+    try { return JSON.parse(fenceMatch[1]); } catch { /* intentional: fallback parse — try largest object extraction below */ }
   }
 
   // Try extracting the largest JSON object
   const match = output.match(/\{[\s\S]*\}/);
   if (match) {
-    try { return JSON.parse(match[0]); } catch {}
+    try { return JSON.parse(match[0]); } catch { /* intentional: all parse attempts exhausted, return null below */ }
   }
 
   return null;
@@ -448,7 +449,7 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
       vision = await readFile(join(CONFIG_PATH, "direction", "user-priorities.md"), "utf-8");
           if (vision) (goals as any).userPriorities = vision;
       console.log("[Research] Loaded operator priorities (user-priorities.md fallback)");
-    } catch {}
+    } catch { /* intentional: user-priorities.md fallback also missing — proceed without vision */ }
   }
 
   // Load current roadmap for Director milestone sync

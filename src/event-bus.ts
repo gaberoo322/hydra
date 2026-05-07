@@ -208,7 +208,7 @@ class EventBus {
       obj[fields[i]] = fields[i + 1];
     }
     if (obj.payload) {
-      try { obj.payload = JSON.parse(obj.payload); } catch {}
+      try { obj.payload = JSON.parse(obj.payload); } catch { /* intentional: payload may not be JSON, keep as raw string */ }
     }
     return obj;
   }
