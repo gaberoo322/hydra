@@ -26,7 +26,7 @@ import {
 } from "./redis-adapter.ts";
 import { prepareWorkspace } from "./prepare-workspace.ts";
 import { runPlannerAgent } from "./planner-prompt.ts";
-import { selectAnchor } from "./anchor-selection.ts";
+import { selectAnchor, markLowConfidenceSkip } from "./anchor-selection.ts";
 import { scoreAnchor, getMinConfidence, recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { classifyTaskComplexity } from "./preflight.ts";
 import { createCycleSession } from "./learning.ts";
@@ -122,6 +122,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
 
     if (anchorConfidence.score < minConf) {
       console.log(`[ControlLoop] Anchor confidence ${anchorConfidence.score.toFixed(2)} < threshold ${minConf} — skipping`);
+      await markLowConfidenceSkip(anchor);
       await recordCalibrationOutcome(cycleId, anchor, anchorConfidence, "no-task");
       await handleEarlyExit({
         cycleId, startTime, grounding, ovSession, anchor,
