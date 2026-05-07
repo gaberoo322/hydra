@@ -23,6 +23,81 @@ import { redisKeys } from "./redis-keys.ts";
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
 // ---------------------------------------------------------------------------
+// Context budget constants
+// ---------------------------------------------------------------------------
+
+export const CONTEXT_BUDGET = 12_000;  // chars
+export const MIN_TRUNCATED = 500;      // minimum chars to keep when truncating
+
+/** Priority order: highest-priority first (grounding is never truncated). */
+export const SOURCE_PRIORITY: readonly string[] = [
+  "grounding",
+  "feedback",
+  "reflections",    // plannerMemory contains reflections
+  "priorities",
+  "memory",         // ovContext
+  "accomplishments",
+  "continuity",
+] as const;
+
+// ---------------------------------------------------------------------------
+// applyContextBudget — pure, testable truncation logic
+// ---------------------------------------------------------------------------
+
+export interface ContextSource {
+  name: string;
+  content: string;
+}
+
+/**
+ * Truncate lower-priority sources so total char count fits within budget.
+ * Higher-index sources are truncated first (lowest priority = last in array).
+ * Sources are returned in the same order. Truncated sources keep at least
+ * `minTruncated` chars plus a truncation notice.
+ */
+export function applyContextBudget(
+  sources: ContextSource[],
+  budget: number = CONTEXT_BUDGET,
+  minTruncated: number = MIN_TRUNCATED,
+): ContextSource[] {
+  let total = sources.reduce((sum, s) => sum + s.content.length, 0);
+  if (total <= budget) return sources;
+
+  // Build a priority-indexed lookup: lower index = higher priority
+  const priorityIndex = new Map<string, number>();
+  SOURCE_PRIORITY.forEach((name, i) => priorityIndex.set(name, i));
+
+  // Sort indices by priority ascending (lowest priority first for truncation)
+  const indices = sources.map((_, i) => i);
+  indices.sort((a, b) => {
+    const pa = priorityIndex.get(sources[a].name) ?? SOURCE_PRIORITY.length;
+    const pb = priorityIndex.get(sources[b].name) ?? SOURCE_PRIORITY.length;
+    return pb - pa; // highest index = lowest priority = truncate first
+  });
+
+  const result = sources.map((s) => ({ ...s }));
+
+  for (const idx of indices) {
+    if (total <= budget) break;
+    const src = result[idx];
+    // Never truncate the highest-priority source (grounding)
+    if (priorityIndex.get(src.name) === 0) continue;
+    if (src.content.length <= minTruncated) continue;
+
+    const originalLen = src.content.length;
+    const notice = `\n... (truncated from ${originalLen} chars)`;
+    const keepChars = Math.max(minTruncated, src.content.length - (total - budget));
+    if (keepChars < src.content.length) {
+      const saved = src.content.length - keepChars;
+      src.content = src.content.slice(0, keepChars) + notice;
+      total -= saved - notice.length;
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // PlannerContext — all context sources needed by the Planner agent
 // ---------------------------------------------------------------------------
 
@@ -115,15 +190,37 @@ export async function buildPlannerContext(
   // Load continuity context (last cycle report + repo diff)
   const continuityContext = await loadContinuityContext(anchor, warnings);
 
+  // --- Context budget: measure, log, truncate if needed ---
+  const rawSources: ContextSource[] = [
+    { name: "grounding", content: groundingSummary },
+    { name: "feedback", content: feedback || "" },
+    { name: "reflections", content: plannerMemory || "" },
+    { name: "priorities", content: priorities || "" },
+    { name: "memory", content: ovContext },
+    { name: "accomplishments", content: (accomplishmentsContext || "") + (milestoneContext || "") },
+    { name: "continuity", content: continuityContext },
+  ];
+
+  const sourceSizes: Record<string, number> = {};
+  for (const s of rawSources) sourceSizes[s.name] = s.content.length;
+  const total = rawSources.reduce((sum, s) => sum + s.content.length, 0);
+  console.log(`[ContextBuilder] Source sizes: ${JSON.stringify(sourceSizes)}`);
+  console.log(`[ContextBuilder] Total context: ${total} chars (budget: ${CONTEXT_BUDGET})`);
+
+  const budgeted = applyContextBudget(rawSources);
+
+  // Map budgeted sources back to PlannerContext fields
+  const byName = new Map(budgeted.map((s) => [s.name, s.content]));
+
   return {
-    priorities: priorities || "",
-    feedback: feedback || "",
-    plannerMemory: plannerMemory || "",
-    ovContext,
+    priorities: byName.get("priorities") ?? "",
+    feedback: byName.get("feedback") ?? "",
+    plannerMemory: byName.get("reflections") ?? "",
+    ovContext: byName.get("memory") ?? "",
     milestoneContext: milestoneContext || "",
-    accomplishmentsContext: accomplishmentsContext || "",
-    groundingSummary,
-    continuityContext,
+    accomplishmentsContext: byName.get("accomplishments") ?? "",
+    groundingSummary: byName.get("grounding") ?? "",
+    continuityContext: byName.get("continuity") ?? "",
     warnings,
   };
 }
