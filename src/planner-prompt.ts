@@ -196,19 +196,27 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   // Plan cache — skip LLM call for recurring task patterns.
   // Belt-and-suspenders: bypass cache when reflections exist for this anchor,
   // so the planner is forced to re-plan with failure context (issue #22).
-  // getContext() loads memory + reflections; check for reflection markers.
+  //
+  // Exception: quick-fix anchor types (failing-test, typecheck) are deterministic
+  // narrow tasks where the cached plan is safe even with reflections — the fix
+  // for a specific failing test doesn't change based on prior attempt context.
+  // This enables >20% cache hit rate for the most common anchor types (issue #118).
+  const CACHE_SAFE_ANCHOR_TYPES = new Set(["failing-test"]);
   const plannerContext = await getContext("planner", anchor).catch(() => "");
   const hasReflections = plannerContext.includes("PRIOR ATTEMPTS") || plannerContext.includes("Recent Failures");
-  if (!hasReflections) {
+  const cacheBypassOverride = CACHE_SAFE_ANCHOR_TYPES.has(anchor.type);
+  if (!hasReflections || cacheBypassOverride) {
     const cachedTask = await getCachedPlan(anchor, grounding);
     if (cachedTask) {
       cachedTask.__plannerModel = "cached";
       cachedTask.__planCacheHit = true;
+      cachedTask.__planCacheAnchorType = anchor.type;
       await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0);
+      console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present but safe for quick-fix)" : ""}`);
       return cachedTask;
     }
   } else {
-    console.log(`[PlanCache] BYPASS: reflections exist for anchor "${anchor.reference.slice(0, 60)}" — forcing re-plan`);
+    console.log(`[PlanCache] BYPASS: reflections exist for anchor "${anchor.reference.slice(0, 60)}" type="${anchor.type}" — forcing re-plan`);
   }
 
   // Load all context sources via centralized context builder
