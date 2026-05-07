@@ -11,36 +11,58 @@ import Redis from "ioredis";
 
 const BUFFER_KEY = "hydra:reflections:buffer";
 
+// Set REDIS_URL before any import of learning.ts so the singleton picks up DB 1
+process.env.REDIS_URL = "redis://localhost:6379/1";
+
 let reflections;
 let redis: any;
+let redisAvailable = false;
 
 async function cleanReflectionKeys() {
   const keys = await redis.keys("hydra:reflections:*");
   if (keys.length > 0) await redis.del(...keys);
 }
 
+/** Call at top of each test — skips the test if Redis is unreachable. */
+function requireRedis(t: any) {
+  if (!redisAvailable) {
+    t.skip("Redis unavailable");
+  }
+}
+
 describe("reflections buffer", () => {
   beforeEach(async () => {
     if (!redis) {
       // Use Redis DB 1 for tests — production uses DB 0
-      redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379/1");
-      process.env.REDIS_URL = "redis://localhost:6379/1";
+      redis = new Redis(process.env.REDIS_URL!);
+      try {
+        await redis.ping();
+        redisAvailable = true;
+      } catch (err) {
+        console.error("Redis unavailable at localhost:6379/1, skipping reflections tests");
+        return;
+      }
       reflections = await import("../src/learning.ts");
     }
+    if (!redisAvailable) return;
     await cleanReflectionKeys();
   });
 
   after(async () => {
     if (redis) {
-      await cleanReflectionKeys();
+      if (redisAvailable) await cleanReflectionKeys();
       redis.disconnect();
     }
     if (reflections?.closeReflectionsRedis) {
       reflections.closeReflectionsRedis();
     }
+    // Close the shared redis-adapter connection (learning.ts may use it)
+    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    closeRedisConnections();
   });
 
-  test("recordReflection stores a reflection in the buffer", async () => {
+  test("recordReflection stores a reflection in the buffer", async (t) => {
+    requireRedis(t);
     await reflections.recordReflection({
       cycleId: "cycle-test-001",
       anchorType: "failing-test",
@@ -60,7 +82,8 @@ describe("reflections buffer", () => {
     assert.ok(all[0].timestamp);
   });
 
-  test("buffer is capped at 20 entries", async () => {
+  test("buffer is capped at 20 entries", async (t) => {
+    requireRedis(t);
     // Insert 25 reflections
     for (let i = 0; i < 25; i++) {
       await reflections.recordReflection({
@@ -82,7 +105,8 @@ describe("reflections buffer", () => {
     assert.equal(all[19].cycleId, "cycle-test-005");
   });
 
-  test("loadRelevantReflections filters by anchor reference", async () => {
+  test("loadRelevantReflections filters by anchor reference", async (t) => {
+    requireRedis(t);
     await reflections.recordReflection({
       cycleId: "cycle-a", anchorType: "failing-test", anchorReference: "auth flow",
       failureMode: "verification-failed", whatFailed: "auth broke",
@@ -108,7 +132,8 @@ describe("reflections buffer", () => {
     assert.equal(relevant[0].cycleId, "cycle-c");
   });
 
-  test("loadRelevantReflections respects limit", async () => {
+  test("loadRelevantReflections respects limit", async (t) => {
+    requireRedis(t);
     for (let i = 0; i < 5; i++) {
       await reflections.recordReflection({
         cycleId: `cycle-${i}`, anchorType: "failing-test", anchorReference: "same-anchor",
@@ -124,7 +149,8 @@ describe("reflections buffer", () => {
     assert.equal(limited.length, 2);
   });
 
-  test("clearReflectionsForAnchor removes matching entries", async () => {
+  test("clearReflectionsForAnchor removes matching entries", async (t) => {
+    requireRedis(t);
     await reflections.recordReflection({
       cycleId: "cycle-1", anchorType: "research", anchorReference: "payments",
       failureMode: "no-diff", whatFailed: "payments",
@@ -149,12 +175,14 @@ describe("reflections buffer", () => {
     assert.equal(remaining[0].anchorReference, "auth");
   });
 
-  test("getAllReflections returns empty array when buffer is empty", async () => {
+  test("getAllReflections returns empty array when buffer is empty", async (t) => {
+    requireRedis(t);
     const all = await reflections.getAllReflections();
     assert.deepEqual(all, []);
   });
 
-  test("formatReflectionsForPrompt produces ## Recent Failures section", () => {
+  test("formatReflectionsForPrompt produces ## Recent Failures section", (t) => {
+    requireRedis(t);
     const formatted = reflections.formatReflectionsForPrompt([
       {
         cycleId: "cycle-test-001",
@@ -175,12 +203,14 @@ describe("reflections buffer", () => {
     assert.ok(formatted.includes("Check imports first"));
   });
 
-  test("formatReflectionsForPrompt returns empty string for no reflections", () => {
+  test("formatReflectionsForPrompt returns empty string for no reflections", (t) => {
+    requireRedis(t);
     const formatted = reflections.formatReflectionsForPrompt([]);
     assert.equal(formatted, "");
   });
 
-  test("clearReflectionsForAnchor returns 0 when no matches", async () => {
+  test("clearReflectionsForAnchor returns 0 when no matches", async (t) => {
+    requireRedis(t);
     await reflections.recordReflection({
       cycleId: "cycle-1", anchorType: "research", anchorReference: "unrelated",
       failureMode: "no-diff", whatFailed: "something",
@@ -194,7 +224,8 @@ describe("reflections buffer", () => {
     assert.equal(all.length, 1);
   });
 
-  test("clearOutcomes removes per-anchor reflections so getContext returns no PRIOR ATTEMPTS", async () => {
+  test("clearOutcomes removes per-anchor reflections so getContext returns no PRIOR ATTEMPTS", async (t) => {
+    requireRedis(t);
     const anchorRef = "auth login broken";
 
     // Record a failure reflection (both per-anchor and global)
@@ -237,7 +268,8 @@ describe("reflections buffer", () => {
     assert.ok(!contextAfter.includes("PRIOR ATTEMPTS"), "should NOT contain PRIOR ATTEMPTS after clearOutcomes");
   });
 
-  test("clearOutcomes also removes matching entries from global reflection buffer", async () => {
+  test("clearOutcomes also removes matching entries from global reflection buffer", async (t) => {
+    requireRedis(t);
     // Record reflections for two different anchors via recordReflection (global buffer)
     await reflections.recordReflection({
       cycleId: "cycle-global-1", anchorType: "research", anchorReference: "payments broken",
