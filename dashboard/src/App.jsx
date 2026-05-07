@@ -16,6 +16,7 @@ import Roadmap from "./pages/Roadmap.jsx";
 import Architecture from "./pages/Architecture.jsx";
 import EnvVars from "./pages/EnvVars.jsx";
 import Calibration from "./pages/Calibration.jsx";
+import Checklist from "./pages/Checklist.jsx";
 
 export default function App() {
   const ws = useWebSocket();
@@ -38,6 +39,7 @@ export default function App() {
           <Route path="/architecture" element={<Architecture />} />
           <Route path="/env" element={<EnvVars />} />
           <Route path="/calibration" element={<Calibration />} />
+          <Route path="/checklist" element={<Checklist />} />
         </Routes>
       </Layout>
     </ToastProvider>
