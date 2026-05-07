@@ -190,14 +190,23 @@ describe("pipeline flow — dry-run cycle orchestration", () => {
 
     test("small scope (<=2 files, <=3 criteria) → quick-fix", () => {
       const task = makeTask({
-        scopeBoundary: { in: ["src/a.ts"], out: [] },
-        acceptanceCriteria: ["Tests pass"],
+        scopeBoundary: { in: ["src/a.ts", "src/b.ts"], out: [] },
+        acceptanceCriteria: ["A works", "B works", "Tests pass"],
       });
-      const anchor = makeAnchor({ type: "prior-failure" });
+      const anchor = makeAnchor({ type: "priorities" });
       assert.equal(classifyTaskComplexity(task, anchor), "quick-fix");
     });
 
-    test("standard scope → standard", () => {
+    test("codebase-health anchor → quick-fix regardless of scope", () => {
+      const task = makeTask({
+        scopeBoundary: { in: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"], out: [] },
+        acceptanceCriteria: ["A works", "B works", "C works", "D works", "Tests pass"],
+      });
+      const anchor = makeAnchor({ type: "codebase-health" });
+      assert.equal(classifyTaskComplexity(task, anchor), "quick-fix");
+    });
+
+    test("3 files exceeds quick-fix threshold → standard", () => {
       const task = makeTask({
         scopeBoundary: { in: ["src/a.ts", "src/b.ts", "src/c.ts"], out: [] },
         acceptanceCriteria: ["A works", "B works", "C works", "Tests pass"],

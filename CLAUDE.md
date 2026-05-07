@@ -143,7 +143,7 @@ Always run `npm test` before committing.
 ## Scope-Adaptive Planning
 
 Tasks are classified post-planner based on `scopeBoundary.in` and `acceptanceCriteria`:
-- **quick-fix** (<=2 files, <=3 criteria, or failing-test/prior-failure anchor): skip all gates, use codex model for planner, compressed prompt
+- **quick-fix** (<=2 files, <=3 criteria, or failing-test/codebase-health anchor): skip all gates, use codex model for planner, compressed prompt
 - **standard** (default): deterministic preflight check, no agent call
 - **complex** (>5 files or >8 criteria): deterministic preflight + log warning
 - **high-risk** (any complexity with `risk: high`): deterministic preflight + nano-model safety review
