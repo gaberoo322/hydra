@@ -70,6 +70,51 @@ export async function handlePlanResult(
     return { continue: false, result: { cycleId, tasks: [], reason: "Codex usage limit hit — scheduler paused", durationMs: Date.now() - startTime, __usageLimitHit: true } };
   }
 
+  // Check for noWork sentinel — planner explicitly said no work needed (issue #137).
+  // Counts toward abandonment circuit-breaker so the same anchor doesn't burn
+  // frontier model inference indefinitely, but logged as a distinct outcome for
+  // learning/metrics.
+  if (task?.__noWork) {
+    const noWorkReason = task.reason || "all priorities addressed";
+    console.log(`[ControlLoop] Planner noWork — ${noWorkReason}`);
+
+    // Circuit breaker: noWork counts as an abandonment (issue #137)
+    try {
+      await reportOutcome(anchor, { status: "abandoned", reason: `Planner noWork: ${noWorkReason}`, task: { title: anchor.reference, taskId: "none" } });
+    } catch (err: any) {
+      console.error(`[ControlLoop] Circuit breaker tracking failed on noWork: ${err.message}`);
+    }
+
+    await ovSession.logPlanner(anchor, null);
+    await recordOutcome({
+      agents: [],
+      cycleId, task: { title: `noWork: ${noWorkReason}` }, finalState: "abandoned",
+      anchorRef: anchor.reference, anchorType: anchor.type,
+      reflection: {
+        failureMode: "no-work", whatFailed: `Planner noWork for "${anchor.reference}"`,
+        whyItFailed: noWorkReason,
+        whatToTryDifferently: "Anchor may be fully addressed, blocked, or need operator input. If recurring, will escalate to reframe queue.",
+      },
+    });
+
+    if (anchorConfidence) {
+      await recordCalibrationOutcome(cycleId, anchor, anchorConfidence, "no-task");
+    }
+    await handleEarlyExit({
+      cycleId, startTime, grounding, ovSession, anchor,
+      outcome: "no-work", reason: `Planner noWork: ${noWorkReason}`,
+      clearProcessing: false, // reportOutcome already called above
+      metricsOverrides: {
+        tasksAbandoned: 1, taskTitle: `noWork: ${noWorkReason}`,
+        anchorType: anchor.type, anchorReference: anchor.reference,
+        plannerModel: "unknown", abandonReason: `Planner noWork: ${noWorkReason}`,
+        anchorConfidence: anchorConfidence?.score ?? null, anchorSkipped: false,
+        noWork: true, noWorkReason,
+      },
+    });
+    return { continue: false, result: { cycleId, tasks: [], reason: `Planner noWork: ${noWorkReason}`, durationMs: Date.now() - startTime } };
+  }
+
   if (!task) {
     console.log(`[ControlLoop] Planner produced no valid task — cycle complete`);
 

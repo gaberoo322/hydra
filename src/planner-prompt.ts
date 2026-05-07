@@ -412,11 +412,12 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     }
   }
 
-  // Handle explicit "no work" response
+  // Handle explicit "no work" response — return sentinel so handlePlanResult
+  // can distinguish noWork from parse failures (issue #137)
   if (task?.noWork) {
     console.log(`[ControlLoop] Planner says no work needed: ${task.reason || "all priorities addressed"}`);
     await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "no-work", result.usage, result.costUsd);
-    return null;
+    return { __noWork: true, reason: task.reason || "all priorities addressed" } as any;
   }
 
   // Validate required fields — deterministic schema check ($0, 0ms)
