@@ -120,7 +120,9 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
       const schema = await readFile(schemaFile, "utf-8").catch(() => "");
       const tableMatches = schema.matchAll(/export\s+const\s+(\w+)\s*=\s*pgTable/g);
       for (const m of tableMatches) state.database.tables.push(m[1]);
-    } catch {}
+    } catch (err: any) {
+      console.error(`[CodebaseAnalyzer] Failed to read database schema info: ${err.message}`);
+    }
 
     // Get package.json dependencies
     try {
@@ -132,7 +134,9 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
           d.includes("next") || d.includes("react") || d.includes("tailwind")
         ),
       };
-    } catch {}
+    } catch (err: any) {
+      console.error(`[CodebaseAnalyzer] Failed to read package.json dependencies: ${err.message}`);
+    }
 
     // Recent git commits (last 10)
     try {
@@ -141,7 +145,9 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
         "--format=%s"
       ], { cwd: workDir, timeout: 5000 });
       state.recentCommits = stdout.trim().split("\n").filter(Boolean);
-    } catch {}
+    } catch (err: any) {
+      console.error(`[CodebaseAnalyzer] Failed to read recent git commits: ${err.message}`);
+    }
 
     // Identify gaps
     state.gaps = identifyGaps(state);
@@ -202,7 +208,9 @@ async function findFiles(dir, ext, skipDirs) {
         results.push(fullPath);
       }
     }
-  } catch {}
+  } catch (err: any) {
+    console.error(`[CodebaseAnalyzer] findFiles failed for ${dir}: ${err.message}`);
+  }
   return results;
 }
 
