@@ -144,7 +144,7 @@ export async function cachePlan(
   grounding: { testReport: { passed: number } },
 ): Promise<void> {
   if (!CACHEABLE_TYPES.has(anchor.type)) return;
-  if (!task || task.noWork) return;
+  if (!task || task.noWork || task.__noWork) return;
 
   const key = cacheKey(anchor);
   const ttl = (anchor.type === "failing-test") ? TTL_QUICK_FIX : TTL_STANDARD;
