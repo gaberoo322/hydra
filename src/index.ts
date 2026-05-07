@@ -171,7 +171,7 @@ async function main() {
   } catch {}
 
   // Initialize event bus and task tracker
-  const eventBus = new EventBus(REDIS_URL);
+  const eventBus = new EventBus();
   await eventBus.init();
   console.log("[Hydra] Event bus initialized (Redis Streams ready)");
 
