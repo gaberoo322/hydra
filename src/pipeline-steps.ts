@@ -13,6 +13,7 @@
  *   - runMergeStep — merge lock acquisition + merge to main
  */
 
+import * as Sentry from "@sentry/node";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { STREAMS } from "./event-bus.ts";
@@ -546,7 +547,10 @@ export async function runMergeStep(
     : { ok: false, commitSha: "", featureBranch: null, error: "Merge lock not acquired" };
 
   // Always release merge lock after merge attempt
-  await releaseMergeLock().catch(() => {});
+  await releaseMergeLock().catch((err: any) => {
+    console.error(`[MergeStep] Failed to release merge lock: ${err.message}`);
+    Sentry.addBreadcrumb({ category: "pipeline", message: `Merge lock release failed: ${err.message}`, level: "error" });
+  });
 
   return { continue: true, mergeResult };
 }
