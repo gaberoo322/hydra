@@ -120,10 +120,6 @@ When a cycle changes code but the reported test count does not increase, explici
 
 When a task is high-risk and touches live submit, buying power, balances, account limits, or stake enforcement, treat any test-count decrease as a blocking issue even if `npm test`, `tsc`, and build pass. Before pushing, compare the grounded starting test count with the final count. If the count decreased, either restore equivalent coverage or document the exact removed obsolete tests and why no behavior coverage was lost in the commit message.
 
-## Vercel Cron Schedule Constraint (DEPLOY-BLOCKING)
-
-This project runs on Vercel's Hobby plan. **Every cron schedule in `vercel.json` MUST be daily or less frequent** — use `0 0 * * *` (once daily at midnight UTC). Hourly schedules like `0 * * * *` are rejected by Vercel and block ALL deploys for the entire project, not just the cron route. If your task adds or modifies a cron entry in `vercel.json`, double-check the schedule field before committing. This rule has been violated before and caused deploy outages.
-
 ## Stability-window pruning trigger
 
 When the last 20 cycles show zero failures, zero abandonments, and zero regressions, treat additional executor-specific prevention rules as a last resort. Before adding or following new ceremony-heavy guidance, check whether the same safety outcome is already enforced by hard verification (`npm test`, `tsc`, `npm run build`) or existing tests. If yes, prefer the smaller implementation path and explicitly call out stale or redundant executor guidance for operator review instead of compounding it with another rule.
@@ -167,6 +163,18 @@ When executing a `failing-test` anchored task, spend the first pass proving the 
 - If the task would require inventing a new mutation path after that search, stop and escalate rather than guessing through a high-risk flow.
 
 ## Stop On Grounding Regressions\n- If your task is not anchored to an already-failing test and your local grounding gets worse than cycle start, stop feature work and isolate the regression before continuing.\n- Treat any drop in discovered/passing test count as a blocking signal, even if the remaining verification commands still pass. Restore the original baseline or hand back the exact failing command and minimal repro.\n- For high-risk execution or recovery-flow changes, run the nearest existing recovery/execution test coverage before final verification so regressions surface before commit, not after merge review.
+
+## Frontend UI Patterns
+
+When touching any file under `web/src/app/` or `web/src/components/`:
+
+1. **Read `web/src/DESIGN_SYSTEM.md` first.** It defines the canonical colors, spacing, components, and banned patterns. Follow it exactly.
+2. **Dark theme only.** Page backgrounds are `bg-gray-950`, cards are `bg-gray-900 border border-gray-800 rounded-xl`. Never use `bg-white`, `bg-slate-*`, or `shadow-sm`.
+3. **Use shared components.** Buttons: `components/ui/button.tsx`. Inputs: `components/ui/input.tsx`. Selects: `components/ui/select.tsx`. Never inline button or input styles — add a new variant to the component if needed.
+4. **Consistent cards.** `rounded-xl border border-gray-800 bg-gray-900 p-4` for top-level cards. `rounded-lg bg-gray-800/50 p-3` for nested sub-cards.
+5. **SiteNav on every page.** Import from `@/components/nav`. Do not create custom navigation.
+6. **Status colors follow the system.** Emerald for success, amber for warning, red for error, blue for info. Use the opacity pattern: `text-{color}-400 bg-{color}-400/10 border-{color}-400/30`.
+7. **No new CSS classes in globals.css** without operator approval. Use Tailwind utilities.
 
 ## Auto-Promoted Rules
 
