@@ -193,4 +193,73 @@ describe("reflections buffer", () => {
     const all = await reflections.getAllReflections();
     assert.equal(all.length, 1);
   });
+
+  test("clearOutcomes removes per-anchor reflections so getContext returns no PRIOR ATTEMPTS", async () => {
+    const anchorRef = "auth login broken";
+
+    // Record a failure reflection (both per-anchor and global)
+    await reflections.recordOutcome({
+      agents: [],
+      cycleId: "cycle-merge-test-1",
+      task: { title: "fix auth bug" },
+      finalState: "failed",
+      anchorRef,
+      anchorType: "failing-test",
+      reflection: {
+        failureMode: "verification-failed",
+        whatFailed: "auth login test",
+        whyItFailed: "missing import in auth module",
+        whatToTryDifferently: "check all imports before committing",
+      },
+    });
+
+    // Verify per-anchor reflections key exists in Redis
+    const perAnchorKey = "hydra:reflections:" + anchorRef.replace(/\s+/g, "-").toLowerCase().slice(0, 120);
+    const entriesBefore = await redis.lrange(perAnchorKey, 0, -1);
+    assert.ok(entriesBefore.length > 0, "per-anchor reflection should exist before clearOutcomes");
+
+    // Verify global buffer has the entry
+    const globalBefore = await reflections.getAllReflections();
+    assert.ok(globalBefore.some((r: any) => r.anchorReference === anchorRef), "global buffer should contain anchor before clearOutcomes");
+
+    // Simulate successful merge: clear outcomes
+    await reflections.clearOutcomes(anchorRef);
+
+    // Verify per-anchor reflections key is deleted
+    const entriesAfter = await redis.lrange(perAnchorKey, 0, -1);
+    assert.equal(entriesAfter.length, 0, "per-anchor reflection should be empty after clearOutcomes");
+
+    // Verify getContext returns no PRIOR ATTEMPTS text
+    const contextAfter = await reflections.getContext("planner", {
+      type: "failing-test",
+      reference: anchorRef,
+    });
+    assert.ok(!contextAfter.includes("PRIOR ATTEMPTS"), "should NOT contain PRIOR ATTEMPTS after clearOutcomes");
+  });
+
+  test("clearOutcomes also removes matching entries from global reflection buffer", async () => {
+    // Record reflections for two different anchors via recordReflection (global buffer)
+    await reflections.recordReflection({
+      cycleId: "cycle-global-1", anchorType: "research", anchorReference: "payments broken",
+      failureMode: "no-diff", whatFailed: "payments integration",
+      whyItFailed: "no code written", whatToTryDifferently: "narrow scope",
+    });
+    await reflections.recordReflection({
+      cycleId: "cycle-global-2", anchorType: "failing-test", anchorReference: "auth flow",
+      failureMode: "verification-failed", whatFailed: "auth broke",
+      whyItFailed: "missing import", whatToTryDifferently: "check imports",
+    });
+
+    // Both should be in global buffer
+    const allBefore = await reflections.getAllReflections();
+    assert.equal(allBefore.length, 2);
+
+    // clearOutcomes should clear per-anchor key AND global buffer entries
+    await reflections.clearOutcomes("payments broken");
+
+    // Only auth should remain in global buffer
+    const allAfter = await reflections.getAllReflections();
+    assert.equal(allAfter.length, 1);
+    assert.equal(allAfter[0].anchorReference, "auth flow");
+  });
 });
