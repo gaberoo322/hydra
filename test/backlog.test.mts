@@ -2,7 +2,7 @@
  * Regression tests for src/backlog.mjs — Redis-backed Kanban state machine.
  *
  * Requires Redis running on localhost:6379 (default).
- * Uses the real Redis with hydra:backlog:* keys — cleaned up between tests.
+ * Uses Redis DB 1 for tests — cleaned up between tests via hydra:backlog:* key flush.
  */
 
 import { test, describe, beforeEach, after } from "node:test";
@@ -11,39 +11,55 @@ import Redis from "ioredis";
 
 let backlog;
 let admin;
-let redis;
+let redis: any;
+let redisAvailable = false;
 
-const TEST_PREFIX = "hydra-test-backlog";
+// Set REDIS_URL before any import of backlog.ts so the singleton picks up DB 1
+process.env.REDIS_URL = "redis://localhost:6379/1";
 
 async function cleanBacklogKeys() {
-  const keys = await redis.keys(`${TEST_PREFIX}:*`);
+  const keys = await redis.keys("hydra:backlog:*");
   if (keys.length > 0) await redis.del(...keys);
+}
+
+/** Call at top of each test — skips the test if Redis is unreachable. */
+function requireRedis(t: any) {
+  if (!redisAvailable) {
+    t.skip("Redis unavailable");
+  }
 }
 
 describe("backlog state machine", () => {
   beforeEach(async () => {
     if (!redis) {
-      process.env.REDIS_URL = "redis://localhost:6379/1";
-      process.env.HYDRA_KEY_PREFIX = TEST_PREFIX;
-      redis = new Redis(process.env.REDIS_URL);
+      redis = new Redis(process.env.REDIS_URL!);
+      try {
+        await redis.ping();
+        redisAvailable = true;
+      } catch (err) {
+        console.error("Redis unavailable at localhost:6379/1, skipping backlog tests");
+        return;
+      }
       const mod = await import("../src/backlog.ts");
       backlog = mod;
       admin = mod._admin;
     }
+    if (!redisAvailable) return;
     await cleanBacklogKeys();
   });
 
   after(async () => {
     if (redis) {
-      await cleanBacklogKeys();
+      if (redisAvailable) await cleanBacklogKeys();
       redis.disconnect();
     }
-    if (admin?.closeBacklogRedis) {
-      await admin.closeBacklogRedis();
-    }
+    // Close the shared redis-adapter connection used by backlog.ts
+    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    closeRedisConnections();
   });
 
-  test("addToBacklog → getBacklogCounts round-trip", async () => {
+  test("addToBacklog → getBacklogCounts round-trip", async (t) => {
+    requireRedis(t);
     const result = await admin.addToBacklog({
       title: "Test item 1",
       category: "reliability",
@@ -56,7 +72,8 @@ describe("backlog state machine", () => {
     assert.equal(counts.total, 1);
   });
 
-  test("addToBacklog dedups items with the same title", async () => {
+  test("addToBacklog dedups items with the same title", async (t) => {
+    requireRedis(t);
     const first = await admin.addToBacklog({
       title: "Duplicate test",
       category: "test",
@@ -70,7 +87,8 @@ describe("backlog state machine", () => {
     assert.equal(second.reason, "duplicate");
   });
 
-  test("promoteToQueued moves items backlog → queued", async () => {
+  test("promoteToQueued moves items backlog → queued", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "Promote me A", category: "test" });
     await admin.addToBacklog({ title: "Promote me B", category: "test" });
 
@@ -82,13 +100,15 @@ describe("backlog state machine", () => {
     assert.equal(counts.queued, 2);
   });
 
-  test("promoteToQueued with count > backlog length moves only what exists", async () => {
+  test("promoteToQueued with count > backlog length moves only what exists", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "Only one", category: "test" });
     const promoted = await admin.promoteToQueued(5);
     assert.equal(promoted.length, 1);
   });
 
-  test("regression (2026-04-08): moveToInProgress requires EXACT title match", async () => {
+  test("regression (2026-04-08): moveToInProgress requires EXACT title match", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({
       title: "Exact title required",
       category: "test",
@@ -116,7 +136,8 @@ describe("backlog state machine", () => {
     assert.equal(counts.inProgress, 1);
   });
 
-  test("moveToInProgress can also pull directly from Backlog lane", async () => {
+  test("moveToInProgress can also pull directly from Backlog lane", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({
       title: "Direct from backlog",
       category: "test",
@@ -128,7 +149,8 @@ describe("backlog state machine", () => {
     assert.equal(counts.inProgress, 1);
   });
 
-  test("moveToDone moves items from any lane", async () => {
+  test("moveToDone moves items from any lane", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({
       title: "Lifecycle item",
       category: "test",
@@ -142,7 +164,8 @@ describe("backlog state machine", () => {
     assert.equal(counts.done, 1);
   });
 
-  test("moveToDone moves in-progress items to done", async () => {
+  test("moveToDone moves in-progress items to done", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({
       title: "In-progress item",
       category: "test",
@@ -157,7 +180,8 @@ describe("backlog state machine", () => {
     assert.equal(counts.done, 1);
   });
 
-  test("returnToBacklog moves in-progress items back with reason", async () => {
+  test("returnToBacklog moves in-progress items back with reason", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "Will fail", category: "test" });
     await admin.promoteToQueued(1);
     await admin.moveToInProgress("Will fail");
@@ -172,7 +196,8 @@ describe("backlog state machine", () => {
     assert.equal(counts.inProgress, 0);
   });
 
-  test("full lifecycle: add → promote → inProgress → done", async () => {
+  test("full lifecycle: add → promote → inProgress → done", async (t) => {
+    requireRedis(t);
     const title = "End-to-end item";
     await admin.addToBacklog({ title, category: "e2e" });
 
@@ -197,7 +222,8 @@ describe("backlog state machine", () => {
 
   // --- Linear-inspired upgrade tests ---
 
-  test("addToBacklog with priority and description populates fields", async () => {
+  test("addToBacklog with priority and description populates fields", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({
       title: "Urgent fix",
       category: "execution",
@@ -215,7 +241,8 @@ describe("backlog state machine", () => {
     assert.equal(item.parentId, null);
   });
 
-  test("existing items without new fields get defaults (backward compat)", async () => {
+  test("existing items without new fields get defaults (backward compat)", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "Legacy item", category: "test" });
     const lanes = await admin.loadBacklog();
     const item = lanes.backlog[0];
@@ -226,7 +253,8 @@ describe("backlog state machine", () => {
     assert.equal(item.parentId, null);
   });
 
-  test("promoteToQueued promotes by priority (urgent before low before none)", async () => {
+  test("promoteToQueued promotes by priority (urgent before low before none)", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "No priority", category: "test" });
     await admin.addToBacklog({ title: "Low priority", category: "test", priority: 4 });
     await admin.addToBacklog({ title: "Urgent", category: "test", priority: 1 });
@@ -237,7 +265,8 @@ describe("backlog state machine", () => {
     assert.equal(promoted[2].title, "No priority");
   });
 
-  test("promoteToQueued falls back to score for equal priority", async () => {
+  test("promoteToQueued falls back to score for equal priority", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "Low score", category: "test", priority: 2, adjustedScore: 10 });
     await admin.addToBacklog({ title: "High score", category: "test", priority: 2, adjustedScore: 90 });
 
@@ -246,7 +275,8 @@ describe("backlog state machine", () => {
     assert.equal(promoted[1].title, "Low score");
   });
 
-  test("triage lane in loadBacklog and getBacklogCounts", async () => {
+  test("triage lane in loadBacklog and getBacklogCounts", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "Triage item", category: "test", lane: "triage" });
     const lanes = await admin.loadBacklog();
     assert.equal(lanes.triage.length, 1);
@@ -257,14 +287,16 @@ describe("backlog state machine", () => {
     assert.equal(counts.total, 1); // triage counts toward total
   });
 
-  test("addToBacklog with lane: triage places item in triage", async () => {
+  test("addToBacklog with lane: triage places item in triage", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "Research finding", category: "research", lane: "triage" });
     const counts = await admin.getBacklogCounts();
     assert.equal(counts.triage, 1);
     assert.equal(counts.backlog, 0);
   });
 
-  test("updateItem modifies allowed fields", async () => {
+  test("updateItem modifies allowed fields", async (t) => {
+    requireRedis(t);
     const { id } = await admin.addToBacklog({ title: "Update me", category: "test" });
     const result = await admin.updateItem(id, { priority: 2, description: "Updated desc", labels: ["infra"] });
     assert.equal(result.ok, true);
@@ -274,21 +306,24 @@ describe("backlog state machine", () => {
     assert.equal(result.item.title, "Update me"); // unchanged
   });
 
-  test("updateItem rejects unknown item IDs", async () => {
+  test("updateItem rejects unknown item IDs", async (t) => {
+    requireRedis(t);
     const result = await admin.updateItem("item-99999", { priority: 1 });
     assert.equal(result.ok, false);
   });
 
   // --- WIP limit tests ---
 
-  test("isWipLimitReached returns false when no items in-progress", async () => {
+  test("isWipLimitReached returns false when no items in-progress", async (t) => {
+    requireRedis(t);
     const wip = await admin.isWipLimitReached();
     assert.equal(wip.atLimit, false);
     assert.equal(wip.count, 0);
     assert.equal(typeof wip.limit, "number");
   });
 
-  test("isWipLimitReached returns true when in-progress count >= WIP_LIMIT", async () => {
+  test("isWipLimitReached returns true when in-progress count >= WIP_LIMIT", async (t) => {
+    requireRedis(t);
     // Move WIP_LIMIT items to in-progress
     const limit = admin.WIP_LIMIT;
     for (let i = 0; i < limit; i++) {
@@ -301,7 +336,8 @@ describe("backlog state machine", () => {
     assert.equal(wip.count, limit);
   });
 
-  test("getInProgressCount returns correct count", async () => {
+  test("getInProgressCount returns correct count", async (t) => {
+    requireRedis(t);
     assert.equal(await admin.getInProgressCount(), 0);
 
     await admin.addToBacklog({ title: "Count test A", category: "test" });
@@ -313,7 +349,8 @@ describe("backlog state machine", () => {
     assert.equal(await admin.getInProgressCount(), 2);
   });
 
-  test("requeueStaleInProgressItems requeues old items, leaves fresh ones", async () => {
+  test("requeueStaleInProgressItems requeues old items, leaves fresh ones", async (t) => {
+    requireRedis(t);
     // Add two items to in-progress
     await admin.addToBacklog({ title: "Fresh item", category: "test" });
     await admin.moveToInProgress("Fresh item");
@@ -322,11 +359,13 @@ describe("backlog state machine", () => {
     await admin.moveToInProgress("Stale item");
 
     // Manually backdate the stale item's startedAt to 10 days ago
-    const raw = await redis.hget(`${TEST_PREFIX}:backlog:items`, (await admin.getInProgressItems()).find(i => i.title === "Stale item").id);
+    const inProgressItems = await admin.getInProgressItems();
+    const staleEntry = inProgressItems.find((i: any) => i.title === "Stale item");
+    const raw = await redis.hget("hydra:backlog:items", staleEntry.id);
     const staleItem = JSON.parse(raw);
     const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
     staleItem.meta.startedAt = tenDaysAgo;
-    await redis.hset(`${TEST_PREFIX}:backlog:items`, staleItem.id, JSON.stringify(staleItem));
+    await redis.hset("hydra:backlog:items", staleItem.id, JSON.stringify(staleItem));
 
     const requeued = await admin.requeueStaleInProgressItems();
     assert.equal(requeued.length, 1);
@@ -339,7 +378,8 @@ describe("backlog state machine", () => {
     assert.equal(counts.queued, 1);
   });
 
-  test("getInProgressItems returns items sorted from inProgress lane", async () => {
+  test("getInProgressItems returns items sorted from inProgress lane", async (t) => {
+    requireRedis(t);
     await admin.addToBacklog({ title: "IP item 1", category: "test", priority: 2 });
     await admin.moveToInProgress("IP item 1");
     await admin.addToBacklog({ title: "IP item 2", category: "test", priority: 1 });
@@ -347,7 +387,7 @@ describe("backlog state machine", () => {
 
     const items = await admin.getInProgressItems();
     assert.equal(items.length, 2);
-    const titles = items.map(i => i.title);
+    const titles = items.map((i: any) => i.title);
     assert.ok(titles.includes("IP item 1"));
     assert.ok(titles.includes("IP item 2"));
   });
