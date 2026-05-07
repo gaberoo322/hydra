@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  dashboard-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - run: cd dashboard && npm ci
+      - run: cd dashboard && npm run build
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [test, dashboard-build]
+    runs-on: self-hosted
+    steps:
+      - name: Pull latest code
+        run: cd /home/gabe/hydra && git pull --ff-only origin master
+
+      - name: Install dependencies
+        run: cd /home/gabe/hydra && npm ci
+
+      - name: Build dashboard
+        run: cd /home/gabe/hydra/dashboard && npm ci && npm run build
+
+      - name: Restart service
+        run: systemctl --user restart hydra-orchestrator.service
+
+      - name: Verify health
+        run: |
+          sleep 5
+          curl -sf http://localhost:4000/api/health | grep -q '"status":"ok"'

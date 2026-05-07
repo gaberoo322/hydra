@@ -75,6 +75,27 @@ curl http://localhost:4000/api/cycle/status
 curl "http://localhost:4000/api/cycle/history?limit=5"
 ```
 
+## CI/CD & Deployment
+
+**All changes to master must go through a PR.** Branch protection enforces CI passing before merge.
+
+**CI** (`.github/workflows/ci.yml`) runs on every PR:
+- `npm run typecheck` + `npm test` (orchestrator)
+- `cd dashboard && npm run build` (dashboard build check)
+
+**Deploy** runs automatically on merge to master via a self-hosted GitHub Actions runner on this server:
+1. `git pull --ff-only origin master`
+2. `npm ci` (orchestrator deps)
+3. `cd dashboard && npm ci && npm run build` (dashboard static assets)
+4. `systemctl --user restart hydra-orchestrator.service`
+5. Health check: `curl http://localhost:4000/api/health`
+
+Manual deploy (emergency): `./scripts/deploy.sh`
+
+**Never deploy by manually restarting the service without building the dashboard first.** The Express server serves `dashboard/dist/` — stale builds mean stale UI.
+
+**Claude Code / Hydra agents:** Always push changes on a feature branch and open a PR. Never push directly to master.
+
 ## Testing
 
 Tests are regression tests -- each corresponds to a real bug. Located in `test/*.test.mts`. Run with `npm test`. Zero external dependencies (uses `node:test`).
