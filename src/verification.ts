@@ -736,13 +736,13 @@ async function runVerification(projectDir: string, plan: any[], opts: { totalTim
   let appDir = projectDir;
   try {
     await access(join(projectDir, "package.json"));
-  } catch {
+  } catch { /* intentional: no package.json at root — probe subdirs */
     for (const sub of ["web", "app", "packages/app"]) {
       try {
         await access(join(projectDir, sub, "package.json"));
         appDir = join(projectDir, sub);
         break;
-      } catch {}
+      } catch { /* intentional: sub-dir does not have package.json, try next */ }
     }
   }
 
@@ -801,7 +801,10 @@ async function runVerification(projectDir: string, plan: any[], opts: { totalTim
         .split("\n")
         .filter((l) => l.includes("|"))
         .map((l) => l.split("|")[0].trim());
-    } catch {}
+    } catch (err: any) {
+      console.error(`[Verification] git diff --stat failed for both main and HEAD~1: ${err.message}`);
+      Sentry.addBreadcrumb({ category: "verification", message: `git diff --stat fallback failed: ${err.message}`, level: "warning" });
+    }
   }
 
   return {
@@ -1004,14 +1007,14 @@ async function runMutationTests(
   try {
     const { readFile: rf } = await import("node:fs/promises");
     await rf(`${projectDir}/package.json`);
-  } catch {
+  } catch { /* intentional: no package.json at root — probe subdirs */
     for (const sub of ["web", "app"]) {
       try {
         const { readFile: rf } = await import("node:fs/promises");
         await rf(`${projectDir}/${sub}/package.json`);
         appDir = `${projectDir}/${sub}`;
         break;
-      } catch {}
+      } catch { /* intentional: sub-dir does not have package.json, try next */ }
     }
   }
 

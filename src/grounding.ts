@@ -164,14 +164,13 @@ export async function groundProject(projectDir,  opts: Record<string, any> = {})
   let appDir = projectDir;
   try {
     await readFile(join(projectDir, "package.json"), "utf-8");
-  } catch {
-    // No package.json at root — check common subdirs
+  } catch { /* intentional: no package.json at root — probe subdirs */
     for (const sub of ["web", "app", "packages/app"]) {
       try {
         await readFile(join(projectDir, sub, "package.json"), "utf-8");
         appDir = join(projectDir, sub);
         break;
-      } catch {}
+      } catch { /* intentional: sub-dir does not have package.json, try next */ }
     }
   }
 
