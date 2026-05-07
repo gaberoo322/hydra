@@ -50,7 +50,7 @@ async function isReviewed(commitSha: string): Promise<boolean> {
   try {
     const r = getRedisConnection();
     return (await r.sismember(REVIEWED_SET_KEY, commitSha)) === 1;
-  } catch {
+  } catch { /* intentional: Redis unavailable — treat as not-reviewed to allow re-review */
     return false;
   }
 }
@@ -109,7 +109,7 @@ async function reviewCommit(sha: string, subject: string): Promise<DeepReviewRep
       { cwd: PROJECT_WORKSPACE, timeout: 15000, maxBuffer: 2 * 1024 * 1024 },
     );
     diff = stdout;
-  } catch (err: any) {
+  } catch (err: any) { /* intentional: error captured in return value */
     return { commitSha: sha, taskTitle: subject, findings: [], durationMs: Date.now() - start, error: `diff failed: ${err.message}` };
   }
 
@@ -147,7 +147,7 @@ async function reviewCommit(sha: string, subject: string): Promise<DeepReviewRep
       const fullPath = file.startsWith("/") ? file : join(PROJECT_WORKSPACE, file);
       const content = await readFile(fullPath, "utf-8");
       fileContents.push(`### ${file}\n\`\`\`\n${content.slice(0, 8000)}\n\`\`\``);
-    } catch { /* file might not exist */ }
+    } catch { /* intentional: file may not exist on disk (deleted in diff) */ }
   }
 
   // Truncate diff to 16K (Gemma has 128K context but let's be reasonable)

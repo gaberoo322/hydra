@@ -40,7 +40,7 @@ export async function loadProjectGoals() {
   let raw;
   try {
     raw = await readFile(GOALS_FILE, "utf-8");
-  } catch {
+  } catch { /* intentional: goals.md may not exist — null signals no goals configured */
     return null;
   }
 
@@ -198,7 +198,7 @@ export async function loadAppMetrics() {
   try {
     const raw = await readFile(metricsFile, "utf-8");
     return { source: "file", data: JSON.parse(raw), loadedAt: new Date().toISOString() };
-  } catch {}
+  } catch { /* intentional: file-based metrics may not exist — fall through to API */ }
 
   // Try API endpoint
   const metricsUrl = process.env.HYDRA_APP_METRICS_URL;
@@ -207,7 +207,7 @@ export async function loadAppMetrics() {
       const response = await fetch(metricsUrl, { signal: AbortSignal.timeout(10000) });
       const data = await response.json();
       return { source: "api", url: metricsUrl, data, loadedAt: new Date().toISOString() };
-    } catch {}
+    } catch { /* intentional: metrics API unavailable — return null below */ }
   }
 
   return null;

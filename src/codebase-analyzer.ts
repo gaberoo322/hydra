@@ -102,11 +102,9 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
       });
       const testResult = JSON.parse(stdout);
       state.tests.total = testResult.numTotalTests || 0;
-    } catch (err) {
-      // Try parsing test count from error output (vitest outputs JSON even on test failure)
+    } catch (err) { /* intentional: vitest may fail — try parsing test count from error output */
       const match = err?.stdout?.match(/"numTotalTests"\s*:\s*(\d+)/);
       if (match) state.tests.total = parseInt(match[1]);
-      // Or use the grounding data
     }
 
     // Get database schema info
@@ -120,7 +118,7 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
       const schema = await readFile(schemaFile, "utf-8").catch(() => "");
       const tableMatches = schema.matchAll(/export\s+const\s+(\w+)\s*=\s*pgTable/g);
       for (const m of tableMatches) state.database.tables.push(m[1]);
-    } catch {}
+    } catch { /* intentional: database schema info is optional enrichment */ }
 
     // Get package.json dependencies
     try {
@@ -132,7 +130,7 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
           d.includes("next") || d.includes("react") || d.includes("tailwind")
         ),
       };
-    } catch {}
+    } catch { /* intentional: package.json may not exist in expected location */ }
 
     // Recent git commits (last 10)
     try {
@@ -141,12 +139,12 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
         "--format=%s"
       ], { cwd: workDir, timeout: 5000 });
       state.recentCommits = stdout.trim().split("\n").filter(Boolean);
-    } catch {}
+    } catch { /* intentional: git log failure is non-fatal for analysis */ }
 
     // Identify gaps
     state.gaps = identifyGaps(state);
 
-  } catch (err) {
+  } catch (err) { /* intentional: error captured in state.error */
     (state as any).error = err.message;
   }
 
@@ -202,7 +200,7 @@ async function findFiles(dir, ext, skipDirs) {
         results.push(fullPath);
       }
     }
-  } catch {}
+  } catch { /* intentional: directory may not exist or be unreadable */ }
   return results;
 }
 

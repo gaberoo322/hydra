@@ -74,8 +74,7 @@ async function areScopeFilesUnmodified(scopeFiles: string[], cachedAt: string): 
     );
     // If git log returns any commits, files were modified
     return stdout.trim().length === 0;
-  } catch {
-    // If git check fails, treat as stale (safe default)
+  } catch { /* intentional: git check failure treated as stale (safe default) */
     return false;
   }
 }

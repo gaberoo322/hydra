@@ -668,7 +668,7 @@ async function runStep(step: any, projectDir: string, timeout = STEP_TIMEOUT) {
       expected,
       actual: passed ? "exit code 0" : "exit code 0 but expectation not met",
     };
-  } catch (err: any) {
+  } catch (err: any) { /* intentional: verification step error captured in return value */
     const exitCode = err.status ?? err.code ?? 1;
     const stdout = truncate(err.stdout);
     const stderr = truncate(err.stderr || err.message);
@@ -736,13 +736,13 @@ async function runVerification(projectDir: string, plan: any[], opts: { totalTim
   let appDir = projectDir;
   try {
     await access(join(projectDir, "package.json"));
-  } catch {
+  } catch { /* intentional: no package.json at root — check subdirs */
     for (const sub of ["web", "app", "packages/app"]) {
       try {
         await access(join(projectDir, sub, "package.json"));
         appDir = join(projectDir, sub);
         break;
-      } catch {}
+      } catch { /* intentional: subdir may not have package.json */ }
     }
   }
 
@@ -790,7 +790,7 @@ async function runVerification(projectDir: string, plan: any[], opts: { totalTim
       .split("\n")
       .filter((l) => l.includes("|"))
       .map((l) => l.split("|")[0].trim());
-  } catch {
+  } catch { /* intentional: diff stat on feature branch — fall back to HEAD~1 */
     try {
       const { stdout } = await execFileAsync("git", ["diff", "--stat", "HEAD~1"], {
         cwd: projectDir,
@@ -801,7 +801,7 @@ async function runVerification(projectDir: string, plan: any[], opts: { totalTim
         .split("\n")
         .filter((l) => l.includes("|"))
         .map((l) => l.split("|")[0].trim());
-    } catch {}
+    } catch { /* intentional: no diff available — proceed without summary */ }
   }
 
   return {
@@ -1004,14 +1004,14 @@ async function runMutationTests(
   try {
     const { readFile: rf } = await import("node:fs/promises");
     await rf(`${projectDir}/package.json`);
-  } catch {
+  } catch { /* intentional: no package.json at root — check subdirs */
     for (const sub of ["web", "app"]) {
       try {
         const { readFile: rf } = await import("node:fs/promises");
         await rf(`${projectDir}/${sub}/package.json`);
         appDir = `${projectDir}/${sub}`;
         break;
-      } catch {}
+      } catch { /* intentional: subdir may not have package.json */ }
     }
   }
 
@@ -1024,9 +1024,7 @@ async function runMutationTests(
       const content = await readFile(fullPath, "utf-8");
       const mutations = generateMutations(fullPath, content);
       allMutations.push(...mutations);
-    } catch {
-      // File might not exist (deleted in diff)
-    }
+    } catch { /* intentional: file might not exist (deleted in diff) */ }
   }
 
   // Shuffle mutations to get a representative sample if we time out
@@ -1046,7 +1044,7 @@ async function runMutationTests(
     let originalContent: string;
     try {
       originalContent = await readFile(mutation.file, "utf-8");
-    } catch {
+    } catch { /* intentional: file unreadable — record as skipped */
       results.push({ mutation, survived: false, skipped: true, error: "cannot read file" });
       continue;
     }
@@ -1071,8 +1069,7 @@ async function runMutationTests(
         });
         // Tests passed with mutation = SURVIVED (bad)
         results.push({ mutation, survived: true, skipped: false });
-      } catch {
-        // Tests failed with mutation = KILLED (good)
+      } catch { /* intentional: tests failed with mutation = KILLED (good) */
         results.push({ mutation, survived: false, skipped: false });
       }
     } finally {
@@ -1213,13 +1210,12 @@ function parseJitResult(output: string): { tests: Array<{ filename: string; desc
   let parsed: any;
   try {
     parsed = JSON.parse(output);
-  } catch {
-    // Try to find JSON in the output (model may include surrounding text)
+  } catch { /* intentional: initial JSON parse failed — try extraction below */
     const match = output.match(/\{[\s\S]*"tests"[\s\S]*\}/);
     if (match) {
       try {
         parsed = JSON.parse(match[0]);
-      } catch (err: any) {
+      } catch (err: any) { /* intentional: parse error captured in return value */
         return { tests: [], error: `JSON parse failed after extraction: ${err.message}` };
       }
     } else {
@@ -1346,8 +1342,7 @@ async function runJitTests(
           } catch (commitErr: any) {
             console.error(`[JiT] Failed to commit test ${testDef.filename}: ${commitErr.message}`);
           }
-        } catch (testErr: any) {
-          // Test failed — check if it caught a real bug or is just bad generation
+        } catch (testErr: any) { /* intentional: test failure is expected — analyze below */
           const stderr = testErr.stderr || testErr.message || "";
           const stdout = testErr.stdout || "";
           const output = stderr + stdout;
@@ -1506,9 +1501,7 @@ async function runAdversarialValidation(
       const fullPath = file.startsWith("/") ? file : join(PROJECT_WORKSPACE, file);
       const content = await readFile(fullPath, "utf-8");
       fileContents.push(`### ${file}\n\`\`\`\n${content.slice(0, 2000)}\n\`\`\``);
-    } catch {
-      // File might not exist (deleted or moved)
-    }
+    } catch { /* intentional: file may not exist (deleted or moved) */ }
   }
 
   if (fileContents.length === 0) {

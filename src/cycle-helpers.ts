@@ -230,9 +230,7 @@ export async function isAnchorStale(anchor: any): Promise<string | null> {
         }
       }
     }
-  } catch {
-    // priorities.md not readable — proceed without this check
-  }
+  } catch { /* intentional: priorities.md not readable — proceed without this check */ }
 
   return null;
 }

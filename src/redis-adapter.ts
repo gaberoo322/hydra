@@ -1038,7 +1038,7 @@ export async function cleanWorkQueue(): Promise<{ removedCompleted: number; remo
     try {
       const item = JSON.parse(raw);
       ref = item.reference || "";
-    } catch {
+    } catch { /* intentional: unparseable item — use raw string as reference */
       ref = raw;
     }
 

@@ -44,6 +44,7 @@ async function startCycle(eventBus: any, opts: any = {}) {
     return { cycle: completed, ...result };
   } catch (err: any) {
     const errorMsg = err?.message || String(err);
+    console.error(`[Cycle] Control loop failed: ${errorMsg}`);
     if (currentCycle) {
       currentCycle.status = "failed";
       currentCycle.error = errorMsg;

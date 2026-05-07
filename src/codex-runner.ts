@@ -6,6 +6,7 @@
  * structured output via outputSchema.
  */
 
+import * as Sentry from "@sentry/node";
 import { Codex, type ThreadOptions, type TurnOptions } from "@openai/codex-sdk";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -54,7 +55,7 @@ async function resolveModel(tierOrModel: string): Promise<string> {
       console.log(`[CodexRunner] Spend cap hit ($${spend.usd.toFixed(2)}/$${DAILY_COST_CAP_USD}) — ${tierOrModel} → ${fallback}`);
       return fallback;
     }
-  } catch { /* use default tiers */ }
+  } catch { /* intentional: spend check failure falls through to default model tiers */ }
   return MODEL_TIERS[tierOrModel];
 }
 
@@ -556,7 +557,8 @@ async function searchKnowledge(query, limit = 5, sessionId = null) {
     }).join("\n");
 
     return `\n## KNOWLEDGE CONTEXT (from OpenViking)\n${formatted}\n`;
-  } catch {
+  } catch (err: any) { /* intentional: OV search is optional enrichment — empty string on failure */
+    Sentry.addBreadcrumb({ category: "openviking", message: `searchKnowledge failed: ${err?.message}`, level: "warning" });
     return "";
   }
 }

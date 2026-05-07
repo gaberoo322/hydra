@@ -66,9 +66,7 @@ async function validatePrerequisites(prerequisites: string[]): Promise<{ valid: 
           found = true;
           break;
         }
-      } catch {
-        // grep returns exit 1 when no matches — that's expected
-      }
+      } catch { /* intentional: grep returns exit 1 when no matches */ }
     }
     if (!found) missing.push(prereq);
   }
@@ -115,9 +113,7 @@ async function loadMethodologyOverrides(researcherName) {
   try {
     const content = await readFile(join(METHODOLOGY_DIR, `${researcherName}.md`), "utf-8");
     return content.trim();
-  } catch {
-    return "";
-  }
+  } catch { /* intentional: methodology override file may not exist */ }
 }
 
 /**
@@ -129,7 +125,7 @@ async function loadLastResearchReport() {
     if (ids.length === 0) return null;
     const raw = await getResearchReportAdapter(ids[0]);
     return raw ? JSON.parse(raw) : null;
-  } catch {
+  } catch { /* intentional: no previous research report — return null */
     return null;
   }
 }
@@ -208,7 +204,7 @@ async function scoreLastResearchOutcomes(): Promise<string> {
     }
 
     return lines.join("\n");
-  } catch {
+  } catch { /* intentional: outcome scoring is best-effort — empty string on failure */
     return "";
   }
 }
@@ -887,7 +883,7 @@ export async function listResearchReports(count = 10) {
       }
     }
     return reports;
-  } catch {
+  } catch { /* intentional: research report listing is non-critical */
     return [];
   }
 }

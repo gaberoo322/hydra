@@ -15,6 +15,7 @@
  *   hydra:backlog:counter       → Auto-increment ID counter
  */
 
+import * as Sentry from "@sentry/node";
 import { redisKeys } from "./redis-keys.ts";
 import {
   getBacklogItemRaw, saveBacklogItem, removeBacklogItem as removeBacklogItemAdapter,
@@ -518,7 +519,7 @@ async function getCurrentMilestoneProgress() {
       };
     }
     return null;
-  } catch {
+  } catch { /* intentional: spec progress is optional context — null signals no spec found */
     return null;
   }
 }
@@ -602,7 +603,9 @@ async function claimNextQueuedItem(claimedBy) {
     };
     await saveItem(parsed);
     return { claimed: true, item: parsed };
-  } catch {
+  } catch (err: any) {
+    console.error(`[Backlog] claimNextQueued parse error: ${err?.message || err}`);
+    Sentry.addBreadcrumb({ category: "redis", message: `claimNextQueued parse error: ${err?.message}`, level: "error" });
     return { claimed: false, reason: "parse-error" };
   }
 }

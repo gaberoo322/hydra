@@ -72,7 +72,7 @@ async function runCmd(cmd, args,  opts: Record<string, any> = {}) {
       stderr: truncate(stderr),
       durationMs: Date.now() - start,
     };
-  } catch (err: any) {
+  } catch (err: any) { /* intentional: error captured in return value (grounding never throws) */
     return {
       exitCode: err.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? 1 : (err.status ?? err.code ?? 1),
       stdout: truncate(err.stdout),
@@ -164,14 +164,13 @@ export async function groundProject(projectDir,  opts: Record<string, any> = {})
   let appDir = projectDir;
   try {
     await readFile(join(projectDir, "package.json"), "utf-8");
-  } catch {
-    // No package.json at root — check common subdirs
+  } catch { /* intentional: no package.json at root — check common subdirs */
     for (const sub of ["web", "app", "packages/app"]) {
       try {
         await readFile(join(projectDir, sub, "package.json"), "utf-8");
         appDir = join(projectDir, sub);
         break;
-      } catch {}
+      } catch { /* intentional: subdir may not have package.json */ }
     }
   }
 

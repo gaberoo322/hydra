@@ -83,7 +83,7 @@ async function runMetaAnalysis(eventBus, event) {
       "### Per-cycle detail:",
       ...trend.map((m) => `- ${m.cycleId}: ${m.tasksMerged ? "MERGED" : m.tasksFailed ? "FAILED" : "ABANDONED"} | "${m.taskTitle}" | tests:${m.testsBefore}→${m.testsAfter} | anchor:${m.anchorType} | risk:${m.rollbackRisk || "?"} | ${m.totalDurationMs}ms`),
     ].join("\n"));
-  } catch { contextSections.push("## Cycle Metrics\n(unavailable)"); }
+  } catch { /* intentional: metrics unavailable — add placeholder */ contextSections.push("## Cycle Metrics\n(unavailable)"); }
 
   // 2. Reality reports — detailed post-cycle reports with grounding, verification, merge info
   try {
@@ -99,7 +99,7 @@ async function runMetaAnalysis(eventBus, event) {
     if (reports.length > 0) {
       contextSections.push(`## Reality Reports (last ${reports.length})\n${reports.join("\n")}`);
     }
-  } catch { /* no reality reports */ }
+  } catch { /* intentional: reality reports unavailable — skip section */ }
 
   // 3. Spending — cost trends
   try {
@@ -113,7 +113,7 @@ async function runMetaAnalysis(eventBus, event) {
     if (cyclesWithCost > 0) {
       contextSections.push(`## Spending\nTotal: $${totalCost.toFixed(2)} across ${cyclesWithCost} cycles | Avg: $${(totalCost / cyclesWithCost).toFixed(3)}/cycle`);
     }
-  } catch { /* no spending data */ }
+  } catch { /* intentional: spending data unavailable — skip section */ }
 
   // 4. Backlog state — what's queued, blocked, in progress
   try {
@@ -129,7 +129,7 @@ async function runMetaAnalysis(eventBus, event) {
       `Backlog: ${counts.backlog} | Queued: ${counts.queued} | Blocked: ${counts.blocked} | In Progress: ${counts.inProgress} | Done: ${counts.done}`,
       blockedItems.length > 0 ? `Blocked items: ${blockedItems.join(", ")}` : "",
     ].filter(Boolean).join("\n"));
-  } catch { /* no backlog data */ }
+  } catch { /* intentional: backlog data unavailable — skip section */ }
 
   // 5. Agent memory — learned prevention rules (WHEN/CHECK/BECAUSE)
   try {
@@ -145,7 +145,7 @@ async function runMetaAnalysis(eventBus, event) {
     if (agentRules.length > 0) {
       contextSections.push(`## Agent Memory (learned rules)\n${agentRules.join("\n")}`);
     }
-  } catch { /* no agent memory */ }
+  } catch { /* intentional: agent memory unavailable — skip section */ }
 
   // 6. Current agent config files — so Meta knows what it's proposing changes to
   try {
@@ -157,7 +157,7 @@ async function runMetaAnalysis(eventBus, event) {
       agentConfigs.push(`### ${agent}.md (first 30 lines)\n\`\`\`\n${preview}\n\`\`\``);
     }
     contextSections.push(`## Current Agent Personalities\n${agentConfigs.join("\n\n")}`);
-  } catch { /* no config files */ }
+  } catch { /* intentional: config files unavailable — skip section */ }
 
   // 7. Feedback files — current operator guidance
   try {
@@ -168,7 +168,7 @@ async function runMetaAnalysis(eventBus, event) {
       feedbackSummary.push(`- **${target}.md**: ${lineCount} lines`);
     }
     contextSections.push(`## Operator Feedback Files\n${feedbackSummary.join("\n")}`);
-  } catch { /* no feedback files */ }
+  } catch { /* intentional: feedback files unavailable — skip section */ }
 
   // 8. Recent proposals — so Meta doesn't re-propose the same things
   try {
@@ -179,7 +179,7 @@ async function runMetaAnalysis(eventBus, event) {
       );
       contextSections.push(`## Recent Proposals (do NOT re-propose these)\n${proposalLines.join("\n")}\n\nDo not propose anything that duplicates or closely resembles an existing approved, applied, or rejected proposal. If a proposal was rejected, do not re-propose it unless you have new evidence that was not available when it was rejected.`);
     }
-  } catch { /* no proposals */ }
+  } catch { /* intentional: proposals unavailable — skip section */ }
 
   // 9. System architecture summary
   contextSections.push([

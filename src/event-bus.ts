@@ -63,8 +63,7 @@ class EventBus {
       for (const group of groups) {
         try {
           await this.publisher.xgroup("CREATE", stream, group, "0", "MKSTREAM");
-        } catch (err: any) {
-          // BUSYGROUP = group already exists, which is fine
+        } catch (err: any) { /* intentional: BUSYGROUP = group already exists, re-throw others */
           if (!err.message.includes("BUSYGROUP")) throw err;
         }
       }
@@ -229,7 +228,7 @@ class EventBus {
         parsed[info[i]] = info[i + 1];
       }
       return parsed;
-    } catch {
+    } catch { /* intentional: stream may not exist yet — null signals no info available */
       return null;
     }
   }

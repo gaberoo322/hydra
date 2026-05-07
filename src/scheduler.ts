@@ -8,6 +8,7 @@
  * Controlled via API: POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status
  */
 
+import * as Sentry from "@sentry/node";
 import { startCycle } from "./cycle.ts";
 import { sendNotification } from "./notify.ts";
 import { getMetricsTrend } from "./metrics.ts";
@@ -188,7 +189,9 @@ async function getDailySpend() {
       return { date: todayLocalDate(), usd: 0 };
     }
     return stored;
-  } catch {
+  } catch (err: any) {
+    console.error(`[Scheduler] getDailySpend failed: ${err?.message || err}`);
+    Sentry.addBreadcrumb({ category: "redis", message: `getDailySpend failed: ${err?.message}`, level: "error" });
     return { date: todayLocalDate(), usd: 0 };
   }
 }
@@ -498,7 +501,10 @@ async function runScheduledCycle(eventBus) {
         console.log("[Scheduler] Sent weekly summary");
       }
     }
-  } catch {}
+  } catch (err: any) {
+    console.error(`[Scheduler] Weekly summary failed: ${err?.message || err}`);
+    Sentry.addBreadcrumb({ category: "redis", message: `Weekly summary failed: ${err?.message}`, level: "error" });
+  }
 
   // Daily memory consolidation — prune stale patterns
   try {
@@ -510,12 +516,18 @@ async function runScheduledCycle(eventBus) {
       await consolidate();
       await setString(MEMORY_CONSOLIDATION_KEY, Date.now().toString());
     }
-  } catch {}
+  } catch (err: any) {
+    console.error(`[Scheduler] Memory consolidation failed: ${err?.message || err}`);
+    Sentry.addBreadcrumb({ category: "redis", message: `Memory consolidation failed: ${err?.message}`, level: "error" });
+  }
 
   // Check if research is needed (throttled)
   try {
     await maybeRunResearch(eventBus);
-  } catch {}
+  } catch (err: any) {
+    console.error(`[Scheduler] Research check failed: ${err?.message || err}`);
+    Sentry.addBreadcrumb({ category: "redis", message: `Research check failed: ${err?.message}`, level: "error" });
+  }
 
   // Anchor selection in the control loop already prioritizes failing tests
   // (priority #4) — no need to pre-check here. Removing the redundant

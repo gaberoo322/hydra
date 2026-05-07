@@ -63,7 +63,7 @@ async function runGit(cwd, args, timeout = 5000) {
   try {
     const { stdout, stderr } = await execFileAsync("git", args, { cwd, timeout });
     return { stdout, stderr };
-  } catch (err) {
+  } catch (err) { /* intentional: git error captured in return value */
     return { stdout: err.stdout || "", stderr: err.stderr || err.message || "" };
   }
 }

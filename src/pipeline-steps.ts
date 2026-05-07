@@ -433,7 +433,8 @@ async function validateDiffExists(projectDir: string, baseBranch = "main", featu
     }
 
     return false;
-  } catch {
+  } catch (err: any) {
+    console.error(`[Pipeline] ensureFeatureBranch failed: ${err?.message || err}`);
     return false;
   }
 }
@@ -604,7 +605,7 @@ async function mergeToMain(projectDir: string, cycleId: string) {
     await execFileAsync("git", ["push", "origin", "main"], { cwd: projectDir, timeout: 30000 });
     const { stdout: sha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: projectDir, timeout: 5000 });
     return { ok: true, commitSha: sha.trim(), featureBranch: null, error: null };
-  } catch (err: any) {
+  } catch (err: any) { /* intentional: merge error captured in return value */
     return { ok: false, commitSha: "", featureBranch: null, error: err?.message || String(err) };
   }
 }

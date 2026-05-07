@@ -86,7 +86,7 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
     const merged = trend.filter(m => m.tasksMerged > 0).length;
     const failed = trend.filter(m => m.tasksFailed > 0).length;
     metricsContext = `Last 10 cycles: ${merged} merged, ${failed} failed.`;
-  } catch {}
+  } catch { /* intentional: metrics trend is optional context for priorities refresh */ }
 
   // 5. Get backlog state
   let backlogContext = "";
@@ -148,7 +148,7 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
   try {
     dataAssetsContext = await readFile(join(DIRECTION_DIR, "data-assets.md"), "utf-8");
     console.log(`[PrioritiesRefresh] Loaded data-assets.md`);
-  } catch { /* no data-assets file is fine */ }
+  } catch { /* intentional: no data-assets file is fine */ }
 
   // 8. Build the prompt
   const prompt = [

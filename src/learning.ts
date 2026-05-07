@@ -22,6 +22,7 @@
  *   createCycleSession()     — control-loop.ts session creation
  */
 
+import * as Sentry from "@sentry/node";
 import { readFile, writeFile, unlink } from "node:fs/promises";
 import { watch } from "node:fs";
 import { join, resolve, extname, relative } from "node:path";
@@ -593,7 +594,8 @@ function createNoOpSession(cycleId: string) {
         if (!res.ok) return [];
         const data = await res.json() as any;
         return data?.result?.resources || [];
-      } catch {
+      } catch (err: any) { /* intentional: OV search is best-effort — empty results on failure */
+        Sentry.addBreadcrumb({ category: "openviking", message: `OV search failed: ${err?.message}`, level: "warning" });
         return [];
       }
     },
@@ -611,7 +613,7 @@ async function loadPatterns(agentName: string): Promise<MemoryPattern[]> {
   if (!raw) return [];
   try {
     return JSON.parse(raw);
-  } catch {
+  } catch { /* intentional: corrupt patterns JSON — return empty to allow fresh start */
     return [];
   }
 }
