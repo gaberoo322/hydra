@@ -8,6 +8,7 @@
  * Controlled via API: POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status
  */
 
+import * as Sentry from "@sentry/node";
 import { startCycle } from "./cycle.ts";
 import { sendNotification } from "./notify.ts";
 import { getMetricsTrend } from "./metrics.ts";
@@ -188,7 +189,8 @@ async function getDailySpend() {
       return { date: todayLocalDate(), usd: 0 };
     }
     return stored;
-  } catch {
+  } catch (err: any) {
+    /* intentional: fallback to zero spend on parse/Redis failure — non-critical for cycle operation */
     return { date: todayLocalDate(), usd: 0 };
   }
 }
@@ -274,7 +276,10 @@ async function detectRepetition(eventBus) {
 
 async function maybeRunResearch(eventBus) {
   // Prune old done items from backlog
-  try { await pruneOldDoneItems(); } catch {}
+  try { await pruneOldDoneItems(); } catch (err: any) {
+    console.error(`[Scheduler] Failed to prune old done items: ${err.message}`);
+    Sentry.addBreadcrumb({ category: "scheduler", message: `pruneOldDoneItems failed: ${err.message}`, level: "error" });
+  }
 
   // Check if operator forced a research cycle (bypasses all throttles)
   const forced = await consumeResearchForceOnce();
@@ -381,7 +386,9 @@ async function maybeRunResearch(eventBus) {
           capUsd: DAILY_COST_CAP_USD,
         },
       });
-    } catch {}
+    } catch (err: any) {
+      console.error(`[Scheduler] Failed to send spend cap notification: ${err.message}`);
+    }
     return;
   }
 
@@ -481,7 +488,9 @@ async function runScheduledCycle(eventBus) {
   // Check blocked items for re-escalation
   try {
     await checkBlockedEscalation(eventBus);
-  } catch {}
+  } catch (err: any) {
+    console.error(`[Scheduler] Blocked escalation check failed in scheduled cycle: ${err.message}`);
+  }
 
   // Weekly summary — send once per week
   try {
@@ -498,7 +507,10 @@ async function runScheduledCycle(eventBus) {
         console.log("[Scheduler] Sent weekly summary");
       }
     }
-  } catch {}
+  } catch (err: any) {
+    console.error(`[Scheduler] Weekly summary failed: ${err.message}`);
+    Sentry.addBreadcrumb({ category: "scheduler", message: `Weekly summary failed: ${err.message}`, level: "error" });
+  }
 
   // Daily memory consolidation — prune stale patterns
   try {
@@ -510,12 +522,18 @@ async function runScheduledCycle(eventBus) {
       await consolidate();
       await setString(MEMORY_CONSOLIDATION_KEY, Date.now().toString());
     }
-  } catch {}
+  } catch (err: any) {
+    console.error(`[Scheduler] Memory consolidation failed: ${err.message}`);
+    Sentry.addBreadcrumb({ category: "scheduler", message: `Memory consolidation failed: ${err.message}`, level: "error" });
+  }
 
   // Check if research is needed (throttled)
   try {
     await maybeRunResearch(eventBus);
-  } catch {}
+  } catch (err: any) {
+    console.error(`[Scheduler] maybeRunResearch failed: ${err.message}`);
+    Sentry.addBreadcrumb({ category: "scheduler", message: `maybeRunResearch failed: ${err.message}`, level: "error" });
+  }
 
   // Anchor selection in the control loop already prioritizes failing tests
   // (priority #4) — no need to pre-check here. Removing the redundant

@@ -226,7 +226,9 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   } finally {
     // Commit OV session on crash paths
     if (ovSession.active) {
-      await ovSession.logOutcome("crashed", "Cycle terminated by unhandled exception").catch(() => {});
+      await ovSession.logOutcome("crashed", "Cycle terminated by unhandled exception").catch((err: any) =>
+        console.error(`[ControlLoop] OV session crash-logOutcome failed: ${err.message}`)
+      );
       await ovSession.commit().catch((err: any) =>
         console.error(`[ControlLoop] OV session crash-commit failed: ${err.message}`)
       );

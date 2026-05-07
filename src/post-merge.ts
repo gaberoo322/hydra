@@ -132,7 +132,9 @@ export async function runPostMerge(
     try {
       const { stdout: stuckBranch } = await execFileAsync("git", ["branch", "--show-current"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
       const stuck = stuckBranch.trim();
-      await execFileAsync("git", ["stash", "--include-untracked"], { cwd: PROJECT_WORKSPACE, timeout: 10000 }).catch(() => {});
+      await execFileAsync("git", ["stash", "--include-untracked"], { cwd: PROJECT_WORKSPACE, timeout: 10000 }).catch((err: any) =>
+        console.error(`[ControlLoop] git stash during merge cleanup failed: ${err.message}`)
+      );
       await execFileAsync("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
       await execFileAsync("git", ["checkout", "."], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
       if (stuck && stuck !== "main") {
