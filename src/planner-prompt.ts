@@ -190,8 +190,9 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   // and cheaper model — they don't need priorities, accomplishments, or
   // continuity because the anchor IS the entire scope.
   const isQuickFixAnchor = anchor.type === "failing-test" || anchor.type === "prior-failure";
+  const isCheapAnchor = isQuickFixAnchor || anchor.type === "codebase-health";
   const isReframe = anchor.type === "reframe";
-  const plannerModel = isQuickFixAnchor ? "codex" : "frontier";
+  const plannerModel = isCheapAnchor ? "codex" : "frontier";
 
   // Plan cache — skip LLM call for recurring task patterns.
   // Belt-and-suspenders: bypass cache when reflections exist for this anchor,
