@@ -22,6 +22,7 @@ import {
   getProposalIdsAsc,
   deleteProposal,
   removeProposalFromIndex,
+  getProposalIdsByTimeRange,
   getRecentReportIdsDesc,
   getRealityReport,
   getRecentMetricIdsDesc,
@@ -240,11 +241,12 @@ async function runMetaAnalysis(eventBus, event) {
     }
   }
 
-  const createdProposals = [];
+  const createdProposals: any[] = [];
   for (const proposal of metaOutput.proposals || []) {
-    const created = await createProposal(proposal, event?.correlationId, eventBus);
+    const created: any = await createProposal(proposal, event?.correlationId, eventBus);
     createdProposals.push(created);
 
+    if (created.dedupRejected) continue; // skip dedup-rejected proposals
     if (created.type === "personality" && created.risk === "low") {
       console.log(`[Meta] Auto-approving low-risk personality proposal ${created.proposalId}: ${created.title}`);
       await approveProposal(created.proposalId, eventBus);
@@ -255,10 +257,177 @@ async function runMetaAnalysis(eventBus, event) {
   return { metaOutput, proposals: createdProposals };
 }
 
+// ---------------------------------------------------------------------------
+// Dedup helpers (AC1)
+// ---------------------------------------------------------------------------
+
+const DEDUP_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * Compute word-overlap ratio between two titles.
+ * Returns a number 0–1 representing fraction of shared words.
+ */
+function titleOverlap(a: string, b: string): number {
+  const wordsA = new Set(a.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean));
+  const wordsB = new Set(b.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean));
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  let overlap = 0;
+  for (const w of wordsA) { if (wordsB.has(w)) overlap++; }
+  const minSize = Math.min(wordsA.size, wordsB.size);
+  return overlap / minSize;
+}
+
+/**
+ * Check if a proposal with similar title+targetFile already exists within the last 30 days.
+ * Returns { duplicate: true, existingId, existingTitle, reason } or { duplicate: false }.
+ */
+async function checkDuplicate(title: string, targetFile: string): Promise<
+  { duplicate: true; existingId: string; existingTitle: string; reason: string } |
+  { duplicate: false }
+> {
+  const now = Date.now();
+  const cutoff = now - DEDUP_WINDOW_MS;
+  const recentIds = await getProposalIdsByTimeRange(cutoff, now);
+
+  for (const id of recentIds) {
+    const existing = await getProposal(id);
+    if (!existing) continue;
+
+    const overlap = titleOverlap(title, existing.title || "");
+    const targetMatch = targetFile && existing.targetFile
+      ? targetFile === existing.targetFile
+      : false;
+
+    // Match if >70% word overlap AND same targetFile (when both present)
+    if (overlap > 0.7 && (targetMatch || (!targetFile && !existing.targetFile))) {
+      return {
+        duplicate: true,
+        existingId: id,
+        existingTitle: existing.title,
+        reason: `title overlap ${Math.round(overlap * 100)}%${targetMatch ? " + same targetFile" : ""}`,
+      };
+    }
+  }
+
+  return { duplicate: false };
+}
+
+// ---------------------------------------------------------------------------
+// Metrics snapshot helpers (AC2 / AC3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Capture current system metrics for proposal impact measurement.
+ */
+async function captureMetricsSnapshot(): Promise<{
+  mergeRate: number;
+  failureRate: number;
+  avgDuration: number;
+  capturedAt: string;
+}> {
+  try {
+    const { getAggregateStats } = await import("./metrics.ts");
+    const stats = await getAggregateStats(20);
+    return {
+      mergeRate: stats.mergedRate ?? 0,
+      failureRate: stats.failedRate ?? 0,
+      avgDuration: stats.avgDurationMs ?? 0,
+      capturedAt: new Date().toISOString(),
+    };
+  } catch (err: any) {
+    console.error(`[Proposals] Failed to capture metrics snapshot: ${err.message}`);
+    return {
+      mergeRate: 0,
+      failureRate: 0,
+      avgDuration: 0,
+      capturedAt: new Date().toISOString(),
+    };
+  }
+}
+
+/**
+ * Check if enough cycles have elapsed since a proposal was applied,
+ * then capture post-metrics and calculate impact delta.
+ *
+ * Returns the impact result or an error object. Does not throw.
+ */
+async function checkProposalImpact(proposalId: string): Promise<
+  { measured: true; impact: { mergeRateDelta: number; failureRateDelta: number; avgDurationDelta: number }; proposal: any } |
+  { measured: false; reason: string }
+> {
+  const record = await getProposal(proposalId);
+  if (!record) return { measured: false, reason: `Proposal ${proposalId} not found` };
+  if (record.applied !== "true") return { measured: false, reason: `Proposal ${proposalId} was not applied` };
+  if (!record.appliedAt) return { measured: false, reason: `Proposal ${proposalId} has no appliedAt timestamp` };
+
+  // Check if 3+ cycles have run since appliedAt
+  try {
+    const { getMetricsTrend } = await import("./metrics.ts");
+    const trend = await getMetricsTrend(20);
+    const appliedMs = new Date(record.appliedAt).getTime();
+    const cyclesSinceApplied = trend.filter((m: any) => {
+      const cycleMs = m.timestamp ? new Date(m.timestamp).getTime() : 0;
+      return cycleMs > appliedMs;
+    }).length;
+
+    if (cyclesSinceApplied < 3) {
+      return { measured: false, reason: `Only ${cyclesSinceApplied} cycles since application (need 3)` };
+    }
+  } catch (err: any) {
+    console.error(`[Proposals] Failed to check cycle count for impact: ${err.message}`);
+    return { measured: false, reason: `Failed to check cycle count: ${err.message}` };
+  }
+
+  // Already measured?
+  if (record.postMetrics) {
+    try {
+      const existing = typeof record.postMetrics === "string"
+        ? JSON.parse(record.postMetrics) : record.postMetrics;
+      const impact = typeof record.impact === "string"
+        ? JSON.parse(record.impact) : record.impact;
+      return { measured: true, impact, proposal: record };
+    } catch { /* intentional: re-measure if parsing fails */ }
+  }
+
+  const postMetrics = await captureMetricsSnapshot();
+  let preMetrics = { mergeRate: 0, failureRate: 0, avgDuration: 0 };
+  try {
+    preMetrics = typeof record.preMetrics === "string"
+      ? JSON.parse(record.preMetrics) : (record.preMetrics || preMetrics);
+  } catch { /* intentional: use zeros if pre-metrics missing/corrupt */ }
+
+  const impact = {
+    mergeRateDelta: postMetrics.mergeRate - preMetrics.mergeRate,
+    failureRateDelta: postMetrics.failureRate - preMetrics.failureRate,
+    avgDurationDelta: postMetrics.avgDuration - preMetrics.avgDuration,
+  };
+
+  record.postMetrics = JSON.stringify(postMetrics);
+  record.impact = JSON.stringify(impact);
+  await saveProposal(record);
+
+  console.log(`[Proposals] Impact measured for ${proposalId}: mergeRate ${impact.mergeRateDelta > 0 ? "+" : ""}${impact.mergeRateDelta}%, failureRate ${impact.failureRateDelta > 0 ? "+" : ""}${impact.failureRateDelta}%`);
+  return { measured: true, impact, proposal: record };
+}
+
 /**
  * Create a proposal and store it in Redis.
+ * Checks for duplicates before creating (AC1).
  */
 async function createProposal(proposal, correlationId, eventBus) {
+  // AC1: dedup check — reject if a similar proposal exists within last 30 days
+  const dedupResult = await checkDuplicate(proposal.title || "", proposal.targetFile || "");
+  if (dedupResult.duplicate) {
+    console.log(`[Proposals] Dedup rejected: "${proposal.title}" matches "${dedupResult.existingTitle}" (${dedupResult.reason})`);
+    return {
+      proposalId: null,
+      title: proposal.title,
+      status: "rejected",
+      rejectionReason: `Duplicate of proposal ${dedupResult.existingId}: ${dedupResult.existingTitle}`,
+      dedupRejected: true,
+    };
+  }
+
   const proposalId = generateProposalId();
 
   const record = {
@@ -336,12 +505,23 @@ async function approveProposal(proposalId, eventBus) {
   record.status = "approved";
   record.approvedAt = new Date().toISOString();
 
+  // AC2: capture pre-application metrics snapshot
+  try {
+    const preMetrics = await captureMetricsSnapshot();
+    record.preMetrics = JSON.stringify(preMetrics);
+  } catch (err: any) {
+    console.error(`[Proposals] Failed to capture pre-metrics for ${proposalId}: ${err.message}`);
+  }
+
   // Attempt to auto-apply the proposal
   let applicationResult = { applied: false, reason: "skipped" };
   try {
     // @ts-expect-error — migrate to proper types
     applicationResult = await applyProposal(record);
     record.applied = applicationResult.applied ? "true" : "false";
+    if (applicationResult.applied) {
+      record.appliedAt = new Date().toISOString();
+    }
     record.applicationNote = applicationResult.applied
     // @ts-expect-error — migrate to proper types
       ? `Applied to ${applicationResult.targetFile}`
@@ -481,4 +661,8 @@ export {
   listProposals,
   watchApprovals,
   archiveApprovedProposals,
+  checkProposalImpact,
+  checkDuplicate,
+  titleOverlap,
+  captureMetricsSnapshot,
 };

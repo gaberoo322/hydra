@@ -500,6 +500,18 @@ export async function removeProposalFromIndex(proposalId: string): Promise<void>
 }
 
 /**
+ * Get proposal IDs created within a time range (by index score).
+ * Scores are epoch ms timestamps set by saveProposalHash.
+ */
+export async function getProposalIdsByTimeRange(
+  minMs: number,
+  maxMs: number,
+): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.zrangebyscore(redisKeys.proposalsIndex(), minMs, maxMs);
+}
+
+/**
  * Get the cost microdollars field from a cycle's costs hash.
  */
 export async function getCycleCostMicrodollars(cycleId: string): Promise<string | null> {
