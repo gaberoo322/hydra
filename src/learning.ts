@@ -304,6 +304,13 @@ export async function consolidate(): Promise<void> {
       console.log(`[Learning] Consolidated ${agent}: ${before} → ${kept.length} patterns (${before - kept.length} stale pruned)`);
     }
   }
+
+  // Detect and process stale auto-promoted rules in feedback files
+  try {
+    await consolidateStalePromotedRules();
+  } catch (err: any) {
+    console.error(`[Learning] Stale rule consolidation failed: ${err.message}`);
+  }
 }
 
 // ===========================================================================
@@ -756,7 +763,7 @@ async function promoteToFeedback(agentName: string, pattern: MemoryPattern) {
       `### ${pattern.category} (${pattern.hitCount}x since ${pattern.firstSeen})`,
       pattern.action,
       `Last: ${pattern.lastCycleId} (${pattern.examples[0] || "no example"})`,
-      `<!-- auto-promoted ${new Date().toISOString().split("T")[0]} -->`,
+      `<!-- auto-promoted ${new Date().toISOString().split("T")[0]}, last hit ${pattern.lastSeen} -->`,
     ].join("\n");
 
     if (content.includes(sectionHeader)) {
@@ -771,6 +778,178 @@ async function promoteToFeedback(agentName: string, pattern: MemoryPattern) {
     await writeFile(feedbackPath, content);
   } catch (err: any) {
     console.error(`[Learning] Failed to promote to ${feedbackPath}: ${err.message}`);
+  }
+}
+
+// ===========================================================================
+// Section: Staleness detection for auto-promoted feedback rules
+// ===========================================================================
+
+export type StaleRule = {
+  heading: string;
+  promotedDate: string;
+  lastHitDate: string;
+  daysSinceLastHit: number;
+  fullBlock: string;
+};
+
+/**
+ * Parse auto-promoted rules from feedback file content and identify stale ones.
+ * Pure function for testability — no I/O.
+ *
+ * @param feedbackContent - raw markdown content of a feedback file
+ * @param agentName - agent name for logging
+ * @param now - reference date (default: today)
+ * @returns { active, stale30, stale60 } — rules bucketed by staleness
+ */
+export function detectStalePromotedRules(
+  feedbackContent: string,
+  agentName: string,
+  now: Date = new Date(),
+): { active: StaleRule[]; stale30: StaleRule[]; stale60: StaleRule[] } {
+  const active: StaleRule[] = [];
+  const stale30: StaleRule[] = [];
+  const stale60: StaleRule[] = [];
+
+  // Match rule blocks: ### heading ... <!-- auto-promoted ... -->
+  // A rule block starts with ### and ends at the next ### or ## or end of content
+  const autoPromotedSection = feedbackContent.indexOf("## Auto-Promoted Rules");
+  if (autoPromotedSection === -1) return { active, stale30, stale60 };
+
+  const staleSection = feedbackContent.indexOf("## Stale Rules (review needed)");
+  const sectionEnd = staleSection !== -1 ? staleSection : feedbackContent.length;
+  const sectionContent = feedbackContent.slice(autoPromotedSection, sectionEnd);
+
+  // Split into rule blocks by ### headings
+  const ruleBlockRegex = /^### .+$/gm;
+  const headings: { index: number; match: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = ruleBlockRegex.exec(sectionContent)) !== null) {
+    headings.push({ index: m.index, match: m[0] });
+  }
+
+  for (let i = 0; i < headings.length; i++) {
+    const start = headings[i].index;
+    const end = i + 1 < headings.length ? headings[i + 1].index : sectionContent.length;
+    const block = sectionContent.slice(start, end).trimEnd();
+    const heading = headings[i].match;
+
+    // Parse the auto-promoted comment
+    const commentMatch = block.match(
+      /<!--\s*auto-promoted\s+(\d{4}-\d{2}-\d{2})(?:,?\s*last\s+hit\s+(\d{4}-\d{2}-\d{2}))?\s*-->/
+    );
+    if (!commentMatch) continue;
+
+    const promotedDate = commentMatch[1];
+    const lastHitDate = commentMatch[2] || promotedDate;
+
+    const lastHit = new Date(lastHitDate + "T00:00:00Z");
+    const diffMs = now.getTime() - lastHit.getTime();
+    const daysSinceLastHit = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    const rule: StaleRule = {
+      heading,
+      promotedDate,
+      lastHitDate,
+      daysSinceLastHit,
+      fullBlock: block,
+    };
+
+    if (daysSinceLastHit > 60) {
+      stale60.push(rule);
+      console.log(`[Learning] Stale rule (>60d): ${heading} in to-${agentName}.md — last hit ${lastHitDate} (${daysSinceLastHit}d ago)`);
+    } else if (daysSinceLastHit > 30) {
+      stale30.push(rule);
+      console.log(`[Learning] Stale rule (>30d): ${heading} in to-${agentName}.md — last hit ${lastHitDate} (${daysSinceLastHit}d ago)`);
+    } else {
+      active.push(rule);
+    }
+  }
+
+  return { active, stale30, stale60 };
+}
+
+/**
+ * Process feedback file content: move 30-day stale rules to a review section,
+ * remove 60-day stale rules entirely (returned for archival logging).
+ * Pure function — returns the new file content.
+ *
+ * @param feedbackContent - raw markdown content
+ * @param agentName - agent name for logging
+ * @param now - reference date (default: today)
+ * @returns { newContent, archived } — updated content and removed rules
+ */
+export function processStaleRules(
+  feedbackContent: string,
+  agentName: string,
+  now: Date = new Date(),
+): { newContent: string; archived: StaleRule[] } {
+  const { stale30, stale60 } = detectStalePromotedRules(feedbackContent, agentName, now);
+
+  if (stale30.length === 0 && stale60.length === 0) {
+    return { newContent: feedbackContent, archived: [] };
+  }
+
+  let content = feedbackContent;
+
+  // Remove stale60 rules entirely (auto-archived)
+  for (const rule of stale60) {
+    content = content.replace(rule.fullBlock, "");
+  }
+
+  // Move stale30 rules from their current position to the stale section
+  for (const rule of stale30) {
+    content = content.replace(rule.fullBlock, "");
+  }
+
+  // Clean up multiple blank lines that result from removals
+  content = content.replace(/\n{3,}/g, "\n\n");
+
+  // Build the stale section for 30-day rules (review needed)
+  if (stale30.length > 0) {
+    const staleHeader = "## Stale Rules (review needed)";
+    const existingStaleIdx = content.indexOf(staleHeader);
+
+    const staleBlocks = stale30.map(r => r.fullBlock).join("\n\n");
+
+    if (existingStaleIdx !== -1) {
+      // Append to existing stale section
+      const insertPoint = existingStaleIdx + staleHeader.length;
+      content = content.slice(0, insertPoint) + "\n\n" + staleBlocks + content.slice(insertPoint);
+    } else {
+      // Add new stale section at the end
+      content = content.trimEnd() + "\n\n" + staleHeader + "\n\n" +
+        "Rules below have not fired in >30 days. Review and remove if no longer relevant.\n\n" +
+        staleBlocks + "\n";
+    }
+  }
+
+  return { newContent: content, archived: stale60 };
+}
+
+/**
+ * Run staleness detection on all feedback files.
+ * Called during consolidation.
+ */
+async function consolidateStalePromotedRules(): Promise<void> {
+  for (const agent of ["planner", "executor", "skeptic"]) {
+    const feedbackPath = join(CONFIG_PATH, "feedback", `to-${agent}.md`);
+    try {
+      const content = await readFile(feedbackPath, "utf-8");
+      const { newContent, archived } = processStaleRules(content, agent);
+
+      if (newContent !== content) {
+        await writeFile(feedbackPath, newContent);
+
+        if (archived.length > 0) {
+          for (const rule of archived) {
+            console.log(`[Learning] Archived stale rule from to-${agent}.md: ${rule.heading} (last hit ${rule.lastHitDate}, ${rule.daysSinceLastHit}d ago)`);
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error(`[Learning] Failed to process stale rules for to-${agent}.md: ${err.message}`);
+    }
   }
 }
 
