@@ -13,7 +13,7 @@ import { readFile, symlink, access } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { runAgent, findPersonality } from "./codex-runner.ts";
+import { runAgent, findPersonality, getExecutorTimeout } from "./codex-runner.ts";
 import { getTracker } from "./task-tracker.ts";
 import { getContext } from "./learning.ts";
 import { generateRepoMap } from "./repo-map.ts";
@@ -67,10 +67,12 @@ export interface BuildPromptInput {
   branchName: string;
   complexity: string;
   repoMapContext?: string;
+  timeRemainingMs?: number;
+  deadlineUnix?: number;
 }
 
 export function buildExecutorPrompt(input: BuildPromptInput): string {
-  const { task, groundingSummary, executorContext, executorKnowledge, testPatternHint, useWorktree, branchName, complexity, repoMapContext } = input;
+  const { task, groundingSummary, executorContext, executorKnowledge, testPatternHint, useWorktree, branchName, complexity, repoMapContext, timeRemainingMs, deadlineUnix } = input;
 
   const prompt = [
     `## TASK`,
@@ -100,6 +102,12 @@ export function buildExecutorPrompt(input: BuildPromptInput): string {
     "",
     executorKnowledge,
     "",
+    ...(timeRemainingMs != null ? [
+      `## TIME BUDGET`,
+      `You have ${Math.round(timeRemainingMs / 1000)}s remaining (deadline: ${deadlineUnix ? new Date(deadlineUnix * 1000).toISOString() : "unknown"}).`,
+      `When timeRemainingMs < 120000 (2 minutes left), commit what you have immediately. Skip optional verification. Push before timeout.`,
+      "",
+    ] : []),
     `## RULES`,
     ...(useWorktree ? [
       `1. You are in an isolated worktree on branch \`${branchName}\`. The workspace is clean. Start working immediately — do NOT run git checkout or create branches.`,
@@ -247,6 +255,9 @@ export async function runExecutorAgent(
     }
   } catch { /* intentional: test pattern hint is optional context for the executor */ }
 
+  const executorTimeoutMs = getExecutorTimeout(complexity);
+  const deadlineUnix = Math.floor((Date.now() + executorTimeoutMs) / 1000);
+
   const prompt = buildExecutorPrompt({
     task,
     groundingSummary,
@@ -257,6 +268,8 @@ export async function runExecutorAgent(
     branchName,
     complexity,
     repoMapContext,
+    timeRemainingMs: executorTimeoutMs,
+    deadlineUnix,
   });
 
   const personality = await findPersonality("executor");
@@ -268,6 +281,7 @@ export async function runExecutorAgent(
     taskId: task.taskId,
     correlationId: cycleId,
     workDir: executorWorkDir,
+    timeout: executorTimeoutMs,
   });
 
   // If using worktree, push the branch and clean up the worktree

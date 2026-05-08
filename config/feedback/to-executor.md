@@ -176,6 +176,15 @@ When touching any file under `web/src/app/` or `web/src/components/`:
 6. **Status colors follow the system.** Emerald for success, amber for warning, red for error, blue for info. Use the opacity pattern: `text-{color}-400 bg-{color}-400/10 border-{color}-400/30`.
 7. **No new CSS classes in globals.css** without operator approval. Use Tailwind utilities.
 
+## Time Budget Awareness
+
+The orchestrator passes a time budget in your prompt context (TIME BUDGET section). Monitor your remaining time:
+
+- When timeRemainingMs < 120000 (2 minutes), commit what you have immediately. Skip optional verification. Push before timeout.
+- Prefer running `npm test` once after all changes rather than after each file edit. Each test run costs ~100s.
+- If the task requires multiple test runs (TDD red-green cycle), budget accordingly: standard tasks get 900s, complex tasks get 1200s, quick-fix tasks get 600s.
+- A timeout with uncommitted work is worse than a partial commit that passes tests.
+
 ## Auto-Promoted Rules
 
 ### verification-failure (25x since 2026-04-19)
