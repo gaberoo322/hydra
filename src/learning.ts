@@ -60,7 +60,7 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, 
 const OV_CONFIG_MOUNT = process.env.OV_CONFIG_MOUNT || "/config";
 
 const MAX_PATTERNS = 15;
-const PROMOTION_THRESHOLD = 5;
+export const PROMOTION_THRESHOLD = 3;
 const MAX_EXAMPLES = 3;
 const REFLECTION_TTL = 7 * 24 * 60 * 60; // 7 days
 const REFLECTION_TTL_EXTENDED = 30 * 24 * 60 * 60; // 30 days for effective reflections
