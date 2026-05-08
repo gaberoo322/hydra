@@ -1285,6 +1285,35 @@ export async function consumeResearchForceOnce(): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
+// Reflection outcome tracking (issue #150)
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a reflection outcome (whether a retry with reflections succeeded or failed).
+ * Stored as a sorted set (by timestamp) for time-ordered retrieval.
+ */
+export async function pushReflectionOutcome(json: string, score: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.zadd(redisKeys.reflectionOutcomes(), score, json);
+}
+
+/**
+ * Get all reflection outcomes (oldest first).
+ */
+export async function getReflectionOutcomes(): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.zrange(redisKeys.reflectionOutcomes(), 0, -1);
+}
+
+/**
+ * Set TTL on a reflection key (for extending effective reflections).
+ */
+export async function setReflectionKeyTTL(key: string, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.expire(key, ttlSeconds);
+}
+
+// ---------------------------------------------------------------------------
 // Atomic scheduler operations (issue #140)
 // ---------------------------------------------------------------------------
 
