@@ -74,4 +74,4 @@ This returns up-to-date documentation and code examples. Use it instead of guess
 - Don't merge to main — ever
 - Don't delete files that have tests — they are intentional
 - Don't weaken validation to make tests pass
-- **Don't add hourly crons to `vercel.json`** — Hobby plan only allows daily (`0 0 * * *`). Hourly crons block ALL deploys.
+- **Cron jobs run as systemd timers** — the project is fully self-hosted on the NUC.
