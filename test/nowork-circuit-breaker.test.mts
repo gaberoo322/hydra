@@ -18,11 +18,11 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import { createMockCycleContext, createMockAnchor } from "./helpers/mock-context.ts";
 
 let redis: any;
 
 const REFRAME_QUEUE_KEY = "hydra:anchors:reframe-queue";
-const ABANDONMENT_PREFIX = "hydra:anchors:abandonment-count:";
 
 async function cleanKeys() {
   const patterns = [
@@ -163,38 +163,16 @@ describe("noWork circuit-breaker escalation (issue #137)", () => {
     const { createTracker } = await import("../src/task-tracker.ts");
     createTracker();
 
-    const anchor = {
+    const anchor = createMockAnchor({
       type: "doc",
       reference: "direction/priorities.md",
       whyNow: "Priorities doc",
-    };
+    });
 
-    const ctx = {
+    const ctx = createMockCycleContext({
       cycleId: "cycle-nowork-test",
-      startTime: Date.now(),
-      grounding: {
-        testReport: { passed: 42, failed: 0, total: 42, duration: 5000 },
-        typecheckReport: { errors: 0 },
-        groundingDurationMs: 5000,
-        gitStatus: { clean: true },
-      },
-      groundingSummary: "Tests: 42 passed, 0 failed.",
-      ovSession: {
-        sessionId: "test-session",
-        cycleId: "cycle-nowork-test",
-        active: false,
-        async logPlanner() {},
-        async logSkeptic() {},
-        async logExecutor() {},
-        async logOutcome() {},
-        async logVerification() {},
-        async markUsed() {},
-        async commit() {},
-      },
-      eventBus: { async publish() {} },
       anchor,
-      anchorConfidence: { score: 0.75, reason: "heuristic", tier: "heuristic" as const },
-    };
+    });
 
     // Simulate the __noWork sentinel that runPlannerAgent now returns
     const noWorkTask = { __noWork: true, reason: "All priorities addressed" };
