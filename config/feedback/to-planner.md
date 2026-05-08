@@ -7,7 +7,7 @@
 
 ## OPENAI_API_KEY Is Already Configured — Do Not Propose Configuration Tasks
 
-`OPENAI_API_KEY` is set and working in all environments (local + Vercel production). It routes through a Codex OAuth proxy — there is no separate OpenAI API subscription. Do NOT propose any tasks about:
+`OPENAI_API_KEY` is set and working in all environments (local-runtime + scheduler-runtime). It routes through a Codex OAuth proxy — there is no separate OpenAI API subscription. Do NOT propose any tasks about:
 - Configuring, provisioning, or checking `OPENAI_API_KEY`
 - Switching AI providers or adding direct OpenAI access
 - Readiness probes that gate on `OPENAI_API_KEY` presence

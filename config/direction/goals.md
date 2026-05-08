@@ -127,7 +127,7 @@ Next target: cross-platform arbitrage (lowest risk, highest certainty).
 - Execution: 4 modules (executor, persistence, reconciliation, venue loader)
 - Providers: 10 modules (Kalshi, Polymarket REST/WS/CLOB, Odds API, etc.)
 - Runners: 7 CLI scripts
-- Deployment: Vercel (config ready), VPS for runners
+- Deployment: Self-hosted on NUC (systemd + Cloudflare tunnel)
 - Orchestration: Hydra with research, agent memory, Kanban backlog
 
 ## 2026-04-22 Current-State Override
