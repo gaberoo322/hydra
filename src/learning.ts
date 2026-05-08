@@ -45,6 +45,9 @@ import {
   getRealityReport,
   getReportScore,
   getMemoryPatterns,
+  pushReflectionOutcome,
+  getReflectionOutcomes,
+  setReflectionKeyTTL,
 } from "./redis-adapter.ts";
 
 // ===========================================================================
@@ -60,6 +63,7 @@ const MAX_PATTERNS = 15;
 const PROMOTION_THRESHOLD = 5;
 const MAX_EXAMPLES = 3;
 const REFLECTION_TTL = 7 * 24 * 60 * 60; // 7 days
+const REFLECTION_TTL_EXTENDED = 30 * 24 * 60 * 60; // 30 days for effective reflections
 const MAX_REFLECTIONS_PER_ANCHOR = 5;
 const MAX_BUFFER_SIZE = 20;
 
@@ -120,6 +124,22 @@ type GlobalReflection = {
   timestamp: string;
 };
 
+export type ReflectionOutcome = {
+  anchorRef: string;
+  hadReflections: true;
+  outcome: "merged" | "failed" | "abandoned";
+  cycleId: string;
+  timestamp: string;
+};
+
+export type ReflectionEffectiveness = {
+  ref: string;
+  totalRetries: number;
+  successes: number;
+  failures: number;
+  successRate: number;
+};
+
 type AnchorReflection = {
   cycleId: string;
   anchorRef: string;
@@ -145,6 +165,24 @@ export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
     agents, cycleId, task, finalState, anchorRef, anchorType,
     context = {}, skepticVerdict, reflection,
   } = opts;
+
+  // AC1: Check if anchor had existing reflections — if so, record the outcome
+  try {
+    const existingReflections = await getAnchorReflections(reflectionKey(anchorRef));
+    if (existingReflections.length > 0) {
+      const outcome: ReflectionOutcome = {
+        anchorRef,
+        hadReflections: true,
+        outcome: finalState === "merged" ? "merged" : finalState === "abandoned" ? "abandoned" : "failed",
+        cycleId,
+        timestamp: new Date().toISOString(),
+      };
+      await pushReflectionOutcome(JSON.stringify(outcome), Date.now());
+      console.log(`[Learning] Recorded reflection outcome for "${anchorRef.slice(0, 60)}": ${outcome.outcome} (had ${existingReflections.length} prior reflections)`);
+    }
+  } catch (err: any) {
+    console.error(`[Learning] Failed to record reflection outcome for ${cycleId}: ${err.message}`);
+  }
 
   // Record per-agent lessons
   for (const agent of agents) {
@@ -300,10 +338,25 @@ export async function initLearning(): Promise<void> {
 /**
  * Clear per-anchor and global reflections for an anchor reference.
  * Called after a successful merge. Never throws.
+ *
+ * AC3: If the reflection has >50% success rate, extend TTL to 30 days
+ * instead of deleting — preserving effective reflections longer.
  */
 export async function clearOutcomes(anchorRef: string): Promise<void> {
   try {
-    await deleteReflectionKey(reflectionKey(anchorRef));
+    // Check effectiveness before deciding to delete or extend
+    const effectiveness = await getReflectionEffectiveness();
+    const anchorStats = effectiveness.anchors.find(a => a.ref === anchorRef);
+
+    if (anchorStats && anchorStats.successRate > 0.5) {
+      // Effective reflections: extend TTL instead of deleting
+      const key = reflectionKey(anchorRef);
+      await setReflectionKeyTTL(key, REFLECTION_TTL_EXTENDED);
+      console.log(`[Learning] Extended TTL for effective reflections "${anchorRef.slice(0, 60)}" to 30 days (${Math.round(anchorStats.successRate * 100)}% success rate)`);
+    } else {
+      // Ineffective or no data: delete as before
+      await deleteReflectionKey(reflectionKey(anchorRef));
+    }
   } catch (err: any) {
     console.error(`[Learning] Failed to clear per-anchor reflections for "${anchorRef}": ${err.message}`);
   }
@@ -312,6 +365,53 @@ export async function clearOutcomes(anchorRef: string): Promise<void> {
     await clearReflectionsForAnchor(anchorRef);
   } catch (err: any) {
     console.error(`[Learning] Failed to clear global reflections for "${anchorRef}": ${err.message}`);
+  }
+}
+
+// ===========================================================================
+// Section: Public API — getReflectionEffectiveness
+// ===========================================================================
+
+/**
+ * Compute per-anchor effectiveness scores from reflection outcomes.
+ * Returns anchors that had reflections when retried, with success/failure counts.
+ */
+export async function getReflectionEffectiveness(): Promise<{ anchors: ReflectionEffectiveness[] }> {
+  try {
+    const raw = await getReflectionOutcomes();
+    const byAnchor = new Map<string, { successes: number; failures: number }>();
+
+    for (const entry of raw) {
+      try {
+        const outcome: ReflectionOutcome = JSON.parse(entry);
+        if (!outcome.anchorRef) continue;
+
+        const existing = byAnchor.get(outcome.anchorRef) || { successes: 0, failures: 0 };
+        if (outcome.outcome === "merged") {
+          existing.successes++;
+        } else {
+          existing.failures++;
+        }
+        byAnchor.set(outcome.anchorRef, existing);
+      } catch { /* intentional: skip unparseable entries */ }
+    }
+
+    const anchors: ReflectionEffectiveness[] = [];
+    for (const [ref, counts] of byAnchor) {
+      const totalRetries = counts.successes + counts.failures;
+      anchors.push({
+        ref,
+        totalRetries,
+        successes: counts.successes,
+        failures: counts.failures,
+        successRate: totalRetries > 0 ? counts.successes / totalRetries : 0,
+      });
+    }
+
+    return { anchors };
+  } catch (err: any) {
+    console.error(`[Learning] Failed to compute reflection effectiveness: ${err.message}`);
+    return { anchors: [] };
   }
 }
 

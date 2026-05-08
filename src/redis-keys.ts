@@ -72,6 +72,7 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   reflectionPrefix: () => "hydra:reflections:",
   reflection: (normalizedRef: string) => `hydra:reflections:${normalizedRef}`,
+  reflectionOutcomes: () => "hydra:learning:reflection:outcomes",
 
   // ---------------------------------------------------------------------------
   // Backlog

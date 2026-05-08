@@ -6,7 +6,7 @@ import { killCycle } from "../cycle.ts";
 import { loadProjectGoals, summarizeGoalsForPrompt } from "../project-goals.ts";
 import { getPlanCacheStats, invalidatePlanCache } from "../plan-cache.ts";
 import { sendDigestNow } from "../digest.ts";
-import { getAllReflections } from "../learning.ts";
+import { getAllReflections, getReflectionEffectiveness } from "../learning.ts";
 import { redisKeys } from "../redis-keys.ts";
 import {
   pushToWorkQueue, pushAlert, setNX, getString, delKey,
@@ -337,6 +337,16 @@ export function createMiscRouter(eventBus: any) {
     try {
       const reflections = await getAllReflections();
       res.json({ reflections, count: reflections.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /reflections/effectiveness — Per-anchor effectiveness scores (issue #150)
+  router.get("/reflections/effectiveness", async (req, res) => {
+    try {
+      const result = await getReflectionEffectiveness();
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
