@@ -24,7 +24,8 @@ import {
   updateCycleHash, refreshCycleTTL,
   setCycleLast, clearCycleActive,
   saveRealityReport, trimRealityReports,
-  pushToWorkQueue,
+  pushToWorkQueue, findWorkQueueDuplicate,
+  getRecentReportIds, getRealityReport,
   markHealthAnchorResolved,
   getPatternCooldown, setPatternCooldown, pushAlert,
 } from "./redis-adapter.ts";
@@ -69,6 +70,34 @@ async function syncTargetPriorities(): Promise<void> {
 
   await writeFile(TARGET_PRIORITIES_PATH, source);
   console.log(`[ControlLoop] Synced priorities.md to target project`);
+}
+
+/**
+ * Check if an adversarial finding overlaps a recently-merged task title.
+ * Prevents queueing fix items for work already completed in a prior cycle.
+ */
+async function isAdversarialFindingAlreadyMerged(reference: string): Promise<boolean> {
+  try {
+    const reportIds = await getRecentReportIds(15);
+    const refWords = new Set(reference.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w: string) => w.length > 2));
+    if (refWords.size === 0) return false;
+
+    for (const rid of reportIds) {
+      const raw = await getRealityReport(rid);
+      if (!raw) continue;
+      try {
+        const report = JSON.parse(raw);
+        if (!report.taskTitle || parseInt(report.tasksMerged || "0") === 0) continue;
+        const mergedWords = new Set(report.taskTitle.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter((w: string) => w.length > 2));
+        const overlap = Array.from(refWords).filter((w: string) => mergedWords.has(w)).length;
+        const similarity = overlap / Math.min(refWords.size, mergedWords.size);
+        if (similarity > 0.5) return true;
+      } catch { /* intentional: skip unparseable reports */ }
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Adversarial merge-dedup check failed (proceeding): ${err.message}`);
+  }
+  return false;
 }
 
 export interface PostMergeResult {
@@ -411,9 +440,25 @@ export async function runPostMerge(
         console.log(`[ControlLoop] Adversarial: ${advReport.findings.length} finding(s) — ${advReport.findings.filter((f: any) => f.severity === "high").length} high, ${advReport.findings.filter((f: any) => f.severity === "medium").length} medium`);
         const queueItems = _verificationInternal.findingsToQueueItems(advReport);
         if (queueItems.length > 0) {
+          let queued = 0;
           for (const item of queueItems.slice(0, 3)) {
+            // Dedup against existing work queue items
+            const existingMatch = await findWorkQueueDuplicate(item.reference);
+            if (existingMatch) {
+              console.log(`[ControlLoop] Adversarial: skipped (queue dedup) — ${item.reference.slice(0, 80)}`);
+              continue;
+            }
+            // Dedup against recently-merged tasks
+            if (await isAdversarialFindingAlreadyMerged(item.reference)) {
+              console.log(`[ControlLoop] Adversarial: skipped (already merged) — ${item.reference.slice(0, 80)}`);
+              continue;
+            }
             await pushToWorkQueue(JSON.stringify(item));
+            queued++;
             console.log(`[ControlLoop] Adversarial: queued fix — ${item.reference.slice(0, 80)}`);
+          }
+          if (queued === 0) {
+            console.log(`[ControlLoop] Adversarial: all ${queueItems.length} finding(s) already in queue — skipped`);
           }
         }
         report.adversarialValidation = {
