@@ -44,6 +44,11 @@ const REFRAME_QUEUE_CAP = 20;
 const REFRAME_QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const REFRAME_INTERLEAVE_INTERVAL = 5; // force reframe every Nth cycle when queue non-empty
 
+// Confidence gate for codebase-health anchors (issue #147)
+// Health anchors without grounding signal (failing tests or type errors) are
+// low-confidence — they tend to produce "Planner produced no task" abandonments.
+export const HEALTH_CONFIDENCE_THRESHOLD = 0.5;
+
 // Key helpers
 const PERM_SKIP_PREFIX = "hydra:anchors:perm-skip:";
 const METRICS_INDEX_KEY = "hydra:metrics:index";
@@ -497,6 +502,18 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
         console.log(`[ControlLoop] Skipping codebase-health issue "${ref}" (abandoned=${abandonCount}, permSkip=${permSkipCount}) — falling through`);
         continue;
       }
+      // Confidence gate (issue #147): skip health anchors when grounding has
+      // no failing tests and no type errors — these are low-confidence and tend
+      // to produce "Planner produced no task" abandonments.
+      const hasGroundingSignal =
+        (grounding.testReport?.failed ?? 0) > 0 ||
+        (grounding.typecheckReport?.errors ?? 0) > 0;
+      if (!hasGroundingSignal) {
+        console.log(`[AnchorSelection] low-confidence-skip: codebase-health anchor skipped (no failing tests or type errors) — "${ref}"`);
+        await markLowConfidenceSkip({ type: "codebase-health", reference: ref });
+        continue;
+      }
+
       console.log(`[ControlLoop] Codebase health anchor: ${issue.category} — ${issue.file} (${issue.metric})`);
       return {
         type: "codebase-health",
@@ -843,6 +860,7 @@ export const _testing = {
   REFRAME_QUEUE_CAP,
   REFRAME_QUEUE_MAX_AGE_MS,
   REFRAME_INTERLEAVE_INTERVAL,
+  HEALTH_CONFIDENCE_THRESHOLD,
   trackAbandonment,
   clearAbandonmentCounter,
   storePriorFailure,
