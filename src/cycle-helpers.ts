@@ -11,6 +11,7 @@
  */
 
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -295,6 +296,58 @@ export async function handleEarlyExit(opts: EarlyExitOpts): Promise<void> {
     planCacheHit: task?.__planCacheHit ? "true" : "false",
     ...metricsOverrides,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Scope path validation — reject plans with non-existent file paths (issue #170)
+// ---------------------------------------------------------------------------
+
+export interface ScopePathValidation {
+  valid: boolean;
+  missingFiles: string[];
+  hints: string[];
+}
+
+/**
+ * Validate that every file in scopeBoundary.in exists in the target project.
+ * If a file doesn't exist, check if `web/${file}` exists and provide a hint.
+ * Never throws — returns a result object.
+ */
+export function validateScopePaths(
+  scopeIn: string[],
+  projectWorkspace: string,
+): ScopePathValidation {
+  if (!scopeIn || scopeIn.length === 0) {
+    return { valid: true, missingFiles: [], hints: [] };
+  }
+
+  // Skip validation if the workspace directory itself doesn't exist (e.g., CI/test)
+  if (!existsSync(projectWorkspace)) {
+    return { valid: true, missingFiles: [], hints: [] };
+  }
+
+  const missingFiles: string[] = [];
+  const hints: string[] = [];
+
+  for (const filePath of scopeIn) {
+    const fullPath = join(projectWorkspace, filePath);
+    if (!existsSync(fullPath)) {
+      missingFiles.push(filePath);
+
+      // Check for common src/ vs web/src/ confusion
+      const webPrefixed = `web/${filePath}`;
+      const webFullPath = join(projectWorkspace, webPrefixed);
+      if (existsSync(webFullPath)) {
+        hints.push(`${filePath} does not exist, but ${webPrefixed} does — did the planner omit the web/ prefix?`);
+      }
+    }
+  }
+
+  return {
+    valid: missingFiles.length === 0,
+    missingFiles,
+    hints,
+  };
 }
 
 // ---------------------------------------------------------------------------

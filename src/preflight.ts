@@ -7,6 +7,7 @@ import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getContext } from "./learning.ts";
 import { getTracker } from "./task-tracker.ts";
 import { getRecentReportIds, getRealityReport } from "./redis-adapter.ts";
+import { validateScopePaths, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 
 // ---------------------------------------------------------------------------
 // Operator-blocked detection
@@ -160,7 +161,7 @@ export function classifyTaskComplexity(task, anchor) {
 // Catches: duplicates, scope issues, grounding contradictions, verification gaps
 // ---------------------------------------------------------------------------
 
-export async function preflightCheck(task, grounding, groundingSummary) {
+export async function preflightCheck(task, grounding, groundingSummary, projectWorkspace?: string) {
   const flags: string[] = [];
 
   // 1. Duplicate check — compare against recent cycle history in Redis
@@ -215,6 +216,19 @@ export async function preflightCheck(task, grounding, groundingSummary) {
   const badSteps = (task.verificationPlan || []).filter((s) => !s.command || typeof s.command !== "string");
   if (badSteps.length > 0) {
     flags.push(`${badSteps.length} verification step(s) missing a command`);
+  }
+
+  // 5. Scope path validation — reject plans with non-existent file paths (issue #170)
+  if (task.scopeBoundary?.in?.length > 0) {
+    const scopeValidation = validateScopePaths(task.scopeBoundary.in, projectWorkspace ?? PROJECT_WORKSPACE);
+    if (!scopeValidation.valid) {
+      const fileList = scopeValidation.missingFiles.join(", ");
+      let flag = `Planner scoped non-existent file(s): ${fileList}`;
+      if (scopeValidation.hints.length > 0) {
+        flag += ` [${scopeValidation.hints.join("; ")}]`;
+      }
+      flags.push(flag);
+    }
   }
 
   return { pass: flags.length === 0, flags };
