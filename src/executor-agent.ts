@@ -9,7 +9,7 @@
  * - Result parsing into typed ExecutorResult
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, symlink, access } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -195,6 +195,17 @@ export async function runExecutorAgent(
     });
     useWorktree = true;
     console.log(`[ExecutorAgent] Created worktree at ${worktreePath} on branch ${branchName}`);
+
+    // Symlink env files that are gitignored/untracked so tests have env vars
+    const envFiles = ["web/.env", "web/.env.local", ".env.local"];
+    for (const envFile of envFiles) {
+      const src = join(PROJECT_WORKSPACE, envFile);
+      const dst = join(worktreePath, envFile);
+      try {
+        await access(src);
+        await symlink(src, dst);
+      } catch { /* intentional: env file doesn't exist in main repo, skip */ }
+    }
   } catch (err: any) {
     console.error(`[ExecutorAgent] Worktree creation failed (falling back to shared workspace): ${err.message}`);
   }

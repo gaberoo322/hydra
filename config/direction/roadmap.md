@@ -77,86 +77,17 @@ status: active
 started: 2026-04-21
 completed:
 
-Deliver real-money cross-venue proof, route-level execution evidence, and operator-visible monitoring for sports-first arbitrage.
+Deliver real-money cross-venue proof, hardened execution controls, and operator-grade monitoring for sports-first arbitrage.
 
-- [x] Expose Polymarket matched-vs-confirmed residual exposure states in run packets
-- [x] Add Polymarket CLOB V2 production smoke proof to arbitrage run packets
-- [x] Add route-level sports execution quality summary
-- [x] Add sports route-mode decision to run-cycle packets
-- [x] Add Polymarket reward price-distance discount evidence
-- [x] Persist Kalshi batch orderbook timestamp evidence in run packets
-- [x] Add Kalshi RFQ visible-book route quality comparator
-- [ ] Validate Polymarket CLOB V2 execution end-to-end (V2 went live April 28)
-- [ ] Add Polymarket ghost-fill detection and position reconciliation
-- [ ] Persist Polymarket V2 per-sport fee evidence and pUSD collateral lifecycle
-- [ ] Enforce daily loss limit and kill switch in executeArbitrage() (not just API route)
-- [ ] Add execution alerting (Telegram) for partial_needs_unwind, circuit breaker trips, stuck orders
-- [ ] Instrument execution latency tracking end-to-end
-- [ ] Track sports arbitrage opportunity half-life from first detection through expiry
-- [ ] Wire Polymarket US preview, slippage, and AUTOMATIC proof into live sports legs
-- [ ] Persist Kalshi account limits, rate-limit token buckets, and fractional trading fields
-
-## M7: Sports Forecast Trust & Sizing Compounding
-status: planned
-started:
-completed:
-
-Use settled sports outcomes, CLV, and source reliability to compound sizing toward the most accurate signals.
-
-- [x] Expose settlement update audit fields for forecast outcome sync
-- [x] Update unresolved sports forecast outcomes on settlement sync
-- [x] Persist sportsbook fair-line sizing basis on candidates
-- [x] Carry sportsbook fair-line edge into run-cycle sizing preview
-- [x] Expose sports replay summaries on calibration dashboard
-- [x] Add OpticOdds sharp-line fair-value adapter for CLV benchmarking
-- [ ] Convert calibration outcomes and Pinnacle CLV into source trust weights
-- [ ] Feed source trust weights into sports run-cycle sizing previews
-- [ ] Show calibration-backed sizing rationale on the calibration dashboard
-
-## M8: Sports Operator Workflow & Scale
-status: planned
-started:
-completed:
-
-Improve operator throughput once the live proof and trust-weighted sizing loops are in place.
-
-- [ ] Make kill switch, daily loss limit, and risk settings editable from dashboard
-- [ ] Add auto-refresh / live polling to dashboard pages
-- [ ] Surface circuit breaker state and recovery queue in dashboard
-- [ ] Add execution timeline / unified activity log page
-- [ ] Add venue maintenance window visibility and execution-blocking indicators
-- [ ] Add a compact live sports opportunity queue across arbitrage, markets, and venue orders
-- [ ] Optimize forecast outcome sync away from full-table terminal order scans when history grows
-
-## M9: Execution Speed & Latency Optimization
-status: planned
-started:
-completed:
-
-Address the collapsing arb half-life (2.7s avg, 3.6s NBA) by optimizing execution latency.
-
-- [ ] Implement WebSocket-based Kalshi price monitoring via orderbook and ticker channels
-- [ ] Profile and benchmark dual-leg submission latency end-to-end
-- [ ] Add parallel first-leg and second-leg pre-positioning for near-simultaneous execution
-- [ ] Add venue API timeout and retry budget enforcement for dual-leg execution
-- [ ] Add execution-speed metrics to run packets (time-to-first-fill, total-round-trip)
-- [ ] Consume Kalshi order_group_updates WebSocket channel for real-time lifecycle events
-- [ ] Consume Kalshi fractional trading and settlement_value fields for precision sizing
-
-## M10: Sharp-Line Benchmarking & Multi-Venue Expansion
-status: planned
-started:
-completed:
-
-Replace restricted Pinnacle API with aggregated sharp-line data and explore new venue opportunities.
-
-- [x] Add OpticOdds odds-fetching capability (fetchOdds with Zod schemas)
-- [ ] Wire OpticOdds unified odds API as sharp-line benchmark
-- [ ] Seed FIFA World Cup 2026 verified pair registry (June 11 - July 19)
-- [ ] Build NBA Finals rapid pair seeding pipeline (Finals start June 3)
-- [ ] Integrate SportsDataIO injury and lineup feed for line-movement alpha
-- [ ] Add MLB Polymarket-Sportradar official data advantage to scanner pair matching
-- [ ] Model Kalshi combo contracts for multi-leg correlation arbitrage
-- [ ] Implement Polymarket builderCode attribution and maker rebate tracking
-- [ ] Integrate Oddpool cross-venue spread alerts as secondary scanner validation
-- [ ] Evaluate FanDuel Predicts (CME Group) and Hyperliquid HIP-4 as future venues
+- [x] Add Kalshi Fill Latency Percentile Helper
+- [x] Add AI Agent Margin Compression Helper
+- [x] Add Dashboard Exposure Risk Matrix
+- [x] Add Polymarket CLOB provider rate limiting
+- [x] Fix Kalshi IOC partial-fill second-leg sizing to actual fill_count_fp
+- [x] Fix fee-inclusive arbitrage run profitability timeline P&L
+- [ ] Project proposed trade size in single-market exposure preflight
+- [ ] Fail closed on pending migration drift
+- [ ] Require Kalshi price_ranges or price_level_structure for live execution
+- [ ] Persist Polymarket US side-inversion evidence in run packets
+- [ ] Add venue-native sports identity matching before title fallback
+- [ ] Add OpticOdds supported-market capability gating to scanner scope
