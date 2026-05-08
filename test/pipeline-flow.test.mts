@@ -79,7 +79,7 @@ function makeTask(overrides: any = {}) {
     confidence: 0.8,
     risk: "low",
     scopeBoundary: {
-      in: ["src/widget.ts", "src/widget.test.ts"],
+      in: [],
       out: ["src/db.ts"],
     },
     acceptanceCriteria: [
