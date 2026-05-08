@@ -69,7 +69,7 @@ function computeCost(modelId, usage) {
 // Per-agent timeout in ms
 const AGENT_TIMEOUTS = {
   planner: 600_000,
-  executor: 600_000,
+  executor: 600_000, // default; overridden by getExecutorTimeout() per complexity
   skeptic: 600_000,
   strategist: 600_000,
   builder: 600_000,
@@ -81,6 +81,20 @@ const AGENT_TIMEOUTS = {
   "director": 600_000,
   "fixer": 600_000,
 };
+
+/**
+ * Return executor timeout in ms based on task complexity.
+ * quick-fix: 600s, standard: 900s, complex/high-risk: 1200s.
+ */
+function getExecutorTimeout(complexity: string): number {
+  switch (complexity) {
+    case "quick-fix": return 600_000;
+    case "complex":
+    case "high-risk": return 1_200_000;
+    case "standard":
+    default: return 900_000;
+  }
+}
 
 // Agents that only produce text/JSON and don't need file/shell access
 const READ_ONLY_AGENTS = new Set(["planner", "skeptic", "meta", "high-risk-review"]);
@@ -294,7 +308,7 @@ async function runLocalAgent({ agentName, personality, prompt, workDir, timeout:
 /**
  * Run a task using the Codex SDK.
  */
-async function runAgent({ agentName, personality, prompt, model, taskId, correlationId, workDir, onStream, outputSchema }: any) {
+async function runAgent({ agentName, personality, prompt, model, taskId, correlationId, workDir, onStream, outputSchema, timeout: explicitTimeout }: any) {
   const streamFn = onStream || _globalStreamCallback;
   const startTime = Date.now();
   const resolvedModel = await resolveModel(model || "frontier");
@@ -348,7 +362,7 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     sandboxMode: isReadOnly ? "read-only" : "danger-full-access",
   };
 
-  const timeout = AGENT_TIMEOUTS[agentName] || 300_000;
+  const timeout = explicitTimeout || AGENT_TIMEOUTS[agentName] || 300_000;
   const { thread, reused } = getOrCreateThread(agentName, threadOptions, resolvedModel);
   if (reused) {
     console.log(`[CodexRunner] Reusing persistent ${agentName} thread (prompt caching active)`);
@@ -561,4 +575,4 @@ async function searchKnowledge(query, limit = 5, sessionId = null) {
   }
 }
 
-export { runAgent, runLocalAgent, isOllamaAvailable, findPersonality, searchKnowledge, MODEL_TIERS, MODEL_PRICING, composePrompt, buildCodexArgs, computeCost, setAgentStreamCallback, OLLAMA_HOST };
+export { runAgent, runLocalAgent, isOllamaAvailable, findPersonality, searchKnowledge, MODEL_TIERS, MODEL_PRICING, composePrompt, buildCodexArgs, computeCost, setAgentStreamCallback, getExecutorTimeout, OLLAMA_HOST };
