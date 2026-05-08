@@ -35,6 +35,70 @@ import type { CycleContext } from "./cycle-helpers.ts";
 const execFileAsync = promisify(execFile);
 
 // =========================================================================
+// Fixability classifier — pure function, no side effects
+// =========================================================================
+
+/**
+ * Unfixable stderr patterns — these indicate structural problems
+ * that a fixer agent cannot resolve in a single pass.
+ */
+const UNFIXABLE_PATTERNS: Array<{ pattern: RegExp; category: string; reason: string }> = [
+  { pattern: /Cannot find module/i, category: "missing-module", reason: "Missing module — requires install or architectural change" },
+  { pattern: /circular dependency/i, category: "circular-dependency", reason: "Circular dependency — requires architectural refactor" },
+  { pattern: /Maximum call stack/i, category: "stack-overflow", reason: "Stack overflow — likely infinite recursion" },
+  { pattern: /out of memory/i, category: "out-of-memory", reason: "Out of memory — cannot be fixed by code changes" },
+  { pattern: /ENOENT/, category: "missing-file", reason: "Missing file or directory (ENOENT)" },
+  { pattern: /EPERM/, category: "permission-error", reason: "Permission denied (EPERM)" },
+  { pattern: /Cannot read properties of undefined/i, category: "undefined-access", reason: "Undefined property access — likely missing dependency or wrong API shape" },
+];
+
+/**
+ * Fixable stderr patterns — if any of these match, the failure is likely
+ * fixable by the fixer agent.
+ */
+const FIXABLE_PATTERNS: Array<{ pattern: RegExp; category: string }> = [
+  { pattern: /(?:AssertionError|assert\.|toBe|toEqual|not equal|deepEqual|\bExpected\b.*\bgot\b|\bexpected\b.*\bto\b)/i, category: "test-expectation" },
+  { pattern: /(?:has no exported member|is not exported|cannot find name)/i, category: "import-error" },
+  { pattern: /(?:Module build failed|Failed to compile|Build error)/i, category: "build-error" },
+  { pattern: /(?:Type\s+'[^']+'\s+is not assignable|Type error|TS\d{4})/i, category: "type-error" },
+];
+
+/**
+ * Classify whether a set of failed verification steps are fixable by the fixer agent.
+ *
+ * Returns { fixable, reason, category }. Defaults to fixable if no unfixable
+ * pattern matched (conservative — don't skip when unsure).
+ */
+function isFixableFailure(steps: any[]): { fixable: boolean; reason: string; category: string } {
+  const failedSteps = steps.filter((s: any) => !s.passed);
+  if (failedSteps.length === 0) {
+    return { fixable: true, reason: "no failed steps", category: "none" };
+  }
+
+  // Combine all stderr/stdout from failed steps for pattern matching
+  const combinedOutput = failedSteps
+    .map((s: any) => `${s.stderr || ""}\n${s.stdout || ""}`)
+    .join("\n");
+
+  // Check unfixable patterns first — any match means skip fixer
+  for (const { pattern, category, reason } of UNFIXABLE_PATTERNS) {
+    if (pattern.test(combinedOutput)) {
+      return { fixable: false, reason, category };
+    }
+  }
+
+  // Check fixable patterns — if matched, return the specific category
+  for (const { pattern, category } of FIXABLE_PATTERNS) {
+    if (pattern.test(combinedOutput)) {
+      return { fixable: true, reason: `Matched fixable pattern: ${category}`, category };
+    }
+  }
+
+  // Default: fixable (conservative — don't skip when unsure)
+  return { fixable: true, reason: "No unfixable pattern detected (default: fixable)", category: "unknown" };
+}
+
+// =========================================================================
 // Public types
 // =========================================================================
 
@@ -106,12 +170,21 @@ export async function verify(
   // =========================================================================
   // Step 6.5: FIXER — if verification failed, give a fixer agent one shot
   // =========================================================================
+  let fixerSkipped = false;
+  let fixerCategory = "none";
   if (!verification.allPassed) {
-    verification = await runFixerAttempt(ctx, task, verification, verificationPlan, taskId);
+    const fixability = isFixableFailure(verification.steps);
+    fixerCategory = fixability.category;
+    if (fixability.fixable) {
+      verification = await runFixerAttempt(ctx, task, verification, verificationPlan, taskId);
+    } else {
+      fixerSkipped = true;
+      console.log(`[ControlLoop] Fixer SKIPPED: ${fixability.reason} (category: ${fixability.category})`);
+    }
   }
 
   if (!verification.allPassed) {
-    const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
+    const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, fixerSkipped, fixerCategory);
     return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, earlyReturn };
   }
 
@@ -292,6 +365,7 @@ async function runFixerAttempt(
 async function handleVerificationFailure(
   ctx: CycleContext, task: any, verification: any, execResult: any,
   complexity: string, filesInScope: number, criteriaCount: number, taskId: string,
+  fixerSkipped = false, fixerCategory = "none",
 ): Promise<any> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
   const tracker = getTracker();
@@ -346,6 +420,8 @@ async function handleVerificationFailure(
     plannerModel: task.__plannerModel || "unknown",
     planCacheHit: task.__planCacheHit ? "true" : "false",
     executorModel: execResult?.__executorModel || "unknown",
+    fixerSkipped: fixerSkipped ? "true" : "false",
+    fixerCategory,
   });
 
   // Route to Blocked or Backlog
@@ -1814,4 +1890,5 @@ export const _testing = {
   findingsToQueueItems,
   checkRevertCorrelation,
   parseVerificationTestCount,
+  isFixableFailure,
 };
