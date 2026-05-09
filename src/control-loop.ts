@@ -230,7 +230,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   const executeResult = await runExecuteStep(ctx, task, groundingSummary, complexity, taskId);
   if (!executeResult.continue) return executeResult.result;
 
-  const { execResult, diff } = executeResult;
+  const { execResult, diff, scopeFilterCleaned } = executeResult;
 
   // Steps 6–6.9: VERIFICATION PIPELINE
   const vResult = await runVerificationPipeline(ctx, task, diff, execResult, complexity, filesInScope, criteriaCount, taskId);
@@ -239,7 +239,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
     return vResult.earlyReturn;
   }
 
-  const { verification, reconciliation, mutationReport, jitReport } = vResult;
+  const { verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved } = vResult;
 
   // Step 7: MERGE — git operation, NOT an agent
   const mergeStepResult = await runMergeStep(ctx, task, taskId);
@@ -250,6 +250,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
     ctx, task, verification, mergeResult, execResult,
     complexity, filesInScope, criteriaCount, taskId,
     reconciliation, mutationReport, jitReport,
+    scopeFilterCleaned || 0, fixerUsed || false, fixerResolved || false,
   );
 
   return report;

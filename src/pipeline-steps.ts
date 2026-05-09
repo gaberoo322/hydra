@@ -506,10 +506,12 @@ export async function runExecuteStep(
   await ovSession.logExecutor(execResult);
 
   // Step 5.5: SCOPE CREEP FILTER — reset out-of-scope changes before verification
+  let scopeFilterCleaned = 0;
   if (task.scopeBoundary?.in?.length > 0) {
     const scopeClean = await cleanOutOfScopeChanges(PROJECT_WORKSPACE, task.scopeBoundary.in);
-    if (scopeClean.cleaned.length > 0) {
-      console.log(`[ControlLoop] Step 5.5: Scope filter cleaned ${scopeClean.cleaned.length} out-of-scope file(s)`);
+    scopeFilterCleaned = scopeClean.cleaned.length;
+    if (scopeFilterCleaned > 0) {
+      console.log(`[ControlLoop] Step 5.5: Scope filter cleaned ${scopeFilterCleaned} out-of-scope file(s)`);
     }
   }
 
@@ -548,7 +550,7 @@ export async function runExecuteStep(
   await tracker.transitionTask(taskId, "changed-code", { diffLength: diff.length, filesChanged: execResult.filesChanged || [] });
   console.log(`[ControlLoop] Code changed (${diff.split("\n").length} diff lines)`);
 
-  return { continue: true, execResult, diff };
+  return { continue: true, execResult, diff, scopeFilterCleaned };
 }
 
 // ---------------------------------------------------------------------------
