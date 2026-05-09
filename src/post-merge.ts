@@ -28,6 +28,7 @@ import {
   getRecentReportIds, getRealityReport,
   markHealthAnchorResolved,
   getPatternCooldown, setPatternCooldown, pushAlert,
+  indexWorkItem,
 } from "./redis-adapter.ts";
 import { recordCycleMetrics, getMetricsTrend } from "./metrics.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
@@ -392,6 +393,13 @@ export async function runPostMerge(
   if (finalState === "merged") {
     try { await reportOutcome(anchor, { status: "merged" }); } catch { /* intentional: best-effort cleanup */ }
     try { await clearOutcomes(anchor.reference); } catch { /* intentional: best-effort cleanup */ }
+
+    // Index merged task title into OV for semantic dedup of future queue items
+    if (task?.title) {
+      indexWorkItem(task.title, "merged").catch((err: any) => {
+        console.error(`[ControlLoop] Failed to index merged title into OV: ${err.message}`);
+      });
+    }
 
     if (anchor.type === "codebase-health") {
       try {
