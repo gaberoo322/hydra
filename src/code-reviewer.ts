@@ -18,7 +18,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { runLocalAgent, isOllamaAvailable, findPersonality } from "./codex-runner.ts";
+import { runAgent, findPersonality } from "./codex-runner.ts";
 import { pushToWorkQueue, getRedisConnection } from "./redis-adapter.ts";
 
 const execFileAsync = promisify(execFile);
@@ -186,12 +186,12 @@ async function reviewCommit(sha: string, subject: string): Promise<DeepReviewRep
 
   try {
     const personality = await findPersonality("executor");
-    const result = await runLocalAgent({
+    const result = await runAgent({
       agentName: "deep-reviewer",
       personality,
       prompt,
+      model: "local",
       workDir: PROJECT_WORKSPACE,
-      timeout: 180_000, // 3 minutes — Gemma is slower but free
     });
 
     let findings: DeepReviewFinding[] = [];
@@ -229,12 +229,6 @@ export function startCodeReviewerLoop(eventBus: any): () => void {
 
   const run = async () => {
     try {
-      // Check if Ollama is available before doing any work
-      const available = await isOllamaAvailable();
-      if (!available) {
-        return; // Skip this interval — Ollama is offline
-      }
-
       const merges = await getRecentMerges(5);
       if (merges.length === 0) return;
 

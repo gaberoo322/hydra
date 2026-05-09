@@ -205,6 +205,9 @@ const OLLAMA_HEALTH_CACHE_MS = 60_000;
 const OLLAMA_MODEL_NAME = "gemma4:26b";
 
 async function isOllamaAvailable(): Promise<boolean> {
+  if (process.env.OLLAMA_DISABLED === "true") {
+    return false;
+  }
   if (Date.now() - _ollamaHealthCheckedAt < OLLAMA_HEALTH_CACHE_MS && _ollamaHealthy !== null) {
     return _ollamaHealthy;
   }
