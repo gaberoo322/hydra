@@ -193,6 +193,101 @@ describe("prior-failure escalation (issue #18)", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Orphan pruning — prior failures with expired task hash (issue #188)
+  // ---------------------------------------------------------------------------
+
+  test("selectAnchor prunes prior-failure entries whose task hash expired and lack embedded context", async () => {
+    // Insert a prior-failure entry WITHOUT title/description (legacy format)
+    // and WITHOUT a corresponding task hash in Redis — simulates TTL expiry.
+    const orphanItem = JSON.stringify({
+      taskId: "task-orphan-001",
+      reason: "no code changes produced",
+      failedSteps: ["npm test"],
+      retryCount: 1,
+      timestamp: new Date().toISOString(),
+    });
+    await redis.rpush(PRIOR_FAILURES_KEY, orphanItem);
+
+    // No task hash exists for task-orphan-001 — it expired.
+
+    // Minimal grounding that produces no higher-priority anchors
+    const grounding = {
+      failingTests: [],
+      testReport: { passed: 10, failed: 0, total: 10 },
+      typecheckReport: { exitCode: 0, errors: 0 },
+      todoMarkers: [],
+      fileTree: "",
+    };
+
+    const anchor = await anchorSelection.selectAnchor(grounding);
+
+    // The orphan entry should have been pruned — not returned as an anchor
+    if (anchor) {
+      assert.notEqual(anchor.type, "prior-failure",
+        "orphan prior-failure with expired task hash should be pruned, not retried");
+    }
+
+    // The prior-failures queue should be empty (orphan was removed)
+    const remaining = await redis.lrange(PRIOR_FAILURES_KEY, 0, -1);
+    assert.equal(remaining.length, 0, "orphan prior-failure should be pruned from queue");
+  });
+
+  test("selectAnchor retains prior-failure entries that have embedded title/description", async () => {
+    // Insert a prior-failure entry WITH title/description (new format from issue #188).
+    // Even though the task hash doesn't exist, it should NOT be pruned because
+    // the entry is self-contained.
+    const selfContainedItem = JSON.stringify({
+      taskId: "task-self-contained-001",
+      title: "Fix the widget parser",
+      description: "The widget parser crashes on empty input",
+      reason: "build failed",
+      failedSteps: ["tsc"],
+      retryCount: 1,
+      timestamp: new Date().toISOString(),
+    });
+    await redis.rpush(PRIOR_FAILURES_KEY, selfContainedItem);
+
+    const grounding = {
+      failingTests: [],
+      testReport: { passed: 10, failed: 0, total: 10 },
+      typecheckReport: { exitCode: 0, errors: 0 },
+      todoMarkers: [],
+      fileTree: "",
+    };
+
+    const anchor = await anchorSelection.selectAnchor(grounding);
+
+    // Should be returned as a retryable prior-failure anchor
+    assert.ok(anchor, "should return the self-contained prior-failure as an anchor");
+    assert.equal(anchor.type, "prior-failure");
+    assert.equal(anchor.reference, "task-self-contained-001");
+  });
+
+  // ---------------------------------------------------------------------------
+  // storePriorFailure embeds title/description (issue #188)
+  // ---------------------------------------------------------------------------
+
+  test("storePriorFailure includes title and description from task hash", async () => {
+    // Create a task hash with title and description
+    await redis.hset("hydra:task:task-embed-001",
+      "title", "Refactor the grounding module",
+      "description", "Split grounding.ts into focused sub-modules",
+      "status", "running",
+    );
+
+    await anchorSelection._testing.storePriorFailure("task-embed-001", "build failed", null, 0);
+
+    const entries = await redis.lrange(PRIOR_FAILURES_KEY, 0, -1);
+    assert.equal(entries.length, 1, "should have 1 entry in prior-failures");
+
+    const entry = JSON.parse(entries[0]);
+    assert.equal(entry.title, "Refactor the grounding module",
+      "prior-failure entry should embed task title");
+    assert.equal(entry.description, "Split grounding.ts into focused sub-modules",
+      "prior-failure entry should embed task description");
+  });
+
+  // ---------------------------------------------------------------------------
   // Constants are exported and configurable
   // ---------------------------------------------------------------------------
 
