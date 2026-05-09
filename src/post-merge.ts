@@ -116,9 +116,12 @@ export interface PostMergeResult {
  * @param filesInScope   — number of files in scope boundary
  * @param criteriaCount  — number of acceptance criteria
  * @param taskId         — task identifier
- * @param reconciliation — plan vs actual reconciliation
- * @param mutationReport — mutation testing report (may be null)
- * @param jitReport      — JIT testing report (may be null)
+ * @param reconciliation    — plan vs actual reconciliation
+ * @param mutationReport    — mutation testing report (may be null)
+ * @param jitReport         — JIT testing report (may be null)
+ * @param scopeFilterCleaned — number of out-of-scope files cleaned by scope filter
+ * @param fixerUsed         — whether the fixer agent was invoked
+ * @param fixerResolved     — whether the fixer agent resolved the failure
  */
 export async function runPostMerge(
   ctx: CycleContext,
@@ -133,6 +136,9 @@ export async function runPostMerge(
   reconciliation: any,
   mutationReport: any,
   jitReport: any,
+  scopeFilterCleaned = 0,
+  fixerUsed = false,
+  fixerResolved = false,
 ): Promise<PostMergeResult> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor, anchorConfidence } = ctx;
   const tracker = getTracker();
@@ -336,6 +342,21 @@ export async function runPostMerge(
 
   console.log(`[ControlLoop] Cycle ${cycleId} complete — ${report.task.finalState} in ${report.durationMs}ms`);
 
+  // Compute mutation kill rate for metrics
+  const mutationTestable = mutationReport
+    ? mutationReport.totalMutants - (mutationReport.skipped || 0)
+    : 0;
+  const mutationKillRate = mutationReport && mutationTestable > 0
+    ? Math.round((mutationReport.killed / mutationTestable) * 100)
+    : null;
+
+  // Derive reconciliation status
+  const reconciliationStatus = reconciliation
+    ? (reconciliation.aligned
+      ? "aligned"
+      : (reconciliation.scopeCreep?.length > 0 ? "scopeCreep" : "incomplete"))
+    : "skipped";
+
   // Record structured metrics
   await recordCycleMetrics(cycleId, {
     tasksAttempted: 1,
@@ -368,6 +389,14 @@ export async function runPostMerge(
     jitTestsCaughtBug: jitReport?.caughtBug ? 1 : 0,
     anchorConfidence: anchorConfidence?.score ?? null,
     anchorSkipped: false,
+    // Quality gate fields (issue #181)
+    mutationKillRate: mutationKillRate ?? -1,
+    mutationKilled: mutationReport?.killed ?? 0,
+    mutationSurvived: mutationReport?.survived ?? 0,
+    fixerUsed: fixerUsed ? 1 : 0,
+    fixerResolved: fixerResolved ? 1 : 0,
+    scopeFilterCleaned,
+    reconciliationStatus,
   });
 
   // Step 8.0.5: Calibration

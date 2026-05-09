@@ -113,6 +113,10 @@ export interface VerificationResult {
   mutationReport: any;
   /** JIT testing report (null if skipped) */
   jitReport: any;
+  /** Whether the fixer agent was invoked during this pipeline run */
+  fixerUsed: boolean;
+  /** Whether the fixer agent resolved the verification failure */
+  fixerResolved: boolean;
   /** If failed, the early return value for the caller */
   earlyReturn?: any;
 }
@@ -172,11 +176,15 @@ export async function verify(
   // =========================================================================
   let fixerSkipped = false;
   let fixerCategory = "none";
+  let fixerUsed = false;
+  let fixerResolved = false;
   if (!verification.allPassed) {
     const fixability = isFixableFailure(verification.steps);
     fixerCategory = fixability.category;
     if (fixability.fixable) {
+      fixerUsed = true;
       verification = await runFixerAttempt(ctx, task, verification, verificationPlan, taskId);
+      fixerResolved = verification.allPassed;
     } else {
       fixerSkipped = true;
       console.log(`[ControlLoop] Fixer SKIPPED: ${fixability.reason} (category: ${fixability.category})`);
@@ -185,7 +193,7 @@ export async function verify(
 
   if (!verification.allPassed) {
     const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, fixerSkipped, fixerCategory);
-    return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, earlyReturn };
+    return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, earlyReturn };
   }
 
   // =========================================================================
@@ -214,7 +222,7 @@ export async function verify(
         };
         verification.steps.push(syntheticStep);
         const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
-        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, earlyReturn };
+        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, earlyReturn };
       }
     }
   }
@@ -249,7 +257,7 @@ export async function verify(
   if (verification.filesChanged?.length > 0) {
     const mutResult = await runMutationGate(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
     if (mutResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport: mutResult.report, jitReport: null, earlyReturn: mutResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport: mutResult.report, jitReport: null, fixerUsed, fixerResolved, earlyReturn: mutResult.earlyReturn };
     }
     mutationReport = mutResult.report;
   }
@@ -268,7 +276,7 @@ export async function verify(
   if (complexity !== "quick-fix" && diff && verification.filesChanged?.length > 0) {
     const jitResult = await runDiffAwareJitTests(ctx, task, verification, verificationPlan, diff, execResult, complexity, filesInScope, criteriaCount, taskId);
     if (jitResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, earlyReturn: jitResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, earlyReturn: jitResult.earlyReturn };
     }
     jitReport = jitResult.report;
     if (jitResult.updatedVerification) {
@@ -282,11 +290,11 @@ export async function verify(
   if (task.scopeBoundary?.in?.length > 0 && verification.filesChanged?.length > 0) {
     const scopeResult = await runScopeEnforcement(ctx, task, verification, taskId);
     if (scopeResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport, jitReport, earlyReturn: scopeResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, earlyReturn: scopeResult.earlyReturn };
     }
   }
 
-  return { passed: true, verification, reconciliation, mutationReport, jitReport };
+  return { passed: true, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved };
 }
 
 // ---------------------------------------------------------------------------

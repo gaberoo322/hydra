@@ -68,6 +68,9 @@ export async function getMetricsTrend(count = 20) {
       "testsBefore", "testsAfter", "testsPassingBefore", "testsPassingAfter",
       "filesChanged", "totalDurationMs", "groundingDurationMs", "verificationDurationMs",
       "planningDurationMs", "executionDurationMs", "tokenCost", "costUsd",
+      "jitTestsGenerated", "jitTestsKept", "jitTestsCaughtBug",
+      "mutationKillRate", "mutationKilled", "mutationSurvived",
+      "fixerUsed", "fixerResolved", "scopeFilterCleaned",
     ]) {
       if (parsed[key] !== undefined) parsed[key] = parseInt(parsed[key]) || 0;
     }
