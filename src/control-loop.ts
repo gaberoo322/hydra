@@ -29,6 +29,7 @@ import { runPlannerAgent } from "./planner-prompt.ts";
 import { selectAnchor, markLowConfidenceSkip } from "./anchor-selection.ts";
 import { scoreAnchor, getMinConfidence, recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { classifyTaskComplexity } from "./preflight.ts";
+import { autoDecomposeComplexTask } from "./auto-decompose.ts";
 import { createCycleSession } from "./learning.ts";
 import {
   groundProjectCached, generateCycleId, isAnchorStale,
@@ -184,8 +185,37 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   const filesInScope = task.scopeBoundary?.in?.length || 0;
   const criteriaCount = task.acceptanceCriteria?.length || 0;
   console.log(`[ControlLoop] Task: "${task.title}" (anchor: ${task.anchorType}, confidence: ${task.confidence}, complexity: ${complexity}, scope: ${filesInScope} files, ${criteriaCount} criteria)`);
+
+  // Step 3.2: AUTO-DECOMPOSE — complex tasks (>5 files) are auto-split into specs
+  // instead of being sent to the executor, which has a 0% merge rate on 5+ file tasks.
   if (complexity === "complex") {
-    console.log(`[ControlLoop] COMPLEX task detected (${filesInScope} files, ${criteriaCount} criteria) — consider splitting in future cycles`);
+    const decomposeResult = await autoDecomposeComplexTask(task);
+    if (decomposeResult) {
+      console.log(`[ControlLoop] Complex task auto-decomposed into spec "${decomposeResult.spec.slug}" with ${decomposeResult.taskCount} tasks — returning early`);
+      await handleEarlyExit({
+        cycleId, startTime, grounding, ovSession, anchor,
+        outcome: "decomposed", reason: `Complex task auto-decomposed into spec with ${decomposeResult.taskCount} tasks`,
+        task,
+        metricsOverrides: {
+          taskTitle: task.title,
+          anchorType: task.anchorType, anchorReference: task.anchorReference,
+          plannerModel: task.__plannerModel || "unknown",
+          planCacheHit: task.__planCacheHit ? "true" : "false",
+          abandonReason: `Auto-decomposed: ${decomposeResult.taskCount} spec tasks created`,
+        },
+      });
+      return {
+        cycleId,
+        tasks: [],
+        reason: `Complex task auto-decomposed into spec with ${decomposeResult.taskCount} tasks`,
+        durationMs: Date.now() - startTime,
+        decomposed: true,
+        specSlug: decomposeResult.spec.slug,
+        specTaskCount: decomposeResult.taskCount,
+      };
+    }
+    // If decomposition failed (e.g. spec already exists), proceed normally
+    console.log(`[ControlLoop] COMPLEX task detected (${filesInScope} files, ${criteriaCount} criteria) — decomposition skipped, proceeding to executor`);
   }
 
   // Step 3.5: DRIFT DETECTION
