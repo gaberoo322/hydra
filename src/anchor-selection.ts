@@ -15,7 +15,7 @@ import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
 import {
   listRange, listRPush, listRem, listLPop, listLen, listMove, listTrim,
   getString, setString, delKey, incrKey, expireKey,
-  hashGetAll, zRevRange,
+  hashGetAll, zRevRange, keyExists,
   getRealityReport, getRecentReportIds, getCycleMetrics,
   isHealthAnchorResolved,
 } from "./redis-adapter.ts";
@@ -150,8 +150,8 @@ async function escalateStalePriorFailures(): Promise<number> {
         // Escalate to reframe queue with age reason
         await listRPush(REFRAME_QUEUE, JSON.stringify({
           originalTaskId: item.taskId,
-          originalTitle: item.taskId,
-          originalDescription: "",
+          originalTitle: item.title || item.taskId,
+          originalDescription: item.description || "",
           anchorType: "prior-failure",
           anchorReference: item.taskId,
           scopeBoundary: null,
@@ -384,17 +384,33 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // Scan prior-failure queue, skipping items that have exceeded the retry cap (issue #93).
   // Items with retryCount >= MAX_PRIOR_FAILURE_RETRIES are escalated to reframe immediately
   // instead of burning another cycle.
+  // Items whose task hash has expired are pruned silently (issue #188).
   const allPriorFailures = await listRange(PRIOR_FAILURES_KEY, 0, -1);
   for (const raw of allPriorFailures) {
     try {
       const failure = JSON.parse(raw);
+
+      // Prune orphan entries whose task hash has expired from Redis (issue #188).
+      // Prior-failure entries have no TTL but task hashes expire after 7 days.
+      // Without title/description context the planner can't act on these, so
+      // check the self-contained fields first, then fall back to the task hash.
+      const hasContext = !!(failure.title && failure.description);
+      if (!hasContext) {
+        const taskExists = await keyExists(taskKey(failure.taskId));
+        if (!taskExists) {
+          await listRem(PRIOR_FAILURES_KEY, 1, raw);
+          console.log(`[ControlLoop] Pruned orphan prior-failure "${failure.taskId}" — task hash expired, no embedded context`);
+          continue;
+        }
+      }
+
       if ((failure.retryCount || 0) >= MAX_PRIOR_FAILURE_RETRIES) {
         // Exceeded retry cap — escalate to reframe, don't retry
         await listRem(PRIOR_FAILURES_KEY, 1, raw);
         await listRPush(REFRAME_QUEUE, JSON.stringify({
           originalTaskId: failure.taskId,
-          originalTitle: failure.taskId,
-          originalDescription: "",
+          originalTitle: failure.title || failure.taskId,
+          originalDescription: failure.description || "",
           anchorType: "prior-failure",
           anchorReference: failure.taskId,
           scopeBoundary: null,
@@ -664,12 +680,15 @@ async function storePriorFailure(taskId, reason, verificationResult, priorRetryC
   }).length;
   const priorAttempts = Math.max(priorRetryCount, queueMatches);
 
+  // Read task hash now — embed title/description in the prior-failure entry so it
+  // remains self-contained after the task hash expires (7-day TTL). (issue #188)
+  const task = await hashGetAll(taskKey(taskId));
+
   if (priorAttempts >= MAX_PRIOR_FAILURE_RETRIES) {
     // Escalate to reframe queue — planner will diagnose and rewrite the task
     console.log(`[ControlLoop] Escalating ${taskId} to reframe queue after ${priorAttempts + 1} failures`);
 
     // Gather failure history for context
-    const task = await hashGetAll(taskKey(taskId));
     const failureHistory = existing
       .map(raw => { try { return JSON.parse(raw); } catch { return null; } })
       .filter(f => f?.taskId === taskId);
@@ -696,6 +715,8 @@ async function storePriorFailure(taskId, reason, verificationResult, priorRetryC
 
   await listRPush(PRIOR_FAILURES_KEY, JSON.stringify({
     taskId,
+    title: task?.title || "",
+    description: task?.description || "",
     reason,
     failedSteps: verificationResult?.steps?.filter((s) => !s.passed).map((s) => s.label) || [],
     retryCount: priorAttempts + 1,
@@ -714,8 +735,8 @@ async function storePriorFailure(taskId, reason, verificationResult, priorRetryC
           const item = JSON.parse(raw);
           await listRPush(REFRAME_QUEUE, JSON.stringify({
             originalTaskId: item.taskId,
-            originalTitle: item.taskId,
-            originalDescription: "",
+            originalTitle: item.title || item.taskId,
+            originalDescription: item.description || "",
             anchorType: "prior-failure",
             anchorReference: item.taskId,
             scopeBoundary: null,
