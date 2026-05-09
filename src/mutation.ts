@@ -16,6 +16,13 @@
 import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { getTracker } from "./task-tracker.ts";
+import { recordOutcome } from "./learning.ts";
+import { recordCycleMetrics } from "./metrics.ts";
+import { reportOutcome } from "./anchor-selection.ts";
+import { fail } from "./backlog.ts";
+import { cleanupBrokenBranch, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
+import type { CycleContext } from "./cycle-helpers.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -306,4 +313,86 @@ export function summarizeMutationTests(report: MutationTestReport): string {
   }
 
   return parts.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Mutation gate — pipeline orchestration (step 6.7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the mutation testing quality gate. Blocks merge when kill rate
+ * is critically low on non-trivial tasks.
+ *
+ * Never throws — returns { report, earlyReturn? }.
+ */
+export async function runMutationGate(
+  ctx: CycleContext, task: any, verification: any, execResult: any,
+  complexity: string, filesInScope: number, criteriaCount: number, taskId: string,
+): Promise<{ report: any; earlyReturn?: any }> {
+  const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
+  const tracker = getTracker();
+
+  console.log(`[ControlLoop] Step 6.7: Running mutation tests on ${verification.filesChanged.length} changed files...`);
+  try {
+    const mutationReport = await runMutationTests(PROJECT_WORKSPACE, verification.filesChanged, {
+      timeBudgetMs: 60_000,
+      testCommand: "npm test",
+    });
+    const testable = mutationReport.totalMutants - mutationReport.skipped;
+    const killRate = testable > 0
+      ? Math.round((mutationReport.killed / testable) * 100)
+      : 100;
+    console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${testable} killed, ${mutationReport.survived} survived)`);
+    if (mutationReport.survived > 0) {
+      console.log(`[ControlLoop] ${mutationReport.survived} surviving mutants — executor's tests may not cover changed behavior`);
+      for (const s of mutationReport.survivors.slice(0, 3)) {
+        console.log(`[ControlLoop]   ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]`);
+      }
+    }
+
+    // Hard gate: block merge when kill rate is critically low on non-trivial tasks
+    const MUTATION_KILL_THRESHOLD = 30;
+    if (complexity !== "quick-fix" && testable >= 3 && killRate < MUTATION_KILL_THRESHOLD) {
+      console.error(`[ControlLoop] MUTATION GATE: kill rate ${killRate}% < ${MUTATION_KILL_THRESHOLD}% threshold — blocking merge`);
+      await tracker.transitionTask(taskId, "failed", { reason: `Mutation gate: ${killRate}% kill rate (${mutationReport.survived} survivors)` });
+      await recordOutcome({
+        agents: ["planner"],
+        cycleId, task, finalState: "failed",
+        anchorRef: anchor.reference, anchorType: anchor.type,
+        context: { failReason: `Mutation gate: ${killRate}% kill rate`, failedSteps: ["mutation-testing"] },
+      });
+      await fail(anchor.reference, "mutation gate blocked merge", { eventBus, cycleId });
+
+      await cleanupBrokenBranch(PROJECT_WORKSPACE);
+      await reportOutcome(anchor, { status: "failed", reason: `Mutation gate: tests don't cover changed behavior (${killRate}% kill rate)`, verification, taskId });
+      await ovSession.logOutcome("failed", `Mutation gate: ${killRate}% kill rate`);
+      await ovSession.commit();
+      await recordCycleMetrics(cycleId, {
+        tasksAttempted: 1, tasksFailed: 1, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 0,
+        testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
+        testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
+        filesChanged: verification.filesChanged.length, totalDurationMs: Date.now() - startTime,
+        groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: verification.totalDurationMs,
+        regressionIntroduced: false, taskTitle: task.title,
+        anchorType: task.anchorType, anchorReference: task.anchorReference,
+        complexity, filesInScope, criteriaCount,
+        plannerModel: task.__plannerModel || "unknown",
+        executorModel: execResult?.__executorModel || "unknown",
+        mutationKillRate: killRate,
+      });
+      return {
+        report: mutationReport,
+        earlyReturn: {
+          cycleId,
+          tasks: [{ taskId, finalState: "failed", reason: `Mutation gate: ${killRate}% kill rate` }],
+          durationMs: Date.now() - startTime,
+        },
+      };
+    }
+
+    return { report: mutationReport };
+  } catch (err: any) {
+    console.error(`[ControlLoop] Mutation testing failed (non-fatal): ${err.message}`);
+    return { report: null };
+  }
 }

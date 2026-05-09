@@ -2,10 +2,11 @@
  * verification.ts — Steps 6 through 6.9 of the control loop
  *
  * Thin orchestrator delegating to focused submodules:
- *   - src/fixer.ts       — fixability classification + fixer orchestration
- *   - src/mutation.ts    — mutation testing gate and runner
- *   - src/jit.ts         — JIT test generation (mutation-aware and diff-aware)
- *   - src/adversarial.ts — adversarial validation and finding-to-queue conversion
+ *   - src/fixer.ts             — fixability classification + fixer orchestration
+ *   - src/mutation.ts          — mutation testing gate and runner
+ *   - src/jit.ts               — JIT test generation (mutation-aware and diff-aware)
+ *   - src/adversarial.ts       — adversarial validation and finding-to-queue conversion
+ *   - src/scope-enforcement.ts — scope gate (>80% out-of-scope blocks merge)
  *
  * Public API (3 exports):
  *   - verify()              — run the full verification pipeline
@@ -19,7 +20,6 @@ import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { STREAMS } from "./event-bus.ts";
-import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker } from "./task-tracker.ts";
 import { recordOutcome } from "./learning.ts";
 import { recordCycleMetrics } from "./metrics.ts";
@@ -31,11 +31,9 @@ import type { CycleContext } from "./cycle-helpers.ts";
 
 // Submodule imports
 import { isFixableFailure, runFixerAttempt } from "./fixer.ts";
-import {
-  runMutationTests, summarizeMutationTests,
-  MUTATORS, SKIP_PATTERNS, shouldSkipMutation, generateMutations,
-} from "./mutation.ts";
-import { runJitTests, buildJitPrompt, parseJitResult, summarizeJitTests } from "./jit.ts";
+import { runMutationGate } from "./mutation.ts";
+import { runMutationAwareJitTests, runDiffAwareJitTests } from "./jit.ts";
+import { runScopeEnforcement } from "./scope-enforcement.ts";
 import {
   runAdversarialValidation, findingsToQueueItems, checkRevertCorrelation,
   trackMergedCommit,
@@ -154,7 +152,6 @@ export async function verify(
       const discoveredTests = parseVerificationTestCount(testStep.stdout, testStep.stderr);
       if (discoveredTests > 0 && discoveredTests < baselineTests * 0.9) {
         console.error(`[ControlLoop] TEST DISCOVERY GUARD: test count collapsed ${baselineTests} → ${discoveredTests} (>${Math.round((1 - discoveredTests / baselineTests) * 100)}% drop) — blocking merge`);
-        // Treat as verification failure so the normal failure path handles cleanup
         verification.allPassed = false;
         (verification as any).testDiscoveryBlocked = true;
         const syntheticStep = {
@@ -214,7 +211,7 @@ export async function verify(
   // Step 6.8: DIFF-AWARE TEST GENERATION (mutation-survivor-aware)
   // =========================================================================
   if (mutationReport?.survived > 0 && complexity !== "quick-fix") {
-    verification = await runMutationAwareJitTests(ctx, task, verification, verificationPlan, mutationReport, taskId);
+    verification = await runMutationAwareJitTests(ctx, task, verification, verificationPlan, mutationReport, taskId, runVerification);
   }
 
   // =========================================================================
@@ -222,7 +219,7 @@ export async function verify(
   // =========================================================================
   let jitReport: any = null;
   if (complexity !== "quick-fix" && diff && verification.filesChanged?.length > 0) {
-    const jitResult = await runDiffAwareJitTests(ctx, task, verification, verificationPlan, diff, execResult, complexity, filesInScope, criteriaCount, taskId);
+    const jitResult = await runDiffAwareJitTests(ctx, task, verification, verificationPlan, diff, execResult, complexity, filesInScope, criteriaCount, taskId, runVerification);
     if (jitResult.earlyReturn) {
       return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, earlyReturn: jitResult.earlyReturn };
     }
@@ -337,284 +334,6 @@ async function handleVerificationFailure(
   };
 }
 
-async function runMutationGate(
-  ctx: CycleContext, task: any, verification: any, execResult: any,
-  complexity: string, filesInScope: number, criteriaCount: number, taskId: string,
-): Promise<{ report: any; earlyReturn?: any }> {
-  const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
-  const tracker = getTracker();
-
-  console.log(`[ControlLoop] Step 6.7: Running mutation tests on ${verification.filesChanged.length} changed files...`);
-  try {
-    const mutationReport = await runMutationTests(PROJECT_WORKSPACE, verification.filesChanged, {
-      timeBudgetMs: 60_000,
-      testCommand: "npm test",
-    });
-    const testable = mutationReport.totalMutants - mutationReport.skipped;
-    const killRate = testable > 0
-      ? Math.round((mutationReport.killed / testable) * 100)
-      : 100;
-    console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${testable} killed, ${mutationReport.survived} survived)`);
-    if (mutationReport.survived > 0) {
-      console.log(`[ControlLoop] ${mutationReport.survived} surviving mutants — executor's tests may not cover changed behavior`);
-      for (const s of mutationReport.survivors.slice(0, 3)) {
-        console.log(`[ControlLoop]   ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]`);
-      }
-    }
-
-    // Hard gate: block merge when kill rate is critically low on non-trivial tasks
-    const MUTATION_KILL_THRESHOLD = 30;
-    if (complexity !== "quick-fix" && testable >= 3 && killRate < MUTATION_KILL_THRESHOLD) {
-      console.error(`[ControlLoop] MUTATION GATE: kill rate ${killRate}% < ${MUTATION_KILL_THRESHOLD}% threshold — blocking merge`);
-      await tracker.transitionTask(taskId, "failed", { reason: `Mutation gate: ${killRate}% kill rate (${mutationReport.survived} survivors)` });
-      await recordOutcome({
-        agents: ["planner"],
-        cycleId, task, finalState: "failed",
-        anchorRef: anchor.reference, anchorType: anchor.type,
-        context: { failReason: `Mutation gate: ${killRate}% kill rate`, failedSteps: ["mutation-testing"] },
-      });
-      await fail(anchor.reference, "mutation gate blocked merge", { eventBus, cycleId });
-
-      await cleanupBrokenBranch(PROJECT_WORKSPACE);
-      await reportOutcome(anchor, { status: "failed", reason: `Mutation gate: tests don't cover changed behavior (${killRate}% kill rate)`, verification, taskId });
-      await ovSession.logOutcome("failed", `Mutation gate: ${killRate}% kill rate`);
-      await ovSession.commit();
-      await recordCycleMetrics(cycleId, {
-        tasksAttempted: 1, tasksFailed: 1, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 0,
-        testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
-        testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
-        filesChanged: verification.filesChanged.length, totalDurationMs: Date.now() - startTime,
-        groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: verification.totalDurationMs,
-        regressionIntroduced: false, taskTitle: task.title,
-        anchorType: task.anchorType, anchorReference: task.anchorReference,
-        complexity, filesInScope, criteriaCount,
-        plannerModel: task.__plannerModel || "unknown",
-        executorModel: execResult?.__executorModel || "unknown",
-        mutationKillRate: killRate,
-      });
-      return {
-        report: mutationReport,
-        earlyReturn: {
-          cycleId,
-          tasks: [{ taskId, finalState: "failed", reason: `Mutation gate: ${killRate}% kill rate` }],
-          durationMs: Date.now() - startTime,
-        },
-      };
-    }
-
-    return { report: mutationReport };
-  } catch (err: any) {
-    console.error(`[ControlLoop] Mutation testing failed (non-fatal): ${err.message}`);
-    return { report: null };
-  }
-}
-
-async function runMutationAwareJitTests(
-  ctx: CycleContext, task: any, verification: any, verificationPlan: any[],
-  mutationReport: any, taskId: string,
-): Promise<any> {
-  const { cycleId } = ctx;
-  const tracker = getTracker();
-
-  const testable = mutationReport.totalMutants - mutationReport.skipped;
-  const killRate = testable > 0 ? Math.round((mutationReport.killed / testable) * 100) : 100;
-
-  if (killRate >= 80) return verification;
-
-  console.log(`[ControlLoop] Step 6.8: Generating diff-aware tests for ${mutationReport.survived} surviving mutants...`);
-  try {
-    const survivorDetails = mutationReport.survivors.slice(0, 5).map((s: any) =>
-      `- ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]: ${s.mutation.description || "mutation survived"}`
-    ).join("\n");
-
-    const jitPrompt = [
-      `## GENERATE TESTS FOR UNCOVERED CODE`,
-      ``,
-      `The executor just implemented: "${task.title}"`,
-      `Mutation testing found ${mutationReport.survived} surviving mutants — the existing tests don't cover these code paths.`,
-      ``,
-      `### Surviving mutants (tests needed for these):`,
-      survivorDetails,
-      ``,
-      `### Changed files:`,
-      verification.filesChanged.map((f: string) => `- ${f}`).join("\n"),
-      ``,
-      `## YOUR JOB`,
-      `Write tests that would FAIL if these mutations were applied. Each test should:`,
-      `1. Target a specific surviving mutant`,
-      `2. Assert the correct behavior that the mutation would break`,
-      `3. Follow the project's existing test patterns`,
-      ``,
-      `Do NOT modify implementation code. Only add/modify test files.`,
-      `Run \`npm test\` after writing tests to verify they pass.`,
-      `Commit with message: "test: add diff-aware tests for [description]"`,
-      ``,
-      `Output JSON: { "summary": "what tests you added", "filesChanged": [...], "testsAdded": N }`,
-    ].join("\n");
-
-    const jitPersonality = await findPersonality("executor");
-    const jitResult = await runAgent({
-      agentName: "jit-tester",
-      personality: jitPersonality,
-      prompt: jitPrompt,
-      model: "codex",
-      taskId: `${taskId}-jit`,
-      correlationId: cycleId,
-      workDir: PROJECT_WORKSPACE,
-    });
-
-    await tracker.logAgentRun(cycleId, "jit-tester", taskId, jitResult.duration, jitResult.exitCode === 0 ? "tests-generated" : "generation-failed", jitResult.usage, jitResult.costUsd);
-    console.log(`[ControlLoop] JIT test generation: ${Math.round(jitResult.duration / 1000)}s, exit ${jitResult.exitCode}`);
-
-    // Re-verify after adding tests
-    if (jitResult.exitCode === 0) {
-      console.log(`[ControlLoop] Re-verifying after JIT test generation...`);
-      const jitVerification = await runVerification(PROJECT_WORKSPACE, verificationPlan);
-      if (!jitVerification.allPassed) {
-        console.log(`[ControlLoop] JIT tests introduced failures — reverting test changes`);
-        try {
-          await execFileAsync("git", ["checkout", "HEAD~1", "--", "."], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
-        } catch { /* intentional: revert best-effort */ }
-      } else {
-        console.log(`[ControlLoop] JIT tests pass — included in merge`);
-        return jitVerification;
-      }
-    }
-  } catch (err: any) {
-    console.error(`[ControlLoop] JIT test generation failed (non-fatal): ${err.message}`);
-  }
-
-  return verification;
-}
-
-async function runDiffAwareJitTests(
-  ctx: CycleContext, task: any, verification: any, verificationPlan: any[],
-  diff: string, execResult: any, complexity: string, filesInScope: number,
-  criteriaCount: number, taskId: string,
-): Promise<{ report: any; earlyReturn?: any; updatedVerification?: any }> {
-  const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
-  const tracker = getTracker();
-
-  console.log(`[ControlLoop] Step 6.85: Running JiT test generation on diff...`);
-  try {
-    const jitReport = await runJitTests(
-      PROJECT_WORKSPACE,
-      diff,
-      verification.filesChanged,
-      task.title,
-      cycleId,
-      taskId,
-    );
-    console.log(`[ControlLoop] JiT tests: ${jitReport.generated} generated, ${jitReport.kept} kept, ${jitReport.discarded} discarded${jitReport.caughtBug ? " — BUG DETECTED" : ""}`);
-
-    if (jitReport.caughtBug) {
-      console.error(`[ControlLoop] JIT GATE: generated test caught a bug — blocking merge`);
-      console.error(`[ControlLoop] Bug details: ${jitReport.bugDetails?.slice(0, 300)}`);
-      await tracker.transitionTask(taskId, "failed", { reason: `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}` });
-      await recordOutcome({
-        agents: ["planner"],
-        cycleId, task, finalState: "failed",
-        anchorRef: anchor.reference, anchorType: anchor.type,
-        context: { failReason: "JiT test caught a regression bug", failedSteps: ["jit-testing"] },
-      });
-      await fail(anchor.reference, "JiT test caught bug", { eventBus, cycleId });
-
-      await cleanupBrokenBranch(PROJECT_WORKSPACE);
-      await reportOutcome(anchor, { status: "failed", reason: `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}`, verification, taskId });
-      await ovSession.logOutcome("failed", `JiT test caught bug: ${jitReport.bugDetails?.slice(0, 200)}`);
-      await ovSession.commit();
-      await recordCycleMetrics(cycleId, {
-        tasksAttempted: 1, tasksFailed: 1, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 0,
-        testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
-        testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
-        filesChanged: verification.filesChanged.length, totalDurationMs: Date.now() - startTime,
-        groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: verification.totalDurationMs,
-        regressionIntroduced: false, taskTitle: task.title,
-        anchorType: task.anchorType, anchorReference: task.anchorReference,
-        complexity, filesInScope, criteriaCount,
-        plannerModel: task.__plannerModel || "unknown",
-        executorModel: execResult?.__executorModel || "unknown",
-        jitTestsGenerated: jitReport.generated,
-        jitTestsKept: jitReport.kept,
-        jitTestsCaughtBug: 1,
-      });
-      return {
-        report: jitReport,
-        earlyReturn: {
-          cycleId,
-          tasks: [{ taskId, finalState: "failed", reason: `JiT test caught bug` }],
-          durationMs: Date.now() - startTime,
-        },
-      };
-    }
-
-    // If JiT tests were kept, re-verify
-    if (jitReport.kept > 0) {
-      console.log(`[ControlLoop] Re-verifying after JiT test generation (${jitReport.kept} tests added)...`);
-      const jitVerification = await runVerification(PROJECT_WORKSPACE, verificationPlan);
-      if (!jitVerification.allPassed) {
-        console.log(`[ControlLoop] JiT tests caused verification failure — reverting JiT test commits`);
-        for (let i = 0; i < jitReport.kept; i++) {
-          try {
-            await execFileAsync("git", ["revert", "--no-edit", "HEAD"], { cwd: PROJECT_WORKSPACE, timeout: 10000 });
-          } catch { /* intentional: revert best-effort */ }
-        }
-        jitReport.kept = 0;
-        jitReport.discarded = jitReport.generated;
-      } else {
-        return { report: jitReport, updatedVerification: jitVerification };
-      }
-    }
-
-    return { report: jitReport };
-  } catch (err: any) {
-    console.error(`[ControlLoop] JiT test generation failed (non-fatal): ${err.message}`);
-    return { report: null };
-  }
-}
-
-async function runScopeEnforcement(
-  ctx: CycleContext, task: any, verification: any, taskId: string,
-): Promise<{ earlyReturn?: any }> {
-  const { cycleId, startTime, ovSession, anchor } = ctx;
-  const tracker = getTracker();
-
-  const inScope = new Set((task.scopeBoundary.in as string[]).map((f: string) => f.replace(/^web\//, "")));
-  const outOfScope = verification.filesChanged.filter((f: string) => {
-    const normalized = f.replace(/^web\//, "");
-    return !inScope.has(normalized) && ![...inScope].some((s: string) => normalized.startsWith(s) || normalized.endsWith(s));
-  });
-  const outOfScopeRatio = outOfScope.length / verification.filesChanged.length;
-  if (outOfScopeRatio > 0.8 && outOfScope.length > 3) {
-    console.error(`[ControlLoop] SCOPE GATE: ${outOfScope.length}/${verification.filesChanged.length} files (${Math.round(outOfScopeRatio * 100)}%) outside scope — blocking merge`);
-    console.error(`[ControlLoop] Out-of-scope files: ${outOfScope.slice(0, 5).join(", ")}${outOfScope.length > 5 ? ` (+${outOfScope.length - 5} more)` : ""}`);
-
-    await tracker.transitionTask(taskId, "failed", { reason: `Scope gate: ${outOfScope.length}/${verification.filesChanged.length} files outside planned scope` });
-    await recordOutcome({
-      agents: ["planner"],
-      cycleId, task, finalState: "failed",
-      anchorRef: anchor.reference, anchorType: anchor.type,
-      context: { failReason: `Scope gate: ${outOfScope.length} files outside scope`, failedSteps: ["scope-enforcement"] },
-    });
-    await fail(anchor.reference, "scope gate blocked merge", { eventBus: ctx.eventBus, cycleId });
-
-    await cleanupBrokenBranch(PROJECT_WORKSPACE);
-    await reportOutcome(anchor, { status: "failed", reason: `Scope gate blocked merge: ${Math.round(outOfScopeRatio * 100)}% out of scope`, verification, taskId });
-    await ovSession.logOutcome("failed", `Scope gate: ${outOfScope.length} files outside scope`);
-    await ovSession.commit();
-
-    return {
-      earlyReturn: {
-        cycleId,
-        tasks: [{ taskId, finalState: "failed", reason: `Scope gate: ${Math.round(outOfScopeRatio * 100)}% out of scope` }],
-        durationMs: Date.now() - startTime,
-      },
-    };
-  }
-
-  return {};
-}
-
 // ---------------------------------------------------------------------------
 // Core verification runner
 // ---------------------------------------------------------------------------
@@ -721,72 +440,62 @@ function checkExpectation(expected: string, exitCode: number, stdout: string, st
 /**
  * Run a verification plan against the project. Never throws.
  */
-async function runVerification(projectDir: string, plan: any[], opts: { totalTimeoutMs?: number; stepTimeoutMs?: number } = {}) {
+function runVerification(projectDir: string, plan: any[], opts: { totalTimeoutMs?: number; stepTimeoutMs?: number } = {}) {
   const totalTimeout = opts.totalTimeoutMs || TOTAL_TIMEOUT;
   const stepTimeout = opts.stepTimeoutMs || STEP_TIMEOUT;
   const start = Date.now();
 
-  // Auto-detect app directory (same logic as grounding)
-  let appDir = projectDir;
-  try {
-    await access(join(projectDir, "package.json"));
-  } catch { /* intentional: no package.json at root — probe subdirs */
-    for (const sub of ["web", "app", "packages/app"]) {
-      try {
-        await access(join(projectDir, sub, "package.json"));
-        appDir = join(projectDir, sub);
-        break;
-      } catch { /* intentional: sub-dir does not have package.json, try next */ }
-    }
-  }
-
-  const steps: any[] = [];
-
-  for (const step of plan) {
-    // Check total timeout
-    if (Date.now() - start > totalTimeout) {
-      steps.push({
-        label: step.label,
-        command: step.command,
-        passed: false,
-        exitCode: -1,
-        stdout: "",
-        stderr: "Skipped: total verification timeout exceeded",
-        durationMs: 0,
-        expected: step.expected,
-        actual: "skipped (timeout)",
-      });
-      continue;
-    }
-
-    // Normalize step command: if it uses `npm` without `--prefix`, run in appDir
-    const normalizedStep = { ...step };
-    const cmd = step.command.trim();
-    const isNpmCmd = cmd.startsWith("npm ") || cmd.startsWith("npx ");
-    const hasPrefix = cmd.includes("--prefix");
-    const hasCd = cmd.startsWith("cd ");
-    const runDir = (isNpmCmd && !hasPrefix && !hasCd) ? appDir : projectDir;
-
-    const result = await runStep(normalizedStep, runDir, stepTimeout);
-    steps.push(result);
-  }
-
-  // Get diff summary for the report
-  let diffSummary = "";
-  let filesChanged: string[] = [];
-  try {
-    const { stdout } = await execFileAsync("git", ["diff", "--stat", "main"], {
-      cwd: projectDir,
-      timeout: 10000,
-    });
-    diffSummary = stdout.trim();
-    filesChanged = stdout
-      .split("\n")
-      .filter((l) => l.includes("|"))
-      .map((l) => l.split("|")[0].trim());
-  } catch {
+  return (async () => {
+    // Auto-detect app directory (same logic as grounding)
+    let appDir = projectDir;
     try {
-      const { stdout } = await execFileAsync("git", ["diff", "--stat", "HEAD~1"], {
+      await access(join(projectDir, "package.json"));
+    } catch { /* intentional: no package.json at root — probe subdirs */
+      for (const sub of ["web", "app", "packages/app"]) {
+        try {
+          await access(join(projectDir, sub, "package.json"));
+          appDir = join(projectDir, sub);
+          break;
+        } catch { /* intentional: sub-dir does not have package.json, try next */ }
+      }
+    }
+
+    const steps: any[] = [];
+
+    for (const step of plan) {
+      // Check total timeout
+      if (Date.now() - start > totalTimeout) {
+        steps.push({
+          label: step.label,
+          command: step.command,
+          passed: false,
+          exitCode: -1,
+          stdout: "",
+          stderr: "Skipped: total verification timeout exceeded",
+          durationMs: 0,
+          expected: step.expected,
+          actual: "skipped (timeout)",
+        });
+        continue;
+      }
+
+      // Normalize step command: if it uses `npm` without `--prefix`, run in appDir
+      const normalizedStep = { ...step };
+      const cmd = step.command.trim();
+      const isNpmCmd = cmd.startsWith("npm ") || cmd.startsWith("npx ");
+      const hasPrefix = cmd.includes("--prefix");
+      const hasCd = cmd.startsWith("cd ");
+      const runDir = (isNpmCmd && !hasPrefix && !hasCd) ? appDir : projectDir;
+
+      const result = await runStep(normalizedStep, runDir, stepTimeout);
+      steps.push(result);
+    }
+
+    // Get diff summary for the report
+    let diffSummary = "";
+    let filesChanged: string[] = [];
+    try {
+      const { stdout } = await execFileAsync("git", ["diff", "--stat", "main"], {
         cwd: projectDir,
         timeout: 10000,
       });
@@ -795,19 +504,31 @@ async function runVerification(projectDir: string, plan: any[], opts: { totalTim
         .split("\n")
         .filter((l) => l.includes("|"))
         .map((l) => l.split("|")[0].trim());
-    } catch (err: any) {
-      console.error(`[Verification] git diff --stat failed for both main and HEAD~1: ${err.message}`);
-      Sentry.addBreadcrumb({ category: "verification", message: `git diff --stat fallback failed: ${err.message}`, level: "warning" });
+    } catch {
+      try {
+        const { stdout } = await execFileAsync("git", ["diff", "--stat", "HEAD~1"], {
+          cwd: projectDir,
+          timeout: 10000,
+        });
+        diffSummary = stdout.trim();
+        filesChanged = stdout
+          .split("\n")
+          .filter((l) => l.includes("|"))
+          .map((l) => l.split("|")[0].trim());
+      } catch (err: any) {
+        console.error(`[Verification] git diff --stat failed for both main and HEAD~1: ${err.message}`);
+        Sentry.addBreadcrumb({ category: "verification", message: `git diff --stat fallback failed: ${err.message}`, level: "warning" });
+      }
     }
-  }
 
-  return {
-    allPassed: steps.every((s) => s.passed),
-    steps,
-    diffSummary,
-    filesChanged,
-    totalDurationMs: Date.now() - start,
-  };
+    return {
+      allPassed: steps.every((s) => s.passed),
+      steps,
+      diffSummary,
+      filesChanged,
+      totalDurationMs: Date.now() - start,
+    };
+  })();
 }
 
 /**
@@ -893,6 +614,13 @@ export const runVerificationPipeline = verify;
 // ---------------------------------------------------------------------------
 // Test escape hatch — expose internals needed by unit tests
 // ---------------------------------------------------------------------------
+
+// Re-import from submodules for the _testing escape hatch
+import {
+  MUTATORS, SKIP_PATTERNS, shouldSkipMutation, generateMutations,
+  summarizeMutationTests,
+} from "./mutation.ts";
+import { buildJitPrompt, parseJitResult, summarizeJitTests } from "./jit.ts";
 
 /**
  * Internal helpers exposed for unit testing only. Not part of the public API.
