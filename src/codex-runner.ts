@@ -540,25 +540,13 @@ async function findPersonality(agentName) {
 
 /**
  * Search OpenViking knowledge base for relevant context.
+ * Uses trackedOvSearch from learning.ts for metrics tracking + fallback.
  */
 async function searchKnowledge(query, limit = 5, sessionId = null) {
-  const ovUrl = process.env.OPENVIKING_URL || "http://localhost:1933";
   try {
-    const ovKey = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
-    const body: Record<string, any> = { query, limit };
-    if (sessionId) body.session_id = sessionId;
+    const { trackedOvSearch } = await import("./learning.ts");
+    const { resources, memories } = await trackedOvSearch(query, limit, sessionId);
 
-    const res = await fetch(`${ovUrl}/api/v1/search/find`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Api-Key": ovKey },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return "";
-    const data = await res.json();
-
-    const resources = data?.result?.resources || [];
-    const memories = data?.result?.memories || [];
     const all = [...resources, ...memories];
     if (all.length === 0) return "";
 

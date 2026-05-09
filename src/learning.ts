@@ -72,6 +72,186 @@ const SKIP_DIRS = new Set([".git", "node_modules"]);
 const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
 const REDIS_POLL_MS = parseInt(process.env.INDEXER_POLL_MS as any) || 30000;
 
+// ===========================================================================
+// Section: OV Search Metrics (in-memory, resets on restart)
+// ===========================================================================
+
+export interface OvSearchMetrics {
+  totalSearches: number;
+  zeroResultCount: number;
+  totalResults: number;
+  totalLatencyMs: number;
+  fallbackAttempts: number;
+  fallbackSuccesses: number;
+  errors: number;
+}
+
+const ovSearchMetrics: OvSearchMetrics = {
+  totalSearches: 0,
+  zeroResultCount: 0,
+  totalResults: 0,
+  totalLatencyMs: 0,
+  fallbackAttempts: 0,
+  fallbackSuccesses: 0,
+  errors: 0,
+};
+
+export function getOvSearchMetrics(): OvSearchMetrics & { avgResultsPerQuery: number; avgLatencyMs: number; zeroResultRate: number } {
+  const avg = ovSearchMetrics.totalSearches > 0
+    ? ovSearchMetrics.totalResults / ovSearchMetrics.totalSearches
+    : 0;
+  const avgLatency = ovSearchMetrics.totalSearches > 0
+    ? ovSearchMetrics.totalLatencyMs / ovSearchMetrics.totalSearches
+    : 0;
+  const zeroRate = ovSearchMetrics.totalSearches > 0
+    ? ovSearchMetrics.zeroResultCount / ovSearchMetrics.totalSearches
+    : 0;
+  return {
+    ...ovSearchMetrics,
+    avgResultsPerQuery: Math.round(avg * 100) / 100,
+    avgLatencyMs: Math.round(avgLatency * 100) / 100,
+    zeroResultRate: Math.round(zeroRate * 1000) / 1000,
+  };
+}
+
+/** Reset metrics -- exposed for testing only. */
+export function resetOvSearchMetrics(): void {
+  ovSearchMetrics.totalSearches = 0;
+  ovSearchMetrics.zeroResultCount = 0;
+  ovSearchMetrics.totalResults = 0;
+  ovSearchMetrics.totalLatencyMs = 0;
+  ovSearchMetrics.fallbackAttempts = 0;
+  ovSearchMetrics.fallbackSuccesses = 0;
+  ovSearchMetrics.errors = 0;
+}
+
+/**
+ * Build a simplified fallback query from the original query.
+ * Strips anchor-specific detail, keeps only agent name + generic terms.
+ */
+export function buildFallbackQuery(originalQuery: string): string {
+  // Extract agent name if present (e.g., "planner agent context for: ...")
+  const agentMatch = originalQuery.match(/^(\w+)\s+agent/i);
+  const agentName = agentMatch ? agentMatch[1] : "";
+
+  // Remove common filler phrases
+  let simplified = originalQuery
+    .replace(/\bagent\s+context\s+for:?\s*/gi, "")
+    .replace(/\bagent\s+lessons?\s*/gi, "")
+    .replace(/\bfailures?\s+prevention\b/gi, "patterns")
+    .replace(/[^\w\s]/g, " ")  // strip punctuation
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Take only the first 4 meaningful words (skip very short words)
+  const words = simplified.split(" ").filter(w => w.length > 2);
+  const kept = words.slice(0, 4).join(" ");
+
+  // Prepend agent name if we found one and it's not already included
+  if (agentName && !kept.toLowerCase().startsWith(agentName.toLowerCase())) {
+    return `${agentName} patterns ${kept}`.trim();
+  }
+
+  return kept || "patterns context";
+}
+
+/**
+ * Tracked OV search -- wraps a fetch to /api/v1/search/find with metrics + logging + fallback.
+ * Returns { resources, memories } arrays.
+ */
+export async function trackedOvSearch(
+  query: string,
+  limit = 5,
+  sessionId?: string | null,
+): Promise<{ resources: any[]; memories: any[] }> {
+  const startMs = Date.now();
+  let resources: any[] = [];
+  let memories: any[] = [];
+
+  try {
+    const body: Record<string, any> = { query, limit };
+    if (sessionId) body.session_id = sessionId;
+
+    const res = await fetch(`${OV_URL}/api/v1/search/find`, {
+      method: "POST",
+      headers: OV_HEADERS,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    const latencyMs = Date.now() - startMs;
+
+    if (!res.ok) {
+      ovSearchMetrics.totalSearches++;
+      ovSearchMetrics.errors++;
+      ovSearchMetrics.totalLatencyMs += latencyMs;
+      console.log(`[OV Search] query="${query.slice(0, 80)}" status=${res.status} latency=${latencyMs}ms ERROR`);
+      return { resources: [], memories: [] };
+    }
+
+    const data = await res.json() as any;
+    resources = data?.result?.resources || [];
+    memories = data?.result?.memories || [];
+    const resultCount = resources.length + memories.length;
+
+    ovSearchMetrics.totalSearches++;
+    ovSearchMetrics.totalResults += resultCount;
+    ovSearchMetrics.totalLatencyMs += latencyMs;
+
+    if (resultCount === 0) {
+      ovSearchMetrics.zeroResultCount++;
+      console.log(`[OV Search] query="${query.slice(0, 80)}" results=0 latency=${latencyMs}ms -- attempting fallback`);
+
+      // Fallback: simplified query
+      const fallbackQuery = buildFallbackQuery(query);
+      ovSearchMetrics.fallbackAttempts++;
+
+      const fbStartMs = Date.now();
+      try {
+        const fbBody: Record<string, any> = { query: fallbackQuery, limit };
+        if (sessionId) fbBody.session_id = sessionId;
+
+        const fbRes = await fetch(`${OV_URL}/api/v1/search/find`, {
+          method: "POST",
+          headers: OV_HEADERS,
+          body: JSON.stringify(fbBody),
+          signal: AbortSignal.timeout(5000),
+        });
+
+        const fbLatencyMs = Date.now() - fbStartMs;
+
+        if (fbRes.ok) {
+          const fbData = await fbRes.json() as any;
+          const fbResources = fbData?.result?.resources || [];
+          const fbMemories = fbData?.result?.memories || [];
+          const fbCount = fbResources.length + fbMemories.length;
+
+          if (fbCount > 0) {
+            ovSearchMetrics.fallbackSuccesses++;
+            resources = fbResources;
+            memories = fbMemories;
+            console.log(`[OV Search] fallback query="${fallbackQuery.slice(0, 80)}" results=${fbCount} latency=${fbLatencyMs}ms SUCCESS`);
+          } else {
+            console.log(`[OV Search] fallback query="${fallbackQuery.slice(0, 80)}" results=0 latency=${fbLatencyMs}ms -- no results`);
+          }
+        }
+      } catch (err: any) {
+        console.error(`[OV Search] fallback error: ${err.message}`);
+      }
+    } else {
+      console.log(`[OV Search] query="${query.slice(0, 80)}" results=${resultCount} latency=${latencyMs}ms`);
+    }
+  } catch (err: any) {
+    const latencyMs = Date.now() - startMs;
+    ovSearchMetrics.totalSearches++;
+    ovSearchMetrics.errors++;
+    ovSearchMetrics.totalLatencyMs += latencyMs;
+    console.error(`[OV Search] query="${query.slice(0, 80)}" error="${err.message}" latency=${latencyMs}ms`);
+  }
+
+  return { resources, memories };
+}
+
 const OV_HEADERS = {
   "Content-Type": "application/json",
   "X-Api-Key": OV_KEY,
@@ -586,25 +766,13 @@ export async function createCycleSession(cycleId: string) {
     },
 
     async search(query: string, limit = 5) {
-      const result = await ovFetch("/api/v1/search/find", {
-        query,
-        limit,
-        session_id: sessionId,
-      });
-      return result?.result?.resources || [];
+      const { resources } = await trackedOvSearch(query, limit, sessionId);
+      return resources;
     },
 
     async getAgentContext(agentName: string, anchor: any, limit = 10) {
       const query = `${agentName} agent context for: ${anchor.reference || ""} ${anchor.whyNow || ""}`.trim();
-      const result = await ovFetch("/api/v1/search/find", {
-        query,
-        limit,
-        session_id: sessionId,
-      });
-      if (!result?.result) return { resources: [], memories: [], formatted: "" };
-
-      const resources = result.result.resources || [];
-      const memories = result.result.memories || [];
+      const { resources, memories } = await trackedOvSearch(query, limit, sessionId);
 
       const parts: string[] = [];
       if (resources.length > 0) {
@@ -690,19 +858,8 @@ function createNoOpSession(cycleId: string) {
     async logOutcome() {},
     async markUsed() {},
     async search(query: string, limit = 5) {
-      try {
-        const res = await fetch(`${OV_URL}/api/v1/search/find`, {
-          method: "POST",
-          headers: OV_HEADERS,
-          body: JSON.stringify({ query, limit }),
-          signal: AbortSignal.timeout(5000),
-        });
-        if (!res.ok) return [];
-        const data = await res.json() as any;
-        return data?.result?.resources || [];
-      } catch {
-        return [];
-      }
+      const { resources } = await trackedOvSearch(query, limit);
+      return resources;
     },
     async getAgentContext() { return { resources: [], memories: [], formatted: "" }; },
     async commit() {},
@@ -975,30 +1132,21 @@ export async function loadAgentMemory(agentName: string): Promise<string> {
     }
   }
 
-  // Also load from OpenViking
+  // Also load from OpenViking (with tracked metrics + fallback)
   try {
-    const res = await fetch(`${OV_URL}/api/v1/search/find`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Api-Key": OV_KEY },
-      body: JSON.stringify({
-        query: `${agentName} agent lessons failures prevention`,
-        limit: 5,
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (res.ok) {
-      const data = await res.json() as any;
-      const memories = data?.result?.memories || [];
-      if (memories.length > 0) {
-        parts.push(`\n# ${agentName} — Learned Patterns (from OpenViking)\n`);
-        for (const mem of memories.slice(0, 5)) {
-          const abstract = mem.abstract || mem.content || "";
-          if (abstract.trim()) {
-            parts.push(`- ${abstract.slice(0, 300)}`);
-          }
+    const { memories } = await trackedOvSearch(
+      `${agentName} agent lessons failures prevention`,
+      5,
+    );
+    if (memories.length > 0) {
+      parts.push(`\n# ${agentName} — Learned Patterns (from OpenViking)\n`);
+      for (const mem of memories.slice(0, 5)) {
+        const abstract = mem.abstract || mem.content || "";
+        if (abstract.trim()) {
+          parts.push(`- ${abstract.slice(0, 300)}`);
         }
-        parts.push("");
       }
+      parts.push("");
     }
   } catch { /* intentional: OV unavailable */ }
 

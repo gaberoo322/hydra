@@ -6,7 +6,7 @@ import { killCycle } from "../cycle.ts";
 import { loadProjectGoals, summarizeGoalsForPrompt } from "../project-goals.ts";
 import { getPlanCacheStats, invalidatePlanCache } from "../plan-cache.ts";
 import { sendDigestNow } from "../digest.ts";
-import { getAllReflections, getReflectionEffectiveness } from "../learning.ts";
+import { getAllReflections, getReflectionEffectiveness, getOvSearchMetrics } from "../learning.ts";
 import { redisKeys } from "../redis-keys.ts";
 import {
   pushToWorkQueue, pushAlert, setNX, getString, delKey,
@@ -48,6 +48,11 @@ export function createMiscRouter(eventBus: any) {
     } catch (err: any) {
       res.status(502).json({ error: `OpenViking unavailable: ${err.message}` });
     }
+  });
+
+  // GET /openviking-stats — OV search quality metrics (in-memory, resets on restart)
+  router.get("/openviking-stats", (_req, res) => {
+    res.json(getOvSearchMetrics());
   });
 
   // GET /goals — Current project goals
