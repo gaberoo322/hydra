@@ -33,6 +33,65 @@ jobs:
       - run: cd dashboard && npm ci
       - run: cd dashboard && npm run build
 
+  # Tier gate (issue #243, ADR-0001 + ADR-0004 work-order step 3).
+  # Classifies changed files into modification tiers. Blocks Tier 0
+  # (Untouchable Core) PRs unless the `operator-approved` label is
+  # present. Echoes the result to the PR step summary so reviewers and
+  # agents see it without digging.
+  tier-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Compute changed files
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr diff --name-only "${{ github.event.pull_request.number }}" > changed-files.txt || \
+            git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" > changed-files.txt
+          echo "Files changed:"
+          cat changed-files.txt
+
+      - name: Classify tier
+        env:
+          OPERATOR_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'operator-approved') }}
+        run: |
+          set +e
+          FLAG=""
+          if [ "$OPERATOR_APPROVED" = "true" ]; then
+            FLAG="--operator-approved"
+          fi
+          mapfile -t FILES < changed-files.txt
+          npx tsx scripts/tier-classify.ts $FLAG "${FILES[@]}" > tier-result.json 2> tier-stderr.txt
+          STATUS=$?
+          cat tier-result.json
+          {
+            echo "## Tier-gate classification"
+            echo ""
+            echo '```json'
+            cat tier-result.json
+            echo '```'
+            if [ $STATUS -ne 0 ]; then
+              echo ""
+              echo "### Failure"
+              echo ""
+              echo '```'
+              cat tier-stderr.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ $STATUS -ne 0 ]; then
+            cat tier-stderr.txt >&2
+          fi
+          exit $STATUS
+
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: [test, dashboard-build]
