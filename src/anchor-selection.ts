@@ -12,6 +12,7 @@ import { _admin, block } from "./backlog.ts";
 const { peekNextQueuedItem, isWipLimitReached, requeueStaleInProgressItems, claimNextQueuedItem } = _admin;
 import { getNextSpecTask, formatSpecForPrompt } from "./specs.ts";
 import { invalidatePlanCacheForAnchor } from "./plan-cache.ts";
+import { findRecentDriftMatch } from "./metrics.ts";
 import {
   listRange, listRPush, listRem, listLPop, listLen, listMove, listTrim,
   getString, setString, delKey, incrKey, expireKey,
@@ -48,6 +49,64 @@ const REFRAME_INTERLEAVE_INTERVAL = 5; // force reframe every Nth cycle when que
 // Health anchors without grounding signal (failing tests or type errors) are
 // low-confidence — they tend to produce "Planner produced no task" abandonments.
 export const HEALTH_CONFIDENCE_THRESHOLD = 0.5;
+
+// Drift pre-filter (issue #233) — reject near-duplicate anchors BEFORE the
+// planner runs. Same string-similarity threshold used by detectDrift after
+// planning; moving it earlier saves the ~$1-2 frontier-model planner call
+// (~40% of abandons were drift). See computeTitleSimilarity in metrics.ts.
+const DRIFT_PREFILTER_LOOKBACK = 50;
+const DRIFT_PREFILTER_THRESHOLD = 0.7;
+// Eligible anchor sources — the three where post-planner drift fires today.
+// failing-test / typecheck / prior-failure / spec / kanban anchors are exempt:
+// they legitimately repeat (failing tests come back, kanban items are
+// pre-deduped via fuzzy-match in backlog.ts).
+const DRIFT_PREFILTER_TYPES = new Set(["user-request", "research", "reframe", "doc"]);
+// Per-process counter — surfaced via _testing for metric wiring & tests.
+let driftPreFilteredCount = 0;
+
+/**
+ * Returns true and logs if `anchor.reference` is more than 70% similar to a
+ * recent cycle's task title. Mutates the per-process counter so callers can
+ * surface savings via /metrics. Pure for `failing-test`/`typecheck` callers
+ * (returns false without scanning).
+ *
+ * Errors during the scan are swallowed — drift filtering must never break
+ * anchor selection. Returns false in that case so the candidate proceeds.
+ */
+async function isAnchorDriftDuplicate(anchor: any): Promise<{
+  drift: boolean;
+  match?: { cycleId: string; taskTitle: string; similarity: number };
+}> {
+  if (!anchor?.reference || !DRIFT_PREFILTER_TYPES.has(anchor.type)) {
+    return { drift: false };
+  }
+  try {
+    const match = await findRecentDriftMatch(
+      anchor.reference,
+      DRIFT_PREFILTER_LOOKBACK,
+      DRIFT_PREFILTER_THRESHOLD,
+    );
+    if (!match) return { drift: false };
+    driftPreFilteredCount++;
+    console.log(
+      `[AnchorSelection] drift-pre-filter: rejecting [${anchor.type}] "${anchor.reference}" — ${Math.round(match.similarity * 100)}% similar to "${match.taskTitle}" from ${match.cycleId} (planner skipped, est ~$1-2 saved)`,
+    );
+    return { drift: true, match };
+  } catch (err: any) {
+    console.error(`[AnchorSelection] drift pre-filter scan failed: ${err.message}`);
+    return { drift: false };
+  }
+}
+
+/**
+ * Read and reset the per-process drift pre-filter counter. Called by the
+ * control loop after each cycle so metrics can record cycle-scoped savings.
+ */
+export function consumeDriftPreFilteredCount(): number {
+  const n = driftPreFilteredCount;
+  driftPreFilteredCount = 0;
+  return n;
+}
 
 // Key helpers
 const PERM_SKIP_PREFIX = "hydra:anchors:perm-skip:";
@@ -239,13 +298,30 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
       if (claimResult.claimed && claimResult.item) {
         const queuedItem = claimResult.item;
         console.log(`[ControlLoop] Claimed queued backlog item: ${queuedItem.id} (priority ${queuedItem.priority || 0}) — "${queuedItem.title}"`);
-        return {
+        const candidate = {
           type: "user-request",
           reference: queuedItem.title,
           whyNow: `Queued backlog item ${queuedItem.id} (priority ${queuedItem.priority || 0})`,
           context: queuedItem.description || null,
           description: queuedItem.description || null,
         };
+        // Drift pre-filter (issue #233) — block the kanban item if it's a
+        // near-duplicate of a recent cycle so we don't burn planner cost.
+        const driftResult = await isAnchorDriftDuplicate(candidate);
+        if (driftResult.drift) {
+          try {
+            await block(
+              queuedItem.title,
+              `Drift pre-filter: ${Math.round(driftResult.match!.similarity * 100)}% similar to "${driftResult.match!.taskTitle}" from ${driftResult.match!.cycleId}`,
+            );
+          } catch (err: any) {
+            console.error(`[ControlLoop] Failed to block drift-duplicate kanban item: ${err.message}`);
+          }
+          // Fall through to subsequent sources rather than returning null —
+          // a non-duplicate may still be available below.
+        } else {
+          return candidate;
+        }
       }
       if (claimResult.reason === "wip-limit") {
         wipBlocked = true;
@@ -329,7 +405,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
           : parsedContext)
         : parsedContext;
 
-      return {
+      const candidate = {
         type: item.source === "research" ? "research" : "user-request",
         reference: item.reference || item.description,
         whyNow: `Queued by ${item.source === "research" ? "research system" : "operator"}: ${item.reason || "from work queue"}`,
@@ -337,6 +413,20 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
         description,
         _workQueueRaw: queued,
       };
+      // Drift pre-filter (issue #233) — drop near-duplicate work-queue items
+      // before the planner runs. Item already moved to processing; remove it
+      // there so it isn't recovered on next cycle.
+      const driftResult = await isAnchorDriftDuplicate(candidate);
+      if (driftResult.drift) {
+        try {
+          await listRem(PROCESSING_QUEUE, 1, queued);
+        } catch (err: any) {
+          console.error(`[ControlLoop] Failed to drop drift-duplicate work-queue item: ${err.message}`);
+        }
+        // Fall through to next source.
+      } else {
+        return candidate;
+      }
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt work-queue item dropped: ${err.message} — data: ${queued.slice(0, 200)}`);
       // Remove corrupt item from processing queue — it cannot be recovered
@@ -359,12 +449,19 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
     try {
       const item = JSON.parse(reframeItems[0]);
       await listLPop(REFRAME_QUEUE);
-      return {
+      const candidate = {
         type: "reframe",
         reference: item.originalTitle,
         whyNow: `Task "${item.originalTitle}" failed ${item.totalAttempts} times. Needs diagnosis and a new approach.`,
         context: item,
       };
+      // Drift pre-filter (issue #233) — already popped, just drop & continue
+      // if a near-duplicate of recent merged work.
+      const driftResult = await isAnchorDriftDuplicate(candidate);
+      if (!driftResult.drift) {
+        return candidate;
+      }
+      // dropped — fall through
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt reframe item: ${err.message}`);
       await listLPop(REFRAME_QUEUE);
@@ -585,7 +682,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
       }
     }
 
-    return {
+    const candidate = {
       type: "doc",
       reference: "direction/priorities.md",
       whyNow: recentDocCycles >= 5
@@ -593,6 +690,17 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
         : "Next priority from operator direction document",
       context: priorities,
     };
+    // Drift pre-filter (issue #233) — symmetry with queue/reframe sources.
+    // The doc reference itself ("direction/priorities.md") doesn't typically
+    // match recent task titles, so this is a near-no-op today. Kept here so
+    // a future planner that emits a deterministic anchor.reference (e.g.
+    // first heading from priorities.md) is automatically guarded.
+    const driftResult = await isAnchorDriftDuplicate(candidate);
+    if (driftResult.drift) {
+      console.log(`[ControlLoop] Priorities-doc anchor pre-filtered as drift duplicate — returning no-work`);
+      return null;
+    }
+    return candidate;
   } catch (err: any) {
     if (err.code !== "ENOENT") {
       console.error(`[ControlLoop] selectAnchor: failed to read priorities.md: ${err.message}`);
@@ -882,6 +990,9 @@ export const _testing = {
   REFRAME_QUEUE_MAX_AGE_MS,
   REFRAME_INTERLEAVE_INTERVAL,
   HEALTH_CONFIDENCE_THRESHOLD,
+  DRIFT_PREFILTER_LOOKBACK,
+  DRIFT_PREFILTER_THRESHOLD,
+  DRIFT_PREFILTER_TYPES,
   trackAbandonment,
   clearAbandonmentCounter,
   storePriorFailure,
@@ -890,4 +1001,5 @@ export const _testing = {
   escalateStalePriorFailures,
   pruneReframeQueue,
   getReframeQueueLen,
+  isAnchorDriftDuplicate,
 };

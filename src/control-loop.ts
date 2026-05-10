@@ -26,7 +26,7 @@ import {
 } from "./redis-adapter.ts";
 import { prepareWorkspace } from "./prepare-workspace.ts";
 import { runPlannerAgent } from "./planner-prompt.ts";
-import { selectAnchor, markLowConfidenceSkip } from "./anchor-selection.ts";
+import { selectAnchor, markLowConfidenceSkip, consumeDriftPreFilteredCount } from "./anchor-selection.ts";
 import { scoreAnchor, getMinConfidence, recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { classifyTaskComplexity } from "./preflight.ts";
 import { autoDecomposeComplexTask } from "./auto-decompose.ts";
@@ -96,16 +96,46 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   // Step 2: SELECT ANCHOR
   console.log(`[ControlLoop] Step 2: Selecting anchor...`);
   const anchor = await selectAnchor(grounding, opts, eventBus);
+  // Issue #233: capture drift pre-filter count for metrics. The counter is
+  // a per-process accumulator inside anchor-selection; consume it now whether
+  // or not we found an anchor so the next cycle starts fresh.
+  const driftPreFiltered = consumeDriftPreFilteredCount();
 
   if (!anchor) {
-    console.log(`[ControlLoop] No actionable anchor found — cycle complete (no work needed)`);
+    const driftReason = driftPreFiltered > 0
+      ? `Drift pre-filter rejected ${driftPreFiltered} candidate(s); no fallback work available`
+      : "No actionable anchor found";
+    console.log(`[ControlLoop] ${driftReason} — cycle complete (no work needed)`);
     await eventBus.publish(STREAMS.NOTIFICATIONS, {
       type: "cycle:completed",
       source: "control-loop",
       correlationId: cycleId,
-      payload: { reason: "No actionable anchor found", tasksAttempted: 0 },
+      payload: { reason: driftReason, tasksAttempted: 0, driftPreFiltered },
     });
-    return { cycleId, tasks: [], reason: "No actionable anchor", durationMs: Date.now() - startTime };
+    // Record metrics so /api/metrics surfaces the drift-pre-filter savings (issue #233).
+    // Only record when something was actually filtered — preserves prior
+    // no-anchor behaviour (no metric row) when the queue is just empty.
+    if (driftPreFiltered > 0) {
+      await handleEarlyExit({
+        cycleId, startTime, grounding, ovSession,
+        anchor: { type: "drift-pre-filter", reference: "drift-pre-filter" },
+        outcome: "skipped",
+        reason: driftReason,
+        metricsOverrides: {
+          taskTitle: `drift-pre-filter: ${driftPreFiltered} candidate(s) rejected`,
+          anchorType: "drift-pre-filter",
+          anchorReference: "drift-pre-filter",
+          driftPreFiltered,
+          abandonReason: "drift-pre-filter",
+        },
+      });
+    }
+    return { cycleId, tasks: [], reason: driftReason, durationMs: Date.now() - startTime, driftPreFiltered };
+  }
+  if (driftPreFiltered > 0) {
+    console.log(`[ControlLoop] Drift pre-filter rejected ${driftPreFiltered} candidate(s) before settling on this anchor`);
+    // Stash on anchor so downstream metric recording can include it.
+    (anchor as any)._driftPreFiltered = driftPreFiltered;
   }
   console.log(`[ControlLoop] Anchor: [${anchor.type}] ${anchor.reference}`);
 
