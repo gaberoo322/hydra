@@ -1,0 +1,14 @@
+[Unit]
+Description=Hourly Hydra stale-process reaper (issue #226 defense in depth)
+Documentation=https://github.com/gaberoo322/hydra/issues/226
+
+[Timer]
+# Run hourly, on the same cadence as hydra-test-container-cleanup.timer.
+# The 30-min --max-age cutoff in the service ensures recently-started test
+# runs are never touched.
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

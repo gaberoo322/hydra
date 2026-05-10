@@ -1,0 +1,17 @@
+[Unit]
+Description=Hydra stale tsx/esbuild process reaper (issue #226 defense in depth)
+Documentation=https://github.com/gaberoo322/hydra/issues/226
+
+[Service]
+Type=oneshot
+# Default cwd: the repo. ExecStart resolves to whatever HYDRA_ROOT points at,
+# falling back to the canonical install path.
+Environment=HYDRA_ROOT=%h/hydra
+ExecStart=/bin/bash -c '${HYDRA_ROOT}/scripts/reap-stale-test-procs.sh --apply --max-age 30'
+# The script exits 0 even on failure; this is intentional so the timer stays
+# clean. Operator inspects journalctl --user -u hydra-test-proc-reaper for output.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
