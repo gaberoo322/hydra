@@ -35,7 +35,7 @@ export function createHealthRouter(eventBus: any) {
     try {
       await eventBus.publisher.ping();
       redisOk = true;
-    } catch {}
+    } catch { /* intentional: ping failure reflected via redisOk=false in the response */ }
 
     res.json({
       status: killFileExists ? "killed" : "ok",
@@ -77,7 +77,7 @@ export function createHealthRouter(eventBus: any) {
       /* 0: basic health */ (async () => {
         const killed = existsSync(KILL_FILE);
         let redisOk = false;
-        try { await eventBus.publisher.ping(); redisOk = true; } catch {}
+        try { await eventBus.publisher.ping(); redisOk = true; } catch { /* intentional: ping failure reflected via redisOk=false */ }
         return { status: killed ? "killed" : "ok", redis: redisOk, cycle: (await getCycleStatus()).status || "idle", uptime: process.uptime() };
       })(),
       /* 1: service probes */ (async () => {
@@ -318,7 +318,7 @@ export function createHealthRouter(eventBus: any) {
             link: "/vision",
           });
         }
-      } catch { /* no priorities file */ }
+      } catch { /* intentional: no priorities file present yet — degrade silently */ }
 
       // 7. Kill file present
       if (existsSync(KILL_FILE)) {

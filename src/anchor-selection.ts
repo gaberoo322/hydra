@@ -574,7 +574,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
           if (report.task?.finalState === "merged") {
             mergedTasks.push(`- "${report.task.title}" (${report.filesChanged?.length || 0} files, commit ${report.commitSha?.slice(0, 7) || "?"})`);
           }
-        } catch { /* intentional */ }
+        } catch { /* intentional: skip unparseable reality report when scanning merged tasks */ }
       }
 
       await setString(REGRESSION_HUNT_LAST_KEY, new Date().toISOString(), 86400 * 3); // 3-day cooldown
@@ -784,7 +784,7 @@ async function storePriorFailure(taskId, reason, verificationResult, priorRetryC
   // caller so the count accumulates correctly.
   const existing = await listRange(PRIOR_FAILURES_KEY, 0, -1);
   const queueMatches = existing.filter(raw => {
-    try { return JSON.parse(raw).taskId === taskId; } catch { return false; }
+    try { return JSON.parse(raw).taskId === taskId; } catch { /* intentional: unparseable prior-failure entry is not a match */ return false; }
   }).length;
   const priorAttempts = Math.max(priorRetryCount, queueMatches);
 
@@ -798,7 +798,7 @@ async function storePriorFailure(taskId, reason, verificationResult, priorRetryC
 
     // Gather failure history for context
     const failureHistory = existing
-      .map(raw => { try { return JSON.parse(raw); } catch { return null; } })
+      .map(raw => { try { return JSON.parse(raw); } catch { /* intentional: drop unparseable history entries */ return null; } })
       .filter(f => f?.taskId === taskId);
 
     await listRPush(REFRAME_QUEUE, JSON.stringify({

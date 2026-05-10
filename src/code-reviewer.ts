@@ -50,8 +50,12 @@ async function isReviewed(commitSha: string): Promise<boolean> {
   try {
     const r = getRedisConnection();
     return (await r.sismember(REVIEWED_SET_KEY, commitSha)) === 1;
-  } catch {
-    return false;
+  } catch (err: any) {
+    // Fail closed: when Redis is unavailable, treat the commit as already-reviewed
+    // to avoid an infinite re-review loop on every tick. Log so a stuck reviewer
+    // is observable. (issue #234: silent isReviewed failure caused re-review loops.)
+    console.error(`[CodeReviewer] isReviewed Redis check failed for ${commitSha.slice(0, 7)} — failing closed (treating as reviewed): ${err?.message ?? err}`);
+    return true;
   }
 }
 
@@ -125,7 +129,7 @@ async function reviewCommit(sha: string, subject: string): Promise<DeepReviewRep
       { cwd: PROJECT_WORKSPACE, timeout: 5000 },
     );
     changedFiles = stdout.trim().split("\n").filter(Boolean);
-  } catch { /* intentional */ }
+  } catch { /* intentional: git diff failure leaves changedFiles empty — review proceeds on diff only */ }
 
   // Filter to source files
   const sourceFiles = changedFiles.filter((f) =>
@@ -147,7 +151,7 @@ async function reviewCommit(sha: string, subject: string): Promise<DeepReviewRep
       const fullPath = file.startsWith("/") ? file : join(PROJECT_WORKSPACE, file);
       const content = await readFile(fullPath, "utf-8");
       fileContents.push(`### ${file}\n\`\`\`\n${content.slice(0, 8000)}\n\`\`\``);
-    } catch { /* file might not exist */ }
+    } catch { /* intentional: file may have been deleted in the diff — skip from contents bundle */ }
   }
 
   // Truncate diff to 16K (Gemma has 128K context but let's be reasonable)
@@ -200,7 +204,7 @@ async function reviewCommit(sha: string, subject: string): Promise<DeepReviewRep
       findings = (parsed.findings || []).filter((f: any) =>
         f.file && f.issue && ["low", "medium", "high"].includes(f.severity)
       );
-    } catch {
+    } catch { /* intentional: agent emitted prose-wrapped JSON — fall through to regex extraction */
       const match = result.output.match(/\{[\s\S]*\}/);
       if (match) {
         try {
