@@ -114,7 +114,11 @@ export async function verify(
     verificationPlan = [...verificationPlan, { command: "npm run build", expected: "exit code 0", label: "build" }];
   }
 
-  let verification = await runVerification(PROJECT_WORKSPACE, verificationPlan);
+  // Issue #220: pass executor's feature branch so filesChanged reflects the
+  // actual diff against main, even if the workspace checkout silently failed
+  // and PROJECT_WORKSPACE is still on main.
+  const featureBranch = execResult?.branch || undefined;
+  let verification = await runVerification(PROJECT_WORKSPACE, verificationPlan, { featureBranch });
   await ovSession.logVerification(verification, verification.allPassed);
 
   // =========================================================================
@@ -443,9 +447,166 @@ function checkExpectation(expected: string, exitCode: number, stdout: string, st
 }
 
 /**
- * Run a verification plan against the project. Never throws.
+ * Extract the list of files changed and a stat summary, choosing the most
+ * reliable git ref available. Never throws — returns empty fields on failure.
+ *
+ * Issue #220: callers may pass an explicit feature branch (pre-merge) or a
+ * merge commit SHA (post-merge) to avoid the silent-empty-diff trap when the
+ * workspace happens to be on main.
+ *
+ * Exported so test/verification-files-changed.test.mts can drive it against a
+ * real on-disk git fixture.
  */
-function runVerification(projectDir: string, plan: any[], opts: { totalTimeoutMs?: number; stepTimeoutMs?: number } = {}) {
+export async function extractDiff(
+  projectDir: string,
+  opts: { featureBranch?: string; commitSha?: string } = {},
+): Promise<{ diffSummary: string; filesChanged: string[] }> {
+  const { featureBranch, commitSha } = opts;
+
+  // Strategy 1: explicit feature branch. `main...<branch>` ignores the
+  // workspace's current HEAD entirely.
+  if (featureBranch) {
+    try {
+      const namesPromise = execFileAsync(
+        "git",
+        ["diff", "--name-only", `main...${featureBranch}`],
+        { cwd: projectDir, timeout: 10000 },
+      );
+      const statPromise = execFileAsync(
+        "git",
+        ["diff", "--stat", `main...${featureBranch}`],
+        { cwd: projectDir, timeout: 10000 },
+      );
+      const [names, stat] = await Promise.all([namesPromise, statPromise]);
+      const filesChanged = names.stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (filesChanged.length > 0) {
+        return { diffSummary: stat.stdout.trim(), filesChanged };
+      }
+      // Branch yielded nothing — fall through to other strategies (e.g. branch
+      // already merged into main and pointer reset).
+    } catch (err: any) {
+      console.error(
+        `[Verification] git diff main...${featureBranch} failed: ${err.message}`,
+      );
+      Sentry.addBreadcrumb({
+        category: "verification",
+        message: `extractDiff featureBranch failed: ${err.message}`,
+        level: "warning",
+      });
+    }
+  }
+
+  // Strategy 2: explicit merge commit SHA (post-merge path). `git show
+  // --name-only` lists files touched by the merge; for a `--no-ff` merge
+  // commit this is the same set of files as the feature branch contributed.
+  if (commitSha) {
+    try {
+      const namesPromise = execFileAsync(
+        "git",
+        ["show", "--name-only", "--pretty=format:", commitSha],
+        { cwd: projectDir, timeout: 10000 },
+      );
+      const statPromise = execFileAsync(
+        "git",
+        ["show", "--stat", "--pretty=format:", commitSha],
+        { cwd: projectDir, timeout: 10000 },
+      );
+      const [names, stat] = await Promise.all([namesPromise, statPromise]);
+      const filesChanged = names.stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (filesChanged.length > 0) {
+        return { diffSummary: stat.stdout.trim(), filesChanged };
+      }
+    } catch (err: any) {
+      console.error(
+        `[Verification] git show --name-only ${commitSha} failed: ${err.message}`,
+      );
+      Sentry.addBreadcrumb({
+        category: "verification",
+        message: `extractDiff commitSha failed: ${err.message}`,
+        level: "warning",
+      });
+    }
+  }
+
+  // Strategy 3 (legacy): `git diff --stat main` from the workspace. Only
+  // produces output when the workspace HEAD is the feature branch.
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["diff", "--stat", "main"],
+      { cwd: projectDir, timeout: 10000 },
+    );
+    const diffSummary = stdout.trim();
+    const filesChanged = stdout
+      .split("\n")
+      .filter((l) => l.includes("|"))
+      .map((l) => l.split("|")[0].trim());
+    if (filesChanged.length > 0) {
+      return { diffSummary, filesChanged };
+    }
+  } catch (err: any) {
+    console.error(
+      `[Verification] git diff --stat main fallback failed: ${err.message}`,
+    );
+    Sentry.addBreadcrumb({
+      category: "verification",
+      message: `extractDiff fallback failed: ${err.message}`,
+      level: "warning",
+    });
+  }
+
+  // Strategy 4 (legacy fallback-of-fallback): HEAD~1 — kept for parity with
+  // the pre-#220 behaviour on isolated test workspaces with no `main` ref.
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["diff", "--stat", "HEAD~1"],
+      { cwd: projectDir, timeout: 10000 },
+    );
+    const diffSummary = stdout.trim();
+    const filesChanged = stdout
+      .split("\n")
+      .filter((l) => l.includes("|"))
+      .map((l) => l.split("|")[0].trim());
+    return { diffSummary, filesChanged };
+  } catch (err: any) {
+    console.error(
+      `[Verification] git diff --stat HEAD~1 fallback failed: ${err.message}`,
+    );
+    Sentry.addBreadcrumb({
+      category: "verification",
+      message: `extractDiff HEAD~1 fallback failed: ${err.message}`,
+      level: "warning",
+    });
+  }
+
+  return { diffSummary: "", filesChanged: [] };
+}
+
+/**
+ * Run a verification plan against the project. Never throws.
+ *
+ * Issue #220: opts.featureBranch / opts.commitSha let callers pin the diff
+ * extraction to a specific ref instead of trusting `git diff --stat main` from
+ * the workspace (which yields empty output when the workspace silently stays
+ * on main — the exact failure that motivated this fix).
+ */
+function runVerification(
+  projectDir: string,
+  plan: any[],
+  opts: {
+    totalTimeoutMs?: number;
+    stepTimeoutMs?: number;
+    featureBranch?: string;
+    commitSha?: string;
+  } = {},
+) {
   const totalTimeout = opts.totalTimeoutMs || TOTAL_TIMEOUT;
   const stepTimeout = opts.stepTimeoutMs || STEP_TIMEOUT;
   const start = Date.now();
@@ -496,35 +657,18 @@ function runVerification(projectDir: string, plan: any[], opts: { totalTimeoutMs
       steps.push(result);
     }
 
-    // Get diff summary for the report
-    let diffSummary = "";
-    let filesChanged: string[] = [];
-    try {
-      const { stdout } = await execFileAsync("git", ["diff", "--stat", "main"], {
-        cwd: projectDir,
-        timeout: 10000,
-      });
-      diffSummary = stdout.trim();
-      filesChanged = stdout
-        .split("\n")
-        .filter((l) => l.includes("|"))
-        .map((l) => l.split("|")[0].trim());
-    } catch {
-      try {
-        const { stdout } = await execFileAsync("git", ["diff", "--stat", "HEAD~1"], {
-          cwd: projectDir,
-          timeout: 10000,
-        });
-        diffSummary = stdout.trim();
-        filesChanged = stdout
-          .split("\n")
-          .filter((l) => l.includes("|"))
-          .map((l) => l.split("|")[0].trim());
-      } catch (err: any) {
-        console.error(`[Verification] git diff --stat failed for both main and HEAD~1: ${err.message}`);
-        Sentry.addBreadcrumb({ category: "verification", message: `git diff --stat fallback failed: ${err.message}`, level: "warning" });
-      }
-    }
+    // Issue #220: extract diff via the most reliable ref available.
+    //  1. featureBranch (pre-merge): `main...<branch>` works regardless of
+    //     which ref the workspace is currently on, including the failure mode
+    //     where the executor's checkout back to main never completed and the
+    //     workspace silently stayed on main (yielding an empty diff before).
+    //  2. commitSha (post-merge fallback): list files in the merge commit.
+    //  3. plain `git diff --stat main` (legacy): only works when workspace is
+    //     actually on the feature branch. Last resort.
+    const { diffSummary, filesChanged } = await extractDiff(projectDir, {
+      featureBranch: opts.featureBranch,
+      commitSha: opts.commitSha,
+    });
 
     return {
       allPassed: steps.every((s) => s.passed),
