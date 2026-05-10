@@ -1,5 +1,6 @@
 import { useApi } from "../hooks/useApi.js";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import AbandonmentPanel from "../components/AbandonmentPanel.jsx";
 
 export default function Metrics() {
   const { data: metricsData } = useApi("/metrics?count=30");
@@ -56,6 +57,9 @@ export default function Metrics() {
           <p className="text-sm text-zinc-600 py-8 text-center">No metrics data</p>
         )}
       </div>
+
+      {/* Abandonment causes (issue #195) */}
+      <AbandonmentPanel count={50} />
 
       {/* Test trend */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
