@@ -97,7 +97,16 @@ export default function Health() {
           <ServiceCard name="Scheduler" status={svc.scheduler?.status} details={{
             interval: svc.scheduler?.intervalHuman || "not set",
             cycles: `${svc.scheduler?.cyclesMerged || 0} merged / ${svc.scheduler?.cyclesRun || 0} run`,
-            ...(svc.scheduler?.mergeRate > 0 ? { "merge rate": `${svc.scheduler.mergeRate}%` } : {}),
+            // Issue #232: surface the rolling N-cycle merge rate as the
+            // operator-visible metric. Lifetime ratio is shown as a tooltip
+            // on hover for audit context. Window size comes from the API so
+            // the label updates if HYDRA_ROLLING_MERGE_RATE_WINDOW changes.
+            ...(svc.scheduler?.mergeRate > 0 ? {
+              [`Recent Merge Rate (${svc.scheduler?.mergeRateWindow ?? 50})`]: {
+                value: `${svc.scheduler.mergeRate}%`,
+                tooltip: `Rolling merge rate over the last ${svc.scheduler?.mergeRateCyclesInWindow ?? 0} cycles (window size ${svc.scheduler?.mergeRateWindow ?? 50}). Lifetime: ${svc.scheduler?.mergeRateLifetime ?? 0}% across ${svc.scheduler?.cyclesRun ?? 0} cycles — kept for audit only because historical regressions skew it (see issue #232).`,
+              },
+            } : {}),
             ...(svc.scheduler?.consecutiveErrors > 0 ? { errors: `${svc.scheduler.consecutiveErrors} consecutive` } : {}),
             ...(svc.scheduler?.lastError ? { "last error": svc.scheduler.lastError.slice(0, 80) } : {}),
             spend: `$${(svc.scheduler?.research?.dailySpendUsd || 0).toFixed(2)} / $${svc.scheduler?.research?.dailyCostCapUsd || 50}`,
@@ -264,11 +273,19 @@ function ServiceCard({ name, port, status, details }) {
       {port && <p className="text-xs text-zinc-600 font-mono">:{port}</p>}
       {details && Object.keys(details).length > 0 && (
         <div className="mt-2 space-y-0.5">
-          {Object.entries(details).map(([key, val]) => (
-            <p key={key} className="text-xs text-zinc-500">
-              <span className="text-zinc-600">{key}:</span> {String(val)}
-            </p>
-          ))}
+          {Object.entries(details).map(([key, val]) => {
+            // Support `{ value, tooltip }` shape so callers can attach
+            // explanatory hover text to a single field (issue #232).
+            const isObj = val && typeof val === "object" && "value" in val;
+            const display = isObj ? String(val.value) : String(val);
+            const tooltip = isObj ? val.tooltip : undefined;
+            return (
+              <p key={key} className="text-xs text-zinc-500" title={tooltip}>
+                <span className="text-zinc-600">{key}:</span> {display}
+                {tooltip && <span className="ml-1 text-zinc-700 cursor-help">ⓘ</span>}
+              </p>
+            );
+          })}
         </div>
       )}
     </div>

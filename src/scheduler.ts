@@ -63,6 +63,45 @@ const MAX_STALL_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes max backoff
 // evidence of system rot, not just slow work.
 const NO_OP_MERGE_HALT_THRESHOLD = parseInt(process.env.HYDRA_NO_OP_MERGE_HALT_THRESHOLD) || 3;
 
+// Rolling merge-rate window (issue #232): the operator-visible mergeRate is
+// computed from the last N cycles in cycle-history (same source as
+// `hydra metrics --count N`). Lifetime counters (cyclesMerged / cyclesRun)
+// are still surfaced as `mergeRateLifetime` for audit, but they get heavily
+// skewed by historical regressions (e.g. issue #218 where merges were 0 for
+// 14 hours) and trip stall-style alerts long after the underlying bug is fixed.
+const ROLLING_MERGE_RATE_WINDOW = parseInt(process.env.HYDRA_ROLLING_MERGE_RATE_WINDOW) || 50;
+
+/**
+ * Compute the rolling merge rate from cycle metrics history.
+ *
+ * Counts a cycle as "merged" when its persisted `tasksMerged` field is > 0,
+ * matching the semantics used by `getAggregateStats()` and the post-merge
+ * pattern detector (so the scheduler card and `hydra metrics --count N` no
+ * longer disagree).
+ *
+ * Returns null when there's no recent history yet (caller should treat as
+ * "no data" rather than 0%, which would falsely flag a healthy fresh start
+ * as a stall).
+ *
+ * Pure-ish: only side effect is a Redis read via getMetricsTrend.
+ */
+async function computeRollingMergeRate(window: number = ROLLING_MERGE_RATE_WINDOW): Promise<{ mergeRate: number | null; cyclesInWindow: number }> {
+  try {
+    const trend = await getMetricsTrend(window);
+    if (!Array.isArray(trend) || trend.length === 0) {
+      return { mergeRate: null, cyclesInWindow: 0 };
+    }
+    const merged = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
+    return {
+      mergeRate: Math.round((merged / trend.length) * 100),
+      cyclesInWindow: trend.length,
+    };
+  } catch (err: any) {
+    console.error(`[Scheduler] Rolling merge-rate computation failed: ${err?.message || err}`);
+    return { mergeRate: null, cyclesInWindow: 0 };
+  }
+}
+
 /**
  * Compute exponential backoff delay for stall detection.
  * Exported for testability (issue #24 test coverage).
@@ -903,6 +942,19 @@ async function getStatus() {
   const buildCount24h = await getBuildEventCount24h().catch(() => 0);
   const currentRatio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
   const perCycleCostCapUsd = getPerCycleCostCapUsd();
+
+  // Issue #232: report a rolling-window merge rate as the primary
+  // operator-visible metric. The lifetime ratio is preserved as
+  // `mergeRateLifetime` for audit but is heavily skewed by historical
+  // regressions and should not drive alerts or dashboards.
+  const rolling = await computeRollingMergeRate();
+  const lifetimeMergeRate = state.cyclesRun > 0
+    ? Math.round((state.cyclesMerged / state.cyclesRun) * 100)
+    : 0;
+  // When no rolling history is available yet, fall back to the lifetime ratio
+  // so existing consumers that read `mergeRate` keep getting a number.
+  const mergeRate = rolling.mergeRate ?? lifetimeMergeRate;
+
   return {
     running: state.running,
     intervalMs: state.intervalMs,
@@ -910,7 +962,14 @@ async function getStatus() {
     cyclesRun: state.cyclesRun,
     cyclesMerged: state.cyclesMerged,
     cyclesFailed: state.cyclesFailed,
-    mergeRate: state.cyclesRun > 0 ? Math.round((state.cyclesMerged / state.cyclesRun) * 100) : 0,
+    // Rolling N-cycle merge rate (default 50) — same source as
+    // `hydra metrics --count N`. Operator-visible primary metric.
+    mergeRate,
+    mergeRateWindow: ROLLING_MERGE_RATE_WINDOW,
+    mergeRateCyclesInWindow: rolling.cyclesInWindow,
+    // Lifetime counter ratio — kept for audit / debugging only. Do not use
+    // for alerts, stall detection, or operator dashboards (see issue #232).
+    mergeRateLifetime: lifetimeMergeRate,
     lastCycleAt: state.lastCycleAt,
     lastError: state.lastError,
     startedAt: state.startedAt,
