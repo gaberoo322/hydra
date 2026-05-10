@@ -1,6 +1,7 @@
 import { useApi } from "../hooks/useApi.js";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import AbandonmentPanel from "../components/AbandonmentPanel.jsx";
+import QualityGatesPanel from "../components/QualityGatesPanel.jsx";
 
 export default function Metrics() {
   const { data: metricsData } = useApi("/metrics?count=30");
@@ -57,6 +58,9 @@ export default function Metrics() {
           <p className="text-sm text-zinc-600 py-8 text-center">No metrics data</p>
         )}
       </div>
+
+      {/* Quality gates trend (issue #212) */}
+      <QualityGatesPanel count={50} />
 
       {/* Abandonment causes (issue #195) */}
       <AbandonmentPanel count={50} />

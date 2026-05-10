@@ -350,6 +350,9 @@ export async function runPostMerge(
   const mutationKillRate = mutationReport && mutationTestable > 0
     ? Math.round((mutationReport.killed / mutationTestable) * 100)
     : null;
+  // Issue #212: surface mutation/JIT trend in metrics so quality regressions
+  // are visible without forensic log digs.
+  const mutationsTested = mutationReport ? mutationTestable : 0;
 
   // Derive reconciliation status
   const reconciliationStatus = reconciliation
@@ -398,6 +401,9 @@ export async function runPostMerge(
     mutationKillRate: mutationKillRate ?? -1,
     mutationKilled: mutationReport?.killed ?? 0,
     mutationSurvived: mutationReport?.survived ?? 0,
+    // Quality gate trend fields (issue #212)
+    mutationsTested,
+    gateBlocked: 0,
     fixerUsed: fixerUsed ? 1 : 0,
     fixerResolved: fixerResolved ? 1 : 0,
     scopeFilterCleaned,

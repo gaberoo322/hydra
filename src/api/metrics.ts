@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getMetricsTrend, getAggregateStats, recordCycleMetrics, getAbandonmentBreakdown } from "../metrics.ts";
+import { getMetricsTrend, getAggregateStats, recordCycleMetrics, getAbandonmentBreakdown, getQualityGateTrend } from "../metrics.ts";
 import { redisKeys } from "../redis-keys.ts";
 import { getWorkQueueLen, listLen, getCycleCosts } from "../redis-adapter.ts";
 
@@ -106,6 +106,32 @@ export function createMetricsRouter() {
       res.json(breakdown);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /metrics/quality-gates — Mutation kill-rate + JIT trend (issue #212)
+  router.get("/metrics/quality-gates", async (req, res) => {
+    try {
+      // @ts-expect-error — req.query.count is a string at runtime
+      const count = parseInt(req.query.count) || 50;
+      const result = await getQualityGateTrend(count);
+      res.json(result);
+    } catch (err: any) {
+      // AC: never 500 on this endpoint — empty state instead
+      console.error(`[api/metrics] /metrics/quality-gates failed: ${err.message}`);
+      res.status(200).json({
+        trend: [],
+        summary: {
+          cycles: 0,
+          cyclesWithMutationData: 0,
+          avgKillRate: null,
+          killRateP50: null,
+          killRateP95: null,
+          gateBlockCount: 0,
+          totalJitTestsAdded: 0,
+        },
+        error: err.message,
+      });
     }
   });
 
