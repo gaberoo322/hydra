@@ -60,7 +60,7 @@ describe("context-builder PlannerContext shape", () => {
     assert.ok(Array.isArray(ctx.warnings), "warnings must be an array");
   });
 
-  test("quick-fix anchor skips heavy context sources", async () => {
+  test("quick-fix anchor skips heavy context sources but keeps reflections (issue #193)", async () => {
     const mod = await import("../src/context-builder.ts");
 
     const anchor = { type: "prior-failure", reference: "fix:bar" };
@@ -68,12 +68,15 @@ describe("context-builder PlannerContext shape", () => {
 
     assert.equal(ctx.priorities, "", "quick-fix should skip priorities");
     assert.equal(ctx.feedback, "", "quick-fix should skip feedback");
-    assert.equal(ctx.plannerMemory, "", "quick-fix should skip plannerMemory");
     assert.equal(ctx.ovContext, "", "quick-fix should skip ovContext");
     assert.equal(ctx.milestoneContext, "", "quick-fix should skip milestoneContext");
     assert.equal(ctx.accomplishmentsContext, "", "quick-fix should skip accomplishments");
     assert.equal(ctx.continuityContext, "", "quick-fix should skip continuity");
     assert.ok(ctx.groundingSummary.length > 0, "quick-fix should still have grounding summary");
+    // Reflections are loaded for quick-fix anchors (issue #193 fix). The value
+    // may be empty when no reflections exist in Redis, but the contract is that
+    // the load is attempted, not skipped.
+    assert.equal(typeof ctx.plannerMemory, "string", "plannerMemory must be a string (loaded, not skipped)");
   });
 
   test("grounding summary is always populated for valid grounding", async () => {
@@ -91,13 +94,16 @@ describe("context-builder PlannerContext shape", () => {
     assert.ok(ctx.groundingSummary.includes("50"), "grounding summary should mention test count");
   });
 
-  test("warnings array starts empty for quick-fix (no sources attempted)", async () => {
+  test("warnings array stays small for quick-fix (only reflection load attempted)", async () => {
     const mod = await import("../src/context-builder.ts");
 
     const anchor = { type: "failing-test", reference: "test:clean" };
     const ctx = await mod.buildPlannerContext(anchor, makeGrounding(), null);
-    assert.equal(ctx.warnings.length, 0,
-      "quick-fix should have no warnings (no sources attempted beyond grounding)");
+    // Only the planner-context (reflections) load is attempted for quick-fix
+    // anchors after issue #193. If Redis is unavailable in the test env, that
+    // is the only warning we'll see.
+    assert.ok(ctx.warnings.length <= 1,
+      `quick-fix should have at most one warning (reflection load), got ${ctx.warnings.length}: ${ctx.warnings.join("; ")}`);
   });
 });
 

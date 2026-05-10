@@ -143,12 +143,21 @@ export async function buildPlannerContext(
     warnings.push("grounding-summary: failed");
   }
 
-  // Quick-fix anchors skip most context — the anchor IS the entire scope
+  // Quick-fix anchors skip most context — the anchor IS the entire scope.
+  // EXCEPTION (issue #193): Episodic reflections MUST be loaded for retries,
+  // otherwise the planner produces the same plan that failed last time. Without
+  // this, prior-failure retries had a 0% merge rate (measured 2026-05-09).
   if (isQuickFixAnchor) {
+    const plannerMemory = await loadSource("planner-context", () =>
+      getContext("planner", anchor), warnings) || "";
+    const reflectionCount = countReflections(plannerMemory as string);
+    if (reflectionCount > 0) {
+      console.log(`[Planner] Injected ${reflectionCount} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type})`);
+    }
     return {
       priorities: "",
       feedback: "",
-      plannerMemory: "",
+      plannerMemory: plannerMemory as string,
       ovContext: "",
       milestoneContext: "",
       accomplishmentsContext: "",
@@ -212,10 +221,18 @@ export async function buildPlannerContext(
   // Map budgeted sources back to PlannerContext fields
   const byName = new Map(budgeted.map((s) => [s.name, s.content]));
 
+  // Issue #193: log reflection injection count so production logs show whether
+  // reflections actually reached the planner (previously silent for quick-fix).
+  const finalPlannerMemory = byName.get("reflections") ?? "";
+  const reflectionCount = countReflections(finalPlannerMemory);
+  if (reflectionCount > 0) {
+    console.log(`[Planner] Injected ${reflectionCount} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type})`);
+  }
+
   return {
     priorities: byName.get("priorities") ?? "",
     feedback: byName.get("feedback") ?? "",
-    plannerMemory: byName.get("reflections") ?? "",
+    plannerMemory: finalPlannerMemory,
     ovContext: byName.get("memory") ?? "",
     milestoneContext: milestoneContext || "",
     accomplishmentsContext: byName.get("accomplishments") ?? "",
@@ -223,6 +240,28 @@ export async function buildPlannerContext(
     continuityContext: byName.get("continuity") ?? "",
     warnings,
   };
+}
+
+/**
+ * Count reflection blocks in formatted planner context.
+ * Looks for the "PRIOR ATTEMPTS" header (per-anchor) and "Recent Failures"
+ * header (global). Used for telemetry and the reflectionInjected metric.
+ */
+export function countReflections(plannerMemory: string): number {
+  if (!plannerMemory) return 0;
+  let count = 0;
+  // Per-anchor reflections format: "## PRIOR ATTEMPTS (N previous failures...)"
+  const priorMatch = plannerMemory.match(/## PRIOR ATTEMPTS \((\d+) previous failures?/);
+  if (priorMatch) count += parseInt(priorMatch[1], 10) || 0;
+  // Global reflections format: each reflection starts with "### <cycleId>"
+  // under a "## Recent Failures" section
+  const recentIdx = plannerMemory.indexOf("## Recent Failures");
+  if (recentIdx >= 0) {
+    const recentSection = plannerMemory.slice(recentIdx);
+    const matches = recentSection.match(/^### /gm);
+    if (matches) count += matches.length;
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------

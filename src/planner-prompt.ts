@@ -17,7 +17,7 @@ import { getContext } from "./learning.ts";
 import { getCachedPlan, cachePlan } from "./plan-cache.ts";
 import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
-import { buildPlannerContext } from "./context-builder.ts";
+import { buildPlannerContext, countReflections } from "./context-builder.ts";
 import type { PlannerContext } from "./context-builder.ts";
 
 // ---------------------------------------------------------------------------
@@ -217,6 +217,11 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
       cachedTask.__plannerModel = "cached";
       cachedTask.__planCacheHit = true;
       cachedTask.__planCacheAnchorType = anchor.type;
+      // Cache hits don't inject reflections (cache only used when none exist
+      // for non-CACHE_SAFE types, or for CACHE_SAFE failing-test type where
+      // reflections aren't useful for narrow deterministic fixes).
+      cachedTask.__reflectionsInjected = 0;
+      cachedTask.__hadReflections = false;
       await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0);
       console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present but safe for quick-fix)" : ""}`);
       return cachedTask;
@@ -308,7 +313,9 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     ].filter(Boolean).join("\n");
     console.log(`[ControlLoop] Planner using REFRAME prompt for "${ctx.originalTitle}" (${ctx.totalAttempts} prior failures)`);
   } else if (isQuickFixAnchor) {
-    // Compressed prompt for quick-fix: just anchor + compact grounding + fix instructions
+    // Compressed prompt for quick-fix: just anchor + compact grounding + fix instructions.
+    // Issue #193: reflections (plannerMemory) are now loaded for quick-fix anchors —
+    // without them, prior-failure retries were stuck at 0% merge rate.
     const compactGrounding = summarizeForPrompt(grounding, { compact: true }).slice(0, 2000);
     prompt = [
       `## FIX THIS (quick-fix — targeted repair, minimal scope)`,
@@ -320,10 +327,15 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
       "",
       compactGrounding,
       "",
+      // Inject reflections so the planner sees prior failure context. This is the
+      // entire point of retrying a prior-failure anchor.
+      plannerMemory ? plannerMemory : "",
+      "",
       `## INSTRUCTIONS`,
       `This is a targeted fix. Produce exactly 1 task with the SMALLEST change that resolves the issue.`,
       `The task MUST be anchored to "${anchor.reference}".`,
       `Keep scopeBoundary narrow — ideally 1-2 files.`,
+      plannerMemory ? `Prior attempts for this anchor are listed above — propose a DIFFERENT approach (different files, different method, narrower scope) than what failed before.` : "",
       "",
       jsonSchema,
     ].filter(Boolean).join("\n");
@@ -455,7 +467,14 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   }
 
   await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "completed", result.usage, result.costUsd);
-  if (task) task.__plannerModel = result.model;
+  if (task) {
+    task.__plannerModel = result.model;
+    // Issue #193: tag whether reflections reached the planner so cycle metrics
+    // can correlate retry success rate with reflection injection.
+    const injectedCount = countReflections(plannerMemory || "");
+    task.__reflectionsInjected = injectedCount;
+    task.__hadReflections = injectedCount > 0;
+  }
 
   // Store in plan cache for future reuse
   if (task) {

@@ -294,6 +294,9 @@ export async function handleEarlyExit(opts: EarlyExitOpts): Promise<void> {
     anchorReference: anchor?.reference || "unknown",
     plannerModel: task?.__plannerModel || "none",
     planCacheHit: task?.__planCacheHit ? "true" : "false",
+    // Issue #193: surface reflection injection on aborted/abandoned cycles too
+    reflectionInjected: task?.__hadReflections ? "true" : "false",
+    reflectionCount: task?.__reflectionsInjected || 0,
     ...metricsOverrides,
   });
 }

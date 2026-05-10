@@ -385,6 +385,10 @@ export async function runPostMerge(
     complexity, filesInScope, criteriaCount,
     plannerModel: task.__plannerModel || "unknown",
     executorModel: execResult?.__executorModel || "unknown",
+    // Issue #193: track whether reflections were injected so retry effectiveness
+    // can be correlated with reflection presence.
+    reflectionInjected: task.__hadReflections ? "true" : "false",
+    reflectionCount: task.__reflectionsInjected || 0,
     jitTestsGenerated: jitReport?.generated || 0,
     jitTestsKept: jitReport?.kept || 0,
     jitTestsCaughtBug: jitReport?.caughtBug ? 1 : 0,
