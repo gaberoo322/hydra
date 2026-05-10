@@ -206,9 +206,16 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
       console.log(`[ControlLoop] Complex task auto-decomposed into spec "${decomposeResult.spec.slug}" with ${decomposeResult.taskCount} tasks — continuing cycle with first sub-task`);
       // Carry planner attribution from the parent so cost/cache metrics
       // remain accurate for the cycle.
+      // Issue #221: also carry reflection telemetry — without it, the
+      // sub-task surfaced no __hadReflections flag and the
+      // reflectionInjected metric stayed at 0 even when the parent task
+      // was planned with reflection context.
       const parentMeta = {
         __plannerModel: task.__plannerModel,
         __planCacheHit: task.__planCacheHit,
+        __hadReflections: task.__hadReflections,
+        __reflectionsInjected: task.__reflectionsInjected,
+        __reflectionSources: task.__reflectionSources,
         taskId: task.taskId,
       };
       task = { ...decomposeResult.firstTask, ...parentMeta };

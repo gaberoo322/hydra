@@ -53,6 +53,8 @@ describe("context-builder PlannerContext shape", () => {
       "priorities", "feedback", "plannerMemory", "ovContext",
       "milestoneContext", "accomplishmentsContext", "groundingSummary",
       "continuityContext", "warnings",
+      // Issue #221: reflection telemetry exposed by the context builder
+      "reflectionInjected", "reflectionSources",
     ];
     for (const key of expectedKeys) {
       assert.ok(key in ctx, `PlannerContext must have field "${key}"`);

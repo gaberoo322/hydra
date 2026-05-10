@@ -120,7 +120,18 @@ export interface PlannerContext {
   continuityContext: string;
   /** Per-source warnings for degraded loads */
   warnings: string[];
+  /**
+   * Issue #221: Reflection injection telemetry. Set whenever reflections were
+   * actually present in the assembled prompt (after budget truncation). Used by
+   * planner-prompt.ts to tag the resulting task and by metric writers to
+   * compute the reflectionInjected/reflectionCount/reflectionSources fields.
+   */
+  reflectionInjected: number;
+  /** Which reflection sources contributed: "per-anchor" and/or "global". */
+  reflectionSources: ReflectionSource[];
 }
+
+export type ReflectionSource = "per-anchor" | "global";
 
 // ---------------------------------------------------------------------------
 // buildPlannerContext — loads all context sources with graceful degradation
@@ -150,9 +161,9 @@ export async function buildPlannerContext(
   if (isQuickFixAnchor) {
     const plannerMemory = await loadSource("planner-context", () =>
       getContext("planner", anchor), warnings) || "";
-    const reflectionCount = countReflections(plannerMemory as string);
-    if (reflectionCount > 0) {
-      console.log(`[Planner] Injected ${reflectionCount} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type})`);
+    const reflectionStats = inspectReflections(plannerMemory as string);
+    if (reflectionStats.count > 0) {
+      console.log(`[Planner] Injected ${reflectionStats.count} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type}, sources=${reflectionStats.sources.join(",")})`);
     }
     return {
       priorities: "",
@@ -164,6 +175,8 @@ export async function buildPlannerContext(
       groundingSummary,
       continuityContext: "",
       warnings,
+      reflectionInjected: reflectionStats.count,
+      reflectionSources: reflectionStats.sources,
     };
   }
 
@@ -224,9 +237,9 @@ export async function buildPlannerContext(
   // Issue #193: log reflection injection count so production logs show whether
   // reflections actually reached the planner (previously silent for quick-fix).
   const finalPlannerMemory = byName.get("reflections") ?? "";
-  const reflectionCount = countReflections(finalPlannerMemory);
-  if (reflectionCount > 0) {
-    console.log(`[Planner] Injected ${reflectionCount} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type})`);
+  const reflectionStats = inspectReflections(finalPlannerMemory);
+  if (reflectionStats.count > 0) {
+    console.log(`[Planner] Injected ${reflectionStats.count} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type}, sources=${reflectionStats.sources.join(",")})`);
   }
 
   return {
@@ -239,6 +252,8 @@ export async function buildPlannerContext(
     groundingSummary: byName.get("grounding") ?? "",
     continuityContext: byName.get("continuity") ?? "",
     warnings,
+    reflectionInjected: reflectionStats.count,
+    reflectionSources: reflectionStats.sources,
   };
 }
 
@@ -248,20 +263,44 @@ export async function buildPlannerContext(
  * header (global). Used for telemetry and the reflectionInjected metric.
  */
 export function countReflections(plannerMemory: string): number {
-  if (!plannerMemory) return 0;
+  return inspectReflections(plannerMemory).count;
+}
+
+/**
+ * Inspect reflection content in formatted planner context. Returns both the
+ * total count and the list of contributing sources ("per-anchor" / "global").
+ *
+ * Issue #221: previously only the total count was exposed; the metric pipeline
+ * could not distinguish which reflection sources reached the planner.
+ */
+export function inspectReflections(plannerMemory: string): {
+  count: number;
+  sources: ReflectionSource[];
+} {
+  if (!plannerMemory) return { count: 0, sources: [] };
   let count = 0;
+  const sources: ReflectionSource[] = [];
   // Per-anchor reflections format: "## PRIOR ATTEMPTS (N previous failures...)"
   const priorMatch = plannerMemory.match(/## PRIOR ATTEMPTS \((\d+) previous failures?/);
-  if (priorMatch) count += parseInt(priorMatch[1], 10) || 0;
+  if (priorMatch) {
+    const n = parseInt(priorMatch[1], 10) || 0;
+    if (n > 0) {
+      count += n;
+      sources.push("per-anchor");
+    }
+  }
   // Global reflections format: each reflection starts with "### <cycleId>"
   // under a "## Recent Failures" section
   const recentIdx = plannerMemory.indexOf("## Recent Failures");
   if (recentIdx >= 0) {
     const recentSection = plannerMemory.slice(recentIdx);
     const matches = recentSection.match(/^### /gm);
-    if (matches) count += matches.length;
+    if (matches && matches.length > 0) {
+      count += matches.length;
+      sources.push("global");
+    }
   }
-  return count;
+  return { count, sources };
 }
 
 // ---------------------------------------------------------------------------

@@ -392,6 +392,10 @@ export async function runPostMerge(
     // can be correlated with reflection presence.
     reflectionInjected: task.__hadReflections ? "true" : "false",
     reflectionCount: task.__reflectionsInjected || 0,
+    // Issue #221: source breakdown (per-anchor / global)
+    reflectionSources: Array.isArray(task.__reflectionSources)
+      ? task.__reflectionSources.join(",")
+      : "",
     jitTestsGenerated: jitReport?.generated || 0,
     jitTestsKept: jitReport?.kept || 0,
     jitTestsCaughtBug: jitReport?.caughtBug ? 1 : 0,

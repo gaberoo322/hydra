@@ -17,7 +17,7 @@ import { getContext } from "./learning.ts";
 import { getCachedPlan, cachePlan } from "./plan-cache.ts";
 import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
-import { buildPlannerContext, countReflections } from "./context-builder.ts";
+import { buildPlannerContext } from "./context-builder.ts";
 import type { PlannerContext } from "./context-builder.ts";
 
 // ---------------------------------------------------------------------------
@@ -222,6 +222,7 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
       // reflections aren't useful for narrow deterministic fixes).
       cachedTask.__reflectionsInjected = 0;
       cachedTask.__hadReflections = false;
+      cachedTask.__reflectionSources = [];
       await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0);
       console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present but safe for quick-fix)" : ""}`);
       return cachedTask;
@@ -472,11 +473,15 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "completed", result.usage, result.costUsd);
   if (task) {
     task.__plannerModel = result.model;
-    // Issue #193: tag whether reflections reached the planner so cycle metrics
-    // can correlate retry success rate with reflection injection.
-    const injectedCount = countReflections(plannerMemory || "");
-    task.__reflectionsInjected = injectedCount;
-    task.__hadReflections = injectedCount > 0;
+    // Issue #193 / #221: tag whether reflections reached the planner so cycle
+    // metrics can correlate retry success rate with reflection injection.
+    // Source of truth is ctx.reflectionInjected / ctx.reflectionSources, set
+    // by the context builder after budget truncation has been applied — so
+    // this matches what the planner actually saw, not the pre-truncation raw
+    // bytes.
+    task.__reflectionsInjected = ctx.reflectionInjected;
+    task.__hadReflections = ctx.reflectionInjected > 0;
+    task.__reflectionSources = ctx.reflectionSources.slice();
   }
 
   // Store in plan cache for future reuse

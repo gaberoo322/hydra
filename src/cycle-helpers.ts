@@ -297,6 +297,11 @@ export async function handleEarlyExit(opts: EarlyExitOpts): Promise<void> {
     // Issue #193: surface reflection injection on aborted/abandoned cycles too
     reflectionInjected: task?.__hadReflections ? "true" : "false",
     reflectionCount: task?.__reflectionsInjected || 0,
+    // Issue #221: include source breakdown so the effectiveness API can
+    // attribute outcomes to per-anchor vs global reflections.
+    reflectionSources: Array.isArray(task?.__reflectionSources)
+      ? task.__reflectionSources.join(",")
+      : "",
     ...metricsOverrides,
   });
 }
