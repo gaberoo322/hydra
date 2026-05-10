@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getMetricsTrend, getAggregateStats, recordCycleMetrics } from "../metrics.ts";
+import { getMetricsTrend, getAggregateStats, recordCycleMetrics, getAbandonmentBreakdown } from "../metrics.ts";
 import { redisKeys } from "../redis-keys.ts";
 import { getWorkQueueLen, listLen, getCycleCosts } from "../redis-adapter.ts";
 
@@ -92,6 +92,18 @@ export function createMetricsRouter() {
           : 0,
         perCycle,
       });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /metrics/abandonment — Aggregated abandonment causes from recent cycles (issue #195)
+  router.get("/metrics/abandonment", async (req, res) => {
+    try {
+      // @ts-expect-error — req.query.count is a string at runtime
+      const count = parseInt(req.query.count) || 50;
+      const breakdown = await getAbandonmentBreakdown(count);
+      res.json(breakdown);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
