@@ -75,12 +75,19 @@ export function looksOperatorBlocked(verification) {
 // a prevention rule is recorded for the planner.
 
 export function reconcilePlanVsActual(task, verification) {
-  const plannedFiles = new Set(task.scopeBoundary?.in || []);
+  // Planned scope = files declared as modified ("in") plus files declared as
+  // created ("creates"). Without including creates, every refactor/extract
+  // task would flag its own intentional new files as scope creep (issue #190).
+  const plannedFiles = new Set([
+    ...(task.scopeBoundary?.in || []),
+    ...(task.scopeBoundary?.creates || []),
+  ]);
   const actualFiles = new Set(verification.filesChanged || []);
 
   const result = {
     scopeCreep: [],
     scopeGaps: [],
+    missingCreates: [] as string[],
     aligned: true,
     warnings: [],
   };
@@ -101,9 +108,18 @@ export function reconcilePlanVsActual(task, verification) {
   // Scope gaps: planned source files (not test files) that weren't changed
   for (const f of plannedFiles) {
     if (actualFiles.has(f)) continue;
-    // @ts-expect-error — migrate to proper types
     if (f.includes(".test.")) continue;
     result.scopeGaps.push(f);
+  }
+
+  // Missing creates: declared in scopeBoundary.creates but not present in
+  // verification.filesChanged. Verifies the executor actually produced the
+  // new files the planner said it would (issue #190).
+  const declaredCreates: string[] = task.scopeBoundary?.creates || [];
+  for (const f of declaredCreates) {
+    if (!actualFiles.has(f)) {
+      result.missingCreates.push(f);
+    }
   }
 
   if (result.scopeCreep.length > 0) {
@@ -112,6 +128,10 @@ export function reconcilePlanVsActual(task, verification) {
   }
   if (result.scopeGaps.length > 0) {
     result.warnings.push(`Potentially incomplete: ${result.scopeGaps.length} planned file(s) not modified: ${result.scopeGaps.join(", ")}`);
+    result.aligned = false;
+  }
+  if (result.missingCreates.length > 0) {
+    result.warnings.push(`Declared-but-missing creates: ${result.missingCreates.length} file(s) in scopeBoundary.creates were not produced: ${result.missingCreates.join(", ")}`);
     result.aligned = false;
   }
 
@@ -219,6 +239,10 @@ export async function preflightCheck(task, grounding, groundingSummary, projectW
   }
 
   // 5. Scope path validation — reject plans with non-existent file paths (issue #170)
+  //
+  // Only `scopeBoundary.in` (modify-intent) is checked for existence.
+  // `scopeBoundary.creates` (create-intent, issue #190) is intentionally
+  // skipped here — those files are NEW and verified post-execution.
   if (task.scopeBoundary?.in?.length > 0) {
     const scopeValidation = validateScopePaths(task.scopeBoundary.in, projectWorkspace ?? PROJECT_WORKSPACE);
     if (!scopeValidation.valid) {
@@ -227,6 +251,7 @@ export async function preflightCheck(task, grounding, groundingSummary, projectW
       if (scopeValidation.hints.length > 0) {
         flag += ` [${scopeValidation.hints.join("; ")}]`;
       }
+      flag += ` [hint: if these are NEW files the executor will create, move them to scopeBoundary.creates]`;
       flags.push(flag);
     }
   }

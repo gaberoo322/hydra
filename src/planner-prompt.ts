@@ -50,8 +50,13 @@ export const PLANNER_OUTPUT_SCHEMA = {
       properties: {
         in: { type: "array", items: { type: "string" } },
         out: { type: "array", items: { type: "string" } },
+        // creates: files the executor will CREATE during this task. Must not
+        // already exist on disk — preflight skips its file-existence check for
+        // these paths (issue #190). Post-execution, the cycle verifies each
+        // listed path was actually created.
+        creates: { type: "array", items: { type: "string" } },
       },
-      required: ["in", "out"],
+      required: ["in", "out", "creates"],
     },
     acceptanceCriteria: { type: "array", items: { type: "string" } },
     verificationPlan: {
@@ -242,7 +247,10 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     `  "anchorReference": "${anchor.reference}",`,
     `  "whyNow": "...",`,
     `  "confidence": "${confidence}",`,
-    `  "scopeBoundary": { "in": ["file1.ts", "file2.ts"], "out": ["unrelated/"] },`,
+    `  "scopeBoundary": { "in": ["file1.ts", "file2.ts"], "out": ["unrelated/"], "creates": [] },`,
+    `  // scopeBoundary.creates: list NEW files this task will create (refactor/extract/split tasks).`,
+    `  // Files in "in" must already exist on disk. Files in "creates" must NOT yet exist — they are`,
+    `  // verified to exist after the executor runs. Use [] if no new files are created.`,
     `  "acceptanceCriteria": ["criterion 1", "criterion 2"],`,
     `  "verificationPlan": [`,
     `    { "command": "npm test", "expected": "exit code 0", "label": "tests pass" },`,
