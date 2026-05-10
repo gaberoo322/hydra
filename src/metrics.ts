@@ -66,6 +66,8 @@ export async function getMetricsTrend(count = 20) {
     for (const key of [
       "tasksAttempted", "tasksVerified", "tasksMerged", "tasksFailed", "tasksAbandoned",
       "noOpMerges", // issue #222: silent-rot guardrail counter
+      "driftPreFiltered", // issue #233: anchors rejected by pre-filter
+      "driftPreFilteredCost", // issue #233: estimated planner $ saved
       "testsBefore", "testsAfter", "testsPassingBefore", "testsPassingAfter",
       "filesChanged", "totalDurationMs", "groundingDurationMs", "verificationDurationMs",
       "planningDurationMs", "executionDurationMs", "tokenCost", "costUsd",
@@ -86,6 +88,27 @@ export async function getMetricsTrend(count = 20) {
   }
 
   return results;
+}
+
+/**
+ * Compute title similarity using word-overlap (Jaccard-like, max-denominator).
+ *
+ * Pure function — extracted so anchor-selection can pre-filter near-duplicates
+ * before the planner runs, without re-implementing the comparison (issue #233).
+ *
+ * Tokenisation: lowercase, split on whitespace, drop tokens of length <= 3
+ * (filter stop-words like "the", "and", "for"). Returns 0 when either side
+ * has no remaining tokens — keeps callers from comparing degenerate titles.
+ *
+ * Score range: [0, 1]. 1.0 = identical token sets, 0 = disjoint.
+ */
+export function computeTitleSimilarity(a: string, b: string): number {
+  if (typeof a !== "string" || typeof b !== "string") return 0;
+  const aWords = new Set(a.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
+  const bWords = new Set(b.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
+  if (aWords.size === 0 || bWords.size === 0) return 0;
+  const intersection = [...aWords].filter((w) => bWords.has(w));
+  return intersection.length / Math.max(aWords.size, bWords.size);
 }
 
 /**
@@ -118,26 +141,48 @@ export async function detectDrift(currentTask, lookback = 10) {
       };
     }
 
-    // Title similarity — simple word overlap
-    const currentWords = new Set(currentTask.title.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
-    const priorWords = new Set(raw.taskTitle.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
-
-    if (currentWords.size > 0 && priorWords.size > 0) {
-      const intersection = [...currentWords].filter((w: string) => priorWords.has(w));
-      const similarity = intersection.length / Math.max(currentWords.size, priorWords.size);
-
-      if (similarity > 0.7) {
-        return {
-          isDuplicate: true,
-          similarTo: cycleId,
-          similarity,
-          reason: `Task title "${currentTask.title}" is ${Math.round(similarity * 100)}% similar to "${raw.taskTitle}" from ${cycleId}`,
-        };
-      }
+    // Title similarity — shared helper with the anchor-selection pre-filter (issue #233)
+    const similarity = computeTitleSimilarity(currentTask.title, raw.taskTitle);
+    if (similarity > 0.7) {
+      return {
+        isDuplicate: true,
+        similarTo: cycleId,
+        similarity,
+        reason: `Task title "${currentTask.title}" is ${Math.round(similarity * 100)}% similar to "${raw.taskTitle}" from ${cycleId}`,
+      };
     }
   }
 
   return { isDuplicate: false, similarTo: null, similarity: 0, reason: null };
+}
+
+/**
+ * Pre-filter helper: scan recent cycles and return the first one whose taskTitle
+ * is more than `threshold` similar to `reference`. Used by anchor-selection to
+ * reject near-duplicate anchors before the planner is invoked (issue #233).
+ *
+ * Returns the matching descriptor (cycleId, taskTitle, similarity) or null.
+ *
+ * @param reference  Candidate anchor reference (typically the queue/doc title)
+ * @param lookback   Number of recent cycles to scan (default 50)
+ * @param threshold  Similarity above which we consider the anchor a duplicate (default 0.7)
+ */
+export async function findRecentDriftMatch(
+  reference: string,
+  lookback = 50,
+  threshold = 0.7,
+): Promise<{ cycleId: string; taskTitle: string; similarity: number } | null> {
+  if (!reference || typeof reference !== "string") return null;
+  const cycleIds = await getRecentMetricIds(lookback);
+  for (const cycleId of cycleIds) {
+    const raw = await getCycleMetrics(cycleId);
+    if (!raw.taskTitle) continue;
+    const similarity = computeTitleSimilarity(reference, raw.taskTitle);
+    if (similarity > threshold) {
+      return { cycleId, taskTitle: raw.taskTitle, similarity };
+    }
+  }
+  return null;
 }
 
 /**
