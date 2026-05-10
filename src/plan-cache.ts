@@ -51,11 +51,82 @@ export function getPlanCacheStats() {
 }
 
 // -------------------------------------------------------------------------
-// Cache key
+// Cache key — issue #192
+//
+// The legacy implementation hashed `${type}:${reference.toLowerCase().trim()}`,
+// which produced ~0% hit rate (84 stored / 0 hits as of 2026-05-09) because
+// planner-generated references vary slightly between cycles (different
+// parenthetical metrics, word ordering, surrounding wording).
+//
+// The fix normalizes references before hashing so semantically-equivalent
+// anchors collide on the same cache key:
+//
+// 1. codebase-health anchors: parse the deterministic
+//    "codebase-health: <category> in <file>" format and key on category+file.
+//    Drops parentheticals (metrics) which fluctuate cycle-to-cycle.
+// 2. Other anchor types: normalize the reference text — lowercase, strip
+//    parenthetical clauses, remove stopwords, sort tokens. Reference variants
+//    like "Add tests for foo (DB-backed, 0 tests)" and "tests for foo" hash
+//    to the same key.
 // -------------------------------------------------------------------------
 
+// Common English stopwords + Hydra anchor noise words that don't affect intent.
+const STOPWORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "for", "with", "from", "to", "of",
+  "in", "on", "at", "by", "is", "are", "was", "were", "be", "been", "being",
+  "do", "does", "did", "have", "has", "had", "this", "that", "these", "those",
+  "it", "its", "as", "if", "then", "than", "so", "into", "via", "using", "use",
+]);
+
+function tokenize(text: string): string[] {
+  // Lowercase, strip parenthetical/bracket clauses, drop punctuation while
+  // keeping path-like chars (so src/foo.ts and quick-fix survive intact).
+  const cleaned = text
+    .toLowerCase()
+    .replace(/\([^)]*\)/g, " ")           // strip "(...)" clauses
+    .replace(/\[[^\]]*\]/g, " ")          // strip "[...]" clauses
+    .replace(/[^a-z0-9_./\- ]+/g, " ");   // keep word/path chars
+  return cleaned
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && !STOPWORDS.has(t));
+}
+
+/**
+ * Normalize codebase-health references that follow the deterministic
+ * "codebase-health: <category> in <file>" pattern emitted by anchor-selection.ts.
+ * Returns null if the reference doesn't match the expected shape — caller
+ * falls back to generic normalization.
+ */
+function normalizeHealthReference(reference: string): string | null {
+  // Match: "codebase-health: <category> in <file>" with optional trailing
+  // parenthetical metric. Category is a single token; file may include path
+  // separators and a dot extension.
+  const match = reference.match(
+    /^codebase-health:\s*(\S+)\s+in\s+(\S+?)\s*(?:\([^)]*\))?\s*$/i,
+  );
+  if (!match) return null;
+  const [, category, file] = match;
+  return `health|${category.toLowerCase()}|${file.toLowerCase()}`;
+}
+
+/**
+ * Normalize an anchor reference into a stable string used as the cache key
+ * input. Exported for tests; callers should use `cacheKey()`.
+ */
+export function normalizeReference(type: string, reference: string): string {
+  if (type === "codebase-health") {
+    const health = normalizeHealthReference(reference);
+    if (health) return health;
+  }
+  // Generic: tokenize + sort so small wording differences collide.
+  const tokens = tokenize(reference);
+  tokens.sort();
+  return tokens.join(" ");
+}
+
 function cacheKey(anchor: { type: string; reference: string }): string {
-  const normalized = `${anchor.type}:${anchor.reference.toLowerCase().trim()}`;
+  const normalized = `${anchor.type}:${normalizeReference(anchor.type, anchor.reference)}`;
   const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
   return `${CACHE_PREFIX}${hash}`;
 }
