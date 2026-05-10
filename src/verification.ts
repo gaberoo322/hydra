@@ -219,7 +219,7 @@ export async function verify(
   // =========================================================================
   let jitReport: any = null;
   if (complexity !== "quick-fix" && diff && verification.filesChanged?.length > 0) {
-    const jitResult = await runDiffAwareJitTests(ctx, task, verification, verificationPlan, diff, execResult, complexity, filesInScope, criteriaCount, taskId, runVerification);
+    const jitResult = await runDiffAwareJitTests(ctx, task, verification, verificationPlan, diff, execResult, complexity, filesInScope, criteriaCount, taskId, runVerification, mutationReport);
     if (jitResult.earlyReturn) {
       return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, earlyReturn: jitResult.earlyReturn };
     }

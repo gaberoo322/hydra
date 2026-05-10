@@ -378,7 +378,12 @@ export async function runMutationGate(
         complexity, filesInScope, criteriaCount,
         plannerModel: task.__plannerModel || "unknown",
         executorModel: execResult?.__executorModel || "unknown",
+        // Quality gate trend fields (issue #212)
         mutationKillRate: killRate,
+        mutationsTested: testable,
+        mutationKilled: mutationReport.killed,
+        mutationSurvived: mutationReport.survived,
+        gateBlocked: 1,
       });
       return {
         report: mutationReport,

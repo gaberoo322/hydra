@@ -475,6 +475,9 @@ export async function runDiffAwareJitTests(
   diff: string, execResult: any, complexity: string, filesInScope: number,
   criteriaCount: number, taskId: string,
   runVerification: (projectDir: string, plan: any[]) => Promise<any>,
+  // Issue #212: thread mutationReport through so JIT bug-catch path can record
+  // mutation metrics (mutationsTested, killed, survived) alongside gateBlocked.
+  mutationReport: any = null,
 ): Promise<{ report: any; earlyReturn?: any; updatedVerification?: any }> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
   const tracker = getTracker();
@@ -521,6 +524,11 @@ export async function runDiffAwareJitTests(
         jitTestsGenerated: jitReport.generated,
         jitTestsKept: jitReport.kept,
         jitTestsCaughtBug: 1,
+        // Quality gate trend fields (issue #212): JIT bug-catch is a gate block
+        gateBlocked: 1,
+        mutationsTested: mutationReport ? (mutationReport.totalMutants - (mutationReport.skipped || 0)) : 0,
+        mutationKilled: mutationReport?.killed ?? 0,
+        mutationSurvived: mutationReport?.survived ?? 0,
       });
       return {
         report: jitReport,

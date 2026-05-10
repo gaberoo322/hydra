@@ -70,6 +70,8 @@ export async function getMetricsTrend(count = 20) {
       "planningDurationMs", "executionDurationMs", "tokenCost", "costUsd",
       "jitTestsGenerated", "jitTestsKept", "jitTestsCaughtBug",
       "mutationKillRate", "mutationKilled", "mutationSurvived",
+      // Quality gate trend (issue #212)
+      "mutationsTested", "gateBlocked",
       "fixerUsed", "fixerResolved", "scopeFilterCleaned",
       "reflectionCount",
     ]) {
@@ -297,6 +299,111 @@ export async function getAbandonmentBreakdown(count = 50) {
     totalAbandoned,
     abandonRate: totalCycles > 0 ? Math.round((totalAbandoned / totalCycles) * 100) : 0,
     byCategory,
+  };
+}
+
+/**
+ * Compute the p-th percentile of a numeric array using nearest-rank.
+ * Pure function — used by quality-gate trend summary.
+ *
+ * @param values  - sorted-or-unsorted numeric array (NaN/non-numeric are filtered out)
+ * @param p       - percentile in [0, 100]
+ * @returns       - percentile value, or null when no valid samples
+ */
+export function percentile(values: number[], p: number): number | null {
+  const nums = values.filter((v) => typeof v === "number" && Number.isFinite(v));
+  if (nums.length === 0) return null;
+  const sorted = [...nums].sort((a, b) => a - b);
+  // Nearest-rank: rank = ceil(p/100 * N), clamp to [1, N], 1-indexed → 0-indexed.
+  const clampedP = Math.max(0, Math.min(100, p));
+  const rank = Math.max(1, Math.ceil((clampedP / 100) * sorted.length));
+  return sorted[rank - 1];
+}
+
+/**
+ * Aggregate mutation kill-rate and JIT trend across the last N cycles (issue #212).
+ *
+ * Returns:
+ *   - trend: per-cycle entries (newest first), null fields for legacy cycles
+ *   - summary: avg/p50/p95 kill rate (over cycles where mutation testing actually ran),
+ *     gateBlockCount, totalJitTestsAdded
+ *
+ * Never throws. Empty input → trend: [], summary: zeroed.
+ */
+export async function getQualityGateTrend(count = 50) {
+  const trend = await getMetricsTrend(count);
+
+  type TrendEntry = {
+    cycleId: string;
+    completedAt: string | null;
+    killRate: number | null;
+    mutationsTested: number | null;
+    mutationsKilled: number | null;
+    jitTestsAdded: number | null;
+    gateBlocked: boolean;
+  };
+
+  const entries: TrendEntry[] = trend.map((m) => {
+    // mutationKillRate is recorded as -1 when the gate didn't apply
+    // (e.g., quick-fix, fixer-only failures). Treat -1 as null in trend.
+    const rawKillRate = m.mutationKillRate;
+    const killRate = typeof rawKillRate === "number" && rawKillRate >= 0
+      ? rawKillRate
+      : null;
+
+    const mutationsTested = typeof m.mutationsTested === "number"
+      ? m.mutationsTested
+      // Back-compat: derive from killed+survived if mutationsTested missing
+      : (typeof m.mutationKilled === "number" && typeof m.mutationSurvived === "number"
+        ? (m.mutationKilled + m.mutationSurvived) || null
+        : null);
+
+    const mutationsKilled = typeof m.mutationKilled === "number" ? m.mutationKilled : null;
+    const jitTestsAdded = typeof m.jitTestsKept === "number" ? m.jitTestsKept : null;
+    const gateBlocked = typeof m.gateBlocked === "number"
+      ? m.gateBlocked === 1
+      // Back-compat: infer from jitTestsCaughtBug for cycles before #212
+      : (m.jitTestsCaughtBug === 1);
+
+    return {
+      cycleId: m.cycleId,
+      completedAt: m.recordedAt || null,
+      killRate,
+      mutationsTested: mutationsTested ?? null,
+      mutationsKilled,
+      jitTestsAdded,
+      gateBlocked,
+    };
+  });
+
+  const validKillRates = entries
+    .map((e) => e.killRate)
+    .filter((v): v is number => typeof v === "number" && v >= 0);
+
+  const avgKillRate = validKillRates.length > 0
+    ? Math.round(validKillRates.reduce((a, b) => a + b, 0) / validKillRates.length)
+    : null;
+
+  const killRateP50 = percentile(validKillRates, 50);
+  const killRateP95 = percentile(validKillRates, 95);
+
+  const gateBlockCount = entries.filter((e) => e.gateBlocked).length;
+  const totalJitTestsAdded = entries.reduce(
+    (sum, e) => sum + (typeof e.jitTestsAdded === "number" ? e.jitTestsAdded : 0),
+    0,
+  );
+
+  return {
+    trend: entries,
+    summary: {
+      cycles: entries.length,
+      cyclesWithMutationData: validKillRates.length,
+      avgKillRate,
+      killRateP50,
+      killRateP95,
+      gateBlockCount,
+      totalJitTestsAdded,
+    },
   };
 }
 
