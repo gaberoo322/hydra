@@ -1,95 +1,86 @@
 /**
- * learning.ts — Unified learning system for Hydra
+ * learning.ts — Facade for the Hydra learning system
  *
- * Consolidates all learning subsystems into a single module:
- *   - Agent memory patterns (Redis-backed, two-tier)
- *   - Per-anchor episodic reflections (Reflexion pattern)
- *   - Global bounded reflection buffer
- *   - OpenViking session lifecycle (create, log, commit)
- *   - OV skill registration
- *   - Knowledge indexer (background config + Redis polling)
+ * After the issue #219 split, this module is a thin orchestrator that
+ * composes the learning subsystems:
  *
- * Public API (4 exports):
+ *   - learning/agent-memory.ts        — Redis-backed pattern memory + auto-promotion
+ *   - learning/reflections.ts         — per-anchor + global Reflexion-style storage
+ *   - learning/ov-search.ts           — OpenViking search wrapper + cycle sessions
+ *   - learning/knowledge-indexer.ts   — fs.watch + Redis polling background process
+ *   - learning/skill-registration.ts  — OV skill catalog
+ *   - learning/source-indexer.ts + learning/ov-upload.ts — already split (#210/#217)
+ *
+ * Public API (kept stable for callers):
  *   recordOutcome()  — record agent lessons + reflections after a cycle
  *   getContext()     — load all learning context for an agent prompt
- *   consolidate()    — prune stale patterns, commit OV session, promote rules
- *   initLearning()  — start knowledge indexer, register OV skills, migrate rules
+ *   consolidate()    — prune stale patterns + auto-promoted rules (daily)
+ *   initLearning()   — start knowledge indexer, register OV skills, migrate rules
+ *   clearOutcomes()  — drop reflections for an anchor after a successful merge
  *
- * Internal exports (for API/scheduler backward compat):
- *   getAllReflections()       — GET /api/reflections endpoint
- *   closeReflectionsRedis()  — test cleanup (no-op, kept for compat)
- *   recordPattern()          — POST /api/memory/:agent/pattern
- *   createCycleSession()     — control-loop.ts session creation
+ * All other exports are pass-throughs from the subsystem modules so existing
+ * callers (codex-runner, control-loop, api/*, tests) keep working without
+ * needing to update their imports.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
-import { watch } from "node:fs";
-import { join, resolve, extname, relative } from "node:path";
-import { redisKeys } from "./redis-keys.ts";
-import { indexFile, indexText } from "./learning/ov-upload.ts";
+import {
+  loadAgentMemory,
+  formatMemoryForPrompt,
+  recordPlannerLesson,
+  recordExecutorLesson,
+  recordSkepticLesson,
+  recordPattern as recordPatternImpl,
+  consolidateAgentPatterns,
+  consolidateStalePromotedRules,
+  migrateRulesToPatterns,
+  PROMOTION_THRESHOLD as PROMOTION_THRESHOLD_VALUE,
+  detectStalePromotedRules as detectStalePromotedRulesImpl,
+  processStaleRules as processStaleRulesImpl,
+} from "./learning/agent-memory.ts";
+import {
+  recordAnchorReflection,
+  loadAnchorReflections,
+  recordGlobalReflection,
+  loadRelevantReflections as loadRelevantReflectionsImpl,
+  formatReflectionsForPrompt as formatReflectionsForPromptImpl,
+  clearReflectionsForAnchor as clearReflectionsForAnchorImpl,
+  recordReflection as recordReflectionImpl,
+  recordReflectionOutcome,
+  deleteAnchorReflections,
+  extendAnchorReflectionsTTL,
+  getAllReflections as getAllReflectionsImpl,
+  closeReflectionsRedis as closeReflectionsRedisImpl,
+  getReflectionEffectiveness as getReflectionEffectivenessImpl,
+} from "./learning/reflections.ts";
+import {
+  trackedOvSearch as trackedOvSearchImpl,
+  buildFallbackQuery as buildFallbackQueryImpl,
+  getOvSearchMetrics as getOvSearchMetricsImpl,
+  resetOvSearchMetrics as resetOvSearchMetricsImpl,
+  createCycleSession as createCycleSessionImpl,
+  type OvSearchMetrics,
+} from "./learning/ov-search.ts";
+import { registerSkills } from "./learning/skill-registration.ts";
+import { startKnowledgeIndexer } from "./learning/knowledge-indexer.ts";
 import type { SourcePath } from "./learning/source-indexer.ts";
 import {
-  SOURCE_PATHS,
   parseSourcePaths,
   shouldIndexSource,
   enumerateSourceFiles,
   buildSourceTitle,
   runSourceInitialPass,
-  makeSourceWatcher,
   getCoverageStats,
   resetCoverageStats,
-  setWatchedPaths,
 } from "./learning/source-indexer.ts";
-import {
-  getRedisConnection,
-  loadPatternsRaw,
-  savePatternsRaw,
-  getOldRulesCount,
-  patternsExist,
-  getOldRules,
-  deleteOldRules,
-  pushAnchorReflection,
-  getAnchorReflections,
-  deleteReflectionKey,
-  pushReflection,
-  getReflectionBuffer,
-  replaceReflectionBuffer,
-  getReportIdsByScore,
-  getRealityReport,
-  getReportScore,
-  getMemoryPatterns,
-  pushReflectionOutcome,
-  getReflectionOutcomes,
-  setReflectionKeyTTL,
-} from "./redis-adapter.ts";
 
 // ===========================================================================
-// Section: Configuration
+// Re-exports — keep public surface stable for existing callers / tests
 // ===========================================================================
 
-const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
-const OV_KEY = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
-const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
-const OV_CONFIG_MOUNT = process.env.OV_CONFIG_MOUNT || "/config";
-
-const MAX_PATTERNS = 15;
-export const PROMOTION_THRESHOLD = 3;
-const MAX_EXAMPLES = 3;
-const REFLECTION_TTL = 7 * 24 * 60 * 60; // 7 days
-const REFLECTION_TTL_EXTENDED = 30 * 24 * 60 * 60; // 30 days for effective reflections
-const MAX_REFLECTIONS_PER_ANCHOR = 5;
-const MAX_BUFFER_SIZE = 20;
-
-const INDEXABLE_EXTS = new Set([".md", ".txt", ".json", ".yaml", ".yml"]);
-const SKIP_DIRS = new Set([".git", "node_modules"]);
-const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
-const REDIS_POLL_MS = parseInt(process.env.INDEXER_POLL_MS as any) || 30000;
-
-// Source-file indexing now lives in src/learning/source-indexer.ts (issue #211).
-// Public symbols (parseSourcePaths, SourcePath, shouldIndexSource, etc.) are
-// re-exported below so existing imports of "./learning.ts" keep working.
-export type { SourcePath };
+export const PROMOTION_THRESHOLD = PROMOTION_THRESHOLD_VALUE;
+export type { SourcePath, OvSearchMetrics };
 export {
+  // source indexer (issue #210/#211)
   parseSourcePaths,
   shouldIndexSource,
   enumerateSourceFiles,
@@ -99,193 +90,36 @@ export {
   resetCoverageStats,
 };
 
-// ===========================================================================
-// Section: OV Search Metrics (in-memory, resets on restart)
-// ===========================================================================
+// OV search (issue #219)
+export const trackedOvSearch = trackedOvSearchImpl;
+export const buildFallbackQuery = buildFallbackQueryImpl;
+export const getOvSearchMetrics = getOvSearchMetricsImpl;
+export const resetOvSearchMetrics = resetOvSearchMetricsImpl;
+export const createCycleSession = createCycleSessionImpl;
 
-export interface OvSearchMetrics {
-  totalSearches: number;
-  zeroResultCount: number;
-  totalResults: number;
-  totalLatencyMs: number;
-  fallbackAttempts: number;
-  fallbackSuccesses: number;
-  errors: number;
-}
+// Reflection storage (issue #219)
+export const recordReflection = recordReflectionImpl;
+export const getAllReflections = getAllReflectionsImpl;
+export const closeReflectionsRedis = closeReflectionsRedisImpl;
+export const loadRelevantReflections = loadRelevantReflectionsImpl;
+export const formatReflectionsForPrompt = formatReflectionsForPromptImpl;
+export const clearReflectionsForAnchor = clearReflectionsForAnchorImpl;
+export const getReflectionEffectiveness = getReflectionEffectivenessImpl;
 
-const ovSearchMetrics: OvSearchMetrics = {
-  totalSearches: 0,
-  zeroResultCount: 0,
-  totalResults: 0,
-  totalLatencyMs: 0,
-  fallbackAttempts: 0,
-  fallbackSuccesses: 0,
-  errors: 0,
-};
-
-export function getOvSearchMetrics(): OvSearchMetrics & { avgResultsPerQuery: number; avgLatencyMs: number; zeroResultRate: number } {
-  const avg = ovSearchMetrics.totalSearches > 0
-    ? ovSearchMetrics.totalResults / ovSearchMetrics.totalSearches
-    : 0;
-  const avgLatency = ovSearchMetrics.totalSearches > 0
-    ? ovSearchMetrics.totalLatencyMs / ovSearchMetrics.totalSearches
-    : 0;
-  const zeroRate = ovSearchMetrics.totalSearches > 0
-    ? ovSearchMetrics.zeroResultCount / ovSearchMetrics.totalSearches
-    : 0;
-  return {
-    ...ovSearchMetrics,
-    avgResultsPerQuery: Math.round(avg * 100) / 100,
-    avgLatencyMs: Math.round(avgLatency * 100) / 100,
-    zeroResultRate: Math.round(zeroRate * 1000) / 1000,
-  };
-}
-
-/** Reset metrics -- exposed for testing only. */
-export function resetOvSearchMetrics(): void {
-  ovSearchMetrics.totalSearches = 0;
-  ovSearchMetrics.zeroResultCount = 0;
-  ovSearchMetrics.totalResults = 0;
-  ovSearchMetrics.totalLatencyMs = 0;
-  ovSearchMetrics.fallbackAttempts = 0;
-  ovSearchMetrics.fallbackSuccesses = 0;
-  ovSearchMetrics.errors = 0;
-}
-
-/**
- * Build a simplified fallback query from the original query.
- * Strips anchor-specific detail, keeps only agent name + generic terms.
- */
-export function buildFallbackQuery(originalQuery: string): string {
-  // Extract agent name if present (e.g., "planner agent context for: ...")
-  const agentMatch = originalQuery.match(/^(\w+)\s+agent/i);
-  const agentName = agentMatch ? agentMatch[1] : "";
-
-  // Remove common filler phrases
-  let simplified = originalQuery
-    .replace(/\bagent\s+context\s+for:?\s*/gi, "")
-    .replace(/\bagent\s+lessons?\s*/gi, "")
-    .replace(/\bfailures?\s+prevention\b/gi, "patterns")
-    .replace(/[^\w\s]/g, " ")  // strip punctuation
-    .replace(/\s+/g, " ")
-    .trim();
-
-  // Take only the first 4 meaningful words (skip very short words)
-  const words = simplified.split(" ").filter(w => w.length > 2);
-  const kept = words.slice(0, 4).join(" ");
-
-  // Prepend agent name if we found one and it's not already included
-  if (agentName && !kept.toLowerCase().startsWith(agentName.toLowerCase())) {
-    return `${agentName} patterns ${kept}`.trim();
-  }
-
-  return kept || "patterns context";
-}
-
-/**
- * Tracked OV search -- wraps a fetch to /api/v1/search/find with metrics + logging + fallback.
- * Returns { resources, memories } arrays.
- */
-export async function trackedOvSearch(
-  query: string,
-  limit = 5,
-  sessionId?: string | null,
-): Promise<{ resources: any[]; memories: any[] }> {
-  const startMs = Date.now();
-  let resources: any[] = [];
-  let memories: any[] = [];
-
-  try {
-    const body: Record<string, any> = { query, limit };
-    if (sessionId) body.session_id = sessionId;
-
-    const res = await fetch(`${OV_URL}/api/v1/search/find`, {
-      method: "POST",
-      headers: OV_HEADERS,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    const latencyMs = Date.now() - startMs;
-
-    if (!res.ok) {
-      ovSearchMetrics.totalSearches++;
-      ovSearchMetrics.errors++;
-      ovSearchMetrics.totalLatencyMs += latencyMs;
-      console.log(`[OV Search] query="${query.slice(0, 80)}" status=${res.status} latency=${latencyMs}ms ERROR`);
-      return { resources: [], memories: [] };
-    }
-
-    const data = await res.json() as any;
-    resources = data?.result?.resources || [];
-    memories = data?.result?.memories || [];
-    const resultCount = resources.length + memories.length;
-
-    ovSearchMetrics.totalSearches++;
-    ovSearchMetrics.totalResults += resultCount;
-    ovSearchMetrics.totalLatencyMs += latencyMs;
-
-    if (resultCount === 0) {
-      ovSearchMetrics.zeroResultCount++;
-      console.log(`[OV Search] query="${query.slice(0, 80)}" results=0 latency=${latencyMs}ms -- attempting fallback`);
-
-      // Fallback: simplified query
-      const fallbackQuery = buildFallbackQuery(query);
-      ovSearchMetrics.fallbackAttempts++;
-
-      const fbStartMs = Date.now();
-      try {
-        const fbBody: Record<string, any> = { query: fallbackQuery, limit };
-        if (sessionId) fbBody.session_id = sessionId;
-
-        const fbRes = await fetch(`${OV_URL}/api/v1/search/find`, {
-          method: "POST",
-          headers: OV_HEADERS,
-          body: JSON.stringify(fbBody),
-          signal: AbortSignal.timeout(5000),
-        });
-
-        const fbLatencyMs = Date.now() - fbStartMs;
-
-        if (fbRes.ok) {
-          const fbData = await fbRes.json() as any;
-          const fbResources = fbData?.result?.resources || [];
-          const fbMemories = fbData?.result?.memories || [];
-          const fbCount = fbResources.length + fbMemories.length;
-
-          if (fbCount > 0) {
-            ovSearchMetrics.fallbackSuccesses++;
-            resources = fbResources;
-            memories = fbMemories;
-            console.log(`[OV Search] fallback query="${fallbackQuery.slice(0, 80)}" results=${fbCount} latency=${fbLatencyMs}ms SUCCESS`);
-          } else {
-            console.log(`[OV Search] fallback query="${fallbackQuery.slice(0, 80)}" results=0 latency=${fbLatencyMs}ms -- no results`);
-          }
-        }
-      } catch (err: any) {
-        console.error(`[OV Search] fallback error: ${err.message}`);
-      }
-    } else {
-      console.log(`[OV Search] query="${query.slice(0, 80)}" results=${resultCount} latency=${latencyMs}ms`);
-    }
-  } catch (err: any) {
-    const latencyMs = Date.now() - startMs;
-    ovSearchMetrics.totalSearches++;
-    ovSearchMetrics.errors++;
-    ovSearchMetrics.totalLatencyMs += latencyMs;
-    console.error(`[OV Search] query="${query.slice(0, 80)}" error="${err.message}" latency=${latencyMs}ms`);
-  }
-
-  return { resources, memories };
-}
-
-const OV_HEADERS = {
-  "Content-Type": "application/json",
-  "X-Api-Key": OV_KEY,
-};
+// Agent memory (issue #219)
+export { loadAgentMemory, formatMemoryForPrompt };
+export const recordPattern = recordPatternImpl;
+export const detectStalePromotedRules = detectStalePromotedRulesImpl;
+export const processStaleRules = processStaleRulesImpl;
+export type { StaleRule } from "./learning/agent-memory.ts";
+export type {
+  GlobalReflection,
+  ReflectionOutcome,
+  ReflectionEffectiveness,
+} from "./learning/reflections.ts";
 
 // ===========================================================================
-// Section: Types
+// Public types
 // ===========================================================================
 
 export type OutcomeAgent = "planner" | "executor" | "skeptic";
@@ -308,59 +142,8 @@ export interface OutcomeOpts {
   };
 }
 
-type MemoryPattern = {
-  category: string;
-  severity: "prevent" | "reinforce";
-  hitCount: number;
-  firstSeen: string;
-  lastSeen: string;
-  lastCycleId: string;
-  action: string;
-  examples: string[];
-  promoted: boolean;
-};
-
-type GlobalReflection = {
-  cycleId: string;
-  anchorType: string;
-  anchorReference: string;
-  failureMode: string;
-  whatFailed: string;
-  whyItFailed: string;
-  whatToTryDifferently: string;
-  timestamp: string;
-};
-
-export type ReflectionOutcome = {
-  anchorRef: string;
-  hadReflections: true;
-  outcome: "merged" | "failed" | "abandoned";
-  cycleId: string;
-  timestamp: string;
-};
-
-export type ReflectionEffectiveness = {
-  ref: string;
-  totalRetries: number;
-  successes: number;
-  failures: number;
-  successRate: number;
-};
-
-type AnchorReflection = {
-  cycleId: string;
-  anchorRef: string;
-  taskTitle: string;
-  outcome: string;
-  reason: string;
-  whatWasAttempted: string;
-  whyItFailed: string;
-  whatShouldChange: string;
-  timestamp: string;
-};
-
 // ===========================================================================
-// Section: Public API — recordOutcome
+// Public API — recordOutcome
 // ===========================================================================
 
 /**
@@ -375,17 +158,12 @@ export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
 
   // AC1: Check if anchor had existing reflections — if so, record the outcome
   try {
-    const existingReflections = await getAnchorReflections(reflectionKey(anchorRef));
-    if (existingReflections.length > 0) {
-      const outcome: ReflectionOutcome = {
-        anchorRef,
-        hadReflections: true,
-        outcome: finalState === "merged" ? "merged" : finalState === "abandoned" ? "abandoned" : "failed",
-        cycleId,
-        timestamp: new Date().toISOString(),
-      };
-      await pushReflectionOutcome(JSON.stringify(outcome), Date.now());
-      console.log(`[Learning] Recorded reflection outcome for "${anchorRef.slice(0, 60)}": ${outcome.outcome} (had ${existingReflections.length} prior reflections)`);
+    const outcome = finalState === "merged"
+      ? "merged"
+      : finalState === "abandoned" ? "abandoned" : "failed";
+    const priorCount = await recordReflectionOutcome({ anchorRef, outcome, cycleId });
+    if (priorCount > 0) {
+      console.log(`[Learning] Recorded reflection outcome for "${anchorRef.slice(0, 60)}": ${outcome} (had ${priorCount} prior reflections)`);
     }
   } catch (err: any) {
     console.error(`[Learning] Failed to record reflection outcome for ${cycleId}: ${err.message}`);
@@ -442,7 +220,7 @@ export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
 }
 
 // ===========================================================================
-// Section: Public API — getContext
+// Public API — getContext
 // ===========================================================================
 
 /**
@@ -475,8 +253,8 @@ export async function getContext(
 
   // 3. Global relevant reflections (Reflexion pattern)
   try {
-    const relevant = await loadRelevantReflections(anchor);
-    const formatted = formatReflectionsForPrompt(relevant);
+    const relevant = await loadRelevantReflectionsImpl(anchor);
+    const formatted = formatReflectionsForPromptImpl(relevant);
     if (formatted) parts.push(formatted);
   } catch (err: any) {
     console.error(`[Learning] getContext: global reflections failed for "${anchor.reference}": ${err.message}`);
@@ -486,31 +264,15 @@ export async function getContext(
 }
 
 // ===========================================================================
-// Section: Public API — consolidate
+// Public API — consolidate
 // ===========================================================================
 
 /**
- * Run daily consolidation: prune stale patterns across all agents.
- * Called by the scheduler once per day.
+ * Run daily consolidation: prune stale agent patterns + sweep stale
+ * auto-promoted feedback rules. Called by the scheduler once per day.
  */
 export async function consolidate(): Promise<void> {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 14);
-  const cutoffStr = cutoff.toISOString().split("T")[0];
-
-  for (const agent of ["planner", "executor", "skeptic"]) {
-    const patterns = await loadPatterns(agent);
-    const before = patterns.length;
-
-    const kept = patterns.filter(p =>
-      p.hitCount >= 2 || p.lastSeen >= cutoffStr || p.promoted
-    );
-
-    if (kept.length < before) {
-      await savePatterns(agent, kept);
-      console.log(`[Learning] Consolidated ${agent}: ${before} → ${kept.length} patterns (${before - kept.length} stale pruned)`);
-    }
-  }
+  await consolidateAgentPatterns();
 
   // Detect and process stale auto-promoted rules in feedback files
   try {
@@ -521,7 +283,7 @@ export async function consolidate(): Promise<void> {
 }
 
 // ===========================================================================
-// Section: Public API — initLearning
+// Public API — initLearning
 // ===========================================================================
 
 /**
@@ -546,7 +308,7 @@ export async function initLearning(): Promise<void> {
 }
 
 // ===========================================================================
-// Section: Public API — clearOutcomes (post-merge cleanup)
+// Public API — clearOutcomes (post-merge cleanup)
 // ===========================================================================
 
 /**
@@ -559,1226 +321,24 @@ export async function initLearning(): Promise<void> {
 export async function clearOutcomes(anchorRef: string): Promise<void> {
   try {
     // Check effectiveness before deciding to delete or extend
-    const effectiveness = await getReflectionEffectiveness();
+    const effectiveness = await getReflectionEffectivenessImpl();
     const anchorStats = effectiveness.anchors.find(a => a.ref === anchorRef);
 
     if (anchorStats && anchorStats.successRate > 0.5) {
       // Effective reflections: extend TTL instead of deleting
-      const key = reflectionKey(anchorRef);
-      await setReflectionKeyTTL(key, REFLECTION_TTL_EXTENDED);
+      await extendAnchorReflectionsTTL(anchorRef);
       console.log(`[Learning] Extended TTL for effective reflections "${anchorRef.slice(0, 60)}" to 30 days (${Math.round(anchorStats.successRate * 100)}% success rate)`);
     } else {
       // Ineffective or no data: delete as before
-      await deleteReflectionKey(reflectionKey(anchorRef));
+      await deleteAnchorReflections(anchorRef);
     }
   } catch (err: any) {
     console.error(`[Learning] Failed to clear per-anchor reflections for "${anchorRef}": ${err.message}`);
   }
 
   try {
-    await clearReflectionsForAnchor(anchorRef);
+    await clearReflectionsForAnchorImpl(anchorRef);
   } catch (err: any) {
     console.error(`[Learning] Failed to clear global reflections for "${anchorRef}": ${err.message}`);
   }
-}
-
-// ===========================================================================
-// Section: Public API — getReflectionEffectiveness
-// ===========================================================================
-
-/**
- * Compute per-anchor effectiveness scores from reflection outcomes.
- * Returns anchors that had reflections when retried, with success/failure counts.
- *
- * Issue #193: also returns `injection` aggregate stats from recent cycle metrics
- * so the operator can verify reflections are actually reaching the planner.
- */
-export async function getReflectionEffectiveness(): Promise<{
-  anchors: ReflectionEffectiveness[];
-  injection: { totalCycles: number; cyclesWithReflections: number; injectionRate: number };
-}> {
-  let anchors: ReflectionEffectiveness[] = [];
-  try {
-    const raw = await getReflectionOutcomes();
-    const byAnchor = new Map<string, { successes: number; failures: number }>();
-
-    for (const entry of raw) {
-      try {
-        const outcome: ReflectionOutcome = JSON.parse(entry);
-        if (!outcome.anchorRef) continue;
-
-        const existing = byAnchor.get(outcome.anchorRef) || { successes: 0, failures: 0 };
-        if (outcome.outcome === "merged") {
-          existing.successes++;
-        } else {
-          existing.failures++;
-        }
-        byAnchor.set(outcome.anchorRef, existing);
-      } catch { /* intentional: skip unparseable entries */ }
-    }
-
-    for (const [ref, counts] of byAnchor) {
-      const totalRetries = counts.successes + counts.failures;
-      anchors.push({
-        ref,
-        totalRetries,
-        successes: counts.successes,
-        failures: counts.failures,
-        successRate: totalRetries > 0 ? counts.successes / totalRetries : 0,
-      });
-    }
-  } catch (err: any) {
-    console.error(`[Learning] Failed to compute reflection effectiveness: ${err.message}`);
-    anchors = [];
-  }
-
-  // Aggregate injection rate from recent metrics (issue #193 telemetry).
-  // Failure-tolerant — never throws.
-  const injection = await computeInjectionStats();
-
-  return { anchors, injection };
-}
-
-/**
- * Compute reflection injection rate from the last 50 cycles.
- * Returns zeros if metrics are unavailable.
- */
-async function computeInjectionStats(): Promise<{ totalCycles: number; cyclesWithReflections: number; injectionRate: number }> {
-  try {
-    const { getMetricsTrend } = await import("./metrics.ts");
-    const recent = await getMetricsTrend(50);
-    const totalCycles = recent.length;
-    const cyclesWithReflections = recent.filter((m: any) => m.reflectionInjected === "true").length;
-    return {
-      totalCycles,
-      cyclesWithReflections,
-      injectionRate: totalCycles > 0 ? cyclesWithReflections / totalCycles : 0,
-    };
-  } catch (err: any) {
-    console.error(`[Learning] Failed to compute injection stats: ${err.message}`);
-    return { totalCycles: 0, cyclesWithReflections: 0, injectionRate: 0 };
-  }
-}
-
-// ===========================================================================
-// Section: Internal exports (backward compat for API/scheduler/control-loop)
-// ===========================================================================
-
-/**
- * Record a global reflection (backward compat for tests + direct API use).
- */
-export async function recordReflection(opts: {
-  cycleId: string;
-  anchorType: string;
-  anchorReference: string;
-  failureMode: string;
-  whatFailed: string;
-  whyItFailed: string;
-  whatToTryDifferently: string;
-}): Promise<void> {
-  await recordGlobalReflection(opts);
-}
-
-/**
- * Return all reflections in the global buffer (for GET /api/reflections).
- * Most recent first.
- */
-export async function getAllReflections(): Promise<GlobalReflection[]> {
-  const raw = await getReflectionBuffer();
-
-  const reflections: GlobalReflection[] = [];
-  for (const entry of raw) {
-    try {
-      reflections.push(JSON.parse(entry));
-    } catch { /* intentional: skip unparseable entries */ }
-  }
-
-  return reflections.reverse();
-}
-
-/**
- * Close the Redis connection — kept for backward compatibility with tests.
- * The shared connection is managed by redis-adapter.
- */
-export function closeReflectionsRedis() {
-  // No-op: connection managed by redis-adapter singleton
-}
-
-/**
- * Record a pattern directly (for POST /api/memory/:agent/pattern).
- */
-export async function recordPattern(
-  agentName: string,
-  category: string,
-  details: {
-    severity?: "prevent" | "reinforce";
-    action: string;
-    example: string;
-    cycleId: string;
-  },
-) {
-  const patterns = await loadPatterns(agentName);
-  const today = new Date().toISOString().split("T")[0];
-
-  const existing = patterns.find(p => p.category === category);
-
-  if (existing) {
-    existing.hitCount++;
-    existing.lastSeen = today;
-    existing.lastCycleId = details.cycleId;
-    existing.action = details.action;
-    existing.examples = [details.example, ...existing.examples].slice(0, MAX_EXAMPLES);
-
-    if (existing.hitCount >= PROMOTION_THRESHOLD && !existing.promoted) {
-      await promoteToFeedback(agentName, existing);
-      existing.promoted = true;
-      console.log(`[Learning] Promoted "${category}" to to-${agentName}.md (${existing.hitCount} hits)`);
-    }
-  } else {
-    patterns.push({
-      category,
-      severity: details.severity || "prevent",
-      hitCount: 1,
-      firstSeen: today,
-      lastSeen: today,
-      lastCycleId: details.cycleId,
-      action: details.action,
-      examples: [details.example],
-      promoted: false,
-    });
-  }
-
-  await savePatterns(agentName, patterns);
-}
-
-/**
- * Create a new OpenViking session for a cycle.
- * Returns a session object with helper methods for logging agent interactions.
- */
-export async function createCycleSession(cycleId: string) {
-  const result = await ovFetch("/api/v1/sessions", {});
-  if (!result?.result?.session_id) {
-    console.log(`[Learning] Failed to create OV session for ${cycleId} — proceeding without`);
-    return createNoOpSession(cycleId);
-  }
-
-  const sessionId = result.result.session_id;
-  console.log(`[Learning] Created OV session ${sessionId} for ${cycleId}`);
-
-  return {
-    sessionId,
-    cycleId,
-    active: true,
-
-    async logPlanner(anchor: any, task: any) {
-      await ovFetch(`/api/v1/sessions/${sessionId}/messages`, {
-        role: "user",
-        content: `[Cycle ${cycleId}] Planning task for anchor: [${anchor.type}] ${anchor.reference}\nReason: ${anchor.whyNow || ""}`,
-      });
-      if (task) {
-        await ovFetch(`/api/v1/sessions/${sessionId}/messages`, {
-          role: "assistant",
-          content: `[Planner] Proposed: "${task.title}"\nScope: ${JSON.stringify(task.scopeBoundary?.in || [])}\nCriteria: ${(task.acceptanceCriteria || []).join("; ")}`,
-        });
-      }
-    },
-
-    async logSkeptic(verdict: string, reason?: string) {
-      await ovFetch(`/api/v1/sessions/${sessionId}/messages`, {
-        role: "assistant",
-        content: `[Skeptic] Verdict: ${verdict}${reason ? ` — ${reason}` : ""}`,
-      });
-    },
-
-    async logExecutor(execResult: any) {
-      const summary = execResult?.summary || execResult?.output?.slice?.(0, 500) || "no output";
-      const files = execResult?.filesChanged || [];
-      await ovFetch(`/api/v1/sessions/${sessionId}/messages`, {
-        role: "assistant",
-        content: `[Executor] ${summary}\nFiles changed: ${files.join(", ") || "none"}`,
-      });
-    },
-
-    async logVerification(verification: any, passed: boolean) {
-      const steps = (verification?.steps || [])
-        .map((s: any) => `${s.label}: ${s.passed ? "PASS" : "FAIL"}`)
-        .join(", ");
-      await ovFetch(`/api/v1/sessions/${sessionId}/messages`, {
-        role: "assistant",
-        content: `[Verification] ${passed ? "ALL PASSED" : "FAILED"}: ${steps}`,
-      });
-    },
-
-    async logOutcome(finalState: string, details = "") {
-      await ovFetch(`/api/v1/sessions/${sessionId}/messages`, {
-        role: "assistant",
-        content: `[Outcome] ${finalState}${details ? ` — ${details}` : ""}`,
-      });
-    },
-
-    async markUsed(uris: string[]) {
-      if (uris.length === 0) return;
-      await ovFetch(`/api/v1/sessions/${sessionId}/used`, {
-        contexts: uris,
-      });
-    },
-
-    async search(query: string, limit = 5) {
-      const { resources } = await trackedOvSearch(query, limit, sessionId);
-      return resources;
-    },
-
-    async getAgentContext(agentName: string, anchor: any, limit = 10) {
-      const query = `${agentName} agent context for: ${anchor.reference || ""} ${anchor.whyNow || ""}`.trim();
-      const { resources, memories } = await trackedOvSearch(query, limit, sessionId);
-
-      const parts: string[] = [];
-      if (resources.length > 0) {
-        parts.push(`## CONTEXT (from OpenViking — ${resources.length} relevant resources)`);
-        for (const r of resources.slice(0, 8)) {
-          const title = r.uri || r.title || "untitled";
-          const abstract = (r.abstract || "").slice(0, 400);
-          if (abstract) parts.push(`\n### ${title}\n${abstract}`);
-        }
-      }
-      if (memories.length > 0) {
-        parts.push(`\n## LEARNED PATTERNS (from past cycles)`);
-        for (const m of memories.slice(0, 5)) {
-          const abstract = (m.abstract || m.content || "").slice(0, 300);
-          if (abstract) parts.push(`- ${abstract}`);
-        }
-      }
-
-      return {
-        resources,
-        memories,
-        formatted: parts.join("\n"),
-      };
-    },
-
-    async commit() {
-      try {
-        const res = await fetch(`${OV_URL}/api/v1/sessions/${sessionId}/commit?wait=false`, {
-          method: "POST",
-          headers: OV_HEADERS,
-          body: "{}",
-          signal: AbortSignal.timeout(15000),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          console.log(`[Learning] Committed OV session ${sessionId} (async) — memory extraction queued`);
-          this.active = false;
-          return data;
-        }
-        console.error(`[Learning] OV commit failed: ${res.status}`);
-      } catch (err: any) {
-        console.error(`[Learning] OV commit error: ${err.message}`);
-      }
-      this.active = false;
-      return null;
-    },
-  };
-}
-
-// ===========================================================================
-// Section: Private — OV HTTP helpers
-// ===========================================================================
-
-async function ovFetch(path: string, body: any) {
-  try {
-    const res = await fetch(`${OV_URL}${path}`, {
-      method: "POST",
-      headers: OV_HEADERS,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      console.error(`[Learning] OV ${path} failed: ${res.status} ${text.slice(0, 200)}`);
-      return null;
-    }
-    return await res.json();
-  } catch (err: any) {
-    console.error(`[Learning] OV ${path} error: ${err.message}`);
-    return null;
-  }
-}
-
-function createNoOpSession(cycleId: string) {
-  return {
-    sessionId: null,
-    cycleId,
-    active: false,
-    async logPlanner() {},
-    async logSkeptic() {},
-    async logExecutor() {},
-    async logVerification() {},
-    async logOutcome() {},
-    async markUsed() {},
-    async search(query: string, limit = 5) {
-      const { resources } = await trackedOvSearch(query, limit);
-      return resources;
-    },
-    async getAgentContext() { return { resources: [], memories: [], formatted: "" }; },
-    async commit() {},
-  };
-}
-
-// ===========================================================================
-// Section: Private — Pattern storage (agent memory)
-// ===========================================================================
-
-async function loadPatterns(agentName: string): Promise<MemoryPattern[]> {
-  const raw = await loadPatternsRaw(agentName);
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
-}
-
-async function savePatterns(agentName: string, patterns: MemoryPattern[]) {
-  const sorted = patterns
-    .sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime())
-    .slice(0, MAX_PATTERNS);
-  await savePatternsRaw(agentName, JSON.stringify(sorted));
-}
-
-async function sweepStalePromotions(agentName: string) {
-  const patterns = await loadPatterns(agentName);
-  let changed = false;
-
-  for (const p of patterns) {
-    if (p.hitCount >= PROMOTION_THRESHOLD && !p.promoted) {
-      try {
-        await promoteToFeedback(agentName, p);
-        p.promoted = true;
-        changed = true;
-        console.log(`[Learning] Retroactive promotion: "${p.category}" to to-${agentName}.md (${p.hitCount} hits)`);
-      } catch (err: any) {
-        console.error(`[Learning] Retroactive promotion failed for "${p.category}": ${err.message}`);
-      }
-    }
-  }
-
-  if (changed) {
-    await savePatterns(agentName, patterns);
-  }
-}
-
-async function promoteToFeedback(agentName: string, pattern: MemoryPattern) {
-  const feedbackPath = join(CONFIG_PATH, "feedback", `to-${agentName}.md`);
-  try {
-    let content = await readFile(feedbackPath, "utf-8");
-
-    const sectionHeader = "## Auto-Promoted Rules";
-    const ruleBlock = [
-      ``,
-      `### ${pattern.category} (${pattern.hitCount}x since ${pattern.firstSeen})`,
-      pattern.action,
-      `Last: ${pattern.lastCycleId} (${pattern.examples[0] || "no example"})`,
-      `<!-- auto-promoted ${new Date().toISOString().split("T")[0]}, last hit ${pattern.lastSeen} -->`,
-    ].join("\n");
-
-    if (content.includes(sectionHeader)) {
-      content = content.replace(sectionHeader, sectionHeader + "\n" + ruleBlock);
-    } else {
-      content += "\n\n" + sectionHeader + "\n\n" +
-        "Rules below were auto-promoted from agent memory after proving themselves\n" +
-        "across multiple cycles. They represent durable patterns, not one-off incidents.\n" +
-        ruleBlock;
-    }
-
-    await writeFile(feedbackPath, content);
-  } catch (err: any) {
-    console.error(`[Learning] Failed to promote to ${feedbackPath}: ${err.message}`);
-  }
-}
-
-// ===========================================================================
-// Section: Staleness detection for auto-promoted feedback rules
-// ===========================================================================
-
-export type StaleRule = {
-  heading: string;
-  promotedDate: string;
-  lastHitDate: string;
-  daysSinceLastHit: number;
-  fullBlock: string;
-};
-
-/**
- * Parse auto-promoted rules from feedback file content and identify stale ones.
- * Pure function for testability — no I/O.
- *
- * @param feedbackContent - raw markdown content of a feedback file
- * @param agentName - agent name for logging
- * @param now - reference date (default: today)
- * @returns { active, stale30, stale60 } — rules bucketed by staleness
- */
-export function detectStalePromotedRules(
-  feedbackContent: string,
-  agentName: string,
-  now: Date = new Date(),
-): { active: StaleRule[]; stale30: StaleRule[]; stale60: StaleRule[] } {
-  const active: StaleRule[] = [];
-  const stale30: StaleRule[] = [];
-  const stale60: StaleRule[] = [];
-
-  // Match rule blocks: ### heading ... <!-- auto-promoted ... -->
-  // A rule block starts with ### and ends at the next ### or ## or end of content
-  const autoPromotedSection = feedbackContent.indexOf("## Auto-Promoted Rules");
-  if (autoPromotedSection === -1) return { active, stale30, stale60 };
-
-  const staleSection = feedbackContent.indexOf("## Stale Rules (review needed)");
-  const sectionEnd = staleSection !== -1 ? staleSection : feedbackContent.length;
-  const sectionContent = feedbackContent.slice(autoPromotedSection, sectionEnd);
-
-  // Split into rule blocks by ### headings
-  const ruleBlockRegex = /^### .+$/gm;
-  const headings: { index: number; match: string }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = ruleBlockRegex.exec(sectionContent)) !== null) {
-    headings.push({ index: m.index, match: m[0] });
-  }
-
-  for (let i = 0; i < headings.length; i++) {
-    const start = headings[i].index;
-    const end = i + 1 < headings.length ? headings[i + 1].index : sectionContent.length;
-    const block = sectionContent.slice(start, end).trimEnd();
-    const heading = headings[i].match;
-
-    // Parse the auto-promoted comment
-    const commentMatch = block.match(
-      /<!--\s*auto-promoted\s+(\d{4}-\d{2}-\d{2})(?:,?\s*last\s+hit\s+(\d{4}-\d{2}-\d{2}))?\s*-->/
-    );
-    if (!commentMatch) continue;
-
-    const promotedDate = commentMatch[1];
-    const lastHitDate = commentMatch[2] || promotedDate;
-
-    const lastHit = new Date(lastHitDate + "T00:00:00Z");
-    const diffMs = now.getTime() - lastHit.getTime();
-    const daysSinceLastHit = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-    const rule: StaleRule = {
-      heading,
-      promotedDate,
-      lastHitDate,
-      daysSinceLastHit,
-      fullBlock: block,
-    };
-
-    if (daysSinceLastHit > 60) {
-      stale60.push(rule);
-      console.log(`[Learning] Stale rule (>60d): ${heading} in to-${agentName}.md — last hit ${lastHitDate} (${daysSinceLastHit}d ago)`);
-    } else if (daysSinceLastHit > 30) {
-      stale30.push(rule);
-      console.log(`[Learning] Stale rule (>30d): ${heading} in to-${agentName}.md — last hit ${lastHitDate} (${daysSinceLastHit}d ago)`);
-    } else {
-      active.push(rule);
-    }
-  }
-
-  return { active, stale30, stale60 };
-}
-
-/**
- * Process feedback file content: move 30-day stale rules to a review section,
- * remove 60-day stale rules entirely (returned for archival logging).
- * Pure function — returns the new file content.
- *
- * @param feedbackContent - raw markdown content
- * @param agentName - agent name for logging
- * @param now - reference date (default: today)
- * @returns { newContent, archived } — updated content and removed rules
- */
-export function processStaleRules(
-  feedbackContent: string,
-  agentName: string,
-  now: Date = new Date(),
-): { newContent: string; archived: StaleRule[] } {
-  const { stale30, stale60 } = detectStalePromotedRules(feedbackContent, agentName, now);
-
-  if (stale30.length === 0 && stale60.length === 0) {
-    return { newContent: feedbackContent, archived: [] };
-  }
-
-  let content = feedbackContent;
-
-  // Remove stale60 rules entirely (auto-archived)
-  for (const rule of stale60) {
-    content = content.replace(rule.fullBlock, "");
-  }
-
-  // Move stale30 rules from their current position to the stale section
-  for (const rule of stale30) {
-    content = content.replace(rule.fullBlock, "");
-  }
-
-  // Clean up multiple blank lines that result from removals
-  content = content.replace(/\n{3,}/g, "\n\n");
-
-  // Build the stale section for 30-day rules (review needed)
-  if (stale30.length > 0) {
-    const staleHeader = "## Stale Rules (review needed)";
-    const existingStaleIdx = content.indexOf(staleHeader);
-
-    const staleBlocks = stale30.map(r => r.fullBlock).join("\n\n");
-
-    if (existingStaleIdx !== -1) {
-      // Append to existing stale section
-      const insertPoint = existingStaleIdx + staleHeader.length;
-      content = content.slice(0, insertPoint) + "\n\n" + staleBlocks + content.slice(insertPoint);
-    } else {
-      // Add new stale section at the end
-      content = content.trimEnd() + "\n\n" + staleHeader + "\n\n" +
-        "Rules below have not fired in >30 days. Review and remove if no longer relevant.\n\n" +
-        staleBlocks + "\n";
-    }
-  }
-
-  return { newContent: content, archived: stale60 };
-}
-
-/**
- * Run staleness detection on all feedback files.
- * Called during consolidation.
- */
-async function consolidateStalePromotedRules(): Promise<void> {
-  for (const agent of ["planner", "executor", "skeptic"]) {
-    const feedbackPath = join(CONFIG_PATH, "feedback", `to-${agent}.md`);
-    try {
-      const content = await readFile(feedbackPath, "utf-8");
-      const { newContent, archived } = processStaleRules(content, agent);
-
-      if (newContent !== content) {
-        await writeFile(feedbackPath, newContent);
-
-        if (archived.length > 0) {
-          for (const rule of archived) {
-            console.log(`[Learning] Archived stale rule from to-${agent}.md: ${rule.heading} (last hit ${rule.lastHitDate}, ${rule.daysSinceLastHit}d ago)`);
-          }
-        }
-      }
-    } catch (err: any) {
-      console.error(`[Learning] Failed to process stale rules for to-${agent}.md: ${err.message}`);
-    }
-  }
-}
-
-// ===========================================================================
-// Section: Private — Agent memory loading + formatting
-// ===========================================================================
-
-export async function loadAgentMemory(agentName: string): Promise<string> {
-  await sweepStalePromotions(agentName);
-
-  const patterns = await loadPatterns(agentName);
-  const parts: string[] = [];
-
-  if (patterns.length > 0) {
-    parts.push(`# ${agentName} — Learned Patterns\n`);
-    for (const p of patterns) {
-      parts.push([
-        `### [${p.severity}] ${p.category} (${p.hitCount}x)`,
-        `ACTION: ${p.action}`,
-        `LAST: ${p.lastCycleId} — ${p.examples[0] || ""}`,
-        "",
-      ].join("\n"));
-    }
-  }
-
-  // Also load from OpenViking (with tracked metrics + fallback)
-  try {
-    const { memories } = await trackedOvSearch(
-      `${agentName} agent lessons failures prevention`,
-      5,
-    );
-    if (memories.length > 0) {
-      parts.push(`\n# ${agentName} — Learned Patterns (from OpenViking)\n`);
-      for (const mem of memories.slice(0, 5)) {
-        const abstract = mem.abstract || mem.content || "";
-        if (abstract.trim()) {
-          parts.push(`- ${abstract.slice(0, 300)}`);
-        }
-      }
-      parts.push("");
-    }
-  } catch { /* intentional: OV unavailable */ }
-
-  return parts.join("\n");
-}
-
-function formatMemoryForPrompt(memory: string, agentName: string): string {
-  if (!memory || memory.trim().length === 0) return "";
-
-  const blocks = memory.split(/^(?=### \[)/m).filter(r => r.trim().startsWith("### ["));
-  if (blocks.length === 0) {
-    const lines = memory.split("\n").filter(l => l.startsWith("- ") || l.startsWith("ACTION:"));
-    if (lines.length === 0) return "";
-    return `\n## PAST OUTCOMES (learn from these)\n${lines.slice(-10).join("\n")}\n`;
-  }
-
-  const preventBlocks = blocks.filter(b => b.includes("[prevent]"));
-  const reinforceBlocks = blocks.filter(b => b.includes("[reinforce]"));
-
-  const parts: string[] = [];
-
-  if (preventBlocks.length > 0) {
-    parts.push(`\n## PREVENTION PATTERNS (ranked by frequency — follow these)`);
-    const sorted = preventBlocks.sort((a, b) => {
-      const countA = parseInt(a.match(/\((\d+)x\)/)?.[1] || "0");
-      const countB = parseInt(b.match(/\((\d+)x\)/)?.[1] || "0");
-      return countB - countA;
-    });
-    for (const block of sorted.slice(0, 10)) {
-      const lines = block.split("\n").filter(l =>
-        l.startsWith("ACTION:") || l.startsWith("LAST:") || l.startsWith("### [")
-      );
-      if (lines.length > 0) parts.push(lines.join("\n"));
-    }
-  }
-
-  if (reinforceBlocks.length > 0 && reinforceBlocks.length <= 5) {
-    parts.push(`\n## REINFORCED PATTERNS (these approaches have worked)`);
-    for (const block of reinforceBlocks.slice(-3)) {
-      const lines = block.split("\n").filter(l =>
-        l.startsWith("ACTION:") || l.startsWith("LAST:") || l.startsWith("### [")
-      );
-      if (lines.length > 0) parts.push(lines.join("\n"));
-    }
-  }
-
-  return parts.length > 0 ? parts.join("\n\n") + "\n" : "";
-}
-
-// ===========================================================================
-// Section: Private — Per-agent lesson recorders
-// ===========================================================================
-
-async function recordPlannerLesson(cycleId: string, task: any, finalState: string, context: any = {}) {
-  if (finalState === "merged") {
-    if (context.scopeCreep?.length > 0) {
-      await recordPattern("planner", "scope-creep", {
-        action: `Include adjacent test files and shared modules in scopeBoundary.in. The executor went outside scope: ${context.scopeCreep.slice(0, 3).join(", ")}`,
-        example: `${cycleId}: "${task.title}" — ${context.scopeCreep.length} file(s) outside scope`,
-        cycleId,
-      });
-    }
-    if (task.scopeBoundary?.in?.length > 4) {
-      await recordPattern("planner", "broad-scope-success", {
-        severity: "reinforce",
-        action: `Broad scope (${task.scopeBoundary.in.length} files) can work when each file is needed`,
-        example: `${cycleId}: "${task.title}" — ${task.scopeBoundary.in.length} files`,
-        cycleId,
-      });
-    }
-    return;
-  }
-
-  if (finalState === "failed") {
-    const failedSteps = context.failedSteps || [];
-    await recordPattern("planner", "verification-failure", {
-      action: `Ensure ${failedSteps.join(" + ") || "verification"} will pass before proposing. ${task.scopeBoundary?.in?.length > 3 ? `Scope was broad (${task.scopeBoundary.in.length} files) — consider narrowing.` : ""}`,
-      example: `${cycleId}: "${task.title}" failed — ${context.failReason || "verification failed"}`,
-      cycleId,
-    });
-    return;
-  }
-
-  if (finalState === "rolled-back") {
-    await recordPattern("planner", "rollback", {
-      action: `Changes to ${(task.scopeBoundary?.in || []).slice(0, 3).join(", ") || "these files"} caused test regressions. Verify test stability before proposing changes here.`,
-      example: `${cycleId}: "${task.title}" — auto-reverted`,
-      cycleId,
-    });
-    return;
-  }
-
-  if (finalState === "abandoned") {
-    const reason = context.reason || "rejected or drift";
-    if (reason.includes("Drift")) {
-      await recordPattern("planner", "drift", {
-        action: `Check recent cycle history for duplicates before proposing work similar to "${task.title}"`,
-        example: `${cycleId}: abandoned — ${reason}`,
-        cycleId,
-      });
-    } else if (reason.includes("Review rejected:")) {
-      await recordPattern("planner", "high-risk-rejection", {
-        action: `High-risk review flagged a safety concern: ${reason.replace("Review rejected: ", "").slice(0, 200)}`,
-        example: `${cycleId}: "${task.title}" — ${reason}`,
-        cycleId,
-      });
-    }
-  }
-}
-
-async function recordExecutorLesson(cycleId: string, task: any, finalState: string, context: any = {}) {
-  if (finalState === "merged") return;
-
-  if (finalState === "failed") {
-    if (context.noDiff) {
-      await recordPattern("executor", "no-diff", {
-        action: `Actually write code and commit. Previous attempt produced zero changes.`,
-        example: `${cycleId}: "${task.title}" — no files modified`,
-        cycleId,
-      });
-    } else if (context.failedSteps?.length > 0) {
-      await recordPattern("executor", "verification-failure", {
-        action: `Run npm test and npm run typecheck before committing. ${context.failedSteps.join(" + ")} failed.`,
-        example: `${cycleId}: ${context.failedSteps.join(", ")} failed${context.verificationStderr ? " — " + context.verificationStderr.slice(0, 100) : ""}`,
-        cycleId,
-      });
-    }
-    return;
-  }
-
-  if (finalState === "rolled-back") {
-    await recordPattern("executor", "rollback", {
-      action: `Run the FULL test suite when modifying ${(task.scopeBoundary?.in || []).slice(0, 3).join(", ") || "these files"}. A previous change broke tests elsewhere.`,
-      example: `${cycleId}: tests ${context.testsBefore} → ${context.testsAfter} — auto-reverted`,
-      cycleId,
-    });
-  }
-}
-
-async function recordSkepticLesson(cycleId: string, task: any, skepticVerdict: string, finalState: string) {
-  if (skepticVerdict === "approve" && (finalState === "failed" || finalState === "rolled-back")) {
-    await recordPattern("skeptic", "skeptic-miss", {
-      action: `You approved a task that ${finalState}. Check scope boundary and verification plan more carefully for similar tasks.`,
-      example: `${cycleId}: approved "${task.title}" — it ${finalState}`,
-      cycleId,
-    });
-    return;
-  }
-
-  if (skepticVerdict === "reject" && finalState === "abandoned") {
-    await recordPattern("skeptic", "correct-rejection", {
-      severity: "reinforce",
-      action: `Rejection in this area was correct. Keep standards high for ${(task.scopeBoundary?.in || []).slice(0, 2).join(", ") || "similar work"}.`,
-      example: `${cycleId}: correctly rejected "${task.title}"`,
-      cycleId,
-    });
-  }
-}
-
-// ===========================================================================
-// Section: Private — Per-anchor episodic reflections
-// ===========================================================================
-
-const REFLECTION_PREFIX = redisKeys.reflectionPrefix();
-
-function reflectionKey(anchorRef: string): string {
-  return REFLECTION_PREFIX + (anchorRef || "unknown").replace(/\s+/g, "-").toLowerCase().slice(0, 120);
-}
-
-async function recordAnchorReflection(opts: {
-  cycleId: string;
-  anchorRef: string;
-  taskTitle: string;
-  outcome: string;
-  reason: string;
-  filesChanged?: string[];
-  verificationErrors?: string[];
-}) {
-  const key = reflectionKey(opts.anchorRef);
-
-  const reflection: AnchorReflection = {
-    cycleId: opts.cycleId,
-    anchorRef: opts.anchorRef,
-    taskTitle: opts.taskTitle,
-    outcome: opts.outcome,
-    reason: opts.reason,
-    whatWasAttempted: opts.taskTitle || "Unknown task",
-    whyItFailed: opts.reason || "Unknown reason",
-    whatShouldChange: generateAdvice(opts),
-    timestamp: new Date().toISOString(),
-  };
-
-  await pushAnchorReflection(key, JSON.stringify(reflection), REFLECTION_TTL, MAX_REFLECTIONS_PER_ANCHOR);
-  console.log(`[Learning] Recorded reflection for "${opts.anchorRef.slice(0, 60)}" (${opts.outcome})`);
-}
-
-function generateAdvice(opts: { outcome: string; reason: string; filesChanged?: string[]; verificationErrors?: string[] }): string {
-  if (opts.outcome === "no-task") {
-    return "The planner could not produce a task for this anchor. The anchor may be too vague, already completed, or blocked by an external dependency. Consider: is there a more specific, actionable formulation?";
-  }
-  if (opts.outcome === "no-diff") {
-    return "The executor ran but produced no code changes. The task may have been unclear, already implemented, or blocked by missing context. Consider: provide more specific scope boundary and acceptance criteria.";
-  }
-  if (opts.verificationErrors?.length) {
-    return `Verification failed on: ${opts.verificationErrors.join(", ")}. The next attempt should address these specific failures. Consider: narrower scope, or fix the verification errors before adding new behavior.`;
-  }
-  if (opts.outcome === "abandoned") {
-    return `Task was abandoned: ${opts.reason}. Consider: different approach, narrower scope, or verify prerequisites are met.`;
-  }
-  return `Previous attempt failed: ${opts.reason}. The next attempt should take a different approach.`;
-}
-
-async function loadAnchorReflections(anchorRef: string): Promise<string> {
-  const key = reflectionKey(anchorRef);
-  const raw = await getAnchorReflections(key);
-  if (raw.length === 0) return "";
-
-  const reflections: AnchorReflection[] = raw.map(r => {
-    try { return JSON.parse(r); } catch { return null; }
-  }).filter(Boolean);
-
-  if (reflections.length === 0) return "";
-
-  const lines = [
-    `## PRIOR ATTEMPTS (${reflections.length} previous failures for this anchor)`,
-    ``,
-    `IMPORTANT: This anchor has been tried before and FAILED. Do NOT repeat the same approach.`,
-    ``,
-  ];
-
-  for (const ref of reflections) {
-    lines.push(`### Attempt: ${ref.cycleId}`);
-    lines.push(`- **Task**: ${ref.taskTitle}`);
-    lines.push(`- **Outcome**: ${ref.outcome}`);
-    lines.push(`- **Why it failed**: ${ref.whyItFailed}`);
-    lines.push(`- **Advice**: ${ref.whatShouldChange}`);
-    lines.push(``);
-  }
-
-  return lines.join("\n");
-}
-
-// ===========================================================================
-// Section: Private — Global reflection buffer
-// ===========================================================================
-
-async function recordGlobalReflection(opts: {
-  cycleId: string;
-  anchorType: string;
-  anchorReference: string;
-  failureMode: string;
-  whatFailed: string;
-  whyItFailed: string;
-  whatToTryDifferently: string;
-}): Promise<void> {
-  const reflection: GlobalReflection = {
-    cycleId: opts.cycleId,
-    anchorType: opts.anchorType,
-    anchorReference: opts.anchorReference,
-    failureMode: opts.failureMode,
-    whatFailed: opts.whatFailed,
-    whyItFailed: opts.whyItFailed,
-    whatToTryDifferently: opts.whatToTryDifferently,
-    timestamp: new Date().toISOString(),
-  };
-
-  await pushReflection(JSON.stringify(reflection), MAX_BUFFER_SIZE);
-  console.log(`[Learning] Recorded global reflection for cycle ${opts.cycleId}: ${opts.failureMode}`);
-}
-
-export async function loadRelevantReflections(
-  anchor: { type: string; reference: string },
-  limit = 3,
-): Promise<GlobalReflection[]> {
-  const raw = await getReflectionBuffer();
-  if (raw.length === 0) return [];
-
-  const all: GlobalReflection[] = [];
-  for (const entry of raw) {
-    try {
-      all.push(JSON.parse(entry));
-    } catch { /* intentional: skip unparseable entries */ }
-  }
-
-  const refLower = (anchor.reference || "").toLowerCase();
-  const relevant = all.filter((r) => {
-    const rRefLower = (r.anchorReference || "").toLowerCase();
-    if (rRefLower === refLower) return true;
-    if (refLower && rRefLower && (rRefLower.includes(refLower) || refLower.includes(rRefLower))) return true;
-    if (r.anchorType === anchor.type) return true;
-    return false;
-  });
-
-  return relevant.reverse().slice(0, limit);
-}
-
-export function formatReflectionsForPrompt(reflections: GlobalReflection[]): string {
-  if (reflections.length === 0) return "";
-
-  const lines = [
-    `## Recent Failures`,
-    ``,
-    `IMPORTANT: These recent failures are relevant to the current anchor. Do NOT repeat the same approaches.`,
-    ``,
-  ];
-
-  for (const ref of reflections) {
-    lines.push(`### ${ref.cycleId} (${ref.failureMode})`);
-    lines.push(`- **What failed**: ${ref.whatFailed}`);
-    lines.push(`- **Why**: ${ref.whyItFailed}`);
-    lines.push(`- **Try differently**: ${ref.whatToTryDifferently}`);
-    lines.push(``);
-  }
-
-  return lines.join("\n");
-}
-
-export async function clearReflectionsForAnchor(anchorReference: string): Promise<number> {
-  const raw = await getReflectionBuffer();
-  if (raw.length === 0) return 0;
-
-  const refLower = (anchorReference || "").toLowerCase();
-  let removed = 0;
-
-  const kept: string[] = [];
-  for (const entry of raw) {
-    try {
-      const parsed: GlobalReflection = JSON.parse(entry);
-      const entryRefLower = (parsed.anchorReference || "").toLowerCase();
-      if (entryRefLower === refLower || (refLower && entryRefLower.includes(refLower))) {
-        removed++;
-      } else {
-        kept.push(entry);
-      }
-    } catch {
-      kept.push(entry);
-    }
-  }
-
-  if (removed > 0) {
-    await replaceReflectionBuffer(kept);
-    console.log(`[Learning] Cleared ${removed} reflection(s) for anchor "${anchorReference.slice(0, 60)}"`);
-  }
-
-  return removed;
-}
-
-// ===========================================================================
-// Section: Private — Rules migration
-// ===========================================================================
-
-function categorizeRule(rule: any): string {
-  const text = `${rule.when || ""} ${rule.check || ""} ${rule.because || ""}`.toLowerCase();
-  if (text.includes("scope") && (text.includes("creep") || text.includes("outside") || text.includes("boundary"))) return "scope-creep";
-  if (text.includes("verification") || text.includes("npm test") || text.includes("typecheck")) return "verification-failure";
-  if (text.includes("no code") || text.includes("zero changes") || text.includes("no diff")) return "no-diff";
-  if (text.includes("rollback") || text.includes("reverted") || text.includes("regress")) return "rollback";
-  if (text.includes("drift") || text.includes("duplicate")) return "drift";
-  if (text.includes("rejected") || text.includes("skeptic")) return "skeptic-rejection";
-  return "other";
-}
-
-async function migrateRulesToPatterns() {
-  for (const agent of ["planner", "executor", "skeptic"]) {
-    const oldExists = await getOldRulesCount(agent);
-    const newExists = await patternsExist(agent);
-
-    if (oldExists > 0 && !newExists) {
-      console.log(`[Learning] Migrating ${agent}: ${oldExists} rules → patterns`);
-      const rawRules = await getOldRules(agent);
-      const patterns: MemoryPattern[] = [];
-
-      for (const raw of rawRules) {
-        try {
-          const rule = JSON.parse(raw);
-          const category = categorizeRule(rule);
-          const existing = patterns.find(p => p.category === category);
-
-          if (existing) {
-            existing.hitCount++;
-            existing.lastSeen = rule.date || existing.lastSeen;
-            existing.lastCycleId = rule.cycleId || existing.lastCycleId;
-            existing.examples = [rule.because?.slice(0, 200) || "", ...existing.examples].slice(0, MAX_EXAMPLES);
-          } else {
-            patterns.push({
-              category,
-              severity: rule.severity || "prevent",
-              hitCount: 1,
-              firstSeen: rule.date || new Date().toISOString().split("T")[0],
-              lastSeen: rule.date || new Date().toISOString().split("T")[0],
-              lastCycleId: rule.cycleId || "migrated",
-              action: rule.check || rule.when || "Review this pattern",
-              examples: [rule.because?.slice(0, 200) || ""],
-              promoted: false,
-            });
-          }
-        } catch { /* intentional: skip unparseable rules */ }
-      }
-
-      await savePatterns(agent, patterns);
-      await deleteOldRules(agent);
-      console.log(`[Learning] Migrated ${agent}: ${oldExists} rules → ${patterns.length} patterns`);
-    }
-  }
-}
-
-// ===========================================================================
-// Section: Private — OV skill registration
-// ===========================================================================
-
-const OV_SKILLS = [
-  {
-    name: "planner",
-    description: "Proposes one bounded development task per cycle. Reads priorities, grounding, and knowledge context. Outputs structured JSON with title, scope boundary, acceptance criteria, and verification plan.",
-    content: `# planner\n\nPropose one bounded development task per cycle.\n\n## Capabilities\n- Reads project priorities, goals, and operator vision\n- Analyzes codebase grounding (test counts, typecheck status, file tree)\n- Searches OpenViking knowledge base for relevant context\n- Proposes tasks with concrete scope boundaries and verification plans\n- Adapts complexity: quick-fix (1-2 files) or standard (full analysis)\n\n## Input\n- Anchor (what to work on): failing test, queued item, research finding, or priorities doc\n- Grounding: npm test results, typecheck status, git state\n- Priorities: operator-authored direction document\n- Knowledge: OpenViking search results relevant to the anchor\n\n## Output\nJSON with: title, description, scopeBoundary, acceptanceCriteria, verificationPlan\n\n## Constraints\n- One task per cycle (never multiple)\n- Must be anchored to real evidence\n- Scope boundary must list specific files\n- Verification plan must use npm test and npm run typecheck\n`,
-  },
-  {
-    name: "executor",
-    description: "Writes code on a feature branch to implement a planned task. Has full codebase access. Runs tests before committing. Never merges to main.",
-    content: `# executor\n\nWrite code to implement a planned task.\n\n## Capabilities\n- Full read/write access to the target project codebase\n- Creates feature branches, writes code, runs tests\n- Follows existing test patterns from the project\n- Respects scope boundaries from the planner\n\n## Input\n- Task with title, description, scope boundary, acceptance criteria\n- Grounding summary with current test counts and file structure\n- Agent memory with prevention rules from past failures\n\n## Output\nJSON with: summary, filesChanged, commits, branch, testsRun\n\n## Constraints\n- Must stay within scope boundary\n- Must run npm test before committing\n- Never merges to main — control loop handles merging\n- Creates one feature branch per cycle\n`,
-  },
-  {
-    name: "skeptic",
-    description: "Challenges proposed tasks before execution. Has veto power. Checks for duplicates, scope issues, and feasibility. Skipped for quick-fix and research-vetted tasks.",
-    content: `# skeptic\n\nChallenge a proposed task before it gets executed.\n\n## Capabilities\n- Reviews task proposals for anchoring, scope, feasibility\n- Checks recent cycle history for duplicate work\n- Reads prevention rules from past failures\n- Can approve or reject with a reason\n\n## Input\n- Proposed task (title, description, scope, criteria)\n- Recent cycle history (last 5 cycles)\n- Agent memory with prevention rules\n\n## Output\nJSON with: verdict (approve/reject), reason\n\n## Constraints\n- Should lean toward approve when uncertain\n- Skip for research-vetted items and quick-fixes\n- Must provide concrete reason for rejection\n`,
-  },
-  {
-    name: "director",
-    description: "Synthesizes operator vision, codebase state, and multi-stream research into a prioritized feature roadmap. Writes priorities.md and ranks opportunities.",
-    content: `# director\n\nSynthesize vision + codebase state + research into priorities.\n\n## Capabilities\n- Reads operator vision (short intent document)\n- Analyzes structured codebase state (modules, routes, gaps)\n- Processes domain, technical, and market research findings\n- Produces ranked opportunity list with alignment scores\n- Writes complete priorities.md for the planner\n\n## Input\n- Operator vision (5-20 lines)\n- Codebase analysis (modules, API routes, test count, gaps)\n- Three research streams (domain, technical, market)\n\n## Output\nJSON with: priorities (markdown string), opportunities (ranked list), summary, researchHighlights\n\n## Constraints\n- Features over hardening (follow operator vision)\n- Concrete tasks over vague direction\n- Wire existing code before building new things\n- Research-backed recommendations\n`,
-  },
-];
-
-async function registerSkills() {
-  let registered = 0;
-  for (const skill of OV_SKILLS) {
-    try {
-      const res = await fetch(`${OV_URL}/api/v1/skills`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Api-Key": OV_KEY },
-        body: JSON.stringify({ data: skill }),
-        signal: AbortSignal.timeout(60000),
-      });
-      if (res.ok) {
-        registered++;
-      } else {
-        const text = await res.text().catch(() => "");
-        console.error(`[Learning] Failed to register skill ${skill.name}: ${res.status} ${text.slice(0, 150)}`);
-      }
-    } catch (err: any) {
-      console.error(`[Learning] Failed to register skill ${skill.name}: ${err.message}`);
-    }
-  }
-  if (registered > 0) {
-    console.log(`[Learning] Registered ${registered}/${OV_SKILLS.length} OV skills`);
-  }
-}
-
-// ===========================================================================
-// Section: Private — Knowledge indexer (background process)
-// ===========================================================================
-//
-// Source-file indexing (issue #210) was extracted to src/learning/source-indexer.ts
-// and OV upload helpers to src/learning/ov-upload.ts as the first scope-trimmed
-// step of the broader split tracked in issue #211. Behavior is preserved:
-// startKnowledgeIndexer wires the same fs.watch + Redis poll surfaces as before,
-// just with the source-side helpers imported from the new module.
-
-const indexerPending = new Map<string, ReturnType<typeof setTimeout>>();
-let lastReportIndex = 0;
-let lastRuleCounts: Record<string, number> = {};
-
-function shouldIndex(filePath: string): boolean {
-  const rel = relative(CONFIG_PATH, filePath);
-  for (const skip of SKIP_DIRS) {
-    if (rel.startsWith(skip)) return false;
-  }
-  return INDEXABLE_EXTS.has(extname(filePath));
-}
-
-function onFileChange(_eventType: string, filename: string | null) {
-  if (!filename) return;
-  const fullPath = resolve(CONFIG_PATH, filename);
-  if (!shouldIndex(fullPath)) return;
-
-  if (indexerPending.has(fullPath)) clearTimeout(indexerPending.get(fullPath)!);
-  indexerPending.set(
-    fullPath,
-    setTimeout(() => {
-      indexerPending.delete(fullPath);
-      indexFile(fullPath);
-    }, DEBOUNCE_MS)
-  );
-}
-
-async function pollRedisContent() {
-  try {
-    const reportIds = await getReportIdsByScore(lastReportIndex);
-    for (const id of reportIds) {
-      const raw = await getRealityReport(id);
-      if (raw) {
-        const report = JSON.parse(raw);
-        const summary = `Cycle ${report.cycleId}: ${report.task?.title} — ${report.task?.finalState}. Tests: ${report.grounding?.before?.passed}→${report.grounding?.after?.passed}`;
-        await indexText(`reality-report:${id}`, summary);
-      }
-    }
-    if (reportIds.length > 0) {
-      const latest = await getReportScore(reportIds[reportIds.length - 1]);
-      lastReportIndex = parseInt(latest as string) || lastReportIndex;
-    }
-
-    for (const agent of ["planner", "executor", "skeptic"]) {
-      const raw = await getMemoryPatterns(agent);
-      if (!raw) continue;
-      try {
-        const patterns = JSON.parse(raw);
-        const patternCount = patterns.length;
-        const prev = lastRuleCounts[agent] || 0;
-        if (patternCount > prev) {
-          for (const p of patterns.slice(prev)) {
-            const text = `${agent} pattern [${p.severity}]: ${p.category} (${p.hitCount}x) — ACTION: ${p.action}. Last: ${p.lastCycleId}`;
-            await indexText(`memory:${agent}:${p.category}`, text);
-          }
-          lastRuleCounts[agent] = patternCount;
-        }
-      } catch { /* intentional: skip unparseable patterns */ }
-    }
-  } catch (err: any) {
-    console.error(`[Learning:Indexer] Redis poll failed: ${err.message}`);
-  }
-}
-
-let indexerInterval: ReturnType<typeof setInterval> | null = null;
-
-function startKnowledgeIndexer() {
-  console.log(`[Learning:Indexer] Watching configs: ${CONFIG_PATH}`);
-  console.log(`[Learning:Indexer] Polling Redis every ${REDIS_POLL_MS / 1000}s`);
-
-  setWatchedPaths([CONFIG_PATH, ...SOURCE_PATHS.map(s => `${s.root}(${s.ext})`)]);
-
-  // Watch config files
-  try {
-    watch(CONFIG_PATH, { recursive: true }, onFileChange);
-  } catch (err: any) {
-    console.error(`[Learning:Indexer] fs.watch failed: ${err.message}`);
-  }
-
-  // Issue #210: Watch source paths (src/, docs/, test/) so agents can
-  // semantically retrieve actual implementation context. The watcher
-  // shares indexerPending with the config watcher so debounce dedup
-  // is global across both surfaces.
-  for (const source of SOURCE_PATHS) {
-    try {
-      watch(source.root, { recursive: true }, makeSourceWatcher(source, indexerPending, DEBOUNCE_MS));
-      console.log(`[Learning:Indexer] Watching source: ${source.root} (${source.ext})`);
-    } catch (err: any) {
-      // ENOENT for missing dir is non-fatal (e.g. docs/ may not exist).
-      if (err.code === "ENOENT") {
-        console.log(`[Learning:Indexer] Source path missing, skipping: ${source.root}`);
-      } else {
-        console.error(`[Learning:Indexer] fs.watch failed for ${source.root}: ${err.message}`);
-      }
-    }
-  }
-
-  // Initial-index pass: upload recently-modified source files in the
-  // background so agents have code-level context after a restart.
-  runSourceInitialPass()
-    .then(({ scanned, indexed, skipped }) => {
-      console.log(`[Learning:Indexer] Initial source pass: scanned=${scanned} indexed=${indexed} skipped=${skipped}`);
-    })
-    .catch((err: any) => console.error(`[Learning:Indexer] Initial source pass failed: ${err.message}`));
-
-  // Poll Redis for new content
-  indexerInterval = setInterval(() => pollRedisContent(), REDIS_POLL_MS);
-  pollRedisContent();
 }
