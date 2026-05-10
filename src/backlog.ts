@@ -25,6 +25,37 @@ import {
 const DONE_RETENTION_DAYS = 7;
 const LANES = ["triage", "backlog", "queued", "blocked", "inProgress", "done"];
 
+/**
+ * Apply a lane transition to an item in-place, recording timing metadata.
+ *
+ * Every transition writes `movedAt` (ISO timestamp). Transitions into the
+ * `inProgress` lane additionally write `claimedAt` + `claimedBy` so stalled
+ * items can be detected by both API consumers and the WIP enforcement code.
+ *
+ * Mutates `item` and returns it. Callers are responsible for persisting via
+ * saveItem(). The timestamp is also returned to support deterministic tests
+ * that need to know what value was written.
+ */
+function applyLaneTransition(
+  item: any,
+  targetLane: string,
+  opts: { claimedBy?: string | null } = {},
+): { movedAt: string } {
+  const movedAt = new Date().toISOString();
+  item.lane = targetLane;
+  item.movedAt = movedAt;
+  if (targetLane === "inProgress") {
+    item.claimedAt = movedAt;
+    item.claimedBy = opts.claimedBy ?? item.claimedBy ?? null;
+  } else {
+    // Leaving inProgress (or never entering) — clear the claim fields so a
+    // stale claimedBy from an earlier cycle doesn't confuse downstream code.
+    item.claimedAt = null;
+    item.claimedBy = null;
+  }
+  return { movedAt };
+}
+
 async function nextId() {
   return incrBacklogCounter();
 }
@@ -110,7 +141,7 @@ async function addToBacklog(item) {
 
   const id = await nextId();
   const targetLane = item.lane || "backlog";
-  const backlogItem = {
+  const backlogItem: any = {
     id,
     title: item.title,
     checked: false,
@@ -128,8 +159,13 @@ async function addToBacklog(item) {
       addedAt: new Date().toISOString().split("T")[0],
     },
     lane: targetLane,
+    movedAt: null,
+    claimedAt: null,
+    claimedBy: null,
   };
 
+  // Record the initial lane assignment as a transition so movedAt is always set.
+  applyLaneTransition(backlogItem, targetLane, { claimedBy: item.claimedBy ?? null });
   await saveItem(backlogItem);
   await addToBacklogLane(targetLane, Date.now(), id);
   return { added: true, id };
@@ -170,8 +206,8 @@ async function promoteToQueued(count = 1) {
 
   for (const item of toPromote) {
     await removeFromBacklogLane("backlog", item.id);
-    item.lane = "queued";
     item.meta = { ...item.meta, queuedAt: new Date().toISOString().split("T")[0] };
+    applyLaneTransition(item, "queued");
     await saveItem(item);
     await addToBacklogLane("queued", Date.now(), item.id);
     moved.push(item);
@@ -182,8 +218,34 @@ async function promoteToQueued(count = 1) {
 
 /**
  * Move a queued item to In Progress by title.
+ *
+ * Enforces the WIP cap: if the inProgress lane already holds WIP_LIMIT items,
+ * this returns `{ blocked: "wip-limit", count }` instead of moving the item.
+ * For backward compatibility, callers that pass no opts still receive a plain
+ * boolean (true = moved, false = not found). When opts.claimedBy is provided
+ * the result is the structured object so callers can distinguish "not found"
+ * from "blocked by WIP cap".
  */
-async function moveToInProgress(title) {
+async function moveToInProgress(
+  title: string,
+  opts: { claimedBy?: string | null } | string | null = null,
+): Promise<any> {
+  // Normalize: support legacy `moveToInProgress(title)` and the new
+  // `moveToInProgress(title, { claimedBy })` signatures. Also accept a bare
+  // string as a convenience shorthand for { claimedBy: <string> }.
+  const structured = opts !== null && opts !== undefined;
+  const claimedBy = typeof opts === "string"
+    ? opts
+    : (opts && typeof opts === "object" ? (opts.claimedBy ?? null) : null);
+
+  // WIP cap enforcement — refuse the claim before mutating any state.
+  const wipCount = await getBacklogLaneCount("inProgress");
+  if (wipCount >= WIP_LIMIT) {
+    console.warn(`[Backlog] moveToInProgress refused for "${title}": WIP cap ${WIP_LIMIT} reached (count=${wipCount})`);
+    if (structured) return { blocked: "wip-limit", count: wipCount, limit: WIP_LIMIT };
+    return false;
+  }
+
   // Search queued first, then backlog
   for (const sourceLane of ["queued", "backlog"]) {
     const ids = await getBacklogLaneIds(sourceLane);
@@ -191,14 +253,16 @@ async function moveToInProgress(title) {
       const item = await getItem(id);
       if (item && item.title === title) {
         await removeFromBacklogLane(sourceLane, id);
-        item.lane = "inProgress";
         item.meta = { ...item.meta, startedAt: new Date().toISOString().split("T")[0] };
+        applyLaneTransition(item, "inProgress", { claimedBy });
         await saveItem(item);
         await addToBacklogLane("inProgress", Date.now(), id);
+        if (structured) return { ok: true, item };
         return true;
       }
     }
   }
+  if (structured) return { ok: false, reason: "not-found" };
   return false;
 }
 
@@ -214,13 +278,13 @@ async function moveToDone(title, outcome = "merged") {
       const item = await getItem(id);
       if (item && item.title === title) {
         await removeFromBacklogLane(sourceLane, id);
-        item.lane = "done";
         item.checked = outcome === "merged";
         item.meta = {
           ...item.meta,
           completedAt: new Date().toISOString().split("T")[0],
           outcome,
         };
+        applyLaneTransition(item, "done");
         await saveItem(item);
         // Score with negative timestamp so newest is first in zrange
         await addToBacklogLane("done", -Date.now(), id);
@@ -242,12 +306,12 @@ async function moveToBlocked(title, reason) {
       const item = await getItem(id);
       if (item && item.title === title) {
         await removeFromBacklogLane(sourceLane, id);
-        item.lane = "blocked";
         item.meta = {
           ...item.meta,
           blockedAt: new Date().toISOString().split("T")[0],
           blockedReason: reason,
         };
+        applyLaneTransition(item, "blocked");
         await saveItem(item);
         await addToBacklogLane("blocked", Date.now(), id);
         console.log(`[Backlog] Moved "${title}" to Blocked: ${reason}`);
@@ -268,8 +332,8 @@ async function returnToBacklog(title, reason) {
     const item = await getItem(id);
     if (item && item.title === title) {
       await removeFromBacklogLane("inProgress", id);
-      item.lane = "backlog";
       item.meta = { ...item.meta, returnedAt: new Date().toISOString().split("T")[0], returnReason: reason };
+      applyLaneTransition(item, "backlog");
       await saveItem(item);
       await addToBacklogLane("backlog", Date.now(), id);
       return true;
@@ -315,12 +379,12 @@ async function blockItemById(itemId, reason) {
     await removeFromBacklogLane(lane, itemId);
   }
 
-  item.lane = "blocked";
   item.meta = {
     ...item.meta,
     blockedAt: new Date().toISOString().split("T")[0],
     blockedReason: reason,
   };
+  applyLaneTransition(item, "blocked");
   await saveItem(item);
   await addToBacklogLane("blocked", Date.now(), itemId);
   console.log(`[Backlog] Blocked item "${item.title}" (${itemId}): ${reason}`);
@@ -330,17 +394,25 @@ async function blockItemById(itemId, reason) {
 /**
  * Move an item between lanes by ID (for dashboard drag-and-drop).
  */
-async function moveItemToLane(itemId, targetLane) {
+async function moveItemToLane(itemId, targetLane, opts: { claimedBy?: string | null } = {}) {
   if (!LANES.includes(targetLane)) return { ok: false, error: `Invalid lane: ${targetLane}` };
   const item = await getItem(itemId);
   if (!item) return { ok: false, error: "Item not found" };
+
+  // Enforce WIP cap when transitioning into the inProgress lane.
+  if (targetLane === "inProgress" && item.lane !== "inProgress") {
+    const wipCount = await getBacklogLaneCount("inProgress");
+    if (wipCount >= WIP_LIMIT) {
+      return { ok: false, error: "wip-limit", count: wipCount, limit: WIP_LIMIT };
+    }
+  }
 
   // Remove from current lane
   for (const lane of LANES) {
     await removeFromBacklogLane(lane, itemId);
   }
 
-  item.lane = targetLane;
+  applyLaneTransition(item, targetLane, { claimedBy: opts.claimedBy ?? null });
   await saveItem(item);
   const score = targetLane === "done" ? -Date.now() : Date.now();
   await addToBacklogLane(targetLane, score, itemId);
@@ -472,12 +544,12 @@ async function requeueStaleInProgressItems() {
     const ageMs = now - startedMs;
     if (ageMs > cutoffMs) {
       await removeFromBacklogLane("inProgress", id);
-      item.lane = "queued";
       item.meta = {
         ...item.meta,
         requeuedAt: new Date().toISOString().split("T")[0],
         requeueReason: `Stale in-progress for ${Math.round(ageMs / (24 * 60 * 60 * 1000))} days (WIP limit enforcement)`,
       };
+      applyLaneTransition(item, "queued");
       await saveItem(item);
       await addToBacklogLane("queued", Date.now(), id);
       requeued.push(item);
@@ -598,12 +670,12 @@ async function claimNextQueuedItem(claimedBy) {
     }
 
     // It's the raw item JSON — update lane metadata and save
-    parsed.lane = "inProgress";
     parsed.meta = {
       ...parsed.meta,
       startedAt: new Date().toISOString().split("T")[0],
       claimedBy,
     };
+    applyLaneTransition(parsed, "inProgress", { claimedBy });
     await saveItem(parsed);
     return { claimed: true, item: parsed };
   } catch {
@@ -661,10 +733,21 @@ async function publishFacadeFailure(
  */
 async function claim(
   reference: string,
-  opts: { eventBus?: FacadeEventBus | null; cycleId?: string } = {},
-): Promise<{ ok: boolean; error?: string }> {
+  opts: { eventBus?: FacadeEventBus | null; cycleId?: string; claimedBy?: string | null } = {},
+): Promise<{ ok: boolean; error?: string; reason?: string; count?: number; limit?: number }> {
   try {
-    await moveToInProgress(reference);
+    const result = await moveToInProgress(reference, { claimedBy: opts.claimedBy ?? null });
+    // moveToInProgress returns a structured object when called with opts;
+    // surface the WIP-cap rejection as a non-throwing failure.
+    if (result && typeof result === "object" && "blocked" in result) {
+      const msg = `WIP cap reached (${result.count}/${result.limit})`;
+      console.warn(`[Backlog] claim() refused for "${reference}": ${msg}`);
+      await publishFacadeFailure(opts.eventBus || null, opts.cycleId || "", "claim", reference, msg);
+      return { ok: false, error: msg, reason: "wip-limit", count: result.count, limit: result.limit };
+    }
+    if (result && typeof result === "object" && "ok" in result && !result.ok) {
+      return { ok: false, error: result.reason || "not-found", reason: result.reason };
+    }
     return { ok: true };
   } catch (err: any) {
     console.error(`[Backlog] claim() failed for "${reference}": ${err.message}`);
