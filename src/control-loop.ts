@@ -45,6 +45,7 @@ import {
   runExecuteStep,
   runMergeStep,
 } from "./pipeline-steps.ts";
+import { runCostCapCheck, getPerCycleCostCapUsd } from "./cost-cap.ts";
 
 // ---------------------------------------------------------------------------
 // The control loop — evidence-driven pipeline
@@ -61,6 +62,12 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   const tracker = getTracker();
 
   console.log(`[ControlLoop] Starting cycle ${cycleId}`);
+  const perCycleCostCapUsd = getPerCycleCostCapUsd();
+  if (Number.isFinite(perCycleCostCapUsd)) {
+    console.log(`[ControlLoop] Per-cycle cost cap: $${perCycleCostCapUsd.toFixed(2)} (HYDRA_PER_CYCLE_COST_CAP_USD)`);
+  } else {
+    console.log(`[ControlLoop] Per-cycle cost cap: disabled (HYDRA_PER_CYCLE_COST_CAP_USD=Infinity)`);
+  }
 
   const ovSession = await createCycleSession(cycleId);
 
@@ -236,9 +243,21 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   const preflightResult = await runPreflightGate(ctx, task, complexity, groundingSummary, taskId);
   if (!preflightResult.continue) return preflightResult.result;
 
+  // Step 4.5: COST CAP — bail BEFORE executor (cheapest exit) if planner +
+  // preflight already burned the per-cycle budget. Issue #209: top abandoned
+  // cycles consumed up to $56 each; this is the dominant cost-leak class.
+  const preExecCapCheck = await runCostCapCheck(ctx, task, taskId, "post-preflight");
+  if (preExecCapCheck.continue === false) return preExecCapCheck.result;
+
   // Step 5: EXECUTE — make the smallest change (codex agent call)
   const executeResult = await runExecuteStep(ctx, task, groundingSummary, complexity, taskId);
   if (!executeResult.continue) return executeResult.result;
+
+  // Step 5.5: COST CAP — re-check after executor. Even though we bailed
+  // pre-executor, an expensive executor call can blow past the cap and we
+  // shouldn't pay for fixer / mutation / jit on top.
+  const postExecCapCheck = await runCostCapCheck(ctx, task, taskId, "post-executor");
+  if (postExecCapCheck.continue === false) return postExecCapCheck.result;
 
   const { execResult, diff, scopeFilterCleaned } = executeResult;
 

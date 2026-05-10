@@ -15,6 +15,7 @@ import { getMetricsTrend } from "./metrics.ts";
 import { _admin } from "./backlog.ts";
 const { getBacklogCounts, promoteToQueued, pruneOldDoneItems } = _admin;
 import { runResearchLoop } from "./research-loop.ts";
+import { getPerCycleCostCapUsd } from "./cost-cap.ts";
 import { redisKeys } from "./redis-keys.ts";
 import {
   getString, setString, getWorkQueueLen, pushToWorkQueue,
@@ -806,6 +807,7 @@ async function getStatus() {
   const researchCount24h = await getResearchEventCount24h().catch(() => 0);
   const buildCount24h = await getBuildEventCount24h().catch(() => 0);
   const currentRatio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
+  const perCycleCostCapUsd = getPerCycleCostCapUsd();
   return {
     running: state.running,
     intervalMs: state.intervalMs,
@@ -821,6 +823,9 @@ async function getStatus() {
     consecutiveNonMerges: state.consecutiveNonMerges,
     stallAlertThreshold: STALL_ALERT_THRESHOLD,
     zeroOutputThreshold: ZERO_OUTPUT_THRESHOLD,
+    // Issue #209: per-cycle cost cap (separate from daily research cap).
+    // null when the cap is Infinity / disabled.
+    perCycleCostCapUsd: Number.isFinite(perCycleCostCapUsd) ? perCycleCostCapUsd : null,
     research: {
       queueThreshold: RESEARCH_QUEUE_THRESHOLD,
       buildRatioMax: RESEARCH_BUILD_RATIO_MAX,
