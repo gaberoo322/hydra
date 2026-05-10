@@ -1458,6 +1458,41 @@ export async function getSchedulerCyclesRun(): Promise<number> {
 }
 
 /**
+ * Atomically increment the scheduler cycles-merged counter. Returns new value.
+ * Mirrors the cyclesRun pattern (issue #208) so mergeRate is consistent across
+ * orchestrator restarts and the zero-output circuit breaker reasons over real
+ * lifetime history rather than a per-process counter.
+ */
+export async function incrSchedulerCyclesMerged(): Promise<number> {
+  const r = getRedisConnection();
+  return r.incr(redisKeys.schedulerCyclesMerged());
+}
+
+/** Get the current scheduler cycles-merged counter value. */
+export async function getSchedulerCyclesMerged(): Promise<number> {
+  const r = getRedisConnection();
+  const val = await r.get(redisKeys.schedulerCyclesMerged());
+  return val ? parseInt(val, 10) : 0;
+}
+
+/**
+ * Atomically increment the scheduler cycles-failed counter. Returns new value.
+ * Persisted alongside cyclesMerged (issue #208) so the failed/run/merged
+ * triple is restart-stable.
+ */
+export async function incrSchedulerCyclesFailed(): Promise<number> {
+  const r = getRedisConnection();
+  return r.incr(redisKeys.schedulerCyclesFailed());
+}
+
+/** Get the current scheduler cycles-failed counter value. */
+export async function getSchedulerCyclesFailed(): Promise<number> {
+  const r = getRedisConnection();
+  const val = await r.get(redisKeys.schedulerCyclesFailed());
+  return val ? parseInt(val, 10) : 0;
+}
+
+/**
  * Atomically claim research eligibility: checks if lastResearchAt is old enough,
  * and if so sets it to `now`. Returns true if claimed, false if throttled.
  *

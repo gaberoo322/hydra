@@ -25,6 +25,8 @@ import {
   consumeResearchForceOnce,
   listLPop, listLen,
   incrSchedulerCyclesRun, getSchedulerCyclesRun,
+  incrSchedulerCyclesMerged, getSchedulerCyclesMerged,
+  incrSchedulerCyclesFailed, getSchedulerCyclesFailed,
   atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
   saveSchedulerStateVersioned, getSchedulerStateVersion,
 } from "./redis-adapter.ts";
@@ -116,8 +118,17 @@ let state = {
 // SCHEDULER_STATE_KEY. On startup, loadSchedulerState() merges the stored
 // values into `state` before the first tick. After every research cycle
 // and architect review, saveSchedulerState() writes the updated fields
-// back to Redis. Non-research counters (cyclesRun, cyclesMerged, etc.)
-// still reset on restart — they're per-session metrics, not throttle state.
+// back to Redis.
+//
+// Lifetime cycle counters (cyclesRun, cyclesMerged, cyclesFailed) are also
+// persisted via dedicated Redis atomic counters — see incrSchedulerCyclesRun /
+// incrSchedulerCyclesMerged / incrSchedulerCyclesFailed. Originally only
+// cyclesRun was persisted (issue #140); the other two were in-memory only,
+// which made mergeRate snap to a misleading near-zero value after every
+// restart and tripped the zero-output circuit breaker on transient resets
+// (issue #208). On startup, loadSchedulerState() seeds in-memory state from
+// the Redis counters when they're non-zero so /api/scheduler/status reports
+// stable lifetime metrics immediately after restart.
 
 const SCHEDULER_STATE_KEY = redisKeys.schedulerState();
 
@@ -138,6 +149,15 @@ async function loadSchedulerState() {
     const atomicCyclesRun = await getSchedulerCyclesRun();
     if (atomicCyclesRun > 0) state.cyclesRun = atomicCyclesRun;
 
+    // Load atomic counters for cyclesMerged / cyclesFailed (issue #208)
+    // so that /api/scheduler/status reports stable lifetime mergeRate
+    // immediately after restart, instead of resetting to 0 and confusing
+    // the zero-output circuit breaker.
+    const atomicCyclesMerged = await getSchedulerCyclesMerged();
+    if (atomicCyclesMerged > 0) state.cyclesMerged = atomicCyclesMerged;
+    const atomicCyclesFailed = await getSchedulerCyclesFailed();
+    if (atomicCyclesFailed > 0) state.cyclesFailed = atomicCyclesFailed;
+
     // Load atomic lastResearchAt (issue #140 — AC2)
     const lastResearchMs = await getLastResearchAtMs();
     if (lastResearchMs) {
@@ -147,7 +167,7 @@ async function loadSchedulerState() {
     // Load state version for optimistic locking (issue #140 — AC3)
     state._stateVersion = await getSchedulerStateVersion();
 
-    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, cyclesRun=${state.cyclesRun}, version=${state._stateVersion}`);
+    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, cyclesRun=${state.cyclesRun}, cyclesMerged=${state.cyclesMerged}, cyclesFailed=${state.cyclesFailed}, version=${state._stateVersion}`);
   } catch (err: any) {
     console.error(`[Scheduler] Failed to load persisted state: ${err.message}`);
   }
@@ -624,7 +644,7 @@ async function runScheduledCycle(eventBus) {
     }
 
     if (result.error) {
-      state.cyclesFailed++;
+      state.cyclesFailed = await incrSchedulerCyclesFailed(); // issue #208: atomic Redis INCR
       state.lastError = result.error;
       state.consecutiveNonMerges++;
       console.log(`[Scheduler] Cycle returned error: ${result.error}`);
@@ -632,7 +652,7 @@ async function runScheduledCycle(eventBus) {
       const merged = result.tasks?.some(t => t.finalState === "merged") ||
                      result.task?.finalState === "merged";
       if (merged) {
-        state.cyclesMerged++;
+        state.cyclesMerged = await incrSchedulerCyclesMerged(); // issue #208: atomic Redis INCR
         state.consecutiveNonMerges = 0;
       } else {
         state.consecutiveNonMerges++;
@@ -699,7 +719,7 @@ async function runScheduledCycle(eventBus) {
     }
   } catch (err: any) {
     state.cyclesRun = await incrSchedulerCyclesRun(); // AC1: atomic Redis INCR
-    state.cyclesFailed++;
+    state.cyclesFailed = await incrSchedulerCyclesFailed(); // issue #208: atomic Redis INCR
     state.consecutiveErrors++;
     state.consecutiveNonMerges++;
     state.lastError = err.message;

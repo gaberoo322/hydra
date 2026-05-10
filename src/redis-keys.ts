@@ -102,6 +102,8 @@ export const redisKeys = {
   schedulerBuildEvents: () => "hydra:scheduler:build-events",
   schedulerResearchForceOnce: () => "hydra:scheduler:research-force-once",
   schedulerCyclesRun: () => "hydra:scheduler:cycles-run",
+  schedulerCyclesMerged: () => "hydra:scheduler:cycles-merged",
+  schedulerCyclesFailed: () => "hydra:scheduler:cycles-failed",
   schedulerStateVersion: () => "hydra:scheduler:state-version",
 
   // ---------------------------------------------------------------------------
