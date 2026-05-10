@@ -75,6 +75,10 @@ export interface StucknessResult {
   threshold: number;
   /** Cycle id of the last sustained favorable move, or null if none yet. */
   lastFavorableCycleId: string | null;
+  /** Outcome kind — needed by anchor-selection to prefer leading over terminal
+   *  per ADR-0003 vision vector 1 (#253). Undefined for unknown-outcome paths
+   *  where we synthesize a baseline result without a config entry. */
+  kind?: "leading" | "terminal";
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +222,7 @@ export function computeStucknessFromHistory(
     fired: false,
     threshold: outcome.stuckness_threshold_cycles,
     lastFavorableCycleId: null,
+    kind: outcome.kind,
   };
 
   if (history.length < 2) {
@@ -249,6 +254,7 @@ export function computeStucknessFromHistory(
     lastFavorableCycleId: lastFavorableAt !== null
       ? history[lastFavorableAt].cycleId
       : null,
+    kind: outcome.kind,
   };
 }
 
@@ -304,6 +310,7 @@ export async function getAllStuckness(): Promise<StucknessResult[]> {
           fired: false,
           threshold: o.stuckness_threshold_cycles,
           lastFavorableCycleId: null,
+          kind: o.kind,
         });
       }
     }

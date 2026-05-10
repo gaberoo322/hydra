@@ -21,6 +21,7 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:anchors:prior-failures` | Redis list -- failed tasks for retry |
 | `hydra:anchors:reframe-queue` | Redis list -- tasks needing diagnosis after repeated failure |
 | `hydra:anchors:abandonment-count:{ref}` | Counter per anchor, 24h TTL. Circuit breaker at 3. |
+| `hydra:stuckness:cooldown:{outcome}` | Cooldown flag (30-min TTL ≈ 5 cycles). Suppresses stuckness-driven re-selection of the same outcome. Issue #253. |
 | `hydra:merge:lock` | Short-lived merge serialization lock (60s TTL) |
 | `hydra:metrics:{id}` | Cycle metrics hash |
 | `hydra:metrics:index` | Sorted set of cycle IDs by timestamp |
@@ -108,6 +109,26 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 **Error handling:** `loadOutcomes()` never throws. Returns `{ ok: false, errors: string[] }` on parse / schema violations. Missing file is `{ ok: true, outcomes: [] }` so projects start with no outcomes declared without crashing.
 
 **Dependency chain:** Foundational for ADR-0004 work-order — #242 (stuckness detector) and #244 (Tier-2 outcome holdback) import `loadOutcomes` and `getOutcomeValue`.
+
+## Anchor Selection Priority
+
+Order enforced by `selectAnchor()` in `src/anchor-selection.ts`:
+
+1. **Explicit operator request** — `opts.anchor`
+2. **Stuckness-driven research** (#253) — when any fired outcome from `getAllStuckness()` lacks a cooldown entry. Builds a `research`-type anchor with reference `outcome-stuckness:<name>` and `domain: orchestrator-self-improvement`. Leading outcomes outrank terminal; within a kind, most-stuck wins (lex name tiebreak). Sets 30-min cooldown (~5 cycles) to prevent thrashing on the same signal. Enforces ADR-0003 vision vector 1.
+3. **Kanban queued lane** — atomic Lua claim, WIP-gated
+4. **Active specs** — next unchecked task from oldest active spec
+5. **Failing tests** — from grounding
+6. **Typecheck errors** — from grounding
+7. **Work queue** (`POST /api/queue`, research auto-queue) — LMOVE to processing
+8. **Reframe queue** — repeated failures awaiting diagnosis
+9. **Prior failures** — Redis-tracked; cap 2 retries
+10. **TODO/FIXME markers** — from codebase
+11. **Regression hunt** — every 10 merges
+12. **Codebase health** — reductive improvements
+13. **Priorities doc** — `config/direction/priorities.md`, auto-refreshed if stale
+
+**Notifications stream emits** `anchor.selected.stuckness` `{outcomeName, cycles, threshold, kind}` when slot 2 fires (issue #253). Dashboard + digest consume via existing `hydra:notifications` subscription.
 
 ## Codex OpenTelemetry (issue #199)
 
