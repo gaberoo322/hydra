@@ -28,6 +28,7 @@ import { fail, block } from "./backlog.ts";
 import { looksOperatorBlocked, reconcilePlanVsActual } from "./preflight.ts";
 import { cleanupBrokenBranch, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
+import { execWithGroupCleanup } from "./exec-with-timeout.ts";
 
 // Submodule imports
 import { isFixableFailure, runFixerAttempt } from "./fixer.ts";
@@ -358,56 +359,60 @@ function truncate(str: string, limit = OUTPUT_LIMIT) {
 
 /**
  * Run a single verification step. Never throws.
+ *
+ * Issue #226: uses execWithGroupCleanup so a `npm test` step that times out
+ * kills its full process tree (sh → npm → node → tsx → esbuild --service)
+ * instead of leaving grandchildren behind. The previous
+ * `execFileAsync({ shell: true, timeout })` only signalled the immediate
+ * `/bin/sh` and silently leaked the rest of the tree.
  */
 async function runStep(step: any, projectDir: string, timeout = STEP_TIMEOUT) {
-  const start = Date.now();
   const { command, expected, label } = step;
 
-  // Parse command into executable + args
+  // Parse command into executable + args. shell:true is preserved so PATH
+  // lookups + chained `npm run …` commands keep working as they did before.
   const parts = command.split(/\s+/);
   const cmd = parts[0];
   const args = parts.slice(1);
 
-  try {
-    const { stdout, stderr } = await execFileAsync(cmd, args, {
-      cwd: projectDir,
-      timeout,
-      env: process.env,
-      shell: true,
-      maxBuffer: 1024 * 1024 * 5,
-    });
+  const result = await execWithGroupCleanup(cmd, args, {
+    cwd: projectDir,
+    env: process.env,
+    timeout,
+    shell: true,
+    maxBuffer: 1024 * 1024 * 5,
+  });
 
-    const passed = checkExpectation(expected, 0, stdout, stderr);
+  const passed = checkExpectation(
+    expected,
+    result.exitCode,
+    result.stdout,
+    result.stderr,
+  );
 
-    return {
-      label,
-      command,
-      passed,
-      exitCode: 0,
-      stdout: truncate(stdout),
-      stderr: truncate(stderr),
-      durationMs: Date.now() - start,
-      expected,
-      actual: passed ? "exit code 0" : "exit code 0 but expectation not met",
-    };
-  } catch (err: any) {
-    const exitCode = err.status ?? err.code ?? 1;
-    const stdout = truncate(err.stdout);
-    const stderr = truncate(err.stderr || err.message);
-    const passed = checkExpectation(expected, exitCode, stdout, stderr);
-
-    return {
-      label,
-      command,
-      passed,
-      exitCode,
-      stdout,
-      stderr,
-      durationMs: Date.now() - start,
-      expected,
-      actual: `exit code ${exitCode}`,
-    };
+  let actual: string;
+  if (result.timedOut) {
+    actual = `timeout after ${timeout}ms (process group killed)`;
+  } else if (result.exitCode === 0) {
+    actual = passed
+      ? "exit code 0"
+      : "exit code 0 but expectation not met";
+  } else {
+    actual = `exit code ${result.exitCode}`;
   }
+
+  return {
+    label,
+    command,
+    passed,
+    exitCode: result.exitCode,
+    stdout: truncate(result.stdout),
+    stderr: truncate(result.stderr),
+    durationMs: result.durationMs,
+    expected,
+    actual,
+    timedOut: result.timedOut,
+  };
 }
 
 /**

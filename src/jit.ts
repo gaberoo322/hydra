@@ -15,6 +15,7 @@ import { execFile } from "node:child_process";
 import { writeFile, unlink, mkdir } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { promisify } from "node:util";
+import { execWithGroupCleanup } from "./exec-with-timeout.ts";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getTracker } from "./task-tracker.ts";
 import { recordOutcome } from "./learning.ts";
@@ -242,14 +243,24 @@ export async function runJitTests(
         // Write the test file
         await writeFile(testPath, testDef.code, "utf-8");
 
-        // Run just this test file to check if it passes
-        try {
-          await execFileAsync("node", ["--experimental-strip-types", "--test", testPath], {
+        // Run just this test file to check if it passes.
+        //
+        // Issue #226: use execWithGroupCleanup so a JIT test that hangs (or
+        // pulls in tsx/esbuild via the test code itself) cannot leak its
+        // grandchildren past JIT_TEST_TIMEOUT_MS. The old execFileAsync
+        // only signalled the immediate `node` process and left esbuild
+        // --service daemons spinning indefinitely.
+        const jitRun = await execWithGroupCleanup(
+          "node",
+          ["--experimental-strip-types", "--test", testPath],
+          {
             cwd: projectDir,
             timeout: JIT_TEST_TIMEOUT_MS,
             env: process.env,
-          });
+          },
+        );
 
+        if (jitRun.exitCode === 0 && !jitRun.timedOut) {
           // Test passed — keep it
           result.kept++;
           result.testFiles.push(testPath);
@@ -264,10 +275,12 @@ export async function runJitTests(
           } catch (commitErr: any) {
             console.error(`[JiT] Failed to commit test ${testDef.filename}: ${commitErr.message}`);
           }
-        } catch (testErr: any) {
-          // Test failed — check if it caught a real bug or is just bad generation
-          const stderr = testErr.stderr || testErr.message || "";
-          const stdout = testErr.stdout || "";
+        } else {
+          // Test failed (or timed out) — check if it caught a real bug or is just bad generation.
+          // Issue #226: timeout no longer throws, so we no longer have a thrown error to inspect;
+          // jitRun.timedOut + the captured stderr/stdout are equivalent for this heuristic.
+          const stderr = jitRun.stderr || "";
+          const stdout = jitRun.stdout || "";
           const output = stderr + stdout;
 
           // Heuristic: if the error mentions assertion failure on expected vs actual,
