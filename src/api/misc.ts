@@ -12,6 +12,10 @@ import {
   pushToWorkQueue, pushAlert, setNX, getString, delKey,
   getMergeLockHolder, releaseMergeLock,
 } from "../redis-adapter.ts";
+// Issue #231: shared OV connection config — the previous local default literal
+// for OPENVIKING_API_KEY in this file was the WRONG key (returned 401), so the
+// dashboard search proxy silently broke whenever the env var was absent.
+import { OPENVIKING_URL, OPENVIKING_API_KEY } from "../learning/ov-config.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -35,8 +39,8 @@ export function createMiscRouter(eventBus: any) {
     }
 
     try {
-      const ovUrl = process.env.OPENVIKING_URL || "http://localhost:1933";
-      const ovKey = process.env.OPENVIKING_API_KEY || "1080bb34205409e58aa433512cb5e5d6344560adce963c442543001808181115";
+      const ovUrl = OPENVIKING_URL;
+      const ovKey = OPENVIKING_API_KEY;
       const response = await fetch(`${ovUrl}/api/v1/search/find`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Api-Key": ovKey },

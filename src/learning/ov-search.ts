@@ -17,13 +17,14 @@
  * Behavior preserved 1:1 from the previous learning.ts implementation.
  */
 
-export const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
-export const OV_KEY = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
+// OpenViking connection config — single source of truth in ov-config.ts (issue #231).
+// Re-exported under the historical OV_URL / OV_KEY / OV_HEADERS names so existing
+// importers keep compiling without churn.
+import { OPENVIKING_URL, OPENVIKING_API_KEY, OPENVIKING_HEADERS } from "./ov-config.ts";
 
-export const OV_HEADERS = {
-  "Content-Type": "application/json",
-  "X-Api-Key": OV_KEY,
-};
+export const OV_URL = OPENVIKING_URL;
+export const OV_KEY = OPENVIKING_API_KEY;
+export const OV_HEADERS = OPENVIKING_HEADERS;
 
 // ===========================================================================
 // Metrics (in-memory, resets on restart)

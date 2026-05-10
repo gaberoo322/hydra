@@ -16,10 +16,12 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve, sep as pathSep } from "node:path";
 import { createHash } from "node:crypto";
 
-const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
-const OV_KEY =
-  process.env.OPENVIKING_API_KEY ||
-  "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
+// Issue #231: import the canonical OV connection config instead of duplicating
+// the literal API key default that diverged across src/ files.
+import { OPENVIKING_URL, OPENVIKING_API_KEY } from "./ov-config.ts";
+
+const OV_URL = OPENVIKING_URL;
+const OV_KEY = OPENVIKING_API_KEY;
 const OV_CONFIG_MOUNT = process.env.OV_CONFIG_MOUNT || "/config";
 const CONFIG_PATH =
   process.env.HYDRA_CONFIG_PATH ||

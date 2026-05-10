@@ -18,6 +18,8 @@ import {
   listLen, getMemoryPatterns, scanKeys, redisInfo as getRedisInfo,
   getWorkQueueLen,
 } from "../redis-adapter.ts";
+// Issue #231: shared OV credential — health probe must use the same key as agent searches.
+import { OPENVIKING_API_KEY } from "../learning/ov-config.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -111,7 +113,7 @@ export function createHealthRouter(eventBus: any) {
       })(),
       /* 15 */ (async () => {
         try {
-          const ovKey = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
+          const ovKey = OPENVIKING_API_KEY;
           const start = Date.now();
           const r = await fetch("http://localhost:1933/api/v1/search/find", { method: "POST", headers: { "Content-Type": "application/json", "X-Api-Key": ovKey }, body: JSON.stringify({ query: "system health", limit: 3 }), signal: AbortSignal.timeout(3000) });
           const lat = Date.now() - start;

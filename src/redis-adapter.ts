@@ -10,6 +10,8 @@
 
 import Redis from "ioredis";
 import { redisKeys } from "./redis-keys.ts";
+// Issue #231: shared OV connection config — no local literal default.
+import { OPENVIKING_URL as OV_DEDUP_URL, OPENVIKING_API_KEY as OV_DEDUP_KEY } from "./learning/ov-config.ts";
 
 // ---------------------------------------------------------------------------
 // Singleton connection
@@ -1034,8 +1036,7 @@ export async function removeFromWorkQueue(value: string): Promise<number> {
 // Work queue dedup utilities
 // ---------------------------------------------------------------------------
 
-const OV_DEDUP_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
-const OV_DEDUP_KEY = process.env.OPENVIKING_API_KEY || "56611b96a5aa35614ceb40814bb9d989d9523a764b386f569e0d1327c78d350c";
+// OV connection config is imported at the top of this file (issue #231).
 
 /** Configurable semantic similarity threshold for dedup (0-1). Default 0.85. */
 export const SEMANTIC_DEDUP_THRESHOLD = parseFloat(
