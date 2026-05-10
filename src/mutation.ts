@@ -215,9 +215,7 @@ export async function runMutationTests(
       const content = await readFile(fullPath, "utf-8");
       const mutations = generateMutations(fullPath, content);
       allMutations.push(...mutations);
-    } catch {
-      // File might not exist (deleted in diff)
-    }
+    } catch { /* intentional: file may have been deleted in diff — skip mutation generation */ }
   }
 
   // Shuffle mutations to get a representative sample if we time out
@@ -237,8 +235,10 @@ export async function runMutationTests(
     let originalContent: string;
     try {
       originalContent = await readFile(mutation.file, "utf-8");
-    } catch {
-      results.push({ mutation, survived: false, skipped: true, error: "cannot read file" });
+    } catch (err: any) {
+      // Intentionally non-fatal: record the read failure on the result so the
+      // skip is surfaced in the mutation report rather than silently swallowed.
+      results.push({ mutation, survived: false, skipped: true, error: `cannot read file: ${err?.message ?? err}` });
       continue;
     }
 
@@ -262,8 +262,7 @@ export async function runMutationTests(
         });
         // Tests passed with mutation = SURVIVED (bad)
         results.push({ mutation, survived: true, skipped: false });
-      } catch {
-        // Tests failed with mutation = KILLED (good)
+      } catch { /* intentional: test failure under mutation = killed mutant (the desired signal) */
         results.push({ mutation, survived: false, skipped: false });
       }
     } finally {

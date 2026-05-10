@@ -66,9 +66,7 @@ async function validatePrerequisites(prerequisites: string[]): Promise<{ valid: 
           found = true;
           break;
         }
-      } catch {
-        // grep returns exit 1 when no matches — that's expected
-      }
+      } catch { /* intentional: grep returns exit 1 when no matches — expected, treat as not-found */ }
     }
     if (!found) missing.push(prereq);
   }
@@ -457,21 +455,21 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
   try {
     roadmapContent = await readFile(join(CONFIG_PATH, "direction", "roadmap.md"), "utf-8");
     console.log("[Research] Loaded roadmap.md for Director context");
-  } catch { /* no roadmap file is fine */ }
+  } catch { /* intentional: roadmap.md is optional Director context — proceed without it */ }
 
   // Load research journal — persistent memory of what's been explored
   let journalContent = "";
   try {
     journalContent = await readFile(join(CONFIG_PATH, "direction", "research-journal.md"), "utf-8");
     console.log("[Research] Loaded research-journal.md");
-  } catch { /* no journal file is fine — first run */ }
+  } catch { /* intentional: research-journal.md missing on first run — proceed without it */ }
 
   // Load data assets manifest — what data is available for features
   let dataAssetsContent = "";
   try {
     dataAssetsContent = await readFile(join(CONFIG_PATH, "direction", "data-assets.md"), "utf-8");
     console.log("[Research] Loaded data-assets.md");
-  } catch { /* no data-assets file is fine */ }
+  } catch { /* intentional: data-assets.md is optional — proceed without it */ }
 
   const [appMetrics, lastReport, accomplishmentsRaw, researchScorecard] = await Promise.all([
     loadAppMetrics(),

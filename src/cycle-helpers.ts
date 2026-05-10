@@ -231,8 +231,12 @@ export async function isAnchorStale(anchor: any): Promise<string | null> {
         }
       }
     }
-  } catch {
-    // priorities.md not readable — proceed without this check
+  } catch (err: any) {
+    // priorities.md may be missing on fresh installs; log non-ENOENT failures so
+    // a stuck reader is observable, but never block the cycle on this check.
+    if (err?.code !== "ENOENT") {
+      console.error(`[ControlLoop] priorities.md duplicate-check read failed (proceeding): ${err?.message ?? err}`);
+    }
   }
 
   return null;

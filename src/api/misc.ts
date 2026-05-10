@@ -464,7 +464,7 @@ export function createMiscRouter(eventBus: any) {
     }
     try {
       let raw = "";
-      try { raw = await readFile(envPath, "utf-8"); } catch { /* new file */ }
+      try { raw = await readFile(envPath, "utf-8"); } catch { /* intentional: env file doesn't exist yet — initialize as empty */ }
       const lines = raw.split("\n");
       const needle = `${key}=`;
       const idx = lines.findIndex(l => l.startsWith(needle) || l.startsWith(`${key} =`));

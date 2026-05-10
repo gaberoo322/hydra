@@ -145,9 +145,7 @@ async function measureFileSizes(
       const content = await readFile(join(projectRoot, file), "utf-8");
       const lines = content.split("\n").length;
       results.push({ file, lines });
-    } catch {
-      // Skip files we can't read (deleted, permissions, etc.)
-    }
+    } catch { /* intentional: skip files we can't read (deleted, permissions, etc.) during health scan */ }
   }
 
   results.sort((a, b) => b.lines - a.lines);
@@ -188,9 +186,7 @@ async function findUndocumentedModules(
       if (!hasDocHeader && !hasDirectiveAndDoc) {
         undocumented.push(file);
       }
-    } catch {
-      // Skip unreadable files
-    }
+    } catch { /* intentional: skip unreadable files during undocumented-module scan */ }
   }
 
   return undocumented;

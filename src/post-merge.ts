@@ -63,7 +63,7 @@ async function syncTargetPriorities(): Promise<void> {
 
   // Read current target to avoid unnecessary writes
   let current = "";
-  try { current = await readFile(TARGET_PRIORITIES_PATH, "utf-8"); } catch { /* file may not exist */ }
+  try { current = await readFile(TARGET_PRIORITIES_PATH, "utf-8"); } catch { /* intentional: target priorities file may not exist on first sync — treat as empty */ }
 
   // Only write if content has actually changed (ignore frontmatter timestamp diffs)
   const stripFrontmatter = (s: string) => s.replace(/^---[\s\S]*?---\n*/m, "").trim();

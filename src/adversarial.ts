@@ -95,9 +95,7 @@ export async function runAdversarialValidation(
       const fullPath = file.startsWith("/") ? file : join(PROJECT_WORKSPACE, file);
       const content = await readFile(fullPath, "utf-8");
       fileContents.push(`### ${file}\n\`\`\`\n${content.slice(0, 2000)}\n\`\`\``);
-    } catch {
-      // File might not exist (deleted or moved)
-    }
+    } catch { /* intentional: file may have been deleted or moved — skip from adversarial sample */ }
   }
 
   if (fileContents.length === 0) {

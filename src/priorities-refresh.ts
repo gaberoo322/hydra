@@ -65,7 +65,7 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
   let currentPriorities = "";
   try {
     currentPriorities = await readFile(PRIORITIES_FILE, "utf-8");
-  } catch { /* no existing file is fine */ }
+  } catch { /* intentional: no existing priorities file — refresh will create one */ }
 
   // 3. Get recent accomplishments
   let accomplishments = "";
@@ -141,14 +141,14 @@ export async function refreshPriorities(opts: Record<string, any> = {}) {
   try {
     roadmapContext = await readFile(ROADMAP_FILE, "utf-8");
     console.log(`[PrioritiesRefresh] Loaded roadmap.md`);
-  } catch { /* no roadmap file is fine */ }
+  } catch { /* intentional: roadmap.md is optional context — proceed without it */ }
 
   // 7.6. Read data assets manifest (what data is available)
   let dataAssetsContext = "";
   try {
     dataAssetsContext = await readFile(join(DIRECTION_DIR, "data-assets.md"), "utf-8");
     console.log(`[PrioritiesRefresh] Loaded data-assets.md`);
-  } catch { /* no data-assets file is fine */ }
+  } catch { /* intentional: data-assets.md is optional context — proceed without it */ }
 
   // 8. Build the prompt
   const prompt = [

@@ -55,7 +55,7 @@ async function resolveModel(tierOrModel: string): Promise<string> {
       console.log(`[CodexRunner] Spend cap hit ($${spend.usd.toFixed(2)}/$${DAILY_COST_CAP_USD}) — ${tierOrModel} → ${fallback}`);
       return fallback;
     }
-  } catch { /* use default tiers */ }
+  } catch { /* intentional: spend lookup failure leaves caller on default tiers */ }
   return MODEL_TIERS[tierOrModel];
 }
 
@@ -277,14 +277,14 @@ async function runLocalAgent({ agentName, personality, prompt, workDir, timeout:
   // Load personality + feedback + core memory using existing composePrompt()
   let systemPrompt = "";
   if (personality) {
-    try { systemPrompt = await readFile(personality, "utf-8"); } catch { /* intentional */ }
+    try { systemPrompt = await readFile(personality, "utf-8"); } catch { /* intentional: personality file optional — fall through to empty prompt */ }
   }
   const feedbackPath = join(CONFIG_PATH, "feedback", `to-${agentName}.md`);
   let feedback = "";
-  try { feedback = await readFile(feedbackPath, "utf-8"); } catch { /* intentional */ }
+  try { feedback = await readFile(feedbackPath, "utf-8"); } catch { /* intentional: feedback file optional — no operator notes for this agent */ }
   const coreMemoryPath = join(CONFIG_PATH, "core-memory", `${agentName}.md`);
   let coreMemory = "";
-  try { coreMemory = await readFile(coreMemoryPath, "utf-8"); } catch { /* intentional */ }
+  try { coreMemory = await readFile(coreMemoryPath, "utf-8"); } catch { /* intentional: core-memory file optional — no consolidated patterns yet */ }
 
   const fullPrompt = composePrompt({ prompt, systemPrompt, feedback, workDir, coreMemory });
 
