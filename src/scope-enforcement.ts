@@ -30,7 +30,14 @@ export async function runScopeEnforcement(
   const { cycleId, startTime, ovSession, anchor } = ctx;
   const tracker = getTracker();
 
-  const inScope = new Set((task.scopeBoundary.in as string[]).map((f: string) => f.replace(/^web\//, "")));
+  // Combine modify-intent (`in`) and create-intent (`creates`, issue #190).
+  // Without including creates, the post-merge scope gate would flag every
+  // newly-created file from a refactor/extract task as out-of-scope.
+  const declaredScope = [
+    ...((task.scopeBoundary.in as string[]) || []),
+    ...((task.scopeBoundary.creates as string[]) || []),
+  ];
+  const inScope = new Set(declaredScope.map((f: string) => f.replace(/^web\//, "")));
   const outOfScope = verification.filesChanged.filter((f: string) => {
     const normalized = f.replace(/^web\//, "");
     return !inScope.has(normalized) && ![...inScope].some((s: string) => normalized.startsWith(s) || normalized.endsWith(s));
