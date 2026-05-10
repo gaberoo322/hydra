@@ -14,7 +14,14 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-import { buildSpecTasks, autoDecomposeComplexTask } from "../src/auto-decompose.ts";
+import {
+  buildSpecTasks,
+  autoDecomposeComplexTask,
+  buildFirstTaskFromSpec,
+  extractFilesFromSpecTaskDescription,
+  extractCriteriaFromSpecTaskDescription,
+} from "../src/auto-decompose.ts";
+import { classifyTaskComplexity } from "../src/preflight.ts";
 
 // ---------------------------------------------------------------------------
 // Redis setup for integration tests
@@ -192,5 +199,179 @@ describe("autoDecomposeComplexTask", () => {
     assert.ok(result !== null);
     assert.ok(result!.spec.rationale.includes("6 files"), `Rationale should mention file count: ${result!.spec.rationale}`);
     assert.ok(result!.spec.rationale.includes("Original detailed description"), `Rationale should include original description`);
+  });
+
+  // Issue #194 — first sub-task is exposed for in-cycle continuation.
+
+  test("issue #194: result exposes a planner-shaped firstTask", async () => {
+    const result = await autoDecomposeComplexTask({
+      title: "Build feature X",
+      description: "Big feature touching many files",
+      scopeBoundary: { in: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts", "src/e.ts", "src/f.ts"] },
+      acceptanceCriteria: ["A passes", "B passes", "C passes"],
+      anchorType: "user-request",
+      anchorReference: "build-feature-x",
+    });
+
+    assert.ok(result !== null);
+    const first = result!.firstTask;
+    assert.ok(first, "result must expose firstTask for in-cycle continuation");
+    // Required planner schema fields are present so the task can re-enter
+    // the classify/preflight/execute pipeline without going back to the planner.
+    assert.equal(typeof first.title, "string");
+    assert.ok(first.title.length > 0, "sub-task must have a title");
+    assert.ok(first.scopeBoundary.in.length > 0, "scopeBoundary.in must be populated");
+    assert.ok(first.acceptanceCriteria.length > 0, "acceptanceCriteria must be populated");
+    assert.equal(first.anchorReference, "build-feature-x", "anchorReference carries from parent");
+    assert.equal(first.anchorType, "user-request", "anchorType carries from parent");
+    assert.equal(first.__fromAutoDecompose, true, "marker tells control loop not to re-decompose");
+    assert.equal(first.__parentSpecSlug, result!.spec.slug);
+    assert.equal(first.__parentSpecTaskId, result!.spec.tasks[0].id);
+  });
+
+  test("issue #194: first sub-task does NOT re-classify as complex (no infinite recursion)", async () => {
+    // Parent has 6 files (complex); buildSpecTasks splits into 1-2 file chunks.
+    // The first sub-task should be quick-fix or standard, NOT complex.
+    const result = await autoDecomposeComplexTask({
+      title: "Multi-file refactor",
+      description: "Touch many files",
+      scopeBoundary: { in: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts", "src/e.ts", "src/f.ts"] },
+      acceptanceCriteria: ["c1", "c2", "c3"],
+      anchorReference: "multi-file-refactor",
+    });
+
+    assert.ok(result !== null);
+    const first = result!.firstTask;
+    const complexity = classifyTaskComplexity(first, { type: "user-request", reference: "multi-file-refactor" });
+    assert.notEqual(
+      complexity,
+      "complex",
+      `first sub-task classified as ${complexity}; must NOT be complex (would cause re-decompose recursion)`,
+    );
+  });
+
+  test("issue #194: acceptance criteria are preserved on the first sub-task", async () => {
+    const result = await autoDecomposeComplexTask({
+      title: "Criteria preservation test",
+      description: "Test",
+      scopeBoundary: { in: ["a.ts", "b.ts", "c.ts", "d.ts"] },
+      acceptanceCriteria: ["First criterion", "Second criterion"],
+      anchorReference: "crit-test",
+    });
+
+    assert.ok(result !== null);
+    const first = result!.firstTask;
+    // First sub-task got "First criterion" via round-robin in buildSpecTasks.
+    assert.ok(
+      first.acceptanceCriteria.some(c => c.includes("First criterion")),
+      `Expected first sub-task criteria to include "First criterion"; got ${JSON.stringify(first.acceptanceCriteria)}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #194 — first sub-task is exposed for in-cycle continuation
+// ---------------------------------------------------------------------------
+
+describe("extractFilesFromSpecTaskDescription", () => {
+  test("parses Scope: line into file list", () => {
+    const desc = "Scope: src/a.ts, src/b.ts\n\nCriteria:\n- foo";
+    assert.deepEqual(extractFilesFromSpecTaskDescription(desc), ["src/a.ts", "src/b.ts"]);
+  });
+
+  test("returns [] when no Scope: line", () => {
+    assert.deepEqual(extractFilesFromSpecTaskDescription("just text"), []);
+  });
+
+  test("returns [] for empty input", () => {
+    assert.deepEqual(extractFilesFromSpecTaskDescription(""), []);
+  });
+});
+
+describe("extractCriteriaFromSpecTaskDescription", () => {
+  test("parses Criteria block into list", () => {
+    const desc = "Scope: a.ts\n\nCriteria:\n- First\n- Second";
+    assert.deepEqual(
+      extractCriteriaFromSpecTaskDescription(desc),
+      ["First", "Second"],
+    );
+  });
+
+  test("returns [] when no Criteria block", () => {
+    assert.deepEqual(extractCriteriaFromSpecTaskDescription("Scope: a.ts"), []);
+  });
+});
+
+describe("buildFirstTaskFromSpec — issue #194 in-cycle continuation (pure)", () => {
+  test("falls back to a synthetic criterion when sub-task description has no Criteria block", () => {
+    // Synthesize a spec-task with no criteria to exercise the fallback.
+    const spec = {
+      slug: "no-criteria",
+      title: "No criteria spec",
+      rationale: "test",
+      source: "auto-decompose",
+      tasks: [
+        { id: "1", title: "Sub-task one", description: "Scope: src/x.ts", completed: false },
+      ],
+      status: "active" as const,
+      createdAt: new Date().toISOString(),
+    };
+    const parent = {
+      title: "parent",
+      description: "parent desc",
+      scopeBoundary: { in: ["src/x.ts", "src/y.ts"] },
+      anchorReference: "anchor-ref",
+    };
+    const first = buildFirstTaskFromSpec(parent, spec, spec.tasks[0]);
+    assert.ok(first.acceptanceCriteria.length > 0, "fallback criterion must exist so preflight passes");
+    assert.equal(first.scopeBoundary.in[0], "src/x.ts");
+  });
+
+  test("scopeBoundary.in falls back to parent files when sub-task has no Scope: line", () => {
+    const spec = {
+      slug: "no-scope",
+      title: "No scope spec",
+      rationale: "test",
+      source: "auto-decompose",
+      tasks: [
+        { id: "1", title: "Sub-task", description: "no scope here", completed: false },
+      ],
+      status: "active" as const,
+      createdAt: new Date().toISOString(),
+    };
+    const parent = {
+      title: "parent",
+      description: "parent desc",
+      scopeBoundary: { in: ["src/parent-a.ts", "src/parent-b.ts"] },
+      anchorReference: "anchor",
+    };
+    const first = buildFirstTaskFromSpec(parent, spec, spec.tasks[0]);
+    assert.deepEqual(first.scopeBoundary.in, ["src/parent-a.ts", "src/parent-b.ts"]);
+  });
+
+  test("preserves anchorType and risk from parent", () => {
+    const spec = {
+      slug: "ar",
+      title: "ar",
+      rationale: "r",
+      source: "auto-decompose",
+      tasks: [{ id: "1", title: "t", description: "Scope: a.ts", completed: false }],
+      status: "active" as const,
+      createdAt: new Date().toISOString(),
+    };
+    const parent = {
+      title: "p",
+      description: "d",
+      scopeBoundary: { in: ["a.ts"] },
+      anchorReference: "ref",
+      anchorType: "spec",
+      risk: "medium" as const,
+    };
+    const first = buildFirstTaskFromSpec(parent, spec, spec.tasks[0]);
+    assert.equal(first.anchorType, "spec");
+    assert.equal(first.risk, "medium");
+    assert.equal(first.__fromAutoDecompose, true);
+    assert.equal(first.__parentSpecSlug, "ar");
+    assert.equal(first.__parentSpecTaskId, "1");
   });
 });
