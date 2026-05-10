@@ -33,7 +33,10 @@ import { execWithGroupCleanup } from "./exec-with-timeout.ts";
 // Submodule imports
 import { isFixableFailure, runFixerAttempt } from "./fixer.ts";
 import { runMutationGate } from "./mutation.ts";
-import { runMutationAwareJitTests, runDiffAwareJitTests } from "./jit.ts";
+import {
+  runMutationAwareJitTests, runDiffAwareJitTests, jitSkipReport,
+  JIT_SKIP_QUICK_FIX, JIT_SKIP_NO_DIFF, JIT_SKIP_NO_FILES_CHANGED,
+} from "./jit.ts";
 import { runScopeEnforcement } from "./scope-enforcement.ts";
 import {
   runAdversarialValidation, findingsToQueueItems, checkRevertCorrelation,
@@ -232,6 +235,15 @@ export async function verify(
     if (jitResult.updatedVerification) {
       verification = jitResult.updatedVerification;
     }
+  } else {
+    // Issue #235: surface why JIT was skipped so the dashboard shows a
+    // human-readable reason instead of a silent zero. Order matches the
+    // gate predicates above (quick-fix is checked first).
+    let decision: string;
+    if (complexity === "quick-fix") decision = JIT_SKIP_QUICK_FIX;
+    else if (!diff) decision = JIT_SKIP_NO_DIFF;
+    else decision = JIT_SKIP_NO_FILES_CHANGED;
+    jitReport = jitSkipReport(decision);
   }
 
   // =========================================================================

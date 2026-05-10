@@ -449,6 +449,12 @@ export async function runPostMerge(
     jitTestsGenerated: jitReport?.generated || 0,
     jitTestsKept: jitReport?.kept || 0,
     jitTestsCaughtBug: jitReport?.caughtBug ? 1 : 0,
+    // Issue #235: observable decision string per cycle so operators can answer
+    // "is JIT working?" from the dashboard. Always present — when JIT was
+    // skipped entirely, verification.ts injects a synthetic skip report.
+    jitDecision: typeof jitReport?.decision === "string" && jitReport.decision.length > 0
+      ? jitReport.decision
+      : (jitReport === null ? "skipped: not run" : "unknown"),
     anchorConfidence: anchorConfidence?.score ?? null,
     anchorSkipped: false,
     // Quality gate fields (issue #181)
