@@ -407,6 +407,9 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     taskId: "planner",
     correlationId: cycleId,
     outputSchema: PLANNER_OUTPUT_SCHEMA,
+    // Pre-classification heuristic for OTel span tagging only — the
+    // authoritative complexity is set post-planner by classifyComplexity().
+    complexity: isCheapAnchor ? "quick-fix" : "standard",
   });
 
   // Detect Codex usage-limit errors — signal the caller to pause instead of retrying

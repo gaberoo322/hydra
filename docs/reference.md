@@ -83,3 +83,47 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 **Metrics** (`api/metrics.ts`): GET /metrics, GET /spending, GET /summary, POST /metrics/record
 **Health** (`api/health.ts`): GET /health, GET /health/services, GET /health/deep, GET /recommendations
 **Misc** (`api/misc.ts`): Meta, goals, config, alerts, events, memory, merge locks, plan cache, digest, grounding, OpenViking, calibration, env, OpenAI proxy, webhooks, kill
+
+## Codex OpenTelemetry (issue #199)
+
+The Codex CLI emits OTel traces and logs natively. Hydra correlates those with cycles by injecting per-call resource attributes into the spawned CLI process environment (`src/codex-otel.ts`, wired through `src/codex-runner.ts`).
+
+**Resource attributes added per agent call:**
+
+| Attribute | Source | Example |
+|---|---|---|
+| `hydra.cycle_id` | `correlationId` passed to `runAgent()` | `cycle-2026-05-09-1234` |
+| `hydra.agent_role` | `agentName` | `planner`, `executor`, `fixer`, `meta`, `high-risk-review` |
+| `hydra.task_id` | `taskId` | backlog item ID / spec task slug |
+| `hydra.model_tier` | requested tier | `frontier`, `codex`, `mini`, `local` |
+| `hydra.model` | resolved model | `gpt-5.5`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gemma-4-26b` |
+| `hydra.complexity` | classifier output | `quick-fix`, `standard`, `complex`, `high-risk` |
+
+**Environment variables (Hydra orchestrator):**
+
+| Var | Default | Effect |
+|---|---|---|
+| `HYDRA_OTEL_ENABLED` | `false` | When `true` (or `1`), Hydra constructs a per-call Codex with merged OTel env. When unset/false, behavior is unchanged (singleton Codex, no env injection). |
+| `OTEL_RESOURCE_ATTRIBUTES` | unset | Base attrs merged with `hydra.*` (hydra wins on collision). Use for deployment.environment, team, etc. |
+| `OTEL_SERVICE_NAME` | `hydra-codex` | Defaulted only if operator hasn't set one. |
+
+**Codex CLI configuration (`~/.codex/config.toml`):**
+
+```toml
+[otel]
+log_user_prompt = true
+
+[otel.exporter.otlp-grpc]
+endpoint = "https://ingest.eu.signoz.cloud:443"
+# Headers loaded from env so the ingestion key never lands in git
+```
+
+Set the ingestion key out-of-band:
+
+```bash
+export OTEL_EXPORTER_OTLP_HEADERS="signoz-ingestion-key=$(cat ~/.codex/signoz.key)"
+```
+
+**Self-hosted alternative:** point `endpoint` at a local OTel collector (`http://localhost:4317`) feeding Tempo/Jaeger/Loki. Collector setup + dashboard panel are deferred to follow-up issues per the #199 scope guard.
+
+**Verifying:** with OTel enabled, run a single cycle and confirm spans tagged with `hydra.cycle_id={id}` appear in the backend. Group by `hydra.agent_role` to see per-agent latency / token counts.

@@ -17,6 +17,7 @@ const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://100.125.108.68:11434";
 
 import { getDailySpend, DAILY_COST_CAP_USD } from "./scheduler.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { buildCodexOtelEnv, isOtelEnabled, type OtelAttrs } from "./codex-otel.ts";
 
 // Model routing table — default tiers (used when under daily spend cap)
 const MODEL_TIERS = {
@@ -134,12 +135,20 @@ function buildCodexArgs({ prompt, model, workDir }) {
 }
 
 // ---------------------------------------------------------------------------
-// Singleton Codex SDK instance + persistent threads for prompt caching
+// Codex SDK instances + persistent threads for prompt caching
 // ---------------------------------------------------------------------------
+//
+// Two modes:
+//   1. Default — singleton Codex (no per-call env), Thread objects cached.
+//   2. OTel-enabled (HYDRA_OTEL_ENABLED=true) — per-call Codex with
+//      OTEL_RESOURCE_ATTRIBUTES env merged with Hydra context (cycle_id,
+//      agent_role, etc). Persistent thread cache stores thread IDs and
+//      re-binds them via resumeThread() so prompt caching still works
+//      across cycles even though the Codex instance changes per call.
 
 let _codex: InstanceType<typeof Codex> | null = null;
 
-function getCodex(): InstanceType<typeof Codex> {
+function getDefaultCodex(): InstanceType<typeof Codex> {
   if (!_codex) {
     _codex = new Codex();
     console.log("[CodexRunner] Codex SDK initialized");
@@ -147,37 +156,71 @@ function getCodex(): InstanceType<typeof Codex> {
   return _codex;
 }
 
-// Persistent threads per agent — reusing a thread lets the model cache
-// the system prompt tokens across turns, reducing input cost by 40-80%.
-// Threads are keyed by (agentName, model) and recreated on error.
-const _persistentThreads = new Map<string, { thread: InstanceType<typeof import("@openai/codex-sdk").Thread>; createdAt: number }>();
+/**
+ * Build a Codex instance for one agent call. When OTel is enabled we
+ * construct a fresh Codex with per-call resource attributes; otherwise
+ * we reuse the process-wide singleton.
+ */
+function getCodexForCall(otelAttrs: OtelAttrs): InstanceType<typeof Codex> {
+  const env = buildCodexOtelEnv(otelAttrs);
+  if (env) return new Codex({ env });
+  return getDefaultCodex();
+}
+
+type PersistentThreadEntry = {
+  // First-call thread is held in-memory until its id is populated; subsequent
+  // calls resume by id (which works across Codex instances, enabling per-call
+  // OTel env without losing prompt-cache-friendly conversation continuity).
+  thread: InstanceType<typeof import("@openai/codex-sdk").Thread> | null;
+  threadId: string | null;
+  createdAt: number;
+};
+
+const _persistentThreads = new Map<string, PersistentThreadEntry>();
 const THREAD_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6 hours — prevent unbounded context growth
 
 function getOrCreateThread(
   agentName: string,
   threadOptions: ThreadOptions,
   resolvedModel: string,
-): { thread: InstanceType<typeof import("@openai/codex-sdk").Thread>; reused: boolean } {
-  // Only reuse threads for read-only agents (planner, skeptic, meta)
-  // Executor needs a fresh thread per cycle (file state changes between cycles)
+  otelAttrs: OtelAttrs,
+): { thread: InstanceType<typeof import("@openai/codex-sdk").Thread>; reused: boolean; entry?: PersistentThreadEntry } {
+  // Only reuse threads for read-only agents (planner, skeptic, meta).
+  // Executor needs a fresh thread per cycle (file state changes between cycles).
   if (!READ_ONLY_AGENTS.has(agentName)) {
-    return { thread: getCodex().startThread(threadOptions), reused: false };
+    const codex = getCodexForCall(otelAttrs);
+    return { thread: codex.startThread(threadOptions), reused: false };
   }
 
   const key = `${agentName}:${resolvedModel}`;
   const existing = _persistentThreads.get(key);
 
   if (existing && (Date.now() - existing.createdAt) < THREAD_MAX_AGE_MS) {
-    return { thread: existing.thread, reused: true };
+    const codex = getCodexForCall(otelAttrs);
+    // Prefer resumeThread() once we know the id — it works across Codex
+    // instances and is required when OTel attaches per-call env.
+    if (existing.threadId) {
+      return {
+        thread: codex.resumeThread(existing.threadId, threadOptions),
+        reused: true,
+        entry: existing,
+      };
+    }
+    // First-call still in flight — fall back to the cached Thread object.
+    if (existing.thread) {
+      return { thread: existing.thread, reused: true, entry: existing };
+    }
   }
 
   // Create new thread and cache it
-  const thread = getCodex().startThread(threadOptions);
-  _persistentThreads.set(key, { thread, createdAt: Date.now() });
+  const codex = getCodexForCall(otelAttrs);
+  const thread = codex.startThread(threadOptions);
+  const entry: PersistentThreadEntry = { thread, threadId: null, createdAt: Date.now() };
+  _persistentThreads.set(key, entry);
   if (existing) {
     console.log(`[CodexRunner] Recycled stale ${agentName} thread (age: ${Math.round((Date.now() - existing.createdAt) / 60000)}m)`);
   }
-  return { thread, reused: false };
+  return { thread, reused: false, entry };
 }
 
 // Invalidate a persistent thread on error so the next call gets a fresh one
@@ -311,11 +354,23 @@ async function runLocalAgent({ agentName, personality, prompt, workDir, timeout:
 /**
  * Run a task using the Codex SDK.
  */
-async function runAgent({ agentName, personality, prompt, model, taskId, correlationId, workDir, onStream, outputSchema, timeout: explicitTimeout }: any) {
+async function runAgent({ agentName, personality, prompt, model, taskId, correlationId, workDir, onStream, outputSchema, timeout: explicitTimeout, complexity }: any) {
   const streamFn = onStream || _globalStreamCallback;
   const startTime = Date.now();
-  const resolvedModel = await resolveModel(model || "frontier");
+  const requestedTier = model || "frontier";
+  const resolvedModel = await resolveModel(requestedTier);
   const workspaceDir = workDir || PROJECT_WORKSPACE;
+
+  // OTel resource attributes — passed into the Codex CLI process for span
+  // tagging. Disabled by default; opt in via HYDRA_OTEL_ENABLED=true.
+  const otelAttrs: OtelAttrs = {
+    cycleId: correlationId,
+    agentName,
+    taskId,
+    modelTier: MODEL_TIERS[requestedTier] ? requestedTier : null,
+    resolvedModel,
+    complexity,
+  };
 
   // Route to Ollama for local model tier (with fallback to mini if unavailable)
   if (resolvedModel === "gemma-4-26b") {
@@ -326,7 +381,7 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     console.log(`[CodexRunner] Ollama unavailable — falling back to mini for ${agentName}`);
     // Fall through to Codex SDK path with mini model
     const miniModel = MODEL_TIERS.mini;
-    return runAgent({ agentName, personality, prompt, model: miniModel, taskId, correlationId, workDir, onStream, outputSchema });
+    return runAgent({ agentName, personality, prompt, model: miniModel, taskId, correlationId, workDir, onStream, outputSchema, complexity });
   }
 
   // Load personality file
@@ -366,9 +421,12 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   };
 
   const timeout = explicitTimeout || AGENT_TIMEOUTS[agentName] || 300_000;
-  const { thread, reused } = getOrCreateThread(agentName, threadOptions, resolvedModel);
+  const { thread, reused, entry } = getOrCreateThread(agentName, threadOptions, resolvedModel, otelAttrs);
   if (reused) {
     console.log(`[CodexRunner] Reusing persistent ${agentName} thread (prompt caching active)`);
+  }
+  if (isOtelEnabled()) {
+    console.log(`[CodexRunner] OTel attrs: cycle=${correlationId || "n/a"} role=${agentName} model=${resolvedModel}`);
   }
 
   // Set up abort controller for timeout
@@ -437,6 +495,13 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
         console.error(`[CodexRunner] Turn failed for ${agentName}: ${errMsg}`);
         exitCode = 1;
       }
+    }
+
+    // Capture thread.id into the persistent cache so the *next* call can
+    // resume by id (works across Codex instances, required when OTel
+    // attaches per-call env). Safe no-op for ephemeral (executor) threads.
+    if (entry && !entry.threadId && thread.id) {
+      entry.threadId = thread.id;
     }
   } catch (err: any) {
     // Invalidate persistent thread on error so next call gets a fresh one
