@@ -161,6 +161,10 @@ Always run `npm test` before committing.
 | codex | gpt-5.3-codex | Executor, Fixer, JIT tester, Planner (quick-fix) | $1.75 / $14.00 |
 | mini | gpt-5.4-mini | Meta agent, classification, adversarial validation, high-risk review | $0.75 / $4.50 |
 
+## Codex Telemetry (OTel)
+
+Codex CLI emits OTel traces natively. Hydra correlates them with cycles by injecting per-call resource attributes (`hydra.cycle_id`, `hydra.agent_role`, `hydra.task_id`, `hydra.model_tier`, `hydra.complexity`) into the spawned CLI process when `HYDRA_OTEL_ENABLED=true`. See `docs/reference.md` for the full env-var contract and `~/.codex/config.toml` exporter setup. Disabled by default — opt in once a backend (SigNoz / Tempo / Jaeger) is ready.
+
 ## Scope-Adaptive Planning
 
 Tasks are classified post-planner based on `scopeBoundary.in` and `acceptanceCriteria`:

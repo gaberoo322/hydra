@@ -282,6 +282,7 @@ export async function runExecutorAgent(
     correlationId: cycleId,
     workDir: executorWorkDir,
     timeout: executorTimeoutMs,
+    complexity,
   });
 
   // If using worktree, push the branch and clean up the worktree
