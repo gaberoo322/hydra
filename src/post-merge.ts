@@ -145,12 +145,24 @@ export async function runPostMerge(
   const tracker = getTracker();
   let commitSha = "";
 
+  // Issue #222: detect no-op "merges" — verification reports no files changed
+  // but the planner had a non-empty scope. This indicates the merge command
+  // succeeded (so we have a commit) but the cycle accomplished nothing real.
+  // Without this guard the system can silently churn for hours, reporting
+  // tasksMerged: 1 each cycle while writing zero code.
+  const plannedFileCount = Array.isArray(task?.scopeBoundary?.in) ? task.scopeBoundary.in.length : 0;
+  const filesChangedCount = Array.isArray(verification?.filesChanged) ? verification.filesChanged.length : 0;
+  const isNoOpMerge = mergeResult.ok && filesChangedCount === 0 && plannedFileCount > 0;
+
   if (mergeResult.ok) {
     commitSha = mergeResult.commitSha;
     if (mergeResult.featureBranch) {
       console.log(`[ControlLoop] Merged ${mergeResult.featureBranch} → main (${commitSha.slice(0, 7)})`);
     } else {
       console.log(`[ControlLoop] Already on main, pushed (${commitSha.slice(0, 7)})`);
+    }
+    if (isNoOpMerge) {
+      console.error(`[ControlLoop] NO-OP MERGE: planner scoped ${plannedFileCount} file(s) but verification.filesChanged is empty — downgrading to verified-no-diff`);
     }
     await tracker.transitionTask(taskId, "merged", { commitSha });
 
@@ -258,7 +270,7 @@ export async function runPostMerge(
       title: task.title,
       anchorType: task.anchorType,
       confidence: task.confidence,
-      finalState: commitSha ? "merged" : "verified",
+      finalState: commitSha ? (isNoOpMerge ? "verified-no-diff" : "merged") : "verified",
     },
     grounding: {
       before: { passed: grounding.testReport.passed, failed: grounding.testReport.failed, typecheckClean: grounding.typecheckReport.exitCode === 0 },
@@ -329,6 +341,40 @@ export async function runPostMerge(
     await reportOutcome(anchor, { status: "failed", reason: `Regression: tests ${grounding.testReport.passed} → ${finalGrounding.testReport.passed}`, verification, taskId });
   }
 
+  // Issue #222: surface no-op merges as a critical alert so the operator
+  // sees them immediately. The scheduler tracks consecutiveNoOpMerges and
+  // halts after 3 consecutive — but the per-cycle alert is the early warning.
+  report.noOpMerge = isNoOpMerge;
+  if (isNoOpMerge) {
+    try {
+      const alert = {
+        id: `no-op-merge-${cycleId}`,
+        type: "cycle:no_op_merge",
+        timestamp: new Date().toISOString(),
+        message: `Cycle ${cycleId} reported merge but wrote zero files (planner scoped ${plannedFileCount}). Possible verification or merge-extraction bug.`,
+        severity: "critical",
+        dismissed: false,
+        payload: {
+          cycleId,
+          taskId,
+          taskTitle: task.title,
+          plannedFiles: plannedFileCount,
+          filesChanged: 0,
+          commitSha,
+        },
+      };
+      await pushAlert(JSON.stringify(alert), 100);
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
+        type: "cycle:no_op_merge",
+        source: "post-merge",
+        correlationId: cycleId,
+        payload: alert.payload,
+      });
+    } catch (err: any) {
+      console.error(`[ControlLoop] Failed to publish no-op-merge alert: ${err.message}`);
+    }
+  }
+
   // Write reality report to Redis
   await saveRealityReport(cycleId, JSON.stringify(report), CYCLE_KEY_TTL);
   await trimRealityReports(50);
@@ -362,10 +408,14 @@ export async function runPostMerge(
     : "skipped";
 
   // Record structured metrics
+  // Issue #222: a no-op merge does NOT count as a merge — the cycle wrote zero
+  // files. Record it separately so dashboards can detect silent rot, and
+  // refuse to credit it toward tasksMerged.
   await recordCycleMetrics(cycleId, {
     tasksAttempted: 1,
     tasksVerified: commitSha ? 1 : 0,
-    tasksMerged: (commitSha && !rolledBack) ? 1 : 0,
+    tasksMerged: (commitSha && !rolledBack && !isNoOpMerge) ? 1 : 0,
+    noOpMerges: isNoOpMerge ? 1 : 0,
     tasksFailed: rolledBack ? 1 : 0,
     tasksRolledBack: rolledBack ? 1 : 0,
     tasksAbandoned: 0,
@@ -432,7 +482,12 @@ export async function runPostMerge(
   }
 
   // Kanban updates
-  const finalState = rolledBack ? "rolled-back" : (commitSha ? "merged" : "verified");
+  // Issue #222: a no-op merge produced a commit but no files changed — do NOT
+  // mark the kanban item as merged. Treat it like a verified-no-diff and let
+  // the operator (or follow-up cycle) decide whether to retry.
+  const finalState = rolledBack
+    ? "rolled-back"
+    : (isNoOpMerge ? "verified-no-diff" : (commitSha ? "merged" : "verified"));
   if (finalState === "merged") {
     try { await reportOutcome(anchor, { status: "merged" }); } catch { /* intentional: best-effort cleanup */ }
     try { await clearOutcomes(anchor.reference); } catch { /* intentional: best-effort cleanup */ }

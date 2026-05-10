@@ -55,6 +55,14 @@ const STALL_ALERT_THRESHOLD = parseInt(process.env.HYDRA_STALL_ALERT_THRESHOLD) 
 const ZERO_OUTPUT_THRESHOLD = parseInt(process.env.HYDRA_ZERO_OUTPUT_THRESHOLD) || 8;
 const MAX_STALL_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes max backoff
 
+// No-op merge detection (issue #222): cycles that report a merge but write
+// zero files indicate a phantom-merge bug (verification or merge-extraction).
+// Three consecutive no-op merges halt the scheduler — running more cycles
+// burns money for no output. Threshold matches existing stall-detection
+// pattern but is much more aggressive because a no-op merge is unambiguous
+// evidence of system rot, not just slow work.
+const NO_OP_MERGE_HALT_THRESHOLD = parseInt(process.env.HYDRA_NO_OP_MERGE_HALT_THRESHOLD) || 3;
+
 /**
  * Compute exponential backoff delay for stall detection.
  * Exported for testability (issue #24 test coverage).
@@ -87,6 +95,16 @@ function classifyStallState(consecutiveNonMerges: number): "ok" | "alert" | "har
   return "ok";
 }
 
+/**
+ * Classify the no-op-merge state (issue #222).
+ * Returns "ok" | "halt" — there's no intermediate alert tier because every
+ * no-op merge already triggers a per-cycle critical alert in post-merge.ts.
+ * The scheduler-level halt fires once the run hits NO_OP_MERGE_HALT_THRESHOLD.
+ */
+function classifyNoOpMergeState(consecutiveNoOpMerges: number): "ok" | "halt" {
+  return consecutiveNoOpMerges >= NO_OP_MERGE_HALT_THRESHOLD ? "halt" : "ok";
+}
+
 let state = {
   running: false,
   intervalMs: parseInt(process.env.HYDRA_AUTO_CYCLE_INTERVAL_MS) || 0,
@@ -99,6 +117,8 @@ let state = {
   startedAt: null,
   consecutiveErrors: 0,
   consecutiveNonMerges: 0,
+  consecutiveNoOpMerges: 0,
+  haltedForNoOpMerges: false,
   researchCyclesRun: 0,
   lastResearchAt: null,
   _stateVersion: 0, // optimistic locking version (issue #140 — AC3)
@@ -651,13 +671,52 @@ async function runScheduledCycle(eventBus) {
     } else {
       const merged = result.tasks?.some(t => t.finalState === "merged") ||
                      result.task?.finalState === "merged";
+      // Issue #222: detect no-op merges (verification.filesChanged empty
+      // but planner had scope). post-merge.ts records `noOpMerge: true` on
+      // the cycle report when this happens. A no-op merge is NOT counted
+      // as a merge for stall detection — it's worse than a non-merge,
+      // because it produced a commit and burned tokens for no output.
+      const noOpMerge = result.noOpMerge === true ||
+                        result.task?.finalState === "verified-no-diff";
       if (merged) {
         state.cyclesMerged = await incrSchedulerCyclesMerged(); // issue #208: atomic Redis INCR
         state.consecutiveNonMerges = 0;
+        state.consecutiveNoOpMerges = 0;
       } else {
         state.consecutiveNonMerges++;
+        if (noOpMerge) {
+          state.consecutiveNoOpMerges++;
+        } else {
+          state.consecutiveNoOpMerges = 0;
+        }
       }
       state.lastError = null;
+
+      // Issue #222: hard-stop when consecutive no-op merges hit the threshold.
+      // This fires before the generic zero-output breaker because no-op
+      // merges are unambiguous evidence the system is broken (commit
+      // recorded, zero files changed).
+      if (state.consecutiveNoOpMerges >= NO_OP_MERGE_HALT_THRESHOLD) {
+        console.error(`[Scheduler] NO-OP MERGE HALT: ${state.consecutiveNoOpMerges} consecutive cycles produced commits with zero files changed — pausing scheduler`);
+        state.haltedForNoOpMerges = true;
+        await sendNotification({
+          type: "scheduler:no_op_merge_halt",
+          payload: {
+            reason: `${state.consecutiveNoOpMerges} consecutive cycles reported merges but wrote zero files. The verification or merge-extraction logic is broken. Running more cycles burns money for no output.`,
+            consecutiveNoOpMerges: state.consecutiveNoOpMerges,
+            cyclesRun: state.cyclesRun,
+            severity: "critical",
+            suggestion: "Inspect post-merge.ts (verification.filesChanged extraction) and merge.ts (worktree handling). Restart scheduler via POST /scheduler/start once the underlying issue is resolved.",
+          },
+        });
+        state.running = false;
+        if (state.timer) {
+          clearTimeout(state.timer);
+          state.timer = null;
+        }
+        console.log(`[Scheduler] Paused after ${state.cyclesRun} cycles (${state.cyclesMerged} merged, ${state.consecutiveNoOpMerges} consecutive no-op). Restart via POST /scheduler/start`);
+        return;
+      }
 
       // Zero-output stall detection (issue #24): hard-stop when the system has
       // churned for too long without producing a merge.
@@ -775,6 +834,20 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   // unwanted research cycle by losing lastResearchAt.
   await loadSchedulerState();
 
+  // Issue #222: if the scheduler is halted for consecutive no-op merges,
+  // refuse to start until the operator explicitly clears it. The watchdog
+  // and the dashboard read this state from /api/scheduler/status — auto-
+  // restart is suppressed here so silent rot does not resume.
+  if (state.haltedForNoOpMerges && !opts.forceClearNoOpHalt) {
+    return {
+      error: `Scheduler halted for ${state.consecutiveNoOpMerges} consecutive no-op merges. ` +
+        `Investigate post-merge.ts / merge.ts (verification.filesChanged extraction), ` +
+        `then restart with { forceClearNoOpHalt: true } to acknowledge.`,
+      haltedForNoOpMerges: true,
+      consecutiveNoOpMerges: state.consecutiveNoOpMerges,
+    };
+  }
+
   const intervalMs = opts.intervalMs || state.intervalMs || DEFAULT_INTERVAL_MS;
   if (intervalMs < MIN_INTERVAL_MS) {
     return { error: `Interval must be at least ${MIN_INTERVAL_MS}ms (${MIN_INTERVAL_MS / 1000}s)` };
@@ -785,6 +858,8 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   state.startedAt = new Date().toISOString();
   state.consecutiveErrors = 0;
   state.consecutiveNonMerges = 0;
+  state.consecutiveNoOpMerges = 0;
+  state.haltedForNoOpMerges = false;
 
   console.log(`[Scheduler] Started — cycles every ${intervalMs / 1000}s, research throttle ${RESEARCH_MIN_INTERVAL_MS / 3600_000}h`);
 
@@ -843,6 +918,11 @@ async function getStatus() {
     consecutiveNonMerges: state.consecutiveNonMerges,
     stallAlertThreshold: STALL_ALERT_THRESHOLD,
     zeroOutputThreshold: ZERO_OUTPUT_THRESHOLD,
+    // Issue #222: surface no-op-merge counter so dashboards and operator
+    // checklist can display the silent-rot guardrail status.
+    consecutiveNoOpMerges: state.consecutiveNoOpMerges,
+    noOpMergeHaltThreshold: NO_OP_MERGE_HALT_THRESHOLD,
+    haltedForNoOpMerges: state.haltedForNoOpMerges,
     // Issue #209: per-cycle cost cap (separate from daily research cap).
     // null when the cap is Infinity / disabled.
     perCycleCostCapUsd: Number.isFinite(perCycleCostCapUsd) ? perCycleCostCapUsd : null,
@@ -925,4 +1005,6 @@ export {
   shouldSuppressResearch,
   // Exported for test coverage (issue #24):
   computeStallBackoffMs, shouldSendStallAlert, classifyStallState, formatDuration,
+  // Exported for test coverage (issue #222):
+  classifyNoOpMergeState, NO_OP_MERGE_HALT_THRESHOLD,
 };
