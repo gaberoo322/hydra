@@ -65,6 +65,7 @@ export async function getMetricsTrend(count = 20) {
     const parsed: Record<string, any> = { ...raw };
     for (const key of [
       "tasksAttempted", "tasksVerified", "tasksMerged", "tasksFailed", "tasksAbandoned",
+      "noOpMerges", // issue #222: silent-rot guardrail counter
       "testsBefore", "testsAfter", "testsPassingBefore", "testsPassingAfter",
       "filesChanged", "totalDurationMs", "groundingDurationMs", "verificationDurationMs",
       "planningDurationMs", "executionDurationMs", "tokenCost", "costUsd",
@@ -151,6 +152,9 @@ export async function getAggregateStats(count = 20) {
   const failed = trend.filter((m) => m.tasksFailed > 0).length;
   const abandoned = trend.filter((m) => m.tasksAbandoned > 0).length;
   const regressions = trend.filter((m) => m.regressionIntroduced).length;
+  // Issue #222: aggregate no-op-merge counter so /metrics surfaces the
+  // silent-rot guardrail across the trend window.
+  const noOpMerges = trend.filter((m) => m.noOpMerges > 0).length;
 
   const durations = trend.map((m) => m.totalDurationMs).filter(Boolean);
   const avgDuration = durations.length > 0
@@ -176,6 +180,8 @@ export async function getAggregateStats(count = 20) {
     failedRate: Math.round((failed / total) * 100),
     abandonedRate: Math.round((abandoned / total) * 100),
     regressionRate: Math.round((regressions / total) * 100),
+    noOpMerges, // issue #222: cycle count where filesChanged was empty after a "merge"
+    noOpMergeRate: Math.round((noOpMerges / total) * 100),
     retryRate: Math.round((retries / total) * 100),
     avgDurationMs: avgDuration,
     avgDurationHuman: `${Math.round(avgDuration / 1000)}s`,

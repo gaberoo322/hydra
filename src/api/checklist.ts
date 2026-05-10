@@ -44,13 +44,36 @@ async function checkSchedulerHealth(): Promise<ChecklistItem[]> {
   try {
     const status = await getSchedulerStatus();
     if (!status.running) {
+      // Issue #222: distinguish a "no-op merge halt" from a generic stop —
+      // it requires operator investigation, not just a restart.
+      const haltedForNoOp = (status as any).haltedForNoOpMerges === true;
       items.push({
-        id: "scheduler-stopped",
+        id: haltedForNoOp ? "scheduler-halted-no-op-merges" : "scheduler-stopped",
         category: "system-health",
         severity: "critical",
-        title: "Scheduler is stopped",
-        description: "No cycles are running. The system is idle.",
-        action: { type: "dashboard", label: "Start scheduler", target: "/" },
+        title: haltedForNoOp
+          ? `Scheduler halted: ${(status as any).consecutiveNoOpMerges} consecutive no-op merges`
+          : "Scheduler is stopped",
+        description: haltedForNoOp
+          ? "Cycles produced commits but wrote zero files. Investigate verification.filesChanged extraction (post-merge.ts / merge.ts) before restarting."
+          : "No cycles are running. The system is idle.",
+        action: { type: "dashboard", label: haltedForNoOp ? "Investigate" : "Start scheduler", target: "/" },
+      });
+    }
+
+    // Issue #222: surface no-op-merge counter even before the halt fires.
+    // Each no-op merge already triggers a critical alert; this checklist
+    // entry gives the operator a persistent reminder.
+    const noOpCount = (status as any).consecutiveNoOpMerges || 0;
+    const noOpThreshold = (status as any).noOpMergeHaltThreshold || 3;
+    if (noOpCount > 0 && noOpCount < noOpThreshold && status.running) {
+      items.push({
+        id: "no-op-merges",
+        category: "system-health",
+        severity: "critical",
+        title: `${noOpCount} consecutive no-op merge${noOpCount > 1 ? "s" : ""} (halt at ${noOpThreshold})`,
+        description: "Cycle reported a merge but verification.filesChanged was empty. Likely a phantom-merge bug — see #218 / #220.",
+        action: { type: "skill", label: "Run /hydra-doctor", target: "/hydra-doctor" },
       });
     }
 
