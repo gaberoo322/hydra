@@ -551,7 +551,15 @@ async function searchKnowledge(query, limit = 5, sessionId = null) {
     const { resources, memories } = await trackedOvSearch(query, limit, sessionId);
 
     const all = [...resources, ...memories];
-    if (all.length === 0) return "";
+    if (all.length === 0) {
+      // Issue #210: surface knowledge misses to operators when explicitly
+      // enabled. Off by default to avoid log spam during routine cycles.
+      if (process.env.HYDRA_LOG_KB_MISSES === "1") {
+        const truncated = String(query).slice(0, 120);
+        console.warn(`[KB] miss: query returned 0 results — "${truncated}"`);
+      }
+      return "";
+    }
 
     const formatted = all.slice(0, limit).map((r, i) => {
       const title = r.title || r.uri || r.path || r.name || `Result ${i + 1}`;
@@ -561,7 +569,11 @@ async function searchKnowledge(query, limit = 5, sessionId = null) {
     }).join("\n");
 
     return `\n## KNOWLEDGE CONTEXT (from OpenViking)\n${formatted}\n`;
-  } catch {
+  } catch (err) {
+    // Fail loud (issue #210): silent failures hid the indexing gap for weeks.
+    if (process.env.HYDRA_LOG_KB_MISSES === "1") {
+      console.warn(`[KB] error during search: ${(err && err.message) || err}`);
+    }
     return "";
   }
 }
