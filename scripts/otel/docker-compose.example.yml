@@ -1,0 +1,36 @@
+# Example only; review before running. Tempo persistence path is ./tempo-data/ — adjust for prod.
+# Bridge network. Ports published to 127.0.0.1 only so collector + Tempo are not reachable from the LAN.
+
+name: hydra-otel
+
+networks:
+  otel:
+    driver: bridge
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: hydra-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector.example.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"
+    networks:
+      - otel
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    container_name: hydra-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo.example.yaml:/etc/tempo/tempo.yaml:ro
+      - ./tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"
+    networks:
+      - otel

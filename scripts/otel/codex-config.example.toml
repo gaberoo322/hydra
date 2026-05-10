@@ -1,0 +1,10 @@
+# Drop this [otel] block into ~/.codex/config.toml on the orchestrator host.
+# OTEL_INGEST_KEY is resolved from the process environment so the secret never
+# lands in this user-owned config file.
+
+[otel]
+log_user_prompt = true
+
+[otel.exporter.otlp-grpc]
+endpoint = "http://localhost:4317"
+headers = { "x-hydra-ingest" = "${OTEL_INGEST_KEY}" }

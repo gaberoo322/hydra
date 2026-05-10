@@ -1,0 +1,48 @@
+# Minimal collector: OTLP/gRPC in, OTLP/HTTP out to Tempo. Passes hydra.* attributes through unchanged.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+  # Pass through hydra.* resource attributes unchanged. Listed explicitly so a
+  # future filter/transform processor stays honest about what hydra ships.
+  resource:
+    attributes:
+      - key: hydra.cycle_id
+        action: upsert
+        from_attribute: hydra.cycle_id
+      - key: hydra.agent_role
+        action: upsert
+        from_attribute: hydra.agent_role
+      - key: hydra.task_id
+        action: upsert
+        from_attribute: hydra.task_id
+      - key: hydra.model_tier
+        action: upsert
+        from_attribute: hydra.model_tier
+      - key: hydra.model
+        action: upsert
+        from_attribute: hydra.model
+      - key: hydra.complexity
+        action: upsert
+        from_attribute: hydra.complexity
+
+exporters:
+  otlphttp/tempo:
+    endpoint: http://tempo:4318
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [otlphttp/tempo]
