@@ -122,7 +122,10 @@ describe("Scheduler API routes (issue #164)", () => {
       // Required fields per scheduler.ts getStatus()
       const requiredFields = [
         "running", "intervalMs", "cyclesRun", "cyclesMerged",
-        "cyclesFailed", "mergeRate", "lastCycleAt", "lastError",
+        "cyclesFailed", "mergeRate",
+        // Issue #232: rolling/lifetime split for operator-visible metrics
+        "mergeRateLifetime", "mergeRateWindow", "mergeRateCyclesInWindow",
+        "lastCycleAt", "lastError",
         "startedAt", "consecutiveErrors", "consecutiveNonMerges",
         "stallAlertThreshold", "zeroOutputThreshold",
         "research", "repetition",
