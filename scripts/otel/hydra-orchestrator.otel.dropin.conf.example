@@ -1,0 +1,5 @@
+# Install to ~/.config/systemd/user/hydra-orchestrator.service.d/otel.conf
+# Leading dash on EnvironmentFile = tolerant of a missing file; a failed install will not take the service down.
+
+[Service]
+EnvironmentFile=-/etc/hydra/otel.env
