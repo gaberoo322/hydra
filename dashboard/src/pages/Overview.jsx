@@ -56,6 +56,9 @@ export default function Overview({ ws }) {
   const { data: backlog } = useApi("/backlog/counts", { poll: 30000 });
   const { data: metrics } = useApi("/metrics?count=10", { poll: 30000 });
   const { data: alertsData, refresh: refreshAlerts } = useApi("/alerts?limit=50", { poll: 10000 });
+  // Issue #252 — surface stuckness count in header so the operator notices
+  // when cycles are green but outcomes aren't moving (vision pain-point 3).
+  const { data: stucknessData } = useApi("/stuckness", { poll: 30000 });
   const [startingCycle, setStartingCycle] = useState(false);
   const [togglingScheduler, setTogglingScheduler] = useState(false);
   const [runningResearch, setRunningResearch] = useState(false);
@@ -137,6 +140,11 @@ export default function Overview({ ws }) {
     .slice(0, 5);
   const undismissedAlerts = (alertsData || []).filter(a => !a.dismissed);
 
+  // Stuckness summary for the header badge (issue #252).
+  const stucknessRows = Array.isArray(stucknessData?.outcomes) ? stucknessData.outcomes : [];
+  const stucknessFiredCount = stucknessRows.filter((r) => r?.fired).length;
+  const stucknessTotal = stucknessRows.length;
+
   async function handleStartCycle() {
     setStartingCycle(true);
     try {
@@ -201,7 +209,10 @@ export default function Overview({ ws }) {
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Dashboard</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold">Dashboard</h1>
+          <StucknessBadge firedCount={stucknessFiredCount} total={stucknessTotal} onClick={() => navigate("/outcomes")} />
+        </div>
         <div className="flex items-center gap-2">
           {cycleRunning && (
             <button
@@ -684,6 +695,33 @@ export default function Overview({ ws }) {
         onCancel={() => setShowKillDialog(false)}
       />
     </div>
+  );
+}
+
+/**
+ * Stuckness summary badge for the header (issue #252).
+ * - 0 outcomes total → don't render (no signal to show)
+ * - 0 fired → muted/grey "all clear"
+ * - N fired → red, alert icon, clickable link to /outcomes
+ */
+function StucknessBadge({ firedCount, total, onClick }) {
+  if (total === 0) return null;
+  const stuck = firedCount > 0;
+  const classes = stuck
+    ? "bg-red-500/10 border-red-500/50 text-red-300 hover:bg-red-500/20"
+    : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700/70";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="View outcomes"
+      className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded border transition-colors ${classes}`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${stuck ? "bg-red-400 animate-pulse" : "bg-zinc-500"}`} />
+      <span className="font-medium">
+        {firedCount} of {total} outcomes stuck
+      </span>
+    </button>
   );
 }
 
