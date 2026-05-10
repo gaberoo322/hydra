@@ -356,6 +356,9 @@ async function readFileAdapter(query: string): Promise<OutcomeReading | null> {
       const s = await stat(path);
       ts = s.mtime.toISOString();
     } catch {
+      /* intentional: mtime stat failed but readFile succeeded — fall back
+         to wall clock; the value itself is the load-bearing field, ts is
+         informational. */
       ts = new Date().toISOString();
     }
     return { value, ts };
