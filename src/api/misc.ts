@@ -6,7 +6,7 @@ import { killCycle } from "../cycle.ts";
 import { loadProjectGoals, summarizeGoalsForPrompt } from "../project-goals.ts";
 import { getPlanCacheStats, invalidatePlanCache } from "../plan-cache.ts";
 import { sendDigestNow } from "../digest.ts";
-import { getAllReflections, getReflectionEffectiveness, getOvSearchMetrics } from "../learning.ts";
+import { getAllReflections, getReflectionEffectiveness, getOvSearchMetrics, getCoverageStats } from "../learning.ts";
 import { redisKeys } from "../redis-keys.ts";
 import {
   pushToWorkQueue, pushAlert, setNX, getString, delKey,
@@ -53,6 +53,13 @@ export function createMiscRouter(eventBus: any) {
   // GET /openviking-stats — OV search quality metrics (in-memory, resets on restart)
   router.get("/openviking-stats", (_req, res) => {
     res.json(getOvSearchMetrics());
+  });
+
+  // GET /learning/coverage — Knowledge index coverage (issue #210).
+  // Reports indexed source/doc counts so operators can detect a regression
+  // where the indexer is silently failing.
+  router.get("/learning/coverage", (_req, res) => {
+    res.json(getCoverageStats());
   });
 
   // GET /goals — Current project goals
