@@ -561,6 +561,7 @@ export async function runMergeStep(
   ctx: CycleContext,
   task: any,
   taskId: string,
+  execResult?: { branch?: string | null; __worktreeUsed?: boolean } | null,
 ): Promise<StepResult> {
   const { cycleId, eventBus } = ctx;
 
@@ -589,8 +590,9 @@ export async function runMergeStep(
     });
   }
 
+  const featureBranch = execResult?.branch || undefined;
   const mergeResult = mergeLockAcquired
-    ? await mergeToMain(PROJECT_WORKSPACE, cycleId)
+    ? await mergeToMain(PROJECT_WORKSPACE, cycleId, featureBranch)
     : { ok: false, commitSha: "", featureBranch: null, error: "Merge lock not acquired" };
 
   // Always release merge lock after merge attempt
@@ -605,17 +607,70 @@ export async function runMergeStep(
 // ---------------------------------------------------------------------------
 // mergeToMain — inlined from merge.ts
 // Git merge + push. Never throws — returns a result object.
+//
+// Issue #218: must operate against the executor's actual feature branch even
+// when PROJECT_WORKSPACE is on main (prior code took a "Already on main, pushed"
+// path and silently returned success while the feature branch — sitting in a
+// separate worktree — never landed). Callers now pass the executor's branch
+// name explicitly. We also reject empty-diff merges to surface deeper bugs
+// (e.g. executor producing no commits) instead of pretending success.
 // ---------------------------------------------------------------------------
 
-async function mergeToMain(projectDir: string, cycleId: string) {
+export async function mergeToMain(
+  projectDir: string,
+  cycleId: string,
+  explicitFeatureBranch?: string,
+) {
   try {
-    const { stdout: branchOut } = await execFileAsync(
-      "git", ["branch", "--show-current"],
-      { cwd: projectDir, timeout: 5000 },
-    );
-    const featureBranch = branchOut.trim();
+    let featureBranch = (explicitFeatureBranch || "").trim();
+
+    if (!featureBranch) {
+      const { stdout: branchOut } = await execFileAsync(
+        "git", ["branch", "--show-current"],
+        { cwd: projectDir, timeout: 5000 },
+      );
+      featureBranch = branchOut.trim();
+    }
 
     if (featureBranch && featureBranch !== "main") {
+      // Ensure the feature branch is locally available in projectDir.
+      // Worktrees push the branch to origin during executor cleanup, so a
+      // fetch covers the case where the workspace never had the branch.
+      const branchExists = await execFileAsync(
+        "git", ["rev-parse", "--verify", `refs/heads/${featureBranch}`],
+        { cwd: projectDir, timeout: 5000 },
+      ).then(() => true).catch(() => false);
+
+      if (!branchExists) {
+        console.log(`[Merge] Feature branch ${featureBranch} not local — fetching from origin`);
+        await execFileAsync(
+          "git", ["fetch", "origin", `${featureBranch}:${featureBranch}`],
+          { cwd: projectDir, timeout: 30000 },
+        ).catch((err) => {
+          // Non-fatal at this point; the merge step below will fail loudly if
+          // the ref still cannot be resolved.
+          console.error(`[Merge] Fetch of feature branch failed: ${err.message}`);
+        });
+      }
+
+      // Empty-diff guard (issue #218): if the feature branch has zero commits
+      // beyond main, merging would be a no-op that historically masquaraded
+      // as success. Surface this as an explicit failure instead.
+      let aheadCount = -1;
+      try {
+        const { stdout: countOut } = await execFileAsync(
+          "git", ["rev-list", "--count", `main..${featureBranch}`],
+          { cwd: projectDir, timeout: 10000 },
+        );
+        aheadCount = parseInt(countOut.trim(), 10);
+      } catch (err: any) {
+        console.error(`[Merge] Could not count commits on ${featureBranch}: ${err.message}`);
+      }
+      if (aheadCount === 0) {
+        console.error(`[Merge] Feature branch ${featureBranch} has no commits beyond main — refusing to record phantom merge`);
+        return { ok: false, commitSha: "", featureBranch, error: "empty diff" };
+      }
+
       await execFileAsync("git", ["checkout", "main"], { cwd: projectDir, timeout: 10000 });
       await execFileAsync("git", ["pull", "origin", "main"], { cwd: projectDir, timeout: 30000 })
         .catch((err) => console.error(`[Merge] git pull before merge failed (continuing with local main): ${err.message}`));
@@ -651,10 +706,12 @@ async function mergeToMain(projectDir: string, cycleId: string) {
       return { ok: true, commitSha: sha.trim(), featureBranch, error: null };
     }
 
-    // Already on main — push
-    await execFileAsync("git", ["push", "origin", "main"], { cwd: projectDir, timeout: 30000 });
-    const { stdout: sha } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: projectDir, timeout: 5000 });
-    return { ok: true, commitSha: sha.trim(), featureBranch: null, error: null };
+    // No feature branch known — workspace already on main with nothing to
+    // merge. Issue #218: this used to be reported as a successful merge,
+    // hiding the real problem (executor branch never threaded into merge).
+    // Treat this as an explicit empty-diff failure so callers can react.
+    console.error(`[Merge] No feature branch supplied and workspace already on main — refusing to record phantom merge`);
+    return { ok: false, commitSha: "", featureBranch: null, error: "empty diff" };
   } catch (err: any) {
     return { ok: false, commitSha: "", featureBranch: null, error: err?.message || String(err) };
   }

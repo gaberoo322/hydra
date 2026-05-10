@@ -271,7 +271,11 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   const { verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved } = vResult;
 
   // Step 7: MERGE — git operation, NOT an agent
-  const mergeStepResult = await runMergeStep(ctx, task, taskId);
+  // Issue #218: thread execResult so mergeToMain knows the actual feature
+  // branch produced by the executor (worktree branch, may not be checked out
+  // in PROJECT_WORKSPACE). Without this, mergeToMain falls into the
+  // "Already on main" path and silently records phantom merges.
+  const mergeStepResult = await runMergeStep(ctx, task, taskId, execResult);
   const mergeResult = mergeStepResult.continue ? (mergeStepResult as any).mergeResult : { ok: false, commitSha: "", featureBranch: null, error: "Merge step stopped" };
 
   // Step 8+: POST-MERGE — report, metrics, learning, adversarial, cleanup
