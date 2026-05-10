@@ -316,6 +316,10 @@ async function handleVerificationFailure(
     // still failed" vs "no reflections to learn from".
     reflectionInjected: task.__hadReflections ? "true" : "false",
     reflectionCount: task.__reflectionsInjected || 0,
+    // Issue #221: source breakdown (per-anchor / global)
+    reflectionSources: Array.isArray(task.__reflectionSources)
+      ? task.__reflectionSources.join(",")
+      : "",
   });
 
   // Route to Blocked or Backlog
