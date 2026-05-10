@@ -41,17 +41,18 @@ Merge lock: short-lived Redis lock (60s TTL) serializes merges across Codex and 
 Determined by `selectAnchor()` in `src/anchor-selection.ts`. Priority order:
 
 1. **Explicit operator request** — passed via `opts.anchor`
-2. **Kanban queued lane** — atomic claim (Lua script), gated by WIP limit
-3. **Active specs** — next unchecked task from oldest active spec
-4. **Failing tests** — from grounding report
-5. **Typecheck errors** — from grounding report
-6. **Work queue** — items from POST /queue or research auto-queue (LMOVE to processing)
-7. **Reframe queue** — tasks that failed repeatedly, need diagnosis
-8. **Prior failures** — stored in Redis, capped at 2 retries before escalation
-9. **TODO/FIXME markers** — from codebase
-10. **Regression hunt** — every 10 merges, adversarial testing of recent features
-11. **Codebase health** — reductive improvements (split, consolidate, document)
-12. **Priorities doc** — fallback to `config/direction/priorities.md` (auto-refreshed if stale)
+2. **Stuckness-driven research** — when `getAllStuckness()` reports a fired Target Outcome, build a `research` anchor (`outcome-stuckness:<name>`, `domain: orchestrator-self-improvement`) instead of pulling backlog. Enforces ADR-0003 vision vector 1. 5-cycle cooldown per outcome.
+3. **Kanban queued lane** — atomic claim (Lua script), gated by WIP limit
+4. **Active specs** — next unchecked task from oldest active spec
+5. **Failing tests** — from grounding report
+6. **Typecheck errors** — from grounding report
+7. **Work queue** — items from POST /queue or research auto-queue (LMOVE to processing)
+8. **Reframe queue** — tasks that failed repeatedly, need diagnosis
+9. **Prior failures** — stored in Redis, capped at 2 retries before escalation
+10. **TODO/FIXME markers** — from codebase
+11. **Regression hunt** — every 10 merges, adversarial testing of recent features
+12. **Codebase health** — reductive improvements (split, consolidate, document)
+13. **Priorities doc** — fallback to `config/direction/priorities.md` (auto-refreshed if stale)
 
 ## Key Files
 
