@@ -562,8 +562,15 @@ export async function clearOutcomes(anchorRef: string): Promise<void> {
 /**
  * Compute per-anchor effectiveness scores from reflection outcomes.
  * Returns anchors that had reflections when retried, with success/failure counts.
+ *
+ * Issue #193: also returns `injection` aggregate stats from recent cycle metrics
+ * so the operator can verify reflections are actually reaching the planner.
  */
-export async function getReflectionEffectiveness(): Promise<{ anchors: ReflectionEffectiveness[] }> {
+export async function getReflectionEffectiveness(): Promise<{
+  anchors: ReflectionEffectiveness[];
+  injection: { totalCycles: number; cyclesWithReflections: number; injectionRate: number };
+}> {
+  let anchors: ReflectionEffectiveness[] = [];
   try {
     const raw = await getReflectionOutcomes();
     const byAnchor = new Map<string, { successes: number; failures: number }>();
@@ -583,7 +590,6 @@ export async function getReflectionEffectiveness(): Promise<{ anchors: Reflectio
       } catch { /* intentional: skip unparseable entries */ }
     }
 
-    const anchors: ReflectionEffectiveness[] = [];
     for (const [ref, counts] of byAnchor) {
       const totalRetries = counts.successes + counts.failures;
       anchors.push({
@@ -594,11 +600,36 @@ export async function getReflectionEffectiveness(): Promise<{ anchors: Reflectio
         successRate: totalRetries > 0 ? counts.successes / totalRetries : 0,
       });
     }
-
-    return { anchors };
   } catch (err: any) {
     console.error(`[Learning] Failed to compute reflection effectiveness: ${err.message}`);
-    return { anchors: [] };
+    anchors = [];
+  }
+
+  // Aggregate injection rate from recent metrics (issue #193 telemetry).
+  // Failure-tolerant — never throws.
+  const injection = await computeInjectionStats();
+
+  return { anchors, injection };
+}
+
+/**
+ * Compute reflection injection rate from the last 50 cycles.
+ * Returns zeros if metrics are unavailable.
+ */
+async function computeInjectionStats(): Promise<{ totalCycles: number; cyclesWithReflections: number; injectionRate: number }> {
+  try {
+    const { getMetricsTrend } = await import("./metrics.ts");
+    const recent = await getMetricsTrend(50);
+    const totalCycles = recent.length;
+    const cyclesWithReflections = recent.filter((m: any) => m.reflectionInjected === "true").length;
+    return {
+      totalCycles,
+      cyclesWithReflections,
+      injectionRate: totalCycles > 0 ? cyclesWithReflections / totalCycles : 0,
+    };
+  } catch (err: any) {
+    console.error(`[Learning] Failed to compute injection stats: ${err.message}`);
+    return { totalCycles: 0, cyclesWithReflections: 0, injectionRate: 0 };
   }
 }
 

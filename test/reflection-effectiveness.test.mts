@@ -203,10 +203,17 @@ describe("reflection effectiveness (issue #150)", () => {
     assert.equal(exists, 0, "ineffective reflection key should be deleted");
   });
 
-  test("AC2: getReflectionEffectiveness returns empty when no outcomes", async (t) => {
+  test("AC2: getReflectionEffectiveness returns empty anchors when no outcomes", async (t) => {
     requireRedis(t);
 
     const result = await learning.getReflectionEffectiveness();
-    assert.deepEqual(result, { anchors: [] });
+    assert.deepEqual(result.anchors, []);
+    // Issue #193: response now also includes an injection summary block.
+    // Don't assert exact values — depends on what cycle metrics happen to
+    // be in Redis from other tests sharing DB 1.
+    assert.ok(result.injection, "response includes injection stats");
+    assert.equal(typeof result.injection.totalCycles, "number");
+    assert.equal(typeof result.injection.cyclesWithReflections, "number");
+    assert.equal(typeof result.injection.injectionRate, "number");
   });
 });

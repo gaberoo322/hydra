@@ -306,6 +306,11 @@ async function handleVerificationFailure(
     executorModel: execResult?.__executorModel || "unknown",
     fixerSkipped: fixerSkipped ? "true" : "false",
     fixerCategory,
+    // Issue #193: surface reflection injection on verification-failed cycles
+    // so the effectiveness API can attribute failures to "had reflections but
+    // still failed" vs "no reflections to learn from".
+    reflectionInjected: task.__hadReflections ? "true" : "false",
+    reflectionCount: task.__reflectionsInjected || 0,
   });
 
   // Route to Blocked or Backlog
