@@ -1,0 +1,40 @@
+# Target Outcomes — the contract between target vision and orchestrator behavior.
+#
+# Each outcome declares a metric the orchestrator optimizes against. ADR-0003
+# (terminal goal hierarchy) and ADR-0004 (self-modification tiers) reference
+# this file as the structured source of truth — code reads here, prose lives
+# in vision.md.
+#
+# Schema (per issue #241, work-order step 1):
+#   name                        unique identifier (lowercase, dash-separated)
+#   kind                        leading | terminal
+#                               leading  = moves first; usable inside Tier-2
+#                                          5-cycle holdback windows
+#                               terminal = the thing that ultimately matters;
+#                                          too slow for holdback decisions
+#   direction                   up | down  (favorable direction for `value`)
+#   source                      prometheus | api | sql | file
+#   query                       source-specific lookup (URL path, file path,
+#                               SQL string, prom expression). Required.
+#   baseline                    starting reference value; numeric
+#   target                      goal value; numeric
+#   stuckness_threshold_cycles  cycles without sustained favorable movement
+#                               before the stuckness detector (#242) fires
+#   noise_epsilon               (optional, default 0) absolute change below
+#                               this is treated as no-move
+#
+# This file is intentionally seeded with one `kind: file` outcome so the
+# loader has a working read path with no external dependencies. Real
+# leading/terminal outcomes against hydra-betting are added by the operator
+# (or by a follow-up issue once the stuckness detector lands).
+
+outcomes:
+  - name: orchestrator-self-improvement-share
+    kind: leading
+    direction: up
+    source: file
+    query: metrics/orchestrator-share.txt
+    baseline: 0
+    target: 0.25
+    stuckness_threshold_cycles: 20
+    noise_epsilon: 0.01

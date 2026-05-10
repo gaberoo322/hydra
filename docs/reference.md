@@ -83,6 +83,31 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 **Metrics** (`api/metrics.ts`): GET /metrics, GET /spending, GET /summary, POST /metrics/record
 **Health** (`api/health.ts`): GET /health, GET /health/services, GET /health/deep, GET /recommendations
 **Misc** (`api/misc.ts`): Meta, goals, config, alerts, events, memory, merge locks, plan cache, digest, grounding, OpenViking, calibration, env, OpenAI proxy, webhooks, kill
+**Outcomes** (`api/outcomes.ts`): GET /outcomes — declared Target Outcomes + current readings (issue #241)
+
+## Target Outcomes (issue #241, ADR-0003 + ADR-0004)
+
+`config/direction/outcomes.yaml` declares the structured contract between target vision (prose) and orchestrator behavior (code). Loader: `src/outcomes.ts`. API: `GET /api/outcomes`.
+
+**Schema (per outcome):**
+
+| Field | Required | Type | Notes |
+|---|---|---|---|
+| `name` | yes | string | Unique identifier; lowercase + dashes |
+| `kind` | yes | `leading` \| `terminal` | `leading` = usable inside Tier-2 5-cycle holdback windows; `terminal` = ultimate goal, too slow for holdback |
+| `direction` | yes | `up` \| `down` | Favorable direction for the value |
+| `source` | yes | `prometheus` \| `api` \| `sql` \| `file` | Adapter dispatch in `getOutcomeValue` |
+| `query` | yes | string | Source-specific lookup (URL path, file path, SQL string, prom expression) |
+| `baseline` | yes | number | Starting reference |
+| `target` | yes | number | Goal value |
+| `stuckness_threshold_cycles` | yes | number | Cycles without sustained favorable movement before #242 fires |
+| `noise_epsilon` | no (default 0) | number | Absolute change below this is treated as no-move |
+
+**Source adapters:** `file` is implemented (reads a number from a path resolved against `HYDRA_ROOT`). `api`, `prometheus`, and `sql` are stubbed — they return `null` and log a warning rather than throwing, so downstream consumers (#242 stuckness, #244 holdback) treat them as no-data instead of synthetic regressions.
+
+**Error handling:** `loadOutcomes()` never throws. Returns `{ ok: false, errors: string[] }` on parse / schema violations. Missing file is `{ ok: true, outcomes: [] }` so projects start with no outcomes declared without crashing.
+
+**Dependency chain:** Foundational for ADR-0004 work-order — #242 (stuckness detector) and #244 (Tier-2 outcome holdback) import `loadOutcomes` and `getOutcomeValue`.
 
 ## Codex OpenTelemetry (issue #199)
 
