@@ -391,4 +391,199 @@ describe("backlog state machine", () => {
     assert.ok(titles.includes("IP item 1"));
     assert.ok(titles.includes("IP item 2"));
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #191 — every lane transition must record movedAt; inProgress
+  // transitions must also record claimedAt + claimedBy; WIP cap must be
+  // enforced at claim time so stalled items can't silently exceed the limit.
+  // -------------------------------------------------------------------------
+
+  test("issue #191: addToBacklog stamps movedAt on initial lane assignment", async (t) => {
+    requireRedis(t);
+    const before = Date.now();
+    const { id } = await admin.addToBacklog({ title: "Initial stamp", category: "test" });
+    const after = Date.now();
+
+    const lanes = await admin.loadBacklog();
+    const item = lanes.backlog.find((i: any) => i.id === id);
+    assert.ok(item, "added item should be in backlog lane");
+    assert.ok(typeof item.movedAt === "string", "movedAt must be a string");
+    const ts = new Date(item.movedAt).getTime();
+    assert.ok(Number.isFinite(ts), `movedAt "${item.movedAt}" must parse as a timestamp`);
+    assert.ok(ts >= before - 1 && ts <= after + 1, `movedAt ${ts} must fall within [${before},${after}]`);
+    // Items not in inProgress should have null claim metadata.
+    assert.equal(item.claimedAt, null);
+    assert.equal(item.claimedBy, null);
+  });
+
+  test("issue #191: lifecycle queued → inProgress → done writes movedAt on every transition", async (t) => {
+    requireRedis(t);
+    const title = "Lifecycle 191";
+    await admin.addToBacklog({ title, category: "test" });
+    await admin.promoteToQueued(1);
+
+    const queuedLanes = await admin.loadBacklog();
+    const queuedItem = queuedLanes.queued.find((i: any) => i.title === title);
+    assert.ok(queuedItem.movedAt, "queued transition must set movedAt");
+    const queuedTs = new Date(queuedItem.movedAt).getTime();
+
+    // Force a small gap so movedAt strictly increases across transitions.
+    await new Promise(r => setTimeout(r, 5));
+
+    await admin.moveToInProgress(title, { claimedBy: "claude" });
+    const inProgLanes = await admin.loadBacklog();
+    const inProgItem = inProgLanes.inProgress.find((i: any) => i.title === title);
+    assert.ok(inProgItem.movedAt, "inProgress transition must set movedAt");
+    assert.equal(inProgItem.claimedBy, "claude", "inProgress transition must set claimedBy");
+    assert.ok(inProgItem.claimedAt, "inProgress transition must set claimedAt");
+    const inProgTs = new Date(inProgItem.movedAt).getTime();
+    assert.ok(inProgTs > queuedTs, `movedAt must strictly increase: ${inProgTs} > ${queuedTs}`);
+    // claimedAt should match movedAt at the moment of claim.
+    assert.equal(inProgItem.claimedAt, inProgItem.movedAt);
+
+    await new Promise(r => setTimeout(r, 5));
+
+    await admin.moveToDone(title, "merged");
+    const doneLanes = await admin.loadBacklog();
+    const doneItem = doneLanes.done.find((i: any) => i.title === title);
+    assert.ok(doneItem.movedAt, "done transition must set movedAt");
+    const doneTs = new Date(doneItem.movedAt).getTime();
+    assert.ok(doneTs > inProgTs, `movedAt must strictly increase across all transitions: ${doneTs} > ${inProgTs}`);
+    // Leaving inProgress must clear the claim fields so stale claimedBy
+    // doesn't confuse downstream consumers (e.g. ownership audits).
+    assert.equal(doneItem.claimedBy, null);
+    assert.equal(doneItem.claimedAt, null);
+  });
+
+  test("issue #191: returnToBacklog refreshes movedAt and clears claim fields", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "Return claim 191", category: "test" });
+    await admin.moveToInProgress("Return claim 191", { claimedBy: "codex" });
+    await new Promise(r => setTimeout(r, 5));
+    await admin.returnToBacklog("Return claim 191", "rolled-back");
+
+    const lanes = await admin.loadBacklog();
+    const item = lanes.backlog.find((i: any) => i.title === "Return claim 191");
+    assert.ok(item, "returned item should be back in backlog lane");
+    assert.ok(item.movedAt, "returnToBacklog must set movedAt");
+    assert.equal(item.claimedBy, null, "returning to backlog must clear claimedBy");
+    assert.equal(item.claimedAt, null, "returning to backlog must clear claimedAt");
+  });
+
+  test("issue #191: moveToBlocked stamps movedAt", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "Block stamp 191", category: "test" });
+    await admin.moveToBlocked("Block stamp 191", "needs-info");
+    const lanes = await admin.loadBacklog();
+    const item = lanes.blocked.find((i: any) => i.title === "Block stamp 191");
+    assert.ok(item.movedAt, "moveToBlocked must set movedAt");
+  });
+
+  test("issue #191: moveToInProgress refuses claim when WIP cap is reached", async (t) => {
+    requireRedis(t);
+    const limit = admin.WIP_LIMIT;
+    // Fill the inProgress lane to the cap.
+    for (let i = 0; i < limit; i++) {
+      await admin.addToBacklog({ title: `WIP cap fill ${i}`, category: "test" });
+      const ok = await admin.moveToInProgress(`WIP cap fill ${i}`);
+      assert.equal(ok, true, `pre-cap claim ${i} must succeed`);
+    }
+    // One more item — claim must be refused.
+    await admin.addToBacklog({ title: "WIP cap overflow", category: "test" });
+    const refusedLegacy = await admin.moveToInProgress("WIP cap overflow");
+    assert.equal(refusedLegacy, false, "legacy signature must return false when WIP cap is reached");
+
+    // The structured signature should report the wip-limit reason.
+    const refusedStructured = await admin.moveToInProgress("WIP cap overflow", { claimedBy: "claude" });
+    assert.equal(refusedStructured.blocked, "wip-limit");
+    assert.equal(refusedStructured.count, limit);
+    assert.equal(refusedStructured.limit, limit);
+
+    // The overflow item must still be in its original lane (backlog), not inProgress.
+    const counts = await admin.getBacklogCounts();
+    assert.equal(counts.inProgress, limit);
+    assert.equal(counts.backlog, 1);
+  });
+
+  test("issue #191: claim() facade surfaces wip-limit rejection without throwing", async (t) => {
+    requireRedis(t);
+    const limit = admin.WIP_LIMIT;
+    for (let i = 0; i < limit; i++) {
+      await admin.addToBacklog({ title: `Facade fill ${i}`, category: "test" });
+      await admin.moveToInProgress(`Facade fill ${i}`);
+    }
+    await admin.addToBacklog({ title: "Facade overflow", category: "test" });
+
+    // Public facade `claim` is the top-level export, not on _admin.
+    const result = await backlog.claim("Facade overflow", { claimedBy: "claude" });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "wip-limit");
+    assert.equal(result.count, limit);
+    assert.equal(result.limit, limit);
+  });
+
+  test("issue #191: GET /api/backlog surfaces movedAt, claimedAt, claimedBy on every item", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "API queued visible", category: "test" });
+    await admin.addToBacklog({ title: "API in-progress visible", category: "test" });
+    await admin.moveToInProgress("API in-progress visible", { claimedBy: "codex" });
+
+    const { createBacklogRouter } = await import("../src/api/backlog.ts");
+    const router = createBacklogRouter();
+
+    // Find the GET /backlog handler in the router stack.
+    let handler: Function | null = null;
+    for (const layer of router.stack) {
+      if (layer.route && layer.route.path === "/backlog" && layer.route.methods.get) {
+        const stack = layer.route.stack;
+        handler = stack[stack.length - 1].handle;
+        break;
+      }
+    }
+    assert.ok(handler, "GET /backlog handler should exist");
+
+    let body: any = null;
+    const res: any = {
+      status() { return res; },
+      json(b: any) { body = b; return res; },
+    };
+    await handler!({ method: "GET", url: "/backlog", headers: {}, query: {}, params: {}, body: {} }, res, () => {});
+
+    assert.ok(body, "handler must respond with a body");
+    assert.ok(Array.isArray(body.backlog));
+    assert.ok(Array.isArray(body.inProgress));
+
+    // Every backlog item must expose movedAt.
+    for (const item of body.backlog) {
+      assert.ok(typeof item.movedAt === "string", `backlog item ${item.id} must expose movedAt`);
+    }
+    // Every inProgress item must expose movedAt + claimedAt + claimedBy.
+    for (const item of body.inProgress) {
+      assert.ok(typeof item.movedAt === "string", `inProgress item ${item.id} must expose movedAt`);
+      assert.ok(typeof item.claimedAt === "string", `inProgress item ${item.id} must expose claimedAt`);
+      assert.ok(item.claimedBy, `inProgress item ${item.id} must expose claimedBy`);
+    }
+
+    const ipItem = body.inProgress.find((i: any) => i.title === "API in-progress visible");
+    assert.equal(ipItem.claimedBy, "codex");
+  });
+
+  test("issue #191: claimNextQueuedItem stamps movedAt + claimedAt + claimedBy", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "Lua claim 191", category: "test" });
+    await admin.promoteToQueued(1);
+
+    const before = Date.now();
+    const result = await admin.claimNextQueuedItem("claude");
+    const after = Date.now();
+
+    assert.equal(result.claimed, true);
+    assert.equal(result.item.lane, "inProgress");
+    assert.equal(result.item.claimedBy, "claude");
+    assert.ok(result.item.movedAt, "claimNextQueuedItem must set movedAt");
+    assert.ok(result.item.claimedAt, "claimNextQueuedItem must set claimedAt");
+    const ts = new Date(result.item.movedAt).getTime();
+    assert.ok(ts >= before - 1 && ts <= after + 1, `movedAt ${ts} must fall within [${before},${after}]`);
+    assert.equal(result.item.claimedAt, result.item.movedAt);
+  });
 });
