@@ -12,6 +12,7 @@
 
 import { Router } from "express";
 import { loadOutcomes, getOutcomeValue, type Outcome } from "../outcomes.ts";
+import { getAllStuckness } from "../stuckness.ts";
 
 interface OutcomeRow {
   name: string;
@@ -71,6 +72,20 @@ export function createOutcomesRouter(outcomesFile?: string) {
       // Defensive — loader/adapter both don't throw, but Express demands
       // a final guard so we never hand a 500 with no body to the dashboard.
       console.error(`[outcomes-api] unexpected error: ${err?.message || String(err)}`);
+      res.status(500).json({ outcomes: [], errors: [err?.message || String(err)] });
+    }
+  });
+
+  // GET /stuckness — return cycles-since-favorable-movement for each outcome
+  // (issue #242). Surfaces the diagnostic that drives autopilot's
+  // "don't pull from the backlog" decision per ADR-0003.
+  router.get("/stuckness", async (_req, res) => {
+    try {
+      const rows = await getAllStuckness();
+      res.json({ outcomes: rows });
+    } catch (err: any) {
+      // getAllStuckness never throws, but defend the Express handler boundary.
+      console.error(`[stuckness-api] unexpected error: ${err?.message || String(err)}`);
       res.status(500).json({ outcomes: [], errors: [err?.message || String(err)] });
     }
   });

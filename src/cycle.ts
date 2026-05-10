@@ -2,6 +2,7 @@ import { getTracker } from "./task-tracker.ts";
 import { runControlLoop } from "./control-loop.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { getString, hashGetAll, findKeys } from "./redis-adapter.ts";
+import { recordOutcomeReadings } from "./stuckness.ts";
 
 interface CycleRecord {
   id: string;
@@ -30,6 +31,16 @@ async function startCycle(eventBus: any, opts: any = {}) {
   currentCycle = { id: "pending", status: "running", startedAt: new Date().toISOString() };
   try {
     const result: any = await runControlLoop(eventBus, { anchor: opts?.anchor });
+
+    // Issue #242: Record per-outcome readings AFTER the cycle completes,
+    // regardless of merge success — stuckness measures outcomes, not cycle
+    // status. The function never throws and is a no-op when no outcomes are
+    // declared. We intentionally hook here (not in post-merge.ts) because
+    // post-merge.ts is in the Untouchable Core per ADR-0001.
+    if (result?.cycleId) {
+      await recordOutcomeReadings(result.cycleId, eventBus);
+    }
+
     currentCycle = {
       id: result.cycleId,
       status: "completed",
