@@ -11,9 +11,10 @@
  * working unchanged via re-exports from learning.ts.
  */
 
-import { writeFile, unlink } from "node:fs/promises";
+import { readFile, writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep as pathSep } from "node:path";
+import { createHash } from "node:crypto";
 
 const OV_URL = process.env.OPENVIKING_URL || "http://localhost:1933";
 const OV_KEY =
@@ -24,6 +25,19 @@ const CONFIG_PATH =
   process.env.HYDRA_CONFIG_PATH ||
   resolve(process.env.HOME!, "hydra", "config");
 
+// Per-file content hashes so unchanged re-writes (priorities-agent rewriting
+// the same content, fs.watch firing twice, etc.) skip the OV round-trip.
+const indexedConfigHashes = new Map<string, string>();
+
+// Translate a config-relative path into the OV virtual-fs URI under
+// viking://resources. Without an explicit `to:` target, OV defaults the
+// destination to a top-level basename — stripping the directory prefix
+// and the file extension — which both clobbers nested layout and
+// conflicts with prior orphan entries on every subsequent re-index.
+export function indexerTargetUri(rel: string): string {
+  return `viking://resources/${rel.split(pathSep).join("/")}`;
+}
+
 /**
  * Index a file already mounted into the OV container (config tree).
  * Tells OV to ingest the file by container-relative path.
@@ -31,19 +45,40 @@ const CONFIG_PATH =
 export async function indexFile(filePath: string): Promise<void> {
   const rel = relative(CONFIG_PATH, filePath);
   const containerPath = join(OV_CONFIG_MOUNT, rel);
+  const targetUri = indexerTargetUri(rel);
+
+  let hash: string | undefined;
+  try {
+    const buf = await readFile(filePath);
+    hash = createHash("sha256").update(buf).digest("hex");
+    if (indexedConfigHashes.get(filePath) === hash) return;
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      indexedConfigHashes.delete(filePath);
+      return;
+    }
+    /* intentional: hash failure is non-fatal — fall through and try to index */
+  }
+
   try {
     const res = await fetch(`${OV_URL}/api/v1/resources`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Api-Key": OV_KEY },
-      body: JSON.stringify({ path: containerPath }),
+      body: JSON.stringify({ path: containerPath, to: targetUri }),
       signal: AbortSignal.timeout(60000),
     });
     if (res.ok) {
-      console.log(`[Learning:Indexer] Indexed file: ${rel}`);
+      if (hash) indexedConfigHashes.set(filePath, hash);
+      console.log(`[Learning:Indexer] Indexed file: ${rel} -> ${targetUri}`);
     } else {
       const err = await res.text();
       if (err.includes("not exist") || err.includes("ENOENT")) {
         console.log(`[Learning:Indexer] Skipped (removed): ${rel}`);
+        indexedConfigHashes.delete(filePath);
+      } else if (err.includes("file exists") || err.includes("point lock")) {
+        console.warn(
+          `[Learning:Indexer] Transient OV conflict on ${rel} — will retry on next change: ${err.slice(0, 160)}`
+        );
       } else {
         console.error(
           `[Learning:Indexer] Failed to index ${rel}: ${err.slice(0, 200)}`
