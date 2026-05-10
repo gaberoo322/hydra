@@ -391,6 +391,11 @@ export async function getQualityGateTrend(count = 50) {
     mutationsTested: number | null;
     mutationsKilled: number | null;
     jitTestsAdded: number | null;
+    /**
+     * Operator-facing JIT decision string (issue #235).
+     * `null` for legacy cycles recorded before the field was introduced.
+     */
+    jitDecision: string | null;
     gateBlocked: boolean;
   };
 
@@ -416,6 +421,13 @@ export async function getQualityGateTrend(count = 50) {
       // Back-compat: infer from jitTestsCaughtBug for cycles before #212
       : (m.jitTestsCaughtBug === 1);
 
+    // Issue #235: jitDecision is stored as a string field on the metrics hash
+    // (post-merge.ts records it). Legacy cycles → null so the dashboard can
+    // distinguish "unknown" from "skipped: ...".
+    const jitDecision = typeof m.jitDecision === "string" && m.jitDecision.length > 0
+      ? m.jitDecision
+      : null;
+
     return {
       cycleId: m.cycleId,
       completedAt: m.recordedAt || null,
@@ -423,6 +435,7 @@ export async function getQualityGateTrend(count = 50) {
       mutationsTested: mutationsTested ?? null,
       mutationsKilled,
       jitTestsAdded,
+      jitDecision,
       gateBlocked,
     };
   });

@@ -46,7 +46,53 @@ export type JitTestResult = {
   testFiles: string[];
   durationMs: number;
   error: string | null;
+  /**
+   * Operator-facing summary of what JIT decided this cycle.
+   * Examples (issue #235):
+   *   - "skipped: kill-rate >= 80%"
+   *   - "skipped: quick-fix"
+   *   - "skipped: no diff"
+   *   - "skipped: no files changed"
+   *   - "skipped: no surviving mutants"
+   *   - "ran: 3 tests added"
+   *   - "ran: 0 tests, no testable behavior"
+   *   - "ran: 0 tests, all discarded"
+   *   - "ran: bug detected — merge blocked"
+   *   - "error: <message>"
+   * Always present so dashboards can render it without null checks.
+   */
+  decision: string;
 };
+
+/**
+ * Synthetic JIT skip decisions (issue #235) — used at call sites that gate
+ * JIT off entirely so the cycle still records an observable reason.
+ */
+export const JIT_SKIP_QUICK_FIX = "skipped: quick-fix";
+export const JIT_SKIP_NO_DIFF = "skipped: no diff";
+export const JIT_SKIP_NO_FILES_CHANGED = "skipped: no files changed";
+export const JIT_SKIP_KILL_RATE = "skipped: kill-rate >= 80%";
+export const JIT_SKIP_NO_SURVIVING_MUTANTS = "skipped: no surviving mutants";
+
+/**
+ * Build a minimal JitTestResult-shaped report for a skip decision (issue #235).
+ *
+ * Lets non-JIT call sites record an observable `jitDecision` on the cycle
+ * report without inventing a parallel mechanism. All counters are zeroed.
+ */
+export function jitSkipReport(decision: string): JitTestResult {
+  return {
+    generated: 0,
+    kept: 0,
+    discarded: 0,
+    caughtBug: false,
+    bugDetails: null,
+    testFiles: [],
+    durationMs: 0,
+    error: null,
+    decision,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Prompt builder
@@ -191,6 +237,8 @@ export async function runJitTests(
     testFiles: [],
     durationMs: 0,
     error: null,
+    // Default — overwritten before return at every terminal path below (issue #235)
+    decision: "ran: 0 tests, no testable behavior",
   };
 
   try {
@@ -211,6 +259,7 @@ export async function runJitTests(
 
     if (agentResult.exitCode !== 0 && !agentResult.output) {
       result.error = "JiT model call failed";
+      result.decision = "error: model call failed";
       result.durationMs = Date.now() - start;
       return result;
     }
@@ -219,11 +268,13 @@ export async function runJitTests(
     const { tests, error } = parseJitResult(agentResult.output);
     if (error) {
       result.error = `Parse error: ${error}`;
+      result.decision = `error: parse failed (${error})`;
       result.durationMs = Date.now() - start;
       return result;
     }
 
     if (tests.length === 0) {
+      result.decision = "ran: 0 tests, no testable behavior";
       result.durationMs = Date.now() - start;
       return result; // No testable behavior — valid outcome
     }
@@ -330,8 +381,20 @@ export async function runJitTests(
         } catch { /* intentional: status check best-effort */ }
       }
     }
+
+    // Decision string — observable summary of what JIT did this cycle (issue #235)
+    if (result.caughtBug) {
+      result.decision = "ran: bug detected — merge blocked";
+    } else if (result.kept > 0) {
+      result.decision = `ran: ${result.kept} test${result.kept === 1 ? "" : "s"} added`;
+    } else if (result.generated > 0 && result.discarded === result.generated) {
+      result.decision = `ran: 0 tests, all ${result.generated} discarded`;
+    } else if (result.generated === 0) {
+      result.decision = "ran: 0 tests, no testable behavior";
+    }
   } catch (err: any) {
     result.error = `JiT testing failed: ${err.message}`;
+    result.decision = `error: ${err.message}`;
     console.error(`[JiT] ${result.error}`);
   }
 
@@ -537,6 +600,8 @@ export async function runDiffAwareJitTests(
         jitTestsGenerated: jitReport.generated,
         jitTestsKept: jitReport.kept,
         jitTestsCaughtBug: 1,
+        // Issue #235: surface decision string on the bug-catch path too
+        jitDecision: jitReport.decision,
         // Quality gate trend fields (issue #212): JIT bug-catch is a gate block
         gateBlocked: 1,
         mutationsTested: mutationReport ? (mutationReport.totalMutants - (mutationReport.skipped || 0)) : 0,

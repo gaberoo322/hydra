@@ -22,8 +22,17 @@ export default function QualityGatesPanel({ count = 50 }) {
       name: (e.cycleId || "").replace("cycle-", "").slice(0, 10),
       killRate: typeof e.killRate === "number" ? e.killRate : null,
       jitTestsAdded: typeof e.jitTestsAdded === "number" ? e.jitTestsAdded : 0,
+      jitDecision: typeof e.jitDecision === "string" ? e.jitDecision : null,
       gateBlocked: e.gateBlocked,
     }));
+
+  // Issue #235: most-recent cycles first for the decision list so operators
+  // see the latest outcome at a glance.
+  const recentDecisions = trend.slice(0, 10).map((e) => ({
+    cycleId: (e.cycleId || "").replace("cycle-", "").slice(0, 10),
+    killRate: typeof e.killRate === "number" ? e.killRate : null,
+    jitDecision: typeof e.jitDecision === "string" ? e.jitDecision : null,
+  }));
 
   const cyclesWithData = summary.cyclesWithMutationData ?? 0;
   const avg = summary.avgKillRate;
@@ -93,6 +102,44 @@ export default function QualityGatesPanel({ count = 50 }) {
             />
           </LineChart>
         </ResponsiveContainer>
+      )}
+
+      {/* Issue #235: per-cycle JIT decision so operators can answer
+          "is JIT working?" without digging through logs. */}
+      {recentDecisions.length > 0 && (
+        <div className="mt-4">
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-2">
+            Recent JIT Decisions
+          </p>
+          <div className="space-y-1">
+            {recentDecisions.map((d) => (
+              <div
+                key={d.cycleId}
+                className="flex items-center justify-between text-xs bg-zinc-950 border border-zinc-800 rounded px-2 py-1"
+              >
+                <span className="text-zinc-500 font-mono">{d.cycleId}</span>
+                <span className="text-zinc-400">
+                  kill {d.killRate !== null ? `${d.killRate}%` : "—"}
+                </span>
+                <span
+                  className={
+                    d.jitDecision === null
+                      ? "text-zinc-600"
+                      : d.jitDecision.startsWith("error")
+                        ? "text-red-400"
+                        : d.jitDecision.startsWith("ran: bug")
+                          ? "text-amber-400"
+                          : d.jitDecision.startsWith("ran:")
+                            ? "text-emerald-400"
+                            : "text-zinc-400"
+                  }
+                >
+                  {d.jitDecision ?? "unknown"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );
