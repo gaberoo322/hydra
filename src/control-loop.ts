@@ -142,7 +142,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
 
   // Step 3: PLAN — propose one bounded task (codex agent call)
   console.log(`[ControlLoop] Step 3: Planning...`);
-  const task = await runPlannerAgent(cycleId, anchor, grounding, ovSession);
+  let task: any = await runPlannerAgent(cycleId, anchor, grounding, ovSession);
 
   const planResult = await handlePlanResult(
     { cycleId, startTime, grounding, groundingSummary, ovSession, eventBus, anchor, anchorConfidence },
@@ -181,41 +181,51 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   const ctx: CycleContext = { cycleId, startTime, grounding, groundingSummary, ovSession, eventBus, anchor, anchorConfidence };
 
   // Step 3.1: CLASSIFY COMPLEXITY
-  const complexity = classifyTaskComplexity(task, anchor);
-  const filesInScope = task.scopeBoundary?.in?.length || 0;
-  const criteriaCount = task.acceptanceCriteria?.length || 0;
+  let complexity = classifyTaskComplexity(task, anchor);
+  let filesInScope = task.scopeBoundary?.in?.length || 0;
+  let criteriaCount = task.acceptanceCriteria?.length || 0;
   console.log(`[ControlLoop] Task: "${task.title}" (anchor: ${task.anchorType}, confidence: ${task.confidence}, complexity: ${complexity}, scope: ${filesInScope} files, ${criteriaCount} criteria)`);
 
   // Step 3.2: AUTO-DECOMPOSE — complex tasks (>5 files) are auto-split into specs
   // instead of being sent to the executor, which has a 0% merge rate on 5+ file tasks.
+  //
+  // Issue #194: Previously we returned early after creating the spec, abandoning
+  // the cycle. That wasted the planner cost and accounted for ~30% of recent
+  // abandoned cycles. We now continue execution with the first sub-task in the
+  // SAME cycle so the planner spend produces a merged change.
   if (complexity === "complex") {
     const decomposeResult = await autoDecomposeComplexTask(task);
     if (decomposeResult) {
-      console.log(`[ControlLoop] Complex task auto-decomposed into spec "${decomposeResult.spec.slug}" with ${decomposeResult.taskCount} tasks — returning early`);
-      await handleEarlyExit({
-        cycleId, startTime, grounding, ovSession, anchor,
-        outcome: "decomposed", reason: `Complex task auto-decomposed into spec with ${decomposeResult.taskCount} tasks`,
-        task,
-        metricsOverrides: {
-          taskTitle: task.title,
-          anchorType: task.anchorType, anchorReference: task.anchorReference,
-          plannerModel: task.__plannerModel || "unknown",
-          planCacheHit: task.__planCacheHit ? "true" : "false",
-          abandonReason: `Auto-decomposed: ${decomposeResult.taskCount} spec tasks created`,
-        },
-      });
-      return {
-        cycleId,
-        tasks: [],
-        reason: `Complex task auto-decomposed into spec with ${decomposeResult.taskCount} tasks`,
-        durationMs: Date.now() - startTime,
-        decomposed: true,
-        specSlug: decomposeResult.spec.slug,
-        specTaskCount: decomposeResult.taskCount,
+      console.log(`[ControlLoop] Complex task auto-decomposed into spec "${decomposeResult.spec.slug}" with ${decomposeResult.taskCount} tasks — continuing cycle with first sub-task`);
+      // Carry planner attribution from the parent so cost/cache metrics
+      // remain accurate for the cycle.
+      const parentMeta = {
+        __plannerModel: task.__plannerModel,
+        __planCacheHit: task.__planCacheHit,
+        taskId: task.taskId,
       };
+      task = { ...decomposeResult.firstTask, ...parentMeta };
+      // Refresh the tracker hash so downstream readers (metrics, dashboard,
+      // event bus consumers) see the sub-task title/scope, not the parent.
+      await tracker.initTaskV2(cycleId, task);
+      // Re-classify the sub-task (it should be quick-fix or standard now).
+      complexity = classifyTaskComplexity(task, anchor);
+      filesInScope = task.scopeBoundary?.in?.length || 0;
+      criteriaCount = task.acceptanceCriteria?.length || 0;
+      console.log(`[ControlLoop] Continuing with sub-task: "${task.title}" (complexity: ${complexity}, scope: ${filesInScope} files, ${criteriaCount} criteria)`);
+
+      // Infinite-recursion guard: if the first sub-task ALSO classifies as
+      // complex (e.g. parent had ~12 files and the 1-2-file split somehow
+      // ended up being judged complex by criteria count), do NOT decompose
+      // again — log and proceed to preflight/executor anyway. Quality gates
+      // downstream will still block a bad merge.
+      if (complexity === "complex") {
+        console.warn(`[ControlLoop] WARN: first sub-task of decomposed spec still classifies as complex — proceeding without further decomposition to avoid recursion`);
+      }
+    } else {
+      // If decomposition failed (e.g. spec already exists), proceed normally
+      console.log(`[ControlLoop] COMPLEX task detected (${filesInScope} files, ${criteriaCount} criteria) — decomposition skipped, proceeding to executor`);
     }
-    // If decomposition failed (e.g. spec already exists), proceed normally
-    console.log(`[ControlLoop] COMPLEX task detected (${filesInScope} files, ${criteriaCount} criteria) — decomposition skipped, proceeding to executor`);
   }
 
   // Step 3.5: DRIFT DETECTION
