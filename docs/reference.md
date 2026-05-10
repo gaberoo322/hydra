@@ -203,3 +203,26 @@ export OTEL_EXPORTER_OTLP_HEADERS="signoz-ingestion-key=$(cat ~/.codex/signoz.ke
 ```
 
 You should get one trace per agent call (planner, executor, optionally fixer / high-risk-review), each carrying `resource.hydra.agent_role`, `resource.hydra.model_tier`, `resource.hydra.complexity`. Group by `resource.hydra.agent_role` for per-agent latency / token counts.
+
+## Modification Tiers (issue #243, ADR-0001 + ADR-0004)
+
+Every PR is classified into one of four tiers based on the files it touches. The classifier (`src/tier-classifier.ts`) is invoked by the `tier-gate` CI job and exposed at `GET /api/tier?files=a,b,c`.
+
+| Tier | Policy | Paths |
+|---|---|---|
+| **0 — Untouchable Core** | Operator-approved label required; CI blocks otherwise | See `src/untouchable.ts` (canonical list) |
+| **1 — Auto-merge, no holdback** | Ships if CI green | `config/agents/`, `config/feedback/` |
+| **2 — Auto-merge with outcome holdback** | Ships if CI green; auto-revert if Target Outcomes regress for 5 cycles (holdback impl is a follow-up issue) | `.claude/skills/`, `dashboard/`, `src/anchor-selection.ts` |
+| **3 — Operator review** | Default; operator merges | Everything else in `src/`, new agent roles, etc. |
+
+**Multi-file PRs:** Tier 0 short-circuits everything else. Otherwise the highest tier number wins (most operator scrutiny).
+
+**Tier 0 list (`UNTOUCHABLE_PATHS`):** `src/gate.ts` (proactive — protected before extraction), `src/grounding.ts`, `src/verification.ts`, `src/post-merge.ts`, `src/redis-adapter.ts`, `src/cost-cap.ts`, `src/control-loop.ts`, `scripts/deploy.sh`, `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/untouchable.ts`, `src/tier-classifier.ts`. Out-of-repo: `~/.local/bin/hydra-orchestrator-watchdog.sh` (the watchdog script — `gh pr diff` won't surface it, so it's protected by location rather than by the classifier).
+
+**The `operator-approved` label:** GitHub doesn't enforce per-user labels natively. The convention is that only the operator account (gaberoo322) applies it. The `tier-gate` CI job fails any Tier-0 PR without the label; merging anyway requires admin override, which only the operator has. Do not attempt CODEOWNERS-based simulation — keep the gate dumb and auditable.
+
+**Extending the Tier-2 list:** add a path to `TIER_2_PREFIXES` or `TIER_2_FILES` in `src/tier-classifier.ts`. Note: `src/tier-classifier.ts` is itself Tier 0, so the change requires `operator-approved`.
+
+**Adding a Tier-0 path:** modify `UNTOUCHABLE_PATHS` in `src/untouchable.ts`. Same self-protection — the file is in its own list.
+
+**CLI wrapper:** `npx tsx scripts/tier-classify.ts [--operator-approved] <file1> <file2> ...` prints JSON `{tier, reason, files, operatorApproved, perFile}` and exits 2 if Tier 0 without the flag, 0 otherwise. Accepts piped input (`gh pr diff --name-only N | npx tsx scripts/tier-classify.ts`).

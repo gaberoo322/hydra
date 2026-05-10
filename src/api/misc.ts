@@ -16,6 +16,7 @@ import {
 // for OPENVIKING_API_KEY in this file was the WRONG key (returned 401), so the
 // dashboard search proxy silently broke whenever the env var was absent.
 import { OPENVIKING_URL, OPENVIKING_API_KEY } from "../learning/ov-config.ts";
+import { classifyChange } from "../tier-classifier.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -64,6 +65,20 @@ export function createMiscRouter(eventBus: any) {
   // where the indexer is silently failing.
   router.get("/learning/coverage", (_req, res) => {
     res.json(getCoverageStats());
+  });
+
+  // GET /tier?files=a,b,c — Modification tier classification (issue #243,
+  // ADR-0004 work-order step 3). Used by autopilot/dashboard to know
+  // which merge policy applies to a proposed change.
+  router.get("/tier", (req, res) => {
+    const raw = req.query.files;
+    if (raw === undefined || raw === null) {
+      return res.status(400).json({ error: "Missing query parameter 'files' (comma-separated)" });
+    }
+    const list = Array.isArray(raw) ? raw.flatMap(s => String(s).split(",")) : String(raw).split(",");
+    const files = list.map(s => s.trim()).filter(s => s.length > 0);
+    const result = classifyChange(files);
+    res.json(result);
   });
 
   // GET /goals — Current project goals
