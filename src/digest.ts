@@ -132,6 +132,26 @@ function buildDigestMessage(events) {
     lines.push("");
   }
 
+  // Stuckness (issue #242) — surface outcomes that transitioned into stuck
+  // since the last digest. The detector only emits one event per transition,
+  // so each appearance here is a meaningful signal (not noise). When no
+  // outcomes fired we still print the heading so the operator can see the
+  // detector is alive — per CONTEXT.md "the bar is that the digest surfaces
+  // it before the operator has to ask".
+  const stucknessFired = events.filter(e => e.type === "outcomes.stuckness.fired");
+  lines.push("*Stuckness:*");
+  if (stucknessFired.length === 0) {
+    lines.push("• No outcomes stuck");
+  } else {
+    for (const e of stucknessFired) {
+      const name = e.payload?.outcome || "?";
+      const cycles = e.payload?.cyclesStuck ?? "?";
+      const threshold = e.payload?.threshold ?? "?";
+      lines.push(`• ${name} — stuck for ${cycles} cycles (threshold: ${threshold})`);
+    }
+  }
+  lines.push("");
+
   // Research
   const researchCompletes = events.filter(e => e.type === "research:completed");
   if (researchCompletes.length > 0) {
