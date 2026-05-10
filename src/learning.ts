@@ -22,12 +22,24 @@
  *   createCycleSession()     — control-loop.ts session creation
  */
 
-import { readFile, writeFile, unlink, readdir, stat } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { watch } from "node:fs";
-import { join, resolve, extname, relative, basename, dirname } from "node:path";
-import { tmpdir } from "node:os";
-import { createHash } from "node:crypto";
+import { join, resolve, extname, relative } from "node:path";
 import { redisKeys } from "./redis-keys.ts";
+import { indexFile, indexText } from "./learning/ov-upload.ts";
+import type { SourcePath } from "./learning/source-indexer.ts";
+import {
+  SOURCE_PATHS,
+  parseSourcePaths,
+  shouldIndexSource,
+  enumerateSourceFiles,
+  buildSourceTitle,
+  runSourceInitialPass,
+  makeSourceWatcher,
+  getCoverageStats,
+  resetCoverageStats,
+  setWatchedPaths,
+} from "./learning/source-indexer.ts";
 import {
   getRedisConnection,
   loadPatternsRaw,
@@ -73,42 +85,19 @@ const SKIP_DIRS = new Set([".git", "node_modules"]);
 const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
 const REDIS_POLL_MS = parseInt(process.env.INDEXER_POLL_MS as any) || 30000;
 
-// Issue #210: Source-file indexing. Indexer also watches src/ (*.ts) and
-// docs/ (*.md) so agents can semantically retrieve actual implementation
-// context, not just config + reports. Comma-separated list of <path>:<ext>
-// entries (extension is glob-less). Defaults to <hydra-root>/src:.ts and
-// <hydra-root>/docs:.md. Override with HYDRA_INDEX_SOURCE_PATHS.
-const HYDRA_ROOT_FOR_SOURCE = process.env.HYDRA_ROOT || resolve(process.env.HOME!, "hydra");
-const DEFAULT_SOURCE_SPEC = `${join(HYDRA_ROOT_FOR_SOURCE, "src")}:.ts,${join(HYDRA_ROOT_FOR_SOURCE, "docs")}:.md,${join(HYDRA_ROOT_FOR_SOURCE, "test")}:.mts`;
-export interface SourcePath {
-  root: string;
-  ext: string;
-}
-export function parseSourcePaths(spec: string): SourcePath[] {
-  const out: SourcePath[] = [];
-  if (!spec) return out;
-  for (const entry of spec.split(",").map(s => s.trim()).filter(Boolean)) {
-    const idx = entry.lastIndexOf(":");
-    if (idx <= 0) continue;
-    const root = entry.slice(0, idx);
-    let ext = entry.slice(idx + 1);
-    if (!root || !ext) continue;
-    if (!ext.startsWith(".")) ext = "." + ext;
-    out.push({ root, ext });
-  }
-  return out;
-}
-const SOURCE_PATHS: SourcePath[] = parseSourcePaths(
-  process.env.HYDRA_INDEX_SOURCE_PATHS || DEFAULT_SOURCE_SPEC
-);
-// Files modified within this window get the initial-index pass on startup.
-const SOURCE_INITIAL_WINDOW_MS = parseInt(process.env.HYDRA_INDEX_INITIAL_DAYS as any) > 0
-  ? parseInt(process.env.HYDRA_INDEX_INITIAL_DAYS as any) * 86400_000
-  : 7 * 86400_000;
-// Path-based dedup: tracks indexed source paths + content hash so we skip
-// re-uploading unchanged files. Resets on process restart (idempotent w.r.t.
-// content because OV uses the title as the resource key).
-const indexedSourceHashes = new Map<string, string>();
+// Source-file indexing now lives in src/learning/source-indexer.ts (issue #211).
+// Public symbols (parseSourcePaths, SourcePath, shouldIndexSource, etc.) are
+// re-exported below so existing imports of "./learning.ts" keep working.
+export type { SourcePath };
+export {
+  parseSourcePaths,
+  shouldIndexSource,
+  enumerateSourceFiles,
+  buildSourceTitle,
+  runSourceInitialPass,
+  getCoverageStats,
+  resetCoverageStats,
+};
 
 // ===========================================================================
 // Section: OV Search Metrics (in-memory, resets on restart)
@@ -1677,41 +1666,16 @@ async function registerSkills() {
 // ===========================================================================
 // Section: Private — Knowledge indexer (background process)
 // ===========================================================================
+//
+// Source-file indexing (issue #210) was extracted to src/learning/source-indexer.ts
+// and OV upload helpers to src/learning/ov-upload.ts as the first scope-trimmed
+// step of the broader split tracked in issue #211. Behavior is preserved:
+// startKnowledgeIndexer wires the same fs.watch + Redis poll surfaces as before,
+// just with the source-side helpers imported from the new module.
 
 const indexerPending = new Map<string, ReturnType<typeof setTimeout>>();
 let lastReportIndex = 0;
 let lastRuleCounts: Record<string, number> = {};
-
-// Issue #210: knowledge coverage stats for /api/learning/coverage
-interface CoverageStats {
-  resourceCount: number;
-  sourceFilesIndexed: number;
-  sourceFilesSkipped: number;
-  lastIndexAt: string | null;
-  watchedPaths: string[];
-}
-const coverageStats: CoverageStats = {
-  resourceCount: 0,
-  sourceFilesIndexed: 0,
-  sourceFilesSkipped: 0,
-  lastIndexAt: null,
-  watchedPaths: [],
-};
-export function getCoverageStats(): CoverageStats {
-  return {
-    ...coverageStats,
-    watchedPaths: [...coverageStats.watchedPaths],
-  };
-}
-// Test-only: reset coverage stats between tests.
-export function resetCoverageStats(): void {
-  coverageStats.resourceCount = 0;
-  coverageStats.sourceFilesIndexed = 0;
-  coverageStats.sourceFilesSkipped = 0;
-  coverageStats.lastIndexAt = null;
-  coverageStats.watchedPaths = [];
-  indexedSourceHashes.clear();
-}
 
 function shouldIndex(filePath: string): boolean {
   const rel = relative(CONFIG_PATH, filePath);
@@ -1719,220 +1683,6 @@ function shouldIndex(filePath: string): boolean {
     if (rel.startsWith(skip)) return false;
   }
   return INDEXABLE_EXTS.has(extname(filePath));
-}
-
-async function indexFile(filePath: string) {
-  const rel = relative(CONFIG_PATH, filePath);
-  const containerPath = join(OV_CONFIG_MOUNT, rel);
-  try {
-    const res = await fetch(`${OV_URL}/api/v1/resources`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Api-Key": OV_KEY },
-      body: JSON.stringify({ path: containerPath }),
-      signal: AbortSignal.timeout(60000),
-    });
-    if (res.ok) {
-      console.log(`[Learning:Indexer] Indexed file: ${rel}`);
-    } else {
-      const err = await res.text();
-      if (err.includes("not exist") || err.includes("ENOENT")) {
-        console.log(`[Learning:Indexer] Skipped (removed): ${rel}`);
-      } else {
-        console.error(`[Learning:Indexer] Failed to index ${rel}: ${err.slice(0, 200)}`);
-      }
-    }
-  } catch (err: any) {
-    console.error(`[Learning:Indexer] Failed to index ${rel}: ${err.message}`);
-  }
-}
-
-async function indexText(title: string, content: string) {
-  const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
-  const tmpFile = join(tmpdir(), `hydra-indexer-${safeName}-${Date.now()}.md`);
-  try {
-    await writeFile(tmpFile, `# ${title}\n\n${content}`, "utf-8");
-
-    const { readFile: rf } = await import("node:fs/promises");
-    const fileContent = await rf(tmpFile);
-    const formData = new FormData();
-    formData.append("file", new Blob([fileContent], { type: "text/markdown" }), `${safeName}.md`);
-
-    const uploadRes = await fetch(`${OV_URL}/api/v1/resources/temp_upload`, {
-      method: "POST",
-      headers: { "X-Api-Key": OV_KEY },
-      body: formData,
-      signal: AbortSignal.timeout(30000),
-    });
-
-    if (uploadRes.ok) {
-      const uploadData = await uploadRes.json() as any;
-      const tempPath = uploadData.temp_path || uploadData.path;
-
-      if (tempPath) {
-        const addRes = await fetch(`${OV_URL}/api/v1/resources`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Api-Key": OV_KEY },
-          body: JSON.stringify({ temp_path: tempPath, to: `viking://resources/hydra-memory/${safeName}` }),
-          signal: AbortSignal.timeout(60000),
-        });
-        if (addRes.ok) {
-          console.log(`[Learning:Indexer] Indexed text: ${title}`);
-        } else {
-          console.error(`[Learning:Indexer] Failed to add text "${title}": ${(await addRes.text()).slice(0, 200)}`);
-        }
-      }
-    } else {
-      console.error(`[Learning:Indexer] Failed to upload text "${title}": ${(await uploadRes.text()).slice(0, 200)}`);
-    }
-  } catch (err: any) {
-    console.error(`[Learning:Indexer] Failed to index text "${title}": ${err.message}`);
-  } finally {
-    await unlink(tmpFile).catch(() => { /* intentional: best-effort temp file cleanup */ });
-  }
-}
-
-// Issue #210: Source-file indexing helpers.
-// shouldIndexSource is exported for testing.
-export function shouldIndexSource(filePath: string, source: SourcePath): boolean {
-  if (!filePath.startsWith(source.root)) return false;
-  if (extname(filePath) !== source.ext) return false;
-  const rel = relative(source.root, filePath);
-  for (const skip of SKIP_DIRS) {
-    if (rel === skip || rel.startsWith(skip + "/")) return false;
-  }
-  // Skip dist/build/coverage and dotfile dirs commonly under src trees.
-  if (/(^|\/)(dist|build|coverage|\.next|\.vite|\.cache)(\/|$)/.test(rel)) return false;
-  return true;
-}
-
-// Recursively enumerate files under root, skipping standard ignore dirs and
-// matching the configured extension. Exported for tests.
-export async function enumerateSourceFiles(source: SourcePath, maxFiles = 2000): Promise<string[]> {
-  const out: string[] = [];
-  async function walk(dir: string): Promise<void> {
-    if (out.length >= maxFiles) return;
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (err: any) {
-      // Missing directory is fine — operator may not have docs/ for example.
-      if (err.code !== "ENOENT") {
-        console.error(`[Learning:Indexer] readdir failed for ${dir}: ${err.message}`);
-      }
-      return;
-    }
-    for (const entry of entries) {
-      if (out.length >= maxFiles) return;
-      if (SKIP_DIRS.has(entry.name)) continue;
-      if (entry.name.startsWith(".")) continue;
-      if (entry.name === "dist" || entry.name === "build" || entry.name === "coverage") continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(full);
-      } else if (entry.isFile() && shouldIndexSource(full, source)) {
-        out.push(full);
-      }
-    }
-  }
-  await walk(source.root);
-  return out;
-}
-
-// Build a stable, OV-friendly title from an absolute source path.
-// The OV resource title acts as a logical key; same title -> overwrite.
-export function buildSourceTitle(filePath: string, source: SourcePath): string {
-  const rel = relative(source.root, filePath);
-  const folder = basename(source.root);
-  const slug = `${folder}/${rel}`.replace(/\//g, "__");
-  return `hydra-source:${slug}`;
-}
-
-async function indexSourceFile(filePath: string, source: SourcePath): Promise<"indexed" | "skipped" | "error"> {
-  let content: string;
-  try {
-    content = await readFile(filePath, "utf-8");
-  } catch (err: any) {
-    if (err.code !== "ENOENT") {
-      console.error(`[Learning:Indexer] readFile failed for ${filePath}: ${err.message}`);
-    }
-    return "error";
-  }
-  // Cap individual file size to keep payload reasonable (~256KB).
-  const MAX_BYTES = 256 * 1024;
-  if (content.length > MAX_BYTES) {
-    content = content.slice(0, MAX_BYTES) + `\n\n... [truncated at ${MAX_BYTES} bytes]`;
-  }
-  const hash = createHash("sha1").update(content).digest("hex");
-  const prev = indexedSourceHashes.get(filePath);
-  if (prev === hash) {
-    coverageStats.sourceFilesSkipped++;
-    return "skipped";
-  }
-  const title = buildSourceTitle(filePath, source);
-  const rel = relative(source.root, filePath);
-  const folder = basename(source.root);
-  const header = `# ${folder}/${rel}\n\n_Indexed source file (sha1=${hash.slice(0, 12)})._\n\n`;
-  // Reuse indexText machinery for upload.
-  await indexText(title, `${header}\`\`\`\n${content}\n\`\`\``);
-  indexedSourceHashes.set(filePath, hash);
-  coverageStats.sourceFilesIndexed++;
-  coverageStats.resourceCount++;
-  coverageStats.lastIndexAt = new Date().toISOString();
-  return "indexed";
-}
-
-// Initial-index pass: enumerate, filter to recently-modified, upload missing.
-// Returns counts for tests + logging. Idempotent across restarts (hash-based).
-export async function runSourceInitialPass(opts: {
-  paths?: SourcePath[];
-  windowMs?: number;
-  now?: number;
-} = {}): Promise<{ scanned: number; indexed: number; skipped: number }> {
-  const paths = opts.paths ?? SOURCE_PATHS;
-  const windowMs = opts.windowMs ?? SOURCE_INITIAL_WINDOW_MS;
-  const now = opts.now ?? Date.now();
-  let scanned = 0;
-  let indexed = 0;
-  let skipped = 0;
-  for (const source of paths) {
-    const files = await enumerateSourceFiles(source);
-    for (const file of files) {
-      scanned++;
-      let mtimeMs: number;
-      try {
-        const s = await stat(file);
-        mtimeMs = s.mtimeMs;
-      } catch {
-        continue;
-      }
-      if (now - mtimeMs > windowMs) {
-        skipped++;
-        continue;
-      }
-      const result = await indexSourceFile(file, source);
-      if (result === "indexed") indexed++;
-      else if (result === "skipped") skipped++;
-    }
-  }
-  return { scanned, indexed, skipped };
-}
-
-function makeSourceWatcher(source: SourcePath) {
-  return (_eventType: string, filename: string | null) => {
-    if (!filename) return;
-    const fullPath = resolve(source.root, filename);
-    if (!shouldIndexSource(fullPath, source)) return;
-    if (indexerPending.has(fullPath)) clearTimeout(indexerPending.get(fullPath)!);
-    indexerPending.set(
-      fullPath,
-      setTimeout(() => {
-        indexerPending.delete(fullPath);
-        indexSourceFile(fullPath, source).catch((err: any) =>
-          console.error(`[Learning:Indexer] Source change index failed for ${fullPath}: ${err.message}`)
-        );
-      }, DEBOUNCE_MS)
-    );
-  };
 }
 
 function onFileChange(_eventType: string, filename: string | null) {
@@ -1993,7 +1743,7 @@ function startKnowledgeIndexer() {
   console.log(`[Learning:Indexer] Watching configs: ${CONFIG_PATH}`);
   console.log(`[Learning:Indexer] Polling Redis every ${REDIS_POLL_MS / 1000}s`);
 
-  coverageStats.watchedPaths = [CONFIG_PATH, ...SOURCE_PATHS.map(s => `${s.root}(${s.ext})`)];
+  setWatchedPaths([CONFIG_PATH, ...SOURCE_PATHS.map(s => `${s.root}(${s.ext})`)]);
 
   // Watch config files
   try {
@@ -2003,10 +1753,12 @@ function startKnowledgeIndexer() {
   }
 
   // Issue #210: Watch source paths (src/, docs/, test/) so agents can
-  // semantically retrieve actual implementation context.
+  // semantically retrieve actual implementation context. The watcher
+  // shares indexerPending with the config watcher so debounce dedup
+  // is global across both surfaces.
   for (const source of SOURCE_PATHS) {
     try {
-      watch(source.root, { recursive: true }, makeSourceWatcher(source));
+      watch(source.root, { recursive: true }, makeSourceWatcher(source, indexerPending, DEBOUNCE_MS));
       console.log(`[Learning:Indexer] Watching source: ${source.root} (${source.ext})`);
     } catch (err: any) {
       // ENOENT for missing dir is non-fatal (e.g. docs/ may not exist).
