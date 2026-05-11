@@ -15,6 +15,7 @@ import { setAgentStreamCallback } from "./codex-runner.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { startCodeReviewerLoop } from "./code-reviewer.ts";
 import { cleanWorkQueue } from "./redis-adapter.ts";
+import { recordCycleSide, classifySide } from "./capacity-floor.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 
 import { createServer } from "node:net";
@@ -88,6 +89,25 @@ function startConsumers(eventBus) {
   startConsumerWithRecovery("notifications", () =>
     eventBus.consume(STREAMS.NOTIFICATIONS, "openclaw", `notify-${process.pid}`, async (event) => {
       recordEvent(event);
+
+      // Issue #245: stamp each completed cycle's "side" in the capacity-floor
+      // history so autopilot can enforce the 25% orchestrator self-improvement
+      // floor. Codex cycles only ever merge against the target workspace, but
+      // we still run classifySide() so the call site stays honest if that
+      // ever changes (e.g. mixed-repo cycles). Best-effort — recordCycleSide
+      // swallows its own errors so digest/alerting can never break a cycle.
+      if (event.type === "cycle:completed") {
+        const p = event.payload || {};
+        const finalState = p.task?.finalState;
+        const files: string[] = Array.isArray(p.filesChanged) ? p.filesChanged : [];
+        const isMerged = (finalState === "merged") && !p.rolledBack;
+        const side = isMerged ? classifySide(files, { workspaceHint: "target" }) : "idle";
+        await recordCycleSide(p.cycleId || event.correlationId || `evt-${Date.now()}`, side, {
+          commitSha: p.commitSha || undefined,
+          filesChanged: files.length > 0 ? files.slice(0, 50) : undefined,
+          source: "cycle-completed-listener",
+        });
+      }
 
       // Persist important events as dashboard alerts
       if (ALERT_TYPES.has(event.type)) {

@@ -40,7 +40,6 @@ import { trackMergedCommit, _internal as _verificationInternal } from "./verific
 import { PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 import { getTargetServiceName } from "./target-config.ts";
-import { recordCycleSide, classifySide } from "./capacity-floor.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -478,21 +477,6 @@ export async function runPostMerge(
     const calOutcome = (commitSha && !rolledBack) ? "merged" : "failed";
     await recordCalibrationOutcome(cycleId, anchor, anchorConfidence, calOutcome);
   }
-
-  // Issue #245: stamp this cycle's "side" in the capacity-floor history so
-  // autopilot can enforce the 25% orchestrator self-improvement floor. The
-  // Codex control loop only ever merges into the target workspace, but we
-  // run it through classifySide() so the call site stays honest if that
-  // ever changes (e.g. mixed-repo cycles).
-  const sideFilesChanged: string[] = Array.isArray(verification.filesChanged) ? verification.filesChanged : [];
-  const cycleSide = (commitSha && !rolledBack && !isNoOpMerge)
-    ? classifySide(sideFilesChanged, { workspaceHint: "target" })
-    : "idle";
-  await recordCycleSide(cycleId, cycleSide, {
-    commitSha: commitSha || undefined,
-    filesChanged: sideFilesChanged.length > 0 ? sideFilesChanged.slice(0, 50) : undefined,
-    source: "post-merge",
-  });
 
   // Step 8.1: Pattern detection
   await detectPatterns(eventBus, cycleId);
