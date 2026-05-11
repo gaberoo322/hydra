@@ -111,6 +111,33 @@ export interface PostMergeResult {
 }
 
 /**
+ * Compute the `qualityGateCoverage` boolean (issue #272).
+ *
+ * True iff EITHER:
+ *   - the mutation gate actually executed (mutationDecision === "ran"), OR
+ *   - the JIT gate produced real output (kept any tests, caught a bug, or
+ *     errored after running — anything non-skip)
+ *
+ * False for skip / no-mutants / cost-cap / error cases on both sides — those
+ * are the cycles the aggregate dashboard wants to surface as "no real gate".
+ *
+ * Pure function — exported for unit testing.
+ */
+export function computeQualityGateCoverage(
+  mutationDecision: string | undefined,
+  jitReport: any,
+): boolean {
+  const mutationRan = mutationDecision === "ran";
+  // JIT "ran" outcomes start with "ran:" (see jit.ts decision strings).
+  // Skip outcomes start with "skipped:"; errors with "error".
+  const jitDecision: string | undefined = typeof jitReport?.decision === "string"
+    ? jitReport.decision
+    : undefined;
+  const jitRan = typeof jitDecision === "string" && jitDecision.startsWith("ran");
+  return mutationRan || jitRan;
+}
+
+/**
  * Run all post-merge steps (step 8 and beyond).
  *
  * @param ctx            — shared cycle context
@@ -145,6 +172,10 @@ export async function runPostMerge(
   scopeFilterCleaned = 0,
   fixerUsed = false,
   fixerResolved = false,
+  // Issue #272: optional gate observability — surfaces "why didn't the gate
+  // run?" (mutationDecision) and "what was looked at?" (filesInspected) in
+  // cycle metrics. Defaulted so callers from before #272 stay compatible.
+  qualityGateMeta: { mutationDecision?: string; mutationFilesInspected?: string[] } = {},
 ): Promise<PostMergeResult> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor, anchorConfidence } = ctx;
   const tracker = getTracker();
@@ -474,6 +505,15 @@ export async function runPostMerge(
     // Quality gate trend fields (issue #212)
     mutationsTested,
     gateBlocked: 0,
+    // Issue #272: gate-coverage observability. mutationDecision tells the
+    // operator why the gate did/didn't run; qualityGateCoverage is the
+    // headline boolean ("did either gate actually do useful work?") that
+    // backs the aggregate target of >50% (vs ~5% before #272).
+    mutationDecision: qualityGateMeta.mutationDecision ?? (mutationReport ? "ran" : "skipped: no files changed"),
+    mutationFilesInspected: Array.isArray(qualityGateMeta.mutationFilesInspected)
+      ? qualityGateMeta.mutationFilesInspected.join(",")
+      : "",
+    qualityGateCoverage: computeQualityGateCoverage(qualityGateMeta.mutationDecision, jitReport) ? "true" : "false",
     fixerUsed: fixerUsed ? 1 : 0,
     fixerResolved: fixerResolved ? 1 : 0,
     scopeFilterCleaned,
