@@ -83,6 +83,10 @@ export async function getMetricsTrend(count = 20) {
     if (parsed.regressionIntroduced !== undefined) {
       parsed.regressionIntroduced = parsed.regressionIntroduced === "true";
     }
+    // Issue #272: gate-coverage observability — string "true"/"false" in Redis.
+    if (parsed.qualityGateCoverage !== undefined) {
+      parsed.qualityGateCoverage = parsed.qualityGateCoverage === "true";
+    }
 
     results.push(parsed);
   }
@@ -219,6 +223,16 @@ export async function getAggregateStats(count = 20) {
     anchorDist[at] = (anchorDist[at] || 0) + 1;
   }
 
+  // Issue #272: qualityGateCoverage — fraction of cycles where the mutation
+  // OR JIT gate actually ran. Pre-#272 cycles lack the field, so they're
+  // excluded from the denominator (cyclesWithCoverageData) so legacy data
+  // doesn't drag the rate to zero. Target is >50% on the new path.
+  const coverageSamples = trend.filter((m) => typeof m.qualityGateCoverage === "boolean");
+  const coverageCovered = coverageSamples.filter((m) => m.qualityGateCoverage === true).length;
+  const qualityGateCoverageRate = coverageSamples.length > 0
+    ? Math.round((coverageCovered / coverageSamples.length) * 100)
+    : null;
+
   return {
     cycles: total,
     mergedRate: Math.round((merged / total) * 100),
@@ -241,6 +255,10 @@ export async function getAggregateStats(count = 20) {
     // All tasks in V2 are anchored by design
     anchoredRate: 100,
     verifiedCompletionRate: merged > 0 ? 100 : 0,
+    // Issue #272: gate-coverage rate (null when no samples have the field).
+    qualityGateCoverageRate,
+    qualityGateCoverageSamples: coverageSamples.length,
+    qualityGateCoverageCovered: coverageCovered,
   };
 }
 

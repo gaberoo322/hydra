@@ -67,6 +67,18 @@ export interface VerificationResult {
   fixerUsed: boolean;
   /** Whether the fixer agent resolved the verification failure */
   fixerResolved: boolean;
+  /**
+   * Mutation gate decision string (issue #272).
+   *   - "ran"                          — mutation gate executed
+   *   - "no-mutants"                   — too few testable mutants (<3)
+   *   - "cost-cap-skip"                — cycle already at cost cap
+   *   - "skipped: no files changed"    — verification produced empty diff
+   *   - "skipped: verification failed" — verification didn't reach the gate
+   *   - "error"                        — mutation runner threw
+   */
+  mutationDecision: string;
+  /** Files inspected by the mutation gate (issue #272 — observability for "no-mutants" case). */
+  mutationFilesInspected: string[];
   /** If failed, the early return value for the caller */
   earlyReturn?: any;
 }
@@ -147,7 +159,7 @@ export async function verify(
 
   if (!verification.allPassed) {
     const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, fixerSkipped, fixerCategory);
-    return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, earlyReturn };
+    return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], earlyReturn };
   }
 
   // =========================================================================
@@ -175,7 +187,7 @@ export async function verify(
         };
         verification.steps.push(syntheticStep);
         const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
-        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, earlyReturn };
+        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], earlyReturn };
       }
     }
   }
@@ -205,20 +217,32 @@ export async function verify(
 
   // =========================================================================
   // Step 6.7: MUTATION TESTING — coverage quality gate
+  //
+  // Issue #272: quick-fix cycles now run a reduced mutation budget instead of
+  // skipping outright. mutationDecision surfaces the per-cycle outcome
+  // ("ran" / "no-mutants" / "cost-cap-skip" / "skipped: no files changed").
   // =========================================================================
   let mutationReport: any = null;
+  let mutationDecision: string = "skipped: no files changed";
+  let mutationFilesInspected: string[] = [];
   if (verification.filesChanged?.length > 0) {
     const mutResult = await runMutationGate(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
     if (mutResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport: mutResult.report, jitReport: null, fixerUsed, fixerResolved, earlyReturn: mutResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport: mutResult.report, jitReport: null, fixerUsed, fixerResolved, mutationDecision: mutResult.decision, mutationFilesInspected: mutResult.filesInspected, earlyReturn: mutResult.earlyReturn };
     }
     mutationReport = mutResult.report;
+    mutationDecision = mutResult.decision;
+    mutationFilesInspected = mutResult.filesInspected;
   }
 
   // =========================================================================
   // Step 6.8: DIFF-AWARE TEST GENERATION (mutation-survivor-aware)
+  //
+  // Issue #272: mutation-aware JIT now runs on quick-fix too when survivors
+  // are present — small diffs can still have uncovered behavior worth
+  // catching, and the gate cost is bounded by survivor count.
   // =========================================================================
-  if (mutationReport?.survived > 0 && complexity !== "quick-fix") {
+  if (mutationReport?.survived > 0) {
     verification = await runMutationAwareJitTests(ctx, task, verification, verificationPlan, mutationReport, taskId, runVerification);
   }
 
@@ -229,7 +253,7 @@ export async function verify(
   if (complexity !== "quick-fix" && diff && verification.filesChanged?.length > 0) {
     const jitResult = await runDiffAwareJitTests(ctx, task, verification, verificationPlan, diff, execResult, complexity, filesInScope, criteriaCount, taskId, runVerification, mutationReport);
     if (jitResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, earlyReturn: jitResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, earlyReturn: jitResult.earlyReturn };
     }
     jitReport = jitResult.report;
     if (jitResult.updatedVerification) {
@@ -252,11 +276,11 @@ export async function verify(
   if (task.scopeBoundary?.in?.length > 0 && verification.filesChanged?.length > 0) {
     const scopeResult = await runScopeEnforcement(ctx, task, verification, taskId);
     if (scopeResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, earlyReturn: scopeResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, earlyReturn: scopeResult.earlyReturn };
     }
   }
 
-  return { passed: true, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved };
+  return { passed: true, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected };
 }
 
 // ---------------------------------------------------------------------------

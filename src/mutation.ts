@@ -33,6 +33,48 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_TIME_BUDGET_MS = 120_000;
 const MT_TEST_TIMEOUT_MS = 45_000;
 
+// Issue #272: quick-fix mutation budget — small diffs deserve a cheap gate
+// instead of being skipped outright. Kept loose (capped mutants + lower
+// kill-rate threshold) so trivial changes don't fail spuriously.
+const QUICKFIX_MAX_MUTANTS = 10;
+const QUICKFIX_TIME_BUDGET_MS = 60_000;
+const DEFAULT_QUICKFIX_KILL_THRESHOLD = 50;
+const DEFAULT_STANDARD_KILL_THRESHOLD = 30;
+
+/**
+ * Mutation decision strings (issue #272) — observable reason recorded in
+ * cycle metrics so dashboards can answer "did the mutation gate run?".
+ *
+ * Values are stable strings, mirroring jit.ts decision conventions.
+ */
+export const MUTATION_DECISION = {
+  RAN: "ran",
+  NO_MUTANTS: "no-mutants",
+  COST_CAP_SKIP: "cost-cap-skip",
+  NO_FILES: "skipped: no files changed",
+  ERROR: "error",
+} as const;
+
+export type MutationDecision = typeof MUTATION_DECISION[keyof typeof MUTATION_DECISION];
+
+/**
+ * Resolve the quick-fix kill-rate threshold from env (issue #272).
+ * Looser than the standard gate (default 30) — small diffs typically
+ * have fewer mutants so 50% is the right floor.
+ *
+ * Pure function — re-reads env each call so tests can mutate without
+ * service restart.
+ */
+export function getQuickFixKillThreshold(): number {
+  const raw = process.env.MUTATION_QUICKFIX_THRESHOLD;
+  if (raw === undefined || raw === "") return DEFAULT_QUICKFIX_KILL_THRESHOLD;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    return DEFAULT_QUICKFIX_KILL_THRESHOLD;
+  }
+  return parsed;
+}
+
 // Files we never mutate
 export const SKIP_PATTERNS = [
   /\.test\.[jt]sx?$/,
@@ -181,10 +223,15 @@ export function generateMutations(filePath: string, content: string): Mutation[]
 export async function runMutationTests(
   projectDir: string,
   changedFiles: string[],
-  opts: { timeBudgetMs?: number; testCommand?: string } = {},
+  opts: { timeBudgetMs?: number; testCommand?: string; maxMutants?: number } = {},
 ): Promise<MutationTestReport> {
   const timeBudget = opts.timeBudgetMs || DEFAULT_TIME_BUDGET_MS;
   const testCommand = opts.testCommand || "npm test";
+  // Issue #272: optional cap on candidate mutants — used by the quick-fix
+  // path to keep the mutation run cheap (<60s) for thin diffs.
+  const maxMutants = typeof opts.maxMutants === "number" && opts.maxMutants > 0
+    ? opts.maxMutants
+    : Infinity;
   const start = Date.now();
 
   const results: MutationResult[] = [];
@@ -224,9 +271,16 @@ export async function runMutationTests(
     [allMutations[i], allMutations[j]] = [allMutations[j], allMutations[i]];
   }
 
+  // Issue #272: cap candidate list so quick-fix runs stay cheap. Applied
+  // AFTER the shuffle so the sample is representative, not biased toward
+  // the first files in the diff.
+  const candidates = Number.isFinite(maxMutants)
+    ? allMutations.slice(0, maxMutants)
+    : allMutations;
+
   let timedOut = false;
 
-  for (const mutation of allMutations) {
+  for (const mutation of candidates) {
     if (Date.now() - start > timeBudget) {
       timedOut = true;
       break;
@@ -319,29 +373,74 @@ export function summarizeMutationTests(report: MutationTestReport): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Run the mutation testing quality gate. Blocks merge when kill rate
- * is critically low on non-trivial tasks.
+ * Decide if the mutation pass should be skipped because the cycle has
+ * already exceeded its per-cycle cost cap (issue #272 implementation note).
  *
- * Never throws — returns { report, earlyReturn? }.
+ * Pure(-ish) helper — reads the cap via cost-cap.ts (which reads env). Kept
+ * separate so tests can override via env without touching control-loop wiring.
+ */
+async function shouldSkipForCostCap(cycleId: string): Promise<boolean> {
+  try {
+    const { checkCostCap } = await import("./cost-cap.ts");
+    const status = await checkCostCap(cycleId);
+    return status.exceeded;
+  } catch { /* intentional: cost cap is best-effort; never block mutation on a cap-check error */
+    return false;
+  }
+}
+
+/**
+ * Run the mutation testing quality gate. Blocks merge when kill rate
+ * is critically low.
+ *
+ * Issue #272: quick-fix cycles now run a reduced mutation budget instead of
+ * skipping outright, with a looser (configurable) kill-rate threshold. The
+ * gate result includes a `decision` string for observability and a
+ * `filesInspected` list when no mutants were generated.
+ *
+ * Never throws — returns { report, decision, filesInspected, earlyReturn? }.
  */
 export async function runMutationGate(
   ctx: CycleContext, task: any, verification: any, execResult: any,
   complexity: string, filesInScope: number, criteriaCount: number, taskId: string,
-): Promise<{ report: any; earlyReturn?: any }> {
+): Promise<{ report: any; decision: MutationDecision; filesInspected: string[]; earlyReturn?: any }> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
   const tracker = getTracker();
 
-  console.log(`[ControlLoop] Step 6.7: Running mutation tests on ${verification.filesChanged.length} changed files...`);
+  const isQuickFix = complexity === "quick-fix";
+  const inspectable = verification.filesChanged.filter((f: string) => !shouldSkipMutation(f));
+
+  // Issue #272: short-circuit if the cycle is already at the cost cap.
+  // Don't burn another mutation budget on something the operator has capped.
+  if (await shouldSkipForCostCap(cycleId)) {
+    console.log(`[ControlLoop] Step 6.7: Mutation gate skipped — cycle at cost cap`);
+    return { report: null, decision: MUTATION_DECISION.COST_CAP_SKIP, filesInspected: inspectable };
+  }
+
+  const budgetMs = isQuickFix ? QUICKFIX_TIME_BUDGET_MS : 60_000;
+  const maxMutants = isQuickFix ? QUICKFIX_MAX_MUTANTS : undefined;
+  const killThreshold = isQuickFix ? getQuickFixKillThreshold() : DEFAULT_STANDARD_KILL_THRESHOLD;
+
+  console.log(`[ControlLoop] Step 6.7: Running mutation tests on ${verification.filesChanged.length} changed files${isQuickFix ? ` (quick-fix budget: ${QUICKFIX_MAX_MUTANTS} mutants, ${QUICKFIX_TIME_BUDGET_MS}ms)` : ""}...`);
   try {
     const mutationReport = await runMutationTests(PROJECT_WORKSPACE, verification.filesChanged, {
-      timeBudgetMs: 60_000,
+      timeBudgetMs: budgetMs,
       testCommand: "npm test",
+      maxMutants,
     });
     const testable = mutationReport.totalMutants - mutationReport.skipped;
     const killRate = testable > 0
       ? Math.round((mutationReport.killed / testable) * 100)
       : 100;
     console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${testable} killed, ${mutationReport.survived} survived)`);
+
+    // Issue #272: testable < 3 → no usable signal. Surface the file list that
+    // was inspected so the operator can see exactly what was looked at.
+    if (testable < 3) {
+      console.log(`[ControlLoop] Mutation testing: no testable mutants (testable=${testable}). Inspected files: ${inspectable.join(", ") || "(none)"}`);
+      return { report: mutationReport, decision: MUTATION_DECISION.NO_MUTANTS, filesInspected: inspectable };
+    }
+
     if (mutationReport.survived > 0) {
       console.log(`[ControlLoop] ${mutationReport.survived} surviving mutants — executor's tests may not cover changed behavior`);
       for (const s of mutationReport.survivors.slice(0, 3)) {
@@ -349,10 +448,11 @@ export async function runMutationGate(
       }
     }
 
-    // Hard gate: block merge when kill rate is critically low on non-trivial tasks
-    const MUTATION_KILL_THRESHOLD = 30;
-    if (complexity !== "quick-fix" && testable >= 3 && killRate < MUTATION_KILL_THRESHOLD) {
-      console.error(`[ControlLoop] MUTATION GATE: kill rate ${killRate}% < ${MUTATION_KILL_THRESHOLD}% threshold — blocking merge`);
+    // Hard gate: block merge when kill rate is below threshold.
+    // Quick-fix uses a looser configurable threshold (MUTATION_QUICKFIX_THRESHOLD,
+    // default 50); standard/complex/high-risk use DEFAULT_STANDARD_KILL_THRESHOLD (30).
+    if (killRate < killThreshold) {
+      console.error(`[ControlLoop] MUTATION GATE: kill rate ${killRate}% < ${killThreshold}% threshold (${complexity}) — blocking merge`);
       await tracker.transitionTask(taskId, "failed", { reason: `Mutation gate: ${killRate}% kill rate (${mutationReport.survived} survivors)` });
       await recordOutcome({
         agents: ["planner"],
@@ -386,6 +486,8 @@ export async function runMutationGate(
       });
       return {
         report: mutationReport,
+        decision: MUTATION_DECISION.RAN,
+        filesInspected: inspectable,
         earlyReturn: {
           cycleId,
           tasks: [{ taskId, finalState: "failed", reason: `Mutation gate: ${killRate}% kill rate` }],
@@ -394,9 +496,9 @@ export async function runMutationGate(
       };
     }
 
-    return { report: mutationReport };
+    return { report: mutationReport, decision: MUTATION_DECISION.RAN, filesInspected: inspectable };
   } catch (err: any) {
     console.error(`[ControlLoop] Mutation testing failed (non-fatal): ${err.message}`);
-    return { report: null };
+    return { report: null, decision: MUTATION_DECISION.ERROR, filesInspected: inspectable };
   }
 }
