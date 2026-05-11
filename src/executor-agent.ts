@@ -17,10 +17,11 @@ import { runAgent, findPersonality, getExecutorTimeout } from "./codex-runner.ts
 import { getTracker } from "./task-tracker.ts";
 import { getContext } from "./learning.ts";
 import { generateRepoMap } from "./repo-map.ts";
+import { getTargetWorkspace, getTargetWorktreePrefix } from "./target-config.ts";
 
 const execFileAsync = promisify(execFile);
 
-const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
+const PROJECT_WORKSPACE = getTargetWorkspace();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -194,7 +195,7 @@ export async function runExecutorAgent(
   // from shared workspace state (formatting artifacts, operator changes).
   const branchName = `feature/${cycleId}-slug`;
   const worktreeBase = process.env.HYDRA_WORKTREE_DIR || "/dev/shm/hydra-worktrees";
-  const worktreePath = join(worktreeBase, `hydra-betting-worktree-${cycleId}`);
+  const worktreePath = join(worktreeBase, `${getTargetWorktreePrefix()}-${cycleId}`);
   let useWorktree = false;
   try {
     await execFileAsync("git", ["worktree", "add", "-b", branchName, worktreePath, "main"], {

@@ -39,6 +39,7 @@ import { markTaskComplete } from "./specs.ts";
 import { trackMergedCommit, _internal as _verificationInternal } from "./verification.ts";
 import { PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
+import { getTargetServiceName } from "./target-config.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,7 +52,7 @@ const SOURCE_PRIORITIES_PATH = resolve(CONFIG_PATH, "direction", "priorities.md"
 
 /**
  * Sync the orchestrator's priorities.md to the target project's direction/ folder.
- * This keeps ~/hydra-betting/direction/priorities.md current without requiring
+ * This keeps the target's direction/priorities.md current without requiring
  * a separate refresh agent run.
  */
 async function syncTargetPriorities(): Promise<void> {
@@ -168,10 +169,11 @@ export async function runPostMerge(
 
     // Restart the web service so it picks up the new build artifacts.
     try {
-      await execFileAsync("systemctl", ["--user", "restart", "hydra-betting-web.service"], { timeout: 120_000 });
-      console.log(`[ControlLoop] Restarted hydra-betting-web.service after merge`);
+      const serviceName = getTargetServiceName();
+      await execFileAsync("systemctl", ["--user", "restart", serviceName], { timeout: 120_000 });
+      console.log(`[ControlLoop] Restarted ${serviceName} after merge`);
     } catch (restartErr: any) {
-      console.error(`[ControlLoop] Failed to restart hydra-betting-web.service: ${restartErr.message}`);
+      console.error(`[ControlLoop] Failed to restart ${getTargetServiceName()}: ${restartErr.message}`);
     }
   } else {
     console.error(`[ControlLoop] Merge failed: ${mergeResult.error}`);
@@ -529,9 +531,9 @@ export async function runPostMerge(
 
   // =========================================================================
   // Step 8.6: SYNC TARGET PRIORITIES
-  // Keep ~/hydra-betting/direction/priorities.md in sync with the orchestrator's
-  // canonical priorities after every merge. This ensures the target repo's
-  // direction doc stays current for operator visibility.
+  // Keep the target project's direction/priorities.md in sync with the
+  // orchestrator's canonical priorities after every merge. This ensures the
+  // target repo's direction doc stays current for operator visibility.
   // =========================================================================
   if (finalState === "merged") {
     try {

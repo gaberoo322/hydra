@@ -17,9 +17,9 @@
 
 import { readFile } from "node:fs/promises";
 import { join, dirname, basename, extname } from "node:path";
+import { getTargetWorkspace } from "./target-config.ts";
 
-const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE
-  || (process.env.HOME ? join(process.env.HOME, "hydra-betting") : "");
+const PROJECT_WORKSPACE = getTargetWorkspace();
 
 // Thresholds — tune these based on experience
 const LARGE_FILE_LINES = 400;

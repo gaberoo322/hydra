@@ -18,6 +18,7 @@ import {
   listLen, getMemoryPatterns, scanKeys, redisInfo as getRedisInfo,
   getWorkQueueLen,
 } from "../redis-adapter.ts";
+import { getTargetServiceName } from "../target-config.ts";
 // Issue #231: shared OV credential — health probe must use the same key as agent searches.
 import { OPENVIKING_API_KEY } from "../learning/ov-config.ts";
 
@@ -101,7 +102,7 @@ export function createHealthRouter(eventBus: any) {
       /* 9 */ execFileAsync("free", ["-b"], { timeout: 3000 }).catch(() => null),
       /* 10 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 11 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
-      /* 12 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-betting-web.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
+      /* 12 */ execFileAsync("systemctl", ["--user", "is-active", getTargetServiceName()], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 13 */ (async () => {
         const [p, e, s] = await Promise.all([getMemoryPatterns("planner"), getMemoryPatterns("executor"), getMemoryPatterns("skeptic")]);
         const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };

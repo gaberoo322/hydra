@@ -17,6 +17,7 @@ import {
 // dashboard search proxy silently broke whenever the env var was absent.
 import { OPENVIKING_URL, OPENVIKING_API_KEY } from "../learning/ov-config.ts";
 import { classifyChange } from "../tier-classifier.ts";
+import { getTargetName, getTargetWorkspace } from "../target-config.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -397,7 +398,7 @@ export function createMiscRouter(eventBus: any) {
       const data = await response.json();
       res.status(response.status).json(data);
     } catch (err: any) {
-      res.status(502).json({ error: `hydra-betting unavailable: ${err.message}` });
+      res.status(502).json({ error: `${getTargetName()} unavailable: ${err.message}` });
     }
   });
 
@@ -407,7 +408,7 @@ export function createMiscRouter(eventBus: any) {
       const data = await response.json();
       res.status(response.status).json(data);
     } catch (err: any) {
-      res.status(502).json({ error: `hydra-betting unavailable: ${err.message}` });
+      res.status(502).json({ error: `${getTargetName()} unavailable: ${err.message}` });
     }
   });
 
@@ -417,7 +418,7 @@ export function createMiscRouter(eventBus: any) {
 
   const ENV_PROJECTS: Record<string, string> = {
     hydra: resolve(process.env.HOME || "", "hydra", ".env"),
-    "hydra-betting": resolve(process.env.HOME || "", "hydra-betting", ".env.local"),
+    [getTargetName()]: resolve(getTargetWorkspace(), ".env.local"),
   };
 
   const CRON_SECRET = process.env.CRON_SECRET || "";

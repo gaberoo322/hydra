@@ -14,6 +14,7 @@ import {
   listLen, getWorkQueueLen,
 } from "../redis-adapter.ts";
 import { redisKeys } from "../redis-keys.ts";
+import { getTargetWorkspace } from "../target-config.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
@@ -290,7 +291,7 @@ async function checkTargetProject(): Promise<ChecklistItem[]> {
     // Check for recent merges in target project
     const { stdout } = await execFileAsync("git", [
       "log", "--oneline", "--since=24 hours ago",
-    ], { cwd: resolve(process.env.HOME, "hydra-betting"), timeout: 5000 });
+    ], { cwd: getTargetWorkspace(), timeout: 5000 });
 
     const mergeCount = stdout.trim().split("\n").filter(Boolean).length;
     if (mergeCount === 0) {
