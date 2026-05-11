@@ -214,6 +214,26 @@ function buildDigestMessage(events, capacitySnapshot = null) {
   if (rollbacks.length > 0) {
     actionItems.push(`⚠️ ${rollbacks.length} auto-rollback(s) — regressions detected and reverted`);
   }
+  // Tier-2 outcome holdback events (issue #244, ADR-0004 step 4).
+  // These are self-modification reverts driven by leading-outcome regression,
+  // distinct from the test-regression rollbacks above.
+  const holdbackReverts = events.filter(e => e.type === "holdback.reverted");
+  if (holdbackReverts.length > 0) {
+    actionItems.push(`⚠️ ${holdbackReverts.length} Tier-2 auto-revert(s) — leading outcomes regressed after self-mod`);
+    for (const e of holdbackReverts.slice(0, 3)) {
+      const sha = (e.payload?.commitSha || "?").toString().slice(0, 7);
+      const outs = Array.isArray(e.payload?.regressedOutcomes) ? e.payload.regressedOutcomes.join(", ") : "?";
+      actionItems.push(`  • ${sha} — ${outs}`);
+    }
+  }
+  const holdbackCapReached = events.filter(e => e.type === "holdback.cap-reached");
+  if (holdbackCapReached.length > 0) {
+    actionItems.push(`⚠️ Per-day Tier-2 revert cap reached — additional regressions suppressed (${holdbackCapReached.length} event(s))`);
+  }
+  const holdbackRevertFailed = events.filter(e => e.type === "holdback.revert_failed");
+  if (holdbackRevertFailed.length > 0) {
+    actionItems.push(`⚠️ ${holdbackRevertFailed.length} Tier-2 revert attempt(s) failed — manual intervention needed`);
+  }
 
   if (actionItems.length > 0) {
     lines.push("*Action items:*");

@@ -44,6 +44,7 @@ import { trackMergedCommit, _internal as _verificationInternal } from "./verific
 import { PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 import { getTargetServiceName } from "./target-config.ts";
+import { snapshotForHoldback } from "./holdback.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -640,6 +641,34 @@ export async function runPostMerge(
     try {
       await trackMergedCommit(cycleId, commitSha, []);
     } catch { /* intentional: tracking is best-effort */ }
+
+    // =========================================================================
+    // Step 8.8: TIER-2 OUTCOME HOLDBACK SNAPSHOT (issue #244, ADR-0004 step 4)
+    //
+    // If the merged file set classifies as Tier 2 per src/tier-classifier.ts,
+    // capture a baseline of leading Target Outcomes. The watcher in
+    // evaluateAllHoldbacks() (called from the next cycle's control loop)
+    // compares fresh readings to this baseline and auto-reverts on sustained
+    // regression. Kill flag `hydra:tier2:disabled` short-circuits the snapshot.
+    //
+    // Practically, target-project merges rarely match Tier-2 patterns
+    // (`.claude/skills/`, `dashboard/`, `src/anchor-selection.ts` — all in
+    // the orchestrator repo). The integration is here so that when a future
+    // self-modification path produces a tier-2 commit via the control loop,
+    // the watcher activates automatically. No-op for non-tier-2 merges.
+    // =========================================================================
+    try {
+      const snap = await snapshotForHoldback(commitSha, null, verification.filesChanged || []);
+      if (snap.snapshotted) {
+        report.holdback = {
+          status: "watching",
+          commitSha,
+          baseline: snap.record?.baseline ?? {},
+        };
+      }
+    } catch (err: any) {
+      console.error(`[ControlLoop] Tier-2 holdback snapshot failed (non-fatal): ${err.message}`);
+    }
   }
 
   try {
