@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { STREAMS } from "./event-bus.ts";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { getTargetName } from "./target-config.ts";
 import {
   getProposalHash,
   saveProposalHash,
@@ -185,7 +186,7 @@ async function runMetaAnalysis(eventBus, event) {
   // 9. System architecture summary
   contextSections.push([
     "## System Architecture",
-    "Hydra runs a 3-agent control loop on the hydra-betting codebase:",
+    `Hydra runs a 3-agent control loop on the ${getTargetName()} codebase:`,
     "1. **Grounding**: npm test + tsc (read-only repo inspection)",
     "2. **Planner** (frontier model): proposes 1 bounded task from anchor (queue > failing-test > prior-failure > backlog > priorities > research)",
     "3. **Skeptic** (codex model): challenges the plan (skipped for quick-fix/research tasks)",
