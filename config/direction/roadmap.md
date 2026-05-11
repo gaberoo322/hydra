@@ -85,9 +85,9 @@ Deliver real-money cross-venue proof, hardened execution controls, and operator-
 - [x] Add Polymarket CLOB provider rate limiting
 - [x] Fix Kalshi IOC partial-fill second-leg sizing to actual fill_count_fp
 - [x] Fix fee-inclusive arbitrage run profitability timeline P&L
-- [ ] Project proposed trade size in single-market exposure preflight
-- [ ] Fail closed on pending migration drift
-- [ ] Require Kalshi price_ranges or price_level_structure for live execution
-- [ ] Persist Polymarket US side-inversion evidence in run packets
+- [-] Project proposed trade size in single-market exposure preflight
+- [-] Fail closed on pending migration drift
+- [-] Require Kalshi price_ranges or price_level_structure for live execution
+- [-] Persist Polymarket US side-inversion evidence in run packets
 - [ ] Add venue-native sports identity matching before title fallback
 - [ ] Add OpticOdds supported-market capability gating to scanner scope
