@@ -14,6 +14,7 @@
 
 import { sendToTelegram } from "./notify.ts";
 import { getTargetCommitUrl } from "./target-config.ts";
+import { getCapacitySnapshot, DEFAULT_WINDOW_CYCLES, ORCHESTRATOR_FLOOR } from "./capacity-floor.ts";
 
 const DIGEST_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const QUIET_START_HOUR = 22; // 10pm
@@ -74,12 +75,21 @@ async function sendDigest() {
   pendingEvents = [];
   lastDigestAt = new Date().toISOString();
 
-  const message = buildDigestMessage(events);
+  // Issue #245: capacity-split snapshot for the digest. Failures are
+  // non-fatal — digest still ships if Redis is unavailable.
+  let capacitySnapshot = null;
+  try {
+    capacitySnapshot = await getCapacitySnapshot(DEFAULT_WINDOW_CYCLES);
+  } catch (err: any) {
+    console.error(`[Digest] capacity-floor snapshot failed (non-fatal): ${err.message}`);
+  }
+
+  const message = buildDigestMessage(events, capacitySnapshot);
   await sendToTelegram(message);
   console.log(`[Digest] Sent digest (${events.length} events)`);
 }
 
-function buildDigestMessage(events) {
+function buildDigestMessage(events, capacitySnapshot = null) {
   const lines = ["📊 *Hydra Digest*", ""];
 
   // Cycle summary
@@ -150,6 +160,25 @@ function buildDigestMessage(events) {
       const threshold = e.payload?.threshold ?? "?";
       lines.push(`• ${name} — stuck for ${cycles} cycles (threshold: ${threshold})`);
     }
+  }
+  lines.push("");
+
+  // Capacity split (issue #245) — show orchestrator self-improvement share
+  // against the 25% floor. Always render so the operator can see the floor
+  // is being tracked even when the system is healthy.
+  lines.push("*Capacity split:*");
+  if (capacitySnapshot && (capacitySnapshot.orchestrator.window > 0 || capacitySnapshot.idle.count > 0)) {
+    const orchPct = Math.round((capacitySnapshot.orchestrator.share || 0) * 100);
+    const tgtPct = Math.round((capacitySnapshot.target.share || 0) * 100);
+    const floorPct = Math.round(ORCHESTRATOR_FLOOR * 100);
+    const floorMark = capacitySnapshot.floorMet ? "✅" : "⚠️";
+    lines.push(`• Orchestrator: ${orchPct}% (${capacitySnapshot.orchestrator.count}/${capacitySnapshot.orchestrator.window}) ${floorMark} floor ${floorPct}%`);
+    lines.push(`• Target: ${tgtPct}% (${capacitySnapshot.target.count}/${capacitySnapshot.orchestrator.window})`);
+    if (capacitySnapshot.idle.count > 0) {
+      lines.push(`• Idle (excluded): ${capacitySnapshot.idle.count}`);
+    }
+  } else {
+    lines.push("• No cycle history yet — capacity floor not enforceable");
   }
   lines.push("");
 
