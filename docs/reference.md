@@ -393,3 +393,54 @@ Snapshot fires when **any** file in the merged change classifies as Tier 2 per `
 - `src/anchor-selection.ts` (anchor weight tuning)
 
 Target-project file changes (the default `verification.filesChanged` output) never match Tier-2 patterns, so the watcher is a no-op for ordinary feature-build cycles. It activates for orchestrator self-mod cycles whose verification reports Tier-2 paths.
+
+## Cost reconciliation (issue #296)
+
+Hydra's local cost accounting has two independent figures that historically disagreed by ~200x:
+- `/api/scheduler/status.dailySpendUsd` — rolling counter incremented per agent call
+- sum of `/api/metrics` `costMicrodollars` — per-cycle metrics aggregation
+
+`src/cost-reconciliation.ts` adds a third, independent figure: replay Codex CLI's own on-disk session JSONL logs, aggregate authoritative token counts per model, and multiply by `MODEL_PRICING` from `codex-runner.ts`. The three figures can then be compared to find which side of Hydra's accounting drifted.
+
+### Env vars
+
+| Var | Default | Purpose |
+|---|---|---|
+| `CODEX_HOME` | `~/.codex` | Root of Codex's local state. The module reads sessions from `${CODEX_HOME}/sessions/{YYYY}/{MM}/{DD}/*.jsonl`. |
+
+### Kill switch
+
+Setting `hydra:cost-reconciliation:disabled` to `"1"` or `"true"` in Redis short-circuits `reconcileDailyCosts()` before any filesystem work. Used to disable the future scheduler hook if the disk walk becomes a hotspot.
+
+### JSONL schema dependency
+
+Verified against Codex CLI 0.125.0:
+- One file per CLI turn, path `${CODEX_HOME}/sessions/{YYYY}/{MM}/{DD}/rollout-{iso-timestamp}-{uuid}.jsonl`
+- Each line is a JSON object with a `type` discriminator. Two types matter:
+  - `turn_context` — carries the active model in `payload.model` (fallback: `payload.collaboration_mode.settings.model`)
+  - `event_msg` with `payload.type === "token_count"` — carries authoritative usage in `payload.info.total_token_usage.{input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens}`
+- `total_token_usage` is **cumulative** within the session; the last `token_count` event with non-null `info` is the session total. Earlier events are subsets and must not be summed.
+
+If the CLI changes this schema, the parser at the top of `src/cost-reconciliation.ts` documents the contract and tests in `test/cost-reconciliation.test.mts` will catch regressions in the cumulative-vs-incremental handling.
+
+### Pricing source
+
+`~/.codex/models_cache.json` was inspected and does **not** carry pricing — only model slugs and reasoning levels. The reconciliation falls back to `MODEL_PRICING` from `codex-runner.ts` (same hardcoded rates Hydra uses today). Token counts are independent; dollar figures share Hydra's rate table. A follow-up issue should source pricing from a stable upstream so the $-figure is also independent.
+
+### Redis state
+
+- `hydra:cost:reconciliation:{YYYY-MM-DD}` — JSON-encoded `ReconciliationResult`, 90-day TTL
+- `hydra:cost:reconciliation:index` — sorted set of date strings, score = UTC epoch-ms of that date
+
+### API
+
+`GET /api/cost/reconciliation` — returns `{ history: ReconciliationResult[] }` newest first.
+- `?limit=N` — number of days returned, 1..30 (default 30)
+- `?run=YYYY-MM-DD` — runs a fresh reconciliation for that date instead of reading history (operator forensic on-demand; idempotent within the day)
+
+### Deferred (follow-up issues)
+
+- Scheduler hook for once-per-UTC-day automatic runs (against `date - 1`)
+- `cost.reconciliation.divergence` event published when any pair diverges by `> DIVERGENCE_THRESHOLD` (10%)
+- Digest section surfacing divergence events from the digest window
+- Dashboard panel with the three-number side-by-side and 30-day trend

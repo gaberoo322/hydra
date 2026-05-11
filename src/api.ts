@@ -28,6 +28,7 @@ import { createCapacityRouter } from "./api/capacity.ts";
 import { createObservabilityRouter } from "./api/observability.ts";
 import { createHoldbackRouter } from "./api/holdback.ts";
 import { createLearningRouter } from "./api/learning.ts";
+import { createCostRouter } from "./api/cost.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -74,6 +75,7 @@ function createApi(eventBus) {
   api.use(createObservabilityRouter());
   api.use(createHoldbackRouter());
   api.use(createLearningRouter());
+  api.use(createCostRouter());
   api.use(createMiscRouter(eventBus));
   api.use(createChecklistRouter());
   api.use(createOutcomesRouter());
