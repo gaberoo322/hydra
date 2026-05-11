@@ -19,6 +19,7 @@ const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://100.125.108.68:11434";
 import { getDailySpend, DAILY_COST_CAP_USD } from "./scheduler.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { buildCodexOtelEnv, isOtelEnabled, type OtelAttrs } from "./codex-otel.ts";
+import { createStreamingBudget, type StreamingBudget } from "./cost-cap.ts";
 
 // Model routing table — default tiers (used when under daily spend cap)
 const MODEL_TIERS = {
@@ -232,6 +233,41 @@ function invalidateThread(agentName: string, resolvedModel: string) {
   }
 }
 
+/**
+ * Feed a streamed ThreadEvent into the cost budget. Returns true if the
+ * event mutated the budget state (so callers can re-check `shouldAbort`).
+ *
+ * Only textual output items contribute to the projected output cost:
+ * `agent_message` and `reasoning`. Tool-call items, web-search items,
+ * todo-list items, and file_change items do not consume output tokens
+ * in the same way and are excluded from projection.
+ *
+ * Issue #286: extracted as a module-scope helper so it can be unit
+ * tested in isolation without booting the full Codex SDK.
+ */
+export function maybeUpdateStreamBudget(
+  budget: StreamingBudget,
+  event: any,
+): boolean {
+  if (!event) return false;
+  const type = event.type;
+  if (type !== "item.updated" && type !== "item.completed" && type !== "item.started") {
+    return false;
+  }
+  const item = event.item;
+  if (!item || (item.type !== "agent_message" && item.type !== "reasoning")) {
+    return false;
+  }
+  const text: string = item.text || "";
+  const id: string = item.id || `${item.type}-anon`;
+  if (type === "item.completed") {
+    budget.completeItem(id, text.length);
+  } else {
+    budget.updateItemChars(id, text.length);
+  }
+  return true;
+}
+
 // Global stream callback — set by the orchestrator to broadcast agent output
 let _globalStreamCallback: ((data: any) => void) | null = null;
 
@@ -349,6 +385,12 @@ async function runLocalAgent({ agentName, personality, prompt, workDir, timeout:
     usageLimitHit: false,
     threadReused: false,
     promptCacheRate: 0,
+    // Local Ollama runs are free so the streaming cost cap never fires.
+    // Keep these fields present for return-shape consistency with
+    // `runAgent()` so callers don't need to special-case the local path.
+    costCapTripped: false,
+    costCapReason: null,
+    costCapPartialOutput: "",
   };
 }
 
@@ -447,6 +489,45 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   let usageLimitHit = false;
   let exitCode = 0;
 
+  // Issue #286: build a streaming cost budget so a single call can't
+  // burst past the per-cycle cap mid-stream. Returns null if the cap is
+  // Infinity / disabled / no cycle id — preserves pre-#286 behavior.
+  const pricing = MODEL_PRICING[resolvedModel];
+  let streamBudget: StreamingBudget | null = null;
+  let costCapTripped = false;
+  let costCapReason: string | null = null;
+  let costCapPartialOutput = "";
+  if (pricing) {
+    try {
+      // Estimate input tokens from prompt length (~4 chars/token). Used
+      // only for projecting cost during stream; authoritative usage is
+      // overwritten on turn.completed.
+      const estimatedInputTokens = Math.ceil(fullPrompt.length / 4);
+      streamBudget = await createStreamingBudget({
+        cycleId: correlationId,
+        pricing,
+        agentName,
+        inputTokens: estimatedInputTokens,
+      });
+      // Pre-call check: if the cycle is ALREADY over budget before we
+      // even send the request, abort immediately. Saves the prompt
+      // round-trip entirely.
+      if (streamBudget && streamBudget.shouldAbort()) {
+        costCapReason = streamBudget.markAborted("pre-stream");
+        costCapTripped = true;
+        console.error(`[CodexRunner] ${agentName}: cost cap already exceeded before call — ${costCapReason}`);
+        // Abort immediately so we don't even start the stream.
+        abortController.abort();
+      }
+    } catch (err: any) {
+      // Fail-open: if we can't construct the budget (Redis hiccup, etc.),
+      // skip mid-stream checks. The inter-step `runCostCapCheck` will
+      // still catch overruns at the next pipeline boundary.
+      console.error(`[CodexRunner] Failed to create streaming budget for ${agentName}: ${err.message}`);
+      streamBudget = null;
+    }
+  }
+
   try {
     const turnOptions: TurnOptions = {
       signal: abortController.signal,
@@ -460,6 +541,30 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
       // Stream events to the dashboard callback
       if (streamFn) {
         streamFn({ agent: agentName, taskId, correlationId, event });
+      }
+
+      // Issue #286: mid-stream cost projection. Inspect item.started /
+      // item.updated / item.completed for textual output items (agent
+      // message + reasoning) and feed accumulated char counts into the
+      // budget. If projected total exceeds the cap, abort the SDK call
+      // immediately.
+      if (streamBudget && !costCapTripped) {
+        const updated = maybeUpdateStreamBudget(streamBudget, event);
+        if (updated) {
+          // Keep a forensic copy of partial output captured so far.
+          if (event.type === "item.updated" && (event as any).item?.type === "agent_message") {
+            costCapPartialOutput = (event as any).item.text || costCapPartialOutput;
+          }
+          if (streamBudget.shouldAbort()) {
+            costCapReason = streamBudget.markAborted("mid-stream");
+            costCapTripped = true;
+            console.error(`[CodexRunner] ${agentName}: ${costCapReason} — aborting subprocess. ` +
+              `Snapshot: ${JSON.stringify(streamBudget.snapshot())}`);
+            abortController.abort();
+            // Continue iterating to drain in-flight events; the abort
+            // will surface as a thrown AbortError on next async await.
+          }
+        }
       }
 
       // Collect usage and final message — try multiple event shapes for SDK compatibility
@@ -508,8 +613,17 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     // Invalidate persistent thread on error so next call gets a fresh one
     invalidateThread(agentName, resolvedModel);
     if (abortController.signal.aborted) {
-      timedOut = true;
-      console.error(`[CodexRunner] ${agentName} aborted after timeout`);
+      if (costCapTripped) {
+        // Distinct from timeout — record exit code 1 + the cost cap
+        // reason so caller can surface this in cycle metrics. We
+        // intentionally do NOT set `timedOut` because the abort cause
+        // is budget, not wall-clock.
+        exitCode = 1;
+        console.error(`[CodexRunner] ${agentName} aborted by cost cap mid-stream`);
+      } else {
+        timedOut = true;
+        console.error(`[CodexRunner] ${agentName} aborted after timeout`);
+      }
     } else {
       console.error(`[CodexRunner] ${agentName} error: ${err.message}`);
       exitCode = 1;
@@ -557,8 +671,16 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     console.log(`[CodexRunner] ${agentName} prompt cache: ${cacheRate}% of input tokens cached (saved ~$${(costUsd * cacheRate / 100).toFixed(4)})`);
   }
 
+  // Issue #286: if mid-stream cost cap fired, prefer the partial output
+  // captured during streaming as the "output" payload so downstream
+  // forensics (Redis summary, dashboards) can see what the model was
+  // saying when it was killed.
+  const effectiveOutput = costCapTripped && !finalMessage && costCapPartialOutput
+    ? costCapPartialOutput
+    : finalMessage;
+
   return {
-    output: finalMessage,
+    output: effectiveOutput,
     exitCode,
     signal: null,
     timedOut,
@@ -572,6 +694,14 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     usageLimitHit,
     threadReused: reused,
     promptCacheRate: cacheRate,
+    // Issue #286 — mid-stream cost cap signals. costCapTripped is true
+    // when the budget projector aborted the SDK call before completion;
+    // costCapReason is a stable, parseable string suitable for use as
+    // `abandonReason` in cycle metrics; costCapPartialOutput preserves
+    // whatever the model had emitted at abort time for forensic review.
+    costCapTripped,
+    costCapReason,
+    costCapPartialOutput,
   };
 }
 

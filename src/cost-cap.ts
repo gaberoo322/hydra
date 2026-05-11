@@ -1,10 +1,17 @@
 /**
- * cost-cap.ts — Per-cycle cost cap circuit breaker (issue #209)
+ * cost-cap.ts — Per-cycle cost cap circuit breaker (issue #209, #286)
  *
  * Bug: There was no per-cycle cost cap on the build loop. Abandoned cycles
  * could consume up to $56 each before hitting their abandonment gate
  * (Preflight, Auto-decompose, Planner noWork). With ~31 abandoned cycles
  * in 50, this was the dominant cost-leak class.
+ *
+ * Issue #286: Even with the inter-step `runCostCapCheck` gate, a *single*
+ * planner call can stream past the cap (one observed cycle burned $60+ in
+ * one shot). The cap previously fired only AFTER the call completed, so
+ * the spend was already gone. This module now exposes `StreamingBudget`,
+ * a mid-stream projector wired into `codex-runner.runAgent` that aborts
+ * the SDK call once projected total cost exceeds the cap.
  *
  * Fix: Track accumulated agent cost per cycle (via the existing
  * `costMicrodollars` Redis field that `task-tracker.logAgentRun` already
@@ -25,6 +32,11 @@
  *   into how much each abort cost.
  * - Honors `Infinity` semantics consistent with `HYDRA_DAILY_COST_CAP_USD`:
  *   absent or non-finite env value → cap is `Infinity` (effectively off).
+ * - Mid-stream projection (issue #286) uses a conservative chars/token
+ *   ratio of 4 (≈OpenAI tokenizer average for English prose + JSON). The
+ *   estimate is intentionally an OVER-estimate so we trip slightly early
+ *   rather than slightly late: better to abandon a marginally-under-cap
+ *   cycle than to bleed past it.
  */
 
 import { getCycleCostMicrodollars } from "./redis-adapter.ts";
@@ -247,4 +259,223 @@ export async function runCostCapCheck(
       costCap: { costUsd: status.costUsd, capUsd: status.capUsd, checkpoint },
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Streaming budget (issue #286)
+// ---------------------------------------------------------------------------
+//
+// `StreamingBudget` projects the in-flight cost of a single agent call by
+// counting input tokens (known up-front from the prompt) and accumulating
+// streamed output tokens (estimated from character deltas). When the
+// projected total cycle spend would exceed the per-cycle cap, the budget
+// reports "abort" — the caller (codex-runner.runAgent) then fires its
+// AbortController, killing the SDK turn before more output streams in.
+//
+// Why a projector and not a hard token meter:
+//   The Codex SDK only emits authoritative `usage` on `turn.completed`
+//   (sdk 0.125.0). Mid-stream we receive `item.updated` events whose
+//   ThreadItem payload contains the assistant message / reasoning text
+//   accumulated so far. Counting characters and dividing by 4 yields a
+//   conservative upper bound on output tokens — good enough to circuit-
+//   break a runaway response before the bill arrives.
+//
+// Why conservative (over-estimate) is the right tuning:
+//   The cost-per-merge regression at $142 was caused by single calls
+//   spending $60+ in one shot. Tripping at $24 of *projected* spend when
+//   the true number is $20 is a tiny over-correction; tripping at $30
+//   when the true number is $40 is the failure mode we're fixing. So we
+//   round UP on tokens-per-char.
+
+/** Default chars-per-token estimate. OpenAI tokenizer averages ~4 chars
+ *  per token for English prose; for JSON / code the ratio drops to ~3.5.
+ *  We use 3.5 to OVER-count output tokens (and therefore cost) so the
+ *  projector trips slightly early. */
+const CHARS_PER_TOKEN_OUTPUT = 3.5;
+
+/** Env flag to disable streaming projection without disabling the
+ *  inter-step cap. Off by default in tests; on by default in prod. */
+export function isStreamingBudgetEnabled(): boolean {
+  const raw = process.env.HYDRA_STREAM_COST_CHECK_ENABLED;
+  if (raw === undefined || raw === "") return true; // default ON
+  return raw !== "false" && raw !== "0";
+}
+
+export interface ModelPricing {
+  /** USD per 1M input tokens. */
+  input: number;
+  /** USD per 1M output tokens. */
+  output: number;
+}
+
+export interface StreamingBudgetOpts {
+  /** Spend already accumulated on the cycle BEFORE this call started. */
+  baselineUsd: number;
+  /** Per-cycle cost cap. Pass Infinity to disable. */
+  capUsd: number;
+  /** Input tokens for this call (from the composed prompt). May be 0 if
+   *  unknown; the projector handles it as zero input cost. */
+  inputTokens?: number;
+  /** Pricing for the model in use. Source from MODEL_PRICING. */
+  pricing: ModelPricing;
+  /** Diagnostic label included in the abort reason. */
+  agentName: string;
+  /** Chars-per-token override (mostly for tests). */
+  charsPerTokenOutput?: number;
+}
+
+/**
+ * Mid-stream cost projector. Stateful but tiny; constructed once per
+ * `runAgent` call. Not concurrent-safe — assumed to be called from a
+ * single async event loop.
+ */
+export class StreamingBudget {
+  readonly baselineUsd: number;
+  readonly capUsd: number;
+  readonly inputCostUsd: number;
+  readonly pricing: ModelPricing;
+  readonly agentName: string;
+  readonly charsPerTokenOutput: number;
+  /** Highest output-char count seen across all in-flight items.
+   *  Items can both grow (item.updated) and reset (new items in a turn);
+   *  we track the SUM of completed items + the max of any in-flight one
+   *  per type so abandonment of one item doesn't lose its accumulated
+   *  cost projection. */
+  private completedOutputChars = 0;
+  private inFlightByItem = new Map<string, number>();
+  private aborted = false;
+  private abortReason: string | null = null;
+
+  constructor(opts: StreamingBudgetOpts) {
+    this.baselineUsd = Math.max(0, opts.baselineUsd || 0);
+    this.capUsd = opts.capUsd;
+    this.pricing = opts.pricing;
+    this.agentName = opts.agentName;
+    this.charsPerTokenOutput = opts.charsPerTokenOutput ?? CHARS_PER_TOKEN_OUTPUT;
+    const inputTokens = Math.max(0, opts.inputTokens || 0);
+    this.inputCostUsd = (inputTokens / 1_000_000) * this.pricing.input;
+  }
+
+  /**
+   * Update the running output-char count for a given item id. Both
+   * `item.updated` and `item.completed` carry the FULL accumulated text
+   * (not a delta), so callers pass the latest text length each time.
+   *
+   * When an item completes, the caller should call `completeItem(id)` so
+   * the in-flight slot is moved into the completed pool — that way a
+   * new item starting on the same id (rare, but possible across turns)
+   * doesn't double-count.
+   */
+  updateItemChars(itemId: string, charsSoFar: number): void {
+    if (this.aborted) return;
+    const safe = Math.max(0, charsSoFar | 0);
+    this.inFlightByItem.set(itemId, safe);
+  }
+
+  /** Move an in-flight item into completed-sum. */
+  completeItem(itemId: string, finalChars: number): void {
+    if (this.aborted) return;
+    const safe = Math.max(0, finalChars | 0);
+    this.completedOutputChars += safe;
+    this.inFlightByItem.delete(itemId);
+  }
+
+  /** Estimated output tokens, ceiling-rounded. */
+  estimatedOutputTokens(): number {
+    let inFlight = 0;
+    for (const c of this.inFlightByItem.values()) inFlight += c;
+    const totalChars = this.completedOutputChars + inFlight;
+    if (totalChars <= 0) return 0;
+    return Math.ceil(totalChars / this.charsPerTokenOutput);
+  }
+
+  /** Estimated USD cost of THIS call so far (input + projected output). */
+  projectedCallCostUsd(): number {
+    const outputCost = (this.estimatedOutputTokens() / 1_000_000) * this.pricing.output;
+    return this.inputCostUsd + outputCost;
+  }
+
+  /** Estimated total cycle spend (baseline + this call). */
+  projectedTotalUsd(): number {
+    return this.baselineUsd + this.projectedCallCostUsd();
+  }
+
+  /** True if projected total has crossed the cap. */
+  shouldAbort(): boolean {
+    if (this.aborted) return true;
+    if (!Number.isFinite(this.capUsd)) return false;
+    return this.projectedTotalUsd() >= this.capUsd;
+  }
+
+  /** Mark this budget as having fired an abort. Subsequent updates are no-ops. */
+  markAborted(checkpoint: string): string {
+    if (this.aborted) return this.abortReason || "";
+    this.aborted = true;
+    const projected = this.projectedTotalUsd();
+    const capStr = Number.isFinite(this.capUsd) ? `$${this.capUsd.toFixed(2)}` : "Infinity";
+    this.abortReason =
+      `${COST_CAP_REASON_PREFIX}: projected $${projected.toFixed(2)} >= ${capStr} ` +
+      `mid-${this.agentName} (after ${checkpoint})`;
+    return this.abortReason;
+  }
+
+  /** Has this budget already aborted? */
+  hasAborted(): boolean {
+    return this.aborted;
+  }
+
+  /** Human-readable abort reason, or null if not yet aborted. */
+  getAbortReason(): string | null {
+    return this.abortReason;
+  }
+
+  /** Snapshot of completed + in-flight chars, mostly for forensics. */
+  snapshot() {
+    const inFlightChars = Array.from(this.inFlightByItem.values()).reduce((a, b) => a + b, 0);
+    return {
+      baselineUsd: this.baselineUsd,
+      capUsd: this.capUsd,
+      inputCostUsd: this.inputCostUsd,
+      completedOutputChars: this.completedOutputChars,
+      inFlightOutputChars: inFlightChars,
+      estimatedOutputTokens: this.estimatedOutputTokens(),
+      projectedCallCostUsd: this.projectedCallCostUsd(),
+      projectedTotalUsd: this.projectedTotalUsd(),
+      aborted: this.aborted,
+      abortReason: this.abortReason,
+    };
+  }
+}
+
+/**
+ * Convenience constructor — builds a StreamingBudget for the given cycle.
+ *
+ * Returns `null` when streaming projection is disabled (cap = Infinity OR
+ * `HYDRA_STREAM_COST_CHECK_ENABLED=false`). Callers should treat null as
+ * "skip mid-stream checks", which is the historical pre-#286 behavior.
+ */
+export async function createStreamingBudget({
+  cycleId,
+  pricing,
+  agentName,
+  inputTokens,
+}: {
+  cycleId: string | null | undefined;
+  pricing: ModelPricing;
+  agentName: string;
+  inputTokens?: number;
+}): Promise<StreamingBudget | null> {
+  if (!isStreamingBudgetEnabled()) return null;
+  const capUsd = getPerCycleCostCapUsd();
+  if (!Number.isFinite(capUsd)) return null;
+  // No cycleId → manual / out-of-band call; skip projection.
+  if (!cycleId) return null;
+  const baselineUsd = await getCycleCostUsd(cycleId);
+  return new StreamingBudget({
+    baselineUsd,
+    capUsd,
+    pricing,
+    agentName,
+    inputTokens: inputTokens || 0,
+  });
 }
