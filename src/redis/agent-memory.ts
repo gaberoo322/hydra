@@ -1,0 +1,84 @@
+/**
+ * Agent-memory Redis ops (pattern persistence + cooldowns).
+ * Extracted from redis-adapter.ts (issue #269).
+ *
+ * Note: this is the low-level Redis adapter for agent-memory. The higher-level
+ * learning logic lives in src/learning/agent-memory.ts.
+ */
+
+import { redisKeys } from "../redis-keys.ts";
+import { getRedisConnection } from "./connection.ts";
+
+/**
+ * Fetch memory patterns string for a given agent.
+ */
+export async function getMemoryPatterns(agent: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.memoryPatterns(agent));
+}
+
+/**
+ * Get the last alert timestamp for a given pattern name.
+ * Returns null if never alerted.
+ */
+export async function getPatternCooldown(pattern: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.hget(redisKeys.patternDetectorCooldowns(), pattern);
+}
+
+/**
+ * Set the cooldown timestamp for a pattern name.
+ */
+export async function setPatternCooldown(pattern: string, timestamp: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(redisKeys.patternDetectorCooldowns(), pattern, timestamp);
+}
+
+/**
+ * Load raw patterns JSON for an agent.
+ */
+export async function loadPatternsRaw(agent: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.memoryPatterns(agent));
+}
+
+/**
+ * Save patterns JSON for an agent.
+ */
+export async function savePatternsRaw(agent: string, json: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.memoryPatterns(agent), json);
+}
+
+/**
+ * Get the length of old rules list for an agent.
+ */
+export async function getOldRulesCount(agent: string): Promise<number> {
+  const r = getRedisConnection();
+  return r.llen(redisKeys.memoryRules(agent));
+}
+
+/**
+ * Check if patterns key exists for an agent.
+ */
+export async function patternsExist(agent: string): Promise<boolean> {
+  const r = getRedisConnection();
+  const val = await r.exists(redisKeys.memoryPatterns(agent));
+  return val === 1;
+}
+
+/**
+ * Get all old rules for an agent.
+ */
+export async function getOldRules(agent: string): Promise<string[]> {
+  const r = getRedisConnection();
+  return r.lrange(redisKeys.memoryRules(agent), 0, -1);
+}
+
+/**
+ * Delete old rules key for an agent.
+ */
+export async function deleteOldRules(agent: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.memoryRules(agent));
+}
