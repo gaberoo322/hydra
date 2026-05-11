@@ -54,6 +54,7 @@ import {
   gateReleaseMergeLock,
   getPerCycleCostCapUsd,
 } from "./gate.ts";
+import { evaluateAllHoldbacks } from "./holdback.ts";
 
 // ---------------------------------------------------------------------------
 // The control loop — evidence-driven pipeline
@@ -100,6 +101,21 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   const grounding = await groundProjectCached(PROJECT_WORKSPACE);
   const groundingSummary = summarizeForPrompt(grounding);
   console.log(`[ControlLoop] Grounded: ${grounding.testReport.passed} tests passing, ${grounding.testReport.failed} failing (${grounding.groundingDurationMs}ms)`);
+
+  // Step 1c: EVALUATE TIER-2 OUTCOME HOLDBACKS (issue #244, ADR-0004 step 4)
+  //
+  // Runs after groundProject so a revert this cycle restarts grounded next
+  // cycle (the revert pushes to master; the next prepareWorkspace + ground
+  // picks up the new HEAD). Kill flag `hydra:tier2:disabled` is checked
+  // inside evaluateAllHoldbacks — short-circuits there. Never throws.
+  try {
+    const holdbackResult = await evaluateAllHoldbacks(cycleId, eventBus);
+    if (holdbackResult.evaluated > 0) {
+      console.log(`[ControlLoop] Holdback: evaluated ${holdbackResult.evaluated}, reverted ${holdbackResult.reverted.length}, passed ${holdbackResult.passed.length}${holdbackResult.capReached ? " (CAP REACHED)" : ""}`);
+    }
+  } catch (err: any) {
+    console.error(`[ControlLoop] Holdback evaluation failed (non-fatal): ${err.message}`);
+  }
 
   // Step 2: SELECT ANCHOR
   console.log(`[ControlLoop] Step 2: Selecting anchor...`);
