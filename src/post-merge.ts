@@ -19,7 +19,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { STREAMS } from "./event-bus.ts";
 import { getTracker, CYCLE_KEY_TTL } from "./task-tracker.ts";
-import { groundProject } from "./grounding.ts";
+// Post-merge grounding + rollback are Tier-0 gate-proof steps. We
+// access them through the gate facade (ADR-0001 step 6, issue #249)
+// rather than reaching directly into grounding.ts / executing git
+// revert inline. Behavior is unchanged.
+import { gateGrounding, gateRollback } from "./gate.ts";
 import {
   updateCycleHash, refreshCycleTTL,
   setCycleLast, clearCycleActive,
@@ -207,19 +211,23 @@ export async function runPostMerge(
   // Step 8: REPORT — reality report
   // =========================================================================
   console.log(`[ControlLoop] Step 8: Reporting...`);
-  const finalGrounding = await groundProject(PROJECT_WORKSPACE);
+  const finalGrounding = await gateGrounding(PROJECT_WORKSPACE);
   const regressionIntroduced = finalGrounding.testReport.passed < grounding.testReport.passed;
 
-  // Auto-rollback: if tests regressed after merge, revert the merge commit
+  // Auto-rollback: if tests regressed after merge, revert the merge commit.
+  // The revert mechanics live in `gate.ts` (Tier-0) so the rollback path is
+  // operator-only; this site owns only the trigger condition + event publishing.
   let rolledBack = false;
   if (regressionIntroduced && commitSha) {
     console.error(`[ControlLoop] REGRESSION: Tests went from ${grounding.testReport.passed} → ${finalGrounding.testReport.passed} passing — auto-reverting`);
-    try {
-      await execFileAsync("git", ["revert", "--no-edit", "-m", "1", commitSha], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
-      await execFileAsync("git", ["push", "origin", "main"], { cwd: PROJECT_WORKSPACE, timeout: 30000 });
+    const rollbackResult = await gateRollback(
+      PROJECT_WORKSPACE,
+      commitSha,
+      `tests regressed: ${grounding.testReport.passed} → ${finalGrounding.testReport.passed}`,
+    );
+    if (rollbackResult.ok) {
       rolledBack = true;
       console.log(`[ControlLoop] Reverted merge commit ${commitSha.slice(0, 7)} and pushed`);
-
       await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type: "cycle:rollback",
         source: "control-loop",
@@ -233,8 +241,8 @@ export async function runPostMerge(
           testsAfter: finalGrounding.testReport.passed,
         },
       });
-    } catch (err: any) {
-      console.error(`[ControlLoop] Auto-rollback failed: ${err.message}`);
+    } else {
+      console.error(`[ControlLoop] Auto-rollback failed: ${rollbackResult.error}`);
       await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type: "cycle:rollback_failed",
         source: "control-loop",
@@ -244,7 +252,7 @@ export async function runPostMerge(
           taskId,
           title: task.title,
           commitSha,
-          error: err.message,
+          error: rollbackResult.error,
           testsBefore: grounding.testReport.passed,
           testsAfter: finalGrounding.testReport.passed,
         },
