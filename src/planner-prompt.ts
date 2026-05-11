@@ -19,6 +19,7 @@ import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
 import { buildPlannerContext } from "./context-builder.ts";
 import type { PlannerContext } from "./context-builder.ts";
+import { isAnchorActionable } from "./anchor-actionability.ts";
 
 // ---------------------------------------------------------------------------
 // Deterministic task schema validation — replaces LLM-based structural checks
@@ -190,6 +191,23 @@ function formatPrioritiesForPlanner(priorities: string, mode: "standard" | "refr
 // ---------------------------------------------------------------------------
 
 export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = null) {
+  // Pre-planner actionability gate (issue #270).
+  // For research/user-request/doc anchors, do a deterministic check against
+  // completed priorities + last 50 merged cycle titles BEFORE paying for the
+  // frontier model. NoWork outcomes were costing $5–$11 each; this gate cuts
+  // that to <$0.10 per skipped cycle. Recovery anchor types (failing-test,
+  // prior-failure, reframe, codebase-health) are deliberately not gated.
+  const actionability = await isAnchorActionable(anchor);
+  if (!actionability.actionable) {
+    console.log(`[Planner] PRE-GATE skip: ${actionability.reason}`);
+    return {
+      __noWork: true,
+      reason: actionability.reason,
+      __planCacheHit: false,
+      __plannerModel: "pregate-skip",
+    } as any;
+  }
+
   // Scope-adaptive planner routing (PAUL pattern):
   // Quick-fix anchors (failing-test, prior-failure) get a compressed prompt
   // and cheaper model — they don't need priorities, accomplishments, or
