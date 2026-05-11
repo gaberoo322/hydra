@@ -257,10 +257,21 @@ Already executed in Phase 3. Log + report.
 2. Log: `echo "<S> $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/hydra-autopilot-log.txt`
 3. **Do NOT write the skill's own cooldown file here.** Skills with internal rate-limiting (`hydra-research`, `hydra-discover`, `hydra-target-research`) own their own cooldown timestamp and check it on entry. If autopilot writes the cooldown pre-dispatch, the skill reads it and rate-limits itself into a no-op (observed 2026-05-09: research dispatched, skipped 16s later because autopilot pre-stamped the file). The autopilot's circuit breaker (Phase 3, 3-same-skill-in-a-row check) is the dispatch-rate guard. The cooldown table (P3, P5, P8) applies only to **inline API actions** that have no skill of their own to enforce it.
 4. Save board state for circuit breaker.
-5. Dispatch:
-   - **Claude:** `Agent(description:"<S>", run_in_background:true, prompt:"... call Skill(skill:'<S>',args:'<ARGS>') and write completion marker on done/failed.")`
+5. **Worktree-guard preamble (required for code-writing skills: `hydra-dev`, `hydra-qa`).** Every dispatched prompt MUST begin with the block below. The dispatched agent uses it to verify isolation and ABORT on mismatch — never fall back to `~/hydra`. See `docs/operator-playbooks/hydra-dev.md` for the canonical text and rationale.
+
+   ```
+   ## CRITICAL SAFETY RULE — READ FIRST
+   Run `pwd` and `git rev-parse --git-dir` first.
+   - Worktree path AND `.git/worktrees/...` gitdir → proceed.
+   - cwd == `/home/gabe/hydra` → ABORT with status:failed. Do not run any git commands.
+   No fallback to `~/hydra`. No `git checkout` in the main tree.
+   ```
+6. Dispatch:
+   - **Claude:** `Agent(description:"<S>", run_in_background:true, isolation:"worktree", prompt:"<WORKTREE-GUARD PREAMBLE>\n\n... call Skill(skill:'<S>',args:'<ARGS>') and write completion marker on done/failed.")`
+     Pass `isolation:"worktree"` for any skill that writes code. The harness should spin a fresh worktree under `.claude/worktrees/agent-<id>`.
    - **Codex:** `nohup codex exec --skill <S> --args '<ARGS>' >> /tmp/hydra-autopilot-bg.log 2>&1 & disown`
      Then write `done`/`failed` to `/tmp/hydra-autopilot-dispatch.json` from a wrapper.
+7. **Post-dispatch sanity check.** After the BG agent terminates, verify `git -C ~/hydra rev-parse --abbrev-ref HEAD == master`. If not, surface a warning in the Phase 5 report (`isolation_breach=<branch>`) and do NOT auto-`checkout master` — let the operator decide whether the feature branch has unpushed work. This catches the 2026-05-11 #245 failure mode where isolation silently broke and the BG agent committed in `~/hydra`.
 
 ### Recording orchestrator-side merges (capacity-floor data source)
 
