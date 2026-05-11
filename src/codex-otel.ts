@@ -144,3 +144,33 @@ export function buildCodexOtelEnv(attrs: OtelAttrs): Record<string, string> | nu
 
   return env;
 }
+
+/**
+ * Build an operator-facing trace UI URL for a given cycle (issue #207, Tier-3).
+ *
+ * The operator points `HYDRA_TRACE_UI_URL` at their observability backend
+ * (Grafana → Tempo, SigNoz, Jaeger, etc). The string may contain the literal
+ * placeholder `{cycleId}`, which is URL-encoded and substituted in. If no
+ * placeholder is present, the cycle ID is appended as a query parameter
+ * `?hydra_cycle_id=<id>` so links still resolve to a useful page.
+ *
+ * Returns null when the env var is unset or empty, or when the cycle ID is
+ * missing — callers should fall back to "no link" UX in that case.
+ *
+ * No new dependency is introduced: substitution and encoding use the
+ * Node.js stdlib `encodeURIComponent` and `URL` constructor only when the
+ * input is well-formed.
+ */
+export function buildTraceUrl(cycleId: string | null | undefined, template?: string | undefined): string | null {
+  const tpl = (template ?? process.env.HYDRA_TRACE_UI_URL ?? "").trim();
+  if (!tpl) return null;
+  const id = (cycleId ?? "").toString().trim();
+  if (!id) return null;
+  const encoded = encodeURIComponent(id);
+  if (tpl.includes("{cycleId}")) {
+    return tpl.replace(/\{cycleId\}/g, encoded);
+  }
+  // No placeholder — append as a query parameter so the link still carries the ID.
+  const sep = tpl.includes("?") ? "&" : "?";
+  return `${tpl}${sep}hydra_cycle_id=${encoded}`;
+}

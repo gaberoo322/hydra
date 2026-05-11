@@ -1,0 +1,118 @@
+{
+  "annotations": { "list": [] },
+  "description": "Hydra OTel drill-down — pick a hydra.cycle_id and see planner prompt + response side-by-side with the executor spans for that cycle. Issue #207, Tier-3. Pair with `grafana-hydra-overview.json`. The `cycle_id` template variable is meant to be passed in via dashboard link from the Hydra dashboard (see `HYDRA_TRACE_UI_URL` in docs/reference.md).",
+  "editable": true,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Cycle ${cycle_id}",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "traces",
+      "title": "All spans for hydra.cycle_id = ${cycle_id}",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "description": "Every agent call in the cycle. Order top-to-bottom is planner → preflight/high-risk-review → executor → fixer. Click a span to see prompt + response in the right-hand panel.",
+      "targets": [
+        {
+          "query": "{ resource.hydra.cycle_id = \"${cycle_id}\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 1 }
+    },
+    {
+      "type": "row",
+      "title": "Planner vs executor side-by-side",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 }
+    },
+    {
+      "type": "logs",
+      "title": "Planner spans (prompt + response)",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "description": "Planner spans for this cycle. Codex CLI logs the user prompt as a span event when `[otel] log_user_prompt = true` is set in `~/.codex/config.toml` (see scripts/otel/codex-config.example.toml).",
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "enableLogDetails": true,
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "query": "{ resource.hydra.cycle_id = \"${cycle_id}\" && resource.hydra.agent_role = \"planner\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 16, "w": 12, "x": 0, "y": 16 }
+    },
+    {
+      "type": "logs",
+      "title": "Executor spans (prompt + response)",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "description": "Executor spans for this cycle. Compare prompts side-by-side with the planner panel to debug preflight abandonment, planner/executor drift, or scope-out violations without touching journalctl.",
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "enableLogDetails": true,
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "query": "{ resource.hydra.cycle_id = \"${cycle_id}\" && resource.hydra.agent_role = \"executor\" }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 16, "w": 12, "x": 12, "y": 16 }
+    },
+    {
+      "type": "row",
+      "title": "Fixer / high-risk-review (if present)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 }
+    },
+    {
+      "type": "traces",
+      "title": "Fixer + high-risk-review spans",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "description": "Only populated when the cycle ran the fixer or high-risk review. Empty traces here = neither ran.",
+      "targets": [
+        {
+          "query": "{ resource.hydra.cycle_id = \"${cycle_id}\" && (resource.hydra.agent_role = \"fixer\" || resource.hydra.agent_role = \"high-risk-review\") }",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 33 }
+    }
+  ],
+  "refresh": "",
+  "schemaVersion": 39,
+  "tags": ["hydra", "otel", "tier-3", "drill-down"],
+  "templating": {
+    "list": [
+      {
+        "name": "tempo",
+        "type": "datasource",
+        "label": "Tempo datasource",
+        "query": "tempo",
+        "current": { "selected": false, "text": "Tempo", "value": "Tempo" }
+      },
+      {
+        "name": "cycle_id",
+        "type": "textbox",
+        "label": "hydra.cycle_id",
+        "description": "Paste a cycle ID from the Hydra dashboard (Cycles page) or from journalctl. The dashboard's per-row \"traces ↗\" link will populate this automatically when HYDRA_TRACE_UI_URL points here.",
+        "query": "",
+        "current": { "selected": false, "text": "", "value": "" }
+      }
+    ]
+  },
+  "time": { "from": "now-7d", "to": "now" },
+  "timezone": "browser",
+  "title": "Hydra — Cycle drill-down (hydra.cycle_id)",
+  "uid": "hydra-otel-cycle-drilldown",
+  "version": 1
+}

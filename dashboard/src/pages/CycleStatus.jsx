@@ -18,12 +18,29 @@ const EVIDENCE_COLORS = {
   blocked: "bg-yellow-500",
 };
 
+// Issue #207 (Tier-3 OTel): build a deep-link to the operator's trace UI
+// using the template returned by /observability/config. Mirrors the
+// buildTraceUrl logic in src/codex-otel.ts so the link renders client-side
+// without a round-trip per row.
+function traceUrlFor(template, cycleId) {
+  if (!template || !cycleId) return null;
+  const encoded = encodeURIComponent(String(cycleId));
+  if (template.includes("{cycleId}")) {
+    return template.replace(/\{cycleId\}/g, encoded);
+  }
+  const sep = template.includes("?") ? "&" : "?";
+  return `${template}${sep}hydra_cycle_id=${encoded}`;
+}
+
 export default function CycleStatus({ ws }) {
   const { data: current, refresh: refreshCurrent } = useApi("/cycle/status", { poll: 3000 });
   const { data: report } = useApi("/cycle/report", { poll: 5000 });
   const [historyLimit, setHistoryLimit] = useState(50);
   const { data: historyMetrics } = useApi(`/metrics?count=${historyLimit}`);
   const { data: tasks, refresh: refreshTasks } = useApi("/tasks", { poll: 5000 });
+  // Issue #207: fetch operator-configured trace UI template once; cached for the page.
+  const { data: obsConfig } = useApi("/observability/config");
+  const traceTemplate = obsConfig?.traceUrlTemplate || null;
   const [selectedCycle, setSelectedCycle] = useState(null);
   const [selectedTaskId, setSelectedTaskId] = useState(null);
 
@@ -46,7 +63,21 @@ export default function CycleStatus({ ws }) {
           <div className="flex items-center justify-between mb-4">
             <div>
               <h2 className="text-sm font-semibold text-zinc-400">Active Cycle</h2>
-              <p className="font-mono text-xs text-zinc-500 mt-0.5">{current.cycleId}</p>
+              <p className="font-mono text-xs text-zinc-500 mt-0.5">
+                {current.cycleId}
+                {/* Issue #207: Tier-3 OTel deep-link to the operator's trace UI. */}
+                {traceUrlFor(traceTemplate, current.cycleId) && (
+                  <a
+                    href={traceUrlFor(traceTemplate, current.cycleId)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="ml-2 text-blue-400 hover:text-blue-300 underline"
+                    title="Open traces in the configured observability backend"
+                  >
+                    traces ↗
+                  </a>
+                )}
+              </p>
             </div>
             <StatusBadge status={current.status || "running"} />
           </div>
@@ -170,6 +201,19 @@ export default function CycleStatus({ ws }) {
                         {m.anchorType && <span className="text-zinc-700">{m.anchorType}</span>}
                         {testDelta && <span className="text-emerald-700">{testDelta}</span>}
                         {dur && <span>{dur}</span>}
+                        {/* Issue #207: per-row OTel deep-link, only rendered when configured. */}
+                        {traceUrlFor(traceTemplate, m.cycleId) && (
+                          <a
+                            href={traceUrlFor(traceTemplate, m.cycleId)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-blue-400 hover:text-blue-300 underline"
+                            title="Open traces for this cycle in the configured observability backend"
+                          >
+                            traces ↗
+                          </a>
+                        )}
                         <span className="w-28 text-right">{time}</span>
                       </div>
                     </button>

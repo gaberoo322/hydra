@@ -25,6 +25,7 @@ import { createPlanCacheRouter } from "./api/plan-cache.ts";
 import { createReflectionsRouter } from "./api/reflections.ts";
 import { createMergeLockRouter } from "./api/merge-lock.ts";
 import { createCapacityRouter } from "./api/capacity.ts";
+import { createObservabilityRouter } from "./api/observability.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -68,6 +69,7 @@ function createApi(eventBus) {
   api.use(createReflectionsRouter());
   api.use(createMergeLockRouter());
   api.use(createCapacityRouter());
+  api.use(createObservabilityRouter());
   api.use(createMiscRouter(eventBus));
   api.use(createChecklistRouter());
   api.use(createOutcomesRouter());
