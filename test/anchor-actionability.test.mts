@@ -275,3 +275,233 @@ describe("anchor actionability gate (issue #270)", () => {
     assert.equal(r.actionable, true);
   });
 });
+
+// =============================================================================
+// Issue #285 — doc-anchor saturation gate.
+//
+// In the 2026-05-11 50-cycle window, 9 cycles spent ~$60 each on the same doc
+// anchor with abandonReason "Drift: ...". `isDocAnchorSaturated()` short-
+// circuits this loop BEFORE the planner runs by counting consecutive recent
+// drift-rejected cycles with the same anchor reference.
+// =============================================================================
+
+describe("doc-anchor saturation gate (issue #285)", () => {
+  // Use a dedicated Redis client so the outer suite's `after` disconnect
+  // doesn't close out from under us (test order is not guaranteed).
+  let satRedis: any;
+  let satTempConfigRoot: string;
+  let satOriginalConfigPath: string | undefined;
+  let satActionability: typeof import("../src/anchor-actionability.ts");
+
+  async function cleanSatRedisKeys() {
+    const keys = await satRedis.keys("hydra:*");
+    if (keys.length > 0) await satRedis.del(...keys);
+  }
+
+  beforeEach(async () => {
+    if (!satRedis) {
+      const redisUrl = process.env.REDIS_URL || "redis://localhost:6379/1";
+      process.env.REDIS_URL = redisUrl;
+      satRedis = new Redis(redisUrl);
+    }
+    satTempConfigRoot = await mkdtemp(join(tmpdir(), "hydra-saturation-"));
+    satOriginalConfigPath = process.env.HYDRA_CONFIG_PATH;
+    process.env.HYDRA_CONFIG_PATH = satTempConfigRoot;
+    await cleanSatRedisKeys();
+    delete process.env.HYDRA_DOC_SATURATION_THRESHOLD;
+    satActionability = await import(`../src/anchor-actionability.ts?ts=${Date.now()}`);
+  });
+
+  after(async () => {
+    if (satRedis) {
+      await cleanSatRedisKeys();
+      satRedis.disconnect();
+    }
+    if (satTempConfigRoot) {
+      await rm(satTempConfigRoot, { recursive: true, force: true });
+    }
+    if (satOriginalConfigPath === undefined) delete process.env.HYDRA_CONFIG_PATH;
+    else process.env.HYDRA_CONFIG_PATH = satOriginalConfigPath;
+    delete process.env.HYDRA_DOC_SATURATION_THRESHOLD;
+  });
+
+  /**
+   * Record a synthetic cycle in the metrics index. Newer ts -> newer cycle.
+   * `outcome` is one of:
+   *   - "drift"       — drift-rejected via planner (post-spend abandon)
+   *   - "drift-pre"   — drift-rejected via the pre-filter (cheap abandon)
+   *   - "merge"       — produced a merge
+   *   - "other"       — some other failure (no abandonReason)
+   */
+  async function recordCycle(opts: {
+    cycleId: string;
+    anchorType: string;
+    anchorReference: string;
+    outcome: "drift" | "drift-pre" | "merge" | "other";
+    ts: number;
+  }) {
+    const fields: Record<string, string> = {
+      cycleId: opts.cycleId,
+      anchorType: opts.anchorType,
+      anchorReference: opts.anchorReference,
+      taskTitle: `synthetic-${opts.cycleId}`,
+      tasksAttempted: "1",
+      tasksMerged: opts.outcome === "merge" ? "1" : "0",
+      tasksAbandoned: opts.outcome === "merge" ? "0" : "1",
+    };
+    if (opts.outcome === "drift") fields.abandonReason = "Drift: Title 'foo' is 92% similar to 'bar' from cycle-x";
+    else if (opts.outcome === "drift-pre") fields.abandonReason = "drift-pre-filter";
+    else if (opts.outcome === "other") fields.abandonReason = "Planner produced no task";
+    await satRedis.hset(`hydra:metrics:${opts.cycleId}`, fields);
+    await satRedis.zadd("hydra:metrics:index", opts.ts, opts.cycleId);
+  }
+
+  test("non-doc anchor types are not gated", async () => {
+    const r = await satActionability.isDocAnchorSaturated("research", "anything");
+    assert.equal(r.saturated, false);
+    assert.match(r.reason, /not a doc anchor/);
+  });
+
+  test("missing reference returns not-saturated", async () => {
+    const r = await satActionability.isDocAnchorSaturated("doc", "");
+    assert.equal(r.saturated, false);
+    assert.match(r.reason, /no reference/);
+  });
+
+  test("no recent cycles returns not-saturated", async () => {
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, false);
+    assert.equal(r.consecutiveDriftCount, 0);
+  });
+
+  test("2 consecutive drift-rejected doc cycles → saturated (default threshold N=2)", async () => {
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 2000 });
+    await recordCycle({ cycleId: "c2", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, true);
+    assert.equal(r.consecutiveDriftCount, 2);
+    assert.match(r.reason, /2 consecutive drift-rejected/);
+  });
+
+  test("matches AC: 2 prior drift cycles → 3rd doc anchor short-circuits before any planner cost", async () => {
+    // Acceptance criterion from issue #285:
+    // "2 prior drift-rejected doc cycles → 3rd doc anchor returns
+    //  { actionable: false, reason: ... } before any planner cost is incurred."
+    const now = Date.now();
+    await recordCycle({ cycleId: "doc-cycle-1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 2000 });
+    await recordCycle({ cycleId: "doc-cycle-2", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, true, "3rd doc-anchor cycle must be flagged saturated");
+    assert.ok(r.consecutiveDriftCount >= 2);
+  });
+
+  test("1 drift cycle is below default threshold", async () => {
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, false);
+    assert.equal(r.consecutiveDriftCount, 1);
+  });
+
+  test("drift-pre-filter abandons also count toward saturation", async () => {
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift-pre", ts: now - 2000 });
+    await recordCycle({ cycleId: "c2", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift-pre", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, true);
+    assert.equal(r.consecutiveDriftCount, 2);
+  });
+
+  test("non-drift abandon breaks the consecutive run", async () => {
+    // [drift, other, drift] — the "other" failure breaks the streak.
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 3000 });
+    await recordCycle({ cycleId: "c2", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "other", ts: now - 2000 });
+    await recordCycle({ cycleId: "c3", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, false);
+    // Newest-first scan: c3 is drift → counter=1; c2 is "other" → break.
+    assert.equal(r.consecutiveDriftCount, 1);
+  });
+
+  test("merged interleaved cycle (for any anchor) resets the streak", async () => {
+    // [drift on doc, merge on queue, drift on doc] — the queue merge resets.
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 3000 });
+    await recordCycle({ cycleId: "c2", anchorType: "queue", anchorReference: "some other thing", outcome: "merge", ts: now - 2000 });
+    await recordCycle({ cycleId: "c3", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, false);
+    assert.equal(r.consecutiveDriftCount, 1);
+  });
+
+  test("other-anchor cycles without a merge don't reset the streak", async () => {
+    // [drift on doc, fail on queue (not merged), drift on doc] — saturated.
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 3000 });
+    await recordCycle({ cycleId: "c2", anchorType: "queue", anchorReference: "queue item", outcome: "other", ts: now - 2000 });
+    await recordCycle({ cycleId: "c3", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, true);
+    assert.equal(r.consecutiveDriftCount, 2);
+  });
+
+  test("different doc reference doesn't trigger saturation", async () => {
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/other.md", outcome: "drift", ts: now - 2000 });
+    await recordCycle({ cycleId: "c2", anchorType: "doc", anchorReference: "direction/other.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, false);
+    assert.equal(r.consecutiveDriftCount, 0);
+  });
+
+  test("HYDRA_DOC_SATURATION_THRESHOLD env var tunes threshold", async () => {
+    process.env.HYDRA_DOC_SATURATION_THRESHOLD = "3";
+    satActionability = await import(`../src/anchor-actionability.ts?ts=${Date.now()}`);
+
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 2000 });
+    await recordCycle({ cycleId: "c2", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    // 2 cycles, threshold=3 → not saturated yet.
+    const r1 = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r1.saturated, false);
+
+    await recordCycle({ cycleId: "c3", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now });
+
+    const r2 = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r2.saturated, true);
+    assert.equal(r2.consecutiveDriftCount, 3);
+  });
+
+  test("HYDRA_DOC_SATURATION_THRESHOLD=0 disables the gate", async () => {
+    process.env.HYDRA_DOC_SATURATION_THRESHOLD = "0";
+    satActionability = await import(`../src/anchor-actionability.ts?ts=${Date.now()}`);
+
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 2000 });
+    await recordCycle({ cycleId: "c2", anchorType: "doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("doc", "direction/priorities.md");
+    assert.equal(r.saturated, false);
+    assert.match(r.reason, /disabled/);
+  });
+
+  test("priorities-doc alias is gated alongside 'doc'", async () => {
+    const now = Date.now();
+    await recordCycle({ cycleId: "c1", anchorType: "priorities-doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 2000 });
+    await recordCycle({ cycleId: "c2", anchorType: "priorities-doc", anchorReference: "direction/priorities.md", outcome: "drift", ts: now - 1000 });
+
+    const r = await satActionability.isDocAnchorSaturated("priorities-doc", "direction/priorities.md");
+    assert.equal(r.saturated, true);
+  });
+});
