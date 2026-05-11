@@ -8,6 +8,8 @@ import {
   getTargetWorkspace,
   getTargetServiceName,
   getTargetWorktreePrefix,
+  getTargetGithubRepo,
+  getTargetCommitUrl,
   __resetForTests,
 } from "../src/target-config.ts";
 
@@ -15,6 +17,7 @@ type EnvSnapshot = {
   HYDRA_TARGET_NAME: string | undefined;
   HYDRA_PROJECT_WORKSPACE: string | undefined;
   HYDRA_WORKSPACE: string | undefined;
+  HYDRA_TARGET_GITHUB_REPO: string | undefined;
 };
 
 let snapshot: EnvSnapshot;
@@ -26,6 +29,7 @@ function saveEnv(): EnvSnapshot {
     HYDRA_TARGET_NAME: process.env.HYDRA_TARGET_NAME,
     HYDRA_PROJECT_WORKSPACE: process.env.HYDRA_PROJECT_WORKSPACE,
     HYDRA_WORKSPACE: process.env.HYDRA_WORKSPACE,
+    HYDRA_TARGET_GITHUB_REPO: process.env.HYDRA_TARGET_GITHUB_REPO,
   };
 }
 
@@ -34,6 +38,7 @@ function restoreEnv(snap: EnvSnapshot) {
     "HYDRA_TARGET_NAME",
     "HYDRA_PROJECT_WORKSPACE",
     "HYDRA_WORKSPACE",
+    "HYDRA_TARGET_GITHUB_REPO",
   ] as const) {
     const v = snap[key];
     if (v === undefined) delete process.env[key];
@@ -46,6 +51,7 @@ function setup() {
   delete process.env.HYDRA_TARGET_NAME;
   delete process.env.HYDRA_PROJECT_WORKSPACE;
   delete process.env.HYDRA_WORKSPACE;
+  delete process.env.HYDRA_TARGET_GITHUB_REPO;
   warnCalls = [];
   originalWarn = console.warn;
   console.warn = (...args: unknown[]) => {
@@ -222,6 +228,76 @@ test("no warnings when both canonical env vars are set", () => {
     getTargetServiceName();
     getTargetWorktreePrefix();
     assert.equal(warnCalls.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetGithubRepo reads HYDRA_TARGET_GITHUB_REPO when set", () => {
+  setup();
+  try {
+    process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
+    assert.equal(getTargetGithubRepo(), "acme/widgets");
+    assert.equal(warnCalls.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetGithubRepo returns gaberoo322/hydra-betting and warns once when unset", () => {
+  setup();
+  try {
+    assert.equal(getTargetGithubRepo(), "gaberoo322/hydra-betting");
+    assert.equal(getTargetGithubRepo(), "gaberoo322/hydra-betting");
+    assert.equal(getTargetGithubRepo(), "gaberoo322/hydra-betting");
+    const repoWarns = warnCalls.filter((c) =>
+      /HYDRA_TARGET_GITHUB_REPO is unset/.test(String(c[0])),
+    );
+    assert.equal(repoWarns.length, 1);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetGithubRepo treats empty string as unset", () => {
+  setup();
+  try {
+    process.env.HYDRA_TARGET_GITHUB_REPO = "";
+    assert.equal(getTargetGithubRepo(), "gaberoo322/hydra-betting");
+    const repoWarns = warnCalls.filter((c) =>
+      /HYDRA_TARGET_GITHUB_REPO is unset/.test(String(c[0])),
+    );
+    assert.equal(repoWarns.length, 1);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetCommitUrl builds URL from configured repo and sha", () => {
+  setup();
+  try {
+    process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
+    assert.equal(
+      getTargetCommitUrl("deadbeef1234"),
+      "https://github.com/acme/widgets/commit/deadbeef1234",
+    );
+    assert.equal(warnCalls.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+test("getTargetCommitUrl falls back to default repo with a one-time warn when env unset", () => {
+  setup();
+  try {
+    const url = getTargetCommitUrl("abc123");
+    assert.equal(url, "https://github.com/gaberoo322/hydra-betting/commit/abc123");
+    // Calling again should not produce additional warnings
+    getTargetCommitUrl("def456");
+    const repoWarns = warnCalls.filter((c) =>
+      /HYDRA_TARGET_GITHUB_REPO is unset/.test(String(c[0])),
+    );
+    assert.equal(repoWarns.length, 1);
   } finally {
     teardown();
   }

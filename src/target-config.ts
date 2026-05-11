@@ -22,10 +22,11 @@ import path from "node:path";
 import os from "node:os";
 
 const DEFAULT_TARGET_NAME = "hydra-betting";
+const DEFAULT_TARGET_GITHUB_REPO = "gaberoo322/hydra-betting";
 
 // Module-level memoization for one-time warnings. Booleans (not Map) per ADR-0002
 // guidance — keep this leaf module deliberately minimal.
-let warned = { name: false, workspace: false, legacy: false };
+let warned = { name: false, workspace: false, legacy: false, githubRepo: false };
 
 /**
  * Returns the target name slug (e.g. `hydra-betting`).
@@ -97,9 +98,42 @@ export function getTargetWorktreePrefix(): string {
 }
 
 /**
+ * Returns the target's GitHub repo identifier in `owner/repo` form
+ * (e.g. `gaberoo322/hydra-betting`).
+ *
+ * Reads `HYDRA_TARGET_GITHUB_REPO`. Empty string is treated as unset.
+ * Falls back to `"gaberoo322/hydra-betting"` with a one-time `console.warn`
+ * so deployments without the env var keep running while the operator
+ * migrates. Per ADR-0002, returns a single string — multi-target
+ * abstractions are out of scope.
+ */
+export function getTargetGithubRepo(): string {
+  const raw = process.env.HYDRA_TARGET_GITHUB_REPO;
+  if (raw && raw.trim()) return raw.trim();
+  if (!warned.githubRepo) {
+    warned.githubRepo = true;
+    console.warn(
+      `[target-config] HYDRA_TARGET_GITHUB_REPO is unset; falling back to "${DEFAULT_TARGET_GITHUB_REPO}". Set HYDRA_TARGET_GITHUB_REPO explicitly (ADR-0002).`,
+    );
+  }
+  return DEFAULT_TARGET_GITHUB_REPO;
+}
+
+/**
+ * Returns the GitHub commit URL for the configured target repo and the given
+ * commit SHA, e.g. `https://github.com/gaberoo322/hydra-betting/commit/<sha>`.
+ *
+ * Used by `notify.ts` and `digest.ts` to link merge commits in Telegram
+ * messages. Composes `getTargetGithubRepo()` — no separate env var.
+ */
+export function getTargetCommitUrl(sha: string): string {
+  return `https://github.com/${getTargetGithubRepo()}/commit/${sha}`;
+}
+
+/**
  * Test-only: reset the one-time warning flags so each test can assert
  * warning behavior in isolation. Not for production use.
  */
 export function __resetForTests(): void {
-  warned = { name: false, workspace: false, legacy: false };
+  warned = { name: false, workspace: false, legacy: false, githubRepo: false };
 }

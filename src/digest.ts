@@ -13,6 +13,7 @@
  */
 
 import { sendToTelegram } from "./notify.ts";
+import { getTargetCommitUrl } from "./target-config.ts";
 
 const DIGEST_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const QUIET_START_HOUR = 22; // 10pm
@@ -98,7 +99,7 @@ function buildDigestMessage(events) {
       for (const e of shown) {
         const task = e.payload?.task;
         const sha = e.payload?.commitSha?.slice(0, 7);
-        const link = sha ? `https://github.com/gaberoo322/hydra-betting/commit/${e.payload.commitSha}` : "";
+        const link = sha ? getTargetCommitUrl(e.payload.commitSha) : "";
         lines.push(`• ${task?.title || "?"}${sha ? ` (${link})` : ""}`);
       }
       if (merged.length > 10) lines.push(`• ... and ${merged.length - 10} more`);
