@@ -27,12 +27,20 @@ import { recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { preflightCheck, runHighRiskReview } from "./preflight.ts";
 import { runExecutorAgent } from "./executor-agent.ts";
 import {
-  acquireMergeLock, getMergeLockHolder, releaseMergeLock,
-} from "./redis-adapter.ts";
-import {
   handleEarlyExit, PROJECT_WORKSPACE,
 } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
+// Merge-lock + merge mechanics are accessed through the Tier-0 gate
+// facade (ADR-0001 step 6, issue #249). `mergeToMain` is *defined* in
+// this file but the merge step's invocation site goes through `gate.ts`
+// so the gate is the single contract control-loop and pipeline-steps
+// share.
+import {
+  gateAcquireMergeLock,
+  gateGetMergeLockHolder,
+  gateReleaseMergeLock,
+  gateMergeToMain,
+} from "./gate.ts";
 
 // ---------------------------------------------------------------------------
 // StepResult — consistent return type for all pipeline steps
@@ -570,12 +578,12 @@ export async function runMergeStep(
   const MERGE_LOCK_TTL = 60;
   let mergeLockAcquired = false;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const acquired = await acquireMergeLock(cycleId, MERGE_LOCK_TTL);
+    const acquired = await gateAcquireMergeLock(cycleId, MERGE_LOCK_TTL);
     if (acquired) {
       mergeLockAcquired = true;
       break;
     }
-    const holder = await getMergeLockHolder();
+    const holder = await gateGetMergeLockHolder();
     console.log(`[ControlLoop] Merge lock held by ${holder} — retry ${attempt + 1}/3`);
     await new Promise(r => setTimeout(r, 5000 * (attempt + 1)));
   }
@@ -592,11 +600,11 @@ export async function runMergeStep(
 
   const featureBranch = execResult?.branch || undefined;
   const mergeResult = mergeLockAcquired
-    ? await mergeToMain(PROJECT_WORKSPACE, cycleId, featureBranch)
+    ? await gateMergeToMain(PROJECT_WORKSPACE, cycleId, featureBranch)
     : { ok: false, commitSha: "", featureBranch: null, error: "Merge lock not acquired" };
 
   // Always release merge lock after merge attempt
-  await releaseMergeLock().catch((err: any) => {
+  await gateReleaseMergeLock().catch((err: any) => {
     console.error(`[MergeStep] Failed to release merge lock: ${err.message}`);
     Sentry.addBreadcrumb({ category: "pipeline", message: `Merge lock release failed: ${err.message}`, level: "error" });
   });

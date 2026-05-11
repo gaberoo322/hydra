@@ -22,7 +22,6 @@ import {
   registerCycleSource, releaseCycleSource,
   setCycleActive,
   initCycleHash,
-  releaseMergeLock,
 } from "./redis-adapter.ts";
 import { prepareWorkspace } from "./prepare-workspace.ts";
 import { runPlannerAgent } from "./planner-prompt.ts";
@@ -36,7 +35,6 @@ import {
   handleEarlyExit, PROJECT_WORKSPACE,
 } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
-import { runVerificationPipeline } from "./verification.ts";
 import { runPostMerge } from "./post-merge.ts";
 import {
   handlePlanResult,
@@ -45,7 +43,17 @@ import {
   runExecuteStep,
   runMergeStep,
 } from "./pipeline-steps.ts";
-import { runCostCapCheck, getPerCycleCostCapUsd } from "./cost-cap.ts";
+// All merge-proof steps are accessed through the Tier-0 gate facade
+// (ADR-0001 work-order step 6). Do not bypass this import — adding a
+// direct import of grounding / verification / scope-enforcement /
+// mutation / cost-cap / merge-lock for a gate-proof call site would
+// re-introduce the "gate is implicit" hazard that #249 fixed.
+import {
+  gateVerify,
+  gateCheckCostCap,
+  gateReleaseMergeLock,
+  getPerCycleCostCapUsd,
+} from "./gate.ts";
 
 // ---------------------------------------------------------------------------
 // The control loop — evidence-driven pipeline
@@ -283,7 +291,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   // Step 4.5: COST CAP — bail BEFORE executor (cheapest exit) if planner +
   // preflight already burned the per-cycle budget. Issue #209: top abandoned
   // cycles consumed up to $56 each; this is the dominant cost-leak class.
-  const preExecCapCheck = await runCostCapCheck(ctx, task, taskId, "post-preflight");
+  const preExecCapCheck = await gateCheckCostCap(ctx, task, taskId, "post-preflight");
   if (preExecCapCheck.continue === false) return preExecCapCheck.result;
 
   // Step 5: EXECUTE — make the smallest change (codex agent call)
@@ -293,13 +301,14 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
   // Step 5.5: COST CAP — re-check after executor. Even though we bailed
   // pre-executor, an expensive executor call can blow past the cap and we
   // shouldn't pay for fixer / mutation / jit on top.
-  const postExecCapCheck = await runCostCapCheck(ctx, task, taskId, "post-executor");
+  const postExecCapCheck = await gateCheckCostCap(ctx, task, taskId, "post-executor");
   if (postExecCapCheck.continue === false) return postExecCapCheck.result;
 
   const { execResult, diff, scopeFilterCleaned } = executeResult;
 
-  // Steps 6–6.9: VERIFICATION PIPELINE
-  const vResult = await runVerificationPipeline(ctx, task, diff, execResult, complexity, filesInScope, criteriaCount, taskId);
+  // Steps 6–6.9: VERIFICATION PIPELINE (gate-proof — verification, scope
+  // enforcement, mutation kill-rate gate all live behind gateVerify).
+  const vResult = await gateVerify(ctx, task, diff, execResult, complexity, filesInScope, criteriaCount, taskId);
 
   if (!vResult.passed) {
     return vResult.earlyReturn;
@@ -339,7 +348,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
     await releaseCycleSource("codex").catch((err: any) =>
       console.error(`[ControlLoop] Failed to release codex cycle registration: ${err.message}`)
     );
-    await releaseMergeLock().catch((err: any) =>
+    await gateReleaseMergeLock().catch((err: any) =>
       console.error(`[ControlLoop] Failed to release merge lock (safety net): ${err.message}`)
     );
   }

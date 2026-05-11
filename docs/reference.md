@@ -205,6 +205,29 @@ export OTEL_EXPORTER_OTLP_HEADERS="signoz-ingestion-key=$(cat ~/.codex/signoz.ke
 
 You should get one trace per agent call (planner, executor, optionally fixer / high-risk-review), each carrying `resource.hydra.agent_role`, `resource.hydra.model_tier`, `resource.hydra.complexity`. Group by `resource.hydra.agent_role` for per-agent latency / token counts.
 
+## Merge Gate (`src/gate.ts`) (issue #249, ADR-0001 work-order step 6)
+
+The merge gate is the operator-only Tier-0 surface the control loop calls for every merge-proof step. `src/gate.ts` is a thin facade — it names and exposes the gate-proof contract; the underlying logic still lives in `verification.ts` / `mutation.ts` / `scope-enforcement.ts` / `cost-cap.ts` / `pipeline-steps.ts` / `redis-adapter.ts` and evolves under their own tier rules. The gate's contract is Tier-0; the loop body that calls it (`control-loop.ts`) and the logic the gate delegates to (where allowed) can evolve through normal PR flow.
+
+| Function | Step | Delegates to |
+|---|---|---|
+| `gateGrounding(workspace, opts?)` | 1b / post-merge re-ground | `groundProject` in `grounding.ts` |
+| `gateVerify(ctx, task, diff, execResult, complexity, filesInScope, criteriaCount, taskId)` | 6 through 6.9 | `runVerificationPipeline` in `verification.ts` |
+| `gateScopeEnforcement(ctx, task, verification, taskId)` | 6.9 — >80% out-of-scope blocks merge | `runScopeEnforcement` in `scope-enforcement.ts` |
+| `gateMutationKillRate(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId)` | 6.7 — <30% kill rate blocks non-quick-fix | `runMutationGate` in `mutation.ts` |
+| `gateAcquireMergeLock(cycleId, ttlSeconds?)` | 7 — Redis lock (60s TTL) | `acquireMergeLock` in `redis-adapter.ts` |
+| `gateReleaseMergeLock()` | 7 + finally safety-net | `releaseMergeLock` in `redis-adapter.ts` |
+| `gateMergeToMain(projectDir, cycleId, explicitFeatureBranch?)` | 7 — `git merge --no-ff` + push | `mergeToMain` in `pipeline-steps.ts` |
+| `gateRollback(projectDir, commitSha, reason)` | 8 — `git revert -m 1` + push when tests regress | inline (revert mechanics live in `gate.ts`) |
+| `gateCheckCostCap(ctx, task, taskId, checkpoint)` | 4.5 / 5.5 — per-cycle $-cap | `runCostCapCheck` in `cost-cap.ts` |
+| `getPerCycleCostCapUsd()` | logging | re-exported from `cost-cap.ts` |
+| `gateGetMergeLockHolder()` | diagnostics | re-exported from `redis-adapter.ts` |
+
+**Invariants:**
+- The control loop and `pipeline-steps.ts` / `post-merge.ts` import from `gate.ts` for every gate-proof call site. Reaching around the gate (e.g. importing `groundProject` directly for a post-merge re-ground) is a contract violation; it cannot be enforced by the type system, so reviewers check it and `test/gate-surface.test.mts` pins the named exports.
+- `gate.ts` is listed in `UNTOUCHABLE_PATHS` (`src/untouchable.ts`) — any change to the facade requires `operator-approved`.
+- The gate adds no behavior. Pure refactor — same tests pass before and after.
+
 ## Modification Tiers (issue #243, ADR-0001 + ADR-0004)
 
 Every PR is classified into one of four tiers based on the files it touches. The classifier (`src/tier-classifier.ts`) is invoked by the `tier-gate` CI job and exposed at `GET /api/tier?files=a,b,c`.
