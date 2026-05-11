@@ -46,10 +46,18 @@ const DEFAULT_STANDARD_KILL_THRESHOLD = 30;
  * cycle metrics so dashboards can answer "did the mutation gate run?".
  *
  * Values are stable strings, mirroring jit.ts decision conventions.
+ *
+ * Issue #300: NO_MUTANTS is now reserved for the case where the candidate
+ * generator produced zero mutants for the diff (e.g. comment-only / formatting
+ * diffs). A small-but-non-zero mutant count is reported as RAN — the gate did
+ * useful work, even if the sample is thin. ALL_UNCOMPILABLE covers the
+ * intermediate case where candidates were generated but every applied mutant
+ * failed to compile or could not be read.
  */
 export const MUTATION_DECISION = {
   RAN: "ran",
   NO_MUTANTS: "no-mutants",
+  ALL_UNCOMPILABLE: "skipped: all-mutants-uncompilable",
   COST_CAP_SKIP: "cost-cap-skip",
   NO_FILES: "skipped: no files changed",
   ERROR: "error",
@@ -114,6 +122,11 @@ export type MutationTestReport = {
   timedOut: boolean;
   durationMs: number;
   survivors: MutationResult[]; // only the surviving mutants (uncovered code)
+  // Issue #300: number of mutation candidates the generator emitted BEFORE the
+  // maxMutants cap was applied. Distinguishes "diff had nothing to mutate"
+  // (candidatesGenerated === 0 → no-mutants) from "we capped a larger pool"
+  // (candidatesGenerated > totalMutants → quick-fix sample).
+  candidatesGenerated: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -277,6 +290,10 @@ export async function runMutationTests(
   const candidates = Number.isFinite(maxMutants)
     ? allMutations.slice(0, maxMutants)
     : allMutations;
+  // Issue #300: record the pre-cap candidate count so the gate can distinguish
+  // "nothing to mutate" (legitimate no-mutants) from "we capped a larger pool"
+  // (still useful signal, should classify as RAN).
+  const candidatesGenerated = allMutations.length;
 
   let timedOut = false;
 
@@ -337,6 +354,7 @@ export async function runMutationTests(
     timedOut,
     durationMs: Date.now() - start,
     survivors: results.filter((r) => r.survived),
+    candidatesGenerated,
   };
 }
 
@@ -371,6 +389,31 @@ export function summarizeMutationTests(report: MutationTestReport): string {
 // ---------------------------------------------------------------------------
 // Mutation gate — pipeline orchestration (step 6.7)
 // ---------------------------------------------------------------------------
+
+/**
+ * Classify the gate decision when no mutants survived the testable filter.
+ *
+ * Issue #300: the gate previously short-circuited to NO_MUTANTS whenever
+ * `testable < 3`, which silently downgraded small-but-valid samples (the
+ * `mutationsTested: 2, mutationSurvived: 0` constant in the 20-cycle
+ * telemetry) and pinned qualityGateCoverageRate at ~14%. Post-#300 the
+ * decision is:
+ *
+ *   testable > 0                                    → null  (caller uses RAN)
+ *   testable === 0 && candidatesGenerated === 0     → NO_MUTANTS
+ *   testable === 0 && candidatesGenerated > 0       → ALL_UNCOMPILABLE
+ *
+ * Pure helper — exported for unit testing without a CycleContext mock.
+ */
+export function classifyNoSignalDecision(
+  testable: number,
+  candidatesGenerated: number,
+): MutationDecision | null {
+  if (testable > 0) return null;
+  return candidatesGenerated === 0
+    ? MUTATION_DECISION.NO_MUTANTS
+    : MUTATION_DECISION.ALL_UNCOMPILABLE;
+}
 
 /**
  * Decide if the mutation pass should be skipped because the cycle has
@@ -432,13 +475,14 @@ export async function runMutationGate(
     const killRate = testable > 0
       ? Math.round((mutationReport.killed / testable) * 100)
       : 100;
-    console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${testable} killed, ${mutationReport.survived} survived)`);
+    console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${testable} killed, ${mutationReport.survived} survived, ${mutationReport.candidatesGenerated} candidates generated)`);
 
-    // Issue #272: testable < 3 → no usable signal. Surface the file list that
-    // was inspected so the operator can see exactly what was looked at.
-    if (testable < 3) {
-      console.log(`[ControlLoop] Mutation testing: no testable mutants (testable=${testable}). Inspected files: ${inspectable.join(", ") || "(none)"}`);
-      return { report: mutationReport, decision: MUTATION_DECISION.NO_MUTANTS, filesInspected: inspectable };
+    // Issue #300: classify "no signal" cases via the pure helper. testable > 0
+    // returns null and falls through to the kill-rate gate below.
+    const noSignal = classifyNoSignalDecision(testable, mutationReport.candidatesGenerated);
+    if (noSignal !== null) {
+      console.log(`[ControlLoop] Mutation testing: ${noSignal} (candidates=${mutationReport.candidatesGenerated}, skipped=${mutationReport.skipped}). Inspected files: ${inspectable.join(", ") || "(none)"}`);
+      return { report: mutationReport, decision: noSignal, filesInspected: inspectable };
     }
 
     if (mutationReport.survived > 0) {

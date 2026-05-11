@@ -27,6 +27,7 @@ import {
   MUTATION_DECISION,
   generateMutations,
   runMutationTests,
+  classifyNoSignalDecision,
 } from "../src/mutation.ts";
 import { computeQualityGateCoverage } from "../src/post-merge.ts";
 
@@ -162,11 +163,11 @@ describe("runMutationTests maxMutants cap (issue #272 quick-fix budget)", () => 
   });
 });
 
-describe("no-mutants case (AC: testable < 3 records mutationDecision='no-mutants')", () => {
+describe("no-mutants case (AC: zero candidates records mutationDecision='no-mutants')", () => {
   test("thin diffs produce zero or near-zero candidates", () => {
     // A docstring-only / formatting-only diff has nothing the MUTATORS can
-    // transform. This pins the assumption that thin diffs land in the
-    // no-mutants branch of runMutationGate rather than the gate-run branch.
+    // transform. Pre-#300 this landed in NO_MUTANTS regardless of size; post-#300
+    // it only lands in NO_MUTANTS when candidatesGenerated === 0.
     const docstring = [
       "/**",
       " * Foo does a thing.",
@@ -174,7 +175,7 @@ describe("no-mutants case (AC: testable < 3 records mutationDecision='no-mutants
       "export const NAME = 'foo';",
     ].join("\n");
     const mutations = generateMutations("/tmp/docs.ts", docstring);
-    assert.ok(mutations.length < 3, `docstring-only file should have <3 mutants, got ${mutations.length}`);
+    assert.equal(mutations.length, 0, `docstring-only file should have 0 mutants, got ${mutations.length}`);
   });
 
   test("thin boolean assignment still produces some candidates (sanity)", () => {
@@ -187,5 +188,137 @@ describe("no-mutants case (AC: testable < 3 records mutationDecision='no-mutants
     ].join("\n");
     const mutations = generateMutations("/tmp/booleans.ts", src);
     assert.ok(mutations.length >= 3, `three-bool file should have ≥3 mutants, got ${mutations.length}`);
+  });
+});
+
+// =============================================================================
+// Issue #300 regression: the gate must classify small-but-non-zero mutant runs
+// as RAN, not NO_MUTANTS.
+//
+// Pre-#300, `testable < 3` short-circuited the decision to NO_MUTANTS. Telemetry
+// in the issue showed `mutationsTested: 2, mutationSurvived: 0` constant for
+// 17 of 20 cycles, with `mutationDecision: "no-mutants"` — i.e. the engine had
+// run, killed both mutants, but the gate reported "didn't run". That kept
+// qualityGateCoverageRate stuck at 14% even after #287 landed.
+// =============================================================================
+
+describe("MutationTestReport.candidatesGenerated (issue #300)", () => {
+  let workdir: string;
+
+  test("populates candidatesGenerated from pre-cap mutation count", async () => {
+    workdir = await mkdtemp(join(tmpdir(), "mutation-issue300-"));
+    try {
+      const lines: string[] = [];
+      for (let i = 0; i < 20; i++) {
+        lines.push(`  if (x${i} === ${i}) return true;`);
+      }
+      const sourceFile = join(workdir, "many-mutants.ts");
+      await writeFile(sourceFile, lines.join("\n"));
+      await writeFile(join(workdir, "package.json"), '{"name":"x","scripts":{"test":"true"}}');
+
+      // Even with maxMutants capping totalMutants to 5, candidatesGenerated
+      // reflects the unfiltered candidate count.
+      const report = await runMutationTests(
+        workdir,
+        ["many-mutants.ts"],
+        { maxMutants: 5, testCommand: "true", timeBudgetMs: 30_000 },
+      );
+      assert.equal(report.totalMutants, 5, "cap should limit results to 5");
+      assert.ok(
+        report.candidatesGenerated >= 10,
+        `candidatesGenerated should reflect pre-cap count (>=10), got ${report.candidatesGenerated}`,
+      );
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("candidatesGenerated === 0 for diffs the mutators cannot transform", async () => {
+    workdir = await mkdtemp(join(tmpdir(), "mutation-issue300-nomut-"));
+    try {
+      const inert = [
+        "// just a comment",
+        "/* and another */",
+        "export const NAME = 'foo';",
+        "import { x } from 'y';",
+      ].join("\n");
+      const sourceFile = join(workdir, "inert.ts");
+      await writeFile(sourceFile, inert);
+      await writeFile(join(workdir, "package.json"), '{"name":"x","scripts":{"test":"true"}}');
+
+      const report = await runMutationTests(
+        workdir,
+        ["inert.ts"],
+        { testCommand: "true", timeBudgetMs: 30_000 },
+      );
+      assert.equal(report.candidatesGenerated, 0, "comment/import-only diff yields zero candidates");
+      assert.equal(report.totalMutants, 0);
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("candidatesGenerated > 0 for a diff with mutation-eligible expressions (small sample)", async () => {
+    // AC: "diff with mutation-eligible expressions → RAN with ≥1 mutant".
+    // A 2-mutant file is exactly the small-sample case the pre-#300 gate
+    // silently downgraded to NO_MUTANTS. Verify the generator emits them.
+    workdir = await mkdtemp(join(tmpdir(), "mutation-issue300-small-"));
+    try {
+      const src = [
+        "export function a() { return true; }",
+        "export function b() { return false; }",
+      ].join("\n");
+      const sourceFile = join(workdir, "small.ts");
+      await writeFile(sourceFile, src);
+      await writeFile(join(workdir, "package.json"), '{"name":"x","scripts":{"test":"true"}}');
+
+      const report = await runMutationTests(
+        workdir,
+        ["small.ts"],
+        { testCommand: "true", timeBudgetMs: 30_000 },
+      );
+      // Two boolean returns => two mutants, each "survives" against `true`.
+      assert.equal(report.candidatesGenerated, 2);
+      assert.equal(report.totalMutants, 2);
+      // The critical post-#300 invariant: testable > 0 means the gate has
+      // real signal. We assert testable here as the value the gate uses.
+      const testable = report.totalMutants - report.skipped;
+      assert.equal(testable, 2, "small-but-non-zero testable count must survive into the gate");
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("MUTATION_DECISION.ALL_UNCOMPILABLE (issue #300)", () => {
+  test("is a stable string distinct from no-mutants", () => {
+    assert.equal(MUTATION_DECISION.ALL_UNCOMPILABLE, "skipped: all-mutants-uncompilable");
+    assert.notEqual(MUTATION_DECISION.ALL_UNCOMPILABLE, MUTATION_DECISION.NO_MUTANTS);
+  });
+});
+
+describe("classifyNoSignalDecision (issue #300)", () => {
+  test("returns null (caller uses RAN) when testable > 0 regardless of count", () => {
+    // The bug: pre-#300 the gate used `testable < 3` and reported NO_MUTANTS
+    // for 1- or 2-mutant runs. Post-#300, ANY positive testable count is
+    // real signal — classify as RAN by returning null.
+    assert.equal(classifyNoSignalDecision(1, 1), null);
+    assert.equal(classifyNoSignalDecision(2, 2), null);
+    assert.equal(classifyNoSignalDecision(2, 5), null); // capped sample
+    assert.equal(classifyNoSignalDecision(10, 10), null);
+  });
+
+  test("returns NO_MUTANTS when zero candidates were generated", () => {
+    // Comment-only / import-only / formatting-only diff: the mutators had
+    // nothing to transform. This is the only legitimate no-mutants case.
+    assert.equal(classifyNoSignalDecision(0, 0), MUTATION_DECISION.NO_MUTANTS);
+  });
+
+  test("returns ALL_UNCOMPILABLE when candidates were generated but all failed to apply", () => {
+    // The mutators emitted candidates, but every applied mutant was skipped
+    // (read error, compile error). Distinct decision so the dashboard does
+    // not blame the diff for being inert.
+    assert.equal(classifyNoSignalDecision(0, 3), MUTATION_DECISION.ALL_UNCOMPILABLE);
+    assert.equal(classifyNoSignalDecision(0, 1), MUTATION_DECISION.ALL_UNCOMPILABLE);
   });
 });
