@@ -69,42 +69,118 @@ export interface CostAttributionResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Map model string -> tier label. Matches the CLAUDE.md "Model Tiers" table:
- *   - frontier: gpt-5.4
- *   - codex:    gpt-5.3-codex
- *   - mini:     gpt-5.4-mini
- *
- * Inputs may be raw model names ("gpt-5.4") or tier aliases ("frontier",
- * "codex", "mini", "local"). Unknown values fall back to "unknown".
+ * Authoritative model-name -> tier table. Mirrors `MODEL_PRICING` /
+ * `MODEL_TIERS` in `src/codex-runner.ts`. Keep in sync when adding a new
+ * model id to the routing table — otherwise its spend lands in `byTier`
+ * as "unknown" and the cost-attribution dashboard becomes unreliable
+ * (issue #303: 38-48% of runs were classified "unknown" because the
+ * planner was bumped to `gpt-5.5` but `modelToTier` only matched 5.4).
+ */
+const MODEL_NAME_TO_TIER: Record<string, string> = {
+  // Frontier — planner default
+  "gpt-5.5":             "frontier",
+  "gpt-5.4":             "frontier",
+  // Codex — executor / fixer / JIT tester / quick-fix planner
+  "gpt-5.3-codex":       "codex",
+  "gpt-5.3-codex-spark": "codex",   // "rapid" tier + cost-cap fallback for frontier
+  // Mini — meta / classification / adversarial / high-risk review
+  "gpt-5.4-mini":        "mini",
+  // Local — Ollama fallback (tracked as mini for cost-tier purposes since spend = 0)
+  "gemma-4-26b":         "mini",
+};
+
+/** Tier aliases the runner accepts (`"frontier"`, `"codex"`, etc.) plus a
+ * couple of book-keeping values that `logAgentRun` can emit. */
+const TIER_ALIAS_TO_TIER: Record<string, string> = {
+  frontier: "frontier",
+  codex: "codex",
+  rapid: "codex",         // "rapid" -> gpt-5.3-codex-spark -> codex tier
+  mini: "mini",
+  local: "mini",          // free Ollama path
+  nano: "mini",           // legacy alias from an earlier draft
+  cache: "frontier",      // cache hit on a planner call (model unknown but tier is the planner's)
+};
+
+/**
+ * Map model string -> tier label. Accepts either a raw model name
+ * (`"gpt-5.5"`, `"gpt-5.3-codex-spark"`) or a tier alias (`"frontier"`,
+ * `"codex"`, `"mini"`). Unknown / missing values fall back to `"unknown"`
+ * — but every model id used by `src/codex-runner.ts` should be enumerated
+ * above, so seeing "unknown" in production is a regression worth fixing.
  */
 export function modelToTier(model: string | undefined | null): string {
   if (!model) return "unknown";
-  const m = model.toLowerCase();
-  if (m === "frontier" || m.includes("5.4") && !m.includes("mini")) return "frontier";
-  if (m === "codex" || m.includes("codex") || m.includes("5.3")) return "codex";
-  if (m === "mini" || m.includes("mini") || m.includes("nano") || m === "local") return "mini";
+  const raw = String(model);
+  const lower = raw.toLowerCase();
+
+  // Exact match against the authoritative tables first
+  if (MODEL_NAME_TO_TIER[raw]) return MODEL_NAME_TO_TIER[raw];
+  if (MODEL_NAME_TO_TIER[lower]) return MODEL_NAME_TO_TIER[lower];
+  if (TIER_ALIAS_TO_TIER[lower]) return TIER_ALIAS_TO_TIER[lower];
+
+  // Substring fallbacks — kept narrow so a future "gpt-6" doesn't silently
+  // get bucketed; loud "unknown" forces an explicit table update.
+  if (lower.includes("mini") || lower.includes("nano")) return "mini";
+  if (lower.includes("codex")) return "codex";
+
   return "unknown";
 }
 
 /**
- * Static fallback when an agent-run entry has no `model` field (older Redis
- * data predates the cost-attribution work). Picks the typical tier for each
- * agent role per CLAUDE.md.
+ * Static fallback when an agent-run entry has no `model` field (older
+ * Redis data predates the per-run model field added in #271). Picks the
+ * typical tier for each agent role per CLAUDE.md "Model Tiers".
+ *
+ * Issue #303: research roles ("director", "domain-researcher", …) were
+ * absent and any non-standard role string fell through to "unknown".
+ * Research agents run on `model: "frontier"` (see `src/research-loop.ts`)
+ * so they map to frontier here too.
  */
+const AGENT_ROLE_TO_TIER: Record<string, string> = {
+  // Planner / executor / fixer / JIT tester
+  planner: "frontier",       // quick-fix overrides via run.model -> codex
+  executor: "codex",
+  fixer: "codex",
+  "jit-tester": "codex",
+
+  // Skeptic / high-risk-review / adversarial / meta — mini-model
+  skeptic: "mini",
+  meta: "mini",
+  adversarial: "mini",
+  "high-risk-reviewer": "mini",
+  "code-reviewer": "codex",
+
+  // Research loop (see src/research-loop.ts — all spawn with model: "frontier")
+  director: "frontier",
+  "research-director": "frontier",
+  "domain-researcher": "frontier",
+  "technical-researcher": "frontier",
+  "market-researcher": "frontier",
+  "research-strategist": "frontier",
+  strategist: "frontier",
+  "priorities-refresh": "frontier",
+};
+
 export function agentRoleToTier(role: string): string {
-  switch (role) {
-    case "planner":   return "frontier";   // default — quick-fix overrides via run.model
-    case "executor":  return "codex";
-    case "fixer":     return "codex";
-    case "jit-tester":return "codex";
-    case "skeptic":   return "mini";       // high-risk-review uses mini; preflight is deterministic
-    case "meta":      return "mini";
-    case "adversarial": return "mini";
-    case "high-risk-reviewer": return "mini";
-    case "code-reviewer": return "codex";
-    default: return "unknown";
-  }
+  const hit = AGENT_ROLE_TO_TIER[role];
+  if (hit) return hit;
+
+  // Soft fallback for unanticipated role strings: research-* / *-researcher
+  // are always frontier (see research-loop.ts). Keeping this as a regex
+  // fallback means a new researcher variant in config/research/ doesn't
+  // immediately drop into "unknown".
+  if (/^research-/.test(role) || /-researcher$/.test(role)) return "frontier";
+  if (/-reviewer$/.test(role)) return "codex";
+
+  return "unknown";
 }
+
+/**
+ * Exported for regression-test enumeration — every role string emitted by
+ * `logAgentRun` call sites in `src/` should appear here and map to a
+ * non-`"unknown"` tier. See `test/cost-attribution.test.mts`.
+ */
+export const KNOWN_AGENT_ROLES = Object.freeze(Object.keys(AGENT_ROLE_TO_TIER));
 
 // ---------------------------------------------------------------------------
 // Outcome derivation
