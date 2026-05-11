@@ -1,0 +1,135 @@
+---
+name: hydra-dev
+description: Pick up a GitHub issue from gaberoo322/hydra and autonomously implement it in a worktree — research the codebase, implement, verify, and open a PR.
+when_to_use: "When the user wants to work on a Hydra orchestrator issue, says 'pick up an issue', 'work on issue #N', 'develop'."
+allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
+arguments: [issue_number]
+claude_only: true
+---
+
+# Hydra Dev
+
+Autonomous implementation of GitHub issues against the Hydra orchestrator (`~/hydra`). Delegates to a worktree subagent for isolation.
+
+## Critical safety rules
+
+1. **NEVER run `git stash`/`checkout`/`reset`/`clean` on the main `~/hydra` working tree.** Operator may have uncommitted work.
+2. All implementation runs inside a worktree — Claude: `Agent(isolation: "worktree")`; Codex: `codex exec` in a fresh `git worktree add`.
+3. Dirty main tree is fine — worktrees are independent.
+4. **No silent fallback.** If the dispatched BG agent finds itself in `~/hydra` instead of a worktree, it MUST abort. Falling back to `~/hydra` left the main checkout on a feature branch on 2026-05-11 and stalled deploys for ~30 min (incident: PR #245).
+
+## Pre-flight (parent context)
+
+### 1. Select issue
+
+If `$issue_number` provided, use it. Otherwise:
+```bash
+gh issue list --repo gaberoo322/hydra --label "ready-for-agent" --state open --json number,title --jq '.[0]'
+```
+None → report and stop.
+
+### 2. Fetch and validate
+```bash
+gh issue view $issue_number --repo gaberoo322/hydra
+```
+
+Verify structured sections (acceptance criteria or "What to build"). Vague one-liner → stop, tell operator to run `/triage` first.
+
+### 3. Size check — decompose if too large
+
+If body has **>5 acceptance criteria** OR description suggests **>8 files changed**:
+1. `/to-issues $issue_number` to decompose (Claude) or `codex exec --skill to-issues` (Codex)
+2. `gh issue edit $issue_number --add-label blocked --remove-label ready-for-agent`
+3. Comment on parent listing children
+4. Stop — `/hydra-sweep` picks up children after triage
+
+### 4. Mark in-progress
+```bash
+gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progress
+```
+
+### 5. Spawn worktree agent
+
+- **Claude:** `Agent(isolation: "worktree", prompt: <child-prompt>)`
+- **Codex:** Create worktree first, then `codex exec` inside it:
+  ```bash
+  WT=/dev/shm/hydra-worktrees/issue-${issue_number}-$(date +%s)
+  git -C ~/hydra worktree add -b "issue-${issue_number}-dev" "$WT" master
+  (cd "$WT" && codex exec --skill hydra-dev-child --json "{\"issue\":${issue_number}}")
+  ```
+
+The child prompt MUST include the worktree-guard preamble (see below). The child:
+1. Verifies it is in a worktree (NOT `/home/gabe/hydra`). Aborts if not.
+2. Reads CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs
+3. Greps/reads the source for context
+4. Implements the issue
+5. Runs `npm test` + `npm run typecheck` + `npm run build`
+6. Opens a PR with `closes #$issue_number` in the body
+7. Returns: PR URL + summary table
+
+### Child-prompt worktree-guard preamble (REQUIRED)
+
+Every dispatched hydra-dev BG agent prompt MUST begin with the following block, verbatim. The parent skill (or autopilot) is responsible for prepending it before the task body:
+
+```
+## CRITICAL SAFETY RULE — READ FIRST
+
+Before doing ANYTHING else, run `pwd` and check:
+- If cwd is a fresh worktree (path under `/dev/shm/hydra-worktrees/`, `/home/gabe/hydra-worktrees/`, or `/home/gabe/hydra/.claude/worktrees/`) AND `git rev-parse --git-dir` returns a path under `.git/worktrees/`, proceed.
+- If cwd is `/home/gabe/hydra` (the main repo working tree), **ABORT IMMEDIATELY**. Return a failure status with the message: "Worktree isolation broken — cwd is main repo. Refusing to proceed per operator memory feedback_bg_agent_worktree_hygiene. Do not run any git commands."
+
+Do NOT fall back to running in `~/hydra`. Do NOT create a branch in the main tree. Do NOT `git checkout` in the main tree. If isolation failed, the only acceptable action is to fail loudly.
+```
+
+If the harness exposes `EnterWorktree`/`ExitWorktree` tools, the child should call `EnterWorktree` only when its initial `pwd` check fails the worktree predicate — never assume "already isolated" without verifying via `git rev-parse --git-dir`.
+
+### 6. Post-agent
+
+**Success (PR URL returned):**
+```bash
+gh issue edit $issue_number --remove-label in-progress --add-label needs-qa
+```
+
+Then unblock dependents:
+```bash
+DEPENDENTS=$(gh issue list --repo gaberoo322/hydra --label blocked --state open --json number,body \
+  --jq "[.[] | select(.body | test(\"Blocked by.*#$issue_number(\\\\b|[^0-9])\")) | .number] | .[]")
+for dep in $DEPENDENTS; do
+  BLOCKERS=$(gh issue view $dep --repo gaberoo322/hydra --json body --jq '.body' | grep -oP '(?<=Blocked by.*#)\d+' | tr '\n' ' ')
+  ALL_CLOSED=true
+  for b in $BLOCKERS; do
+    STATE=$(gh issue view $b --repo gaberoo322/hydra --json state --jq '.state')
+    [ "$STATE" != "CLOSED" ] && ALL_CLOSED=false && break
+  done
+  [ "$ALL_CLOSED" = true ] && gh issue edit $dep --repo gaberoo322/hydra --remove-label blocked --add-label ready-for-agent
+done
+```
+
+**Failure (including isolation-abort):**
+```bash
+gh issue edit $issue_number --remove-label in-progress --add-label ready-for-agent
+gh issue comment $issue_number --body "> *Automated agent comment*
+
+Agent attempted implementation but failed.
+
+**Reason:** <failure reason>
+**Branch:** <branch name or 'none — aborted before any git ops'>
+**What was tried:** <approach summary>"
+```
+
+Isolation aborts must NOT escalate to `ready-for-human` — they are infrastructure errors, not implementation failures. Re-label as `ready-for-agent` so the next dispatch can retry once the harness recovers.
+
+### 7. Post-dispatch sanity check (parent)
+
+After the BG agent returns (success OR failure), the dispatching parent MUST verify the main tree is still clean:
+
+```bash
+MAIN_BRANCH=$(git -C ~/hydra rev-parse --abbrev-ref HEAD)
+if [ "$MAIN_BRANCH" != "master" ]; then
+  echo "WARN: ~/hydra is on '$MAIN_BRANCH', expected 'master'. Isolation likely broke."
+  echo "WARN: Do NOT auto-fix without operator approval — feature branch may have unpushed work."
+  # Surface to operator; do not run `git checkout master` autonomously.
+fi
+```
+
+This catches the case where isolation silently failed and the BG agent ran in the main tree anyway (the #245 failure mode).
