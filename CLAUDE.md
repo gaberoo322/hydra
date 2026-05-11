@@ -2,6 +2,22 @@
 
 Autonomous multi-agent development framework. Runs a control loop that grounds → plans → challenges → executes → verifies → merges code changes in ~/hydra-betting, using Codex CLI agents for planning and execution, hard verification (npm test, tsc), Redis for state, and OpenViking for knowledge search.
 
+## Documentation Map
+
+Read these first when working on the orchestrator:
+
+- [`README.md`](./README.md) — system overview, dashboard/API surface, design principles
+- [`CONTEXT.md`](./CONTEXT.md) — **canonical glossary**. Use these terms exactly (Target, Orchestrator, Untouchable Core, Gate, Stuckness, Modification Tier, Outcome Holdback, Operator-Required Intervention)
+- [`docs/adr/`](./docs/adr/) — architectural decision records:
+  - ADR-0001 — Untouchable Core & gate extraction (protected paths, operator-only)
+  - ADR-0002 — Single target per orchestrator instance
+  - ADR-0003 — Terminal goal hierarchy (Target Outcomes + 25% self-improvement floor)
+  - ADR-0004 — Self-modification tiers (Tier 0/1/2/3 + Outcome Holdback)
+  - ADR-0005 — Operator escalation is narrow (closed list)
+- [`config/direction/vision.md`](./config/direction/vision.md) — **target product** vision (what hydra-betting should become)
+- [`config/orchestrator/vision.md`](./config/orchestrator/vision.md) — **orchestrator-self** vision (what good autonomous building looks like)
+- [`config/direction/outcomes.yaml`](./config/direction/outcomes.yaml) — structured Target Outcome metrics that drive Stuckness detection
+
 ## Architecture
 
 Two codex agent calls per cycle (three for high-risk, four if fixer runs): **planner** (frontier model), **executor** (codex model). The former skeptic agent is replaced by a deterministic preflight gate + nano-model review for high-risk tasks only. All runtime state in Redis; configs git-tracked in `~/hydra/config/`; agents query OpenViking for semantic knowledge context. Event bus (Redis Streams) connects all subsystems; knowledge indexer keeps OpenViking in sync with config files and Redis reports.
@@ -67,7 +83,7 @@ journalctl --user -u hydra-orchestrator.service -f
 
 # Development
 npx tsx src/index.ts       # direct run (check port 4000 first!)
-npm test                    # 246 regression tests (node:test, zero deps)
+npm test                    # 1035+ regression tests (node:test, zero deps)
 
 # Health
 curl http://localhost:4000/api/health
@@ -106,15 +122,18 @@ Always run `npm test` before committing.
 ## Config (~/hydra/config/) -- git-tracked
 
 **Operator edits these (or uses dashboard):**
-- `config/direction/priorities.md` -- what Hydra should work on next
+- `config/direction/vision.md` -- **target product** vision (prose; what hydra-betting should become)
+- `config/direction/outcomes.yaml` -- structured Target Outcome metrics (drives Stuckness; see ADR-0003)
+- `config/orchestrator/vision.md` -- **orchestrator-self** vision (trade-offs the orchestrator makes when ambiguous)
+- `config/direction/priorities.md` -- what Hydra should work on next (auto-refreshed from vision + system state)
 - `config/direction/goals.md` -- high-level project goals
-- `config/direction/vision.md` -- operator vision (short intent document)
 - `config/feedback/to-planner.md` -- correct planner behavior
 - `config/feedback/to-executor.md` -- correct executor behavior
-- `config/feedback/to-skeptic.md` -- correct skeptic behavior
+- `config/feedback/to-skeptic.md` -- correct high-risk-review behavior (file is named "skeptic" for legacy reasons; loaded only on high-risk tasks via `agentName: "skeptic"` in `src/preflight.ts`)
 
 **Agent personalities:**
-- `config/agents/{planner,executor,skeptic,meta}.md` -- system prompts loaded by codex-runner
+- `config/agents/{planner,executor,meta}.md` -- system prompts loaded by codex-runner
+- `config/agents/skeptic.md` -- still loaded as the personality for the **high-risk review** path (mini-model safety review); the low/medium-risk skeptic agent was replaced by the deterministic preflight gate
 - `config/research/` -- research agent configs (director, domain/technical/market researchers, strategist)
 
 **Runtime state (all in Redis):**
@@ -185,6 +204,21 @@ Tasks are classified post-planner based on `scopeBoundary.in` and `acceptanceCri
 - **API routes in sub-routers** -- `src/api.ts` is a thin mount point. Route handlers live in `src/api/{domain}.ts`. Each sub-router is a factory function receiving `eventBus` if needed.
 - **grounding.ts is read-only** -- workspace mutation lives in prepare-workspace.ts.
 - **eventBus scope**: `eventBus` is a parameter of `runControlLoop()`, not a module global. Helper functions that need it must receive it as a parameter.
+
+## Self-Modification: Untouchable Core & Tiers
+
+The orchestrator classifies its own PRs by blast radius (see [ADR-0004](./docs/adr/0004-self-modification-tiers.md)):
+
+| Tier | Scope | Who merges | Notes |
+|------|-------|-----------|-------|
+| 0 — Untouchable | Merge gate, rollback, watchdog, cost guardrails, the protected-paths list itself | **Operator only** | Enforced via CI; PR needs `operator-approved` label |
+| 1 — Prompt-shaped | `config/agents/*`, `config/feedback/*` | Auto-merge | |
+| 2 — Skill / verification additions | New tests, new verification steps, scoring tweaks | Auto-merge with **Outcome Holdback** | 5-cycle watch + auto-revert on Target Outcome regression |
+| 3 — Everything else in `src/` | Control-loop changes, agent logic, infra | Operator merges | |
+
+Protected paths live in `src/untouchable.ts` (see [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md)). Before proposing or applying a change to anything that smells load-bearing — merge, rollback, scope enforcement, mutation gate, cost caps — check the untouchable list first. **Never bypass the gate.**
+
+Operator escalation is reserved for the **closed list** in [ADR-0005](./docs/adr/0005-operator-escalation-is-narrow.md): credentials/secrets, external-account actions, Tier-0 changes, vision-level conflicts. Everything else, Hydra researches and tries autonomously.
 
 ## Common Pitfalls
 
