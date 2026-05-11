@@ -112,6 +112,15 @@ export const recordPattern = recordPatternImpl;
 export const detectStalePromotedRules = detectStalePromotedRulesImpl;
 export const processStaleRules = processStaleRulesImpl;
 export type { StaleRule } from "./learning/agent-memory.ts";
+export {
+  getIneffectivePromotedPatterns,
+  evaluatePromotedPatternEffectiveness,
+  MIN_DAYS_POST_PROMOTION,
+} from "./learning/agent-memory.ts";
+export type {
+  IneffectivePromotedPattern,
+  MemoryPattern,
+} from "./learning/agent-memory.ts";
 export type {
   GlobalReflection,
   ReflectionOutcome,

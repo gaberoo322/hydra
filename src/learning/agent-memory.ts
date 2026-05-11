@@ -52,6 +52,31 @@ export type MemoryPattern = {
   action: string;
   examples: string[];
   promoted: boolean;
+  /** ISO date (YYYY-MM-DD) the pattern was promoted to the feedback file. */
+  promotedAt?: string;
+  /** Hit count at the moment of promotion — baseline for post-promotion effectiveness. */
+  hitsAtPromotion?: number;
+};
+
+/**
+ * Issue #289 — Promoted-but-ineffective pattern surfaced via
+ * `getIneffectivePromotedPatterns()`. A promoted rule is "ineffective" when the
+ * post-promotion firing rate (hits/day) is at least as high as the
+ * pre-promotion rate. Promotion is supposed to durably change agent behavior;
+ * a flat or rising rate means the rule text isn't actually preventing the
+ * failure mode it describes.
+ */
+export type IneffectivePromotedPattern = {
+  category: string;
+  promotedAt: string;
+  hitsAtPromotion: number;
+  hitsSincePromotion: number;
+  daysToPromotion: number;
+  daysSincePromotion: number;
+  preRate: number; // hits/day before promotion
+  postRate: number; // hits/day after promotion
+  rateRatio: number; // postRate / preRate (Infinity when preRate === 0)
+  lastSeen: string;
 };
 
 // ===========================================================================
@@ -84,6 +109,8 @@ async function sweepStalePromotions(agentName: string) {
       try {
         await promoteToFeedback(agentName, p);
         p.promoted = true;
+        p.promotedAt = new Date().toISOString().split("T")[0];
+        p.hitsAtPromotion = p.hitCount;
         changed = true;
         console.log(`[Learning] Retroactive promotion: "${p.category}" to to-${agentName}.md (${p.hitCount} hits)`);
       } catch (err: any) {
@@ -417,6 +444,8 @@ export async function recordPattern(
     if (existing.hitCount >= PROMOTION_THRESHOLD && !existing.promoted) {
       await promoteToFeedback(agentName, existing);
       existing.promoted = true;
+      existing.promotedAt = today;
+      existing.hitsAtPromotion = existing.hitCount;
       console.log(`[Learning] Promoted "${category}" to to-${agentName}.md (${existing.hitCount} hits)`);
     }
   } else {
@@ -544,6 +573,90 @@ export async function recordSkepticLesson(cycleId: string, task: any, skepticVer
       cycleId,
     });
   }
+}
+
+// ===========================================================================
+// Issue #289 — Ineffective promoted-pattern detection
+// ===========================================================================
+
+/**
+ * Pure helper — given a single pattern, decide whether it qualifies as
+ * "promoted-but-ineffective". Exported for unit tests so we don't have to
+ * round-trip through Redis.
+ *
+ * A pattern is ineffective when ALL of the following hold:
+ *   1. `promoted === true` and `promotedAt` + `hitsAtPromotion` are present
+ *      (legacy patterns promoted before this instrumentation are skipped).
+ *   2. `daysSincePromotion >= MIN_DAYS_POST_PROMOTION` — we need a comparable
+ *      window before judging.
+ *   3. `postRate >= preRate` (or `preRate === 0`, in which case any
+ *      post-promotion hits flag it).
+ *
+ * Returns the metric envelope when ineffective, otherwise null.
+ */
+export const MIN_DAYS_POST_PROMOTION = 3;
+
+export function evaluatePromotedPatternEffectiveness(
+  p: MemoryPattern,
+  now: Date = new Date(),
+): IneffectivePromotedPattern | null {
+  if (!p.promoted || !p.promotedAt || typeof p.hitsAtPromotion !== "number") return null;
+
+  const firstSeen = new Date(p.firstSeen + "T00:00:00Z");
+  const promotedAt = new Date(p.promotedAt + "T00:00:00Z");
+  const nowUtc = new Date(now.toISOString().split("T")[0] + "T00:00:00Z");
+
+  const dayMs = 1000 * 60 * 60 * 24;
+  const daysToPromotion = Math.max(1, Math.round((promotedAt.getTime() - firstSeen.getTime()) / dayMs));
+  const daysSincePromotion = Math.max(0, Math.round((nowUtc.getTime() - promotedAt.getTime()) / dayMs));
+
+  if (daysSincePromotion < MIN_DAYS_POST_PROMOTION) return null;
+
+  const hitsSincePromotion = Math.max(0, p.hitCount - p.hitsAtPromotion);
+  const preRate = p.hitsAtPromotion / daysToPromotion;
+  const postRate = hitsSincePromotion / Math.max(1, daysSincePromotion);
+  const rateRatio = preRate === 0 ? (hitsSincePromotion > 0 ? Infinity : 0) : postRate / preRate;
+
+  const ineffective = preRate === 0 ? hitsSincePromotion > 0 : postRate >= preRate;
+  if (!ineffective) return null;
+
+  return {
+    category: p.category,
+    promotedAt: p.promotedAt,
+    hitsAtPromotion: p.hitsAtPromotion,
+    hitsSincePromotion,
+    daysToPromotion,
+    daysSincePromotion,
+    preRate: round2(preRate),
+    postRate: round2(postRate),
+    rateRatio: Number.isFinite(rateRatio) ? round2(rateRatio) : rateRatio,
+    lastSeen: p.lastSeen,
+  };
+}
+
+function round2(n: number): number {
+  if (!Number.isFinite(n)) return n;
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * Return all patterns for `agentName` whose post-promotion firing rate is
+ * at least as high as their pre-promotion rate. Used by the
+ * `/api/learning/ineffective-rules` endpoint and surfaced in cycle reports.
+ */
+export async function getIneffectivePromotedPatterns(
+  agentName: string,
+  now: Date = new Date(),
+): Promise<IneffectivePromotedPattern[]> {
+  const patterns = await loadPatterns(agentName);
+  const flagged: IneffectivePromotedPattern[] = [];
+  for (const p of patterns) {
+    const ev = evaluatePromotedPatternEffectiveness(p, now);
+    if (ev) flagged.push(ev);
+  }
+  // Worst offenders first (highest post-promotion rate, then highest absolute hits-since)
+  flagged.sort((a, b) => b.postRate - a.postRate || b.hitsSincePromotion - a.hitsSincePromotion);
+  return flagged;
 }
 
 // ===========================================================================
