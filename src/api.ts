@@ -16,6 +16,14 @@ import { createMiscRouter } from "./api/misc.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
 import { createChecklistRouter } from "./api/checklist.ts";
 import { createOutcomesRouter } from "./api/outcomes.ts";
+import { createOpenVikingRouter } from "./api/openviking.ts";
+import { createGoalsRouter } from "./api/goals.ts";
+import { createEventsRouter } from "./api/events.ts";
+import { createConfigRouter } from "./api/config.ts";
+import { createAlertsRouter } from "./api/alerts.ts";
+import { createPlanCacheRouter } from "./api/plan-cache.ts";
+import { createReflectionsRouter } from "./api/reflections.ts";
+import { createMergeLockRouter } from "./api/merge-lock.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -49,6 +57,15 @@ function createApi(eventBus) {
   api.use(createProposalsRouter(eventBus));
   api.use(createMetricsRouter());
   api.use(createArchitectureRouter(eventBus));
+  // Routes split out of misc.ts per issue #268 — each owns one domain.
+  api.use(createOpenVikingRouter());
+  api.use(createGoalsRouter());
+  api.use(createEventsRouter(eventBus));
+  api.use(createConfigRouter());
+  api.use(createAlertsRouter(eventBus));
+  api.use(createPlanCacheRouter());
+  api.use(createReflectionsRouter());
+  api.use(createMergeLockRouter());
   api.use(createMiscRouter(eventBus));
   api.use(createChecklistRouter());
   api.use(createOutcomesRouter());
