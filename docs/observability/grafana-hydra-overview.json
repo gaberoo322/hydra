@@ -1,0 +1,126 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Hydra OTel overview — per-agent-role latency, token counts, model attribution, and error rate. Issue #207, Tier-3. Import into Grafana with a Tempo datasource named 'Tempo' (or remap on import). Variables let the operator filter by deployment.environment and model_tier.",
+  "editable": true,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Per-agent latency",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Span duration p50 by hydra.agent_role",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "targets": [
+        {
+          "query": "{ resource.service.name = \"hydra-codex\" && resource.hydra.agent_role != nil } | quantile_over_time(duration, 0.5) by (resource.hydra.agent_role)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Span duration p95 by hydra.agent_role",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "targets": [
+        {
+          "query": "{ resource.service.name = \"hydra-codex\" && resource.hydra.agent_role != nil } | quantile_over_time(duration, 0.95) by (resource.hydra.agent_role)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 }
+    },
+    {
+      "type": "row",
+      "title": "Token usage + model attribution",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Token counts (sum) by hydra.agent_role",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "description": "Sum of Codex CLI usage span attributes (`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`). Requires Codex's native OTel exporter — no additional Hydra instrumentation.",
+      "targets": [
+        {
+          "query": "{ resource.service.name = \"hydra-codex\" && span.gen_ai.usage.input_tokens != nil } | sum_over_time(span.gen_ai.usage.input_tokens + span.gen_ai.usage.output_tokens) by (resource.hydra.agent_role)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 }
+    },
+    {
+      "type": "piechart",
+      "title": "Calls by hydra.model (last 24h)",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "description": "Pie chart of agent calls grouped by resolved model name. Surfaces which tier (frontier / codex / mini) is doing the work.",
+      "targets": [
+        {
+          "query": "{ resource.service.name = \"hydra-codex\" && resource.hydra.model != nil } | count_over_time() by (resource.hydra.model)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 }
+    },
+    {
+      "type": "row",
+      "title": "Errors",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 }
+    },
+    {
+      "type": "stat",
+      "title": "Error rate by hydra.agent_role (status = error)",
+      "datasource": { "type": "tempo", "uid": "${tempo}" },
+      "description": "Percentage of spans with OTel status=error, grouped by agent role. Spikes here usually indicate planner/executor refusal or Codex CLI failure.",
+      "targets": [
+        {
+          "query": "{ resource.service.name = \"hydra-codex\" && status = error } | rate() by (resource.hydra.agent_role)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 19 }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["hydra", "otel", "tier-3"],
+  "templating": {
+    "list": [
+      {
+        "name": "tempo",
+        "type": "datasource",
+        "label": "Tempo datasource",
+        "query": "tempo",
+        "current": { "selected": false, "text": "Tempo", "value": "Tempo" }
+      },
+      {
+        "name": "environment",
+        "type": "custom",
+        "label": "deployment.environment",
+        "query": "prod,staging,dev",
+        "current": { "selected": false, "text": "prod", "value": "prod" }
+      },
+      {
+        "name": "model_tier",
+        "type": "custom",
+        "label": "hydra.model_tier",
+        "query": "frontier,codex,mini,local",
+        "current": { "selected": false, "text": "frontier", "value": "frontier" }
+      }
+    ]
+  },
+  "time": { "from": "now-24h", "to": "now" },
+  "timezone": "browser",
+  "title": "Hydra — OTel overview (per-agent-role)",
+  "uid": "hydra-otel-overview",
+  "version": 1
+}
