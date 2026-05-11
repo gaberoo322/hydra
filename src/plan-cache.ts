@@ -18,10 +18,11 @@ import {
   findPlanCacheKeys,
   deleteKeys,
 } from "./redis-adapter.ts";
+import { getTargetWorkspace } from "./target-config.ts";
 
 const execFileAsync = promisify(execFile);
 
-const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || "/home/gabe/hydra-betting";
+const PROJECT_WORKSPACE = getTargetWorkspace();
 
 const CACHE_PREFIX = redisKeys.planCachePrefix();
 

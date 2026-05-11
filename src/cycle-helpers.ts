@@ -19,10 +19,11 @@ import { groundProject } from "./grounding.ts";
 import { recordCycleMetrics } from "./metrics.ts";
 import { reportOutcome } from "./anchor-selection.ts";
 import { getRecentReportIds, getRealityReport } from "./redis-adapter.ts";
+import { getTargetWorkspace } from "./target-config.ts";
 
 const execFileAsync = promisify(execFile);
 
-export const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME!, "hydra-betting");
+export const PROJECT_WORKSPACE = getTargetWorkspace();
 
 // ---------------------------------------------------------------------------
 // Shared types — contracts for pipeline step parameters

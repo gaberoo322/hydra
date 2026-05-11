@@ -14,9 +14,10 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve, extname, basename, dirname } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { getTargetWorkspace } from "./target-config.ts";
 
 const execFileAsync = promisify(execFile);
-const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
+const PROJECT_WORKSPACE = getTargetWorkspace();
 
 /**
  * Analyze the target project and produce structured state.

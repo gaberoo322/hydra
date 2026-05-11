@@ -23,13 +23,14 @@ import { _admin, addItem } from "./backlog.ts";
 const { getBacklogCounts, loadBacklog, blockItemById } = _admin;
 import { groundProject, summarizeForPrompt } from "./grounding.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { getTargetWorkspace } from "./target-config.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 const DIRECTION_DIR = join(CONFIG_PATH, "direction");
 const USER_PRIORITIES_FILE = join(DIRECTION_DIR, "user-priorities.md");
 const PRIORITIES_FILE = join(DIRECTION_DIR, "priorities.md");
 const ROADMAP_FILE = join(DIRECTION_DIR, "roadmap.md");
-const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
+const PROJECT_WORKSPACE = getTargetWorkspace();
 const ROADMAP_DELIMITER = "\n---ROADMAP_UPDATE---\n";
 
 /**

@@ -30,9 +30,10 @@ import {
   getWorkQueueItems, pushToWorkQueue, removeFromWorkQueue,
   findWorkQueueDuplicate,
 } from "./redis-adapter.ts";
+import { getTargetWorkspace } from "./target-config.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
-const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
+const PROJECT_WORKSPACE = getTargetWorkspace();
 const METHODOLOGY_DIR = join(CONFIG_PATH, "research");
 
 /**

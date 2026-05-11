@@ -17,6 +17,7 @@ const { getBacklogCounts, promoteToQueued, pruneOldDoneItems } = _admin;
 import { runResearchLoop } from "./research-loop.ts";
 import { getPerCycleCostCapUsd } from "./cost-cap.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { getTargetName } from "./target-config.ts";
 import {
   getString, setString, getWorkQueueLen, pushToWorkQueue,
   hashGet, hashSetField,
@@ -541,7 +542,7 @@ function generateUnblockCommands(blockedReason: string, title: string): string[]
   const commands: string[] = [];
   if (/api[_ ]?key|credentials|secret.*missing|token.*expired|env.*not set|missing.*env/i.test(blockedReason)) {
     const envVar = blockedReason.match(/\b([A-Z][A-Z_]{2,})\b/)?.[1] || "THE_MISSING_KEY";
-    commands.push(`echo '${envVar}=<value>' >> ~/hydra-betting/.env.local`);
+    commands.push(`echo '${envVar}=<value>' >> ~/${getTargetName()}/.env.local`);
   }
   if (/DATABASE_URL|ECONNREFUSED.*5432|connection.*refused/i.test(blockedReason)) {
     commands.push(`cd ~/hydra && docker compose up -d postgres`);

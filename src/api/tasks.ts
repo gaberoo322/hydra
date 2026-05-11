@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getTracker } from "../task-tracker.ts";
 import { getCycleStatus } from "../cycle.ts";
+import { getTargetWorkspace } from "../target-config.ts";
 
 export function createTasksRouter() {
   const router = Router();
@@ -47,7 +48,7 @@ export function createTasksRouter() {
   router.get("/grounding/latest", async (req, res) => {
     try {
       const { groundProject } = await import("../grounding.ts");
-      const projectDir = process.env.HYDRA_PROJECT_WORKSPACE || "/home/gabe/hydra-betting";
+      const projectDir = getTargetWorkspace();
       const report = await groundProject(projectDir);
       res.json(report);
     } catch (err: any) {

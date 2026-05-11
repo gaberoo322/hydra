@@ -20,10 +20,11 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { pushToWorkQueue, getRedisConnection } from "./redis-adapter.ts";
+import { getTargetWorkspace } from "./target-config.ts";
 
 const execFileAsync = promisify(execFile);
 
-const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || "/home/gabe/hydra-betting";
+const PROJECT_WORKSPACE = getTargetWorkspace();
 const REVIEW_INTERVAL_MS = parseInt(process.env.CODE_REVIEW_INTERVAL_MS || "600000", 10); // 10 minutes
 const REVIEWED_SET_KEY = "hydra:code-reviewer:reviewed";
 const REVIEWED_SET_MAX = 200; // keep last 200 reviewed commits

@@ -10,9 +10,10 @@ import { Codex, type ThreadOptions, type TurnOptions } from "@openai/codex-sdk";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { getTargetWorkspace } from "./target-config.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
-const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
+const PROJECT_WORKSPACE = getTargetWorkspace();
 const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://100.125.108.68:11434";
 
 import { getDailySpend, DAILY_COST_CAP_USD } from "./scheduler.ts";

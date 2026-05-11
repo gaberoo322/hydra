@@ -15,6 +15,7 @@ import { setAgentStreamCallback } from "./codex-runner.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { startCodeReviewerLoop } from "./code-reviewer.ts";
 import { cleanWorkQueue } from "./redis-adapter.ts";
+import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
@@ -154,9 +155,10 @@ async function main() {
   }
 
   console.log("[Hydra] Starting orchestrator...");
+  console.log(`[Hydra] Target: ${getTargetName()} (workspace: ${getTargetWorkspace()})`);
 
   // Startup cleanup: delete stale feature branches in the target project
-  const PROJECT_WORKSPACE = process.env.HYDRA_PROJECT_WORKSPACE || "/home/gabe/hydra-betting";
+  const PROJECT_WORKSPACE = getTargetWorkspace();
   try {
     const { execFile: ef } = await import("node:child_process");
     const { promisify: p } = await import("node:util");

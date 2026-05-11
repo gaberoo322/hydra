@@ -19,6 +19,7 @@ import { getContext } from "./learning.ts";
 import { getCumulativeAccomplishments } from "./metrics.ts";
 import { summarizeForPrompt, getDiff } from "./grounding.ts";
 import { redisKeys } from "./redis-keys.ts";
+import { getTargetWorkspace } from "./target-config.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
@@ -311,7 +312,7 @@ async function loadContinuityContext(
   anchor: { type: string; reference: string; [k: string]: any },
   warnings: string[],
 ): Promise<string> {
-  const PROJECT_WORKSPACE = process.env.HYDRA_WORKSPACE || resolve(process.env.HOME, "hydra-betting");
+  const PROJECT_WORKSPACE = getTargetWorkspace();
   let continuityContext = "";
 
   // Last cycle report (single fetch, format separately)
