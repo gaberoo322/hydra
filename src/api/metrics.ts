@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { getMetricsTrend, getAggregateStats, recordCycleMetrics, getAbandonmentBreakdown, getQualityGateTrend } from "../metrics.ts";
 import { redisKeys } from "../redis-keys.ts";
-import { getWorkQueueLen, listLen, getCycleCosts } from "../redis-adapter.ts";
+import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../redis-adapter.ts";
+import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost-attribution.ts";
 
 export function createMetricsRouter() {
   const router = Router();
@@ -132,6 +133,44 @@ export function createMetricsRouter() {
         },
         error: err.message,
       });
+    }
+  });
+
+  // GET /metrics/cost-attribution — Per-role / tier / anchor / complexity cost breakdown (issue #271)
+  router.get("/metrics/cost-attribution", async (req, res) => {
+    try {
+      // @ts-expect-error — req.query.count is a string at runtime
+      const count = parseInt(req.query.count) || 50;
+      const trend = await getMetricsTrend(count);
+
+      const cycles: CycleSummary[] = [];
+      for (const m of trend) {
+        const rawRuns = await getCycleAgentRuns(m.cycleId);
+        const agentRuns: AgentRun[] = [];
+        for (const raw of rawRuns) {
+          try {
+            agentRuns.push(JSON.parse(raw));
+          } catch { /* intentional: skip corrupt agent-run entries */ }
+        }
+        cycles.push({
+          cycleId: m.cycleId,
+          taskTitle: m.taskTitle,
+          anchorType: m.anchorType,
+          complexity: m.complexity,
+          tasksMerged: m.tasksMerged,
+          tasksFailed: m.tasksFailed,
+          tasksAbandoned: m.tasksAbandoned,
+          plannerModel: m.plannerModel,
+          executorModel: m.executorModel,
+          agentRuns,
+        });
+      }
+
+      const result = aggregateCostAttribution(cycles);
+      res.json(result);
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/cost-attribution failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
     }
   });
 
