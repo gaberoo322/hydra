@@ -11,8 +11,77 @@ const METRICS_INDEX = redisKeys.metricsIndex();
 const metricsKey = (cycleId) => redisKeys.metrics(cycleId);
 
 /**
+ * Derive `qualityGateCoverage` from other metric signals when callers haven't
+ * set it explicitly (issue #287).
+ *
+ * Pre-#287 only the post-merge path recorded the field — every other early-exit
+ * (verification failure, mutation-gate block, JIT bug catch, drift, planner
+ * no-work, preflight rejection, cost-cap) silently dropped out of the
+ * denominator, biasing the rate upward (3/20 samples → reported 33% even
+ * though the true denominator was 20).
+ *
+ * Rules:
+ *   - explicit value wins (post-merge keeps its precise truth)
+ *   - mutation OR JIT actually produced output → "true" (gate did useful work)
+ *   - verification ran but neither gate did → "false" (explicit miss)
+ *   - verification did not run at all → absent (null / not-applicable)
+ *
+ * Pure function — exported for unit tests.
+ */
+export function deriveQualityGateCoverage(metrics: Record<string, any>): "true" | "false" | undefined {
+  // Caller already set it — preserve their value (boolean OR string form).
+  if (metrics.qualityGateCoverage !== undefined && metrics.qualityGateCoverage !== null) {
+    if (typeof metrics.qualityGateCoverage === "boolean") {
+      return metrics.qualityGateCoverage ? "true" : "false";
+    }
+    const s = String(metrics.qualityGateCoverage).toLowerCase();
+    if (s === "true" || s === "false") return s as "true" | "false";
+    // Unknown explicit value — fall through to derive.
+  }
+
+  // Did mutation OR JIT actually run? Any of these signals means a gate
+  // produced real output for this cycle.
+  const mutationsTested = typeof metrics.mutationsTested === "number" ? metrics.mutationsTested : 0;
+  const mutationKillRate = typeof metrics.mutationKillRate === "number" ? metrics.mutationKillRate : -1;
+  const mutationDecision = typeof metrics.mutationDecision === "string" ? metrics.mutationDecision : "";
+  const jitTestsGenerated = typeof metrics.jitTestsGenerated === "number" ? metrics.jitTestsGenerated : 0;
+  const jitTestsKept = typeof metrics.jitTestsKept === "number" ? metrics.jitTestsKept : 0;
+  const jitTestsCaughtBug = typeof metrics.jitTestsCaughtBug === "number" ? metrics.jitTestsCaughtBug : 0;
+  const jitDecision = typeof metrics.jitDecision === "string" ? metrics.jitDecision : "";
+
+  const mutationRan = mutationDecision === "ran" || mutationsTested > 0 || mutationKillRate >= 0;
+  const jitRan = jitDecision.startsWith("ran")
+    || jitTestsGenerated > 0
+    || jitTestsKept > 0
+    || jitTestsCaughtBug > 0;
+  if (mutationRan || jitRan) return "true";
+
+  // Did verification run at all? Any of these signals means we got past
+  // the executor and into the verification step (test/typecheck/build).
+  // tasksAttempted alone is not enough — drift-rejected and preflight-rejected
+  // cycles also set tasksAttempted=1 without running verification.
+  const verificationDurationMs = typeof metrics.verificationDurationMs === "number"
+    ? metrics.verificationDurationMs : 0;
+  const tasksVerified = typeof metrics.tasksVerified === "number" ? metrics.tasksVerified : 0;
+  const tasksMerged = typeof metrics.tasksMerged === "number" ? metrics.tasksMerged : 0;
+  // tasksFailed only counts as "verification ran" when not paired with an
+  // abandonReason indicating pre-verification exit (drift, preflight, cost-cap).
+  const tasksFailed = typeof metrics.tasksFailed === "number" ? metrics.tasksFailed : 0;
+  const abandonReason = typeof metrics.abandonReason === "string" ? metrics.abandonReason : "";
+  const preVerificationAbandon = abandonReason.length > 0; // any abandonReason means we exited early
+
+  const verificationRan = verificationDurationMs > 0
+    || tasksVerified > 0
+    || tasksMerged > 0
+    || (tasksFailed > 0 && !preVerificationAbandon);
+
+  return verificationRan ? "false" : undefined;
+}
+
+/**
  * Record a cycle's outcome metrics.
  * Auto-computes costUsd from logged agent runs if not already provided.
+ * Auto-derives `qualityGateCoverage` per issue #287 when not explicitly set.
  *
  * @param {string} cycleId
  * @param {CycleMetrics} metrics
@@ -33,9 +102,25 @@ export async function recordCycleMetrics(cycleId, metrics) {
     } catch { /* intentional: cost tracking is best-effort */ }
   }
 
+  // Issue #287: derive qualityGateCoverage so cycles that ran verification but
+  // skipped the gate (or that didn't reach verification) get an explicit
+  // false / not-applicable instead of dropping out of the rate denominator.
+  const derivedCoverage = deriveQualityGateCoverage(metrics);
+  if (derivedCoverage !== undefined) {
+    metrics.qualityGateCoverage = derivedCoverage;
+  } else {
+    // Verification did not run — strip the field so it is genuinely absent
+    // in Redis (parses back as undefined → "not applicable").
+    delete metrics.qualityGateCoverage;
+  }
+
   const flat: Record<string, string> = {};
   for (const [k, v] of Object.entries(metrics)) {
-    flat[k] = typeof v === "object" ? JSON.stringify(v) : String(v);
+    // Issue #287: skip undefined so "not-applicable" stays absent rather than
+    // being persisted as the string "undefined". Other null/numeric values
+    // retain legacy stringification for back-compat with existing consumers.
+    if (v === undefined) continue;
+    flat[k] = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
   }
   flat.cycleId = cycleId;
   flat.recordedAt = new Date().toISOString();
@@ -227,8 +312,16 @@ export async function getAggregateStats(count = 20) {
   // OR JIT gate actually ran. Pre-#272 cycles lack the field, so they're
   // excluded from the denominator (cyclesWithCoverageData) so legacy data
   // doesn't drag the rate to zero. Target is >50% on the new path.
+  //
+  // Issue #287: also surface the three-way breakdown (covered / not-covered /
+  // not-applicable) so dashboards can show absolute counters, not just the
+  // ratio. "Not-applicable" cycles are those that never reached verification
+  // (drift, planner no-work, preflight reject, cost-cap pre-exec) — they
+  // legitimately have no opinion on gate coverage.
   const coverageSamples = trend.filter((m) => typeof m.qualityGateCoverage === "boolean");
   const coverageCovered = coverageSamples.filter((m) => m.qualityGateCoverage === true).length;
+  const coverageNotCovered = coverageSamples.filter((m) => m.qualityGateCoverage === false).length;
+  const coverageNotApplicable = total - coverageSamples.length;
   const qualityGateCoverageRate = coverageSamples.length > 0
     ? Math.round((coverageCovered / coverageSamples.length) * 100)
     : null;
@@ -259,6 +352,12 @@ export async function getAggregateStats(count = 20) {
     qualityGateCoverageRate,
     qualityGateCoverageSamples: coverageSamples.length,
     qualityGateCoverageCovered: coverageCovered,
+    // Issue #287: separate counters for covered / not-covered / not-applicable
+    // so dashboards distinguish "gate ran" from "gate ran but skipped" from
+    // "verification never ran". qualityGateCoverageSamples ===
+    // qualityGateCoverageCovered + qualityGateCoverageNotCovered.
+    qualityGateCoverageNotCovered: coverageNotCovered,
+    qualityGateCoverageNotApplicable: coverageNotApplicable,
   };
 }
 
