@@ -177,12 +177,18 @@ class TaskTracker {
 
   /**
    * Log an agent execution to the cycle's agent run list.
+   *
+   * `model` is optional (added for issue #271 cost attribution). When present
+   * it lets the cost-attribution endpoint map a run to a model tier (frontier
+   * / codex / mini) directly instead of falling back to an agent-role table.
+   * Pre-#271 entries lack the field — cost-attribution.ts handles that.
    */
-  async logAgentRun(cycleId, agentName, taskId, duration, verdict, usage, costUsd) {
+  async logAgentRun(cycleId, agentName, taskId, duration, verdict, usage, costUsd, model) {
     await listRPush(agentsKey(cycleId), JSON.stringify({
       agent: agentName, task: taskId, duration,
       verdict: verdict || "completed",
       costUsd: costUsd || 0,
+      ...(model ? { model } : {}),
       timestamp: new Date().toISOString(),
     }));
     // Ensure agents list has TTL (created on first rpush)

@@ -324,6 +324,6 @@ export async function runExecutorAgent(
 
   const executorResult = parseExecutorOutput(result.output, result.exitCode, result.duration, result.model, useWorktree);
 
-  await getTracker().logAgentRun(cycleId, "executor", task.taskId, result.duration, "completed", result.usage, result.costUsd);
+  await getTracker().logAgentRun(cycleId, "executor", task.taskId, result.duration, "completed", result.usage, result.costUsd, result.model);
   return executorResult;
 }

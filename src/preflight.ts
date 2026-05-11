@@ -318,7 +318,7 @@ export async function runHighRiskReview(cycleId, task, grounding, groundingSumma
     }
   }
 
-  await getTracker().logAgentRun(cycleId, "skeptic", "high-risk-review", result.duration, verdict.verdict, result.usage, result.costUsd);
+  await getTracker().logAgentRun(cycleId, "skeptic", "high-risk-review", result.duration, verdict.verdict, result.usage, result.costUsd, result.model || "mini");
   return verdict;
 }
 
@@ -410,6 +410,6 @@ export async function runSkepticAgent(cycleId, task, grounding, groundingSummary
     }
   }
 
-  await getTracker().logAgentRun(cycleId, "skeptic", "skeptic", result.duration, verdict.verdict, result.usage, result.costUsd);
+  await getTracker().logAgentRun(cycleId, "skeptic", "skeptic", result.duration, verdict.verdict, result.usage, result.costUsd, result.model || "codex");
   return verdict;
 }

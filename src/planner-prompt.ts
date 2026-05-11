@@ -223,7 +223,7 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
       cachedTask.__reflectionsInjected = 0;
       cachedTask.__hadReflections = false;
       cachedTask.__reflectionSources = [];
-      await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0);
+      await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0, "cache");
       console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present but safe for quick-fix)" : ""}`);
       return cachedTask;
     }
@@ -441,7 +441,7 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   // can distinguish noWork from parse failures (issue #137)
   if (task?.noWork) {
     console.log(`[ControlLoop] Planner says no work needed: ${task.reason || "all priorities addressed"}`);
-    await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "no-work", result.usage, result.costUsd);
+    await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "no-work", result.usage, result.costUsd, result.model);
     return { __noWork: true, reason: task.reason || "all priorities addressed" } as any;
   }
 
@@ -470,7 +470,7 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     }
   }
 
-  await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "completed", result.usage, result.costUsd);
+  await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "completed", result.usage, result.costUsd, result.model);
   if (task) {
     task.__plannerModel = result.model;
     // Issue #193 / #221: tag whether reflections reached the planner so cycle
