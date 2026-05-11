@@ -19,6 +19,7 @@ import {
   modelToTier,
   agentRoleToTier,
   deriveOutcome,
+  KNOWN_AGENT_ROLES,
   type CycleSummary,
 } from "../src/cost-attribution.ts";
 
@@ -40,6 +41,23 @@ describe("cost-attribution aggregation (issue #271)", () => {
     assert.equal(modelToTier("something-else"), "unknown");
   });
 
+  // Issue #303: the planner was bumped to `gpt-5.5` but `modelToTier`'s old
+  // hard-coded "5.4" substring made it return "unknown" for ~77% of spend.
+  // Lock every model id used by `src/codex-runner.ts` MODEL_PRICING into the
+  // regression suite so adding a new model without updating cost-attribution
+  // fails fast at CI rather than silently mis-bucketing dashboards.
+  test("modelToTier recognizes every model id in MODEL_PRICING (issue #303)", () => {
+    assert.equal(modelToTier("gpt-5.5"), "frontier");
+    assert.equal(modelToTier("gpt-5.4"), "frontier");
+    assert.equal(modelToTier("gpt-5.3-codex"), "codex");
+    assert.equal(modelToTier("gpt-5.3-codex-spark"), "codex");
+    assert.equal(modelToTier("gpt-5.4-mini"), "mini");
+    assert.equal(modelToTier("gemma-4-26b"), "mini");
+    // Tier aliases the runner emits
+    assert.equal(modelToTier("rapid"), "codex");
+    assert.equal(modelToTier("cache"), "frontier");
+  });
+
   test("agentRoleToTier covers the standard roles", () => {
     assert.equal(agentRoleToTier("planner"), "frontier");
     assert.equal(agentRoleToTier("executor"), "codex");
@@ -47,6 +65,55 @@ describe("cost-attribution aggregation (issue #271)", () => {
     assert.equal(agentRoleToTier("jit-tester"), "codex");
     assert.equal(agentRoleToTier("skeptic"), "mini");
     assert.equal(agentRoleToTier("unknown-role"), "unknown");
+  });
+
+  // Issue #303: research roles (director, domain-researcher, …) were absent
+  // from agentRoleToTier, so any research-loop agent run lacking a `model`
+  // field fell through to "unknown". They all run on the frontier tier.
+  test("agentRoleToTier covers research roles (issue #303)", () => {
+    assert.equal(agentRoleToTier("director"), "frontier");
+    assert.equal(agentRoleToTier("research-director"), "frontier");
+    assert.equal(agentRoleToTier("domain-researcher"), "frontier");
+    assert.equal(agentRoleToTier("technical-researcher"), "frontier");
+    assert.equal(agentRoleToTier("market-researcher"), "frontier");
+    assert.equal(agentRoleToTier("research-strategist"), "frontier");
+    assert.equal(agentRoleToTier("strategist"), "frontier");
+    assert.equal(agentRoleToTier("priorities-refresh"), "frontier");
+  });
+
+  test("agentRoleToTier soft-falls-back for research-* / *-researcher variants", () => {
+    // A new researcher config in config/research/ should not immediately
+    // drop into "unknown" before someone updates the static table.
+    assert.equal(agentRoleToTier("research-foo"), "frontier");
+    assert.equal(agentRoleToTier("foo-researcher"), "frontier");
+    assert.equal(agentRoleToTier("foo-reviewer"), "codex");
+  });
+
+  // Issue #303 acceptance: every role string emitted by `logAgentRun` call
+  // sites in src/ resolves to a non-"unknown" tier. The roles below mirror
+  // the literal first-arg passed at each call site (grep `logAgentRun` in src/).
+  test("every role emitted by logAgentRun in src/ maps to a known tier (issue #303)", () => {
+    const ROLES_FROM_SRC = [
+      "planner",        // src/planner-prompt.ts (×3 — cache, no-work, completed)
+      "executor",       // src/executor-agent.ts
+      "fixer",          // src/fixer.ts
+      "jit-tester",     // src/jit.ts
+      "skeptic",        // src/preflight.ts (×2 — high-risk-review + skeptic verdict path)
+    ];
+    for (const role of ROLES_FROM_SRC) {
+      const tier = agentRoleToTier(role);
+      assert.notEqual(tier, "unknown", `role "${role}" maps to "unknown"`);
+    }
+    // Sanity-check that the exported enumeration is non-empty and all entries
+    // resolve to a real tier.
+    assert.ok(KNOWN_AGENT_ROLES.length > 0);
+    for (const role of KNOWN_AGENT_ROLES) {
+      const tier = agentRoleToTier(role);
+      assert.ok(
+        tier === "frontier" || tier === "codex" || tier === "mini",
+        `KNOWN_AGENT_ROLES["${role}"] resolved to "${tier}"`,
+      );
+    }
   });
 
   test("deriveOutcome prefers merge > failure > abandoned > noWork", () => {
@@ -234,6 +301,30 @@ describe("cost-attribution aggregation (issue #271)", () => {
     const totalPct = r.byRole.reduce((sum, b) => sum + b.pct, 0);
     // Round-off tolerance — pct is rounded to 2 decimals
     assert.ok(Math.abs(totalPct - 100) < 0.1, `byRole pct sum ${totalPct} should be ~100`);
+  });
+
+  // Issue #303: end-to-end regression for the actual bug. Before the fix,
+  // planner runs with model="gpt-5.5" landed in `byTier.unknown` because the
+  // substring matcher only knew about 5.4. With the fix every dollar is
+  // accounted for under a known tier.
+  test("planner runs on gpt-5.5 land under frontier, not unknown (issue #303)", () => {
+    const cycles: CycleSummary[] = [
+      {
+        cycleId: "c1",
+        anchorType: "issue",
+        complexity: "standard",
+        tasksMerged: 1,
+        agentRuns: [
+          { agent: "planner",  costUsd: 5.0, model: "gpt-5.5" },
+          { agent: "executor", costUsd: 1.0, model: "gpt-5.3-codex" },
+        ],
+      },
+    ];
+    const r = aggregateCostAttribution(cycles);
+    const tierMap = Object.fromEntries(r.byTier.map((b) => [b.tier, b]));
+    assert.equal(tierMap.frontier?.costUsd, 5.0, "planner spend should land under frontier");
+    assert.equal(tierMap.codex?.costUsd, 1.0);
+    assert.equal(tierMap.unknown, undefined, "no spend should be classified unknown");
   });
 
   test("ignores zero-cost agent runs in role/tier rollup but still counts cycles", () => {
