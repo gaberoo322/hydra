@@ -812,13 +812,48 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
   // 7. Fall back to priorities doc — but check if it's stale
   try {
     const priorities = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
+    const DOC_REF = "direction/priorities.md";
 
-    // Check how many recent cycles used this same anchor
+    // Issue #285: pre-planner saturation gate. If the last N consecutive
+    // doc-anchor cycles were ALL drift-rejected, the priorities doc is
+    // semantically stale even if the file hasn't been touched — the planner
+    // keeps generating titles that drift-match recent merges. Refresh inline
+    // to break the loop; if refresh fails, fall through to no-work (caller
+    // continues anchor selection or records a noWork outcome).
+    const { isDocAnchorSaturated } = await import("./anchor-actionability.ts");
+    const saturation = await isDocAnchorSaturated("doc", DOC_REF);
+    if (saturation.saturated) {
+      console.log(`[ControlLoop] Doc-anchor saturated: ${saturation.reason} — forcing inline priorities refresh (planner skipped, est ~$60+ saved)`);
+      try {
+        const { refreshPriorities } = await import("./priorities-refresh.ts");
+        const refreshResult = await refreshPriorities({ grounding, trigger: "saturation" });
+        if (refreshResult.ok) {
+          console.log(`[ControlLoop] Priorities refreshed inline (saturation trigger, ${refreshResult.priorities?.split("\n").length || 0} lines)`);
+          const updated = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
+          return {
+            type: "doc",
+            reference: DOC_REF,
+            whyNow: `Freshly refreshed priorities (doc-anchor saturated: ${saturation.consecutiveDriftCount} drift-rejected cycles)`,
+            context: updated,
+          };
+        }
+        console.error(`[ControlLoop] Saturation-triggered refresh failed: ${refreshResult.error} — returning no-work to break loop`);
+      } catch (err: any) {
+        console.error(`[ControlLoop] Saturation-triggered refresh threw: ${err?.message ?? err} — returning no-work to break loop`);
+      }
+      // Refresh failed: skip this cycle's doc anchor entirely. Returning null
+      // lets the scheduler record a noWork outcome WITHOUT a frontier-tier
+      // planner call. The next cycle will retry the saturation check (and
+      // can refresh again, since refresh failures are transient).
+      return null;
+    }
+
+    // Check how many recent cycles used this same anchor (any outcome)
     const recentDocCycles = await (async () => {
       try {
         const { getMetricsTrend } = await import("./metrics.ts");
         const trend = await getMetricsTrend(10);
-        return trend.filter((m) => m.anchorType === "doc" && m.anchorReference === "direction/priorities.md").length;
+        return trend.filter((m) => m.anchorType === "doc" && m.anchorReference === DOC_REF).length;
       } catch (err: any) {
         console.error(`[ControlLoop] Failed to check recent doc-cycle trend: ${err.message}`);
         return 0;
@@ -838,7 +873,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
           const updated = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
           return {
             type: "doc",
-            reference: "direction/priorities.md",
+            reference: DOC_REF,
             whyNow: "Freshly refreshed priorities (stale doc detected)",
             context: updated,
           };
@@ -850,7 +885,7 @@ export async function selectAnchor(grounding, opts = {}, eventBus = null) {
 
     const candidate = {
       type: "doc",
-      reference: "direction/priorities.md",
+      reference: DOC_REF,
       whyNow: recentDocCycles >= 5
         ? `Priorities doc (used ${recentDocCycles}x recently)`
         : "Next priority from operator direction document",

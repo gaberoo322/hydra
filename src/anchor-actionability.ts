@@ -204,6 +204,128 @@ function containsAll(haystack: Set<string>, needles: Set<string>): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Doc-anchor saturation check (issue #285)
+//
+// The actionability gate above catches "anchor already addressed" cases by
+// token-matching the anchor reference against completed work. But the doc
+// fallback anchor in `selectAnchor()` uses a constant reference
+// (`direction/priorities.md`), so token-overlap never fires — the planner
+// runs anyway, produces a freshly-drifted title, and the post-planner drift
+// detector rejects it after the frontier call has completed.
+//
+// In the 50-cycle window from 2026-05-11, this loop fired 9 times against
+// the same doc anchor at ~$60/cycle — $518 of $1421 total spend (36.5%).
+//
+// This function provides a pre-planner saturation signal: if the last N
+// cycles for `{anchorType: "doc", anchorReference: <ref>}` were all
+// drift-rejected, the caller should either trigger a priorities refresh
+// inline or fall through to the next anchor source. Threshold N comes from
+// `HYDRA_DOC_SATURATION_THRESHOLD` (default 2).
+// ---------------------------------------------------------------------------
+
+import { getMetricsTrend } from "./metrics.ts";
+
+const DOC_SATURATION_LOOKBACK = 10;
+const DOC_SATURATION_DEFAULT_THRESHOLD = 2;
+// Drift-rejected cycles record `abandonReason` like "Drift: ..." (pipeline-
+// steps.ts L217) or `abandonReason: "drift-pre-filter"` (control-loop.ts
+// L153). Either form counts toward saturation.
+const DRIFT_ABANDON_PATTERNS = [/^drift:/i, /^drift-pre-filter$/i];
+
+export type DocSaturationResult = {
+  saturated: boolean;
+  reason: string;
+  /** Number of consecutive recent drift-rejected cycles for this anchor. */
+  consecutiveDriftCount: number;
+};
+
+/**
+ * Returns true when the last N cycles for the given doc anchor were ALL
+ * drift-rejected (i.e. `abandonReason` starts with "Drift:" or equals
+ * "drift-pre-filter") AND no merged cycle interleaves them.
+ *
+ * Scans the `HYDRA_DOC_SATURATION_LOOKBACK` most recent cycles. If a merge
+ * for any anchor is interleaved, the counter resets (we only care about
+ * uninterrupted runs of waste). Other-anchor cycles (e.g. queue items) are
+ * ignored — they don't reset the counter because they're not the same
+ * anchor source.
+ *
+ * Never throws — Redis failures log and return `{ saturated: false }` (safe
+ * default: prefer paying the planner cost than blocking legitimate work).
+ *
+ * Threshold is read fresh on each call so tests can tune it via env var.
+ */
+export async function isDocAnchorSaturated(
+  anchorType: string,
+  anchorReference: string,
+): Promise<DocSaturationResult> {
+  if (anchorType !== "doc" && anchorType !== "priorities-doc") {
+    return { saturated: false, reason: "not a doc anchor", consecutiveDriftCount: 0 };
+  }
+  if (!anchorReference || typeof anchorReference !== "string") {
+    return { saturated: false, reason: "no reference", consecutiveDriftCount: 0 };
+  }
+
+  const threshold = readSaturationThreshold();
+  if (threshold <= 0) {
+    return { saturated: false, reason: "saturation check disabled", consecutiveDriftCount: 0 };
+  }
+
+  try {
+    const trend = await getMetricsTrend(DOC_SATURATION_LOOKBACK);
+    let consecutive = 0;
+    for (const m of trend) {
+      // Skip cycles for other anchors — they don't break the run.
+      const sameAnchor =
+        (m.anchorType === "doc" || m.anchorType === "priorities-doc") &&
+        m.anchorReference === anchorReference;
+      if (!sameAnchor) {
+        // A merged cycle for any anchor signals real progress; reset.
+        const merged = (typeof m.tasksMerged === "number" ? m.tasksMerged : parseInt(m.tasksMerged ?? "0", 10) || 0) > 0;
+        if (merged) break;
+        continue;
+      }
+
+      const reason = typeof m.abandonReason === "string" ? m.abandonReason.trim() : "";
+      const isDriftRejected = reason.length > 0 && DRIFT_ABANDON_PATTERNS.some((p) => p.test(reason));
+      if (isDriftRejected) {
+        consecutive++;
+        if (consecutive >= threshold) {
+          return {
+            saturated: true,
+            reason: `${consecutive} consecutive drift-rejected cycles on doc anchor "${anchorReference}"`,
+            consecutiveDriftCount: consecutive,
+          };
+        }
+      } else {
+        // Same anchor, but cycle ended without drift rejection — either
+        // merged or some other failure mode. Either way, the saturation
+        // signal we care about (repeated drift on a stale doc) is broken.
+        break;
+      }
+    }
+    return {
+      saturated: false,
+      reason: consecutive > 0
+        ? `only ${consecutive} consecutive drift-rejected cycles (threshold ${threshold})`
+        : "no recent drift-rejected cycles for this anchor",
+      consecutiveDriftCount: consecutive,
+    };
+  } catch (err: any) {
+    console.error(`[AnchorActionability] doc-saturation scan failed (proceeding): ${err?.message ?? err}`);
+    return { saturated: false, reason: "scan failed", consecutiveDriftCount: 0 };
+  }
+}
+
+function readSaturationThreshold(): number {
+  const raw = process.env.HYDRA_DOC_SATURATION_THRESHOLD;
+  if (raw === undefined || raw === "") return DOC_SATURATION_DEFAULT_THRESHOLD;
+  const n = parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return DOC_SATURATION_DEFAULT_THRESHOLD;
+}
+
+// ---------------------------------------------------------------------------
 // Test surface — exported for white-box testing of the matcher only.
 // ---------------------------------------------------------------------------
 
@@ -212,4 +334,8 @@ export const __test__ = {
   containsAll,
   GATED_ANCHOR_TYPES,
   MERGED_TITLE_LOOKBACK,
+  DOC_SATURATION_LOOKBACK,
+  DOC_SATURATION_DEFAULT_THRESHOLD,
+  DRIFT_ABANDON_PATTERNS,
+  readSaturationThreshold,
 };
