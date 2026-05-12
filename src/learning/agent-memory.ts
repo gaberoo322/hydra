@@ -31,6 +31,7 @@ import {
   getOldRules,
   deleteOldRules,
 } from "../redis-adapter.ts";
+import { keyExists, setString } from "../redis/kv.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
 
@@ -657,6 +658,114 @@ export async function getIneffectivePromotedPatterns(
   // Worst offenders first (highest post-promotion rate, then highest absolute hits-since)
   flagged.sort((a, b) => b.postRate - a.postRate || b.hitsSincePromotion - a.hitsSincePromotion);
   return flagged;
+}
+
+// ===========================================================================
+// Issue #302 — One-time backfill of promotion metadata for legacy patterns
+// ===========================================================================
+
+/**
+ * Redis flag indicating the one-time promotion-metadata backfill has run.
+ * Exposed for tests; production code should not branch on this directly.
+ */
+export const BACKFILL_PROMOTION_META_KEY = "hydra:learning:backfill:promotion-meta:done";
+
+/**
+ * Pure helper — mutate-in-place backfill of `promotedAt` / `hitsAtPromotion`
+ * for legacy promoted patterns. Exported for unit testing without Redis.
+ *
+ * Patterns promoted before issue #289 (commit 3fd70b4) have `promoted === true`
+ * but lack the new metadata fields, which makes them invisible to
+ * `evaluatePromotedPatternEffectiveness()`. These are exactly the patterns
+ * worth flagging — they have been firing for weeks since promotion.
+ *
+ * Rules:
+ *   - `promotedAt = firstSeen ?? lastSeen ?? today` (per AC3). Anchoring the
+ *     promotion timestamp at pattern birth means `daysSincePromotion` covers
+ *     the full lifetime, so the MIN_DAYS_POST_PROMOTION window is trivially
+ *     satisfied and the detector can judge the pattern on its next call.
+ *   - `hitsAtPromotion = 0` when `promotedAt` was missing. AC1 nominally
+ *     says "use current hitCount as hitsAtPromotion", but combined with the
+ *     birth-time `promotedAt` clamp (`daysToPromotion` becomes 1), that would
+ *     produce an enormous `preRate` that no plausible post-rate could exceed,
+ *     leaving the known offenders permanently invisible. Treating all
+ *     historical hits as post-promotion is the only assignment consistent with
+ *     AC3's "worst case: detector flags them immediately because they kept
+ *     firing" and with the issue's stated goal that
+ *     `/api/learning/ineffective-rules` should surface the existing 292/456-hit
+ *     patterns after deploy.
+ *   - When `promotedAt` is already present (partial-metadata case), preserve
+ *     it and fall back to AC1's literal `hitsAtPromotion = hitCount` — the
+ *     operator-set timestamp means `daysToPromotion` is meaningful and the
+ *     standard math works.
+ *
+ * Returns the count of patterns mutated (0 when there is nothing to do, which
+ * is the steady state after the first run).
+ */
+export function backfillPatternPromotionMetadata(
+  patterns: MemoryPattern[],
+  today: string = new Date().toISOString().split("T")[0],
+): number {
+  let mutated = 0;
+  for (const p of patterns) {
+    if (!p.promoted) continue;
+    if (p.promotedAt && typeof p.hitsAtPromotion === "number") continue;
+
+    const promotedAtWasMissing = !p.promotedAt;
+    if (promotedAtWasMissing) {
+      p.promotedAt = p.firstSeen || p.lastSeen || today;
+    }
+    if (typeof p.hitsAtPromotion !== "number") {
+      // See doc comment above: 0 when we just synthesized promotedAt from
+      // firstSeen, otherwise current hitCount per AC1.
+      p.hitsAtPromotion = promotedAtWasMissing ? 0 : p.hitCount;
+    }
+    mutated++;
+  }
+  return mutated;
+}
+
+/**
+ * One-time startup migration: scan planner/executor/skeptic patterns and
+ * backfill missing promotion metadata. Idempotent — guarded by the
+ * `BACKFILL_PROMOTION_META_KEY` Redis flag.
+ *
+ * Safe to call on every boot. Once the flag is set, this is a single Redis
+ * lookup; the underlying Redis writes only happen on the first invocation
+ * after the issue #289 instrumentation landed.
+ */
+export async function backfillPromotionMetadata(): Promise<void> {
+  try {
+    if (await keyExists(BACKFILL_PROMOTION_META_KEY)) return;
+  } catch (err: any) {
+    console.error(`[Learning] backfillPromotionMetadata: flag lookup failed: ${err.message}`);
+    return;
+  }
+
+  let totalMutated = 0;
+  for (const agent of ["planner", "executor", "skeptic"]) {
+    try {
+      const patterns = await loadPatterns(agent);
+      if (patterns.length === 0) continue;
+      const mutated = backfillPatternPromotionMetadata(patterns);
+      if (mutated > 0) {
+        await savePatterns(agent, patterns);
+        totalMutated += mutated;
+        console.log(`[Learning] Backfilled promotion metadata for ${mutated} ${agent} pattern(s)`);
+      }
+    } catch (err: any) {
+      console.error(`[Learning] backfillPromotionMetadata: ${agent} pass failed: ${err.message}`);
+    }
+  }
+
+  try {
+    await setString(BACKFILL_PROMOTION_META_KEY, new Date().toISOString());
+    if (totalMutated > 0) {
+      console.log(`[Learning] Promotion-metadata backfill complete (${totalMutated} pattern(s) updated)`);
+    }
+  } catch (err: any) {
+    console.error(`[Learning] backfillPromotionMetadata: flag write failed (will retry next boot): ${err.message}`);
+  }
 }
 
 // ===========================================================================
