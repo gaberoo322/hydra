@@ -38,7 +38,7 @@ import { recordCycleMetrics, getMetricsTrend } from "./metrics.ts";
 import { recordCalibrationOutcome } from "./anchor-scorer.ts";
 import { reportOutcome } from "./anchor-selection.ts";
 import { clearOutcomes } from "./learning.ts";
-import { complete, fail } from "./backlog.ts";
+import { complete, fail, isKanbanAnchor } from "./backlog.ts";
 import { markTaskComplete } from "./specs.ts";
 import { trackMergedCommit, _internal as _verificationInternal } from "./verification.ts";
 import { PROJECT_WORKSPACE } from "./cycle-helpers.ts";
@@ -573,8 +573,24 @@ export async function runPostMerge(
       }
     }
 
-    await complete(anchor.reference, "merged", { eventBus, cycleId });
+    // Issue #312: only call complete() for anchors that actually live on the
+    // kanban board. Research, codebase-health, failing-test, prior-failure,
+    // reframe, regression-hunt, doc, issue, and work-queue user-request
+    // anchors never claim a kanban row, so completing them used to log
+    // "[Backlog] complete() failed: ... not found in any lane" on every
+    // merge (134 spurious errors over 2 days in prod). The kanban-tier
+    // marks its anchor with _fromKanban: true so we can gate cleanly.
+    // Existing complete()-failure logging stays loud for real kanban anchors
+    // — this only suppresses the false-positive path.
+    if (isKanbanAnchor(anchor)) {
+      await complete(anchor.reference, "merged", { eventBus, cycleId });
+    }
   } else {
+    // fail() routes to returnToBacklog which already silently no-ops for
+    // non-kanban anchors (returnToBacklog returns false without logging,
+    // and fail() doesn't check the result). No gate needed here — keeping
+    // the call covers the rare case where a non-kanban anchor was promoted
+    // to in-progress via a different path.
     await fail(anchor.reference, finalState, { eventBus, cycleId });
   }
 

@@ -844,6 +844,25 @@ async function addItem(item: Record<string, any>): Promise<{ added: boolean; id?
 }
 
 /**
+ * Issue #312: Decide whether a given anchor lives on the kanban board.
+ *
+ * Only kanban-claimed user-requests (priority-3 in selectAnchor) and explicit
+ * operator anchors with a kanban marker live in one of the kanban lanes. Other
+ * anchor types — research, codebase-health, failing-test, prior-failure,
+ * reframe, regression-hunt, doc, issue, work-queue user-request — never have
+ * a row, so calling complete() on them used to log a benign-but-noisy
+ * "[Backlog] complete() failed: ... not found in any lane" on every merge.
+ *
+ * Returns true iff the anchor originated from selectKanbanAnchor() (or an
+ * explicit operator request that carries the _fromKanban marker). Pure: takes
+ * any anchor-shaped object so callers don't need a typed anchor union.
+ */
+function isKanbanAnchor(anchor: { type?: string; _fromKanban?: boolean } | null | undefined): boolean {
+  if (!anchor) return false;
+  return anchor._fromKanban === true;
+}
+
+/**
  * _admin namespace — internal operations exposed ONLY for the dashboard API
  * and orchestrator internals. Not part of the stable public contract.
  */
@@ -878,6 +897,9 @@ export {
   getStatus,
   addItem,
   claim, complete, fail, block,
+  // Predicate for callers that need to decide whether an anchor lives on
+  // the kanban board before calling complete()/fail() (issue #312).
+  isKanbanAnchor,
   // _admin for dashboard API + orchestrator internals
   _admin,
 };

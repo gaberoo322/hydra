@@ -18,6 +18,10 @@ export interface KanbanAnchor {
   whyNow: string;
   context: any;
   description: any;
+  // Issue #312: marker so post-merge.ts can distinguish kanban-claimed
+  // user-request anchors from work-queue user-request anchors (which never
+  // live on the kanban board). Used by isKanbanAnchor() in backlog.ts.
+  _fromKanban: true;
 }
 
 export interface KanbanResult {
@@ -43,6 +47,7 @@ export async function selectKanbanAnchor(): Promise<KanbanResult> {
         whyNow: `Queued backlog item ${queuedItem.id} (priority ${queuedItem.priority || 0})`,
         context: queuedItem.description || null,
         description: queuedItem.description || null,
+        _fromKanban: true,
       };
       // Drift pre-filter (issue #233) — block the kanban item if it's a
       // near-duplicate of a recent cycle so we don't burn planner cost.
