@@ -101,3 +101,61 @@ export async function setReflectionKeyTTL(key: string, ttlSeconds: number): Prom
   const r = getRedisConnection();
   await r.expire(key, ttlSeconds);
 }
+
+// ===========================================================================
+// By-file secondary index (issue #326)
+// ===========================================================================
+//
+// Reflections are primarily keyed by `hydra:reflections:<normalized-anchor-ref>`,
+// which is too narrow: 103/127 stored reflection keys are unique within the
+// first 40 chars, so retries with a different anchor string but the same
+// underlying file never re-use the reflection.
+//
+// This secondary index maps `file -> { anchorKey, anchorKey, ... }` via a
+// Redis Set per file, so a new anchor touching `foo.ts` can fan out to
+// every reflection key whose source anchor also touched `foo.ts`.
+
+const BY_FILE_PREFIX = "hydra:reflections:by-file:";
+
+/** Returns the Redis key holding the anchor-key set for `file`. */
+export function reflectionByFileKey(file: string): string {
+  return BY_FILE_PREFIX + file;
+}
+
+/**
+ * Add `anchorKey` to the by-file index for `file` and set TTL.
+ * Idempotent — SADD is a no-op on duplicates.
+ */
+export async function addReflectionToFileIndex(
+  file: string,
+  anchorKey: string,
+  ttlSeconds: number,
+): Promise<void> {
+  if (!file || !anchorKey) return;
+  const r = getRedisConnection();
+  const key = reflectionByFileKey(file);
+  await r.sadd(key, anchorKey);
+  await r.expire(key, ttlSeconds);
+}
+
+/**
+ * Return all anchor keys associated with `file`. Empty array if none.
+ */
+export async function getReflectionKeysByFile(file: string): Promise<string[]> {
+  if (!file) return [];
+  const r = getRedisConnection();
+  return r.smembers(reflectionByFileKey(file));
+}
+
+/**
+ * Remove `anchorKey` from the by-file index entry for `file`.
+ * Used by post-merge cleanup.
+ */
+export async function removeReflectionFromFileIndex(
+  file: string,
+  anchorKey: string,
+): Promise<void> {
+  if (!file || !anchorKey) return;
+  const r = getRedisConnection();
+  await r.srem(reflectionByFileKey(file), anchorKey);
+}

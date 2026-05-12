@@ -133,6 +133,28 @@ export async function recordCycleMetrics(cycleId, metrics) {
 }
 
 /**
+ * Issue #326: derive the categorical `reflectionMatchSource` from the raw
+ * comma-separated `reflectionSources` Redis field. Pure helper, kept here so
+ * it stays close to the metric write path even though the corresponding
+ * source-detection logic lives in context-builder.ts.
+ *
+ * Buckets: none | by-anchor | by-file | both | global | mixed.
+ */
+export function deriveReflectionMatchSource(rawSources: unknown): string {
+  if (typeof rawSources !== "string" || rawSources.length === 0) return "none";
+  const sources = rawSources.split(",").map((s) => s.trim()).filter(Boolean);
+  if (sources.length === 0) return "none";
+  const hasPerAnchor = sources.includes("per-anchor");
+  const hasByFile = sources.includes("by-file");
+  const hasGlobal = sources.includes("global");
+  if (hasPerAnchor && hasByFile && !hasGlobal) return "both";
+  if (hasPerAnchor && !hasByFile && !hasGlobal) return "by-anchor";
+  if (!hasPerAnchor && hasByFile && !hasGlobal) return "by-file";
+  if (!hasPerAnchor && !hasByFile && hasGlobal) return "global";
+  return "mixed";
+}
+
+/**
  * Get metrics for the N most recent cycles.
  *
  * @param {number} count - How many cycles to return (default 20)
@@ -171,6 +193,14 @@ export async function getMetricsTrend(count = 20) {
     // Issue #272: gate-coverage observability — string "true"/"false" in Redis.
     if (parsed.qualityGateCoverage !== undefined) {
       parsed.qualityGateCoverage = parsed.qualityGateCoverage === "true";
+    }
+
+    // Issue #326: derive `reflectionMatchSource` at read time when callers
+    // (verification, post-merge) did not emit it directly. Those writers live
+    // in Tier-0 paths so we cannot add a new metric field there; the bucket
+    // is computable from the already-emitted `reflectionSources` string.
+    if (!parsed.reflectionMatchSource) {
+      parsed.reflectionMatchSource = deriveReflectionMatchSource(parsed.reflectionSources);
     }
 
     results.push(parsed);

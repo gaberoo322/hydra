@@ -41,6 +41,9 @@ import {
 import {
   recordAnchorReflection,
   loadAnchorReflections,
+  loadAnchorReflectionsByFile,
+  backfillByFileIndex,
+  extractFilesFromAnchor,
   recordGlobalReflection,
   loadRelevantReflections as loadRelevantReflectionsImpl,
   formatReflectionsForPrompt as formatReflectionsForPromptImpl,
@@ -100,6 +103,9 @@ export const createCycleSession = createCycleSessionImpl;
 
 // Reflection storage (issue #219)
 export const recordReflection = recordReflectionImpl;
+// Issue #326: surface the file-extraction helper so anchor-selection and
+// planner-prompt callers can pre-compute scope hints when needed.
+export { extractFilesFromAnchor, loadAnchorReflectionsByFile, backfillByFileIndex };
 export const getAllReflections = getAllReflectionsImpl;
 export const closeReflectionsRedis = closeReflectionsRedisImpl;
 export const loadRelevantReflections = loadRelevantReflectionsImpl;
@@ -143,6 +149,12 @@ export interface OutcomeOpts {
   anchorType: string;
   context?: any;
   skepticVerdict?: string;
+  /**
+   * Issue #326: files the task touched (planner `scopeBoundary.in` or
+   * actual changed files). Used to populate the by-file reflection index so
+   * future anchors touching the same files can match.
+   */
+  scopeFiles?: string[];
   reflection?: {
     failureMode: string;
     whatFailed: string;
@@ -163,7 +175,7 @@ export interface OutcomeOpts {
 export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
   const {
     agents, cycleId, task, finalState, anchorRef, anchorType,
-    context = {}, skepticVerdict, reflection,
+    context = {}, skepticVerdict, reflection, scopeFiles,
   } = opts;
 
   // AC1: Check if anchor had existing reflections — if so, record the outcome
@@ -201,6 +213,12 @@ export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
   // Record reflections (both per-anchor and global) if provided
   if (reflection) {
     try {
+      // Issue #326: derive scope files from explicit scopeFiles opt, the
+      // task's scopeBoundary.in (planner-supplied), or fall back to extraction
+      // from anchorRef.
+      const derivedScope: string[] = Array.isArray(scopeFiles) && scopeFiles.length > 0
+        ? scopeFiles
+        : (Array.isArray(task?.scopeBoundary?.in) ? task.scopeBoundary.in : []);
       await recordAnchorReflection({
         cycleId,
         anchorRef,
@@ -208,6 +226,7 @@ export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
         outcome: reflection.failureMode,
         reason: reflection.whyItFailed,
         verificationErrors: reflection.verificationErrors,
+        scopeFiles: derivedScope,
       });
     } catch (err: any) {
       console.error(`[Learning] Failed to record per-anchor reflection for ${cycleId}: ${err.message}`);
@@ -235,12 +254,16 @@ export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
 
 /**
  * Load all learning context for an agent + anchor in one call.
- * Combines agent memory, per-anchor reflections, and global reflections.
- * Never throws — individual sources degrade gracefully.
+ * Combines agent memory, per-anchor reflections, by-file reflections (issue
+ * #326), and global reflections. Never throws — individual sources degrade
+ * gracefully.
+ *
+ * `anchor.files` (optional) hints scope files for the by-file index lookup.
+ * When omitted, file paths are extracted from `anchor.reference`.
  */
 export async function getContext(
   agent: string,
-  anchor: { type: string; reference: string },
+  anchor: { type: string; reference: string; files?: string[] },
 ): Promise<string> {
   const parts: string[] = [];
 
@@ -253,15 +276,42 @@ export async function getContext(
     console.error(`[Learning] getContext: agent memory load failed for ${agent}: ${err.message}`);
   }
 
-  // 2. Per-anchor episodic reflections
+  // 2. Per-anchor episodic reflections (legacy primary key — verbatim
+  //    anchor.reference). When this returns content, opportunistically
+  //    backfill the by-file index so the new path warms organically.
+  let perAnchorHit = false;
   try {
     const reflections = await loadAnchorReflections(anchor.reference);
-    if (reflections) parts.push(reflections);
+    if (reflections) {
+      parts.push(reflections);
+      perAnchorHit = true;
+      // Acceptance: "Backfill on read: when an old reflection is hit by the
+      // legacy path, opportunistically index it under by-file:".
+      try {
+        await backfillByFileIndex(anchor.reference, anchor.files);
+      } catch (err: any) {
+        console.error(`[Learning] getContext: by-file backfill failed for "${anchor.reference}": ${err.message}`);
+      }
+    }
   } catch (err: any) {
     console.error(`[Learning] getContext: per-anchor reflections failed for "${anchor.reference}": ${err.message}`);
   }
 
-  // 3. Global relevant reflections (Reflexion pattern)
+  // 3. By-file secondary index (issue #326): fan out to reflections recorded
+  //    for *other* anchors that touched the same files. This is the dominant
+  //    reflection-injection failure mode — verbatim anchor.reference rarely
+  //    matches but file paths recur constantly.
+  try {
+    const files = extractFilesFromAnchor(anchor.reference, anchor.files);
+    if (files.length > 0) {
+      const byFile = await loadAnchorReflectionsByFile(files, anchor.reference);
+      if (byFile) parts.push(byFile);
+    }
+  } catch (err: any) {
+    console.error(`[Learning] getContext: by-file reflections failed for "${anchor.reference}": ${err.message}`);
+  }
+
+  // 4. Global relevant reflections (Reflexion pattern)
   try {
     const relevant = await loadRelevantReflectionsImpl(anchor);
     const formatted = formatReflectionsForPromptImpl(relevant);
@@ -270,6 +320,8 @@ export async function getContext(
     console.error(`[Learning] getContext: global reflections failed for "${anchor.reference}": ${err.message}`);
   }
 
+  // Silence unused-var lint when perAnchorHit is purely for future telemetry.
+  void perAnchorHit;
   return parts.join("\n\n");
 }
 
