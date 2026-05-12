@@ -107,6 +107,58 @@ function generateResearchId() {
 }
 
 /**
+ * Derive `rank`, `adjustedScore`, and `confidence` from the Director's
+ * opportunity schema so the auto-queue telemetry has real numbers.
+ *
+ * The Director (config/research/director.md) emits opportunities with
+ * `alignmentScore`, `impact`, `feasibility` — but historically the consumer
+ * code in this file logged `opp.rank` / `opp.adjustedScore` / `opp.confidence`
+ * which the Director never produces. Result: 90+ log lines per day of the
+ * form `[Research] Auto-queued #undefined: "..." (score: undefined,
+ * confidence: undefined)` (issue #314).
+ *
+ * Rather than reshape the Director prompt (which would force a re-run of
+ * many cached test fixtures), we map the existing fields:
+ *
+ *   - `rank` = 1-based array index (the Director ranks by emitting them in order)
+ *   - `adjustedScore` = `alignmentScore` (Director's primary score field)
+ *   - `confidence` = derived from `feasibility` (high=0.8, medium=0.5, low=0.3)
+ *
+ * Existing values on the opportunity take precedence — so a future Director
+ * upgrade that produces these fields directly will just work.
+ */
+export function enrichOpportunity<T extends Record<string, any>>(opp: T, index: number): T & {
+  rank: number;
+  adjustedScore: number | null;
+  confidence: number | null;
+} {
+  const feasibilityToConfidence: Record<string, number> = {
+    high: 0.8,
+    medium: 0.5,
+    low: 0.3,
+  };
+
+  // Rank: existing value (if it's a positive number) wins; otherwise use index+1
+  const existingRank = typeof opp.rank === "number" && opp.rank > 0 ? opp.rank : null;
+  const rank = existingRank ?? (index + 1);
+
+  // Adjusted score: existing adjustedScore wins; otherwise fall back to alignmentScore
+  const existingAdjusted = typeof opp.adjustedScore === "number" ? opp.adjustedScore : null;
+  const fromAlignment = typeof opp.alignmentScore === "number" ? opp.alignmentScore : null;
+  const adjustedScore = existingAdjusted ?? fromAlignment;
+
+  // Confidence: existing confidence wins; otherwise derive from feasibility tier
+  let confidence: number | null = null;
+  if (typeof opp.confidence === "number") {
+    confidence = opp.confidence;
+  } else if (typeof opp.feasibility === "string") {
+    confidence = feasibilityToConfidence[opp.feasibility.toLowerCase()] ?? null;
+  }
+
+  return Object.assign({}, opp, { rank, adjustedScore, confidence });
+}
+
+/**
  * Load methodology overrides written by the Research Architect.
  * These are appended to researcher prompts to improve quality over time.
  */
@@ -653,7 +705,8 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
   // Kanban incident. See: hydra/reports/decisions/kanban-scope.md.
   let autoQueued = 0;
   if (synthesis?.opportunities) {
-    for (const opp of synthesis.opportunities) {
+    for (let i = 0; i < synthesis.opportunities.length; i++) {
+      const opp = enrichOpportunity(synthesis.opportunities[i], i);
       if (!opp.autoQueue) {
         // Not auto-queued — surface in Triage for operator review before entering backlog.
         const descParts = [];
@@ -842,9 +895,10 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
         projectName: goals.name,
         opportunityCount: report.opportunityCount,
         autoQueued,
-        topOpportunities: (synthesis?.opportunities || []).slice(0, 5).map(o =>
-          `#${o.rank}: ${o.title} (score: ${o.adjustedScore}, ${o.confidence} confidence)`
-        ),
+        topOpportunities: (synthesis?.opportunities || []).slice(0, 5).map((o, idx) => {
+          const enriched = enrichOpportunity(o, idx);
+          return `#${enriched.rank}: ${enriched.title} (score: ${enriched.adjustedScore}, ${enriched.confidence} confidence)`;
+        }),
         summary: synthesis?.summary || "Research complete",
         duration: report.duration.totalHuman,
         cost: `$${report.cost.totalUsd.toFixed(4)}`,
