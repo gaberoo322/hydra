@@ -42,6 +42,13 @@ const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
 
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 6;
 const RESEARCH_BUILD_RATIO_MAX = parseFloat(process.env.HYDRA_RESEARCH_BUILD_RATIO_MAX) || 3;
+// Issue #327: research capacity floor. Symmetric to RESEARCH_BUILD_RATIO_MAX.
+// If the rolling research:build ratio drops below this minimum AND
+// RESEARCH_MIN_INTERVAL_MS has elapsed AND the daily cost cap is not exhausted,
+// the scheduler forces a research cycle to keep the target-direction lane
+// from being indefinitely shadowed by user-request anchors.
+// Default 1/20 — at least one research cycle per 20 build cycles.
+const RESEARCH_BUILD_RATIO_MIN = parseFloat(process.env.HYDRA_RESEARCH_BUILD_RATIO_MIN) || 1 / 20;
 const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 2 * 60 * 60 * 1000; // 2 hours
 // ARCHITECT_EVERY_N_RESEARCH removed — research-architect module disconnected
 const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || Infinity;
@@ -161,6 +168,10 @@ let state = {
   haltedForNoOpMerges: false,
   researchCyclesRun: 0,
   lastResearchAt: null,
+  // Issue #327: per-cycle telemetry — set true on the scheduler tick that
+  // triggers the research capacity floor. Surfaced on /api/scheduler/status
+  // as `researchFloorTriggered`. Reset every maybeRunResearch() entry.
+  lastResearchFloorTriggered: false,
   _stateVersion: 0, // optimistic locking version (issue #140 — AC3)
 };
 
@@ -415,65 +426,101 @@ async function maybeRunResearch(eventBus) {
     return;
   }
 
-  // Check queue depth — skip research when there's enough work to build
+  // Check the research-to-build ratio first — this drives both the upper
+  // bound (RESEARCH_BUILD_RATIO_MAX, throttle) and the lower bound
+  // (RESEARCH_BUILD_RATIO_MIN, capacity floor — issue #327).
   const queueLen = await getWorkQueueLen();
-  if (queueLen >= RESEARCH_QUEUE_THRESHOLD) {
-    console.log(`[Scheduler] Research suppressed: queue depth ${queueLen} >= threshold ${RESEARCH_QUEUE_THRESHOLD}`);
-    return;
-  }
-
-  // Check research-to-build ratio (rolling 24h window)
   const researchCount24h = await getResearchEventCount24h();
   const buildCount24h = await getBuildEventCount24h();
-  const ratio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
-  if (researchCount24h > 0 && ratio > RESEARCH_BUILD_RATIO_MAX) {
-    console.log(`[Scheduler] Research suppressed: ratio ${ratio.toFixed(1)} exceeds max ${RESEARCH_BUILD_RATIO_MAX} (${researchCount24h} research / ${buildCount24h} builds in 24h)`);
-    return;
+
+  // Issue #327: research capacity floor — symmetric to RESEARCH_BUILD_RATIO_MAX.
+  // If the natural rolling ratio has dropped below the floor AND the min-
+  // interval has elapsed AND the daily cost cap is not exhausted, force a
+  // research cycle even if queueLen would normally suppress it. AC7: the
+  // floor never overrides the cost cap.
+  const lastResearchAtMs = await getLastResearchAtMs();
+  const spendForFloor = await getDailySpend();
+  const floor = shouldTriggerResearchFloor(
+    buildCount24h,
+    researchCount24h,
+    lastResearchAtMs,
+    spendForFloor.usd,
+  );
+
+  // Reset the per-cycle telemetry flag every entry — only the floor branch
+  // below sets it to true. Surfaced on /api/scheduler/status.
+  state.lastResearchFloorTriggered = false;
+
+  if (!floor.triggered) {
+    // No floor pressure — apply the normal suppression rules.
+
+    // Check queue depth — skip research when there's enough work to build
+    if (queueLen >= RESEARCH_QUEUE_THRESHOLD) {
+      console.log(`[Scheduler] Research suppressed: queue depth ${queueLen} >= threshold ${RESEARCH_QUEUE_THRESHOLD}`);
+      return;
+    }
+
+    // Check research-to-build ratio (rolling 24h window)
+    const ratio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
+    if (researchCount24h > 0 && ratio > RESEARCH_BUILD_RATIO_MAX) {
+      console.log(`[Scheduler] Research suppressed: ratio ${ratio.toFixed(1)} exceeds max ${RESEARCH_BUILD_RATIO_MAX} (${researchCount24h} research / ${buildCount24h} builds in 24h)`);
+      return;
+    }
+
+    // Ratio throttle: if queue still has items, prefer building over researching.
+    // Research should only run when the queue is nearly empty (< 3 items).
+    const RESEARCH_QUEUE_LOW_WATERMARK = Math.min(3, Math.floor(RESEARCH_QUEUE_THRESHOLD / 2));
+    if (queueLen >= RESEARCH_QUEUE_LOW_WATERMARK) {
+      console.log(`[Scheduler] Queue has ${queueLen} items (>= ${RESEARCH_QUEUE_LOW_WATERMARK}) — prefer building over researching`);
+      return;
+    }
+  } else {
+    // Floor fired — log it and continue past suppression to run research.
+    // AC3 (issue #327): cycle log includes "[Scheduler] research floor fired: <reason>".
+    console.log(`[Scheduler] research floor fired: ${floor.reason}`);
+    state.lastResearchFloorTriggered = true;
   }
 
-  // Ratio throttle: if queue still has items, prefer building over researching.
-  // Research should only run when the queue is nearly empty (< 3 items).
-  const RESEARCH_QUEUE_LOW_WATERMARK = Math.min(3, Math.floor(RESEARCH_QUEUE_THRESHOLD / 2));
-  if (queueLen >= RESEARCH_QUEUE_LOW_WATERMARK) {
-    console.log(`[Scheduler] Queue has ${queueLen} items (>= ${RESEARCH_QUEUE_LOW_WATERMARK}) — prefer building over researching`);
-    return;
-  }
-
-  // If queue is low but backlog has items, promote from backlog first
-  try {
-    const counts = await getBacklogCounts();
-    if (counts.backlog > 0) {
-      const needed = RESEARCH_QUEUE_THRESHOLD - queueLen;
-      const promoted = await promoteToQueued(needed);
-      if (promoted.length > 0) {
-        // Push promoted items into Redis queue with full context
-        for (const item of promoted) {
-          await pushToWorkQueue(JSON.stringify({
-            reference: item.title,
-            reason: `Promoted from backlog (priority: ${item.priority || 0}, score: ${item.meta?.score || "?"}, ${item.meta?.confidence || "?"} confidence)`,
-            context: JSON.stringify({
-              ...item.meta,
-              description: item.description,
-              priority: item.priority,
-              estimate: item.estimate,
-              labels: item.labels,
-              parentId: item.parentId,
-            }),
-            queuedAt: new Date().toISOString(),
-            source: "backlog",
-          }));
+  // If queue is low but backlog has items, promote from backlog first.
+  // Issue #327: skip this shortcut when the research capacity floor has fired
+  // — the whole point of the floor is that we must run research even when
+  // there's build work available.
+  if (!floor.triggered) {
+    try {
+      const counts = await getBacklogCounts();
+      if (counts.backlog > 0) {
+        const needed = RESEARCH_QUEUE_THRESHOLD - queueLen;
+        const promoted = await promoteToQueued(needed);
+        if (promoted.length > 0) {
+          // Push promoted items into Redis queue with full context
+          for (const item of promoted) {
+            await pushToWorkQueue(JSON.stringify({
+              reference: item.title,
+              reason: `Promoted from backlog (priority: ${item.priority || 0}, score: ${item.meta?.score || "?"}, ${item.meta?.confidence || "?"} confidence)`,
+              context: JSON.stringify({
+                ...item.meta,
+                description: item.description,
+                priority: item.priority,
+                estimate: item.estimate,
+                labels: item.labels,
+                parentId: item.parentId,
+              }),
+              queuedAt: new Date().toISOString(),
+              source: "backlog",
+            }));
+          }
+          console.log(`[Scheduler] Promoted ${promoted.length} items from backlog to queue`);
+          return; // Queue is now filled, no need for research
         }
-        console.log(`[Scheduler] Promoted ${promoted.length} items from backlog to queue`);
-        return; // Queue is now filled, no need for research
       }
-    }
 
-    // Log if backlog AND queue are both empty (no notification — too noisy)
-    if (counts.total === 0 && counts.inProgress === 0) {
-      console.log(`[Scheduler] Backlog and queue are both empty — will pick from priorities doc`);
+      // Log if backlog AND queue are both empty (no notification — too noisy)
+      if (counts.total === 0 && counts.inProgress === 0) {
+        console.log(`[Scheduler] Backlog and queue are both empty — will pick from priorities doc`);
+      }
+    } catch (err: any) {
+      console.error(`[Scheduler] Backlog check failed: ${err.message}`);
     }
-  } catch (err: any) {
-    console.error(`[Scheduler] Backlog check failed: ${err.message}`);
   }
 
   // Check throttle — don't run research more often than the minimum interval
@@ -989,6 +1036,9 @@ async function getStatus() {
     research: {
       queueThreshold: RESEARCH_QUEUE_THRESHOLD,
       buildRatioMax: RESEARCH_BUILD_RATIO_MAX,
+      // Issue #327: capacity floor symmetric to buildRatioMax. Operator-
+      // visible alongside the max so the dashboard can render both bounds.
+      buildRatioMin: RESEARCH_BUILD_RATIO_MIN,
       currentRatio: Math.round(currentRatio * 10) / 10,
       researchCount24h,
       buildCount24h,
@@ -998,6 +1048,9 @@ async function getStatus() {
       dailyCostCapUsd: DAILY_COST_CAP_USD,
       dailySpendUsd: spend.usd,
       dailySpendDate: spend.date,
+      // Issue #327: per-cycle telemetry — true if the most recent scheduler
+      // tick fired the capacity floor. AC4.
+      researchFloorTriggered: state.lastResearchFloorTriggered,
     },
     repetition: {
       window: REPETITION_WINDOW,
@@ -1059,6 +1112,90 @@ function shouldSuppressResearch(
   return { suppressed: false };
 }
 
+/**
+ * Determine whether the research capacity floor should force a research cycle
+ * (issue #327). Symmetric to shouldSuppressResearch.
+ *
+ * The floor fires when:
+ *   1. The rolling 24h research:build ratio is below `ratioMin` (after at
+ *      least one build event has been recorded — fresh schedulers do NOT
+ *      trip the floor before any work has happened), AND
+ *   2. The minimum interval since the last research cycle has elapsed
+ *      (lastResearchAtMs is null OR now - lastResearchAtMs >= minIntervalMs), AND
+ *   3. The daily research-spend cap is not exhausted
+ *      (dailySpendUsd < dailyCostCapUsd).
+ *
+ * Acceptance criterion 7 (issue #327): the floor never overrides the daily
+ * cost cap — if spend has hit the cap, we return `triggered: false` with a
+ * `cost-cap` reason so the caller can log it and skip.
+ *
+ * Pure function — exported for testability.
+ *
+ * Returns:
+ *   { triggered: true,  reason: string } when the floor fires
+ *   { triggered: false, reason?: string } when the floor stays silent
+ */
+function shouldTriggerResearchFloor(
+  buildCount24h: number,
+  researchCount24h: number,
+  lastResearchAtMs: number | null,
+  dailySpendUsd: number,
+  opts?: {
+    ratioMin?: number;
+    minIntervalMs?: number;
+    dailyCostCapUsd?: number;
+    now?: number;
+  },
+): { triggered: boolean; reason?: string } {
+  const ratioMin = opts?.ratioMin ?? RESEARCH_BUILD_RATIO_MIN;
+  const minIntervalMs = opts?.minIntervalMs ?? RESEARCH_MIN_INTERVAL_MS;
+  const dailyCostCapUsd = opts?.dailyCostCapUsd ?? DAILY_COST_CAP_USD;
+  const now = opts?.now ?? Date.now();
+
+  // Guard: nothing to compare against on a fresh scheduler — never trip the
+  // floor before at least one build event has been recorded. This prevents
+  // a brand-new orchestrator instance from immediately burning a research
+  // cycle before any user-request work has happened.
+  if (buildCount24h <= 0) {
+    return { triggered: false, reason: "no build events recorded yet" };
+  }
+
+  // Compute the natural research:build ratio. If buildCount24h is 0 we
+  // already returned above.
+  const ratio = researchCount24h / buildCount24h;
+  if (ratio >= ratioMin) {
+    return {
+      triggered: false,
+      reason: `natural ratio ${ratio.toFixed(3)} >= floor ${ratioMin.toFixed(3)}`,
+    };
+  }
+
+  // Min-interval gate — never violate the human-set research throttle.
+  if (lastResearchAtMs !== null) {
+    const elapsed = now - lastResearchAtMs;
+    if (elapsed < minIntervalMs) {
+      const remainingMin = Math.round((minIntervalMs - elapsed) / 60_000);
+      return {
+        triggered: false,
+        reason: `min interval not elapsed (~${remainingMin}min remaining)`,
+      };
+    }
+  }
+
+  // Cost-cap gate — AC7. Floor never overrides the daily cost cap.
+  if (dailySpendUsd >= dailyCostCapUsd) {
+    return {
+      triggered: false,
+      reason: `daily cost cap reached ($${dailySpendUsd.toFixed(2)} >= $${dailyCostCapUsd.toFixed(2)})`,
+    };
+  }
+
+  return {
+    triggered: true,
+    reason: `ratio ${ratio.toFixed(3)} < floor ${ratioMin.toFixed(3)} (${researchCount24h} research / ${buildCount24h} builds in 24h)`,
+  };
+}
+
 export {
   start, stop, getStatus, autoStart, getDailySpend, DAILY_COST_CAP_USD,
   RESEARCH_BUILD_RATIO_MAX, RESEARCH_QUEUE_THRESHOLD,
@@ -1067,4 +1204,6 @@ export {
   computeStallBackoffMs, shouldSendStallAlert, classifyStallState, formatDuration,
   // Exported for test coverage (issue #222):
   classifyNoOpMergeState, NO_OP_MERGE_HALT_THRESHOLD,
+  // Exported for test coverage (issue #327):
+  shouldTriggerResearchFloor, RESEARCH_BUILD_RATIO_MIN,
 };

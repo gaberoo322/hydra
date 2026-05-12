@@ -71,6 +71,12 @@ Determined by `selectAnchor()` in `src/anchor-selection.ts`. Priority order:
 13. **Codebase health** — reductive improvements (split, consolidate, document)
 14. **Priorities doc** — fallback to `config/direction/priorities.md` (auto-refreshed if stale)
 
+### Scheduler-level capacity floors (cross-cutting, not part of `selectAnchor`)
+
+These floors are evaluated by `src/scheduler.ts` (the tick loop), not by `selectAnchor()`. They decide whether the scheduler *enqueues a research cycle* alongside the normal build pipeline — they don't choose between build anchors.
+
+- **Research capacity floor** — `RESEARCH_BUILD_RATIO_MIN` (default 1/20, env `HYDRA_RESEARCH_BUILD_RATIO_MIN`). Symmetric to `RESEARCH_BUILD_RATIO_MAX`. When the rolling 24h research:build ratio drops below the floor AND `HYDRA_RESEARCH_MIN_INTERVAL_MS` has elapsed AND the daily cost cap (`HYDRA_DAILY_COST_CAP_USD`) is not exhausted, the scheduler forces a research cycle even if queue depth would normally suppress it. Prevents the target-direction (research-driven) lane from being indefinitely shadowed by user-request anchors (issue #327). Surfaced on `/api/scheduler/status` as `research.buildRatioMin` and `research.researchFloorTriggered` (per-tick boolean). The floor never overrides the daily cost cap.
+
 ## Key Files
 
 See `docs/reference.md` for full file inventory, Redis keys, event bus streams, and API endpoints.
