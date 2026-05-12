@@ -16,6 +16,7 @@ import { redisKeys } from "./redis-keys.ts";
 import { startCodeReviewerLoop } from "./code-reviewer.ts";
 import { cleanWorkQueue } from "./redis-adapter.ts";
 import { recordCycleSide, classifySide } from "./capacity-floor.ts";
+import { publishOrchestratorShareMetric } from "./metrics-publisher.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 
 import { createServer } from "node:net";
@@ -107,6 +108,15 @@ function startConsumers(eventBus) {
           filesChanged: files.length > 0 ? files.slice(0, 50) : undefined,
           source: "cycle-completed-listener",
         });
+
+        // Issue #315: publish the current self-improvement share to disk so
+        // the outcomes file adapter (config/direction/outcomes.yaml ->
+        // metrics/orchestrator-share.txt) has a real value to read. Without
+        // this, the only seeded Target Outcome is permanently unobservable
+        // and the stuckness detector (ADR-0003, #242) plus 25% capacity
+        // floor (#245) have no signal to fire on. Best-effort — publisher
+        // logs and never throws.
+        await publishOrchestratorShareMetric();
       }
 
       // Persist important events as dashboard alerts
