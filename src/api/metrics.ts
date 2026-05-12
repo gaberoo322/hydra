@@ -3,6 +3,7 @@ import { getMetricsTrend, getAggregateStats, recordCycleMetrics, getAbandonmentB
 import { redisKeys } from "../redis-keys.ts";
 import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../redis-adapter.ts";
 import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost-attribution.ts";
+import { getSpecStarvationStats } from "../anchor-selection/spec-starvation.ts";
 
 export function createMetricsRouter() {
   const router = Router();
@@ -170,6 +171,17 @@ export function createMetricsRouter() {
       res.json(result);
     } catch (err: any) {
       console.error(`[api/metrics] /metrics/cost-attribution failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /metrics/spec-starvation — Why active specs are/aren't being served (issue #301)
+  router.get("/metrics/spec-starvation", async (_req, res) => {
+    try {
+      const stats = await getSpecStarvationStats();
+      res.json(stats);
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/spec-starvation failed: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });

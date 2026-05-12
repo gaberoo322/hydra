@@ -23,8 +23,37 @@ import { selectPriorFailureAnchor } from "./prior-failures-tier.ts";
 import { selectRegressionHuntAnchor } from "./regression-hunt-tier.ts";
 import { selectCodebaseHealthAnchor } from "./codebase-health-tier.ts";
 import { selectPrioritiesDocAnchor } from "./priorities-doc-tier.ts";
+import {
+  recordSpecPassedReason,
+  recordSpecServed,
+  getCyclesSinceSpecServed,
+  shouldForceSpecPriority,
+  getSpecCapacityFloorN,
+} from "./spec-starvation.ts";
 
 const { isWipLimitReached, requeueStaleInProgressItems } = _admin;
+
+/**
+ * Build a "user-request" anchor from a spec task. Shared between the
+ * natural spec-tier path and the capacity-floor pre-emption path (issue
+ * #301) so both paths produce byte-identical anchors.
+ */
+function buildSpecAnchor(specNext: { spec: any; task: any }) {
+  console.log(`[ControlLoop] Picking spec task: "${specNext.task.title}" from spec "${specNext.spec.title}" (task ${specNext.task.id}/${specNext.spec.tasks.length})`);
+  return {
+    type: "user-request" as const,
+    reference: specNext.task.title,
+    whyNow: `Spec "${specNext.spec.title}" task ${specNext.task.id}/${specNext.spec.tasks.length}: ${specNext.task.title}`,
+    context: {
+      specSlug: specNext.spec.slug,
+      specTaskId: specNext.task.id,
+      specTitle: specNext.spec.title,
+      specRationale: specNext.spec.rationale,
+      _specPromptContext: formatSpecForPrompt(specNext.spec, specNext.task),
+    },
+    description: specNext.task.description || specNext.task.title,
+  };
+}
 
 /**
  * Select the next anchor based on priority:
@@ -53,22 +82,52 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
     return { ...opts.anchor, whyNow: "Explicit operator request" };
   }
 
+  // 1.2. Spec-starvation prefetch (issue #301).
+  //      Read the cycles-since-spec-served gauge BEFORE the stuckness/kanban
+  //      tiers so we can decide whether to force the spec tier ahead of
+  //      kanban. Cheap reads only — actual selection happens below.
+  let nextSpec: Awaited<ReturnType<typeof getNextSpecTask>> = null;
+  let cyclesSinceSpec = 0;
+  try {
+    [nextSpec, cyclesSinceSpec] = await Promise.all([
+      getNextSpecTask(),
+      getCyclesSinceSpecServed(),
+    ]);
+  } catch (err: any) {
+    console.error(`[AnchorSelection] spec-starvation prefetch failed: ${err.message}`);
+  }
+  const hasSpecTask = !!nextSpec;
+  const floorN = getSpecCapacityFloorN();
+  const forceSpec = shouldForceSpecPriority(cyclesSinceSpec, hasSpecTask, floorN);
+
   // 1.25. Stuckness-driven research (issue #253, ADR-0003 vision vector 1).
   //       When a Target Outcome has not moved favorably for N cycles, the next
   //       action MUST be research/self-modification — not another pull from the
   //       kanban backlog. Inserted before the kanban lane so a fired outcome
   //       short-circuits queue consumption. Per ADR-0005, no operator
   //       escalation — the autonomous response is research.
-  try {
-    const stucknessRows = await getAllStuckness();
-    const stuckPick = await pickStuckOutcome(stucknessRows);
-    if (stuckPick) {
-      return await buildStucknessAnchor(stuckPick, eventBus);
+  //
+  //       Exception (issue #301): when the spec capacity-floor has fired
+  //       (>= floorN cycles since a spec was served AND a spec task exists),
+  //       the spec tier pre-empts stuckness too — otherwise a perpetually-
+  //       stuck outcome would also starve specs. The floor is intentionally
+  //       cheap (1 cycle per N), so this only steals at most 1/N of the
+  //       stuckness budget.
+  if (!forceSpec) {
+    try {
+      const stucknessRows = await getAllStuckness();
+      const stuckPick = await pickStuckOutcome(stucknessRows);
+      if (stuckPick) {
+        if (hasSpecTask) {
+          await recordSpecPassedReason("stuckness_won");
+        }
+        return await buildStucknessAnchor(stuckPick, eventBus);
+      }
+    } catch (err: any) {
+      console.error(`[AnchorSelection] stuckness check failed: ${err.message}`);
+      // Fall through to existing priority chain — stuckness is a *preferred*
+      // signal, not load-bearing. Original behavior is the safe default.
     }
-  } catch (err: any) {
-    console.error(`[AnchorSelection] stuckness check failed: ${err.message}`);
-    // Fall through to existing priority chain — stuckness is a *preferred*
-    // signal, not load-bearing. Original behavior is the safe default.
   }
 
   // 1.5. WIP limit enforcement — requeue stale items, then check limit
@@ -92,10 +151,25 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
     console.error(`[ControlLoop] WIP limit check failed: ${err.message}`);
   }
 
-  // 2. Kanban queued lane — priority-sorted backlog items take precedence.
+  // 1.7. Spec capacity-floor pre-emption (issue #301).
+  //      If the floor has fired AND a spec task is available, serve the spec
+  //      tier BEFORE kanban. This is the only way out of the historical
+  //      starvation pattern where kanban perpetually held priority 3.
+  if (forceSpec && nextSpec) {
+    console.log(`[ControlLoop] Spec capacity-floor fired (${cyclesSinceSpec} cycles since last spec served, floor=${floorN}) — pre-empting kanban with spec task`);
+    await recordSpecServed();
+    await recordSpecPassedReason("force_floor");
+    return buildSpecAnchor(nextSpec);
+  }
+
+  // 2. Kanban queued lane — priority-sorted backlog items take precedence
+  //    when the capacity floor has not yet fired.
   if (!wipBlocked) {
     const kanban = await selectKanbanAnchor();
-    if (kanban.anchor) return kanban.anchor;
+    if (kanban.anchor) {
+      if (hasSpecTask) await recordSpecPassedReason("kanban_won");
+      return kanban.anchor;
+    }
     if (kanban.wipBlocked) wipBlocked = true;
   }
 
@@ -104,27 +178,16 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
   //      Picks the next unchecked task from the oldest active spec.
   //      NOT gated by WIP limit — specs represent committed multi-cycle plans.
   if (!wipBlocked) {
-    try {
-      const specNext = await getNextSpecTask();
-      if (specNext) {
-        console.log(`[ControlLoop] Picking spec task: "${specNext.task.title}" from spec "${specNext.spec.title}" (task ${specNext.task.id}/${specNext.spec.tasks.length})`);
-        return {
-          type: "user-request",
-          reference: specNext.task.title,
-          whyNow: `Spec "${specNext.spec.title}" task ${specNext.task.id}/${specNext.spec.tasks.length}: ${specNext.task.title}`,
-          context: {
-            specSlug: specNext.spec.slug,
-            specTaskId: specNext.task.id,
-            specTitle: specNext.spec.title,
-            specRationale: specNext.spec.rationale,
-            _specPromptContext: formatSpecForPrompt(specNext.spec, specNext.task),
-          },
-          description: specNext.task.description || specNext.task.title,
-        };
-      }
-    } catch (err: any) {
-      console.error(`[ControlLoop] Failed to check active specs: ${err.message}`);
+    if (nextSpec) {
+      await recordSpecServed();
+      return buildSpecAnchor(nextSpec);
     }
+    // hasSpecTask was false during prefetch — record the reason.
+    await recordSpecPassedReason("no_active_spec");
+  } else if (hasSpecTask) {
+    // WIP blocked AND we had a spec — record wip_full so operators see why
+    // specs aren't running even though they exist.
+    await recordSpecPassedReason("wip_full");
   }
 
   // 2.7. Failing tests — must be fixed before other work proceeds.
