@@ -216,6 +216,113 @@ async function scoreLastResearchOutcomes(): Promise<string> {
 /**
  * Parse JSON from agent output, handling markdown fences and JSON lines.
  */
+/**
+ * Normalize a director-produced opportunity to the field names the
+ * auto-queue consumer (and downstream logs) expect.
+ *
+ * The director's JSON schema (config/research/director.md) emits:
+ *   { title, description, category, impact, feasibility, alignmentScore,
+ *     reasoning, autoQueue, prerequisites }
+ *
+ * But the auto-queue logger and the work-queue payload reference
+ * `rank`, `adjustedScore`, `confidence`, `complexity`, `rationale`,
+ * `acceptanceCriteria`, and `estimatedCycles`. Before this normalizer,
+ * those fields were always undefined — producing log lines like
+ * `[Research] Auto-queued #undefined: "..." (score: undefined, confidence: undefined)`
+ * (issue #314). We now derive the missing fields from director output
+ * so telemetry surfaces real values without changing the director's
+ * schema contract.
+ *
+ * Mappings:
+ *   rank             ← 1-based index after sorting by alignmentScore desc
+ *                      (caller supplies via rank arg; falls back to opp.rank
+ *                      if the director ever begins emitting one directly)
+ *   adjustedScore    ← alignmentScore (0..1)
+ *   confidence       ← feasibility (high|medium|low) — director's
+ *                      feasibility field is the semantic closest to
+ *                      "how confident we are we can ship this"
+ *   complexity       ← inverse of feasibility (high feasibility ⇒ low
+ *                      complexity), used only when director omits it.
+ *                      complexityToEstimate map keys are
+ *                      trivial|low|medium|high|extreme.
+ *   rationale        ← reasoning (the actual field name in director output)
+ *   acceptanceCriteria ← preserved as-is if present (director may emit it
+ *                        even though the documented schema doesn't list it)
+ *   estimatedCycles  ← preserved as-is if present, otherwise undefined
+ *
+ * Any field already present on the input wins — we never overwrite a
+ * real value with a derived one. This keeps the door open for the
+ * director schema to be expanded in the future without re-breaking
+ * this normalization.
+ */
+export function normalizeOpportunity(opp: any, rank?: number): any {
+  if (!opp || typeof opp !== "object") return opp;
+
+  const feasibilityToComplexity: Record<string, string> = {
+    high: "low",
+    medium: "medium",
+    low: "high",
+  };
+
+  const feasibility = typeof opp.feasibility === "string" ? opp.feasibility.toLowerCase() : null;
+
+  const normalized: any = { ...opp };
+
+  if (normalized.rank === undefined || normalized.rank === null) {
+    if (typeof rank === "number") normalized.rank = rank;
+  }
+
+  if (normalized.adjustedScore === undefined || normalized.adjustedScore === null) {
+    if (typeof opp.alignmentScore === "number") normalized.adjustedScore = opp.alignmentScore;
+  }
+
+  if (normalized.confidence === undefined || normalized.confidence === null) {
+    if (feasibility) normalized.confidence = feasibility;
+  }
+
+  if (normalized.complexity === undefined || normalized.complexity === null) {
+    if (feasibility && feasibilityToComplexity[feasibility]) {
+      normalized.complexity = feasibilityToComplexity[feasibility];
+    }
+  }
+
+  if (normalized.rationale === undefined || normalized.rationale === null) {
+    if (typeof opp.reasoning === "string") normalized.rationale = opp.reasoning;
+  }
+
+  return normalized;
+}
+
+/**
+ * Normalize an opportunity array: sort by alignmentScore (desc), assign
+ * 1-based rank, and fill in derived consumer fields via normalizeOpportunity.
+ * Stable for already-ranked input — explicit rank values are preserved.
+ */
+export function normalizeOpportunities(opportunities: any[]): any[] {
+  if (!Array.isArray(opportunities)) return [];
+
+  // Sort by adjustedScore/alignmentScore descending (existing rank takes
+  // precedence; otherwise sort by alignmentScore so the top opportunity
+  // is #1). Use a stable sort by attaching the original index.
+  const withIndex = opportunities.map((opp, i) => ({ opp, i }));
+  withIndex.sort((a, b) => {
+    const aRank = typeof a.opp?.rank === "number" ? a.opp.rank : null;
+    const bRank = typeof b.opp?.rank === "number" ? b.opp.rank : null;
+    if (aRank !== null && bRank !== null) return aRank - bRank;
+    if (aRank !== null) return -1;
+    if (bRank !== null) return 1;
+
+    const aScore = typeof a.opp?.adjustedScore === "number" ? a.opp.adjustedScore
+                  : (typeof a.opp?.alignmentScore === "number" ? a.opp.alignmentScore : -Infinity);
+    const bScore = typeof b.opp?.adjustedScore === "number" ? b.opp.adjustedScore
+                  : (typeof b.opp?.alignmentScore === "number" ? b.opp.alignmentScore : -Infinity);
+    if (bScore !== aScore) return bScore - aScore;
+    return a.i - b.i;
+  });
+
+  return withIndex.map(({ opp }, i) => normalizeOpportunity(opp, i + 1));
+}
+
 function parseAgentJson(output) {
   // Try direct parse
   try { return JSON.parse(output); } catch { /* intentional: fallback parse — try fence/object extraction below */ }
@@ -563,6 +670,17 @@ export async function runResearchLoop(eventBus,  opts: Record<string, any> = {})
   console.log(`[Research] Director: ${(synthesisResult as any).output ? "OK" : "EMPTY"} (${(synthesisResult as any).duration}ms)`);
 
   const synthesis = parseAgentJson((synthesisResult as any).output);
+
+  // Normalize opportunities up-front so downstream consumers (work-queue
+  // payloads, "[Research] Auto-queued #N" logs, the persisted report, and
+  // the recap email) all see populated rank/adjustedScore/confidence
+  // fields. The director's documented schema emits alignmentScore/
+  // feasibility/reasoning; normalizeOpportunities maps those onto the
+  // consumer field names without changing the director's contract.
+  // (issue #314)
+  if (synthesis && Array.isArray(synthesis.opportunities)) {
+    synthesis.opportunities = normalizeOpportunities(synthesis.opportunities);
+  }
 
   // Write priorities.md from Director output
   let prioritiesRefreshed = false;
