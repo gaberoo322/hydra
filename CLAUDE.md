@@ -58,17 +58,18 @@ Determined by `selectAnchor()` in `src/anchor-selection.ts`. Priority order:
 
 1. **Explicit operator request** — passed via `opts.anchor`
 2. **Stuckness-driven research** — when `getAllStuckness()` reports a fired Target Outcome, build a `research` anchor (`outcome-stuckness:<name>`, `domain: orchestrator-self-improvement`) instead of pulling backlog. Enforces ADR-0003 vision vector 1. 5-cycle cooldown per outcome.
-3. **Kanban queued lane** — atomic claim (Lua script), gated by WIP limit
-4. **Active specs** — next unchecked task from oldest active spec
-5. **Failing tests** — from grounding report
-6. **Typecheck errors** — from grounding report
-7. **Work queue** — items from POST /queue or research auto-queue (LMOVE to processing)
-8. **Reframe queue** — tasks that failed repeatedly, need diagnosis
-9. **Prior failures** — stored in Redis, capped at 2 retries before escalation
-10. **TODO/FIXME markers** — from codebase
-11. **Regression hunt** — every 10 merges, adversarial testing of recent features
-12. **Codebase health** — reductive improvements (split, consolidate, document)
-13. **Priorities doc** — fallback to `config/direction/priorities.md` (auto-refreshed if stale)
+3. **Spec capacity-floor pre-emption** — every Nth eligible cycle (default N=3, `HYDRA_SPEC_CAPACITY_FLOOR_N`), if a spec task exists AND `cyclesSinceSpecLastServed >= N`, the spec tier pre-empts kanban *and* stuckness. Prevents the active-specs lane from being indefinitely shadowed (issue #301). Instrumented at `/api/metrics/spec-starvation`.
+4. **Kanban queued lane** — atomic claim (Lua script), gated by WIP limit
+5. **Active specs** — next unchecked task from oldest active spec (also reachable below kanban when the capacity-floor has not fired)
+6. **Failing tests** — from grounding report
+7. **Typecheck errors** — from grounding report
+8. **Work queue** — items from POST /queue or research auto-queue (LMOVE to processing)
+9. **Reframe queue** — tasks that failed repeatedly, need diagnosis
+10. **Prior failures** — stored in Redis, capped at 2 retries before escalation
+11. **TODO/FIXME markers** — from codebase
+12. **Regression hunt** — every 10 merges, adversarial testing of recent features
+13. **Codebase health** — reductive improvements (split, consolidate, document)
+14. **Priorities doc** — fallback to `config/direction/priorities.md` (auto-refreshed if stale)
 
 ## Key Files
 
