@@ -288,42 +288,106 @@ export async function runExecutorAgent(
 
   // If using worktree, push the branch and clean up the worktree
   if (useWorktree) {
-    try {
-      // Push the branch from the worktree so it's available in the main repo
-      await execFileAsync("git", ["push", "origin", branchName], {
-        cwd: executorWorkDir,
-        timeout: 30000,
-      }).catch((err) => { console.warn(`[ExecutorAgent] Push failed (may have no commits): ${err.message}`); });
-
-      // Fetch the branch into the main repo
-      await execFileAsync("git", ["fetch", "origin", branchName], {
-        cwd: PROJECT_WORKSPACE,
-        timeout: 15000,
-      }).catch((err) => { console.warn(`[ExecutorAgent] Fetch failed: ${err.message}`); });
-
-      // Checkout the executor's branch in the main workspace for verification
-      await execFileAsync("git", ["checkout", branchName], {
-        cwd: PROJECT_WORKSPACE,
-        timeout: 10000,
-      }).catch((err) => { console.warn(`[ExecutorAgent] Checkout failed: ${err.message}`); });
-    } catch (err: any) {
-      console.error(`[ExecutorAgent] Worktree branch sync failed: ${err.message}`);
-    }
-
-    // Remove the worktree
-    try {
-      await execFileAsync("git", ["worktree", "remove", "--force", worktreePath], {
-        cwd: PROJECT_WORKSPACE,
-        timeout: 15000,
-      });
-      console.log(`[ExecutorAgent] Cleaned up worktree at ${worktreePath}`);
-    } catch (err: any) {
-      console.error(`[ExecutorAgent] Worktree cleanup failed (manual cleanup needed): ${err.message}`);
-    }
+    await runWorktreeCleanup({
+      branchName,
+      worktreePath,
+      executorWorkDir,
+      projectWorkspace: PROJECT_WORKSPACE,
+      runGit: defaultRunGit,
+    });
   }
 
   const executorResult = parseExecutorOutput(result.output, result.exitCode, result.duration, result.model, useWorktree);
 
   await getTracker().logAgentRun(cycleId, "executor", task.taskId, result.duration, "completed", result.usage, result.costUsd, result.model);
   return executorResult;
+}
+
+// ---------------------------------------------------------------------------
+// Worktree cleanup orchestration (extracted for testability — see #311)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single git invocation, recorded for testability.
+ * Order matters: callers and tests assert this sequence.
+ */
+export interface GitOp {
+  args: string[];
+  cwd: string;
+}
+
+export type RunGit = (op: GitOp) => Promise<void>;
+
+export interface WorktreeCleanupInput {
+  branchName: string;
+  worktreePath: string;
+  executorWorkDir: string;
+  projectWorkspace: string;
+  runGit: RunGit;
+}
+
+/**
+ * Tear down an executor worktree and leave the main workspace checked out on
+ * the executor branch for verification.
+ *
+ * Regression (#311): the previous order was push → fetch → checkout → remove.
+ * Because the worktree still owned the branch, `git checkout <branch>` in the
+ * main workspace failed every cycle with "branch is already used by worktree",
+ * forcing the diff-recovery path in pipeline-steps.ts and producing two noisy
+ * log lines on every successful cycle. The correct order is
+ * push → fetch → remove → checkout: once the worktree releases the branch,
+ * the main workspace can check it out cleanly.
+ *
+ * Each step is independently fault-tolerant: a failure logs and continues so
+ * downstream recovery (pipeline-steps.ts) can still salvage the diff if the
+ * cleanup is partially broken.
+ */
+export async function runWorktreeCleanup(input: WorktreeCleanupInput): Promise<void> {
+  const { branchName, worktreePath, executorWorkDir, projectWorkspace, runGit } = input;
+
+  // 1. Push the branch from the worktree so it's available in the main repo.
+  try {
+    await runGit({ args: ["push", "origin", branchName], cwd: executorWorkDir });
+  } catch (err: any) {
+    console.warn(`[ExecutorAgent] Push failed (may have no commits): ${err.message}`);
+  }
+
+  // 2. Fetch the branch into the main repo.
+  try {
+    await runGit({ args: ["fetch", "origin", branchName], cwd: projectWorkspace });
+  } catch (err: any) {
+    console.warn(`[ExecutorAgent] Fetch failed: ${err.message}`);
+  }
+
+  // 3. Remove the worktree FIRST so the branch is no longer "owned" by it.
+  //    If this fails we still try the checkout — the recovery path in
+  //    pipeline-steps.ts can salvage the diff from the worktree if needed.
+  try {
+    await runGit({ args: ["worktree", "remove", "--force", worktreePath], cwd: projectWorkspace });
+    console.log(`[ExecutorAgent] Cleaned up worktree at ${worktreePath}`);
+  } catch (err: any) {
+    console.error(`[ExecutorAgent] Worktree cleanup failed (manual cleanup needed): ${err.message}`);
+  }
+
+  // 4. NOW check out the executor's branch in the main workspace for
+  //    verification. Order matters: this must come AFTER worktree remove
+  //    or git refuses with "branch is already used by worktree" (#311).
+  try {
+    await runGit({ args: ["checkout", branchName], cwd: projectWorkspace });
+  } catch (err: any) {
+    console.warn(`[ExecutorAgent] Checkout failed: ${err.message}`);
+  }
+}
+
+/**
+ * Default git runner used in production. Wraps `execFileAsync` with the
+ * timeouts that were inline before the refactor.
+ */
+async function defaultRunGit(op: GitOp): Promise<void> {
+  // Per-command timeout preserves the previous behavior:
+  // push=30s, fetch=15s, worktree remove=15s, checkout=10s.
+  const timeout = op.args[0] === "push" ? 30000
+    : op.args[0] === "checkout" ? 10000
+    : 15000;
+  await execFileAsync("git", op.args, { cwd: op.cwd, timeout });
 }

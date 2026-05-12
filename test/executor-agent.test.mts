@@ -8,8 +8,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { buildExecutorPrompt, parseExecutorOutput } from "../src/executor-agent.ts";
-import type { BuildPromptInput, ExecutorResult } from "../src/executor-agent.ts";
+import { buildExecutorPrompt, parseExecutorOutput, runWorktreeCleanup } from "../src/executor-agent.ts";
+import type { BuildPromptInput, ExecutorResult, GitOp } from "../src/executor-agent.ts";
 
 // ---------------------------------------------------------------------------
 // buildExecutorPrompt tests
@@ -207,5 +207,120 @@ describe("parseExecutorOutput", () => {
     assert.equal(result.exitCode, 137);
     assert.equal(result.duration, 99999);
     assert.equal(result.__executorModel, "gpt-5.4");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runWorktreeCleanup tests (regression: issue #311)
+//
+// The previous order was push → fetch → checkout → worktree-remove, which
+// failed every cycle because git refused to check out a branch still owned by
+// the worktree ("fatal: '<branch>' is already used by worktree at ..."). The
+// fix swaps the last two steps so the worktree releases the branch first.
+// ---------------------------------------------------------------------------
+
+describe("runWorktreeCleanup (issue #311)", () => {
+  function makeInput(overrides: Partial<Parameters<typeof runWorktreeCleanup>[0]> = {}) {
+    const ops: GitOp[] = [];
+    const runGit = async (op: GitOp) => {
+      ops.push(op);
+    };
+    return {
+      ops,
+      input: {
+        branchName: "feature/cycle-2026-05-11-1200-fix",
+        worktreePath: "/dev/shm/hydra-worktrees/cycle-2026-05-11-1200-fix",
+        executorWorkDir: "/dev/shm/hydra-worktrees/cycle-2026-05-11-1200-fix",
+        projectWorkspace: "/home/gabe/hydra-betting",
+        runGit,
+        ...overrides,
+      },
+    };
+  }
+
+  test("worktree remove runs BEFORE checkout (the #311 bug fix)", async () => {
+    const { ops, input } = makeInput();
+    await runWorktreeCleanup(input);
+
+    const removeIdx = ops.findIndex((o) => o.args[0] === "worktree" && o.args[1] === "remove");
+    const checkoutIdx = ops.findIndex((o) => o.args[0] === "checkout");
+
+    assert.ok(removeIdx >= 0, "worktree remove must be invoked");
+    assert.ok(checkoutIdx >= 0, "checkout must be invoked");
+    assert.ok(
+      removeIdx < checkoutIdx,
+      `worktree remove (index ${removeIdx}) must precede checkout (index ${checkoutIdx}) — otherwise git refuses with "branch is already used by worktree"`,
+    );
+  });
+
+  test("full order is push → fetch → worktree remove → checkout", async () => {
+    const { ops, input } = makeInput();
+    await runWorktreeCleanup(input);
+
+    assert.equal(ops.length, 4, "expected exactly 4 git operations");
+    assert.equal(ops[0].args[0], "push");
+    assert.equal(ops[1].args[0], "fetch");
+    assert.equal(ops[2].args[0], "worktree");
+    assert.equal(ops[2].args[1], "remove");
+    assert.equal(ops[3].args[0], "checkout");
+  });
+
+  test("push runs in the worktree, fetch/remove/checkout run in the main workspace", async () => {
+    const { ops, input } = makeInput();
+    await runWorktreeCleanup(input);
+
+    assert.equal(ops[0].cwd, input.executorWorkDir, "push runs in worktree");
+    assert.equal(ops[1].cwd, input.projectWorkspace, "fetch runs in main workspace");
+    assert.equal(ops[2].cwd, input.projectWorkspace, "worktree remove runs in main workspace");
+    assert.equal(ops[3].cwd, input.projectWorkspace, "checkout runs in main workspace");
+  });
+
+  test("worktree remove uses --force on the configured worktreePath", async () => {
+    const { ops, input } = makeInput();
+    await runWorktreeCleanup(input);
+
+    const remove = ops.find((o) => o.args[0] === "worktree" && o.args[1] === "remove");
+    assert.ok(remove, "worktree remove op must be present");
+    assert.deepEqual(remove!.args, ["worktree", "remove", "--force", input.worktreePath]);
+  });
+
+  test("checkout targets the executor branch name", async () => {
+    const { ops, input } = makeInput();
+    await runWorktreeCleanup(input);
+
+    const checkout = ops.find((o) => o.args[0] === "checkout");
+    assert.deepEqual(checkout!.args, ["checkout", input.branchName]);
+  });
+
+  test("push failure does not abort the cleanup — subsequent ops still run", async () => {
+    const ops: GitOp[] = [];
+    const runGit = async (op: GitOp) => {
+      ops.push(op);
+      if (op.args[0] === "push") throw new Error("nothing to push");
+    };
+    const { input } = makeInput({ runGit });
+
+    await runWorktreeCleanup(input);
+
+    // All four steps were attempted despite the push failure.
+    assert.equal(ops.length, 4);
+    assert.equal(ops[2].args[0], "worktree"); // remove still ran
+    assert.equal(ops[3].args[0], "checkout"); // checkout still ran
+  });
+
+  test("worktree remove failure still lets checkout run (fallback to recovery path)", async () => {
+    const ops: GitOp[] = [];
+    const runGit = async (op: GitOp) => {
+      ops.push(op);
+      if (op.args[0] === "worktree") throw new Error("worktree busy");
+    };
+    const { input } = makeInput({ runGit });
+
+    await runWorktreeCleanup(input);
+
+    // Checkout still attempted — pipeline-steps.ts recovery handles the
+    // resulting state.
+    assert.equal(ops.length, 4);
+    assert.equal(ops[3].args[0], "checkout");
   });
 });
