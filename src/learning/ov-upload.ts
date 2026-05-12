@@ -120,8 +120,15 @@ export async function indexText(title: string, content: string): Promise<void> {
     });
 
     if (uploadRes.ok) {
+      // OpenViking wraps responses as {status, result, error, telemetry}.
+      // The temp_upload endpoint returns the path under `result.temp_path` —
+      // older code read `uploadData.temp_path` directly and silently no-op'd
+      // on every call (issue #313 in src/redis/work-queue.ts; same bug here
+      // per #318). Read both wrapped and legacy unwrapped shapes for safety.
       const uploadData = (await uploadRes.json()) as any;
-      const tempPath = uploadData.temp_path || uploadData.path;
+      const result = uploadData?.result ?? {};
+      const tempPath =
+        result.temp_path ?? result.path ?? uploadData.temp_path ?? uploadData.path;
 
       if (tempPath) {
         const addRes = await fetch(`${OV_URL}/api/v1/resources`, {
@@ -139,17 +146,27 @@ export async function indexText(title: string, content: string): Promise<void> {
         if (addRes.ok) {
           console.log(`[Learning:Indexer] Indexed text: ${title}`);
         } else {
+          const body = await addRes.text().catch(() => "");
           console.error(
-            `[Learning:Indexer] Failed to add text "${title}": ${(await addRes.text()).slice(
+            `[Learning:Indexer] Failed to add text "${title}": ${addRes.status} body=${body.slice(
               0,
               200
             )}`
           );
         }
+      } else {
+        // Fail loud (CLAUDE.md convention): log the full response body so a
+        // future API shape change is debuggable from logs alone.
+        console.error(
+          `[Learning:Indexer] indexText "${title}": no temp_path in upload response — body=${JSON.stringify(
+            uploadData
+          ).slice(0, 300)}`
+        );
       }
     } else {
+      const body = await uploadRes.text().catch(() => "");
       console.error(
-        `[Learning:Indexer] Failed to upload text "${title}": ${(await uploadRes.text()).slice(
+        `[Learning:Indexer] Failed to upload text "${title}": ${uploadRes.status} body=${body.slice(
           0,
           200
         )}`
