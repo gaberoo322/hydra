@@ -21,6 +21,9 @@ let redis: any;
 let planCache: typeof import("../src/plan-cache.ts");
 
 async function cleanTestKeys() {
+  // Covers both plan entries (hydra:plans:cache:<hash>) and persisted stats
+  // (hydra:plans:cache:stats:*, issue #325). Both share the prefix, so a
+  // single KEYS scan + DEL is sufficient to reset state between tests.
   const planKeys = await redis.keys("hydra:plans:cache:*");
   if (planKeys.length > 0) await redis.del(...planKeys);
 }
@@ -248,5 +251,122 @@ describe("plan cache key normalization (issue #192)", () => {
       after.hits > before.hits,
       `hits counter should increment (before=${before.hits} after=${after.hits})`,
     );
+  });
+
+  // -----------------------------------------------------------------------
+  // Persisted counters (issue #325) — must survive a simulated restart so
+  // operators can measure multi-day hit rate after deploys.
+  // -----------------------------------------------------------------------
+
+  describe("persisted stats counters (issue #325)", () => {
+    test("hitRate returns 0 (not NaN) when hits+misses === 0", () => {
+      // Pure function — no Redis required.
+      assert.equal(planCache.computeHitRate(0, 0), 0);
+      assert.equal(planCache.computeHitRate(0, 5), 0);
+      assert.equal(planCache.computeHitRate(1, 1), 0.5);
+      // hits=2 misses=1 -> 0.667 (3-dp)
+      assert.equal(planCache.computeHitRate(2, 1), 0.667);
+    });
+
+    test("getPlanCacheStatsFull shape includes lifetime, last24h, thisProcess each with hitRate", async () => {
+      const stats = await planCache.getPlanCacheStatsFull();
+      for (const view of ["lifetime", "last24h", "thisProcess"] as const) {
+        assert.ok(stats[view], `${view} view present`);
+        for (const m of ["hits", "misses", "stored", "invalidated", "stale"] as const) {
+          assert.equal(typeof stats[view][m], "number", `${view}.${m} is number`);
+        }
+        assert.equal(typeof stats[view].hitRate, "number", `${view}.hitRate is number`);
+        assert.ok(!Number.isNaN(stats[view].hitRate), `${view}.hitRate not NaN`);
+      }
+    });
+
+    test("a HIT persists to Redis and survives a simulated module reload", async () => {
+      const grounding = { testReport: { passed: 100 } };
+      const task = {
+        title: "Persist test",
+        scopeBoundary: { in: ["src/persist.ts"] },
+        acceptanceCriteria: ["counter survives restart"],
+      };
+
+      const anchor = {
+        type: "user-request" as const,
+        reference: "Persist-stats regression check src/persist.ts",
+      };
+
+      // Baseline: lifetime hits at start of this test.
+      const beforeFull = await planCache.getPlanCacheStatsFull();
+      const beforeHits = beforeFull.lifetime.hits;
+
+      await planCache.cachePlan(anchor, task, grounding);
+      const hit = await planCache.getCachedPlan(anchor, grounding);
+      assert.ok(hit, "must hit (precondition for the persistence assertion)");
+
+      // The persisted INCR is fire-and-forget; flush by reading and retrying
+      // until lifetime increments or we time out (~1s).
+      let afterHits = beforeHits;
+      const deadline = Date.now() + 1000;
+      while (Date.now() < deadline) {
+        const v = await planCache.getPlanCacheStatsFull();
+        if (v.lifetime.hits > beforeHits) {
+          afterHits = v.lifetime.hits;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.ok(
+        afterHits >= beforeHits + 1,
+        `lifetime hits must increment in Redis (before=${beforeHits} after=${afterHits})`,
+      );
+
+      // Simulate a "process restart": invalidate the module cache and re-import.
+      // Lifetime counter (in Redis) must still report the hit; thisProcess
+      // counter (in-memory) is allowed to reset.
+      const mod = await import("../src/plan-cache.ts");
+      const reread = await mod.getPlanCacheStatsFull();
+      assert.ok(
+        reread.lifetime.hits >= beforeHits + 1,
+        `after re-import, lifetime hits should still reflect the prior hit ` +
+          `(before=${beforeHits} reread=${reread.lifetime.hits})`,
+      );
+    });
+
+    test("invalidatePlanCache does NOT delete persisted stats keys", async () => {
+      const grounding = { testReport: { passed: 100 } };
+      const task = {
+        title: "Stats survive flush",
+        scopeBoundary: { in: ["src/x.ts"] },
+        acceptanceCriteria: ["stats preserved"],
+      };
+      const anchor = {
+        type: "user-request" as const,
+        reference: "Stats survive bulk invalidate flush",
+      };
+
+      await planCache.cachePlan(anchor, task, grounding);
+      await planCache.getCachedPlan(anchor, grounding); // record a hit
+
+      // Wait for at least one stats key to exist.
+      const deadline = Date.now() + 1000;
+      let lifetimeBefore = 0;
+      while (Date.now() < deadline) {
+        const v = await planCache.getPlanCacheStatsFull();
+        if (v.lifetime.hits > 0 || v.lifetime.stored > 0) {
+          lifetimeBefore = v.lifetime.hits;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      await planCache.invalidatePlanCache();
+
+      const after = await planCache.getPlanCacheStatsFull();
+      // Counters MUST NOT be wiped by a bulk invalidate (they live in Redis
+      // alongside cache entries but under a separate `stats:*` sub-prefix).
+      assert.ok(
+        after.lifetime.hits >= lifetimeBefore,
+        `lifetime hits preserved across invalidatePlanCache ` +
+          `(before=${lifetimeBefore} after=${after.lifetime.hits})`,
+      );
+    });
   });
 });
