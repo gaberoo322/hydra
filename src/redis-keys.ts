@@ -123,6 +123,12 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   planCachePrefix: () => "hydra:plans:cache:",
   planCache: (hash: string) => `hydra:plans:cache:${hash}`,
+  // Persisted stats — survive restarts so multi-day hit-rate can be measured
+  // (issue #325). Lifetime counters use a single key per metric; per-day
+  // counters use ISO-date suffix (UTC) with 7-day TTL for a rolling 24h view.
+  planCacheStatLifetime: (metric: string) => `hydra:plans:cache:stats:${metric}`,
+  planCacheStatDay: (metric: string, isoDate: string) =>
+    `hydra:plans:cache:stats:${metric}:${isoDate}`,
 
   // ---------------------------------------------------------------------------
   // Adversarial Validation

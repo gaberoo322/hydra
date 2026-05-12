@@ -18,6 +18,12 @@ import {
   findPlanCacheKeys,
   deleteKeys,
 } from "./redis-adapter.ts";
+import {
+  incrPlanCacheStat,
+  getPlanCacheStatsLifetime,
+  getPlanCacheStatsLast24h,
+  type PlanCacheStatMetric,
+} from "./redis/plan-cache.ts";
 import { getTargetWorkspace } from "./target-config.ts";
 
 const execFileAsync = promisify(execFile);
@@ -42,13 +48,84 @@ type CacheEntry = {
 };
 
 // -------------------------------------------------------------------------
-// Stats (in-memory, reset on restart — lightweight)
+// Stats
+//
+// Two views (issue #325):
+//   1. `thisProcess` — in-memory counters, reset on restart. Cheap, sync, and
+//      useful for "what has *this* process done since boot".
+//   2. `lifetime` + `last24h` — persisted to Redis via incrPlanCacheStat so
+//      operators can measure whether the #192 normalization fix is producing
+//      hits over a multi-day window across restarts/deploys.
+//
+// Each cache event bumps both views. Redis failures are logged but never
+// propagate — instrumentation must not break the cache hot path.
 // -------------------------------------------------------------------------
 
 const stats = { hits: 0, misses: 0, stored: 0, invalidated: 0, stale: 0 };
 
+/**
+ * Synchronous this-process counters. Kept for backward compatibility with
+ * existing call sites that need a cheap snapshot without a Redis round-trip.
+ *
+ * For lifetime / 24h views (the operator-visible numbers), use
+ * `getPlanCacheStatsFull()`.
+ */
 export function getPlanCacheStats() {
   return { ...stats };
+}
+
+/**
+ * Bump both in-memory and persisted counters for a metric. Persisted increment
+ * is fire-and-forget — we don't block the cache path on Redis.
+ */
+function bumpStat(metric: PlanCacheStatMetric, delta: number = 1): void {
+  if (delta <= 0) return;
+  stats[metric] += delta;
+  // Fire-and-forget; incrPlanCacheStat swallows its own errors.
+  void incrPlanCacheStat(metric, delta);
+}
+
+/** Compute hitRate as hits/(hits+misses), 0 when denominator is 0, 1-dp. */
+export function computeHitRate(hits: number, misses: number): number {
+  const total = hits + misses;
+  if (total <= 0) return 0;
+  return Math.round((hits / total) * 1000) / 1000;
+}
+
+export type PlanCacheStatsView = Record<PlanCacheStatMetric, number> & {
+  hitRate: number;
+};
+
+export type PlanCacheStatsFull = {
+  lifetime: PlanCacheStatsView;
+  last24h: PlanCacheStatsView;
+  thisProcess: PlanCacheStatsView;
+};
+
+function withHitRate(s: Record<PlanCacheStatMetric, number>): PlanCacheStatsView {
+  return { ...s, hitRate: computeHitRate(s.hits, s.misses) };
+}
+
+/**
+ * Operator-visible plan-cache stats — surfaced on /api/plan-cache/stats.
+ *
+ * Returns three views:
+ *   - `lifetime`   : Redis-persisted counters across restarts (issue #325)
+ *   - `last24h`    : sum of today + yesterday UTC per-day keys
+ *   - `thisProcess`: in-memory counters since this Node process booted
+ *
+ * Each view includes a `hitRate` derived from its own hits/misses.
+ */
+export async function getPlanCacheStatsFull(): Promise<PlanCacheStatsFull> {
+  const [lifetime, last24h] = await Promise.all([
+    getPlanCacheStatsLifetime(),
+    getPlanCacheStatsLast24h(),
+  ]);
+  return {
+    lifetime: withHitRate(lifetime),
+    last24h: withHitRate(last24h),
+    thisProcess: withHitRate(stats),
+  };
 }
 
 // -------------------------------------------------------------------------
@@ -174,7 +251,7 @@ export async function getCachedPlan(
   try {
     const raw = await getPlanCacheEntry(key);
     if (!raw) {
-      stats.misses++;
+      bumpStat("misses");
       return null;
     }
 
@@ -184,8 +261,8 @@ export async function getCachedPlan(
     const staleReason = isStale(entry, grounding);
     if (staleReason) {
       console.log(`[PlanCache] STALE: ${staleReason} — key ${key.slice(-12)}`);
-      stats.stale++;
-      stats.misses++;
+      bumpStat("stale");
+      bumpStat("misses");
       await deletePlanCacheEntry(key);
       return null;
     }
@@ -194,18 +271,18 @@ export async function getCachedPlan(
     const filesOk = await areScopeFilesUnmodified(entry.scopeFiles, entry.cachedAt);
     if (!filesOk) {
       console.log(`[PlanCache] STALE: scope files modified since cache — key ${key.slice(-12)}`);
-      stats.stale++;
-      stats.misses++;
+      bumpStat("stale");
+      bumpStat("misses");
       await deletePlanCacheEntry(key);
       return null;
     }
 
-    stats.hits++;
+    bumpStat("hits");
     console.log(`[PlanCache] HIT: "${entry.task.title?.slice(0, 60)}" (cached ${entry.cachedAt.slice(0, 16)})`);
     return entry.task;
   } catch (err: any) {
     console.error(`[PlanCache] GET failed: ${err.message}`);
-    stats.misses++;
+    bumpStat("misses");
     return null;
   }
 }
@@ -232,7 +309,7 @@ export async function cachePlan(
 
   try {
     await setPlanCacheEntry(key, JSON.stringify(entry), ttl);
-    stats.stored++;
+    bumpStat("stored");
     console.log(`[PlanCache] STORED: "${task.title?.slice(0, 60)}" (TTL ${ttl / 3600}h)`);
   } catch (err: any) {
     console.error(`[PlanCache] SET failed: ${err.message}`);
@@ -252,7 +329,7 @@ export async function invalidatePlanCacheForAnchor(
     const existed = await getPlanCacheEntry(key);
     if (existed) {
       await deletePlanCacheEntry(key);
-      stats.invalidated++;
+      bumpStat("invalidated");
       console.log(`[PlanCache] INVALIDATED for anchor: "${anchor.reference.slice(0, 60)}" (type=${anchor.type})`);
       return true;
     }
@@ -265,10 +342,15 @@ export async function invalidatePlanCacheForAnchor(
 
 export async function invalidatePlanCache(): Promise<number> {
   try {
-    const keys = await findPlanCacheKeys(CACHE_PREFIX);
+    const allKeys = await findPlanCacheKeys(CACHE_PREFIX);
+    // Exclude persisted stats keys (hydra:plans:cache:stats:*) — issue #325.
+    // Otherwise bulk invalidation would wipe the lifetime counters that exist
+    // to outlive cache flushes/restarts.
+    const STATS_PREFIX = `${CACHE_PREFIX}stats:`;
+    const keys = allKeys.filter((k) => !k.startsWith(STATS_PREFIX));
     if (keys.length > 0) {
       await deleteKeys(keys);
-      stats.invalidated += keys.length;
+      bumpStat("invalidated", keys.length);
       console.log(`[PlanCache] INVALIDATED: ${keys.length} cached plans`);
     }
     return keys.length;
