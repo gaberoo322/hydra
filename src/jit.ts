@@ -37,6 +37,31 @@ const JIT_TEST_TIMEOUT_MS = 60_000;
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-discard-reason counters (issue #299).
+ *
+ * When a generated JIT test cannot be kept, we classify why so dashboards and
+ * prompt-tuning can attribute the failure mode instead of just seeing "all
+ * discarded". Categories are mutually exclusive — each discarded test
+ * increments exactly one counter.
+ *
+ *   - import_error    : test referenced a module that could not be resolved
+ *                       (Cannot find module / ERR_MODULE_NOT_FOUND / etc).
+ *                       Primary failure mode per #299 telemetry and the only
+ *                       category that triggers the one-shot retry path.
+ *   - compile_error   : SyntaxError or TypeScript strip-types failure.
+ *   - runtime_error   : non-assertion, non-import failure (TypeError,
+ *                       timeout, non-zero exit without a recognisable message).
+ *   - generation_empty: the test file could not be written to disk
+ *                       (writeFile threw). Rare but observable.
+ */
+export type JitDiscardReasons = {
+  import_error: number;
+  compile_error: number;
+  runtime_error: number;
+  generation_empty: number;
+};
+
 export type JitTestResult = {
   generated: number;
   kept: number;
@@ -47,8 +72,19 @@ export type JitTestResult = {
   durationMs: number;
   error: string | null;
   /**
+   * Per-discard-reason counters (issue #299). Always present even when
+   * discarded === 0 (all-zero object) so callers don't need null checks.
+   */
+  discardReasons: JitDiscardReasons;
+  /**
+   * Whether the one-shot retry path was attempted (issue #299). True when an
+   * initial generation produced at least one import_error and a re-prompt
+   * was issued with the failure context injected.
+   */
+  retried: boolean;
+  /**
    * Operator-facing summary of what JIT decided this cycle.
-   * Examples (issue #235):
+   * Examples (issue #235; #299 adds the discard-reason suffix):
    *   - "skipped: kill-rate >= 80%"
    *   - "skipped: quick-fix"
    *   - "skipped: no diff"
@@ -56,13 +92,101 @@ export type JitTestResult = {
    *   - "skipped: no surviving mutants"
    *   - "ran: 3 tests added"
    *   - "ran: 0 tests, no testable behavior"
-   *   - "ran: 0 tests, all discarded"
+   *   - "ran: 0 tests, all 2 discarded (import_error)"
    *   - "ran: bug detected — merge blocked"
    *   - "error: <message>"
    * Always present so dashboards can render it without null checks.
    */
   decision: string;
 };
+
+/**
+ * Build a zeroed JitDiscardReasons object (issue #299). Exported so call
+ * sites that synthesise JitTestResult instances (skips, errors, fixtures)
+ * don't need to remember the field list.
+ */
+export function emptyDiscardReasons(): JitDiscardReasons {
+  return {
+    import_error: 0,
+    compile_error: 0,
+    runtime_error: 0,
+    generation_empty: 0,
+  };
+}
+
+/**
+ * Classify a failing JIT test run from its captured output (issue #299).
+ *
+ * Order matters: import-resolution failures are checked before generic
+ * SyntaxError because ERR_MODULE_NOT_FOUND surfaces as SyntaxError-shaped
+ * traces on some Node versions but is conceptually a missing-module failure.
+ *
+ * Assertion-failure cases are handled by the caller before classification
+ * runs (caughtBug path) — this function only runs on the discard path.
+ *
+ * Pure function — exported for unit testing.
+ */
+export function classifyJitDiscard(
+  output: string,
+  exitCode: number,
+  timedOut: boolean,
+): keyof JitDiscardReasons {
+  const text = output || "";
+  // Import resolution failures — primary failure mode per #299 telemetry.
+  if (
+    text.includes("Cannot find module") ||
+    text.includes("ERR_MODULE_NOT_FOUND") ||
+    text.includes("Cannot find package") ||
+    text.includes("ERR_UNSUPPORTED_DIR_IMPORT")
+  ) {
+    return "import_error";
+  }
+  // TS strip-types / parse failures.
+  if (
+    text.includes("SyntaxError") ||
+    text.includes("Unexpected token") ||
+    text.includes("TransformError") ||
+    text.includes("ERR_INVALID_TYPESCRIPT_SYNTAX")
+  ) {
+    return "compile_error";
+  }
+  // Anything else that exited non-zero (or timed out) is a runtime issue.
+  if (timedOut || exitCode !== 0) {
+    return "runtime_error";
+  }
+  // Defensive default — shouldn't reach here in the discard path.
+  return "runtime_error";
+}
+
+/**
+ * Return the top discard reason for a decision-string suffix (issue #299).
+ *
+ * Used to annotate `decision` like `"ran: 0 tests, all 2 discarded
+ * (import_error)"`. Returns `null` when counters are all zero.
+ *
+ * Tie-break: order in the reasons array (import_error first) — matches
+ * operator intuition that import errors are the loudest actionable signal.
+ *
+ * Pure function — exported for unit testing.
+ */
+export function topDiscardReason(reasons: JitDiscardReasons): keyof JitDiscardReasons | null {
+  const order: Array<keyof JitDiscardReasons> = [
+    "import_error",
+    "compile_error",
+    "runtime_error",
+    "generation_empty",
+  ];
+  let best: keyof JitDiscardReasons | null = null;
+  let bestCount = 0;
+  for (const k of order) {
+    const c = reasons[k] || 0;
+    if (c > bestCount) {
+      best = k;
+      bestCount = c;
+    }
+  }
+  return best;
+}
 
 /**
  * Synthetic JIT skip decisions (issue #235) — used at call sites that gate
@@ -90,6 +214,8 @@ export function jitSkipReport(decision: string): JitTestResult {
     testFiles: [],
     durationMs: 0,
     error: null,
+    discardReasons: emptyDiscardReasons(),
+    retried: false,
     decision,
   };
 }
@@ -153,6 +279,55 @@ export function buildJitPrompt(diff: string, changedFiles: string[], taskTitle: 
     `- Only test pure functions or exported behavior — do NOT mock Redis, file system, or network`,
     `- If the diff only changes config/types/imports with no testable behavior, return { "tests": [] }`,
     `- Do NOT generate tests for code you cannot import (private functions, side effects)`,
+  ].join("\n");
+}
+
+/**
+ * Build the retry prompt for the JIT model when the first generation failed
+ * with import_error discards (issue #299).
+ *
+ * Injects the captured failure output so the model can correct relative
+ * import paths or missing-module references. Limits the failure context to
+ * keep the prompt compact.
+ *
+ * Pure function — exported for unit testing.
+ */
+export function buildJitRetryPrompt(
+  diff: string,
+  changedFiles: string[],
+  taskTitle: string,
+  failures: Array<{ filename: string; output: string }>,
+): string {
+  const base = buildJitPrompt(diff, changedFiles, taskTitle);
+  const failureLines: string[] = [];
+  for (const f of failures.slice(0, 3)) {
+    // Trim each failure transcript to the most informative lines so the prompt
+    // stays cheap. Real ERR_MODULE_NOT_FOUND traces include the resolved
+    // request path which is exactly what the model needs to correct.
+    const trimmed = (f.output || "").split("\n")
+      .filter((l) => l.includes("Error") || l.includes("Cannot") || l.includes("ERR_") || l.includes("from"))
+      .slice(0, 8)
+      .join("\n");
+    failureLines.push(`### ${f.filename}`);
+    failureLines.push("```");
+    failureLines.push(trimmed || (f.output || "").slice(0, 400));
+    failureLines.push("```");
+  }
+  return [
+    base,
+    ``,
+    `## RETRY CONTEXT (issue #299)`,
+    `Your previous generation was discarded — every test failed to import the`,
+    `module under test. The captured failures are below. Common fixes:`,
+    `- Use the correct relative path from \`test/\` to \`src/\` (typically \`../src/<file>.ts\`)`,
+    `- Include the \`.ts\` extension on local imports (ESM, no extension resolution)`,
+    `- Do NOT import private/un-exported symbols — only what the changed file actually exports`,
+    `- Do NOT invent module names; only import paths visible in the diff or file list above`,
+    ``,
+    `### First-attempt failures:`,
+    ...failureLines,
+    ``,
+    `Generate fresh tests in the same JSON shape. Fix the imports.`,
   ].join("\n");
 }
 
@@ -237,9 +412,13 @@ export async function runJitTests(
     testFiles: [],
     durationMs: 0,
     error: null,
+    discardReasons: emptyDiscardReasons(),
+    retried: false,
     // Default — overwritten before return at every terminal path below (issue #235)
     decision: "ran: 0 tests, no testable behavior",
   };
+  // Track import_error failures for the one-shot retry path (issue #299).
+  const importErrorContexts: Array<{ filename: string; output: string }> = [];
 
   try {
     // Build the prompt
@@ -352,16 +531,115 @@ export async function runJitTests(
             result.testFiles.push(testPath);
             // Don't commit a failing test — keep it for the report but don't merge
           } else {
-            // Bad generation — discard
+            // Bad generation — discard. Classify why (issue #299) so dashboards
+            // and prompt-tuning can attribute the failure mode instead of just
+            // seeing "all discarded".
             result.discarded++;
+            const reason = classifyJitDiscard(output, jitRun.exitCode, jitRun.timedOut);
+            result.discardReasons[reason]++;
+            if (reason === "import_error") {
+              importErrorContexts.push({ filename: testDef.filename, output });
+            }
             try {
               await unlink(testPath);
             } catch { /* intentional: file may not exist */ }
           }
         }
       } catch (writeErr: any) {
+        // Issue #299: classify the write failure as generation_empty so the
+        // discard-reason counters stay total.
         console.error(`[JiT] Failed to write test ${testDef.filename}: ${writeErr.message}`);
         result.discarded++;
+        result.discardReasons.generation_empty++;
+      }
+    }
+
+    // One-shot retry path (issue #299): when the first generation produced
+    // at least one import_error AND nothing was kept AND no bug was caught,
+    // re-prompt the model once with the failure context injected. Import
+    // errors are the dominant JIT failure mode per #299 telemetry — usually
+    // the model used a wrong relative path or omitted the .ts extension.
+    if (
+      !result.retried &&
+      !result.caughtBug &&
+      result.kept === 0 &&
+      importErrorContexts.length > 0
+    ) {
+      result.retried = true;
+      console.log(`[JiT] One-shot retry: ${importErrorContexts.length} import_error discard(s), re-prompting with failure context`);
+      try {
+        const retryPrompt = buildJitRetryPrompt(diff, changedFiles, taskTitle, importErrorContexts);
+        const retryPersonality = await findPersonality("executor");
+        const retryAgent = await runAgent({
+          agentName: "jit-tester",
+          personality: retryPersonality,
+          prompt: retryPrompt,
+          model: "local",
+          taskId: `${taskId}-jit-retry`,
+          correlationId: cycleId,
+          workDir: projectDir,
+        });
+
+        if (retryAgent.exitCode === 0 || retryAgent.output) {
+          const { tests: retryTests, error: retryParseErr } = parseJitResult(retryAgent.output);
+          if (retryParseErr) {
+            console.error(`[JiT] Retry parse error: ${retryParseErr}`);
+          } else if (retryTests.length > 0) {
+            // Retry generation is treated as additional generated tests.
+            // Each is fed through the same per-test pipeline; classification
+            // accumulates into the same discardReasons counters.
+            result.generated += retryTests.length;
+            for (const testDef of retryTests) {
+              const testPath = join(testDir, basename(testDef.filename));
+              try {
+                await writeFile(testPath, testDef.code, "utf-8");
+                const jitRun = await execWithGroupCleanup(
+                  "node",
+                  ["--experimental-strip-types", "--test", testPath],
+                  { cwd: projectDir, timeout: JIT_TEST_TIMEOUT_MS, env: process.env },
+                );
+                if (jitRun.exitCode === 0 && !jitRun.timedOut) {
+                  result.kept++;
+                  result.testFiles.push(testPath);
+                  try {
+                    await execFileAsync("git", ["add", testPath], { cwd: projectDir, timeout: 5000 });
+                    await execFileAsync("git", ["commit", "-m", `test: add JiT regression test (retry) — ${testDef.description || basename(testDef.filename)}`], {
+                      cwd: projectDir,
+                      timeout: 10000,
+                    });
+                  } catch (commitErr: any) {
+                    console.error(`[JiT] Failed to commit retry test ${testDef.filename}: ${commitErr.message}`);
+                  }
+                } else {
+                  const out = (jitRun.stderr || "") + (jitRun.stdout || "");
+                  const isAssertionFailure = out.includes("AssertionError") ||
+                    out.includes("Expected") ||
+                    out.includes("assert");
+                  const isImportError = out.includes("Cannot find module") ||
+                    out.includes("ERR_MODULE_NOT_FOUND");
+                  if (isAssertionFailure && !isImportError) {
+                    result.caughtBug = true;
+                    result.bugDetails = `Test "${testDef.description}" failed with assertion error: ${out.slice(0, 500)}`;
+                    result.kept++;
+                    result.testFiles.push(testPath);
+                  } else {
+                    result.discarded++;
+                    result.discardReasons[classifyJitDiscard(out, jitRun.exitCode, jitRun.timedOut)]++;
+                    try { await unlink(testPath); } catch { /* intentional: best-effort cleanup */ }
+                  }
+                }
+              } catch (writeErr: any) {
+                console.error(`[JiT] Failed to write retry test ${testDef.filename}: ${writeErr.message}`);
+                result.discarded++;
+                result.discardReasons.generation_empty++;
+              }
+            }
+          }
+        } else {
+          console.error(`[JiT] Retry model call failed (exit ${retryAgent.exitCode})`);
+        }
+      } catch (retryErr: any) {
+        console.error(`[JiT] Retry path errored (non-fatal): ${retryErr.message}`);
       }
     }
 
@@ -382,13 +660,17 @@ export async function runJitTests(
       }
     }
 
-    // Decision string — observable summary of what JIT did this cycle (issue #235)
+    // Decision string — observable summary of what JIT did this cycle
+    // (issue #235; #299 adds the discard-reason suffix and a retry tag).
     if (result.caughtBug) {
       result.decision = "ran: bug detected — merge blocked";
     } else if (result.kept > 0) {
-      result.decision = `ran: ${result.kept} test${result.kept === 1 ? "" : "s"} added`;
+      const retryTag = result.retried ? " (after retry)" : "";
+      result.decision = `ran: ${result.kept} test${result.kept === 1 ? "" : "s"} added${retryTag}`;
     } else if (result.generated > 0 && result.discarded === result.generated) {
-      result.decision = `ran: 0 tests, all ${result.generated} discarded`;
+      const top = topDiscardReason(result.discardReasons);
+      const suffix = top ? ` (${top})` : "";
+      result.decision = `ran: 0 tests, all ${result.generated} discarded${suffix}`;
     } else if (result.generated === 0) {
       result.decision = "ran: 0 tests, no testable behavior";
     }
@@ -424,7 +706,20 @@ export function summarizeJitTests(result: JitTestResult): string {
   }
 
   if (result.discarded > 0) {
-    parts.push(`Discarded: ${result.discarded} tests (bad generation or import errors)`);
+    // Issue #299: surface per-reason breakdown so operators can attribute
+    // the failure mode instead of seeing a generic message.
+    const r = result.discardReasons;
+    const breakdown = [
+      r.import_error > 0 ? `${r.import_error} import_error` : null,
+      r.compile_error > 0 ? `${r.compile_error} compile_error` : null,
+      r.runtime_error > 0 ? `${r.runtime_error} runtime_error` : null,
+      r.generation_empty > 0 ? `${r.generation_empty} generation_empty` : null,
+    ].filter((x): x is string => x !== null).join(", ");
+    const detail = breakdown ? ` (${breakdown})` : " (bad generation or import errors)";
+    parts.push(`Discarded: ${result.discarded} tests${detail}`);
+  }
+  if (result.retried) {
+    parts.push(`Retry: one-shot retry path was attempted (issue #299)`);
   }
 
   if (result.testFiles.length > 0) {
