@@ -33,6 +33,7 @@ import {
   consolidateAgentPatterns,
   consolidateStalePromotedRules,
   migrateRulesToPatterns,
+  backfillPromotionMetadata,
   PROMOTION_THRESHOLD as PROMOTION_THRESHOLD_VALUE,
   detectStalePromotedRules as detectStalePromotedRulesImpl,
   processStaleRules as processStaleRulesImpl,
@@ -307,6 +308,14 @@ export async function initLearning(): Promise<void> {
     await migrateRulesToPatterns();
   } catch (err: any) {
     console.error(`[Learning] Memory migration failed: ${err.message}`);
+  }
+
+  // 1b. Backfill promotion metadata for patterns promoted before issue #289
+  //     instrumentation (idempotent, guarded by Redis flag — issue #302).
+  try {
+    await backfillPromotionMetadata();
+  } catch (err: any) {
+    console.error(`[Learning] Promotion-metadata backfill failed: ${err.message}`);
   }
 
   // 2. Register OV skills (non-blocking)
