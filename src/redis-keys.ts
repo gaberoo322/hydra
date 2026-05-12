@@ -112,6 +112,15 @@ export const redisKeys = {
   schedulerCyclesFailed: () => "hydra:scheduler:cycles-failed",
   schedulerStateVersion: () => "hydra:scheduler:state-version",
 
+  // Research capacity floor (issue #327) — sibling of #245 (self-improvement
+  // floor) and #308 (spec capacity-floor). Tracks how often the floor fires,
+  // when it last fired, the empty-result streak, and the suppression deadline
+  // applied after two consecutive forced-empty cycles.
+  researchFloorStats: () => "hydra:scheduler:research-floor:stats",
+  researchFloorLastTriggeredAt: () => "hydra:scheduler:research-floor:last-triggered-at",
+  researchFloorEmptyStreak: () => "hydra:scheduler:research-floor:empty-streak",
+  researchFloorSuppressedUntil: () => "hydra:scheduler:research-floor:suppressed-until",
+
   // ---------------------------------------------------------------------------
   // Locks
   // ---------------------------------------------------------------------------

@@ -71,6 +71,8 @@ Determined by `selectAnchor()` in `src/anchor-selection.ts`. Priority order:
 13. **Codebase health** — reductive improvements (split, consolidate, document)
 14. **Priorities doc** — fallback to `config/direction/priorities.md` (auto-refreshed if stale)
 
+**Scheduler-side research floor (issue #327, sibling of #245 / #301).** Independent of `selectAnchor()`: `maybeRunResearch()` in `src/scheduler.ts` consults the research capacity floor before queue-depth / ratio-cap suppression. When the realised 24h research:build ratio drops below `HYDRA_RESEARCH_BUILD_RATIO_MIN` (default 1/20) over at least `HYDRA_RESEARCH_FLOOR_WINDOW` builds (default 20), the scheduler forces a research cycle on the next tick. The floor overrides queue-depth and `buildRatioMax` suppression *but never bypasses* the min-interval throttle (`HYDRA_RESEARCH_MIN_INTERVAL_MS`, default 2h) or the daily cost cap. If two consecutive forced cycles return zero auto-queued opportunities, the floor self-suppresses for 24h and alerts the operator. Surfaced at `/api/scheduler/status` under `research.buildRatioMin` and `research.floor`.
+
 ## Key Files
 
 See `docs/reference.md` for full file inventory, Redis keys, event bus streams, and API endpoints.
