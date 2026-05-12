@@ -17,7 +17,7 @@ import { getContext } from "./learning.ts";
 import { getCachedPlan, cachePlan } from "./plan-cache.ts";
 import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
-import { buildPlannerContext } from "./context-builder.ts";
+import { buildPlannerContext, reflectionMatchSource } from "./context-builder.ts";
 import type { PlannerContext } from "./context-builder.ts";
 import { isAnchorActionable } from "./anchor-actionability.ts";
 
@@ -241,6 +241,7 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
       cachedTask.__reflectionsInjected = 0;
       cachedTask.__hadReflections = false;
       cachedTask.__reflectionSources = [];
+      cachedTask.__reflectionMatchSource = "none";
       await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0, "cache");
       console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present but safe for quick-fix)" : ""}`);
       return cachedTask;
@@ -500,6 +501,10 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     task.__reflectionsInjected = ctx.reflectionInjected;
     task.__hadReflections = ctx.reflectionInjected > 0;
     task.__reflectionSources = ctx.reflectionSources.slice();
+    // Issue #326: pre-compute the categorical match-source bucket so all
+    // downstream metric writers (including Tier-0 paths in verification/post-
+    // merge) can emit it without recomputing.
+    task.__reflectionMatchSource = reflectionMatchSource(ctx.reflectionSources);
   }
 
   // Store in plan cache for future reuse

@@ -307,6 +307,11 @@ export async function handleEarlyExit(opts: EarlyExitOpts): Promise<void> {
     reflectionSources: Array.isArray(task?.__reflectionSources)
       ? task.__reflectionSources.join(",")
       : "",
+    // Issue #326: single-token bucket for dashboards (none/by-anchor/by-file/
+    // both/global/mixed). Derived from the same source array.
+    reflectionMatchSource: typeof task?.__reflectionMatchSource === "string"
+      ? task.__reflectionMatchSource
+      : "none",
     ...metricsOverrides,
   });
 }

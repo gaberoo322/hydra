@@ -132,7 +132,7 @@ export interface PlannerContext {
   reflectionSources: ReflectionSource[];
 }
 
-export type ReflectionSource = "per-anchor" | "global";
+export type ReflectionSource = "per-anchor" | "global" | "by-file";
 
 // ---------------------------------------------------------------------------
 // buildPlannerContext — loads all context sources with graceful degradation
@@ -290,6 +290,16 @@ export function inspectReflections(plannerMemory: string): {
       sources.push("per-anchor");
     }
   }
+  // By-file reflections (issue #326) format:
+  // "## RELATED FILES — Prior Failures (N matched by file)"
+  const byFileMatch = plannerMemory.match(/## RELATED FILES — Prior Failures \((\d+) matched by file/);
+  if (byFileMatch) {
+    const n = parseInt(byFileMatch[1], 10) || 0;
+    if (n > 0) {
+      count += n;
+      sources.push("by-file");
+    }
+  }
   // Global reflections format: each reflection starts with "### <cycleId>"
   // under a "## Recent Failures" section
   const recentIdx = plannerMemory.indexOf("## Recent Failures");
@@ -302,6 +312,32 @@ export function inspectReflections(plannerMemory: string): {
     }
   }
   return { count, sources };
+}
+
+/**
+ * Issue #326: derive a single-token `reflectionMatchSource` value for cycle
+ * metrics from the source list. Buckets:
+ *
+ *   - "none"        — no reflections injected
+ *   - "by-anchor"   — only per-anchor (legacy primary key) matched
+ *   - "by-file"     — only the file-based secondary index matched
+ *   - "both"        — both per-anchor and by-file matched
+ *   - "global"      — only the global recent-failures buffer matched
+ *   - "mixed"       — any other combination involving global + one specific
+ *
+ * Kept narrow on purpose so the metric remains dashboardable as a categorical
+ * field rather than a free-form list.
+ */
+export function reflectionMatchSource(sources: ReflectionSource[]): string {
+  if (!Array.isArray(sources) || sources.length === 0) return "none";
+  const hasPerAnchor = sources.includes("per-anchor");
+  const hasByFile = sources.includes("by-file");
+  const hasGlobal = sources.includes("global");
+  if (hasPerAnchor && hasByFile && !hasGlobal) return "both";
+  if (hasPerAnchor && !hasByFile && !hasGlobal) return "by-anchor";
+  if (!hasPerAnchor && hasByFile && !hasGlobal) return "by-file";
+  if (!hasPerAnchor && !hasByFile && hasGlobal) return "global";
+  return "mixed";
 }
 
 // ---------------------------------------------------------------------------
