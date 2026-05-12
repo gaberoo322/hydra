@@ -165,14 +165,30 @@ export async function indexWorkItem(reference: string, source: string = "queue")
     });
 
     if (!uploadRes.ok) {
-      console.error(`[WorkQueue] indexWorkItem upload failed: ${uploadRes.status}`);
+      const body = await uploadRes.text().catch(() => "");
+      console.error(
+        `[WorkQueue] indexWorkItem upload failed: ${uploadRes.status} body=${body.slice(0, 200)}`,
+      );
       return;
     }
 
-    const uploadData = await uploadRes.json() as any;
-    const tempPath = uploadData.temp_path || uploadData.path;
+    // OpenViking wraps responses as {status, result, error, telemetry}.
+    // The temp_upload endpoint returns the path under `result.temp_path` —
+    // older code read `uploadData.temp_path` directly and silently no-op'd
+    // on every call (issue #313: 354 silent failures over 2 days). Read
+    // both wrapped and legacy unwrapped shapes for safety.
+    const uploadData = (await uploadRes.json()) as any;
+    const result = uploadData?.result ?? {};
+    const tempPath =
+      result.temp_path ?? result.path ?? uploadData.temp_path ?? uploadData.path;
     if (!tempPath) {
-      console.error(`[WorkQueue] indexWorkItem: no temp_path in upload response`);
+      // Fail loud (CLAUDE.md convention): log the full response body so a
+      // future API shape change is debuggable from logs alone.
+      console.error(
+        `[WorkQueue] indexWorkItem: no temp_path in upload response — body=${JSON.stringify(
+          uploadData,
+        ).slice(0, 300)}`,
+      );
       return;
     }
 
@@ -190,7 +206,10 @@ export async function indexWorkItem(reference: string, source: string = "queue")
     if (addRes.ok) {
       console.log(`[WorkQueue] Indexed work item into OV: "${reference.slice(0, 80)}" (source=${source})`);
     } else {
-      console.error(`[WorkQueue] indexWorkItem add-resource failed: ${addRes.status}`);
+      const body = await addRes.text().catch(() => "");
+      console.error(
+        `[WorkQueue] indexWorkItem add-resource failed: ${addRes.status} body=${body.slice(0, 200)}`,
+      );
     }
   } catch (err: any) {
     console.error(`[WorkQueue] indexWorkItem failed: ${err.message}`);
