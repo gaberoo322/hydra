@@ -78,7 +78,6 @@ describe("cost-attribution aggregation (issue #271)", () => {
     assert.equal(agentRoleToTier("market-researcher"), "frontier");
     assert.equal(agentRoleToTier("research-strategist"), "frontier");
     assert.equal(agentRoleToTier("strategist"), "frontier");
-    assert.equal(agentRoleToTier("priorities-refresh"), "frontier");
   });
 
   test("agentRoleToTier soft-falls-back for research-* / *-researcher variants", () => {

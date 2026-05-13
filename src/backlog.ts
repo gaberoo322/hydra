@@ -367,7 +367,6 @@ async function pruneOldDoneItems() {
 
 /**
  * Move an item to Blocked by ID, with a structured reason.
- * Used by priorities-refresh to sync [BLOCKED] items from priorities.md.
  */
 async function blockItemById(itemId, reason) {
   const item = await getItem(itemId);
