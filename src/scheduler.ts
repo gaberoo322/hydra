@@ -30,6 +30,8 @@ import {
   incrSchedulerCyclesFailed, getSchedulerCyclesFailed,
   atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
   saveSchedulerStateVersioned, getSchedulerStateVersion,
+  getWorkspaceWedgedCounter, getWorkspaceWedgedBranch,
+  resetWorkspaceWedgedCounter, clearWorkspaceWedgedBranch,
 } from "./redis-adapter.ts";
 import {
   shouldForceResearchFloor,
@@ -76,6 +78,13 @@ const MAX_STALL_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes max backoff
 // pattern but is much more aggressive because a no-op merge is unambiguous
 // evidence of system rot, not just slow work.
 const NO_OP_MERGE_HALT_THRESHOLD = parseInt(process.env.HYDRA_NO_OP_MERGE_HALT_THRESHOLD) || 3;
+
+// Wedged-workspace halt threshold (issue #340): if prepareWorkspace skips
+// cleanup because the target repo is sitting on a feature branch for N
+// consecutive cycles on the SAME branch, halt the scheduler. Prevents the
+// 10+ cycle abandon-storm seen on 2026-05-12 ($280 wasted). Mirrors the
+// noOpMerge pattern.
+const WEDGED_WORKSPACE_HALT_THRESHOLD = parseInt(process.env.HYDRA_WEDGED_WORKSPACE_HALT_THRESHOLD) || 3;
 
 // Rolling merge-rate window (issue #232): the operator-visible mergeRate is
 // computed from the last N cycles in cycle-history (same source as
@@ -158,6 +167,22 @@ function classifyNoOpMergeState(consecutiveNoOpMerges: number): "ok" | "halt" {
   return consecutiveNoOpMerges >= NO_OP_MERGE_HALT_THRESHOLD ? "halt" : "ok";
 }
 
+/**
+ * Classify the wedged-workspace state (issue #340).
+ * Returns "ok" | "alert" | "halt" — alert at >=2 consecutive wedged cycles
+ * on the same branch, halt at >= WEDGED_WORKSPACE_HALT_THRESHOLD.
+ *
+ * Exported for test coverage (issue #340).
+ */
+function classifyWedgedWorkspaceState(
+  consecutiveCycles: number,
+  haltThreshold: number = WEDGED_WORKSPACE_HALT_THRESHOLD,
+): "ok" | "alert" | "halt" {
+  if (consecutiveCycles >= haltThreshold) return "halt";
+  if (consecutiveCycles >= 2) return "alert";
+  return "ok";
+}
+
 let state = {
   running: false,
   intervalMs: parseInt(process.env.HYDRA_AUTO_CYCLE_INTERVAL_MS) || 0,
@@ -172,6 +197,7 @@ let state = {
   consecutiveNonMerges: 0,
   consecutiveNoOpMerges: 0,
   haltedForNoOpMerges: false,
+  haltedForWedgedWorkspace: false, // issue #340
   researchCyclesRun: 0,
   lastResearchAt: null,
   _stateVersion: 0, // optimistic locking version (issue #140 — AC3)
@@ -814,6 +840,46 @@ async function runScheduledCycle(eventBus) {
       }
       state.lastError = null;
 
+      // Issue #340: hard-stop when prepareWorkspace has been wedged on the
+      // same feature/* branch for too many consecutive cycles. Fires before
+      // the no-op-merge breaker because a wedged workspace produces
+      // abandons, not no-op merges — and the abandon-storm is what burned
+      // ~$280 on 2026-05-12. Auto-recovery (orchestrator-owned branches)
+      // already handles the common case; this halt is the safety net for
+      // unrecoverable wedges (operator-named branch, dirty tree).
+      try {
+        const wedgedCount = await getWorkspaceWedgedCounter();
+        const wedgedBranch = wedgedCount > 0 ? await getWorkspaceWedgedBranch() : null;
+        if (wedgedCount >= WEDGED_WORKSPACE_HALT_THRESHOLD) {
+          console.error(
+            `[Scheduler] WEDGED WORKSPACE HALT: ${wedgedCount} consecutive cycles wedged on "${wedgedBranch}" — pausing scheduler (issue #340)`,
+          );
+          state.haltedForWedgedWorkspace = true;
+          await sendNotification({
+            type: "scheduler:wedged_workspace_halt",
+            payload: {
+              reason: `${wedgedCount} consecutive cycles found target repo on "${wedgedBranch}" instead of main. prepareWorkspace cannot auto-recover (likely operator-named branch or dirty tree).`,
+              wedgedBranch,
+              consecutiveCycles: wedgedCount,
+              cyclesRun: state.cyclesRun,
+              severity: "critical",
+              suggestion: `Manually return ~/hydra-betting to main: \`cd ~/hydra-betting && git checkout main && git branch -D ${wedgedBranch}\`, then restart via POST /scheduler/start with { forceClearWedgedHalt: true }.`,
+            },
+          });
+          state.running = false;
+          if (state.timer) {
+            clearTimeout(state.timer);
+            state.timer = null;
+          }
+          console.log(
+            `[Scheduler] Paused after ${state.cyclesRun} cycles (${state.cyclesMerged} merged, wedged on ${wedgedBranch}). Restart via POST /scheduler/start once recovered`,
+          );
+          return;
+        }
+      } catch (wedgeErr: any) {
+        console.error(`[Scheduler] Wedged-workspace halt check failed (non-fatal): ${wedgeErr.message}`);
+      }
+
       // Issue #222: hard-stop when consecutive no-op merges hit the threshold.
       // This fires before the generic zero-output breaker because no-op
       // merges are unambiguous evidence the system is broken (commit
@@ -970,6 +1036,29 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
     };
   }
 
+  // Issue #340: refuse to restart while the workspace-wedge halt is active
+  // until the operator explicitly clears it. Auto-restart on wedge would
+  // immediately re-halt because the wedged branch is still there.
+  if (state.haltedForWedgedWorkspace && !opts.forceClearWedgedHalt) {
+    const wedgedCount = await getWorkspaceWedgedCounter().catch(() => 0);
+    const wedgedBranch = await getWorkspaceWedgedBranch().catch(() => null);
+    return {
+      error:
+        `Scheduler halted: target repo wedged on "${wedgedBranch}" for ${wedgedCount} consecutive cycles. ` +
+        `Manually return ~/hydra-betting to main, then restart with { forceClearWedgedHalt: true } to acknowledge.`,
+      haltedForWedgedWorkspace: true,
+      wedgedBranch,
+      consecutiveCycles: wedgedCount,
+    };
+  }
+
+  // If the operator force-cleared the wedged halt, also clear the Redis
+  // counter so the next cycle starts from zero.
+  if (state.haltedForWedgedWorkspace && opts.forceClearWedgedHalt) {
+    await resetWorkspaceWedgedCounter().catch(() => { /* intentional: best effort */ });
+    await clearWorkspaceWedgedBranch().catch(() => { /* intentional: best effort */ });
+  }
+
   const intervalMs = opts.intervalMs || state.intervalMs || DEFAULT_INTERVAL_MS;
   if (intervalMs < MIN_INTERVAL_MS) {
     return { error: `Interval must be at least ${MIN_INTERVAL_MS}ms (${MIN_INTERVAL_MS / 1000}s)` };
@@ -982,6 +1071,7 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   state.consecutiveNonMerges = 0;
   state.consecutiveNoOpMerges = 0;
   state.haltedForNoOpMerges = false;
+  state.haltedForWedgedWorkspace = false; // issue #340
 
   console.log(`[Scheduler] Started — cycles every ${intervalMs / 1000}s, research throttle ${RESEARCH_MIN_INTERVAL_MS / 3600_000}h`);
 
@@ -1030,6 +1120,26 @@ async function getStatus() {
     return null;
   });
 
+  // Issue #340: surface wedged-workspace state so /api/scheduler/status
+  // reflects the live counter (the in-memory state.haltedForWedgedWorkspace
+  // is only set on halt-trigger; the Redis counter is the source of truth
+  // for "currently wedged on N cycles").
+  let wedgedWorkspace: { branch: string | null; consecutiveCycles: number; alerting: boolean; halted: boolean; haltThreshold: number } | null = null;
+  try {
+    const wedgedCount = await getWorkspaceWedgedCounter();
+    const wedgedBranch = wedgedCount > 0 ? await getWorkspaceWedgedBranch() : null;
+    wedgedWorkspace = {
+      branch: wedgedBranch,
+      consecutiveCycles: wedgedCount,
+      alerting: wedgedCount >= 2,
+      halted: state.haltedForWedgedWorkspace,
+      haltThreshold: WEDGED_WORKSPACE_HALT_THRESHOLD,
+    };
+  } catch (err: any) {
+    /* intentional: status endpoint should never fail because Redis read failed; surface null instead */
+    console.error(`[Scheduler] wedgedWorkspace read failed: ${err.message}`);
+  }
+
   // Issue #232: report a rolling-window merge rate as the primary
   // operator-visible metric. The lifetime ratio is preserved as
   // `mergeRateLifetime` for audit but is heavily skewed by historical
@@ -1069,6 +1179,10 @@ async function getStatus() {
     consecutiveNoOpMerges: state.consecutiveNoOpMerges,
     noOpMergeHaltThreshold: NO_OP_MERGE_HALT_THRESHOLD,
     haltedForNoOpMerges: state.haltedForNoOpMerges,
+    // Issue #340: wedged-workspace tracking — exposes the same counter
+    // prepareWorkspace increments when it skips cleanup because the target
+    // repo is on a feature/* branch it cannot auto-recover.
+    wedgedWorkspace,
     // Issue #209: per-cycle cost cap (separate from daily research cap).
     // null when the cap is Infinity / disabled.
     perCycleCostCapUsd: Number.isFinite(perCycleCostCapUsd) ? perCycleCostCapUsd : null,
@@ -1172,4 +1286,6 @@ export {
   computeStallBackoffMs, shouldSendStallAlert, classifyStallState, formatDuration,
   // Exported for test coverage (issue #222):
   classifyNoOpMergeState, NO_OP_MERGE_HALT_THRESHOLD,
+  // Exported for test coverage (issue #340):
+  classifyWedgedWorkspaceState, WEDGED_WORKSPACE_HALT_THRESHOLD,
 };

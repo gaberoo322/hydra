@@ -217,3 +217,50 @@ export async function getSchedulerStateVersion(): Promise<number> {
   const val = await r.get(redisKeys.schedulerStateVersion());
   return val ? parseInt(val, 10) : 0;
 }
+
+// ---------------------------------------------------------------------------
+// Workspace wedge tracking (issue #340)
+// ---------------------------------------------------------------------------
+//
+// On 2026-05-12 the executor's worktree cleanup left ~/hydra-betting checked
+// out on `feature/cycle-2026-05-12-0712-slug`, and prepareWorkspace silently
+// skipped cleanup for 10 consecutive cycles (~$280 of abandoned cycles). The
+// counter below feeds a scheduler-level halt threshold so the same incident
+// stops at ~$60 of waste, not $280.
+
+/** Atomically increment the wedged-workspace counter. Returns new value. */
+export async function incrWorkspaceWedgedCounter(): Promise<number> {
+  const r = getRedisConnection();
+  return r.incr(redisKeys.workspaceWedgedCounter());
+}
+
+/** Read the wedged-workspace counter. Returns 0 if never set. */
+export async function getWorkspaceWedgedCounter(): Promise<number> {
+  const r = getRedisConnection();
+  const val = await r.get(redisKeys.workspaceWedgedCounter());
+  return val ? parseInt(val, 10) : 0;
+}
+
+/** Reset the wedged-workspace counter to 0. */
+export async function resetWorkspaceWedgedCounter(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.workspaceWedgedCounter());
+}
+
+/** Persist the current wedged branch name (for alert context + branch-change detection). */
+export async function setWorkspaceWedgedBranch(branch: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.workspaceWedgedBranch(), branch);
+}
+
+/** Read the most-recently-recorded wedged branch name, or null. */
+export async function getWorkspaceWedgedBranch(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.workspaceWedgedBranch());
+}
+
+/** Clear the wedged-branch marker (called on successful cleanup). */
+export async function clearWorkspaceWedgedBranch(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.workspaceWedgedBranch());
+}

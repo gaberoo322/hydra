@@ -128,6 +128,16 @@ export const redisKeys = {
   workspaceLock: () => "hydra:workspace:lock",
 
   // ---------------------------------------------------------------------------
+  // Workspace wedge detection (issue #340)
+  // ---------------------------------------------------------------------------
+  // Tracks consecutive cycles where prepareWorkspace skipped cleanup because
+  // the target repo was sitting on a feature/cycle-* branch. If this counter
+  // exceeds wedgedWorkspaceHaltThreshold, the scheduler halts to prevent the
+  // 10+ cycle abandon-storm seen on 2026-05-12.
+  workspaceWedgedCounter: () => "hydra:workspace:wedged-cycles",
+  workspaceWedgedBranch: () => "hydra:workspace:wedged-branch",
+
+  // ---------------------------------------------------------------------------
   // Plan Cache
   // ---------------------------------------------------------------------------
   planCachePrefix: () => "hydra:plans:cache:",

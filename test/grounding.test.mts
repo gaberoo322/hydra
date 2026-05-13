@@ -208,9 +208,13 @@ describe("shouldCleanWorkingTree", () => {
     assert.equal(decision.ok, true);
   });
 
-  test("feature branch with clean tree → skip", () => {
+  test("operator-named feature branch with clean tree → skip", () => {
+    // Issue #340 update: orchestrator-owned `feature/cycle-YYYY-MM-DD-NNNN-*`
+    // branches with clean trees ARE now auto-recoverable (see
+    // test/prepare-workspace.test.mts). Operator-named feature branches like
+    // `feature/foo-bar` remain protected even with a clean tree.
     const decision = shouldCleanWorkingTree(
-      { stdout: "feature/cycle-2026-04-08-1234-slug\n" },
+      { stdout: "feature/operator-experiment\n" },
       { stdout: "" },
     );
     assert.equal(decision.ok, false);

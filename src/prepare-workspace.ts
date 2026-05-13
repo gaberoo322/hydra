@@ -5,6 +5,26 @@ import { acquireWorkspaceLock, releaseWorkspaceLock } from "./redis-adapter.ts";
 const execFileAsync = promisify(execFile);
 
 /**
+ * Match orchestrator-owned cycle feature branches.
+ *
+ * Format produced by the executor: `feature/cycle-YYYY-MM-DD-NNNN-slug`
+ * (see src/executor-agent.ts `branchName = feature/${cycleId}-slug`).
+ *
+ * Operator-driven branches (e.g. `feature/foo-bar`, `feature/operator-experiment`,
+ * `feature/hotfix-3`) do NOT match this pattern — they're protected by the
+ * existing safety gate.
+ *
+ * Exported for test coverage (issue #340).
+ *
+ * @param {string} branchName
+ * @returns {boolean}
+ */
+export function isOrchestratorOwnedBranch(branchName) {
+  if (!branchName || typeof branchName !== "string") return false;
+  return /^feature\/cycle-\d{4}-\d{2}-\d{2}-\d{4}/.test(branchName.trim());
+}
+
+/**
  * Decide whether it's safe to auto-clean the target project's working tree.
  *
  * Historically this lived in grounding.mjs, where groundProject() would
@@ -36,10 +56,6 @@ export function shouldCleanWorkingTree(branchResult, statusResult) {
     return { ok: false, reason: "no current branch (detached HEAD or fresh repo)" };
   }
 
-  if (branch !== "main" && branch !== "master") {
-    return { ok: false, reason: `on feature branch "${branch}" — operator-driven work, not auto-cleaning` };
-  }
-
   // Filter out untracked files (lines starting with "?? "). Untracked files
   // are safe — `git checkout main && git checkout .` doesn't touch them, and
   // the original cleanup code explicitly avoided `git clean -fd` for this
@@ -48,6 +64,21 @@ export function shouldCleanWorkingTree(branchResult, statusResult) {
   const trackedChanges = status
     ? status.split("\n").filter((line) => line && !line.startsWith("?? "))
     : [];
+
+  if (branch !== "main" && branch !== "master") {
+    // Issue #340: orchestrator-owned cycle branches (feature/cycle-YYYY-MM-DD-NNNN-*)
+    // with a clean tracked tree are safe to auto-recover — they're leftovers
+    // from a failed executor cleanup, not operator-driven work. Without this,
+    // a single botched worktree-remove leaves the repo wedged on a feature
+    // branch and every subsequent cycle abandons.
+    if (isOrchestratorOwnedBranch(branch) && trackedChanges.length === 0) {
+      return {
+        ok: true,
+        recoverFromOrchestratorBranch: branch,
+      };
+    }
+    return { ok: false, reason: `on feature branch "${branch}" — operator-driven work, not auto-cleaning` };
+  }
 
   if (trackedChanges.length > 0) {
     return {
@@ -89,10 +120,25 @@ export async function prepareWorkspace(projectDir) {
   const branchResult = await runGit(projectDir, ["branch", "--show-current"]);
   const statusResult = await runGit(projectDir, ["status", "--short"]);
   const decision = shouldCleanWorkingTree(branchResult, statusResult);
+  const currentBranch = (branchResult?.stdout || "").trim();
 
   if (!decision.ok) {
     console.log(`[PrepareWorkspace] Skipping auto-cleanup: ${decision.reason}`);
-    return { cleaned: false, reason: decision.reason, staleBranchesDeleted: 0 };
+
+    // Issue #340: track consecutive wedged cycles. A "wedged" workspace is one
+    // where prepareWorkspace skipped cleanup because the target repo is sitting
+    // on a feature branch we can't auto-recover (operator-named, or dirty).
+    // Surfaces in /api/scheduler/status; scheduler halts at the configured
+    // threshold so we don't burn the daily budget on no-op cycles.
+    const wedged = await recordWedgedCycle(currentBranch, decision.reason);
+
+    return {
+      cleaned: false,
+      reason: decision.reason,
+      staleBranchesDeleted: 0,
+      wedgedBranch: wedged.branch,
+      wedgedConsecutiveCycles: wedged.consecutiveCycles,
+    };
   }
 
   // Acquire workspace lock — prevents concurrent git operations from
@@ -103,6 +149,12 @@ export async function prepareWorkspace(projectDir) {
   }
 
   try {
+    if (decision.recoverFromOrchestratorBranch) {
+      console.log(
+        `[PrepareWorkspace] Auto-recovering from orchestrator-owned branch "${decision.recoverFromOrchestratorBranch}" — checking out main (issue #340)`,
+      );
+    }
+
     await runGit(projectDir, ["checkout", "main"]);
     await runGit(projectDir, ["checkout", "."]);
 
@@ -121,10 +173,71 @@ export async function prepareWorkspace(projectDir) {
       console.log(`[PrepareWorkspace] Cleaned up ${stale.length} stale feature branches`);
     }
 
-    return { cleaned: true, reason: null, staleBranchesDeleted: stale.length };
+    // Issue #340: cleanup succeeded — reset the wedged-cycle counter so a
+    // single recovered cycle doesn't keep the alert state stuck.
+    await clearWedgedCycle();
+
+    return {
+      cleaned: true,
+      reason: null,
+      staleBranchesDeleted: stale.length,
+      recoveredFromOrchestratorBranch: decision.recoverFromOrchestratorBranch || null,
+    };
   } finally {
     await releaseWorkspaceLock().catch((err) =>
       console.error(`[PrepareWorkspace] Failed to release workspace lock: ${err.message}`)
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wedged-workspace counter (issue #340)
+// ---------------------------------------------------------------------------
+//
+// Lazy import so test files that don't initialise Redis still work.
+
+async function recordWedgedCycle(branch, reason) {
+  try {
+    const { incrWorkspaceWedgedCounter, setWorkspaceWedgedBranch, getWorkspaceWedgedBranch, resetWorkspaceWedgedCounter } =
+      await import("./redis-adapter.ts");
+    const previousBranch = await getWorkspaceWedgedBranch();
+
+    // If the wedged branch changed, reset the counter — we're tracking
+    // *consecutive* cycles on the *same* branch. A different branch means
+    // a different incident.
+    let consecutive;
+    if (previousBranch && previousBranch !== branch) {
+      await resetWorkspaceWedgedCounter();
+      consecutive = await incrWorkspaceWedgedCounter();
+    } else {
+      consecutive = await incrWorkspaceWedgedCounter();
+    }
+    await setWorkspaceWedgedBranch(branch);
+
+    if (consecutive >= 2) {
+      console.error(
+        `[PrepareWorkspace] WEDGED WORKSPACE ALERT: ${consecutive} consecutive cycles wedged on "${branch}" (reason: ${reason}). ` +
+          `Scheduler will halt at the configured threshold to prevent abandon-storm. (issue #340)`,
+      );
+    }
+
+    return { branch, consecutiveCycles: consecutive };
+  } catch (err) {
+    /* intentional: Redis unavailable should never block cycle progress. The
+       wedge-detection feature degrades gracefully — operator can still recover
+       manually. */
+    console.error(`[PrepareWorkspace] Wedged-cycle tracking failed: ${err?.message || err}`);
+    return { branch, consecutiveCycles: 0 };
+  }
+}
+
+async function clearWedgedCycle() {
+  try {
+    const { resetWorkspaceWedgedCounter, clearWorkspaceWedgedBranch } = await import("./redis-adapter.ts");
+    await resetWorkspaceWedgedCounter();
+    await clearWorkspaceWedgedBranch();
+  } catch (err) {
+    /* intentional: best-effort reset; non-fatal */
+    console.error(`[PrepareWorkspace] Wedged-cycle clear failed: ${err?.message || err}`);
   }
 }

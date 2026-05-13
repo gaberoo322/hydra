@@ -208,6 +208,13 @@ export {
   setLastResearchAt,
   saveSchedulerStateVersioned,
   getSchedulerStateVersion,
+  // Workspace wedge tracking (issue #340)
+  incrWorkspaceWedgedCounter,
+  getWorkspaceWedgedCounter,
+  resetWorkspaceWedgedCounter,
+  setWorkspaceWedgedBranch,
+  getWorkspaceWedgedBranch,
+  clearWorkspaceWedgedBranch,
 } from "./redis/scheduler.ts";
 
 // Generic key/value/list/hash/zset/set/pipeline ops
