@@ -65,7 +65,7 @@ Single Claude Code session, internal decision loop:
 
 ## Phase 0: Bootstrap
 
-Run once at session start.
+Run once at session start. **The budget limits resolved here MUST be written into `state.json`'s `"limits"` block** — shell variables don't persist between turns, and the model cannot remember a budget value it only saw printed once. Every subsequent termination check reads from `state.json`, not from env.
 
 ```bash
 # Heartbeat
@@ -75,19 +75,42 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=$$ run_id=$(uuidgen)" > /tmp/hydr
 [ -f /tmp/hydra-autopilot-nightly.log ] && mv /tmp/hydra-autopilot-nightly.log /tmp/hydra-autopilot-nightly.log.prev
 : > /tmp/hydra-autopilot-nightly.log
 
-# Read budget knobs (allow per-run override via env)
+# Resolve budget knobs from env (per-run override) with hardcoded defaults
 TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-2000000}"
 WALL_CLOCK_MAX_SEC="${HYDRA_AUTOPILOT_MAX_SEC:-28800}"   # 8h
 IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STARTED_EPOCH="$(date -u +%s)"
 
-# Initialize state file
+# Initialize state file — limits are now first-class members
 cat > /tmp/hydra-autopilot-state.json <<EOF
-{"started":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","cumulative_tokens":0,"dispatches":0,"idle_turns":0,
- "slots":{"health":null,"qa":null,"dev_orch":null,"dev_target":null,
-          "research_orch":null,"research_target":null,"sweep_orch":null,
-          "sweep_target":null,"discover_orch":null,"discover_target":null}}
+{
+  "started": "${STARTED_AT}",
+  "started_epoch": ${STARTED_EPOCH},
+  "limits": {
+    "token_budget": ${TOKEN_BUDGET},
+    "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
+    "idle_drain_turns": ${IDLE_DRAIN_TURNS}
+  },
+  "cumulative_tokens": 0,
+  "dispatches": 0,
+  "idle_turns": 0,
+  "turn": 0,
+  "slots": {
+    "health": null, "qa": null,
+    "dev_orch": null, "dev_target": null,
+    "research_orch": null, "research_target": null,
+    "sweep_orch": null, "sweep_target": null,
+    "discover_orch": null, "discover_target": null
+  }
+}
 EOF
+
+# Echo resolved limits so the model captures them in conversation context
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS}"
 ```
+
+After Phase 0, the model MUST treat `/tmp/hydra-autopilot-state.json` as the authoritative budget source. Do not invent or rely on remembered defaults.
 
 **Required preflight** before entering the decision loop:
 
@@ -201,13 +224,29 @@ Update `dispatches` counter. Increment `idle_turns` if NO new dispatch this turn
 
 ## Phase 3: Termination check
 
-If any of these is true, jump to Phase 7 (terminal):
+**Run this Bash snippet at the top of every decision turn.** Do not rely on remembering limit values across turns — read them from `state.json`.
 
-- `cumulative_tokens >= TOKEN_BUDGET`
-- `now() - started >= WALL_CLOCK_MAX_SEC`
-- `idle_turns >= IDLE_DRAIN_TURNS` AND no slots occupied
+```bash
+python3 - <<'PY'
+import json, time, os, sys
+s = json.load(open('/tmp/hydra-autopilot-state.json'))
+limits = s['limits']
+elapsed = int(time.time()) - s['started_epoch']
+tokens = s['cumulative_tokens']
+slots_occupied = sum(1 for v in s['slots'].values() if v is not None)
 
-Otherwise, continue to Phase 4.
+if tokens >= limits['token_budget']:
+    print(f"TERM:budget tokens={tokens}/{limits['token_budget']} elapsed={elapsed}s")
+elif elapsed >= limits['wall_clock_max_sec']:
+    print(f"TERM:wall_clock elapsed={elapsed}s/{limits['wall_clock_max_sec']}s tokens={tokens}")
+elif s['idle_turns'] >= limits['idle_drain_turns'] and slots_occupied == 0:
+    print(f"TERM:idle idle_turns={s['idle_turns']} slots=0")
+else:
+    print(f"OK elapsed={elapsed}s tokens={tokens}/{limits['token_budget']} idle={s['idle_turns']}/{limits['idle_drain_turns']} slots={slots_occupied}")
+PY
+```
+
+If the output starts with `TERM:`, jump immediately to **Phase 7** (terminal drain + digest). Do not enter Phase 4. If it starts with `OK`, proceed to Phase 4.
 
 ## Phase 4: Priority waterfall (per class slot, parallel decisions)
 
@@ -219,7 +258,24 @@ P0 (health) and P0.5 (pipeline recovery) always pre-empt this preference.
 
 ### Standard waterfall per class
 
-For each class with a FREE slot, walk its eligibility check in priority order. First match wins for that class:
+**You MUST walk every class with a free slot on each turn — not just the first one or two that match.** The whole point of class-parallel dispatch is to fan out across multiple classes simultaneously. Stopping after the first match collapses the new design back to the old sequential `/loop` behaviour.
+
+Iteration order (every turn, exactly once):
+
+```
+for class in [health, qa, dev_orch, dev_target, research_orch, research_target,
+              sweep_orch, sweep_target, discover_orch, discover_target]:
+    if state.slots[class] is not None: continue          # slot busy
+    if class on cooldown: continue
+    if class circuit-broken this turn: continue
+    eligible_skill = evaluate_priority(class, state)     # see per-class rules below
+    if eligible_skill is None: continue
+    dispatch(class, eligible_skill)                      # Phase 5
+```
+
+Apply the capacity-floor preference (Phase 4.0) by ordering `*_orch` classes before `*_target` in this iteration when the floor has fired.
+
+Per-class eligibility rules (first match wins **for that class**):
 
 #### `health`
 - **P0**: `health=FAIL` OR `redis=false` OR `failed_services>0` → dispatch `hydra-doctor`
@@ -293,17 +349,29 @@ For each class that selected a skill in Phase 4:
    No fallback. No `git checkout` in the main tree.
    ```
 
-4. Dispatch via `Agent` tool:
+4. Dispatch via `Agent` tool. The subagent does NOT have access to slash commands in its prompt — it must invoke skills via the `Skill` tool explicitly. Use `subagent_type: "general-purpose"` (which has access to all tools including `Skill`):
+
    ```
    Agent(
      description: "<class>:<skill>",
-     subagent_type: "Skill",   // or the appropriate subagent type
+     subagent_type: "general-purpose",
      run_in_background: true,
      isolation: "worktree",    // REQUIRED for dev_orch and dev_target
-     prompt: "<WORKTREE-GUARD PREAMBLE (if code-writing)>\n\n<skill invocation: /<S>>\n\n<any args>"
+     prompt: |
+       <WORKTREE-GUARD PREAMBLE (if code-writing)>
+
+       Invoke the Skill tool to run skill="<S>" with args="<ARGS>".
+       Specifically: Skill(skill: "<S>", args: "<ARGS>")
+
+       After the skill completes, return a one-paragraph summary of what
+       it did, any errors, and any artifacts created (PR numbers, file
+       paths, issue numbers, etc).
    )
    ```
-   The harness will spin a fresh worktree for code-writing classes under `.claude/worktrees/agent-<id>` and return its path on completion.
+
+   The harness will spin a fresh worktree for code-writing classes under `.claude/worktrees/agent-<id>` and return its path on completion. Slash-command invocation (`/<S>`) inside the prompt is NOT supported in subagent context — that's the `skill_denied` failure mode observed in early smoke tests.
+
+   The autopilot session itself MUST be launched with `claude --dangerously-skip-permissions` (the systemd unit does this). Without that flag, headless `claude -p` denies tool calls that require confirmation, including `Skill` and `Bash` invocations the subagents make.
 
 5. **Capacity-ledger writeback (post hydra-dev/hydra-target-build merges):**
    When `dev_orch` or `dev_target` completes AND it reports a merged PR, POST to the capacity ledger so the share is reflected:
@@ -319,17 +387,42 @@ For each class that selected a skill in Phase 4:
 
    Without this, the share reads as 0% and the capacity-floor preference fires every turn.
 
-## Phase 6: Turn report
+## Phase 6: Turn report + ACTIVE LOOP CONTINUATION
 
-One line per decision turn:
+One line per decision turn appended to `/tmp/hydra-autopilot-nightly.log`:
 
 ```
 [autopilot] <ts> | turn=<N> | active=[<class>:<skill>,...] | tokens=<cum>/<budget> | board: qa=N agent=N triage=N wq=N | dispatched=<N this turn>
 ```
 
-Append to `/tmp/hydra-autopilot-nightly.log`. Don't print on every turn (would spam) — only when a state change occurs (dispatch made, subagent finished, classification changed).
+### CRITICAL: This is an ACTIVE loop, not a passive wait
 
-Then sleep 5s and go back to Phase 1.
+After appending the turn report, run this Bash snippet and **immediately re-enter Phase 1**:
+
+```bash
+sleep 5
+# Increment turn counter in state.json so the model knows how many turns have elapsed
+python3 -c "
+import json
+s = json.load(open('/tmp/hydra-autopilot-state.json'))
+s['turn'] = s.get('turn', 0) + 1
+json.dump(s, open('/tmp/hydra-autopilot-state.json', 'w'))
+print(f'turn={s[\"turn\"]}')
+"
+```
+
+**You MUST re-enter Phase 1 after the sleep.** Do NOT passively wait for a background subagent's TaskNotification to arrive — those arrive asynchronously and the loop must continue polling state regardless. The whole point of the loop is to:
+
+1. Re-collect state every 5–30s (`Phase 1`).
+2. Reap any subagents that completed asynchronously (`Phase 2`).
+3. Check termination conditions (`Phase 3`).
+4. Make new dispatches into any free class slots (`Phases 4 + 5`).
+5. Report (`Phase 6`).
+6. Sleep 5s. Repeat.
+
+If `Phase 4` produces no new dispatches AND all class slots are non-empty (every class busy), the loop still runs — its purpose is to detect completions and check termination, not to dispatch on every turn. Increment `idle_turns` only if no dispatch was made AND no slot was occupied this turn. Otherwise reset `idle_turns = 0`.
+
+**Common failure mode to avoid:** "I dispatched two subagents on turn=1 and now I'm waiting for them to come back." This is wrong. After turn=1, sleep 5s, run Phase 1's bash collectors again, check termination, and either dispatch into freed slots or report turn=2. Never passively wait.
 
 ## Phase 7: Terminal (graceful drain + final digest)
 
@@ -360,10 +453,15 @@ Then sleep 5s and go back to Phase 1.
 
 ### Manual invocation (development / debugging)
 ```bash
-claude -p "/hydra-autopilot"
-# Custom budget for a short smoke test:
-HYDRA_AUTOPILOT_TOKEN_BUDGET=100000 HYDRA_AUTOPILOT_MAX_SEC=600 claude -p "/hydra-autopilot"
+claude --dangerously-skip-permissions -p "/hydra-autopilot"
+
+# Custom budget for a short smoke test (env vars are honoured via state.json):
+HYDRA_AUTOPILOT_TOKEN_BUDGET=100000 \
+HYDRA_AUTOPILOT_MAX_SEC=600 \
+  claude --dangerously-skip-permissions -p "/hydra-autopilot"
 ```
+
+The `--dangerously-skip-permissions` flag is REQUIRED. Headless `claude -p` denies all confirmation-required tool calls by default; without skip-permissions, the subagents the autopilot dispatches return `skill_denied` and Phase 2 reaps them as immediate failures.
 
 ### Scheduled invocation
 The provided systemd unit pair (`scripts/systemd/hydra-autopilot.{service,timer}`) fires `claude -p "/hydra-autopilot"` nightly at 22:00 local time. The service is `Type=oneshot` with `RuntimeMaxSec=32400` (9h) — slightly above the default wall-clock cap to allow Phase 7 drain. Failure handler routes to the existing `hydra-notify-failure@.service` template.
