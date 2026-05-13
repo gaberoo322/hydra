@@ -20,9 +20,13 @@ import {
 } from "./redis-adapter.ts";
 import {
   incrPlanCacheStat,
+  incrPlanCacheMissReason,
   getPlanCacheStatsLifetime,
   getPlanCacheStatsLast24h,
+  getPlanCacheMissReasonsLifetime,
+  getPlanCacheMissReasonsLast24h,
   type PlanCacheStatMetric,
+  type PlanCacheMissReason,
 } from "./redis/plan-cache.ts";
 import { getTargetWorkspace } from "./target-config.ts";
 
@@ -77,12 +81,38 @@ export function getPlanCacheStats() {
 /**
  * Bump both in-memory and persisted counters for a metric. Persisted increment
  * is fire-and-forget — we don't block the cache path on Redis.
+ *
+ * When `metric === "misses"` and a `reason` is supplied, we also bump the
+ * miss-reason histogram (issue #363). Callers that record a "logical" miss
+ * (e.g. cache was intentionally bypassed before query) should call
+ * `recordMiss(reason)` instead, which records a miss + reason without needing
+ * the cache-entry code path.
  */
-function bumpStat(metric: PlanCacheStatMetric, delta: number = 1): void {
+function bumpStat(
+  metric: PlanCacheStatMetric,
+  delta: number = 1,
+  reason?: PlanCacheMissReason,
+): void {
   if (delta <= 0) return;
   stats[metric] += delta;
   // Fire-and-forget; incrPlanCacheStat swallows its own errors.
   void incrPlanCacheStat(metric, delta);
+  if (metric === "misses" && reason) {
+    trackInProcessMissReason(reason);
+    void incrPlanCacheMissReason(reason);
+  }
+}
+
+/**
+ * Record a miss with an explicit reason. Used by callers (e.g.
+ * planner-prompt.ts) that bypass `getCachedPlan` entirely — without this hook,
+ * the bypass would be invisible in the miss-reason histogram.
+ *
+ * The bookkeeping reasons `reflection-bypass`, `non-cacheable-type`, and
+ * `actionability-skipped` are the primary external callers.
+ */
+export function recordPlanCacheMiss(reason: PlanCacheMissReason): void {
+  bumpStat("misses", 1, reason);
 }
 
 /** Compute hitRate as hits/(hits+misses), 0 when denominator is 0, 1-dp. */
@@ -94,6 +124,13 @@ export function computeHitRate(hits: number, misses: number): number {
 
 export type PlanCacheStatsView = Record<PlanCacheStatMetric, number> & {
   hitRate: number;
+  /**
+   * Miss-reason histogram for this view (issue #363). Keys are
+   * PlanCacheMissReason labels; values are integer counts. The sum of all
+   * values approximates the view's `misses` total (small skew is possible
+   * when a miss is recorded right around the day boundary).
+   */
+  missReasons: Record<PlanCacheMissReason, number>;
 };
 
 export type PlanCacheStatsFull = {
@@ -102,8 +139,33 @@ export type PlanCacheStatsFull = {
   thisProcess: PlanCacheStatsView;
 };
 
-function withHitRate(s: Record<PlanCacheStatMetric, number>): PlanCacheStatsView {
-  return { ...s, hitRate: computeHitRate(s.hits, s.misses) };
+function withHitRate(
+  s: Record<PlanCacheStatMetric, number>,
+  missReasons: Record<PlanCacheMissReason, number>,
+): PlanCacheStatsView {
+  return { ...s, hitRate: computeHitRate(s.hits, s.misses), missReasons };
+}
+
+/**
+ * In-memory miss-reason counters (thisProcess view). Mirrors `stats` above:
+ * cheap synchronous counters reset on restart, useful for "what has this
+ * process seen since boot".
+ */
+const inProcessMissReasons: Record<PlanCacheMissReason, number> = {
+  "not-found": 0,
+  "non-cacheable-type": 0,
+  "reflection-bypass": 0,
+  "actionability-skipped": 0,
+  "stale-tests": 0,
+  "stale-files": 0,
+  "get-error": 0,
+};
+
+// Patch bumpStat path: track in-memory miss reasons alongside the persisted
+// histogram. Kept as a separate hook so the existing bumpStat call sites
+// don't need to change shape.
+function trackInProcessMissReason(reason: PlanCacheMissReason): void {
+  inProcessMissReasons[reason] += 1;
 }
 
 /**
@@ -114,17 +176,20 @@ function withHitRate(s: Record<PlanCacheStatMetric, number>): PlanCacheStatsView
  *   - `last24h`    : sum of today + yesterday UTC per-day keys
  *   - `thisProcess`: in-memory counters since this Node process booted
  *
- * Each view includes a `hitRate` derived from its own hits/misses.
+ * Each view includes a `hitRate` derived from its own hits/misses, and a
+ * `missReasons` histogram explaining why the misses occurred (issue #363).
  */
 export async function getPlanCacheStatsFull(): Promise<PlanCacheStatsFull> {
-  const [lifetime, last24h] = await Promise.all([
+  const [lifetime, last24h, lifetimeMR, last24hMR] = await Promise.all([
     getPlanCacheStatsLifetime(),
     getPlanCacheStatsLast24h(),
+    getPlanCacheMissReasonsLifetime(),
+    getPlanCacheMissReasonsLast24h(),
   ]);
   return {
-    lifetime: withHitRate(lifetime),
-    last24h: withHitRate(last24h),
-    thisProcess: withHitRate(stats),
+    lifetime: withHitRate(lifetime, lifetimeMR),
+    last24h: withHitRate(last24h, last24hMR),
+    thisProcess: withHitRate(stats, { ...inProcessMissReasons }),
   };
 }
 
@@ -245,13 +310,18 @@ export async function getCachedPlan(
   anchor: { type: string; reference: string },
   grounding: { testReport: { passed: number } },
 ): Promise<Record<string, any> | null> {
-  if (!CACHEABLE_TYPES.has(anchor.type)) return null;
+  if (!CACHEABLE_TYPES.has(anchor.type)) {
+    // Record the bookkeeping miss so the histogram reflects every planner
+    // call that *could* have hit cache but didn't (issue #363).
+    bumpStat("misses", 1, "non-cacheable-type");
+    return null;
+  }
 
   const key = cacheKey(anchor);
   try {
     const raw = await getPlanCacheEntry(key);
     if (!raw) {
-      bumpStat("misses");
+      bumpStat("misses", 1, "not-found");
       return null;
     }
 
@@ -262,7 +332,7 @@ export async function getCachedPlan(
     if (staleReason) {
       console.log(`[PlanCache] STALE: ${staleReason} — key ${key.slice(-12)}`);
       bumpStat("stale");
-      bumpStat("misses");
+      bumpStat("misses", 1, "stale-tests");
       await deletePlanCacheEntry(key);
       return null;
     }
@@ -272,7 +342,7 @@ export async function getCachedPlan(
     if (!filesOk) {
       console.log(`[PlanCache] STALE: scope files modified since cache — key ${key.slice(-12)}`);
       bumpStat("stale");
-      bumpStat("misses");
+      bumpStat("misses", 1, "stale-files");
       await deletePlanCacheEntry(key);
       return null;
     }
@@ -282,7 +352,7 @@ export async function getCachedPlan(
     return entry.task;
   } catch (err: any) {
     console.error(`[PlanCache] GET failed: ${err.message}`);
-    bumpStat("misses");
+    bumpStat("misses", 1, "get-error");
     return null;
   }
 }
