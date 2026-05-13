@@ -1,0 +1,19 @@
+[Unit]
+Description=Hydra Autopilot — nightly trigger (22:00 local time)
+Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/operator-playbooks/hydra-autopilot.md
+
+[Timer]
+# Local time. The service has its own 8h internal budget and 9h RuntimeMaxSec,
+# so the run typically completes between 05:00 and 06:00 local time.
+OnCalendar=*-*-* 22:00:00
+
+# If the machine was off at 22:00, run once at next boot. The skill's idle-drain
+# logic will end the run quickly if there's nothing to do.
+Persistent=true
+
+# Tiny randomization so the autopilot doesn't fight other 22:00 timers for
+# resources / API rate-limits.
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

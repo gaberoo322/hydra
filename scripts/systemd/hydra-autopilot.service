@@ -1,0 +1,41 @@
+[Unit]
+Description=Hydra Autopilot — long-running autonomous decision loop (overnight)
+Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/operator-playbooks/hydra-autopilot.md
+After=network-online.target hydra-orchestrator.service
+Wants=network-online.target
+
+# Failure routing — reuse the existing notify-failure template.
+OnFailure=hydra-notify-failure@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/gabe/hydra
+
+# Soft cap above the autopilot's own 8h budget so Phase 7 (drain + digest) has
+# headroom. Beyond this, systemd hard-kills.
+RuntimeMaxSec=32400
+TimeoutStopSec=600
+
+# Subscription-billed: the claude CLI uses the operator's logged-in
+# credentials in ~/.claude/. Do NOT set ANTHROPIC_API_KEY here.
+Environment=HOME=/home/gabe
+Environment=PATH=/home/gabe/.npm-global/bin:/home/gabe/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Optional per-run overrides (uncomment + edit if needed for a one-off):
+# Environment=HYDRA_AUTOPILOT_TOKEN_BUDGET=2000000
+# Environment=HYDRA_AUTOPILOT_MAX_SEC=28800
+# Environment=HYDRA_AUTOPILOT_IDLE_TURNS=5
+
+# The skill itself enforces all phase logic; the CLI just stays alive while the
+# model produces tool calls and exits when the session terminates.
+ExecStart=/usr/bin/env claude -p "/hydra-autopilot"
+
+StandardOutput=journal
+StandardError=journal
+
+# Do NOT auto-restart. The skill self-terminates on budget/clock/idle; if it
+# crashes, the operator should investigate, not blindly relaunch.
+Restart=no
+
+[Install]
+WantedBy=default.target
