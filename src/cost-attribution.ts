@@ -148,7 +148,6 @@ const AGENT_ROLE_TO_TIER: Record<string, string> = {
   meta: "mini",
   adversarial: "mini",
   "high-risk-reviewer": "mini",
-  "code-reviewer": "codex",
 
   // Research loop (see src/research-loop.ts — all spawn with model: "frontier")
   director: "frontier",
