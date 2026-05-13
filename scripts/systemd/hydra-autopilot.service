@@ -28,7 +28,12 @@ Environment=PATH=/home/gabe/.npm-global/bin:/home/gabe/.local/bin:/usr/local/bin
 
 # The skill itself enforces all phase logic; the CLI just stays alive while the
 # model produces tool calls and exits when the session terminates.
-ExecStart=/usr/bin/env claude -p "/hydra-autopilot"
+#
+# --dangerously-skip-permissions is REQUIRED. Headless `claude -p` denies all
+# confirmation-required tool calls by default; without skip-permissions, the
+# subagents the autopilot dispatches return skill_denied and Phase 2 reaps
+# them as immediate failures. Observed in the 2026-05-13 v1 smoke test.
+ExecStart=/usr/bin/env claude --dangerously-skip-permissions -p "/hydra-autopilot"
 
 StandardOutput=journal
 StandardError=journal
