@@ -7,15 +7,13 @@
 // stays a thin dispatcher of "try tier N, otherwise fall through".
 
 import { _admin } from "../backlog.ts";
-import { getNextSpecTask, formatSpecForPrompt } from "../specs.ts";
-import { getAllStuckness } from "../stuckness.ts";
+import { getNextSpecTask } from "../specs.ts";
 import {
   listRange,
   listRPush,
   delKey,
 } from "../redis-adapter.ts";
 import { WORK_QUEUE, PROCESSING_QUEUE } from "./constants.ts";
-import { pickStuckOutcome, buildStucknessAnchor } from "./stuckness-routing.ts";
 import { selectKanbanAnchor } from "./kanban-tier.ts";
 import { selectWorkQueueAnchor } from "./work-queue-tier.ts";
 import { selectReframeAnchor } from "./reframe-queue-tier.ts";
@@ -26,34 +24,14 @@ import { selectPrioritiesDocAnchor } from "./priorities-doc-tier.ts";
 import {
   recordSpecPassedReason,
   recordSpecServed,
-  getCyclesSinceSpecServed,
-  shouldForceSpecPriority,
-  getSpecCapacityFloorN,
 } from "./spec-starvation.ts";
+import { buildSpecAnchor } from "./build-spec-anchor.ts";
+import {
+  dispatchCapacityFloor,
+  defaultCapacityFloors,
+} from "./capacity-floors.ts";
 
 const { isWipLimitReached, requeueStaleInProgressItems } = _admin;
-
-/**
- * Build a "user-request" anchor from a spec task. Shared between the
- * natural spec-tier path and the capacity-floor pre-emption path (issue
- * #301) so both paths produce byte-identical anchors.
- */
-function buildSpecAnchor(specNext: { spec: any; task: any }) {
-  console.log(`[ControlLoop] Picking spec task: "${specNext.task.title}" from spec "${specNext.spec.title}" (task ${specNext.task.id}/${specNext.spec.tasks.length})`);
-  return {
-    type: "user-request" as const,
-    reference: specNext.task.title,
-    whyNow: `Spec "${specNext.spec.title}" task ${specNext.task.id}/${specNext.spec.tasks.length}: ${specNext.task.title}`,
-    context: {
-      specSlug: specNext.spec.slug,
-      specTaskId: specNext.task.id,
-      specTitle: specNext.spec.title,
-      specRationale: specNext.spec.rationale,
-      _specPromptContext: formatSpecForPrompt(specNext.spec, specNext.task),
-    },
-    description: specNext.task.description || specNext.task.title,
-  };
-}
 
 /**
  * Select the next anchor based on priority:
@@ -82,52 +60,30 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
     return { ...opts.anchor, whyNow: "Explicit operator request" };
   }
 
-  // 1.2. Spec-starvation prefetch (issue #301).
-  //      Read the cycles-since-spec-served gauge BEFORE the stuckness/kanban
-  //      tiers so we can decide whether to force the spec tier ahead of
-  //      kanban. Cheap reads only — actual selection happens below.
-  let nextSpec: Awaited<ReturnType<typeof getNextSpecTask>> = null;
-  let cyclesSinceSpec = 0;
-  try {
-    [nextSpec, cyclesSinceSpec] = await Promise.all([
-      getNextSpecTask(),
-      getCyclesSinceSpecServed(),
-    ]);
-  } catch (err: any) {
-    console.error(`[AnchorSelection] spec-starvation prefetch failed: ${err.message}`);
-  }
-  const hasSpecTask = !!nextSpec;
-  const floorN = getSpecCapacityFloorN();
-  const forceSpec = shouldForceSpecPriority(cyclesSinceSpec, hasSpecTask, floorN);
-
-  // 1.25. Stuckness-driven research (issue #253, ADR-0003 vision vector 1).
-  //       When a Target Outcome has not moved favorably for N cycles, the next
-  //       action MUST be research/self-modification — not another pull from the
-  //       kanban backlog. Inserted before the kanban lane so a fired outcome
-  //       short-circuits queue consumption. Per ADR-0005, no operator
-  //       escalation — the autonomous response is research.
+  // 1.2. Unified capacity-floor dispatcher (issue #321).
+  //      Was: two independent branches (stuckness-driven research, spec
+  //      capacity-floor) that stole cycles from kanban without seeing each
+  //      other's state. They've been collapsed into a single declarative
+  //      dispatcher in capacity-floors.ts. At most one floor fires per
+  //      cycle; ties go to the floor with the largest deficit, then by
+  //      declared priority. When no floor is ready we fall through to the
+  //      existing tier chain (kanban → specs → failing tests → …).
   //
-  //       Exception (issue #301): when the spec capacity-floor has fired
-  //       (>= floorN cycles since a spec was served AND a spec task exists),
-  //       the spec tier pre-empts stuckness too — otherwise a perpetually-
-  //       stuck outcome would also starve specs. The floor is intentionally
-  //       cheap (1 cycle per N), so this only steals at most 1/N of the
-  //       stuckness budget.
-  if (!forceSpec) {
-    try {
-      const stucknessRows = await getAllStuckness();
-      const stuckPick = await pickStuckOutcome(stucknessRows);
-      if (stuckPick) {
-        if (hasSpecTask) {
-          await recordSpecPassedReason("stuckness_won");
-        }
-        return await buildStucknessAnchor(stuckPick, eventBus);
-      }
-    } catch (err: any) {
-      console.error(`[AnchorSelection] stuckness check failed: ${err.message}`);
-      // Fall through to existing priority chain — stuckness is a *preferred*
-      // signal, not load-bearing. Original behavior is the safe default.
+  //      Behavior preservation:
+  //        - When ONLY the stuckness floor is ready → fires stuckness anchor,
+  //          identical to the pre-refactor `pickStuckOutcome` path.
+  //        - When ONLY the spec floor is ready → fires spec anchor, identical
+  //          to the pre-refactor `forceSpec && nextSpec` path.
+  //        - When BOTH are ready → spec floor wins (priority 1 < 2),
+  //          matching the pre-refactor `if (!forceSpec)` gating of stuckness.
+  try {
+    const dispatch = await dispatchCapacityFloor(defaultCapacityFloors(), eventBus);
+    if (dispatch.anchor) {
+      return dispatch.anchor;
     }
+  } catch (err: any) {
+    console.error(`[AnchorSelection] capacity-floor dispatch failed: ${err.message}`);
+    // Fall through — floors are *preferred* signals, not load-bearing.
   }
 
   // 1.5. WIP limit enforcement — requeue stale items, then check limit
@@ -151,16 +107,16 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
     console.error(`[ControlLoop] WIP limit check failed: ${err.message}`);
   }
 
-  // 1.7. Spec capacity-floor pre-emption (issue #301).
-  //      If the floor has fired AND a spec task is available, serve the spec
-  //      tier BEFORE kanban. This is the only way out of the historical
-  //      starvation pattern where kanban perpetually held priority 3.
-  if (forceSpec && nextSpec) {
-    console.log(`[ControlLoop] Spec capacity-floor fired (${cyclesSinceSpec} cycles since last spec served, floor=${floorN}) — pre-empting kanban with spec task`);
-    await recordSpecServed();
-    await recordSpecPassedReason("force_floor");
-    return buildSpecAnchor(nextSpec);
+  // The spec-tier prefetch is still needed for the *non-pre-empting* spec
+  // selection path below (priority 4 in CLAUDE.md). When the capacity-floor
+  // dispatcher already served a spec we never reach this point.
+  let nextSpec: Awaited<ReturnType<typeof getNextSpecTask>> = null;
+  try {
+    nextSpec = await getNextSpecTask();
+  } catch (err: any) {
+    console.error(`[AnchorSelection] spec prefetch failed: ${err.message}`);
   }
+  const hasSpecTask = !!nextSpec;
 
   // 2. Kanban queued lane — priority-sorted backlog items take precedence
   //    when the capacity floor has not yet fired.
