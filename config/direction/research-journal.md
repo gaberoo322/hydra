@@ -41,3 +41,5 @@ old ground and to deepen investigation in promising areas.
 - Referee, weather, travel, rest, and schedule-derived sports signals as first-class candidate source cohorts.
 - In-game state ingestion for low-latency sports dislocation detection once pre-game ranking and replay metrics are measurable.
 - Trade-ground-truth evaluation for Polymarket paper replay using confirmed transaction, matched, mined, and settlement evidence rather than public orderbook inference alone.
+
+> Research-loop codex agents disabled 2026-05-13 (#342). New research flows through /hydra-target-research.
