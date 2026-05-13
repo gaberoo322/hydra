@@ -84,7 +84,13 @@ export async function handlePlanResult(
   // learning/metrics.
   if (task?.__noWork) {
     const noWorkReason = task.reason || "all priorities addressed";
-    console.log(`[ControlLoop] Planner noWork — ${noWorkReason}`);
+    // Issue #361 — output-token cap is a distinct, addressable failure
+    // mode (not "all priorities addressed"). Surface it in cycle metrics
+    // so the operator can track cap-hit rate and tune the cap if needed.
+    const plannerTokenCapHit = task.__plannerTokenCapHit === true;
+    const plannerMaxOutputTokens = typeof task.__plannerMaxOutputTokens === "number"
+      ? task.__plannerMaxOutputTokens : null;
+    console.log(`[ControlLoop] Planner noWork — ${noWorkReason}${plannerTokenCapHit ? ` (token cap=${plannerMaxOutputTokens})` : ""}`);
 
     // Circuit breaker: noWork counts as an abandonment (issue #137)
     try {
@@ -115,9 +121,13 @@ export async function handlePlanResult(
       metricsOverrides: {
         tasksAbandoned: 1, taskTitle: `noWork: ${noWorkReason}`,
         anchorType: anchor.type, anchorReference: anchor.reference,
-        plannerModel: "unknown", abandonReason: `Planner noWork: ${noWorkReason}`,
+        plannerModel: typeof task.__plannerModel === "string" ? task.__plannerModel : "unknown",
+        abandonReason: `Planner noWork: ${noWorkReason}`,
         anchorConfidence: anchorConfidence?.score ?? null, anchorSkipped: false,
         noWork: true, noWorkReason,
+        // Issue #361 — record token-cap signal as flat metric fields
+        plannerTokenCapHit,
+        ...(plannerMaxOutputTokens !== null ? { plannerMaxOutputTokens } : {}),
       },
     });
     return { continue: false, result: { cycleId, tasks: [], reason: `Planner noWork: ${noWorkReason}`, durationMs: Date.now() - startTime } };
