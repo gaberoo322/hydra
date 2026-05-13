@@ -4,6 +4,7 @@ import { redisKeys } from "../redis-keys.ts";
 import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../redis-adapter.ts";
 import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost-attribution.ts";
 import { getSpecStarvationStats } from "../anchor-selection/spec-starvation.ts";
+import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
 
 export function createMetricsRouter() {
   const router = Router();
@@ -182,6 +183,20 @@ export function createMetricsRouter() {
       res.json(stats);
     } catch (err: any) {
       console.error(`[api/metrics] /metrics/spec-starvation failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /metrics/capacity-floors — Unified capacity-floor view (issue #321).
+  // Surfaces every declared floor (self-improvement, specs, …) with its
+  // target share, realised share over the rolling window, and per-floor
+  // gauges. /metrics/spec-starvation stays as the legacy single-floor view.
+  router.get("/metrics/capacity-floors", async (_req, res) => {
+    try {
+      const snapshot = await getCapacityFloorsSnapshot();
+      res.json(snapshot);
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/capacity-floors failed: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });

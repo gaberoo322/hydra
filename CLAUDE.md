@@ -58,19 +58,21 @@ Merge lock: short-lived Redis lock (60s TTL) serializes merges across Codex and 
 Determined by `selectAnchor()` in `src/anchor-selection.ts`. Priority order:
 
 1. **Explicit operator request** — passed via `opts.anchor`
-2. **Stuckness-driven research** — when `getAllStuckness()` reports a fired Target Outcome, build a `research` anchor (`outcome-stuckness:<name>`, `domain: orchestrator-self-improvement`) instead of pulling backlog. Enforces ADR-0003 vision vector 1. 5-cycle cooldown per outcome.
-3. **Spec capacity-floor pre-emption** — every Nth eligible cycle (default N=3, `HYDRA_SPEC_CAPACITY_FLOOR_N`), if a spec task exists AND `cyclesSinceSpecLastServed >= N`, the spec tier pre-empts kanban *and* stuckness. Prevents the active-specs lane from being indefinitely shadowed (issue #301). Instrumented at `/api/metrics/spec-starvation`.
-4. **Kanban queued lane** — atomic claim (Lua script), gated by WIP limit
-5. **Active specs** — next unchecked task from oldest active spec (also reachable below kanban when the capacity-floor has not fired)
-6. **Failing tests** — from grounding report
-7. **Typecheck errors** — from grounding report
-8. **Work queue** — items from POST /queue or research auto-queue (LMOVE to processing)
-9. **Reframe queue** — tasks that failed repeatedly, need diagnosis
-10. **Prior failures** — stored in Redis, capped at 2 retries before escalation
-11. **TODO/FIXME markers** — from codebase
-12. **Regression hunt** — every 10 merges, adversarial testing of recent features
-13. **Codebase health** — reductive improvements (split, consolidate, document)
-14. **Priorities doc** — fallback to `config/direction/priorities.md`. The doc is refreshed by `/hydra-target-research`, not by the control loop. When the doc-anchor saturation gate fires (last N cycles all drift-rejected) or the doc has been used >=5x in the last 10 cycles, the tier returns no-work and logs that refresh is deferred to the next research run.
+2. **Capacity-floor dispatcher (issue #321)** — single dispatcher in `src/anchor-selection/capacity-floors.ts` evaluates every declared floor and fires AT MOST one per cycle (highest-deficit wins; tiebreak by declared priority). The dispatcher unifies what used to be two independent pre-emption branches (issues #245 / #301):
+   - **`specs` floor** — every Nth eligible cycle (default N=3, `HYDRA_CAPACITY_FLOOR_SPEC_N`; legacy `HYDRA_SPEC_CAPACITY_FLOOR_N` honoured with deprecation log), if a spec task exists, pre-empts kanban. Prevents the active-specs lane from being indefinitely shadowed.
+   - **`self-improvement` floor** — when `getAllStuckness()` reports a fired Target Outcome, build a `research` anchor (`outcome-stuckness:<name>`, `domain: orchestrator-self-improvement`) instead of pulling backlog. Enforces ADR-0003 vision vector 1. 5-cycle cooldown per outcome.
+   When BOTH are ready in the same cycle, the specs floor wins (lower tiebreak priority value), matching pre-refactor behaviour. Instrumented at `/api/metrics/capacity-floors` (unified) and `/api/metrics/spec-starvation` (legacy single-floor view).
+3. **Kanban queued lane** — atomic claim (Lua script), gated by WIP limit
+4. **Active specs** — next unchecked task from oldest active spec (also reachable below kanban when the capacity-floor has not fired)
+5. **Failing tests** — from grounding report
+6. **Typecheck errors** — from grounding report
+7. **Work queue** — items from POST /queue or research auto-queue (LMOVE to processing)
+8. **Reframe queue** — tasks that failed repeatedly, need diagnosis
+9. **Prior failures** — stored in Redis, capped at 2 retries before escalation
+10. **TODO/FIXME markers** — from codebase
+11. **Regression hunt** — every 10 merges, adversarial testing of recent features
+12. **Codebase health** — reductive improvements (split, consolidate, document)
+13. **Priorities doc** — fallback to `config/direction/priorities.md`. The doc is refreshed by `/hydra-target-research`, not by the control loop. When the doc-anchor saturation gate fires (last N cycles all drift-rejected) or the doc has been used >=5x in the last 10 cycles, the tier returns no-work and logs that refresh is deferred to the next research run.
 
 **Scheduler-side research floor (issue #327, sibling of #245 / #301).** Independent of `selectAnchor()`: `maybeRunResearch()` in `src/scheduler.ts` consults the research capacity floor before queue-depth / ratio-cap suppression. When the realised 24h research:build ratio drops below `HYDRA_RESEARCH_BUILD_RATIO_MIN` (default 1/20) over at least `HYDRA_RESEARCH_FLOOR_WINDOW` builds (default 20), the scheduler forces a research cycle on the next tick. The floor overrides queue-depth and `buildRatioMax` suppression *but never bypasses* the min-interval throttle (`HYDRA_RESEARCH_MIN_INTERVAL_MS`, default 2h) or the daily cost cap. If two consecutive forced cycles return zero auto-queued opportunities, the floor self-suppresses for 24h and alerts the operator. Surfaced at `/api/scheduler/status` under `research.buildRatioMin` and `research.floor`.
 
