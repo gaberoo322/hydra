@@ -159,13 +159,28 @@ function getDefaultCodex(): InstanceType<typeof Codex> {
 }
 
 /**
- * Build a Codex instance for one agent call. When OTel is enabled we
- * construct a fresh Codex with per-call resource attributes; otherwise
- * we reuse the process-wide singleton.
+ * Build a Codex instance for one agent call. When OTel is enabled OR a
+ * per-call config override is requested (e.g. `model_max_output_tokens`),
+ * construct a fresh Codex with those settings. Otherwise reuse the
+ * process-wide singleton.
+ *
+ * Issue #361 — `maxOutputTokens` is forwarded to the Codex CLI via its
+ * `--config model_max_output_tokens=<N>` mechanism, exposed by the SDK as
+ * `CodexOptions.config`. Setting it per-call means quick-fix planners can
+ * use a tight cap while complex tasks get more room — without touching the
+ * shared singleton.
  */
-function getCodexForCall(otelAttrs: OtelAttrs): InstanceType<typeof Codex> {
+function getCodexForCall(
+  otelAttrs: OtelAttrs,
+  maxOutputTokens?: number,
+): InstanceType<typeof Codex> {
   const env = buildCodexOtelEnv(otelAttrs);
-  if (env) return new Codex({ env });
+  const config = typeof maxOutputTokens === "number" && maxOutputTokens > 0
+    ? { model_max_output_tokens: maxOutputTokens }
+    : undefined;
+  if (env || config) {
+    return new Codex({ ...(env ? { env } : {}), ...(config ? { config } : {}) });
+  }
   return getDefaultCodex();
 }
 
@@ -186,11 +201,12 @@ function getOrCreateThread(
   threadOptions: ThreadOptions,
   resolvedModel: string,
   otelAttrs: OtelAttrs,
+  maxOutputTokens?: number,
 ): { thread: InstanceType<typeof import("@openai/codex-sdk").Thread>; reused: boolean; entry?: PersistentThreadEntry } {
   // Only reuse threads for read-only agents (planner, skeptic, meta).
   // Executor needs a fresh thread per cycle (file state changes between cycles).
   if (!READ_ONLY_AGENTS.has(agentName)) {
-    const codex = getCodexForCall(otelAttrs);
+    const codex = getCodexForCall(otelAttrs, maxOutputTokens);
     return { thread: codex.startThread(threadOptions), reused: false };
   }
 
@@ -198,7 +214,7 @@ function getOrCreateThread(
   const existing = _persistentThreads.get(key);
 
   if (existing && (Date.now() - existing.createdAt) < THREAD_MAX_AGE_MS) {
-    const codex = getCodexForCall(otelAttrs);
+    const codex = getCodexForCall(otelAttrs, maxOutputTokens);
     // Prefer resumeThread() once we know the id — it works across Codex
     // instances and is required when OTel attaches per-call env.
     if (existing.threadId) {
@@ -215,7 +231,7 @@ function getOrCreateThread(
   }
 
   // Create new thread and cache it
-  const codex = getCodexForCall(otelAttrs);
+  const codex = getCodexForCall(otelAttrs, maxOutputTokens);
   const thread = codex.startThread(threadOptions);
   const entry: PersistentThreadEntry = { thread, threadId: null, createdAt: Date.now() };
   _persistentThreads.set(key, entry);
@@ -231,6 +247,34 @@ function invalidateThread(agentName: string, resolvedModel: string) {
   if (_persistentThreads.delete(key)) {
     console.log(`[CodexRunner] Invalidated ${agentName} thread after error`);
   }
+}
+
+/**
+ * Issue #361 — recognise Codex CLI / model messages that indicate the
+ * output-token cap aborted the call. The CLI's wording has varied across
+ * versions ("max output tokens reached", "max_output_tokens", "output
+ * tokens limit", "maximum output token count"), so we match liberally on
+ * lowercased substrings. Pure function — exported for unit tests.
+ */
+export function isMaxTokensMessage(message: unknown): boolean {
+  if (typeof message !== "string" || message.length === 0) return false;
+  const m = message.toLowerCase();
+  // Common phrasings from the OpenAI / Codex stack
+  if (m.includes("max_output_tokens")) return true;
+  if (m.includes("max output tokens")) return true;
+  if (m.includes("maximum output token")) return true;
+  if (m.includes("output token limit")) return true;
+  if (m.includes("output tokens limit")) return true;
+  // "max tokens" alone is ambiguous (could mean input window), but in an
+  // error/turn.failed context where the call did not complete, it is
+  // overwhelmingly the output cap.
+  if (m.includes("max tokens reached")) return true;
+  if (m.includes("max tokens exceeded")) return true;
+  if (m.includes("token limit reached")) return true;
+  // Codex CLI surfaces some caps as "finish_reason=length"
+  if (m.includes("finish_reason=length")) return true;
+  if (m.includes("\"finish_reason\":\"length\"")) return true;
+  return false;
 }
 
 /**
@@ -391,13 +435,25 @@ async function runLocalAgent({ agentName, personality, prompt, workDir, timeout:
     costCapTripped: false,
     costCapReason: null,
     costCapPartialOutput: "",
+    // Issue #361 — local Ollama doesn't honour `model_max_output_tokens`
+    // (the cap is a CLI/Codex feature, not an Ollama feature). Always
+    // return false here for return-shape consistency.
+    maxTokensReached: false,
+    maxOutputTokens: null,
   };
 }
 
 /**
  * Run a task using the Codex SDK.
+ *
+ * Optional knobs:
+ *   - `maxOutputTokens` (issue #361): hard cap on output tokens for this
+ *     call. Forwarded to Codex CLI via `--config model_max_output_tokens=<N>`.
+ *     When the cap aborts a call mid-output, the return value sets
+ *     `maxTokensReached: true` so the caller can treat it as no-work rather
+ *     than acting on a partial structured payload.
  */
-async function runAgent({ agentName, personality, prompt, model, taskId, correlationId, workDir, onStream, outputSchema, timeout: explicitTimeout, complexity }: any) {
+async function runAgent({ agentName, personality, prompt, model, taskId, correlationId, workDir, onStream, outputSchema, timeout: explicitTimeout, complexity, maxOutputTokens }: any) {
   const streamFn = onStream || _globalStreamCallback;
   const startTime = Date.now();
   const requestedTier = model || "frontier";
@@ -464,7 +520,7 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   };
 
   const timeout = explicitTimeout || AGENT_TIMEOUTS[agentName] || 300_000;
-  const { thread, reused, entry } = getOrCreateThread(agentName, threadOptions, resolvedModel, otelAttrs);
+  const { thread, reused, entry } = getOrCreateThread(agentName, threadOptions, resolvedModel, otelAttrs, maxOutputTokens);
   if (reused) {
     console.log(`[CodexRunner] Reusing persistent ${agentName} thread (prompt caching active)`);
   }
@@ -488,6 +544,13 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
   let timedOut = false;
   let usageLimitHit = false;
   let exitCode = 0;
+  // Issue #361 — set when the Codex CLI / model reports that the call was
+  // aborted because the configured `model_max_output_tokens` was reached.
+  // Distinct from `usageLimitHit` (account-level quota) and `costCapTripped`
+  // (Hydra streaming budget). Detected from explicit turn.failed / error
+  // messages and from heuristic "agent_message missing but output_tokens
+  // saturated the cap" patterns.
+  let maxTokensReached = false;
 
   // Issue #286: build a streaming cost budget so a single call can't
   // burst past the per-cycle cap mid-stream. Returns null if the cap is
@@ -593,14 +656,48 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
         console.error(`[CodexRunner] Codex usage limit hit for ${agentName}`);
       }
 
+      // Issue #361 — Codex CLI surfaces output-token-cap aborts as either
+      // an `error` item or a `turn.failed` carrying a message containing
+      // "max_output_tokens" / "output tokens" / "max tokens". Be liberal
+      // in what we match — the CLI's wording has varied across versions
+      // and the signal is more valuable than a strict pattern.
+      if (event.type === "error" && isMaxTokensMessage((event as any).message)) {
+        maxTokensReached = true;
+        console.error(`[CodexRunner] ${agentName} hit output-token cap (error item): ${(event as any).message}`);
+      }
+
       if (event.type === "turn.failed") {
         const errMsg = event.error?.message || "unknown";
         if (errMsg.includes("UsageLimitExceeded")) {
           usageLimitHit = true;
         }
+        if (isMaxTokensMessage(errMsg)) {
+          maxTokensReached = true;
+          console.error(`[CodexRunner] ${agentName} hit output-token cap (turn.failed): ${errMsg}`);
+        }
         console.error(`[CodexRunner] Turn failed for ${agentName}: ${errMsg}`);
         exitCode = 1;
       }
+    }
+
+    // Issue #361 — heuristic fallback. If the call completed without an
+    // explicit error but produced no agent_message AND the output token
+    // count is at or above the configured cap, the model almost certainly
+    // ran out of room mid-stream. Treat as cap-reached so callers can
+    // record it correctly rather than falling through to the generic
+    // "unparseable output" path.
+    if (
+      !maxTokensReached
+      && !timedOut
+      && !usageLimitHit
+      && !costCapTripped
+      && typeof maxOutputTokens === "number"
+      && maxOutputTokens > 0
+      && !finalMessage
+      && usage.outputTokens >= Math.floor(maxOutputTokens * 0.9)
+    ) {
+      maxTokensReached = true;
+      console.error(`[CodexRunner] ${agentName} likely hit output-token cap (heuristic): output=${usage.outputTokens}/cap=${maxOutputTokens}, no agent_message produced`);
     }
 
     // Capture thread.id into the persistent cache so the *next* call can
@@ -702,6 +799,11 @@ async function runAgent({ agentName, personality, prompt, model, taskId, correla
     costCapTripped,
     costCapReason,
     costCapPartialOutput,
+    // Issue #361 — output-token cap hit during planning/execution. The
+    // caller (typically runPlannerAgent) treats this as noWork rather
+    // than attempting to parse a truncated structured payload.
+    maxTokensReached,
+    maxOutputTokens: typeof maxOutputTokens === "number" ? maxOutputTokens : null,
   };
 }
 
@@ -774,3 +876,5 @@ async function searchKnowledge(query, limit = 5, sessionId = null) {
 }
 
 export { runAgent, runLocalAgent, isOllamaAvailable, findPersonality, searchKnowledge, MODEL_TIERS, MODEL_PRICING, composePrompt, buildCodexArgs, computeCost, setAgentStreamCallback, getExecutorTimeout, OLLAMA_HOST };
+// Note: `isMaxTokensMessage` and `maybeUpdateStreamBudget` are exported
+// inline above via `export function` declarations.

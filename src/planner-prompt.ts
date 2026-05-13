@@ -107,6 +107,64 @@ export function validateTaskSchema(task) {
 }
 
 // ---------------------------------------------------------------------------
+// Output-token cap selection — issue #361
+// ---------------------------------------------------------------------------
+//
+// The planner accounts for ~74% of orchestrator spend, dominated by frontier
+// reasoning tokens. Top-5 cycles burned $12–$18 each on planner alone, with
+// the model emitting ~1M output tokens before producing a ~2K-token JSON
+// task. A static `max_output_tokens` cap is the cheapest way to bound this:
+// the model is forced to stop reasoning before it runs away, and if it can't
+// produce a complete structured payload under the cap, the cycle records
+// `max_tokens_reached` and exits as noWork instead of crashing.
+//
+// Caps are chosen by anchor type pre-planner (post-planner classification
+// runs only AFTER we have a task in hand, which is too late to budget the
+// call that produces it). Quick-fix / cheap anchors get a tighter cap
+// because their compressed prompt does not justify deep reasoning; complex
+// research/reframe anchors get a higher ceiling but still well below the
+// observed 1M-token outliers.
+//
+// At frontier rates ($15/1M output), these caps imply an upper bound of:
+//   quick-fix : 3000 tokens → ~$0.045 per call
+//   standard  : 8000 tokens → ~$0.12 per call
+//   complex   : 12000 tokens → ~$0.18 per call
+//
+// All well below the current $5 average and $15 ceiling.
+
+export const PLANNER_MAX_OUTPUT_TOKENS = {
+  quickFix: 3000,
+  standard: 8000,
+  complex: 12000,
+} as const;
+
+/**
+ * Pure helper — choose the planner output-token cap for an anchor BEFORE the
+ * planner runs. Mirrors the cheap/standard anchor classification used by
+ * model-tier selection (see issue #138 / `planner-model-routing.test.mts`).
+ *
+ * Exported for unit tests. Inputs are intentionally narrow (just `type`) so
+ * the helper can be exercised without constructing a full anchor object.
+ */
+export function selectPlannerTokenCap(anchorType: string): number {
+  // quick-fix anchor types — narrow, deterministic, compressed prompt
+  if (anchorType === "failing-test" || anchorType === "prior-failure") {
+    return PLANNER_MAX_OUTPUT_TOKENS.quickFix;
+  }
+  // codebase-health is also cheap (reductive, single-file scope)
+  if (anchorType === "codebase-health") {
+    return PLANNER_MAX_OUTPUT_TOKENS.quickFix;
+  }
+  // Reframe anchors retry a failed task — full ceremony, complex reasoning.
+  if (anchorType === "reframe") {
+    return PLANNER_MAX_OUTPUT_TOKENS.complex;
+  }
+  // Everything else (kanban, spec, research, work-queue, user-request, todo,
+  // typecheck-error, regression-hunt, doc-anchor): standard cap.
+  return PLANNER_MAX_OUTPUT_TOKENS.standard;
+}
+
+// ---------------------------------------------------------------------------
 // Research context formatter — gives the planner rich context from research
 // ---------------------------------------------------------------------------
 
@@ -419,6 +477,12 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
 
   const personality = await findPersonality("planner");
 
+  // Issue #361: hard-cap output tokens to bound runaway frontier reasoning.
+  // Chosen pre-planner from anchor type (the only signal available before
+  // the planner produces a task). See selectPlannerTokenCap above for the
+  // mapping rationale.
+  const plannerMaxOutputTokens = selectPlannerTokenCap(anchor.type);
+
   const result = await runAgent({
     agentName: "planner",
     personality,
@@ -427,6 +491,7 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     taskId: "planner",
     correlationId: cycleId,
     outputSchema: PLANNER_OUTPUT_SCHEMA,
+    maxOutputTokens: plannerMaxOutputTokens,
     // Pre-classification heuristic for OTel span tagging only — the
     // authoritative complexity is set post-planner by classifyComplexity().
     complexity: isCheapAnchor ? "quick-fix" : "standard",
@@ -437,6 +502,24 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     console.error(`[ControlLoop] Codex usage limit hit during planning — signaling pause`);
     // Return a sentinel object that the caller can detect
     return { __usageLimitHit: true } as any;
+  }
+
+  // Issue #361: hard output-token cap aborted the call before a complete
+  // structured payload was emitted. Treat as noWork (partial JSON is unsafe
+  // to act on) and tag the cycle metrics so we can track cap-hit rate.
+  if (result.maxTokensReached) {
+    console.error(`[ControlLoop] Planner output-token cap reached (cap=${plannerMaxOutputTokens}, anchor=${anchor.type}) — treating as noWork`);
+    await getTracker().logAgentRun(
+      cycleId, "planner", "planner", result.duration, "max-tokens-reached",
+      result.usage, result.costUsd, result.model,
+    );
+    return {
+      __noWork: true,
+      reason: "max_tokens_reached",
+      __plannerTokenCapHit: true,
+      __plannerMaxOutputTokens: plannerMaxOutputTokens,
+      __plannerModel: result.model,
+    } as any;
   }
 
   // Parse output — try direct parse, then regex fallback, then fail loud
