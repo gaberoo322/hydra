@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+#
+# hydra — thin CLI wrapper around the orchestrator's HTTP API.
+#
+# Skills (hydra-autopilot, hydra-doctor, hydra-sweep, etc.) call `hydra <cmd>`
+# from their bash collectors. Until this file existed, those calls failed
+# silently and the skills fell back to raw curl / docker exec — fragile.
+#
+# All subcommands print JSON on stdout (or plain text where the API returns
+# plain text). Callers pipe through `python3 -c 'import json,sys; …'` or `jq`.
+#
+# Override the API base via HYDRA_BASE_URL (default: http://localhost:4000).
+#
+# Usage examples:
+#   hydra health
+#   hydra health deep
+#   hydra scheduler status
+#   hydra scheduler start | stop
+#   hydra cycle status
+#   hydra cycle start
+#   hydra cycle reality
+#   hydra backlog ls | counts | move <id> <lane>
+#   hydra queue ls | add <reference>
+#   hydra metrics [--count N]
+#   hydra alerts ls [--limit N]
+#   hydra recommendations
+#   hydra research start | force | history
+#   hydra raw GET <path>
+#   hydra raw POST <path> [--json '<body>']
+#   hydra raw PATCH <path> --json '<body>'
+
+set -eu
+
+BASE_URL="${HYDRA_BASE_URL:-http://localhost:4000}"
+
+usage() {
+  sed -n '/^# Usage examples:/,/^$/p' "$0" | sed 's/^# \?//'
+  exit "${1:-2}"
+}
+
+# Wrappers — curl with sane defaults. -sS hides the progress bar but still
+# surfaces errors on stderr. We do NOT use -f so callers can see 4xx/5xx
+# JSON bodies that may contain useful error context.
+_get()    { curl -sS "$BASE_URL/api$1"; }
+_post()   { local p="$1"; shift; if [ "$#" -gt 0 ]; then curl -sS -X POST -H 'content-type: application/json' -d "$1" "$BASE_URL/api$p"; else curl -sS -X POST "$BASE_URL/api$p"; fi; }
+_patch()  { curl -sS -X PATCH -H 'content-type: application/json' -d "$2" "$BASE_URL/api$1"; }
+_delete() { curl -sS -X DELETE "$BASE_URL/api$1"; }
+
+cmd_health() {
+  case "${1:-}" in
+    deep) _get "/health/deep" ;;
+    ""  ) _get "/health" ;;
+    *   ) echo "hydra health: unknown sub '$1'" >&2; exit 2 ;;
+  esac
+}
+
+cmd_scheduler() {
+  case "${1:-}" in
+    status) _get "/scheduler/status" ;;
+    start ) _post "/scheduler/start" ;;
+    stop  ) _post "/scheduler/stop" ;;
+    *     ) echo "hydra scheduler: need status|start|stop" >&2; exit 2 ;;
+  esac
+}
+
+cmd_cycle() {
+  case "${1:-}" in
+    status ) _get "/cycle/status" ;;
+    start  ) _post "/cycle/start" ;;
+    reality) _get "/cycle/reality" ;;
+    history)
+      shift
+      local q=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --limit) q="?limit=$2"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      _get "/cycle/history${q}" ;;
+    *      ) echo "hydra cycle: need status|start|reality|history" >&2; exit 2 ;;
+  esac
+}
+
+cmd_backlog() {
+  case "${1:-}" in
+    ls|""  ) _get "/backlog" ;;
+    counts ) _get "/backlog/counts" ;;
+    move   )
+      shift
+      [ "$#" -ge 2 ] || { echo "hydra backlog move: need <id> <lane>" >&2; exit 2; }
+      _patch "/backlog/$1" "{\"lane\":\"$2\"}" ;;
+    *      ) echo "hydra backlog: need ls|counts|move" >&2; exit 2 ;;
+  esac
+}
+
+cmd_queue() {
+  case "${1:-}" in
+    ls|"") _get "/queue" ;;
+    add )
+      shift
+      [ "$#" -ge 1 ] || { echo "hydra queue add: need <reference>" >&2; exit 2; }
+      local ref="$1"; shift
+      local reason="${1:-Added by hydra CLI}"
+      _post "/queue" "{\"reference\":$(printf '%s' "$ref" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"reason\":$(printf '%s' "$reason" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"source\":\"hydra-cli\"}" ;;
+    *   ) echo "hydra queue: need ls|add" >&2; exit 2 ;;
+  esac
+}
+
+cmd_metrics() {
+  local q=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --count) q="?count=$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  _get "/metrics${q}"
+}
+
+cmd_alerts() {
+  case "${1:-}" in
+    ls|"")
+      shift || true
+      local q=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --limit) q="?limit=$2"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      _get "/alerts${q}" ;;
+    dismiss-all) _post "/alerts/dismiss-all" ;;
+    *          ) echo "hydra alerts: need ls|dismiss-all" >&2; exit 2 ;;
+  esac
+}
+
+cmd_recommendations() {
+  _get "/recommendations"
+}
+
+cmd_research() {
+  case "${1:-}" in
+    start  ) _post "/research/start" ;;
+    force  ) _post "/research/force" ;;
+    history)
+      shift
+      local q=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --limit) q="?limit=$2"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      _get "/research/history${q}" ;;
+    *      ) echo "hydra research: need start|force|history" >&2; exit 2 ;;
+  esac
+}
+
+cmd_raw() {
+  local method="${1:-}"
+  local path="${2:-}"
+  shift 2 || { echo "hydra raw: need <METHOD> <PATH>" >&2; exit 2; }
+  local body=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) body="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$method" in
+    GET)    _get "$path" ;;
+    POST)   if [ -n "$body" ]; then _post "$path" "$body"; else _post "$path"; fi ;;
+    PATCH)  [ -n "$body" ] || { echo "hydra raw PATCH: need --json '<body>'" >&2; exit 2; }
+            _patch "$path" "$body" ;;
+    DELETE) _delete "$path" ;;
+    *)      echo "hydra raw: unsupported method '$method'" >&2; exit 2 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
+[ "$#" -ge 1 ] || usage
+
+case "$1" in
+  -h|--help|help) usage 0 ;;
+  health)          shift; cmd_health "$@" ;;
+  scheduler)       shift; cmd_scheduler "$@" ;;
+  cycle)           shift; cmd_cycle "$@" ;;
+  backlog)         shift; cmd_backlog "$@" ;;
+  queue)           shift; cmd_queue "$@" ;;
+  metrics)         shift; cmd_metrics "$@" ;;
+  alerts)          shift; cmd_alerts "$@" ;;
+  recommendations) shift; cmd_recommendations "$@" ;;
+  research)        shift; cmd_research "$@" ;;
+  raw)             shift; cmd_raw "$@" ;;
+  *)               echo "hydra: unknown command '$1'" >&2; usage ;;
+esac
