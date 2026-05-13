@@ -13,9 +13,10 @@ const STREAMS = {
   DLQ: redisKeys.streamDlq(),
 };
 
-// Consumer groups — only streams with active consumers
+// Consumer groups — only streams with active consumers.
+// META consumer removed in #345 (meta agent deleted); stream key retained
+// for back-compat with any external listeners.
 const CONSUMER_GROUPS = {
-  [STREAMS.META]: ["meta"],
   [STREAMS.PROPOSALS]: ["orchestrator"],
   [STREAMS.NOTIFICATIONS]: ["telegram"],
   [STREAMS.DLQ]: ["dlq-processor"],

@@ -5,7 +5,7 @@ import { EventBus, STREAMS } from "./event-bus.ts";
 import { createApi } from "./api.ts";
 import { createTracker, getTracker } from "./task-tracker.ts";
 import { initMetrics } from "./metrics.ts";
-import { watchApprovals, runMetaAnalysis } from "./proposals.ts";
+import { watchApprovals } from "./proposals.ts";
 import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule } from "./cleanup.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler.ts";
@@ -135,16 +135,6 @@ function startConsumers(eventBus) {
         await eventBus.publisher.ltrim(ALERTS_KEY, 0, 99); // keep 100 most recent
       }
     }, { count: 1, blockMs: 5000 }),
-  );
-
-  // Meta agent consumer — triggers analysis from measured failures
-  startConsumerWithRecovery("meta", () =>
-    eventBus.consume(STREAMS.META, "meta", `meta-${process.pid}`, async (event) => {
-      if (event.type === "cycle:report" || event.type === "eval:failed") {
-        console.log(`[Consumer] meta processing ${event.type}`);
-        await runMetaAnalysis(eventBus, event);
-      }
-    }, { count: 1, blockMs: 10000 }),
   );
 
   // Dead-letter queue consumer — alert and mark tasks failed

@@ -1,4 +1,3 @@
-import { STREAMS } from "./event-bus.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { canTransitionTo, isTerminal, TERMINAL_STATES, VALID_TARGETS } from "./task-machine.ts";
 import type { TaskState } from "./task-machine.ts";
@@ -146,16 +145,8 @@ class TaskTracker {
     const total = parseInt(cycle.total || "0");
     console.log(`[TaskTracker] Cycle ${cycleId} completed — ${completed} ok, ${failed} failed, ${abandoned} abandoned, ${timedOut} timed out`);
 
-    // Only publish to Meta stream — the V2 control loop handles notifications
-    // with the full reality report payload (task title, grounding, commit, etc.)
-    if (eventBus) {
-      await eventBus.publish(STREAMS.META, {
-        type: "cycle:report",
-        source: "orchestrator",
-        correlationId: cycleId,
-        payload: { trigger: "all_tasks_complete", total, completed, failed, abandoned, timedOut },
-      });
-    }
+    // Meta stream publish removed in #345 — meta agent deleted; V2 control loop
+    // handles its own notifications with the full reality report payload.
   }
 
   /**
