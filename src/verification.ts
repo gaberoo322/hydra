@@ -5,13 +5,16 @@
  *   - src/fixer.ts             — fixability classification + fixer orchestration
  *   - src/mutation.ts          — mutation testing gate and runner
  *   - src/jit.ts               — JIT test generation (mutation-aware and diff-aware)
- *   - src/adversarial.ts       — adversarial validation and finding-to-queue conversion
  *   - src/scope-enforcement.ts — scope gate (>80% out-of-scope blocks merge)
  *
- * Public API (3 exports):
+ * Public API (2 exports):
  *   - verify()              — run the full verification pipeline
  *   - VerificationResult    — result type
- *   - trackMergedCommit()   — record a merge for revert-correlation (used by post-merge.ts)
+ *
+ * Issue #344 (Phase A codex-removal): the in-cycle adversarial validation
+ * agent was removed. The Redis schema (`hydra:adversarial:*`) is preserved
+ * for digest + dashboard; the nightly replacement is tracked in
+ * docs/operator-playbooks/hydra-target-adversarial.md.
  */
 
 import * as Sentry from "@sentry/node";
@@ -38,13 +41,6 @@ import {
   JIT_SKIP_QUICK_FIX, JIT_SKIP_NO_DIFF, JIT_SKIP_NO_FILES_CHANGED,
 } from "./jit.ts";
 import { runScopeEnforcement } from "./scope-enforcement.ts";
-import {
-  runAdversarialValidation, findingsToQueueItems, checkRevertCorrelation,
-  trackMergedCommit,
-} from "./adversarial.ts";
-
-// Re-export trackMergedCommit for post-merge.ts
-export { trackMergedCommit } from "./adversarial.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -789,16 +785,6 @@ function summarizeVerification(result: any) {
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers (used by post-merge.ts — not part of the public API)
-// ---------------------------------------------------------------------------
-
-export const _internal = {
-  runAdversarialValidation,
-  findingsToQueueItems,
-  checkRevertCorrelation,
-};
-
-// ---------------------------------------------------------------------------
 // Backward-compat alias
 // ---------------------------------------------------------------------------
 
@@ -828,9 +814,6 @@ export const _testing = {
   SKIP_PATTERNS,
   shouldSkipMutation,
   generateMutations,
-  runAdversarialValidation,
-  findingsToQueueItems,
-  checkRevertCorrelation,
   parseVerificationTestCount,
   isFixableFailure,
 };

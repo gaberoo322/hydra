@@ -40,7 +40,7 @@ import { reportOutcome } from "./anchor-selection.ts";
 import { clearOutcomes } from "./learning.ts";
 import { complete, fail } from "./backlog.ts";
 import { markTaskComplete } from "./specs.ts";
-import { trackMergedCommit, _internal as _verificationInternal } from "./verification.ts";
+import { trackMergedCommit, checkRevertCorrelation } from "./merge-tracking.ts";
 import { PROJECT_WORKSPACE } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
 import { getTargetServiceName } from "./target-config.ts";
@@ -592,52 +592,7 @@ export async function runPostMerge(
     }
   }
 
-  // =========================================================================
-  // Step 8.7: ADVERSARIAL VALIDATION
-  // =========================================================================
   if (commitSha && !rolledBack && verification.filesChanged?.length > 0) {
-    try {
-      console.log(`[ControlLoop] Step 8.7: Running adversarial validation...`);
-      const advReport = await _verificationInternal.runAdversarialValidation(cycleId, task.title, verification.filesChanged, commitSha);
-      if (advReport.findings.length > 0) {
-        console.log(`[ControlLoop] Adversarial: ${advReport.findings.length} finding(s) — ${advReport.findings.filter((f: any) => f.severity === "high").length} high, ${advReport.findings.filter((f: any) => f.severity === "medium").length} medium`);
-        const queueItems = _verificationInternal.findingsToQueueItems(advReport);
-        if (queueItems.length > 0) {
-          let queued = 0;
-          for (const item of queueItems.slice(0, 3)) {
-            // Dedup against existing work queue items
-            const existingMatch = await findWorkQueueDuplicate(item.reference);
-            if (existingMatch) {
-              console.log(`[ControlLoop] Adversarial: skipped (queue dedup) — ${item.reference.slice(0, 80)}`);
-              continue;
-            }
-            // Dedup against recently-merged tasks
-            if (await isAdversarialFindingAlreadyMerged(item.reference)) {
-              console.log(`[ControlLoop] Adversarial: skipped (already merged) — ${item.reference.slice(0, 80)}`);
-              continue;
-            }
-            await pushToWorkQueue(JSON.stringify(item));
-            queued++;
-            console.log(`[ControlLoop] Adversarial: queued fix — ${item.reference.slice(0, 80)}`);
-          }
-          if (queued === 0) {
-            console.log(`[ControlLoop] Adversarial: all ${queueItems.length} finding(s) already in queue — skipped`);
-          }
-        }
-        report.adversarialValidation = {
-          findings: advReport.findings.length,
-          high: advReport.findings.filter((f: any) => f.severity === "high").length,
-          medium: advReport.findings.filter((f: any) => f.severity === "medium").length,
-          queued: queueItems.length,
-          durationMs: advReport.durationMs,
-        };
-      } else {
-        console.log(`[ControlLoop] Adversarial: no findings (${advReport.durationMs}ms)`);
-      }
-    } catch (err: any) {
-      console.error(`[ControlLoop] Adversarial validation failed (non-fatal): ${err.message}`);
-    }
-
     try {
       await trackMergedCommit(cycleId, commitSha, []);
     } catch { /* intentional: tracking is best-effort */ }
@@ -672,7 +627,7 @@ export async function runPostMerge(
   }
 
   try {
-    await _verificationInternal.checkRevertCorrelation(PROJECT_WORKSPACE);
+    await checkRevertCorrelation(PROJECT_WORKSPACE);
   } catch { /* intentional: correlation check is best-effort */ }
 
   // Complete the cycle in tracker
