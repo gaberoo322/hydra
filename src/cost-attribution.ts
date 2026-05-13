@@ -157,7 +157,6 @@ const AGENT_ROLE_TO_TIER: Record<string, string> = {
   "market-researcher": "frontier",
   "research-strategist": "frontier",
   strategist: "frontier",
-  "priorities-refresh": "frontier",
 };
 
 export function agentRoleToTier(role: string): string {

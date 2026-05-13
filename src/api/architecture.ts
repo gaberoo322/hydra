@@ -20,7 +20,7 @@ const GROUPS = [
   { id: "state", label: "State & Data", color: "cyan",
     modules: ["redis-adapter", "redis-keys", "event-bus", "task-tracker", "task-machine", "metrics", "backlog"] },
   { id: "planning", label: "Planning & Research", color: "rose",
-    modules: ["research-loop", "priorities-refresh", "project-goals", "anchor-selection", "anchor-scorer", "plan-cache"] },
+    modules: ["research-loop", "project-goals", "anchor-selection", "anchor-scorer", "plan-cache"] },
   { id: "infra", label: "Infrastructure", color: "zinc",
     modules: ["api", "notify", "digest", "cleanup", "instrument", "merge", "post-merge", "prepare-workspace", "specs", "proposals"] },
 ];

@@ -3,9 +3,10 @@
 // ---------------------------------------------------------------------------
 //
 // Handles:
-//   - saturation gate (issue #285): refresh inline when last N doc cycles
-//     were all drift-rejected
-//   - staleness gate: refresh when the doc has been used >=5x in last 10 cycles
+//   - saturation gate (issue #285): when last N doc cycles were all drift-
+//     rejected, return no-work to break the loop. The doc is refreshed
+//     out-of-band by `/hydra-target-research` (operator-scheduled) rather
+//     than inline (issue #347, Phase A codex-removal refactor).
 //   - drift pre-filter on the returned anchor
 
 import { readFile } from "node:fs/promises";
@@ -22,51 +23,38 @@ export interface DocAnchor {
 
 /**
  * Build the priorities-doc fallback anchor, returning `null` when the doc is
- * missing, the saturation gate fires + refresh fails, or the candidate is
- * itself drift-rejected.
+ * missing, the saturation gate fires, or the candidate is itself
+ * drift-rejected.
+ *
+ * Note: this tier no longer triggers inline priorities-refresh codex calls.
+ * priorities.md is owned by `/hydra-target-research` (operator-scheduled).
+ * When saturation or staleness is detected, the tier returns no-work and the
+ * caller continues anchor selection (or records a noWork outcome) — the next
+ * research cycle will refresh the doc.
  */
 export async function selectPrioritiesDocAnchor(
-  grounding: any,
+  _grounding: any,
 ): Promise<DocAnchor | null> {
   try {
     const priorities = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
     const DOC_REF = "direction/priorities.md";
 
-    // Issue #285: pre-planner saturation gate. If the last N consecutive
+    // Issue #285 / #347: pre-planner saturation gate. If the last N consecutive
     // doc-anchor cycles were ALL drift-rejected, the priorities doc is
     // semantically stale even if the file hasn't been touched — the planner
-    // keeps generating titles that drift-match recent merges. Refresh inline
-    // to break the loop; if refresh fails, fall through to no-work (caller
-    // continues anchor selection or records a noWork outcome).
+    // keeps generating titles that drift-match recent merges. Return no-work
+    // so the scheduler records a noWork outcome WITHOUT a frontier-tier
+    // planner call. The doc will be refreshed by the next
+    // `/hydra-target-research` run.
     const { isDocAnchorSaturated } = await import("../anchor-actionability.ts");
     const saturation = await isDocAnchorSaturated("doc", DOC_REF);
     if (saturation.saturated) {
-      console.log(`[ControlLoop] Doc-anchor saturated: ${saturation.reason} — forcing inline priorities refresh (planner skipped, est ~$60+ saved)`);
-      try {
-        const { refreshPriorities } = await import("../priorities-refresh.ts");
-        const refreshResult = await refreshPriorities({ grounding, trigger: "saturation" });
-        if (refreshResult.ok) {
-          console.log(`[ControlLoop] Priorities refreshed inline (saturation trigger, ${refreshResult.priorities?.split("\n").length || 0} lines)`);
-          const updated = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
-          return {
-            type: "doc",
-            reference: DOC_REF,
-            whyNow: `Freshly refreshed priorities (doc-anchor saturated: ${saturation.consecutiveDriftCount} drift-rejected cycles)`,
-            context: updated,
-          };
-        }
-        console.error(`[ControlLoop] Saturation-triggered refresh failed: ${refreshResult.error} — returning no-work to break loop`);
-      } catch (err: any) {
-        console.error(`[ControlLoop] Saturation-triggered refresh threw: ${err?.message ?? err} — returning no-work to break loop`);
-      }
-      // Refresh failed: skip this cycle's doc anchor entirely. Returning null
-      // lets the scheduler record a noWork outcome WITHOUT a frontier-tier
-      // planner call. The next cycle will retry the saturation check (and
-      // can refresh again, since refresh failures are transient).
+      console.log(`[ControlLoop] Doc-anchor saturated: ${saturation.reason} — returning no-work (priorities.md refresh deferred to /hydra-target-research)`);
       return null;
     }
 
-    // Check how many recent cycles used this same anchor (any outcome)
+    // Check how many recent cycles used this same anchor (any outcome). Logged
+    // for visibility only — staleness no longer triggers an inline refresh.
     const recentDocCycles = await (async () => {
       try {
         const { getMetricsTrend } = await import("../metrics.ts");
@@ -79,33 +67,18 @@ export async function selectPrioritiesDocAnchor(
     })();
 
     if (recentDocCycles >= 5) {
-      // Priorities doc is stale — too many cycles using the same doc.
-      // Trigger a lightweight refresh using accomplishments + vision.
-      console.log(`[ControlLoop] Priorities doc used ${recentDocCycles}x in last 10 — triggering inline refresh`);
-      try {
-        const { refreshPriorities } = await import("../priorities-refresh.ts");
-        const refreshResult = await refreshPriorities({ grounding, trigger: "stale" });
-        if (refreshResult.ok) {
-          console.log(`[ControlLoop] Priorities refreshed inline (${refreshResult.priorities?.split("\n").length || 0} lines)`);
-          // Re-read the updated file
-          const updated = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
-          return {
-            type: "doc",
-            reference: DOC_REF,
-            whyNow: "Freshly refreshed priorities (stale doc detected)",
-            context: updated,
-          };
-        }
-      } catch (err: any) {
-        console.error(`[ControlLoop] Inline priorities refresh failed: ${err.message}`);
-      }
+      // Priorities doc looks stale — surface this for operator visibility, but
+      // do not trigger an inline refresh. `/hydra-target-research` owns the
+      // doc; the operator should run it (or it should be scheduled) when this
+      // log appears repeatedly.
+      console.log(`[ControlLoop] Priorities doc used ${recentDocCycles}x in last 10 — refresh deferred to /hydra-target-research`);
     }
 
     const candidate: DocAnchor = {
       type: "doc",
       reference: DOC_REF,
       whyNow: recentDocCycles >= 5
-        ? `Priorities doc (used ${recentDocCycles}x recently)`
+        ? `Priorities doc (used ${recentDocCycles}x recently — refresh deferred to /hydra-target-research)`
         : "Next priority from operator direction document",
       context: priorities,
     };

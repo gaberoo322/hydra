@@ -69,7 +69,7 @@ Determined by `selectAnchor()` in `src/anchor-selection.ts`. Priority order:
 11. **TODO/FIXME markers** — from codebase
 12. **Regression hunt** — every 10 merges, adversarial testing of recent features
 13. **Codebase health** — reductive improvements (split, consolidate, document)
-14. **Priorities doc** — fallback to `config/direction/priorities.md` (auto-refreshed if stale)
+14. **Priorities doc** — fallback to `config/direction/priorities.md`. The doc is refreshed by `/hydra-target-research`, not by the control loop. When the doc-anchor saturation gate fires (last N cycles all drift-rejected) or the doc has been used >=5x in the last 10 cycles, the tier returns no-work and logs that refresh is deferred to the next research run.
 
 **Scheduler-side research floor (issue #327, sibling of #245 / #301).** Independent of `selectAnchor()`: `maybeRunResearch()` in `src/scheduler.ts` consults the research capacity floor before queue-depth / ratio-cap suppression. When the realised 24h research:build ratio drops below `HYDRA_RESEARCH_BUILD_RATIO_MIN` (default 1/20) over at least `HYDRA_RESEARCH_FLOOR_WINDOW` builds (default 20), the scheduler forces a research cycle on the next tick. The floor overrides queue-depth and `buildRatioMax` suppression *but never bypasses* the min-interval throttle (`HYDRA_RESEARCH_MIN_INTERVAL_MS`, default 2h) or the daily cost cap. If two consecutive forced cycles return zero auto-queued opportunities, the floor self-suppresses for 24h and alerts the operator. Surfaced at `/api/scheduler/status` under `research.buildRatioMin` and `research.floor`.
 
@@ -128,7 +128,7 @@ Always run `npm test` before committing.
 - `config/direction/vision.md` -- **target product** vision (prose; what hydra-betting should become)
 - `config/direction/outcomes.yaml` -- structured Target Outcome metrics (drives Stuckness; see ADR-0003)
 - `config/orchestrator/vision.md` -- **orchestrator-self** vision (trade-offs the orchestrator makes when ambiguous)
-- `config/direction/priorities.md` -- what Hydra should work on next (auto-refreshed from vision + system state)
+- `config/direction/priorities.md` -- what Hydra should work on next. Refreshed by the operator-scheduled `/hydra-target-research` skill (not by the orchestrator). The control loop reads this file as a fallback anchor source but never writes to it (issue #347, Phase A codex-removal refactor).
 - `config/direction/goals.md` -- high-level project goals
 - `config/feedback/to-planner.md` -- correct planner behavior
 - `config/feedback/to-executor.md` -- correct executor behavior
