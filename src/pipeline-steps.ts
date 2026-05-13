@@ -83,18 +83,28 @@ export async function handlePlanResult(
   // frontier model inference indefinitely, but logged as a distinct outcome for
   // learning/metrics.
   if (task?.__noWork) {
+    // Issue #364 — when the planner exhausted its retry without producing
+    // a structured response, the sentinel sets __plannerSchemaFailure=true.
+    // Bucket these under a distinct category prefix so the abandonment
+    // breakdown reports schema failures separately from real noWork
+    // ("all priorities addressed" etc.). The `categorizeAbandonReason`
+    // splitter takes everything before the first colon as the category.
+    const plannerSchemaFailure = task.__plannerSchemaFailure === true;
     const noWorkReason = task.reason || "all priorities addressed";
+    const abandonReason = plannerSchemaFailure
+      ? `Planner schema failure: ${noWorkReason}`
+      : `Planner noWork: ${noWorkReason}`;
     // Issue #361 — output-token cap is a distinct, addressable failure
     // mode (not "all priorities addressed"). Surface it in cycle metrics
     // so the operator can track cap-hit rate and tune the cap if needed.
     const plannerTokenCapHit = task.__plannerTokenCapHit === true;
     const plannerMaxOutputTokens = typeof task.__plannerMaxOutputTokens === "number"
       ? task.__plannerMaxOutputTokens : null;
-    console.log(`[ControlLoop] Planner noWork — ${noWorkReason}${plannerTokenCapHit ? ` (token cap=${plannerMaxOutputTokens})` : ""}`);
+    console.log(`[ControlLoop] Planner ${plannerSchemaFailure ? "schema-failure" : "noWork"} — ${noWorkReason}${plannerTokenCapHit ? ` (token cap=${plannerMaxOutputTokens})` : ""}`);
 
     // Circuit breaker: noWork counts as an abandonment (issue #137)
     try {
-      await reportOutcome(anchor, { status: "abandoned", reason: `Planner noWork: ${noWorkReason}`, task: { title: anchor.reference, taskId: "none" } });
+      await reportOutcome(anchor, { status: "abandoned", reason: abandonReason, task: { title: anchor.reference, taskId: "none" } });
     } catch (err: any) {
       console.error(`[ControlLoop] Circuit breaker tracking failed on noWork: ${err.message}`);
     }
@@ -104,7 +114,12 @@ export async function handlePlanResult(
       agents: [],
       cycleId, task: { title: `noWork: ${noWorkReason}` }, finalState: "abandoned",
       anchorRef: anchor.reference, anchorType: anchor.type,
-      reflection: {
+      reflection: plannerSchemaFailure ? {
+        failureMode: "planner-schema-failure",
+        whatFailed: `Planner output unparseable / malformed for "${anchor.reference}" (issue #364)`,
+        whyItFailed: noWorkReason,
+        whatToTryDifferently: "Planner returned malformed JSON twice (first call + retry). Tighten the schema constraints or shrink the prompt; if recurring on the same anchor, escalate to reframe queue.",
+      } : {
         failureMode: "no-work", whatFailed: `Planner noWork for "${anchor.reference}"`,
         whyItFailed: noWorkReason,
         whatToTryDifferently: "Anchor may be fully addressed, blocked, or need operator input. If recurring, will escalate to reframe queue.",
@@ -116,24 +131,33 @@ export async function handlePlanResult(
     }
     await handleEarlyExit({
       cycleId, startTime, grounding, ovSession, anchor,
-      outcome: "no-work", reason: `Planner noWork: ${noWorkReason}`,
+      outcome: "no-work", reason: abandonReason,
       clearProcessing: false, // reportOutcome already called above
       metricsOverrides: {
         tasksAbandoned: 1, taskTitle: `noWork: ${noWorkReason}`,
         anchorType: anchor.type, anchorReference: anchor.reference,
         plannerModel: typeof task.__plannerModel === "string" ? task.__plannerModel : "unknown",
-        abandonReason: `Planner noWork: ${noWorkReason}`,
+        abandonReason,
         anchorConfidence: anchorConfidence?.score ?? null, anchorSkipped: false,
         noWork: true, noWorkReason,
         // Issue #361 — record token-cap signal as flat metric fields
         plannerTokenCapHit,
         ...(plannerMaxOutputTokens !== null ? { plannerMaxOutputTokens } : {}),
+        // Issue #364 — record schema-failure signal so /api/metrics/abandonment
+        // can distinguish unrecovered planner schema failures from real noWork.
+        plannerSchemaFailure,
       },
     });
-    return { continue: false, result: { cycleId, tasks: [], reason: `Planner noWork: ${noWorkReason}`, durationMs: Date.now() - startTime } };
+    return { continue: false, result: { cycleId, tasks: [], reason: abandonReason, durationMs: Date.now() - startTime } };
   }
 
   if (!task) {
+    // After issue #364, the planner converts unrecoverable schema failures
+    // into a `__noWork` sentinel with `__plannerSchemaFailure: true` (handled
+    // above). The only way to reach this branch is when `validateTaskSchema`
+    // rejects an otherwise-parseable task — i.e. the model produced JSON
+    // missing required fields like `risk` or `scopeBoundary.in`. Treat as
+    // a schema failure for metrics purposes, with the AC-mandated flag.
     console.log(`[ControlLoop] Planner produced no valid task — cycle complete`);
 
     // Circuit breaker: planner null counts as an abandonment
@@ -150,7 +174,7 @@ export async function handlePlanResult(
       anchorRef: anchor.reference, anchorType: anchor.type,
       reflection: {
         failureMode: "no-task", whatFailed: "Planner produced no task",
-        whyItFailed: "Planner could not produce a valid task from this anchor",
+        whyItFailed: "Planner could not produce a valid task from this anchor (schema validation rejected the payload)",
         whatToTryDifferently: "Anchor may be too vague, already completed, or blocked. Consider a more specific formulation.",
       },
     });
@@ -167,6 +191,9 @@ export async function handlePlanResult(
         anchorType: anchor.type, anchorReference: anchor.reference,
         plannerModel: "unknown", abandonReason: "Planner produced no task",
         anchorConfidence: anchorConfidence?.score ?? null, anchorSkipped: false,
+        // Issue #364 — this branch implies schema validation rejected the
+        // payload. Set the flag so /api/metrics/abandonment can attribute it.
+        plannerSchemaFailure: true,
       },
     });
     return { continue: false, result: { cycleId, tasks: [], reason: "Planner produced no task", durationMs: Date.now() - startTime } };

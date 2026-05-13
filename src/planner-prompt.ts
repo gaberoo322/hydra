@@ -27,16 +27,38 @@ import { isAnchorActionable } from "./anchor-actionability.ts";
 
 const VALID_RISK_VALUES = ["low", "medium", "high"];
 
+/**
+ * Minimum length for a `noWork` diagnostic reason (issue #364).
+ *
+ * 12/18 abandonments in the issue-#364 window were the "Planner produced no
+ * task" branch — frontier-model calls that returned empty/malformed JSON
+ * instead of the documented structured noWork shape from `to-planner.md`.
+ * Enforcing a 20-char floor on `reason` blocks "n/a", "no", "blocked" etc.
+ * and forces the planner to name what was inspected and why it failed, so
+ * downstream telemetry (abandonment breakdown, reframe queue, OV memory)
+ * has actionable diagnostic text instead of silent churn.
+ *
+ * Exported so tests can assert on the same threshold the validator uses.
+ */
+export const NOWORK_REASON_MIN_LENGTH = 20;
+
 // JSON Schema for structured planner output — passed to Codex SDK's outputSchema
 // to eliminate parsing failures and ensure valid JSON on every call.
 // OpenAI structured output requires: additionalProperties=false on every object,
 // ALL properties in required (use ["type", "null"] for optional fields).
+//
+// Issue #364 — `reason` is required and non-nullable (was previously
+// `["string", "null"]`). The model MUST emit a string; deterministic
+// `validateTaskSchema()` then enforces the 20-char floor when `noWork=true`.
+// We can't use OpenAI's `if/then/oneOf` constructs here because structured
+// output rejects conditional shapes — the contract is "always emit reason,
+// and validator decides whether the value is admissible".
 export const PLANNER_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
     noWork: { type: "boolean" },
-    reason: { type: ["string", "null"] },
+    reason: { type: "string" },
     title: { type: "string" },
     description: { type: "string" },
     taskType: { type: "string", enum: ["build", "fix", "test", "refactor", "docs"] },
@@ -81,6 +103,37 @@ export const PLANNER_OUTPUT_SCHEMA = {
   ],
 };
 
+/**
+ * Validate the structured `noWork` arm of the planner output (issue #364).
+ *
+ * Pure helper — returns a list of human-readable error strings. Empty array
+ * means the noWork payload is well-formed. Caller decides what to do with
+ * a malformed payload (retry once with a stricter prompt, then escalate).
+ *
+ * Constraints:
+ *   - `noWork` must be exactly `true` (the noWork arm is opt-in)
+ *   - `reason` must be a string of at least NOWORK_REASON_MIN_LENGTH chars
+ *     after trim. This blocks "n/a", "blocked", "no", and similar non-
+ *     diagnostic short-circuits that defeat the abandonment-telemetry goal
+ *     of `to-planner.md`'s "No-Task Diagnostic Requirement".
+ */
+export function validateNoWorkSchema(task: any): string[] {
+  const errors: string[] = [];
+  if (task?.noWork !== true) {
+    errors.push("noWork flag must be true for the no-task arm");
+  }
+  const reason = typeof task?.reason === "string" ? task.reason.trim() : "";
+  if (!reason) {
+    errors.push("missing or empty reason on noWork response");
+  } else if (reason.length < NOWORK_REASON_MIN_LENGTH) {
+    errors.push(
+      `noWork reason too short (got ${reason.length} chars, need >= ${NOWORK_REASON_MIN_LENGTH}) — ` +
+      `state which anchors were inspected and the specific rule/missing evidence that blocked task creation`,
+    );
+  }
+  return errors;
+}
+
 export function validateTaskSchema(task) {
   const errors: string[] = [];
 
@@ -102,8 +155,70 @@ export function validateTaskSchema(task) {
   if (!task.acceptanceCriteria || !Array.isArray(task.acceptanceCriteria) || task.acceptanceCriteria.length === 0) {
     errors.push("missing or empty acceptanceCriteria");
   }
+  if (!task.title || typeof task.title !== "string" || task.title.trim().length === 0) {
+    errors.push("missing or empty title");
+  }
 
   return errors;
+}
+
+/**
+ * Parse the raw planner output into a JS object. Tries strict JSON.parse
+ * first, then falls back to extracting the first `{…}` substring (the model
+ * occasionally wraps the payload in stray prose despite the structured
+ * output schema). Returns `null` when nothing parses.
+ *
+ * Pure helper — exported for the retry path and for tests so the parse
+ * contract is stable across the two call sites in runPlannerAgent.
+ */
+export function parsePlannerOutput(raw: string | undefined | null): any | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  try {
+    return JSON.parse(raw);
+  } catch { /* intentional: fall through to regex extraction */ }
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch (err: any) {
+    console.error(`[ControlLoop] Planner output unparseable even after regex extraction: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Build the stricter retry prompt used when the first planner call returns
+ * an unparseable payload or a malformed noWork response (issue #364).
+ *
+ * The prompt is deliberately compressed: just the anchor identity and a
+ * single instruction to emit one of two structured shapes. We never reuse
+ * the original verbose planner prompt because (a) the retry budget is
+ * tight (~1500 tokens out) and (b) the goal is to *convert an unstructured
+ * failure into a structured diagnostic*, not to make a fresh task attempt.
+ *
+ * Pure helper — exported for unit tests so the prompt contract is locked.
+ */
+export function buildRetryNoWorkPrompt(anchor: { type: string; reference: string; whyNow?: string }): string {
+  return [
+    `Your previous response was unparseable or missing required fields.`,
+    `Emit ONE of these two JSON shapes and nothing else.`,
+    ``,
+    `## Anchor`,
+    `Type: ${anchor.type}`,
+    `Reference: ${anchor.reference}`,
+    anchor.whyNow ? `Why now: ${anchor.whyNow}` : "",
+    ``,
+    `## Required output (choose one)`,
+    ``,
+    `Option A — you have a concrete task: emit the full task JSON (all fields per the schema).`,
+    ``,
+    `Option B — no actionable work: emit { "noWork": true, "reason": "<diagnostic>" }`,
+    `  - reason MUST be at least ${NOWORK_REASON_MIN_LENGTH} characters`,
+    `  - reason MUST name: what anchor you inspected, which rule/evidence blocked task creation,`,
+    `    and the smallest concrete change that would unblock the next planning attempt`,
+    ``,
+    `Do not return null. Do not return an empty object. Do not omit "noWork". Do not omit "reason".`,
+  ].filter(Boolean).join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -523,28 +638,132 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   }
 
   // Parse output — try direct parse, then regex fallback, then fail loud
-  let task = null;
-  try {
-    task = JSON.parse(result.output);
-  } catch {
-    const match = result.output.match(/\{[\s\S]*\}/);
-    if (match) {
-      try {
-        task = JSON.parse(match[0]);
-      } catch (err: any) {
-        console.error(`[ControlLoop] Planner output unparseable even after regex extraction: ${err.message}`);
-      }
+  let task = parsePlannerOutput(result.output);
+
+  // Issue #364 — Retry-once-on-unstructured-failure.
+  //
+  // 67% of abandonments (12/18 in the issue-#364 window) were "Planner produced
+  // no task": the model emitted malformed JSON / an empty object / omitted the
+  // `noWork` field, defeating the structured noWork contract. The fix is a
+  // single cheap retry on the mini tier with a stripped prompt that demands
+  // either a full task OR a structured noWork — converting an unstructured
+  // null into a structured diagnostic so downstream telemetry has something
+  // to act on (and the abandonment breakdown reports the real failure mode).
+  //
+  // Retry triggers:
+  //   (a) first call's output didn't parse to an object, OR
+  //   (b) parsed noWork response failed schema validation (empty/too-short reason)
+  //
+  // Cost is bounded: mini tier ($0.75/$4.50 per 1M), capped at 1500 output
+  // tokens → ~$0.007 worst case. Much cheaper than the $5 first-call spend.
+  const initialNoWorkErrors = task?.noWork === true ? validateNoWorkSchema(task) : [];
+  const needsRetry = !task || initialNoWorkErrors.length > 0;
+  let plannerSchemaFailure = false;
+  let retryAttempted = false;
+  let retryResult: any = null;
+
+  if (needsRetry) {
+    retryAttempted = true;
+    plannerSchemaFailure = true;
+    const retryReason = !task
+      ? "unparseable planner output"
+      : `malformed noWork (${initialNoWorkErrors.join("; ")})`;
+    console.log(`[ControlLoop] Planner retry — ${retryReason} (issue #364)`);
+    try {
+      retryResult = await runAgent({
+        agentName: "planner",
+        personality,
+        prompt: buildRetryNoWorkPrompt(anchor),
+        model: "mini",
+        taskId: "planner-retry",
+        correlationId: cycleId,
+        outputSchema: PLANNER_OUTPUT_SCHEMA,
+        maxOutputTokens: 1500,
+        complexity: "quick-fix",
+      });
+    } catch (err: any) {
+      console.error(`[ControlLoop] Planner retry failed: ${err.message}`);
+    }
+
+    if (retryResult?.usageLimitHit) {
+      console.error(`[ControlLoop] Codex usage limit hit during planner retry — signaling pause`);
+      return { __usageLimitHit: true } as any;
+    }
+
+    const retried = retryResult ? parsePlannerOutput(retryResult.output) : null;
+    const retriedNoWorkErrors = retried?.noWork === true ? validateNoWorkSchema(retried) : [];
+
+    if (retried?.noWork === true && retriedNoWorkErrors.length === 0) {
+      // Retry succeeded with a structured noWork — short-circuit and return
+      // the noWork sentinel with the schema-failure flag set so cycle metrics
+      // can distinguish "real noWork" (rare) from "schema-fail recovered as
+      // noWork" (the 67% case we're targeting).
+      console.log(`[ControlLoop] Planner retry produced structured noWork: ${retried.reason}`);
+      await getTracker().logAgentRun(
+        cycleId, "planner", "planner-retry", retryResult.duration, "no-work",
+        retryResult.usage, retryResult.costUsd, retryResult.model,
+      );
+      return {
+        __noWork: true,
+        reason: retried.reason,
+        __plannerSchemaFailure: true,
+        __plannerModel: result.model,
+      } as any;
+    }
+
+    if (retried && retried.noWork !== true) {
+      // Retry produced a fresh task — use it. Fall through to validation below.
+      console.log(`[ControlLoop] Planner retry produced a task (schema-fail on first call)`);
+      task = retried;
     } else {
-      console.error(`[ControlLoop] Planner output contained no JSON object`);
+      // Retry also failed to produce a structured response. Convert into a
+      // structured noWork sentinel with __plannerSchemaFailure so the
+      // abandonment-breakdown endpoint can categorise this as a schema
+      // failure rather than the generic "Planner produced no task" bucket
+      // (issue #364 AC).
+      console.error(`[ControlLoop] Planner retry also failed — returning schema-failure sentinel`);
+      await getTracker().logAgentRun(
+        cycleId, "planner", "planner-retry",
+        retryResult?.duration ?? 0, "schema-failure",
+        retryResult?.usage ?? {}, retryResult?.costUsd ?? 0,
+        retryResult?.model ?? "unknown",
+      );
+      return {
+        __noWork: true,
+        reason: "planner_schema_failure (retry exhausted)",
+        __plannerSchemaFailure: true,
+        __plannerModel: result.model,
+      } as any;
     }
   }
 
   // Handle explicit "no work" response — return sentinel so handlePlanResult
   // can distinguish noWork from parse failures (issue #137)
   if (task?.noWork) {
-    console.log(`[ControlLoop] Planner says no work needed: ${task.reason || "all priorities addressed"}`);
+    // Issue #364 — at this point the noWork shape has either been validated
+    // on the first call (initialNoWorkErrors.length === 0) or come back well-
+    // formed from the retry path (which already short-circuited above).
+    // Defensive double-check so a future refactor can't slip a malformed
+    // payload through.
+    const finalErrors = validateNoWorkSchema(task);
+    if (finalErrors.length > 0) {
+      console.error(`[ControlLoop] Planner noWork final validation failed: ${finalErrors.join("; ")}`);
+      await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "no-work", result.usage, result.costUsd, result.model);
+      return {
+        __noWork: true,
+        reason: `schema-fail-fallback: ${finalErrors[0]}`,
+        __plannerSchemaFailure: true,
+        __plannerModel: result.model,
+      } as any;
+    }
+    console.log(`[ControlLoop] Planner says no work needed: ${task.reason}`);
     await getTracker().logAgentRun(cycleId, "planner", "planner", result.duration, "no-work", result.usage, result.costUsd, result.model);
-    return { __noWork: true, reason: task.reason || "all priorities addressed" } as any;
+    return {
+      __noWork: true,
+      reason: task.reason,
+      ...(plannerSchemaFailure ? { __plannerSchemaFailure: true } : {}),
+      __plannerModel: result.model,
+    } as any;
   }
 
   // Validate required fields — deterministic schema check ($0, 0ms)
@@ -588,6 +807,13 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     // downstream metric writers (including Tier-0 paths in verification/post-
     // merge) can emit it without recomputing.
     task.__reflectionMatchSource = reflectionMatchSource(ctx.reflectionSources);
+    // Issue #364: tag that the first call required a schema-recovery retry,
+    // so cycle metrics can correlate downstream verification outcomes with
+    // first-call schema reliability. Distinct from `__plannerSchemaFailure`
+    // on the noWork sentinel which marks an *unrecovered* failure.
+    if (retryAttempted) {
+      task.__plannerSchemaFailure = true;
+    }
   }
 
   // Store in plan cache for future reuse
