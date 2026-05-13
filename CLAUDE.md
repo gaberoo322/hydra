@@ -14,6 +14,7 @@ Read these first when working on the orchestrator:
   - ADR-0003 — Terminal goal hierarchy (Target Outcomes + 25% self-improvement floor)
   - ADR-0004 — Self-modification tiers (Tier 0/1/2/3 + Outcome Holdback)
   - ADR-0005 — Operator escalation is narrow (closed list)
+- [`docs/codex-removal-measurement.md`](./docs/codex-removal-measurement.md) — Phase A → B → C measurement plan gating the Codex CLI removal on data, not calendar
 - [`config/direction/vision.md`](./config/direction/vision.md) — **target product** vision (what hydra-betting should become)
 - [`config/orchestrator/vision.md`](./config/orchestrator/vision.md) — **orchestrator-self** vision (what good autonomous building looks like)
 - [`config/direction/outcomes.yaml`](./config/direction/outcomes.yaml) — structured Target Outcome metrics that drive Stuckness detection
