@@ -8,6 +8,34 @@ import { redisKeys } from "../redis-keys.ts";
 /** Metric names for persisted plan-cache counters (issue #325). */
 export type PlanCacheStatMetric = "hits" | "misses" | "stored" | "invalidated" | "stale";
 
+/**
+ * Miss-reason labels for the histogram persisted alongside the plan-cache
+ * stats (issue #363). Every cache miss is attributed to exactly one reason so
+ * operators can answer "why is the hit rate 0?" without rerunning the system.
+ *
+ * Labels:
+ *  - `not-found`             — cache lookup returned no entry for the key
+ *  - `non-cacheable-type`    — anchor.type not in CACHEABLE_TYPES
+ *  - `reflection-bypass`     — reflections exist; cache deliberately skipped
+ *  - `actionability-skipped` — pre-planner gate fired before cache was queried
+ *  - `stale-tests`           — entry evicted: test count dropped since cache
+ *  - `stale-files`           — entry evicted: scope file modified since cache
+ *  - `get-error`             — Redis read failed; treated as miss
+ *
+ * Both reflection-bypass and actionability-skipped are bookkeeping reasons
+ * (the cache was never queried), recorded at the call site in planner-prompt.
+ * They count toward the misses total so the hit rate stays interpretable as
+ * "of all planner calls that needed a plan, what fraction reused one?".
+ */
+export type PlanCacheMissReason =
+  | "not-found"
+  | "non-cacheable-type"
+  | "reflection-bypass"
+  | "actionability-skipped"
+  | "stale-tests"
+  | "stale-files"
+  | "get-error";
+
 /** Per-day key TTL — keeps storage bounded while allowing 24h windows. */
 const STAT_DAY_TTL_SECONDS = 7 * 24 * 60 * 60;
 
@@ -103,6 +131,107 @@ export async function getPlanCacheStatsLifetime(): Promise<
     console.error(`[PlanCache] getPlanCacheStatsLifetime failed: ${err.message}`);
     return { hits: 0, misses: 0, stored: 0, invalidated: 0, stale: 0 };
   }
+}
+
+/**
+ * Increment the miss-reason histogram (issue #363). Stores into a Redis hash
+ * keyed by reason, alongside a per-day variant with the same TTL strategy as
+ * the metric counters above.
+ *
+ * Fire-and-forget: errors are logged and swallowed. The cache hot path must
+ * never break because of instrumentation.
+ */
+export async function incrPlanCacheMissReason(
+  reason: PlanCacheMissReason,
+): Promise<void> {
+  const r = getRedisConnection();
+  const lifetimeKey = redisKeys.planCacheMissReasonsLifetime();
+  const dayKey = redisKeys.planCacheMissReasonsDay(statDayKey());
+  try {
+    const pipeline = r.pipeline();
+    pipeline.hincrby(lifetimeKey, reason, 1);
+    pipeline.hincrby(dayKey, reason, 1);
+    pipeline.expire(dayKey, STAT_DAY_TTL_SECONDS);
+    await pipeline.exec();
+  } catch (err: any) {
+    console.error(`[PlanCache] incrPlanCacheMissReason(${reason}) failed: ${err.message}`);
+  }
+}
+
+/**
+ * Read the lifetime miss-reason histogram. Returns a Record keyed by reason
+ * label with integer counts (0 for any missing reason).
+ */
+export async function getPlanCacheMissReasonsLifetime(): Promise<
+  Record<PlanCacheMissReason, number>
+> {
+  const r = getRedisConnection();
+  try {
+    const raw = await r.hgetall(redisKeys.planCacheMissReasonsLifetime());
+    return parseMissReasonHash(raw);
+  } catch (err: any) {
+    console.error(`[PlanCache] getPlanCacheMissReasonsLifetime failed: ${err.message}`);
+    return emptyMissReasonHistogram();
+  }
+}
+
+/**
+ * Read the rolling 24h miss-reason histogram (today + yesterday UTC).
+ */
+export async function getPlanCacheMissReasonsLast24h(
+  now: Date = new Date(),
+): Promise<Record<PlanCacheMissReason, number>> {
+  const r = getRedisConnection();
+  const today = statDayKey(now);
+  const yesterday = statDayKey(new Date(now.getTime() - 24 * 60 * 60 * 1000));
+  try {
+    const [a, b] = await Promise.all([
+      r.hgetall(redisKeys.planCacheMissReasonsDay(today)),
+      r.hgetall(redisKeys.planCacheMissReasonsDay(yesterday)),
+    ]);
+    const merged = emptyMissReasonHistogram();
+    for (const part of [a, b]) {
+      const parsed = parseMissReasonHash(part);
+      for (const k of MISS_REASON_LABELS) {
+        merged[k] += parsed[k];
+      }
+    }
+    return merged;
+  } catch (err: any) {
+    console.error(`[PlanCache] getPlanCacheMissReasonsLast24h failed: ${err.message}`);
+    return emptyMissReasonHistogram();
+  }
+}
+
+const MISS_REASON_LABELS: PlanCacheMissReason[] = [
+  "not-found",
+  "non-cacheable-type",
+  "reflection-bypass",
+  "actionability-skipped",
+  "stale-tests",
+  "stale-files",
+  "get-error",
+];
+
+function emptyMissReasonHistogram(): Record<PlanCacheMissReason, number> {
+  const out = {} as Record<PlanCacheMissReason, number>;
+  for (const k of MISS_REASON_LABELS) out[k] = 0;
+  return out;
+}
+
+function parseMissReasonHash(
+  raw: Record<string, string> | null | undefined,
+): Record<PlanCacheMissReason, number> {
+  const out = emptyMissReasonHistogram();
+  if (!raw) return out;
+  for (const k of MISS_REASON_LABELS) {
+    const v = raw[k];
+    if (v) {
+      const n = parseInt(v, 10);
+      out[k] = Number.isFinite(n) ? n : 0;
+    }
+  }
+  return out;
 }
 
 /**

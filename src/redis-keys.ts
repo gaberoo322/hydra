@@ -138,6 +138,12 @@ export const redisKeys = {
   planCacheStatLifetime: (metric: string) => `hydra:plans:cache:stats:${metric}`,
   planCacheStatDay: (metric: string, isoDate: string) =>
     `hydra:plans:cache:stats:${metric}:${isoDate}`,
+  // Miss-reason histogram (issue #363). Hash keys are reasons (see
+  // PlanCacheMissReason), values are counts. Lifetime + per-day variants
+  // mirror the per-metric counter scheme above.
+  planCacheMissReasonsLifetime: () => `hydra:plans:cache:miss-reasons`,
+  planCacheMissReasonsDay: (isoDate: string) =>
+    `hydra:plans:cache:miss-reasons:${isoDate}`,
 
   // ---------------------------------------------------------------------------
   // Adversarial Validation

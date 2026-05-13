@@ -14,12 +14,24 @@
 
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getContext } from "./learning.ts";
-import { getCachedPlan, cachePlan } from "./plan-cache.ts";
+import { getCachedPlan, cachePlan, recordPlanCacheMiss } from "./plan-cache.ts";
 import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
 import { buildPlannerContext, reflectionMatchSource } from "./context-builder.ts";
 import type { PlannerContext } from "./context-builder.ts";
 import { isAnchorActionable } from "./anchor-actionability.ts";
+
+// Mirror of the cacheable-anchor-types set in plan-cache.ts. Kept here as a
+// local constant so the bookkeeping-miss attribution (issue #363) doesn't
+// have to round-trip into Redis just to ask "would this anchor have been
+// cached if reached?". MUST stay in sync with the CACHEABLE_TYPES Set in
+// src/plan-cache.ts — if you add a type there, add it here too.
+const PLAN_CACHEABLE_TYPES = new Set([
+  "user-request",
+  "codebase-health",
+  "failing-test",
+  "research",
+]);
 
 // ---------------------------------------------------------------------------
 // Deterministic task schema validation — replaces LLM-based structural checks
@@ -200,6 +212,13 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   const actionability = await isAnchorActionable(anchor);
   if (!actionability.actionable) {
     console.log(`[Planner] PRE-GATE skip: ${actionability.reason}`);
+    // Issue #363: attribute pre-gate skips to the cache-miss histogram for
+    // cacheable anchor types. This makes the "lifetime hit rate is 0%"
+    // mystery solvable from /api/plan-cache/stats alone — operators can see
+    // that gated cycles dominate the miss column instead of guessing.
+    if (PLAN_CACHEABLE_TYPES.has(anchor.type)) {
+      recordPlanCacheMiss("actionability-skipped");
+    }
     return {
       __noWork: true,
       reason: actionability.reason,
@@ -221,11 +240,14 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   // Belt-and-suspenders: bypass cache when reflections exist for this anchor,
   // so the planner is forced to re-plan with failure context (issue #22).
   //
-  // Exception: quick-fix anchor types (failing-test, typecheck) are deterministic
-  // narrow tasks where the cached plan is safe even with reflections — the fix
-  // for a specific failing test doesn't change based on prior attempt context.
-  // This enables >20% cache hit rate for the most common anchor types (issue #118).
-  const CACHE_SAFE_ANCHOR_TYPES = new Set(["failing-test"]);
+  // Exception: cache-safe anchor types are deterministic narrow tasks where
+  // the cached plan remains valid even when reflections exist — the fix for
+  // a specific failing test or the "add tests to file X" health task doesn't
+  // change based on prior attempt context. Issue #363 broadens this from
+  // `failing-test` only to also include `codebase-health` (deterministic
+  // "<category> in <file>" plans) so the cache actually has a reachable hit
+  // population.
+  const CACHE_SAFE_ANCHOR_TYPES = new Set(["failing-test", "codebase-health"]);
   const plannerContext = await getContext("planner", anchor).catch(() => "");
   const hasReflections = plannerContext.includes("PRIOR ATTEMPTS") || plannerContext.includes("Recent Failures");
   const cacheBypassOverride = CACHE_SAFE_ANCHOR_TYPES.has(anchor.type);
@@ -236,17 +258,24 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
       cachedTask.__planCacheHit = true;
       cachedTask.__planCacheAnchorType = anchor.type;
       // Cache hits don't inject reflections (cache only used when none exist
-      // for non-CACHE_SAFE types, or for CACHE_SAFE failing-test type where
-      // reflections aren't useful for narrow deterministic fixes).
+      // for non-CACHE_SAFE types, or for CACHE_SAFE types where reflections
+      // aren't useful for narrow deterministic fixes).
       cachedTask.__reflectionsInjected = 0;
       cachedTask.__hadReflections = false;
       cachedTask.__reflectionSources = [];
       cachedTask.__reflectionMatchSource = "none";
       await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0, "cache");
-      console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present but safe for quick-fix)" : ""}`);
+      console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present but safe for cache-safe type)" : ""}`);
       return cachedTask;
     }
   } else {
+    // Issue #363: record the bypass in the miss-reason histogram so the
+    // hit-rate-is-0 mystery is diagnosable from /api/plan-cache/stats alone.
+    // Only attribute for cacheable types — non-cacheable bypasses are already
+    // covered by the `non-cacheable-type` reason path in getCachedPlan.
+    if (PLAN_CACHEABLE_TYPES.has(anchor.type)) {
+      recordPlanCacheMiss("reflection-bypass");
+    }
     console.log(`[PlanCache] BYPASS: reflections exist for anchor "${anchor.reference.slice(0, 60)}" type="${anchor.type}" — forcing re-plan`);
   }
 
