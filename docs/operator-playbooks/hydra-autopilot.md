@@ -1,53 +1,103 @@
 ---
 name: hydra-autopilot
-description: Meta-orchestrator that selects and runs the highest-priority Hydra skill based on system state. Designed for /loop overnight operation. Target-project work uses orchestrator API triggers; orchestrator-side work dispatches via background agents.
+description: Long-running autonomous decision loop. A single Claude Code session orchestrates Hydra work through parallel-across-class background subagents. Token-budgeted; designed to run unattended for ~8 hours (e.g., overnight).
 when_to_use: "When the user wants autonomous overnight operation, says 'autopilot', 'run overnight', 'autonomous mode', or wants a single skill to manage all hydra operations."
 allowed-tools: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
+claude_only: true
 ---
 
 # Hydra Autopilot
 
-Meta-orchestrator for overnight autonomous operation. Each iteration is a thin decision loop (~2 min). Target-project work uses the orchestrator's own API (non-blocking, Codex-powered). Orchestrator-side work dispatches via background agents with isolated context.
+Long-running autonomous decision loop. Replaces the previous `/loop`-based iteration model. A single Claude Code session orchestrates Hydra work end-to-end by dispatching background subagents, one per class, in parallel.
+
+Designed to be invoked once per overnight window (typically `claude -p "/hydra-autopilot"` from `hydra-autopilot.timer` at 22:00) and run to completion. Three independent termination conditions:
+
+1. **Token budget** — `cumulative_subagent_tokens >= 2,000,000`
+2. **Wall-clock cap** — elapsed time `>= 8h`
+3. **Idle drain** — all class slots empty AND nothing eligible for ≥ 5 consecutive decision turns
+
+Whichever fires first triggers Phase 7 (graceful drain + final digest).
+
+## Class taxonomy
+
+Work is partitioned into 10 classes. At most one subagent per class is in flight at a time; multiple classes run in parallel. Theoretical max concurrency = 10, but cooldowns + priority gates keep typical concurrency at 2–4.
+
+| Class | Skills | Code-writing? | Notes |
+|---|---|---|---|
+| `health` | hydra-doctor | No | Mostly read-only; can fix quick wins inline |
+| `qa` | hydra-qa | No | Reviews target PRs |
+| `dev_orch` | hydra-dev | Yes | Orchestrator-side feature work; requires worktree-guard |
+| `dev_target` | hydra-target-build | Yes | Claude-side replacement for Codex cycles; requires worktree-guard |
+| `research_orch` | hydra-research, hydra-issue-research | No | Subject to research_orch cooldown |
+| `research_target` | hydra-target-research | No | Subject to research_target cooldown |
+| `sweep_orch` | hydra-sweep | No | Board management; idempotent |
+| `sweep_target` | hydra-target-sweep | No | Target board management; idempotent |
+| `discover_orch` | hydra-discover | No | Patrol; produces issues |
+| `discover_target` | hydra-target-discover | No | Runtime diagnostics on target |
+
+**Inline operations** (not class-scoped, run in main thread):
+
+- `hydra scheduler start` / `hydra scheduler stop` (P0.5 pipeline recovery)
+- `hydra research start` (P3 research-cycle trigger — separate from `research_orch` / `research_target` classes)
+- `hydra raw POST /capacity/orchestrator-merge` (post-merge capacity-ledger writeback)
+- Stale-label fixes (Phase 1.5)
+
+The Codex cycle trigger (`hydra cycle start`, previously P5) has been **removed**. The orchestrator's own scheduler continues to tick Codex cycles until Codex is fully retired; the autopilot no longer kicks it.
 
 ## Architecture
 
 ```
-Each iteration (~2 min):
-  Phase 0: /compact + heartbeat + iteration budget
-  Phase 1: Collect state (parallel, counts only)
-  Phase 1.5: Auto-recover stale issues (inline label fixes)
-  Phase 2: Dispatch gate (background agent already running?)
-  Phase 3: Priority waterfall (first match wins)
-  Phase 4: Dispatch
-  Phase 5: One-line report
+Single Claude Code session, internal decision loop:
 
-Three dispatch modes:
-  1. Inline API — target-project work via orchestrator endpoints (non-blocking)
-  2. Background agent — orchestrator-side skills, isolated context
-     (Claude: Agent(run_in_background:true); Codex: codex exec & disowned subprocess)
-  3. Skip — already in flight
+  Phase 0:  bootstrap (heartbeat, run log, read budget)
+  Phase 1:  collect state (parallel, counts only)
+  Phase 1.5: auto-recover stale issues
+  Phase 2:  reap completed subagents, sum token usage
+  Phase 3:  termination check (budget? clock? idle?)
+              → if terminating, jump to Phase 7
+  Phase 4:  priority waterfall (per class slot, parallel decisions)
+  Phase 5:  dispatch eligible work (Agent run_in_background per class)
+  Phase 6:  brief turn report
+              → 5s pause, back to Phase 1
+
+  Phase 7:  drain in-flight subagents (graceful), then final hydra-digest dispatch, then exit
 ```
 
-## Phase 0: Housekeeping
+## Phase 0: Bootstrap
 
-1. `/compact` (Claude) or fresh context (Codex).
-2. Heartbeat:
-   ```bash
-   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$" > /tmp/hydra-autopilot-heartbeat.txt
-   ```
-3. Iteration budget:
-   ```bash
-   COUNTER_FILE=/tmp/hydra-autopilot-iteration-count.txt
-   if [ -f "$COUNTER_FILE" ]; then
-     FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$COUNTER_FILE") ))
-     [ "$FILE_AGE" -gt 28800 ] && echo 0 > "$COUNTER_FILE"
-   fi
-   COUNT=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
-   echo $((COUNT + 1)) > "$COUNTER_FILE"
-   ```
-   Count > 50 → STOP gracefully. Print `[autopilot] Session budget exhausted (50 iterations). Restart loop for fresh context.`
+Run once at session start.
+
+```bash
+# Heartbeat
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=$$ run_id=$(uuidgen)" > /tmp/hydra-autopilot-heartbeat.txt
+
+# Run log (overwrites previous run; previous-run content rotated to .prev)
+[ -f /tmp/hydra-autopilot-nightly.log ] && mv /tmp/hydra-autopilot-nightly.log /tmp/hydra-autopilot-nightly.log.prev
+: > /tmp/hydra-autopilot-nightly.log
+
+# Read budget knobs (allow per-run override via env)
+TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-2000000}"
+WALL_CLOCK_MAX_SEC="${HYDRA_AUTOPILOT_MAX_SEC:-28800}"   # 8h
+IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
+
+# Initialize state file
+cat > /tmp/hydra-autopilot-state.json <<EOF
+{"started":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","cumulative_tokens":0,"dispatches":0,"idle_turns":0,
+ "slots":{"health":null,"qa":null,"dev_orch":null,"dev_target":null,
+          "research_orch":null,"research_target":null,"sweep_orch":null,
+          "sweep_target":null,"discover_orch":null,"discover_target":null}}
+EOF
+```
+
+**Required preflight** before entering the decision loop:
+
+1. Verify `pwd` is `/home/gabe/hydra`. Abort otherwise.
+2. Verify orchestrator health: `curl -sf http://localhost:4000/api/health` returns 200. If not, dispatch `hydra-doctor` once as the first action, then proceed.
+3. Confirm Hydra scheduler state (we do NOT start/stop it from here unless P0.5 fires).
 
 ## Phase 1: Collect state (parallel, counts only — never dump raw responses)
+
+Same collectors as the previous iteration-loop version. Run on every decision turn (cheap: ~100ms total).
 
 ```bash
 # health
@@ -59,7 +109,7 @@ except: print('health=FAIL')"
 # failed services
 echo -n "failed_services="; systemctl --user list-units --type=service --state=failed --no-legend 2>/dev/null | grep -c hydra || echo 0
 
-# issue board + stale
+# orchestrator-side issue board (counts + stale lists)
 gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
   needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
   ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
@@ -79,7 +129,7 @@ echo -n "work_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:wo
 echo -n "reframe_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:reframe-queue 2>/dev/null || echo 0
 echo -n "prior_failures="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures 2>/dev/null || echo 0
 
-# capacity-floor — orchestrator self-improvement share (issue #245)
+# capacity-floor (orchestrator self-improvement share)
 hydra raw GET /capacity 2>/dev/null | python3 -c "
 import json,sys
 try:
@@ -87,7 +137,7 @@ try:
   print(f'capacity_orch_share={o[\"share\"]:.2f} capacity_floor_met={d[\"floorMet\"]} capacity_window={o[\"window\"]}')
 except: print('capacity_floor_met=true capacity_window=0')"
 
-# cycle + scheduler
+# scheduler / cycle
 hydra cycle status 2>/dev/null | python3 -c "
 import json,sys
 try: d=json.load(sys.stdin); print('CODEX_ACTIVE' if d.get('running') else 'CODEX_IDLE')
@@ -101,9 +151,6 @@ try:
   print(f'scheduler={s} nonmerges={nm} stall={stall}')
 except: print('scheduler=unknown stall=unknown')"
 
-# dispatch state
-cat /tmp/hydra-autopilot-dispatch.json 2>/dev/null || echo '{"status":"idle"}'
-
 # recommendations
 hydra recommendations 2>/dev/null | python3 -c "
 import json,sys
@@ -116,7 +163,7 @@ except: print('recommendations=unavailable')"
 
 ## Phase 1.5: Auto-recover stale issues
 
-**Stale in-progress (>90 min):**
+**Stale in-progress (>90 min, orchestrator board):**
 ```bash
 for ISSUE in <stale_in_progress>; do
   gh issue edit $ISSUE --repo gaberoo322/hydra --remove-label in-progress --add-label ready-for-agent
@@ -137,176 +184,193 @@ for ISSUE in <stale_blocked>; do
 done
 ```
 
-If labels changed, re-read board.
+If labels changed, re-read board on the next turn.
 
-## Phase 2: Dispatch gate
+## Phase 2: Reap completed subagents + accounting
 
-Parse `/tmp/hydra-autopilot-dispatch.json`:
+For each class slot in `/tmp/hydra-autopilot-state.json` that has an entry:
 
-| State | Action |
-|-------|--------|
-| `running` <90min | BG dispatches blocked. Inline API still allowed. |
-| `running` >=90min | Timeout — clear. All allowed. |
-| `done`/`failed`/missing | All allowed. |
+1. Check whether the background Agent dispatch has produced its task notification (TaskNotification fires on completion; the dispatching session sees it as a completed agent result).
+2. If completed:
+   - Read the agent's reported `total_tokens` from its result block, add to `cumulative_tokens`
+   - **Post-dispatch sanity check (code-writing classes only)**: verify `git -C ~/hydra rev-parse --abbrev-ref HEAD == master`. If not, log `isolation_breach=<branch>` and surface in turn report. Do NOT auto-`checkout master`.
+   - Append the dispatch result to `/tmp/hydra-autopilot-nightly.log` (one line: skill, duration, tokens, exit-state, result-summary-first-line)
+   - Clear the slot (`slots[class] = null`)
 
-Codex cycle active → `codex_busy=true` (blocks P5 only).
+Update `dispatches` counter. Increment `idle_turns` if NO new dispatch this turn AND no class slot still occupied; otherwise reset `idle_turns = 0`.
 
-## Phase 3: Priority waterfall (first match wins)
+## Phase 3: Termination check
 
-### Phase 3.0: Capacity-floor preference (issue #245, ADR-0003 vision-vector-2)
+If any of these is true, jump to Phase 7 (terminal):
 
-Before walking the waterfall, check the orchestrator self-improvement share collected in Phase 1 (`capacity_orch_share`, `capacity_floor_met`).
+- `cumulative_tokens >= TOKEN_BUDGET`
+- `now() - started >= WALL_CLOCK_MAX_SEC`
+- `idle_turns >= IDLE_DRAIN_TURNS` AND no slots occupied
 
-**If `capacity_floor_met == false` AND `capacity_window >= 5`** (enough history to make a call), the autopilot **prefers orchestrator-side skills** in this order:
+Otherwise, continue to Phase 4.
 
-1. `hydra-discover` — only if orchestrator board has <5 `ready-for-agent` issues
-2. `hydra-research` — if cooldown allows
-3. `hydra-dev <highest-impact>` — if `ready_for_agent > 0`
+## Phase 4: Priority waterfall (per class slot, parallel decisions)
 
-Falls back to the normal waterfall only when the orchestrator side has nothing actionable (board empty AND research on cooldown). The floor is a **soft preference**, not a hard block — P0 (health) and P0.5 (pipeline recovery) still pre-empt it. The share recovers naturally on subsequent cycles.
+### Phase 4.0: Capacity-floor preference (ADR-0003 vision-vector-2)
 
-Log line when the preference fires:
-```
-[autopilot] capacity-floor fired: orchestrator share <X>% < floor 25% (window=N)
-```
+If `capacity_floor_met == false` AND `capacity_window >= 5`, **prefer filling `*_orch` slots first** this turn. Targets (`*_target`) are only considered after all eligible `*_orch` slots have been examined.
 
-### Standard waterfall
+P0 (health) and P0.5 (pipeline recovery) always pre-empt this preference.
 
-| Pri | Condition | Action | Type | Cooldown |
-|-----|-----------|--------|------|----------|
-| **P0** | health=FAIL or redis=false or failed_services>0 | Deep health → doctor if needed | API+BG | -- |
-| **P0.5** | stall=hard-stop OR scheduler=stopped OR (alert AND rising) | Pipeline recovery | API+BG | -- |
-| **P1** | needs_qa > 0 | `hydra-qa <oldest>` | BG | -- |
-| **P2** | ready_for_agent > 0 AND in_progress = 0 | `hydra-dev <highest-impact>` | BG | -- |
-| **P3** | work_queue + triage < 15 | Orchestrator research trigger | API | 30 min |
-| **P3.5** | ready_for_agent = 0 | `hydra-research` | BG | 60 min |
-| **P4** | needs_triage > 0 | `hydra-sweep` | BG | -- |
-| **P4.5** | triage>5 OR reframe>2 OR prior_failures>8 | `hydra-target-sweep` | BG | -- |
-| **P5** | work_queue>0 AND !codex_busy | Codex cycle trigger | API | -- |
-| **P6** | backlog≥30 AND last 10 cycles >50% empty/failed | `hydra-discover` | BG | -- |
-| **P7** | needs_research>0 | `hydra-issue-research <oldest>` | BG | -- |
-| **P8** | last digest >6h | `hydra-digest` | BG | 6 hr |
-| **P9** | true idle | `hydra-target-discover` | BG | -- |
+### Standard waterfall per class
 
-### Inline API actions
+For each class with a FREE slot, walk its eligibility check in priority order. First match wins for that class:
 
-**P0 deep:**
-```bash
-DEEP=$(hydra health deep 2>/dev/null)
-echo "$DEEP" | python3 -c "
-import json,sys
-try:
-  d=json.load(sys.stdin)
-  issues=[k for k,v in d.items() if isinstance(v,dict) and v.get('status') not in ('ok','healthy',True)]
-  print(f'HEALTH_ISSUES: {issues}' if issues else 'HEALTH_DEEP: clear')
-except: print('HEALTH_DEEP: parse error — dispatch doctor')"
-```
-Clear → fall through to P1. Real issues / parse error → dispatch `hydra-doctor` BG.
+#### `health`
+- **P0**: `health=FAIL` OR `redis=false` OR `failed_services>0` → dispatch `hydra-doctor`
+- **P0.5**: `stall=hard-stop` OR `scheduler=stopped` → first run inline pipeline recovery (`hydra scheduler start`), then dispatch `hydra-doctor` if root cause unclear
 
-**P0.5 pipeline recovery:**
-```bash
-# scheduler=stopped or hard-stop:
-hydra scheduler start && echo "Restarted scheduler"
-hydra research force && echo "Forced research cycle"
-# also dispatch hydra-doctor BG to diagnose root cause
-```
-After P0.5 actions, **don't fall through** — skip to Phase 5.
+#### `qa`
+- **P1**: `needs_qa > 0` → dispatch `hydra-qa <oldest>`
 
-**P3 research trigger:**
-```bash
-hydra research start && \
-  echo "research-trigger $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/hydra-autopilot-log.txt && \
-  date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/hydra-last-research.txt
-```
+#### `dev_orch`
+- **P2**: `ready_for_agent > 0` AND `in_progress == 0` → dispatch `hydra-dev <highest-impact>`
+- Worktree-guard preamble REQUIRED. Post-dispatch sanity check REQUIRED.
 
-**P5 codex cycle trigger:**
-```bash
-hydra cycle start && \
-  echo "codex-trigger $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/hydra-autopilot-log.txt
-```
+#### `dev_target`
+- **P-dev-target**: `work_queue > 0` AND no Codex cycle currently mid-flight (`CODEX_IDLE`) → dispatch `hydra-target-build`
+- Worktree-guard preamble REQUIRED. Post-dispatch sanity check REQUIRED.
+- **Codex coexistence**: while Codex removal is in progress, the Codex-driven scheduler still ticks cycles. We gate dev_target on `CODEX_IDLE` to avoid both touching the target at once. The merge lock will catch any race, but this gate avoids the lock contention.
 
-### Cooldown checks
+#### `research_orch`
+- **P3.5**: `ready_for_agent == 0` AND research_orch cooldown elapsed → dispatch `hydra-research`
+- **P7**: `needs_research > 0` AND research_orch cooldown elapsed → dispatch `hydra-issue-research <oldest>`
 
-```bash
-[ -f "$FILE" ] && LAST=$(cat "$FILE") && NOW=$(date +%s) && \
-  THEN=$(date -d "$LAST" +%s 2>/dev/null || echo 0) && \
-  [ $((NOW - THEN)) -lt $COOLDOWN_SECS ] && echo "SKIP: cooldown active"
-```
+#### `research_target`
+- **P-research-target**: target backlog signal weak (`work_queue + triage < 15`) AND research_target cooldown elapsed → dispatch `hydra-target-research`
+- The previous inline P3 (`hydra research start`) may still be invoked as a non-class operation when this same condition fires AND no `research_target` is currently in flight. Inline takes precedence — if `hydra research start` ran this turn, skip the subagent dispatch.
 
-| Action | File | Cooldown |
-|--------|------|----------|
-| P3 research trigger | `/tmp/hydra-last-research.txt` | 1800s |
-| P3.5 hydra-research | `/tmp/hydra-last-orchestrator-research.txt` | 3600s |
-| P8 hydra-digest | `/tmp/hydra-last-digest.txt` | 21600s |
+#### `sweep_orch`
+- **P4**: `needs_triage > 0` → dispatch `hydra-sweep`
+
+#### `sweep_target`
+- **P4.5**: `triage > 5` OR `reframe > 2` OR `prior_failures > 8` → dispatch `hydra-target-sweep`
+
+#### `discover_orch`
+- **P6**: `backlog >= 30` AND last 10 cycles >50% empty/failed → dispatch `hydra-discover`
+
+#### `discover_target`
+- **P9**: true idle (no other class produced a dispatch this turn) → dispatch `hydra-target-discover`
+
+### Cooldowns (per class, written by the skill itself on dispatch start)
+
+| Class | File | Cooldown |
+|---|---|---|
+| `research_orch` | `/tmp/hydra-last-research-orch.txt` | 3600s |
+| `research_target` | `/tmp/hydra-last-research-target.txt` | 3600s |
+| `discover_orch` | `/tmp/hydra-last-discover-orch.txt` | 1800s |
+| `discover_target` | `/tmp/hydra-last-discover-target.txt` | 1800s |
+
+**Do not pre-stamp cooldown files** — skills with internal rate-limiting own their own files and check on entry. Pre-stamping causes the skill to read its own pre-write and rate-limit itself into a no-op (observed 2026-05-09).
 
 ### Circuit breaker
 
-If same skill in last 5 log entries 3+ times AND board state hasn't changed (compare to `/tmp/hydra-autopilot-prev-state.txt`), skip and fall through:
+Per class: if the same skill was dispatched 3+ times in the last 5 dispatches for that class AND board state for that class hasn't changed (compare to `/tmp/hydra-autopilot-prev-state.json`), skip this class this turn:
+
 ```
-[autopilot] Circuit break: <skill> dispatched <N>x without board progress.
+[autopilot] Circuit break: <skill> dispatched 3x without board progress.
 ```
 
-## Phase 4: Dispatch
+## Phase 5: Dispatch
 
-### Inline API (P0-api, P3, P5)
-Already executed in Phase 3. Log + report.
+For each class that selected a skill in Phase 4:
 
-### Background agent (P0-doctor, P1, P2, P3.5, P4, P4.5, P6-P9)
-
-1. Marker: `echo '{"status":"running","skill":"<S>","started":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' > /tmp/hydra-autopilot-dispatch.json`
-2. Log: `echo "<S> $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/hydra-autopilot-log.txt`
-3. **Do NOT write the skill's own cooldown file here.** Skills with internal rate-limiting (`hydra-research`, `hydra-discover`, `hydra-target-research`) own their own cooldown timestamp and check it on entry. If autopilot writes the cooldown pre-dispatch, the skill reads it and rate-limits itself into a no-op (observed 2026-05-09: research dispatched, skipped 16s later because autopilot pre-stamped the file). The autopilot's circuit breaker (Phase 3, 3-same-skill-in-a-row check) is the dispatch-rate guard. The cooldown table (P3, P5, P8) applies only to **inline API actions** that have no skill of their own to enforce it.
-4. Save board state for circuit breaker.
-5. **Worktree-guard preamble (required for code-writing skills: `hydra-dev`, `hydra-qa`).** Every dispatched prompt MUST begin with the block below. The dispatched agent uses it to verify isolation and ABORT on mismatch — never fall back to `~/hydra`. See `docs/operator-playbooks/hydra-dev.md` for the canonical text and rationale.
+1. Mark slot: `slots[<class>] = {"skill":"<S>","started":"<ts>","prompt_summary":"..."}`
+2. Log: `dispatch <class> <skill> <ts>` appended to `/tmp/hydra-autopilot-nightly.log`
+3. **Worktree-guard preamble (REQUIRED for `dev_orch` and `dev_target`):**
 
    ```
    ## CRITICAL SAFETY RULE — READ FIRST
    Run `pwd` and `git rev-parse --git-dir` first.
    - Worktree path AND `.git/worktrees/...` gitdir → proceed.
-   - cwd == `/home/gabe/hydra` → ABORT with status:failed. Do not run any git commands.
-   No fallback to `~/hydra`. No `git checkout` in the main tree.
+   - cwd == `/home/gabe/hydra` (or `/home/gabe/hydra-betting`) → ABORT with status:failed.
+     Do not run any git commands. Do not check out master. Do not fall back.
+   No fallback. No `git checkout` in the main tree.
    ```
-6. Dispatch:
-   - **Claude:** `Agent(description:"<S>", run_in_background:true, isolation:"worktree", prompt:"<WORKTREE-GUARD PREAMBLE>\n\n... call Skill(skill:'<S>',args:'<ARGS>') and write completion marker on done/failed.")`
-     Pass `isolation:"worktree"` for any skill that writes code. The harness should spin a fresh worktree under `.claude/worktrees/agent-<id>`.
-   - **Codex:** `nohup codex exec --skill <S> --args '<ARGS>' >> /tmp/hydra-autopilot-bg.log 2>&1 & disown`
-     Then write `done`/`failed` to `/tmp/hydra-autopilot-dispatch.json` from a wrapper.
-7. **Post-dispatch sanity check.** After the BG agent terminates, verify `git -C ~/hydra rev-parse --abbrev-ref HEAD == master`. If not, surface a warning in the Phase 5 report (`isolation_breach=<branch>`) and do NOT auto-`checkout master` — let the operator decide whether the feature branch has unpushed work. This catches the 2026-05-11 #245 failure mode where isolation silently broke and the BG agent committed in `~/hydra`.
 
-### Recording orchestrator-side merges (capacity-floor data source)
+4. Dispatch via `Agent` tool:
+   ```
+   Agent(
+     description: "<class>:<skill>",
+     subagent_type: "Skill",   // or the appropriate subagent type
+     run_in_background: true,
+     isolation: "worktree",    // REQUIRED for dev_orch and dev_target
+     prompt: "<WORKTREE-GUARD PREAMBLE (if code-writing)>\n\n<skill invocation: /<S>>\n\n<any args>"
+   )
+   ```
+   The harness will spin a fresh worktree for code-writing classes under `.claude/worktrees/agent-<id>` and return its path on completion.
 
-`hydra-dev` lands orchestrator-side PRs but does not run through the Codex control loop, so post-merge does not stamp those entries. After a successful merge to `master` of `gaberoo322/hydra`, the dispatching skill (or a webhook) should POST the merge to the capacity ledger so the floor sees it:
+5. **Capacity-ledger writeback (post hydra-dev/hydra-target-build merges):**
+   When `dev_orch` or `dev_target` completes AND it reports a merged PR, POST to the capacity ledger so the share is reflected:
 
-```bash
-hydra raw POST /capacity/orchestrator-merge --json '{
-  "cycleId": "pr-<PR_NUMBER>",
-  "commitSha": "<sha>",
-  "filesChanged": ["src/foo.ts", "..."],
-  "source": "hydra-dev"
-}'
+   ```bash
+   hydra raw POST /capacity/orchestrator-merge --json '{
+     "cycleId": "pr-<PR_NUMBER>",
+     "commitSha": "<sha>",
+     "filesChanged": ["src/foo.ts","..."],
+     "source": "<skill>"
+   }'
+   ```
+
+   Without this, the share reads as 0% and the capacity-floor preference fires every turn.
+
+## Phase 6: Turn report
+
+One line per decision turn:
+
+```
+[autopilot] <ts> | turn=<N> | active=[<class>:<skill>,...] | tokens=<cum>/<budget> | board: qa=N agent=N triage=N wq=N | dispatched=<N this turn>
 ```
 
-Without this signal the share will read as 0% and the preference will fire every cycle until merged orchestrator work appears in the window.
+Append to `/tmp/hydra-autopilot-nightly.log`. Don't print on every turn (would spam) — only when a state change occurs (dispatch made, subagent finished, classification changed).
 
-## Phase 5: Report (one line)
+Then sleep 5s and go back to Phase 1.
 
-```
-[autopilot] <ts> | <action> | Reason: <condition> | Board: qa=N agent=N triage=N wq=N | Capacity: orch=X%/25% (W cycles)
-```
+## Phase 7: Terminal (graceful drain + final digest)
 
-Or:
-```
-[autopilot] <ts> | WAITING for <skill> (<N>m) | Board: qa=N agent=N triage=N wq=N
-[autopilot] <ts> | STOPPED | Session budget exhausted | Board: qa=N agent=N triage=N wq=N
-```
+1. **Stop accepting new dispatches.** Phase 4 returns nothing.
+2. **Drain.** Wait for all in-flight class slots to finish, with a 30-min cap. Beyond that, accept that they continue running headlessly via TaskNotification; the autopilot exits without their token counts (they show up in the next run's accounting if applicable, otherwise lost).
+3. **Final dispatch: `hydra-digest`** with prompt `"Generate an overnight summary for the operator. Cover: number of dispatches per class, token usage, merges shipped, incidents auto-resolved, alerts opened/closed, capacity-floor share movement, isolation breaches if any, and a 'next morning action items' bullet list. Source data: /tmp/hydra-autopilot-nightly.log."`
+4. **Wait** up to 5 min for the digest to complete; capture its output.
+5. **Final summary line printed to stdout** (this is what the operator sees in journalctl):
+   ```
+   [autopilot] FINAL | duration=<HH:MM> | dispatches=<N> | tokens=<cum>/<budget> | merged_PRs=<N> | digest=/tmp/hydra-autopilot-nightly.log
+   ```
+6. Exit cleanly.
 
 ## Safety rules
 
-1. NEVER modify `~/hydra` working tree directly.
-2. NEVER call skills inline from autopilot. BG dispatch only (Claude: `Agent(run_in_background:true)`; Codex: disowned `codex exec`). Inline API for non-blocking ops only.
-3. One BG agent at a time. Inline API always allowed.
-4. Rate-limit research (30/60 min); rate-limit codex triggers; circuit-break repeated dispatches without progress.
-5. Iteration cap = 50.
-6. Dispatch timeout = 90 min.
-7. NEVER auto-run `/hydra-architect` — operator-only.
-8. Capacity-floor preference is **soft** — P0/P0.5 always pre-empt it. Never refuse target work indefinitely; the share recovers naturally.
+1. **NEVER modify `~/hydra` or `~/hydra-betting` working tree directly.** All code writes happen in isolated worktrees via the Agent tool.
+2. **Worktree-guard preamble is mandatory** for `dev_orch` and `dev_target` dispatches. The subagent must ABORT if it lands in a main tree — no fallback.
+3. **One subagent per class.** Multiple classes run in parallel; never two `dev_orch` at once.
+4. **Token budget is a hard cap.** Stop at 2M cumulative reported tokens. Do not exceed.
+5. **Cooldowns are per-class and skill-owned.** Do not pre-stamp from autopilot.
+6. **Circuit breaker is per-class.** 3 same-skill dispatches in 5 without board progress → skip that class.
+7. **`hydra-architect` is operator-only.** Never auto-dispatch.
+8. **Capacity-floor preference is SOFT.** P0 / P0.5 always pre-empt. The share recovers naturally.
+9. **No Codex cycle triggers.** The `hydra cycle start` op is removed from this skill. The orchestrator's scheduler still ticks Codex on its own.
+10. **Idempotent shutdown.** Phase 7 must run regardless of how termination is reached (budget, clock, idle). It is the only path to the morning digest.
+
+## Operator interface
+
+### Manual invocation (development / debugging)
+```bash
+claude -p "/hydra-autopilot"
+# Custom budget for a short smoke test:
+HYDRA_AUTOPILOT_TOKEN_BUDGET=100000 HYDRA_AUTOPILOT_MAX_SEC=600 claude -p "/hydra-autopilot"
+```
+
+### Scheduled invocation
+The provided systemd unit pair (`scripts/systemd/hydra-autopilot.{service,timer}`) fires `claude -p "/hydra-autopilot"` nightly at 22:00 local time. The service is `Type=oneshot` with `RuntimeMaxSec=32400` (9h) — slightly above the default wall-clock cap to allow Phase 7 drain. Failure handler routes to the existing `hydra-notify-failure@.service` template.
+
+### Inspecting a run
+- Heartbeat: `cat /tmp/hydra-autopilot-heartbeat.txt`
+- Live state: `cat /tmp/hydra-autopilot-state.json`
+- Run log: `cat /tmp/hydra-autopilot-nightly.log`
+- Previous run: `cat /tmp/hydra-autopilot-nightly.log.prev`
+- Final morning artifact: the `hydra-digest` output is appended to the same log; tail it (`tail -100 /tmp/hydra-autopilot-nightly.log`) to see the summary first thing.
