@@ -636,33 +636,7 @@ export async function runPostMerge(
   await setCycleLast(cycleId);
   await clearCycleActive();
 
-  // Trigger Meta analysis
-  try {
-    const { getMetricsTrend } = await import("./metrics.ts");
-    const trend = await getMetricsTrend(20);
-    const recentFailures = trend.slice(0, 5).filter((m: any) => m.tasksFailed > 0).length;
-    const totalCycles = trend.length;
-
-    if (totalCycles >= 5 && recentFailures >= 2) {
-      console.log(`[ControlLoop] Triggering Meta analysis — fast-path (${recentFailures} failures in last 5 cycles)`);
-      await eventBus.publish(STREAMS.META, {
-        type: "cycle:report",
-        source: "control-loop",
-        correlationId: cycleId,
-        payload: { trigger: "failure_fast_path", recentFailures },
-      });
-    } else if (totalCycles >= 20 && totalCycles % 20 === 0) {
-      console.log(`[ControlLoop] Triggering Meta analysis — periodic review (cycle ${totalCycles})`);
-      await eventBus.publish(STREAMS.META, {
-        type: "cycle:report",
-        source: "control-loop",
-        correlationId: cycleId,
-        payload: { trigger: "periodic_review", totalCycles },
-      });
-    }
-  } catch (err: any) {
-    console.error(`[ControlLoop] Meta trigger check failed: ${err.message}`);
-  }
+  // Meta agent trigger removed in #345 — proposals now come from /hydra-discover.
 
   // Commit OV session
   const cycleOutcome = report.task?.finalState || "unknown";

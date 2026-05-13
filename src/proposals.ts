@@ -13,9 +13,6 @@
 import { readFile, appendFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { STREAMS } from "./event-bus.ts";
-import { runAgent, findPersonality } from "./codex-runner.ts";
-import { redisKeys } from "./redis-keys.ts";
-import { getTargetName } from "./target-config.ts";
 import {
   getProposalHash,
   saveProposalHash,
@@ -24,10 +21,6 @@ import {
   deleteProposal,
   removeProposalFromIndex,
   getProposalIdsByTimeRange,
-  getRecentReportIdsDesc,
-  getRealityReport,
-  getRecentMetricIdsDesc,
-  getCycleCostMicrodollars,
 } from "./redis-adapter.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
@@ -59,203 +52,6 @@ async function saveProposal(record) {
   const toStore = { ...record };
   if (Array.isArray(toStore.evidence)) toStore.evidence = JSON.stringify(toStore.evidence);
   await saveProposalHash(record.proposalId, toStore);
-}
-
-/**
- * Run the Meta agent to analyze cycle reports and generate proposals.
- * Gathers comprehensive system context: metrics, reality reports, backlog,
- * agent memory rules, spending, and grounding state.
- */
-async function runMetaAnalysis(eventBus, event) {
-  const trigger = event?.payload?.trigger || "manual";
-  console.log(`[Meta] Starting analysis (trigger: ${trigger})...`);
-
-  const contextSections = [];
-
-  // 1. Hard metrics — 20 cycles of trend data + aggregate stats
-  try {
-    const { getMetricsTrend, getAggregateStats } = await import("./metrics.ts");
-    const trend = await getMetricsTrend(20);
-    const stats = await getAggregateStats(20);
-    contextSections.push([
-      `## Cycle Metrics (last ${trend.length} cycles)`,
-      `Merged: ${stats.mergedRate}% | Failed: ${stats.failedRate}% | Abandoned: ${stats.abandonedRate}% | Regression: ${stats.regressionRate}%`,
-      `Average cycle duration: ${stats.avgDurationHuman}`,
-      "",
-      "### Per-cycle detail:",
-      ...trend.map((m) => `- ${m.cycleId}: ${m.tasksMerged ? "MERGED" : m.tasksFailed ? "FAILED" : "ABANDONED"} | "${m.taskTitle}" | tests:${m.testsBefore}→${m.testsAfter} | anchor:${m.anchorType} | risk:${m.rollbackRisk || "?"} | ${m.totalDurationMs}ms`),
-    ].join("\n"));
-  } catch { contextSections.push("## Cycle Metrics\n(unavailable)"); }
-
-  // 2. Reality reports — detailed post-cycle reports with grounding, verification, merge info
-  try {
-    const reportIds = await getRecentReportIdsDesc(10);
-    const reports = [];
-    for (const id of reportIds) {
-      const raw = await getRealityReport(id);
-      if (raw) {
-        const report = JSON.parse(raw);
-        reports.push(`- **${report.cycleId || id}**: task="${report.task?.title || "?"}" state=${report.task?.finalState || "?"} | grounding: ${report.grounding?.before?.passed ?? "?"}→${report.grounding?.after?.passed ?? "?"} tests | verification: ${report.verification?.allPassed ? "PASS" : "FAIL"} | regression: ${report.regressionIntroduced ? "YES" : "no"}`);
-      }
-    }
-    if (reports.length > 0) {
-      contextSections.push(`## Reality Reports (last ${reports.length})\n${reports.join("\n")}`);
-    }
-  } catch { /* intentional: reality reports optional — meta context proceeds without */ }
-
-  // 3. Spending — cost trends
-  try {
-    const cycleIds = await getRecentMetricIdsDesc(20);
-    let totalCost = 0;
-    let cyclesWithCost = 0;
-    for (const cid of cycleIds) {
-      const costMicro = parseInt(await getCycleCostMicrodollars(cid) || "0");
-      if (costMicro > 0) { totalCost += costMicro / 1_000_000; cyclesWithCost++; }
-    }
-    if (cyclesWithCost > 0) {
-      contextSections.push(`## Spending\nTotal: $${totalCost.toFixed(2)} across ${cyclesWithCost} cycles | Avg: $${(totalCost / cyclesWithCost).toFixed(3)}/cycle`);
-    }
-  } catch { /* intentional: spending metrics optional — meta context proceeds without */ }
-
-  // 4. Backlog state — what's queued, blocked, in progress
-  try {
-    const { _admin: backlogAdmin } = await import("./backlog.ts");
-    const backlog = await backlogAdmin.loadBacklog();
-    const counts: Record<string, any> = {};
-    for (const lane of ["backlog", "queued", "blocked", "inProgress", "done"]) {
-      counts[lane] = ((backlog as any)[lane] || []).length;
-    }
-    const blockedItems = ((backlog as any).blocked || []).map((i: any) => `"${i.title || i}"`).slice(0, 5);
-    contextSections.push([
-      "## Backlog State",
-      `Backlog: ${counts.backlog} | Queued: ${counts.queued} | Blocked: ${counts.blocked} | In Progress: ${counts.inProgress} | Done: ${counts.done}`,
-      blockedItems.length > 0 ? `Blocked items: ${blockedItems.join(", ")}` : "",
-    ].filter(Boolean).join("\n"));
-  } catch { /* intentional: backlog snapshot optional — meta context proceeds without */ }
-
-  // 5. Agent memory — learned prevention rules (WHEN/CHECK/BECAUSE)
-  try {
-    const { loadAgentMemory } = await import("./learning.ts");
-    const agentRules = [];
-    for (const agent of ["planner", "executor", "skeptic"]) {
-      const memory = await loadAgentMemory(agent);
-      if (memory && memory.trim()) {
-        const ruleCount = (memory.match(/WHEN:/g) || []).length;
-        agentRules.push(`- **${agent}**: ${ruleCount} prevention rules`);
-      }
-    }
-    if (agentRules.length > 0) {
-      contextSections.push(`## Agent Memory (learned rules)\n${agentRules.join("\n")}`);
-    }
-  } catch { /* intentional: agent memory optional — meta context proceeds without */ }
-
-  // 6. Current agent config files — so Meta knows what it's proposing changes to
-  try {
-    const agentConfigs = [];
-    for (const agent of ["planner", "executor", "skeptic"]) {
-      const content = await readFile(join(CONFIG_PATH, `agents/${agent}.md`), "utf-8");
-      // Include first 30 lines (identity + core rules) not the full file
-      const preview = content.split("\n").slice(0, 30).join("\n");
-      agentConfigs.push(`### ${agent}.md (first 30 lines)\n\`\`\`\n${preview}\n\`\`\``);
-    }
-    contextSections.push(`## Current Agent Personalities\n${agentConfigs.join("\n\n")}`);
-  } catch { /* intentional: agent config files optional — meta context proceeds without */ }
-
-  // 7. Feedback files — current operator guidance
-  try {
-    const feedbackSummary = [];
-    for (const target of ["to-planner", "to-executor", "to-skeptic"]) {
-      const content = await readFile(join(CONFIG_PATH, `feedback/${target}.md`), "utf-8");
-      const lineCount = content.split("\n").length;
-      feedbackSummary.push(`- **${target}.md**: ${lineCount} lines`);
-    }
-    contextSections.push(`## Operator Feedback Files\n${feedbackSummary.join("\n")}`);
-  } catch { /* intentional: feedback files optional — meta context proceeds without */ }
-
-  // 8. Recent proposals — so Meta doesn't re-propose the same things
-  try {
-    const recent = await listProposals();
-    if (recent.length > 0) {
-      const proposalLines = recent.slice(0, 15).map(p =>
-        `- [${p.status}] "${p.title}" → ${p.targetFile || "?"} (${p.risk} risk)${p.status === "rejected" ? ` — rejected: ${p.rejectionReason || "no reason"}` : ""}${p.applied === "true" ? " — APPLIED" : ""}`
-      );
-      contextSections.push(`## Recent Proposals (do NOT re-propose these)\n${proposalLines.join("\n")}\n\nDo not propose anything that duplicates or closely resembles an existing approved, applied, or rejected proposal. If a proposal was rejected, do not re-propose it unless you have new evidence that was not available when it was rejected.`);
-    }
-  } catch { /* intentional: prior proposals optional — meta context proceeds without */ }
-
-  // 9. System architecture summary
-  contextSections.push([
-    "## System Architecture",
-    `Hydra runs a 3-agent control loop on the ${getTargetName()} codebase:`,
-    "1. **Grounding**: npm test + tsc (read-only repo inspection)",
-    "2. **Planner** (frontier model): proposes 1 bounded task from anchor (queue > failing-test > prior-failure > backlog > priorities > research)",
-    "3. **Skeptic** (codex model): challenges the plan (skipped for quick-fix/research tasks)",
-    "4. **Executor** (codex model): implements on feature branch",
-    "5. **Verification**: npm test + tsc + npm run build (hard verification, not an agent)",
-    "6. **Merge**: git merge --no-ff to main",
-    "7. **Report + compound learnings**: reality report + WHEN/CHECK/BECAUSE rules extracted",
-    "",
-    "Config files live in ~/hydra/config/ (git-tracked). State is in Redis.",
-    "Agent personalities: config/agents/{planner,executor,skeptic}.md",
-    "Feedback files: config/feedback/{to-planner,to-executor,to-skeptic}.md",
-    "Direction files: config/direction/{vision,goals,priorities,tech-preferences}.md",
-  ].join("\n"));
-
-  // Build the prompt
-  const prompt = [
-    `## Trigger: ${trigger}`,
-    "",
-    ...contextSections,
-    "",
-    "## Your Task",
-    "Analyze the data above. Identify the highest-impact improvements to Hydra's effectiveness.",
-    "Consider: cycle success rate, failure patterns, cost efficiency, agent behavior, backlog health, and system architecture.",
-    "",
-    "When everything is working well, look for optimization opportunities:",
-    "- Can cycles run faster? Are agents over-scoped or under-scoped?",
-    "- Are there recurring patterns in task types that suggest specialization?",
-    "- Are agent personalities or feedback files stale, redundant, or missing guidance?",
-    "- Is spending efficient? Are expensive models used where cheaper ones would suffice?",
-    "- Are blocked items stuck? Should priorities shift?",
-    "",
-    "Output ONLY valid JSON as specified in your personality file.",
-  ].join("\n");
-
-  const personality = await findPersonality("meta");
-
-  const result = await runAgent({
-    agentName: "meta",
-    personality,
-    prompt,
-    model: "frontier",
-    taskId: `meta-analysis-${Date.now()}`,
-    correlationId: event?.correlationId || "manual",
-  });
-
-  let metaOutput: Record<string, any> = {};
-  try {
-    metaOutput = JSON.parse(result.output);
-  } catch {
-    const match = result.output.match(/\{[\s\S]*\}/);
-    if (match) {
-      try { metaOutput = JSON.parse(match[0]); } catch { /* intentional: fallback JSON parse from regex match, proceed with empty metaOutput */ }
-    }
-  }
-
-  const createdProposals: any[] = [];
-  for (const proposal of metaOutput.proposals || []) {
-    const created: any = await createProposal(proposal, event?.correlationId, eventBus);
-    createdProposals.push(created);
-
-    if (created.dedupRejected) continue; // skip dedup-rejected proposals
-    if (created.type === "personality" && created.risk === "low") {
-      console.log(`[Meta] Auto-approving low-risk personality proposal ${created.proposalId}: ${created.title}`);
-      await approveProposal(created.proposalId, eventBus);
-    }
-  }
-
-  console.log(`[Meta] Created ${createdProposals.length} proposals (${createdProposals.filter(p => p.status === "approved").length} auto-approved)`);
-  return { metaOutput, proposals: createdProposals };
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +451,6 @@ async function archiveApprovedProposals() {
 }
 
 export {
-  runMetaAnalysis,
   createProposal,
   approveProposal,
   rejectProposal,
