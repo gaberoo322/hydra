@@ -201,6 +201,78 @@ export function createMetricsRouter() {
     }
   });
 
+  // GET /metrics/grounding-duration — p50/p95 + incremental vs full bucket
+  //
+  // Issue #341: incremental grounding/verification can cut a 14-min cycle to
+  // ~10 min by running only tests whose transitive import closure intersects
+  // the changed files. This endpoint exposes the grounding/verification
+  // duration trend, bucketed by groundingMode ("incremental" | "full" | ""),
+  // so the rollout's effect can be measured per-cycle without scraping the
+  // raw metrics index.
+  //
+  // Until selectAffectedTests is wired into the verification path (env-gated:
+  // HYDRA_INCREMENTAL_GROUNDING=true), all cycles will report mode="full" or
+  // an empty mode field — bucket distribution makes that visible.
+  router.get("/metrics/grounding-duration", async (req, res) => {
+    try {
+      // @ts-expect-error — req.query.count is a string at runtime
+      const count = parseInt(req.query.count) || 50;
+      const trend = await getMetricsTrend(count);
+
+      const samples = trend.map((m: any) => ({
+        cycleId: m.cycleId,
+        groundingMode: typeof m.groundingMode === "string" ? m.groundingMode : "",
+        groundingDurationMs: typeof m.groundingDurationMs === "number" ? m.groundingDurationMs : 0,
+        verificationDurationMs: typeof m.verificationDurationMs === "number" ? m.verificationDurationMs : 0,
+        // testsSelected: how many tests the incremental selector actually ran
+        // (undefined for full-suite runs). Surfaced for rollout-vs-baseline
+        // comparison without forcing callers to do bucket math.
+        testsSelected: typeof m.incrementalTestsSelected === "number" ? m.incrementalTestsSelected : null,
+      }));
+
+      const percentile = (arr: number[], p: number): number | null => {
+        if (arr.length === 0) return null;
+        const sorted = [...arr].sort((a, b) => a - b);
+        const idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p));
+        return sorted[idx];
+      };
+
+      const bucket = (mode: string) => {
+        const subset = samples.filter((s) => s.groundingMode === mode);
+        const ground = subset.map((s) => s.groundingDurationMs).filter((x) => x > 0);
+        const verify = subset.map((s) => s.verificationDurationMs).filter((x) => x > 0);
+        return {
+          cycles: subset.length,
+          grounding: {
+            p50: percentile(ground, 0.5),
+            p95: percentile(ground, 0.95),
+            mean: ground.length > 0 ? Math.round(ground.reduce((a, b) => a + b, 0) / ground.length) : null,
+          },
+          verification: {
+            p50: percentile(verify, 0.5),
+            p95: percentile(verify, 0.95),
+            mean: verify.length > 0 ? Math.round(verify.reduce((a, b) => a + b, 0) / verify.length) : null,
+          },
+        };
+      };
+
+      const buckets = {
+        incremental: bucket("incremental"),
+        full: bucket("full"),
+        unlabelled: bucket(""),
+      };
+
+      res.json({
+        sampleSize: samples.length,
+        buckets,
+        recent: samples.slice(0, 20),
+      });
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/grounding-duration failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // POST /metrics/record — Record cycle metrics from external sources
   router.post("/metrics/record", async (req, res) => {
     try {
