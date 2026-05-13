@@ -719,7 +719,6 @@ async function findPersonality(agentName) {
   const agentMap = {
     planner: "product/product-manager.md",
     executor: "engineering/engineering-senior-developer.md",
-    skeptic: "engineering/engineering-code-reviewer.md",
     strategist: "product/product-manager.md",
     builder: "engineering/engineering-senior-developer.md",
     meta: "engineering/engineering-sre.md",

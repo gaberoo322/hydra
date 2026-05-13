@@ -13,7 +13,6 @@ import { startDigest, stopDigest, recordEvent } from "./digest.ts";
 import { initLearning } from "./learning.ts";
 import { setAgentStreamCallback } from "./codex-runner.ts";
 import { redisKeys } from "./redis-keys.ts";
-import { startCodeReviewerLoop } from "./code-reviewer.ts";
 import { cleanWorkQueue } from "./redis-adapter.ts";
 import { recordCycleSide, classifySide } from "./capacity-floor.ts";
 import { publishOrchestratorShareMetric } from "./metrics-publisher.ts";
@@ -285,9 +284,6 @@ async function main() {
   // Report cleanup (cycle-summaries 2d, reality-reports keep 50)
   startCleanupSchedule();
 
-  // Continuous code reviewer — deep reviews via local Gemma model
-  const stopCodeReviewer = startCodeReviewerLoop(eventBus);
-
   // Cycle watchdog — auto-kill cycles past the TTL, alert on stalls
   setInterval(async () => {
     try {
@@ -342,7 +338,6 @@ async function main() {
     console.log(`\n[Hydra] Received ${signal}, shutting down...`);
     stopDigest();
     stopScheduler();
-    stopCodeReviewer();
     eventBus.stopConsuming();
     clearInterval(heartbeat);
     for (const ws of wss.clients) ws.close(1001, "server shutting down");
