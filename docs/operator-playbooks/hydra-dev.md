@@ -133,3 +133,35 @@ fi
 ```
 
 This catches the case where isolation silently failed and the BG agent ran in the main tree anyway (the #245 failure mode).
+
+### 8. Lesson capture on verification failure (issue #392)
+
+When the BG agent returns a **failure** with `verification-failure`, `no-diff`,
+or `rollback` as the cause, the parent MUST capture a learning hit so the
+executor pattern memory keeps growing after #383 deletes the in-process
+control loop. This is the only post-cycle writer to
+`hydra:memory:executor:patterns` for Claude-driven runs.
+
+```bash
+# Only on failure with a recognised cause. Skip on success (the planner
+# pattern set will be trained from QA failures, not from dev success).
+curl -fsS -X POST http://localhost:4000/api/memory/subagent-lesson \
+  -H 'content-type: application/json' \
+  -d "$(jq -n \
+    --arg skill "hydra-dev" \
+    --arg outcome "verification-failure" \
+    --arg cue "verification-failure" \
+    --arg context "issue-${issue_number}: ${FAILURE_REASON}" \
+    --arg cycleId "hydra-dev-${issue_number}-$(date +%s)" \
+    '{skill: $skill, outcome: $outcome, cue: $cue, context: $context, cycleId: $cycleId}')"
+```
+
+Use the cue that best matches what failed:
+- `verification-failure` — npm test / typecheck / build failed
+- `no-diff` — agent produced zero file changes
+- `rollback` — merge succeeded but auto-reverted on regression
+
+The endpoint is idempotent on `(skill, outcome, cue)` — multiple calls for
+the same logical event merge into one pattern (hit count increments). Don't
+call it on success, and don't call it on infrastructure aborts (the
+isolation-abort path in Step 6) — those aren't agent-fixable.

@@ -123,5 +123,47 @@ export function createMiscRouter(eventBus: any) {
     }
   });
 
+  // POST /memory/subagent-lesson (issue #392) — lesson-capture hook for
+  // autopilot-dispatched subagents (hydra-dev / hydra-qa / hydra-target-build).
+  // After codex-runner is deleted by issue #383, this is the *only*
+  // post-cycle writer to hydra:memory:{agent}:patterns. The endpoint is
+  // intentionally a thin wrapper around captureSubagentLesson() so the
+  // existing 3-hit auto-promotion pipeline continues to apply unchanged.
+  router.post("/memory/subagent-lesson", async (req, res) => {
+    try {
+      const { skill, outcome, cue, context, action, severity, cycleId } = req.body || {};
+      const { captureSubagentLesson, isValidSkill, isValidOutcome } =
+        await import("../learning/subagent-capture.ts");
+
+      if (!isValidSkill(skill)) {
+        return res.status(400).json({
+          error: `Invalid or missing 'skill' — expected hydra-qa | hydra-dev | hydra-target-build`,
+        });
+      }
+      if (!isValidOutcome(outcome)) {
+        return res.status(400).json({
+          error: `Invalid or missing 'outcome' — expected qa-fail | verification-failure | no-diff | rollback`,
+        });
+      }
+      if (typeof cue !== "string" || cue.trim().length === 0) {
+        return res.status(400).json({ error: "Missing 'cue' (non-empty string)" });
+      }
+
+      const result = await captureSubagentLesson({
+        skill,
+        outcome,
+        cue,
+        context: typeof context === "string" ? context : "",
+        action: typeof action === "string" ? action : undefined,
+        severity: severity === "reinforce" ? "reinforce" : "prevent",
+        cycleId: typeof cycleId === "string" ? cycleId : undefined,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      console.error(`[api/memory/subagent-lesson] failed:`, err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }
