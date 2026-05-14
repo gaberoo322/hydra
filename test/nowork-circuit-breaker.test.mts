@@ -154,43 +154,9 @@ describe("noWork circuit-breaker escalation (issue #137)", () => {
     assert.equal(count, 0, "Merge should reset abandonment counter");
   });
 
-  test("handlePlanResult noWork sentinel triggers abandonment path", async () => {
-    // This test verifies the pipeline-steps.ts integration:
-    // the __noWork sentinel from runPlannerAgent flows through handlePlanResult
-    // and calls reportOutcome with status: "abandoned"
-    const { handlePlanResult } = await import("../src/pipeline-steps.ts");
-    const { _testing } = anchorSelection;
-    const { createTracker } = await import("../src/task-tracker.ts");
-    createTracker();
-
-    const anchor = createMockAnchor({
-      type: "doc",
-      reference: "direction/priorities.md",
-      whyNow: "Priorities doc",
-    });
-
-    const ctx = createMockCycleContext({
-      cycleId: "cycle-nowork-test",
-      anchor,
-    });
-
-    // Simulate the __noWork sentinel that runPlannerAgent now returns
-    const noWorkTask = { __noWork: true, reason: "All priorities addressed" };
-
-    const result = await handlePlanResult(ctx, noWorkTask, ctx.anchorConfidence);
-
-    // Pipeline should stop
-    assert.equal(result.continue, false);
-    if (!result.continue) {
-      assert.ok(
-        result.result.reason.includes("noWork"),
-        `Expected 'noWork' in reason, got: ${result.result.reason}`,
-      );
-    }
-
-    // Abandonment counter should have been incremented
-    const key = _testing.anchorKey(anchor.reference);
-    const count = parseInt(await redis.get(key) || "0");
-    assert.ok(count >= 1, `Expected abandonment counter >= 1, got ${count}`);
-  });
+  // `handlePlanResult noWork sentinel triggers abandonment path` was removed
+  // in PR-3 (issue #383) along with `src/pipeline-steps.ts`. The abandonment
+  // accounting it exercised (`reportOutcome({ status: "abandoned" })`) is
+  // still tested by the three subtests above, which drive the counter
+  // directly without routing through the deleted pipeline-steps helper.
 });

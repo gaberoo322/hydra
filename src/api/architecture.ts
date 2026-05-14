@@ -8,21 +8,28 @@ const SRC_DIR = resolve(HYDRA_ROOT, "src");
 
 // Group definitions — update these when major architectural boundaries shift
 const GROUP_MAP: Record<string, { id: string; label: string; color: string }> = {};
+// Group definitions updated in PR-3 (issue #383): the entire "agents" group
+// (codex-runner / executor-agent / planner-prompt / preflight) plus the
+// control-loop / pipeline-steps / verification / post-merge / holdback /
+// gate modules in the "core" and "quality" groups were deleted along with
+// the in-process codex control loop. Autopilot subagents own execution
+// now and are tracked outside this orchestrator-internal architecture
+// graph.
 const GROUPS = [
   { id: "core", label: "Core Loop", color: "emerald",
-    modules: ["index", "control-loop", "cycle", "cycle-helpers", "pipeline-steps", "scheduler"] },
-  { id: "agents", label: "Agents", color: "blue",
-    modules: ["codex-runner", "executor-agent", "planner-prompt", "context-builder", "preflight"] },
+    modules: ["index", "cycle", "cycle-helpers", "scheduler"] },
+  { id: "agents", label: "Agents (legacy / stubs)", color: "blue",
+    modules: ["context-builder"] },
   { id: "quality", label: "Quality & Verification", color: "amber",
-    modules: ["verification", "codebase-health", "codebase-analyzer"] },
+    modules: ["codebase-health", "codebase-analyzer"] },
   { id: "knowledge", label: "Knowledge & Learning", color: "purple",
-    modules: ["knowledge-indexer", "learning", "reflections", "agent-memory", "pattern-detector", "prompt-evolution", "repo-map", "grounding", "ov-session", "ov-skills"] },
+    modules: ["knowledge-indexer", "learning", "reflections", "agent-memory", "pattern-detector", "prompt-evolution", "repo-map", "grounding", "ov-session"] },
   { id: "state", label: "State & Data", color: "cyan",
     modules: ["redis-adapter", "redis-keys", "event-bus", "task-tracker", "task-machine", "metrics", "backlog"] },
   { id: "planning", label: "Planning & Research", color: "rose",
     modules: ["research-loop", "project-goals", "anchor-selection", "anchor-scorer", "plan-cache"] },
   { id: "infra", label: "Infrastructure", color: "zinc",
-    modules: ["api", "notify", "digest", "cleanup", "instrument", "merge", "post-merge", "prepare-workspace", "specs", "proposals"] },
+    modules: ["api", "notify", "digest", "cleanup", "instrument", "merge", "prepare-workspace", "specs", "proposals"] },
 ];
 
 for (const g of GROUPS) {

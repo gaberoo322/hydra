@@ -59,6 +59,11 @@ describe("cost-attribution aggregation (issue #271)", () => {
   });
 
   test("agentRoleToTier covers the standard roles", () => {
+    // executor / fixer / jit-tester are LEGACY entries kept in the role
+    // table for back-compat with historical Redis records emitted before
+    // PR-3 (issue #383) deleted the codex agents themselves. They MUST
+    // continue to resolve to "codex" so the cost-attribution dashboard
+    // stays accurate for retention-window queries.
     assert.equal(agentRoleToTier("planner"), "frontier");
     assert.equal(agentRoleToTier("executor"), "codex");
     assert.equal(agentRoleToTier("fixer"), "codex");
@@ -89,15 +94,18 @@ describe("cost-attribution aggregation (issue #271)", () => {
   });
 
   // Issue #303 acceptance: every role string emitted by `logAgentRun` call
-  // sites in src/ resolves to a non-"unknown" tier. The roles below mirror
-  // the literal first-arg passed at each call site (grep `logAgentRun` in src/).
+  // sites in src/ resolves to a non-"unknown" tier. PR-3 (issue #383) removed
+  // the codex-driven src/executor-agent.ts / src/fixer.ts / src/jit.ts /
+  // src/preflight.ts call sites, but legacy Redis records from before the
+  // cut are still attributed via the role table — `executor` etc. remain
+  // in the role list as LEGACY entries.
   test("every role emitted by logAgentRun in src/ maps to a known tier (issue #303)", () => {
     const ROLES_FROM_SRC = [
-      "planner",        // src/planner-prompt.ts (×3 — cache, no-work, completed)
-      "executor",       // src/executor-agent.ts
-      "fixer",          // src/fixer.ts
-      "jit-tester",     // src/jit.ts
-      "skeptic",        // src/preflight.ts (×2 — high-risk-review + skeptic verdict path)
+      "planner",        // plan-cache hit-recording + (legacy) src/planner-prompt.ts
+      "executor",       // LEGACY — historical runs from src/executor-agent.ts
+      "fixer",          // LEGACY — historical runs from src/fixer.ts
+      "jit-tester",     // LEGACY — historical runs from src/jit.ts
+      "skeptic",        // LEGACY — historical runs from src/preflight.ts
     ];
     for (const role of ROLES_FROM_SRC) {
       const tier = agentRoleToTier(role);

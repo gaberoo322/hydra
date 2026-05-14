@@ -11,7 +11,6 @@ import { startCleanupSchedule } from "./cleanup.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler.ts";
 import { startDigest, stopDigest, recordEvent } from "./digest.ts";
 import { initLearning } from "./learning.ts";
-import { setAgentStreamCallback } from "./codex-runner.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { cleanWorkQueue } from "./redis-adapter.ts";
 import { recordCycleSide, classifySide } from "./capacity-floor.ts";
@@ -231,16 +230,11 @@ async function main() {
   console.log("[Hydra] Proposal approval watcher started");
 
 
-  // Wire agent streaming — broadcast codex exec output to WebSocket clients in real-time
-  setAgentStreamCallback((data) => {
-    eventBus._broadcastToClients(redisKeys.streamAgentStream(), {
-      type: "agent:stream",
-      ...data,
-      timestamp: new Date().toISOString(),
-    });
-  });
+  // Agent streaming was wired through codex-runner's setAgentStreamCallback,
+  // both removed in PR-3 (issue #383). Autopilot subagents own execution
+  // now and emit their own events via the event bus directly.
 
-  console.log("[Hydra] V2 CONTROL LOOP — ground→plan→skeptic→execute→verify→merge");
+  console.log("[Hydra] Scheduler heartbeat — housekeeping only (codex control loop removed PR-3 #383)");
 
   // Create and start API + WebSocket server
   const app = createApi(eventBus);

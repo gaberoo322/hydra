@@ -36,14 +36,20 @@ describe("tier classifier — Tier 0 (Untouchable Core)", () => {
   });
 
   test("isUntouchable returns true for protected paths and false otherwise", () => {
-    assert.equal(isUntouchable("src/control-loop.ts"), true);
+    // gate.ts / verification.ts / post-merge.ts / control-loop.ts were
+    // removed from the protected-paths list in PR-3 (issue #383) along with
+    // the files themselves (the in-process codex control loop is gone).
     assert.equal(isUntouchable("src/grounding.ts"), true);
-    assert.equal(isUntouchable("src/verification.ts"), true);
-    assert.equal(isUntouchable("src/post-merge.ts"), true);
     assert.equal(isUntouchable("src/redis-adapter.ts"), true);
     assert.equal(isUntouchable("src/cost-cap.ts"), true);
     assert.equal(isUntouchable("scripts/deploy.sh"), true);
     assert.equal(isUntouchable(".github/workflows/ci.yml"), true);
+
+    // No longer protected — files were deleted in PR-3 #383
+    assert.equal(isUntouchable("src/control-loop.ts"), false);
+    assert.equal(isUntouchable("src/verification.ts"), false);
+    assert.equal(isUntouchable("src/post-merge.ts"), false);
+    assert.equal(isUntouchable("src/gate.ts"), false);
 
     assert.equal(isUntouchable("src/anchor-selection.ts"), false);
     assert.equal(isUntouchable("config/agents/planner.md"), false);
@@ -66,12 +72,11 @@ describe("tier classifier — Tier 0 (Untouchable Core)", () => {
     assert.equal(r3.tier, 0);
   });
 
-  test("future-extracted gate.ts is already protected (proactive)", () => {
-    // src/gate.ts doesn't exist yet, but the matcher protects it the
-    // instant any PR introduces it. Per ADR-0001 work-order step 6.
-    const r = classifyChange(["src/gate.ts"]);
-    assert.equal(r.tier, 0);
-  });
+  // The "future-extracted gate.ts is already protected (proactive)" test was
+  // removed in PR-3 (issue #383): gate.ts was created, lived briefly as the
+  // merge-gate facade, then deleted along with the in-process control loop.
+  // The proactive-protection pattern is exercised below for paths that
+  // remain on the untouchable list.
 
   test("./-prefixed paths normalize correctly", () => {
     const r = classifyChange(["./src/grounding.ts"]);

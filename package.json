@@ -14,7 +14,6 @@
   "author": "Gabe",
   "license": "UNLICENSED",
   "dependencies": {
-    "@openai/codex-sdk": "^0.125.0",
     "@sentry/node": "^10.48.0",
     "express": "^5.2.1",
     "ioredis": "^5.10.1",

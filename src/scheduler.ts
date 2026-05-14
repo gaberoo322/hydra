@@ -9,7 +9,6 @@
  */
 
 import * as Sentry from "@sentry/node";
-import { startCycle } from "./cycle.ts";
 import { sendNotification } from "./notify.ts";
 import { getMetricsTrend } from "./metrics.ts";
 import { _admin } from "./backlog.ts";
@@ -88,30 +87,13 @@ const NO_OP_MERGE_HALT_THRESHOLD = parseInt(process.env.HYDRA_NO_OP_MERGE_HALT_T
 // 14 hours) and trip stall-style alerts long after the underlying bug is fixed.
 const ROLLING_MERGE_RATE_WINDOW = parseInt(process.env.HYDRA_ROLLING_MERGE_RATE_WINDOW) || 50;
 
-/**
- * Issue #381 (codex cut-over PR-1): one-flag kill-switch that prevents
- * `runScheduledCycle()` from invoking the in-process control loop (and thus
- * the codex CLI agents). Defaults to disabled — codex spend is dead weight
- * now that autopilot is the only execution path. The flag can be flipped
- * back to `true` via the systemd unit env file to verify a clean kill or
- * to temporarily re-enable codex.
- *
- * When disabled, the scheduler still runs every tick — stale-claim reaper,
- * blocked-escalation check, weekly digest, memory consolidation, research,
- * etc. — so housekeeping that depends on the heartbeat continues to work.
- * Only the `startCycle()` -> `runControlLoop()` call is suppressed.
- *
- * Accepts "1" / "true" / "yes" (case-insensitive) as truthy; everything
- * else (including unset) is falsy.
- */
-function readCodexCycleEnabled(): boolean {
-  const raw = (process.env.HYDRA_CODEX_CYCLE_ENABLED ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes";
-}
-const CODEX_CYCLE_ENABLED = readCodexCycleEnabled();
-// Exported for tests (re-read on demand so env changes apply without a full
-// module reload). Production code reads CODEX_CYCLE_ENABLED at import time.
-export { readCodexCycleEnabled };
+// Issue #381 (codex cut-over PR-1) introduced HYDRA_CODEX_CYCLE_ENABLED as a
+// kill-switch that prevented the scheduler from invoking the in-process
+// control loop. Issue #383 (PR-3) deleted the control loop entirely — the
+// scheduler now ONLY runs housekeeping (stale-claim reaper, weekly digest,
+// memory consolidation, maybeRunResearch). There is no codex cycle to gate;
+// the flag is gone. Reaching this comment in a debug session = grep for
+// "HYDRA_CODEX_CYCLE_ENABLED" in operator runbooks and tell them it is dead.
 
 /**
  * Compute the rolling merge rate from cycle metrics history.
@@ -778,234 +760,20 @@ async function runScheduledCycle(eventBus) {
     Sentry.addBreadcrumb({ category: "scheduler", message: `maybeRunResearch failed: ${err.message}`, level: "error" });
   }
 
-  // Issue #381 (codex cut-over PR-1): when the codex cycle is disabled, the
-  // scheduler still runs the housekeeping above (stale-claim reaper, weekly
-  // digest, memory consolidation, maybeRunResearch) but skips the in-process
-  // control loop. Update `lastCycleAt` so the watchdog's >15min stale-cycle
-  // alert doesn't false-fire, then schedule the next tick.
-  if (!CODEX_CYCLE_ENABLED) {
-    state.lastCycleAt = new Date().toISOString();
-    if (state.running) {
-      const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
-      state.timer = setTimeout(
-        () => runScheduledCycle(eventBus).catch((err: any) =>
-          console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`),
-        ),
-        delay,
-      );
-    }
-    return;
-  }
-
-  // Anchor selection in the control loop already prioritizes failing tests
-  // (priority #4) — no need to pre-check here. Removing the redundant
-  // groundProject() call saves ~49s per cycle.
-  let cycleOpts: Record<string, any> = {};
-
-  // Reframe interleaving (issue #57): every Nth cycle, force a reframe anchor
-  // if the queue is non-empty. This ensures reframe items get scheduled more
-  // frequently instead of starving behind higher-priority sources.
-  try {
-    const reframeLen = await listLen(REFRAME_QUEUE);
-    if (reframeLen > 0 && state.cyclesRun > 0 && state.cyclesRun % REFRAME_INTERLEAVE_INTERVAL === 0) {
-      const raw = await listLPop(REFRAME_QUEUE);
-      if (raw) {
-        const item = JSON.parse(raw);
-        cycleOpts.anchor = {
-          type: "reframe",
-          reference: item.originalTitle,
-          whyNow: `Reframe interleave: queue has ${reframeLen} items, forcing drain every ${REFRAME_INTERLEAVE_INTERVAL} cycles`,
-          context: item,
-        };
-        console.log(`[Scheduler] Reframe interleave: forcing reframe anchor "${item.originalTitle}" (queue: ${reframeLen}, cycle: ${state.cyclesRun})`);
-      }
-    }
-  } catch (err: any) {
-    console.error(`[Scheduler] Reframe interleave check failed: ${err.message}`);
-  }
-
-  let result = null;
-  try {
-    console.log(`[Scheduler] Starting scheduled cycle #${state.cyclesRun + 1}${cycleOpts.anchor ? ` (test-fix priority)` : ""}`);
-    result = await startCycle(eventBus, cycleOpts);
-
-    state.cyclesRun = await incrSchedulerCyclesRun(); // AC1: atomic Redis INCR
-    state.lastCycleAt = new Date().toISOString();
-    state.consecutiveErrors = 0;
-    try { await recordBuildEvent(); } catch { /* intentional: non-critical ratio tracking */ }
-
-    // Codex usage-limit — alert + backoff, auto-resume after 10 minutes
-    if (result.__usageLimitHit || result.result?.__usageLimitHit) {
-      const pauseMs = 10 * 60 * 1000;
-      console.error(`[Scheduler] Codex usage limit hit — backing off for 10 minutes, then retrying`);
-      state.lastError = "Codex usage limit — retrying at " + new Date(Date.now() + pauseMs).toISOString();
-      await sendNotification({
-        type: "scheduler:usage_limit_alert",
-        payload: { pauseMs, resumeAt: new Date(Date.now() + pauseMs).toISOString() },
-      });
-      state.timer = setTimeout(() => runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`)), pauseMs);
-      return;
-    }
-
-    if (result.error) {
-      state.cyclesFailed = await incrSchedulerCyclesFailed(); // issue #208: atomic Redis INCR
-      state.lastError = result.error;
-      state.consecutiveNonMerges++;
-      console.log(`[Scheduler] Cycle returned error: ${result.error}`);
-    } else {
-      const merged = result.tasks?.some(t => t.finalState === "merged") ||
-                     result.task?.finalState === "merged";
-      // Issue #222: detect no-op merges (verification.filesChanged empty
-      // but planner had scope). post-merge.ts records `noOpMerge: true` on
-      // the cycle report when this happens. A no-op merge is NOT counted
-      // as a merge for stall detection — it's worse than a non-merge,
-      // because it produced a commit and burned tokens for no output.
-      const noOpMerge = result.noOpMerge === true ||
-                        result.task?.finalState === "verified-no-diff";
-      if (merged) {
-        state.cyclesMerged = await incrSchedulerCyclesMerged(); // issue #208: atomic Redis INCR
-        state.consecutiveNonMerges = 0;
-        state.consecutiveNoOpMerges = 0;
-      } else {
-        state.consecutiveNonMerges++;
-        if (noOpMerge) {
-          state.consecutiveNoOpMerges++;
-        } else {
-          state.consecutiveNoOpMerges = 0;
-        }
-      }
-      state.lastError = null;
-
-      // Issue #222: hard-stop when consecutive no-op merges hit the threshold.
-      // This fires before the generic zero-output breaker because no-op
-      // merges are unambiguous evidence the system is broken (commit
-      // recorded, zero files changed).
-      if (state.consecutiveNoOpMerges >= NO_OP_MERGE_HALT_THRESHOLD) {
-        console.error(`[Scheduler] NO-OP MERGE HALT: ${state.consecutiveNoOpMerges} consecutive cycles produced commits with zero files changed — pausing scheduler`);
-        state.haltedForNoOpMerges = true;
-        await sendNotification({
-          type: "scheduler:no_op_merge_halt",
-          payload: {
-            reason: `${state.consecutiveNoOpMerges} consecutive cycles reported merges but wrote zero files. The verification or merge-extraction logic is broken. Running more cycles burns money for no output.`,
-            consecutiveNoOpMerges: state.consecutiveNoOpMerges,
-            cyclesRun: state.cyclesRun,
-            severity: "critical",
-            suggestion: "Inspect post-merge.ts (verification.filesChanged extraction) and merge.ts (worktree handling). Restart scheduler via POST /scheduler/start once the underlying issue is resolved.",
-          },
-        });
-        state.running = false;
-        if (state.timer) {
-          clearTimeout(state.timer);
-          state.timer = null;
-        }
-        console.log(`[Scheduler] Paused after ${state.cyclesRun} cycles (${state.cyclesMerged} merged, ${state.consecutiveNoOpMerges} consecutive no-op). Restart via POST /scheduler/start`);
-        return;
-      }
-
-      // Zero-output stall detection (issue #24): hard-stop when the system has
-      // churned for too long without producing a merge.
-      if (state.consecutiveNonMerges >= ZERO_OUTPUT_THRESHOLD) {
-        console.error(`[Scheduler] ZERO-OUTPUT CIRCUIT BREAKER: ${state.consecutiveNonMerges} consecutive cycles without a merge — pausing scheduler`);
-        await sendNotification({
-          type: "scheduler:zero_output_breaker",
-          payload: {
-            reason: `${state.consecutiveNonMerges} consecutive cycles produced no merge. System may be stuck.`,
-            consecutiveNonMerges: state.consecutiveNonMerges,
-            cyclesRun: state.cyclesRun,
-            lastCycleReason: result.reason || "unknown",
-            suggestion: "Check work queue items, planner output, and executor behavior. Restart with POST /scheduler/start when resolved.",
-          },
-        });
-        // Pause but don't fully stop — allow operator to restart via API
-        state.running = false;
-        if (state.timer) {
-          clearTimeout(state.timer);
-          state.timer = null;
-        }
-        console.log(`[Scheduler] Paused after ${state.cyclesRun} cycles (${state.cyclesMerged} merged). Restart via POST /scheduler/start`);
-        return;
-      }
-
-      // Zero-output stall alert (issue #24): early warning with exponential
-      // backoff before the hard-stop threshold. Gives the operator time to
-      // intervene while slowing token burn.
-      if (state.consecutiveNonMerges >= STALL_ALERT_THRESHOLD) {
-        const stallBackoffMs = computeStallBackoffMs(state.consecutiveNonMerges);
-
-        console.log(`[Scheduler] STALL ALERT: ${state.consecutiveNonMerges} consecutive non-merge cycles — backing off ${formatDuration(stallBackoffMs)}`);
-
-        // Only send notification on the first hit (threshold) and every 5 after
-        if (shouldSendStallAlert(state.consecutiveNonMerges)) {
-          await sendNotification({
-            type: "scheduler:stall_alert",
-            payload: {
-              reason: `${state.consecutiveNonMerges} consecutive cycles produced no merge. Applying exponential backoff.`,
-              consecutiveNonMerges: state.consecutiveNonMerges,
-              cyclesRun: state.cyclesRun,
-              backoffMs: stallBackoffMs,
-              hardStopAt: ZERO_OUTPUT_THRESHOLD,
-              suggestion: "System may be stuck on work beyond executor capability. Check queue and planner output.",
-            },
-          });
-        }
-
-        state.timer = setTimeout(() => runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`)), stallBackoffMs);
-        return;
-      }
-
-      // Check for repetitive work pattern — alert + research, don't stop
-      if (await detectRepetition(eventBus)) {
-        // Add extended delay after repetition detection to let research results populate
-        state.timer = setTimeout(() => runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`)), state.intervalMs * 2);
-        return;
-      }
-    }
-  } catch (err: any) {
-    state.cyclesRun = await incrSchedulerCyclesRun(); // AC1: atomic Redis INCR
-    state.cyclesFailed = await incrSchedulerCyclesFailed(); // issue #208: atomic Redis INCR
-    state.consecutiveErrors++;
-    state.consecutiveNonMerges++;
-    state.lastError = err.message;
-    state.lastCycleAt = new Date().toISOString();
-    console.error(`[Scheduler] Cycle error (${state.consecutiveErrors} consecutive):`, err.message);
-
-    // Alert on repeated errors but keep running with extended backoff
-    if (state.consecutiveErrors >= 5 && state.consecutiveErrors % 5 === 0) {
-      console.error(`[Scheduler] ${state.consecutiveErrors} consecutive errors — alerting operator, continuing with extended backoff`);
-      await sendNotification({
-        type: "scheduler:error_alert",
-        payload: {
-          reason: `${state.consecutiveErrors} consecutive errors. Last: ${err.message}`,
-          cyclesRun: state.cyclesRun,
-          backoffMs: COOLDOWN_ON_ERROR_MS * state.consecutiveErrors,
-          suggestion: "Check journalctl --user -u hydra-orchestrator.service for root cause",
-        },
-      });
-    }
-  }
-
-  // Schedule next cycle — immediate if there's work, delayed if idle
+  // Issue #383 (codex cut-over PR-3): the in-process control loop is gone.
+  // `runScheduledCycle` now exists solely as a heartbeat for the housekeeping
+  // tasks above (stale-claim reaper, weekly digest, memory consolidation,
+  // maybeRunResearch). Update `lastCycleAt` so the watchdog's >15min stale-
+  // cycle alert doesn't false-fire, then schedule the next tick.
+  state.lastCycleAt = new Date().toISOString();
   if (state.running) {
-    let delay;
-    if (state.consecutiveErrors > 0) {
-      // Back off on errors
-      delay = COOLDOWN_ON_ERROR_MS * state.consecutiveErrors;
-    } else {
-      // Check if there's work waiting — if so, start immediately
-      const queueLen = await getWorkQueueLen().catch(() => 0);
-      const hadWork = !result?.reason?.includes("No actionable anchor") &&
-                      !result?.reason?.includes("No work needed") &&
-                      !result?.reason?.includes("Planner produced no task");
-      if (queueLen > 0 || hadWork) {
-        delay = 0; // work available — no idle gap
-      } else {
-        delay = state.intervalMs; // queue empty — wait before trying again
-      }
-    }
-    if (delay === 0) {
-      console.log(`[Scheduler] Work available — starting next cycle immediately`);
-    }
-    state.timer = setTimeout(() => runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`)), delay);
+    const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
+    state.timer = setTimeout(
+      () => runScheduledCycle(eventBus).catch((err: any) =>
+        console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`),
+      ),
+      delay,
+    );
   }
 }
 
@@ -1106,11 +874,12 @@ async function getStatus() {
 
   return {
     running: state.running,
-    // Issue #381 (codex cut-over PR-1): expose the codex-cycle kill-switch so
-    // operators / the dashboard can confirm at a glance whether
-    // `runScheduledCycle()` is invoking the control loop. When false, the
-    // scheduler ticks for housekeeping only.
-    codexCycleEnabled: CODEX_CYCLE_ENABLED,
+    // Issue #383 (codex cut-over PR-3): the in-process codex control loop is
+    // gone — the scheduler ticks for housekeeping only. The legacy
+    // `codexCycleEnabled` flag is reported as false for backward-compat with
+    // dashboard widgets that still read it; remove once the dashboard is
+    // updated (tracked under PR-4 doc cleanup).
+    codexCycleEnabled: false,
     intervalMs: state.intervalMs,
     intervalHuman: state.intervalMs ? formatDuration(state.intervalMs) : null,
     cyclesRun: state.cyclesRun,
@@ -1239,6 +1008,6 @@ export {
   computeStallBackoffMs, shouldSendStallAlert, classifyStallState, formatDuration,
   // Exported for test coverage (issue #222):
   classifyNoOpMergeState, NO_OP_MERGE_HALT_THRESHOLD,
-  // Exported for test coverage (issue #381):
-  runScheduledCycle, CODEX_CYCLE_ENABLED,
+  // Exported for test coverage (issue #381 / #383):
+  runScheduledCycle,
 };

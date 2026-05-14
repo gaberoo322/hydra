@@ -1,74 +1,51 @@
-import { getTracker } from "./task-tracker.ts";
-import { runControlLoop } from "./control-loop.ts";
+/**
+ * src/cycle.ts — Read-only cycle state surface.
+ *
+ * Before PR-3 (issue #383) this module wrapped the in-process control loop:
+ * `startCycle()` would invoke `runControlLoop()`, track an in-memory active
+ * cycle, and push completed cycles onto a history array. PR-3 deleted the
+ * control loop entirely — autopilot subagents own execution now and write
+ * their own cycle records straight to Redis (`hydra:cycle:*`).
+ *
+ * This module survives as a thin read-only adapter so the existing
+ * `/api/cycle/status` and `/api/cycle/history` endpoints keep working
+ * against the same Redis-backed records. `startCycle()` is preserved as a
+ * stub that immediately reports the in-process loop is gone; nothing in
+ * `src/` calls it any more, only the legacy `POST /api/cycle/start` route
+ * does, and operators who hit it should get a clear error message.
+ *
+ * Keep this module dumb. Real cycle tracking lives in the autopilot.
+ */
+
 import { redisKeys } from "./redis-keys.ts";
 import { getString, hashGetAll, findKeys } from "./redis-adapter.ts";
-import { recordOutcomeReadings } from "./stuckness.ts";
 
 interface CycleRecord {
   id: string;
   status: string;
-  startedAt: string;
+  startedAt?: string | null;
   completedAt?: string | null;
   total?: number;
   completed?: number;
   failed?: number;
   abandoned?: number;
   timedOut?: number;
-  tasks?: any[];
-  result?: any;
-  error?: string;
 }
 
-// Cycle state
-let currentCycle: CycleRecord | null = null;
-const cycleHistory: CycleRecord[] = [];
-
-async function startCycle(eventBus: any, opts: any = {}) {
-  if (currentCycle?.status === "running") {
-    return { error: "A cycle is already running", cycle: currentCycle };
-  }
-
-  currentCycle = { id: "pending", status: "running", startedAt: new Date().toISOString() };
-  try {
-    const result: any = await runControlLoop(eventBus, { anchor: opts?.anchor });
-
-    // Issue #242: Record per-outcome readings AFTER the cycle completes,
-    // regardless of merge success — stuckness measures outcomes, not cycle
-    // status. The function never throws and is a no-op when no outcomes are
-    // declared. We intentionally hook here (not in post-merge.ts) because
-    // post-merge.ts is in the Untouchable Core per ADR-0001.
-    if (result?.cycleId) {
-      await recordOutcomeReadings(result.cycleId, eventBus);
-    }
-
-    currentCycle = {
-      id: result.cycleId,
-      status: "completed",
-      startedAt: currentCycle.startedAt,
-      completedAt: new Date().toISOString(),
-      tasks: result.tasks || [],
-      result,
-    };
-    cycleHistory.push({ ...currentCycle });
-    const completed = currentCycle;
-    currentCycle = null;
-    return { cycle: completed, ...result };
-  } catch (err: any) {
-    const errorMsg = err?.message || String(err);
-    if (currentCycle) {
-      currentCycle.status = "failed";
-      currentCycle.error = errorMsg;
-      currentCycle.completedAt = new Date().toISOString();
-      cycleHistory.push({ ...currentCycle });
-    }
-    currentCycle = null;
-    return { error: errorMsg, cycle: { status: "failed" } };
-  }
+/**
+ * Legacy entry point. The in-process control loop was removed in PR-3
+ * (issue #383). Returns an error so the operator-facing
+ * `POST /api/cycle/start` route reports a clear failure instead of
+ * silently no-oping.
+ */
+async function startCycle(_eventBus: unknown, _opts: any = {}) {
+  return {
+    error: "In-process control loop removed (issue #383). Execution runs via autopilot subagents — see `hydra-autopilot` skill.",
+    cycle: { status: "removed" },
+  };
 }
 
 async function getCycleStatus(): Promise<CycleRecord | { status: string }> {
-  if (currentCycle) return currentCycle;
-
   const activeId = await getString(redisKeys.cycleActive());
   if (!activeId) return { status: "idle" };
 
@@ -123,23 +100,13 @@ async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
   return records;
 }
 
-async function killCycle(eventBus: any) {
-  if (currentCycle?.status === "running") {
-    try {
-      const timedOut = await getTracker().timeoutStaleTasks(currentCycle.id, eventBus);
-      console.log(`[Cycle] Killed cycle ${currentCycle.id} — ${timedOut} tasks timed out`);
-    } catch (err: any) {
-      console.error(`[Cycle] Error timing out tasks:`, err.message);
-    }
-
-    currentCycle.status = "killed";
-    currentCycle.completedAt = new Date().toISOString();
-    cycleHistory.push({ ...currentCycle });
-    const killed = currentCycle;
-    currentCycle = null;
-    return { killed: true, cycle: killed };
-  }
-  return { killed: false, reason: "No running cycle" };
+/**
+ * Legacy entry point. The in-process control loop was removed in PR-3
+ * (issue #383). There is no in-memory active cycle to kill. Returns the
+ * no-op shape callers used to expect when the scheduler was already idle.
+ */
+async function killCycle(_eventBus: unknown) {
+  return { killed: false, reason: "In-process control loop removed (issue #383)" };
 }
 
 export { startCycle, getCycleStatus, getCycleHistory, killCycle };
