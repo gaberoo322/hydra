@@ -457,7 +457,7 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   if (ctx.warnings.length > 0) {
     console.log(`[ControlLoop] Planner context loaded with ${ctx.warnings.length} warning(s): ${ctx.warnings.join("; ")}`);
   }
-  const { priorities, feedback, plannerMemory, ovContext, milestoneContext, accomplishmentsContext, groundingSummary, continuityContext } = ctx;
+  const { priorities, feedback, plannerMemory, ovContext, milestoneContext, accomplishmentsContext, groundingSummary, continuityContext, scopedFileTree } = ctx;
 
   const confidence = grounding.testReport.failed > 0 ? "low"
     : (grounding.typecheckReport.exitCode !== 0 || grounding.dirtyFiles.length > 0) ? "medium"
@@ -589,6 +589,14 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
       ].join("\n") : "",
       "",
       groundingSummary.slice(0, 4000),
+      "",
+      // Issue #366: scoped file-tree snapshot. The planner historically
+      // hallucinated plausible-looking file paths (e.g. names matching the
+      // project convention but pointing at files that don't exist), which the
+      // preflight gate then rejected — costing ~$5 and a wasted cycle every
+      // ~11% of abandonments. Injecting up to ~2000 tokens of real paths
+      // related to the anchor reference closes that gap.
+      scopedFileTree ? scopedFileTree : "",
       "",
       // Continuity contract — what the last cycle did, what changed since.
       // Increased from 1500 to 2500 to accommodate Recent Failures reflections.
