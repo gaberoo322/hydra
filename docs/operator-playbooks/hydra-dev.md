@@ -64,8 +64,65 @@ The child prompt MUST include the worktree-guard preamble (see below). The child
 3. Greps/reads the source for context
 4. Implements the issue
 5. Runs `npm test` + `npm run typecheck` + `npm run build`
-6. Opens a PR with `closes #$issue_number` in the body
-7. Returns: PR URL + summary table
+6. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
+7. Opens a PR with `closes #$issue_number` in the body and a `Tier: <0|1|2|3>` line populated from the API
+8. Returns: PR URL + summary table
+
+### Tier classification — live API (issue #406)
+
+The orchestrator service exposes a deterministic tier classifier at
+`GET http://localhost:4000/api/tier?files=<comma-separated paths>`. The child
+MUST call this endpoint with the exact list of files it changed (relative to
+the repo root, as `git diff --name-only master...HEAD` would emit) and use
+the returned `tier` value verbatim in the PR body. Do NOT infer tier from
+path patterns — that was the failure mode that motivated this rule
+(autopilot run 2026-05-14 mis-classified PR #404 as Tier 2 when the live
+classifier returns Tier 3 for the same file list, wasting a QA cycle).
+
+**Endpoint contract:**
+
+- Method: `GET` (not POST — the endpoint reads a query parameter, not a JSON body)
+- Path: `/api/tier`
+- Query: `files=path1,path2,path3` (comma-separated, repo-relative)
+- Response (200): `{ "tier": 0|1|2|3, "reason": "<string>", "perFile": [{path,tier,matched},...] }`
+- Response (400): `{ "error": "Missing query parameter 'files' (comma-separated)" }`
+
+**Required child-side recipe:**
+
+```bash
+# After all file changes are committed on the feature branch, before opening the PR:
+CHANGED=$(git diff --name-only master...HEAD | paste -sd, -)
+TIER_JSON=$(curl -sf --max-time 5 \
+  "http://localhost:4000/api/tier?files=$(printf '%s' "$CHANGED" | jq -sRr @uri)")
+
+if [ -z "$TIER_JSON" ]; then
+  # Endpoint unreachable — mark unknown and let QA triage instead of guessing.
+  TIER_LINE="Tier: unknown (live classifier unreachable; needs operator triage)"
+  TIER_LABEL_FLAG="--label needs-triage"
+else
+  TIER_VALUE=$(printf '%s' "$TIER_JSON" | jq -r '.tier')
+  TIER_REASON=$(printf '%s' "$TIER_JSON" | jq -r '.reason')
+  TIER_LINE="Tier: ${TIER_VALUE} (${TIER_REASON})"
+  TIER_LABEL_FLAG=""
+fi
+```
+
+Then `gh pr create` MUST include `$TIER_LINE` as its own line in the PR body
+(canonically near the top, on a line that starts with `Tier:`), and MUST
+pass `$TIER_LABEL_FLAG` so an unreachable classifier results in a
+`needs-triage` label rather than a silently-wrong tier claim.
+
+**Why GET, not POST `-d @<file>`:** the endpoint at `src/api/misc.ts` is a
+GET route that reads `req.query.files`. An earlier draft of this skill
+described `curl -d @<json>`; the live endpoint will return 400 (POST not
+allowed) for that shape. The recipe above is the format the running
+service accepts as of issue #406.
+
+**Why not infer from CLAUDE.md tables:** CLAUDE.md describes tier scope
+in prose for humans. The authoritative classification logic lives in
+`src/tier-classifier.ts` and is the only source consulted by the CI
+merge gate. A self-asserted tier in the PR body that disagrees with the
+gate's answer wastes a QA cycle and produces misleading audit history.
 
 ### Child-prompt worktree-guard preamble (REQUIRED)
 
