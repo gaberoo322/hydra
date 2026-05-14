@@ -1,5 +1,11 @@
 # Codex-Removal Measurement Plan (Phase A → B → C)
 
+> **Status: outcome-complete, 2026-05-14.** See [§6 Outcome](#6-outcome-2026-05-1314) at
+> the bottom of this document for the cut-over record and the gates that were
+> waived. Superseded by [ADR-0006](adr/0006-codex-cli-removed-autopilot-only.md).
+> Kept as the historical record of the plan that *would* have run if the
+> de-facto evidence from autopilot hadn't made it redundant.
+
 > Tracking issue: [#348](https://github.com/gaberoo322/hydra/issues/348).
 > Phase A is reversible. Phases B and C are not. This document gates the
 > progression on data, not on a calendar.
@@ -126,3 +132,64 @@ without ceremony:
 
 Abandoned phases are not permanent — they are signals to instrument better,
 fix the underlying gap, and try again with a fresh baseline.
+
+## 6. Outcome (2026-05-13/14)
+
+The cut-over completed without running Phase B and Phase C as separate soaks.
+By the time PR-3 ([#400](https://github.com/gaberoo322/hydra/pull/400)) was
+ready, the autopilot path had already been the primary code-writing source for
+≥14 days, and the codex control loop's residual contribution was near-zero
+unique merges — most of its cycles were "no-op anchor" or were preempted by
+autopilot-side PRs on the same anchors.
+
+**What was cut over and when**
+
+| Phase | Plan | Actual |
+|---|---|---|
+| Phase A | Non-load-bearing call sites move off Codex CLI | Shipped 2026-04 → 2026-05 across the `refactor-batch-2026-05` label |
+| Phase B | Executor cut-over (5-day soak gates Phase C) | Combined with Phase C — see below |
+| Phase C | Planner + SDK removal (one-way door) | [PR #400](https://github.com/gaberoo322/hydra/pull/400) merged 2026-05-13. Soak gate waived. |
+
+**Gates that were waived and why**
+
+- **5-day Phase A soak (§2) → ran ~9 days** by accident-of-scheduling under
+  the `HYDRA_CODEX_CYCLE_ENABLED` kill-switch ([PR #390](https://github.com/gaberoo322/hydra/pull/390)).
+  Comparison vs baseline was net-favorable on all five metrics. No mid-soak
+  rollback occurred.
+- **Phase B trigger conditions (§3)** were satisfied by autopilot's own merge
+  output during the same window — autopilot's `dev_target` class was already
+  doing the executor's job in production. The §3 conditions were defined
+  against the *Codex* executor; with that executor already shadowed by
+  autopilot, evaluating them against autopilot output is what we did
+  qualitatively in the daily digest.
+- **2-week Phase C soak (§4) → waived** in favor of "autopilot has been the
+  primary code-writing path for ≥14 days with no observed regression". The
+  cost-reduction signal in particular was clearer than the original plan
+  required — autopilot's per-merge cost was visibly below the Codex path's
+  in `/api/spending` over the comparison window. Operator memory
+  `feedback_bg_agent_worktree_hygiene` (PR #245 incident) reinforced the
+  case: keeping the second execution path alive was a *negative* trade, not
+  just a neutral one.
+
+**What the abandonment-conditions check returned**
+
+None of §5's abandonment triggers fired during the autopilot shadow period.
+No spike in `bad-merge`-labelled issues, no auto-revert volume above
+baseline, no cost regression. The decision to combine Phase B/C and waive
+the calendar gate was made on the strength of the affirmative evidence, not
+the absence of negative evidence.
+
+**Pointers**
+
+- PR-1 (kill-switch): [#390](https://github.com/gaberoo322/hydra/pull/390) (issue [#381](https://github.com/gaberoo322/hydra/issues/381))
+- PR-2 (CI quality gates): [#393](https://github.com/gaberoo322/hydra/pull/393) (issue [#382](https://github.com/gaberoo322/hydra/issues/382))
+- PR-3 (runtime removal): [#400](https://github.com/gaberoo322/hydra/pull/400) (issue [#383](https://github.com/gaberoo322/hydra/issues/383))
+- PR-4 (docs cut-over): closes [#384](https://github.com/gaberoo322/hydra/issues/384)
+- Epic: [#380](https://github.com/gaberoo322/hydra/issues/380)
+- Successor decision record: [ADR-0006](adr/0006-codex-cli-removed-autopilot-only.md)
+
+If the data in `/api/cycle/history` for the 2-week window leading up to
+2026-05-13 ever needs to be revisited, the Redis baseline snapshots from §1
+were captured to `hydra:metrics:codex-removal:baseline` and
+`hydra:metrics:codex-removal:phaseA` and are still queryable. They are now
+historical artifacts, not active comparison floors.
