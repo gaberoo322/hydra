@@ -1,17 +1,30 @@
 #!/usr/bin/env -S npx tsx
 /**
- * scripts/ci/scope-check.ts — Scope enforcement CI gate (issue #382).
+ * scripts/ci/scope-check.ts — Scope enforcement CI gate (issues #382, #396).
  *
  * Re-homes the in-cycle scope enforcement gate (was step 6.9 of the codex
  * control loop, in src/scope-enforcement.ts) so PRs from any source —
  * hydra-dev, hydra-target-build, manual operator branches — get the same
  * safety net once the codex CLI is removed (PR-3).
  *
- * Failure semantics: exit 2 when >80% of changed files are out-of-scope
- * AND more than 3 files are out-of-scope (matches the in-cycle gate
- * thresholds in src/scope-enforcement.ts). Exit 0 otherwise.
+ * Issue #396 extends this with subagent-side parity for the deleted
+ * reconcilePlanVsActual step: the gate now also recognises an explicit
+ * "Files out of scope" block (hard-block any matching file) and a
+ * `scope-justification:` escape hatch in the PR body that whitelists
+ * specific out-of-scope files when the subagent had a good reason.
  *
- * Definition of in-scope (per issue #382 AC):
+ * Failure semantics:
+ *   - Hard fail (exit 2) if ANY changed file matches the declared
+ *     "Files out of scope" list (unless it appears in a
+ *     `scope-justification:` block in the PR body).
+ *   - Soft fail (exit 2) when >80% of changed files are out-of-scope AND
+ *     more than 3 files are out-of-scope (matches the legacy in-cycle
+ *     thresholds in src/scope-enforcement.ts). Files appearing in a
+ *     `scope-justification:` block are excluded from the out-of-scope
+ *     count.
+ *   - Pass (exit 0) otherwise.
+ *
+ * Definition of in-scope (per issues #382 + #396 AC):
  *   - Files matched by the PR body's "Files in scope" / "## Files in scope"
  *     markdown section, OR
  *   - Files matched by the linked issue's "Files in scope" section.
@@ -41,17 +54,70 @@ const DEFAULT_RATIO = 0.8;
 const DEFAULT_MIN_COUNT = 3;
 
 export function extractScopeFromBody(body: string): string[] {
+  return extractSection(body, /Files in scope/i);
+}
+
+/**
+ * Issue #396: explicit "Files out of scope" block. Any changed file matching
+ * one of these entries triggers a hard fail (unless justified — see
+ * extractScopeJustifications).
+ */
+export function extractOutOfScopeFromBody(body: string): string[] {
+  return extractSection(body, /Files out of scope/i);
+}
+
+/**
+ * Issue #396: parse `scope-justification:` blocks from the PR body. Each
+ * block whitelists one or more out-of-scope files that the subagent
+ * deliberately touched. Recognised forms (case-insensitive):
+ *
+ *   scope-justification: `src/foo.ts` — needed to update the test fixture
+ *   scope-justification:
+ *     - `src/foo.ts`
+ *     - `src/bar.ts`
+ *     reason: shared regression suite
+ *
+ * The parser is intentionally permissive: any backticked path appearing
+ * within ~6 lines after a `scope-justification:` line is treated as
+ * justified. Returns the set of justified file paths.
+ */
+export function extractScopeJustifications(body: string): string[] {
   if (!body) return [];
-  // Match "Files in scope" header (markdown ## or bold) up to the next header.
-  // Issue #382: also handle "Scope" as a fallback for short PR descriptions.
-  const re = /(?:^|\n)\s*(?:##+\s*|\*\*)?Files in scope(?:\*\*)?\s*[\r\n]+([\s\S]*?)(?=\n\s*(?:##+\s|\*\*[A-Z])|\n\s*Files out of scope|\n\s*Risk\b|\n\s*Implementation\b|\n\s*$|$)/i;
+  const lines = body.split(/\r?\n/);
+  const justified: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*scope-justification\s*:/i.test(lines[i])) continue;
+    // Grab paths from the marker line itself.
+    const inline = Array.from(lines[i].matchAll(/`([^`]+)`/g)).map((m) => m[1].trim());
+    inline.filter(looksLikePath).forEach((p) => justified.push(p));
+    // Plus up to 6 trailing lines until we hit a blank/heading/new marker.
+    for (let j = 1; j <= 6 && i + j < lines.length; j++) {
+      const ln = lines[i + j];
+      if (/^\s*$/.test(ln)) break;
+      if (/^\s*#{1,6}\s/.test(ln)) break;
+      if (/^\s*scope-justification\s*:/i.test(ln)) break;
+      const paths = Array.from(ln.matchAll(/`([^`]+)`/g)).map((m) => m[1].trim());
+      paths.filter(looksLikePath).forEach((p) => justified.push(p));
+    }
+  }
+  return Array.from(new Set(justified));
+}
+
+function extractSection(body: string, headerRe: RegExp): string[] {
+  if (!body) return [];
+  // Build a markdown-section regex anchored on the header keyword. The
+  // section runs until the next markdown heading, a sibling section
+  // (Risk / Implementation / Files in/out of scope / Acceptance), or EOF.
+  const headerSource = headerRe.source.replace(/\\b/g, "");
+  const re = new RegExp(
+    `(?:^|\\n)\\s*(?:##+\\s*|\\*\\*)?${headerSource}(?:\\*\\*)?\\s*[\\r\\n]+([\\s\\S]*?)(?=\\n\\s*(?:##+\\s|\\*\\*[A-Z])|\\n\\s*Files (?:in|out of) scope|\\n\\s*Risk\\b|\\n\\s*Implementation\\b|\\n\\s*Acceptance\\b|\\n\\s*$|$)`,
+    "i",
+  );
   const m = body.match(re);
   if (!m) return [];
   const block = m[1];
-  // Pull paths out of `code spans` first; if none, fall back to bullet text.
   const codeSpans = Array.from(block.matchAll(/`([^`]+)`/g)).map((x) => x[1].trim());
   if (codeSpans.length > 0) return codeSpans.filter(looksLikePath);
-  // Fallback: bullet list lines, strip leading "- " or "* "
   return block
     .split("\n")
     .map((l) => l.replace(/^\s*[-*]\s+/, "").trim())
@@ -70,29 +136,97 @@ function looksLikePath(s: string): boolean {
 export function classifyScope(
   changed: string[],
   inScope: string[],
-  opts: { ratio?: number; minCount?: number } = {},
+  opts: {
+    ratio?: number;
+    minCount?: number;
+    /** Explicit "Files out of scope" entries (issue #396). */
+    outOfScopeDeclared?: string[];
+    /** Out-of-scope files justified by `scope-justification:` PR-body blocks. */
+    justified?: string[];
+  } = {},
 ): {
   blocked: boolean;
   outOfScope: string[];
+  /** Subset of outOfScope that matched the declared "out of scope" block. */
+  hardOutOfScope: string[];
+  /** Files excused from the count by `scope-justification:`. */
+  justifiedTouched: string[];
   ratio: number;
   threshold: number;
   minCount: number;
+  reason: "pass" | "hard-out-of-scope" | "ratio-exceeded";
 } {
   const ratio = opts.ratio ?? DEFAULT_RATIO;
   const minCount = opts.minCount ?? DEFAULT_MIN_COUNT;
+  const outOfScopeDeclared = opts.outOfScopeDeclared ?? [];
+  const justified = (opts.justified ?? []).map((p) => normalisePath(p));
+
   if (changed.length === 0) {
-    return { blocked: false, outOfScope: [], ratio: 0, threshold: ratio, minCount };
+    return {
+      blocked: false,
+      outOfScope: [],
+      hardOutOfScope: [],
+      justifiedTouched: [],
+      ratio: 0,
+      threshold: ratio,
+      minCount,
+      reason: "pass",
+    };
   }
-  const norm = (f: string) => f.replace(/^\.\//, "").replace(/^web\//, "");
-  const scopeNormalised = inScope.map(norm).filter((s) => s.length > 0);
-  const outOfScope = changed.filter((f) => {
-    const n = norm(f);
-    if (scopeNormalised.includes(n)) return false;
-    return !scopeNormalised.some((s) => n.startsWith(s) || s.startsWith(n) || n.endsWith(s));
+
+  const scopeNormalised = inScope.map(normalisePath).filter((s) => s.length > 0);
+  const outNormalised = outOfScopeDeclared.map(normalisePath).filter((s) => s.length > 0);
+
+  const matches = (target: string, list: string[]): boolean => {
+    if (list.length === 0) return false;
+    if (list.includes(target)) return true;
+    return list.some((s) => target.startsWith(s) || s.startsWith(target) || target.endsWith(s));
+  };
+
+  const justifiedTouched = changed.filter((f) => matches(normalisePath(f), justified));
+
+  // Hard fail: any changed file matches the declared "out of scope" list and
+  // is NOT justified. This is the per-file gate (#396) — it ignores the
+  // ratio threshold entirely.
+  const hardOutOfScope = changed.filter((f) => {
+    const n = normalisePath(f);
+    if (matches(n, justified)) return false;
+    return matches(n, outNormalised);
   });
+
+  // Soft (ratio-based) classification. Justified files don't count.
+  const outOfScope = changed.filter((f) => {
+    const n = normalisePath(f);
+    if (matches(n, justified)) return false;
+    if (matches(n, scopeNormalised)) return false;
+    return true;
+  });
+
   const observed = outOfScope.length / changed.length;
-  const blocked = observed > ratio && outOfScope.length > minCount;
-  return { blocked, outOfScope, ratio: observed, threshold: ratio, minCount };
+  let blocked = false;
+  let reason: "pass" | "hard-out-of-scope" | "ratio-exceeded" = "pass";
+  if (hardOutOfScope.length > 0) {
+    blocked = true;
+    reason = "hard-out-of-scope";
+  } else if (observed > ratio && outOfScope.length > minCount) {
+    blocked = true;
+    reason = "ratio-exceeded";
+  }
+
+  return {
+    blocked,
+    outOfScope,
+    hardOutOfScope,
+    justifiedTouched,
+    ratio: observed,
+    threshold: ratio,
+    minCount,
+    reason,
+  };
+}
+
+function normalisePath(f: string): string {
+  return f.replace(/^\.\//, "").replace(/^web\//, "");
 }
 
 function readChangedFiles(): string[] {
@@ -129,6 +263,13 @@ function main(): number {
     ...extractScopeFromBody(prBody),
     ...extractScopeFromBody(issueBody),
   ]));
+  const outOfScopeDeclared = Array.from(new Set([
+    ...extractOutOfScopeFromBody(prBody),
+    ...extractOutOfScopeFromBody(issueBody),
+  ]));
+  // Justifications only count if they're in the PR body — issues don't get
+  // to pre-authorise scope violations.
+  const justified = extractScopeJustifications(prBody);
 
   const ratioEnv = process.env.SCOPE_OUT_OF_SCOPE_THRESHOLD;
   const minCountEnv = process.env.SCOPE_MIN_OUT_OF_SCOPE_COUNT;
@@ -138,32 +279,57 @@ function main(): number {
   const result = classifyScope(changed, inScope, {
     ratio: Number.isFinite(ratio) ? ratio : DEFAULT_RATIO,
     minCount: Number.isFinite(minCount) ? minCount : DEFAULT_MIN_COUNT,
+    outOfScopeDeclared,
+    justified,
   });
 
   const report = {
     status: result.blocked ? "fail" : "pass",
+    reason: result.reason,
     changedFiles: changed.length,
     inScopeFiles: inScope.length,
+    outOfScopeDeclaredFiles: outOfScopeDeclared.length,
     outOfScopeFiles: result.outOfScope.length,
+    hardOutOfScope: result.hardOutOfScope,
+    justified: result.justifiedTouched,
     outOfScopeRatio: result.ratio,
     threshold: result.threshold,
     minCount: result.minCount,
     outOfScope: result.outOfScope.slice(0, 20),
     inScope,
+    outOfScopeDeclared,
   };
   process.stdout.write(JSON.stringify(report, null, 2) + "\n");
 
   if (result.blocked) {
-    process.stderr.write(
-      `SCOPE GATE FAILED: ${result.outOfScope.length}/${changed.length} files (${Math.round(result.ratio * 100)}%) outside declared scope.\n` +
-      `Threshold: >${Math.round(result.threshold * 100)}% and >${result.minCount} files.\n` +
-      `Out-of-scope sample: ${result.outOfScope.slice(0, 5).join(", ")}${result.outOfScope.length > 5 ? " ..." : ""}\n` +
-      (inScope.length === 0
-        ? `\nHINT: no "Files in scope" section was found in the PR body or linked issue.\n` +
-          `Add a markdown section listing in-scope paths to override the gate, or tag the PR with [quick-fix].\n`
-        : ""),
-    );
+    if (result.reason === "hard-out-of-scope") {
+      process.stderr.write(
+        `SCOPE GATE FAILED (hard): ${result.hardOutOfScope.length} changed file(s) match the declared "Files out of scope" list:\n` +
+        `  ${result.hardOutOfScope.slice(0, 5).join(", ")}${result.hardOutOfScope.length > 5 ? " ..." : ""}\n` +
+        `\nEscape hatches:\n` +
+        `  1. Remove the file from the PR diff.\n` +
+        `  2. Add a "scope-justification:" block to the PR body listing the specific file(s) with a rationale, e.g.\n\n` +
+        `       scope-justification: \`src/foo.ts\` — required to update the test fixture\n`,
+      );
+    } else {
+      process.stderr.write(
+        `SCOPE GATE FAILED: ${result.outOfScope.length}/${changed.length} files (${Math.round(result.ratio * 100)}%) outside declared scope.\n` +
+        `Threshold: >${Math.round(result.threshold * 100)}% and >${result.minCount} files.\n` +
+        `Out-of-scope sample: ${result.outOfScope.slice(0, 5).join(", ")}${result.outOfScope.length > 5 ? " ..." : ""}\n` +
+        (inScope.length === 0
+          ? `\nHINT: no "Files in scope" section was found in the PR body or linked issue.\n` +
+            `Add a markdown section listing in-scope paths to override the gate, or tag the PR with [quick-fix].\n`
+          : ""),
+      );
+    }
     return 2;
+  }
+
+  if (result.justifiedTouched.length > 0) {
+    process.stderr.write(
+      `Scope gate: ${result.justifiedTouched.length} out-of-scope file(s) accepted via scope-justification:\n` +
+      `  ${result.justifiedTouched.slice(0, 5).join(", ")}${result.justifiedTouched.length > 5 ? " ..." : ""}\n`,
+    );
   }
 
   return 0;

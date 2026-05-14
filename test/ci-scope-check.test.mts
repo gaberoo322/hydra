@@ -8,7 +8,12 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { extractScopeFromBody, classifyScope } from "../scripts/ci/scope-check.ts";
+import {
+  extractScopeFromBody,
+  extractOutOfScopeFromBody,
+  extractScopeJustifications,
+  classifyScope,
+} from "../scripts/ci/scope-check.ts";
 
 describe("extractScopeFromBody", () => {
   test("pulls backticked paths from a markdown ## section", () => {
@@ -133,5 +138,139 @@ describe("classifyScope", () => {
       { ratio: 0.5, minCount: 1 },
     );
     assert.equal(r.blocked, true);
+  });
+
+  // ---- Issue #396: subagent scope-reconciliation parity ----
+
+  test("hard-fails when a changed file matches the declared out-of-scope list", () => {
+    const r = classifyScope(
+      ["src/preflight.ts"],
+      ["docs/agents/issue-tracker.md"],
+      { outOfScopeDeclared: ["src/preflight.ts"] },
+    );
+    assert.equal(r.blocked, true);
+    assert.equal(r.reason, "hard-out-of-scope");
+    assert.deepEqual(r.hardOutOfScope, ["src/preflight.ts"]);
+  });
+
+  test("hard-out-of-scope respects directory prefixes", () => {
+    const r = classifyScope(
+      ["src/control-loop/step-merge.ts"],
+      ["docs/foo.md"],
+      { outOfScopeDeclared: ["src/control-loop/"] },
+    );
+    assert.equal(r.blocked, true);
+    assert.equal(r.reason, "hard-out-of-scope");
+  });
+
+  test("scope-justification whitelists a hard-out-of-scope file", () => {
+    const r = classifyScope(
+      ["src/preflight.ts"],
+      ["docs/foo.md"],
+      {
+        outOfScopeDeclared: ["src/preflight.ts"],
+        justified: ["src/preflight.ts"],
+      },
+    );
+    assert.equal(r.blocked, false);
+    assert.equal(r.reason, "pass");
+    assert.deepEqual(r.justifiedTouched, ["src/preflight.ts"]);
+  });
+
+  test("scope-justification excludes a file from the ratio count", () => {
+    // Without justification: 4/5 = 0.8, would not block.
+    // With justification on one file: out-of-scope = 3/4 = 0.75, still no block.
+    const r = classifyScope(
+      ["a.ts", "b.ts", "c.ts", "d.ts", "src/foo.ts"],
+      ["src/foo.ts"],
+      { justified: ["a.ts"] },
+    );
+    assert.equal(r.outOfScope.length, 3);
+    assert.deepEqual(r.justifiedTouched, ["a.ts"]);
+    assert.equal(r.blocked, false);
+  });
+
+  test("ratio-exceeded reason is reported when soft gate fires", () => {
+    const r = classifyScope(
+      ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "src/foo.ts"],
+      ["src/foo.ts"],
+    );
+    assert.equal(r.blocked, true);
+    assert.equal(r.reason, "ratio-exceeded");
+    assert.deepEqual(r.hardOutOfScope, []);
+  });
+});
+
+describe("extractOutOfScopeFromBody (issue #396)", () => {
+  test("pulls backticked paths from a markdown ## section", () => {
+    const body = [
+      "## Files in scope",
+      "- `docs/foo.md`",
+      "",
+      "## Files out of scope",
+      "- `src/preflight.ts`",
+      "- `src/control-loop.ts`",
+      "",
+      "## Risk",
+      "low",
+    ].join("\n");
+    const out = extractOutOfScopeFromBody(body);
+    assert.deepEqual(out.sort(), ["src/control-loop.ts", "src/preflight.ts"]);
+  });
+
+  test("returns empty when no section is present", () => {
+    const body = "## Files in scope\n- `src/foo.ts`\n";
+    assert.deepEqual(extractOutOfScopeFromBody(body), []);
+  });
+
+  test("does not bleed into the next section", () => {
+    const body = [
+      "## Files out of scope",
+      "- `src/preflight.ts`",
+      "## Acceptance criteria",
+      "- `src/should-not-appear.ts`",
+    ].join("\n");
+    assert.deepEqual(extractOutOfScopeFromBody(body), ["src/preflight.ts"]);
+  });
+});
+
+describe("extractScopeJustifications (issue #396)", () => {
+  test("captures an inline justification on the marker line", () => {
+    const body = "scope-justification: `src/foo.ts` — needed for the test\n";
+    assert.deepEqual(extractScopeJustifications(body), ["src/foo.ts"]);
+  });
+
+  test("captures justifications listed in trailing bullets", () => {
+    const body = [
+      "Some context.",
+      "",
+      "scope-justification:",
+      "- `src/foo.ts`",
+      "- `src/bar.ts`",
+      "reason: shared regression fixture",
+      "",
+      "Other unrelated paragraph.",
+    ].join("\n");
+    const out = extractScopeJustifications(body);
+    assert.deepEqual(out.sort(), ["src/bar.ts", "src/foo.ts"]);
+  });
+
+  test("is case-insensitive on the marker", () => {
+    const body = "Scope-Justification: `src/foo.ts`\n";
+    assert.deepEqual(extractScopeJustifications(body), ["src/foo.ts"]);
+  });
+
+  test("stops at a heading", () => {
+    const body = [
+      "scope-justification:",
+      "- `src/foo.ts`",
+      "## Next section",
+      "- `src/bar.ts`",
+    ].join("\n");
+    assert.deepEqual(extractScopeJustifications(body), ["src/foo.ts"]);
+  });
+
+  test("returns empty when no marker is present", () => {
+    assert.deepEqual(extractScopeJustifications("just a body\n"), []);
   });
 });

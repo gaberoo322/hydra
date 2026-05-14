@@ -43,6 +43,18 @@ If body has **>5 acceptance criteria** OR description suggests **>8 files change
 3. Comment on parent listing children
 4. Stop — `/hydra-sweep` picks up children after triage
 
+### 3.5 Scope contract (issue #396)
+
+Before dispatching, confirm the issue body contains a `## Files in scope` section (and ideally a `## Files out of scope` section). The CI `scope-check` gate now treats both sections as authoritative:
+
+- Anything in **Files in scope** is fair game.
+- Anything in **Files out of scope** is a HARD merge blocker — touching it fails CI regardless of the ratio threshold.
+- The only escape hatch is for the subagent to add a `scope-justification:` block to its PR body listing the specific files it had to touch and why.
+
+If the issue is missing `## Files in scope`, stop and re-triage. The `issue-label-validation` workflow blocks the `ready-for-agent` label transition when this section is missing, so this should be rare in practice — but a freshly-labelled issue may still need a one-time correction.
+
+The dispatched child prompt MUST include the scope-respect block from Step 5 below.
+
 ### 4. Mark in-progress
 ```bash
 gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progress
@@ -58,15 +70,16 @@ gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progre
   (cd "$WT" && codex exec --skill hydra-dev-child --json "{\"issue\":${issue_number}}")
   ```
 
-The child prompt MUST include the worktree-guard preamble (see below). The child:
+The child prompt MUST include the worktree-guard preamble (see below) AND the scope-respect block (see below). The child:
 1. Verifies it is in a worktree (NOT `/home/gabe/hydra`). Aborts if not.
 2. Reads CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs
-3. Greps/reads the source for context
-4. Implements the issue
-5. Runs `npm test` + `npm run typecheck` + `npm run build`
-6. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
-7. Opens a PR with `closes #$issue_number` in the body and a `Tier: <0|1|2|3>` line populated from the API
-8. Returns: PR URL + summary table
+3. Extracts the `## Files in scope` + `## Files out of scope` lists from the issue body
+4. Greps/reads the source for context
+5. Implements the issue — touching out-of-scope files only with a `scope-justification:` block in the PR body
+6. Runs `npm test` + `npm run typecheck` + `npm run build`
+7. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
+8. Opens a PR with `closes #$issue_number` in the body, a `## Files in scope` mirror of the issue's section, and a `Tier: <0|1|2|3>` line populated from the API
+9. Returns: PR URL + summary table
 
 ### Tier classification — live API (issue #406)
 
@@ -139,6 +152,27 @@ Do NOT fall back to running in `~/hydra`. Do NOT create a branch in the main tre
 ```
 
 If the harness exposes `EnterWorktree`/`ExitWorktree` tools, the child should call `EnterWorktree` only when its initial `pwd` check fails the worktree predicate — never assume "already isolated" without verifying via `git rev-parse --git-dir`.
+
+### Child-prompt scope-respect block (REQUIRED — issue #396)
+
+Append the following block to every dispatched hydra-dev BG agent prompt, immediately after the worktree-guard preamble. It is the subagent-side replacement for the deleted `reconcilePlanVsActual()` step (control-loop step 6.5, removed in PR #400):
+
+```
+## SCOPE CONTRACT — issue body is authoritative
+
+The linked issue contains a `## Files in scope` section (mandatory) and may contain a `## Files out of scope` section. Before writing any code:
+
+1. Extract both lists from the issue body.
+2. Treat `Files in scope` as the SOFT boundary — every file you change should match one of these entries (substring/prefix match, so `src/foo/` covers everything beneath).
+3. Treat `Files out of scope` as the HARD boundary — touching anything matching these entries will fail CI's scope-check gate. Do not touch them unless absolutely required.
+4. If you DO have to touch an out-of-scope file (e.g. a shared test fixture, an adjacent import), include a `scope-justification:` block in the PR body listing each affected file with a one-line rationale. Example:
+
+       scope-justification: `test/helpers/fixtures.ts` — fixture used by the new test added in scope
+
+5. Mirror the issue's `## Files in scope` section into the PR body so the gate can match against either source.
+
+The CI `scope-check` job at `.github/workflows/ci.yml` enforces this contract. Surprising the operator with out-of-scope edits is exactly the scope-creep failure mode the deleted `reconcilePlanVsActual` used to catch — the issue body + PR body convention replaces it.
+```
 
 ### 6. Post-agent
 

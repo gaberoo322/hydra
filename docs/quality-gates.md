@@ -66,6 +66,16 @@ threshold is reached.
 
 **Quick-fix bypass.** Same `[quick-fix]` token as the mutation gate.
 
+**Hard out-of-scope block (issue #396).** Issues and PRs may declare a `## Files out of scope` section. Any changed file matching an entry there fails the gate immediately, regardless of the ratio thresholds. This is the subagent-side replacement for the in-cycle `reconcilePlanVsActual` step deleted in PR #400.
+
+**Scope-justification escape hatch (issue #396).** When a subagent legitimately needs to touch an out-of-scope file (e.g. a shared test fixture), it includes a `scope-justification:` block in the PR body listing each affected path with a one-line reason. The gate excludes justified files from both the hard-block and the ratio count, and echoes the justification in the CI step summary so reviewers can audit the override. Example:
+
+```markdown
+scope-justification: `test/helpers/fixtures.ts` — shared fixture used by the new test
+```
+
+The justification only counts if it's in the PR body — issue bodies don't get to pre-authorise scope violations.
+
 ## Required vs advisory
 
 Both jobs run on `pull_request` and post a check status. Branch protection
@@ -96,7 +106,7 @@ or accepted as gone:
 
 | Former in-cycle step | Status (post-cut-over) |
 |---|---|
-| 6.5 reconcilePlanVsActual | Removed with `src/control-loop.ts` (PR-3). Replacement: hydra-qa eyeball review + the `Files in scope` PR convention enforced by `scope-check`. |
+| 6.5 reconcilePlanVsActual | Removed with `src/control-loop.ts` (PR-3). Replacement (issue #396): the per-issue `Files in scope` / `Files out of scope` contract, the label-validation workflow that gates `ready-for-agent`, and the subagent playbook step that mirrors the contract into the PR body — all enforced by the `scope-check` job below. `scope-justification:` PR-body blocks are the explicit per-file escape hatch. hydra-qa eyeball review remains the backstop. |
 | 6.7 runMutationTests | Re-homed to CI `mutation-test` job. |
 | 6.8 jitTestGeneration | Removed with `src/control-loop.ts` (PR-3). Replacement: the 1200+ regression test suite and reviewer judgement. |
 | 6.9 scopeEnforcement | Re-homed to CI `scope-check` job. |
