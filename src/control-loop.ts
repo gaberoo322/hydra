@@ -330,7 +330,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
     return vResult.earlyReturn;
   }
 
-  const { verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected } = vResult;
+  const { verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, fixerOutcome, mutationDecision, mutationFilesInspected } = vResult;
 
   // Step 7: MERGE — git operation, NOT an agent
   // Issue #218: thread execResult so mergeToMain knows the actual feature
@@ -346,7 +346,7 @@ export async function runControlLoop(eventBus: any, opts: Record<string, any> = 
     complexity, filesInScope, criteriaCount, taskId,
     reconciliation, mutationReport, jitReport,
     scopeFilterCleaned || 0, fixerUsed || false, fixerResolved || false,
-    { mutationDecision, mutationFilesInspected },
+    { mutationDecision, mutationFilesInspected, fixerOutcome: fixerOutcome || "no-failure" },
   );
 
   return report;

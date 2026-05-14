@@ -64,6 +64,19 @@ export interface VerificationResult {
   /** Whether the fixer agent resolved the verification failure */
   fixerResolved: boolean;
   /**
+   * Issue #376: structured per-cycle classification of what the fixer did
+   * (or didn't do). Always set on the result envelope so dashboard /
+   * /api/metrics/fixer can answer "why was the fixer skipped?" instead of
+   * showing a silent zero. Values:
+   *   - "ran-recovered"           — fixer ran and re-verification passed
+   *   - "ran-failed"              — fixer ran but verification still failed
+   *   - "skipped:<reason>"        — fixer was eligible but classifier rejected it
+   *   - "not-eligible:<gate>"     — failure happened past the fixer entry point
+   *                                 (test-discovery / mutation / JIT / scope)
+   *   - "no-failure"              — verification passed first try, fixer not needed
+   */
+  fixerOutcome: string;
+  /**
    * Mutation gate decision string (issue #272).
    *   - "ran"                          — mutation gate executed
    *   - "no-mutants"                   — too few testable mutants (<3)
@@ -140,6 +153,9 @@ export async function verify(
   let fixerCategory = "none";
   let fixerUsed = false;
   let fixerResolved = false;
+  // Issue #376: fixerOutcome is the structured per-cycle classification.
+  // Default "no-failure" — overridden below when verification fails.
+  let fixerOutcome: string = "no-failure";
   if (!verification.allPassed) {
     const fixability = isFixableFailure(verification.steps);
     fixerCategory = fixability.category;
@@ -147,15 +163,17 @@ export async function verify(
       fixerUsed = true;
       verification = await runFixerAttempt(ctx, task, verification, verificationPlan, runVerification, taskId);
       fixerResolved = verification.allPassed;
+      fixerOutcome = fixerResolved ? "ran-recovered" : "ran-failed";
     } else {
       fixerSkipped = true;
+      fixerOutcome = `skipped:${fixability.category}`;
       console.log(`[ControlLoop] Fixer SKIPPED: ${fixability.reason} (category: ${fixability.category})`);
     }
   }
 
   if (!verification.allPassed) {
-    const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, fixerSkipped, fixerCategory);
-    return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], earlyReturn };
+    const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, fixerSkipped, fixerCategory, fixerOutcome);
+    return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, fixerOutcome, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], earlyReturn };
   }
 
   // =========================================================================
@@ -182,8 +200,11 @@ export async function verify(
           actual: `${discoveredTests} tests discovered`,
         };
         verification.steps.push(syntheticStep);
-        const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
-        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], earlyReturn };
+        // Issue #376: test-discovery guard fires after the fixer entry-point;
+        // fixer was never offered a chance, so classify as not-eligible.
+        fixerOutcome = "not-eligible:test-discovery-guard";
+        const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, false, "test-count-drift", fixerOutcome);
+        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, fixerOutcome, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], earlyReturn };
       }
     }
   }
@@ -224,7 +245,9 @@ export async function verify(
   if (verification.filesChanged?.length > 0) {
     const mutResult = await runMutationGate(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
     if (mutResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport: mutResult.report, jitReport: null, fixerUsed, fixerResolved, mutationDecision: mutResult.decision, mutationFilesInspected: mutResult.filesInspected, earlyReturn: mutResult.earlyReturn };
+      // Issue #376: mutation gate blocked merge — fixer not eligible at this stage.
+      fixerOutcome = "not-eligible:mutation-gate";
+      return { passed: false, verification, reconciliation, mutationReport: mutResult.report, jitReport: null, fixerUsed, fixerResolved, fixerOutcome, mutationDecision: mutResult.decision, mutationFilesInspected: mutResult.filesInspected, earlyReturn: mutResult.earlyReturn };
     }
     mutationReport = mutResult.report;
     mutationDecision = mutResult.decision;
@@ -249,7 +272,9 @@ export async function verify(
   if (complexity !== "quick-fix" && diff && verification.filesChanged?.length > 0) {
     const jitResult = await runDiffAwareJitTests(ctx, task, verification, verificationPlan, diff, execResult, complexity, filesInScope, criteriaCount, taskId, runVerification, mutationReport);
     if (jitResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, earlyReturn: jitResult.earlyReturn };
+      // Issue #376: JIT gate blocked merge — fixer not eligible at this stage.
+      fixerOutcome = "not-eligible:jit-gate";
+      return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, fixerOutcome, mutationDecision, mutationFilesInspected, earlyReturn: jitResult.earlyReturn };
     }
     jitReport = jitResult.report;
     if (jitResult.updatedVerification) {
@@ -272,11 +297,13 @@ export async function verify(
   if (task.scopeBoundary?.in?.length > 0 && verification.filesChanged?.length > 0) {
     const scopeResult = await runScopeEnforcement(ctx, task, verification, taskId);
     if (scopeResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, earlyReturn: scopeResult.earlyReturn };
+      // Issue #376: scope-enforcement blocked merge — fixer not eligible.
+      fixerOutcome = "not-eligible:scope-enforcement";
+      return { passed: false, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, fixerOutcome, mutationDecision, mutationFilesInspected, earlyReturn: scopeResult.earlyReturn };
     }
   }
 
-  return { passed: true, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected };
+  return { passed: true, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, fixerOutcome, mutationDecision, mutationFilesInspected };
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +314,9 @@ async function handleVerificationFailure(
   ctx: CycleContext, task: any, verification: any, execResult: any,
   complexity: string, filesInScope: number, criteriaCount: number, taskId: string,
   fixerSkipped = false, fixerCategory = "none",
+  // Issue #376: explicit fixerOutcome string so the metric reflects the path
+  // taken at this failure point (ran-failed / skipped:<reason> / not-eligible:<gate>).
+  fixerOutcome: string = "not-eligible:unknown",
 ): Promise<any> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
   const tracker = getTracker();
@@ -343,6 +373,8 @@ async function handleVerificationFailure(
     executorModel: execResult?.__executorModel || "unknown",
     fixerSkipped: fixerSkipped ? "true" : "false",
     fixerCategory,
+    // Issue #376: structured outcome string for /api/metrics/fixer rollup.
+    fixerOutcome,
     // Issue #193: surface reflection injection on verification-failed cycles
     // so the effectiveness API can attribute failures to "had reflections but
     // still failed" vs "no reflections to learn from".

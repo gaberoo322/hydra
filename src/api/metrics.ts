@@ -273,6 +273,101 @@ export function createMetricsRouter() {
     }
   });
 
+  // GET /metrics/fixer — Fixer eligibility / outcome breakdown over the
+  // rolling window (issue #376). Answers: how often is the fixer eligible
+  // but skipped, and why? Surfaces {eligibleCycles, ranCycles, recoveredCycles,
+  // skipReasons:{...}, notEligibleReasons:{...}} so we can verify the widened
+  // classifier is actually pulling cycles through to the fixer.
+  router.get("/metrics/fixer", async (req, res) => {
+    try {
+      // @ts-expect-error — req.query.count is a string at runtime
+      const count = parseInt(req.query.count) || 50;
+      const trend = await getMetricsTrend(count);
+
+      // Buckets — kept aligned with the fixerOutcome value space defined in
+      // src/verification.ts VerificationResult.fixerOutcome.
+      let eligibleCycles = 0;     // verification failed AND fixer was eligible (ran-* OR skipped:*)
+      let ranCycles = 0;          // fixer actually invoked (ran-recovered OR ran-failed)
+      let recoveredCycles = 0;    // fixer resolved the failure
+      const skipReasons: Record<string, number> = {};
+      const notEligibleReasons: Record<string, number> = {};
+      let noFailureCycles = 0;    // verification passed first try
+      let missingOutcomeCycles = 0; // legacy cycles before fixerOutcome was emitted
+
+      for (const m of trend) {
+        const outcome = typeof m.fixerOutcome === "string" ? m.fixerOutcome : "";
+        if (!outcome) { missingOutcomeCycles++; continue; }
+
+        if (outcome === "no-failure") {
+          noFailureCycles++;
+          continue;
+        }
+        if (outcome === "ran-recovered") {
+          eligibleCycles++;
+          ranCycles++;
+          recoveredCycles++;
+          continue;
+        }
+        if (outcome === "ran-failed") {
+          eligibleCycles++;
+          ranCycles++;
+          continue;
+        }
+        if (outcome.startsWith("skipped:")) {
+          eligibleCycles++;
+          const reason = outcome.slice("skipped:".length) || "unknown";
+          skipReasons[reason] = (skipReasons[reason] || 0) + 1;
+          continue;
+        }
+        if (outcome.startsWith("not-eligible:")) {
+          const gate = outcome.slice("not-eligible:".length) || "unknown";
+          notEligibleReasons[gate] = (notEligibleReasons[gate] || 0) + 1;
+          continue;
+        }
+        // Unknown outcome string — surface in a catch-all bucket rather than
+        // silently dropping (the issue specifically calls out silent zeros).
+        notEligibleReasons[`unknown:${outcome}`] = (notEligibleReasons[`unknown:${outcome}`] || 0) + 1;
+      }
+
+      const recoveryRate = ranCycles > 0
+        ? Math.round((recoveredCycles / ranCycles) * 100) / 100
+        : null;
+      const eligibleRunRate = eligibleCycles > 0
+        ? Math.round((ranCycles / eligibleCycles) * 100) / 100
+        : null;
+
+      res.json({
+        windowSize: trend.length,
+        eligibleCycles,
+        ranCycles,
+        recoveredCycles,
+        recoveryRate,           // recoveredCycles / ranCycles
+        eligibleRunRate,        // ranCycles / eligibleCycles (sanity: should be 1.0)
+        skipReasons,            // {category: count} — what classifier rejected
+        notEligibleReasons,     // {gate: count} — which downstream gate fired
+        noFailureCycles,        // verification passed first try
+        missingOutcomeCycles,   // legacy cycles before #376 — should decay to 0
+      });
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/fixer failed: ${err.message}`);
+      // AC: never 500 on this endpoint — empty state instead so the dashboard
+      // can render an honest "no data" rather than a broken card.
+      res.status(200).json({
+        windowSize: 0,
+        eligibleCycles: 0,
+        ranCycles: 0,
+        recoveredCycles: 0,
+        recoveryRate: null,
+        eligibleRunRate: null,
+        skipReasons: {},
+        notEligibleReasons: {},
+        noFailureCycles: 0,
+        missingOutcomeCycles: 0,
+        error: err.message,
+      });
+    }
+  });
+
   // POST /metrics/record — Record cycle metrics from external sources
   router.post("/metrics/record", async (req, res) => {
     try {

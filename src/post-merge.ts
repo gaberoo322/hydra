@@ -176,7 +176,11 @@ export async function runPostMerge(
   // Issue #272: optional gate observability — surfaces "why didn't the gate
   // run?" (mutationDecision) and "what was looked at?" (filesInspected) in
   // cycle metrics. Defaulted so callers from before #272 stay compatible.
-  qualityGateMeta: { mutationDecision?: string; mutationFilesInspected?: string[] } = {},
+  //
+  // Issue #376: fixerOutcome threads the structured per-cycle fixer
+  // classification through to the metric row so /api/metrics/fixer can
+  // distinguish "skipped:<reason>" from "not-eligible:<gate>".
+  qualityGateMeta: { mutationDecision?: string; mutationFilesInspected?: string[]; fixerOutcome?: string } = {},
 ): Promise<PostMergeResult> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor, anchorConfidence } = ctx;
   const tracker = getTracker();
@@ -517,6 +521,16 @@ export async function runPostMerge(
     qualityGateCoverage: computeQualityGateCoverage(qualityGateMeta.mutationDecision, jitReport) ? "true" : "false",
     fixerUsed: fixerUsed ? 1 : 0,
     fixerResolved: fixerResolved ? 1 : 0,
+    // Issue #376: structured fixer outcome string. Defaults sensibly:
+    //   - if the fixer ran and resolved -> "ran-recovered"
+    //   - if the fixer ran but didn't resolve (we still got to merge somehow,
+    //     e.g. test-tolerance) -> "ran-failed"
+    //   - if the fixer was not invoked and verification passed first try
+    //     -> "no-failure"
+    // Caller (verify) always supplies an explicit value; this fallback only
+    // kicks in for callers that haven't been updated yet.
+    fixerOutcome: qualityGateMeta.fixerOutcome
+      ?? (fixerUsed ? (fixerResolved ? "ran-recovered" : "ran-failed") : "no-failure"),
     scopeFilterCleaned,
     reconciliationStatus,
   });
