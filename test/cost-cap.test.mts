@@ -38,7 +38,10 @@ const {
   createStreamingBudget,
   isStreamingBudgetEnabled,
 } = await import("../src/cost-cap.ts");
-const { maybeUpdateStreamBudget } = await import("../src/codex-runner.ts");
+// `maybeUpdateStreamBudget` lived in `src/codex-runner.ts` and was removed
+// in PR-3 (issue #383). The describe block that tested it was deleted at
+// the bottom of this file along with the 9-cycle replay regression suite
+// that depended on it.
 const { getAbandonmentBreakdown } = await import("../src/metrics.ts");
 
 let testRedis: any;
@@ -615,194 +618,10 @@ describe("per-cycle cost cap circuit breaker (issue #209)", () => {
     });
   });
 
-  // -----------------------------------------------------------------
-  // maybeUpdateStreamBudget — feeds SDK ThreadEvents into the budget
-  // -----------------------------------------------------------------
-
-  describe("maybeUpdateStreamBudget (codex-runner helper)", () => {
-    const FRONTIER_PRICING = { input: 3.0, output: 15.0 };
-
-    function freshBudget() {
-      return new StreamingBudget({
-        baselineUsd: 0,
-        capUsd: 100,
-        pricing: FRONTIER_PRICING,
-        agentName: "planner",
-        inputTokens: 0,
-        charsPerTokenOutput: 4,
-      });
-    }
-
-    test("ignores non-item events", () => {
-      const b = freshBudget();
-      const before = b.estimatedOutputTokens();
-      assert.equal(maybeUpdateStreamBudget(b, { type: "turn.started" }), false);
-      assert.equal(maybeUpdateStreamBudget(b, { type: "thread.started", thread_id: "x" }), false);
-      assert.equal(maybeUpdateStreamBudget(b, { type: "turn.completed", usage: {} }), false);
-      assert.equal(b.estimatedOutputTokens(), before);
-    });
-
-    test("ignores non-textual items (tool calls, file changes, etc.)", () => {
-      const b = freshBudget();
-      assert.equal(maybeUpdateStreamBudget(b, {
-        type: "item.updated",
-        item: { id: "c1", type: "command_execution", command: "ls", aggregated_output: "x".repeat(10_000), status: "in_progress" },
-      }), false);
-      assert.equal(maybeUpdateStreamBudget(b, {
-        type: "item.completed",
-        item: { id: "f1", type: "file_change", changes: [], status: "completed" },
-      }), false);
-      assert.equal(b.estimatedOutputTokens(), 0);
-    });
-
-    test("agent_message item.updated accumulates output chars", () => {
-      const b = freshBudget();
-      const ok = maybeUpdateStreamBudget(b, {
-        type: "item.updated",
-        item: { id: "msg-1", type: "agent_message", text: "x".repeat(400) },
-      });
-      assert.equal(ok, true);
-      assert.equal(b.estimatedOutputTokens(), 100);
-    });
-
-    test("reasoning item.updated accumulates output chars", () => {
-      const b = freshBudget();
-      maybeUpdateStreamBudget(b, {
-        type: "item.updated",
-        item: { id: "r-1", type: "reasoning", text: "y".repeat(800) },
-      });
-      assert.equal(b.estimatedOutputTokens(), 200);
-    });
-
-    test("item.completed moves chars into completed pool", () => {
-      const b = freshBudget();
-      maybeUpdateStreamBudget(b, {
-        type: "item.updated",
-        item: { id: "msg-1", type: "agent_message", text: "x".repeat(400) },
-      });
-      maybeUpdateStreamBudget(b, {
-        type: "item.completed",
-        item: { id: "msg-1", type: "agent_message", text: "x".repeat(400) },
-      });
-      // Subsequent updates on a NEW item must add to the completed total.
-      maybeUpdateStreamBudget(b, {
-        type: "item.updated",
-        item: { id: "msg-2", type: "agent_message", text: "x".repeat(400) },
-      });
-      assert.equal(b.estimatedOutputTokens(), 200);
-    });
-
-    test("simulated planner runaway: large message trips the cap mid-stream", () => {
-      // Mirror the production scenario: cycle has $20 baseline, cap $25.
-      // Frontier output is $15/1M tokens. Need $5 of output to cross cap:
-      // 5/15 * 1M = ~333k tokens = ~1.33M chars at 4 chars/token.
-      const b = new StreamingBudget({
-        baselineUsd: 20,
-        capUsd: 25,
-        pricing: FRONTIER_PRICING,
-        agentName: "planner",
-        inputTokens: 50_000, // $0.15
-        charsPerTokenOutput: 4,
-      });
-      // Simulate stream chunks of 50k chars each (≈ realistic for a
-      // large response). Each chunk = 12,500 tokens = ~$0.19 of output.
-      // It will take ~26 chunks to cross the cap.
-      let cumulative = 0;
-      let aborted = false;
-      for (let i = 1; i <= 100; i++) {
-        cumulative = 50_000 * i;
-        maybeUpdateStreamBudget(b, {
-          type: "item.updated",
-          item: { id: "msg-1", type: "agent_message", text: "x".repeat(cumulative) },
-        });
-        if (b.shouldAbort()) {
-          aborted = true;
-          break;
-        }
-      }
-      assert.equal(aborted, true, "expected mid-stream abort before stream exhausted");
-      // We must trip BEFORE the projected cost runs away — projected
-      // total at abort time should be close to (not far above) the cap.
-      // One chunk is ~$0.19; we trip the instant we cross $25, so the
-      // overshoot can't exceed one chunk's worth.
-      const snap = b.snapshot();
-      assert.ok(
-        snap.projectedTotalUsd < 25.5,
-        `projected total at abort should be within one chunk of cap, got $${snap.projectedTotalUsd.toFixed(2)}`,
-      );
-    });
-  });
-
-  // -----------------------------------------------------------------
-  // Replay regression: the 2026-05-11 9-cycle doc-anchor blowup
-  // -----------------------------------------------------------------
-
-  describe("regression — 9-cycle replay capped at 9 * cap (issue #286)", () => {
-    // Before the streaming budget, the 9-cycle doc-anchor pattern burned
-    // $518 (avg $57.5/cycle) because individual planner calls overran
-    // mid-stream. With a $25 streaming cap each call is bounded; the
-    // worst case total for 9 cycles is therefore 9 * $25 = $225.
-
-    test("9 cycles at $25 streaming cap cannot exceed $225 total", () => {
-      const CAP = 25;
-      const FRONTIER_PRICING = { input: 3.0, output: 15.0 };
-
-      let totalSpend = 0;
-      const cycleCosts: number[] = [];
-
-      for (let cycle = 0; cycle < 9; cycle++) {
-        // Each cycle starts with $0 baseline (fresh cycleId).
-        const b = new StreamingBudget({
-          baselineUsd: 0,
-          capUsd: CAP,
-          pricing: FRONTIER_PRICING,
-          agentName: "planner",
-          inputTokens: 200_000, // $0.60 input
-          charsPerTokenOutput: 4,
-        });
-
-        // Simulate a runaway: planner emits 50k chars/chunk. Each chunk
-        // is 12,500 tokens = ~$0.19 at frontier. To cross $25 from $0
-        // baseline we need ~133 chunks. The budget MUST abort before
-        // total spend exceeds CAP.
-        let cycleEffectiveSpend = 0;
-        for (let i = 1; i <= 300; i++) {
-          const chars = 50_000 * i;
-          maybeUpdateStreamBudget(b, {
-            type: "item.updated",
-            item: { id: "msg-1", type: "agent_message", text: "x".repeat(chars) },
-          });
-          if (b.shouldAbort()) {
-            // The "actual" spend at abort time equals the projected call cost
-            // (we kill the SDK turn, so no further tokens accrue).
-            cycleEffectiveSpend = b.projectedCallCostUsd();
-            b.markAborted("mid-stream");
-            break;
-          }
-        }
-        assert.ok(b.hasAborted(), `cycle ${cycle} should have aborted`);
-        // Projected cost at abort time must be <= cap + one chunk worth
-        // of overshoot ($0.20 max). We trip the instant projection
-        // crosses the cap, but the chunk that pushes us over may add up
-        // to its own size in projected cost.
-        assert.ok(
-          cycleEffectiveSpend <= CAP + 1,
-          `cycle ${cycle} effective spend $${cycleEffectiveSpend.toFixed(2)} must be ≈ cap $${CAP} (allowing 1 chunk overshoot)`,
-        );
-        cycleCosts.push(cycleEffectiveSpend);
-        totalSpend += cycleEffectiveSpend;
-      }
-
-      assert.ok(
-        totalSpend <= 9 * (CAP + 1),
-        `9-cycle total $${totalSpend.toFixed(2)} must be <= 9 * (cap + 1 chunk overshoot) = $${9 * (CAP + 1)}`,
-      );
-      // Hard regression assert: vs the observed $518 pre-fix, the
-      // streaming-capped total must be at least 50% lower.
-      assert.ok(
-        totalSpend < 0.5 * 518,
-        `9-cycle total $${totalSpend.toFixed(2)} should be <50% of pre-fix $518`,
-      );
-    });
-  });
+  // The `maybeUpdateStreamBudget` describe blocks and the 9-cycle replay
+  // regression suite that lived here were removed in PR-3 (issue #383)
+  // along with `src/codex-runner.ts`. The `StreamingBudget` class itself
+  // is still exported from `src/cost-cap.ts` and exercised by the cap
+  // unit tests above; the SDK-event integration tests had no replacement
+  // surface to test against once codex-runner went away.
 });

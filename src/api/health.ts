@@ -6,9 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-import { getCycleStatus } from "../cycle.ts";
 import { getMetricsTrend, getAggregateStats } from "../metrics.ts";
-import { OLLAMA_HOST } from "../codex-runner.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler.ts";
 import { listProposals } from "../proposals.ts";
 import { _admin as backlogAdmin } from "../backlog.ts";
@@ -41,12 +39,17 @@ export function createHealthRouter(eventBus: any) {
     res.json({
       status: killFileExists ? "killed" : "ok",
       redis: redisOk,
-      cycle: (await getCycleStatus()).status || "idle",
+      // In-process control loop removed in PR-3 (issue #383). Autopilot
+      // subagents own execution now; "idle" is the only status this surface
+      // ever returns.
+      cycle: "idle",
       uptime: process.uptime(),
     });
   });
 
-  // GET /health/services — Probe VikingDB, OpenViking, OpenAI Proxy
+  // GET /health/services — Probe VikingDB and OpenViking
+  // The openai-proxy and ollama probes were retired in PR-3 (issue #383) —
+  // both only existed to serve the in-process codex CLI agents.
   router.get("/health/services", async (req, res) => {
     async function probe(url, acceptAny = false) {
       try {
@@ -61,14 +64,12 @@ export function createHealthRouter(eventBus: any) {
       }
     }
 
-    const [vikingdb, openviking, openaiProxy, ollama] = await Promise.all([
+    const [vikingdb, openviking] = await Promise.all([
       probe("http://localhost:5000/health"),
       probe("http://localhost:1933/health"),
-      probe("http://localhost:4001/v1/embeddings", true),
-      probe(`${OLLAMA_HOST}/api/tags`, true),
     ]);
 
-    res.json({ vikingdb, openviking, openaiProxy, ollama });
+    res.json({ vikingdb, openviking });
   });
 
   // GET /health/deep — Comprehensive health with diagnostic reasoning
@@ -79,7 +80,8 @@ export function createHealthRouter(eventBus: any) {
         const killed = existsSync(KILL_FILE);
         let redisOk = false;
         try { await eventBus.publisher.ping(); redisOk = true; } catch { /* intentional: ping failure reflected via redisOk=false */ }
-        return { status: killed ? "killed" : "ok", redis: redisOk, cycle: (await getCycleStatus()).status || "idle", uptime: process.uptime() };
+        // In-process cycle removed in PR-3 (issue #383); status is "idle" forever.
+        return { status: killed ? "killed" : "ok", redis: redisOk, cycle: "idle", uptime: process.uptime() };
       })(),
       /* 1: service probes */ (async () => {
         const probe = async (url, acceptAny = false) => {
@@ -89,11 +91,13 @@ export function createHealthRouter(eventBus: any) {
             return { status: (r.ok || acceptAny) ? "running" : "failed", latencyMs: Date.now() - start };
           } catch { return { status: "failed", latencyMs: null }; }
         };
-        const [vikingdb, ov, proxy] = await Promise.all([probe("http://localhost:5000/health"), probe("http://localhost:1933/health"), probe("http://localhost:4001/v1/embeddings", true)]);
-        return { vikingdb, openviking: ov, openaiProxy: proxy };
+        // openai-proxy diagnostic removed in PR-3 (issue #383) — port 4001 only
+        // existed to feed the codex CLI agents.
+        const [vikingdb, ov] = await Promise.all([probe("http://localhost:5000/health"), probe("http://localhost:1933/health")]);
+        return { vikingdb, openviking: ov };
       })(),
       /* 2 */ getSchedulerStatus(),
-      /* 3 */ getCycleStatus(),
+      /* 3 */ Promise.resolve({ status: "idle" }),
       /* 4 */ getWorkQueueLen(),
       /* 5 */ listLen(redisKeys.anchorPriorFailures()),
       /* 6 */ getBacklogCounts(),
@@ -133,7 +137,7 @@ export function createHealthRouter(eventBus: any) {
 
     const val = (i) => settled[i].status === "fulfilled" ? (settled[i] as any).value : null;
     const health = val(0) || { status: "failed", redis: false, cycle: "unknown", uptime: 0 };
-    const svcProbes = val(1) || { vikingdb: { status: "failed" }, openviking: { status: "failed" }, openaiProxy: { status: "failed" } };
+    const svcProbes = val(1) || { vikingdb: { status: "failed" }, openviking: { status: "failed" } };
     const sched = val(2) || { running: false, cyclesRun: 0, cyclesMerged: 0, cyclesFailed: 0, mergeRate: 0, consecutiveErrors: 0 };
     const cycle = val(3) || {};
     const queueDepth = val(4) || 0;
@@ -183,7 +187,6 @@ export function createHealthRouter(eventBus: any) {
     if (!health.redis) diagnostics.push({ severity: "critical", component: "redis", what: "Redis disconnected", why: "Redis is the sole state store. Without it, cycles, backlog, memory, and metrics are unavailable.", impact: "All operations fail.", action: "docker exec hydra-redis-1 redis-cli ping", autoRecovery: false });
     if (sched.consecutiveErrors >= 5) diagnostics.push({ severity: "error", component: "scheduler", what: `Auto-stopped after ${sched.consecutiveErrors} errors`, why: `Last: "${sched.lastError || "unknown"}". Pauses at 5 to prevent runaway spend.`, impact: "No autonomous cycles.", action: "Check logs, then POST /api/scheduler/start", autoRecovery: false });
     else if (!sched.running && (queueDepth > 0 || blCounts.total > 0)) diagnostics.push({ severity: "error", component: "scheduler", what: "Stopped but work exists", why: `${queueDepth} queue + ${blCounts.total} backlog items waiting.`, impact: "Queue growing stale.", action: "POST /api/scheduler/start", autoRecovery: false });
-    if (svcProbes.openaiProxy.status === "failed") diagnostics.push({ severity: "error", component: "openai-proxy", what: "OpenAI Proxy unreachable", why: "Port 4001 provides LLM access. Planning and execution will fail.", impact: "All cycles fail.", action: "Check codex-proxy service", autoRecovery: false });
     if (disk.availableGb > 0 && disk.availableGb < 5) diagnostics.push({ severity: "error", component: "disk", what: `Disk critical: ${disk.availableGb}GB free`, why: `NVMe at ${disk.usedPercent}%. Operations fail below ~2GB.`, impact: "Cycle failures.", action: "Clean Docker images or move to /mnt/hydra-ssd", autoRecovery: false });
     if (mem.usedPercent > 95) diagnostics.push({ severity: "error", component: "memory", what: `Memory critical: ${mem.availableGb}GB free`, why: "OOM killer may terminate processes.", impact: "Crashes.", action: "top -o %MEM", autoRecovery: false });
     if (recent.revertRate > 30 && mergedN >= 3) diagnostics.push({ severity: "error", component: "pipeline", what: `High revert rate: ${recent.revertRate}%`, why: `${revertN}/${mergedN} merges reverted. Executor breaking existing tests.`, impact: "No forward progress.", action: "Review executor feedback, check flaky tests", autoRecovery: false });
@@ -225,7 +228,7 @@ export function createHealthRouter(eventBus: any) {
         orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
         redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },
         scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt, research: { dailySpendUsd: sched.research?.dailySpendUsd || 0, dailyCostCapUsd: sched.research?.dailyCostCapUsd || 50, lastResearchAt: sched.research?.lastResearchAt || null } },
-        vikingdb: svcProbes.vikingdb, openviking: svcProbes.openviking, openaiProxy: svcProbes.openaiProxy,
+        vikingdb: svcProbes.vikingdb, openviking: svcProbes.openviking,
       },
       activeCycle,
       pipeline: { queueDepth, priorFailures, backlogCounts: blCounts, recentMetrics: recent, killSwitch: health.status === "killed" },

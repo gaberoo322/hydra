@@ -58,11 +58,9 @@ export function createTasksRouter() {
 
   // GET /agents/status — Agent health and task assignments
   router.get("/agents/status", async (req, res) => {
-    const cycle = await getCycleStatus();
+    const cycle = await getCycleStatus() as any;
     res.json({
-    // @ts-expect-error — migrate to proper types
       cycle: cycle.id || null,
-    // @ts-expect-error — migrate to proper types
       agents: cycle.agents || {},
     });
   });
@@ -70,10 +68,8 @@ export function createTasksRouter() {
   // POST /agents/:id/pause — Pause a specific agent
   router.post("/agents/:id/pause", async (req, res) => {
     const { id } = req.params;
-    const cycle = await getCycleStatus();
-    // @ts-expect-error — migrate to proper types
+    const cycle = await getCycleStatus() as any;
     if (cycle.agents?.[id]) {
-    // @ts-expect-error — migrate to proper types
       cycle.agents[id].status = "paused";
       res.json({ paused: true, agent: id });
     } else {

@@ -91,7 +91,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 
-import { MODEL_PRICING } from "./codex-runner.ts";
+import { MODEL_PRICING } from "./llm/pricing.ts";
 import { getRedisConnection } from "./redis-adapter.ts";
 
 // ---------------------------------------------------------------------------

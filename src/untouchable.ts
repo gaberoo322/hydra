@@ -19,27 +19,19 @@
 
 /** Canonical Tier-0 path list. Order is illustrative; matching is exact/prefix. */
 export const UNTOUCHABLE_PATHS: readonly string[] = Object.freeze([
-  // Merge gate (extracted in ADR-0001 step 6 — listed proactively so the
-  // protection is live the instant the file is created in any PR).
-  "src/gate.ts",
-
-  // Inputs to the merge gate — grounding + verification + scope decisions.
+  // Inputs to the merge gate — grounding stays read-only.
+  // (gate.ts / verification.ts / post-merge.ts / control-loop.ts were
+  // removed in PR-3 (issue #383) along with the entire in-process codex
+  // control loop. CI quality gates (#382) now own scope/mutation
+  // enforcement; the merge gate moved out-of-process to PR review +
+  // branch protection.)
   "src/grounding.ts",
-  "src/verification.ts",
-
-  // Rollback logic. If a regression slips, this is what catches it.
-  "src/post-merge.ts",
 
   // State contract — the adapter every Redis access funnels through.
   "src/redis-adapter.ts",
 
   // Cost guardrails — the $50/day cap referenced in operator vision.
   "src/cost-cap.ts",
-
-  // Control loop body itself. Will be slimmed once `src/gate.ts` is
-  // extracted (ADR-0001 step 6); until then this protects the merge
-  // sequence that lives inline in the loop.
-  "src/control-loop.ts",
 
   // CI/CD scripts and workflows — the deploy path and the gate that
   // gates the gate.
