@@ -235,6 +235,32 @@ function generateAdvice(opts: { outcome: string; reason: string; filesChanged?: 
   return `Previous attempt failed: ${opts.reason}. The next attempt should take a different approach.`;
 }
 
+/**
+ * Load the raw per-anchor reflection records (parsed, not formatted) for
+ * `anchorRef`. Returns the same data `loadAnchorReflections()` formats, but in
+ * structured form so callers (e.g. plan-cache digest computation, issue #375)
+ * can hash deterministic subsets of the records.
+ *
+ * Filters out malformed entries silently. Order is preserved (oldest first,
+ * matching the Redis list order from `pushAnchorReflection`).
+ */
+export async function loadAnchorReflectionsRaw(
+  anchorRef: string,
+): Promise<AnchorReflection[]> {
+  const key = reflectionKey(anchorRef);
+  const raw = await getAnchorReflections(key);
+  if (raw.length === 0) return [];
+  const parsed: AnchorReflection[] = [];
+  for (const r of raw) {
+    try {
+      parsed.push(JSON.parse(r));
+    } catch {
+      /* intentional: skip malformed reflection entries */
+    }
+  }
+  return parsed;
+}
+
 export async function loadAnchorReflections(anchorRef: string): Promise<string> {
   const key = reflectionKey(anchorRef);
   const raw = await getAnchorReflections(key);

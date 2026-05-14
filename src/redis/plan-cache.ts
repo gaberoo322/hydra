@@ -17,6 +17,13 @@ export type PlanCacheStatMetric = "hits" | "misses" | "stored" | "invalidated" |
  *  - `not-found`             — cache lookup returned no entry for the key
  *  - `non-cacheable-type`    — anchor.type not in CACHEABLE_TYPES
  *  - `reflection-bypass`     — reflections exist; cache deliberately skipped
+ *                              (reserved for explicit-skip paths, e.g. high-risk
+ *                              anchors; the default path now uses reflection
+ *                              digest comparison via `reflection-changed`)
+ *  - `reflection-changed`    — entry evicted: reflection digest differs from
+ *                              the digest stored with the cached plan, so the
+ *                              cached plan was produced under a stale set of
+ *                              prior-attempt reflections (issue #375)
  *  - `actionability-skipped` — pre-planner gate fired before cache was queried
  *  - `stale-tests`           — entry evicted: test count dropped since cache
  *  - `stale-files`           — entry evicted: scope file modified since cache
@@ -31,6 +38,7 @@ export type PlanCacheMissReason =
   | "not-found"
   | "non-cacheable-type"
   | "reflection-bypass"
+  | "reflection-changed"
   | "actionability-skipped"
   | "stale-tests"
   | "stale-files"
@@ -207,6 +215,7 @@ const MISS_REASON_LABELS: PlanCacheMissReason[] = [
   "not-found",
   "non-cacheable-type",
   "reflection-bypass",
+  "reflection-changed",
   "actionability-skipped",
   "stale-tests",
   "stale-files",
