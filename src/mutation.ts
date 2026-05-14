@@ -83,7 +83,13 @@ export function getQuickFixKillThreshold(): number {
   return parsed;
 }
 
-// Files we never mutate
+// Files we never mutate.
+//
+// Issue #402: Markdown / docs / operator-edited config paths are added so the
+// gate doesn't generate `swap-comparison` mutants on `<` / `>` characters that
+// appear in prose (e.g. `≥14 days`, code-block snippets in `.md`, hostnames
+// in YAML). Those mutants always "survive" because no test reads documentation
+// prose, which tanked kill rate on docs-only PRs (observed on PR #401: 11%).
 export const SKIP_PATTERNS = [
   /\.test\.[jt]sx?$/,
   /\.spec\.[jt]sx?$/,
@@ -93,6 +99,10 @@ export const SKIP_PATTERNS = [
   /migrations?\//,
   /__mocks__\//,
   /node_modules\//,
+  // Issue #402: docs + config — see comment above.
+  /\.mdx?$/,         // Markdown (.md) and defensive .mdx
+  /(^|\/)docs\//,    // documentation tree, anywhere in the path
+  /(^|\/)config\//,  // operator-edited config tree, anywhere in the path
 ];
 
 // ---------------------------------------------------------------------------

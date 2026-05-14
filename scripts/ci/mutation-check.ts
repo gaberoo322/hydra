@@ -74,13 +74,20 @@ async function main(): Promise<number> {
 
   const inspectable = changed.filter((f) => !shouldSkipMutation(f));
   if (inspectable.length === 0) {
+    // Issue #402: surface a clear "no inspectable source files" reason so the
+    // CI status check explains why the gate passed (docs-only / config-only /
+    // tests-only diff). All filtered paths come from SKIP_PATTERNS (tests,
+    // configs, migrations, .md, docs/, config/).
     process.stdout.write(
       JSON.stringify({
         status: "pass",
-        reason: "all changed files match SKIP_PATTERNS (tests, configs, migrations)",
+        reason: "no inspectable source files",
         changed: changed.length,
         inspectable: 0,
       }) + "\n",
+    );
+    process.stderr.write(
+      `Mutation gate: no inspectable source files in ${changed.length} changed path(s) — gate passes.\n`,
     );
     return 0;
   }
