@@ -98,7 +98,7 @@ After Phase 0, treat `/tmp/hydra-autopilot-state.json` as the only source of tru
 ./scripts/autopilot/collect-state.sh
 ```
 
-Emits one line per signal: `health`, `failed_services`, board counts (`needs_qa`, `ready_for_agent`, `needs_triage`, `needs_research`, `in_progress`, `blocked`, `stale_in_progress`, `stale_blocked`), `work_queue`, `reframe_queue`, `prior_failures`, capacity-floor state, scheduler / cycle state, and recommendation count.
+Emits one line per signal: `health`, `failed_services`, board counts (`needs_qa`, `ready_for_agent`, `needs_triage`, `needs_research`, `in_progress`, `blocked`, `stale_in_progress`, `stale_blocked`), `active_dev_orch` (open PR on a hydra-dev branch updated within 90 min — drives the `dev_orch` gate, see issue #412), `work_queue`, `reframe_queue`, `prior_failures`, capacity-floor state, scheduler / cycle state, and recommendation count.
 
 Run every decision turn (cheap: ~100ms total).
 
@@ -203,7 +203,8 @@ Per-class eligibility rules (first match wins **for that class**):
 - **P1**: `needs_qa > 0` → dispatch `hydra-qa <oldest>`
 
 #### `dev_orch`
-- **P2**: `ready_for_agent > 0` AND `in_progress == 0` → dispatch `hydra-dev <highest-impact>`
+- **P2**: `ready_for_agent > 0` AND `active_dev_orch == 0` → dispatch `hydra-dev <highest-impact>`
+- The gate is the live PR signal, **not** the `in-progress` label (issue #412). The label can go stale when an earlier dispatch died before producing a PR; Phase 1.5 (`stale_in_progress`) still re-queues those issues, but the dev_orch gate no longer waits on label cleanup.
 - Worktree-guard preamble REQUIRED. Post-dispatch sanity check REQUIRED.
 
 #### `dev_target`

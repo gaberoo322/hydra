@@ -33,6 +33,25 @@ gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedA
   stale_blocked: [.[] | select((.labels | map(.name) | index("blocked")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)
 }'
 
+# active dev_orch detector (issue #412): an open PR on a hydra-dev head
+# branch updated within the last 90 minutes is the only reliable gate
+# signal — the `in-progress` label can go stale when an earlier cycle
+# died before producing a PR. We match the three branch-name prefixes
+# hydra-dev actually creates: `issue-<N>-<slug>`, `hydra-dev/<...>`,
+# and the harness-created `worktree-agent-<hash>` (Claude Agent tool
+# isolation=worktree). 5400s = 90 min, matching the Phase 1.5 stale
+# threshold so the two signals line up.
+echo -n "active_dev_orch="
+gh pr list --repo gaberoo322/hydra --state open --json updatedAt,headRefName --jq '[
+  .[]
+  | select(
+      (.headRefName | startswith("issue-"))
+      or (.headRefName | startswith("hydra-dev/"))
+      or (.headRefName | startswith("worktree-agent-"))
+    )
+  | select((now - (.updatedAt | fromdateiso8601)) < 5400)
+] | length' 2>/dev/null || echo 0
+
 # backlog + queues
 hydra raw GET /backlog/counts 2>/dev/null || hydra backlog ls | python3 -c "
 import json,sys; d=json.load(sys.stdin)
