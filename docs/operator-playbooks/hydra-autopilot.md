@@ -79,6 +79,14 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=$$ run_id=$(uuidgen)" > /tmp/hydr
 TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-2000000}"
 WALL_CLOCK_MAX_SEC="${HYDRA_AUTOPILOT_MAX_SEC:-28800}"   # 8h
 IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
+
+# Resolve scope from env. Allowed: all | orch-only | target-only. Default: all.
+SCOPE="${HYDRA_AUTOPILOT_SCOPE:-all}"
+case "$SCOPE" in
+  all|orch-only|target-only) ;;
+  *) echo "[autopilot] FATAL: HYDRA_AUTOPILOT_SCOPE=$SCOPE invalid (expected all|orch-only|target-only)"; exit 1 ;;
+esac
+
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_EPOCH="$(date -u +%s)"
 
@@ -90,7 +98,8 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
   "limits": {
     "token_budget": ${TOKEN_BUDGET},
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
-    "idle_drain_turns": ${IDLE_DRAIN_TURNS}
+    "idle_drain_turns": ${IDLE_DRAIN_TURNS},
+    "scope": "${SCOPE}"
   },
   "cumulative_tokens": 0,
   "dispatches": 0,
@@ -107,7 +116,7 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
 EOF
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE}"
 ```
 
 After Phase 0, the model MUST treat `/tmp/hydra-autopilot-state.json` as the authoritative budget source. Do not invent or rely on remembered defaults.
@@ -263,8 +272,12 @@ P0 (health) and P0.5 (pipeline recovery) always pre-empt this preference.
 Iteration order (every turn, exactly once):
 
 ```
+SCOPE = state.limits.scope  # "all" | "orch-only" | "target-only"
 for class in [health, qa, dev_orch, dev_target, research_orch, research_target,
               sweep_orch, sweep_target, discover_orch, discover_target]:
+    if SCOPE == "orch-only" and class.endswith("_target"): continue
+    if SCOPE == "target-only" and class.endswith("_orch"):  continue
+    # health and qa are scope-agnostic (qa reviews any PR, health is whole-system)
     if state.slots[class] is not None: continue          # slot busy
     if class on cooldown: continue
     if class circuit-broken this turn: continue
@@ -448,6 +461,7 @@ If `Phase 4` produces no new dispatches AND all class slots are non-empty (every
 8. **Capacity-floor preference is SOFT.** P0 / P0.5 always pre-empt. The share recovers naturally.
 9. **No Codex cycle triggers.** The `hydra cycle start` op is removed from this skill. The orchestrator's scheduler still ticks Codex on its own.
 10. **Idempotent shutdown.** Phase 7 must run regardless of how termination is reached (budget, clock, idle). It is the only path to the morning digest.
+11. **Scope is enforced at dispatch time, not at skill time.** Once a subagent is in flight when scope changes (operator edits `state.json` mid-run), let it finish. New dispatches respect the latest scope. `health` and `qa` are scope-agnostic — they always run regardless of scope.
 
 ## Operator interface
 
@@ -459,12 +473,31 @@ claude --dangerously-skip-permissions -p "/hydra-autopilot"
 HYDRA_AUTOPILOT_TOKEN_BUDGET=100000 \
 HYDRA_AUTOPILOT_MAX_SEC=600 \
   claude --dangerously-skip-permissions -p "/hydra-autopilot"
+
+# Only do orchestrator-side work this run:
+HYDRA_AUTOPILOT_SCOPE=orch-only claude --dangerously-skip-permissions -p "/hydra-autopilot"
+
+# Only do target-side work this run (e.g. orchestrator merge freeze):
+HYDRA_AUTOPILOT_SCOPE=target-only claude --dangerously-skip-permissions -p "/hydra-autopilot"
+
+# Default: do everything (equivalent to omitting HYDRA_AUTOPILOT_SCOPE):
+HYDRA_AUTOPILOT_SCOPE=all claude --dangerously-skip-permissions -p "/hydra-autopilot"
 ```
 
 The `--dangerously-skip-permissions` flag is REQUIRED. Headless `claude -p` denies all confirmation-required tool calls by default; without skip-permissions, the subagents the autopilot dispatches return `skill_denied` and Phase 2 reaps them as immediate failures.
 
 ### Scheduled invocation
 The provided systemd unit pair (`scripts/systemd/hydra-autopilot.{service,timer}`) fires `claude -p "/hydra-autopilot"` nightly at 22:00 local time. The service is `Type=oneshot` with `RuntimeMaxSec=32400` (9h) — slightly above the default wall-clock cap to allow Phase 7 drain. Failure handler routes to the existing `hydra-notify-failure@.service` template.
+
+To make a scope restriction stick across nightly runs, add an `Environment=` line to the systemd service unit:
+
+```ini
+# scripts/systemd/hydra-autopilot.service
+[Service]
+Environment=HYDRA_AUTOPILOT_SCOPE=orch-only
+```
+
+The operator updates this manually (systemd unit changes are out of scope for autopilot itself).
 
 ### Inspecting a run
 - Heartbeat: `cat /tmp/hydra-autopilot-heartbeat.txt`
