@@ -20,6 +20,7 @@ import { getCumulativeAccomplishments } from "./metrics.ts";
 import { summarizeForPrompt, getDiff } from "./grounding.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { getTargetWorkspace } from "./target-config.ts";
+import { findRelatedFiles, formatScopedFileTree } from "./repo-map.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
@@ -33,6 +34,8 @@ export const MIN_TRUNCATED = 500;      // minimum chars to keep when truncating
 /** Priority order: highest-priority first (grounding is never truncated). */
 export const SOURCE_PRIORITY: readonly string[] = [
   "grounding",
+  "scopedFileTree", // issue #366: real file paths next to grounding so the
+                    // planner never falls back to hallucinated names
   "feedback",
   "reflections",    // plannerMemory contains reflections
   "priorities",
@@ -40,6 +43,16 @@ export const SOURCE_PRIORITY: readonly string[] = [
   "accomplishments",
   "continuity",
 ] as const;
+
+/**
+ * Token budget for the per-anchor scoped file-tree block injected into the
+ * planner prompt (issue #366). Approximation is the same ~4-chars-per-token
+ * heuristic used in repo-map.ts, so 2000 tokens ≈ 8000 chars max.
+ */
+export const SCOPED_FILE_TREE_TOKEN_BUDGET = 2000;
+
+/** Maximum number of files listed in the scoped file-tree block. */
+export const SCOPED_FILE_TREE_LIMIT = 50;
 
 // ---------------------------------------------------------------------------
 // applyContextBudget — pure, testable truncation logic
@@ -119,6 +132,15 @@ export interface PlannerContext {
   groundingSummary: string;
   /** Continuity context: last cycle report + repo diff + reflections */
   continuityContext: string;
+  /**
+   * Issue #366: token-bounded list of real file paths relevant to the anchor
+   * reference. Empty string when the anchor produced no recognizable tokens
+   * (e.g. doc anchors) or when grounding has no `fileTree`. Listed paths are
+   * guaranteed to exist on disk at grounding time — the planner can use them
+   * directly in `scopeBoundary.in` without risking the preflight "non-existent
+   * file" rejection that historically ate ~11% of abandoned cycles.
+   */
+  scopedFileTree: string;
   /** Per-source warnings for degraded loads */
   warnings: string[];
   /**
@@ -175,6 +197,10 @@ export async function buildPlannerContext(
       accomplishmentsContext: "",
       groundingSummary,
       continuityContext: "",
+      // Quick-fix anchors already name the exact file in the anchor reference
+      // (failing-test path / prior-failure title). The planner doesn't need a
+      // file-tree snapshot — it has the file. Keep prompts cheap.
+      scopedFileTree: "",
       warnings,
       reflectionInjected: reflectionStats.count,
       reflectionSources: reflectionStats.sources,
@@ -213,9 +239,18 @@ export async function buildPlannerContext(
   // Load continuity context (last cycle report + repo diff)
   const continuityContext = await loadContinuityContext(anchor, warnings);
 
+  // Issue #366: build the scoped file-tree block from grounding.fileTree.
+  // This is cheap (string scan over the same ls-files output grounding
+  // already produces) and bounded, so it runs synchronously here rather than
+  // through loadSource. When the anchor reference has no recognizable tokens
+  // (doc anchors, opaque IDs) findRelatedFiles returns []. We then emit an
+  // empty string so the prompt doesn't bloat with a useless header.
+  const scopedFileTree = buildScopedFileTree(anchor, grounding);
+
   // --- Context budget: measure, log, truncate if needed ---
   const rawSources: ContextSource[] = [
     { name: "grounding", content: groundingSummary },
+    { name: "scopedFileTree", content: scopedFileTree },
     { name: "feedback", content: feedback || "" },
     { name: "reflections", content: plannerMemory || "" },
     { name: "priorities", content: priorities || "" },
@@ -252,10 +287,52 @@ export async function buildPlannerContext(
     accomplishmentsContext: byName.get("accomplishments") ?? "",
     groundingSummary: byName.get("grounding") ?? "",
     continuityContext: byName.get("continuity") ?? "",
+    scopedFileTree: byName.get("scopedFileTree") ?? "",
     warnings,
     reflectionInjected: reflectionStats.count,
     reflectionSources: reflectionStats.sources,
   };
+}
+
+/**
+ * Issue #366: build the scoped file-tree block for the planner prompt.
+ *
+ * Exported for unit tests so the file-tree contract is locked separately
+ * from the full async buildPlannerContext pipeline. The function is pure
+ * (no I/O, no Redis, no logging) and never throws — bad input returns "".
+ *
+ * Inputs:
+ *   - anchor.reference: tokenized for relevance scoring
+ *   - grounding.fileTree: newline-separated `git ls-files` output
+ *
+ * Output: a labelled block ready to drop into the planner prompt, or "" when
+ * there's nothing useful to inject. The block always starts with the marker
+ * `## SCOPED FILE TREE` and ends with a one-liner reminding the planner that
+ * the listed paths are real and should be preferred for `scopeBoundary.in`.
+ */
+export function buildScopedFileTree(
+  anchor: { reference?: string; [k: string]: any },
+  grounding: { fileTree?: string; [k: string]: any },
+): string {
+  if (!anchor || typeof anchor.reference !== "string") return "";
+  if (!grounding || typeof grounding.fileTree !== "string" || grounding.fileTree.length === 0) {
+    return "";
+  }
+  const lines = grounding.fileTree.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return "";
+
+  const related = findRelatedFiles(anchor.reference, lines, SCOPED_FILE_TREE_LIMIT);
+  if (related.length === 0) return "";
+
+  const body = formatScopedFileTree(related, SCOPED_FILE_TREE_TOKEN_BUDGET);
+  if (!body) return "";
+
+  return [
+    `## SCOPED FILE TREE (real paths relevant to "${anchor.reference}" — DO NOT invent file names)`,
+    body,
+    `# These paths exist on disk at grounding time. Prefer them for scopeBoundary.in.`,
+    `# Files the executor will CREATE go in scopeBoundary.creates, not "in".`,
+  ].join("\n");
 }
 
 /**
