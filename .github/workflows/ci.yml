@@ -92,6 +92,136 @@ jobs:
           fi
           exit $STATUS
 
+  # Mutation testing gate (issue #382, codex cut-over PR-2). Re-homes step
+  # 6.7 of the in-cycle codex loop (runMutationGate in src/mutation.ts) to
+  # CI so every PR — codex, hydra-dev, hydra-target-build, manual — gets the
+  # same kill-rate gate after the codex CLI is removed (PR-3). See
+  # docs/quality-gates.md for thresholds, overrides, and the [quick-fix]
+  # bypass.
+  mutation-test:
+    if: github.event_name == 'pull_request'
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Compute changed files
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh pr diff --name-only "${{ github.event.pull_request.number }}" > changed-files.txt || \
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
+          echo "Files changed:"
+          cat changed-files.txt
+
+      - name: Run mutation gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MUTATION_KILL_RATE_FLOOR: ${{ vars.MUTATION_KILL_RATE_FLOOR || '30' }}
+          MUTATION_TIME_BUDGET_MS: ${{ vars.MUTATION_TIME_BUDGET_MS || '540000' }}
+        run: |
+          set +e
+          PR_BODY="$(gh pr view ${{ github.event.pull_request.number }} --json body --jq '.body')"
+          export PR_BODY
+          CHANGED_FILES="$(cat changed-files.txt)"
+          export CHANGED_FILES
+          npx tsx scripts/ci/mutation-check.ts > mutation-result.json 2> mutation-stderr.txt
+          STATUS=$?
+          {
+            echo "## Mutation gate"
+            echo ""
+            echo '```json'
+            cat mutation-result.json
+            echo '```'
+            if [ -s mutation-stderr.txt ]; then
+              echo ""
+              echo "### Notes"
+              echo '```'
+              cat mutation-stderr.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat mutation-result.json
+          if [ "$STATUS" -ne 0 ]; then
+            cat mutation-stderr.txt >&2
+          fi
+          exit $STATUS
+
+  # Scope enforcement gate (issue #382, codex cut-over PR-2). Re-homes step
+  # 6.9 of the in-cycle codex loop (runScopeEnforcement in
+  # src/scope-enforcement.ts) to CI. Reads `Files in scope` from the PR
+  # body / linked issue; blocks merge when >80% of files are out-of-scope
+  # and there are >3 such files. See docs/quality-gates.md.
+  scope-check:
+    if: github.event_name == 'pull_request'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Compute changed files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh pr diff --name-only "${{ github.event.pull_request.number }}" > changed-files.txt || \
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
+          cat changed-files.txt
+
+      - name: Run scope gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCOPE_OUT_OF_SCOPE_THRESHOLD: ${{ vars.SCOPE_OUT_OF_SCOPE_THRESHOLD || '0.8' }}
+          SCOPE_MIN_OUT_OF_SCOPE_COUNT: ${{ vars.SCOPE_MIN_OUT_OF_SCOPE_COUNT || '3' }}
+        run: |
+          set +e
+          PR_NUM=${{ github.event.pull_request.number }}
+          PR_BODY="$(gh pr view "$PR_NUM" --json body --jq '.body')"
+          export PR_BODY
+          # Resolve a linked issue body if the PR closes/fixes/resolves one.
+          ISSUE_NUM="$(printf '%s' "$PR_BODY" | grep -oiE '(closes|fixes|resolves)[[:space:]]+#[0-9]+' | head -1 | grep -oE '[0-9]+' || true)"
+          ISSUE_BODY=""
+          if [ -n "$ISSUE_NUM" ]; then
+            ISSUE_BODY="$(gh issue view "$ISSUE_NUM" --json body --jq '.body' 2>/dev/null || true)"
+          fi
+          export ISSUE_BODY
+          CHANGED_FILES="$(cat changed-files.txt)"
+          export CHANGED_FILES
+          npx tsx scripts/ci/scope-check.ts > scope-result.json 2> scope-stderr.txt
+          STATUS=$?
+          {
+            echo "## Scope gate"
+            echo ""
+            echo '```json'
+            cat scope-result.json
+            echo '```'
+            if [ -s scope-stderr.txt ]; then
+              echo ""
+              echo "### Notes"
+              echo '```'
+              cat scope-stderr.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat scope-result.json
+          if [ "$STATUS" -ne 0 ]; then
+            cat scope-stderr.txt >&2
+          fi
+          exit $STATUS
+
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     needs: [test, dashboard-build]
