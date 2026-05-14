@@ -14,7 +14,8 @@
 
 import { runAgent, findPersonality } from "./codex-runner.ts";
 import { getContext } from "./learning.ts";
-import { getCachedPlan, cachePlan, recordPlanCacheMiss } from "./plan-cache.ts";
+import { getCachedPlan, cachePlan, recordPlanCacheMiss, computeReflectionDigest } from "./plan-cache.ts";
+import { loadAnchorReflectionsRaw } from "./learning/reflections.ts";
 import { getTracker } from "./task-tracker.ts";
 import { summarizeForPrompt } from "./grounding.ts";
 import { buildPlannerContext, reflectionMatchSource } from "./context-builder.ts";
@@ -410,46 +411,64 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
   const plannerModel = isCheapAnchor ? "codex" : "frontier";
 
   // Plan cache — skip LLM call for recurring task patterns.
-  // Belt-and-suspenders: bypass cache when reflections exist for this anchor,
-  // so the planner is forced to re-plan with failure context (issue #22).
   //
-  // Exception: cache-safe anchor types are deterministic narrow tasks where
-  // the cached plan remains valid even when reflections exist — the fix for
-  // a specific failing test or the "add tests to file X" health task doesn't
-  // change based on prior attempt context. Issue #363 broadens this from
-  // `failing-test` only to also include `codebase-health` (deterministic
-  // "<category> in <file>" plans) so the cache actually has a reachable hit
-  // population.
+  // Issue #375: Previously the cache was unconditionally bypassed whenever any
+  // reflection existed for the anchor, which meant once an anchor had ever
+  // failed its cache was effectively disabled forever (reflections live 7-30
+  // days). The new policy is digest-based: the cached entry stores a
+  // `reflectionDigest` of the reflection set at plan time. On lookup we
+  // recompute the digest and only treat the entry as invalid when the digest
+  // has *changed* — i.e. a new reflection appeared since the plan was
+  // produced. After the planner has run once with the reflections injected,
+  // the resulting plan IS the post-reflection plan; subsequent identical-
+  // anchor cycles should reuse it.
+  //
+  // The reflection digest is only computed for cacheable types — for
+  // non-cacheable types `getCachedPlan` short-circuits with `non-cacheable-type`
+  // anyway, so loading reflections would be wasted work. Cache-safe anchor
+  // types (failing-test, codebase-health) remain digest-skipped: those are
+  // deterministic narrow tasks where the cached plan remains valid even when
+  // reflections exist (the fix for a specific failing test doesn't change
+  // based on prior attempt context), so we pass `undefined` to preserve the
+  // legacy "ignore reflections for cache key" behaviour.
   const CACHE_SAFE_ANCHOR_TYPES = new Set(["failing-test", "codebase-health"]);
   const plannerContext = await getContext("planner", anchor).catch(() => "");
   const hasReflections = plannerContext.includes("PRIOR ATTEMPTS") || plannerContext.includes("Recent Failures");
-  const cacheBypassOverride = CACHE_SAFE_ANCHOR_TYPES.has(anchor.type);
-  if (!hasReflections || cacheBypassOverride) {
-    const cachedTask = await getCachedPlan(anchor, grounding);
-    if (cachedTask) {
-      cachedTask.__plannerModel = "cached";
-      cachedTask.__planCacheHit = true;
-      cachedTask.__planCacheAnchorType = anchor.type;
-      // Cache hits don't inject reflections (cache only used when none exist
-      // for non-CACHE_SAFE types, or for CACHE_SAFE types where reflections
-      // aren't useful for narrow deterministic fixes).
-      cachedTask.__reflectionsInjected = 0;
-      cachedTask.__hadReflections = false;
-      cachedTask.__reflectionSources = [];
-      cachedTask.__reflectionMatchSource = "none";
-      await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0, "cache");
-      console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present but safe for cache-safe type)" : ""}`);
-      return cachedTask;
+  const isCacheSafeAnchor = CACHE_SAFE_ANCHOR_TYPES.has(anchor.type);
+
+  // Compute reflection digest from the raw per-anchor reflections. We hash the
+  // cycleId + reason tuples (sorted) so identical reflection sets — even when
+  // the global buffer reshuffles unrelated entries — produce the same digest.
+  // Skipped for cache-safe types (pass `undefined`) so the cache lookup
+  // ignores reflections entirely for those anchors.
+  let reflectionDigest: string | null | undefined = undefined;
+  if (!isCacheSafeAnchor && PLAN_CACHEABLE_TYPES.has(anchor.type)) {
+    try {
+      const rawReflections = await loadAnchorReflectionsRaw(anchor.reference);
+      reflectionDigest = computeReflectionDigest(rawReflections);
+    } catch (err: any) {
+      console.error(`[PlanCache] reflection-digest computation failed: ${err.message}`);
+      // Fall through with `undefined` — degrade to legacy "skip digest check"
+      // behaviour rather than blocking the cache hot path on Redis errors.
+      reflectionDigest = undefined;
     }
-  } else {
-    // Issue #363: record the bypass in the miss-reason histogram so the
-    // hit-rate-is-0 mystery is diagnosable from /api/plan-cache/stats alone.
-    // Only attribute for cacheable types — non-cacheable bypasses are already
-    // covered by the `non-cacheable-type` reason path in getCachedPlan.
-    if (PLAN_CACHEABLE_TYPES.has(anchor.type)) {
-      recordPlanCacheMiss("reflection-bypass");
-    }
-    console.log(`[PlanCache] BYPASS: reflections exist for anchor "${anchor.reference.slice(0, 60)}" type="${anchor.type}" — forcing re-plan`);
+  }
+
+  const cachedTask = await getCachedPlan(anchor, grounding, reflectionDigest);
+  if (cachedTask) {
+    cachedTask.__plannerModel = "cached";
+    cachedTask.__planCacheHit = true;
+    cachedTask.__planCacheAnchorType = anchor.type;
+    // Cache hits don't inject reflections — the cached plan was already
+    // produced with the same reflection set (digest matched), or under
+    // cache-safe semantics where reflections are intentionally ignored.
+    cachedTask.__reflectionsInjected = 0;
+    cachedTask.__hadReflections = false;
+    cachedTask.__reflectionSources = [];
+    cachedTask.__reflectionMatchSource = "none";
+    await getTracker().logAgentRun(cycleId, "planner", "planner", 0, "cache-hit", {}, 0, "cache");
+    console.log(`[PlanCache] HIT for anchor type="${anchor.type}" ref="${anchor.reference.slice(0, 60)}"${hasReflections ? " (reflections present, digest matched)" : ""}`);
+    return cachedTask;
   }
 
   // Load all context sources via centralized context builder
@@ -853,9 +872,12 @@ export async function runPlannerAgent(cycleId, anchor, grounding, ovSession = nu
     }
   }
 
-  // Store in plan cache for future reuse
+  // Store in plan cache for future reuse. Persist the reflection digest
+  // (issue #375) so subsequent lookups can detect whether the reflection set
+  // changed since this plan was produced. `undefined` (cache-safe types,
+  // digest-load failures) is normalized to `null` by `cachePlan`.
   if (task) {
-    await cachePlan(anchor, task, grounding).catch((err) =>
+    await cachePlan(anchor, task, grounding, reflectionDigest).catch((err) =>
       console.error(`[PlanCache] Store failed: ${err.message}`));
   }
 

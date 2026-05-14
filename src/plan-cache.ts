@@ -49,7 +49,46 @@ type CacheEntry = {
   anchorType: string;
   anchorReference: string;
   scopeFiles: string[];
+  /**
+   * SHA-256 digest of the per-anchor reflection records at plan time
+   * (issue #375). Used to distinguish "reflections are unchanged since this
+   * plan was produced" (cache hit) from "reflections have changed, the
+   * cached plan was made under stale failure context" (miss with
+   * `reflection-changed`). `null` means the plan was cached when no
+   * reflections existed for the anchor — a fresh reflection appearing
+   * later flips the digest from null to a hex string and counts as
+   * `reflection-changed`. Older entries without this field are treated as
+   * `null` (legacy compatibility).
+   */
+  reflectionDigest?: string | null;
 };
+
+/**
+ * Compute a deterministic digest over the per-anchor reflections used to
+ * decide whether a cached plan is still valid (issue #375).
+ *
+ * The digest is `sha256(JSON.stringify(sorted.map(r => r.cycleId + "|" + r.reason)))`,
+ * where `sorted` is the input list sorted by `cycleId` ascending. We hash
+ * only the stable identifying fields (cycleId + failure-mode/reason) rather
+ * than the full reflection record so that benign text reshuffles (e.g. a
+ * cosmetic edit to `whatShouldChange`) do not invalidate the cache. New
+ * reflections — which always carry a fresh `cycleId` — always change the
+ * digest.
+ *
+ * Returns `null` when there are no reflections so callers can store/compare
+ * a sentinel without special-casing the empty list.
+ *
+ * Exported for testing.
+ */
+export function computeReflectionDigest(
+  reflections: Array<{ cycleId?: string; reason?: string }> | null | undefined,
+): string | null {
+  if (!reflections || reflections.length === 0) return null;
+  const sorted = reflections
+    .map((r) => `${r.cycleId ?? ""}|${r.reason ?? ""}`)
+    .sort();
+  return createHash("sha256").update(JSON.stringify(sorted)).digest("hex").slice(0, 16);
+}
 
 // -------------------------------------------------------------------------
 // Stats
@@ -155,6 +194,7 @@ const inProcessMissReasons: Record<PlanCacheMissReason, number> = {
   "not-found": 0,
   "non-cacheable-type": 0,
   "reflection-bypass": 0,
+  "reflection-changed": 0,
   "actionability-skipped": 0,
   "stale-tests": 0,
   "stale-files": 0,
@@ -309,6 +349,15 @@ function isStale(entry: CacheEntry, grounding: { testReport: { passed: number } 
 export async function getCachedPlan(
   anchor: { type: string; reference: string },
   grounding: { testReport: { passed: number } },
+  /**
+   * Optional digest of the current per-anchor reflections (issue #375). When
+   * supplied, the cache entry is only returned if its stored digest matches
+   * — otherwise the entry is evicted and a `reflection-changed` miss is
+   * recorded. `null` means "no reflections exist right now" and matches an
+   * entry that was cached under the same condition. Omitting the parameter
+   * (legacy callers + tests) skips the digest comparison entirely.
+   */
+  reflectionDigest?: string | null,
 ): Promise<Record<string, any> | null> {
   if (!CACHEABLE_TYPES.has(anchor.type)) {
     // Record the bookkeeping miss so the histogram reflects every planner
@@ -347,6 +396,22 @@ export async function getCachedPlan(
       return null;
     }
 
+    // Freshness check 3: reflection digest (issue #375). Skip when the caller
+    // didn't supply one (undefined preserves legacy "ignore reflections"
+    // semantics for tests / callers that don't track per-anchor reflections).
+    if (reflectionDigest !== undefined) {
+      const stored = entry.reflectionDigest ?? null;
+      if (stored !== reflectionDigest) {
+        console.log(
+          `[PlanCache] STALE: reflection digest changed (stored=${stored ?? "none"} now=${reflectionDigest ?? "none"}) — key ${key.slice(-12)}`,
+        );
+        bumpStat("stale");
+        bumpStat("misses", 1, "reflection-changed");
+        await deletePlanCacheEntry(key);
+        return null;
+      }
+    }
+
     bumpStat("hits");
     console.log(`[PlanCache] HIT: "${entry.task.title?.slice(0, 60)}" (cached ${entry.cachedAt.slice(0, 16)})`);
     return entry.task;
@@ -361,6 +426,15 @@ export async function cachePlan(
   anchor: { type: string; reference: string },
   task: Record<string, any>,
   grounding: { testReport: { passed: number } },
+  /**
+   * Optional reflection digest to persist alongside the plan (issue #375).
+   * Pass the same value that was passed (or would have been passed) to
+   * `getCachedPlan` so that subsequent lookups can detect whether the
+   * reflection set has changed since the plan was produced. `null` means
+   * "no reflections existed at plan time". Omitting the argument stores
+   * `null` (legacy behaviour).
+   */
+  reflectionDigest?: string | null,
 ): Promise<void> {
   if (!CACHEABLE_TYPES.has(anchor.type)) return;
   if (!task || task.noWork || task.__noWork) return;
@@ -375,6 +449,7 @@ export async function cachePlan(
     anchorType: anchor.type,
     anchorReference: anchor.reference,
     scopeFiles: task.scopeBoundary?.in || [],
+    reflectionDigest: reflectionDigest === undefined ? null : reflectionDigest,
   };
 
   try {
