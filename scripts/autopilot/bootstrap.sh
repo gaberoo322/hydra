@@ -15,11 +15,15 @@
 #   HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS         (default 400000 — soft cap)
 #   HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS    (default 800000 — hard cap)
 #   HYDRA_AUTOPILOT_SCOPE                       (default all | orch-only | target-only)
+#   HYDRA_AUTOPILOT_UNATTENDED                  (default auto — `true` if stdin is
+#                                                NOT a TTY, `false` otherwise; an
+#                                                explicit value of true|false wins
+#                                                over the TTY auto-detect — issue #413)
 #
 # Inputs (slash args, all optional; processed by args-parse.sh; args > env):
 #   --scope=<v>          --tokens=<N>          --token-budget=<N>
 #   --max-sec=<N>        --max-seconds=<N>     --idle-turns=<N>
-#   --subagent-soft=<N>  --subagent-hard=<N>
+#   --subagent-soft=<N>  --subagent-hard=<N>   --unattended=<true|false>
 #
 # Unknown args are warned-and-ignored (e.g. trailing `focus=...` tokens).
 #
@@ -70,6 +74,27 @@ case "$SCOPE" in
   *) echo "[autopilot] FATAL: HYDRA_AUTOPILOT_SCOPE=$SCOPE invalid (expected all|orch-only|target-only)"; exit 1 ;;
 esac
 
+# Resolve unattended mode (issue #413). Detection precedence chain:
+#   1. Explicit HYDRA_AUTOPILOT_UNATTENDED=true|false  (always wins)
+#   2. TTY auto-detect — `[ -t 0 ]` (interactive stdin) → false; non-TTY → true
+# In unattended mode, the playbook must NOT invoke `AskUserQuestion`; it
+# uses `scripts/autopilot/queue-decision.sh` to append a row to today's
+# rolling `Operator decision queue YYYY-MM-DD` issue instead. The morning
+# `/hydra-review` skill drains the queue.
+if [ -n "${HYDRA_AUTOPILOT_UNATTENDED:-}" ]; then
+  case "$HYDRA_AUTOPILOT_UNATTENDED" in
+    true|TRUE|True|1|yes)   UNATTENDED="true" ;;
+    false|FALSE|False|0|no) UNATTENDED="false" ;;
+    *) echo "[autopilot] FATAL: HYDRA_AUTOPILOT_UNATTENDED=$HYDRA_AUTOPILOT_UNATTENDED invalid (expected true|false)"; exit 1 ;;
+  esac
+else
+  if [ -t 0 ]; then
+    UNATTENDED="false"
+  else
+    UNATTENDED="true"
+  fi
+fi
+
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_EPOCH="$(date -u +%s)"
 
@@ -84,7 +109,8 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
-    "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS}
+    "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},
+    "unattended": ${UNATTENDED}
   },
   "cumulative_tokens": 0,
   "dispatches": 0,
@@ -103,4 +129,4 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
 EOF
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED}"

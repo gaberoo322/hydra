@@ -380,6 +380,45 @@ If `Phase 4` produces no new dispatches AND all class slots are non-empty (every
 10. **Idempotent shutdown.** Phase 7 must run regardless of how termination is reached (budget, clock, idle). It is the only path to the morning digest.
 11. **Scope is enforced at dispatch time, not at skill time.** Once a subagent is in flight when scope changes (operator edits `state.json` mid-run), let it finish. New dispatches respect the latest scope. `health` and `qa` are scope-agnostic — they always run regardless of scope.
 
+## Unattended mode (issue #413)
+
+The autopilot has two interaction modes for decisions that previously called `AskUserQuestion` (e.g. Tier-0 non-mechanical PRs that need an `operator-approved` label, per the operator's `feedback_operator_approved_batch_policy` memory):
+
+- **Attended** — operator is watching the session live. `AskUserQuestion` is invoked as before; the loop blocks until the operator answers.
+- **Unattended** — operator is asleep (overnight systemd run is the prototypical case). The playbook MUST NOT block on `AskUserQuestion`; instead it appends the question to a rolling daily issue and continues.
+
+### Detection precedence
+
+Resolved once at Phase 0 (`bootstrap.sh`) and persisted at `state.limits.unattended`. Precedence chain (later step only runs if the earlier is absent):
+
+1. **Explicit `HYDRA_AUTOPILOT_UNATTENDED=true|false`** (env or `--unattended=` slash arg) — always wins. Accepts `true|false|1|0|yes|no` case-insensitively. Anything else is FATAL.
+2. **TTY auto-detect** — `[ -t 0 ]` (interactive stdin) → `false`; non-TTY (systemd, headless `claude -p`, piped invocation) → `true`.
+
+The env-var-beats-TTY rule lets the operator force interactive mode while attached to a tmux that systemd would otherwise misdetect (`HYDRA_AUTOPILOT_UNATTENDED=false claude -p ...`), and force unattended mode from a TTY for testing (`HYDRA_AUTOPILOT_UNATTENDED=true claude -p ...`). Once written to `state.limits.unattended` it stays there for the whole run — operator changes after Phase 0 are ignored to keep slot accounting deterministic.
+
+### Decision-point routing
+
+Wherever the playbook would call `AskUserQuestion` (today: only the Tier-0 non-mechanical decision in the operator-approved policy):
+
+```text
+if state.limits.unattended == true:
+    ./scripts/autopilot/queue-decision.sh <pr_number> <tier> "<reason>" "<recommendation>" [link]
+    # The script handles "rolling daily issue" creation/append idempotently.
+    # The autopilot continues to the next class — DO NOT block on the operator.
+else:
+    AskUserQuestion(...)  # existing behavior, blocks for operator input
+```
+
+The queue-decision script always exits quickly (one or two `gh` calls) and is safe to call repeatedly within a single turn for different PRs. It is non-fatal on failure: a network blip on GitHub does not stall the loop.
+
+### Morning hand-off via `/hydra-review`
+
+The rolling daily issue is titled `Operator decision queue YYYY-MM-DD` and labeled `needs-triage`. Each invocation appends one row to a markdown table: `PR # | tier | reason | recommendation | link`.
+
+The morning `/hydra-review` skill (`docs/operator-playbooks/hydra-review.md`) reads today's queue issue FIRST when it exists. It walks the rows one at a time, presents the operator with the recommendation, applies the chosen action via `gh`, and either closes the issue (every row actioned) or rewrites it with the remaining rows.
+
+This closes the loop: overnight decisions queue up; the morning review drains them; the operator never gets paged at 03:00.
+
 ## Operator interface
 
 ### Manual invocation (development / debugging)
@@ -421,6 +460,7 @@ When invoking `/hydra-autopilot` from inside a Claude session, the same knobs ar
 | `--idle-turns=<N>` | — | `HYDRA_AUTOPILOT_IDLE_TURNS` |
 | `--subagent-soft=<N>` | — | `HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS` |
 | `--subagent-hard=<N>` | — | `HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS` |
+| `--unattended=<true\|false>` | — | `HYDRA_AUTOPILOT_UNATTENDED` |
 
 Examples:
 ```text

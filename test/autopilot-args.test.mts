@@ -67,7 +67,10 @@ describe("scripts/autopilot/args-parse.sh — slash-arg parsing", () => {
   test("no args, no env: bootstrap emits documented defaults", () => {
     const tmp = makeTempState();
     try {
-      const r = runBootstrap({}, [], tmp);
+      // Pin unattended explicitly so this test's expectation is stable
+      // regardless of whether the test harness stdin is a TTY (it isn't,
+      // in node:test, but we don't want to depend on that).
+      const r = runBootstrap({ HYDRA_AUTOPILOT_UNATTENDED: "true" }, [], tmp);
       assert.equal(r.status, 0, `bootstrap failed: ${r.stderr}`);
       assert.deepEqual(r.limits, {
         token_budget: 2000000,
@@ -76,6 +79,7 @@ describe("scripts/autopilot/args-parse.sh — slash-arg parsing", () => {
         scope: "all",
         subagent_max_tokens: 400000,
         subagent_hard_max_tokens: 800000,
+        unattended: true,
       });
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
