@@ -176,7 +176,17 @@ export async function runPostMerge(
   // Issue #272: optional gate observability — surfaces "why didn't the gate
   // run?" (mutationDecision) and "what was looked at?" (filesInspected) in
   // cycle metrics. Defaulted so callers from before #272 stay compatible.
-  qualityGateMeta: { mutationDecision?: string; mutationFilesInspected?: string[] } = {},
+  //
+  // Issue #362: also surfaces incremental verification metadata so the
+  // parallel-comparison study can bucket cycles by mode at
+  // /api/metrics/grounding-duration.
+  qualityGateMeta: {
+    mutationDecision?: string;
+    mutationFilesInspected?: string[];
+    groundingMode?: "incremental" | "full" | "";
+    incrementalTestsSelected?: number;
+    incrementalReason?: string;
+  } = {},
 ): Promise<PostMergeResult> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor, anchorConfidence } = ctx;
   const tracker = getTracker();
@@ -519,6 +529,12 @@ export async function runPostMerge(
     fixerResolved: fixerResolved ? 1 : 0,
     scopeFilterCleaned,
     reconciliationStatus,
+    // Issue #362: incremental verification — surfaces the per-cycle decision
+    // ("incremental" / "full" / "") + selection size so the parallel-comparison
+    // study can bucket cycles at /api/metrics/grounding-duration.
+    groundingMode: qualityGateMeta.groundingMode ?? "",
+    incrementalTestsSelected: qualityGateMeta.incrementalTestsSelected ?? 0,
+    incrementalReason: qualityGateMeta.incrementalReason ?? "",
   });
 
   // Step 8.0.5: Calibration

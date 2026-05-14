@@ -41,6 +41,12 @@ import {
   JIT_SKIP_QUICK_FIX, JIT_SKIP_NO_DIFF, JIT_SKIP_NO_FILES_CHANGED,
 } from "./jit.ts";
 import { runScopeEnforcement } from "./scope-enforcement.ts";
+import {
+  computeSelection as computeIncrementalSelection,
+  buildIncrementalTestStep,
+  injectIncrementalTestStep,
+  type IncrementalDecision,
+} from "./incremental-verification.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -75,6 +81,24 @@ export interface VerificationResult {
   mutationDecision: string;
   /** Files inspected by the mutation gate (issue #272 — observability for "no-mutants" case). */
   mutationFilesInspected: string[];
+  /**
+   * Incremental verification mode (issue #362, follow-up to #341).
+   *   - "incremental" — only a subset of tests was run (selection-driven)
+   *   - "full"        — full suite ran (default, or safety-net override)
+   *   - ""            — incremental disabled (HYDRA_INCREMENTAL_GROUNDING unset)
+   *
+   * Surfaced into cycle metrics so the parallel-comparison study (acceptance
+   * criterion 3 of issue #362) can bucket cycles by mode at
+   * /api/metrics/grounding-duration without scraping logs.
+   */
+  groundingMode: "incremental" | "full" | "";
+  /**
+   * Count of tests the incremental selector picked. 0 when mode != "incremental".
+   * Surfaced into metrics for the study.
+   */
+  incrementalTestsSelected: number;
+  /** Human-readable rationale for the mode decision (logs + dashboard). */
+  incrementalReason: string;
   /** If failed, the early return value for the caller */
   earlyReturn?: any;
 }
@@ -130,6 +154,69 @@ export async function verify(
   // actual diff against main, even if the workspace checkout silently failed
   // and PROJECT_WORKSPACE is still on main.
   const featureBranch = execResult?.branch || undefined;
+
+  // =========================================================================
+  // Issue #362: incremental verification — env-gated (HYDRA_INCREMENTAL_GROUNDING=true)
+  //
+  // The decision is computed BEFORE running the plan so the test step can be
+  // swapped in-place. When the decision is "full" or "" (disabled), the plan
+  // is untouched and the default `npm test` runs the whole suite — preserving
+  // pre-#362 behaviour bit-for-bit.
+  //
+  // SAFETY: every uncertainty path (env off, every-Nth cycle, no diff,
+  // graph-build failure, saturation, empty selection) falls back to full.
+  // Never throws — incremental is a soft optimisation.
+  // =========================================================================
+  let incrementalDecision: IncrementalDecision;
+  try {
+    incrementalDecision = await computeIncrementalSelection({
+      projectDir: PROJECT_WORKSPACE,
+      featureBranch,
+    });
+  } catch (err: any) {
+    // Defence-in-depth: computeSelection already swallows its own errors, but
+    // an unexpected throw here must not block verification.
+    console.error(
+      `[ControlLoop] Incremental selection threw (treating as full): ${err.message}`,
+    );
+    incrementalDecision = {
+      mode: "full",
+      testsSelected: 0,
+      totalTests: 0,
+      reason: `degraded: selection threw (${err.message}) — running full suite`,
+      selectedTests: [],
+      cycleCounter: 0,
+    };
+  }
+
+  if (incrementalDecision.mode === "incremental") {
+    const step = buildIncrementalTestStep(incrementalDecision.selectedTests);
+    const result = injectIncrementalTestStep(verificationPlan as any, step);
+    if (result.replaced) {
+      verificationPlan = result.plan as any;
+      console.log(
+        `[ControlLoop] Incremental verification: ${incrementalDecision.reason} (${incrementalDecision.testsSelected}/${incrementalDecision.totalTests} tests)`,
+      );
+    } else {
+      // No "tests" step to replace — log and fall back to full suite. This
+      // happens when the planner emits a custom verificationPlan without a
+      // tests step (rare, but observed).
+      console.warn(
+        `[ControlLoop] Incremental selection chose ${incrementalDecision.testsSelected} tests but no "tests" step found in plan — falling back to full suite`,
+      );
+      incrementalDecision = {
+        ...incrementalDecision,
+        mode: "full",
+        reason: `degraded: no "tests" step in verificationPlan — running full suite`,
+      };
+    }
+  } else if (incrementalDecision.mode === "full") {
+    console.log(
+      `[ControlLoop] Verification mode: full suite — ${incrementalDecision.reason}`,
+    );
+  }
+  // mode === "" — flag disabled; legacy path, no log to keep output quiet.
+
   let verification = await runVerification(PROJECT_WORKSPACE, verificationPlan, { featureBranch });
   await ovSession.logVerification(verification, verification.allPassed);
 
@@ -154,8 +241,8 @@ export async function verify(
   }
 
   if (!verification.allPassed) {
-    const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, fixerSkipped, fixerCategory);
-    return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], earlyReturn };
+    const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, fixerSkipped, fixerCategory, incrementalDecision);
+    return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], groundingMode: incrementalDecision.mode, incrementalTestsSelected: incrementalDecision.testsSelected, incrementalReason: incrementalDecision.reason, earlyReturn };
   }
 
   // =========================================================================
@@ -182,8 +269,8 @@ export async function verify(
           actual: `${discoveredTests} tests discovered`,
         };
         verification.steps.push(syntheticStep);
-        const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
-        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], earlyReturn };
+        const earlyReturn = await handleVerificationFailure(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId, false, "none", incrementalDecision);
+        return { passed: false, verification, reconciliation: null, mutationReport: null, jitReport: null, fixerUsed, fixerResolved, mutationDecision: "skipped: verification failed", mutationFilesInspected: [], groundingMode: incrementalDecision.mode, incrementalTestsSelected: incrementalDecision.testsSelected, incrementalReason: incrementalDecision.reason, earlyReturn };
       }
     }
   }
@@ -224,7 +311,7 @@ export async function verify(
   if (verification.filesChanged?.length > 0) {
     const mutResult = await runMutationGate(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId);
     if (mutResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport: mutResult.report, jitReport: null, fixerUsed, fixerResolved, mutationDecision: mutResult.decision, mutationFilesInspected: mutResult.filesInspected, earlyReturn: mutResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport: mutResult.report, jitReport: null, fixerUsed, fixerResolved, mutationDecision: mutResult.decision, mutationFilesInspected: mutResult.filesInspected, groundingMode: incrementalDecision.mode, incrementalTestsSelected: incrementalDecision.testsSelected, incrementalReason: incrementalDecision.reason, earlyReturn: mutResult.earlyReturn };
     }
     mutationReport = mutResult.report;
     mutationDecision = mutResult.decision;
@@ -249,7 +336,7 @@ export async function verify(
   if (complexity !== "quick-fix" && diff && verification.filesChanged?.length > 0) {
     const jitResult = await runDiffAwareJitTests(ctx, task, verification, verificationPlan, diff, execResult, complexity, filesInScope, criteriaCount, taskId, runVerification, mutationReport);
     if (jitResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, earlyReturn: jitResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport, jitReport: jitResult.report, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, groundingMode: incrementalDecision.mode, incrementalTestsSelected: incrementalDecision.testsSelected, incrementalReason: incrementalDecision.reason, earlyReturn: jitResult.earlyReturn };
     }
     jitReport = jitResult.report;
     if (jitResult.updatedVerification) {
@@ -272,11 +359,11 @@ export async function verify(
   if (task.scopeBoundary?.in?.length > 0 && verification.filesChanged?.length > 0) {
     const scopeResult = await runScopeEnforcement(ctx, task, verification, taskId);
     if (scopeResult.earlyReturn) {
-      return { passed: false, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, earlyReturn: scopeResult.earlyReturn };
+      return { passed: false, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, groundingMode: incrementalDecision.mode, incrementalTestsSelected: incrementalDecision.testsSelected, incrementalReason: incrementalDecision.reason, earlyReturn: scopeResult.earlyReturn };
     }
   }
 
-  return { passed: true, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected };
+  return { passed: true, verification, reconciliation, mutationReport, jitReport, fixerUsed, fixerResolved, mutationDecision, mutationFilesInspected, groundingMode: incrementalDecision.mode, incrementalTestsSelected: incrementalDecision.testsSelected, incrementalReason: incrementalDecision.reason };
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +374,7 @@ async function handleVerificationFailure(
   ctx: CycleContext, task: any, verification: any, execResult: any,
   complexity: string, filesInScope: number, criteriaCount: number, taskId: string,
   fixerSkipped = false, fixerCategory = "none",
+  incrementalDecision?: IncrementalDecision,
 ): Promise<any> {
   const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
   const tracker = getTracker();
@@ -352,6 +440,10 @@ async function handleVerificationFailure(
     reflectionSources: Array.isArray(task.__reflectionSources)
       ? task.__reflectionSources.join(",")
       : "",
+    // Issue #362: incremental verification observability — surface mode even
+    // on failure paths so the parallel-comparison study covers all cycles.
+    groundingMode: incrementalDecision?.mode ?? "",
+    incrementalTestsSelected: incrementalDecision?.testsSelected ?? 0,
   });
 
   // Route to Blocked or Backlog

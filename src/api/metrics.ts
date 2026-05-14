@@ -210,9 +210,13 @@ export function createMetricsRouter() {
   // so the rollout's effect can be measured per-cycle without scraping the
   // raw metrics index.
   //
-  // Until selectAffectedTests is wired into the verification path (env-gated:
-  // HYDRA_INCREMENTAL_GROUNDING=true), all cycles will report mode="full" or
-  // an empty mode field — bucket distribution makes that visible.
+  // Issue #362 (PR follow-up): the verifier now wires in the selector when
+  // HYDRA_INCREMENTAL_GROUNDING=true. With the flag off, cycles report
+  // mode="" (legacy "default full"). With the flag on, cycles report
+  // mode="incremental" or mode="full" (the latter when the safety-net every-Nth
+  // cadence fires, the import-graph degrades, the selection saturates >=90%,
+  // or the selection is empty). Bucket distribution surfaces the 100-cycle
+  // parallel-comparison study (#362 acceptance criterion 3).
   router.get("/metrics/grounding-duration", async (req, res) => {
     try {
       // @ts-expect-error — req.query.count is a string at runtime

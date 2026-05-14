@@ -184,6 +184,8 @@ export async function getMetricsTrend(count = 20) {
       "mutationsTested", "gateBlocked",
       "fixerUsed", "fixerResolved", "scopeFilterCleaned",
       "reflectionCount",
+      // Issue #362: incremental verification count (0 when full/disabled).
+      "incrementalTestsSelected",
     ]) {
       if (parsed[key] !== undefined) parsed[key] = parseInt(parsed[key]) || 0;
     }
