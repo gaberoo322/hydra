@@ -1,0 +1,81 @@
+name: issue-label-validation
+
+# Issue #396: when an operator or triage skill labels an issue as
+# `ready-for-agent`, the issue body MUST contain a "## Files in scope"
+# section. The hydra-dev / hydra-target-build subagents rely on that
+# section to know what they're allowed to touch; the CI scope-check gate
+# uses it to block merges that drift out of scope. Without enforcement
+# at the label-transition point, subagents inherit ambiguous scope and
+# the scope-creep failure mode (231 hits in the auto-promoted planner
+# rules) sneaks back in via the new dispatch path.
+#
+# This workflow runs on every issue label event. When the trigger label
+# is added, it inspects the issue body and:
+#   - removes `ready-for-agent` if "Files in scope" is missing
+#   - applies `needs-info` and posts a comment explaining the fix
+#
+# It is a soft enforcer — operators can override by reapplying the
+# label after editing the issue. There is no branch-protection style
+# block; the goal is to surface the gap, not to fight the operator.
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  validate-ready-for-agent:
+    if: github.event.label.name == 'ready-for-agent'
+    runs-on: self-hosted
+    steps:
+      - name: Check for Files in scope section
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          set -euo pipefail
+          # Permissive regex — accept "## Files in scope", "Files in scope:",
+          # bold variants, case-insensitive. Matches the scope-check.ts parser.
+          if printf '%s' "$ISSUE_BODY" | grep -qiE '(^|\n)\s*(##+\s*|\*\*)?Files in scope'; then
+            echo "Issue #$ISSUE_NUM has a Files in scope section — OK."
+            exit 0
+          fi
+
+          echo "::warning::Issue #$ISSUE_NUM is missing a 'Files in scope' section."
+          gh issue edit "$ISSUE_NUM" \
+            --repo "${{ github.repository }}" \
+            --remove-label "ready-for-agent" \
+            --add-label "needs-info"
+
+          gh issue comment "$ISSUE_NUM" \
+            --repo "${{ github.repository }}" \
+            --body "> *Automated label-validation comment (issue #396)*
+
+The \`ready-for-agent\` label was just applied, but this issue is missing a \`## Files in scope\` section.
+
+Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. Without it, the subagent has no contract to honour and the gate has nothing to check against.
+
+The label has been moved to \`needs-info\`. To re-arm:
+
+1. Add a \`## Files in scope\` section to the issue body listing the paths the agent is allowed to touch (backticked code spans or bullet items work). Optionally add a \`## Files out of scope\` block — anything matching it becomes a hard merge blocker.
+2. Re-apply the \`ready-for-agent\` label.
+
+Example:
+
+\`\`\`markdown
+## Files in scope
+
+- \`src/foo.ts\`
+- \`src/foo/\`
+- \`docs/quality-gates.md\`
+
+## Files out of scope
+
+- \`src/control-loop.ts\`
+\`\`\`
+
+See \`docs/agents/issue-tracker.md\` for the full convention."
