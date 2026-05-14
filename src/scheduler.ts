@@ -89,6 +89,31 @@ const NO_OP_MERGE_HALT_THRESHOLD = parseInt(process.env.HYDRA_NO_OP_MERGE_HALT_T
 const ROLLING_MERGE_RATE_WINDOW = parseInt(process.env.HYDRA_ROLLING_MERGE_RATE_WINDOW) || 50;
 
 /**
+ * Issue #381 (codex cut-over PR-1): one-flag kill-switch that prevents
+ * `runScheduledCycle()` from invoking the in-process control loop (and thus
+ * the codex CLI agents). Defaults to disabled — codex spend is dead weight
+ * now that autopilot is the only execution path. The flag can be flipped
+ * back to `true` via the systemd unit env file to verify a clean kill or
+ * to temporarily re-enable codex.
+ *
+ * When disabled, the scheduler still runs every tick — stale-claim reaper,
+ * blocked-escalation check, weekly digest, memory consolidation, research,
+ * etc. — so housekeeping that depends on the heartbeat continues to work.
+ * Only the `startCycle()` -> `runControlLoop()` call is suppressed.
+ *
+ * Accepts "1" / "true" / "yes" (case-insensitive) as truthy; everything
+ * else (including unset) is falsy.
+ */
+function readCodexCycleEnabled(): boolean {
+  const raw = (process.env.HYDRA_CODEX_CYCLE_ENABLED ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+const CODEX_CYCLE_ENABLED = readCodexCycleEnabled();
+// Exported for tests (re-read on demand so env changes apply without a full
+// module reload). Production code reads CODEX_CYCLE_ENABLED at import time.
+export { readCodexCycleEnabled };
+
+/**
  * Compute the rolling merge rate from cycle metrics history.
  *
  * Counts a cycle as "merged" when its persisted `tasksMerged` field is > 0,
@@ -753,6 +778,25 @@ async function runScheduledCycle(eventBus) {
     Sentry.addBreadcrumb({ category: "scheduler", message: `maybeRunResearch failed: ${err.message}`, level: "error" });
   }
 
+  // Issue #381 (codex cut-over PR-1): when the codex cycle is disabled, the
+  // scheduler still runs the housekeeping above (stale-claim reaper, weekly
+  // digest, memory consolidation, maybeRunResearch) but skips the in-process
+  // control loop. Update `lastCycleAt` so the watchdog's >15min stale-cycle
+  // alert doesn't false-fire, then schedule the next tick.
+  if (!CODEX_CYCLE_ENABLED) {
+    state.lastCycleAt = new Date().toISOString();
+    if (state.running) {
+      const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
+      state.timer = setTimeout(
+        () => runScheduledCycle(eventBus).catch((err: any) =>
+          console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`),
+        ),
+        delay,
+      );
+    }
+    return;
+  }
+
   // Anchor selection in the control loop already prioritizes failing tests
   // (priority #4) — no need to pre-check here. Removing the redundant
   // groundProject() call saves ~49s per cycle.
@@ -1062,6 +1106,11 @@ async function getStatus() {
 
   return {
     running: state.running,
+    // Issue #381 (codex cut-over PR-1): expose the codex-cycle kill-switch so
+    // operators / the dashboard can confirm at a glance whether
+    // `runScheduledCycle()` is invoking the control loop. When false, the
+    // scheduler ticks for housekeeping only.
+    codexCycleEnabled: CODEX_CYCLE_ENABLED,
     intervalMs: state.intervalMs,
     intervalHuman: state.intervalMs ? formatDuration(state.intervalMs) : null,
     cyclesRun: state.cyclesRun,
@@ -1190,4 +1239,6 @@ export {
   computeStallBackoffMs, shouldSendStallAlert, classifyStallState, formatDuration,
   // Exported for test coverage (issue #222):
   classifyNoOpMergeState, NO_OP_MERGE_HALT_THRESHOLD,
+  // Exported for test coverage (issue #381):
+  runScheduledCycle, CODEX_CYCLE_ENABLED,
 };
