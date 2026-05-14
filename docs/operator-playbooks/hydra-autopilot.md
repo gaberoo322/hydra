@@ -130,13 +130,17 @@ For each occupied slot whose harness exposed `partial_tokens >= limits.subagent_
 **Step 2 — Completion reap (playbook decision logic).** For each class slot in `state.json` that has an entry, the Claude turn:
 
 1. Checks whether the background Agent dispatch has produced its TaskNotification.
-2. If completed:
-   - Reads the agent's reported `total_tokens` from its result block, adds to `cumulative_tokens`.
-   - **Records per-slot tokens** in the completion log line AND in `slots[class].tokens` immediately before clearing the slot (the turn-report and digest read this; see Phase 6).
-   - **Soft-cap check (issue #395)**: if `slot.tokens >= limits.subagent_max_tokens`, appends `<class>` to `state.burned_classes`. Phase 4 must refuse to dispatch into a class in this list for the rest of the session.
-   - **Post-dispatch sanity check (code-writing classes only)**: verifies `git -C ~/hydra rev-parse --abbrev-ref HEAD == master`. If not, logs `isolation_breach=<branch>` and surfaces it in the turn report. Do NOT auto-`checkout master`.
-   - Appends the dispatch result to `/tmp/hydra-autopilot-nightly.log` (one line: `slot_complete class=<C> skill=<S> tokens=<N> duration=<D>s exit=<state> summary=...`).
-   - Clears the slot (`slots[class] = null`).
+2. If completed, route the result through the **idempotent completion reap** (issue #411). The TaskNotification carries a `task_id`; the same notification can fire multiple times (observed: task `a153eb193e1b05209` fired three completion notifications hours apart for `hydra-qa` on PR #402). Without dedup the tokens would be triple-counted. Invoke:
+
+   ```bash
+   ./scripts/autopilot/reap.py completion <class> <task_id> <total_tokens> <skill>
+   ```
+
+   The script:
+   - Checks `state.reaped_task_ids` for `<task_id>`. If present, emits `dup_skip task_id=<X>` to the run log and exits without any token accounting, slot mutation, or `burned_classes` mutation.
+   - Otherwise: appends `<task_id>` to `reaped_task_ids` (FIFO-bounded to the most-recent 1000 entries), adds `<total_tokens>` to `cumulative_tokens`, records `slots[<class>].tokens = <total_tokens>` (for the turn-report and digest; see Phase 6), runs the **soft-cap check** — if `<total_tokens> >= limits.subagent_max_tokens` it appends `<class>` to `burned_classes` (Phase 4 must refuse to dispatch into a class in this list for the rest of the session) — and clears the slot (`slots[<class>] = null`). One `slot_complete` line is appended to `/tmp/hydra-autopilot-nightly.log`.
+
+   **Post-dispatch sanity check (code-writing classes only):** before invoking the reap subcommand, the Claude turn verifies `git -C ~/hydra rev-parse --abbrev-ref HEAD == master`. If not, log `isolation_breach=<branch>` and surface it in the turn report. Do NOT auto-`checkout master`.
 
 3. Updates `dispatches` counter. Increments `idle_turns` if NO new dispatch this turn AND no class slot still occupied; otherwise resets `idle_turns = 0`.
 
