@@ -17,6 +17,7 @@
 #   --idle-turns=<N>                        → HYDRA_AUTOPILOT_IDLE_TURNS
 #   --subagent-soft=<N>                     → HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS
 #   --subagent-hard=<N>                     → HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS
+#   --unattended=<true|false>               → HYDRA_AUTOPILOT_UNATTENDED  (issue #413)
 #
 # Unknown args (including free-form trailing tokens such as
 # `focus=codex-cli-removal`) produce a `[autopilot] WARN: unknown arg <X>`
@@ -61,6 +62,9 @@ for _ap_arg in "$@"; do
       ;;
     --subagent-hard=*)
       export HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS="${_ap_arg#--subagent-hard=}"
+      ;;
+    --unattended=*)
+      export HYDRA_AUTOPILOT_UNATTENDED="${_ap_arg#--unattended=}"
       ;;
     *)
       # Free-form trailing tokens (e.g. `focus=codex-cli-removal`) are
