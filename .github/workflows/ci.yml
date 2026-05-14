@@ -6,6 +6,21 @@ on:
   push:
     branches: [master]
 
+# Minimum permissions required by the workflow:
+# - `contents: read` for actions/checkout and `gh pr diff` (REST).
+# - `pull-requests: read` for `gh pr view --json body` (GraphQL) used by the
+#   mutation-test and scope-check jobs to read the PR body for the `Files in
+#   scope` section and the `[quick-fix]` bypass tag. Without this, GraphQL
+#   returns "Resource not accessible by integration", PR_BODY arrives empty,
+#   and the scope gate spuriously fires as 100% out-of-scope on every PR
+#   (regression caught on PR #393 — see issue #382).
+# - `issues: read` for `gh issue view --json body` used by scope-check to
+#   resolve linked-issue bodies (closes/fixes/resolves #N).
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
 jobs:
   test:
     runs-on: self-hosted
