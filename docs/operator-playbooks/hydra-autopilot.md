@@ -18,6 +18,8 @@ Designed to be invoked once per overnight window (typically `claude -p "/hydra-a
 
 Whichever fires first triggers Phase 7 (graceful drain + final digest).
 
+The deterministic shell / python plumbing for each phase lives in `scripts/autopilot/`. This playbook owns the decision logic; the scripts own the heredocs. **When you edit a phase, edit the script — not the snippet here.**
+
 ## Class taxonomy
 
 Work is partitioned into 10 classes. At most one subagent per class is in flight at a time; multiple classes run in parallel. Theoretical max concurrency = 10, but cooldowns + priority gates keep typical concurrency at 2–4.
@@ -39,7 +41,7 @@ Work is partitioned into 10 classes. At most one subagent per class is in flight
 
 - `hydra scheduler start` / `hydra scheduler stop` (P0.5 pipeline recovery)
 - `hydra research start` (P3 research-cycle trigger — separate from `research_orch` / `research_target` classes)
-- `hydra raw POST /capacity/orchestrator-merge` (post-merge capacity-ledger writeback)
+- `hydra raw POST /capacity/orchestrator-merge` (post-merge capacity-ledger writeback — see `scripts/autopilot/dispatch.sh capacity-writeback`)
 - Stale-label fixes (Phase 1.5)
 
 The Codex cycle trigger (`hydra cycle start`, previously P5) has been **removed**. The orchestrator's own scheduler continues to tick Codex cycles until Codex is fully retired; the autopilot no longer kicks it.
@@ -49,92 +51,40 @@ The Codex cycle trigger (`hydra cycle start`, previously P5) has been **removed*
 ```
 Single Claude Code session, internal decision loop:
 
-  Phase 0:  bootstrap (heartbeat, run log, read budget)
-  Phase 1:  collect state (parallel, counts only)
-  Phase 1.5: auto-recover stale issues
-  Phase 2:  reap completed subagents, sum token usage
-  Phase 3:  termination check (budget? clock? idle?)
+  Phase 0:  bootstrap (heartbeat, run log, read budget)        scripts/autopilot/bootstrap.sh
+  Phase 1:  collect state (parallel, counts only)              scripts/autopilot/collect-state.sh
+  Phase 1.5: auto-recover stale issues                         scripts/autopilot/recover-stale.sh
+  Phase 2:  reap completed subagents, sum token usage          scripts/autopilot/reap.py (+ playbook prose)
+  Phase 3:  termination check (budget? clock? idle?)           scripts/autopilot/term-check.py
               → if terminating, jump to Phase 7
   Phase 4:  priority waterfall (per class slot, parallel decisions)
-  Phase 5:  dispatch eligible work (Agent run_in_background per class)
+  Phase 5:  dispatch eligible work (Agent run_in_background)   scripts/autopilot/dispatch.sh
   Phase 6:  brief turn report
               → 5s pause, back to Phase 1
 
-  Phase 7:  drain in-flight subagents (graceful), then final hydra-digest dispatch, then exit
+  Phase 7:  drain in-flight subagents (graceful), then         scripts/autopilot/drain.sh
+            final hydra-digest dispatch, then exit
 ```
 
 ## Phase 0: Bootstrap
 
-Run once at session start. **The budget limits resolved here MUST be written into `state.json`'s `"limits"` block** — shell variables don't persist between turns, and the model cannot remember a budget value it only saw printed once. Every subsequent termination check reads from `state.json`, not from env.
+Run once at session start.
 
 ```bash
-# Heartbeat
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=$$ run_id=$(uuidgen)" > /tmp/hydra-autopilot-heartbeat.txt
-
-# Run log (overwrites previous run; previous-run content rotated to .prev)
-[ -f /tmp/hydra-autopilot-nightly.log ] && mv /tmp/hydra-autopilot-nightly.log /tmp/hydra-autopilot-nightly.log.prev
-: > /tmp/hydra-autopilot-nightly.log
-
-# Resolve budget knobs from env (per-run override) with hardcoded defaults
-TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-2000000}"
-WALL_CLOCK_MAX_SEC="${HYDRA_AUTOPILOT_MAX_SEC:-28800}"   # 8h
-IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
-
-# Per-subagent token caps (issue #395). Soft cap = stop re-dispatching that
-# class; hard cap = abandon the in-flight slot and open a runaway issue.
-# Soft must be <= hard. Defaults bound a single misbehaving subagent to
-# ~20% of the 2M total budget at the hard cap; well-behaved subagents
-# (~30-150k tokens for a normal hydra-dev run) are unaffected.
-SUBAGENT_MAX_TOKENS="${HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS:-400000}"
-SUBAGENT_HARD_MAX_TOKENS="${HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS:-800000}"
-if [ "$SUBAGENT_MAX_TOKENS" -gt "$SUBAGENT_HARD_MAX_TOKENS" ]; then
-  echo "[autopilot] FATAL: HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS=$SUBAGENT_MAX_TOKENS exceeds HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS=$SUBAGENT_HARD_MAX_TOKENS"
-  exit 1
-fi
-
-# Resolve scope from env. Allowed: all | orch-only | target-only. Default: all.
-SCOPE="${HYDRA_AUTOPILOT_SCOPE:-all}"
-case "$SCOPE" in
-  all|orch-only|target-only) ;;
-  *) echo "[autopilot] FATAL: HYDRA_AUTOPILOT_SCOPE=$SCOPE invalid (expected all|orch-only|target-only)"; exit 1 ;;
-esac
-
-STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-STARTED_EPOCH="$(date -u +%s)"
-
-# Initialize state file — limits are now first-class members
-cat > /tmp/hydra-autopilot-state.json <<EOF
-{
-  "started": "${STARTED_AT}",
-  "started_epoch": ${STARTED_EPOCH},
-  "limits": {
-    "token_budget": ${TOKEN_BUDGET},
-    "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
-    "idle_drain_turns": ${IDLE_DRAIN_TURNS},
-    "scope": "${SCOPE}",
-    "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
-    "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS}
-  },
-  "cumulative_tokens": 0,
-  "dispatches": 0,
-  "idle_turns": 0,
-  "turn": 0,
-  "burned_classes": [],
-  "slots": {
-    "health": null, "qa": null,
-    "dev_orch": null, "dev_target": null,
-    "research_orch": null, "research_target": null,
-    "sweep_orch": null, "sweep_target": null,
-    "discover_orch": null, "discover_target": null
-  }
-}
-EOF
-
-# Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS}"
+./scripts/autopilot/bootstrap.sh
 ```
 
-After Phase 0, the model MUST treat `/tmp/hydra-autopilot-state.json` as the authoritative budget source. Do not invent or rely on remembered defaults.
+The script:
+1. Initializes `/tmp/hydra-autopilot-heartbeat.txt`.
+2. Rotates the run log: `/tmp/hydra-autopilot-nightly.log` → `.prev`, truncates the live file.
+3. Resolves budget knobs from env vars (`HYDRA_AUTOPILOT_TOKEN_BUDGET`, `_MAX_SEC`, `_IDLE_TURNS`, `_SUBAGENT_MAX_TOKENS`, `_SUBAGENT_HARD_MAX_TOKENS`, `_SCOPE`) with hardcoded defaults.
+4. Validates soft cap ≤ hard cap (FATAL exit on violation, issue #395).
+5. Validates `_SCOPE` is one of `all | orch-only | target-only` (FATAL exit otherwise).
+6. Writes the authoritative `/tmp/hydra-autopilot-state.json` with `limits` as a first-class block, all 10 class slots set to `null`, and counters at zero.
+
+**The budget limits in `state.json`'s `"limits"` block are authoritative** — shell variables don't persist between turns, and the model cannot remember a budget value it only saw printed once. Every subsequent termination check (`term-check.py`) reads from `state.json`, not from env.
+
+After Phase 0, treat `/tmp/hydra-autopilot-state.json` as the only source of truth for budget / scope. Do not invent or rely on remembered defaults.
 
 **Required preflight** before entering the decision loop:
 
@@ -144,175 +94,68 @@ After Phase 0, the model MUST treat `/tmp/hydra-autopilot-state.json` as the aut
 
 ## Phase 1: Collect state (parallel, counts only — never dump raw responses)
 
-Same collectors as the previous iteration-loop version. Run on every decision turn (cheap: ~100ms total).
-
 ```bash
-# health
-hydra health 2>/dev/null | python3 -c "
-import json,sys
-try: d=json.load(sys.stdin); print(f'health={d[\"status\"]} redis={d[\"redis\"]}')
-except: print('health=FAIL')"
-
-# failed services
-echo -n "failed_services="; systemctl --user list-units --type=service --state=failed --no-legend 2>/dev/null | grep -c hydra || echo 0
-
-# orchestrator-side issue board (counts + stale lists)
-gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
-  needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
-  ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
-  needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
-  needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length,
-  in_progress: [.[] | select(.labels | map(.name) | index("in-progress"))] | length,
-  blocked: [.[] | select(.labels | map(.name) | index("blocked"))] | length,
-  stale_in_progress: [.[] | select((.labels | map(.name) | index("in-progress")) and ((now - (.updatedAt | fromdateiso8601)) > 5400))] | map(.number),
-  stale_blocked: [.[] | select((.labels | map(.name) | index("blocked")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)
-}'
-
-# backlog + queues
-hydra raw GET /backlog/counts 2>/dev/null || hydra backlog ls | python3 -c "
-import json,sys; d=json.load(sys.stdin)
-print(json.dumps({l: len(d.get(l,[])) for l in ['queued','inProgress','blocked','triage']}))"
-echo -n "work_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0
-echo -n "reframe_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:reframe-queue 2>/dev/null || echo 0
-echo -n "prior_failures="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures 2>/dev/null || echo 0
-
-# capacity-floor (orchestrator self-improvement share)
-hydra raw GET /capacity 2>/dev/null | python3 -c "
-import json,sys
-try:
-  d=json.load(sys.stdin); o=d['orchestrator']
-  print(f'capacity_orch_share={o[\"share\"]:.2f} capacity_floor_met={d[\"floorMet\"]} capacity_window={o[\"window\"]}')
-except: print('capacity_floor_met=true capacity_window=0')"
-
-# scheduler / cycle
-hydra cycle status 2>/dev/null | python3 -c "
-import json,sys
-try: d=json.load(sys.stdin); print('CODEX_ACTIVE' if d.get('running') else 'CODEX_IDLE')
-except: print('CODEX_IDLE')"
-hydra scheduler status 2>/dev/null | python3 -c "
-import json,sys
-try:
-  d=json.load(sys.stdin)
-  s=d.get('state','?'); nm=d.get('consecutiveNonMerges',0)
-  stall='ok' if nm<5 else ('hard-stop' if nm>=8 else 'alert')
-  print(f'scheduler={s} nonmerges={nm} stall={stall}')
-except: print('scheduler=unknown stall=unknown')"
-
-# recommendations
-hydra recommendations 2>/dev/null | python3 -c "
-import json,sys
-try:
-  items=json.load(sys.stdin)
-  if items: print(f'recommendations={len(items)}: {items[0].get(\"action\",\"?\")[:60]}')
-  else: print('recommendations=0')
-except: print('recommendations=unavailable')"
+./scripts/autopilot/collect-state.sh
 ```
+
+Emits one line per signal: `health`, `failed_services`, board counts (`needs_qa`, `ready_for_agent`, `needs_triage`, `needs_research`, `in_progress`, `blocked`, `stale_in_progress`, `stale_blocked`), `work_queue`, `reframe_queue`, `prior_failures`, capacity-floor state, scheduler / cycle state, and recommendation count.
+
+Run every decision turn (cheap: ~100ms total).
 
 ## Phase 1.5: Auto-recover stale issues
 
-**Stale in-progress (>90 min, orchestrator board):**
 ```bash
-for ISSUE in <stale_in_progress>; do
-  gh issue edit $ISSUE --repo gaberoo322/hydra --remove-label in-progress --add-label ready-for-agent
-  gh issue comment $ISSUE --repo gaberoo322/hydra --body "> *Autopilot:* Re-queued. >90 min idle in in-progress."
-done
+./scripts/autopilot/recover-stale.sh stale_in_progress <N1> <N2> ... stale_blocked <M1> <M2> ...
 ```
 
-**Stale blocked (>12h, blockers closed):**
-```bash
-for ISSUE in <stale_blocked>; do
-  BLOCKERS=$(gh issue view $ISSUE --repo gaberoo322/hydra --json body --jq '.body' | grep -oP '(?<=#)\d+' | head -20)
-  ALL_CLOSED=true
-  for b in $BLOCKERS; do
-    STATE=$(gh issue view $b --repo gaberoo322/hydra --json state --jq '.state' 2>/dev/null)
-    [ "$STATE" != "CLOSED" ] && ALL_CLOSED=false && break
-  done
-  [ "$ALL_CLOSED" = true ] && gh issue edit $ISSUE --repo gaberoo322/hydra --remove-label blocked --add-label ready-for-agent
-done
-```
+Pass the lists Phase 1 emitted. Either list may be empty. The script:
 
-If labels changed, re-read board on the next turn.
+- For each stale in-progress (>90 min): removes `in-progress`, adds `ready-for-agent`, posts a comment.
+- For each stale blocked (>12h): re-checks that ALL blockers referenced in the body are closed; if so, removes `blocked` and adds `ready-for-agent`.
+
+Single-issue failures are logged and skipped — one bad issue doesn't strand the whole turn. If labels changed, re-read the board on the next turn.
 
 ## Phase 2: Reap completed subagents + accounting
 
-For each class slot in `/tmp/hydra-autopilot-state.json` that has an entry:
+Phase 2 has **two distinct concerns** — completion reaps (which require the Claude harness to read TaskNotifications) and in-flight hard-cap enforcement (pure state-file math). The latter is extracted into `scripts/autopilot/reap.py`; the former stays in playbook prose.
 
-1. Check whether the background Agent dispatch has produced its task notification (TaskNotification fires on completion; the dispatching session sees it as a completed agent result).
+**Step 1 — In-flight hard-cap enforcement (issue #395)** — run first, every turn, before the completion-reap loop:
+
+```bash
+./scripts/autopilot/reap.py
+```
+
+For each occupied slot whose harness exposed `partial_tokens >= limits.subagent_hard_max_tokens`: clear the slot, append the class to `burned_classes` (suppresses re-dispatch this session), and file a `needs-triage` issue documenting the runaway. The script is idempotent. If the harness has no partial-token signal for a class, the hard cap only catches the slot at completion (still bounded by `wall_clock_max_sec`).
+
+**Step 2 — Completion reap (playbook decision logic).** For each class slot in `state.json` that has an entry, the Claude turn:
+
+1. Checks whether the background Agent dispatch has produced its TaskNotification.
 2. If completed:
-   - Read the agent's reported `total_tokens` from its result block, add to `cumulative_tokens`
-   - **Record per-slot tokens** in the completion log line AND in `slots[class].tokens` immediately before clearing the slot (the turn-report and digest read this; see Phase 6).
-   - **Soft-cap check (issue #395)**: if `slot.tokens >= limits.subagent_max_tokens`, append `<class>` to `state.burned_classes`. Phase 4 must refuse to dispatch into a class in this list for the rest of the session.
-   - **Post-dispatch sanity check (code-writing classes only)**: verify `git -C ~/hydra rev-parse --abbrev-ref HEAD == master`. If not, log `isolation_breach=<branch>` and surface in turn report. Do NOT auto-`checkout master`.
-   - Append the dispatch result to `/tmp/hydra-autopilot-nightly.log` (one line: `slot_complete class=<C> skill=<S> tokens=<N> duration=<D>s exit=<state> summary=...`).
-   - Clear the slot (`slots[class] = null`).
+   - Reads the agent's reported `total_tokens` from its result block, adds to `cumulative_tokens`.
+   - **Records per-slot tokens** in the completion log line AND in `slots[class].tokens` immediately before clearing the slot (the turn-report and digest read this; see Phase 6).
+   - **Soft-cap check (issue #395)**: if `slot.tokens >= limits.subagent_max_tokens`, appends `<class>` to `state.burned_classes`. Phase 4 must refuse to dispatch into a class in this list for the rest of the session.
+   - **Post-dispatch sanity check (code-writing classes only)**: verifies `git -C ~/hydra rev-parse --abbrev-ref HEAD == master`. If not, logs `isolation_breach=<branch>` and surfaces it in the turn report. Do NOT auto-`checkout master`.
+   - Appends the dispatch result to `/tmp/hydra-autopilot-nightly.log` (one line: `slot_complete class=<C> skill=<S> tokens=<N> duration=<D>s exit=<state> summary=...`).
+   - Clears the slot (`slots[class] = null`).
 
-3. **In-flight poll (issue #395, hard-cap enforcement).** For each class slot still occupied AND whose dispatch exposes a partial token count via the Agent harness (`partial_tokens` / `progress.tokens` in the harness result envelope), compare against `limits.subagent_hard_max_tokens`:
-
-   ```python
-   # Run at the top of Phase 2 each turn, before the completion-reap loop.
-   # Reads /tmp/hydra-autopilot-state.json; writes burned_classes + clears
-   # slots that crossed the hard cap.
-   import json, time, subprocess
-   s = json.load(open('/tmp/hydra-autopilot-state.json'))
-   hard = s['limits']['subagent_hard_max_tokens']
-   soft = s['limits']['subagent_max_tokens']
-   runaways = []
-   for cls, slot in list(s['slots'].items()):
-       if slot is None:
-           continue
-       partial = slot.get('partial_tokens') or 0
-       if partial >= hard:
-           # Hard-cap trip: abandon slot, file diagnostic issue, mark class burned.
-           runaways.append((cls, slot.get('skill', '?'), partial))
-           s['slots'][cls] = None
-           if cls not in s.get('burned_classes', []):
-               s.setdefault('burned_classes', []).append(cls)
-   json.dump(s, open('/tmp/hydra-autopilot-state.json', 'w'))
-   for cls, skill, tokens in runaways:
-       title = f"Subagent token-runaway: {skill} burned {tokens} tokens"
-       body = (
-           f"Autopilot abandoned a `{cls}` slot running `{skill}` at "
-           f"`{tokens}` tokens (hard cap: `{hard}`, soft cap: `{soft}`).\n\n"
-           f"Class `{cls}` is suppressed for the rest of this autopilot session.\n\n"
-           f"Run log: `/tmp/hydra-autopilot-nightly.log`\n\n"
-           f"---\nSource: hydra-autopilot Phase 2 hard-cap enforcement (issue #395)"
-       )
-       subprocess.run([
-           'gh', 'issue', 'create', '--repo', 'gaberoo322/hydra',
-           '--title', title, '--body', body, '--label', 'needs-triage',
-       ], check=False)
-       print(f"[autopilot] HARD-CAP TRIP class={cls} skill={skill} tokens={tokens} -> issue filed, slot cleared")
-   ```
-
-   The harness's partial-token field name may vary; if no partial signal is available for a class, the hard cap only catches the slot at completion (still bounded by `wall_clock_max_sec`). Soft cap still fires on completion via step 2 above.
-
-4. Update `dispatches` counter. Increment `idle_turns` if NO new dispatch this turn AND no class slot still occupied; otherwise reset `idle_turns = 0`.
+3. Updates `dispatches` counter. Increments `idle_turns` if NO new dispatch this turn AND no class slot still occupied; otherwise resets `idle_turns = 0`.
 
 ## Phase 3: Termination check
 
-**Run this Bash snippet at the top of every decision turn.** Do not rely on remembering limit values across turns — read them from `state.json`.
+Run this script at the top of every decision turn:
 
 ```bash
-python3 - <<'PY'
-import json, time, os, sys
-s = json.load(open('/tmp/hydra-autopilot-state.json'))
-limits = s['limits']
-elapsed = int(time.time()) - s['started_epoch']
-tokens = s['cumulative_tokens']
-slots_occupied = sum(1 for v in s['slots'].values() if v is not None)
-
-if tokens >= limits['token_budget']:
-    print(f"TERM:budget tokens={tokens}/{limits['token_budget']} elapsed={elapsed}s")
-elif elapsed >= limits['wall_clock_max_sec']:
-    print(f"TERM:wall_clock elapsed={elapsed}s/{limits['wall_clock_max_sec']}s tokens={tokens}")
-elif s['idle_turns'] >= limits['idle_drain_turns'] and slots_occupied == 0:
-    print(f"TERM:idle idle_turns={s['idle_turns']} slots=0")
-else:
-    print(f"OK elapsed={elapsed}s tokens={tokens}/{limits['token_budget']} idle={s['idle_turns']}/{limits['idle_drain_turns']} slots={slots_occupied}")
-PY
+./scripts/autopilot/term-check.py
 ```
 
-If the output starts with `TERM:`, jump immediately to **Phase 7** (terminal drain + digest). Do not enter Phase 4. If it starts with `OK`, proceed to Phase 4.
+Reads `state.json` and prints one of:
+
+- `OK ...` → proceed to Phase 4
+- `TERM:budget ...` → token budget exhausted; jump to Phase 7
+- `TERM:wall_clock ...` → wall-clock cap exceeded; jump to Phase 7
+- `TERM:idle ...` → idle-drain reached with all slots empty; jump to Phase 7
+
+Do not read limit values from memory — always invoke the script.
 
 ## Phase 4: Priority waterfall (per class slot, parallel decisions)
 
@@ -408,7 +251,12 @@ Per class: if the same skill was dispatched 3+ times in the last 5 dispatches fo
 For each class that selected a skill in Phase 4:
 
 1. Mark slot: `slots[<class>] = {"skill":"<S>","started":"<ts>","prompt_summary":"...","partial_tokens":0}`. The `partial_tokens` field is updated by the Phase 2 in-flight poll (issue #395) whenever the harness exposes a progress signal for the dispatched Agent; it defaults to 0 until the first poll observation lands.
-2. Log: `dispatch <class> <skill> <ts>` appended to `/tmp/hydra-autopilot-nightly.log`
+2. Log the dispatch:
+
+   ```bash
+   ./scripts/autopilot/dispatch.sh log <class> <skill>
+   ```
+
 3. **Worktree-guard preamble (REQUIRED for `dev_orch` and `dev_target`):**
 
    ```
@@ -444,16 +292,11 @@ For each class that selected a skill in Phase 4:
 
    The autopilot session itself MUST be launched with `claude --dangerously-skip-permissions` (the systemd unit does this). Without that flag, headless `claude -p` denies tool calls that require confirmation, including `Skill` and `Bash` invocations the subagents make.
 
-5. **Capacity-ledger writeback (post hydra-dev/hydra-target-build merges):**
+5. **Capacity-ledger writeback (post hydra-dev / hydra-target-build merges):**
    When `dev_orch` or `dev_target` completes AND it reports a merged PR, POST to the capacity ledger so the share is reflected:
 
    ```bash
-   hydra raw POST /capacity/orchestrator-merge --json '{
-     "cycleId": "pr-<PR_NUMBER>",
-     "commitSha": "<sha>",
-     "filesChanged": ["src/foo.ts","..."],
-     "source": "<skill>"
-   }'
+   ./scripts/autopilot/dispatch.sh capacity-writeback <PR_NUMBER> <SHA> <SKILL> '<FILES_JSON>'
    ```
 
    Without this, the share reads as 0% and the capacity-floor preference fires every turn.
@@ -503,10 +346,18 @@ If `Phase 4` produces no new dispatches AND all class slots are non-empty (every
 2. **Drain.** Wait for all in-flight class slots to finish, with a 30-min cap. Beyond that, accept that they continue running headlessly via TaskNotification; the autopilot exits without their token counts (they show up in the next run's accounting if applicable, otherwise lost).
 3. **Final dispatch: `hydra-digest`** with prompt `"Generate an overnight summary for the operator. Cover: number of dispatches per class, token usage, merges shipped, incidents auto-resolved, alerts opened/closed, capacity-floor share movement, isolation breaches if any, and a 'next morning action items' bullet list. Source data: /tmp/hydra-autopilot-nightly.log."`
 4. **Wait** up to 5 min for the digest to complete; capture its output.
-5. **Final summary line printed to stdout** (this is what the operator sees in journalctl):
+5. **Final summary line** — run the drain helper with the merged-PR count tallied during the run:
+
+   ```bash
+   ./scripts/autopilot/drain.sh <MERGED_PR_COUNT>
+   ```
+
+   Emits the final line operators see in `journalctl --user -u hydra-autopilot.service`:
+
    ```
    [autopilot] FINAL | duration=<HH:MM> | dispatches=<N> | tokens=<cum>/<budget> | merged_PRs=<N> | digest=/tmp/hydra-autopilot-nightly.log
    ```
+
 6. Exit cleanly.
 
 ## Safety rules
