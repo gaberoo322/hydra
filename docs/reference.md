@@ -9,7 +9,7 @@ For module roles and file structure, explore `src/` directly — static inventor
 | Pattern | Purpose |
 |---|---|
 | `hydra:cycle:active` | Currently running cycle ID |
-| `hydra:cycle:active:{source}` | Per-source cycle registration (codex, claude). 15-min TTL. |
+| `hydra:cycle:active:{source}` | Per-source cycle registration. Historically multi-source (`codex`, `claude`); post-2026-05-14 codex cut-over, only the `claude` source writes. 15-min TTL. |
 | `hydra:cycle:last` | Last completed cycle ID |
 | `hydra:cycle:{id}` | Cycle hash (status, timestamps, counts) |
 | `hydra:cycle:{id}:agents` | Agent runs for this cycle |
@@ -26,7 +26,7 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:metrics:{id}` | Cycle metrics hash |
 | `hydra:metrics:index` | Sorted set of cycle IDs by timestamp |
 | `hydra:scheduler:state` | Persisted scheduler throttle state |
-| `hydra:scheduler:daily-spend` | Daily codex spend counter |
+| `hydra:scheduler:daily-spend` | Daily token-spend counter. Historically codex; post-cut-over, populated only when the Claude Code harness exposes per-call token usage. |
 | `hydra:backlog:items` | Hash -- backlog item data |
 | `hydra:backlog:lane:{lane}` | Sorted set -- items per Kanban lane |
 | `hydra:backlog:counter` | Monotonic ID counter for backlog items |
@@ -136,7 +136,7 @@ The orchestrator builds one Target Project per instance. The operator switches t
 
 | Var | Default | Effect |
 |---|---|---|
-| `HYDRA_PROJECT_WORKSPACE` | `<homedir>/<HYDRA_TARGET_NAME>` (with one-time warn) | Absolute path to the target workspace. Drives where Codex executes, where context-builder reads, where worktrees are rooted, etc. |
+| `HYDRA_PROJECT_WORKSPACE` | `<homedir>/<HYDRA_TARGET_NAME>` (with one-time warn) | Absolute path to the target workspace. Drives where `hydra-target-build` subagents run, where context-builder reads, where worktrees are rooted, etc. |
 | `HYDRA_TARGET_NAME` | `hydra-betting` (with one-time warn) | Short slug used for the systemd unit name (`${name}-web.service`), the worktree directory prefix (`${name}-worktree`), and operator-instruction strings. |
 | `HYDRA_TARGET_GITHUB_REPO` | `gaberoo322/hydra-betting` (with one-time warn) | GitHub repo identifier in `owner/repo` form. Drives commit-link URLs emitted by `notify.ts` (Telegram cycle-complete messages) and `digest.ts` (periodic digests). Read via `getTargetGithubRepo()` / `getTargetCommitUrl(sha)`. |
 | `HYDRA_WORKSPACE` | — | **Deprecated.** Legacy alias for `HYDRA_PROJECT_WORKSPACE` (`context-builder.ts` historically read this). `getTargetWorkspace()` falls back to it with a one-time deprecation warning. Removed once #259 migrates the last caller. |
@@ -145,11 +145,19 @@ The orchestrator builds one Target Project per instance. The operator switches t
 
 **Migration status:** issue #258 adds the helper module only — no existing callers are rewritten. The mechanical sweep of the ~17 callsites (and removal of the `HYDRA_WORKSPACE` shim) is tracked in issue #259.
 
-## Codex OpenTelemetry (issue #199)
+## Codex OpenTelemetry (issue #199) — historical
 
-The Codex CLI emits OTel traces and logs natively. Hydra correlates those with cycles by injecting per-call resource attributes into the spawned CLI process environment (`src/codex-otel.ts`, wired through `src/codex-runner.ts`).
+> **Historical, kept for trace lookup.** The Codex CLI runtime was removed on
+> 2026-05-14 ([ADR-0006](adr/0006-codex-cli-removed-autopilot-only.md)). No new
+> OTel spans are emitted by Hydra. The `src/codex-otel.ts` helper and its
+> `buildTraceUrl` function are intentionally retained so operators can still
+> open the Grafana / Tempo / SigNoz drill-down for historical cycle IDs from
+> the trace-UI link on `/cycles`. Once the trace-storage retention window on
+> the historical spans expires, `src/codex-otel.ts` will be retired.
 
-**Resource attributes added per agent call:**
+The Codex CLI emitted OTel traces and logs natively. Hydra correlated those with cycles by injecting per-call resource attributes into the spawned CLI process environment (`src/codex-otel.ts`, formerly wired through `src/codex-runner.ts`).
+
+**Resource attributes that were added per agent call (historical):**
 
 | Attribute | Source | Example |
 |---|---|---|
@@ -394,13 +402,22 @@ Snapshot fires when **any** file in the merged change classifies as Tier 2 per `
 
 Target-project file changes (the default `verification.filesChanged` output) never match Tier-2 patterns, so the watcher is a no-op for ordinary feature-build cycles. It activates for orchestrator self-mod cycles whose verification reports Tier-2 paths.
 
-## Cost reconciliation (issue #296)
+## Cost reconciliation (issue #296) — historical
+
+> **Historical, scoped to codex-era data.** With the Codex CLI runtime
+> removed on 2026-05-14 ([ADR-0006](adr/0006-codex-cli-removed-autopilot-only.md))
+> there is no on-disk JSONL session log to replay. `src/cost-reconciliation.ts`
+> still runs and can produce reports for *dates that fall in the codex era*; for
+> dates after the cut-over it returns an empty result (no session files match).
+> The module and its `GET /api/cost/reconciliation` endpoint are retained so
+> operators can answer historical forensic questions; a follow-up issue will
+> retire them along with `src/codex-otel.ts`.
 
 Hydra's local cost accounting has two independent figures that historically disagreed by ~200x:
 - `/api/scheduler/status.dailySpendUsd` — rolling counter incremented per agent call
 - sum of `/api/metrics` `costMicrodollars` — per-cycle metrics aggregation
 
-`src/cost-reconciliation.ts` adds a third, independent figure: replay Codex CLI's own on-disk session JSONL logs, aggregate authoritative token counts per model, and multiply by `MODEL_PRICING` from `codex-runner.ts`. The three figures can then be compared to find which side of Hydra's accounting drifted.
+`src/cost-reconciliation.ts` adds a third, independent figure: replay Codex CLI's own on-disk session JSONL logs, aggregate authoritative token counts per model, and multiply by `MODEL_PRICING` from the historical pricing table. The three figures can then be compared to find which side of Hydra's accounting drifted.
 
 ### Env vars
 

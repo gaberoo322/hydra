@@ -1,8 +1,8 @@
 # Hydra
 
-Hydra is an autonomous software development orchestrator. It runs continuous development cycles against a target codebase — grounding itself in real project state, selecting work, planning a bounded task, gating with a deterministic preflight + nano-model safety review, executing the change, verifying with hard checks (tests, typecheck, build, mutation kill-rate, scope enforcement), and merging to main. Every cycle produces a structured reality report backed by evidence in Redis. Hydra steers itself via two vision documents (target product + orchestrator-self) and improves its own architecture gradually within safety bounds.
+Hydra is an autonomous software development orchestrator. It runs continuous development against a target codebase — grounding itself in real project state, selecting work, dispatching a bounded task to a Claude Code subagent in an isolated worktree, verifying with hard checks (tests, typecheck, build, mutation kill-rate, scope enforcement), and merging to main via PR. Every dispatch produces a structured reality report backed by evidence in Redis. Hydra steers itself via two vision documents (target product + orchestrator-self) and improves its own architecture gradually within safety bounds.
 
-Hydra uses [Codex CLI](https://github.com/openai/codex) as its agent runtime. Two codex agent calls per cycle (planner + executor), one more if the fixer retries verification, plus a nano-model review for high-risk tasks. The former Skeptic agent has been replaced by a deterministic 4-point preflight gate. Verification and merge are deterministic command execution — not agents making claims.
+Hydra is driven by **`hydra-autopilot`** — a long-running Claude Code session that dispatches background subagents in parallel, one per **class** (`dev_orch`, `dev_target`, `research_orch`, `research_target`, `sweep_orch`, `sweep_target`, `discover_orch`, `discover_target`, `health`, `qa`). Code-writing classes (`hydra-dev`, `hydra-target-build`) run in fresh `git worktree`s and open PRs; CI is the merge gate. Verification, merge, and the tier classifier are deterministic command execution — not agents making claims. The Codex CLI runtime was retired on 2026-05-14 (see [ADR-0006](./docs/adr/0006-codex-cli-removed-autopilot-only.md)).
 
 > **Dashboard**: [admin.clawstreetbets.xyz](https://admin.clawstreetbets.xyz) — orchestrator dashboard (also at `http://localhost:4000`)
 > **App**: [hydra.clawstreetbets.xyz](https://hydra.clawstreetbets.xyz) — the [hydra-betting](https://github.com/gaberoo322/hydra-betting) web app
@@ -12,41 +12,50 @@ For the language and architectural decisions that shape the codebase, see [CONTE
 ## Architecture
 
 ```
-                    ┌──────────────────────────────────────────────┐
-                    │              Control Loop                     │
-                    │                                               │
-  POST /api/       │  1. PREPARE ──► 2. GROUND ──► 2.5 CONTINUITY  │
-  cycle/start ────►│       │              │              │          │
-                    │       ▼              ▼              ▼          │
-                    │  Clean workspace  npm test    last report     │
-                    │  (safety-gated)   tsc          + repo diff    │
-                    │                   git state         │          │
-                    │                                     ▼          │
-                    │  3. SELECT ANCHOR ─── stuckness? ──► research  │
-                    │     │  13-priority waterfall (see below)       │
-                    │     ▼                                          │
-                    │  4. PLAN — codex frontier (or codex for fix)   │
-                    │     │  scope-adaptive: quick-fix / std / cplx  │
-                    │     ▼                                          │
-                    │  5. PREFLIGHT — deterministic 4-point gate     │
-                    │     │  (+ nano review on high-risk only)       │
-                    │     ▼                                          │
-                    │  6. EXECUTE — codex on feature branch          │
-                    │     │  isolated worktree                       │
-                    │     ▼                                          │
-                    │  7. VERIFY — npm test + tsc + build (Gate)     │
-                    │     │  ── fail ──► FIXER (one-shot retry)      │
-                    │     │  ── still fail ──► prior-failure         │
-                    │     ▼ pass                                     │
-                    │  7.5 MUTATION + JIT (kill-rate ≥ 30% / 80%)    │
-                    │  7.6 SCOPE ENFORCEMENT (>80% out blocks)       │
-                    │     ▼                                          │
-                    │  8. MERGE — lock + git merge --no-ff + push    │
-                    │     │                                          │
-                    │     ▼                                          │
-                    │  9. REPORT + LEARN + AUTO-ROLLBACK on regress  │
-                    │     OpenViking session commit triggers memory  │
-                    └──────────────────────────────────────────────┘
+                    ┌────────────────────────────────────────────────────┐
+                    │                hydra-autopilot                      │
+                    │   (long-running Claude Code session, parallel BGs)  │
+                    │                                                     │
+                    │  1. health probe        — /api/health               │
+                    │  2. budget + cooldowns  — daily-spend, per-class    │
+                    │  3. pick eligible cls   — health / qa / dev_orch /  │
+                    │                           dev_target / research /   │
+                    │                           sweep / discover           │
+                    │  4. dispatch in parallel — one BG subagent per       │
+                    │                            eligible class            │
+                    │  5. collect lessons     — subagent-capture hook      │
+                    │  6. sleep / next tick                                │
+                    └────────────────────────────────────────────────────┘
+                                            │
+                       ┌────────────────────┴─────────────────────┐
+                       ▼                                          ▼
+            ┌──────────────────────────┐         ┌──────────────────────────┐
+            │  Code-writing subagents  │         │  Read-only subagents     │
+            │  (worktree-isolated)     │         │                          │
+            │                          │         │  hydra-doctor (health)   │
+            │  hydra-dev    → PR       │         │  hydra-qa     (PR review)│
+            │  hydra-target-build → PR │         │  hydra-research          │
+            │                          │         │  hydra-sweep             │
+            │  ── CI gate ──►          │         │  hydra-discover          │
+            │      npm test                       │  hydra-target-research   │
+            │      npm run typecheck              │  hydra-target-sweep      │
+            │      dashboard build                │  hydra-target-discover   │
+            │      tier-gate                      │                          │
+            │      mutation kill ≥ 30%            │  Output: Redis updates,  │
+            │      scope ≤ 80% in                 │  GitHub issues, lessons. │
+            │  ── merge ──►                       │                          │
+            │      Tier-2 holdback watcher        │                          │
+            │      (auto-revert on regression)    │                          │
+            └──────────────────────────┘         └──────────────────────────┘
+                       │
+                       ▼
+            Hydra orchestrator service (port 4000)
+              — Dashboard + REST API
+              — Redis state (backlog, queue, reports, memory, reflections)
+              — Event bus + WebSocket
+              — Knowledge plane (OpenViking)
+              — Scheduler (research-floor, daily-spend)
+              — Merge-gate facade + tier classifier
 ```
 
 ## Key Concepts
@@ -69,8 +78,6 @@ For the language and architectural decisions that shape the codebase, see [CONTE
 11. Regression hunt (every 10 merges)
 12. Codebase health
 13. Priorities doc
-
-**Scope-Adaptive Planning** — Tasks are classified post-planner: quick-fix (≤2 files, ≤3 criteria) uses the cheaper codex model and skips most gates. Standard runs the deterministic preflight. Complex (>5 files) logs warnings; high-risk gets a nano-model safety review.
 
 **Untouchable Core** — A designated set of files Hydra cannot self-modify (only the operator can): the merge gate, rollback, watchdog, cost guardrails, and the protected-paths list itself. Enforced via CI: PRs touching protected paths require an `operator-approved` label. See [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md) and `src/untouchable.ts`.
 
@@ -139,7 +146,7 @@ Operator escalation is reserved for **Operator-Required Intervention** (credenti
 
 - **Node.js** >= 22
 - **Docker** + **Docker Compose** (Redis, VikingDB, OpenViking)
-- **Codex CLI** — installed and authenticated
+- **Claude Code** — installed and authenticated (the harness that runs `hydra-autopilot` and its subagents)
 - **Git** — target project with `main` branch and remote
 - A target project with `npm test`, `npm run typecheck`, and `npm run build`
 
@@ -179,25 +186,22 @@ HYDRA_CONFIG_PATH=~/hydra/config   # Agent configs and direction files
 
 ```
 config/
-├── agents/                 # Agent system prompts (Tier 1 — auto-evolves)
-│   ├── planner.md
-│   ├── executor.md
-│   ├── skeptic.md          # Legacy; preflight is deterministic now
-│   └── meta.md
-├── feedback/               # Operator guidance to agents (Tier 1)
-│   ├── to-planner.md
-│   ├── to-executor.md
-│   └── to-skeptic.md
 ├── direction/              # Target product direction
 │   ├── vision.md           # Target vision (prose, operator-edited)
 │   ├── outcomes.yaml       # Target outcome metrics (parsed by orchestrator)
-│   ├── priorities.md       # Auto-generated from vision + system state
+│   ├── priorities.md       # Refreshed by /hydra-target-research
 │   ├── goals.md
 │   └── tech-preferences.md
 ├── orchestrator/           # Orchestrator-self direction
 │   └── vision.md           # What good autonomous building looks like
 └── research/               # Research agent configs (director, researchers, strategist)
 ```
+
+> Pre-2026-05-14, `config/agents/` and `config/feedback/` held in-process
+> planner/executor/skeptic/meta personalities and operator feedback files.
+> Those were moved to `docs/historical/agent-personalities/` when the Codex
+> CLI runtime was retired. Subagent personalities now live under
+> `~/.claude/skills/` (operator's Claude Code install), not in this repo.
 
 ### Steering Hydra
 
@@ -213,9 +217,9 @@ config/
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| Hydra API | 4000 | REST API + WebSocket + cycle engine |
+| Hydra API | 4000 | REST API + WebSocket + autopilot data plane |
 | Dashboard | 3000 | React operator UI (Vite dev server) |
-| OpenAI Proxy | 4001 | Bridges Codex OAuth → OpenAI API for embeddings |
+| OpenAI Proxy | 4001 | OAuth-bridged proxy used by OpenViking for embeddings (legacy of the Codex OAuth setup; retained because OV's embedding model still routes through it) |
 | Redis | 6379 | Event bus, state, metrics, backlog |
 | VikingDB | 5000 | Vector database backend |
 | OpenViking | 1933 | Knowledge base with semantic retrieval |
@@ -253,19 +257,19 @@ All endpoints are under `/api/`. Full list:
 | `GET` | `/api/config/:section/:name` | Read config file |
 | `PUT` | `/api/config/:section/:name` | Update config file |
 
-## Agent Model Routing
+## Subagent Routing
 
-| Agent | Model tier | Model | Purpose |
-|-------|-----------|-------|---------|
-| Planner | frontier | gpt-5.4 | Decompose anchor into bounded task. Drops to `codex` for quick-fix/low-risk. |
-| Executor | codex | gpt-5.3-codex | Code changes in isolated worktree on feature branch. |
-| Fixer | codex | gpt-5.3-codex | One-shot retry if verification failed on first pass. |
-| JIT tester | codex | gpt-5.3-codex | Diff-aware test generation for surviving mutants. |
-| Meta | mini | gpt-5.4-mini | Strategic analysis every 20 cycles. |
-| High-risk review | mini | gpt-5.4-mini | Nano safety review (high-risk tasks only). |
-| Adversarial | mini | gpt-5.4-mini | Post-merge self-play for edge cases. |
+The orchestrator no longer routes per-call models. Claude Code's harness picks the model when it dispatches a subagent; the operator's subscription determines the model pool. Indicative routing:
 
-Pricing (per 1M tokens): frontier $2.50 in / $15.00 out, codex $1.75 / $14.00, mini $0.75 / $4.50.
+| Subagent | Typical model | Purpose |
+|----------|--------------|---------|
+| hydra-dev / hydra-target-build | claude-opus-4-7 (1M context) | Deep multi-file edits, plan + implement + verify, isolated-worktree PRs |
+| hydra-research / hydra-target-research / hydra-architect | claude-opus-4-7 | Multi-source research and strategic design |
+| hydra-sweep / hydra-target-sweep / hydra-qa / hydra-doctor | claude-sonnet-4-6 | Board/PR/health work with structured outputs |
+| hydra-discover / hydra-target-discover | claude-haiku-4-5 | Patrol and runtime diagnostics; small/fast/cheap |
+| lesson-capture hook | claude-haiku-4-5 | Per-dispatch lesson extraction for the feedback loop |
+
+Daily token spend (when the harness exposes it) flows into `hydra:scheduler:daily-spend` for the same dashboard widget that previously tracked Codex usage. Pricing is determined by the operator's Claude Code plan, not by this repo.
 
 ## Systemd Services
 
@@ -305,9 +309,9 @@ All changes to `master` go through a PR; branch protection enforces CI passing b
 
 ## Stats
 
-- 929+ regression tests (node:test, zero external deps; each test corresponds to a real bug)
-- 4 runtime dependencies: `express`, `ioredis`, `ws`, `@openai/codex-sdk` (+ `@sentry/node` for error tracking)
-- Two-vision steering (target prose + orchestrator-self), structured outcomes config, 5 ADRs
+- 1200+ regression tests (node:test, zero external deps; each test corresponds to a real bug)
+- 4 runtime dependencies: `express`, `ioredis`, `ws`, `@sentry/node` (Codex SDK removed 2026-05-14)
+- Two-vision steering (target prose + orchestrator-self), structured outcomes config, 6 ADRs
 
 ## License
 

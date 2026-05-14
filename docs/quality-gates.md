@@ -1,11 +1,12 @@
 # CI Quality Gates
 
 These quality gates run on every pull request via `.github/workflows/ci.yml`.
-They were re-homed from the in-cycle codex control loop (steps 6.7 and 6.9 of
-`src/control-loop.ts`) in [issue #382](https://github.com/gaberoo322/hydra/issues/382)
-so that every PR — codex-driven, hydra-dev, hydra-target-build, or manual — gets
-the same merge safety net once the codex CLI is removed (PR-3 of the cut-over,
-parent epic #380).
+They were re-homed from the in-cycle control loop (steps 6.7 and 6.9 of the
+former `src/control-loop.ts`) in [issue #382](https://github.com/gaberoo322/hydra/issues/382)
+so that every PR — hydra-dev, hydra-target-build, or manual — gets the same
+merge safety net. The codex CLI runtime has since been removed (PR-3 of the
+cut-over, parent epic [#380](https://github.com/gaberoo322/hydra/issues/380),
+ADR-0006).
 
 ## Gates
 
@@ -90,14 +91,14 @@ There is **no per-PR bypass label**. The accepted escapes are:
 
 ## What was removed
 
-The in-cycle codex control loop ran four checks that are now either CI gates or
-accepted as gone:
+The former in-cycle control loop ran four checks that are now either CI gates
+or accepted as gone:
 
-| In-cycle step | Status after PR-2 (issue #382) |
+| Former in-cycle step | Status (post-cut-over) |
 |---|---|
-| 6.5 reconcilePlanVsActual | Removed when PR-3 deletes `src/control-loop.ts`. Replacement: hydra-qa eyeball review + the `Files in scope` PR convention enforced by `scope-check`. |
+| 6.5 reconcilePlanVsActual | Removed with `src/control-loop.ts` (PR-3). Replacement: hydra-qa eyeball review + the `Files in scope` PR convention enforced by `scope-check`. |
 | 6.7 runMutationTests | Re-homed to CI `mutation-test` job. |
-| 6.8 jitTestGeneration | Removed when PR-3 deletes `src/control-loop.ts`. Replacement: the 1500+ regression test suite and reviewer judgement. |
+| 6.8 jitTestGeneration | Removed with `src/control-loop.ts` (PR-3). Replacement: the 1200+ regression test suite and reviewer judgement. |
 | 6.9 scopeEnforcement | Re-homed to CI `scope-check` job. |
 
 See `docs/codex-removal-measurement.md` for the data-driven rollout plan

@@ -1,6 +1,8 @@
 # Hydra Orchestrator
 
-Autonomous multi-agent development framework. Runs a control loop that grounds → plans → challenges → executes → verifies → merges code changes in ~/hydra-betting, using Codex CLI agents for planning and execution, hard verification (npm test, tsc), Redis for state, and OpenViking for knowledge search.
+Autonomous software-building framework. The orchestrator is a control plane for **Claude Code subagents** (`hydra-dev` for orchestrator work, `hydra-target-build` for target-project work) dispatched in parallel by **`hydra-autopilot`**. State lives in Redis; configs are git-tracked under `~/hydra/config/`; agents query OpenViking for semantic knowledge. Hard verification (npm test, tsc, build) is deterministic, never an agent claim.
+
+> **Codex CLI was retired on 2026-05-14.** The in-process planner/executor/skeptic/fixer/meta agents and the `@openai/codex-sdk` dependency are gone. All code-writing work flows through Claude Code subagents under autopilot. See [ADR-0006](./docs/adr/0006-codex-cli-removed-autopilot-only.md) and [`docs/codex-removal-measurement.md`](./docs/codex-removal-measurement.md) for the cut-over record.
 
 ## Documentation Map
 
@@ -14,71 +16,54 @@ Read these first when working on the orchestrator:
   - ADR-0003 — Terminal goal hierarchy (Target Outcomes + 25% self-improvement floor)
   - ADR-0004 — Self-modification tiers (Tier 0/1/2/3 + Outcome Holdback)
   - ADR-0005 — Operator escalation is narrow (closed list)
-- [`docs/codex-removal-measurement.md`](./docs/codex-removal-measurement.md) — Phase A → B → C measurement plan gating the Codex CLI removal on data, not calendar
+  - ADR-0006 — Codex CLI fully removed; autopilot is the only execution path
+- [`docs/codex-removal-measurement.md`](./docs/codex-removal-measurement.md) — the original Phase A/B/C measurement plan and the cut-over outcome
 - [`config/direction/vision.md`](./config/direction/vision.md) — **target product** vision (what hydra-betting should become)
 - [`config/orchestrator/vision.md`](./config/orchestrator/vision.md) — **orchestrator-self** vision (what good autonomous building looks like)
 - [`config/direction/outcomes.yaml`](./config/direction/outcomes.yaml) — structured Target Outcome metrics that drive Stuckness detection
+- [`docs/operator-playbooks/hydra-autopilot.md`](./docs/operator-playbooks/hydra-autopilot.md) — the autopilot class taxonomy + dispatch contract
 
 ## Architecture
 
-Two codex agent calls per cycle (three for high-risk, four if fixer runs): **planner** (frontier model), **executor** (codex model). The former skeptic agent is replaced by a deterministic preflight gate + nano-model review for high-risk tasks only. All runtime state in Redis; configs git-tracked in `~/hydra/config/`; agents query OpenViking for semantic knowledge context. Event bus (Redis Streams) connects all subsystems; knowledge indexer keeps OpenViking in sync with config files and Redis reports.
+`hydra-autopilot` is a long-running decision loop. A single Claude Code session dispatches background subagents in parallel — one per **class** — subject to per-class cooldowns and a global token budget. The orchestrator HTTP service (port 4000) is now the **data plane** for these subagents: it serves the dashboard, backlog, metrics, health probes, event bus, and Redis-backed work queues. It no longer runs a self-driving control loop.
 
 ```
-Control loop (src/control-loop.ts):
-  1a. prepareWorkspace()       — git cleanup (gated on safety checks)
-  1b. groundProject()          — npm test, tsc, git status (READ-ONLY)
-  1.5 loadContinuity()         — last cycle report + repo diff since last commit
-  2.  selectAnchor()           — pick work (see Anchor Selection Priority below)
-  2.5 isAnchorStale()          — skip completed/blocked items before planner
-  3.  runPlannerAgent()         — propose 1 bounded task (scope-adaptive: quick-fix uses codex model)
-  3.1 classifyComplexity()      — quick-fix / standard / complex based on scope
-  3.5 detectDrift()             — reject near-duplicates of recent work
-  4.  preflightCheck()          — deterministic 4-point checklist (duplicate, scope, grounding, verification)
-  4b. runHighRiskReview()       — nano-model safety review (HIGH-RISK TASKS ONLY)
-  5.  runExecutorAgent()        — write code in isolated worktree on feature branch
-  6.  runVerification()         — npm test + tsc + npm run build (NOT an agent)
-  6.5 runFixerAgent()           — if verification failed, one-shot fixer attempt + re-verify
-  6.5 reconcilePlanVsActual()   — diff planned scope vs actual files changed
-  6.7 runMutationTests()        — kill rate quality gate (<30% blocks merge for non-quick-fix)
-  6.8 jitTestGeneration()       — diff-aware test generation for surviving mutants (kill rate <80%)
-  6.9 scopeEnforcement()        — hard gate: >80% out-of-scope files blocks merge
-  7.  mergeToMain()             — acquire merge lock, git merge --no-ff + push
-  8.  report + metrics          — reality report to Redis, metrics to Redis, auto-rollback if regression
-  8.1 detectPatterns()          — systemic issue detection across recent cycles
-  8.2 markUsed()                — tell OV which resources were used (relevance weighting)
-  8.5 ovSession.commit()        — OV session commit triggers automatic memory extraction
-  8.7 adversarialValidation()   — nano-model self-play: find edge cases, queue fix tasks
+autopilot tick:
+  1. health probe          — /api/health, /api/health/services
+  2. budget check          — daily token spend, per-class cooldowns
+  3. pick eligible classes — see taxonomy below
+  4. dispatch in parallel  — one BG subagent per class (Agent tool, worktree isolation)
+  5. collect lessons       — subagent-capture hook funnels lessons into Redis/feedback files
+  6. sleep                 — until next tick or class cooldown expires
 
-Circuit breaker: if same anchor is abandoned 3x consecutively, auto-escalate to reframe queue.
-Merge lock: short-lived Redis lock (60s TTL) serializes merges across Codex and Claude Code.
+class taxonomy (docs/operator-playbooks/hydra-autopilot.md):
+  health           — hydra-doctor                 (read-only health check)
+  qa               — hydra-qa                     (review target PRs)
+  dev_orch         — hydra-dev                    (orchestrator feature work, worktree-isolated)
+  dev_target       — hydra-target-build           (target feature work, worktree-isolated)
+  research_orch    — hydra-research, hydra-issue-research
+  research_target  — hydra-target-research
+  sweep_orch       — hydra-sweep                  (orchestrator board hygiene)
+  sweep_target     — hydra-target-sweep           (target board hygiene)
+  discover_orch    — hydra-discover               (patrol; produces issues)
+  discover_target  — hydra-target-discover        (runtime diagnostics on the target)
 ```
 
-## Anchor Selection Priority
+Each code-writing class (`dev_orch`, `dev_target`) runs inside a fresh `git worktree` and opens a PR. CI is the merge gate: `npm test`, `npm run typecheck`, `dashboard && npm run build`, mutation kill-rate, scope-enforcement, and the tier classifier are all enforced on the PR, not inside a cycle.
 
-Determined by `selectAnchor()` in `src/anchor-selection.ts`. Priority order:
+The orchestrator service still owns:
+- Redis state (backlog, work queue, reality reports, agent memory, reflections, holdback)
+- Event bus (`hydra:*` Redis streams) and notifications
+- Scheduler (research-floor enforcement, daily-spend tally, cycle metrics aggregation)
+- Knowledge plane (OpenViking indexing, search)
+- Dashboard + REST API
+- Merge-gate facade (`src/gate.ts`), tier classifier, and Tier-2 outcome holdback
 
-1. **Explicit operator request** — passed via `opts.anchor`
-2. **Capacity-floor dispatcher (issue #321)** — single dispatcher in `src/anchor-selection/capacity-floors.ts` evaluates every declared floor and fires AT MOST one per cycle (highest-deficit wins; tiebreak by declared priority). The dispatcher unifies what used to be two independent pre-emption branches (issues #245 / #301):
-   - **`specs` floor** — every Nth eligible cycle (default N=3, `HYDRA_CAPACITY_FLOOR_SPEC_N`; legacy `HYDRA_SPEC_CAPACITY_FLOOR_N` honoured with deprecation log), if a spec task exists, pre-empts kanban. Prevents the active-specs lane from being indefinitely shadowed.
-   - **`self-improvement` floor** — when `getAllStuckness()` reports a fired Target Outcome, build a `research` anchor (`outcome-stuckness:<name>`, `domain: orchestrator-self-improvement`) instead of pulling backlog. Enforces ADR-0003 vision vector 1. 5-cycle cooldown per outcome.
-   When BOTH are ready in the same cycle, the specs floor wins (lower tiebreak priority value), matching pre-refactor behaviour. Instrumented at `/api/metrics/capacity-floors` (unified) and `/api/metrics/spec-starvation` (legacy single-floor view).
-3. **Kanban queued lane** — atomic claim (Lua script), gated by WIP limit
-4. **Active specs** — next unchecked task from oldest active spec (also reachable below kanban when the capacity-floor has not fired)
-5. **Failing tests** — from grounding report
-6. **Typecheck errors** — from grounding report
-7. **Work queue** — items from POST /queue or research auto-queue (LMOVE to processing)
-8. **Reframe queue** — tasks that failed repeatedly, need diagnosis
-9. **Prior failures** — stored in Redis, capped at 2 retries before escalation
-10. **TODO/FIXME markers** — from codebase
-11. **Regression hunt** — every 10 merges, adversarial testing of recent features
-12. **Codebase health** — reductive improvements (split, consolidate, document)
-13. **Priorities doc** — fallback to `config/direction/priorities.md`. The doc is refreshed by `/hydra-target-research`, not by the control loop. When the doc-anchor saturation gate fires (last N cycles all drift-rejected) or the doc has been used >=5x in the last 10 cycles, the tier returns no-work and logs that refresh is deferred to the next research run.
-
-**Scheduler-side research floor (issue #327, sibling of #245 / #301).** Independent of `selectAnchor()`: `maybeRunResearch()` in `src/scheduler.ts` consults the research capacity floor before queue-depth / ratio-cap suppression. When the realised 24h research:build ratio drops below `HYDRA_RESEARCH_BUILD_RATIO_MIN` (default 1/20) over at least `HYDRA_RESEARCH_FLOOR_WINDOW` builds (default 20), the scheduler forces a research cycle on the next tick. The floor overrides queue-depth and `buildRatioMax` suppression *but never bypasses* the min-interval throttle (`HYDRA_RESEARCH_MIN_INTERVAL_MS`, default 2h) or the daily cost cap. If two consecutive forced cycles return zero auto-queued opportunities, the floor self-suppresses for 24h and alerts the operator. Surfaced at `/api/scheduler/status` under `research.buildRatioMin` and `research.floor`.
+> **Why `src/codex-otel.ts` is still in the tree.** PR-3 deleted the codex runtime but intentionally kept `src/codex-otel.ts` and its `buildTraceUrl` helper. Historical SigNoz/Tempo spans emitted before the cut-over are still queried by operators via the trace-UI link in `/cycles`. The file is now legacy telemetry attribution — no new spans are produced. A follow-up issue will retire it once the retention window on the historical traces expires.
 
 ## Key Files
 
-See `docs/reference.md` for full file inventory, Redis keys, event bus streams, and API endpoints.
+See `docs/reference.md` for the file inventory, Redis keys, event bus streams, and API endpoints.
 
 ## Running
 
@@ -89,12 +74,11 @@ journalctl --user -u hydra-orchestrator.service -f
 
 # Development
 npx tsx src/index.ts       # direct run (check port 4000 first!)
-npm test                    # 1035+ regression tests (node:test, zero deps)
+npm test                    # 1200+ regression tests (node:test, zero deps)
 
 # Health
 curl http://localhost:4000/api/health
 curl http://localhost:4000/api/scheduler/status
-curl http://localhost:4000/api/cycle/status
 curl "http://localhost:4000/api/cycle/history?limit=5"
 ```
 
@@ -105,6 +89,8 @@ curl "http://localhost:4000/api/cycle/history?limit=5"
 **CI** (`.github/workflows/ci.yml`) runs on every PR:
 - `npm run typecheck` + `npm test` (orchestrator)
 - `cd dashboard && npm run build` (dashboard build check)
+- `tier-gate` (blocks Tier-0 paths without `operator-approved` label)
+- Mutation kill-rate + scope-enforcement quality gates (re-homed from the in-cycle loop; see [`docs/quality-gates.md`](./docs/quality-gates.md))
 
 **Deploy** runs automatically on merge to master via a self-hosted GitHub Actions runner on this server:
 1. `git pull --ff-only origin master`
@@ -121,106 +107,92 @@ Manual deploy (emergency): `./scripts/deploy.sh`
 
 ## Testing
 
-Tests are regression tests -- each corresponds to a real bug. Located in `test/*.test.mts`. Run with `npm test`. Zero external dependencies (uses `node:test`).
+Tests are regression tests — each corresponds to a real bug. Located in `test/*.test.mts`. Run with `npm test`. Zero external dependencies (uses `node:test`).
 
 Always run `npm test` before committing.
 
-## Config (~/hydra/config/) -- git-tracked
+## Config (~/hydra/config/) — git-tracked
 
 **Operator edits these (or uses dashboard):**
-- `config/direction/vision.md` -- **target product** vision (prose; what hydra-betting should become)
-- `config/direction/outcomes.yaml` -- structured Target Outcome metrics (drives Stuckness; see ADR-0003)
-- `config/orchestrator/vision.md` -- **orchestrator-self** vision (trade-offs the orchestrator makes when ambiguous)
-- `config/direction/priorities.md` -- what Hydra should work on next. Refreshed by the operator-scheduled `/hydra-target-research` skill (not by the orchestrator). The control loop reads this file as a fallback anchor source but never writes to it (issue #347, Phase A codex-removal refactor).
-- `config/direction/goals.md` -- high-level project goals
-- `config/feedback/to-planner.md` -- correct planner behavior
-- `config/feedback/to-executor.md` -- correct executor behavior
-- `config/feedback/to-skeptic.md` -- correct high-risk-review behavior (file is named "skeptic" for legacy reasons; loaded only on high-risk tasks via `agentName: "skeptic"` in `src/preflight.ts`)
+- `config/direction/vision.md` — **target product** vision (prose; what hydra-betting should become)
+- `config/direction/outcomes.yaml` — structured Target Outcome metrics (drives Stuckness; see ADR-0003)
+- `config/orchestrator/vision.md` — **orchestrator-self** vision (trade-offs the orchestrator makes when ambiguous)
+- `config/direction/priorities.md` — what Hydra should work on next. Refreshed by the operator-scheduled `/hydra-target-research` skill.
+- `config/direction/goals.md` — high-level project goals
+- `config/research/` — research agent configs (director, domain/technical/market researchers, strategist)
 
-**Agent personalities:**
-- `config/agents/{planner,executor,meta}.md` -- system prompts loaded by codex-runner
-- `config/agents/skeptic.md` -- still loaded as the personality for the **high-risk review** path (mini-model safety review); the low/medium-risk skeptic agent was replaced by the deterministic preflight gate
-- `config/research/` -- research agent configs (director, domain/technical/market researchers, strategist)
+The legacy in-process agent personalities (`config/agents/{planner,executor,skeptic,meta}.md`) and operator feedback files (`config/feedback/to-{planner,executor,skeptic}.md`) were retired with the codex cut-over and moved to `docs/historical/agent-personalities/` for posterity. The autopilot subagents (hydra-dev, hydra-target-build, etc.) carry their own personalities under `~/.claude/skills/` rather than in this repo's config. The `~/.codex/config.toml` exporter setup is no longer needed and can be removed from operator machines.
 
 **Runtime state (all in Redis):**
-- Backlog -- `hydra:backlog:*` (Redis sorted sets + hashes, stable IDs)
-- Agent memory -- `hydra:memory:{agent}:patterns` (Redis strings, consolidated JSON patterns)
-- Reality reports -- `hydra:reports:reality:*` (Redis keys, kept 50)
-- Cycle summaries -- `hydra:reports:summary:*` (Redis keys, 2-day TTL)
-- Research reports -- `hydra:reports:research:*` (Redis keys, kept 20)
-- Proposals -- `hydra:proposals:*` (Redis hashes)
-- Specs -- `hydra:specs:*` (Redis hashes, 30-day TTL) + `hydra:specs:index` (sorted set)
+- Backlog — `hydra:backlog:*` (Redis sorted sets + hashes, stable IDs)
+- Agent memory — `hydra:memory:{agent}:patterns` (Redis strings, consolidated JSON patterns)
+- Reality reports — `hydra:reports:reality:*` (Redis keys, kept 50)
+- Cycle summaries — `hydra:reports:summary:*` (Redis keys, 2-day TTL)
+- Research reports — `hydra:reports:research:*` (Redis keys, kept 20)
+- Proposals — `hydra:proposals:*` (Redis hashes)
+- Specs — `hydra:specs:*` (Redis hashes, 30-day TTL) + `hydra:specs:index` (sorted set)
+- Lessons (subagent capture) — `hydra:lessons:*` (per-agent rolling JSON; promotes into operator-facing lesson files at 5 hits)
 
 **Specs (multi-cycle task decomposition):**
 - Created by research loop (complex opportunities) or operator (POST /api/specs)
 - Each spec has a slug, title, rationale, and ordered task list
-- `selectAnchor()` picks the next unchecked task from the oldest active spec (priority 3)
-- On merge, the spec task is marked complete; when all tasks done, spec status -> "completed"
+- Subagents claim the next unchecked task; on PR merge the task is marked complete; when all tasks done, spec status -> "completed"
 - API: GET /api/specs, GET /api/specs/:slug, POST /api/specs, POST /api/specs/:slug/archive
 
 **Dashboard:** React + Vite + Tailwind served from port 4000 (`~/hydra/dashboard/`)
 - `npm run dev` in dashboard/ for development
 - API calls at /api/* paths
-- WebSocket for real-time cycle events
+- WebSocket for real-time events
 
-**Knowledge:** OpenViking (port 1933) -- agents query via `searchKnowledge()` in codex-runner.ts
+**Knowledge:** OpenViking (port 1933) — agents query via the OV HTTP API
 - `knowledge-indexer.ts` watches config files and polls Redis for new reports to index
-- `ov-session.ts` manages per-cycle sessions: logs agent interactions, commits for memory extraction
-- `ov-skills.ts` registers agent capabilities (planner, executor, skeptic, director) on startup
+- `ov-session.ts` manages per-cycle sessions: logs subagent interactions, commits for memory extraction
+- `ov-skills.ts` registers subagent capabilities (hydra-dev, hydra-target-build, hydra-research, etc.) on startup
 
 ## Learning System
 
-**OpenViking-primary, Redis-fallback.** Two tiers:
+**OpenViking-primary, Redis-fallback.** Three tiers:
 
-1. **OpenViking (primary):** Each cycle creates an OV session (`ov-session.ts`). Agent interactions (planner, skeptic, executor, verification) are logged as session messages. At cycle end, `ovSession.commit()` triggers automatic memory extraction -- OV analyzes the full conversation and stores learned patterns as searchable embeddings. Agents query `getAgentContext()` and `searchKnowledge()` for relevant past experience.
+1. **OpenViking (primary):** Each autopilot tick or subagent dispatch creates an OV session (`ov-session.ts`). Subagent interactions are logged as session messages. At session close, `ovSession.commit()` triggers automatic memory extraction — OV analyzes the full conversation and stores learned patterns as searchable embeddings. Subagents query `getAgentContext()` and `searchKnowledge()` for relevant past experience.
 
-2. **Redis patterns (fallback):** Consolidated patterns in `hydra:memory:{agent}:patterns` with hit counts. Similar incidents merge into one pattern. When a pattern reaches 5 occurrences, it auto-promotes to the feedback file (`config/feedback/to-{agent}.md`) as a durable cardinal rule. Stale one-offs are pruned after 14 days.
+2. **Redis patterns (fallback):** Consolidated patterns in `hydra:memory:{agent}:patterns` with hit counts. Similar incidents merge into one pattern. When a pattern reaches 5 occurrences, it auto-promotes to a durable lesson file (e.g. `~/.claude/skills/<skill>/lessons.md`) as a cardinal rule. Stale one-offs are pruned after 14 days.
 
-3. **Episodic reflections:** When a cycle fails, a structured reflection (what was attempted, why it failed, what should change) is stored in `hydra:reflections:{anchor}` with 7-day TTL. When the same anchor is retried, reflections are injected as planner context.
-
+3. **Episodic reflections:** When a subagent fails, a structured reflection (what was attempted, why it failed, what should change) is stored in `hydra:reflections:{ref}` with 7-day TTL. When the same anchor/issue is retried, reflections are injected as subagent context.
 
 ## Model Tiers
 
-| Tier | Model | Used by | Cost (in/out per 1M) |
-|---|---|---|---|
-| frontier | gpt-5.4 | Planner (standard tasks) | $2.50 / $15.00 |
-| codex | gpt-5.3-codex | Executor, Fixer, JIT tester, Planner (quick-fix) | $1.75 / $14.00 |
-| mini | gpt-5.4-mini | Meta agent, classification, adversarial validation, high-risk review | $0.75 / $4.50 |
+The orchestrator no longer routes per-call models — model selection is the harness's job. Claude Code dispatches subagents on whichever model the operator's subscription chooses. For accounting/limits visibility:
 
-## Codex Telemetry (OTel)
+| Tier | Model (Claude Code) | Typical use |
+|---|---|---|
+| frontier | claude-opus-4-7 (1M context) | hydra-dev, hydra-target-build, hydra-research, hydra-architect — deep multi-file edits and design work |
+| balanced | claude-sonnet-4-6 | hydra-sweep, hydra-target-sweep, hydra-qa, hydra-doctor — board/health work with structured outputs |
+| fast | claude-haiku-4-5 | hydra-discover, hydra-target-discover, lesson-capture hooks, classification — small/fast/cheap calls |
 
-Codex CLI emits OTel traces natively. Hydra correlates them with cycles by injecting per-call resource attributes (`hydra.cycle_id`, `hydra.agent_role`, `hydra.task_id`, `hydra.model_tier`, `hydra.complexity`) into the spawned CLI process when `HYDRA_OTEL_ENABLED=true`. See `docs/reference.md` for the full env-var contract and `~/.codex/config.toml` exporter setup. Disabled by default — opt in once a backend (SigNoz / Tempo / Jaeger) is ready.
-
-## Scope-Adaptive Planning
-
-Tasks are classified post-planner based on `scopeBoundary.in` and `acceptanceCriteria`:
-- **quick-fix** (<=2 files, <=3 criteria, or failing-test/codebase-health anchor): skip all gates, use codex model for planner, compressed prompt
-- **standard** (default): deterministic preflight check, no agent call
-- **complex** (>5 files or >8 criteria): deterministic preflight + log warning
-- **high-risk** (any complexity with `risk: high`): deterministic preflight + nano-model safety review
+Daily spend tracking still flows through `hydra:scheduler:daily-spend` (renamed semantics — it now tracks Claude Code token usage where the harness exposes it, or stays at 0 when the harness owns billing).
 
 ## Coding Conventions
 
 - **TypeScript** (.ts, import/export). Source in `src/`, tests in `test/*.test.mts`.
-- **Four dependencies**: express, ioredis, ws, @openai/codex-sdk. Plus @sentry/node for error tracking. Use Node.js stdlib for everything else.
-- **Never throw from merge/grounding/verification** -- return result objects so callers decide how to report failures.
+- **Four runtime dependencies**: `express`, `ioredis`, `ws`, plus `@sentry/node` for error tracking. Use Node.js stdlib for everything else. (`@openai/codex-sdk` was removed in PR-3 of the cut-over.)
+- **Never throw from merge/grounding/verification** — return result objects so callers decide how to report failures.
 - **Fail loud**: every `catch` must either log `console.error` with context or be annotated `/* intentional: reason */`. Silent catches caused every major incident in the 2026-04-07/08 debug session.
-- **Kanban updates go through `safeKanban()`** -- logs errors AND publishes events. Never call moveToInProgress/moveToDone/returnToBacklog directly without error handling.
-- **Redis access through redis-adapter.ts or src/redis/*** -- new code should use adapter methods instead of creating `new Redis()` connections or importing redis-keys.ts directly. After the issue #269 split, `redis-adapter.ts` is a thin re-export shim; new call sites may import directly from the domain modules under `src/redis/` (connection, plan-cache, cycle-metrics, reality-reports, backlog, proposals, agent-memory, reflections, utility, alerts, adversarial, calibration, cycle-tracking, research-reports, health-anchor, work-queue, scheduler, kv). Migration in progress; some modules still have legacy direct access.
-- **API routes in sub-routers** -- `src/api.ts` is a thin mount point. Route handlers live in `src/api/{domain}.ts`. Each sub-router is a factory function receiving `eventBus` if needed.
-- **grounding.ts is read-only** -- workspace mutation lives in prepare-workspace.ts.
-- **eventBus scope**: `eventBus` is a parameter of `runControlLoop()`, not a module global. Helper functions that need it must receive it as a parameter.
+- **Kanban updates go through `safeKanban()`** — logs errors AND publishes events. Never call moveToInProgress/moveToDone/returnToBacklog directly without error handling.
+- **Redis access through redis-adapter.ts or src/redis/*** — new code should use adapter methods instead of creating `new Redis()` connections or importing redis-keys.ts directly. After the issue #269 split, `redis-adapter.ts` is a thin re-export shim; new call sites may import directly from the domain modules under `src/redis/` (connection, plan-cache, cycle-metrics, reality-reports, backlog, proposals, agent-memory, reflections, utility, alerts, adversarial, calibration, cycle-tracking, research-reports, health-anchor, work-queue, scheduler, kv).
+- **API routes in sub-routers** — `src/api.ts` is a thin mount point. Route handlers live in `src/api/{domain}.ts`. Each sub-router is a factory function receiving `eventBus` if needed.
+- **grounding.ts is read-only** — workspace mutation lives in prepare-workspace.ts.
+- **eventBus scope**: `eventBus` is a parameter of `runControlLoop()` / route factories, not a module global. Helpers that need it must receive it as a parameter.
 
 ## Self-Modification: Untouchable Core & Tiers
 
-The orchestrator classifies its own PRs by blast radius (see [ADR-0004](./docs/adr/0004-self-modification-tiers.md)):
+The tier system classifies every PR by blast radius, regardless of which agent proposed it (see [ADR-0004](./docs/adr/0004-self-modification-tiers.md)):
 
 | Tier | Scope | Who merges | Notes |
 |------|-------|-----------|-------|
 | 0 — Untouchable | Merge gate, rollback, watchdog, cost guardrails, the protected-paths list itself | **Operator only** | Enforced via CI; PR needs `operator-approved` label |
-| 1 — Prompt-shaped | `config/agents/*`, `config/feedback/*` | Auto-merge | |
-| 2 — Skill / verification additions | New tests, new verification steps, scoring tweaks | Auto-merge with **Outcome Holdback** | 5-cycle watch + auto-revert on Target Outcome regression |
-| 3 — Everything else in `src/` | Control-loop changes, agent logic, infra | Operator merges | |
+| 1 — Prompt-shaped | Subagent lesson files, prompt-only tweaks under `~/.claude/skills/` | Auto-merge | |
+| 2 — Skill / verification additions | New tests, new verification steps, scoring tweaks, dashboard, `src/anchor-selection.ts` | Auto-merge with **Outcome Holdback** | 5-cycle watch + auto-revert on Target Outcome regression |
+| 3 — Everything else in `src/` | Control-loop changes, gate logic, infra | Operator merges | |
 
 Protected paths live in `src/untouchable.ts` (see [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md)). Before proposing or applying a change to anything that smells load-bearing — merge, rollback, scope enforcement, mutation gate, cost caps — check the untouchable list first. **Never bypass the gate.**
 
@@ -230,9 +202,9 @@ Operator escalation is reserved for the **closed list** in [ADR-0005](./docs/adr
 
 - **Port 4000 conflict**: If you run `npx tsx src/index.ts` manually while the service is running, the port guard will abort. Always check `lsof -ti:4000` first.
 - **Stale process**: The systemd service may hold port 4000 after a crash. `systemctl --user restart hydra-orchestrator.service` is the safe restart.
-- **Kanban title matching**: Use `anchor.reference` (not `task.title`) when calling backlog.ts functions. The planner generates titles that don't match Kanban rows.
+- **Kanban title matching**: Use `anchor.reference` (not `task.title`) when calling backlog.ts functions. Subagents generate titles that don't always match Kanban rows.
 - **Test environment**: Tests use `node:test` with no mocking framework. Grounding tests mock `execFileAsync` by testing pure functions (parseTestCounts, shouldCleanWorkingTree) instead of running real git commands.
-- **Merge lock contention**: Both Codex and Claude Code cycles acquire `hydra:merge:lock` (60s TTL) before merging. If a merge hangs, the lock auto-expires. Manual release: `redis-cli DEL hydra:merge:lock`.
+- **Worktree isolation**: Every code-writing subagent dispatch (`hydra-dev`, `hydra-target-build`) MUST run inside a fresh `git worktree`. The harness aborts if cwd is the main repo working tree (`/home/gabe/hydra` or `/home/gabe/hydra-betting`). See `feedback_bg_agent_worktree_hygiene` in operator memory and the PR #245 incident.
 
 ## Watchdog
 
