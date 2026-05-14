@@ -158,6 +158,15 @@ export const redisKeys = {
   patternDetectorCooldowns: () => "hydra:pattern-detector:cooldowns",
 
   // ---------------------------------------------------------------------------
+  // Stale-claim reaper (issue #374)
+  // Lifetime + per-day (UTC isoDate, 7-day TTL) counters of claims released
+  // because their claimedAt age exceeded HYDRA_CLAIM_MAX_AGE_MS.
+  // ---------------------------------------------------------------------------
+  claimsReapedLifetime: () => "hydra:metrics:claims-reaped",
+  claimsReapedDay: (isoDate: string) => `hydra:metrics:claims-reaped:${isoDate}`,
+  claimsReapedLast: () => "hydra:metrics:claims-reaped:last",
+
+  // ---------------------------------------------------------------------------
   // Blocked Escalation
   // ---------------------------------------------------------------------------
   blockedLastEscalation: () => "hydra:blocked:last-escalation",

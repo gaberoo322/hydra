@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { _admin } from "../backlog.ts";
-const { loadBacklog, getBacklogCounts, addToBacklog, moveItemToLane, deleteItem, updateItem, getItemsByParent, isWipLimitReached, claimNextQueuedItem } = _admin;
+import { getString } from "../redis-adapter.ts";
+import { redisKeys } from "../redis-keys.ts";
+const { loadBacklog, getBacklogCounts, addToBacklog, moveItemToLane, deleteItem, updateItem, getItemsByParent, isWipLimitReached, claimNextQueuedItem, getStaleClaims, reapStaleClaims } = _admin;
 
 export function createBacklogRouter() {
   const router = Router();
@@ -174,6 +176,47 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
     try {
       const result = await deleteItem(req.params.id);
       if (!result.ok) return res.status(404).json(result);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /backlog/stale-claims — preview of inProgress items, with each claim's
+  // current age, and which are over the configured `maxAgeMs` threshold (issue
+  // #374). Optional `?maxAgeMs=N` overrides the default for diagnostic queries.
+  router.get("/backlog/stale-claims", async (req, res) => {
+    try {
+      const rawMax = typeof req.query.maxAgeMs === "string" ? parseInt(req.query.maxAgeMs, 10) : NaN;
+      const envMax = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
+      const maxAgeMs = Number.isFinite(rawMax) && rawMax > 0 ? rawMax : envMax;
+      const { all, stale, maxAgeMs: usedMax } = await getStaleClaims({ maxAgeMs });
+      const lifetime = await getString(redisKeys.claimsReapedLifetime());
+      const isoDate = new Date().toISOString().split("T")[0];
+      const day = await getString(redisKeys.claimsReapedDay(isoDate));
+      const last = await getString(redisKeys.claimsReapedLast());
+      res.json({
+        maxAgeMs: usedMax,
+        inProgress: all,
+        stale,
+        metrics: {
+          claimsReapedLifetime: lifetime ? parseInt(lifetime, 10) : 0,
+          claimsReapedToday: day ? parseInt(day, 10) : 0,
+          lastReapedAt: last,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /backlog/stale-claims/reap — operator-triggered reaper run.
+  router.post("/backlog/stale-claims/reap", async (req, res) => {
+    try {
+      const body = req.body || {};
+      const envMax = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
+      const maxAgeMs = typeof body.maxAgeMs === "number" && body.maxAgeMs > 0 ? body.maxAgeMs : envMax;
+      const result = await reapStaleClaims({ maxAgeMs });
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
