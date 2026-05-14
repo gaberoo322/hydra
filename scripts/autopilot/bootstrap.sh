@@ -77,6 +77,7 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
   "idle_turns": 0,
   "turn": 0,
   "burned_classes": [],
+  "reaped_task_ids": [],
   "slots": {
     "health": null, "qa": null,
     "dev_orch": null, "dev_target": null,
