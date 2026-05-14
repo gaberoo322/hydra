@@ -80,6 +80,18 @@ TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-2000000}"
 WALL_CLOCK_MAX_SEC="${HYDRA_AUTOPILOT_MAX_SEC:-28800}"   # 8h
 IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
 
+# Per-subagent token caps (issue #395). Soft cap = stop re-dispatching that
+# class; hard cap = abandon the in-flight slot and open a runaway issue.
+# Soft must be <= hard. Defaults bound a single misbehaving subagent to
+# ~20% of the 2M total budget at the hard cap; well-behaved subagents
+# (~30-150k tokens for a normal hydra-dev run) are unaffected.
+SUBAGENT_MAX_TOKENS="${HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS:-400000}"
+SUBAGENT_HARD_MAX_TOKENS="${HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS:-800000}"
+if [ "$SUBAGENT_MAX_TOKENS" -gt "$SUBAGENT_HARD_MAX_TOKENS" ]; then
+  echo "[autopilot] FATAL: HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS=$SUBAGENT_MAX_TOKENS exceeds HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS=$SUBAGENT_HARD_MAX_TOKENS"
+  exit 1
+fi
+
 # Resolve scope from env. Allowed: all | orch-only | target-only. Default: all.
 SCOPE="${HYDRA_AUTOPILOT_SCOPE:-all}"
 case "$SCOPE" in
@@ -99,12 +111,15 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
     "token_budget": ${TOKEN_BUDGET},
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
     "idle_drain_turns": ${IDLE_DRAIN_TURNS},
-    "scope": "${SCOPE}"
+    "scope": "${SCOPE}",
+    "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
+    "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS}
   },
   "cumulative_tokens": 0,
   "dispatches": 0,
   "idle_turns": 0,
   "turn": 0,
+  "burned_classes": [],
   "slots": {
     "health": null, "qa": null,
     "dev_orch": null, "dev_target": null,
@@ -116,7 +131,7 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
 EOF
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS}"
 ```
 
 After Phase 0, the model MUST treat `/tmp/hydra-autopilot-state.json` as the authoritative budget source. Do not invent or rely on remembered defaults.
@@ -225,11 +240,53 @@ For each class slot in `/tmp/hydra-autopilot-state.json` that has an entry:
 1. Check whether the background Agent dispatch has produced its task notification (TaskNotification fires on completion; the dispatching session sees it as a completed agent result).
 2. If completed:
    - Read the agent's reported `total_tokens` from its result block, add to `cumulative_tokens`
+   - **Record per-slot tokens** in the completion log line AND in `slots[class].tokens` immediately before clearing the slot (the turn-report and digest read this; see Phase 6).
+   - **Soft-cap check (issue #395)**: if `slot.tokens >= limits.subagent_max_tokens`, append `<class>` to `state.burned_classes`. Phase 4 must refuse to dispatch into a class in this list for the rest of the session.
    - **Post-dispatch sanity check (code-writing classes only)**: verify `git -C ~/hydra rev-parse --abbrev-ref HEAD == master`. If not, log `isolation_breach=<branch>` and surface in turn report. Do NOT auto-`checkout master`.
-   - Append the dispatch result to `/tmp/hydra-autopilot-nightly.log` (one line: skill, duration, tokens, exit-state, result-summary-first-line)
-   - Clear the slot (`slots[class] = null`)
+   - Append the dispatch result to `/tmp/hydra-autopilot-nightly.log` (one line: `slot_complete class=<C> skill=<S> tokens=<N> duration=<D>s exit=<state> summary=...`).
+   - Clear the slot (`slots[class] = null`).
 
-Update `dispatches` counter. Increment `idle_turns` if NO new dispatch this turn AND no class slot still occupied; otherwise reset `idle_turns = 0`.
+3. **In-flight poll (issue #395, hard-cap enforcement).** For each class slot still occupied AND whose dispatch exposes a partial token count via the Agent harness (`partial_tokens` / `progress.tokens` in the harness result envelope), compare against `limits.subagent_hard_max_tokens`:
+
+   ```python
+   # Run at the top of Phase 2 each turn, before the completion-reap loop.
+   # Reads /tmp/hydra-autopilot-state.json; writes burned_classes + clears
+   # slots that crossed the hard cap.
+   import json, time, subprocess
+   s = json.load(open('/tmp/hydra-autopilot-state.json'))
+   hard = s['limits']['subagent_hard_max_tokens']
+   soft = s['limits']['subagent_max_tokens']
+   runaways = []
+   for cls, slot in list(s['slots'].items()):
+       if slot is None:
+           continue
+       partial = slot.get('partial_tokens') or 0
+       if partial >= hard:
+           # Hard-cap trip: abandon slot, file diagnostic issue, mark class burned.
+           runaways.append((cls, slot.get('skill', '?'), partial))
+           s['slots'][cls] = None
+           if cls not in s.get('burned_classes', []):
+               s.setdefault('burned_classes', []).append(cls)
+   json.dump(s, open('/tmp/hydra-autopilot-state.json', 'w'))
+   for cls, skill, tokens in runaways:
+       title = f"Subagent token-runaway: {skill} burned {tokens} tokens"
+       body = (
+           f"Autopilot abandoned a `{cls}` slot running `{skill}` at "
+           f"`{tokens}` tokens (hard cap: `{hard}`, soft cap: `{soft}`).\n\n"
+           f"Class `{cls}` is suppressed for the rest of this autopilot session.\n\n"
+           f"Run log: `/tmp/hydra-autopilot-nightly.log`\n\n"
+           f"---\nSource: hydra-autopilot Phase 2 hard-cap enforcement (issue #395)"
+       )
+       subprocess.run([
+           'gh', 'issue', 'create', '--repo', 'gaberoo322/hydra',
+           '--title', title, '--body', body, '--label', 'needs-triage',
+       ], check=False)
+       print(f"[autopilot] HARD-CAP TRIP class={cls} skill={skill} tokens={tokens} -> issue filed, slot cleared")
+   ```
+
+   The harness's partial-token field name may vary; if no partial signal is available for a class, the hard cap only catches the slot at completion (still bounded by `wall_clock_max_sec`). Soft cap still fires on completion via step 2 above.
+
+4. Update `dispatches` counter. Increment `idle_turns` if NO new dispatch this turn AND no class slot still occupied; otherwise reset `idle_turns = 0`.
 
 ## Phase 3: Termination check
 
@@ -279,6 +336,7 @@ for class in [health, qa, dev_orch, dev_target, research_orch, research_target,
     if SCOPE == "target-only" and class.endswith("_orch"):  continue
     # health and qa are scope-agnostic (qa reviews any PR, health is whole-system)
     if state.slots[class] is not None: continue          # slot busy
+    if class in state.burned_classes: continue           # soft cap tripped (#395)
     if class on cooldown: continue
     if class circuit-broken this turn: continue
     eligible_skill = evaluate_priority(class, state)     # see per-class rules below
@@ -349,7 +407,7 @@ Per class: if the same skill was dispatched 3+ times in the last 5 dispatches fo
 
 For each class that selected a skill in Phase 4:
 
-1. Mark slot: `slots[<class>] = {"skill":"<S>","started":"<ts>","prompt_summary":"..."}`
+1. Mark slot: `slots[<class>] = {"skill":"<S>","started":"<ts>","prompt_summary":"...","partial_tokens":0}`. The `partial_tokens` field is updated by the Phase 2 in-flight poll (issue #395) whenever the harness exposes a progress signal for the dispatched Agent; it defaults to 0 until the first poll observation lands.
 2. Log: `dispatch <class> <skill> <ts>` appended to `/tmp/hydra-autopilot-nightly.log`
 3. **Worktree-guard preamble (REQUIRED for `dev_orch` and `dev_target`):**
 
@@ -405,8 +463,10 @@ For each class that selected a skill in Phase 4:
 One line per decision turn appended to `/tmp/hydra-autopilot-nightly.log`:
 
 ```
-[autopilot] <ts> | turn=<N> | active=[<class>:<skill>,...] | tokens=<cum>/<budget> | board: qa=N agent=N triage=N wq=N | dispatched=<N this turn>
+[autopilot] <ts> | turn=<N> | active=[<class>:<skill>@<partial_tokens>,...] | tokens=<cum>/<budget> | burned=[<class>,...] | board: qa=N agent=N triage=N wq=N | dispatched=<N this turn>
 ```
+
+Per-slot `partial_tokens` (when the harness exposes it) and the cumulative total appear in the active-slots field as `<skill>@<N>` so the operator can post-mortem token-burn rates from the run log alone. Once a slot completes, its final total is written as a `slot_complete` line (see Phase 2 step 2).
 
 ### CRITICAL: This is an ACTIVE loop, not a passive wait
 
@@ -455,6 +515,7 @@ If `Phase 4` produces no new dispatches AND all class slots are non-empty (every
 2. **Worktree-guard preamble is mandatory** for `dev_orch` and `dev_target` dispatches. The subagent must ABORT if it lands in a main tree — no fallback.
 3. **One subagent per class.** Multiple classes run in parallel; never two `dev_orch` at once.
 4. **Token budget is a hard cap.** Stop at 2M cumulative reported tokens. Do not exceed.
+   - **Per-subagent caps (issue #395):** `subagent_max_tokens` (default 400k) suppresses re-dispatch into a class that has overspent in this session; `subagent_hard_max_tokens` (default 800k) abandons an in-flight slot and files a `needs-triage` issue. Soft must be `<=` hard. The point is to bound the blast radius of a single misbehaving subagent — without this, one looping `hydra-dev` BG can burn the whole 2M before Phase 3 trips. Caps are inert until tripped; a well-behaved 8h run uses none of this mechanism.
 5. **Cooldowns are per-class and skill-owned.** Do not pre-stamp from autopilot.
 6. **Circuit breaker is per-class.** 3 same-skill dispatches in 5 without board progress → skip that class.
 7. **`hydra-architect` is operator-only.** Never auto-dispatch.
@@ -482,6 +543,12 @@ HYDRA_AUTOPILOT_SCOPE=target-only claude --dangerously-skip-permissions -p "/hyd
 
 # Default: do everything (equivalent to omitting HYDRA_AUTOPILOT_SCOPE):
 HYDRA_AUTOPILOT_SCOPE=all claude --dangerously-skip-permissions -p "/hydra-autopilot"
+
+# Tighten per-subagent caps for a debugging session where the operator
+# is watching for runaways (issue #395). Defaults are 400k soft / 800k hard.
+HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS=200000 \
+HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS=300000 \
+  claude --dangerously-skip-permissions -p "/hydra-autopilot"
 ```
 
 The `--dangerously-skip-permissions` flag is REQUIRED. Headless `claude -p` denies all confirmation-required tool calls by default; without skip-permissions, the subagents the autopilot dispatches return `skill_denied` and Phase 2 reaps them as immediate failures.
