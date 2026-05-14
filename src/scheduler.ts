@@ -13,7 +13,10 @@ import { startCycle } from "./cycle.ts";
 import { sendNotification } from "./notify.ts";
 import { getMetricsTrend } from "./metrics.ts";
 import { _admin } from "./backlog.ts";
-const { getBacklogCounts, promoteToQueued, pruneOldDoneItems } = _admin;
+const { getBacklogCounts, promoteToQueued, pruneOldDoneItems, reapStaleClaims } = _admin;
+
+// Stale-claim reaper threshold (issue #374). Default 2h.
+const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
 import { runResearchLoop } from "./research-loop.ts";
 import { getPerCycleCostCapUsd } from "./cost-cap.ts";
 import { redisKeys } from "./redis-keys.ts";
@@ -690,6 +693,21 @@ async function runScheduledCycle(eventBus) {
     await checkBlockedEscalation(eventBus);
   } catch (err: any) {
     console.error(`[Scheduler] Blocked escalation check failed in scheduled cycle: ${err.message}`);
+  }
+
+  // Stale-claim reaper (issue #374) — release inProgress slots whose claimant
+  // is dead so the WIP cap stays drainable. Runs once per scheduler tick,
+  // before any work selection. Never throws; failures are logged.
+  try {
+    const reaperResult = await reapStaleClaims({ maxAgeMs: CLAIM_MAX_AGE_MS });
+    if (reaperResult.reaped.length > 0) {
+      console.log(
+        `[Scheduler] Stale-claim reaper released ${reaperResult.reaped.length} inProgress slot(s) (threshold ${CLAIM_MAX_AGE_MS}ms)`,
+      );
+    }
+  } catch (err: any) {
+    console.error(`[Scheduler] reapStaleClaims failed: ${err.message}`);
+    Sentry.addBreadcrumb({ category: "scheduler", message: `reapStaleClaims failed: ${err.message}`, level: "error" });
   }
 
   // Weekly summary — send once per week
