@@ -32,6 +32,7 @@ import {
   recordPattern as recordPatternImpl,
   consolidateAgentPatterns,
   consolidateStalePromotedRules,
+  consolidatePromotedRuleEffectiveness,
   migrateRulesToPatterns,
   backfillPromotionMetadata,
   PROMOTION_THRESHOLD as PROMOTION_THRESHOLD_VALUE,
@@ -341,6 +342,14 @@ export async function consolidate(): Promise<void> {
     await consolidateStalePromotedRules();
   } catch (err: any) {
     console.error(`[Learning] Stale rule consolidation failed: ${err.message}`);
+  }
+
+  // Issue #365 — auto-demote rules whose post-promotion firing rate proves
+  // the promotion never closed the loop. Best-effort; never throws.
+  try {
+    await consolidatePromotedRuleEffectiveness();
+  } catch (err: any) {
+    console.error(`[Learning] Promoted-rule effectiveness consolidation failed: ${err.message}`);
   }
 }
 
