@@ -69,6 +69,15 @@ export type MemoryPattern = {
   demotedAt?: string;
   /** Short machine-readable reason: "ineffective" | "manual" | "stale". */
   demotedReason?: string;
+  /**
+   * Issue #392 — discriminator identifying which call path produced this
+   * pattern. `codex-cycle` is the historical in-process control-loop writer
+   * (recordPlannerLesson / recordExecutorLesson / recordSkepticLesson) and
+   * `subagent` covers Claude-driven autopilot skills (hydra-dev / hydra-qa /
+   * hydra-target-build) that POST to /api/memory/subagent-lesson. Metadata
+   * only — does not alter the consolidation/promotion math.
+   */
+  source?: "codex-cycle" | "subagent";
 };
 
 /**
@@ -457,6 +466,12 @@ export function formatMemoryForPrompt(memory: string, agentName: string): string
 
 /**
  * Record a pattern directly (for POST /api/memory/:agent/pattern).
+ *
+ * The optional `source` discriminator (issue #392) lets callers tag whether
+ * the pattern came from the in-process codex cycle or from an autopilot
+ * subagent. It is metadata only — the consolidation/promotion pipeline is
+ * unchanged so existing 5-hit auto-promotion continues to apply regardless
+ * of who recorded the hits.
  */
 export async function recordPattern(
   agentName: string,
@@ -466,6 +481,7 @@ export async function recordPattern(
     action: string;
     example: string;
     cycleId: string;
+    source?: "codex-cycle" | "subagent";
   },
 ) {
   const patterns = await loadPatterns(agentName);
@@ -479,6 +495,7 @@ export async function recordPattern(
     existing.lastCycleId = details.cycleId;
     existing.action = details.action;
     existing.examples = [details.example, ...existing.examples].slice(0, MAX_EXAMPLES);
+    if (details.source) existing.source = details.source;
 
     if (existing.hitCount >= PROMOTION_THRESHOLD && !existing.promoted) {
       await promoteToFeedback(agentName, existing);
@@ -498,6 +515,7 @@ export async function recordPattern(
       action: details.action,
       examples: [details.example],
       promoted: false,
+      source: details.source,
     });
   }
 
