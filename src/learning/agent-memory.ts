@@ -31,7 +31,7 @@ import {
   getOldRules,
   deleteOldRules,
 } from "../redis-adapter.ts";
-import { keyExists, setString } from "../redis/kv.ts";
+import { keyExists, setString, listLPush, listRange, listTrim } from "../redis/kv.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
 
@@ -57,6 +57,18 @@ export type MemoryPattern = {
   promotedAt?: string;
   /** Hit count at the moment of promotion — baseline for post-promotion effectiveness. */
   hitsAtPromotion?: number;
+  /**
+   * ISO timestamp (full ISO, not date) when the effectiveness check last
+   * evaluated this pattern. Used to throttle alert/demote actions so we don't
+   * spam the operator with the same finding every cycle (issue #365).
+   */
+  lastEffectivenessCheckAt?: string;
+  /** Set true when the pattern was previously promoted but later demoted. */
+  demoted?: boolean;
+  /** ISO date the pattern was auto-demoted. */
+  demotedAt?: string;
+  /** Short machine-readable reason: "ineffective" | "manual" | "stale". */
+  demotedReason?: string;
 };
 
 /**
@@ -66,6 +78,13 @@ export type MemoryPattern = {
  * pre-promotion rate. Promotion is supposed to durably change agent behavior;
  * a flat or rising rate means the rule text isn't actually preventing the
  * failure mode it describes.
+ *
+ * Issue #365 — `rateRatio: null` (the JSON serialization of `Infinity`) is
+ * misleading in the API output. `rateRatioLabel` carries the human-readable
+ * form ("infinite" when there's no pre-promotion baseline, otherwise the
+ * numeric ratio formatted to two decimals). `reasonCode` distinguishes
+ * relative-rate failures from absolute-rate failures so downstream consumers
+ * (auto-demote, operator alerts) can act differently.
  */
 export type IneffectivePromotedPattern = {
   category: string;
@@ -77,8 +96,27 @@ export type IneffectivePromotedPattern = {
   preRate: number; // hits/day before promotion
   postRate: number; // hits/day after promotion
   rateRatio: number; // postRate / preRate (Infinity when preRate === 0)
+  rateRatioLabel: string; // "infinite" or "N.NN" — usable in JSON output
+  reasonCode: "rate-ratio" | "absolute-postrate" | "no-baseline";
   lastSeen: string;
 };
+
+// ===========================================================================
+// Effectiveness-check tuning knobs (issue #365)
+// ===========================================================================
+
+/** A pattern is flagged when postRate >= preRate * this multiplier. */
+export const RATE_RATIO_MULTIPLIER = 1.5;
+/** Or when postRate exceeds this absolute threshold *and* the rule has had
+ *  enough time on the floor (`ABSOLUTE_AGE_DAYS`). */
+export const ABSOLUTE_POSTRATE_THRESHOLD = 5; // hits/day
+export const ABSOLUTE_AGE_DAYS = 14;
+/** Demotion cooldown — re-checks of the same pattern within this window are
+ *  no-ops, preventing alert spam if the operator restarts the orchestrator. */
+export const EFFECTIVENESS_CHECK_COOLDOWN_HOURS = 24;
+/** Cap on the rule-action audit log to keep the Redis list bounded. */
+export const RULE_ACTION_LOG_CAP = 200;
+const RULE_ACTION_LOG_KEY = "hydra:learning:rule-actions";
 
 // ===========================================================================
 // Pattern storage
@@ -618,8 +656,29 @@ export function evaluatePromotedPatternEffectiveness(
   const postRate = hitsSincePromotion / Math.max(1, daysSincePromotion);
   const rateRatio = preRate === 0 ? (hitsSincePromotion > 0 ? Infinity : 0) : postRate / preRate;
 
+  // The pattern qualifies as "ineffective" if any of:
+  //   1. There is no pre-promotion baseline (preRate === 0, the backfill case)
+  //      AND the rule has continued firing post-promotion.
+  //   2. The post-promotion rate is at least as high as the pre-promotion rate
+  //      (i.e. promotion did nothing or made things worse).
+  // Note: the action layer (`processPromotedPatternEffectiveness`) applies a
+  // stricter `RATE_RATIO_MULTIPLIER` before auto-demoting, but the diagnostic
+  // endpoint surfaces anything that's not strictly improving.
   const ineffective = preRate === 0 ? hitsSincePromotion > 0 : postRate >= preRate;
   if (!ineffective) return null;
+
+  const reasonCode: IneffectivePromotedPattern["reasonCode"] =
+    preRate === 0
+      ? "no-baseline"
+      : postRate >= preRate * RATE_RATIO_MULTIPLIER
+        ? "rate-ratio"
+        : postRate >= ABSOLUTE_POSTRATE_THRESHOLD && daysSincePromotion >= ABSOLUTE_AGE_DAYS
+          ? "absolute-postrate"
+          : "rate-ratio";
+
+  const rateRatioLabel = Number.isFinite(rateRatio)
+    ? round2(rateRatio).toFixed(2)
+    : "infinite";
 
   return {
     category: p.category,
@@ -631,8 +690,39 @@ export function evaluatePromotedPatternEffectiveness(
     preRate: round2(preRate),
     postRate: round2(postRate),
     rateRatio: Number.isFinite(rateRatio) ? round2(rateRatio) : rateRatio,
+    rateRatioLabel,
+    reasonCode,
     lastSeen: p.lastSeen,
   };
+}
+
+/**
+ * Issue #365 — decide whether the effectiveness check should ACT on a
+ * pattern (auto-demote or alert), distinct from "should this surface in the
+ * diagnostic endpoint." The action threshold is intentionally stricter than
+ * the surface threshold so we never demote a rule that's merely flat.
+ *
+ * Returns the reason code when the pattern qualifies for action, null
+ * otherwise. The reason is propagated to the rule-action log and any
+ * auto-created `needs-info` issue.
+ */
+export function qualifiesForRuleAction(
+  ev: IneffectivePromotedPattern,
+): "rate-ratio" | "absolute-postrate" | "no-baseline" | null {
+  // 1. Strong relative-rate failure: postRate is at least RATE_RATIO_MULTIPLIER
+  //    times preRate. Doesn't apply when preRate is 0 (no baseline).
+  if (ev.preRate > 0 && ev.postRate >= ev.preRate * RATE_RATIO_MULTIPLIER) {
+    return "rate-ratio";
+  }
+  // 2. Absolute high firing rate after a long enough observation window —
+  //    even without a baseline, 5+ hits/day for two weeks is conclusive.
+  if (
+    ev.postRate >= ABSOLUTE_POSTRATE_THRESHOLD &&
+    ev.daysSincePromotion >= ABSOLUTE_AGE_DAYS
+  ) {
+    return ev.preRate === 0 ? "no-baseline" : "absolute-postrate";
+  }
+  return null;
 }
 
 function round2(n: number): number {
@@ -766,6 +856,323 @@ export async function backfillPromotionMetadata(): Promise<void> {
   } catch (err: any) {
     console.error(`[Learning] backfillPromotionMetadata: flag write failed (will retry next boot): ${err.message}`);
   }
+}
+
+// ===========================================================================
+// Issue #365 — Auto-demote / alert action on ineffective promoted rules
+// ===========================================================================
+
+export type RuleActionLogEntry = {
+  /** ISO timestamp of the action. */
+  ts: string;
+  agent: "planner" | "executor" | "skeptic";
+  category: string;
+  action: "demoted" | "alerted" | "skipped-cooldown" | "skipped-disabled";
+  reasonCode: IneffectivePromotedPattern["reasonCode"];
+  /** Snapshot of the metric envelope at the time of action. */
+  metrics: {
+    hitsSincePromotion: number;
+    daysSincePromotion: number;
+    preRate: number;
+    postRate: number;
+    rateRatioLabel: string;
+  };
+  /** Set when `action === "demoted"` and the feedback-file rewrite succeeded. */
+  feedbackFileRewritten?: boolean;
+  /** Free-form note (e.g. "auto-demote disabled via HYDRA_RULE_AUTO_DEMOTE"). */
+  note?: string;
+};
+
+/**
+ * Pure helper — remove a promoted-rule block from a feedback file by category
+ * heading. Returns `{ newContent, removed }` so the caller can decide whether
+ * to write the file. The match is anchored to `### <category> (...)` — exactly
+ * the heading format produced by `promoteToFeedback()`.
+ *
+ * Exported for unit tests (no I/O dependency).
+ */
+export function removePromotedRuleFromFeedback(
+  feedbackContent: string,
+  category: string,
+): { newContent: string; removed: boolean } {
+  const autoPromotedIdx = feedbackContent.indexOf("## Auto-Promoted Rules");
+  if (autoPromotedIdx === -1) return { newContent: feedbackContent, removed: false };
+
+  const staleIdx = feedbackContent.indexOf("## Stale Rules (review needed)", autoPromotedIdx);
+  const sectionEnd = staleIdx !== -1 ? staleIdx : feedbackContent.length;
+  const sectionContent = feedbackContent.slice(autoPromotedIdx, sectionEnd);
+
+  // Find headings inside the Auto-Promoted section. The block goes from this
+  // heading up to the next ### (or end of section).
+  const headingRegex = /^### .+$/gm;
+  const headings: { index: number; match: string }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = headingRegex.exec(sectionContent)) !== null) {
+    headings.push({ index: m.index, match: m[0] });
+  }
+
+  // Match heading that starts with `### <category> (` — the format produced
+  // by promoteToFeedback().
+  const headingPrefix = `### ${category} (`;
+  const targetIdx = headings.findIndex(h => h.match.startsWith(headingPrefix));
+  if (targetIdx === -1) return { newContent: feedbackContent, removed: false };
+
+  const target = headings[targetIdx];
+  const blockStartInSection = target.index;
+  const blockEndInSection =
+    targetIdx + 1 < headings.length ? headings[targetIdx + 1].index : sectionContent.length;
+
+  const absStart = autoPromotedIdx + blockStartInSection;
+  const absEnd = autoPromotedIdx + blockEndInSection;
+
+  let newContent = feedbackContent.slice(0, absStart) + feedbackContent.slice(absEnd);
+  // Collapse triple+ newlines produced by the removal.
+  newContent = newContent.replace(/\n{3,}/g, "\n\n");
+  return { newContent, removed: true };
+}
+
+/**
+ * Remove a promoted rule block from `config/feedback/to-{agent}.md`.
+ * Side-effecting wrapper around `removePromotedRuleFromFeedback()`.
+ * Returns true when the file was rewritten.
+ */
+export async function demotePromotedRuleFromFeedbackFile(
+  agentName: string,
+  category: string,
+): Promise<boolean> {
+  const feedbackPath = join(CONFIG_PATH, "feedback", `to-${agentName}.md`);
+  try {
+    const content = await readFile(feedbackPath, "utf-8");
+    const { newContent, removed } = removePromotedRuleFromFeedback(content, category);
+    if (!removed || newContent === content) return false;
+    await writeFile(feedbackPath, newContent);
+    return true;
+  } catch (err: any) {
+    console.error(
+      `[Learning] demotePromotedRuleFromFeedbackFile(${agentName}, ${category}) failed: ${err.message}`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Append a rule-action audit entry to the bounded Redis list. Tail entries
+ * past `RULE_ACTION_LOG_CAP` are trimmed away. Best-effort: log + swallow
+ * errors so a Redis blip can't break the daily consolidation pass.
+ */
+export async function recordRuleAction(entry: RuleActionLogEntry): Promise<void> {
+  try {
+    await listLPush(RULE_ACTION_LOG_KEY, JSON.stringify(entry));
+    await listTrim(RULE_ACTION_LOG_KEY, 0, RULE_ACTION_LOG_CAP - 1);
+  } catch (err: any) {
+    console.error(`[Learning] recordRuleAction failed: ${err.message}`);
+  }
+}
+
+/** Fetch the rule-action audit log (newest first), up to `limit` entries. */
+export async function getRuleActionLog(limit = 50): Promise<RuleActionLogEntry[]> {
+  try {
+    const raw = await listRange(RULE_ACTION_LOG_KEY, 0, Math.max(0, limit - 1));
+    const out: RuleActionLogEntry[] = [];
+    for (const r of raw) {
+      try {
+        out.push(JSON.parse(r));
+      } catch { /* intentional: skip unparseable log entries */ }
+    }
+    return out;
+  } catch (err: any) {
+    console.error(`[Learning] getRuleActionLog failed: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * Pure helper — given a pattern's `lastEffectivenessCheckAt` and a reference
+ * time, decide whether the cooldown has expired. Exported for tests.
+ */
+export function isEffectivenessCooldownExpired(
+  lastCheckIso: string | undefined,
+  now: Date = new Date(),
+  cooldownHours: number = EFFECTIVENESS_CHECK_COOLDOWN_HOURS,
+): boolean {
+  if (!lastCheckIso) return true;
+  const last = Date.parse(lastCheckIso);
+  if (Number.isNaN(last)) return true;
+  return now.getTime() - last >= cooldownHours * 60 * 60 * 1000;
+}
+
+/** True when `HYDRA_RULE_AUTO_DEMOTE` is not explicitly set to "false". */
+export function isAutoDemoteEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.HYDRA_RULE_AUTO_DEMOTE;
+  if (raw == null) return true;
+  return raw.trim().toLowerCase() !== "false" && raw.trim() !== "0";
+}
+
+/**
+ * Pure helper — given a single pattern that has already been classified
+ * ineffective + action-worthy, mutate it in place to reflect a demotion.
+ * Caller is responsible for the feedback-file rewrite + audit log.
+ */
+export function applyDemotionToPattern(p: MemoryPattern, todayIso: string): void {
+  p.promoted = false;
+  // Preserve a breadcrumb of the prior promotion for diagnostics.
+  // Note: hitsAtPromotion/promotedAt are cleared so the same pattern won't
+  // re-fire the effectiveness check on the very next cycle if hits keep
+  // climbing. If hitCount later reaches PROMOTION_THRESHOLD again, the
+  // standard sweep will re-promote with fresh metadata.
+  p.promotedAt = undefined;
+  p.hitsAtPromotion = undefined;
+  p.demoted = true;
+  p.demotedAt = todayIso.split("T")[0];
+  p.demotedReason = "ineffective";
+}
+
+/**
+ * Run the effectiveness check across all promoted patterns for a single
+ * agent. For each pattern that `qualifiesForRuleAction()` flags:
+ *   - if auto-demote is enabled, demote the pattern (Redis) + remove from
+ *     the feedback file + record `action: "demoted"`.
+ *   - if auto-demote is disabled, record `action: "alerted"` only.
+ *   - if the same pattern was already checked within the cooldown window,
+ *     record `action: "skipped-cooldown"` and move on.
+ *
+ * The `lastEffectivenessCheckAt` stamp is always updated, even when no
+ * action was taken, so cooldown applies uniformly.
+ *
+ * Returns the list of actions taken (excluding skips) — useful for the
+ * scheduler to log a one-line summary.
+ */
+export async function processPromotedPatternEffectiveness(
+  agentName: "planner" | "executor" | "skeptic",
+  now: Date = new Date(),
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<RuleActionLogEntry[]> {
+  const patterns = await loadPatterns(agentName);
+  if (patterns.length === 0) return [];
+
+  const nowIso = now.toISOString();
+  const today = nowIso.split("T")[0];
+  const autoDemote = isAutoDemoteEnabled(env);
+  const actions: RuleActionLogEntry[] = [];
+  let changed = false;
+
+  for (const p of patterns) {
+    if (!p.promoted) continue;
+    const ev = evaluatePromotedPatternEffectiveness(p, now);
+    if (!ev) continue;
+    const reasonCode = qualifiesForRuleAction(ev);
+    if (!reasonCode) continue;
+
+    // Cooldown — skip if checked recently.
+    if (!isEffectivenessCooldownExpired(p.lastEffectivenessCheckAt, now)) {
+      const entry: RuleActionLogEntry = {
+        ts: nowIso,
+        agent: agentName,
+        category: p.category,
+        action: "skipped-cooldown",
+        reasonCode,
+        metrics: {
+          hitsSincePromotion: ev.hitsSincePromotion,
+          daysSincePromotion: ev.daysSincePromotion,
+          preRate: ev.preRate,
+          postRate: ev.postRate,
+          rateRatioLabel: ev.rateRatioLabel,
+        },
+      };
+      await recordRuleAction(entry);
+      continue;
+    }
+
+    // Stamp the check time regardless of action so we honour cooldown next pass.
+    p.lastEffectivenessCheckAt = nowIso;
+
+    if (!autoDemote) {
+      const entry: RuleActionLogEntry = {
+        ts: nowIso,
+        agent: agentName,
+        category: p.category,
+        action: "skipped-disabled",
+        reasonCode,
+        metrics: {
+          hitsSincePromotion: ev.hitsSincePromotion,
+          daysSincePromotion: ev.daysSincePromotion,
+          preRate: ev.preRate,
+          postRate: ev.postRate,
+          rateRatioLabel: ev.rateRatioLabel,
+        },
+        note: "auto-demote disabled via HYDRA_RULE_AUTO_DEMOTE=false",
+      };
+      actions.push(entry);
+      await recordRuleAction(entry);
+      changed = true;
+      continue;
+    }
+
+    // Auto-demote path.
+    applyDemotionToPattern(p, today);
+    let feedbackFileRewritten = false;
+    try {
+      feedbackFileRewritten = await demotePromotedRuleFromFeedbackFile(agentName, p.category);
+    } catch (err: any) {
+      console.error(`[Learning] demote feedback rewrite failed for ${agentName}/${p.category}: ${err.message}`);
+    }
+    const entry: RuleActionLogEntry = {
+      ts: nowIso,
+      agent: agentName,
+      category: p.category,
+      action: "demoted",
+      reasonCode,
+      metrics: {
+        hitsSincePromotion: ev.hitsSincePromotion,
+        daysSincePromotion: ev.daysSincePromotion,
+        preRate: ev.preRate,
+        postRate: ev.postRate,
+        rateRatioLabel: ev.rateRatioLabel,
+      },
+      feedbackFileRewritten,
+    };
+    actions.push(entry);
+    await recordRuleAction(entry);
+    changed = true;
+    console.log(
+      `[Learning] Auto-demoted ${agentName}/${p.category} — ` +
+        `${ev.hitsSincePromotion} hits over ${ev.daysSincePromotion}d ` +
+        `(postRate=${ev.postRate}/day, preRate=${ev.preRate}/day, reason=${reasonCode})`,
+    );
+  }
+
+  if (changed) {
+    await savePatterns(agentName, patterns);
+  }
+  return actions;
+}
+
+/**
+ * Entry point invoked from `consolidate()` once per day. Runs the
+ * effectiveness check across planner/executor/skeptic. Always returns
+ * cleanly — Redis or feedback-file errors are logged but never thrown.
+ */
+export async function consolidatePromotedRuleEffectiveness(
+  now: Date = new Date(),
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<RuleActionLogEntry[]> {
+  const all: RuleActionLogEntry[] = [];
+  for (const agent of ["planner", "executor", "skeptic"] as const) {
+    try {
+      const taken = await processPromotedPatternEffectiveness(agent, now, env);
+      all.push(...taken);
+    } catch (err: any) {
+      console.error(`[Learning] consolidatePromotedRuleEffectiveness(${agent}) failed: ${err.message}`);
+    }
+  }
+  if (all.length > 0) {
+    const demoted = all.filter(a => a.action === "demoted").length;
+    const alerted = all.filter(a => a.action === "skipped-disabled").length;
+    console.log(
+      `[Learning] Rule-effectiveness pass: ${demoted} demoted, ${alerted} alerted (auto-demote disabled)`,
+    );
+  }
+  return all;
 }
 
 // ===========================================================================
