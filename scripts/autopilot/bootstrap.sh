@@ -16,14 +16,28 @@
 #   HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS    (default 800000 — hard cap)
 #   HYDRA_AUTOPILOT_SCOPE                       (default all | orch-only | target-only)
 #
+# Inputs (slash args, all optional; processed by args-parse.sh; args > env):
+#   --scope=<v>          --tokens=<N>          --token-budget=<N>
+#   --max-sec=<N>        --max-seconds=<N>     --idle-turns=<N>
+#   --subagent-soft=<N>  --subagent-hard=<N>
+#
+# Unknown args are warned-and-ignored (e.g. trailing `focus=...` tokens).
+#
 # Side effects:
 #   /tmp/hydra-autopilot-heartbeat.txt       (overwritten)
 #   /tmp/hydra-autopilot-nightly.log         (truncated; old → .prev)
 #   /tmp/hydra-autopilot-state.json          (initialized)
 #
-# Behavior-preserving extraction of the Phase 0 heredoc (issue #409).
+# Behavior-preserving extraction of the Phase 0 heredoc (issue #409),
+# with slash-arg parsing layered on top (issue #410).
 
 set -euo pipefail
+
+# Slash-arg parsing — must run BEFORE env reads below so explicit args
+# override implicit env (issue #410). Sourced (not exec'd) so the
+# exports land in this shell.
+# shellcheck source=./args-parse.sh
+. "$(dirname "$0")/args-parse.sh" "$@"
 
 # Heartbeat
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=$$ run_id=$(uuidgen)" > /tmp/hydra-autopilot-heartbeat.txt

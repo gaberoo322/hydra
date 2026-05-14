@@ -404,6 +404,26 @@ HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS=300000 \
 
 The `--dangerously-skip-permissions` flag is REQUIRED. Headless `claude -p` denies all confirmation-required tool calls by default; without skip-permissions, the subagents the autopilot dispatches return `skill_denied` and Phase 2 reaps them as immediate failures.
 
+#### Slash-arg form (interactive Claude sessions)
+
+When invoking `/hydra-autopilot` from inside a Claude session, the same knobs are exposed as `--key=value` slash args. Args win over env vars (explicit overrides implicit), so a one-off slash invocation can override a systemd-defined `Environment=` line without editing the unit file. Unknown args (e.g. trailing free-form tokens like `focus=codex-cli-removal`) emit a `[autopilot] WARN: unknown arg ...` line but are otherwise ignored — they survive in the run log as conversational context for the model.
+
+| Slash arg | Alias | Env equivalent |
+|---|---|---|
+| `--scope=<v>` | — | `HYDRA_AUTOPILOT_SCOPE` |
+| `--tokens=<N>` | `--token-budget=<N>` | `HYDRA_AUTOPILOT_TOKEN_BUDGET` |
+| `--max-sec=<N>` | `--max-seconds=<N>` | `HYDRA_AUTOPILOT_MAX_SEC` |
+| `--idle-turns=<N>` | — | `HYDRA_AUTOPILOT_IDLE_TURNS` |
+| `--subagent-soft=<N>` | — | `HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS` |
+| `--subagent-hard=<N>` | — | `HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS` |
+
+Examples:
+```text
+/hydra-autopilot --scope=orch-only
+/hydra-autopilot --tokens=500000 --max-sec=3600
+/hydra-autopilot --scope=target-only focus=codex-cli-removal   # focus= is logged but ignored
+```
+
 ### Scheduled invocation
 The provided systemd unit pair (`scripts/systemd/hydra-autopilot.{service,timer}`) fires `claude -p "/hydra-autopilot"` nightly at 22:00 local time. The service is `Type=oneshot` with `RuntimeMaxSec=32400` (9h) — slightly above the default wall-clock cap to allow Phase 7 drain. Failure handler routes to the existing `hydra-notify-failure@.service` template.
 
