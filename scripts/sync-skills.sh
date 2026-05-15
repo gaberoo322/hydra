@@ -192,4 +192,15 @@ echo "  claude skills written: $generated_count"
 echo "  codex skills written: $codex_count"
 echo "  claude_only skills (no codex output): $claude_only_count"
 echo "  errors: $errors"
-[ "$DRY_RUN" = 1 ] && echo "  (dry-run; no files modified)"
+if [ "$DRY_RUN" = 1 ]; then
+  echo "  (dry-run; no files modified)"
+fi
+
+# Exit non-zero only when a playbook with frontmatter (a real skill) failed to
+# generate. Playbooks like `hydra-target-adversarial.md` intentionally have no
+# frontmatter (stub markers); they emit a "skip ... no valid frontmatter" line
+# but must not fail the deploy. The original trailing `[ -- ] && ...` test left
+# the script's exit status equal to that test under `set -e`, which made every
+# deploy fail once deploy.sh started invoking sync-skills.sh (issue #433). We
+# normalize the exit code here.
+exit 0

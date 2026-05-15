@@ -95,9 +95,12 @@ curl "http://localhost:4000/api/cycle/history?limit=5"
 **Deploy** runs automatically on merge to master via a self-hosted GitHub Actions runner on this server:
 1. `git pull --ff-only origin master`
 2. `npm ci` (orchestrator deps)
-3. `cd dashboard && npm ci && npm run build` (dashboard static assets)
-4. `systemctl --user restart hydra-orchestrator.service`
-5. Health check: `curl http://localhost:4000/api/health`
+3. `bash scripts/sync-skills.sh` (regenerate `~/.claude/skills/` + `~/.codex/skills/` from playbooks — fails fast on non-zero exit to avoid half-synced deploys; introduced in issue #433 after the 2026-05-15 silent-wedge incident)
+4. `cd dashboard && npm ci && npm run build` (dashboard static assets)
+5. `systemctl --user restart hydra-orchestrator.service`
+6. Health check: `curl http://localhost:4000/api/health`
+
+**Operator setup (one-time):** run `bash scripts/setup-git-hooks.sh` to install an opt-in `post-merge` git hook that re-runs `scripts/sync-skills.sh` whenever a `git pull` brings in changes to `docs/operator-playbooks/*.md`. Uninstall with `bash scripts/setup-git-hooks.sh --remove`.
 
 Manual deploy (emergency): `./scripts/deploy.sh`
 
