@@ -59,6 +59,15 @@ Each tick:
 | signal | `discover_orch` | hydra-discover |
 | signal | `discover_target` | hydra-target-discover |
 
+> **Phase A placeholder (issue #437):** the **`design_concept_orch`** and
+> **`design_concept_target`** pipeline slots — backed by the new
+> [`hydra-grill`](./hydra-grill.md) skill — are **introduced but not yet
+> wired**. The skill is operator-invocable today (`/hydra-grill <anchor>
+> <scope>`) and produces a Redis-backed design-concept artifact, but
+> `decide.py` does NOT yet refuse `dev_orch` / `dev_target` dispatch when an
+> artifact is missing. Wiring lands in Phase B of #437. Until then, treat
+> these classes as documented placeholders in the taxonomy.
+
 Pipeline slots: at most one subagent per slot in flight. Signal classes
 track only their last-fired timestamp under `signal_last_fired` — no
 slot semantics, just cooldowns. The scope filter (`limits.scope`) is an
