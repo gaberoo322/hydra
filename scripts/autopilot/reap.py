@@ -47,6 +47,14 @@ REPO = os.environ.get("HYDRA_AUTOPILOT_REPO", "gaberoo322/hydra")
 
 REAPED_TASK_IDS_CAP = 1000
 
+# Code-writing skills whose completions trip a cycle-record write
+# (issue #430). QA, research, and discover dispatches are subagent work but
+# don't fit the "cycle" semantic — a cycle here is one autopilot turn that
+# dispatched a code-writing class (ADR-0006). Sweeping/research dispatches
+# stay observable via the run log and the existing capacity writeback.
+CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build"}
+CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
+
 
 def _append_log(line: str) -> None:
     """Append one line to the run log, best-effort. Never raises."""
@@ -86,6 +94,50 @@ def _bound_reaped(ids: list[str]) -> list[str]:
     return ids
 
 
+def _fire_cycle_record(
+    task_id: str,
+    skill: str | None,
+    status: str,
+    total_tokens: int,
+) -> None:
+    """Best-effort POST to /api/autopilot/cycle-record (issue #430).
+
+    Only fires for code-writing dispatches (hydra-dev / hydra-target-build) —
+    that's the post-PR-3 definition of an autopilot "cycle". Failures are
+    swallowed: cycle-record writes are observability, not correctness, and
+    must never block the reap path. The cycle-record endpoint is itself
+    idempotent on cycleId, so retries are safe.
+
+    The cycleId we send is the autopilot task_id, which the harness allocates
+    once per dispatch — that gives natural dedup across retries.
+    """
+    if not skill or skill not in CYCLE_RECORD_SKILLS:
+        return
+    if not CYCLE_RECORD_SCRIPT.exists():
+        return
+    try:
+        subprocess.run(
+            [
+                "bash",
+                str(CYCLE_RECORD_SCRIPT),
+                "cycle-record",
+                task_id,
+                status,
+                skill,
+                "",  # pr_number — not known at reap time; capacity-writeback
+                     # carries the PR number on the merged path.
+                "",  # task_title
+                "",  # anchor_ref
+                "0",  # duration_ms — reap doesn't track wall-clock per task
+            ],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _append_log(f"cycle_record_skipped task_id={task_id} err={exc}")
+
+
 def run_hardcap() -> int:
     """Default mode: hard-cap enforcement against `partial_tokens`."""
     s = _load_state()
@@ -93,19 +145,22 @@ def run_hardcap() -> int:
         return 0
     hard = s["limits"]["subagent_hard_max_tokens"]
     soft = s["limits"]["subagent_max_tokens"]
-    runaways: list[tuple[str, str, int]] = []
+    # (class, skill, partial_tokens, task_id) — capture task_id before we
+    # null the slot so the cycle-record post can dedup on it (issue #430).
+    runaways: list[tuple[str, str, int, str]] = []
     for cls, slot in list(s["slots"].items()):
         if slot is None:
             continue
         partial = slot.get("partial_tokens") or 0
         if partial >= hard:
             # Hard-cap trip: abandon slot, file diagnostic issue, mark class burned.
-            runaways.append((cls, slot.get("skill", "?"), partial))
+            task_id = slot.get("task_id") or f"hardcap-{cls}-{partial}"
+            runaways.append((cls, slot.get("skill", "?"), partial, task_id))
             s["slots"][cls] = None
             if cls not in s.get("burned_classes", []):
                 s.setdefault("burned_classes", []).append(cls)
     _save_state(s)
-    for cls, skill, tokens in runaways:
+    for cls, skill, tokens, task_id in runaways:
         title = f"Subagent token-runaway: {skill} burned {tokens} tokens"
         body = (
             f"Autopilot abandoned a `{cls}` slot running `{skill}` at "
@@ -122,6 +177,11 @@ def run_hardcap() -> int:
             check=False,
         )
         print(f"[autopilot] HARD-CAP TRIP class={cls} skill={skill} tokens={tokens} -> issue filed, slot cleared")
+        # Issue #430: hard-cap is a definitive failure — record it so the
+        # cycles-failed counter advances and discover/digest see the signal.
+        # task_id was captured before the slot was cleared so dedup holds
+        # across re-runs of the hard-cap pass.
+        _fire_cycle_record(task_id, skill, "failed", tokens)
     return 0
 
 
@@ -213,6 +273,17 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     )
     print(f"[autopilot] {line}")
     _append_log(line)
+
+    # Issue #430: fire a cycle-record write for code-writing classes so
+    # /api/cycle/history and /api/metrics reflect post-PR-3 reality. Status
+    # at reap time is "completed" — the autopilot doesn't know merge vs
+    # abandon until later (the auto-merge action handler bumps it via the
+    # idempotent endpoint with status=merged). For runaway/burned reaps
+    # we tag the cycle as "failed" so the cycles-failed counter ticks.
+    soft_cap_hit = soft is not None and total_tokens >= soft
+    status = "failed" if soft_cap_hit else "completed"
+    _fire_cycle_record(task_id, skill, status, total_tokens)
+
     return 0
 
 

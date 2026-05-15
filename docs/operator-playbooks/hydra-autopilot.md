@@ -74,7 +74,7 @@ INV-008.
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
 | `update-branch` | `Bash` → `gh pr update-branch` |
 | `queue-decision` | `Bash` → `./scripts/autopilot/queue-decision.sh ...` |
-| `reap` | `Bash` → `./scripts/autopilot/reap.py completion ...` |
+| `reap` | `Bash` → `./scripts/autopilot/reap.py completion ...` (also fires `dispatch.sh cycle-record` for `hydra-dev` / `hydra-target-build`; see Phase 6) |
 | `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7 |
 | `wait` | sleep N; re-enter loop |
 | `wait-for-api` | `curl --retry`; re-enter loop |
@@ -88,7 +88,37 @@ INV-008.
 - **Phase 3** — `decide.py decide state.json cands.json events.json` returns the plan
 - **Phase 4** — `assert_invariants.py plan.json state.json`
 - **Phase 5** — model executes each action via the table above
-- **Phase 6** — sleep until next event or 15-min heartbeat
+- **Phase 6** — cycle-record write (#430) + sleep until next event or 15-min heartbeat
+
+### Phase 6 cycle-record contract (issue #430)
+
+After PR-3 (#383) deleted the in-process control loop, `src/cycle.ts`
+declared that autopilot subagents would write their own `hydra:cycle:*`
+records. That handoff is implemented by `POST /api/autopilot/cycle-record`
+(see `src/api/autopilot.ts`), invoked via `dispatch.sh cycle-record`.
+
+Two callers fire the write:
+
+1. **`reap.py completion`** — when a code-writing class (`hydra-dev` /
+   `hydra-target-build`) reaps, it fires cycle-record with `status=completed`
+   (or `status=failed` if the soft cap was tripped). The autopilot task_id
+   is the `cycleId`, which gives natural dedup across retries.
+2. **`auto-merge` action** — after `gh pr merge --auto --squash` succeeds,
+   the model SHOULD fire a follow-up `dispatch.sh cycle-record <task_id>
+   merged <skill> <pr_number> "<title>" "<anchor>" <duration_ms>` so the
+   `cycles-merged` lifetime counter and `/api/metrics` reflect the merge.
+   Idempotent on cycleId — a duplicate post is a no-op.
+
+`dispatch.sh cycle-record` is best-effort: a 5xx or unreachable API is logged
+to the nightly run log and the autopilot proceeds. The write covers three
+surfaces atomically server-side:
+
+- `hydra:cycle:<id>` hash + `hydra:cycle:index` ZSET → `/api/cycle/history`
+- `hydra:metrics:<id>` via `recordCycleMetrics(source: "claude")` →
+  `/api/metrics` and `/api/scheduler/status.mergeRateWindow`
+- `hydra:scheduler:cycles-{run,merged,failed}` lifetime counters →
+  `/api/scheduler/status.mergeRateLifetime`
+
 - **Phase 7** — `drain.sh <merged_prs>` + final `hydra-digest` dispatch
 
 ## Phase 0 schema-version handshake (issue #434)
