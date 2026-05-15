@@ -487,7 +487,33 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         plan.debug["terminate"] = term.get("cause")
         return plan
 
-    # 2. Completion reaps first (INV-006 — reap before dispatch)
+    # 2. Completion reaps first (INV-006 — reap before dispatch).
+    #
+    # This loop is the ONLY producer of `reap` actions, and it MUST fire
+    # for every subagent completion — pipeline (dev_orch, qa_orch,
+    # research_orch + _target peers) OR signal (health, sweep_orch,
+    # sweep_target, discover_orch, discover_target).
+    #
+    # Why this is load-bearing (issue #432): cumulative_tokens is the
+    # input to the budget-exhaustion termination check (INV-005). If a
+    # completion event is dropped here, the autopilot silently
+    # mis-reports its token spend and may run past the budget.
+    #
+    # Contract — the playbook (or any caller building events.json) MUST
+    # emit one event per TaskNotification, regardless of class kind:
+    #   {"type": "completion",
+    #    "slot": "<class>",        # pipeline class OR signal class
+    #    "task_id": "<task_id>",
+    #    "total_tokens": <int>,
+    #    "skill": "<skill name>"}
+    # The `class` key is accepted as a synonym of `slot` for callers that
+    # prefer that wording for signal classes. Both work identically.
+    #
+    # We intentionally do NOT filter by PIPELINE_SLOTS / SIGNAL_CLASSES
+    # membership here. A reap for an unknown class is still safer than a
+    # missed reap — reap.py is idempotent and the unknown-class path is a
+    # no-op on slot bookkeeping. Filtering would risk silently dropping
+    # signal completions, which is exactly the bug this issue fixed.
     for ev in events:
         if ev.get("type") != "completion":
             continue
@@ -563,8 +589,15 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         dispatched_any = True
 
     # 5. Signal classes — each is independent. Health pre-empts when sick.
+    # Signal classes also respect `burned_classes`: if reap.py burned a
+    # signal class on soft-cap (issue #432 — a runaway hydra-discover),
+    # we must NOT re-dispatch it for the rest of this session, mirroring
+    # the pipeline-slot suppression in step 4. Before #432 this check
+    # was missing and only pipeline slots were honored.
     for sig in ("health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"):
         if scope_excluded(scope, sig):
+            continue
+        if sig in burned:
             continue
         action = _select_for_signal(sig, state, events, now)
         if action is None:

@@ -315,6 +315,101 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
     }
   });
 
+  // ---------------------------------------------------------------------
+  // Signal-class reap (issue #432)
+  // ---------------------------------------------------------------------
+  //
+  // Until #432 the soft-cap burn was nested inside the `if slot is not
+  // None` branch in reap.py, which meant signal classes (health,
+  // sweep_*, discover_*) — which never occupy a slot — could run hot
+  // without ever getting burned. cumulative_tokens still incremented,
+  // but a runaway hydra-discover would keep getting re-dispatched.
+  // These tests pin the fix.
+
+  test("ISSUE-432: signal-class completion increments cumulative_tokens (no slot to clear)", () => {
+    const tmp = makeTempState();
+    try {
+      // Fresh state — no slot occupied. Signal classes never had one.
+      writeBaseState(tmp.state, {
+        slots: {
+          dev_orch: null, qa_orch: null, research_orch: null,
+          dev_target: null, qa_target: null, research_target: null,
+        },
+      });
+      const r = runReap(
+        ["completion", "discover_orch", "aa6ce268f0b849876", "42500", "hydra-discover"],
+        tmp,
+      );
+      assert.equal(r.status, 0, `signal reap failed: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(
+        s.cumulative_tokens,
+        42500,
+        "signal-class completion must accumulate tokens (was 0 before #432 fix)",
+      );
+      assert.deepEqual(
+        s.reaped_task_ids,
+        ["aa6ce268f0b849876"],
+        "signal task_id must be appended to the dedup ledger",
+      );
+      // state.slots must not gain a new key.
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(s.slots, "discover_orch"),
+        false,
+        "signal class must NOT pollute state.slots (pipeline-only)",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ISSUE-432: signal-class completion still gets soft-cap burned when tokens >= soft", () => {
+    // Latent bug fixed alongside #432: signal classes could never get
+    // burned because the burn logic was inside the pipeline-only branch.
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state);
+      const OVER_SOFT = 500_000; // > 400k soft cap
+      const r = runReap(
+        ["completion", "discover_orch", "runaway-task", String(OVER_SOFT), "hydra-discover"],
+        tmp,
+      );
+      assert.equal(r.status, 0);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.ok(
+        s.burned_classes.includes("discover_orch"),
+        "runaway signal class must be burned on soft-cap trip (was missing pre-#432)",
+      );
+      assert.equal(s.cumulative_tokens, OVER_SOFT);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ISSUE-432: signal-class reap is idempotent (dup_skip on second call)", () => {
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state);
+      const TASK = "a0d9717fb4681215c";
+      const r1 = runReap(
+        ["completion", "sweep_orch", TASK, "18200", "hydra-sweep"],
+        tmp,
+      );
+      assert.equal(r1.status, 0);
+      const r2 = runReap(
+        ["completion", "sweep_orch", TASK, "18200", "hydra-sweep"],
+        tmp,
+      );
+      assert.equal(r2.status, 0);
+      assert.match(r2.stdout, /dup_skip task_id=a0d9717fb4681215c/);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(s.cumulative_tokens, 18200, "duplicate signal reap must not double-count");
+      assert.deepEqual(s.reaped_task_ids, [TASK]);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("default invocation (no subcommand) still runs hard-cap enforcement", () => {
     // Sanity check that adding the `completion` subcommand did not
     // regress the pre-existing default-mode behaviour exercised by

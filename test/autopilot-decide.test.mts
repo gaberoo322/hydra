@@ -419,6 +419,138 @@ describe("decide.py — completion reap ordering (INV-006)", () => {
     assert.ok(firstDispatch !== -1, "expected at least one dispatch");
     assert.ok(firstReap < firstDispatch, `reap (${firstReap}) must precede dispatch (${firstDispatch}) per INV-006`);
   });
+
+  // -------------------------------------------------------------------------
+  // Signal-class completion reap (issue #432)
+  // -------------------------------------------------------------------------
+  //
+  // Motivating observation (autopilot run 2026-05-15T17:57Z): two
+  // signal-driven dispatches (discover_orch task aa6ce268f0b849876 and
+  // sweep_orch task a0d9717fb4681215c) ran to completion and emitted
+  // task-notifications, but the final state.json showed
+  // `cumulative_tokens: 0` and `reaped_task_ids: []`. The reap path was
+  // silently skipped for signal-class completions because the playbook /
+  // model treated reap as pipeline-only (signal classes have no slot to
+  // clear in state.slots, so the mental model was "nothing to reap").
+  //
+  // decide.py's reap-emission MUST fire for every completion event,
+  // regardless of whether the class is one of the 6 PIPELINE_SLOTS or
+  // one of the 5 SIGNAL_CLASSES. These tests pin that contract so the
+  // bug cannot silently regress when the model is refactored.
+
+  test("ISSUE-432: reap action emitted for discover_orch (signal) completion", () => {
+    // Reproduces the failing case from 2026-05-15T17:57Z exactly:
+    // a signal-driven dispatch completes and reports tokens. decide.py
+    // must emit a reap action so reap.py increments cumulative_tokens
+    // and appends the task_id to reaped_task_ids.
+    const state = baseState();
+    const events = [{
+      type: "completion",
+      slot: "discover_orch",
+      task_id: "aa6ce268f0b849876",
+      total_tokens: 42_500,
+      skill: "hydra-discover",
+    }];
+    const plan = runDecide(state, null, events);
+    const reap = findAction(plan, (a) => a.type === "reap" && a.task_id === "aa6ce268f0b849876");
+    assert.ok(reap, "decide.py MUST emit a reap action for signal-class completion (#432)");
+    assert.equal(reap.slot, "discover_orch", "reap action must carry the signal class as its slot");
+    assert.equal(reap.total_tokens, 42_500);
+    assert.equal(reap.skill, "hydra-discover");
+  });
+
+  test("ISSUE-432: reap action emitted for sweep_orch (signal) completion", () => {
+    // Second motivating task from the same run — pin both, not just one,
+    // so a partial regression (e.g. a hardcoded class allowlist) is caught.
+    const state = baseState();
+    const events = [{
+      type: "completion",
+      slot: "sweep_orch",
+      task_id: "a0d9717fb4681215c",
+      total_tokens: 18_200,
+      skill: "hydra-sweep",
+    }];
+    const plan = runDecide(state, null, events);
+    const reap = findAction(plan, (a) => a.type === "reap" && a.task_id === "a0d9717fb4681215c");
+    assert.ok(reap, "decide.py MUST emit a reap action for sweep_orch completion (#432)");
+    assert.equal(reap.slot, "sweep_orch");
+    assert.equal(reap.total_tokens, 18_200);
+  });
+
+  test("ISSUE-432: reap fires for every signal class (parametric)", () => {
+    // Parameterised across all 5 signal classes — protects against a
+    // future refactor that hardcodes the pipeline subset.
+    const SIGNAL_CLASSES = [
+      "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
+    ];
+    for (const cls of SIGNAL_CLASSES) {
+      const events = [{
+        type: "completion",
+        slot: cls,
+        task_id: `task-${cls}`,
+        total_tokens: 1_000,
+        skill: "test-skill",
+      }];
+      const plan = runDecide(baseState(), null, events);
+      const reap = findAction(plan, (a) => a.type === "reap" && a.task_id === `task-${cls}`);
+      assert.ok(reap, `decide.py MUST emit a reap for signal class ${cls!} completion`);
+      assert.equal(reap.slot, cls);
+    }
+  });
+
+  test("ISSUE-432: reap fires when completion event uses `class` field instead of `slot`", () => {
+    // decide.py accepts `slot` OR `class` for the class field — pin both
+    // wire-formats so a caller emitting `class` (semantically natural for
+    // signal classes) doesn't silently lose its completion.
+    const events = [{
+      type: "completion",
+      class: "discover_target",       // ← `class`, not `slot`
+      task_id: "task-class-key",
+      total_tokens: 5_000,
+      skill: "hydra-target-discover",
+    }];
+    const plan = runDecide(baseState(), null, events);
+    const reap = findAction(plan, (a) => a.type === "reap" && a.task_id === "task-class-key");
+    assert.ok(reap, "decide.py must accept `class` as a synonym of `slot` on completion events");
+    assert.equal(reap.slot, "discover_target");
+  });
+
+  test("ISSUE-432: pipeline + signal completions in the same tick BOTH produce reap actions", () => {
+    // The realistic case during a busy autopilot tick: one pipeline
+    // subagent and one signal subagent finish together. Both must reap.
+    const state = baseState({
+      slots: {
+        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 0 },
+        qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+      },
+    });
+    const events = [
+      { type: "completion", slot: "dev_orch", task_id: "pipe-1", total_tokens: 50_000, skill: "hydra-dev" },
+      { type: "completion", slot: "discover_orch", task_id: "sig-1", total_tokens: 30_000, skill: "hydra-discover" },
+    ];
+    const plan = runDecide(state, null, events);
+    const reapPipe = findAction(plan, (a) => a.type === "reap" && a.task_id === "pipe-1");
+    const reapSig = findAction(plan, (a) => a.type === "reap" && a.task_id === "sig-1");
+    assert.ok(reapPipe, "pipeline completion must produce a reap");
+    assert.ok(reapSig, "signal completion in the same tick must ALSO produce a reap");
+    assert.equal(reapPipe.slot, "dev_orch");
+    assert.equal(reapSig.slot, "discover_orch");
+  });
+
+  test("ISSUE-432: signal class in burned_classes is NOT re-dispatched", () => {
+    // Latent bug spotted while fixing #432: the signal-class dispatch
+    // loop in decide.py didn't check `burned_classes`. After reap.py
+    // burns a signal class on a soft-cap trip, the next tick would
+    // happily re-dispatch the runaway. This test pins the suppression.
+    const state = baseState({
+      burned_classes: ["discover_orch"],
+      signals: { orch_idle: true },     // would trigger discover_orch
+    });
+    const plan = runDecide(state, null);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_orch");
+    assert.equal(dispatch, undefined, "burned signal class must not be re-dispatched");
+  });
 });
 
 // ---------------------------------------------------------------------------
