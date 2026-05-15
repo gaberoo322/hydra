@@ -126,15 +126,29 @@ SCHEMA_VERSION=2
 # Schema migration (issue #426 decision brain rewrite):
 #   - `slots` now contains the 6 fixed pipeline slots only
 #     (dev_orch / qa_orch / research_orch + their _target peers).
+#     ALL SIX KEYS MUST BE PRESENT (as `null`) — issue #431. The first
+#     successful γ run (2026-05-15) observed `slots: {}` because an
+#     earlier bootstrap variant emitted an empty dict; downstream
+#     defensive `slots.get(cls)` reads in decide.py and
+#     assert_invariants.py masked the bug, but INV-002's `slots.items()`
+#     iteration over an empty dict silently allowed any dispatch.
+#     Pin the 6-key schema here; tests in test/autopilot-scripts.test.mts
+#     and test/autopilot-invariants.test.mts enforce both shapes.
 #   - The previous signal-driven classes (health / sweep_* / discover_*)
 #     no longer occupy slots; they track only their last-fired timestamp
 #     under `signal_last_fired`, replacing the legacy
-#     `/tmp/hydra-last-*.txt` files.
+#     `/tmp/hydra-last-*.txt` files. ALL FIVE KEYS MUST BE PRESENT
+#     (as `0`) for the same reason.
 #   - `failure_log` is a new ring buffer of structured failure records
 #     consumed by `self_heal.py` (issue #426 self-heal table).
 #   - `reaped_task_ids` (issue #411) and `burned_classes` (issue #395)
 #     are preserved unchanged.
 #   - `schema_version` (issue #434) participates in the Phase 0 handshake.
+#
+# Backward compat: this heredoc OVERWRITES the existing file. A v1
+# legacy state.json (or a v2 state.json with `slots: {}` empty) is
+# clobbered on each bootstrap, so no migration path is needed —
+# bootstrap is always run before the brain reads state.
 cat > /tmp/hydra-autopilot-state.json <<EOF
 {
   "started": "${STARTED_AT}",

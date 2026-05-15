@@ -135,6 +135,46 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     assert.match(r.stderr, /INV-002/);
   });
 
+  // Issue #431: bootstrap.sh must initialize all 6 named slot keys, but
+  // older state.json files (and a regressed bootstrap variant) can carry
+  // an empty `slots: {}` or a partial dict. assert_invariants.py must not
+  // crash on these inputs, and INV-002 must still catch in-plan
+  // double-dispatches when the slot key is initially absent.
+  test("INV-002: empty slots dict does not crash and permits a fresh dispatch", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "dev_orch", skill: "hydra-dev" }] };
+    const state = baseState({ slots: {} });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 0, `expected OK on empty slots dict, got: ${r.stderr}`);
+  });
+
+  test("INV-002: partially-initialized slots — dispatch into missing-key slot is allowed", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "qa_orch", skill: "hydra-qa" }] };
+    // Only dev_orch present; qa_orch key absent entirely.
+    const state = baseState({
+      slots: {
+        dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 0 },
+      },
+    });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 0, `expected OK on missing-key slot, got: ${r.stderr}`);
+  });
+
+  test("INV-002: partially-initialized slots — double-dispatch in plan still blocked", () => {
+    // slots dict has no qa_orch key, but two dispatches in the same plan
+    // must still trip — the within-plan tracking (occupied.add) is the
+    // last line of defense before bootstrap.sh runs the next tick.
+    const plan = {
+      actions: [
+        { type: "dispatch", slot: "qa_orch", skill: "hydra-qa" },
+        { type: "dispatch", slot: "qa_orch", skill: "hydra-qa" },
+      ],
+    };
+    const state = baseState({ slots: {} });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /INV-002/);
+  });
+
   test("INV-003: dispatch into burned class is rejected", () => {
     const plan = { actions: [{ type: "dispatch", slot: "qa_orch", skill: "hydra-qa" }] };
     const state = baseState({ burned_classes: ["qa_orch"] });

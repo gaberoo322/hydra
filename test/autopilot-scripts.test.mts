@@ -161,6 +161,66 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
   });
+
+  // Issue #431: pin the 11-key schema as a single explicit smoke test so a
+  // future bootstrap edit that drops one of the named null keys fails
+  // loudly. The split assertions above (lines 94-107) already check this,
+  // but a consolidated key-count assertion documents the contract.
+  test("emits exactly 6 pipeline slot names + 5 signal_last_fired names (11 keys total)", () => {
+    const tmp = makeTempState();
+    try {
+      const r = runBootstrap({}, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+
+      const pipelineSlots = ["dev_orch", "qa_orch", "research_orch", "dev_target", "qa_target", "research_target"];
+      const signalKeys = ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"];
+
+      assert.deepEqual(Object.keys(s.slots).sort(), [...pipelineSlots].sort(),
+        "slots dict must contain exactly the 6 named pipeline keys");
+      assert.deepEqual(Object.keys(s.signal_last_fired).sort(), [...signalKeys].sort(),
+        "signal_last_fired dict must contain exactly the 5 named signal keys");
+      assert.equal(
+        Object.keys(s.slots).length + Object.keys(s.signal_last_fired).length,
+        11,
+        "schema must declare 11 named keys (6 pipeline + 5 signal) — see issue #431"
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #431 — backward compat. The first γ run observed an existing
+  // state.json with `pipeline: {}` (a misnamed empty dict from an older
+  // bootstrap variant). bootstrap.sh uses `cat > state.json` which
+  // unconditionally overwrites — verify this works for arbitrary
+  // pre-existing shapes without crash.
+  test("overwrites a legacy/malformed pre-existing state.json without crashing", () => {
+    const tmp = makeTempState();
+    try {
+      // Seed the canonical /tmp path with a legacy shape — bootstrap should
+      // clobber it on the next run.
+      writeFileSync("/tmp/hydra-autopilot-state.json", JSON.stringify({
+        pipeline: {},  // misnamed empty dict observed in the wild
+        signal_last_fired: {},  // partially-initialized
+        cumulative_tokens: 999999,
+        legacy_field: "should be gone after overwrite",
+      }));
+      const r = runBootstrap({}, tmp);
+      assert.equal(r.status, 0, `bootstrap should not crash on legacy state: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      // New shape replaces the old completely.
+      assert.equal(s.cumulative_tokens, 0, "fresh bootstrap must reset cumulative_tokens");
+      assert.equal((s as Record<string, unknown>).legacy_field, undefined,
+        "stale fields must be dropped on overwrite");
+      assert.equal((s as Record<string, unknown>).pipeline, undefined,
+        "legacy `pipeline` key must not survive the overwrite — canonical key is `slots`");
+      assert.equal(Object.keys(s.slots).length, 6, "slots must be re-initialized with 6 named keys");
+      assert.equal(Object.keys(s.signal_last_fired).length, 5, "signal_last_fired must be re-initialized with 5 named keys");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("scripts/autopilot/term-check.py", () => {
