@@ -9,6 +9,7 @@ import { createHealthRouter } from "./api/health.ts";
 import { createResearchRouter } from "./api/research.ts";
 import { createBacklogRouter } from "./api/backlog.ts";
 import { createSpecsRouter } from "./api/specs.ts";
+import { createDesignConceptsRouter } from "./api/design-concepts.ts";
 import { createSchedulerRouter } from "./api/scheduler.ts";
 import { createProposalsRouter } from "./api/proposals.ts";
 import { createMetricsRouter } from "./api/metrics.ts";
@@ -60,6 +61,7 @@ function createApi(eventBus) {
   api.use(createResearchRouter(eventBus));
   api.use(createBacklogRouter());
   api.use(createSpecsRouter());
+  api.use(createDesignConceptsRouter());
   api.use(createSchedulerRouter(eventBus));
   api.use(createProposalsRouter(eventBus));
   api.use(createMetricsRouter());
