@@ -14,6 +14,11 @@ export const redisKeys = {
   cycleActive: () => "hydra:cycle:active",
   cycleLast: () => "hydra:cycle:last",
   cycle: (id: string) => `hydra:cycle:${id}`,
+  // Index of cycle IDs scored by Date.now() — written by the autopilot
+  // cycle-record endpoint (issue #430). /api/cycle/history continues to
+  // read the per-cycle hashes via KEYS, but the index lets dashboards and
+  // downstream consumers paginate without an O(N) scan.
+  cycleIndex: () => "hydra:cycle:index",
   cycleTasks: (id: string) => `hydra:cycle:${id}:tasks`,
   cycleAgents: (id: string) => `hydra:cycle:${id}:agents`,
   cycleCosts: (id: string) => `hydra:cycle:${id}:costs`,
