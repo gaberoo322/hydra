@@ -98,7 +98,19 @@ fi
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_EPOCH="$(date -u +%s)"
 
-# Initialize state file — limits are now first-class members
+# Initialize state file — limits are now first-class members.
+#
+# Schema migration (issue #426 decision brain rewrite):
+#   - `slots` now contains the 6 fixed pipeline slots only
+#     (dev_orch / qa_orch / research_orch + their _target peers).
+#   - The previous signal-driven classes (health / sweep_* / discover_*)
+#     no longer occupy slots; they track only their last-fired timestamp
+#     under `signal_last_fired`, replacing the legacy
+#     `/tmp/hydra-last-*.txt` files.
+#   - `failure_log` is a new ring buffer of structured failure records
+#     consumed by `self_heal.py` (issue #426 self-heal table).
+#   - `reaped_task_ids` (issue #411) and `burned_classes` (issue #395)
+#     are preserved unchanged.
 cat > /tmp/hydra-autopilot-state.json <<EOF
 {
   "started": "${STARTED_AT}",
@@ -118,12 +130,21 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
   "turn": 0,
   "burned_classes": [],
   "reaped_task_ids": [],
+  "failure_log": [],
   "slots": {
-    "health": null, "qa": null,
-    "dev_orch": null, "dev_target": null,
-    "research_orch": null, "research_target": null,
-    "sweep_orch": null, "sweep_target": null,
-    "discover_orch": null, "discover_target": null
+    "dev_orch": null,
+    "qa_orch": null,
+    "research_orch": null,
+    "dev_target": null,
+    "qa_target": null,
+    "research_target": null
+  },
+  "signal_last_fired": {
+    "health": 0,
+    "sweep_orch": 0,
+    "sweep_target": 0,
+    "discover_orch": 0,
+    "discover_target": 0
   }
 }
 EOF

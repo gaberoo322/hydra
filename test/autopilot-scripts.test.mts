@@ -88,16 +88,24 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.deepEqual(s.burned_classes, []);
       assert.equal(s.cumulative_tokens, 0);
       assert.equal(s.idle_turns, 0);
-      // All 10 class slots present and null
-      const expectedClasses = [
-        "health", "qa", "dev_orch", "dev_target",
-        "research_orch", "research_target",
-        "sweep_orch", "sweep_target",
-        "discover_orch", "discover_target",
+      // The 6 fixed pipeline slots from the #426 decision-brain rewrite.
+      // Signal-driven classes (health / sweep_* / discover_*) no longer
+      // occupy slots; they live under `signal_last_fired` instead.
+      const expectedSlots = [
+        "dev_orch", "qa_orch", "research_orch",
+        "dev_target", "qa_target", "research_target",
       ];
-      for (const cls of expectedClasses) {
+      assert.equal(Object.keys(s.slots).length, expectedSlots.length, "slots schema has 6 entries");
+      for (const cls of expectedSlots) {
         assert.equal(s.slots[cls], null, `slot ${cls} should be null`);
       }
+      const expectedSignals = [
+        "health", "sweep_orch", "sweep_target", "discover_orch", "discover_target",
+      ];
+      for (const sig of expectedSignals) {
+        assert.equal(s.signal_last_fired[sig], 0, `signal ${sig} should start at 0`);
+      }
+      assert.deepEqual(s.failure_log, [], "failure_log seeded empty (issue #426)");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -157,6 +165,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
 
 describe("scripts/autopilot/term-check.py", () => {
   function writeState(path: string, patch: Record<string, unknown>): void {
+    // Post-#426 schema: 6 pipeline slots + signal_last_fired map.
     const base = {
       started_epoch: Math.floor(Date.now() / 1000),
       limits: {
@@ -170,12 +179,14 @@ describe("scripts/autopilot/term-check.py", () => {
       cumulative_tokens: 0,
       idle_turns: 0,
       slots: {
-        health: null, qa: null,
-        dev_orch: null, dev_target: null,
-        research_orch: null, research_target: null,
-        sweep_orch: null, sweep_target: null,
-        discover_orch: null, discover_target: null,
+        dev_orch: null, qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
       },
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+      },
+      failure_log: [],
     };
     writeFileSync(path, JSON.stringify({ ...base, ...patch }));
   }
@@ -253,12 +264,9 @@ describe("scripts/autopilot/term-check.py", () => {
       writeState(tmp.state, {
         idle_turns: 5,
         slots: {
-          health: null, qa: null,
           dev_orch: { skill: "hydra-dev", started: "now", partial_tokens: 0 },
-          dev_target: null,
-          research_orch: null, research_target: null,
-          sweep_orch: null, sweep_target: null,
-          discover_orch: null, discover_target: null,
+          qa_orch: null, research_orch: null,
+          dev_target: null, qa_target: null, research_target: null,
         },
       });
       const r = runTermCheck(tmp.state);
@@ -298,12 +306,9 @@ describe("scripts/autopilot/reap.py", () => {
       idle_turns: 0,
       burned_classes: [],
       slots: {
-        health: null, qa: null,
         dev_orch: { skill: slot.skill ?? "hydra-dev", started: "now", partial_tokens: slot.partial_tokens },
-        dev_target: null,
-        research_orch: null, research_target: null,
-        sweep_orch: null, sweep_target: null,
-        discover_orch: null, discover_target: null,
+        qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
       },
     }));
   }
@@ -409,10 +414,8 @@ describe("scripts/autopilot/drain.sh", () => {
         cumulative_tokens: 1234567,
         dispatches: 42,
         slots: {
-          health: null, qa: null, dev_orch: null, dev_target: null,
-          research_orch: null, research_target: null,
-          sweep_orch: null, sweep_target: null,
-          discover_orch: null, discover_target: null,
+          dev_orch: null, qa_orch: null, research_orch: null,
+          dev_target: null, qa_target: null, research_target: null,
         },
       }));
       const r = spawnSync(join(SCRIPTS, "drain.sh"), ["7"], {

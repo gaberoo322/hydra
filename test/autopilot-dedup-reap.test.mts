@@ -69,18 +69,20 @@ function writeBaseState(
     idle_turns: 0,
     burned_classes: [],
     reaped_task_ids: [],
+    // Post-#426 schema: 6 fixed pipeline slots.
     slots: {
-      health: null,
-      qa: { skill: "hydra-qa", started: "now", partial_tokens: 0 },
       dev_orch: null,
-      dev_target: null,
+      qa_orch: { skill: "hydra-qa", started: "now", partial_tokens: 0 },
       research_orch: null,
+      dev_target: null,
+      qa_target: null,
       research_target: null,
-      sweep_orch: null,
-      sweep_target: null,
-      discover_orch: null,
-      discover_target: null,
     },
+    signal_last_fired: {
+      health: 0, sweep_orch: 0, sweep_target: 0,
+      discover_orch: 0, discover_target: 0,
+    },
+    failure_log: [],
   };
   writeFileSync(path, JSON.stringify({ ...base, ...patch }));
 }
@@ -144,20 +146,20 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
 
       // First reap: state mutates.
       const first = runReap(
-        ["completion", "qa", TASK, String(TOKENS), "hydra-qa"],
+        ["completion", "qa_orch", TASK, String(TOKENS), "hydra-qa"],
         tmp,
       );
       assert.equal(first.status, 0, `first reap failed: ${first.stderr}`);
       let s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.equal(s.cumulative_tokens, TOKENS, "first reap must add tokens");
       assert.deepEqual(s.reaped_task_ids, [TASK], "task_id must be appended");
-      assert.equal(s.slots.qa, null, "slot must be released after first reap");
+      assert.equal(s.slots.qa_orch, null, "slot must be released after first reap");
       const logAfterFirst = readFileSync(tmp.log, "utf-8");
       assert.match(logAfterFirst, /slot_complete .*task_id=a153eb193e1b05209/);
 
       // Second reap: SAME task_id. Must be a complete no-op on state.
       const second = runReap(
-        ["completion", "qa", TASK, String(TOKENS), "hydra-qa"],
+        ["completion", "qa_orch", TASK, String(TOKENS), "hydra-qa"],
         tmp,
       );
       assert.equal(second.status, 0, `second reap failed: ${second.stderr}`);
@@ -192,7 +194,7 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
     const tmp = makeTempState();
     try {
       writeBaseState(tmp.state);
-      const r1 = runReap(["completion", "qa", "task-A", "10000", "hydra-qa"], tmp);
+      const r1 = runReap(["completion", "qa_orch", "task-A", "10000", "hydra-qa"], tmp);
       assert.equal(r1.status, 0);
       // Slot was released by first reap; the second reap targets a
       // different class that's still occupied. Re-seed dev_orch.
@@ -221,26 +223,26 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
       const TASK = "soft-trip-task";
 
       const r1 = runReap(
-        ["completion", "qa", TASK, String(OVER_SOFT), "hydra-qa"],
+        ["completion", "qa_orch", TASK, String(OVER_SOFT), "hydra-qa"],
         tmp,
       );
       assert.equal(r1.status, 0);
       let s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.ok(
-        s.burned_classes.includes("qa"),
+        s.burned_classes.includes("qa_orch"),
         "soft-cap trip must burn the class",
       );
-      assert.equal(s.burned_classes.filter((c: string) => c === "qa").length, 1);
+      assert.equal(s.burned_classes.filter((c: string) => c === "qa_orch").length, 1);
 
       // Duplicate must not double-burn nor re-append (idempotent).
       const r2 = runReap(
-        ["completion", "qa", TASK, String(OVER_SOFT), "hydra-qa"],
+        ["completion", "qa_orch", TASK, String(OVER_SOFT), "hydra-qa"],
         tmp,
       );
       assert.equal(r2.status, 0);
       s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.equal(
-        s.burned_classes.filter((c: string) => c === "qa").length,
+        s.burned_classes.filter((c: string) => c === "qa_orch").length,
         1,
         "duplicate reap must not duplicate burned_classes entry",
       );
@@ -259,7 +261,7 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
       writeBaseState(tmp.state, { reaped_task_ids: pre });
 
       const NEW = "fresh-task-x";
-      const r = runReap(["completion", "qa", NEW, "1000", "hydra-qa"], tmp);
+      const r = runReap(["completion", "qa_orch", NEW, "1000", "hydra-qa"], tmp);
       assert.equal(r.status, 0, `bounded reap failed: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.equal(
@@ -297,7 +299,7 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
       writeFileSync(tmp.state, JSON.stringify(s0));
 
       const r = runReap(
-        ["completion", "qa", "legacy-task", "5000", "hydra-qa"],
+        ["completion", "qa_orch", "legacy-task", "5000", "hydra-qa"],
         tmp,
       );
       assert.equal(r.status, 0, `legacy reap must not crash: ${r.stderr}`);
@@ -321,16 +323,12 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
     try {
       writeBaseState(tmp.state, {
         slots: {
-          health: null,
-          qa: null,
           dev_orch: { skill: "hydra-dev", started: "now", partial_tokens: 1_000_000 },
-          dev_target: null,
+          qa_orch: null,
           research_orch: null,
+          dev_target: null,
+          qa_target: null,
           research_target: null,
-          sweep_orch: null,
-          sweep_target: null,
-          discover_orch: null,
-          discover_target: null,
         },
       });
       const r = runReap([], tmp);
