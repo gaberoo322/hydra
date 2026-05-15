@@ -184,37 +184,42 @@ describe("scripts/autopilot/collect-state.sh — active_dev_orch collector (issu
   });
 });
 
-describe("docs/operator-playbooks/hydra-autopilot.md — dev_orch rule (issue #412)", () => {
-  const playbook = readFileSync(
-    join(REPO_ROOT, "docs", "operator-playbooks", "hydra-autopilot.md"),
+describe("hydra-autopilot dev_orch rule (issue #412)", () => {
+  // Post-#426 the decision logic moved out of the playbook prose and
+  // into `scripts/autopilot/decide.py`. The #412 invariant — dev_orch
+  // gates on the live PR signal, not the stale `in-progress` label —
+  // is now expressed in code: the dev_orch slot is only filled when
+  // the slot is free (i.e. no in-flight dispatch) AND the best
+  // candidate score meets the threshold. We pin both the busy-slot
+  // guard in decide.py and the PR-signal collector in collect-state.sh
+  // so a future edit can't silently re-introduce the label-based gate.
+  const decide = readFileSync(
+    join(REPO_ROOT, "scripts", "autopilot", "decide.py"),
+    "utf-8",
+  );
+  const collector = readFileSync(
+    join(REPO_ROOT, "scripts", "autopilot", "collect-state.sh"),
     "utf-8",
   );
 
-  test("Phase 4 dev_orch rule reads active_dev_orch, not in_progress", () => {
-    // Match the dev_orch sub-section. We require the live-PR signal AND
-    // that the legacy `in_progress == 0` phrase is gone from this rule.
-    const devOrchSection = playbook.match(/#### `dev_orch`[\s\S]*?(?=####|\Z)/);
-    assert.ok(devOrchSection, "dev_orch section missing from playbook");
-    const body = devOrchSection[0];
-    assert.match(
-      body,
-      /active_dev_orch == 0/,
-      "dev_orch rule must reference active_dev_orch (issue #412)",
-    );
+  test("decide.py gates dev_orch on the live PR signal, not the in-progress label", () => {
+    // Find the dev_orch branch in _select_for_slot.
+    assert.match(decide, /cls == "dev_orch"/);
+    // The dev_orch slot is only filled when the slot is free; that's
+    // INV-002 (already pinned). The legacy `in_progress == 0` guard
+    // must not appear anywhere in the decision module.
     assert.doesNotMatch(
-      body,
-      /`in_progress == 0`/,
-      "dev_orch rule must NOT still gate on `in_progress == 0` (the stale-label bug)",
+      decide,
+      /in_progress\s*==\s*0/,
+      "decide.py must NOT gate dev_orch on the stale `in_progress == 0` label",
     );
   });
 
-  test("Phase 1 collector inventory mentions active_dev_orch", () => {
-    // The collector list in Phase 1 prose should advertise the new key
-    // so operators reading the playbook can find it.
+  test("collect-state.sh still emits active_dev_orch=<count> for the model", () => {
     assert.match(
-      playbook,
+      collector,
       /active_dev_orch/,
-      "Phase 1 prose must mention active_dev_orch so operators see the new signal",
+      "Phase 1 collector must emit the live-PR signal so the model can set signals.active_dev_orch",
     );
   });
 });
