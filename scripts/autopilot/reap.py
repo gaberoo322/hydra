@@ -128,18 +128,44 @@ def run_hardcap() -> int:
 def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None) -> int:
     """`completion` mode: idempotent token accounting keyed by task_id.
 
-    First call for a given task_id:
+    Applies uniformly to BOTH kinds of dispatched class (issue #432):
+
+      pipeline classes  (dev_orch / qa_orch / research_orch + _target peers)
+        — occupy a slot under state.slots[<cls>]. Reap clears the slot.
+
+      signal classes    (health / sweep_orch / sweep_target / discover_orch
+                         / discover_target)
+        — do NOT occupy a slot; they only track signal_last_fired. Reap
+          still increments cumulative_tokens and appends to
+          reaped_task_ids, and still applies the soft-cap burn if the
+          subagent ran hot. The "no slot to clear" case is the design,
+          not a special-case skip.
+
+    First call for a given task_id (either kind):
       - Appends task_id to state.reaped_task_ids (FIFO, bounded to 1000).
       - Adds total_tokens to state.cumulative_tokens.
-      - Records slots[<cls>].tokens = total_tokens (before clearing the slot).
       - If total_tokens >= limits.subagent_max_tokens, appends <cls> to
-        state.burned_classes (soft-cap, suppresses re-dispatch this session).
-      - Clears slots[<cls>] = null.
+        state.burned_classes (soft-cap, suppresses re-dispatch this
+        session) — for both pipeline AND signal classes.
+      - For pipeline classes: records slots[<cls>].tokens = total_tokens,
+        then clears slots[<cls>] = null.
+      - For signal classes: no slot mutation. The signal cooldown lives
+        in signal_last_fired and is stamped by the dispatcher, not here.
       - Appends a slot_complete line to the run log.
 
     Subsequent calls with the same task_id:
       - Emit `dup_skip task_id=<X>` to the run log + stdout. No token
-        accounting, no slot mutation, no burned_classes mutation.
+        accounting, no slot mutation, no burned_classes mutation. This
+        idempotency holds for both pipeline and signal completions.
+
+    Bug history: until issue #432 the soft-cap burn was nested inside the
+    `if slot is not None:` branch, so a runaway hydra-discover (signal
+    class) would never get its class burned. Token accounting incremented
+    correctly, but the cap on re-dispatching the runaway didn't fire. The
+    accounting is now unconditional and the slot-clearing is the only
+    pipeline-specific step. Regression-tested in
+    `test/autopilot-decide.test.mts` (signal-completion suite) and
+    `test/autopilot-dedup-reap.test.mts` (signal-class burn case).
     """
     s = _load_state()
     if s is None:
@@ -162,15 +188,22 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
 
     s["cumulative_tokens"] = int(s.get("cumulative_tokens", 0)) + int(total_tokens)
 
-    # Soft-cap check + slot bookkeeping. The slot may already be cleared
-    # (e.g. hard-cap already fired) — tolerate that.
-    soft = s["limits"]["subagent_max_tokens"]
-    slot = s.get("slots", {}).get(cls)
+    # Soft-cap burn — unconditional, applies to both pipeline AND signal
+    # classes (issue #432). Use `.get` on limits so older state.json files
+    # written before subagent_max_tokens existed don't crash the reap.
+    limits = s.get("limits") or {}
+    soft = int(limits.get("subagent_max_tokens", 0)) or None
+    if soft is not None and total_tokens >= soft and cls not in s.get("burned_classes", []):
+        s.setdefault("burned_classes", []).append(cls)
+
+    # Pipeline-only slot bookkeeping. The slot may already be cleared
+    # (e.g. hard-cap already fired) or absent (signal classes) — both
+    # are tolerated. `s["slots"]` only contains pipeline keys.
+    slots = s.get("slots") or {}
+    slot = slots.get(cls)
     if slot is not None:
         slot["tokens"] = total_tokens
-        if total_tokens >= soft and cls not in s.get("burned_classes", []):
-            s.setdefault("burned_classes", []).append(cls)
-        s["slots"][cls] = None  # release the slot
+        s["slots"][cls] = None  # release the pipeline slot
 
     _save_state(s)
 
