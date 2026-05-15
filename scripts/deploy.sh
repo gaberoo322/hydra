@@ -14,6 +14,15 @@ git pull --ff-only origin master
 echo "==> Installing orchestrator deps..."
 npm ci
 
+echo "==> Syncing operator skills from playbooks..."
+# Regenerate ~/.claude/skills/ and ~/.codex/skills/ so the deployed orchestrator
+# state matches docs/operator-playbooks/. Fail fast on non-zero exit — a half-
+# synced state caused the 2026-05-15 silent-wedge incident (PR #429 merged a new
+# autopilot playbook but the operator's mirror stayed at the stale version).
+# `set -euo pipefail` at the top of this script means a non-zero exit here will
+# abort the deploy before the service is restarted.
+bash scripts/sync-skills.sh
+
 echo "==> Building dashboard..."
 cd dashboard && npm ci && npm run build && cd ..
 
