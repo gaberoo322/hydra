@@ -40,6 +40,7 @@ Each tick:
 3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`.
 4. **`python3 scripts/autopilot/assert_invariants.py plan.json state.json`** — runtime guards.
 5. **Execute** each action in the plan via the right tool (table below).
+5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
 6. **Re-enter step 1.** No inline reasoning between steps.
 
 ## Class taxonomy (6 pipeline slots + 5 signal classes)
@@ -178,11 +179,51 @@ No fallback. No `git checkout` in the main tree.
 
 ## Inspecting a run
 
+- **One-shot status:** `bash scripts/autopilot/status.sh` — pretty-prints the heartbeat (+ wedge verdict), the compact state, and the log tail. Safe to wire to a shell prompt.
 - Heartbeat: `cat /tmp/hydra-autopilot-heartbeat.txt`
+- Liveness probe: `find /tmp/hydra-autopilot-heartbeat.txt -mmin -10` — the model writes the heartbeat every decision turn (Phase 5a). An empty result means no turn completed in the last 10 minutes.
 - Live state: `jq '.slots,.signal_last_fired,.burned_classes' /tmp/hydra-autopilot-state.json`
 - Run log: `tail -100 /tmp/hydra-autopilot-nightly.log`
 - Last decision plan: `jq . /tmp/hydra-autopilot-plan.json`
 - Failure ledger: `tail /tmp/hydra-autopilot-failures.jsonl`
+
+### Per-turn heartbeat format (issue #435)
+
+After Phase 0, every decision turn overwrites `/tmp/hydra-autopilot-heartbeat.txt` with one line of the form:
+
+```
+<epoch> <pid> <run_id> turn=<N> dispatches=<M> tokens=<K> pipeline_filled=<F>/6 signal_active=<S>/5 last_action=<type>
+```
+
+The first turn after bootstrap stamps `last_action=bootstrap`; subsequent turns substitute the type of the most recent executed action (`dispatch`, `auto-merge`, `reap`, `wait`, etc.).
+
+### Wedge detection: stale heartbeat + live process == wedge
+
+`claude -p` buffers stdout, so a running autopilot may produce no observable terminal output for many minutes at a stretch. The heartbeat file is the only liveness signal the operator can trust.
+
+**Decision rule:**
+
+| Heartbeat mtime | Process pid alive? | Verdict |
+|---|---|---|
+| Within last 10 min | yes | Healthy (model is looping) |
+| Within last 10 min | no | Already terminated cleanly — check log tail |
+| >10 min old | no | Crashed or killed externally — check `journalctl` or run log |
+| **>10 min old** | **yes** | **Wedge.** Model is alive but no longer producing decision turns. |
+
+A wedge is the failure mode the 2026-05-15 incident exposed: a stale schema mirror caused the model to silently reconcile two worldviews and stop looping after Phase 0, while the parent `claude -p` process sat live producing no output for ~20 min. Recover with `kill <pid>` and restart the autopilot. File a `needs-triage` issue with the run-log tail.
+
+```bash
+# Quick wedge check:
+hb=/tmp/hydra-autopilot-heartbeat.txt
+if [ -z "$(find "$hb" -mmin -10 2>/dev/null)" ]; then
+  pid=$(awk 'NR==1 { print $2 }' "$hb")  # per-turn format: pid is field 2
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "WEDGE: pid $pid alive, heartbeat stale"
+  fi
+fi
+```
+
+`scripts/autopilot/status.sh` runs the above automatically.
 
 ## Manual invocation
 

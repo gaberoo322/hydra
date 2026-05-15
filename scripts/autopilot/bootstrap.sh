@@ -43,8 +43,16 @@ set -euo pipefail
 # shellcheck source=./args-parse.sh
 . "$(dirname "$0")/args-parse.sh" "$@"
 
-# Heartbeat
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=$$ run_id=$(uuidgen)" > /tmp/hydra-autopilot-heartbeat.txt
+# Heartbeat — Phase 0 marker.
+#
+# This is the FIRST write; subsequent decision turns must call
+# scripts/autopilot/heartbeat.py to refresh the file (issue #435). The
+# pid + run_id stamped here are propagated into state.json below so the
+# per-turn updater can re-emit them on every line without re-querying
+# the kernel for a pid that may have already exec'd into a child.
+RUN_ID="$(uuidgen)"
+PID=$$
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=${PID} run_id=${RUN_ID}" > /tmp/hydra-autopilot-heartbeat.txt
 
 # Run log (overwrites previous run; previous-run content rotated to .prev)
 [ -f /tmp/hydra-autopilot-nightly.log ] && mv /tmp/hydra-autopilot-nightly.log /tmp/hydra-autopilot-nightly.log.prev
@@ -139,6 +147,8 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
 {
   "started": "${STARTED_AT}",
   "started_epoch": ${STARTED_EPOCH},
+  "pid": ${PID},
+  "run_id": "${RUN_ID}",
   "limits": {
     "token_budget": ${TOKEN_BUDGET},
     "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
@@ -177,3 +187,11 @@ EOF
 # Echo resolved limits so the model captures them in conversation context
 echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION}"
 echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; see Phase 0 handshake)"
+
+# Issue #435 — overwrite the Phase 0 heartbeat with the structured
+# per-turn format immediately so the file format is consistent from turn
+# 0 onwards. Best-effort: a heartbeat-write failure must NOT abort
+# bootstrap (we already wrote the legacy `start ...` line above which is
+# enough for operators to see something).
+python3 "$(dirname "$0")/heartbeat.py" --last-action=bootstrap || \
+  echo "[autopilot] heartbeat.py initial write failed; continuing"
