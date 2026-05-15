@@ -80,6 +80,9 @@ describe("scripts/autopilot/args-parse.sh — slash-arg parsing", () => {
         subagent_max_tokens: 400000,
         subagent_hard_max_tokens: 800000,
         unattended: true,
+        // issue #434 — schema-version handshake. Bumped in lockstep with the
+        // playbook's HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker.
+        schema_version: 2,
       });
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
