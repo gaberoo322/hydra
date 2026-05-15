@@ -94,7 +94,17 @@ def check_inv001(actions: list[dict]) -> None:
 
 
 def check_inv002(actions: list[dict], state: dict) -> None:
-    """INV-002 never dispatch into a busy pipeline slot."""
+    """INV-002 never dispatch into a busy pipeline slot.
+
+    Defensive against a malformed `slots` field (issue #431): an empty
+    dict or a partially-initialized dict (missing one or more of the 6
+    named pipeline keys) is treated as "all unlisted slots free". The
+    within-plan tracking (`occupied.add(slot)` below) still catches
+    double-dispatches in the same plan even when the slot key never
+    existed in the state file. bootstrap.sh is the authoritative source
+    of all 6 keys; this method tolerates pre-bootstrap state shapes so
+    a single-run regression can't wedge the loop.
+    """
     slots = state.get("slots") or {}
     # Track within-plan dispatches as occupying the slot, so a single plan
     # can't double-fill the same slot.
