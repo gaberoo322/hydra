@@ -67,6 +67,13 @@ import {
 import { markLowConfidenceSkip } from "./anchor-selection/low-confidence.ts";
 import { reportOutcome, type OutcomeResult } from "./anchor-selection/outcome.ts";
 import { selectAnchor } from "./anchor-selection/select.ts";
+import {
+  scoreCandidate,
+  PRIORITY_TIER_BASE_SCORE,
+  type ScoreSignals,
+  type ScoreResult,
+  type PriorityTier,
+} from "./anchor-selection/scorer.ts";
 
 // ---------------------------------------------------------------------------
 // Public exports — every name previously exported from this file
@@ -77,6 +84,13 @@ export { consumeDriftPreFilteredCount };
 export { selectAnchor };
 export { markLowConfidenceSkip };
 export { reportOutcome, type OutcomeResult };
+export {
+  scoreCandidate,
+  PRIORITY_TIER_BASE_SCORE,
+  type ScoreSignals,
+  type ScoreResult,
+  type PriorityTier,
+};
 
 // ---------------------------------------------------------------------------
 // _testing — escape hatch for tests that need access to internals
