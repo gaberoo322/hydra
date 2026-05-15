@@ -43,8 +43,8 @@ The post-merge watch window where a Tier-2 change is monitored against **Target 
 _Avoid_: canary, soak (overloaded with deploy meanings)
 
 **Design Concept**:
-A structured, persisted artifact produced before any code-writing dispatch. Records the agent's understanding of an anchor against the orchestrator's canonical vocabulary: which modules it intends to touch, which invariants it intends to preserve, the Q&A trace that produced that understanding, and any prototype snippets that encoded thorny decisions. The artifact is the ground truth for both dispatch gating and PR-time review. Defined by ADR-0007 (see epic #437).
-_Avoid_: design doc (overloaded), plan (informal), spec (overloaded with the multi-task decomposition artifact)
+The structured, persisted alignment artifact (`src/design-concept.ts`, `hydra:design-concept:{anchorRef}`) that a code-writing subagent must produce — and an automated gate must accept — before any `dev_orch` / `dev_target` dispatch. Schema includes glossary terms grounded, glossary gaps, modules touched (with interface-impact and depth classification), invariants, rejected alternatives, Q&A trace, and prototype snippets. The same artifact is the ground truth for PR-time two-axis review (Standards + Spec). Defined by ADR-0008 (see epic #437). Phase A (issue #438) ships persistence + API only; autopilot wiring is Phase B, CI hook is Phase C.
+_Avoid_: design doc (overloaded), plan (informal), spec (overloaded with `src/specs.ts` — multi-cycle task decomposition, a different thing)
 
 **Operator-Required Intervention**:
 The closed list of categories where Hydra escalates to the operator instead of attempting autonomous remedy: credentials/secrets, external-account actions, Tier 0 changes, vision-level conflicts. Everything else Hydra researches and tries. Defined by ADR-0005.
@@ -65,9 +65,3 @@ _Avoid_: blocker (overloaded), needs-human (informal)
 > **Maintainer:** "Stuck how? Cycles are green."
 > **Operator:** "Right — green but no **Target Outcomes** moving for 30 cycles. The dashboard is lying."
 > **Maintainer:** "OK, so stuckness fired. Autopilot should now either escalate to me, propose an **Orchestrator** self-modification, or research *why* outcomes aren't moving — not pick up the next backlog item."
-
-## Addenda
-
-**Design Concept**:
-The structured, persisted alignment artifact (`src/design-concept.ts`, `hydra:design-concept:{anchorRef}`) that a code-writing subagent must produce — and an automated gate must accept — before any `dev_orch` / `dev_target` dispatch. Schema includes glossary terms grounded, glossary gaps, modules touched (with interface-impact and depth classification), invariants, rejected alternatives, Q&A trace, and prototype snippets. The same artifact is the ground truth for PR-time two-axis review (Standards + Spec). Defined by ADR-0008. Phase A (issue #438) ships persistence + API only; autopilot wiring is Phase B, CI hook is Phase C.
-_Avoid_: design doc, plan, spec (overloaded with `src/specs.ts` — multi-cycle task decomposition, a different thing).
