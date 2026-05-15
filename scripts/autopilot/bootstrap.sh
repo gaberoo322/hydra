@@ -98,6 +98,29 @@ fi
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_EPOCH="$(date -u +%s)"
 
+# Schema version handshake (issue #434).
+#
+# Bumped every time the on-disk shape of state.json or the playbook's
+# expectations of it change in an incompatible way. The playbook's
+# `HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA: <N>` marker MUST match the value
+# written here; Phase 0 of the playbook fails loud on mismatch and
+# instructs the operator to run `scripts/sync-skills.sh`.
+#
+# Bump procedure (operator-only):
+#   1. Bump this constant in bootstrap.sh.
+#   2. Bump the `HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA:` marker in
+#      docs/operator-playbooks/hydra-autopilot.md.
+#   3. Update test/autopilot-schema-version.test.mts to reflect the
+#      new current version.
+#   4. Run `./scripts/sync-skills.sh` so ~/.claude/skills/hydra-autopilot/
+#      mirrors the new playbook.
+#
+# Why v2 today: the post-#426 schema collapsed the legacy 10 flat slots
+# into 6 pipeline slots + 5 signal_last_fired. A v1 state.json (no
+# schema_version field, ten-slot shape) is detected at Phase 0 as a
+# legacy run; bootstrap re-runs and writes v2 on the next tick.
+SCHEMA_VERSION=2
+
 # Initialize state file — limits are now first-class members.
 #
 # Schema migration (issue #426 decision brain rewrite):
@@ -111,6 +134,7 @@ STARTED_EPOCH="$(date -u +%s)"
 #     consumed by `self_heal.py` (issue #426 self-heal table).
 #   - `reaped_task_ids` (issue #411) and `burned_classes` (issue #395)
 #     are preserved unchanged.
+#   - `schema_version` (issue #434) participates in the Phase 0 handshake.
 cat > /tmp/hydra-autopilot-state.json <<EOF
 {
   "started": "${STARTED_AT}",
@@ -122,7 +146,8 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
     "scope": "${SCOPE}",
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
     "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},
-    "unattended": ${UNATTENDED}
+    "unattended": ${UNATTENDED},
+    "schema_version": ${SCHEMA_VERSION}
   },
   "cumulative_tokens": 0,
   "dispatches": 0,
@@ -150,4 +175,5 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
 EOF
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION}"
+echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; see Phase 0 handshake)"

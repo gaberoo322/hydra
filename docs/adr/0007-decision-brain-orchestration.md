@@ -131,6 +131,37 @@ this is a brain-layer replacement, not a full rewrite.
   decision logic. Python keeps it scriptable and unit-testable without
   adding a new compiled toolchain to the autopilot path.
 
+## Schema-version handshake (issue #434, added 2026-05-15)
+
+Because the brain rewrite changed the on-disk state.json shape, a stale
+playbook (e.g. when `scripts/sync-skills.sh` is forgotten after editing
+the source playbook under `docs/operator-playbooks/`) can leave the
+installed `~/.claude/skills/hydra-autopilot/SKILL.md` mirror describing
+the OLD schema while `bootstrap.sh` writes the NEW one. On 2026-05-15
+this produced a silent wedge: the model attempted to reconcile the two
+worldviews for ~20 minutes with zero observable output.
+
+The fix is a Phase 0 handshake: `bootstrap.sh` writes
+`state.limits.schema_version = 2` (the post-#426 schema), and the
+playbook carries an `HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA: 2` grep-able
+marker near the top. After bootstrap, the model reads both and aborts
+with `[autopilot] FATAL: schema mismatch (playbook expects v$X,
+state.json v$Y; run scripts/sync-skills.sh)` when they disagree.
+
+Bump procedure (operator-only, single commit):
+
+1. Bump `SCHEMA_VERSION` in `scripts/autopilot/bootstrap.sh`.
+2. Bump the `HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA:` marker at the top of
+   `docs/operator-playbooks/hydra-autopilot.md`.
+3. Update the current-version assertion in
+   `test/autopilot-schema-version.test.mts`.
+4. Run `./scripts/sync-skills.sh` so the installed
+   `~/.claude/skills/hydra-autopilot/SKILL.md` mirror is regenerated.
+5. Commit all of the above together.
+
+Anything less makes the next autopilot run abort at Phase 0 — which is
+the intended, loud failure mode.
+
 ## Related
 
 - ADR-0001 Untouchable Core & gate extraction
@@ -142,3 +173,4 @@ this is a brain-layer replacement, not a full rewrite.
 - Issue #395 — per-subagent token caps (`burned_classes`)
 - Issue #411 — idempotent reap (`reaped_task_ids`)
 - Issue #413 — unattended mode + operator decision queue
+- Issue #434 — schema-version handshake (fail-loud on drift)

@@ -8,8 +8,18 @@ claude_only: true
 
 # Hydra Autopilot
 
+HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA: 2
+
 Event-driven autonomous decision loop. The model is a thin Agent-tool-caller;
 the policy lives in `scripts/autopilot/decide.py` (the **L2 decision brain**).
+
+> **Schema-version handshake (issue #434).** The grep-able marker above
+> (`HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA: 2`) must match the
+> `limits.schema_version` value written by `bootstrap.sh`. Phase 0 below
+> verifies this and aborts on mismatch. Bumping the schema requires
+> editing both this marker AND the `SCHEMA_VERSION` constant in
+> `scripts/autopilot/bootstrap.sh` in the same commit, then running
+> `scripts/sync-skills.sh` so the installed skill mirror is refreshed.
 
 **Authoritative references — read these instead of this playbook when you
 need to know what the autopilot will do:**
@@ -71,7 +81,7 @@ INV-008.
 
 ## Phases (one-line each — full prose lives in code)
 
-- **Phase 0** — `bootstrap.sh "$@"` initialises `/tmp/hydra-autopilot-state.json` (slash args via `args-parse.sh`)
+- **Phase 0** — `bootstrap.sh "$@"` initialises `/tmp/hydra-autopilot-state.json` (slash args via `args-parse.sh`), then the **schema-version handshake** (see below) runs before any other phase
 - **Phase 1** — `collect-state.sh` emits signal counts (~100ms)
 - **Phase 1.5** — `recover-stale.sh stale_in_progress <N...> stale_blocked <M...>`
 - **Phase 2** — `reap.py` hard-cap sweep (idempotent; #395)
@@ -80,6 +90,42 @@ INV-008.
 - **Phase 5** — model executes each action via the table above
 - **Phase 6** — sleep until next event or 15-min heartbeat
 - **Phase 7** — `drain.sh <merged_prs>` + final `hydra-digest` dispatch
+
+## Phase 0 schema-version handshake (issue #434)
+
+After `bootstrap.sh` exits successfully, but BEFORE invoking Phase 1
+(`collect-state.sh`), the model MUST verify the playbook's expected
+schema matches the schema bootstrap wrote:
+
+```bash
+PLAYBOOK_SCHEMA=$(grep -oP '^HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA:\s*\K[0-9]+' \
+  docs/operator-playbooks/hydra-autopilot.md)
+STATE_SCHEMA=$(jq -r '.limits.schema_version // 1' /tmp/hydra-autopilot-state.json)
+
+if [ -z "$PLAYBOOK_SCHEMA" ]; then
+  echo "[autopilot] FATAL: playbook missing HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; run scripts/sync-skills.sh"
+  exit 1
+fi
+if [ "$PLAYBOOK_SCHEMA" != "$STATE_SCHEMA" ]; then
+  echo "[autopilot] FATAL: schema mismatch (playbook expects v${PLAYBOOK_SCHEMA}, state.json v${STATE_SCHEMA}; run scripts/sync-skills.sh)"
+  exit 1
+fi
+echo "[autopilot] schema handshake OK (v${PLAYBOOK_SCHEMA})"
+```
+
+Why: PR #429 changed the state.json shape (10 flat slots → 6 pipeline
+slots + 5 signal_last_fired) but the installed `~/.claude/skills/`
+mirror of this playbook was stale because `sync-skills.sh` hadn't run.
+The model attempted to reconcile and silently wedged for ~20 min
+producing no observable output. The handshake makes that wedge a
+loud abort at second 0 of the run instead of an invisible stall at
+minute 20.
+
+A v1 state.json (legacy, no `schema_version` field) is interpreted as
+v1 via the `// 1` jq fallback above — mismatched against any modern
+playbook, the handshake aborts and the operator re-runs after
+`bootstrap.sh` writes a fresh v2 state on next invocation. There is
+no in-place upgrader: bootstrap is the single writer for state.json.
 
 ## Termination
 
