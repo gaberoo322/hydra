@@ -45,12 +45,20 @@ export function createTasksRouter() {
   });
 
   // GET /grounding/latest — Most recent grounding report
+  //
+  // Includes a `testParseStatus` field (mirrored from `report.testReport.parseStatus`)
+  // so dashboard/API consumers can distinguish the silent-no-op shape
+  // ("ran 0 tests" vs "couldn't read the result") without reaching into
+  // nested fields. See issue #456 — the parser used to silently return
+  // `{passed:0, failed:0, total:0}` on unrecognised output and downstream
+  // metrics treated that as ground truth.
   router.get("/grounding/latest", async (req, res) => {
     try {
       const { groundProject } = await import("../grounding.ts");
       const projectDir = getTargetWorkspace();
       const report = await groundProject(projectDir);
-      res.json(report);
+      const testParseStatus = report?.testReport?.parseStatus ?? null;
+      res.json({ ...report, testParseStatus });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

@@ -85,27 +85,48 @@ async function runCmd(cmd, args,  opts: Record<string, any> = {}) {
 /**
  * Parse vitest/jest output for pass/fail counts.
  * Looks for patterns like "Tests  42 passed (42)" or "42 passed | 2 failed".
+ *
+ * Returns `{ passed, failed, total, recognised }` where `recognised` is true
+ * if at least one known summary pattern matched. A `recognised: false`
+ * result paired with `exitCode === 0` is the silent-no-op shape — the test
+ * command appeared to succeed but the parser found nothing to read. Callers
+ * (see `groundProject` below) translate that into a `testParseStatus` field
+ * on the grounding snapshot so consumers can distinguish "ran 0 tests" from
+ * "we couldn't read the result". See issue #456.
  */
 function parseTestCounts(stdout, stderr) {
   // Strip ANSI codes first — see stripAnsi() docs above.
   const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   let passed = 0, failed = 0, total = 0;
+  let recognised = false;
 
   // Vitest outputs two lines: "Test Files  43 passed (43)" and "Tests  352 passed (352)"
   // We want the "Tests" line (individual test count), not "Test Files" (file count)
   const testsLineMatch = combined.match(/^\s*Tests\s+(\d+)\s+passed/m);
   const testsFailMatch = combined.match(/^\s*Tests\s+.*?(\d+)\s+failed/m);
-  if (testsLineMatch) passed = parseInt(testsLineMatch[1]);
-  if (testsFailMatch) failed = parseInt(testsFailMatch[1]);
+  if (testsLineMatch) {
+    passed = parseInt(testsLineMatch[1]);
+    recognised = true;
+  }
+  if (testsFailMatch) {
+    failed = parseInt(testsFailMatch[1]);
+    recognised = true;
+  }
 
   // Fallback: generic "N passed" if the vitest-specific pattern didn't match
   if (passed === 0) {
     const genericPass = combined.match(/(\d+)\s+passed/);
-    if (genericPass) passed = parseInt(genericPass[1]);
+    if (genericPass) {
+      passed = parseInt(genericPass[1]);
+      recognised = true;
+    }
   }
   if (failed === 0) {
     const genericFail = combined.match(/(\d+)\s+failed/);
-    if (genericFail) failed = parseInt(genericFail[1]);
+    if (genericFail) {
+      failed = parseInt(genericFail[1]);
+      recognised = true;
+    }
   }
 
   total = passed + failed;
@@ -117,10 +138,11 @@ function parseTestCounts(stdout, stderr) {
       passed = parseInt(jestMatch[1]);
       total = parseInt(jestMatch[2]);
       failed = total - passed;
+      recognised = true;
     }
   }
 
-  return { passed, failed, total };
+  return { passed, failed, total, recognised };
 }
 
 /**
@@ -214,6 +236,25 @@ export async function groundProject(projectDir,  opts: Record<string, any> = {})
   const testCounts = parseTestCounts(testResult.stdout, testResult.stderr);
   const failingTests = parseFailingTests(testResult.stdout, testResult.stderr);
 
+  // Classify the parse result so consumers can distinguish "ran 0 tests" from
+  // "we ran tests but couldn't read the result" (silent-no-op). See issue #456.
+  // - "ok":           parser matched a known summary pattern.
+  // - "unrecognised": test command exited 0 but no known summary line appeared
+  //                   (silent-no-op shape — informational consumers should warn).
+  // - "errored":      test command exited non-zero. Standard failure mode; the
+  //                   exitCode + stderr already carry the signal.
+  // - "not-run":      test command was not found (exitCode 127).
+  let testParseStatus: "ok" | "unrecognised" | "errored" | "not-run";
+  if (testResult.exitCode === 127) {
+    testParseStatus = "not-run";
+  } else if (testResult.exitCode !== 0) {
+    testParseStatus = "errored";
+  } else if (!testCounts.recognised) {
+    testParseStatus = "unrecognised";
+  } else {
+    testParseStatus = "ok";
+  }
+
   return {
     branch: branchResult.stdout.trim(),
     headCommit: headResult.stdout.trim(),
@@ -230,6 +271,12 @@ export async function groundProject(projectDir,  opts: Record<string, any> = {})
       passed: testCounts.passed,
       failed: testCounts.failed,
       total: testCounts.total,
+      // testParseStatus distinguishes recognised output from silent-no-op runs.
+      // A 0-exit command whose output matched no vitest/jest summary pattern
+      // is `unrecognised` — consumers should render this as a warning rather
+      // than "0 tests ran". See issue #456 (post-PR-400 reframe).
+      parseStatus: testParseStatus,
+      recognised: testCounts.recognised,
       durationMs: testResult.durationMs,
     },
 
@@ -297,6 +344,13 @@ export function summarizeForPrompt(report,  opts: Record<string, any> = {}) {
       }
       parts.push(`\nFailing test output (last 2000 chars):`);
       parts.push(t.stderr.slice(-2000) || t.stdout.slice(-2000));
+    } else if (t.parseStatus === "unrecognised") {
+      // Silent-no-op shape — npm test exited 0 but the parser found no
+      // recognised summary line. Surface this explicitly so consumers don't
+      // mistake "0 tests ran" for "we couldn't read the result" (issue #456).
+      parts.push(`\n### TESTS: parse status = UNRECOGNISED (exit 0, no vitest/jest summary line)`);
+      parts.push(`Last 1000 chars of stdout:`);
+      parts.push((t.stdout || "").slice(-1000));
     } else {
       parts.push(`\n### TESTS: ${t.passed} passing, 0 failing (${t.durationMs}ms)`);
     }
