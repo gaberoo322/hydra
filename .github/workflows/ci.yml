@@ -48,6 +48,105 @@ jobs:
       - run: cd dashboard && npm ci
       - run: cd dashboard && npm run build
 
+  # npm audit gate (issue #479). Fails CI when production dependencies
+  # carry `high` or `critical` advisories. We deliberately run `npm audit`
+  # against the installed tree (after `npm ci`) so the lockfile's transitive
+  # deps are scanned too. Dev-only advisories are excluded via `--omit=dev`
+  # — dev tooling drift is a separate concern handled by reviewer
+  # judgement, and `npm audit fix` is intentionally NOT run here (out of
+  # scope per the issue — manual review only).
+  #
+  # `npm audit` exits non-zero on findings at or above `--audit-level`, so
+  # the step naturally fails the job. We capture `--json` first so we can
+  # render a readable advisory table in `GITHUB_STEP_SUMMARY`, then surface
+  # the human-readable report in the log via a second invocation. Both runs
+  # are cheap (single advisory-DB lookup against the local lockfile).
+  npm-audit-orchestrator:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: npm ci
+
+      - name: npm audit (orchestrator, prod deps, high+ only)
+        run: |
+          set +e
+          npm audit --omit=dev --audit-level=high --json > audit.json
+          STATUS=$?
+          {
+            echo "## npm audit — orchestrator (high+ / critical, prod deps)"
+            echo ""
+            if [ "$STATUS" -eq 0 ]; then
+              echo "No high or critical advisories found."
+            else
+              echo "Advisories blocking merge:"
+              echo ""
+              echo "| Package | Severity | Range | Advisories |"
+              echo "| --- | --- | --- | --- |"
+              # Emit one row per vulnerable package, listing each advisory
+              # title + URL. `via` entries may be strings (transitive
+              # parent package names) or objects (direct advisory records);
+              # we only render the object form here.
+              node -e "
+                const a = require('./audit.json');
+                const v = a.vulnerabilities || {};
+                for (const [name, info] of Object.entries(v)) {
+                  if (!['high','critical'].includes(info.severity)) continue;
+                  const advisories = (info.via || [])
+                    .filter(x => typeof x === 'object' && x.url)
+                    .map(x => \`[\${x.title || x.source}](\${x.url})\`)
+                    .join('<br>') || '(transitive)';
+                  console.log(\`| \${name} | \${info.severity} | \${info.range || ''} | \${advisories} |\`);
+                }
+              "
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Re-run plain to surface the human-readable report in the log.
+          npm audit --omit=dev --audit-level=high || true
+          exit $STATUS
+
+  npm-audit-dashboard:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: cd dashboard && npm ci
+
+      - name: npm audit (dashboard, prod deps, high+ only)
+        run: |
+          set +e
+          cd dashboard
+          npm audit --omit=dev --audit-level=high --json > audit.json
+          STATUS=$?
+          {
+            echo "## npm audit — dashboard (high+ / critical, prod deps)"
+            echo ""
+            if [ "$STATUS" -eq 0 ]; then
+              echo "No high or critical advisories found."
+            else
+              echo "Advisories blocking merge:"
+              echo ""
+              echo "| Package | Severity | Range | Advisories |"
+              echo "| --- | --- | --- | --- |"
+              node -e "
+                const a = require('./audit.json');
+                const v = a.vulnerabilities || {};
+                for (const [name, info] of Object.entries(v)) {
+                  if (!['high','critical'].includes(info.severity)) continue;
+                  const advisories = (info.via || [])
+                    .filter(x => typeof x === 'object' && x.url)
+                    .map(x => \`[\${x.title || x.source}](\${x.url})\`)
+                    .join('<br>') || '(transitive)';
+                  console.log(\`| \${name} | \${info.severity} | \${info.range || ''} | \${advisories} |\`);
+                }
+              "
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          npm audit --omit=dev --audit-level=high || true
+          exit $STATUS
+
   # Tier gate (issue #243, ADR-0001 + ADR-0004 work-order step 3).
   # Classifies changed files into modification tiers. Blocks Tier 0
   # (Untouchable Core) PRs unless the `operator-approved` label is
@@ -239,7 +338,7 @@ jobs:
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [test, dashboard-build]
+    needs: [test, dashboard-build, npm-audit-orchestrator, npm-audit-dashboard]
     runs-on: self-hosted
     steps:
       - name: Pull latest code
