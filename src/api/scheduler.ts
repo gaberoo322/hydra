@@ -20,8 +20,12 @@ export function createSchedulerRouter(eventBus: any) {
   });
 
   // POST /scheduler/stop — Stop automatic cycle scheduling
-  router.post("/scheduler/stop", (req, res) => {
-    const result = stopScheduler();
+  // Issue #388: a stop initiated through this API is treated as a deliberate
+  // operator action. The scheduler writes a Redis marker that the watchdog
+  // reads before issuing its auto-restart, so the operator's intent survives
+  // both a service bounce and the next watchdog tick.
+  router.post("/scheduler/stop", async (req, res) => {
+    const result = await stopScheduler({ reason: "deliberate" });
     if (result.error) {
       res.status(409).json(result);
     } else {

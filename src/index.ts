@@ -321,7 +321,10 @@ async function main() {
   const shutdown = async (signal) => {
     console.log(`\n[Hydra] Received ${signal}, shutting down...`);
     stopDigest();
-    stopScheduler();
+    // Issue #388: process shutdown is NOT operator-deliberate — systemd will
+    // restart the service and autoStart() will resume the scheduler. Writing
+    // a deliberate-stop marker here would defeat that.
+    await stopScheduler({ reason: "shutdown" });
     eventBus.stopConsuming();
     clearInterval(heartbeat);
     for (const ws of wss.clients) ws.close(1001, "server shutting down");

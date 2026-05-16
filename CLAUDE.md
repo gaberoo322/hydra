@@ -213,10 +213,11 @@ Operator escalation is reserved for the **closed list** in [ADR-0005](./docs/adr
 
 `hydra-orchestrator-watchdog.timer` runs every 2 minutes. Checks:
 1. `/health` responds with `status: "ok"` and `redis: true`
-2. Scheduler `lastCycleAt` not stale (>15 min with no cycle in progress)
+2. Scheduler `lastTickAt` not stale (>15 min with no cycle in progress) — post-#397, this is the heartbeat surface, not `lastCycleAt`
 3. Skips if a cycle is actively running
+4. **Respects deliberate operator stops (issue #388).** `POST /scheduler/stop` writes a `stopReason: "deliberate"` flag (persisted in Redis as `hydra:scheduler:deliberate-stop` with a 24h TTL so it survives a service bounce). When the watchdog sees this flag it leaves the scheduler stopped — the historical failure mode was the watchdog ticking the scheduler back on within ~2 minutes of every operator stop. Auto-pause reasons (`circuit-breaker`, `error-cap`) do NOT set this flag, so the watchdog can still recover from genuine self-stops. `POST /scheduler/start` clears the flag explicitly. The flag also self-clears after 24h to keep a forgotten stop from permanently disabling the watchdog.
 
-Script: `~/.local/bin/hydra-orchestrator-watchdog.sh`
+Script source of truth: `scripts/hydra-orchestrator-watchdog.sh` (deployed to `~/.local/bin/hydra-orchestrator-watchdog.sh`).
 
 
 ## Agent skills

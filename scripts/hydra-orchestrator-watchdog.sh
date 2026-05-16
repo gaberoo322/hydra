@@ -93,6 +93,19 @@ fi
 
 running=$(echo "$sched" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("running",False))' 2>/dev/null || echo "False")
 if [[ "$running" != "True" ]]; then
+  # Issue #388: respect deliberate stops. If the operator called
+  # POST /scheduler/stop, /api/scheduler/status reports stopReason="deliberate"
+  # and the scheduler writes a 24h Redis marker (hydra:scheduler:deliberate-stop)
+  # that survives a service bounce. We must NOT auto-restart in that case —
+  # the historical failure mode was the watchdog ticking the scheduler back on
+  # within ~2 minutes of every operator stop. Auto-pause reasons
+  # (circuit-breaker / error-cap) still warrant a restart attempt.
+  stop_reason=$(echo "$sched" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("stopReason","") or "")' 2>/dev/null || echo "")
+  if [[ "$stop_reason" == "deliberate" ]]; then
+    echo "hydra-orchestrator-watchdog: scheduler stopped deliberately (stopReason=deliberate); leaving alone"
+    exit 0
+  fi
+
   # Scheduler stopped — check if it's a fresh startup or a circuit breaker.
   # If uptime > 5 min and work exists, the scheduler self-stopped (zero-output
   # breaker or error cap). Restart it via API instead of restarting the service.
@@ -109,7 +122,7 @@ print(total)
     total_work=$((queue_depth + work_queue))
 
     if (( total_work > 0 )); then
-      echo "hydra-orchestrator-watchdog: scheduler stopped but ${total_work} items waiting (uptime ${uptime_s}s) — restarting scheduler via API"
+      echo "hydra-orchestrator-watchdog: scheduler stopped but ${total_work} items waiting (uptime ${uptime_s}s, stopReason=${stop_reason:-none}) — restarting scheduler via API"
       curl -sS --max-time 5 -X POST "http://localhost:4000/api/scheduler/start" \
         -H "content-type: application/json" -d '{}' >/dev/null 2>&1 || true
     else
