@@ -116,6 +116,12 @@ export const redisKeys = {
   schedulerCyclesMerged: () => "hydra:scheduler:cycles-merged",
   schedulerCyclesFailed: () => "hydra:scheduler:cycles-failed",
   schedulerStateVersion: () => "hydra:scheduler:state-version",
+  // Issue #388: deliberate-stop marker. Set when the operator calls
+  // POST /scheduler/stop so the watchdog can distinguish operator stops
+  // from self-stops (zero-output breaker / error cap) and refuse to
+  // auto-restart the former. 24h TTL so a stale flag eventually clears
+  // itself if start() is never called explicitly.
+  schedulerDeliberateStop: () => "hydra:scheduler:deliberate-stop",
 
   // Research capacity floor (issue #327) — sibling of #245 (self-improvement
   // floor) and #308 (spec capacity-floor). Tracks how often the floor fires,

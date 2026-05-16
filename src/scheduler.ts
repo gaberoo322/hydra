@@ -21,7 +21,7 @@ import { getPerCycleCostCapUsd } from "./cost-cap.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { getTargetName } from "./target-config.ts";
 import {
-  getString, setString, getWorkQueueLen, pushToWorkQueue,
+  getString, setString, delKey, getWorkQueueLen, pushToWorkQueue,
   hashGet, hashSetField,
   recordResearchEvent, recordBuildEvent,
   getResearchEventCount24h, getBuildEventCount24h,
@@ -195,7 +195,24 @@ let state = {
   researchCyclesRun: 0,
   lastResearchAt: null,
   _stateVersion: 0, // optimistic locking version (issue #140 — AC3)
+  // Issue #388: distinguish operator-initiated stops from self-stops so the
+  // watchdog can refuse to auto-restart deliberate stops.
+  //   - "deliberate"     — POST /scheduler/stop. Watchdog must NOT restart.
+  //   - "circuit-breaker"— auto-pause (consecutive-no-op-merges halt).
+  //                        Watchdog SHOULD restart once work is queued.
+  //   - "error-cap"      — auto-pause (consecutive-errors). Watchdog SHOULD restart.
+  //   - null             — never stopped, or last action was start().
+  // Mirrored to Redis (`schedulerDeliberateStop` key) with 24h TTL so the
+  // marker survives an orchestrator restart.
+  stopReason: null as "deliberate" | "circuit-breaker" | "error-cap" | null,
+  deliberateStoppedAt: null as string | null,
 };
+
+// Issue #388: TTL for the deliberate-stop Redis marker. 24h is the
+// operator-friendly maximum — if the operator forgets to restart the
+// scheduler within a day, the marker self-clears so the watchdog regains
+// the ability to recover from genuine self-stops.
+const DELIBERATE_STOP_TTL_SECONDS = 24 * 60 * 60;
 
 // ---------------------------------------------------------------------------
 // Scheduler state persistence
@@ -260,7 +277,26 @@ async function loadSchedulerState() {
     // Load state version for optimistic locking (issue #140 — AC3)
     state._stateVersion = await getSchedulerStateVersion();
 
-    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, cyclesRun=${state.cyclesRun}, cyclesMerged=${state.cyclesMerged}, cyclesFailed=${state.cyclesFailed}, version=${state._stateVersion}`);
+    // Issue #388: rehydrate the deliberate-stop marker. If a marker exists in
+    // Redis the operator stopped the scheduler before the restart — we keep
+    // running=false (loadSchedulerState doesn't auto-start) and surface the
+    // reason so the watchdog still refuses to restart after a service bounce.
+    try {
+      const rawDeliberateStop = await getString(redisKeys.schedulerDeliberateStop());
+      if (rawDeliberateStop) {
+        const parsed = JSON.parse(rawDeliberateStop);
+        if (parsed && typeof parsed.reason === "string") {
+          state.stopReason = parsed.reason;
+        }
+        if (parsed && typeof parsed.stoppedAt === "string") {
+          state.deliberateStoppedAt = parsed.stoppedAt;
+        }
+      }
+    } catch (err: any) {
+      console.error(`[Scheduler] Failed to load deliberate-stop marker: ${err.message}`);
+    }
+
+    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, cyclesRun=${state.cyclesRun}, cyclesMerged=${state.cyclesMerged}, cyclesFailed=${state.cyclesFailed}, version=${state._stateVersion}, stopReason=${state.stopReason ?? "none"}`);
   } catch (err: any) {
     console.error(`[Scheduler] Failed to load persisted state: ${err.message}`);
   }
@@ -828,6 +864,17 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   state.consecutiveNonMerges = 0;
   state.consecutiveNoOpMerges = 0;
   state.haltedForNoOpMerges = false;
+  // Issue #388: explicit operator intent — clear any deliberate-stop marker
+  // so the watchdog regains its auto-restart authority. Failures here are
+  // logged but do not block start() (the in-memory flip is the source of
+  // truth for this process; Redis is the cross-restart belt-and-braces).
+  state.stopReason = null;
+  state.deliberateStoppedAt = null;
+  try {
+    await delKey(redisKeys.schedulerDeliberateStop());
+  } catch (err: any) {
+    console.error(`[Scheduler] Failed to clear deliberate-stop marker: ${err.message}`);
+  }
 
   console.log(`[Scheduler] Started — cycles every ${intervalMs / 1000}s, research throttle ${RESEARCH_MIN_INTERVAL_MS / 3600_000}h`);
 
@@ -841,7 +888,28 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   };
 }
 
-function stop() {
+/**
+ * Stop the scheduler.
+ *
+ * @param opts.reason — why the scheduler is being stopped. The reason
+ *   determines whether a deliberate-stop marker is written to Redis so the
+ *   watchdog can refuse to auto-restart (issue #388).
+ *
+ *     "deliberate"      — operator intent (POST /scheduler/stop). Marker
+ *                         written; watchdog will NOT restart.
+ *     "circuit-breaker" — auto-pause (no-op-merge halt). Marker NOT
+ *                         written; watchdog SHOULD restart once work is
+ *                         queued.
+ *     "error-cap"       — auto-pause (consecutive errors). Same as
+ *                         circuit-breaker.
+ *     "shutdown"        — process exit (SIGTERM/SIGINT). Marker NOT written;
+ *                         the service will be restarted by systemd and the
+ *                         scheduler will autoStart again on boot.
+ *
+ *   Default: "deliberate". This preserves the historical contract — anyone
+ *   calling `stop()` with no args is treating it as an operator action.
+ */
+async function stop(opts: { reason?: "deliberate" | "circuit-breaker" | "error-cap" | "shutdown" } = {}) {
   if (!state.running) {
     return { error: "Scheduler is not running" };
   }
@@ -853,10 +921,40 @@ function stop() {
   }
 
   const stoppedAt = new Date().toISOString();
-  console.log(`[Scheduler] Stopped after ${state.cyclesRun} cycles`);
+  const reason = opts.reason ?? "deliberate";
+
+  // Issue #388: persist the marker for deliberate stops so the watchdog
+  // refuses to auto-restart. Auto-pause reasons (circuit-breaker / error-cap)
+  // are explicitly NOT persisted — those are exactly the cases the watchdog
+  // is designed to recover from. Shutdown is also skipped: systemd will
+  // restart the service and autoStart() needs a clean slate.
+  if (reason === "deliberate") {
+    state.stopReason = "deliberate";
+    state.deliberateStoppedAt = stoppedAt;
+    try {
+      await setString(
+        redisKeys.schedulerDeliberateStop(),
+        JSON.stringify({ reason: "deliberate", stoppedAt }),
+        DELIBERATE_STOP_TTL_SECONDS,
+      );
+    } catch (err: any) {
+      console.error(`[Scheduler] Failed to persist deliberate-stop marker: ${err.message}`);
+    }
+  } else if (reason === "circuit-breaker" || reason === "error-cap") {
+    // Track the reason in-memory so /status surfaces it, but DO NOT write
+    // the marker — the watchdog must still be able to recover these.
+    state.stopReason = reason;
+    state.deliberateStoppedAt = null;
+  } else {
+    // reason === "shutdown" — leave stopReason untouched so a deliberate
+    // stop survives a clean shutdown/restart cycle via the Redis marker.
+  }
+
+  console.log(`[Scheduler] Stopped after ${state.cyclesRun} cycles (reason=${reason})`);
 
   return {
     stopped: true,
+    reason,
     cyclesRun: state.cyclesRun,
     cyclesMerged: state.cyclesMerged,
     cyclesFailed: state.cyclesFailed,
@@ -935,6 +1033,12 @@ async function getStatus() {
     running: state.running,
     codexCycleEnabled,
     mode,
+    // Issue #388: surface why the scheduler is stopped so consumers
+    // (especially the watchdog) can distinguish operator-deliberate stops
+    // from self-stops. `null` when running, or when start() was the last
+    // action. See the `stop()` JSDoc for the closed-list of values.
+    stopReason: state.stopReason,
+    deliberateStoppedAt: state.deliberateStoppedAt,
     intervalMs: state.intervalMs,
     intervalHuman: state.intervalMs ? formatDuration(state.intervalMs) : null,
     cyclesRun: state.cyclesRun,
