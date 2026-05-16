@@ -16,6 +16,9 @@
 #   hydra health deep
 #   hydra scheduler status
 #   hydra scheduler start | stop
+#     stop semantics (issue #385): drains the in-flight cycle, no chained
+#     ticks fire after the response — scheduler is quiescent the instant
+#     stop returns. Safe to call repeatedly; second call returns "not running".
 #   hydra cycle status
 #   hydra cycle start
 #   hydra cycle reality
