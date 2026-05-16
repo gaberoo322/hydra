@@ -175,7 +175,17 @@ let state = {
   cyclesRun: 0,
   cyclesMerged: 0,
   cyclesFailed: 0,
+  // Issue #397: post-#383 the in-process control loop is gone. `lastCycleAt`
+  // is preserved for backward-compat readers but is null whenever
+  // codexCycleEnabled is false (which it always is now) — it never
+  // advances because no `runControlLoop` invocation ever happens.
+  // The watchdog must read `lastTickAt` for genuine liveness instead.
   lastCycleAt: null,
+  // Issue #397: heartbeat for the scheduler's housekeeping loop. Updated on
+  // every `runScheduledCycle` entry regardless of codexCycleEnabled, so the
+  // watchdog can distinguish "scheduler is alive" from "control loop ran
+  // recently". This is the field external liveness probes should read.
+  lastTickAt: null,
   lastError: null,
   startedAt: null,
   consecutiveErrors: 0,
@@ -763,9 +773,15 @@ async function runScheduledCycle(eventBus) {
   // Issue #383 (codex cut-over PR-3): the in-process control loop is gone.
   // `runScheduledCycle` now exists solely as a heartbeat for the housekeeping
   // tasks above (stale-claim reaper, weekly digest, memory consolidation,
-  // maybeRunResearch). Update `lastCycleAt` so the watchdog's >15min stale-
-  // cycle alert doesn't false-fire, then schedule the next tick.
-  state.lastCycleAt = new Date().toISOString();
+  // maybeRunResearch).
+  //
+  // Issue #397: the heartbeat moves to `lastTickAt` so liveness probes can
+  // tell "housekeeping is running" apart from "the control loop ran". The
+  // legacy `lastCycleAt` field is left null on purpose — under PR-3 there is
+  // no `runControlLoop` invocation to point at, so reporting a stale codex
+  // timestamp here misleads the dashboard and the watchdog. Operators that
+  // want liveness must read `lastTickAt`.
+  state.lastTickAt = new Date().toISOString();
   if (state.running) {
     const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
     state.timer = setTimeout(
@@ -872,14 +888,53 @@ async function getStatus() {
   // so existing consumers that read `mergeRate` keep getting a number.
   const mergeRate = rolling.mergeRate ?? lifetimeMergeRate;
 
+  // Issue #383 (codex cut-over PR-3): the in-process codex control loop is
+  // gone — the scheduler ticks for housekeeping only. The legacy
+  // `codexCycleEnabled` flag is hard-coded to `false`; if a future change
+  // resurrects an in-process control loop, this constant moves back to
+  // reading a runtime flag.
+  //
+  // Issue #397: a single source of truth for "what is this scheduler
+  // doing?" — read by the dashboard banner and by anything that needs to
+  // decide whether codex-shaped fields are meaningful.
+  //   - "scheduler-only" — running=true, no control loop. Current default.
+  //   - "disabled"       — running=false. Heartbeat is not advancing.
+  // ("codex-cycle" is intentionally absent — it would only return if a
+  //  future change re-enables an in-process control loop.)
+  const codexCycleEnabled = false;
+  const mode: "scheduler-only" | "disabled" = state.running
+    ? "scheduler-only"
+    : "disabled";
+
+  // When the in-process control loop is disabled, the codex-specific
+  // counters / breakers no longer have meaning — `consecutiveNonMerges`
+  // can't advance because nothing merges through the scheduler, and the
+  // stall backoff / circuit breaker / repetition detector all key off
+  // that counter. Surfacing the frozen values from before PR-3 confuses
+  // operators (the watchdog and dashboard would alert on stale state
+  // that no live code path can ever clear). Report `null` for those
+  // fields when codex is disabled so the dashboard can render "n/a"
+  // instead of a misleading number.
+  const codexFields = codexCycleEnabled
+    ? {
+        consecutiveNonMerges: state.consecutiveNonMerges,
+        stallAlertThreshold: STALL_ALERT_THRESHOLD,
+        zeroOutputThreshold: ZERO_OUTPUT_THRESHOLD,
+        stallBackoffMs: computeStallBackoffMs(state.consecutiveNonMerges),
+        stallState: classifyStallState(state.consecutiveNonMerges),
+      }
+    : {
+        consecutiveNonMerges: null,
+        stallAlertThreshold: null,
+        zeroOutputThreshold: null,
+        stallBackoffMs: null,
+        stallState: null,
+      };
+
   return {
     running: state.running,
-    // Issue #383 (codex cut-over PR-3): the in-process codex control loop is
-    // gone — the scheduler ticks for housekeeping only. The legacy
-    // `codexCycleEnabled` flag is reported as false for backward-compat with
-    // dashboard widgets that still read it; remove once the dashboard is
-    // updated (tracked under PR-4 doc cleanup).
-    codexCycleEnabled: false,
+    codexCycleEnabled,
+    mode,
     intervalMs: state.intervalMs,
     intervalHuman: state.intervalMs ? formatDuration(state.intervalMs) : null,
     cyclesRun: state.cyclesRun,
@@ -893,13 +948,19 @@ async function getStatus() {
     // Lifetime counter ratio — kept for audit / debugging only. Do not use
     // for alerts, stall detection, or operator dashboards (see issue #232).
     mergeRateLifetime: lifetimeMergeRate,
-    lastCycleAt: state.lastCycleAt,
+    // Issue #397: `lastCycleAt` is the timestamp of the last in-process
+    // control loop run. Under PR-3 (#383) it never advances and is
+    // reported as null. Legacy field kept for callers that still read
+    // it — new callers should use `lastTickAt` for liveness.
+    lastCycleAt: codexCycleEnabled ? state.lastCycleAt : null,
+    // Issue #397: heartbeat for the housekeeping tick. The watchdog
+    // reads this to distinguish "scheduler alive" from "control loop
+    // ran". Always present, always advancing when running=true.
+    lastTickAt: state.lastTickAt,
     lastError: state.lastError,
     startedAt: state.startedAt,
     consecutiveErrors: state.consecutiveErrors,
-    consecutiveNonMerges: state.consecutiveNonMerges,
-    stallAlertThreshold: STALL_ALERT_THRESHOLD,
-    zeroOutputThreshold: ZERO_OUTPUT_THRESHOLD,
+    ...codexFields,
     // Issue #222: surface no-op-merge counter so dashboards and operator
     // checklist can display the silent-rot guardrail status.
     consecutiveNoOpMerges: state.consecutiveNoOpMerges,
@@ -940,12 +1001,18 @@ async function getStatus() {
           }
         : null,
     },
-    repetition: {
-      window: REPETITION_WINDOW,
-      threshold: `${Math.round(REPETITION_THRESHOLD * 100)}%`,
-    // @ts-expect-error — migrate to proper types
-      pausedForRepetition: state.pausedForRepetition || false,
-    },
+    // Issue #397: repetition detector only fires inside the in-process
+    // control loop's planner/executor path. When codex is disabled there
+    // is no plan stream to detect repetition in, so report `null` rather
+    // than freezing the dashboard on the last codex-era value.
+    repetition: codexCycleEnabled
+      ? {
+          window: REPETITION_WINDOW,
+          threshold: `${Math.round(REPETITION_THRESHOLD * 100)}%`,
+        // @ts-expect-error — migrate to proper types
+          pausedForRepetition: state.pausedForRepetition || false,
+        }
+      : null,
   };
 }
 

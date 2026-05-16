@@ -205,6 +205,12 @@ export default function Overview({ ws }) {
     refreshAlerts();
   }
 
+  // Issue #397: when the in-process control loop is disabled (the post-#383
+  // default), surface that explicitly so dashboard widgets that show
+  // "0 cycles / merge rate 0% / last cycle: never" are not misread as
+  // a degraded scheduler — work happens via autopilot subagents instead.
+  const codexCycleDisabled = scheduler && scheduler.codexCycleEnabled === false;
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -224,6 +230,17 @@ export default function Overview({ ws }) {
           )}
         </div>
       </div>
+
+      {/* Issue #397: codex-disabled / autopilot-mode banner */}
+      {codexCycleDisabled && (
+        <div
+          className="bg-amber-900/20 border border-amber-700/40 rounded-lg px-4 py-2 text-xs text-amber-200"
+          title="In-process codex control loop disabled — code-writing work happens via autopilot subagents, not the legacy cycle. Cycle-shaped widgets below reflect housekeeping ticks only."
+        >
+          <span className="font-semibold">Autopilot mode</span>
+          <span className="text-amber-300/80"> — in-process control loop disabled. Cycle counters reflect housekeeping ticks; actual code-writing runs as Claude Code subagents.</span>
+        </div>
+      )}
 
       {/* Active Cycle — full width hero */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
