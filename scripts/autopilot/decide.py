@@ -456,8 +456,13 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
            a) class not in burned_classes (soft cap, #395)
            b) class not scope-excluded
            c) at least one eligible candidate / signal for that slot
-           d) for dev_orch: best candidate score >= 0.5 (grilled decision 6)
-              Otherwise, force a research_orch dispatch capped at 4/day.
+           d) for dev_orch: `orch_work_available` signal is set (post-#458)
+           e) for dev_target: `target_work_available` signal is set; the top
+              /api/anchor/candidates entry is surfaced as an anchor hint
+              when its score >= 0.5
+           f) for research_target: top candidate score below 0.5 forces a
+              research_target dispatch capped at 4/day (post-#458 this
+              moved off research_orch)
 
       5. Signal classes (health / sweep_* / discover_*): fire if signal
          cooled AND a relevant board signal is present.
@@ -642,33 +647,65 @@ def _select_for_slot(
             return make_dispatch(cls, "hydra-qa", prompt_args={"scope": "target"}, reason="needs-qa target")
         return None
     if cls == "dev_orch":
-        if best and best_score >= DEV_CONFIDENCE_THRESHOLD:
-            ref = best.get("anchorRef") or best.get("issue")
-            return make_dispatch(cls, "hydra-dev", prompt_args={"anchor": ref, "score": best_score}, reason=f"top candidate score={best_score}")
-        # No candidate above threshold → force research_orch instead (grilled decision 6).
-        # The decide() main loop will pick this up when iterating to research_orch.
+        # ISSUE #458: dev_orch must consume the orchestrator GH `ready-for-agent`
+        # board, NOT /api/anchor/candidates. The unified candidates feed is
+        # dominated by target-product work in this deployment (item-26x are all
+        # hydra-betting tasks), and routing them to dev_orch caused hydra-dev
+        # to receive target-only anchors and either escalate or misroute.
+        #
+        # New contract: dev_orch fires iff `orch_work_available` is set
+        # (collect-state.sh sets this when `ready_for_agent > 0`). hydra-dev
+        # picks its own issue from `gh issue list --label ready-for-agent`
+        # on `gaberoo322/hydra` — no anchor is passed through prompt_args
+        # because the candidate feed is structurally the wrong source.
+        if _signal_present(state, events, "orch_work_available"):
+            return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
         return None
     if cls == "dev_target":
         # Use board signal (work_queue / target backlog) — dev_target dispatches
-        # are driven by the target-side queue, not /api/anchor/candidates.
+        # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
+        # best /api/anchor/candidates entry as an anchor hint, because the
+        # unified candidates feed IS target-product work in this deployment.
         if _signal_present(state, events, "target_work_available"):
-            return make_dispatch(cls, "hydra-target-build", reason="target work queue non-empty")
+            prompt_args: dict = {}
+            if best and best_score >= DEV_CONFIDENCE_THRESHOLD:
+                ref = best.get("anchorRef") or best.get("issue")
+                if ref is not None:
+                    prompt_args["anchor"] = ref
+                    prompt_args["score"] = best_score
+            return make_dispatch(
+                cls,
+                "hydra-target-build",
+                prompt_args=prompt_args,
+                reason="target work queue non-empty",
+            )
         return None
     if cls == "research_orch":
-        # Two triggers: (a) best-score floor (force-research, capped daily) or
-        # (b) explicit needs-research signal.
-        # `candidates is None` means we didn't query the API — DON'T force
-        # research; the autopilot is mid-bootstrap. Only fire force-research
-        # when we have an actual empty/weak candidates payload.
-        if candidates is not None and (best is None or best_score < DEV_CONFIDENCE_THRESHOLD):
-            if _research_force_allowed(state, "research_orch", now):
-                return make_dispatch(cls, "hydra-research", prompt_args={"forced": True}, reason="best-score below threshold; forced")
+        # ISSUE #458: the candidate-driven force-research trigger moved to
+        # research_target (the candidates feed is target-product work). The
+        # orchestrator-side research force lives in the explicit
+        # `needs_research` signal — that's the only path that fires
+        # research_orch now. The daily cap still applies if the signal
+        # repeatedly fires within a day.
         if _signal_present(state, events, "needs_research"):
             return make_dispatch(cls, "hydra-issue-research", reason="explicit needs-research signal")
         return None
     if cls == "research_target":
+        # Two triggers: (a) explicit target_research_due signal, or
+        # (b) best /api/anchor/candidates score below the dev threshold —
+        # the candidates feed IS the target backlog, so a weak top score
+        # means the target product needs more research direction (post-#458,
+        # this trigger moved here from research_orch).
         if _signal_present(state, events, "target_research_due"):
             return make_dispatch(cls, "hydra-target-research", reason="target research due")
+        if candidates is not None and (best is None or best_score < DEV_CONFIDENCE_THRESHOLD):
+            if _research_force_allowed(state, "research_target", now):
+                return make_dispatch(
+                    cls,
+                    "hydra-target-research",
+                    prompt_args={"forced": True},
+                    reason="best target-candidate below threshold; forced",
+                )
         return None
     return None
 

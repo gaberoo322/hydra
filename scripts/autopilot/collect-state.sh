@@ -22,6 +22,13 @@ except: print('health=FAIL')"
 echo -n "failed_services="; systemctl --user list-units --type=service --state=failed --no-legend 2>/dev/null | grep -c hydra || echo 0
 
 # orchestrator-side issue board (counts + stale lists)
+#
+# The `ready_for_agent` count is the source signal for `dev_orch` dispatch
+# (issue #458): when >0, the playbook MUST set
+# `state.signals.orch_work_available = true` so decide.py's `dev_orch`
+# selector fires. Before #458, `dev_orch` consumed /api/anchor/candidates
+# — which in this deployment is structurally a target-product feed —
+# causing hydra-dev to receive target-only anchors and escalate.
 gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
   needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
   ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,

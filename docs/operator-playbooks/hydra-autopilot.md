@@ -248,6 +248,25 @@ Slash-args (`--scope=`, `--tokens=`, `--max-sec=`, `--idle-turns=`,
 `--subagent-soft=`, `--subagent-hard=`, `--unattended=`) parse via
 `args-parse.sh` and override env vars.
 
+## Signal wiring (state.signals)
+
+`collect-state.sh` emits raw counts; the model turns them into the
+boolean signals decide.py reads from `state.signals`. The key mappings:
+
+| collect-state output | state.signals key | Drives |
+|---|---|---|
+| `ready_for_agent > 0` (orch GH board) | `orch_work_available` | `dev_orch` (issue #458) |
+| `work_queue > 0` (target Redis queue) | `target_work_available` | `dev_target` |
+| `needs_qa > 0` (orch GH board) | `needs_qa_orch` | `qa_orch` |
+| `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |
+| `needs_triage > 0` (orch GH board) | `needs_triage_orch` | `sweep_orch` |
+| `health=FAIL` or `failed_services>0` | `health_fail` | `health` |
+
+Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
+received target-product anchors (item-26x). Post-#458, candidates are
+treated as target-side work: `dev_target` surfaces the top candidate as
+a hint, and a low best-score forces `research_target` (not `research_orch`).
+
 ## Where to look when something goes wrong
 
 - Wrong dispatch for a class → `decide.py:_select_for_slot` / `_select_for_signal`

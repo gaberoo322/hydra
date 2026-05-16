@@ -132,22 +132,31 @@ function findAction(plan: any, predicate: (a: any) => boolean): any | undefined 
 // ---------------------------------------------------------------------------
 
 describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () => {
-  test("dispatches dev_orch when slot free and best candidate >= 0.5", () => {
-    const state = baseState();
-    const cands = { candidates: [{ issue: 101, anchorRef: "issue-101", score: 0.72 }], research_recommended: false };
-    const plan = runDecide(state, cands);
+  // ISSUE #458: dev_orch no longer reads /api/anchor/candidates — it fires
+  // on the `orch_work_available` signal, which the playbook turn sets when
+  // collect-state.sh reports `ready_for_agent > 0` on the orchestrator GH
+  // board. hydra-dev picks its own issue from `gh issue list`.
+  test("dispatches dev_orch when slot free and orch_work_available signal set (#458)", () => {
+    const state = baseState({ signals: { orch_work_available: true } });
+    const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
-    assert.ok(dispatch, "expected a dev_orch dispatch action");
+    assert.ok(dispatch, "expected a dev_orch dispatch action on orch_work_available");
     assert.equal(dispatch.skill, "hydra-dev");
-    assert.equal(dispatch.prompt_args.anchor, "issue-101");
+    // dev_orch no longer carries a target-side anchor (#458 was specifically
+    // about NOT routing target candidates through dev_orch).
+    assert.equal(dispatch.prompt_args.anchor, undefined,
+      "dev_orch must not receive an anchor from /api/anchor/candidates (#458)");
   });
 
-  test("does NOT dispatch dev_orch when best score < 0.5", () => {
-    const state = baseState();
-    const cands = { candidates: [{ issue: 99, anchorRef: "issue-99", score: 0.3 }], research_recommended: true };
+  test("does NOT dispatch dev_orch when orch_work_available signal is absent (#458)", () => {
+    const state = baseState();  // no signals
+    // Even a high-scoring target candidate must NOT trigger dev_orch — the
+    // exact misroute symptom that motivated #458.
+    const cands = { candidates: [{ issue: 267, anchorRef: "item-267", score: 0.85 }], research_recommended: false };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
-    assert.equal(dispatch, undefined, "low-confidence candidate must not trigger dev_orch dispatch");
+    assert.equal(dispatch, undefined,
+      "target-product candidate must NOT trigger dev_orch (#458 — was causing hydra-dev misroute escalations)");
   });
 
   test("does NOT dispatch dev_orch when slot is busy", () => {
@@ -157,9 +166,9 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
         qa_orch: null, research_orch: null,
         dev_target: null, qa_target: null, research_target: null,
       },
+      signals: { orch_work_available: true },
     });
-    const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.9 }], research_recommended: false };
-    const plan = runDecide(state, cands);
+    const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     assert.equal(dispatch, undefined, "busy slot must not receive a new dispatch (INV-002)");
   });
@@ -202,39 +211,55 @@ describe("decide.py — pipeline dispatch (issue #426 AC: 6-slot pipeline)", () 
 // ---------------------------------------------------------------------------
 
 describe("decide.py — research force-dispatch when no candidate >= 0.5", () => {
-  test("no candidate -> research_orch forced", () => {
+  // ISSUE #458: the candidate-driven force-research moved from
+  // research_orch to research_target. /api/anchor/candidates is a
+  // target-product backlog in this deployment, so a weak top score means
+  // the TARGET needs research direction — not the orchestrator-self.
+  test("no candidate -> research_target forced (#458)", () => {
     const state = baseState();
     const cands = { candidates: [], research_recommended: true };
     const plan = runDecide(state, cands);
-    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
-    assert.ok(dispatch, "empty candidates must force research_orch");
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+    assert.ok(dispatch, "empty candidates must force research_target (post-#458)");
     assert.equal(dispatch.prompt_args.forced, true);
+    assert.equal(dispatch.skill, "hydra-target-research");
   });
 
-  test("best score below 0.5 -> research_orch forced", () => {
+  test("best score below 0.5 -> research_target forced (#458)", () => {
     const state = baseState();
     const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.4 }], research_recommended: true };
     const plan = runDecide(state, cands);
-    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
     assert.ok(dispatch);
   });
 
-  test("daily research-force cap (4/day) — 4th forced dispatch suppressed", () => {
+  test("daily research-force cap (4/day) — 4th forced research_target dispatch suppressed (#458)", () => {
     const today = new Date().toISOString().slice(0, 10);
     const state = baseState({
-      research_force_counter: { [today]: { research_orch: 4 } },
+      research_force_counter: { [today]: { research_target: 4 } },
     });
     const cands = { candidates: [], research_recommended: true };
     const plan = runDecide(state, cands);
-    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
-    assert.equal(dispatch, undefined, "force cap must suppress further research_orch dispatches");
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+    assert.equal(dispatch, undefined, "force cap must suppress further research_target dispatches");
+  });
+
+  test("low-score candidate does NOT force research_orch (#458)", () => {
+    // Inverse of the test above — verifies the trigger moved off research_orch.
+    const state = baseState();
+    const cands = { candidates: [], research_recommended: true };
+    const plan = runDecide(state, cands);
+    const research_orch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
+    assert.equal(research_orch, undefined,
+      "candidate-driven force must NOT fire research_orch post-#458 — the trigger moved to research_target");
   });
 
   test("needs_research signal triggers research_orch with hydra-issue-research", () => {
-    const state = baseState({ signals: { needs_research: true } });
-    const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.9 }], research_recommended: false };
-    const plan = runDecide(state, cands);
-    // dev_orch should dispatch on the strong candidate, AND research_orch
+    const state = baseState({
+      signals: { needs_research: true, orch_work_available: true },
+    });
+    const plan = runDecide(state, null);
+    // dev_orch should dispatch on orch_work_available, AND research_orch
     // should dispatch on the needs_research signal — they're separate slots.
     const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
     const research = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
@@ -707,7 +732,8 @@ describe("decide.py — plan shape contract", () => {
     const plans = [
       runDecide(baseState({ cumulative_tokens: 5_000_000 })),                                  // terminate
       runDecide(baseState({ signals: { needs_qa_orch: true } })),                              // dispatch
-      runDecide(baseState(), { candidates: [{ issue: 1, anchorRef: "x", score: 0.9 }] }),      // dispatch
+      runDecide(baseState({ signals: { orch_work_available: true } })),                        // dispatch dev_orch (#458)
+      runDecide(baseState(), { candidates: [{ issue: 1, anchorRef: "x", score: 0.9 }] }),      // dispatch (research-related)
       runDecide(baseState(), null, [{                                                          // auto-merge
         type: "qa-verdict", pr_number: 1, tier: 1, verdict: "PASS",
       }]),
@@ -766,5 +792,210 @@ describe("decide.py — should_auto_merge() policy table", () => {
     assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 1));
     assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 2));
     assert.ok(findAction(plan, (a) => a.type === "apply-operator-approved" && a.pr_number === 3));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. ISSUE #458 — dev_orch vs dev_target candidate-feed routing
+// ---------------------------------------------------------------------------
+//
+// Symptom (2026-05-15 ~22:09Z autopilot tick): decide.py dispatched
+// `dev_orch` (hydra-dev) on anchor `item-267` — a target-product Settings-
+// page task whose files live in `~/hydra-betting/web/src/`. hydra-dev
+// correctly identified the work as target-only and escalated, but the
+// dispatch consumed budget and round-trip latency for a routing decision
+// the brain should have made up front.
+//
+// Root cause: `_select_for_slot('dev_orch')` previously read the top
+// /api/anchor/candidates entry, but in this deployment the candidates
+// feed is structurally the target-product backlog (item-26x are all
+// hydra-betting work). dev_orch had no orch/target scope filter and kept
+// picking target items, blocking productive orchestrator-side dispatches
+// (8 orch GH `ready-for-agent` issues sat idle: #449, #448, #443, ...).
+//
+// Fix: dev_orch consumes the orchestrator GH board via the
+// `orch_work_available` signal; dev_target keeps target_work_available
+// AND surfaces the top candidate as an anchor hint; the
+// candidate-driven research force moved from research_orch to
+// research_target.
+//
+// These tests pin every leg of the routing change so a future refactor
+// can't silently regress to the misroute.
+
+describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
+  test("ISSUE-458 reproduction: target-product candidate must NOT trigger dev_orch", () => {
+    // The exact misroute that motivated #458 — `item-267` is target-product
+    // work but was being routed to dev_orch (hydra-dev) for orchestrator
+    // dispatch. After the fix, only an explicit `orch_work_available`
+    // signal can trigger dev_orch; the candidate feed is ignored by it.
+    const state = baseState();  // no signals — fresh tick
+    const cands = {
+      candidates: [
+        { issue: 267, anchorRef: "item-267", score: 0.85, title: "Settings page: editable kill switch" },
+        { issue: 266, anchorRef: "item-266", score: 0.80, title: "Slippage alarm on dashboard" },
+        { issue: 264, anchorRef: "item-264", score: 0.75, title: "Settlement orphan detection" },
+      ],
+      research_recommended: false,
+    };
+    const plan = runDecide(state, cands);
+
+    const devOrch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(devOrch, undefined,
+      "target-product candidate must NOT trigger dev_orch (was the #458 misroute)");
+
+    // The same candidates SHOULD NOT trigger dev_target either, because
+    // target_work_available signal isn't set — the candidate feed is a
+    // hint, not a trigger.
+    const devTarget = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+    assert.equal(devTarget, undefined,
+      "dev_target needs target_work_available signal, not just candidates");
+  });
+
+  test("ISSUE-458: dev_orch dispatches on orch_work_available signal with NO target anchor", () => {
+    // The fixed path: the playbook sets `orch_work_available=true` from
+    // collect-state.sh's `ready_for_agent` count, and dev_orch fires.
+    // No anchor is carried — hydra-dev picks its own issue from the GH
+    // board, which is the only correct source for orch-side work.
+    const state = baseState({ signals: { orch_work_available: true } });
+    // Even with a target-product candidate present, dev_orch must not
+    // carry it through as an anchor.
+    const cands = { candidates: [{ issue: 267, anchorRef: "item-267", score: 0.85 }] };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.ok(dispatch, "orch_work_available must fire dev_orch");
+    assert.equal(dispatch.skill, "hydra-dev");
+    assert.equal(dispatch.prompt_args.anchor, undefined,
+      "dev_orch must NOT pass a target-product anchor — that's the bug #458 fixes");
+    assert.equal(dispatch.prompt_args.score, undefined,
+      "dev_orch must NOT pass a candidate score — candidates are target work");
+  });
+
+  test("ISSUE-458: dev_target dispatches on target_work_available AND carries top candidate as anchor", () => {
+    // The candidates feed IS the target backlog — when dev_target fires,
+    // the top entry is surfaced as `prompt_args.anchor` so hydra-target-build
+    // gets a clear pointer.
+    const state = baseState({ signals: { target_work_available: true } });
+    const cands = {
+      candidates: [{ issue: 267, anchorRef: "item-267", score: 0.85 }],
+    };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+    assert.ok(dispatch, "target_work_available must fire dev_target");
+    assert.equal(dispatch.skill, "hydra-target-build");
+    assert.equal(dispatch.prompt_args.anchor, "item-267",
+      "dev_target must surface the top candidate as its anchor (#458)");
+    assert.equal(dispatch.prompt_args.score, 0.85);
+  });
+
+  test("ISSUE-458: dev_target with weak top candidate fires WITHOUT an anchor hint", () => {
+    // The 0.5 threshold still gates the anchor hint — a weak candidate
+    // is no better than no candidate, so dev_target fires bare.
+    const state = baseState({ signals: { target_work_available: true } });
+    const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.3 }] };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+    assert.ok(dispatch);
+    assert.equal(dispatch.prompt_args.anchor, undefined,
+      "below-threshold candidate must NOT be surfaced as a dev_target anchor");
+  });
+
+  test("ISSUE-458: dev_target with NO candidates feed fires bare (no anchor)", () => {
+    // candidates=null is the bootstrap / API-down case. dev_target should
+    // still dispatch on the signal — it has its own queue to consult.
+    const state = baseState({ signals: { target_work_available: true } });
+    const plan = runDecide(state, null);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+    assert.ok(dispatch);
+    assert.equal(dispatch.prompt_args.anchor, undefined);
+  });
+
+  test("ISSUE-458: empty candidates force research_target, NOT research_orch", () => {
+    // The candidate-driven force-research trigger moved off research_orch.
+    // /api/anchor/candidates is target-product work in this deployment, so
+    // a weak top score signals that the TARGET needs research direction.
+    const state = baseState();
+    const cands = { candidates: [], research_recommended: true };
+    const plan = runDecide(state, cands);
+
+    const researchTarget = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+    assert.ok(researchTarget, "empty candidates must force research_target (#458)");
+    assert.equal(researchTarget.skill, "hydra-target-research");
+    assert.equal(researchTarget.prompt_args.forced, true);
+
+    const researchOrch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
+    assert.equal(researchOrch, undefined,
+      "candidate-driven force must NOT fire research_orch (it moved to research_target in #458)");
+  });
+
+  test("ISSUE-458: research_orch still fires on explicit needs_research signal", () => {
+    // The orch-side research path is intact — it just no longer fires
+    // off the candidates feed. An explicit `needs_research` signal from
+    // the orch GH board still triggers research_orch.
+    const state = baseState({ signals: { needs_research: true } });
+    const plan = runDecide(state, null);
+    const research = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
+    assert.ok(research);
+    assert.equal(research.skill, "hydra-issue-research");
+  });
+
+  test("ISSUE-458: realistic post-fix tick — both dev_orch and dev_target fire correctly", () => {
+    // Simulates the autopilot tick from the issue's evidence AFTER the
+    // fix: GH board has ready-for-agent issues AND the target queue is
+    // hot AND the candidates feed has a strong target item. dev_orch
+    // picks from GH; dev_target picks the candidate. No misroute.
+    const state = baseState({
+      signals: { orch_work_available: true, target_work_available: true },
+    });
+    const cands = { candidates: [{ issue: 267, anchorRef: "item-267", score: 0.85 }] };
+    const plan = runDecide(state, cands);
+
+    const devOrch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    const devTarget = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+
+    assert.ok(devOrch, "dev_orch must fire on the orch board signal");
+    assert.equal(devOrch.skill, "hydra-dev");
+    assert.equal(devOrch.prompt_args.anchor, undefined,
+      "dev_orch carries no target anchor");
+
+    assert.ok(devTarget, "dev_target must fire on the target queue signal");
+    assert.equal(devTarget.skill, "hydra-target-build");
+    assert.equal(devTarget.prompt_args.anchor, "item-267",
+      "dev_target picks up the target-product candidate");
+  });
+
+  test("ISSUE-458: research_target daily cap independent of research_orch cap", () => {
+    // The two slots have separate counters under research_force_counter.
+    // Exhausting the research_target cap must not affect research_orch
+    // (and vice versa).
+    const today = new Date().toISOString().slice(0, 10);
+    const state = baseState({
+      research_force_counter: { [today]: { research_target: 4, research_orch: 0 } },
+    });
+    const cands = { candidates: [], research_recommended: true };
+    const plan = runDecide(state, cands);
+
+    const researchTarget = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+    assert.equal(researchTarget, undefined,
+      "research_target cap exhausted -> no force dispatch");
+
+    // No needs_research signal -> research_orch also idle, but for an
+    // unrelated reason. That's expected.
+    const researchOrch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_orch");
+    assert.equal(researchOrch, undefined);
+  });
+
+  test("ISSUE-458: scope=orch-only does not break dev_orch's new signal-based trigger", () => {
+    // Belt-and-braces: the scope filter still passes dev_orch through under
+    // orch-only, and the new signal-based dispatch path works inside the
+    // restricted scope.
+    const state = baseState({
+      scope: "orch-only",
+      signals: { orch_work_available: true, target_work_available: true },
+    });
+    const plan = runDecide(state, null);
+    const devOrch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    const devTarget = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+    assert.ok(devOrch, "dev_orch must still fire under orch-only scope");
+    assert.equal(devTarget, undefined, "dev_target is excluded by orch-only scope");
   });
 });
