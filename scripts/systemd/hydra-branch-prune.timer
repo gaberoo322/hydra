@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily Hydra stale-branch + worktree garbage collector (issue #443)
+Documentation=https://github.com/gaberoo322/hydra/issues/443
+
+[Timer]
+# Run once per day, off-peak. The skill is idempotent — every successful run
+# leaves the repo with one fewer [gone] branch / orphan worktree — so the
+# exact time matters less than "after the daily merge wave settles".
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

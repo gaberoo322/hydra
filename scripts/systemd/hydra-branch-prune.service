@@ -1,0 +1,21 @@
+[Unit]
+Description=Hydra stale-branch + worktree garbage collector (issue #443)
+Documentation=https://github.com/gaberoo322/hydra/issues/443
+
+[Service]
+Type=oneshot
+# Default cwd: the main repo working tree. The script refuses to run from
+# inside a worktree, so we explicitly point HYDRA_ROOT at the canonical main
+# checkout.
+Environment=HYDRA_ROOT=%h/hydra
+WorkingDirectory=%h/hydra
+ExecStart=/bin/bash -c '${HYDRA_ROOT}/scripts/branch-prune.sh --apply --log /tmp/hydra-branch-prune.log'
+# The script exits non-zero only on hard failures (refusing to run from a
+# worktree, jq/npx missing, classifier produced no output). Per-branch
+# errors are aggregated and surfaced but don't fail the service — the next
+# run picks them up.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
