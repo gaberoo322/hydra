@@ -56,6 +56,18 @@ import {
   getReframeQueueLen,
 } from "./anchor-selection/reframe-queue.ts";
 import {
+  recordReframePassedReason,
+  recordReframeServed,
+  getCyclesSinceReframeServed,
+  getReframeStarvationStats,
+  getReframeFloorN,
+  shouldForceReframePriority,
+  DEFAULT_REFRAME_FLOOR_N,
+  _resetReframeStarvationForTests,
+  type ReframePassedReason,
+  type ReframeStarvationStats,
+} from "./anchor-selection/reframe-starvation.ts";
+import {
   escalateStalePriorFailures,
   storePriorFailure,
 } from "./anchor-selection/prior-failures.ts";
@@ -90,6 +102,18 @@ export {
   type ScoreSignals,
   type ScoreResult,
   type PriorityTier,
+};
+// Reframe-starvation surface (issue #377) — operator-facing stats + tunables.
+export {
+  recordReframePassedReason,
+  recordReframeServed,
+  getCyclesSinceReframeServed,
+  getReframeStarvationStats,
+  getReframeFloorN,
+  shouldForceReframePriority,
+  DEFAULT_REFRAME_FLOOR_N,
+  type ReframePassedReason,
+  type ReframeStarvationStats,
 };
 
 // ---------------------------------------------------------------------------
@@ -128,4 +152,5 @@ export const _testing = {
   stucknessCooldownKey,
   pickStuckOutcome,
   buildStucknessAnchor,
+  _resetReframeStarvationForTests,
 };

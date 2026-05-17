@@ -17,9 +17,10 @@
 //   They lived as two independent branches in `select.ts`. Each independently
 //   stole cycles from kanban; they never saw each other's state. The original
 //   #301 issue called this out and asked for a unified `capacity-floors`
-//   block. This module is that unification — even though only one floor
-//   (stuckness / self-improvement) remains today, the scaffolding is kept
-//   so future floors can plug in without re-introducing the stacking bug.
+//   block. This module is that unification — after the Specs cut-over, two
+//   floors remain: the self-improvement (stuckness) floor, and the
+//   reframe-queue floor (issue #377). Future floors can plug in without
+//   re-introducing the stacking bug.
 //
 // Shape
 //   A *declaration*-driven dispatcher. Each floor is described by:
@@ -36,6 +37,17 @@
 //   normal priority chain (kanban → failing tests → …).
 
 import { getAllStuckness, type StucknessResult } from "../stuckness.ts";
+import {
+  getCyclesSinceReframeServed,
+  getReframeFloorN,
+  recordReframePassedReason,
+  recordReframeServed,
+  DEFAULT_REFRAME_FLOOR_N,
+} from "./reframe-starvation.ts";
+import {
+  hasReframeCandidate,
+  selectReframeAnchor,
+} from "./reframe-queue-tier.ts";
 import { pickStuckOutcome, buildStucknessAnchor } from "./stuckness-routing.ts";
 
 // ---------------------------------------------------------------------------
@@ -106,12 +118,16 @@ export interface DispatchResult {
 export interface CapacityFloorsConfig {
   /** Self-improvement floor (stuckness-driven research). */
   selfImprovement: { targetShare: number };
+  /** Reframe floor (issue #377) — pre-empt kanban every N cycles when the
+   *  reframe queue has work. Cadence default 5. */
+  reframe: { targetShare: number; cadenceN: number };
   /** Rolling window for realised-share computation. */
   windowCycles: number;
 }
 
 export const DEFAULT_CAPACITY_FLOORS_CONFIG: CapacityFloorsConfig = {
   selfImprovement: { targetShare: 0.25 }, // ADR-0003 vision vector 1
+  reframe: { targetShare: 1 / 5, cadenceN: DEFAULT_REFRAME_FLOOR_N }, // issue #377
   windowCycles: 20,
 };
 
@@ -121,8 +137,15 @@ export const DEFAULT_CAPACITY_FLOORS_CONFIG: CapacityFloorsConfig = {
 export function loadCapacityFloorsConfig(env: NodeJS.ProcessEnv = process.env): CapacityFloorsConfig {
   const cfg: CapacityFloorsConfig = {
     selfImprovement: { ...DEFAULT_CAPACITY_FLOORS_CONFIG.selfImprovement },
+    reframe: { ...DEFAULT_CAPACITY_FLOORS_CONFIG.reframe },
     windowCycles: DEFAULT_CAPACITY_FLOORS_CONFIG.windowCycles,
   };
+
+  // Reframe cadence (issue #377). Honours both the canonical name and the
+  // alias that matches the (now-retired) spec floor's naming convention.
+  const reframeFromEnv = parseIntSafe(env.HYDRA_REFRAME_FLOOR_N)
+    ?? parseIntSafe(env.HYDRA_CAPACITY_FLOOR_REFRAME_N);
+  if (reframeFromEnv !== null) cfg.reframe.cadenceN = reframeFromEnv;
 
   const newWindow = parseIntSafe(env.HYDRA_CAPACITY_FLOORS_WINDOW);
   if (newWindow !== null) cfg.windowCycles = newWindow;
@@ -145,6 +168,12 @@ interface StucknessPayload {
   row: StucknessResult;
 }
 
+interface ReframePayload {
+  /** Empty — the reframe floor's buildAnchor consumes the queue head at fire
+   *  time. The payload exists only to satisfy the FloorDecl generic. */
+  marker: "reframe";
+}
+
 /**
  * Stuckness floor declaration. Wraps the existing `pickStuckOutcome` /
  * `buildStucknessAnchor` pair so the selector no longer calls them directly.
@@ -154,7 +183,10 @@ export function stucknessFloorDecl(
 ): FloorDecl<StucknessPayload> {
   return {
     name: "self-improvement",
-    priority: 2,
+    // Tiebreak: self-improvement (priority 1) > reframe (priority 2). The
+    // self-improvement floor represents the 25% vision floor; when both
+    // floors are eligible with equal deficit, the vision floor wins.
+    priority: 1,
     async prepare(): Promise<FloorReadiness<StucknessPayload> | null> {
       let rows: StucknessResult[];
       try {
@@ -168,7 +200,7 @@ export function stucknessFloorDecl(
       // Deficit for the stuckness floor = how many cycles past its threshold
       // the outcome has been stuck. Always >= 0 because pickStuckOutcome only
       // returns fired outcomes; we floor at 1 so a just-fired outcome still
-      // wins against an inert spec floor at deficit 0.
+      // wins against an inert reframe floor at deficit 0.
       const deficit = Math.max(1, (pick.cyclesStuck ?? 0) - (pick.threshold ?? 0));
       return {
         deficit,
@@ -179,6 +211,85 @@ export function stucknessFloorDecl(
     },
     async buildAnchor(payload, eventBus) {
       return await buildStucknessAnchor(payload.row, eventBus);
+    },
+  };
+}
+
+/**
+ * Reframe-queue floor declaration (issue #377). When
+ * `cyclesSinceReframeServed >= cadenceN` AND the reframe queue has a
+ * candidate, pre-empt kanban with the next reframe item.
+ *
+ * Behaviour notes:
+ *   - `prepare()` runs queue maintenance (idempotent) and checks for any
+ *     candidate. Drift-duplicates are NOT excluded at prepare time; they
+ *     surface as null returns from buildAnchor and the selector falls
+ *     through to the regular priority chain.
+ *   - `buildAnchor()` consumes the head item via the existing
+ *     `selectReframeAnchor()` so we don't duplicate the prune+pop+drift
+ *     logic.
+ *   - When buildAnchor returns null (drift duplicate, corrupt item,
+ *     concurrent drain), we record the actual outcome so starvation
+ *     metrics still account for the cycle.
+ *
+ * Priority is set BELOW the self-improvement floor (2 vs 1). The
+ * self-improvement floor enforces the 25% vision share and so wins ties;
+ * the reframe floor still fires on cycles where stuckness isn't ready,
+ * and the "highest deficit wins" rule kicks in once the reframe gauge has
+ * built up enough to outweigh the stuckness deficit.
+ */
+export function reframeFloorDecl(
+  cfg: CapacityFloorsConfig = DEFAULT_CAPACITY_FLOORS_CONFIG,
+): FloorDecl<ReframePayload> {
+  return {
+    name: "reframe",
+    priority: 2,
+    async prepare(): Promise<FloorReadiness<ReframePayload> | null> {
+      const [cyclesSinceServed, candidatePresent] = await Promise.all([
+        getCyclesSinceReframeServed(),
+        hasReframeCandidate(),
+      ]);
+      if (!candidatePresent) return null;
+      // Respect both the config-resolved cadence and the env-var-only
+      // reader so test setups that only set HYDRA_REFRAME_FLOOR_N keep
+      // working in isolation.
+      const cadence = cfg.reframe.cadenceN || getReframeFloorN();
+      const deficit = cyclesSinceServed - cadence;
+      return {
+        deficit,
+        share: cadence > 0 ? Math.min(1, 1 / Math.max(1, cyclesSinceServed + 1)) : 0,
+        targetShare: cfg.reframe.targetShare,
+        payload: { marker: "reframe" },
+      };
+    },
+    async buildAnchor(_payload, _eventBus) {
+      const anchor = await selectReframeAnchor();
+      if (anchor) {
+        await recordReframeServed();
+        await recordReframePassedReason("force_floor");
+        return anchor;
+      }
+      // Queue drained between prepare and buildAnchor, or head was a
+      // drift duplicate / corrupt item. Record the outcome so the
+      // starvation gauge stays honest — drift/corrupt are normal Redis
+      // states, not floor-misfires. The dispatcher will return a null
+      // anchor and the selector falls through to the regular chain.
+      await recordReframePassedReason("drift_duplicate");
+      return null;
+    },
+    async onPassedOver(reason: string) {
+      // Map the dispatcher's "<winner>_won" notification onto the reframe
+      // pass-over reason taxonomy.
+      if (reason === "self-improvement_won") {
+        await recordReframePassedReason("stuckness_won");
+      } else if (reason === "reframe_won") {
+        // Shouldn't happen (we won't pass over ourselves) but stay safe.
+        return;
+      } else {
+        // Unknown winner — record under stuckness_won as the conservative
+        // approximation. Better than dropping the signal entirely.
+        await recordReframePassedReason("stuckness_won");
+      }
     },
   };
 }
@@ -268,12 +379,12 @@ export async function dispatchCapacityFloor(
 
 /**
  * Convenience constructor: build the default-config dispatcher with the
- * stock floor. The selector uses this; tests can substitute custom floors
+ * stock floors. The selector uses this; tests can substitute custom floors
  * via `dispatchCapacityFloor()` directly.
  */
 export function defaultCapacityFloors(env: NodeJS.ProcessEnv = process.env): FloorDecl<any>[] {
   const cfg = loadCapacityFloorsConfig(env);
-  return [stucknessFloorDecl(cfg)];
+  return [stucknessFloorDecl(cfg), reframeFloorDecl(cfg)];
 }
 
 // ---------------------------------------------------------------------------
@@ -314,14 +425,24 @@ export async function getCapacityFloorsSnapshot(
 
   // Imported inline to keep this module's import graph small for tests that
   // exercise the pure dispatcher without bringing in Redis-backed history.
-  const { getSelfImprovementShare } = await import("../capacity-floor.ts");
+  const [
+    { getSelfImprovementShare },
+    { getReframeStarvationStats },
+  ] = await Promise.all([
+    import("../capacity-floor.ts"),
+    import("./reframe-starvation.ts"),
+  ]);
 
-  const selfImprovement = await getSelfImprovementShare(cfg.windowCycles).catch(
-    (err: any) => {
+  const [selfImprovement, reframe] = await Promise.all([
+    getSelfImprovementShare(cfg.windowCycles).catch((err: any) => {
       console.error(`[capacity-floors] selfImprovement share read failed: ${err.message}`);
       return null;
-    },
-  );
+    }),
+    getReframeStarvationStats().catch((err: any) => {
+      console.error(`[capacity-floors] reframe starvation read failed: ${err.message}`);
+      return null;
+    }),
+  ]);
 
   return {
     config: cfg,
@@ -342,6 +463,19 @@ export async function getCapacityFloorsSnapshot(
               floorMet: selfImprovement.floorMet,
             }
           : {},
+      },
+      {
+        name: "reframe",
+        targetShare: cfg.reframe.targetShare,
+        realisedShare: null, // Gauge-only.
+        details: reframe
+          ? {
+              cadenceN: cfg.reframe.cadenceN,
+              cyclesSinceServed: reframe.cyclesSinceServed,
+              lastServedAt: reframe.lastServedAt,
+              reasons: reframe.reasons,
+            }
+          : { cadenceN: cfg.reframe.cadenceN },
       },
     ],
   };

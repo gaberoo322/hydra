@@ -5,6 +5,26 @@ import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../r
 import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost-attribution.ts";
 import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
 import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost-surrogate.ts";
+import { getReframeStarvationStats } from "../anchor-selection/reframe-starvation.ts";
+import { REFRAME_QUEUE } from "../anchor-selection/constants.ts";
+
+/**
+ * Pick the highest-count reason from a starvation-reasons hash, skipping
+ * keys in `exclude` (typically "force_floor" since it's bookkeeping, not
+ * a real pass-over). Returns null when no reasons recorded.
+ */
+function topReason(reasons: Record<string, number>, exclude: string[] = []): string | null {
+  const excludeSet = new Set(exclude);
+  let best: { name: string; count: number } | null = null;
+  for (const [name, count] of Object.entries(reasons || {})) {
+    if (excludeSet.has(name)) continue;
+    if (!Number.isFinite(count) || count <= 0) continue;
+    if (!best || count > best.count) {
+      best = { name, count };
+    }
+  }
+  return best ? best.name : null;
+}
 
 export function createMetricsRouter() {
   const router = Router();
@@ -186,6 +206,123 @@ export function createMetricsRouter() {
       res.json(snapshot);
     } catch (err: any) {
       console.error(`[api/metrics] /metrics/capacity-floors failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /metrics/reframe-starvation — Why the reframe lane is/isn't being
+  // served (issue #377). Mirrors /metrics/spec-starvation. Surfaces the
+  // running cycles-since-served gauge, last-served timestamp, per-reason
+  // pass-over counts, and the configured floor cadence.
+  router.get("/metrics/reframe-starvation", async (_req, res) => {
+    try {
+      const stats = await getReframeStarvationStats();
+      res.json(stats);
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/reframe-starvation failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /metrics/anchor-distribution — Per-priority view of who served what
+  // and who was passed over (issue #377). Aggregates cycle metrics from the
+  // recent window for `served`, joins with the reframe-starvation reasons
+  // hash for `suppressedReason`, and surfaces `candidatesAvailable` from
+  // the live reframe-queue length. The endpoint is intentionally read-only
+  // and best-effort — every sub-read is wrapped so a single Redis hiccup
+  // doesn't fail the whole response.
+  router.get("/metrics/anchor-distribution", async (req, res) => {
+    try {
+      // @ts-expect-error — req.query.count is a string at runtime
+      const count = parseInt(req.query.count) || 50;
+
+      const [trend, reframeStats, reframeQueueLen] = await Promise.all([
+        getMetricsTrend(count).catch((err: any) => {
+          console.error(`[api/metrics] anchor-distribution: trend read failed: ${err.message}`);
+          return [];
+        }),
+        getReframeStarvationStats().catch((err: any) => {
+          console.error(`[api/metrics] anchor-distribution: reframe stats failed: ${err.message}`);
+          return null;
+        }),
+        listLen(REFRAME_QUEUE).catch((err: any) => {
+          console.error(`[api/metrics] anchor-distribution: reframe queue len failed: ${err.message}`);
+          return 0;
+        }),
+      ]);
+
+      // Bucket cycles by anchorType. Mirrors the byAnchorType shape in
+      // cost-attribution.ts but counts cycles only (no cost).
+      const served: Record<string, number> = {};
+      for (const m of trend) {
+        const type = (m.anchorType && String(m.anchorType).trim()) || "unknown";
+        served[type] = (served[type] || 0) + 1;
+      }
+
+      // Per-priority rollup. Names match the priority chain in select.ts;
+      // values are { served, candidatesAvailable, suppressedReason }.
+      // `served` is the count from the rolling window. `candidatesAvailable`
+      // is the live queue depth where we have one; otherwise null.
+      // `suppressedReason` is the most-common pass-over reason for that
+      // priority, drawn from the relevant starvation-reasons hash.
+      const distribution = [
+        {
+          priority: "kanban",
+          served: served["kanban"] || 0,
+          candidatesAvailable: null,
+          // Kanban is the natural-priority winner — no starvation gauge.
+          suppressedReason: null,
+        },
+        {
+          priority: "failing-test",
+          served: served["failing-test"] || 0,
+          candidatesAvailable: null,
+          suppressedReason: null,
+        },
+        {
+          priority: "work-queue",
+          served: served["work-queue"] || served["research"] || served["user-request"] || 0,
+          candidatesAvailable: null,
+          suppressedReason: null,
+        },
+        {
+          priority: "reframe",
+          served: served["reframe"] || 0,
+          candidatesAvailable: reframeQueueLen,
+          suppressedReason: reframeStats
+            ? topReason(reframeStats.reasons, ["force_floor"])
+            : null,
+          cyclesSinceServed: reframeStats?.cyclesSinceServed ?? null,
+          floorN: reframeStats?.floorN ?? null,
+        },
+        {
+          priority: "prior-failure",
+          served: served["prior-failure"] || 0,
+          candidatesAvailable: null,
+          suppressedReason: null,
+        },
+        {
+          priority: "codebase-health",
+          served: served["health"] || served["codebase-health"] || 0,
+          candidatesAvailable: null,
+          suppressedReason: null,
+        },
+        {
+          priority: "priorities-doc",
+          served: served["doc"] || served["priorities-doc"] || 0,
+          candidatesAvailable: null,
+          suppressedReason: null,
+        },
+      ];
+
+      res.json({
+        windowCycles: trend.length,
+        distribution,
+        // Raw served-bucket dict for clients that want a quick map.
+        servedByAnchorType: served,
+      });
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/anchor-distribution failed: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });
