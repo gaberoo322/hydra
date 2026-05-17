@@ -129,6 +129,46 @@ surfaces atomically server-side:
 - `hydra:scheduler:cycles-{run,merged,failed}` lifetime counters →
   `/api/scheduler/status.mergeRateLifetime`
 
+### Phase 6 token-surrogate write (issue #394)
+
+After PR-3 (#383) deleted `codex-runner.ts`, the legacy `recordSpend` writer
+that fed `hydra:scheduler:daily-spend` for code-writing work was removed.
+The autopilot now owns the daily-spend signal via a token surrogate. On
+each subagent reap that has authoritative `total_tokens`, the autopilot
+SHOULD fire:
+
+```bash
+curl -fsS -X POST -H "Content-Type: application/json" \
+  --data "$(jq -n \
+    --arg skill "$cls_skill" \
+    --argjson tokens "$total_tokens" \
+    --arg cycleId "$task_id" \
+    '{skill: $skill, tokens: $tokens, cycleId: $cycleId}')" \
+  "${HYDRA_API:-http://localhost:4000/api}/metrics/tokens" >/dev/null 2>&1 || \
+  echo "[autopilot] dispatch: tokens write failed for cycle=$task_id (non-fatal)" >&2
+```
+
+This is best-effort and idempotent at the autopilot's `reaped_task_ids`
+layer (the reaper already dedupes by `task_id` before firing follow-up
+writes, so the same `cycleId` never bumps the counter twice). The endpoint
+bumps three Redis keys:
+
+- `hydra:metrics:tokens:autopilot:daily:<YYYY-MM-DD>` — INT total
+- `hydra:metrics:tokens:by-skill:daily:<YYYY-MM-DD>` — HASH {skill -> tokens}
+- `hydra:metrics:tokens:by-cycle:<cycleId>` — HASH {tokens, skill}
+
+The first two have a 30-day TTL; the per-cycle hash has 7 days. The
+dashboard `CostWidget` (Metrics page) reads these via `GET /api/metrics/cost`
+and surfaces a clearly-labelled `source` so the operator never mistakes
+surrogate USD for real billed spend. Dollar conversion uses
+`HYDRA_TOKEN_USD_RATE` (USD per million tokens, default 0 — operators must
+opt in to a rate they trust).
+
+The per-cycle write keeps the per-cycle cost-cap in `src/cost-cap.ts`
+alive: `checkCostCap()` now sums the legacy `costMicrodollars` reader and
+the surrogate so a runaway subagent can still trip
+`HYDRA_PER_CYCLE_COST_CAP_USD` even though codex is gone.
+
 - **Phase 7** — `drain.sh <merged_prs>` + final `hydra-digest` dispatch
 
 ## Phase 0 schema-version handshake (issue #434)

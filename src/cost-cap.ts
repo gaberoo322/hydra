@@ -46,6 +46,7 @@ import { getTracker } from "./task-tracker.ts";
 import { STREAMS } from "./event-bus.ts";
 import { handleEarlyExit } from "./cycle-helpers.ts";
 import type { CycleContext } from "./cycle-helpers.ts";
+import { getCycleSubagentCostUsd } from "./cost-surrogate.ts";
 
 /**
  * Stable abandonment reason prefix. Tests assert on this; do NOT change
@@ -101,6 +102,46 @@ export interface CostCapStatus {
   exceeded: boolean;
   /** Human-readable abandonment reason (only meaningful when `exceeded`). */
   reason: string;
+  /** Issue #394: which writers contributed to costUsd. `"codex-recorded"`
+   *  means only the legacy codex `costMicrodollars` path is active;
+   *  `"autopilot-surrogate"` means only post-cut subagent tokens contributed;
+   *  `"mixed"` means both. Allows operators to tell whether a cap trip
+   *  was caused by surrogate-only inflation. */
+  source?: "codex-recorded" | "autopilot-surrogate" | "mixed" | "none";
+  /** Surrogate-only USD contribution (subset of costUsd). */
+  surrogateUsd?: number;
+}
+
+/**
+ * Read the cycle's combined spend — legacy codex `costMicrodollars` PLUS
+ * the post-cut subagent-token surrogate (issue #394).
+ *
+ * Codex was removed in PR-3 (issue #383). The legacy field will be 0 in
+ * any post-cut cycle; the surrogate is the only spend signal left for
+ * cap purposes. The legacy reader is preserved so historical pre-cut
+ * cycles, and any cross-over period, still report correctly.
+ */
+export async function getCycleCostWithSurrogateUsd(cycleId: string): Promise<{
+  costUsd: number;
+  legacyUsd: number;
+  surrogateUsd: number;
+  source: "codex-recorded" | "autopilot-surrogate" | "mixed" | "none";
+}> {
+  const legacyUsd = await getCycleCostUsd(cycleId);
+  let surrogateUsd = 0;
+  try {
+    const surrogate = await getCycleSubagentCostUsd(cycleId);
+    surrogateUsd = surrogate.costUsd;
+  } catch (err: any) {
+    console.error(`[CostCap] surrogate read failed for ${cycleId}: ${err?.message || err}`);
+  }
+  const total = legacyUsd + surrogateUsd;
+  let source: "codex-recorded" | "autopilot-surrogate" | "mixed" | "none";
+  if (legacyUsd > 0 && surrogateUsd > 0) source = "mixed";
+  else if (surrogateUsd > 0) source = "autopilot-surrogate";
+  else if (legacyUsd > 0) source = "codex-recorded";
+  else source = "none";
+  return { costUsd: total, legacyUsd, surrogateUsd, source };
 }
 
 /**
@@ -113,13 +154,18 @@ export interface CostCapStatus {
  */
 export async function checkCostCap(cycleId: string): Promise<CostCapStatus> {
   const capUsd = getPerCycleCostCapUsd();
-  const costUsd = await getCycleCostUsd(cycleId);
+  // Issue #394: cap now considers BOTH the legacy codex per-cycle cost
+  // (read from `costMicrodollars`) AND the post-cut subagent surrogate
+  // (`hydra:metrics:tokens:by-cycle:<id>`). Pre-cut cycles still report
+  // identical numbers because the surrogate is zero unless tokens were
+  // recorded. Post-cut cycles see the surrogate where they used to see 0.
+  const { costUsd, surrogateUsd, source } = await getCycleCostWithSurrogateUsd(cycleId);
   const exceeded = Number.isFinite(capUsd) && costUsd >= capUsd;
   const capStr = Number.isFinite(capUsd) ? `$${capUsd.toFixed(2)}` : "Infinity";
   const reason = exceeded
     ? `${COST_CAP_REASON_PREFIX}: $${costUsd.toFixed(2)} >= ${capStr}`
     : `${COST_CAP_REASON_PREFIX}: under cap ($${costUsd.toFixed(2)} < ${capStr})`;
-  return { costUsd, capUsd, exceeded, reason };
+  return { costUsd, capUsd, exceeded, reason, source, surrogateUsd };
 }
 
 /**
