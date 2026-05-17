@@ -4,6 +4,7 @@ import AbandonmentPanel from "../components/AbandonmentPanel.jsx";
 import QualityGatesPanel from "../components/QualityGatesPanel.jsx";
 import CostAttributionPanel from "../components/CostAttributionPanel.jsx";
 import CostWidget from "../components/CostWidget.jsx";
+import DesignConceptTelemetry from "../components/DesignConceptTelemetry.jsx";
 
 export default function Metrics() {
   const { data: metricsData } = useApi("/metrics?count=30");
@@ -73,6 +74,9 @@ export default function Metrics() {
 
       {/* Abandonment causes (issue #195) */}
       <AbandonmentPanel count={50} />
+
+      {/* Design-concept Phase B telemetry (issue #465) */}
+      <DesignConceptTelemetry />
 
       {/* Test trend */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">

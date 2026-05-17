@@ -30,7 +30,17 @@ import {
   type DesignConceptInput,
   type DesignConceptScope,
 } from "../design-concept.ts";
-import { listLPush, listRange } from "../redis-adapter.ts";
+import {
+  readAndCompute,
+  type TelemetryReader,
+} from "../design-concept/telemetry.ts";
+import {
+  getString,
+  hashGetAll,
+  listLen,
+  listLPush,
+  listRange,
+} from "../redis-adapter.ts";
 
 /**
  * Redis LIST holding `design-concept-exempt` audit entries.
@@ -178,6 +188,42 @@ export function createDesignConceptsRouter() {
     } catch (err: any) {
       console.error("[api/design-concepts] list failed", err);
       res.status(500).json({ error: err?.message ?? "list failed" });
+    }
+  });
+
+  // Telemetry endpoint MUST be declared before `/:anchorRef` so
+  // `/design-concepts/telemetry` doesn't get matched as an anchorRef
+  // literally called "telemetry" (issue #465).
+  router.get("/design-concepts/telemetry", async (_req, res) => {
+    try {
+      const reader: TelemetryReader = {
+        readInt: async (key) => {
+          const raw = await getString(key);
+          if (raw === null) return 0;
+          const n = parseInt(raw, 10);
+          return Number.isFinite(n) ? n : 0;
+        },
+        readNumberList: async (key) => {
+          const raw = await listRange(key, 0, -1);
+          return raw
+            .map((s) => parseFloat(s))
+            .filter((n) => Number.isFinite(n));
+        },
+        readListLen: async (key) => {
+          const n = await listLen(key);
+          return Number.isFinite(n) ? n : 0;
+        },
+        readHash: async (key) => {
+          const h = await hashGetAll(key);
+          return h ?? {};
+        },
+      };
+
+      const view = await readAndCompute(reader, new Date());
+      res.json(view);
+    } catch (err: any) {
+      console.error("[api/design-concepts] telemetry failed", err);
+      res.status(500).json({ error: err?.message ?? "telemetry failed" });
     }
   });
 

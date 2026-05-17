@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily design-concept Phase B telemetry snapshot (issue #465)
+Documentation=https://github.com/gaberoo322/hydra/issues/465
+
+[Timer]
+# Once per UTC day, near the end of the day so the rolling-7d window
+# the snapshot freezes matches what operators saw on the dashboard.
+# RandomizedDelaySec keeps multi-host deployments from stampeding.
+OnCalendar=*-*-* 23:59:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
