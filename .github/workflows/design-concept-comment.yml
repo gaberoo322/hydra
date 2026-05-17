@@ -1,0 +1,272 @@
+name: design-concept-comment
+
+# Issue #464 — Phase B of the design-concept gate epic (#437).
+#
+# Two responsibilities:
+#
+# 1. On `pull_request: opened` for dev PRs (PRs that have a
+#    `Closes #N` / `Fixes #N` / `Resolves #N` link to an issue), post
+#    a single PR comment surfacing the design-concept artifact for the
+#    closed issue. If no artifact exists, post a one-line warning
+#    instead.
+#
+# 2. On `pull_request: labeled` for the `design-concept-exempt`
+#    operator-only label, validate the applier against a git-tracked
+#    allowlist. Non-allowlisted appliers get the label auto-removed.
+#    Allowlisted appliers trigger an audit entry written to Redis via
+#    the orchestrator API, plus a second PR comment documenting the
+#    exemption.
+#
+# Phase B is one-shot — the artifact comment is posted on PR open and
+# never refreshed. Comment refresh, scope-drift detection, and gate-side
+# enforcement land in Phase C (#437 follow-ups).
+#
+# Self-hosted because the orchestrator API is only reachable on
+# localhost:4000 (the runner lives on the same box as the service).
+
+on:
+  pull_request:
+    types: [opened, labeled]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+env:
+  ORCH_BASE_URL: http://localhost:4000
+  EXEMPT_LABEL: design-concept-exempt
+  # Git-tracked allowlist for the `design-concept-exempt` label.
+  # Operator-only — extend with operator usernames as the team grows.
+  # Keep this in the workflow rather than a secret/Redis lookup: a
+  # change to this list shows up in a PR review like any other Tier-3
+  # change, which is the entire point of the audit story.
+  EXEMPT_ALLOWLIST: gaberoo322
+
+jobs:
+  artifact-comment:
+    # Only fire the artifact-comment job on PR open. The `labeled` event
+    # is owned by the exempt-handler job below.
+    if: github.event.action == 'opened'
+    runs-on: self-hosted
+    steps:
+      - name: Post design-concept artifact comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # ---------------------------------------------------------------
+          # 1. Parse the closed-issue reference from the PR body.
+          #    Supports "Closes #N", "Fixes #N", "Resolves #N" (case
+          #    insensitive). Takes the first match — multi-issue PRs
+          #    surface one artifact comment per the first issue;
+          #    operators can run /hydra-grill manually for the rest.
+          # ---------------------------------------------------------------
+          ANCHOR_REF=$(printf '%s' "$PR_BODY" | \
+            grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#[0-9]+' | \
+            head -n1 | \
+            grep -oE '[0-9]+' || true)
+
+          if [ -z "$ANCHOR_REF" ]; then
+            echo "PR #$PR_NUM has no Closes/Fixes/Resolves reference — not a dev PR; skipping."
+            exit 0
+          fi
+          echo "PR #$PR_NUM closes issue #$ANCHOR_REF — looking up artifact."
+
+          # ---------------------------------------------------------------
+          # 2. Fetch the design-concept artifact from the orchestrator.
+          # ---------------------------------------------------------------
+          HTTP_CODE=$(curl -s -o /tmp/dc-artifact.json -w '%{http_code}' \
+            --max-time 10 \
+            "$ORCH_BASE_URL/api/design-concepts/$ANCHOR_REF" || echo 000)
+          echo "API returned HTTP $HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "404" ]; then
+            # No artifact — post the warning and stop.
+            gh pr comment "$PR_NUM" --repo "$REPO" --body "> *Automated design-concept comment (issue #464)*
+
+:warning: No design-concept artifact for issue #$ANCHOR_REF.
+
+The \`hydra-grill\` skill normally produces a design-concept before \`dev_orch\` dispatches an implementation. Either:
+
+- Run \`/hydra-grill $ANCHOR_REF\` on the parent issue to produce the artifact, or
+- Apply the \`$EXEMPT_LABEL\` label (operator-only) to record an explicit exemption.
+
+Phase B is warn-only — this PR can still merge. Phase C will require an artifact or an exemption."
+            exit 0
+          fi
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::Orchestrator API returned HTTP $HTTP_CODE for issue #$ANCHOR_REF; skipping comment."
+            exit 0
+          fi
+
+          # ---------------------------------------------------------------
+          # 3. Build the comment body from the artifact.
+          # ---------------------------------------------------------------
+          ARTIFACT_HASH_FULL=$(jq -r '.artifactHash // ""' /tmp/dc-artifact.json)
+          ARTIFACT_HASH_SHORT=${ARTIFACT_HASH_FULL:0:12}
+          STATUS=$(jq -r '.status // "draft"' /tmp/dc-artifact.json)
+          GATE_OK=$(jq -r '.gate.ok // false' /tmp/dc-artifact.json)
+          GATE_TOP_REASON=$(jq -r '.gate.reasons[0] // ""' /tmp/dc-artifact.json)
+
+          # Compute status badge.
+          if [ "$STATUS" = "approved" ] && [ "$GATE_OK" = "true" ]; then
+            STATUS_BADGE="approved"
+          elif [ "$STATUS" = "approved" ] && [ "$GATE_OK" = "false" ]; then
+            STATUS_BADGE="warn-only"
+          elif [ "$STATUS" = "stale" ]; then
+            STATUS_BADGE="stale"
+          else
+            STATUS_BADGE="draft"
+          fi
+
+          TOP_MODULES=$(jq -r '
+            (.modulesTouched // [])[0:3]
+            | map("- `\(.path)` (\(.interfaceImpact // "none"))")
+            | join("\n")
+          ' /tmp/dc-artifact.json)
+          [ -z "$TOP_MODULES" ] && TOP_MODULES="_(none recorded)_"
+
+          TOP_INVARIANTS=$(jq -r '
+            (.invariants // [])[0:2]
+            | map(if length > 80 then .[0:77] + "..." else . end)
+            | map("- " + .)
+            | join("\n")
+          ' /tmp/dc-artifact.json)
+          [ -z "$TOP_INVARIANTS" ] && TOP_INVARIANTS="_(none recorded)_"
+
+          GATE_LINE=""
+          if [ "$GATE_OK" != "true" ] && [ -n "$GATE_TOP_REASON" ]; then
+            GATE_LINE="**Gate:** :warning: \`$GATE_TOP_REASON\`"$'\n\n'
+          fi
+
+          gh pr comment "$PR_NUM" --repo "$REPO" --body "> *Automated design-concept comment (issue #464)*
+
+**Artifact:** \`$ARTIFACT_HASH_SHORT\`
+**Status:** \`$STATUS_BADGE\`
+**Anchor:** issue #$ANCHOR_REF
+
+${GATE_LINE}**Top modules touched:**
+$TOP_MODULES
+
+**Top invariants:**
+$TOP_INVARIANTS
+
+Fetch the full artifact: \`curl $ORCH_BASE_URL/api/design-concepts/$ANCHOR_REF\`"
+
+  exempt-handler:
+    # Fires when ANY label is applied. Bail out fast inside the job if
+    # the label isn't the one we care about.
+    if: github.event.action == 'labeled'
+    runs-on: self-hosted
+    steps:
+      - name: Handle design-concept-exempt label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          APPLIER: ${{ github.event.sender.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "$LABEL_NAME" != "$EXEMPT_LABEL" ]; then
+            echo "Label '$LABEL_NAME' is not '$EXEMPT_LABEL'; skipping."
+            exit 0
+          fi
+
+          # ---------------------------------------------------------------
+          # 1. Allowlist check. Newline-separated allowlist, exact match.
+          # ---------------------------------------------------------------
+          ALLOWED=false
+          for u in $EXEMPT_ALLOWLIST; do
+            if [ "$u" = "$APPLIER" ]; then
+              ALLOWED=true
+              break
+            fi
+          done
+
+          if [ "$ALLOWED" != "true" ]; then
+            echo "::warning::Applier '$APPLIER' is not in the allowlist; removing label."
+            gh pr edit "$PR_NUM" --repo "$REPO" --remove-label "$EXEMPT_LABEL"
+            gh pr comment "$PR_NUM" --repo "$REPO" --body "> *Automated design-concept comment (issue #464)*
+
+\`$EXEMPT_LABEL\` is operator-only; label removed.
+
+This label suppresses the (Phase C) design-concept gate. Only operators on the allowlist (\`$EXEMPT_ALLOWLIST\`) can apply it. To request an exemption, comment on the PR and an operator can apply the label themselves."
+            exit 1
+          fi
+
+          # ---------------------------------------------------------------
+          # 2. Allowlisted applier — find the anchorRef and fetch the
+          #    artifact (if any) so we can record the gate-fail reasons
+          #    that would have blocked.
+          # ---------------------------------------------------------------
+          ANCHOR_REF=$(printf '%s' "$PR_BODY" | \
+            grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#[0-9]+' | \
+            head -n1 | \
+            grep -oE '[0-9]+' || true)
+
+          # If no Closes ref, record the exemption against PR number itself.
+          [ -z "$ANCHOR_REF" ] && ANCHOR_REF="pr-$PR_NUM"
+
+          GATE_REASONS_JSON="[]"
+          if [ "$ANCHOR_REF" != "pr-$PR_NUM" ]; then
+            HTTP_CODE=$(curl -s -o /tmp/dc-exempt-artifact.json -w '%{http_code}' \
+              --max-time 10 \
+              "$ORCH_BASE_URL/api/design-concepts/$ANCHOR_REF" || echo 000)
+            if [ "$HTTP_CODE" = "200" ]; then
+              GATE_REASONS_JSON=$(jq -c '.gate.reasons // []' /tmp/dc-exempt-artifact.json)
+            else
+              GATE_REASONS_JSON='["no design-concept artifact present"]'
+            fi
+          else
+            GATE_REASONS_JSON='["no Closes/Fixes/Resolves reference in PR body"]'
+          fi
+
+          # ---------------------------------------------------------------
+          # 3. POST audit entry to the orchestrator.
+          # ---------------------------------------------------------------
+          TS_MS=$(date +%s000)
+          PAYLOAD=$(jq -nc \
+            --argjson pr "$PR_NUM" \
+            --arg applier "$APPLIER" \
+            --argjson ts "$TS_MS" \
+            --arg anchorRef "$ANCHOR_REF" \
+            --argjson reasons "$GATE_REASONS_JSON" \
+            '{pr: $pr, applier: $applier, ts: $ts, anchorRef: $anchorRef, gate_fail_reasons: $reasons}')
+
+          POST_CODE=$(curl -s -o /tmp/dc-exempt-post.json -w '%{http_code}' \
+            --max-time 10 \
+            -X POST \
+            -H 'content-type: application/json' \
+            -d "$PAYLOAD" \
+            "$ORCH_BASE_URL/api/design-concepts/exempt-log" || echo 000)
+          if [ "$POST_CODE" != "201" ]; then
+            echo "::warning::Audit-log POST returned HTTP $POST_CODE; payload was $PAYLOAD"
+          fi
+
+          # ---------------------------------------------------------------
+          # 4. Post the second PR comment naming applier + reasons.
+          # ---------------------------------------------------------------
+          REASONS_MD=$(printf '%s' "$GATE_REASONS_JSON" | jq -r '
+            if length == 0 then "_(no blocking reasons recorded)_"
+            else map("- `" + . + "`") | join("\n")
+            end
+          ')
+
+          gh pr comment "$PR_NUM" --repo "$REPO" --body "> *Automated design-concept comment (issue #464)*
+
+:white_check_mark: \`$EXEMPT_LABEL\` applied by **@$APPLIER**.
+
+**Anchor:** \`$ANCHOR_REF\`
+
+**Gate-fail reasons that would have blocked:**
+$REASONS_MD
+
+This exemption is recorded in the audit log (\`hydra:dc:exempt_log\`). Retrieve via \`curl $ORCH_BASE_URL/api/design-concepts/exempt-log\`."
