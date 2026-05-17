@@ -90,7 +90,8 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     await admin.moveToInProgress("Stale claim", { claimedBy: "codex" });
     await backdateClaim(staleId, 3 * 60 * 60 * 1000);
 
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000 });
+    // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
 
     assert.equal(result.reaped.length, 1, "exactly one item reaped");
     assert.equal(result.reaped[0].id, staleId);
@@ -123,7 +124,8 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     // 30 minutes old — well under the 2h default.
     await backdateClaim(id, 30 * 60 * 1000);
 
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000 });
+    // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
     assert.equal(result.reaped.length, 0);
 
     const counts = await admin.getBacklogCounts();
@@ -141,7 +143,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     const lifetimeBefore = await redis.get("hydra:metrics:claims-reaped");
     assert.equal(lifetimeBefore, null, "metric should start unset");
 
-    await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000 });
+    await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
 
     const lifetimeAfter = await redis.get("hydra:metrics:claims-reaped");
     assert.equal(parseInt(lifetimeAfter, 10), 1, "lifetime counter incremented by 1");
@@ -179,7 +181,8 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     // Backdate so this run reaps it (which will bring reapCount to 3 → escalate).
     await backdateClaim(id, 3 * 60 * 60 * 1000);
 
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000 });
+    // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
     assert.equal(result.reaped.length, 1);
     assert.equal(result.reaped[0].escalated, true);
 
@@ -221,7 +224,8 @@ describe("backlog stale-claim reaper (issue #374)", () => {
 
   test("reapStaleClaims is safe to call when inProgress is empty", async (t) => {
     requireRedis(t);
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000 });
+    // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
     assert.deepEqual(result.reaped, []);
   });
 });

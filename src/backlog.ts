@@ -15,6 +15,9 @@
  *   hydra:backlog:counter       → Auto-increment ID counter
  */
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import { redisKeys } from "./redis-keys.ts";
 import {
   getBacklogItemRaw, saveBacklogItem, removeBacklogItem as removeBacklogItemAdapter,
@@ -22,6 +25,9 @@ import {
   incrBacklogCounter, evalScript,
   incrKey, setString, expireKey, pushAlert,
 } from "./redis-adapter.ts";
+import { getTargetGithubRepo } from "./target-config.ts";
+
+const execFileAsync = promisify(execFile);
 
 const DONE_RETENTION_DAYS = 7;
 const LANES = ["triage", "backlog", "queued", "blocked", "inProgress", "done"];
@@ -620,6 +626,67 @@ async function getStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<{
 }
 
 /**
+ * Fetch the set of open PRs in the target repo (default `hydra-betting`) and
+ * return their title+body blobs. Used by the stale-claim reaper to skip
+ * reaping items whose implementing PR is already open (issue #490).
+ *
+ * Returns `null` on any failure (gh missing, network down, JSON malformed) so
+ * the caller treats it as "no information" rather than "no open PRs". The
+ * reaper falls back to the original time-only behaviour in that case — we'd
+ * rather over-reap once than wedge a WIP slot because gh is unavailable.
+ *
+ * Cheap enough to call once per reaper run: hydra-betting averages <20 open
+ * PRs and the gh CLI streams a single API call. Result is intentionally
+ * not memoised so a long-lived service picks up newly-merged PRs.
+ */
+async function fetchOpenTargetPrBlobs(): Promise<string[] | null> {
+  const repo = getTargetGithubRepo();
+  try {
+    const { stdout } = await execFileAsync(
+      "gh",
+      [
+        "pr", "list",
+        "--repo", repo,
+        "--state", "open",
+        "--limit", "100",
+        "--json", "title,body,number",
+      ],
+      { timeout: 10000 },
+    );
+    const prs = JSON.parse(stdout);
+    if (!Array.isArray(prs)) return null;
+    return prs.map((pr: any) => `${pr.title ?? ""}\n${pr.body ?? ""}`);
+  } catch (err: any) {
+    console.error(`[Backlog] fetchOpenTargetPrBlobs failed for ${repo}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Decide whether an in-progress backlog item is already covered by an OPEN
+ * PR in the target repo. Match is on the item ID as a whole word — this is
+ * the convention autopilot subagents use when opening PRs (e.g. PR title
+ * "feat(scanner): item-302 add run history page" or body line "closes
+ * item-302"). Falls back to substring title match for the rare case where
+ * the subagent embedded the item title verbatim.
+ *
+ * Exported via `_admin` so tests can inject a stub without invoking `gh`.
+ */
+function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs: string[]): boolean {
+  if (!Array.isArray(prBlobs) || prBlobs.length === 0) return false;
+  const id = String(item.id || "");
+  if (!id) return false;
+  // Whole-word match for the item ID. `item-302` should not match `item-3020`.
+  const idPattern = new RegExp(`(?:^|[^A-Za-z0-9_-])${id.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}(?:[^A-Za-z0-9_-]|$)`);
+  const title = (item.title || "").trim();
+  for (const blob of prBlobs) {
+    if (idPattern.test(blob)) return true;
+    if (title.length >= 12 && blob.includes(title)) return true;
+  }
+  return false;
+}
+
+/**
  * Reap stale claims: move inProgress items whose `claimedAt` is older than
  * `maxAgeMs` back to `queued` (or to `blocked` if they've been reaped
  * `CLAIM_REAP_ESCALATE_AFTER` times — likely a crash-loop, operator needs to
@@ -627,19 +694,40 @@ async function getStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<{
  * and increments `meta.reapCount`. Emits a `stale-claim-reaped` alert per
  * item and increments the lifetime + per-day `claims-reaped` counters.
  *
- * Returns `{ reaped }` where each entry is the minimal info the caller / API
- * needs to render or log the action. Never throws — Redis errors during
- * metric/alert publication are logged and swallowed so a metrics outage can't
- * leave a wedged WIP slot.
+ * **Open-PR guard (issue #490).** Before reaping any item, the reaper fetches
+ * the list of OPEN PRs in the target repo and skips any item whose ID (or
+ * exact title) appears in a PR title/body. This prevents the "reaper
+ * re-queues an item that already has an open implementing PR" failure mode,
+ * which cost 76k tokens in a duplicate dev_target dispatch on 2026-05-17.
+ * The check is best-effort: a `gh` outage falls back to time-only reaping
+ * (over-reap once rather than wedge a slot). Tests inject the PR feed via
+ * `opts.fetchOpenPrBlobs` so they don't shell out.
+ *
+ * Returns `{ reaped, skippedOpenPr }`. `skippedOpenPr` lists items the open-PR
+ * guard preserved so operators and tests can audit the decision.
+ *
+ * Never throws — Redis errors during metric/alert publication are logged and
+ * swallowed so a metrics outage can't leave a wedged WIP slot.
  */
-async function reapStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<{
+async function reapStaleClaims(opts: {
+  maxAgeMs?: number;
+  fetchOpenPrBlobs?: () => Promise<string[] | null>;
+} = {}): Promise<{
   reaped: Array<{ id: string; title: string; ageMs: number; escalated: boolean }>;
+  skippedOpenPr: Array<{ id: string; title: string; ageMs: number }>;
   maxAgeMs: number;
 }> {
   const maxAgeMs = opts.maxAgeMs ?? CLAIM_MAX_AGE_MS_DEFAULT;
   const now = Date.now();
   const ids = await getBacklogLaneIds("inProgress");
   const reaped: Array<{ id: string; title: string; ageMs: number; escalated: boolean }> = [];
+  const skippedOpenPr: Array<{ id: string; title: string; ageMs: number }> = [];
+
+  // Fetch the open-PR feed once per run. `null` means "couldn't check" — in
+  // that case we fall through to the original time-only reaper rather than
+  // wedging slots indefinitely.
+  const prFetcher = opts.fetchOpenPrBlobs ?? fetchOpenTargetPrBlobs;
+  const prBlobs = await prFetcher();
 
   for (const id of ids) {
     const item = await getItem(id);
@@ -651,6 +739,16 @@ async function reapStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<{
     if (!Number.isFinite(claimedAtMs)) continue;
     const ageMs = now - claimedAtMs;
     if (ageMs <= maxAgeMs) continue;
+
+    // Open-PR guard (issue #490). Only consulted when we actually have PR
+    // data — a null fetch means "we couldn't check", so fall through.
+    if (prBlobs && itemMatchesOpenPr(item, prBlobs)) {
+      console.warn(
+        `[Backlog] Skipping reap of ${id} ("${(item.title || "").slice(0, 60)}") — open PR in target repo references this item. claimedBy=${item.claimedBy ?? "?"} ageMs=${ageMs}`,
+      );
+      skippedOpenPr.push({ id, title: item.title, ageMs });
+      continue;
+    }
 
     const previousClaimedBy = item.claimedBy ?? null;
     const reapCount = (typeof item.meta?.reapCount === "number" ? item.meta.reapCount : 0) + 1;
@@ -718,7 +816,7 @@ async function reapStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<{
     reaped.push({ id, title: item.title, ageMs, escalated: escalate });
   }
 
-  return { reaped, maxAgeMs };
+  return { reaped, skippedOpenPr, maxAgeMs };
 }
 
 /**
@@ -1030,6 +1128,8 @@ const _admin = {
   requeueStaleInProgressItems,
   reapStaleClaims,
   getStaleClaims,
+  itemMatchesOpenPr,
+  fetchOpenTargetPrBlobs,
   claimNextQueuedItem,
   closeBacklogRedis,
   getCurrentMilestoneProgress,

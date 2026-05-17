@@ -758,6 +758,14 @@ async function runScheduledCycle(eventBus) {
         `[Scheduler] Stale-claim reaper released ${reaperResult.reaped.length} inProgress slot(s) (threshold ${CLAIM_MAX_AGE_MS}ms)`,
       );
     }
+    if (reaperResult.skippedOpenPr && reaperResult.skippedOpenPr.length > 0) {
+      // issue #490: items with an open implementing PR in the target repo
+      // are intentionally preserved rather than re-queued (which would
+      // trigger a duplicate dev_target dispatch).
+      console.log(
+        `[Scheduler] Stale-claim reaper preserved ${reaperResult.skippedOpenPr.length} item(s) with open target PRs: ${reaperResult.skippedOpenPr.map(s => s.id).join(", ")}`,
+      );
+    }
   } catch (err: any) {
     console.error(`[Scheduler] reapStaleClaims failed: ${err.message}`);
     Sentry.addBreadcrumb({ category: "scheduler", message: `reapStaleClaims failed: ${err.message}`, level: "error" });
