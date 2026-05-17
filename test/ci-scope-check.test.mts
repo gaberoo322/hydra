@@ -119,7 +119,8 @@ describe("classifyScope", () => {
   });
 
   test("strips a leading web/ when normalising paths", () => {
-    // Matches the in-cycle normalisation in src/scope-enforcement.ts.
+    // Matches the historical in-cycle normalisation that lived in
+    // src/scope-enforcement.ts before it was deleted in issue #476.
     const r = classifyScope(["web/src/foo.ts"], ["src/foo.ts"]);
     assert.equal(r.outOfScope.length, 0);
   });
