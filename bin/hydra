@@ -21,7 +21,14 @@
 #     stop returns. Safe to call repeatedly; second call returns "not running".
 #   hydra cycle status
 #   hydra cycle start
-#   hydra cycle reality
+#   hydra cycle reality [<cycleId>]
+#     Fetches the reality report for <cycleId>. With no argument, resolves
+#     the most recent cycle from `/cycle/history?limit=1` and uses that ID.
+#     Issue #448: the legacy `/api/cycle/reality` route shape never existed
+#     after the router refactor — every invocation 404'd and the CLI printed
+#     the Express HTML to stdout. The current path is `/cycle/:cycleId/reality`
+#     and `_get` now detects HTML / non-2xx responses and exits non-zero so
+#     callers (skills, operators) don't silently consume error pages.
 #   hydra backlog ls | counts | move <id> <lane>
 #   hydra queue ls | add <reference>
 #   hydra metrics [--count N]
@@ -44,7 +51,39 @@ usage() {
 # Wrappers — curl with sane defaults. -sS hides the progress bar but still
 # surfaces errors on stderr. We do NOT use -f so callers can see 4xx/5xx
 # JSON bodies that may contain useful error context.
-_get()    { curl -sS "$BASE_URL/api$1"; }
+#
+# _get separates the body from the HTTP status (using `-w` with a sentinel
+# trailing line), then refuses to print HTML 404 pages as if they were data
+# (issue #448). On non-2xx OR when the body looks like HTML, it writes the
+# response to stderr and exits non-zero so callers can detect the failure
+# without parsing the payload. This regressed silently after the cycles
+# router moved to `/cycle/:cycleId/reality` and the CLI kept GETting the
+# stale `/cycle/reality` path — every call returned the Express 404 page.
+_get() {
+  local response status body
+  # %{http_code} on the last line lets us split the body cleanly even when
+  # the response itself contains newlines. Use a sentinel to avoid relying
+  # on the body NOT ending in three digits.
+  response="$(curl -sS -w '\nHYDRA_HTTP_CODE:%{http_code}' "$BASE_URL/api$1")" || return $?
+  status="${response##*HYDRA_HTTP_CODE:}"
+  body="${response%$'\n'HYDRA_HTTP_CODE:*}"
+  case "$status" in
+    2??) ;;
+    *) echo "hydra: GET $1 failed with HTTP $status" >&2
+       printf '%s\n' "$body" >&2
+       return 1 ;;
+  esac
+  # Some routes (e.g. Express's default 404) reply 200 with HTML in dev
+  # configurations or behind proxies. Refuse to treat HTML as data so
+  # callers that pipe through jq/python don't blow up on `<html>...`.
+  case "$body" in
+    "<!DOCTYPE"*|"<!doctype"*|"<html"*|"<HTML"*)
+      echo "hydra: GET $1 returned HTML (expected JSON/text)" >&2
+      printf '%s\n' "$body" >&2
+      return 1 ;;
+  esac
+  printf '%s\n' "$body"
+}
 _post()   { local p="$1"; shift; if [ "$#" -gt 0 ]; then curl -sS -X POST -H 'content-type: application/json' -d "$1" "$BASE_URL/api$p"; else curl -sS -X POST "$BASE_URL/api$p"; fi; }
 _patch()  { curl -sS -X PATCH -H 'content-type: application/json' -d "$2" "$BASE_URL/api$1"; }
 _delete() { curl -sS -X DELETE "$BASE_URL/api$1"; }
@@ -70,7 +109,33 @@ cmd_cycle() {
   case "${1:-}" in
     status ) _get "/cycle/status" ;;
     start  ) _post "/cycle/start" ;;
-    reality) _get "/cycle/reality" ;;
+    reality)
+      # Issue #448: the real route is /cycle/:cycleId/reality, never
+      # /cycle/reality. Accept an explicit cycleId or resolve the most
+      # recent one from /cycle/history when the operator omits it.
+      shift
+      local cid="${1:-}"
+      if [ -z "$cid" ]; then
+        local hist
+        hist="$(_get "/cycle/history?limit=1")" || {
+          echo "hydra cycle reality: could not resolve a recent cycleId (history fetch failed)" >&2
+          exit 1
+        }
+        cid="$(printf '%s' "$hist" | python3 -c 'import json,sys
+try:
+    rows = json.loads(sys.stdin.read())
+    if isinstance(rows, list) and rows:
+        cid = rows[0].get("cycleId") or rows[0].get("id") or ""
+        print(cid)
+except Exception:
+    pass
+')"
+        if [ -z "$cid" ]; then
+          echo "hydra cycle reality: no cycle history available — pass an explicit <cycleId>" >&2
+          exit 1
+        fi
+      fi
+      _get "/cycle/$cid/reality" ;;
     history)
       shift
       local q=""
