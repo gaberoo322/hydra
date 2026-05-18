@@ -17,10 +17,20 @@ name: issue-label-validation
 # It is a soft enforcer — operators can override by reapplying the
 # label after editing the issue. There is no branch-protection style
 # block; the goal is to surface the gap, not to fight the operator.
+#
+# Issue #505: also triggers on `edited` (so removing the scope section
+# from a labelled issue is detected immediately) and on a nightly
+# `schedule:` (so grandfathered or race-condition-bypassed issues are
+# eventually demoted to `needs-info`).
 
 on:
   issues:
-    types: [labeled]
+    types: [labeled, edited]
+  schedule:
+    # Nightly at 06:00 UTC — picks up any open `ready-for-agent` issue
+    # that was grandfathered in before this workflow shipped, or that
+    # bypassed the `labeled`/`edited` triggers via a webhook race.
+    - cron: "0 6 * * *"
 
 permissions:
   issues: write
@@ -28,7 +38,15 @@ permissions:
 
 jobs:
   validate-ready-for-agent:
-    if: github.event.label.name == 'ready-for-agent'
+    # Only run the single-issue validation on label/edited events for
+    # `ready-for-agent`-labelled issues. The scheduled audit job below
+    # handles the cron path.
+    if: >-
+      github.event_name == 'issues' &&
+      (
+        (github.event.action == 'labeled' && github.event.label.name == 'ready-for-agent') ||
+        (github.event.action == 'edited' && contains(toJSON(github.event.issue.labels.*.name), 'ready-for-agent'))
+      )
     runs-on: self-hosted
     steps:
       - name: Check for Files in scope section
@@ -79,3 +97,69 @@ Example:
 \`\`\`
 
 See \`docs/agents/issue-tracker.md\` for the full convention."
+
+  audit-ready-for-agent:
+    # Issue #505: nightly audit. Iterates every open `ready-for-agent`
+    # issue and demotes any whose body is missing a `Files in scope`
+    # section. Catches grandfathered issues + edited-out scope blocks
+    # + race-condition bypasses of the per-event trigger above.
+    if: github.event_name == 'schedule'
+    runs-on: self-hosted
+    steps:
+      - name: Audit open ready-for-agent issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "Scheduled audit: scanning open ready-for-agent issues in $REPO"
+
+          # Fetch every open ready-for-agent issue. --limit 500 is well above
+          # the steady-state queue depth (typically <30). If we ever exceed
+          # that we want a loud failure, not a silent truncation.
+          issues_json=$(gh issue list \
+            --repo "$REPO" \
+            --label ready-for-agent \
+            --state open \
+            --limit 500 \
+            --json number,title,body)
+
+          count=$(printf '%s' "$issues_json" | jq 'length')
+          echo "Found $count open ready-for-agent issue(s)."
+
+          demoted=0
+          # Iterate by index — jq -r on body would mangle multi-line markdown.
+          for i in $(seq 0 $((count - 1))); do
+            num=$(printf '%s' "$issues_json" | jq -r ".[$i].number")
+            body=$(printf '%s' "$issues_json" | jq -r ".[$i].body // \"\"")
+
+            if printf '%s' "$body" | grep -qiE '(^|\n)\s*(##+\s*|\*\*)?Files in scope'; then
+              echo "  #$num — OK"
+              continue
+            fi
+
+            echo "::warning::Issue #$num is labelled ready-for-agent but missing a 'Files in scope' section — demoting."
+            gh issue edit "$num" \
+              --repo "$REPO" \
+              --remove-label "ready-for-agent" \
+              --add-label "needs-info"
+
+            gh issue comment "$num" \
+              --repo "$REPO" \
+              --body "> *Automated label-validation comment (scheduled audit, issues #396 / #505)*
+
+This issue carried the \`ready-for-agent\` label but is missing a \`## Files in scope\` section. The nightly audit detected the drift and moved the label to \`needs-info\`.
+
+Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. Without it, the subagent has no contract to honour and the gate has nothing to check against.
+
+To re-arm:
+
+1. Add a \`## Files in scope\` section to the issue body listing the paths the agent is allowed to touch (backticked code spans or bullet items work). Optionally add a \`## Files out of scope\` block — anything matching it becomes a hard merge blocker.
+2. Re-apply the \`ready-for-agent\` label.
+
+See \`docs/agents/issue-tracker.md\` for the full convention."
+
+            demoted=$((demoted + 1))
+          done
+
+          echo "Audit complete: $demoted issue(s) demoted to needs-info."

@@ -56,7 +56,13 @@ scope-justification: `test/helpers/fixtures.ts` — shared test fixture required
 
 ### Enforcement
 
-- `.github/workflows/issue-label-validation.yml` — when `ready-for-agent` is applied, blocks the transition if `## Files in scope` is missing (moves the label to `needs-info` and comments). Operator override is just "fix the body and re-apply the label".
+- `.github/ISSUE_TEMPLATE/feature-or-bug.yml` — GitHub form template surfaced at issue-creation time. Prefills `Problem Statement`, `Evidence`, `Files in scope`, and `Files out of scope` so structurally-correct issues are the default rather than a convention triage has to remember. `.github/ISSUE_TEMPLATE/config.yml` controls whether blank issues stay available alongside the form.
+- `.github/workflows/issue-label-validation.yml` — runs on three triggers:
+  - `issues: labeled` — when `ready-for-agent` is applied, blocks the transition if `## Files in scope` is missing (moves the label to `needs-info` and comments).
+  - `issues: edited` — when a `ready-for-agent` issue's body is edited, re-validates so removing the scope section after the label is applied still demotes the issue (issue #505).
+  - `schedule: nightly cron` — audits every open `ready-for-agent` issue and demotes any that drift out of compliance. Catches grandfathered issues that pre-date the workflow + race-condition bypasses of the per-event triggers (issue #505).
+
+  Operator override is unchanged: "fix the body and re-apply the label".
 - `.github/workflows/ci.yml`, `scope-check` job — parses both sections from the PR body and the linked issue body; fails the PR if drift is detected. See `docs/quality-gates.md`.
 - Subagent playbooks (`docs/operator-playbooks/hydra-dev.md`, `hydra-target-build.md`) embed a scope-respect block in the child prompt so the subagent reads the contract before writing code.
 

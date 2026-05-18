@@ -1,0 +1,9 @@
+# Issue template config (issue #505)
+#
+# We keep blank issues enabled so operators can still file
+# free-form notes, but the form template (`feature-or-bug.yml`)
+# is presented first and prefills the scope sections that the
+# `issue-label-validation` workflow and `scope-check` CI gate
+# both consume. Disable blank issues here if the volume of
+# unstructured filings becomes a problem.
+blank_issues_enabled: true

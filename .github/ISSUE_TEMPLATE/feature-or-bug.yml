@@ -1,0 +1,106 @@
+name: Feature or bug
+description: File a feature request or bug for the Hydra orchestrator. Prefilled with the scope sections that subagents and CI consume.
+title: "[Feature/Bug]: "
+labels:
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing an issue. The sections below are the canonical
+        structure that Hydra's triage skill and code-writing subagents
+        (hydra-dev, hydra-target-build) consume. Filling them out at
+        creation time avoids a round-trip through `needs-info`.
+
+        See `docs/agents/issue-tracker.md` for the full convention.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What's wrong, what's missing, or what would you like to be different? Prefer concrete observations over abstract goals.
+      placeholder: |
+        e.g. The scheduler tick stalls for ~30s when Redis is briefly unavailable, and the dashboard reports `lastTickAt` as stale for ~15min afterwards even though Redis recovered.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Logs, screenshots, command output, file paths, prior issues. Anything that lets the next reader verify the problem exists.
+      placeholder: |
+        - `journalctl --user -u hydra-orchestrator.service` excerpt
+        - `curl http://localhost:4000/api/scheduler/status` output
+        - Source: hydra-discover (tier 1), 2026-MM-DD
+    validations:
+      required: false
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: Optional — sketch the approach if you have one. Triage may revise this.
+      placeholder: |
+        e.g. Wrap the Redis ping in `Promise.race` with a 5s timeout and treat a timeout as `redis: false` in the health probe.
+    validations:
+      required: false
+  - type: textarea
+    id: success-criteria
+    attributes:
+      label: Success Criteria
+      description: Concrete, checkable acceptance criteria. Reviewers and the QA subagent use these to decide whether the PR closes the issue.
+      placeholder: |
+        - [ ] `npm test` includes a new regression test for the failure mode.
+        - [ ] `/api/health` returns `redis: false` within 5s when Redis is unreachable.
+        - [ ] Watchdog does not flap the scheduler stop flag on transient Redis loss.
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: false
+  - type: textarea
+    id: files-in-scope
+    attributes:
+      label: Files in scope
+      description: |
+        **Soft boundary.** The subagent (hydra-dev / hydra-target-build) treats
+        these paths as fair game. Files outside this list count toward the
+        ratio-based scope gate in CI. Use backticked code spans or bullets.
+        Directory prefixes (e.g. `src/foo/`) match every file beneath.
+
+        Required when this issue moves to `ready-for-agent` — the
+        `issue-label-validation` workflow enforces the section's presence
+        on both label and edit events, plus a nightly audit.
+      value: |
+        - `src/`
+        - `test/`
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: files-out-of-scope
+    attributes:
+      label: Files out of scope
+      description: |
+        **Hard boundary.** Any changed file matching this list will fail the
+        CI `scope-check` gate regardless of ratio, unless explicitly
+        whitelisted with a `scope-justification:` block in the PR body.
+        Lean on this list to keep Untouchable Core and unrelated subsystems
+        out of the blast radius.
+      value: |
+        - `src/untouchable.ts`
+        - `src/gate.ts`
+        - `scripts/deploy.sh`
+      render: markdown
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Implementation Notes
+      description: Optional. ADR references, related issues, anchor selection hints, estimated scope.
+      placeholder: |
+        - Related: #404, #504
+        - ADR conflicts: none
+        - Estimated scope: small
+    validations:
+      required: false
