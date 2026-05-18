@@ -2,6 +2,24 @@
 """
 reap.py — Phase 2 of /hydra-autopilot.
 
+FALLBACK PATH (issue #509)
+--------------------------
+As of issue #509, primary slot accounting is hook-driven: Claude Code's
+`SubagentStop` hook XADDs `subagent_stop` events onto the Redis stream
+`hydra:autopilot:slot-events`, which `collect-state.sh` surfaces as
+`state.slot_events` and `decide.py` consumes to free slots automatically.
+
+This CLI survives as the FALLBACK path. Use it only when a slot is
+provably silent-wedged — no `SubagentStop` event has arrived within
+`subagent_max_wall_seconds` (default 3600s, env override
+`HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS`). `decide.py` emits a
+`wait_or_reap` action for exactly that case; the harness translates
+that into a `reap.py completion ...` invocation here.
+
+The default-mode (no-subcommand) hard-cap sweep remains useful for
+runaway-token detection (`partial_tokens >= subagent_hard_max_tokens`)
+because hooks don't fire for in-flight token cap trips.
+
 Two modes:
 
   (default)   — In-flight hard-cap enforcement (issue #395).

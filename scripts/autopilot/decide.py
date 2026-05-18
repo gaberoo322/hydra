@@ -180,6 +180,39 @@ SIGNAL_COOLDOWNS = {
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
 
+# Silent-wedge fallback timer (issue #509). When an active slot has been
+# in flight for longer than this without a corresponding subagent_stop
+# hook event, decide.py emits a `wait_or_reap` action so the operator
+# loop falls back to reap.py. The slot_events stream is the primary
+# accounting path; this fallback only fires when the hook itself silently
+# failed (e.g. the subagent process crashed before reaching the harness's
+# SubagentStop dispatch).
+#
+# Default 3600s (1h). Override with HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS.
+def _subagent_max_wall_seconds(state: dict | None = None) -> int:
+    """Resolve the silent-wedge cap from env or state.limits, default 3600."""
+    env = os.environ.get("HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS")
+    if env:
+        try:
+            return int(env)
+        except (TypeError, ValueError):
+            pass
+    if state is not None:
+        limits = state.get("limits") or {}
+        v = limits.get("subagent_max_wall_seconds")
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+    return 3600
+
+
+# Bounded slot_history ring buffer length — decide.py trims to this on
+# every consumption pass so state.json doesn't grow unbounded across
+# an 8-hour run.
+SLOT_HISTORY_MAX_ENTRIES = 50
+
 # Confidence threshold: candidates below this don't justify a dev dispatch;
 # we force research instead (grilled decision 6, AC: research dispatched
 # when no candidate >= 0.5, capped at 4/day).
@@ -272,6 +305,25 @@ def make_wait_for_api(url: str, retries: int = 5, reason: str = "") -> dict:
     return {"type": "wait-for-api", "url": url, "retries": int(retries), "reason": reason}
 
 
+def make_wait_or_reap(slot: str, task_id: str, age_seconds: int, reason: str = "") -> dict:
+    """Silent-wedge fallback (issue #509). Hooks are the primary slot
+    accounting path; this action fires when an active slot has aged past
+    `subagent_max_wall_seconds` with no matching `subagent_stop` event in
+    `state.slot_events`. The autopilot turn handles it by invoking
+    `reap.py completion` as a forced reap — the existing fallback CLI.
+
+    The action carries enough metadata that the harness can dispatch the
+    reap deterministically: `{slot, task_id, age_seconds, reason}`.
+    """
+    return {
+        "type": "wait_or_reap",
+        "slot": slot,
+        "task_id": task_id,
+        "age_seconds": int(age_seconds),
+        "reason": reason,
+    }
+
+
 # Sentinel set of valid action types — used by INV-checks and tests.
 VALID_ACTION_TYPES = frozenset({
     "dispatch",
@@ -283,6 +335,7 @@ VALID_ACTION_TYPES = frozenset({
     "terminate",
     "wait",
     "wait-for-api",
+    "wait_or_reap",
 })
 
 
@@ -504,6 +557,122 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         plan.debug["terminate"] = term.get("cause")
         return plan
 
+    # 1.5. Hook-delivered slot events (issue #509).
+    #
+    # `state.slot_events` is the per-turn batch read by collect-state.sh
+    # from the `hydra:autopilot:slot-events` Redis stream. We translate
+    # each `subagent_stop` event into the same `completion` event shape
+    # consumed by step 2, AND append a structured record to
+    # `state.slot_history` for operator visibility. We do this here (not
+    # in step 2) so the slot-history side effect happens even if the
+    # event somehow lacks the task_id required for a reap (e.g. when the
+    # subagent crashed before the harness allocated one).
+    #
+    # `slot_waiting_permission` events get appended to
+    # `state.failure_log` with a `permission_wait` pattern. The slot
+    # stays active — the subagent is paused, not done.
+    slot_events_raw = state.get("slot_events") or []
+    if isinstance(slot_events_raw, dict):
+        # Tolerate the collect-state JSON shape {"events": [...], "last_id": ...}
+        slot_events_raw = slot_events_raw.get("events") or []
+    synthesised_completions: list[dict] = []
+    for raw_ev in slot_events_raw:
+        if not isinstance(raw_ev, dict):
+            continue
+        fields = raw_ev.get("fields") if "fields" in raw_ev else raw_ev
+        if not isinstance(fields, dict):
+            continue
+        kind = fields.get("event")
+        if kind == "subagent_stop":
+            slot = fields.get("slot") or "unknown"
+            status = fields.get("status") or "unknown"
+            task_id = fields.get("task_id") or ""
+            summary = fields.get("summary") or ""
+            try:
+                ts_epoch = int(fields.get("ts_epoch") or 0)
+            except (TypeError, ValueError):
+                ts_epoch = 0
+            # Append to slot_history (state mutation for telemetry).
+            history = state.get("slot_history")
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "slot": slot,
+                "status": status,
+                "task_id": task_id,
+                "summary": summary,
+                "ts_epoch": ts_epoch,
+            })
+            if len(history) > SLOT_HISTORY_MAX_ENTRIES:
+                history = history[-SLOT_HISTORY_MAX_ENTRIES:]
+            state["slot_history"] = history
+            # Failure outcomes also land in failure_log so self_heal.py
+            # sees them. We don't dedup against existing failure_log
+            # entries — the caller is expected to invoke decide once per
+            # turn with a fresh batch.
+            if status in ("failure", "budget_exceeded"):
+                flog = state.get("failure_log")
+                if not isinstance(flog, list):
+                    flog = []
+                flog.append({
+                    "ts": ts_epoch or now,
+                    "pattern": f"subagent_{status}",
+                    "slot": slot,
+                    "task_id": task_id,
+                    "action": "subagent_stop",
+                    "note": summary,
+                })
+                state["failure_log"] = flog
+            # Synthesise a `completion` event so step 2's reap loop fires
+            # and frees the slot. We DO require a task_id for the reap
+            # to be useful — without it reap.py can't dedup.
+            if task_id:
+                # Best-effort token recovery from slot, if the harness
+                # stamped partial_tokens. The hook itself doesn't carry
+                # tokens (the harness payload doesn't expose them
+                # reliably); we trust slot.partial_tokens as the floor.
+                slot_obj = (state.get("slots") or {}).get(slot)
+                tokens = 0
+                skill = None
+                if isinstance(slot_obj, dict):
+                    try:
+                        tokens = int(slot_obj.get("partial_tokens") or 0)
+                    except (TypeError, ValueError):
+                        tokens = 0
+                    skill = slot_obj.get("skill")
+                synthesised_completions.append({
+                    "type": "completion",
+                    "slot": slot,
+                    "task_id": task_id,
+                    "total_tokens": tokens,
+                    "skill": skill,
+                    "_source": "slot_events",
+                })
+        elif kind == "slot_waiting_permission":
+            slot = fields.get("slot") or "unknown"
+            prompt = fields.get("prompt") or ""
+            try:
+                ts_epoch = int(fields.get("ts_epoch") or 0)
+            except (TypeError, ValueError):
+                ts_epoch = 0
+            flog = state.get("failure_log")
+            if not isinstance(flog, list):
+                flog = []
+            flog.append({
+                "ts": ts_epoch or now,
+                "pattern": "permission_wait",
+                "slot": slot,
+                "task_id": "",
+                "action": "slot_waiting_permission",
+                "note": prompt,
+            })
+            state["failure_log"] = flog
+
+    # Prepend synthesised completions so they precede any caller-supplied
+    # `completion` events in step 2's iteration order.
+    if synthesised_completions:
+        events = synthesised_completions + events
+
     # 2. Completion reaps first (INV-006 — reap before dispatch).
     #
     # This loop is the ONLY producer of `reap` actions, and it MUST fire
@@ -628,6 +797,63 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
             continue
         plan.add(action, reason=f"signal:{sig}")
         dispatched_any = True
+
+    # 5.5. Silent-wedge fallback (issue #509).
+    #
+    # If an active slot has aged past `subagent_max_wall_seconds` AND no
+    # `subagent_stop` event arrived for its task_id, emit a
+    # `wait_or_reap` action so the harness invokes reap.py as a forced
+    # fallback. Hooks are the primary path; this only fires when the
+    # hook itself silently failed.
+    #
+    # We check this AFTER dispatch decisions because a wait_or_reap is
+    # a slot-clear action; mixing it into the same plan as a new
+    # dispatch on the SAME slot would violate INV-006 (reap-before-
+    # dispatch). The slot was busy at decision time, so no new dispatch
+    # for that slot was emitted above.
+    max_wall = _subagent_max_wall_seconds(state)
+    # Build a set of task_ids we already saw a completion for (this
+    # turn's batch — either via slot_events or caller-supplied events).
+    completed_task_ids: set[str] = set()
+    for ev in events:
+        if ev.get("type") == "completion":
+            tid = ev.get("task_id")
+            if tid:
+                completed_task_ids.add(tid)
+    for cls, slot_obj in (slots.items() if isinstance(slots, dict) else []):
+        if not isinstance(slot_obj, dict):
+            continue
+        started_epoch = slot_obj.get("started_epoch")
+        if started_epoch is None:
+            # Tolerate legacy `started` ISO8601 by attempting to parse.
+            started_iso = slot_obj.get("started")
+            if isinstance(started_iso, str):
+                try:
+                    from datetime import datetime
+                    started_epoch = int(datetime.fromisoformat(started_iso.replace("Z", "+00:00")).timestamp())
+                except (ValueError, TypeError):
+                    started_epoch = None
+        try:
+            started_epoch_i = int(started_epoch) if started_epoch is not None else None
+        except (TypeError, ValueError):
+            started_epoch_i = None
+        if started_epoch_i is None:
+            continue
+        age = now - started_epoch_i
+        if age < max_wall:
+            continue
+        task_id = slot_obj.get("task_id") or ""
+        if task_id and task_id in completed_task_ids:
+            continue
+        plan.add(
+            make_wait_or_reap(
+                cls,
+                task_id,
+                age,
+                f"silent-wedge fallback: {cls} active for {age}s with no SubagentStop event (cap {max_wall}s)",
+            ),
+            reason=f"silent-wedge:{cls}",
+        )
 
     # 6. Idle fallback
     occupied = sum(1 for v in slots.values() if v is not None)

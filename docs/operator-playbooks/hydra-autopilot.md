@@ -300,6 +300,87 @@ Slash-args (`--scope=`, `--tokens=`, `--max-sec=`, `--idle-turns=`,
 `--subagent-soft=`, `--subagent-hard=`, `--unattended=`) parse via
 `args-parse.sh` and override env vars.
 
+## Slot lifecycle events (issue #509)
+
+Subagent slot accounting is event-driven, not poll-driven. Claude Code's
+`SubagentStop` and `Notification` hooks XADD lifecycle events onto a
+Redis stream that the autopilot drains every turn:
+
+- **Stream:** `hydra:autopilot:slot-events` (`XADD ... MAXLEN ~ 1000`)
+- **Hook scripts:** `scripts/autopilot/hooks/on-subagent-stop.sh`,
+  `scripts/autopilot/hooks/on-subagent-permission-wait.sh`
+- **Hook registration:** `docs/operator-playbooks/hydra-autopilot.settings.json`
+  (propagated by `scripts/sync-skills.sh` to
+  `~/.claude/skills/hydra-autopilot/.claude/settings.json`)
+
+### Event schema
+
+```
+event=subagent_stop
+  slot=<dev_orch|dev_target|qa_orch|qa_target|research_orch|research_target|design_concept_orch|unknown>
+  status=<success|failure|no_op|budget_exceeded|unknown>
+  task_id=<harness-task-id>
+  subagent_type=<hydra-dev|hydra-target-build|...>
+  summary=<truncated 200-char text>
+  ts_epoch=<unix-epoch>
+
+event=slot_waiting_permission
+  slot=<slot-or-unknown>
+  prompt=<truncated 200-char text>
+  ts_epoch=<unix-epoch>
+```
+
+### How the turn consumes them
+
+1. `collect-state.sh` calls `XREAD COUNT 100 STREAMS
+   hydra:autopilot:slot-events <last-id>` and emits the parsed events
+   as `slot_events_json={events:[...], last_id:"..."}`. The autopilot
+   merges this under `state.slot_events` and updates
+   `state.slot_events_last_id` to the latest seen id so the next turn
+   doesn't re-read.
+2. `decide.py` consumes `state.slot_events`:
+   - Each `subagent_stop` is translated into a `completion` event (the
+     existing reap path) AND appended to `state.slot_history` (capped
+     at 50 entries, FIFO).
+   - `failure` and `budget_exceeded` statuses also append to
+     `state.failure_log` so `self_heal.py` sees them.
+   - Each `slot_waiting_permission` appends to `state.failure_log`
+     with `pattern=permission_wait` but does NOT free the slot —
+     the subagent is paused, not done.
+
+### Silent-wedge fallback
+
+If the hook itself silently fails (e.g. the subagent process crashed
+before reaching the harness's `SubagentStop` dispatch), `decide.py`
+falls back to a wall-clock timer. When an active slot's `started_epoch`
+is older than `subagent_max_wall_seconds` (default `3600`, env override
+`HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS`) AND no matching
+`subagent_stop` event has been observed for the slot's `task_id`,
+`decide.py` emits a `wait_or_reap` action. The harness translates that
+into `reap.py completion ...` — the existing fallback CLI.
+
+`reap.py` survives in the tree but is now the **fallback path**, not
+the primary; see its module docstring.
+
+### Best-effort guarantees
+
+The hook scripts MUST NEVER propagate an error back to the parent
+autopilot session. A Redis outage, a malformed payload, or a missing
+`jq` — any of these results in a stderr warning and `exit 0`. The
+regression test `test/autopilot-hooks.test.mts` enforces this.
+
+### Environment overrides
+
+| Var | Default | Purpose |
+|---|---|---|
+| `HYDRA_REDIS_HOST` | `docker` | When `docker`, hooks shell into `hydra-redis-1`. Otherwise `redis-cli -h $HOST -p $PORT` |
+| `HYDRA_REDIS_PORT` | `6379` | |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM` | `hydra:autopilot:slot-events` | Used by hooks, `collect-state.sh`, and the regression tests |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_LAST_ID` | `0` | Cursor passed by the autopilot to `XREAD` so each turn only reads new events |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT` | `100` | Max events per `XREAD` batch |
+| `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | `1000` | `XADD MAXLEN ~` cap |
+| `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `3600` | Silent-wedge fallback cap (`decide.py` only) |
+
 ## Signal wiring (state.signals)
 
 `collect-state.sh` emits raw counts; the model turns them into the
