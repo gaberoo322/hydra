@@ -22,6 +22,7 @@ import { redisKeys } from "./redis-keys.ts";
 import { getTargetName } from "./target-config.ts";
 import {
   getString, setString, delKey, getWorkQueueLen, pushToWorkQueue,
+  countLiveWorkQueueItems,
   hashGet, hashSetField,
   recordResearchEvent, recordBuildEvent,
   getResearchEventCount24h, getBuildEventCount24h,
@@ -37,6 +38,7 @@ import {
   shouldForceResearchFloor,
   getResearchBuildRatioMin,
   getResearchFloorWindow,
+  getResearchFloorSilenceMs,
   getResearchFloorEmptySuppressMs,
   getResearchFloorSuppressedUntilMs,
   setResearchFloorSuppressedUntilMs,
@@ -487,28 +489,51 @@ async function maybeRunResearch(eventBus) {
   // Check queue depth + ratio caps. Both are *soft* gates that the research
   // capacity floor (#327) can override when the realised research:build ratio
   // is starving research below the configured minimum.
-  const queueLen = await getWorkQueueLen();
+  //
+  // Issue #457: gate on the *live* queue depth, not the raw LLEN. Items with
+  // a source whose producer no longer exists (`code-reviewer`,
+  // `adversarial-validation`; both deleted in PR-3 / issue #383) are orphans
+  // that anchor-selection drains slowly as `user-request` work. They should
+  // not permanently throttle research — the throttle's purpose is to gauge
+  // live work pressure, and orphan items represent frozen pre-cutover work,
+  // not live demand.
+  const liveCounts = await countLiveWorkQueueItems();
+  const queueLen = liveCounts.live;
+  const queueLenTotal = liveCounts.total;
+  const orphanLen = liveCounts.orphan;
+  const orphanAnnotation = orphanLen > 0
+    ? ` (${orphanLen} orphan items excluded; total LLEN=${queueLenTotal})`
+    : "";
   const researchCount24h = await getResearchEventCount24h();
   const buildCount24h = await getBuildEventCount24h();
   const ratio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
 
   // Compute the floor decision once so the soft-gate overrides and the
   // post-throttle logging both reference the same value.
+  //
+  // Issue #457: feed the wall-clock since last research into the floor
+  // predicate so the silence-based override can fire even when build volume
+  // is below `floorWindow`. Without this, a queue full of orphan items can
+  // suppress queue-depth gating for >24h while the floor sits inert because
+  // `buildCount24h < floorWindow`.
   const floorSuppressedUntilMs = await getResearchFloorSuppressedUntilMs();
+  const lastResearchAtMs = await getLastResearchAtMs();
   const floor = shouldForceResearchFloor({
     researchCount24h,
     buildCount24h,
     ratioMin: getResearchBuildRatioMin(),
     floorWindow: getResearchFloorWindow(),
     suppressedUntilMs: floorSuppressedUntilMs,
+    lastResearchAtMs,
+    silenceMs: getResearchFloorSilenceMs(),
   });
 
   if (queueLen >= RESEARCH_QUEUE_THRESHOLD) {
     if (!floor.shouldFire) {
-      console.log(`[Scheduler] Research suppressed: queue depth ${queueLen} >= threshold ${RESEARCH_QUEUE_THRESHOLD}`);
+      console.log(`[Scheduler] Research suppressed: queue depth ${queueLen} >= threshold ${RESEARCH_QUEUE_THRESHOLD}${orphanAnnotation}`);
       return;
     }
-    console.log(`[Scheduler] research floor fired: ${floor.reason} — overriding queue depth ${queueLen} >= ${RESEARCH_QUEUE_THRESHOLD}`);
+    console.log(`[Scheduler] research floor fired: ${floor.reason} — overriding queue depth ${queueLen} >= ${RESEARCH_QUEUE_THRESHOLD}${orphanAnnotation}`);
   }
 
   if (researchCount24h > 0 && ratio > RESEARCH_BUILD_RATIO_MAX) {
@@ -525,7 +550,7 @@ async function maybeRunResearch(eventBus) {
   const RESEARCH_QUEUE_LOW_WATERMARK = Math.min(3, Math.floor(RESEARCH_QUEUE_THRESHOLD / 2));
   if (queueLen >= RESEARCH_QUEUE_LOW_WATERMARK) {
     if (!floor.shouldFire) {
-      console.log(`[Scheduler] Queue has ${queueLen} items (>= ${RESEARCH_QUEUE_LOW_WATERMARK}) — prefer building over researching`);
+      console.log(`[Scheduler] Queue has ${queueLen} items (>= ${RESEARCH_QUEUE_LOW_WATERMARK}) — prefer building over researching${orphanAnnotation}`);
       return;
     }
     console.log(`[Scheduler] research floor fired: ${floor.reason} — overriding low-watermark ${RESEARCH_QUEUE_LOW_WATERMARK}`);
@@ -981,6 +1006,12 @@ async function getStatus() {
     console.error(`[Scheduler] getResearchFloorStats failed: ${err.message}`);
     return null;
   });
+  // Issue #457: surface live vs orphan queue depth so the dashboard can
+  // explain why the throttle isn't firing when LLEN is high.
+  const liveCounts = await countLiveWorkQueueItems().catch((err: any) => {
+    console.error(`[Scheduler] countLiveWorkQueueItems failed: ${err.message}`);
+    return { live: 0, total: 0, orphan: 0 };
+  });
 
   // Issue #232: report a rolling-window merge rate as the primary
   // operator-visible metric. The lifetime ratio is preserved as
@@ -1092,6 +1123,12 @@ async function getStatus() {
       currentRatio: Math.round(currentRatio * 10) / 10,
       researchCount24h,
       buildCount24h,
+      // Issue #457: live vs total queue depth. The throttle gates on `live`,
+      // not `total` — items from deleted producers (orphan source) do not
+      // represent live demand and should not permanently suppress research.
+      queueDepthLive: liveCounts.live,
+      queueDepthTotal: liveCounts.total,
+      queueDepthOrphan: liveCounts.orphan,
       minIntervalHuman: formatDuration(RESEARCH_MIN_INTERVAL_MS),
       cyclesRun: state.researchCyclesRun,
       lastResearchAt: state.lastResearchAt,

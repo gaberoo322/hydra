@@ -80,6 +80,18 @@ export const DEFAULT_RESEARCH_FLOOR_EMPTY_SUPPRESS_MS = 24 * 60 * 60 * 1000;
 /** How many consecutive "no opportunities" results trigger the suppression. */
 export const RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD = 2;
 
+/**
+ * Default "research silence" threshold (issue #457). When research has been
+ * silent for longer than this AND no successful research cycle has happened
+ * in the rolling 24h window, the floor forces a research tick regardless of
+ * `buildCount24h` — i.e. even when there is no traffic at all, an extended
+ * blackout is itself evidence that the throttle/floor is mis-calibrated.
+ *
+ * Default 24h matches the rolling-window semantics used elsewhere in the
+ * scheduler (`researchCount24h` / `buildCount24h`).
+ */
+export const DEFAULT_RESEARCH_FLOOR_SILENCE_MS = 24 * 60 * 60 * 1000;
+
 /** Read the configured floor ratio with safe bounds. Negative/zero/NaN/>1 ⇒
  *  default. The semantics are "minimum acceptable ratio" — values outside
  *  (0, 1] don't make sense (research would have to exceed builds to satisfy
@@ -110,6 +122,15 @@ export function getResearchFloorEmptySuppressMs(env: NodeJS.ProcessEnv = process
   return n;
 }
 
+/** Read the configured research silence threshold (issue #457). */
+export function getResearchFloorSilenceMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.HYDRA_RESEARCH_FLOOR_SILENCE_MS;
+  if (raw === undefined || raw === null || raw === "") return DEFAULT_RESEARCH_FLOOR_SILENCE_MS;
+  const n = parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_RESEARCH_FLOOR_SILENCE_MS;
+  return n;
+}
+
 export type FloorDecision = {
   shouldFire: boolean;
   reason: string;
@@ -137,17 +158,46 @@ export function shouldForceResearchFloor(args: {
   floorWindow?: number;
   suppressedUntilMs?: number | null;
   nowMs?: number;
+  /** When provided, the silence-based override fires if
+   *  `nowMs - lastResearchAtMs > silenceMs` and `researchCount24h === 0`.
+   *  Added for issue #457: when no research has happened in 24h+, the floor
+   *  must fire even when build activity is below `floorWindow` — otherwise
+   *  a queue stuffed with orphan items can suppress research indefinitely. */
+  lastResearchAtMs?: number | null;
+  silenceMs?: number;
 }): FloorDecision {
   const ratioMin = args.ratioMin ?? DEFAULT_RESEARCH_BUILD_RATIO_MIN;
   const floorWindow = args.floorWindow ?? DEFAULT_RESEARCH_FLOOR_WINDOW;
   const nowMs = args.nowMs ?? Date.now();
   const suppressedUntilMs = args.suppressedUntilMs ?? 0;
+  const silenceMs = args.silenceMs ?? DEFAULT_RESEARCH_FLOOR_SILENCE_MS;
+  const lastResearchAtMs = args.lastResearchAtMs ?? null;
 
   if (suppressedUntilMs && nowMs < suppressedUntilMs) {
     const remainingMs = suppressedUntilMs - nowMs;
     return {
       shouldFire: false,
       reason: `research floor suppressed for ${Math.round(remainingMs / 60_000)}min — prior forced cycles returned no new opportunities`,
+    };
+  }
+
+  // Issue #457: silence-based override. When research has been completely
+  // silent in the rolling 24h window AND the wall-clock since the last
+  // research run exceeds the silence threshold, force a tick regardless of
+  // the build-volume sample-size gate. This catches the production
+  // failure mode where the queue is stuffed with orphan items, queue-depth
+  // suppression fires every tick, and the build-volume gate
+  // (`buildCount24h >= floorWindow`) prevents the ratio-based override from
+  // ever triggering.
+  if (
+    args.researchCount24h === 0 &&
+    lastResearchAtMs !== null &&
+    nowMs - lastResearchAtMs >= silenceMs
+  ) {
+    const silenceHours = (nowMs - lastResearchAtMs) / 3_600_000;
+    return {
+      shouldFire: true,
+      reason: `research silent for ${silenceHours.toFixed(1)}h (>= ${(silenceMs / 3_600_000).toFixed(1)}h floor silence threshold) with researchCount24h=0`,
     };
   }
 

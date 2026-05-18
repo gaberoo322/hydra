@@ -178,6 +178,9 @@ export {
 export {
   getWorkQueueLen,
   getWorkQueueItems,
+  countLiveWorkQueueItems,
+  isLiveWorkQueueItem,
+  LIVE_WORK_QUEUE_SOURCES,
   pushToWorkQueue,
   removeFromWorkQueue,
   SEMANTIC_DEDUP_THRESHOLD,

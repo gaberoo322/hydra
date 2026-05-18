@@ -20,6 +20,85 @@ export async function getWorkQueueItems(): Promise<string[]> {
   return r.lrange(redisKeys.anchorWorkQueue(), 0, -1);
 }
 
+/**
+ * Sources that still have a live producer in the current architecture.
+ * Items emitted by anything outside this allowlist are treated as orphans
+ * (issue #449 / #457) — they may still be drained by anchor-selection, but
+ * they should not inflate queue-depth gates whose purpose is to gauge live
+ * work pressure.
+ *
+ * `code-reviewer` and `adversarial-validation` were producers of in-process
+ * Codex agents that PR-3 (issue #383) deleted on 2026-05-13. They have no
+ * post-cut-over replacement and their items sit frozen in the queue.
+ *
+ * Items with no `source` field are treated as live (they predate the
+ * source-tracking convention and can come from operator hand-edits, legacy
+ * promotion paths, etc. — safer to under-filter than over-filter).
+ */
+export const LIVE_WORK_QUEUE_SOURCES: ReadonlySet<string> = new Set([
+  "research",
+  "user-request",
+  "operator",
+  "backlog",
+  "hydra-discover",
+  "hydra-target-discover",
+  "hydra-research",
+  "hydra-target-research",
+  "queue",
+]);
+
+/**
+ * Decide whether a raw work-queue JSON entry is "live" — i.e. has a producer
+ * that still exists in the post-codex-cutover architecture. Items from
+ * deleted producers (e.g. `code-reviewer`, `adversarial-validation`) are
+ * orphans and should not count toward queue-depth gates.
+ *
+ * Items that fail to parse or have no `source` field default to live — we
+ * prefer to under-filter (occasional false positives) over over-filter
+ * (silently dropping operator work).
+ *
+ * Exported for unit testing.
+ */
+export function isLiveWorkQueueItem(
+  raw: string,
+  allowlist: ReadonlySet<string> = LIVE_WORK_QUEUE_SOURCES,
+): boolean {
+  let source: string | undefined;
+  try {
+    const item = JSON.parse(raw) as { source?: unknown };
+    if (typeof item.source === "string") source = item.source;
+  } catch {
+    /* intentional: corrupt items default to live so they're not silently dropped */
+    return true;
+  }
+  if (!source) return true;
+  return allowlist.has(source);
+}
+
+/**
+ * Count work-queue items whose `source` field maps to a producer that still
+ * exists in the architecture. Items from deleted producers are excluded so
+ * orphan residue (issue #449) does not permanently inflate queue-depth
+ * throttles (issue #457).
+ *
+ * Returns `{ live, total, orphan }` so callers can both gate on the live
+ * count AND log how many orphans were excluded (the failure mode in #457
+ * was that suppression silently fired against a queue full of items that
+ * would never be naturally drained).
+ */
+export async function countLiveWorkQueueItems(): Promise<{
+  live: number;
+  total: number;
+  orphan: number;
+}> {
+  const items = await getWorkQueueItems();
+  let live = 0;
+  for (const raw of items) {
+    if (isLiveWorkQueueItem(raw)) live++;
+  }
+  return { live, total: items.length, orphan: items.length - live };
+}
+
 /** Push an item to the work queue and index into OV for semantic dedup. */
 export async function pushToWorkQueue(json: string): Promise<void> {
   const r = getRedisConnection();
