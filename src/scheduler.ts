@@ -22,7 +22,6 @@ import { redisKeys } from "./redis-keys.ts";
 import { getTargetName } from "./target-config.ts";
 import {
   getString, setString, delKey, getWorkQueueLen, pushToWorkQueue,
-  countLiveWorkQueueItems,
   hashGet, hashSetField,
   recordResearchEvent, recordBuildEvent,
   getResearchEventCount24h, getBuildEventCount24h,
@@ -34,6 +33,12 @@ import {
   atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
   saveSchedulerStateVersioned, getSchedulerStateVersion,
 } from "./redis-adapter.ts";
+// Issue #457: new call site — import the source-aware live-count helper
+// directly from the domain module per CLAUDE.md guidance (post-#269 split,
+// redis-adapter.ts is a thin re-export shim and is Tier-0 / operator-only,
+// so new helpers should be imported from the domain modules rather than
+// re-exported through the shim).
+import { countLiveWorkQueueItems } from "./redis/work-queue.ts";
 import {
   shouldForceResearchFloor,
   getResearchBuildRatioMin,
