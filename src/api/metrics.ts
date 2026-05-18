@@ -5,6 +5,7 @@ import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../r
 import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost-attribution.ts";
 import { getSpecStarvationStats } from "../anchor-selection/spec-starvation.ts";
 import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
+import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost-surrogate.ts";
 
 export function createMetricsRouter() {
   const router = Router();
@@ -269,6 +270,64 @@ export function createMetricsRouter() {
       });
     } catch (err: any) {
       console.error(`[api/metrics] /metrics/grounding-duration failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /metrics/cost — Daily spend surrogate (issue #394).
+  //
+  // After #383 deleted codex-runner.ts, the legacy `recordSpend()` writer
+  // stopped feeding `hydra:scheduler:daily-spend` for code-writing work.
+  // This endpoint surfaces the token-based surrogate populated by autopilot
+  // subagents (writers post to /metrics/tokens, scheduler.ts still writes
+  // research-loop spend to the legacy key for back-compat). The `source`
+  // field tells the dashboard which writer(s) contributed so the operator
+  // can tell real billed spend from surrogate inflation.
+  router.get("/metrics/cost", async (req, res) => {
+    try {
+      const dateRaw = req.query.date;
+      const date = (typeof dateRaw === "string" && dateRaw)
+        ? dateRaw
+        : todayDateString();
+      const snapshot = await getDailySpendSurrogate(date);
+      res.json(snapshot);
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/cost failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /metrics/tokens — Autopilot reap-time write hook (issue #394).
+  //
+  // The autopilot's reap.py POSTs here once it has authoritative
+  // `total_tokens` for a completed subagent. Payload shape:
+  //
+  //   { skill: "hydra-dev", tokens: 12345, cycleId?: "<task_id>", date?: "<YYYY-MM-DD>" }
+  //
+  // Best-effort: returns 200 with the updated counters on success, 4xx on
+  // shape errors. A 5xx is logged but the autopilot's `dispatch.sh` already
+  // tolerates a non-2xx via the existing `|| { echo non-fatal }` pattern.
+  router.post("/metrics/tokens", async (req, res) => {
+    try {
+      const body = req.body || {};
+      const skill = typeof body.skill === "string" ? body.skill.trim() : "";
+      if (!skill) {
+        return res.status(400).json({ error: "Missing 'skill' (string)" });
+      }
+      const tokens = typeof body.tokens === "number"
+        ? body.tokens
+        : (typeof body.tokens === "string" ? parseInt(body.tokens, 10) : NaN);
+      if (!Number.isFinite(tokens) || tokens < 0) {
+        return res.status(400).json({ error: "Missing or invalid 'tokens' (non-negative number)" });
+      }
+      const opts: { date?: string; cycleId?: string } = {};
+      if (typeof body.date === "string" && body.date) opts.date = body.date;
+      if (typeof body.cycleId === "string" && body.cycleId) opts.cycleId = body.cycleId;
+
+      const result = await recordSubagentTokens(skill, tokens, opts);
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/tokens failed: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });

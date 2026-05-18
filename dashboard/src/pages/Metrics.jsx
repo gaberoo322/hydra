@@ -3,6 +3,7 @@ import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContai
 import AbandonmentPanel from "../components/AbandonmentPanel.jsx";
 import QualityGatesPanel from "../components/QualityGatesPanel.jsx";
 import CostAttributionPanel from "../components/CostAttributionPanel.jsx";
+import CostWidget from "../components/CostWidget.jsx";
 
 export default function Metrics() {
   const { data: metricsData } = useApi("/metrics?count=30");
@@ -59,6 +60,10 @@ export default function Metrics() {
           <p className="text-sm text-zinc-600 py-8 text-center">No metrics data</p>
         )}
       </div>
+
+      {/* Daily spend surrogate (issue #394) — surfaces post-codex-removal
+          token-based cost signal alongside legacy recordSpend output. */}
+      <CostWidget />
 
       {/* Cost attribution (issue #271) */}
       <CostAttributionPanel count={50} />
