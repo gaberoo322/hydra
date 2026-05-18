@@ -173,8 +173,20 @@ echo "branch-prune: git worktree prune"
 git worktree prune 2>&1 | sed 's/^/  /' || true
 
 if [ "$ERRORS" -gt 0 ]; then
-  echo "branch-prune: completed with $ERRORS error(s) — see log above."
-  exit 1
+  # Per-branch errors are non-fatal by design — the next timer run picks them
+  # up (e.g. a worktree lock held by a dead PID will clear once the lock is
+  # released, an `rm -rf` race resolves on the next pass, etc.). Exit 0 with a
+  # WARNING so the systemd unit doesn't flap to `failed` for transient cleanup
+  # hiccups. Hard failures (worktree refusal, missing jq/npx, classifier
+  # returning no output) are still non-zero via their own `exit` statements
+  # above — only the per-branch error counter is downgraded here.
+  #
+  # Matches the inline comment on `hydra-branch-prune.service`'s ExecStart
+  # ("don't fail the service — the next run picks them up"). See issue #494
+  # for the prior mismatch that caused spurious `failed_services=1` signals
+  # for hydra-doctor to triage.
+  echo "branch-prune: WARNING — completed with $ERRORS per-branch error(s); see log above. Next timer run will retry." >&2
+  exit 0
 fi
 
 echo "branch-prune: done."
