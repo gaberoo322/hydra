@@ -93,6 +93,9 @@ function baseState(o: StateOverrides = {}): any {
     slots: o.slots ?? {
       dev_orch: null, qa_orch: null, research_orch: null,
       dev_target: null, qa_target: null, research_target: null,
+      // Issue #466 (Phase B of #437): 7th pipeline slot. Defensive
+      // selectors tolerate missing keys, but tests pin the full shape.
+      design_concept_orch: null,
     },
     signal_last_fired: o.signal_last_fired ?? {
       health: 0, sweep_orch: 0, sweep_target: 0,
@@ -752,7 +755,9 @@ describe("decide.py — plan shape contract", () => {
     const r = spawnSync("python3", [DECIDE, "smoke"], { encoding: "utf-8" });
     assert.equal(r.status, 0);
     const firstLine = JSON.parse((r.stdout.split("\n")[0] ?? "{}"));
+    // Issue #466 (Phase B of #437) added the 7th pipeline slot.
     assert.deepEqual(firstLine.pipeline_slots.sort(), [
+      "design_concept_orch",
       "dev_orch", "dev_target", "qa_orch", "qa_target", "research_orch", "research_target",
     ]);
     assert.equal(firstLine.action_types.length, 9, "exactly 9 action types per AC");

@@ -52,8 +52,26 @@ REAPED_TASK_IDS_CAP = 1000
 # don't fit the "cycle" semantic — a cycle here is one autopilot turn that
 # dispatched a code-writing class (ADR-0006). Sweeping/research dispatches
 # stay observable via the run log and the existing capacity writeback.
-CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build"}
+#
+# Issue #466 (Phase B of #437) adds `hydra-grill` to this set. Grilling is
+# not code-writing, but it IS the artifact-producing predecessor to a
+# code-writing dispatch, and recording its outcome (completed / failed /
+# timed-out) is what feeds the counters consumed by B-4's dashboard:
+# `hydra:dc:grill_timeout_count`, `hydra:dc:grill_crash_count`,
+# `hydra:dc:artifact_warn_count`. The cycle-record write itself is
+# idempotent on cycleId (the autopilot task_id), so retries from
+# self_heal.py double-write safely. Per the issue's retry policy,
+# warn-only artifacts (case 2) are NOT retried — reap.py records the
+# completion outcome; the counters are incremented by saveDesignConcept()
+# / grill-artifact.sh at write time.
+CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill"}
 CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
+
+# Issue #466: Redis keys for the design-concept counter family.
+# `hydra:dc:counter:{name}:{YYYY-MM-DD}` is the daily-rollup shape;
+# B-4's read path expects 14d TTL.
+DC_COUNTER_KEY_PREFIX = "hydra:dc:counter:"
+DC_COUNTER_TTL_SECONDS = 14 * 24 * 60 * 60  # 14 days
 
 
 def _append_log(line: str) -> None:
@@ -92,6 +110,42 @@ def _bound_reaped(ids: list[str]) -> list[str]:
     if len(ids) > REAPED_TASK_IDS_CAP:
         return ids[-REAPED_TASK_IDS_CAP:]
     return ids
+
+
+def _bump_dc_counter(name: str) -> None:
+    """Best-effort INCR of a `hydra:dc:counter:{name}:{YYYY-MM-DD}` Redis key.
+
+    Issue #466 (Phase B of #437): grill outcomes need to land in the
+    design-concept counter family so B-4's dashboard can show grill
+    timeout / crash rates per day. The shape mirrors the other counters
+    populated by saveDesignConcept() and the autopilot-side helpers.
+
+    Failures are swallowed — counters are observability, not correctness,
+    and a missing redis-cli must never block a reap. The 14d TTL is
+    refreshed on every call so a counter that fires once per day stays
+    visible for the full window even if the day's first hit is the last.
+    """
+    if not name:
+        return
+    from datetime import datetime, timezone
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    key = f"{DC_COUNTER_KEY_PREFIX}{name}:{day}"
+    try:
+        subprocess.run(
+            ["docker", "exec", "hydra-redis-1", "redis-cli", "INCR", key],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+        subprocess.run(
+            ["docker", "exec", "hydra-redis-1", "redis-cli",
+             "EXPIRE", key, str(DC_COUNTER_TTL_SECONDS)],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _append_log(f"dc_counter_bump_skipped key={key} err={exc}")
 
 
 def _fire_cycle_record(
@@ -182,6 +236,13 @@ def run_hardcap() -> int:
         # task_id was captured before the slot was cleared so dedup holds
         # across re-runs of the hard-cap pass.
         _fire_cycle_record(task_id, skill, "failed", tokens)
+        # Issue #466 (Phase B of #437): a hard-cap trip on a `hydra-grill`
+        # dispatch is a TIMEOUT outcome per the issue's retry-policy
+        # taxonomy (case 1 — 5-min wall-clock or 30k token cap mid-Q&A).
+        # Increment the daily counter so the design-concept dashboard can
+        # surface grill timeout rate.
+        if cls == "design_concept_orch" or skill == "hydra-grill":
+            _bump_dc_counter("grill_timeout_count")
     return 0
 
 
@@ -287,6 +348,40 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     return 0
 
 
+def run_grill_crash(task_id: str) -> int:
+    """Issue #466 (Phase B of #437): record a `hydra-grill` crash outcome.
+
+    The harness calls this when a `design_concept_orch` slot dispatches
+    `hydra-grill` but the subagent exits without writing any artifact to
+    Redis (case 3 of the retry policy — distinct from case 1 timeout
+    handled in `run_hardcap`, and case 2 warn-only handled in
+    saveDesignConcept). Increments the daily `grill_crash_count` and
+    fires a `failed` cycle-record for parity with other failure paths.
+
+    Idempotent on `task_id` via the same `reaped_task_ids` ledger as
+    `run_completion` — re-invocations for the same task_id are no-ops on
+    the counter as well as the cycle-record (which is itself idempotent
+    on cycleId).
+    """
+    s = _load_state()
+    if s is not None:
+        reaped = _ensure_reaped_list(s)
+        if task_id in reaped:
+            msg = f"dup_skip_grill_crash task_id={task_id}"
+            print(f"[autopilot] {msg}")
+            _append_log(msg)
+            return 0
+        reaped.append(task_id)
+        s["reaped_task_ids"] = _bound_reaped(reaped)
+        _save_state(s)
+    _bump_dc_counter("grill_crash_count")
+    _fire_cycle_record(task_id, "hydra-grill", "failed", 0)
+    line = f"grill_crash task_id={task_id}"
+    print(f"[autopilot] {line}")
+    _append_log(line)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     # Default (no subcommand): hard-cap enforcement, behavior-preserving
     # for /hydra-autopilot Phase 2 step 1.
@@ -311,6 +406,19 @@ def main(argv: list[str]) -> int:
             return 0
         skill = argv[5] if len(argv) > 5 else None
         return run_completion(cls, task_id, total_tokens, skill)
+
+    if sub == "grill-crash":
+        # Usage: reap.py grill-crash <task_id>
+        # Issue #466 (Phase B of #437): record case-3 grill crash —
+        # `hydra-grill` exited without writing an artifact. The harness
+        # detects this and invokes this subcommand once per crashed task.
+        if len(argv) < 3:
+            print(
+                "[autopilot] reap grill-crash usage: grill-crash <task_id>",
+                file=sys.stderr,
+            )
+            return 0
+        return run_grill_crash(argv[2])
 
     print(f"[autopilot] reap: unknown subcommand {sub!r}", file=sys.stderr)
     return 0

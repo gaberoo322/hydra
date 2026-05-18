@@ -150,6 +150,13 @@ PIPELINE_SLOTS = (
     "dev_target",
     "qa_target",
     "research_target",
+    # design_concept_orch (issue #466, Phase B of #437): grills an
+    # orchestrator anchor before its dev_orch dispatch. Phase B is warn-
+    # only — a draft artifact whose gateCheck() returns ok:false is still
+    # treated as "fresh artifact present" and dev_orch proceeds. Phase C
+    # (separate issue) will flip this to a hard block. The target mirror
+    # (design_concept_target) lands in Phase D.
+    "design_concept_orch",
 )
 
 SIGNAL_CLASSES = (
@@ -185,7 +192,12 @@ RESEARCH_FORCE_DAILY_CAP = 4
 # exclusion mask (grilled decision 3); `health` and `qa_*` are always
 # allowed regardless of scope (qa reviews any PR, health is whole-system).
 SCOPE_ORCH_ONLY_EXCLUDE = ("dev_target", "research_target", "qa_target", "sweep_target", "discover_target")
-SCOPE_TARGET_ONLY_EXCLUDE = ("dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch")
+SCOPE_TARGET_ONLY_EXCLUDE = (
+    "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
+    # design_concept_orch is orch-scope by definition (issue #466) —
+    # excluded under target-only just like dev_orch / qa_orch / etc.
+    "design_concept_orch",
+)
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
 MAX_FAILURE_RETRIES = 5
@@ -572,6 +584,13 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     pipeline_priority = (
         "qa_orch",
         "qa_target",
+        # design_concept_orch precedes dev_orch in priority order (issue
+        # #466 sequencing rule): when an orch anchor needs a fresh
+        # artifact, we grill before coding. The selector below returns
+        # None for dev_orch on the same turn so they don't double-fire,
+        # and in warn-only mode the artifact's presence (even draft) lets
+        # dev_orch proceed next turn.
+        "design_concept_orch",
         "dev_orch",
         "dev_target",
         "research_orch",
@@ -628,6 +647,54 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
 # Internal slot selectors
 # ---------------------------------------------------------------------------
 
+def _candidate_design_concept(
+    candidates: dict | None,
+    best: dict | None,
+) -> dict | None:
+    """Return the `designConcept` sub-object on the best candidate, if any.
+
+    Phase B (issue #466) wiring: the orchestrator's anchor-candidates feed
+    MAY annotate each candidate with a `designConcept` block that mirrors
+    the relevant fields from `getDesignConcept(anchorRef)`:
+
+        {
+          "present": <bool>,
+          "isFresh": <bool>,      # ≤7d per DESIGN_CONCEPT_MAX_AGE_MS
+          "status":  "draft" | "approved" | "stale" | null,
+          "gateOk":  <bool>,      # gateCheck(d).ok at the time of fetch
+        }
+
+    decide.py treats a MISSING `designConcept` block as "no information"
+    rather than "no artifact" — that lets B-1 land warn-only against an
+    API that hasn't been extended to surface the field yet. Once the
+    candidate API is extended (a separate sub-issue under #437), the
+    field will be present on every candidate and the selector below
+    starts gating.
+
+    Returns None when the field is absent OR the best candidate is None.
+    """
+    if not best:
+        return None
+    dc = best.get("designConcept")
+    if not isinstance(dc, dict):
+        return None
+    return dc
+
+
+def _design_concept_is_fresh(dc: dict | None) -> bool:
+    """Phase B freshness check — true iff present AND isFresh.
+
+    A draft/warn-only artifact (status='draft', gateOk=false) is still
+    considered "fresh" here per the issue #466 grilled decision: warn-only
+    proceeds — the artifact was written, the gate flagged it, the handoff
+    was filed by hydra-grill, and visibility is upstream's job. Phase C
+    flips this to require `gateOk` true.
+    """
+    if not dc:
+        return False
+    return bool(dc.get("present")) and bool(dc.get("isFresh"))
+
+
 def _select_for_slot(
     cls: str,
     state: dict,
@@ -658,9 +725,24 @@ def _select_for_slot(
         # picks its own issue from `gh issue list --label ready-for-agent`
         # on `gaberoo322/hydra` — no anchor is passed through prompt_args
         # because the candidate feed is structurally the wrong source.
-        if _signal_present(state, events, "orch_work_available"):
-            return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
-        return None
+        if not _signal_present(state, events, "orch_work_available"):
+            return None
+        # ISSUE #466 (Phase B, warn-only): if an orch pending-grill anchor
+        # is surfaced AND its design-concept artifact is missing/stale,
+        # SKIP dev_orch for this turn — `design_concept_orch` selector
+        # will fire instead in this same plan (it precedes dev_orch in the
+        # pipeline_priority order). Warn-only artifacts (status=draft,
+        # gateOk=false) are STILL treated as "fresh present" and dev_orch
+        # proceeds normally; Phase C will flip that.
+        #
+        # Defensive default: when no candidate is surfaced OR the candidate
+        # has no `designConcept` block, dev_orch proceeds as before. That
+        # keeps Phase B additive — the gate only fires when the data plane
+        # has been extended to populate the field (a follow-up sub-issue).
+        dc = _candidate_design_concept(candidates, best)
+        if dc is not None and not _design_concept_is_fresh(dc):
+            return None
+        return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
     if cls == "dev_target":
         # Use board signal (work_queue / target backlog) — dev_target dispatches
         # are driven by the target-side queue. AFTER #458 it ALSO surfaces the
@@ -707,6 +789,46 @@ def _select_for_slot(
                     reason="best target-candidate below threshold; forced",
                 )
         return None
+    if cls == "design_concept_orch":
+        # ISSUE #466 (Phase B of #437): fire `hydra-grill` for the top
+        # orch candidate when it has work pending AND no fresh artifact.
+        # The selector is intentionally additive to Phase A:
+        #
+        # - `orch_work_available` signal must be present (same gate as
+        #   dev_orch).
+        # - The best candidate must carry a `designConcept` block (see
+        #   `_candidate_design_concept`). If the field is absent the
+        #   selector returns None and Phase B remains a no-op for that
+        #   turn — that gives the data-plane wiring (a separate sub-issue
+        #   under #437) a clean back-merge target.
+        # - When the artifact is missing OR stale, dispatch
+        #   `hydra-grill` with the anchorRef and scope='orch'. The
+        #   pipeline_priority ordering (design_concept_orch BEFORE
+        #   dev_orch) means dev_orch's own selector also returns None for
+        #   this turn, so we don't double-fire on the same anchor.
+        # - When the artifact is fresh (even warn-only), this selector
+        #   returns None — Phase B treats warn-only artifacts as "fresh"
+        #   so dev_orch proceeds in the same plan. Phase C will tighten
+        #   to gateOk-only.
+        if not _signal_present(state, events, "orch_work_available"):
+            return None
+        dc = _candidate_design_concept(candidates, best)
+        if dc is None:
+            return None
+        if _design_concept_is_fresh(dc):
+            return None
+        # Surface the anchorRef on the dispatch — hydra-grill needs it to
+        # write the resulting artifact back to the right Redis key.
+        anchor_ref = best.get("anchorRef") if best else None
+        prompt_args: dict = {"scope": "orch"}
+        if anchor_ref is not None:
+            prompt_args["anchor"] = anchor_ref
+        return make_dispatch(
+            cls,
+            "hydra-grill",
+            prompt_args=prompt_args,
+            reason="orch anchor lacks fresh design-concept artifact (Phase B warn-only)",
+        )
     return None
 
 

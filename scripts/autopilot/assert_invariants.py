@@ -22,6 +22,9 @@ Greppable IDs (also asserted by `test/autopilot-invariants.test.mts`):
   INV-006  reap actions precede dispatch actions in the same plan
   INV-007  auto-merge only when the QA verdict is PASS
   INV-008  no dispatch for a scope-disallowed class (except `health`)
+  INV-009  design_concept_orch precedes dev_orch on the same anchor in
+           the same plan (issue #466 — Phase B warn-only: violations are
+           logged to state.warnings[] rather than raised)
 
 Usage from decide.py / Bash:
 
@@ -59,7 +62,12 @@ class InvariantError(AssertionError):
 # decide here to keep `assert_invariants.py` standalone (tests can run
 # without pulling in the larger module).
 SCOPE_ORCH_ONLY_EXCLUDE = ("dev_target", "research_target", "qa_target", "sweep_target", "discover_target")
-SCOPE_TARGET_ONLY_EXCLUDE = ("dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch")
+SCOPE_TARGET_ONLY_EXCLUDE = (
+    "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
+    # design_concept_orch is orch-scope by definition (issue #466) —
+    # excluded under target-only. Mirror of decide.py's constant.
+    "design_concept_orch",
+)
 
 
 def _scope_excluded(scope: str, cls: str) -> bool:
@@ -186,7 +194,13 @@ def check_inv007(actions: list[dict]) -> None:
 
 
 def check_inv008(actions: list[dict], state: dict) -> None:
-    """INV-008 no dispatch for a scope-disallowed class (except `health`)."""
+    """INV-008 no dispatch for a scope-disallowed class (except `health`).
+
+    Issue #466 extends the scope-exclude list to include
+    `design_concept_orch` under `target-only` (the new slot is
+    orch-scope by definition); the membership lookup against
+    SCOPE_TARGET_ONLY_EXCLUDE keeps this invariant cheap.
+    """
     limits = state.get("limits") or {}
     scope = str(limits.get("scope", "all"))
     for a in actions:
@@ -197,6 +211,52 @@ def check_inv008(actions: list[dict], state: dict) -> None:
             continue
         if _scope_excluded(scope, slot):
             raise InvariantError("INV-008", f"dispatch {slot!r} disallowed under scope={scope!r}")
+
+
+def check_inv009(actions: list[dict], state: dict) -> None:
+    """INV-009 design_concept_orch precedes dev_orch on the same anchor.
+
+    Issue #466 (Phase B of #437) — warn-only invariant. Phase B does NOT
+    raise on violation: the artifact-presence gate in decide.py's
+    `_select_for_slot` already prevents the racing case (when the
+    artifact is missing, design_concept_orch fires and dev_orch returns
+    None for that turn). This check exists so a future bug that emits
+    both a `dispatch:dev_orch` and a `dispatch:design_concept_orch` for
+    the SAME anchor in the SAME plan is surfaced via `state.warnings[]`
+    — Phase C will flip this to `raise InvariantError`.
+
+    "Same anchor" means matching anchorRef in prompt_args. If either
+    dispatch lacks an anchor (e.g. dev_orch's current contract per
+    #458 — no anchor passed), we skip the check rather than guess.
+    """
+    dev_orch_anchors: set[str] = set()
+    grill_anchors: set[str] = set()
+    for a in actions:
+        if a.get("type") != "dispatch":
+            continue
+        slot = a.get("slot")
+        prompt = a.get("prompt_args") or {}
+        anchor = prompt.get("anchor")
+        if not anchor:
+            continue
+        if slot == "dev_orch":
+            dev_orch_anchors.add(str(anchor))
+        elif slot == "design_concept_orch":
+            grill_anchors.add(str(anchor))
+    conflict = dev_orch_anchors & grill_anchors
+    if conflict:
+        # Phase B warn-only: append to state.warnings (a list created
+        # lazily) so reap.py / digest can surface the signal. Do NOT
+        # raise — Phase C is the hard-block flip.
+        warnings = state.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+            state["warnings"] = warnings
+        for anchor in sorted(conflict):
+            warnings.append({
+                "code": "INV-009",
+                "reason": f"dev_orch and design_concept_orch both dispatched for anchor {anchor!r}",
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +272,7 @@ ALL_CHECKS = (
     ("INV-006", check_inv006, False),
     ("INV-007", check_inv007, False),
     ("INV-008", check_inv008, True),
+    ("INV-009", check_inv009, True),
 )
 
 

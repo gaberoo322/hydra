@@ -25,6 +25,17 @@
 #       code mirrors `.gate.ok`: 0 when ok, 1 when not. Use this from
 #       the skill to decide auto-approve vs escalate.
 #
+#   bump <counter-name>
+#       Issue #466 (Phase B of #437): INCR + EXPIRE a daily-rollup
+#       counter of the form `hydra:dc:counter:{name}:{YYYY-MM-DD}` with
+#       a 14-day TTL. Used by the hydra-grill skill to record events
+#       that don't flow through saveDesignConcept() (the
+#       `handoff_filed_count` write at handoff time). The
+#       saveDesignConcept()-owned counters (artifact_produced /
+#       artifact_approved / artifact_warn) increment automatically on
+#       every `write` call — DO NOT bump those here, double-counting
+#       would skew B-4's dashboard.
+#
 # Environment:
 #   HYDRA_API_BASE  defaults to http://localhost:4000
 #
@@ -43,9 +54,22 @@ usage:
   grill-artifact.sh write <json-body-path>
   grill-artifact.sh approve <anchorRef> <by>
   grill-artifact.sh gate <anchorRef>
+  grill-artifact.sh bump <counter-name>
 EOF
   exit 2
 }
+
+# Allow-list for the `bump` subcommand. Anything else is rejected so a
+# typo can't quietly create a stray key under the hydra:dc:counter:
+# namespace that B-4's dashboard would treat as a real metric. Bumping
+# the saveDesignConcept-owned counters from here is forbidden — they
+# tick automatically on every successful POST /api/design-concepts.
+BUMP_ALLOWED_COUNTERS=(
+  "handoff_filed_count"
+  "dispatch_count"
+  "dev_with_artifact_count"
+  "dev_without_artifact_count"
+)
 
 cmd="${1:-}"
 shift || true
@@ -110,6 +134,39 @@ case "$cmd" in
     printf '%s\n' "$gate"
 
     [ "$ok" = "true" ] && exit 0 || exit 1
+    ;;
+
+  bump)
+    name="${1:-}"
+    [ -z "$name" ] && usage
+
+    # Validate against the allow-list — see BUMP_ALLOWED_COUNTERS above.
+    allowed=0
+    for c in "${BUMP_ALLOWED_COUNTERS[@]}"; do
+      if [ "$c" = "$name" ]; then
+        allowed=1
+        break
+      fi
+    done
+    if [ "$allowed" -ne 1 ]; then
+      echo "grill-artifact: '$name' is not in the bump allow-list (would create a stray dashboard metric)" >&2
+      echo "  allowed: ${BUMP_ALLOWED_COUNTERS[*]}" >&2
+      exit 2
+    fi
+
+    day=$(date -u +%Y-%m-%d)
+    key="hydra:dc:counter:${name}:${day}"
+    ttl=$((14 * 24 * 60 * 60))
+
+    # Best-effort: failures must NOT block the calling skill. Mirror the
+    # behavior of reap.py's _bump_dc_counter — the dashboard reads are
+    # tolerant of missing days; missing counters age out naturally.
+    if ! docker exec hydra-redis-1 redis-cli INCR "$key" >/dev/null 2>&1; then
+      echo "grill-artifact: redis INCR failed for $key (non-fatal)" >&2
+      exit 0
+    fi
+    docker exec hydra-redis-1 redis-cli EXPIRE "$key" "$ttl" >/dev/null 2>&1 || true
+    echo "$key"
     ;;
 
   *)
