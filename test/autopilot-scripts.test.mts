@@ -88,14 +88,16 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.deepEqual(s.burned_classes, []);
       assert.equal(s.cumulative_tokens, 0);
       assert.equal(s.idle_turns, 0);
-      // The 6 fixed pipeline slots from the #426 decision-brain rewrite.
-      // Signal-driven classes (health / sweep_* / discover_*) no longer
-      // occupy slots; they live under `signal_last_fired` instead.
+      // The 7 fixed pipeline slots: the 6 from the #426 decision-brain
+      // rewrite plus `design_concept_orch` added in #466 (Phase B of
+      // #437). Signal-driven classes (health / sweep_* / discover_*) no
+      // longer occupy slots; they live under `signal_last_fired` instead.
       const expectedSlots = [
         "dev_orch", "qa_orch", "research_orch",
         "dev_target", "qa_target", "research_target",
+        "design_concept_orch",
       ];
-      assert.equal(Object.keys(s.slots).length, expectedSlots.length, "slots schema has 6 entries");
+      assert.equal(Object.keys(s.slots).length, expectedSlots.length, "slots schema has 7 entries");
       for (const cls of expectedSlots) {
         assert.equal(s.slots[cls], null, `slot ${cls} should be null`);
       }
@@ -162,28 +164,37 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
-  // Issue #431: pin the 11-key schema as a single explicit smoke test so a
-  // future bootstrap edit that drops one of the named null keys fails
-  // loudly. The split assertions above (lines 94-107) already check this,
-  // but a consolidated key-count assertion documents the contract.
-  test("emits exactly 6 pipeline slot names + 5 signal_last_fired names (11 keys total)", () => {
+  // Issue #431 (later extended by #466): pin the 12-key schema as a
+  // single explicit smoke test so a future bootstrap edit that drops one
+  // of the named null keys fails loudly. The split assertions above
+  // already check this, but a consolidated key-count assertion documents
+  // the contract.
+  //
+  // History: #431 introduced the 11-key check (6 pipeline + 5 signal).
+  // #466 (Phase B of #437) added the seventh pipeline slot
+  // `design_concept_orch`, bumping the total to 12 (7 pipeline + 5 signal).
+  test("emits exactly 7 pipeline slot names + 5 signal_last_fired names (12 keys total)", () => {
     const tmp = makeTempState();
     try {
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
 
-      const pipelineSlots = ["dev_orch", "qa_orch", "research_orch", "dev_target", "qa_target", "research_target"];
+      const pipelineSlots = [
+        "dev_orch", "qa_orch", "research_orch",
+        "dev_target", "qa_target", "research_target",
+        "design_concept_orch",
+      ];
       const signalKeys = ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"];
 
       assert.deepEqual(Object.keys(s.slots).sort(), [...pipelineSlots].sort(),
-        "slots dict must contain exactly the 6 named pipeline keys");
+        "slots dict must contain exactly the 7 named pipeline keys");
       assert.deepEqual(Object.keys(s.signal_last_fired).sort(), [...signalKeys].sort(),
         "signal_last_fired dict must contain exactly the 5 named signal keys");
       assert.equal(
         Object.keys(s.slots).length + Object.keys(s.signal_last_fired).length,
-        11,
-        "schema must declare 11 named keys (6 pipeline + 5 signal) — see issue #431"
+        12,
+        "schema must declare 12 named keys (7 pipeline + 5 signal) — see issues #431, #466"
       );
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -215,7 +226,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
         "stale fields must be dropped on overwrite");
       assert.equal((s as Record<string, unknown>).pipeline, undefined,
         "legacy `pipeline` key must not survive the overwrite — canonical key is `slots`");
-      assert.equal(Object.keys(s.slots).length, 6, "slots must be re-initialized with 6 named keys");
+      assert.equal(Object.keys(s.slots).length, 7, "slots must be re-initialized with 7 named keys (post-#466)");
       assert.equal(Object.keys(s.signal_last_fired).length, 5, "signal_last_fired must be re-initialized with 5 named keys");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });

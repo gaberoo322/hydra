@@ -37,6 +37,7 @@ import {
   hashSetField,
   hashGetAll,
   expireKey,
+  incrKey,
   zAdd,
   zRem,
   zRevRange,
@@ -58,6 +59,46 @@ const MIN_QA_TRACE_LENGTH = 6;
 
 const INDEX_KEY = "hydra:design-concept:index";
 const dcKey = (anchorRef: string): string => `hydra:design-concept:${anchorRef}`;
+
+/**
+ * Daily-rollup counter family (issue #466, Phase B of #437). All
+ * design-concept observability counters share the shape
+ * `hydra:dc:counter:{name}:{YYYY-MM-DD}` with a 14-day TTL. B-4's
+ * dashboard read-path reads this prefix; B-1 owns the writes.
+ *
+ * Names populated here (by `saveDesignConcept`):
+ *   - artifact_produced_count — every save
+ *   - artifact_approved_count — save where gateCheck() returned ok:true
+ *   - artifact_warn_count     — save where gateCheck() returned ok:false
+ *
+ * Names populated elsewhere (documented for reference):
+ *   - dispatch_count               — decide.py (autopilot)
+ *   - handoff_filed_count          — hydra-grill skill
+ *   - dev_with_artifact_count      — decide.py
+ *   - dev_without_artifact_count   — decide.py
+ *   - grill_timeout_count          — reap.py (hard-cap trip)
+ *   - grill_crash_count            — reap.py (no-artifact completion)
+ */
+const DC_COUNTER_TTL_SECONDS = 14 * 24 * 60 * 60;
+
+function dcCounterKey(name: string, now: number): string {
+  const day = new Date(now).toISOString().slice(0, 10);
+  return `hydra:dc:counter:${name}:${day}`;
+}
+
+/** Best-effort INCR + EXPIRE of a daily-rollup counter. Failures are
+ *  swallowed — counters are observability, not correctness, and must
+ *  never block a save. */
+async function bumpDcCounter(name: string, now: number): Promise<void> {
+  const key = dcCounterKey(name, now);
+  try {
+    await incrKey(key);
+    await expireKey(key, DC_COUNTER_TTL_SECONDS);
+  } catch (err) {
+    console.error("[DesignConcept] counter bump failed", { name, key, err });
+    /* intentional: counters are observability, swallow */
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -227,6 +268,18 @@ export async function saveDesignConcept(
   );
   await expireKey(key, DESIGN_CONCEPT_TTL_SECONDS);
   await zAdd(INDEX_KEY, concept.createdAt, concept.anchorRef);
+
+  // Issue #466 (Phase B of #437) — daily counters consumed by B-4
+  // dashboard. The gate verdict at write time determines whether this
+  // save counts as `artifact_approved_count` (gateCheck ok) or
+  // `artifact_warn_count` (gateCheck ok:false). `artifact_produced_count`
+  // increments for every save regardless. Failures are best-effort.
+  await bumpDcCounter("artifact_produced_count", now);
+  const gateVerdict = gateCheck(concept, now);
+  await bumpDcCounter(
+    gateVerdict.ok ? "artifact_approved_count" : "artifact_warn_count",
+    now,
+  );
 
   return concept;
 }

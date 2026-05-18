@@ -28,7 +28,7 @@ need to know what the autopilot will do:**
   its docstring own the policy)
 - Merge policy: `decide.py:should_auto_merge.__doc__`
 - Failure self-heal table: `scripts/autopilot/self_heal.py` docstring
-- Runtime invariants: `scripts/autopilot/assert_invariants.py` (INV-001..INV-008)
+- Runtime invariants: `scripts/autopilot/assert_invariants.py` (INV-001..INV-009; INV-009 is warn-only in Phase B per #466)
 - Architecture rationale: [ADR-0007](../adr/0007-decision-brain-orchestration.md)
 
 ## Loop
@@ -43,7 +43,7 @@ Each tick:
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
 6. **Re-enter step 1.** No inline reasoning between steps.
 
-## Class taxonomy (6 pipeline slots + 5 signal classes)
+## Class taxonomy (7 pipeline slots + 5 signal classes)
 
 | Kind | Class | Skill |
 |---|---|---|
@@ -53,20 +53,32 @@ Each tick:
 | pipeline | `dev_target` | hydra-target-build |
 | pipeline | `qa_target` | hydra-qa (target scope) |
 | pipeline | `research_target` | hydra-target-research |
+| pipeline | `design_concept_orch` | hydra-grill (Phase B, warn-only) |
 | signal | `health` | hydra-doctor (scope-agnostic) |
 | signal | `sweep_orch` | hydra-sweep |
 | signal | `sweep_target` | hydra-target-sweep |
 | signal | `discover_orch` | hydra-discover |
 | signal | `discover_target` | hydra-target-discover |
 
-> **Phase A placeholder (issue #437):** the **`design_concept_orch`** and
-> **`design_concept_target`** pipeline slots — backed by the new
-> [`hydra-grill`](./hydra-grill.md) skill — are **introduced but not yet
-> wired**. The skill is operator-invocable today (`/hydra-grill <anchor>
-> <scope>`) and produces a Redis-backed design-concept artifact, but
-> `decide.py` does NOT yet refuse `dev_orch` / `dev_target` dispatch when an
-> artifact is missing. Wiring lands in Phase B of #437. Until then, treat
-> these classes as documented placeholders in the taxonomy.
+> **Phase B wiring (issue #466, sub of #437):** `design_concept_orch`
+> fires before `dev_orch` for an orch anchor when the artifact is
+> missing or stale. Phase B is **warn-only** — a draft artifact whose
+> `gateCheck()` returns `ok:false` is still treated as "fresh present"
+> and `dev_orch` proceeds. Phase C (separate issue) will flip warn-only
+> to a hard block. The `design_concept_target` mirror lands in Phase D.
+>
+> Sequencing rule: when the best candidate carries a `designConcept`
+> block with `present:true` and `isFresh:true`, the
+> `design_concept_orch` selector returns None (no re-grill within 7
+> days) and `dev_orch` proceeds. When the block is absent (legacy
+> candidates API), Phase B is a no-op and `dev_orch` proceeds as
+> before — that lets B-1 (this PR) land before the candidates API is
+> extended to surface artifact metadata.
+>
+> Retry policy (per #466): grill timeout (case 1) and grill crash (case
+> 3) each retry up to `MAX_FAILURE_RETRIES=5` via `self_heal.py`. A
+> warn-only artifact (case 2) does NOT retry — the operator handoff is
+> filed and `dev_orch` proceeds.
 
 Pipeline slots: at most one subagent per slot in flight. Signal classes
 track only their last-fired timestamp under `signal_last_fired` — no

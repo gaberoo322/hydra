@@ -131,17 +131,18 @@ SCHEMA_VERSION=2
 
 # Initialize state file — limits are now first-class members.
 #
-# Schema migration (issue #426 decision brain rewrite):
-#   - `slots` now contains the 6 fixed pipeline slots only
-#     (dev_orch / qa_orch / research_orch + their _target peers).
-#     ALL SIX KEYS MUST BE PRESENT (as `null`) — issue #431. The first
-#     successful γ run (2026-05-15) observed `slots: {}` because an
-#     earlier bootstrap variant emitted an empty dict; downstream
-#     defensive `slots.get(cls)` reads in decide.py and
-#     assert_invariants.py masked the bug, but INV-002's `slots.items()`
-#     iteration over an empty dict silently allowed any dispatch.
-#     Pin the 6-key schema here; tests in test/autopilot-scripts.test.mts
-#     and test/autopilot-invariants.test.mts enforce both shapes.
+# Schema migration (issue #426 decision brain rewrite + issue #466 Phase B):
+#   - `slots` now contains the 7 fixed pipeline slots:
+#     dev_orch / qa_orch / research_orch + their _target peers + the
+#     design_concept_orch slot added in #466. ALL SEVEN KEYS MUST BE
+#     PRESENT (as `null`) — issue #431. The first successful γ run
+#     (2026-05-15) observed `slots: {}` because an earlier bootstrap
+#     variant emitted an empty dict; downstream defensive
+#     `slots.get(cls)` reads in decide.py and assert_invariants.py
+#     masked the bug, but INV-002's `slots.items()` iteration over an
+#     empty dict silently allowed any dispatch. Pin the 7-key schema
+#     here; tests in test/autopilot-scripts.test.mts and
+#     test/autopilot-invariants.test.mts enforce both shapes.
 #   - The previous signal-driven classes (health / sweep_* / discover_*)
 #     no longer occupy slots; they track only their last-fired timestamp
 #     under `signal_last_fired`, replacing the legacy
@@ -186,7 +187,8 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
     "research_orch": null,
     "dev_target": null,
     "qa_target": null,
-    "research_target": null
+    "research_target": null,
+    "design_concept_orch": null
   },
   "signal_last_fired": {
     "health": 0,

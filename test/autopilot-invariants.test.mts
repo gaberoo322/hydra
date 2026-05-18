@@ -257,6 +257,69 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     assert.match(r.stderr, /INV-007/);
   });
 
+  // Issue #466 (Phase B of #437): design_concept_orch slot test cases.
+  test("INV-002 (design_concept_orch): dispatch into busy slot is rejected", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill" }] };
+    const state = baseState({
+      slots: {
+        dev_orch: null, qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: { skill: "hydra-grill", started: "t0", partial_tokens: 1000 },
+      },
+    });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /INV-002/);
+  });
+
+  test("INV-008 (design_concept_orch): target-only scope excludes design_concept_orch", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill" }] };
+    const state = baseState({ scope: "target-only" });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /INV-008/);
+    assert.match(r.stderr, /design_concept_orch/);
+  });
+
+  test("INV-008 (design_concept_orch): orch-only scope allows design_concept_orch", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill" }] };
+    const state = baseState({ scope: "orch-only" });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 0, `expected OK under orch-only scope, got: ${r.stderr}`);
+  });
+
+  test("INV-009: dev_orch and design_concept_orch on same anchor is warn-only (does NOT raise)", () => {
+    // Phase B intentionally does not raise on this conflict — it logs
+    // to state.warnings[] instead. Phase C will flip to raise.
+    const plan = {
+      actions: [
+        { type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill",
+          prompt_args: { anchor: "issue-conflict", scope: "orch" } },
+        { type: "dispatch", slot: "dev_orch", skill: "hydra-dev",
+          prompt_args: { anchor: "issue-conflict" } },
+      ],
+    };
+    const r = runAsserts(plan, baseState());
+    // Warn-only: status must be 0 (no raise) — the warnings are observed via
+    // state.warnings[] (decide.py / reap.py / digest read those), but
+    // assert_invariants.py exits OK.
+    assert.equal(r.status, 0,
+      `INV-009 must NOT raise in Phase B (warn-only); got stderr: ${r.stderr}`);
+  });
+
+  test("INV-009: dev_orch and design_concept_orch on DIFFERENT anchors is allowed", () => {
+    const plan = {
+      actions: [
+        { type: "dispatch", slot: "design_concept_orch", skill: "hydra-grill",
+          prompt_args: { anchor: "issue-A", scope: "orch" } },
+        { type: "dispatch", slot: "dev_orch", skill: "hydra-dev",
+          prompt_args: { anchor: "issue-B" } },
+      ],
+    };
+    const r = runAsserts(plan, baseState());
+    assert.equal(r.status, 0, "different anchors must not trip INV-009");
+  });
+
   test("INV-008: dispatch dev_target under orch-only scope is rejected", () => {
     const plan = { actions: [{ type: "dispatch", slot: "dev_target", skill: "hydra-target-build" }] };
     const state = baseState({ scope: "orch-only" });
