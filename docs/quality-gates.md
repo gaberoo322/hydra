@@ -68,8 +68,10 @@ filtered through `SKIP_PATTERNS` (tests, configs, migrations, `.d.ts`,
 
 **No-signal behaviour.** When the diff yields zero compilable mutants
 (comment-only / formatting changes, or every generated mutant fails to compile)
-the gate exits `0` with a `neutral` status. Mirrors `classifyNoSignalDecision()`
-in `src/mutation.ts`.
+the gate exits `0` with a `neutral` status. Implemented in
+`scripts/ci/mutation-check.ts` (the historical in-cycle helper
+`classifyNoSignalDecision` in `src/mutation.ts` was removed by issue #476
+along with the rest of the orphaned gate orchestration).
 
 **Quick-fix bypass.** PR bodies containing the literal token `[quick-fix]` skip
 the gate with a `neutral` status. Matches the existing in-cycle exemption for
@@ -80,8 +82,10 @@ quick-fix anchors.
 **What it does.** Reads the PR body and (when linked) the issue body, extracts
 the `Files in scope` markdown section, compares it to the diff, and fails when
 **more than 80%** of changed files are out-of-scope AND there are **more than 3**
-out-of-scope files. Thresholds match the pre-cut-over in-cycle gate
-(`outOfScopeRatio > 0.8 && outOfScope.length > 3` in `src/scope-enforcement.ts`).
+out-of-scope files. Thresholds match the historical in-cycle gate
+(`outOfScopeRatio > 0.8 && outOfScope.length > 3`); the original
+`src/scope-enforcement.ts` was removed by issue #476 and the CI script is
+now the single source of truth.
 
 **Thresholds.**
 - `SCOPE_OUT_OF_SCOPE_THRESHOLD` env var, float `0..1`, default `0.8`

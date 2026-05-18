@@ -1,28 +1,41 @@
 /**
- * mutation.ts — Mutation testing gate and runner
+ * mutation.ts — Pure mutation-testing runner (CI-only after issue #476).
  *
- * Extracted from verification.ts (issue #161).
+ * Originally extracted from verification.ts (issue #161) when mutation testing
+ * was step 6.7 of the in-process codex control loop.
  *
- * Exports:
- *   - runMutationTests()        — run mutation testing on changed files
- *   - summarizeMutationTests()  — format report for logging
- *   - generateMutations()       — generate candidate mutations for a file
- *   - shouldSkipMutation()      — check if file should be skipped
- *   - MUTATORS                  — mutation operators
- *   - SKIP_PATTERNS             — file skip patterns
- *   - MutationTestReport type   — report shape
+ * History (why this file is now a thin runner):
+ *
+ *   - Issue #382 / #383 (codex-removal): the in-process control loop and its
+ *     gate orchestration were deleted. CI quality gates took over scope and
+ *     mutation enforcement out-of-process (`scripts/ci/mutation-check.ts`,
+ *     `scripts/ci/scope-check.ts`), invoked from `.github/workflows/ci.yml`.
+ *   - Issue #476 (audit + cleanup): the orphaned in-cycle gate orchestration
+ *     (`runMutationGate`, `summarizeMutationTests`, `classifyNoSignalDecision`,
+ *     `MUTATION_DECISION`, `getQuickFixKillThreshold`, plus the quick-fix
+ *     budget + cost-cap probe) had zero live callers under `src/` after PR-3.
+ *     The CI gate (`scripts/ci/mutation-check.ts`) reimplements the same
+ *     orchestration in a CI-context-appropriate way (no CycleContext, no OV
+ *     session, no Redis), so the in-process versions were deleted.
+ *
+ * What remains here is the deterministic, dependency-free core that the CI
+ * gate composes:
+ *
+ *   - runMutationTests()        — apply candidate mutations to changed files,
+ *                                 run tests under each, report kill/survive.
+ *   - shouldSkipMutation()      — pattern match for files we never mutate.
+ *   - SKIP_PATTERNS             — the regex list backing shouldSkipMutation
+ *                                 (exported so `test/mutation-skip-patterns.test.mts`
+ *                                 can snapshot it; see issue #402).
+ *
+ * Everything else is module-private. If a future caller needs the gate
+ * orchestration back, build it in CI-space (the way `scripts/ci/mutation-check.ts`
+ * does) — do not resurrect the CycleContext-coupled gate that lived here.
  */
 
 import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { getTracker } from "./task-tracker.ts";
-import { recordOutcome } from "./learning.ts";
-import { recordCycleMetrics } from "./metrics.ts";
-import { reportOutcome } from "./anchor-selection.ts";
-import { fail } from "./backlog.ts";
-import { cleanupBrokenBranch, PROJECT_WORKSPACE } from "./cycle-helpers.ts";
-import type { CycleContext } from "./cycle-helpers.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,56 +45,6 @@ const execFileAsync = promisify(execFile);
 
 const DEFAULT_TIME_BUDGET_MS = 120_000;
 const MT_TEST_TIMEOUT_MS = 45_000;
-
-// Issue #272: quick-fix mutation budget — small diffs deserve a cheap gate
-// instead of being skipped outright. Kept loose (capped mutants + lower
-// kill-rate threshold) so trivial changes don't fail spuriously.
-const QUICKFIX_MAX_MUTANTS = 10;
-const QUICKFIX_TIME_BUDGET_MS = 60_000;
-const DEFAULT_QUICKFIX_KILL_THRESHOLD = 50;
-const DEFAULT_STANDARD_KILL_THRESHOLD = 30;
-
-/**
- * Mutation decision strings (issue #272) — observable reason recorded in
- * cycle metrics so dashboards can answer "did the mutation gate run?".
- *
- * Values are stable strings, mirroring jit.ts decision conventions.
- *
- * Issue #300: NO_MUTANTS is now reserved for the case where the candidate
- * generator produced zero mutants for the diff (e.g. comment-only / formatting
- * diffs). A small-but-non-zero mutant count is reported as RAN — the gate did
- * useful work, even if the sample is thin. ALL_UNCOMPILABLE covers the
- * intermediate case where candidates were generated but every applied mutant
- * failed to compile or could not be read.
- */
-export const MUTATION_DECISION = {
-  RAN: "ran",
-  NO_MUTANTS: "no-mutants",
-  ALL_UNCOMPILABLE: "skipped: all-mutants-uncompilable",
-  COST_CAP_SKIP: "cost-cap-skip",
-  NO_FILES: "skipped: no files changed",
-  ERROR: "error",
-} as const;
-
-export type MutationDecision = typeof MUTATION_DECISION[keyof typeof MUTATION_DECISION];
-
-/**
- * Resolve the quick-fix kill-rate threshold from env (issue #272).
- * Looser than the standard gate (default 30) — small diffs typically
- * have fewer mutants so 50% is the right floor.
- *
- * Pure function — re-reads env each call so tests can mutate without
- * service restart.
- */
-export function getQuickFixKillThreshold(): number {
-  const raw = process.env.MUTATION_QUICKFIX_THRESHOLD;
-  if (raw === undefined || raw === "") return DEFAULT_QUICKFIX_KILL_THRESHOLD;
-  const parsed = parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
-    return DEFAULT_QUICKFIX_KILL_THRESHOLD;
-  }
-  return parsed;
-}
 
 // Files we never mutate.
 //
@@ -109,7 +72,7 @@ export const SKIP_PATTERNS = [
 // Types
 // ---------------------------------------------------------------------------
 
-export type Mutation = {
+type Mutation = {
   file: string;
   line: number;
   original: string;
@@ -117,7 +80,7 @@ export type Mutation = {
   type: string;
 };
 
-export type MutationResult = {
+type MutationResult = {
   mutation: Mutation;
   survived: boolean; // true = tests still passed = bad coverage
   skipped: boolean;
@@ -140,14 +103,14 @@ export type MutationTestReport = {
 };
 
 // ---------------------------------------------------------------------------
-// Mutators
+// Mutators (module-private)
 // ---------------------------------------------------------------------------
 
 /**
  * Mutators — each takes a line and returns a mutated version, or null if
  * the mutation doesn't apply.
  */
-export const MUTATORS: { type: string; apply: (line: string) => string | null }[] = [
+const MUTATORS: { type: string; apply: (line: string) => string | null }[] = [
   {
     type: "negate-boolean-return",
     apply: (line) => {
@@ -198,9 +161,10 @@ export function shouldSkipMutation(filePath: string): boolean {
 }
 
 /**
- * Generate candidate mutations for a single file.
+ * Generate candidate mutations for a single file. Module-private — only
+ * `runMutationTests` calls it, and exposing it never paid off.
  */
-export function generateMutations(filePath: string, content: string): Mutation[] {
+function generateMutations(filePath: string, content: string): Mutation[] {
   const mutations: Mutation[] = [];
   const lines = content.split("\n");
 
@@ -240,8 +204,9 @@ export function generateMutations(filePath: string, content: string): Mutation[]
  *
  * @param projectDir - Project root (~/hydra-betting)
  * @param changedFiles - List of changed file paths (from git diff)
- * @param opts.timeBudgetMs - Max time for all mutations (default 60s)
+ * @param opts.timeBudgetMs - Max time for all mutations (default 120s)
  * @param opts.testCommand - Command to run tests (default: npm test)
+ * @param opts.maxMutants  - Optional cap on candidate mutants (quick-fix path)
  */
 export async function runMutationTests(
   projectDir: string,
@@ -366,193 +331,4 @@ export async function runMutationTests(
     survivors: results.filter((r) => r.survived),
     candidatesGenerated,
   };
-}
-
-/**
- * Format mutation test results for logging / reality report.
- */
-export function summarizeMutationTests(report: MutationTestReport): string {
-  const parts: string[] = [];
-  const score = report.totalMutants > 0
-    ? Math.round((report.killed / (report.totalMutants - report.skipped)) * 100)
-    : 100;
-
-  parts.push(`## Mutation Testing: ${score}% kill rate (${report.killed}/${report.totalMutants - report.skipped} killed)`);
-  if (report.timedOut) parts.push(`\u26A0 Time budget exceeded \u2014 ${report.totalMutants} of ${report.totalMutants} candidate mutants tested`);
-  parts.push(`Duration: ${report.durationMs}ms`);
-
-  if (report.survivors.length > 0) {
-    parts.push(`\n### Surviving Mutants (uncovered code):`);
-    for (const s of report.survivors.slice(0, 10)) {
-      parts.push(`- ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]`);
-      parts.push(`  Original: ${s.mutation.original.trim()}`);
-      parts.push(`  Mutated:  ${s.mutation.mutated.trim()}`);
-    }
-    if (report.survivors.length > 10) {
-      parts.push(`  ... and ${report.survivors.length - 10} more`);
-    }
-  }
-
-  return parts.join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// Mutation gate — pipeline orchestration (step 6.7)
-// ---------------------------------------------------------------------------
-
-/**
- * Classify the gate decision when no mutants survived the testable filter.
- *
- * Issue #300: the gate previously short-circuited to NO_MUTANTS whenever
- * `testable < 3`, which silently downgraded small-but-valid samples (the
- * `mutationsTested: 2, mutationSurvived: 0` constant in the 20-cycle
- * telemetry) and pinned qualityGateCoverageRate at ~14%. Post-#300 the
- * decision is:
- *
- *   testable > 0                                    → null  (caller uses RAN)
- *   testable === 0 && candidatesGenerated === 0     → NO_MUTANTS
- *   testable === 0 && candidatesGenerated > 0       → ALL_UNCOMPILABLE
- *
- * Pure helper — exported for unit testing without a CycleContext mock.
- */
-export function classifyNoSignalDecision(
-  testable: number,
-  candidatesGenerated: number,
-): MutationDecision | null {
-  if (testable > 0) return null;
-  return candidatesGenerated === 0
-    ? MUTATION_DECISION.NO_MUTANTS
-    : MUTATION_DECISION.ALL_UNCOMPILABLE;
-}
-
-/**
- * Decide if the mutation pass should be skipped because the cycle has
- * already exceeded its per-cycle cost cap (issue #272 implementation note).
- *
- * Pure(-ish) helper — reads the cap via cost-cap.ts (which reads env). Kept
- * separate so tests can override via env without touching control-loop wiring.
- */
-async function shouldSkipForCostCap(cycleId: string): Promise<boolean> {
-  try {
-    const { checkCostCap } = await import("./cost-cap.ts");
-    const status = await checkCostCap(cycleId);
-    return status.exceeded;
-  } catch { /* intentional: cost cap is best-effort; never block mutation on a cap-check error */
-    return false;
-  }
-}
-
-/**
- * Run the mutation testing quality gate. Blocks merge when kill rate
- * is critically low.
- *
- * Issue #272: quick-fix cycles now run a reduced mutation budget instead of
- * skipping outright, with a looser (configurable) kill-rate threshold. The
- * gate result includes a `decision` string for observability and a
- * `filesInspected` list when no mutants were generated.
- *
- * Never throws — returns { report, decision, filesInspected, earlyReturn? }.
- */
-export async function runMutationGate(
-  ctx: CycleContext, task: any, verification: any, execResult: any,
-  complexity: string, filesInScope: number, criteriaCount: number, taskId: string,
-): Promise<{ report: any; decision: MutationDecision; filesInspected: string[]; earlyReturn?: any }> {
-  const { cycleId, startTime, grounding, ovSession, eventBus, anchor } = ctx;
-  const tracker = getTracker();
-
-  const isQuickFix = complexity === "quick-fix";
-  const inspectable = verification.filesChanged.filter((f: string) => !shouldSkipMutation(f));
-
-  // Issue #272: short-circuit if the cycle is already at the cost cap.
-  // Don't burn another mutation budget on something the operator has capped.
-  if (await shouldSkipForCostCap(cycleId)) {
-    console.log(`[ControlLoop] Step 6.7: Mutation gate skipped — cycle at cost cap`);
-    return { report: null, decision: MUTATION_DECISION.COST_CAP_SKIP, filesInspected: inspectable };
-  }
-
-  const budgetMs = isQuickFix ? QUICKFIX_TIME_BUDGET_MS : 60_000;
-  const maxMutants = isQuickFix ? QUICKFIX_MAX_MUTANTS : undefined;
-  const killThreshold = isQuickFix ? getQuickFixKillThreshold() : DEFAULT_STANDARD_KILL_THRESHOLD;
-
-  console.log(`[ControlLoop] Step 6.7: Running mutation tests on ${verification.filesChanged.length} changed files${isQuickFix ? ` (quick-fix budget: ${QUICKFIX_MAX_MUTANTS} mutants, ${QUICKFIX_TIME_BUDGET_MS}ms)` : ""}...`);
-  try {
-    const mutationReport = await runMutationTests(PROJECT_WORKSPACE, verification.filesChanged, {
-      timeBudgetMs: budgetMs,
-      testCommand: "npm test",
-      maxMutants,
-    });
-    const testable = mutationReport.totalMutants - mutationReport.skipped;
-    const killRate = testable > 0
-      ? Math.round((mutationReport.killed / testable) * 100)
-      : 100;
-    console.log(`[ControlLoop] Mutation testing: ${killRate}% kill rate (${mutationReport.killed}/${testable} killed, ${mutationReport.survived} survived, ${mutationReport.candidatesGenerated} candidates generated)`);
-
-    // Issue #300: classify "no signal" cases via the pure helper. testable > 0
-    // returns null and falls through to the kill-rate gate below.
-    const noSignal = classifyNoSignalDecision(testable, mutationReport.candidatesGenerated);
-    if (noSignal !== null) {
-      console.log(`[ControlLoop] Mutation testing: ${noSignal} (candidates=${mutationReport.candidatesGenerated}, skipped=${mutationReport.skipped}). Inspected files: ${inspectable.join(", ") || "(none)"}`);
-      return { report: mutationReport, decision: noSignal, filesInspected: inspectable };
-    }
-
-    if (mutationReport.survived > 0) {
-      console.log(`[ControlLoop] ${mutationReport.survived} surviving mutants — executor's tests may not cover changed behavior`);
-      for (const s of mutationReport.survivors.slice(0, 3)) {
-        console.log(`[ControlLoop]   ${s.mutation.file}:${s.mutation.line} [${s.mutation.type}]`);
-      }
-    }
-
-    // Hard gate: block merge when kill rate is below threshold.
-    // Quick-fix uses a looser configurable threshold (MUTATION_QUICKFIX_THRESHOLD,
-    // default 50); standard/complex/high-risk use DEFAULT_STANDARD_KILL_THRESHOLD (30).
-    if (killRate < killThreshold) {
-      console.error(`[ControlLoop] MUTATION GATE: kill rate ${killRate}% < ${killThreshold}% threshold (${complexity}) — blocking merge`);
-      await tracker.transitionTask(taskId, "failed", { reason: `Mutation gate: ${killRate}% kill rate (${mutationReport.survived} survivors)` });
-      await recordOutcome({
-        agents: ["planner"],
-        cycleId, task, finalState: "failed",
-        anchorRef: anchor.reference, anchorType: anchor.type,
-        context: { failReason: `Mutation gate: ${killRate}% kill rate`, failedSteps: ["mutation-testing"] },
-      });
-      await fail(anchor.reference, "mutation gate blocked merge", { eventBus, cycleId });
-
-      await cleanupBrokenBranch(PROJECT_WORKSPACE);
-      await reportOutcome(anchor, { status: "failed", reason: `Mutation gate: tests don't cover changed behavior (${killRate}% kill rate)`, verification, taskId });
-      await ovSession.logOutcome("failed", `Mutation gate: ${killRate}% kill rate`);
-      await ovSession.commit();
-      await recordCycleMetrics(cycleId, {
-        tasksAttempted: 1, tasksFailed: 1, tasksMerged: 0, tasksVerified: 0, tasksAbandoned: 0,
-        testsBefore: grounding.testReport.passed, testsAfter: grounding.testReport.passed,
-        testsPassingBefore: grounding.testReport.passed, testsPassingAfter: grounding.testReport.passed,
-        filesChanged: verification.filesChanged.length, totalDurationMs: Date.now() - startTime,
-        groundingDurationMs: grounding.groundingDurationMs, verificationDurationMs: verification.totalDurationMs,
-        regressionIntroduced: false, taskTitle: task.title,
-        anchorType: task.anchorType, anchorReference: task.anchorReference,
-        complexity, filesInScope, criteriaCount,
-        plannerModel: task.__plannerModel || "unknown",
-        executorModel: execResult?.__executorModel || "unknown",
-        // Quality gate trend fields (issue #212)
-        mutationKillRate: killRate,
-        mutationsTested: testable,
-        mutationKilled: mutationReport.killed,
-        mutationSurvived: mutationReport.survived,
-        gateBlocked: 1,
-      });
-      return {
-        report: mutationReport,
-        decision: MUTATION_DECISION.RAN,
-        filesInspected: inspectable,
-        earlyReturn: {
-          cycleId,
-          tasks: [{ taskId, finalState: "failed", reason: `Mutation gate: ${killRate}% kill rate` }],
-          durationMs: Date.now() - startTime,
-        },
-      };
-    }
-
-    return { report: mutationReport, decision: MUTATION_DECISION.RAN, filesInspected: inspectable };
-  } catch (err: any) {
-    console.error(`[ControlLoop] Mutation testing failed (non-fatal): ${err.message}`);
-    return { report: null, decision: MUTATION_DECISION.ERROR, filesInspected: inspectable };
-  }
 }

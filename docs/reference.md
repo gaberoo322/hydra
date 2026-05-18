@@ -298,28 +298,24 @@ Spans are cheap until they hit Tempo's storage — start at 100% (default), only
 | Scope-out merge block | Executor span ran to completion; rejection happens in `src/scope-enforcement.ts` and is in journalctl, not spans. |
 | Rolled back post-merge | Look for the executor span on the *next* cycle's lineage; the revert itself isn't an agent call. |
 
-## Merge Gate (`src/gate.ts`) (issue #249, ADR-0001 work-order step 6)
+## Merge Gate — historical (issue #249, removed in PR-3 / #383)
 
-The merge gate is the operator-only Tier-0 surface the control loop calls for every merge-proof step. `src/gate.ts` is a thin facade — it names and exposes the gate-proof contract; the underlying logic still lives in `verification.ts` / `mutation.ts` / `scope-enforcement.ts` / `cost-cap.ts` / `pipeline-steps.ts` / `redis-adapter.ts` and evolves under their own tier rules. The gate's contract is Tier-0; the loop body that calls it (`control-loop.ts`) and the logic the gate delegates to (where allowed) can evolve through normal PR flow.
+The in-process `src/gate.ts` facade and its delegates (`verification.ts`,
+`scope-enforcement.ts`, `runMutationGate` in `mutation.ts`,
+`pipeline-steps.ts`, `post-merge.ts`, `control-loop.ts`) were deleted with
+the codex-CLI cut-over (PR-3, issue #383). The merge gate is now
+out-of-process: GitHub branch protection + CI quality gates
+(`.github/workflows/ci.yml`, `scripts/ci/scope-check.ts`,
+`scripts/ci/mutation-check.ts`, `tier-gate`) enforce the same proofs at PR
+time. See [ADR-0006](./adr/0006-codex-cli-removed-autopilot-only.md) and
+[`docs/quality-gates.md`](./quality-gates.md).
 
-| Function | Step | Delegates to |
-|---|---|---|
-| `gateGrounding(workspace, opts?)` | 1b / post-merge re-ground | `groundProject` in `grounding.ts` |
-| `gateVerify(ctx, task, diff, execResult, complexity, filesInScope, criteriaCount, taskId)` | 6 through 6.9 | `runVerificationPipeline` in `verification.ts` |
-| `gateScopeEnforcement(ctx, task, verification, taskId)` | 6.9 — >80% out-of-scope blocks merge | `runScopeEnforcement` in `scope-enforcement.ts` |
-| `gateMutationKillRate(ctx, task, verification, execResult, complexity, filesInScope, criteriaCount, taskId)` | 6.7 — <30% kill rate blocks non-quick-fix | `runMutationGate` in `mutation.ts` |
-| `gateAcquireMergeLock(cycleId, ttlSeconds?)` | 7 — Redis lock (60s TTL) | `acquireMergeLock` in `redis-adapter.ts` |
-| `gateReleaseMergeLock()` | 7 + finally safety-net | `releaseMergeLock` in `redis-adapter.ts` |
-| `gateMergeToMain(projectDir, cycleId, explicitFeatureBranch?)` | 7 — `git merge --no-ff` + push | `mergeToMain` in `pipeline-steps.ts` |
-| `gateRollback(projectDir, commitSha, reason)` | 8 — `git revert -m 1` + push when tests regress | inline (revert mechanics live in `gate.ts`) |
-| `gateCheckCostCap(ctx, task, taskId, checkpoint)` | 4.5 / 5.5 — per-cycle $-cap | `runCostCapCheck` in `cost-cap.ts` |
-| `getPerCycleCostCapUsd()` | logging | re-exported from `cost-cap.ts` |
-| `gateGetMergeLockHolder()` | diagnostics | re-exported from `redis-adapter.ts` |
-
-**Invariants:**
-- The control loop and `pipeline-steps.ts` / `post-merge.ts` import from `gate.ts` for every gate-proof call site. Reaching around the gate (e.g. importing `groundProject` directly for a post-merge re-ground) is a contract violation; it cannot be enforced by the type system, so reviewers check it and `test/gate-surface.test.mts` pins the named exports.
-- `gate.ts` is listed in `UNTOUCHABLE_PATHS` (`src/untouchable.ts`) — any change to the facade requires `operator-approved`.
-- The gate adds no behavior. Pure refactor — same tests pass before and after.
+Issue #476 finished the residual cleanup: `src/scope-enforcement.ts` and
+the in-cycle gate orchestration in `src/mutation.ts` (`runMutationGate`,
+`MUTATION_DECISION`, `classifyNoSignalDecision`, `summarizeMutationTests`,
+`getQuickFixKillThreshold`) were deleted. The CI gate keeps importing the
+pure helpers (`runMutationTests`, `shouldSkipMutation`, `SKIP_PATTERNS`)
+from `src/mutation.ts`.
 
 ## Modification Tiers (issue #243, ADR-0001 + ADR-0004)
 
