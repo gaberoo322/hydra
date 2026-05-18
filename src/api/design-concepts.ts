@@ -8,6 +8,11 @@
  *   POST /api/design-concepts                       — create / overwrite (idempotent on anchorRef)
  *   POST /api/design-concepts/:anchorRef/approve    — mark approved, record approvedBy
  *
+ * Phase B audit (issue #464):
+ *
+ *   GET  /api/design-concepts/exempt-log            — list audit entries (query: limit)
+ *   POST /api/design-concepts/exempt-log            — append audit entry (called by GH workflow)
+ *
  * Phase A intentionally does NOT mount any gate-side enforcement —
  * `dev_orch` dispatch wiring is Phase B (`scripts/autopilot/decide.py`).
  * This sub-router only exposes the persistence layer + a `gateCheck`
@@ -25,9 +30,139 @@ import {
   type DesignConceptInput,
   type DesignConceptScope,
 } from "../design-concept.ts";
+import { listLPush, listRange } from "../redis-adapter.ts";
+
+/**
+ * Redis LIST holding `design-concept-exempt` audit entries.
+ * Newest first (LPUSH on write, LRANGE 0 .. limit-1 on read). LIST is
+ * intentional — the operator wants chronological audit-trail semantics
+ * with a cheap append. See issue #464.
+ */
+const EXEMPT_LOG_KEY = "hydra:dc:exempt_log";
+
+/** Maximum number of audit entries the read endpoint will return. */
+const EXEMPT_LOG_DEFAULT_LIMIT = 50;
+const EXEMPT_LOG_MAX_LIMIT = 500;
+
+export type ExemptLogEntry = {
+  pr: number;
+  applier: string;
+  ts: number;
+  anchorRef: string;
+  gate_fail_reasons: string[];
+};
+
+function isExemptLogEntry(value: unknown): value is ExemptLogEntry {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.pr === "number" &&
+    typeof v.applier === "string" &&
+    typeof v.ts === "number" &&
+    typeof v.anchorRef === "string" &&
+    Array.isArray(v.gate_fail_reasons) &&
+    (v.gate_fail_reasons as unknown[]).every((r) => typeof r === "string")
+  );
+}
 
 export function createDesignConceptsRouter() {
   const router = Router();
+
+  // ---------------------------------------------------------------------------
+  // Exempt-log endpoints (issue #464). Declared BEFORE the
+  // `/:anchorRef` routes so the literal "exempt-log" path is not
+  // captured as an anchorRef param.
+  // ---------------------------------------------------------------------------
+
+  router.get("/design-concepts/exempt-log", async (req, res) => {
+    try {
+      const limitParam = parseInt(req.query.limit as string, 10);
+      const limit =
+        Number.isFinite(limitParam) && limitParam > 0
+          ? Math.min(limitParam, EXEMPT_LOG_MAX_LIMIT)
+          : EXEMPT_LOG_DEFAULT_LIMIT;
+
+      const rawEntries = await listRange(EXEMPT_LOG_KEY, 0, limit - 1);
+      const items: ExemptLogEntry[] = [];
+      for (const raw of rawEntries) {
+        try {
+          const parsed = JSON.parse(raw) as unknown;
+          if (isExemptLogEntry(parsed)) {
+            items.push(parsed);
+          } else {
+            // Surface schema drift without dropping the rest of the log.
+            console.error(
+              "[api/design-concepts] exempt-log entry rejected — bad shape",
+              raw,
+            );
+          }
+        } catch (parseErr) {
+          console.error(
+            "[api/design-concepts] exempt-log entry parse failed",
+            { raw, err: parseErr },
+          );
+        }
+      }
+      res.json({ items, count: items.length });
+    } catch (err: any) {
+      console.error("[api/design-concepts] exempt-log read failed", err);
+      res.status(500).json({ error: err?.message ?? "exempt-log read failed" });
+    }
+  });
+
+  router.post("/design-concepts/exempt-log", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as Partial<ExemptLogEntry>;
+      const pr = typeof body.pr === "number" ? body.pr : NaN;
+      const applier = typeof body.applier === "string" ? body.applier : "";
+      const anchorRef =
+        typeof body.anchorRef === "string" ? body.anchorRef : "";
+      const reasonsRaw = Array.isArray(body.gate_fail_reasons)
+        ? body.gate_fail_reasons
+        : [];
+      const gate_fail_reasons = reasonsRaw
+        .filter((r): r is string => typeof r === "string")
+        // Truncate each reason — the audit log doesn't need full paragraphs.
+        .map((r) => (r.length > 500 ? `${r.slice(0, 497)}...` : r));
+
+      if (!Number.isFinite(pr) || pr <= 0) {
+        res.status(400).json({ error: "pr (positive number) is required" });
+        return;
+      }
+      if (!applier) {
+        res.status(400).json({ error: "applier (non-empty string) is required" });
+        return;
+      }
+      if (!anchorRef) {
+        res
+          .status(400)
+          .json({ error: "anchorRef (non-empty string) is required" });
+        return;
+      }
+
+      const ts =
+        typeof body.ts === "number" && Number.isFinite(body.ts) && body.ts > 0
+          ? body.ts
+          : Date.now();
+
+      const entry: ExemptLogEntry = {
+        pr,
+        applier,
+        ts,
+        anchorRef,
+        gate_fail_reasons,
+      };
+
+      // LPUSH so reads return newest-first.
+      await listLPush(EXEMPT_LOG_KEY, JSON.stringify(entry));
+      res.status(201).json(entry);
+    } catch (err: any) {
+      console.error("[api/design-concepts] exempt-log write failed", err);
+      res
+        .status(500)
+        .json({ error: err?.message ?? "exempt-log write failed" });
+    }
+  });
 
   router.get("/design-concepts", async (req, res) => {
     try {
