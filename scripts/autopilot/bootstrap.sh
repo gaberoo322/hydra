@@ -230,3 +230,51 @@ echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HY
 # enough for operators to see something).
 python3 "$(dirname "$0")/heartbeat.py" --last-action=bootstrap || \
   echo "[autopilot] heartbeat.py initial write failed; continuing"
+
+# Issue #497 — register this run with the orchestrator's autopilot-runs
+# dashboard surface. Posts run-start with the limits payload + trigger from
+# hour-of-day heuristic (UTC). Best-effort: orchestrator-down must not block
+# bootstrap, so a curl failure is logged but ignored. The endpoint is
+# idempotent on run_id, so a transient failure followed by a manual retry is
+# safe.
+#
+# Trigger heuristic (UTC):
+#   09:00–11:59 → morning-timer
+#   21:00–23:59 → overnight-timer
+#   else         → manual
+HOUR_UTC=$(date -u +%H)
+HOUR_NUM=$((10#${HOUR_UTC}))
+if [ "${HOUR_NUM}" -ge 9 ] && [ "${HOUR_NUM}" -lt 12 ]; then
+  TRIGGER="morning-timer"
+elif [ "${HOUR_NUM}" -ge 21 ] && [ "${HOUR_NUM}" -le 23 ]; then
+  TRIGGER="overnight-timer"
+else
+  TRIGGER="manual"
+fi
+
+HYDRA_API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
+RUN_START_PAYLOAD=$(cat <<JSON
+{
+  "run_id": "${RUN_ID}",
+  "started": "${STARTED_AT}",
+  "started_epoch": ${STARTED_EPOCH},
+  "pid": ${PID},
+  "trigger": "${TRIGGER}",
+  "limits": {
+    "token_budget": ${TOKEN_BUDGET},
+    "wall_clock_max_sec": ${WALL_CLOCK_MAX_SEC},
+    "idle_drain_turns": ${IDLE_DRAIN_TURNS},
+    "scope": "${SCOPE}",
+    "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
+    "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},
+    "unattended": ${UNATTENDED},
+    "schema_version": ${SCHEMA_VERSION}
+  }
+}
+JSON
+)
+curl -sf --max-time 5 -X POST \
+  -H "content-type: application/json" \
+  -d "${RUN_START_PAYLOAD}" \
+  "${HYDRA_API_BASE}/api/autopilot/run-start" >/dev/null 2>&1 || \
+  echo "[autopilot] run-start POST failed (orchestrator down?); continuing run_id=${RUN_ID} trigger=${TRIGGER}"

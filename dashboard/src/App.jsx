@@ -18,6 +18,7 @@ import EnvVars from "./pages/EnvVars.jsx";
 import Calibration from "./pages/Calibration.jsx";
 import Checklist from "./pages/Checklist.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
+import Autopilot from "./pages/Autopilot.jsx";
 
 export default function App() {
   const ws = useWebSocket();
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/calibration" element={<Calibration />} />
           <Route path="/checklist" element={<Checklist />} />
+          <Route path="/autopilot" element={<Autopilot />} />
         </Routes>
       </Layout>
     </ToastProvider>
