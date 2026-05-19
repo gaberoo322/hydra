@@ -133,15 +133,10 @@ The legacy in-process agent personalities (`config/agents/{planner,executor,skep
 - Cycle summaries — `hydra:reports:summary:*` (Redis keys, 2-day TTL)
 - Research reports — `hydra:reports:research:*` (Redis keys, kept 20)
 - Proposals — `hydra:proposals:*` (Redis hashes)
-- Specs — `hydra:specs:*` (Redis hashes, 30-day TTL) + `hydra:specs:index` (sorted set)
 - Lessons (subagent capture) — `hydra:lessons:*` (per-agent rolling JSON; promotes into operator-facing lesson files at 3 hits — `PROMOTION_THRESHOLD` in `src/learning/agent-memory.ts`)
 - Friction patterns (issue #512) — `hydra:friction:{skill}:patterns` (per-skill soft-friction items; threshold-crosses auto-open a `meta-friction` GitHub issue)
 
-**Specs (multi-cycle task decomposition):**
-- Created by research loop (complex opportunities) or operator (POST /api/specs)
-- Each spec has a slug, title, rationale, and ordered task list
-- Subagents claim the next unchecked task; on PR merge the task is marked complete; when all tasks done, spec status -> "completed"
-- API: GET /api/specs, GET /api/specs/:slug, POST /api/specs, POST /api/specs/:slug/archive
+> **Specs retired (issue #513).** The Specs subsystem (auto-decompose, `/api/specs`, the active-spec anchor tier, the spec capacity-floor, and the `spec-starvation` instrumentation) was deleted. It was already dead in production — the in-process control loop that produced and consumed specs was removed in PR #383, and the autopilot's child-dispatch model superseded multi-cycle task decomposition. Residual `hydra:specs:*` keys are no longer read or written; run `bash scripts/cleanup/retire-specs.sh` to drop them.
 
 **Dashboard:** React + Vite + Tailwind served from port 4000 (`~/hydra/dashboard/`)
 - `npm run dev` in dashboard/ for development

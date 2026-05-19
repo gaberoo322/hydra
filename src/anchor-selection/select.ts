@@ -7,7 +7,6 @@
 // stays a thin dispatcher of "try tier N, otherwise fall through".
 
 import { _admin } from "../backlog.ts";
-import { getNextSpecTask } from "../specs.ts";
 import {
   listRange,
   listRPush,
@@ -21,11 +20,6 @@ import { selectPriorFailureAnchor } from "./prior-failures-tier.ts";
 import { selectRegressionHuntAnchor } from "./regression-hunt-tier.ts";
 import { selectCodebaseHealthAnchor } from "./codebase-health-tier.ts";
 import { selectPrioritiesDocAnchor } from "./priorities-doc-tier.ts";
-import {
-  recordSpecPassedReason,
-  recordSpecServed,
-} from "./spec-starvation.ts";
-import { buildSpecAnchor } from "./build-spec-anchor.ts";
 import {
   dispatchCapacityFloor,
   defaultCapacityFloors,
@@ -60,22 +54,11 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
     return { ...opts.anchor, whyNow: "Explicit operator request" };
   }
 
-  // 1.2. Unified capacity-floor dispatcher (issue #321).
-  //      Was: two independent branches (stuckness-driven research, spec
-  //      capacity-floor) that stole cycles from kanban without seeing each
-  //      other's state. They've been collapsed into a single declarative
-  //      dispatcher in capacity-floors.ts. At most one floor fires per
-  //      cycle; ties go to the floor with the largest deficit, then by
-  //      declared priority. When no floor is ready we fall through to the
-  //      existing tier chain (kanban → specs → failing tests → …).
-  //
-  //      Behavior preservation:
-  //        - When ONLY the stuckness floor is ready → fires stuckness anchor,
-  //          identical to the pre-refactor `pickStuckOutcome` path.
-  //        - When ONLY the spec floor is ready → fires spec anchor, identical
-  //          to the pre-refactor `forceSpec && nextSpec` path.
-  //        - When BOTH are ready → spec floor wins (priority 1 < 2),
-  //          matching the pre-refactor `if (!forceSpec)` gating of stuckness.
+  // 1.2. Capacity-floor dispatcher (issue #321; spec floor retired in #513).
+  //      Stuckness-driven research is the only remaining floor. The
+  //      dispatcher fires at most one floor per cycle; when none are ready
+  //      we fall through to the existing tier chain (kanban → failing tests
+  //      → …).
   try {
     const dispatch = await dispatchCapacityFloor(defaultCapacityFloors(), eventBus);
     if (dispatch.anchor) {
@@ -107,43 +90,14 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
     console.error(`[ControlLoop] WIP limit check failed: ${err.message}`);
   }
 
-  // The spec-tier prefetch is still needed for the *non-pre-empting* spec
-  // selection path below (priority 4 in CLAUDE.md). When the capacity-floor
-  // dispatcher already served a spec we never reach this point.
-  let nextSpec: Awaited<ReturnType<typeof getNextSpecTask>> = null;
-  try {
-    nextSpec = await getNextSpecTask();
-  } catch (err: any) {
-    console.error(`[AnchorSelection] spec prefetch failed: ${err.message}`);
-  }
-  const hasSpecTask = !!nextSpec;
-
   // 2. Kanban queued lane — priority-sorted backlog items take precedence
   //    when the capacity floor has not yet fired.
   if (!wipBlocked) {
     const kanban = await selectKanbanAnchor();
     if (kanban.anchor) {
-      if (hasSpecTask) await recordSpecPassedReason("kanban_won");
       return kanban.anchor;
     }
     if (kanban.wipBlocked) wipBlocked = true;
-  }
-
-  // 2.5. Active specs — persistent multi-cycle task decompositions.
-  //      Created by research (complex opportunities) or the operator.
-  //      Picks the next unchecked task from the oldest active spec.
-  //      NOT gated by WIP limit — specs represent committed multi-cycle plans.
-  if (!wipBlocked) {
-    if (nextSpec) {
-      await recordSpecServed();
-      return buildSpecAnchor(nextSpec);
-    }
-    // hasSpecTask was false during prefetch — record the reason.
-    await recordSpecPassedReason("no_active_spec");
-  } else if (hasSpecTask) {
-    // WIP blocked AND we had a spec — record wip_full so operators see why
-    // specs aren't running even though they exist.
-    await recordSpecPassedReason("wip_full");
   }
 
   // 2.7. Failing tests — must be fixed before other work proceeds.

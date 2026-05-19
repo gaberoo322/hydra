@@ -27,7 +27,6 @@ import {
   getString,
 } from "../redis-adapter.ts";
 import { _admin } from "../backlog.ts";
-import { getActiveSpecs, getNextTask } from "../specs.ts";
 import { loadAnchorReflectionsRaw } from "../learning/reflections.ts";
 import {
   REFRAME_QUEUE,
@@ -117,25 +116,8 @@ export function createAnchorRouter() {
       }
 
       // ---------------------------------------------------------------------
-      // Source 2: Active specs — the next unchecked task from each
+      // Source 2 (active specs) retired in issue #513.
       // ---------------------------------------------------------------------
-      try {
-        const activeSpecs = await getActiveSpecs();
-        for (const spec of activeSpecs) {
-          const nextTask = getNextTask(spec);
-          if (!nextTask) continue;
-          candidates.push({
-            issue: `${spec.slug}:${nextTask.id}`,
-            title: `${spec.title} — ${nextTask.title}`,
-            priority_tier: "active-spec",
-            last_updated: spec.createdAt || null,
-            anchorRef: `spec:${spec.slug}:${nextTask.id}`,
-            extras: { specSlug: spec.slug, taskId: nextTask.id },
-          });
-        }
-      } catch (err: any) {
-        console.error(`[AnchorAPI] Spec enumeration failed: ${err.message}`);
-      }
 
       // ---------------------------------------------------------------------
       // Source 3: Work queue (POST /queue or research auto-queue)

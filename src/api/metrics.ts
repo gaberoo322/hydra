@@ -3,7 +3,6 @@ import { getMetricsTrend, getAggregateStats, recordCycleMetrics, getAbandonmentB
 import { redisKeys } from "../redis-keys.ts";
 import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../redis-adapter.ts";
 import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost-attribution.ts";
-import { getSpecStarvationStats } from "../anchor-selection/spec-starvation.ts";
 import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
 import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost-surrogate.ts";
 
@@ -177,21 +176,10 @@ export function createMetricsRouter() {
     }
   });
 
-  // GET /metrics/spec-starvation — Why active specs are/aren't being served (issue #301)
-  router.get("/metrics/spec-starvation", async (_req, res) => {
-    try {
-      const stats = await getSpecStarvationStats();
-      res.json(stats);
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/spec-starvation failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // GET /metrics/capacity-floors — Unified capacity-floor view (issue #321).
-  // Surfaces every declared floor (self-improvement, specs, …) with its
-  // target share, realised share over the rolling window, and per-floor
-  // gauges. /metrics/spec-starvation stays as the legacy single-floor view.
+  // Surfaces every declared floor (self-improvement) with its target share,
+  // realised share over the rolling window, and per-floor gauges. The
+  // legacy /metrics/spec-starvation surface was retired in issue #513.
   router.get("/metrics/capacity-floors", async (_req, res) => {
     try {
       const snapshot = await getCapacityFloorsSnapshot();

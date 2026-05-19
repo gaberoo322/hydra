@@ -22,7 +22,7 @@
  * is NOT wired here — `src/gate.ts` and the autopilot decide.py are out
  * of scope for this sub-issue.
  *
- * Redis schema (sibling of `src/specs.ts`):
+ * Redis schema:
  *   hydra:design-concept:{anchorRef}  → Hash (full body, JSON-encoded fields)
  *   hydra:design-concept:index         → Sorted set (score = createdAt)
  *

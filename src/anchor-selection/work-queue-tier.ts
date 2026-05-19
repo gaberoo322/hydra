@@ -7,8 +7,8 @@
 // are removed from the processing list and the tier falls through.
 //
 // NOT gated by WIP: research items should be consumed before falling to
-// priorities doc. Kanban queued + specs are still WIP-gated since they
-// represent heavier new-work intake.
+// priorities doc. The Kanban queued tier is still WIP-gated since it
+// represents heavier new-work intake.
 
 import { listMove, listRem } from "../redis-adapter.ts";
 import { WORK_QUEUE, PROCESSING_QUEUE } from "./constants.ts";
