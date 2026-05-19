@@ -54,6 +54,25 @@ RUN_ID="$(uuidgen)"
 PID=$$
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=${PID} run_id=${RUN_ID}" > /tmp/hydra-autopilot-heartbeat.txt
 
+# Concurrent-run guard. If an existing state.json's owner PID is still alive,
+# refuse to overwrite — that is a real collision and the second instance
+# should bow out. If the owner PID is dead, log the recovery and proceed
+# (the chronic case from 2026-05-16: morning run died from a transient API
+# 5xx, its state.json was left stamped with the dead PID, and the auto-retry
+# misread that as a live duplicate). Best-effort: a missing jq is treated
+# as "no prior state" rather than aborting bootstrap.
+if [ -f /tmp/hydra-autopilot-state.json ] && command -v jq >/dev/null 2>&1; then
+  PRIOR_PID=$(jq -r '.pid // 0' /tmp/hydra-autopilot-state.json 2>/dev/null || echo 0)
+  if [ "${PRIOR_PID}" -gt 0 ] && [ "${PRIOR_PID}" != "${PID}" ]; then
+    if kill -0 "${PRIOR_PID}" 2>/dev/null; then
+      echo "[autopilot] FATAL: prior autopilot pid=${PRIOR_PID} is alive; refusing to overwrite state.json"
+      echo "[autopilot]   to force, kill ${PRIOR_PID} or remove /tmp/hydra-autopilot-state.json"
+      exit 1
+    fi
+    echo "[autopilot] recovering from stale state (prior pid=${PRIOR_PID} is dead)"
+  fi
+fi
+
 # Run log (overwrites previous run; previous-run content rotated to .prev)
 [ -f /tmp/hydra-autopilot-nightly.log ] && mv /tmp/hydra-autopilot-nightly.log /tmp/hydra-autopilot-nightly.log.prev
 : > /tmp/hydra-autopilot-nightly.log

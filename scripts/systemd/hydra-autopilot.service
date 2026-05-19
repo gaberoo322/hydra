@@ -7,6 +7,14 @@ Wants=network-online.target
 # Failure routing — reuse the existing notify-failure template.
 OnFailure=hydra-notify-failure@%n.service
 
+# Bounded auto-retry on failure. A transient Anthropic API 5xx killed the
+# 2026-05-16 morning run after 1h 47min and the `Restart=no` policy left the
+# system without an autopilot for ~10h until the next timer fire. One retry
+# after 3 min absorbs transient errors; sustained failures still surface to
+# the operator via OnFailure= once the burst cap is hit.
+StartLimitBurst=2
+StartLimitIntervalSec=3600
+
 [Service]
 Type=oneshot
 WorkingDirectory=/home/gabe/hydra
@@ -38,9 +46,13 @@ ExecStart=/usr/bin/env claude --dangerously-skip-permissions -p "/hydra-autopilo
 StandardOutput=journal
 StandardError=journal
 
-# Do NOT auto-restart. The skill self-terminates on budget/clock/idle; if it
-# crashes, the operator should investigate, not blindly relaunch.
-Restart=no
+# Auto-retry once on failure (bounded by StartLimitBurst above). The skill
+# self-terminates cleanly on budget/clock/idle (exit 0 — no restart). Crashes
+# (non-zero exit) get a single 3-min-delayed retry, which absorbs transient
+# Anthropic API 5xx errors. Sustained failure hits the burst cap and surfaces
+# to the operator via OnFailure=.
+Restart=on-failure
+RestartSec=180
 
 [Install]
 WantedBy=default.target

@@ -46,7 +46,7 @@ function makeTempState(): { dir: string; state: string; log: string } {
   };
 }
 
-function runBootstrap(env: Record<string, string>, tmp: { state: string; log: string }): {
+function runBootstrap(env: Record<string, string>, tmp: { state: string; log: string }, opts: { preserveState?: boolean } = {}): {
   status: number;
   stdout: string;
   stderr: string;
@@ -57,6 +57,15 @@ function runBootstrap(env: Record<string, string>, tmp: { state: string; log: st
   // honest path: run bootstrap and then COPY the result to our tmp,
   // then point all downstream tests at the tmp copy via env vars
   // (term-check.py and reap.py both honor HYDRA_AUTOPILOT_STATE).
+  //
+  // Pre-clear the system state.json so tests run from a known-clean
+  // baseline. Without this, a live autopilot on the dev machine (or a
+  // prior test's residue) leaves a stamped PID that the new concurrent-run
+  // guard would interpret as a real collision and refuse to overwrite.
+  // Tests that exercise that guard pass `preserveState: true`.
+  if (!opts.preserveState) {
+    rmSync("/tmp/hydra-autopilot-state.json", { force: true });
+  }
   const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), [], {
     env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
@@ -230,6 +239,51 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       assert.equal(Object.keys(s.signal_last_fired).length, 5, "signal_last_fired must be re-initialized with 5 named keys");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Regression for 2026-05-16: the morning hydra-autopilot.service died from
+  // a transient Anthropic API 5xx, leaving /tmp/hydra-autopilot-state.json
+  // stamped with its dead PID. The bounded systemd auto-restart then ran a
+  // fresh bootstrap, but the model misread the stale state as a live
+  // duplicate and self-terminated, leaving the system without an autopilot
+  // for ~10h until the next timer fire.
+  test("recovers from stale state when the prior owner PID is dead", () => {
+    const tmp = makeTempState();
+    try {
+      // Seed state.json with a PID that's almost certainly dead (PID 1 is
+      // init, so use a high 32-bit value the kernel won't assign).
+      const deadPid = 2_000_000_000;
+      writeFileSync("/tmp/hydra-autopilot-state.json", JSON.stringify({
+        pid: deadPid, run_id: "stale-test", slots: {}, signal_last_fired: {},
+      }));
+      const r = runBootstrap({}, tmp, { preserveState: true });
+      assert.equal(r.status, 0, `bootstrap should recover from stale state: ${r.stderr}`);
+      assert.match(r.stdout + r.stderr, /recovering from stale state/,
+        "bootstrap should log the stale-state recovery");
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.notEqual(s.pid, deadPid, "fresh bootstrap must stamp its own PID");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses to overwrite state when the prior owner PID is alive", () => {
+    const tmp = makeTempState();
+    // The test runner's own PID is guaranteed alive for the duration of
+    // this test, so it stands in for a live concurrent autopilot.
+    const livePid = process.pid;
+    try {
+      writeFileSync("/tmp/hydra-autopilot-state.json", JSON.stringify({
+        pid: livePid, run_id: "live-test", slots: {}, signal_last_fired: {},
+      }));
+      const r = runBootstrap({}, tmp, { preserveState: true });
+      assert.notEqual(r.status, 0, "bootstrap must abort when prior PID is alive");
+      assert.match(r.stdout + r.stderr, /prior autopilot pid=\d+ is alive/,
+        "bootstrap should log why it refused");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+      rmSync("/tmp/hydra-autopilot-state.json", { force: true });
     }
   });
 });
