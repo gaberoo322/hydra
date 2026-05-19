@@ -91,7 +91,7 @@ INV-008.
 
 | Action type | Tool the model invokes |
 |---|---|
-| `dispatch` | `Agent(run_in_background=True, isolation="worktree", ...)` |
+| `dispatch` | `Agent(run_in_background=True, isolation="worktree", ...)` — action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>` |
 | `auto-merge` | `Bash` → `gh pr review --approve && gh pr merge --auto --squash` |
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
 | `update-branch` | `Bash` → `gh pr update-branch` |
