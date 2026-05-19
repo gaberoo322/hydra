@@ -1,0 +1,231 @@
+---
+name: hydra-tool-scout
+description: Scout for new tools/libraries/skills that would amplify Hydra's autonomous coding leverage. Discovers candidates in a named category, filters them through a three-gate rubric (AI-leverage score, maintenance gate, dedup seen-list), and files GitHub issues for the survivors.
+when_to_use: "When the operator says 'scout tools', '/hydra-tool-scout <category>', or wants to discover new tooling that would make the AI agents faster/safer/more capable in a specific category. Phase A is operator-invoked only — no autopilot wiring."
+allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebFetch(*) WebSearch(*)
+arguments: [category]
+claude_only: true
+---
+
+# Hydra Tool Scout (Phase A — manual)
+
+Hydra is an AI-built system. Its long-term throughput is bounded by how legible the world is to its agents: typed schemas beat docstrings, deterministic builds beat heisenbugs, machine-readable spans beat raw stdout. **`hydra-tool-scout` is the skill that goes looking for tools that make Hydra's agents more leveraged**, files structured proposal issues, and remembers what it has already considered so it doesn't re-propose the same tool twice.
+
+Phase A (issue #484) ships the scaffolding only:
+
+1. This playbook (taxonomy of where to look, rubric for what's worth filing, output schema).
+2. The taxonomy doc (`docs/ai-leverage-categories.md`) — the closed list of categories the scout walks.
+3. The rubric doc (`docs/ai-leverage-rubric.md`) — the 1–5 AI-leverage scale, with worked examples.
+4. The Redis seen-list (`src/scout/seen-list.ts`) — so re-runs don't re-propose `react-query` every time.
+5. Manual invocation only — `/hydra-tool-scout <category>`. **No autopilot wiring, no cron.** Phase B adds those, after the operator has confirmed the issue quality on at least one category.
+
+Phases B/C/D (alert subscriptions, calendar walk, gap-driven triggers) are deferred — see the parent epic #483 and the "Out of scope" section below.
+
+## When NOT to run this
+
+- Without a category argument. The scout is a depth-first walker, not a breadth-first one — it expects to be pointed at one taxonomy entry per invocation.
+- When the orchestrator board is already saturated with proposal-grade issues (>20 open `enhancement` issues). The operator should drain the queue before adding more.
+- From an autopilot loop. Phase A is **operator-invoked only.** The dispatcher in `scripts/autopilot/decide.py` deliberately does not have a `scout` class yet.
+
+## Inputs
+
+| Input | Source | Notes |
+|---|---|---|
+| `category` (positional arg) | Operator | Must be one of the slugs in `docs/ai-leverage-categories.md`. Reject anything else — the rubric is calibrated per category and freeform input would dilute it. |
+| Trigger source | Implicit | Phase A: `"manual"`. Phase B will add `"calendar"`, `"alert"`, `"gap"`. Recorded on every seen-list entry. |
+| Seen-list | `hydra:scout:tools-considered:*` | Read before discovery to skip anything in cooldown. |
+
+## Process
+
+### 1. Validate category
+
+Read `docs/ai-leverage-categories.md`. The H2 headings (with stable slugs in their anchor) are the closed list. If `$category` is not one of them, exit with a clear error: `unknown category: <category>. Valid slugs: ...`. **Do not invent categories.** Adding a new category is an operator action — propose it as a PR to `docs/ai-leverage-categories.md`, don't auto-extend.
+
+### 2. Discover candidates
+
+For the given category, sweep these sources (cheapest first, stop once you have ≥5 candidates):
+
+1. **Curated lists** the category doc points at (awesome-* repos, vendor matrices). Cheapest signal — these are pre-filtered by humans who care about the same problem.
+2. **GitHub topic search** (`https://github.com/topics/<tag>`) for the topic tags the category doc declares as canonical.
+3. **npm registry search** (`npm search <keyword>`) — orchestrator and dashboard are Node/TS, so npm is the primary distribution channel. Skip for non-Node categories (e.g. LSP tooling, language-level work).
+4. **Web search** (broad terms, last 12 months) — last resort. Spends tokens; cheaper sources first.
+
+Each candidate is a `{ name, slug, homepage, repo, npmName?, oneLineDescription }` record. Canonicalize the slug via `src/scout/aliases.ts:canonicalizeSlug()` BEFORE adding to the working set — `@tanstack/query` and `tanstack-query` must collapse to one entry.
+
+> **Discovery quota:** 5 candidates per category is enough. If the source pool is genuinely sparse, file what you have and note the gap in the issue body — don't pad with bad candidates.
+
+### 3. Filter pipeline (three AND-gated criteria)
+
+Each surviving candidate is the *intersection* of three gates. Fail any → drop from the working set AND record the rejection in the seen-list with `decision: "rejected"` and the failing-gate reason.
+
+#### Gate 1: AI-leverage score ≥ 4
+
+Apply the rubric in `docs/ai-leverage-rubric.md`. Score the tool 1–5 against the criteria for **its category** (the rubric is category-aware). Tools scoring 1–3 are rejected. A 4 means "this would noticeably improve agent throughput or safety in a measurable way." A 5 means "agents are currently working around the absence of this tool."
+
+Capture the score, the per-criterion reasoning, and the rubric version (the rubric doc has a `version:` line in its frontmatter — record it so we can re-score historical entries when the rubric changes).
+
+#### Gate 2: Maintenance gate
+
+The tool must clear ALL of:
+
+- ≥ 500 GitHub stars OR ≥ 50k weekly npm downloads OR endorsed in ≥ 2 awesome-lists in the category.
+- A commit to the default branch within the last 90 days.
+- No unaddressed CVE in the last release.
+- License compatible with our stack (MIT, Apache-2.0, BSD, MPL — reject GPL/AGPL/SSPL/BSL).
+
+The thresholds are tuned for Phase A — we expect the operator to revise them after the first smoke test in research question #2 (issue body).
+
+#### Gate 3: Dedup seen-list
+
+Check `hydra:scout:tools-considered:<canonical-slug>` via `seenList.getSeen()`. If a record exists and `seenList.eligibleForReEval()` returns `false`, drop the candidate **without** filing an issue but DO update `lastChecked` so we have a heartbeat for the cooldown.
+
+Re-eval is eligible when ANY of:
+- `decision: "rejected"` AND `filedAt` is more than 90 days old.
+- `decision: "filed"` AND the linked GitHub issue is `closed` AND was closed with `wontfix` more than 90 days ago.
+- `reEvalAt` is set and the timestamp has passed (the operator can force an earlier re-eval — e.g. when a major version ships).
+- `decision: "filed"` AND the linked GitHub issue is still open (this is a stale heartbeat refresh — skip filing, refresh `lastChecked`).
+
+### 4. File an issue per survivor
+
+For each candidate that clears all three gates, file a GitHub issue with the schema below and record `decision: "filed"`, `issueNum`, `filedAt` to the seen-list.
+
+```markdown
+# tool-scout: <Tool Name> — <category>
+
+> Filed by `/hydra-tool-scout` on <ISO date>. AI-leverage score: <N>/5 against rubric <version>.
+
+## What it is
+
+<one paragraph — what the tool does, who built it, what its actual primitive is>
+
+## Why this would help Hydra
+
+<3–5 bullet points, each tying back to a real agent pain we've observed.
+e.g.: "hydra-dev agents currently have to chase down type errors by reading
+runtime stack traces in journalctl — a typed schema gateway would surface
+contract violations at PR time.">
+
+## AI-leverage rubric
+
+| Criterion | Score | Reasoning |
+|---|---|---|
+| Surfaces structured signal | 5 | <why> |
+| Reduces blast radius of agent edits | 4 | <why> |
+| Determinism / reproducibility | 4 | <why> |
+| Discoverability for agents | 3 | <why> |
+| (others per the rubric) | | |
+| **Total / 5 (gated)** | **N** | |
+
+## Maintenance signals
+
+- Stars: <N>
+- Weekly downloads: <N>
+- Last commit: <ISO date>
+- License: <SPDX>
+- CVE check: <link or "none in last release">
+
+## Proposed integration
+
+<concrete, scoped — "add to `dashboard/` package.json", or "wrap as a new sub-router under `src/api/`". Not a design document; a starting point for the operator + a dev_orch follow-up.>
+
+## Risks / unknowns
+
+<any operator-relevant friction: vendor lock-in, runtime cost, deps it pulls in>
+
+## Files in scope (proposed)
+
+<list of files the dev_orch follow-up would touch — gives the tier classifier something to chew on>
+
+## Out of scope
+
+<everything the dev_orch follow-up should not touch>
+
+---
+*Generated by hydra-tool-scout (Phase A). Slug: `<canonical-slug>`. Seen-list key: `hydra:scout:tools-considered:<canonical-slug>`.*
+```
+
+Labels: `enhancement`, `needs-triage`, `tool-scout`. The triage label is intentional — the operator should review and decide before this gets picked up.
+
+### 5. Update the seen-list
+
+After every candidate (filed, rejected, or skipped-due-to-cooldown):
+
+```ts
+await seenList.recordDecision(slug, decision, reason, {
+  tool: "react-query",
+  category: "typed-schemas",
+  issueNum: 567,            // present if decision === "filed"
+  reEvalAt: null,           // optional override
+  trigger: "manual",        // Phase A; "calendar"/"alert"/"gap" later
+});
+```
+
+The seen-list does NOT TTL Redis keys — we want a permanent ledger of every consideration. Re-eval eligibility is computed from the fields, not from key expiry.
+
+### 6. Print a deterministic summary
+
+```
+hydra-tool-scout — category: typed-schemas — 2026-05-18T19:32:00Z
+
+Discovered: 7 candidates
+After dedup:  5
+After maintenance gate: 4
+After AI-leverage gate: 2
+Filed: 2 issues (#567, #568)
+Rejected: 3 (logged to seen-list)
+Skipped (cooldown): 2 (logged heartbeat)
+```
+
+This is the operator's accept/reject point. If the issue bodies look wrong, the seen-list lets us roll back without re-filing on the next invocation — just close the issue with `wontfix` and the dedup cooldown handles the rest.
+
+## Rules
+
+- **No autopilot dispatch in Phase A.** Manual invocation only.
+- **No category invention.** The taxonomy is closed; new categories require a PR to `docs/ai-leverage-categories.md`.
+- **Slug canonicalization happens in `src/scout/aliases.ts`** — never use the raw npm name or repo path as the seen-list key.
+- **Three-gate AND** — a tool must clear all three (leverage, maintenance, dedup). No 2-of-3 fallbacks.
+- **Issues land in `needs-triage`** — never auto-route to `ready-for-agent`. The operator is the accept point in Phase A.
+- **Seen-list is append-only conceptually.** Every consideration leaves a fingerprint, even cooldown-skipped ones (via `lastChecked` heartbeat).
+
+## Manual smoke test
+
+This is the Phase A acceptance flow — the operator runs this before we wire Phase B autopilot dispatch.
+
+```bash
+/hydra-tool-scout typed-schemas
+```
+
+Expected:
+
+- Discovery surfaces 3–5 candidates from the sources in §2.
+- The filter pipeline rejects ≥ 2 of them with a reason logged to the seen-list.
+- ≤ 2 issues filed, each matching the schema in §4.
+- Re-running `/hydra-tool-scout typed-schemas` immediately produces zero new issues — the dedup cooldown holds.
+- The operator either moves a filed issue to `ready-for-agent` (acceptance) or closes it with `wontfix` (which re-feeds the seen-list).
+
+## Out of scope (Phase A)
+
+| Item | Lands in |
+|---|---|
+| Autopilot `scout` class + `decide.py` wiring | Phase B (issue TBD) |
+| Calendar walk (one category per week, round-robin) | Phase B |
+| Alert subscriptions (npm advisories, GitHub security alerts) | Phase C |
+| Gap-driven triggers (e.g. "the same lesson fired 3x → scout the related category") | Phase D |
+| Vibe-driven triggers (operator hunches surfaced via Redis hint) | Phase D |
+| Auto-PRs that actually integrate a tool | Never — that is dev_orch's job; the scout files an issue and stops. |
+
+See parent epic #483 for the full roadmap.
+
+## Files
+
+- `docs/operator-playbooks/hydra-tool-scout.md` — this playbook (source of truth for the skill body).
+- `docs/ai-leverage-categories.md` — closed-list taxonomy of where to scout.
+- `docs/ai-leverage-rubric.md` — 1–5 AI-leverage scale with worked examples.
+- `src/scout/seen-list.ts` — Redis-backed seen-list (`getSeen`, `recordDecision`, `eligibleForReEval`).
+- `src/scout/aliases.ts` — `canonicalizeSlug` + alias map for npm/repo-name collisions.
+- `src/redis-keys.ts` — adds `scoutToolsConsidered(slug)` to the central key registry.
+- `test/scout-seen-list.test.mts` — regression tests for record + re-eval eligibility.
+
+## Tier
+
+Tier 2 (new module + new tests; no Untouchable Core touched). The PR body carries the live tier classifier's verdict; this footer is informational.

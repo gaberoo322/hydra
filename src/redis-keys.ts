@@ -133,6 +133,16 @@ export const redisKeys = {
   researchFloorSuppressedUntil: () => "hydra:scheduler:research-floor:suppressed-until",
 
   // ---------------------------------------------------------------------------
+  // Tool Scout (issue #484)
+  // Per-tool seen-list ledger consumed by /hydra-tool-scout. One hash per
+  // canonical-slug tracking decision history so re-runs of the scout don't
+  // re-propose the same tool. Schema documented in src/scout/seen-list.ts.
+  // Keys are intentionally NOT TTLed — re-eval eligibility is computed from
+  // the hash fields, not from key expiry.
+  // ---------------------------------------------------------------------------
+  scoutToolsConsidered: (slug: string) => `hydra:scout:tools-considered:${slug}`,
+
+  // ---------------------------------------------------------------------------
   // Locks
   // ---------------------------------------------------------------------------
   mergeLock: () => "hydra:merge:lock",
