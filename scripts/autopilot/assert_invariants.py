@@ -67,6 +67,10 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # design_concept_orch is orch-scope by definition (issue #466) —
     # excluded under target-only. Mirror of decide.py's constant.
     "design_concept_orch",
+    # scout_orch (issue #485) walks the orchestrator-side AI-leverage
+    # taxonomy + the orch/dashboard runtime deps — orch-scope by
+    # construction. Mirror of decide.py's SCOPE_TARGET_ONLY_EXCLUDE.
+    "scout_orch",
 )
 
 

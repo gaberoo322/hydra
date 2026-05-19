@@ -43,7 +43,7 @@ Each tick:
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
 6. **Re-enter step 1.** No inline reasoning between steps.
 
-## Class taxonomy (7 pipeline slots + 5 signal classes)
+## Class taxonomy (7 pipeline slots + 6 signal classes)
 
 | Kind | Class | Skill |
 |---|---|---|
@@ -59,6 +59,20 @@ Each tick:
 | signal | `sweep_target` | hydra-target-sweep |
 | signal | `discover_orch` | hydra-discover |
 | signal | `discover_target` | hydra-target-discover |
+| signal | `scout_orch` | hydra-tool-scout (Phase B, weekly calendar walk) |
+
+> **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
+> calendar-driven signal class — `SIGNAL_COOLDOWNS["scout_orch"] = 7d`.
+> The walk surface (categories from `docs/ai-leverage-categories.md` +
+> runtime deps from `package.json` + `dashboard/package.json`) is built
+> by `src/scout/calendar-walk.ts:planWalk()`. Per-category cooldown
+> (30d default) and per-tool cooldown (90d, via the Phase A seen-list)
+> stack on top of the per-class 7d cooldown — all three must clear
+> before a category is dispatched. When the per-category cooldown says
+> "skip" but per-tool says "ready", the category-level skip wins
+> (operator preference: fewer issues). Steady-state cost slice: ~4% of
+> the \$50/day cap (`SCOUT_DAILY_COST_SHARE` in `calendar-walk.ts`);
+> operators override via `state.limits.scout_cost_share`.
 
 > **Phase B wiring (issue #466, sub of #437):** `design_concept_orch`
 > fires before `dev_orch` for an orch anchor when the artifact is
@@ -394,6 +408,8 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `needs_research > 0` (orch GH board) | `needs_research` | `research_orch` |
 | `needs_triage > 0` (orch GH board) | `needs_triage_orch` | `sweep_orch` |
 | `health=FAIL` or `failed_services>0` | `health_fail` | `health` |
+| `scout_last_walk_iso` >7d old or empty | `scout_walk_due` | `scout_orch` (issue #485) |
+| `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
 
 Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
 received target-product anchors (item-26x). Post-#458, candidates are

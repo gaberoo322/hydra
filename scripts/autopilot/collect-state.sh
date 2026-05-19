@@ -67,6 +67,22 @@ echo -n "work_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:wo
 echo -n "reframe_queue="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:reframe-queue 2>/dev/null || echo 0
 echo -n "prior_failures="; docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures 2>/dev/null || echo 0
 
+# Tool Scout — Phase B calendar walk signals (issue #485).
+#
+# `scout_walk_due` is true when the per-class (`scout_orch`) calendar
+# cooldown has elapsed (default 7d). Sourced from
+# `hydra:scout:last-calendar-walk` (ISO-8601 UTC). decide.py turns this
+# into a dispatch on the `scout_orch` signal class.
+#
+# `scout_board_saturated` mirrors the playbook's "When NOT to run this"
+# clause: skip the calendar walk if the orchestrator board already has
+# >20 open `enhancement` issues (the operator should drain before adding
+# more proposal-grade work). Threshold lives here so the playbook
+# doesn't have to grep state JSON.
+echo -n "scout_last_walk_iso="; docker exec hydra-redis-1 redis-cli GET hydra:scout:last-calendar-walk 2>/dev/null | tr -d '"' || echo ""
+echo -n "scout_board_open_enhancements="
+gh issue list --repo gaberoo322/hydra --state open --label enhancement --json number --jq 'length' 2>/dev/null || echo 0
+
 # capacity-floor (orchestrator self-improvement share)
 hydra raw GET /capacity 2>/dev/null | python3 -c "
 import json,sys

@@ -686,6 +686,134 @@ describe("decide.py — signal classes with cooldowns", () => {
     const plan = runDecide(state, null);
     assert.ok(findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_target"));
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #485 (Phase B of /hydra-tool-scout). `scout_orch` is a signal
+  // class with a 7-day cooldown. It fires on `scout_walk_due` AND when the
+  // orch board isn't saturated (`scout_board_saturated` suppresses it).
+  // -------------------------------------------------------------------------
+
+  test("scout_orch fires on scout_walk_due signal (issue #485)", () => {
+    const state = baseState({ signals: { scout_walk_due: true } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "scout_orch");
+    assert.ok(a, "scout_orch must dispatch on scout_walk_due");
+    assert.equal(a.skill, "hydra-tool-scout");
+    assert.equal(a.prompt_args.trigger, "calendar",
+      "calendar-driven dispatch must pass trigger=calendar to the skill");
+  });
+
+  test("scout_orch DOES NOT fire without scout_walk_due signal", () => {
+    const state = baseState();  // no signals
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "scout_orch must not dispatch when the calendar isn't due",
+    );
+  });
+
+  test("scout_orch suppressed when scout_board_saturated is set (issue #485)", () => {
+    const state = baseState({
+      signals: { scout_walk_due: true, scout_board_saturated: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      ">20 open enhancement issues → operator drains queue before more scouts",
+    );
+  });
+
+  test("scout_orch suppressed when recently fired (within 7d cooldown)", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const state = baseState({
+      signals: { scout_walk_due: true },
+      // Fired 1 day ago → inside the 7-day cooldown.
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        scout_orch: now - 24 * 60 * 60,
+      } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "1d ago is well inside the 7d scout_orch cooldown",
+    );
+  });
+
+  test("scout_orch fires after 7d cooldown elapses", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const state = baseState({
+      signals: { scout_walk_due: true },
+      // 8 days ago → past the 7-day cooldown.
+      signal_last_fired: {
+        health: 0, sweep_orch: 0, sweep_target: 0,
+        discover_orch: 0, discover_target: 0,
+        scout_orch: now - 8 * 24 * 60 * 60,
+      } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      "scout_orch must fire once the 7d cooldown has elapsed",
+    );
+  });
+
+  test("scout_orch is excluded by target-only scope (orch-scope by definition)", () => {
+    const state = baseState({
+      scope: "target-only",
+      signals: { scout_walk_due: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "target-only scope must exclude scout_orch (INV-008)",
+    );
+  });
+
+  test("scout_orch is allowed under orch-only scope", () => {
+    const state = baseState({
+      scope: "orch-only",
+      signals: { scout_walk_due: true },
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      "orch-only must NOT exclude scout_orch",
+    );
+  });
+
+  test("scout_orch in burned_classes is NOT re-dispatched (mirrors #432)", () => {
+    const state = baseState({
+      burned_classes: ["scout_orch"],
+      signals: { scout_walk_due: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "burned signal class scout_orch must not be re-dispatched",
+    );
+  });
+
+  test("scout_orch completion event produces a reap (mirrors #432)", () => {
+    const events = [{
+      type: "completion",
+      slot: "scout_orch",
+      task_id: "scout-task-1",
+      total_tokens: 35_000,
+      skill: "hydra-tool-scout",
+    }];
+    const plan = runDecide(baseState(), null, events);
+    const reap = findAction(plan, (a) => a.type === "reap" && a.task_id === "scout-task-1");
+    assert.ok(reap, "scout_orch completion must produce a reap");
+    assert.equal(reap.slot, "scout_orch");
+    assert.equal(reap.skill, "hydra-tool-scout");
+  });
 });
 
 // ---------------------------------------------------------------------------

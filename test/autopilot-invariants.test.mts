@@ -288,6 +288,35 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     assert.equal(r.status, 0, `expected OK under orch-only scope, got: ${r.stderr}`);
   });
 
+  // -------------------------------------------------------------------------
+  // Issue #485 (Phase B of /hydra-tool-scout). scout_orch mirrors the
+  // design_concept_orch scope-exclude semantics — orch-scope by definition,
+  // forbidden under target-only.
+  // -------------------------------------------------------------------------
+
+  test("INV-008 (scout_orch): target-only scope excludes scout_orch (issue #485)", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "scout_orch", skill: "hydra-tool-scout" }] };
+    const state = baseState({ scope: "target-only" });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /INV-008/);
+    assert.match(r.stderr, /scout_orch/);
+  });
+
+  test("INV-008 (scout_orch): orch-only scope allows scout_orch (issue #485)", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "scout_orch", skill: "hydra-tool-scout" }] };
+    const state = baseState({ scope: "orch-only" });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 0, `expected OK under orch-only scope, got: ${r.stderr}`);
+  });
+
+  test("INV-008 (scout_orch): all scope allows scout_orch (issue #485)", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "scout_orch", skill: "hydra-tool-scout" }] };
+    const state = baseState({ scope: "all" });
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 0, `expected OK under all scope, got: ${r.stderr}`);
+  });
+
   test("INV-009: dev_orch and design_concept_orch on same anchor is warn-only (does NOT raise)", () => {
     // Phase B intentionally does not raise on this conflict — it logs
     // to state.warnings[] instead. Phase C will flip to raise.
