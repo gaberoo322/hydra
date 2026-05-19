@@ -34,6 +34,13 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   autopilotRun: (runId: string) => `hydra:autopilot:run:${runId}`,
   autopilotRunsIndex: () => "hydra:autopilot:runs:index",
+  // Per-run turn timeline (issue #498, slice 2). One JSON member per decision
+  // turn, score = turn_n so reads use ZREVRANGEBYSCORE for monotonic ordering
+  // and the (run_id, turn_n) idempotency check is a single ZRANGEBYSCORE
+  // lookup. Rows are immutable — outcomes are joined on read from cycle
+  // records, never patched back into the turn row. 7d TTL matches the run
+  // hash, refreshed alongside it on each write.
+  autopilotRunTurns: (runId: string) => `hydra:autopilot:run:${runId}:turns`,
 
   // ---------------------------------------------------------------------------
   // Tasks

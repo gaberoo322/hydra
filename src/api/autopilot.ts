@@ -34,6 +34,7 @@ import {
   hashSet,
   hashGetAll,
   hashSetField,
+  hashIncrBy,
   zAdd,
   zRevRange,
   expireKey,
@@ -41,6 +42,7 @@ import {
   incrSchedulerCyclesMerged,
   incrSchedulerCyclesFailed,
 } from "../redis-adapter.ts";
+import { getRedisConnection } from "../redis/connection.ts";
 import { recordCycleMetrics } from "../metrics.ts";
 
 const CYCLE_TTL_SECONDS = 7 * 24 * 3600; // 7 days — matches /cycle/register
@@ -333,6 +335,134 @@ export function createAutopilotRouter() {
   });
 
   // -------------------------------------------------------------------------
+  // POST /autopilot/turn (issue #498, slice 2) — heartbeat.py posts one
+  // immutable turn record per decision turn.
+  //
+  // Body shape:
+  //   {
+  //     run_id, turn_n, epoch,
+  //     actions: [{type, ...payload}],         // from plan.json
+  //     reasons: [string],                      // from plan.json
+  //     slots_snapshot: {dev_orch, qa_orch, ...} // from state.json
+  //     signals_snapshot: {health: epoch, ...}  // from state.json
+  //     tokens_after: int,                      // state.cumulative_tokens
+  //     idle_turns: int,                        // state.idle_turns
+  //   }
+  //
+  // Writes:
+  //   1. JSON member to `hydra:autopilot:run:<id>:turns` ZSET with score=turn_n.
+  //   2. Atomic counter update on the run hash:
+  //        turns = MAX(turns, turn_n)                  (monotonic per slice 1 promise)
+  //        dispatches += count(action.type=="dispatch") (HINCRBY — race-safe)
+  //        cumulative_tokens = tokens_after            (snapshot, not accumulated)
+  //        idle_turns = idle_turns                     (snapshot from state)
+  //        last_heartbeat_epoch = epoch                (so the wedge-detector sees liveness)
+  //
+  // Idempotency: re-POST at the same (run_id, turn_n) is a no-op. We detect
+  // it via ZRANGEBYSCORE turn_n turn_n on the turns ZSET — if a member already
+  // exists at that score, the turn was already recorded. NO counters get
+  // touched on the dup path.
+  //
+  // Returns 404 if the run hash doesn't exist yet (out-of-order writes from
+  // a stale playbook hitting a fresh run_id are user error, not a silent
+  // overwrite).
+  // -------------------------------------------------------------------------
+  router.post("/autopilot/turn", async (req, res) => {
+    try {
+      const body = (req.body || {}) as TurnBody;
+      const runId = typeof body.run_id === "string" ? body.run_id.trim() : "";
+      if (!runId) {
+        return res.status(400).json({ error: "Missing run_id" });
+      }
+      const turnN = numberOrDefault(body.turn_n, NaN);
+      if (!Number.isFinite(turnN) || turnN < 0) {
+        return res.status(400).json({ error: "Missing or invalid turn_n" });
+      }
+      const epoch = numberOrDefault(body.epoch, Math.floor(Date.now() / 1000));
+
+      const runRow = await hashGetAll(redisKeys.autopilotRun(runId));
+      if (!runRow || !runRow.started) {
+        return res.status(404).json({ error: `unknown run_id: ${runId}` });
+      }
+
+      // Idempotency check — has this (run_id, turn_n) already been written?
+      const r = getRedisConnection();
+      const existingAtScore: string[] = await r.zrangebyscore(
+        redisKeys.autopilotRunTurns(runId),
+        turnN,
+        turnN,
+      );
+      if (existingAtScore && existingAtScore.length > 0) {
+        return res.json({ ok: true, run_id: runId, turn_n: turnN, deduped: true });
+      }
+
+      const actions = Array.isArray(body.actions) ? body.actions : [];
+      const reasons = Array.isArray(body.reasons) ? body.reasons : [];
+      const slotsSnapshot = body.slots_snapshot && typeof body.slots_snapshot === "object"
+        ? body.slots_snapshot
+        : {};
+      const signalsSnapshot = body.signals_snapshot && typeof body.signals_snapshot === "object"
+        ? body.signals_snapshot
+        : {};
+      const tokensAfter = numberOrDefault(body.tokens_after, 0);
+      const idleTurns = numberOrDefault(body.idle_turns, 0);
+
+      const dispatchCount = actions.reduce(
+        (n, a) => (a && (a as any).type === "dispatch" ? n + 1 : n),
+        0,
+      );
+
+      const turnMember = JSON.stringify({
+        turn_n: turnN,
+        epoch,
+        actions,
+        reasons,
+        slots_snapshot: slotsSnapshot,
+        signals_snapshot: signalsSnapshot,
+        tokens_after: tokensAfter,
+        idle_turns: idleTurns,
+      });
+
+      // 1. Append the immutable turn row.
+      await zAdd(redisKeys.autopilotRunTurns(runId), turnN, turnMember);
+      await expireKey(redisKeys.autopilotRunTurns(runId), RUN_TTL_SECONDS);
+
+      // 2. Counter updates — single-field writes so we don't clobber slice-1
+      //    fields (PR #522 design promise). HINCRBY for additive counters.
+      const currentTurns = Number(runRow.turns || "0");
+      if (turnN > currentTurns) {
+        await hashSetField(redisKeys.autopilotRun(runId), "turns", String(turnN));
+      }
+      if (dispatchCount > 0) {
+        await hashIncrBy(redisKeys.autopilotRun(runId), "dispatches", dispatchCount);
+      }
+      await hashSetField(
+        redisKeys.autopilotRun(runId),
+        "cumulative_tokens",
+        String(tokensAfter),
+      );
+      await hashSetField(redisKeys.autopilotRun(runId), "idle_turns", String(idleTurns));
+      await hashSetField(
+        redisKeys.autopilotRun(runId),
+        "last_heartbeat_epoch",
+        String(epoch),
+      );
+      await expireKey(redisKeys.autopilotRun(runId), RUN_TTL_SECONDS);
+
+      return res.json({
+        ok: true,
+        run_id: runId,
+        turn_n: turnN,
+        deduped: false,
+        dispatch_count: dispatchCount,
+      });
+    } catch (err: any) {
+      console.error(`[autopilot] turn write failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // GET /autopilot/runs/current (issue #497) — header strip on /autopilot.
   //
   // Returns the most recent run by started_epoch. On `running` rows, applies
@@ -369,6 +499,13 @@ export function createAutopilotRouter() {
 
       const sweepResult = await sweepRunIfDead(runId, row);
       const view = projectRunView(sweepResult.row);
+
+      // Slice 2 (issue #498) — attach the most recent turn rows (descending
+      // by turn_n) with cycle-record joins for dispatch actions. Slice 1
+      // clients ignore unknown fields, so this is additive and safe.
+      const turns = await fetchTurnsWithJoins(runId, 50);
+      (view as any).turns = turns;
+
       return res.json(view);
     } catch (err: any) {
       console.error(`[autopilot] runs/current failed: ${err?.message || err}`);
@@ -393,6 +530,133 @@ interface RunEndBody {
   cause?: string;
   ended_epoch?: number;
   exit_code?: number;
+}
+
+interface TurnAction {
+  type?: string;
+  [key: string]: unknown;
+}
+
+interface TurnBody {
+  run_id?: string;
+  turn_n?: number;
+  epoch?: number;
+  actions?: TurnAction[];
+  reasons?: string[];
+  slots_snapshot?: Record<string, unknown>;
+  signals_snapshot?: Record<string, unknown>;
+  tokens_after?: number;
+  idle_turns?: number;
+}
+
+/**
+ * Read the latest `limit` turn rows for a run (descending by turn_n) and
+ * attach cycle-record outcomes onto `action.type=="dispatch"` actions.
+ *
+ * The join key: each dispatch action in a turn may carry an
+ * `autopilotTurnId` (the canonical join key from issue #430) or a derived
+ * `cycleId`. We default cycleId to `<run_id>:<turn_n>:<index>` when the
+ * action doesn't supply one, mirroring how reap.py/dispatch.sh allocate
+ * cycle IDs today. Missing cycles return null in the `outcome` slot — the
+ * UI renders "pending" rather than erroring.
+ *
+ * The fetch is one ZREVRANGEBYSCORE for the turn members and one pipelined
+ * batch of HGETALL calls for the cycle hashes. O(turns + dispatches) Redis
+ * round trips, not O(turns * dispatches).
+ */
+export async function fetchTurnsWithJoins(
+  runId: string,
+  limit: number,
+): Promise<Array<Record<string, unknown>>> {
+  const r = getRedisConnection();
+  // ZREVRANGEBYSCORE +inf -inf LIMIT 0 N → most recent turn_n first.
+  const raw: string[] = await r.zrevrangebyscore(
+    redisKeys.autopilotRunTurns(runId),
+    "+inf",
+    "-inf",
+    "LIMIT",
+    0,
+    limit,
+  );
+  if (!raw || raw.length === 0) return [];
+
+  // Parse + collect the cycle IDs we need to look up. Each dispatch action
+  // contributes one cycle key. Non-dispatch actions contribute nothing.
+  const turns: Array<Record<string, unknown>> = [];
+  const cycleIdsToFetch: string[] = [];
+
+  for (const member of raw) {
+    let parsed: any;
+    try {
+      parsed = JSON.parse(member);
+    } catch (err) {
+      console.error(`[autopilot] failed to parse turn member: ${err}`);
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+
+    const turnN = Number(parsed.turn_n || 0);
+    const actions: any[] = Array.isArray(parsed.actions) ? parsed.actions : [];
+    actions.forEach((a, idx) => {
+      if (a && a.type === "dispatch") {
+        // Action may explicitly carry a cycleId/autopilotTurnId. Otherwise
+        // synthesize the canonical key the dispatcher would have used.
+        const cid =
+          (typeof a.cycleId === "string" && a.cycleId) ||
+          (typeof a.autopilotTurnId === "string" && a.autopilotTurnId) ||
+          `${runId}:${turnN}:${idx}`;
+        a._cycleId = cid;
+        cycleIdsToFetch.push(cid);
+      }
+    });
+    turns.push(parsed);
+  }
+
+  // Batch-fetch all cycle hashes in a single pipeline.
+  const cycleMap: Record<string, Record<string, string>> = {};
+  if (cycleIdsToFetch.length > 0) {
+    const pipeline = r.pipeline();
+    const uniqueIds = Array.from(new Set(cycleIdsToFetch));
+    for (const cid of uniqueIds) {
+      pipeline.hgetall(redisKeys.cycle(cid));
+    }
+    const results: any[] = await pipeline.exec();
+    uniqueIds.forEach((cid, i) => {
+      const entry = results?.[i];
+      // ioredis pipeline result shape: [err, value]
+      const hash = entry && Array.isArray(entry) ? entry[1] : null;
+      if (hash && typeof hash === "object" && Object.keys(hash).length > 0) {
+        cycleMap[cid] = hash as Record<string, string>;
+      }
+    });
+  }
+
+  // Attach outcomes onto the dispatch actions and strip the temporary _cycleId.
+  for (const turn of turns) {
+    const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
+    for (const a of actions) {
+      if (a && a.type === "dispatch") {
+        const cid = a._cycleId;
+        delete a._cycleId;
+        const hash = cycleMap[cid];
+        if (hash) {
+          a.outcome = {
+            cycleId: cid,
+            status: hash.status || "unknown",
+            prNumber: hash.prNumber || hash.pr_number || null,
+            filesChanged: hash.filesChanged || null,
+            costUsd: hash.costUsd ? Number(hash.costUsd) : null,
+            startedAt: hash.startedAt || null,
+            completedAt: hash.completedAt || null,
+          };
+        } else {
+          a.outcome = null;
+        }
+      }
+    }
+  }
+
+  return turns;
 }
 
 /**

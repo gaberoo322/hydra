@@ -88,6 +88,8 @@ import json
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # Import SIGNAL_COOLDOWNS from decide.py so the cooldown definitions stay
@@ -111,6 +113,13 @@ except Exception:  # pragma: no cover — fallback if decide.py is broken
 
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
 HEARTBEAT_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_HEARTBEAT", "/tmp/hydra-autopilot-heartbeat.txt"))
+# Issue #498 — slice 2 wires heartbeat.py into the per-turn POST so the
+# /autopilot dashboard sees actions/reasons/slots immediately, not just the
+# file mtime. Best-effort; POST failure NEVER aborts the turn (heartbeat is
+# observability, not correctness — same contract as slice 1's term-check.py).
+PLAN_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_PLAN", "/tmp/hydra-autopilot-plan.json"))
+HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
+TURN_POST_TIMEOUT_SEC = 3
 
 
 def _count_pipeline_filled(state: dict) -> int:
@@ -163,6 +172,66 @@ def _format_line(state: dict, last_action: str, now: int) -> str:
     )
 
 
+def _read_plan() -> dict:
+    """Best-effort load of /tmp/hydra-autopilot-plan.json. Returns {} on any
+    failure — we don't want a missing-or-malformed plan to suppress the
+    turn POST (the turn POST still has meaningful slots_snapshot,
+    signals_snapshot, and counter info even with no actions/reasons).
+    """
+    try:
+        return json.loads(PLAN_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def post_turn(state: dict, plan: dict, now: int) -> None:
+    """Issue #498 — POST one immutable turn record to /api/autopilot/turn.
+
+    Idempotent on (run_id, turn_n): re-POST at the same turn_n is a no-op
+    server-side, so a heartbeat retry never double-counts dispatches.
+
+    NEVER raises — every failure path logs to stderr and returns. Heartbeat
+    is best-effort observability (issue #435 contract), so an orchestrator
+    outage cannot wedge the autopilot turn loop.
+    """
+    run_id = state.get("run_id") or ""
+    if not run_id:
+        return
+    turn_n = state.get("turn")
+    if turn_n is None:
+        return
+
+    body = {
+        "run_id": run_id,
+        "turn_n": int(turn_n),
+        "epoch": now,
+        "actions": plan.get("actions") or [],
+        "reasons": plan.get("reasons") or [],
+        "slots_snapshot": state.get("slots") or {},
+        "signals_snapshot": state.get("signal_last_fired") or {},
+        "tokens_after": int(state.get("cumulative_tokens", 0) or 0),
+        "idle_turns": int(state.get("idle_turns", 0) or 0),
+    }
+    try:
+        payload = json.dumps(body).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        print(f"[autopilot] heartbeat: turn payload serialize failed ({exc})", file=sys.stderr)
+        return
+
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/autopilot/turn",
+        data=payload,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TURN_POST_TIMEOUT_SEC) as resp:
+            resp.read()
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        # Orchestrator unreachable / slow / 5xx — log and move on.
+        print(f"[autopilot] heartbeat: turn POST failed ({exc})", file=sys.stderr)
+
+
 def write_heartbeat(last_action: str = "(none)", *, now: int | None = None) -> int:
     """Read state.json, build the one-line update, overwrite the
     heartbeat file. Returns 0 on success, non-zero (but never raises)
@@ -191,6 +260,11 @@ def write_heartbeat(last_action: str = "(none)", *, now: int | None = None) -> i
     except OSError as exc:
         print(f"[autopilot] heartbeat: write failed ({exc})", file=sys.stderr)
         return 2
+
+    # Issue #498 — POST per-turn record to the orchestrator AFTER the file
+    # write so a slow/failed POST never delays the file mtime update (which
+    # is what wedge-detection grep's on).
+    post_turn(state, _read_plan(), ts)
     return 0
 
 
