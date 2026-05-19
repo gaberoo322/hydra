@@ -1,13 +1,28 @@
+import { useState, useMemo } from "react";
 import { useApi } from "../hooks/useApi.js";
 
-// Slice 1 of epic #496 — "Is it alive?" header strip only. No turn timeline,
-// no log, no history yet — those land in slices #498, #499, #500.
+// Slice 1 of epic #496 — "Is it alive?" header strip.
+// Slice 2 of epic #496 (issue #498) — pipeline snapshot + turn timeline.
+// Slices #499, #500 follow.
 
 const STATUS_STYLES = {
   running: { label: "RUNNING", bg: "bg-emerald-500/15", border: "border-emerald-500/40", text: "text-emerald-300", dot: "bg-emerald-400" },
   wedge:   { label: "RUNNING — WEDGE LIKELY", bg: "bg-amber-500/15", border: "border-amber-500/40", text: "text-amber-300", dot: "bg-amber-400" },
   ended:   { label: "ENDED",   bg: "bg-zinc-500/15", border: "border-zinc-500/40", text: "text-zinc-300", dot: "bg-zinc-400" },
   killed:  { label: "KILLED",  bg: "bg-red-500/15",   border: "border-red-500/40",   text: "text-red-300",   dot: "bg-red-400" },
+};
+
+// Slice 2 — the 6 pipeline slots and the 5 signal classes. The order here
+// drives the grid layout. Kept in lockstep with bootstrap.sh's state.json
+// scaffold and decide.py's SIGNAL_COOLDOWNS map.
+const PIPELINE_SLOTS = ["dev_orch", "qa_orch", "research_orch", "dev_target", "qa_target", "research_target"];
+const SIGNAL_CLASSES = ["health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"];
+const SIGNAL_COOLDOWN_SEC = {
+  health: 0,
+  sweep_orch: 900,
+  sweep_target: 900,
+  discover_orch: 1800,
+  discover_target: 1800,
 };
 
 function statusKey(run) {
@@ -26,6 +41,18 @@ function formatElapsed(seconds) {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function formatClockTime(epoch) {
+  if (!Number.isFinite(epoch) || epoch <= 0) return "—";
+  const d = new Date(epoch * 1000);
+  return d.toLocaleTimeString();
+}
+
+function formatTokens(n) {
+  if (!Number.isFinite(n)) return "—";
+  if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
 }
 
 function StatusPill({ run }) {
@@ -87,6 +114,259 @@ function truncId(id) {
   return `${id.slice(0, 8)}…${id.slice(-4)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Slice 2 — Pipeline snapshot (6 slots + 5 signal cooldowns)
+// ---------------------------------------------------------------------------
+
+function PipelineSlot({ name, occupant, nowEpoch }) {
+  const isEmpty = !occupant;
+  if (isEmpty) {
+    return (
+      <div className="border border-dashed border-zinc-700 rounded-md p-3 bg-zinc-900/30">
+        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">{name}</div>
+        <div className="text-xs text-zinc-600 italic">empty</div>
+      </div>
+    );
+  }
+  // occupant shape from state.slots — best-effort field extraction; the slot
+  // value is opaque to the dashboard (decide.py stamps {skill, branch,
+  // claimed_epoch, anchor, ...} but the precise field names aren't pinned).
+  const subagent = occupant.skill || occupant.subagent || occupant.type || "(claimed)";
+  const branch = occupant.branch || occupant.worktreeBranch || occupant.worktree_branch || null;
+  const claimedEpoch = Number(occupant.claimed_epoch || occupant.claimedAt || 0);
+  const ageS = claimedEpoch > 0 && nowEpoch > 0 ? Math.max(0, nowEpoch - claimedEpoch) : null;
+  const prNumber = occupant.pr_number || occupant.prNumber || null;
+  return (
+    <div className="border border-emerald-700/40 rounded-md p-3 bg-emerald-900/10">
+      <div className="text-[10px] uppercase tracking-widest text-emerald-400 mb-1">{name}</div>
+      <div className="text-sm font-semibold text-zinc-100 truncate" title={subagent}>{subagent}</div>
+      {branch && (
+        <div className="text-xs font-mono text-zinc-400 truncate" title={branch}>{branch}</div>
+      )}
+      <div className="text-[11px] text-zinc-500 mt-1">
+        {ageS !== null ? `age ${formatElapsed(ageS)}` : "—"}
+        {prNumber ? <> · <a href={`https://github.com/gaberoo322/hydra/pull/${prNumber}`} className="text-emerald-400 hover:underline" target="_blank" rel="noreferrer">PR #{prNumber}</a></> : null}
+      </div>
+    </div>
+  );
+}
+
+function SignalChip({ cls, epoch, nowEpoch }) {
+  const e = Number(epoch || 0);
+  const cooldown = SIGNAL_COOLDOWN_SEC[cls] || 0;
+  const onCooldown = e > 0 && cooldown > 0 && nowEpoch - e < cooldown;
+  // For health (cooldown=0) "active" only means fired within 60s.
+  const recentlyFired = e > 0 && (cooldown === 0 ? nowEpoch - e <= 60 : true);
+  const ageStr = e > 0 ? formatElapsed(Math.max(0, nowEpoch - e)) : "never";
+  const baseStyle = onCooldown
+    ? "border-amber-500/40 bg-amber-900/15 text-amber-300"
+    : recentlyFired
+      ? "border-emerald-500/30 bg-emerald-900/10 text-emerald-300"
+      : "border-zinc-700 bg-zinc-900/30 text-zinc-400";
+  return (
+    <div className={`border ${baseStyle} rounded-md px-2 py-1.5 text-xs flex items-center gap-2`}>
+      <span className="font-mono">{cls}</span>
+      <span className="text-[10px] text-zinc-500">·</span>
+      <span className="text-[11px]">{ageStr}</span>
+      {onCooldown && <span className="text-[10px] uppercase tracking-widest">cooldown</span>}
+    </div>
+  );
+}
+
+function PipelineSnapshot({ run, latestTurn }) {
+  // Prefer the snapshot from the latest turn row; fall back to the empty case.
+  const slots = latestTurn?.slots_snapshot || {};
+  const signals = latestTurn?.signals_snapshot || {};
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  return (
+    <div className="border border-zinc-800 rounded-lg p-5 bg-zinc-900/40 space-y-4">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-base font-semibold text-zinc-100">Pipeline snapshot</h2>
+        <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+          slots filled: {PIPELINE_SLOTS.filter((s) => slots[s]).length}/6
+        </span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        {PIPELINE_SLOTS.map((name) => (
+          <PipelineSlot key={name} name={name} occupant={slots[name]} nowEpoch={nowEpoch} />
+        ))}
+      </div>
+      <div>
+        <div className="text-[10px] uppercase tracking-widest text-zinc-500 mb-2">Signals</div>
+        <div className="flex flex-wrap gap-2">
+          {SIGNAL_CLASSES.map((cls) => (
+            <SignalChip key={cls} cls={cls} epoch={signals[cls]} nowEpoch={nowEpoch} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 — Turn timeline
+// ---------------------------------------------------------------------------
+
+function ActionRow({ action }) {
+  const type = action?.type || "(unknown)";
+  if (type === "dispatch") {
+    const slot = action.slot || action.class || "—";
+    const skill = action.skill || "—";
+    const anchor = action.prompt_args?.anchor || action.anchor || "—";
+    const reason = action.reason || "";
+    const outcome = action.outcome;
+    return (
+      <div className="border-l-2 border-emerald-600/50 pl-3 py-1.5 text-xs space-y-1">
+        <div className="text-emerald-300 font-mono">
+          dispatch:{slot} <span className="text-zinc-400">→ {skill}</span>
+        </div>
+        <div className="text-zinc-400 truncate" title={anchor}>anchor: <span className="font-mono">{anchor}</span></div>
+        {reason && <div className="text-zinc-500 italic">{reason}</div>}
+        {outcome ? (
+          <div className="text-[11px] text-zinc-400 flex flex-wrap gap-x-3 gap-y-0.5">
+            <span>status: <span className={outcome.status === "merged" ? "text-emerald-400" : outcome.status === "failed" ? "text-red-400" : "text-zinc-300"}>{outcome.status}</span></span>
+            {outcome.prNumber && (
+              <span>
+                PR{" "}
+                <a href={`https://github.com/gaberoo322/hydra/pull/${outcome.prNumber}`} className="text-blue-400 hover:underline" target="_blank" rel="noreferrer">
+                  #{outcome.prNumber}
+                </a>
+              </span>
+            )}
+            {outcome.costUsd !== null && outcome.costUsd !== undefined && (
+              <span>cost: ${outcome.costUsd.toFixed(2)}</span>
+            )}
+            {outcome.filesChanged && <span>files: {outcome.filesChanged}</span>}
+          </div>
+        ) : (
+          <div className="text-[11px] text-zinc-600 italic">outcome: pending</div>
+        )}
+      </div>
+    );
+  }
+  // Non-dispatch action — raw payload row.
+  return (
+    <div className="border-l-2 border-zinc-700 pl-3 py-1.5 text-xs space-y-0.5">
+      <div className="text-zinc-300 font-mono">{type}</div>
+      {action.reason && <div className="text-zinc-500 italic">{action.reason}</div>}
+      <pre className="text-[10px] text-zinc-500 font-mono whitespace-pre-wrap break-all">
+        {(() => {
+          const { type: _t, reason: _r, outcome: _o, ...rest } = action;
+          const compact = JSON.stringify(rest);
+          return compact === "{}" ? null : compact;
+        })()}
+      </pre>
+    </div>
+  );
+}
+
+function TurnRow({ turn, expandedDefault }) {
+  const [expanded, setExpanded] = useState(expandedDefault);
+  const actions = Array.isArray(turn.actions) ? turn.actions : [];
+  const typeSummary = actions.map((a) => a.type).slice(0, 5).join(", ");
+  const tokensFmt = formatTokens(turn.tokens_after || 0);
+  return (
+    <div className="border border-zinc-800 rounded-md bg-zinc-900/30">
+      <button
+        type="button"
+        className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left hover:bg-zinc-800/40 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <div className="flex items-baseline gap-3 min-w-0">
+          <span className="text-sm font-mono text-zinc-200">Turn {turn.turn_n}</span>
+          <span className="text-xs text-zinc-500 font-mono">{formatClockTime(turn.epoch)}</span>
+          <span className="text-xs text-zinc-400 truncate">
+            {actions.length} {actions.length === 1 ? "action" : "actions"}
+            {typeSummary ? `: ${typeSummary}` : ""}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[11px] text-zinc-500 font-mono">tokens {tokensFmt}</span>
+          <span className="text-zinc-500 text-xs">{expanded ? "▾" : "▸"}</span>
+        </div>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 space-y-2">
+          {actions.length === 0 ? (
+            <div className="text-xs text-zinc-600 italic px-3 py-2">(no actions)</div>
+          ) : (
+            actions.map((a, i) => <ActionRow key={i} action={a} />)
+          )}
+          {Array.isArray(turn.reasons) && turn.reasons.length > 0 && (
+            <div className="text-[11px] text-zinc-500 italic px-3 pt-1 border-t border-zinc-800/60">
+              {turn.reasons.join(" · ")}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TurnTimeline({ turns }) {
+  const [filter, setFilter] = useState("all");
+  const allTypes = useMemo(() => {
+    const types = new Set();
+    for (const t of turns) {
+      if (Array.isArray(t.actions)) {
+        for (const a of t.actions) {
+          if (a?.type) types.add(a.type);
+        }
+      }
+    }
+    return Array.from(types).sort();
+  }, [turns]);
+
+  const filteredTurns = useMemo(() => {
+    if (filter === "all") return turns;
+    return turns.filter((t) =>
+      Array.isArray(t.actions) && t.actions.some((a) => a?.type === filter),
+    );
+  }, [turns, filter]);
+
+  return (
+    <div className="border border-zinc-800 rounded-lg p-5 bg-zinc-900/40 space-y-4">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-base font-semibold text-zinc-100">Turn timeline</h2>
+        <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+          showing {filteredTurns.length} of {turns.length}
+        </span>
+      </div>
+      {allTypes.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() => setFilter("all")}
+            className={`text-[11px] px-2 py-0.5 rounded-full border ${filter === "all" ? "border-emerald-500/50 bg-emerald-900/20 text-emerald-300" : "border-zinc-700 text-zinc-400 hover:border-zinc-600"}`}
+          >
+            all
+          </button>
+          {allTypes.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setFilter(t)}
+              className={`text-[11px] px-2 py-0.5 rounded-full border font-mono ${filter === t ? "border-emerald-500/50 bg-emerald-900/20 text-emerald-300" : "border-zinc-700 text-zinc-400 hover:border-zinc-600"}`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="space-y-1.5">
+        {filteredTurns.length === 0 ? (
+          <div className="text-sm text-zinc-500 italic">No turns recorded yet for this run.</div>
+        ) : (
+          filteredTurns.map((turn, idx) => (
+            // Most-recent 10 expanded by default; older collapsed.
+            <TurnRow key={turn.turn_n} turn={turn} expandedDefault={idx < 10} />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Autopilot() {
   const { data, error, loading } = useApi("/autopilot/runs/current", { poll: 5000 });
 
@@ -106,7 +386,7 @@ export default function Autopilot() {
     return (
       <div className="p-6">
         <h1 className="text-2xl font-bold text-white mb-2">Autopilot</h1>
-        <p className="text-sm text-zinc-500 mb-6">Slice 1 — "Is it alive?" header strip.</p>
+        <p className="text-sm text-zinc-500 mb-6">Slices 1+2 — header strip + pipeline snapshot + turn timeline.</p>
         <div className="border border-zinc-800 rounded-lg p-6 bg-zinc-900/50">
           {isNoRun ? (
             <>
@@ -134,14 +414,18 @@ export default function Autopilot() {
   const wallClockMax = Number(limits.wall_clock_max_sec) || 0;
   const idleDrainMax = Number(limits.idle_drain_turns) || 0;
   const key = statusKey(run);
+  const turns = Array.isArray(run.turns) ? run.turns : [];
+  const latestTurn = turns[0] || null;
 
   return (
-    <div className="p-6">
-      <div className="flex items-baseline justify-between mb-1">
-        <h1 className="text-2xl font-bold text-white">Autopilot</h1>
-        <span className="text-xs text-zinc-500 font-mono">polls every 5s</span>
+    <div className="p-6 space-y-5">
+      <div>
+        <div className="flex items-baseline justify-between mb-1">
+          <h1 className="text-2xl font-bold text-white">Autopilot</h1>
+          <span className="text-xs text-zinc-500 font-mono">polls every 5s</span>
+        </div>
+        <p className="text-sm text-zinc-500">Slices 1+2 — header strip + pipeline snapshot + turn timeline.</p>
       </div>
-      <p className="text-sm text-zinc-500 mb-6">Slice 1 — "Is it alive?" header strip.</p>
 
       <div className="border border-zinc-800 rounded-lg p-5 bg-zinc-900/40 space-y-5">
         <div className="flex items-center gap-3 flex-wrap">
@@ -189,10 +473,17 @@ export default function Autopilot() {
           />
         </div>
 
-        <p className="text-xs text-zinc-600 italic">
-          Slice 2 wires per-turn writes — until then, token / idle counters stay at zero.
-        </p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-1 border-t border-zinc-800/60">
+          <MetaCell label="Turns" value={String(run.turns || 0)} mono />
+          <MetaCell label="Dispatches" value={String(run.dispatches || 0)} mono />
+          <MetaCell label="Cum. tokens" value={formatTokens(run.cumulative_tokens || 0)} mono />
+          <MetaCell label="Idle turns" value={String(run.idle_turns || 0)} mono />
+        </div>
       </div>
+
+      <PipelineSnapshot run={run} latestTurn={latestTurn} />
+
+      <TurnTimeline turns={turns} />
     </div>
   );
 }
