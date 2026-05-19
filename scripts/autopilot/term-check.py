@@ -27,9 +27,39 @@ import json
 import os
 import sys
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
+HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
+
+
+def post_run_end(run_id: str, cause: str, ended_epoch: int) -> None:
+    """Best-effort POST to /api/autopilot/run-end (issue #497).
+
+    Failure is logged to stderr but never propagates — term-check.py exits 0
+    so the playbook can still terminate gracefully even if the orchestrator
+    is unreachable. The endpoint is idempotent, so playbook retries are safe.
+    """
+    if not run_id:
+        return
+    payload = json.dumps({
+        "run_id": run_id,
+        "cause": cause,
+        "ended_epoch": ended_epoch,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/autopilot/run-end",
+        data=payload,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        print(f"[autopilot] term-check run-end POST failed: {exc}", file=sys.stderr)
 
 
 def main() -> int:
@@ -39,21 +69,34 @@ def main() -> int:
         return 0
     s = json.loads(STATE_PATH.read_text())
     limits = s["limits"]
-    elapsed = int(time.time()) - s["started_epoch"]
+    now = int(time.time())
+    elapsed = now - s["started_epoch"]
     tokens = s["cumulative_tokens"]
     slots_occupied = sum(1 for v in s["slots"].values() if v is not None)
+    run_id = s.get("run_id", "")
 
+    cause: str | None = None
     if tokens >= limits["token_budget"]:
+        cause = "budget"
         print(f"TERM:budget tokens={tokens}/{limits['token_budget']} elapsed={elapsed}s")
     elif elapsed >= limits["wall_clock_max_sec"]:
+        cause = "wall_clock"
         print(f"TERM:wall_clock elapsed={elapsed}s/{limits['wall_clock_max_sec']}s tokens={tokens}")
     elif s["idle_turns"] >= limits["idle_drain_turns"] and slots_occupied == 0:
+        cause = "idle"
         print(f"TERM:idle idle_turns={s['idle_turns']} slots=0")
     else:
         print(
             f"OK elapsed={elapsed}s tokens={tokens}/{limits['token_budget']} "
             f"idle={s['idle_turns']}/{limits['idle_drain_turns']} slots={slots_occupied}"
         )
+
+    # Issue #497 — register the terminal transition with the orchestrator so
+    # the /autopilot dashboard reflects the actual term_reason instead of
+    # waiting for the read-time sweeper to misclassify it as `crash`.
+    if cause is not None:
+        post_run_end(run_id, cause, now)
+
     return 0
 
 
