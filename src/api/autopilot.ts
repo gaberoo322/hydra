@@ -82,6 +82,14 @@ const JOURNAL_CMD_OVERRIDE = process.env.HYDRA_AUTOPILOT_JOURNAL_CMD;
 
 const CYCLE_TTL_SECONDS = 7 * 24 * 3600; // 7 days — matches /cycle/register
 const RUN_TTL_SECONDS = 7 * 24 * 3600; // 7 days — autopilot run rows
+// Slice-4 (issue #500) — soft cap on the number of turns the detail
+// endpoint / history-row digest will fetch per run. Slice-1 imposes a 7d
+// TTL on the turns ZSET, and token-budget limits keep autopilot runs well
+// under a few hundred turns; 10k is two orders of magnitude above that
+// ceiling so the cap only ever bites pathological data. Keeps the LIMIT
+// arg within Redis's 64-bit signed-int comfort zone.
+const RUN_TURNS_MAX_FETCH = 10000;
+
 // Wedge-detection threshold (issue #497). Read-only metadata in GET response;
 // no Redis write. 10 minutes matches the operator-playbook expectation that a
 // healthy autopilot turn completes well under that, and pre-#435 wedges hung
@@ -498,6 +506,60 @@ export function createAutopilotRouter() {
   });
 
   // -------------------------------------------------------------------------
+  // GET /autopilot/runs (issue #500, slice 4) — history table on /autopilot.
+  //
+  // Returns the most-recent N runs (default 14) from `hydra:autopilot:runs:index`
+  // (ZSET, score desc by started_epoch). Each entry is a DIGEST row containing
+  // the fields the history table renders + the cost-breakdown totals computed
+  // from cycle joins.
+  //
+  // Slice-3 AC12 pattern: this endpoint is read-only relative to Redis EXCEPT
+  // for the inherited slice-1 read-time sweeper, which promotes `running →
+  // killed/crash` on rows whose pid is dead. That promotion is idempotent and
+  // pre-existed; no NEW writes are introduced by slice 4. No new top-level
+  // fields on `hydra:autopilot:run:<id>` (slice-2 AC10 schema closure holds).
+  //
+  // Query params:
+  //   ?limit=N — clamped to [1, 50], default 14 per issue body.
+  //
+  // Response shape:
+  //   { runs: [ digest, ... ] }
+  // -------------------------------------------------------------------------
+  router.get("/autopilot/runs", async (req, res) => {
+    try {
+      const limitRaw = req.query.limit;
+      const limit = clampInt(
+        limitRaw === undefined ? 14 : Number(limitRaw),
+        1,
+        50,
+        14,
+      );
+
+      // ZREVRANGE 0 limit-1 → most recent N by started_epoch score.
+      const runIds = await zRevRange(redisKeys.autopilotRunsIndex(), 0, limit - 1);
+      if (!runIds || runIds.length === 0) {
+        return res.json({ runs: [] });
+      }
+
+      const digests: Array<Record<string, unknown>> = [];
+      for (const runId of runIds) {
+        const row = await hashGetAll(redisKeys.autopilotRun(runId));
+        if (!row || !row.started) continue; // index ahead of hash (TTL race)
+        // Apply the same read-time sweeper used on /runs/current — dead-pid
+        // `running` rows in history must show as killed/crash, not running.
+        const sweepResult = await sweepRunIfDead(runId, row);
+        const digest = await projectRunDigest(runId, sweepResult.row);
+        digests.push(digest);
+      }
+
+      return res.json({ runs: digests });
+    } catch (err: any) {
+      console.error(`[autopilot] runs list failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // GET /autopilot/runs/current (issue #497) — header strip on /autopilot.
   //
   // Returns the most recent run by started_epoch. On `running` rows, applies
@@ -540,6 +602,14 @@ export function createAutopilotRouter() {
       // clients ignore unknown fields, so this is additive and safe.
       const turns = await fetchTurnsWithJoins(runId, 50);
       (view as any).turns = turns;
+
+      // Slice 4 (issue #500) — attach cost breakdown computed from the
+      // dispatch cycles in this run. Sourced from the SAME turns we just
+      // fetched (zero extra Redis hits beyond the slice-2 fetch). Schema-
+      // closure-safe: returned only on the response view, never written to
+      // the run hash.
+      const cost = computeCostBreakdown(turns);
+      (view as any).cost = cost;
 
       return res.json(view);
     } catch (err: any) {
@@ -663,6 +733,58 @@ export function createAutopilotRouter() {
       return res.status(200).send(result.text);
     } catch (err: any) {
       console.error(`[autopilot] runs/:runId/journal failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /autopilot/runs/:runId (issue #500, slice 4) — full detail for a
+  // single (historical or live) run. Powers the /autopilot/:runId page.
+  //
+  // Body shape:
+  //   {
+  //     run:   { ...projectRunView fields..., cost: { ... } },
+  //     turns: [ ...ALL turns (no 50 cap), with cycle joins... ]
+  //   }
+  //
+  // Slice-3 AC12 read-only-relative-to-Redis pattern: no writes EXCEPT the
+  // inherited slice-1 sweep promotion. 404 on unknown runId.
+  //
+  // Note `/runs/current` has a 50-turn cap; this endpoint deliberately omits
+  // that cap because the detail page needs the full timeline (issue body:
+  // "Turn timeline still expandable, but shows all turns").
+  // -------------------------------------------------------------------------
+  router.get("/autopilot/runs/:runId", async (req, res) => {
+    try {
+      const runId = String(req.params.runId || "").trim();
+      if (!runId) {
+        return res.status(400).json({ error: "Missing runId" });
+      }
+      // Guard: `current` is a sibling path, not a runId. Express has already
+      // routed `/runs/current` to the more-specific handler above, so this
+      // defensive check only catches truly malformed inputs.
+      if (runId === "current") {
+        return res.status(400).json({ error: "use GET /autopilot/runs/current" });
+      }
+
+      const row = await hashGetAll(redisKeys.autopilotRun(runId));
+      if (!row || !row.started) {
+        return res.status(404).json({ error: `unknown run_id: ${runId}` });
+      }
+
+      const sweepResult = await sweepRunIfDead(runId, row);
+      const view = projectRunView(sweepResult.row);
+
+      // No 50-cap: pass RUN_TURNS_MAX_FETCH so the helper's ZREVRANGEBYSCORE
+      // returns every turn for this run. Run TTL is 7d, so the worst case is
+      // a few thousand rows — well within a single Redis RTT.
+      const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH);
+      const cost = computeCostBreakdown(turns);
+      (view as any).cost = cost;
+
+      return res.json({ run: view, turns });
+    } catch (err: any) {
+      console.error(`[autopilot] runs/:runId failed: ${err?.message || err}`);
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });
@@ -1160,4 +1282,136 @@ function numberOrDefault(v: unknown, fallback: number): number {
     if (Number.isFinite(n)) return n;
   }
   return fallback;
+}
+
+/**
+ * Clamp an integer to [min, max], falling back to `fallback` for NaN /
+ * non-finite / non-integer inputs. Used for query-string limits where a
+ * misbehaving caller shouldn't be able to drive an unbounded ZRANGE.
+ */
+export function clampInt(n: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return fallback;
+  if (n < min) return min;
+  if (n > max) return max;
+  return n;
+}
+
+/**
+ * Compute the slice-4 cost breakdown from a set of (already-joined) turn
+ * rows. Sums `outcome.costUsd` across all dispatch actions in this run.
+ *
+ * `orchestration_cost_usd` is always 0 — the outer `claude -p /hydra-autopilot`
+ * call is subscription-billed (see issue body). It's surfaced as a separate
+ * field so the dashboard can render the explicit "(subscription)" annotation
+ * without inferring it.
+ *
+ * Returns:
+ *   {
+ *     orchestration_cost_usd: 0,
+ *     dispatched_cost_usd:    sum,        // joined from cycle records
+ *     dispatch_count:         N,          // total dispatch actions (any outcome)
+ *     dispatch_count_with_cost: M,        // dispatches whose cycle had costUsd
+ *   }
+ *
+ * Exported for direct test access.
+ */
+export function computeCostBreakdown(
+  turns: Array<Record<string, unknown>>,
+): {
+  orchestration_cost_usd: number;
+  dispatched_cost_usd: number;
+  dispatch_count: number;
+  dispatch_count_with_cost: number;
+} {
+  let dispatched = 0;
+  let dispatchCount = 0;
+  let withCost = 0;
+  for (const turn of turns) {
+    const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
+    for (const a of actions) {
+      if (a && a.type === "dispatch") {
+        dispatchCount += 1;
+        const outcome = a.outcome;
+        if (outcome && typeof outcome === "object") {
+          const c = (outcome as any).costUsd;
+          if (typeof c === "number" && Number.isFinite(c)) {
+            dispatched += c;
+            withCost += 1;
+          }
+        }
+      }
+    }
+  }
+  return {
+    orchestration_cost_usd: 0,
+    dispatched_cost_usd: Number(dispatched.toFixed(6)),
+    dispatch_count: dispatchCount,
+    dispatch_count_with_cost: withCost,
+  };
+}
+
+/**
+ * Project a single run hash + its joined turns into the digest shape used by
+ * the history table. Performs ONE turn-fetch per run (the table needs the
+ * cost total, which we get from the same joins we'd do for the live page).
+ *
+ * Fields match the issue body's column list:
+ *   run_id, started, ended, duration_s, status, term_reason, trigger,
+ *   turns, dispatches, merged_count, failed_count, total_tokens,
+ *   total_cost_usd, exit_code
+ */
+export async function projectRunDigest(
+  runId: string,
+  row: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  // We need the dispatch actions to compute merged_count / failed_count /
+  // total_cost_usd. The run hash already gives us `dispatches` as a counter
+  // but not the breakdown by outcome — that requires walking the joined turns.
+  //
+  // Use a generous cap (RUN_TURNS_MAX_FETCH) so we never under-count for
+  // long runs. Run TTL is 7d, dispatches per run are bounded by token budget.
+  const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH);
+  const cost = computeCostBreakdown(turns);
+
+  let merged = 0;
+  let failed = 0;
+  for (const turn of turns) {
+    const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
+    for (const a of actions) {
+      if (a && a.type === "dispatch" && a.outcome && typeof a.outcome === "object") {
+        const status = String((a.outcome as any).status || "").toLowerCase();
+        if (MERGED_STATUSES.has(status)) merged += 1;
+        else if (FAILED_STATUSES.has(status)) failed += 1;
+        // else: "running"/"pending"/unknown — uncounted in the digest (it's a
+        // history view; in-flight outcomes resolve next refresh).
+      }
+    }
+  }
+
+  const startedEpoch = Number(row.started_epoch || "0");
+  const endedEpoch = row.ended_epoch ? Number(row.ended_epoch) : null;
+  const durationS =
+    endedEpoch !== null && Number.isFinite(endedEpoch) && endedEpoch > startedEpoch
+      ? endedEpoch - startedEpoch
+      : row.status === "running"
+        ? Math.max(0, Math.floor(Date.now() / 1000) - startedEpoch)
+        : null;
+
+  return {
+    run_id: row.run_id || runId,
+    started: row.started || "",
+    started_epoch: startedEpoch,
+    ended_epoch: endedEpoch,
+    duration_s: durationS,
+    status: row.status || "running",
+    term_reason: row.term_reason || null,
+    trigger: row.trigger || "manual",
+    turns: Number(row.turns || "0"),
+    dispatches: Number(row.dispatches || "0"),
+    merged_count: merged,
+    failed_count: failed,
+    total_tokens: Number(row.cumulative_tokens || "0"),
+    total_cost_usd: cost.dispatched_cost_usd,
+    exit_code: row.exit_code !== undefined ? Number(row.exit_code) : null,
+  };
 }

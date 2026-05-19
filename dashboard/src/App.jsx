@@ -19,6 +19,7 @@ import Calibration from "./pages/Calibration.jsx";
 import Checklist from "./pages/Checklist.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
+import AgentStream from "./pages/AgentStream.jsx";
 
 export default function App() {
   const ws = useWebSocket();
@@ -44,6 +45,12 @@ export default function App() {
           <Route path="/calibration" element={<Calibration />} />
           <Route path="/checklist" element={<Checklist />} />
           <Route path="/autopilot" element={<Autopilot />} />
+          {/* Slice 4 (issue #500) — per-run detail page. */}
+          <Route path="/autopilot/:runId" element={<Autopilot />} />
+          {/* Slice 4 (issue #500) — AgentStream subroute for the `?agent=`
+              cross-link filter. The bare /agents route still maps to the
+              memory page. */}
+          <Route path="/agents/stream" element={<AgentStream ws={ws} />} />
         </Routes>
       </Layout>
     </ToastProvider>
