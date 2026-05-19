@@ -760,7 +760,11 @@ describe("decide.py — plan shape contract", () => {
       "design_concept_orch",
       "dev_orch", "dev_target", "qa_orch", "qa_target", "research_orch", "research_target",
     ]);
-    assert.equal(firstLine.action_types.length, 9, "exactly 9 action types per AC");
+    // Issue #509 added the 10th action type `wait_or_reap` — the silent-
+    // wedge fallback emitted when an active slot ages past
+    // subagent_max_wall_seconds with no matching SubagentStop event.
+    assert.equal(firstLine.action_types.length, 10, "exactly 10 action types (9 + wait_or_reap per #509)");
+    assert.ok(firstLine.action_types.includes("wait_or_reap"), "wait_or_reap must be in the catalog");
   });
 });
 

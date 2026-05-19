@@ -129,6 +129,24 @@ else: print("")')
     generated_count=$((generated_count+1))
   fi
 
+  # Companion settings.json (issue #509): if the playbook ships a sibling
+  # `<name>.settings.json` (currently used by hydra-autopilot for hook
+  # registration), copy it to the skill's `.claude/settings.json` so the
+  # harness picks it up on next session start. The companion file is a
+  # plain JSON object; we don't mutate it during sync. Hook scripts that
+  # the settings reference are expected to live in the orchestrator repo
+  # at stable absolute paths (e.g. /home/gabe/hydra/scripts/autopilot/hooks/).
+  settings_src="$PLAYBOOKS/${name}.settings.json"
+  if [ -f "$settings_src" ]; then
+    settings_target="$CLAUDE_DIR/$name/.claude/settings.json"
+    if [ "$DRY_RUN" = 1 ]; then
+      echo "would write $settings_target"
+    else
+      mkdir -p "$(dirname "$settings_target")"
+      cp "$settings_src" "$settings_target"
+    fi
+  fi
+
   # ---- Codex SKILL.md ----
   if [ "$claude_only" = "1" ]; then
     claude_only_count=$((claude_only_count+1))

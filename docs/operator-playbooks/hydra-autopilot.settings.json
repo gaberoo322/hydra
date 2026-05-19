@@ -1,0 +1,27 @@
+{
+  "_comment": "Claude Code hook registrations for the hydra-autopilot skill (issue #509). sync-skills.sh copies this file to ~/.claude/skills/hydra-autopilot/.claude/settings.json. The hook scripts live in the orchestrator repo at scripts/autopilot/hooks/ — paths are absolute so the harness can find them regardless of the autopilot session's cwd.",
+  "hooks": {
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/gabe/hydra/scripts/autopilot/hooks/on-subagent-stop.sh"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/gabe/hydra/scripts/autopilot/hooks/on-subagent-permission-wait.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
