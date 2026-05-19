@@ -75,13 +75,15 @@ state.json {
     "research_target": null | { ... }
   }
 
-  # NEW IN #426 — signal-driven classes track only `last_fired_at` (no slot)
+  # NEW IN #426 — signal-driven classes track only `last_fired_at` (no slot).
+  # `scout_orch` was added in #485 (Phase B of /hydra-tool-scout).
   "signal_last_fired": {
     "health":          unix-epoch | 0
     "sweep_orch":      unix-epoch | 0
     "sweep_target":    unix-epoch | 0
     "discover_orch":   unix-epoch | 0
     "discover_target": unix-epoch | 0
+    "scout_orch":      unix-epoch | 0
   }
 
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
@@ -167,6 +169,12 @@ SIGNAL_CLASSES = (
     "sweep_target",
     "discover_orch",
     "discover_target",
+    # scout_orch (issue #485, Phase B of /hydra-tool-scout epic): weekly
+    # calendar walk over the AI-leverage taxonomy + runtime deps. Calendar-
+    # driven, 7d cooldown — see src/scout/calendar-walk.ts for the walker
+    # itself. Phase A (#484) shipped the skill + seen-list; Phase B wires
+    # the autopilot dispatch so the walk runs unattended.
+    "scout_orch",
 )
 
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
@@ -177,6 +185,12 @@ SIGNAL_COOLDOWNS = {
     "sweep_target":    900,
     "discover_orch":   1800,   # 30 min
     "discover_target": 1800,
+    # 7 days. The calendar walk takes ~a week's worth of context to digest
+    # (10 categories + 2 dep manifests ≈ 12 dispatches; running it more
+    # often produces duplicate work because the per-category cooldown is
+    # 30d). Per-class cooldown is the back-stop; per-category cooldown is
+    # the primary suppressor. See docs/operator-playbooks/hydra-autopilot.md.
+    "scout_orch":      7 * 24 * 60 * 60,
 }
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
@@ -232,6 +246,11 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # design_concept_orch is orch-scope by definition (issue #466) —
     # excluded under target-only just like dev_orch / qa_orch / etc.
     "design_concept_orch",
+    # scout_orch (issue #485) walks the orchestrator's AI-leverage
+    # taxonomy + the orchestrator+dashboard runtime deps — purely orch-
+    # scope work. Under `target-only` the autopilot is told to stay out
+    # of orch issues; scout_orch belongs in that exclusion.
+    "scout_orch",
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -841,7 +860,18 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     # we must NOT re-dispatch it for the rest of this session, mirroring
     # the pipeline-slot suppression in step 4. Before #432 this check
     # was missing and only pipeline slots were honored.
-    for sig in ("health", "sweep_orch", "sweep_target", "discover_orch", "discover_target"):
+    for sig in (
+        "health",
+        "sweep_orch",
+        "sweep_target",
+        "discover_orch",
+        "discover_target",
+        # scout_orch (issue #485, Phase B) — calendar-driven, 7d cooldown.
+        # collect-state.sh emits `scout_walk_due` when the per-class
+        # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
+        # back-stop in parallel.
+        "scout_orch",
+    ):
         if scope_excluded(scope, sig):
             continue
         if sig in burned:
@@ -1162,6 +1192,28 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         if _signal_present(state, events, "target_idle"):
             return make_dispatch(sig, "hydra-target-discover", reason="target diagnostics due")
         return None
+    if sig == "scout_orch":
+        # Issue #485 (Phase B of /hydra-tool-scout, parent #483). Fires when
+        # the weekly walk is due AND the orchestrator board isn't already
+        # saturated with proposal-grade work — the playbook prose pins the
+        # `>20 open enhancement issues` ceiling (see hydra-tool-scout.md
+        # "When NOT to run this"). decide.py honors it via the
+        # `scout_board_saturated` signal so the gate is checked once at
+        # collect-state.sh time, not re-parsed here.
+        #
+        # The actual category/dep selection is in `src/scout/calendar-walk.ts`;
+        # decide.py only emits the dispatch — the skill itself walks the
+        # planner output and invokes one scout per eligible target.
+        if not _signal_present(state, events, "scout_walk_due"):
+            return None
+        if _signal_present(state, events, "scout_board_saturated"):
+            return None
+        return make_dispatch(
+            sig,
+            "hydra-tool-scout",
+            prompt_args={"trigger": "calendar"},
+            reason="weekly calendar walk due",
+        )
     return None
 
 

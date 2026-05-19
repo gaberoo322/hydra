@@ -166,6 +166,25 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   scoutToolsConsidered: (slug: string) => `hydra:scout:tools-considered:${slug}`,
 
+  // Tool Scout — Phase B calendar walk (issue #485).
+  //
+  // `scoutLastCalendarWalk`: ISO-8601 UTC timestamp of the most recent
+  //   weekly walk dispatch. Read by collect-state.sh to compute the
+  //   `scout_walk_due` signal (true when >7d old). Not TTLed — the value
+  //   is a heartbeat, not a session record.
+  //
+  // `scoutCategoryLastWalked`: ISO-8601 UTC timestamp of the most recent
+  //   scout dispatch for a given category slug. Per-category cooldown
+  //   (default 30d) is computed against this. One key per category.
+  //
+  // `scoutStatsDaily`: hash of per-day per-category counters (candidates
+  //   surfaced / filtered / filed / dropped / rejected). 14d TTL — the
+  //   `/api/scout/stats` endpoint window is "last week" so two weeks of
+  //   retention is enough headroom.
+  scoutLastCalendarWalk: () => "hydra:scout:last-calendar-walk",
+  scoutCategoryLastWalked: (category: string) => `hydra:scout:category-last-walked:${category}`,
+  scoutStatsDaily: (isoDate: string) => `hydra:scout:stats:${isoDate}`,
+
   // ---------------------------------------------------------------------------
   // Locks
   // ---------------------------------------------------------------------------

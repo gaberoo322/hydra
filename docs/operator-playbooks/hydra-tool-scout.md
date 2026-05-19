@@ -1,7 +1,7 @@
 ---
 name: hydra-tool-scout
 description: Scout for new tools/libraries/skills that would amplify Hydra's autonomous coding leverage. Discovers candidates in a named category, filters them through a three-gate rubric (AI-leverage score, maintenance gate, dedup seen-list), and files GitHub issues for the survivors.
-when_to_use: "When the operator says 'scout tools', '/hydra-tool-scout <category>', or wants to discover new tooling that would make the AI agents faster/safer/more capable in a specific category. Phase A is operator-invoked only — no autopilot wiring."
+when_to_use: "When the operator says 'scout tools', '/hydra-tool-scout <category>', or wants to discover new tooling that would make the AI agents faster/safer/more capable in a specific category. Phase B (issue #485) wires this into the autopilot via the `scout_orch` signal class — calendar-driven, 7-day cooldown."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) WebFetch(*) WebSearch(*)
 arguments: [category]
 claude_only: true
@@ -25,7 +25,7 @@ Phases B/C/D (alert subscriptions, calendar walk, gap-driven triggers) are defer
 
 - Without a category argument. The scout is a depth-first walker, not a breadth-first one — it expects to be pointed at one taxonomy entry per invocation.
 - When the orchestrator board is already saturated with proposal-grade issues (>20 open `enhancement` issues). The operator should drain the queue before adding more.
-- From an autopilot loop. Phase A is **operator-invoked only.** The dispatcher in `scripts/autopilot/decide.py` deliberately does not have a `scout` class yet.
+- (Phase A only — see Phase B below.) ~~From an autopilot loop.~~ Phase B (issue #485) wires this into the autopilot as the `scout_orch` signal class. The autopilot dispatch passes `trigger: "calendar"` in `prompt_args`; manual invocations still use `trigger: "manual"`.
 
 ## Inputs
 
@@ -203,16 +203,24 @@ Expected:
 - Re-running `/hydra-tool-scout typed-schemas` immediately produces zero new issues — the dedup cooldown holds.
 - The operator either moves a filed issue to `ready-for-agent` (acceptance) or closes it with `wontfix` (which re-feeds the seen-list).
 
-## Out of scope (Phase A)
+## Out of scope (Phase A/B)
 
 | Item | Lands in |
 |---|---|
-| Autopilot `scout` class + `decide.py` wiring | Phase B (issue TBD) |
-| Calendar walk (one category per week, round-robin) | Phase B |
-| Alert subscriptions (npm advisories, GitHub security alerts) | Phase C |
+| Autopilot `scout_orch` class + `decide.py` wiring | **Phase B (issue #485) — shipped** |
+| Calendar walk (one walk/week over categories + deps) | **Phase B (issue #485) — shipped** |
+| Alert subscriptions (npm advisories, GitHub security alerts) | Phase C (issue #486) |
 | Gap-driven triggers (e.g. "the same lesson fired 3x → scout the related category") | Phase D |
 | Vibe-driven triggers (operator hunches surfaced via Redis hint) | Phase D |
 | Auto-PRs that actually integrate a tool | Never — that is dev_orch's job; the scout files an issue and stops. |
+
+### Phase B wiring summary (issue #485)
+
+- `scout_orch` signal class (7d per-class cooldown in `decide.py:SIGNAL_COOLDOWNS`).
+- Walk planner: `src/scout/calendar-walk.ts:planWalk()` — builds the (category, dep) target list with per-category cooldown (30d default).
+- Per-tool cooldown (90d) is honored inside the scout via the Phase A seen-list.
+- Stats: `/api/scout/stats?window=7` returns last-week activity per category.
+- Cost slice: `SCOUT_DAILY_COST_SHARE = 0.04` (~\$2/day on a \$50 cap); operators override via `state.limits.scout_cost_share`.
 
 See parent epic #483 for the full roadmap.
 
