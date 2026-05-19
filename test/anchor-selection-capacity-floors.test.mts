@@ -122,19 +122,19 @@ describe("dispatchCapacityFloor — pure dispatcher (issue #321)", () => {
     );
     const result = await dispatchCapacityFloor([
       {
-        name: "specs",
+        name: "self-improvement",
         priority: 1, // wins ties
-        async prepare() { return { deficit: 3, share: 0, targetShare: 1 / 3, payload: {} }; },
-        async buildAnchor() { return { type: "user-request", reference: "specs" }; },
+        async prepare() { return { deficit: 3, share: 0, targetShare: 0.25, payload: {} }; },
+        async buildAnchor() { return { type: "user-request", reference: "self-improvement" }; },
       },
       {
-        name: "self-improvement",
+        name: "reframe",
         priority: 2,
-        async prepare() { return { deficit: 3, share: 0, targetShare: 0.25, payload: {} }; },
+        async prepare() { return { deficit: 3, share: 0, targetShare: 1 / 5, payload: {} }; },
         async buildAnchor() { throw new Error("loser should not build"); },
       },
     ]);
-    assert.equal(result.firedFloor, "specs");
+    assert.equal(result.firedFloor, "self-improvement");
   });
 
   test("a failing prepare() is logged and skipped, doesn't poison the dispatcher", async () => {
@@ -191,15 +191,20 @@ describe("loadCapacityFloorsConfig — env vars (issue #321)", () => {
 // ---------------------------------------------------------------------------
 
 describe("default floors composition (issue #321)", () => {
-  test("defaultCapacityFloors returns the stuckness/self-improvement floor", async () => {
+  test("defaultCapacityFloors returns [self-improvement, reframe] in priority order", async () => {
     const { defaultCapacityFloors } = await import(
       "../src/anchor-selection/capacity-floors.ts"
     );
     const floors = defaultCapacityFloors({});
-    // Specs floor retired in #513; self-improvement is the only declared
-    // floor today. The scaffolding remains so future floors plug in.
-    assert.equal(floors.length, 1);
+    // Specs floor retired in #513; issue #377 added the reframe floor as
+    // the second declaration. The dispatcher scaffolding stays so future
+    // floors plug in cleanly without reintroducing the stacking bug.
+    assert.equal(floors.length, 2);
     assert.equal(floors[0].name, "self-improvement");
+    assert.equal(floors[1].name, "reframe");
+    // Tiebreak priorities are strictly ordered: self-improvement (1) wins
+    // ties against reframe (2). The 25% vision floor is the senior floor.
+    assert.ok(floors[0].priority < floors[1].priority);
   });
 });
 
@@ -306,8 +311,10 @@ describe("getCapacityFloorsSnapshot — API surface (issue #321)", () => {
     );
     const snap = await getCapacityFloorsSnapshot({});
     assert.equal(snap.config.selfImprovement.targetShare, 0.25);
-    const names = snap.floors.map((f) => f.name);
-    assert.deepEqual(names, ["self-improvement"]);
+    // Issue #377 added the reframe floor with cadence default 5.
+    assert.equal(snap.config.reframe.cadenceN, 5);
+    const names = snap.floors.map((f) => f.name).sort();
+    assert.deepEqual(names, ["reframe", "self-improvement"]);
     // Empty Redis → realised share is null (no data yet).
     const si = snap.floors.find((f) => f.name === "self-improvement")!;
     assert.equal(si.realisedShare, null);

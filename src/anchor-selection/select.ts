@@ -15,11 +15,19 @@ import {
 import { WORK_QUEUE, PROCESSING_QUEUE } from "./constants.ts";
 import { selectKanbanAnchor } from "./kanban-tier.ts";
 import { selectWorkQueueAnchor } from "./work-queue-tier.ts";
-import { selectReframeAnchor } from "./reframe-queue-tier.ts";
+import {
+  selectReframeAnchor,
+  hasReframeCandidate,
+} from "./reframe-queue-tier.ts";
 import { selectPriorFailureAnchor } from "./prior-failures-tier.ts";
 import { selectRegressionHuntAnchor } from "./regression-hunt-tier.ts";
 import { selectCodebaseHealthAnchor } from "./codebase-health-tier.ts";
 import { selectPrioritiesDocAnchor } from "./priorities-doc-tier.ts";
+import {
+  recordReframePassedReason,
+  recordReframeServed,
+  type ReframePassedReason,
+} from "./reframe-starvation.ts";
 import {
   dispatchCapacityFloor,
   defaultCapacityFloors,
@@ -49,19 +57,47 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
     console.error(`[ControlLoop] Processing queue recovery failed: ${err.message}`);
   }
 
-  // 1. Explicit user request
+  // Reframe-starvation bookkeeping (issue #377): if a non-reframe tier wins
+  // below, we'll record the reason so operators can see whether reframe is
+  // shadowed because it has nothing to serve or because a higher tier keeps
+  // pre-empting it. We snapshot the "has candidate" flag once here so the
+  // recording at every branch below is consistent within a cycle, and is
+  // also cheap (single LLEN). When false, every recording path below
+  // collapses to `no_reframe_candidate`.
+  let reframeHasCandidate = false;
+  try {
+    reframeHasCandidate = await hasReframeCandidate();
+  } catch (err: any) {
+    console.error(`[AnchorSelection] reframe candidate probe failed: ${err.message}`);
+  }
+  const recordReframeLoss = async (winnerReason: ReframePassedReason) => {
+    const reason: ReframePassedReason = reframeHasCandidate
+      ? winnerReason
+      : "no_reframe_candidate";
+    await recordReframePassedReason(reason);
+  };
+
+  // 1. Explicit user request — operator override is out-of-band, so we
+  //    deliberately don't increment the reframe pass-over gauge here. The
+  //    cyclesSinceReframeServed counter only advances on normal selection
+  //    cycles.
   if (opts.anchor) {
     return { ...opts.anchor, whyNow: "Explicit operator request" };
   }
 
   // 1.2. Capacity-floor dispatcher (issue #321; spec floor retired in #513).
-  //      Stuckness-driven research is the only remaining floor. The
-  //      dispatcher fires at most one floor per cycle; when none are ready
-  //      we fall through to the existing tier chain (kanban → failing tests
-  //      → …).
+  //      Two floors remain: self-improvement (stuckness-driven research)
+  //      and the reframe-queue floor (issue #377). The dispatcher fires at
+  //      most one floor per cycle; when none are ready we fall through to
+  //      the existing tier chain (kanban → failing tests → …).
   try {
     const dispatch = await dispatchCapacityFloor(defaultCapacityFloors(), eventBus);
     if (dispatch.anchor) {
+      // If the reframe floor fired, its buildAnchor() already recorded
+      // recordReframeServed + recordReframePassedReason("force_floor").
+      // For any other floor winning, the floor's onPassedOver hook handled
+      // the reframe pass-over recording (see reframeFloorDecl). No
+      // further bookkeeping needed here.
       return dispatch.anchor;
     }
   } catch (err: any) {
@@ -95,6 +131,7 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
   if (!wipBlocked) {
     const kanban = await selectKanbanAnchor();
     if (kanban.anchor) {
+      await recordReframeLoss("kanban_won");
       return kanban.anchor;
     }
     if (kanban.wipBlocked) wipBlocked = true;
@@ -106,6 +143,7 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
   //      queue items get selected, pass planning, then get rejected by preflight
   //      — wasting cycles.
   if (grounding.failingTests.length > 0) {
+    await recordReframeLoss("failing_tests_won");
     return {
       type: "failing-test",
       reference: grounding.failingTests[0],
@@ -115,6 +153,7 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
 
   // 2.8. Typecheck errors
   if (grounding.typecheckReport.exitCode !== 0) {
+    await recordReframeLoss("failing_tests_won");
     return {
       type: "failing-test",
       reference: "typecheck",
@@ -124,18 +163,35 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
 
   // 3. Work queue items (from POST /queue or research auto-queue) — NOT WIP-gated.
   const workQueueAnchor = await selectWorkQueueAnchor();
-  if (workQueueAnchor) return workQueueAnchor;
+  if (workQueueAnchor) {
+    await recordReframeLoss("work_queue_won");
+    return workQueueAnchor;
+  }
 
   // 4.5. Reframe queue — tasks that failed repeatedly and need a fresh approach
   const reframeAnchor = await selectReframeAnchor();
-  if (reframeAnchor) return reframeAnchor;
+  if (reframeAnchor) {
+    // This is the natural-priority win (reframe lane reached without
+    // capacity-floor pre-emption). Reset the starvation gauge and stamp
+    // the last-served timestamp. We do NOT also call
+    // recordReframePassedReason("force_floor") here — that's reserved
+    // for the floor-driven path so operators can distinguish "served
+    // because no one else had work" from "served because the floor
+    // forced pre-emption."
+    await recordReframeServed();
+    return reframeAnchor;
+  }
 
   // 5. Prior failures from Redis
   const priorFailureAnchor = await selectPriorFailureAnchor();
-  if (priorFailureAnchor) return priorFailureAnchor;
+  if (priorFailureAnchor) {
+    await recordReframeLoss("prior_failure_won");
+    return priorFailureAnchor;
+  }
 
   // 5. TODO/FIXME markers in code — developer-written signals of known gaps
   if (grounding.todoMarkers?.length > 0) {
+    await recordReframeLoss("codebase_health_won");
     return {
       type: "issue",
       reference: grounding.todoMarkers[0],
@@ -146,12 +202,19 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
 
   // 5.5. Regression hunt — every 10 merges, test recent features for edge cases
   const regressionHunt = await selectRegressionHuntAnchor();
-  if (regressionHunt) return regressionHunt;
+  if (regressionHunt) {
+    await recordReframeLoss("regression_hunt_won");
+    return regressionHunt;
+  }
 
   // 6. Codebase health — reductive improvements (split, consolidate, document)
   const healthAnchor = await selectCodebaseHealthAnchor(grounding);
-  if (healthAnchor) return healthAnchor;
+  if (healthAnchor) {
+    await recordReframeLoss("codebase_health_won");
+    return healthAnchor;
+  }
 
   // 7. Fall back to priorities doc — with saturation/staleness gates
+  await recordReframeLoss("priorities_doc_won");
   return await selectPrioritiesDocAnchor(grounding);
 }
