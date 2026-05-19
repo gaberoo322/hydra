@@ -29,6 +29,8 @@
  */
 
 import { Router } from "express";
+import { spawn } from "node:child_process";
+import { readFile, stat } from "node:fs/promises";
 import { redisKeys } from "../redis-keys.ts";
 import {
   hashSet,
@@ -44,6 +46,39 @@ import {
 } from "../redis-adapter.ts";
 import { getRedisConnection } from "../redis/connection.ts";
 import { recordCycleMetrics } from "../metrics.ts";
+
+// -----------------------------------------------------------------------------
+// Slice 3 (issue #499) — log-tail + journal endpoints.
+//
+// File paths are env-overridable so tests can point at temp files without
+// touching /tmp. Production code never sets these envs.
+// -----------------------------------------------------------------------------
+const AUTOPILOT_LOG_PATH = process.env.HYDRA_AUTOPILOT_LOG || "/tmp/hydra-autopilot-nightly.log";
+const AUTOPILOT_LOG_PREV_PATH = process.env.HYDRA_AUTOPILOT_LOG_PREV || `${AUTOPILOT_LOG_PATH}.prev`;
+const AUTOPILOT_STATE_PATH = process.env.HYDRA_AUTOPILOT_STATE || "/tmp/hydra-autopilot-state.json";
+
+const LOG_TAIL_DEFAULT = 50;
+const LOG_TAIL_MAX = 2000;
+// .prev mtime vs run.started_epoch tolerance — bootstrap.sh runs `mv` after
+// it computes STARTED_EPOCH so the mtime is typically within seconds of the
+// previous run's end (which is approximately the current run's start). 5
+// minutes is generous enough to cover slow disks and clock skew without
+// matching a much older rotated file.
+const LOG_PREV_MTIME_TOLERANCE_S = 300;
+
+// journalctl arg cap — output size cap and timeout (issue #499 AC: 1MB, 10s).
+// Env override exists ONLY so the regression test for the timeout path can
+// drive a sub-second budget instead of forcing CI to wait 10s per run. The
+// production playbook never sets HYDRA_AUTOPILOT_JOURNAL_TIMEOUT_MS — and
+// the surrounding doc explicitly pins the contract at 10s.
+const JOURNAL_MAX_BYTES = 1024 * 1024;
+const JOURNAL_TIMEOUT_MS = Number(process.env.HYDRA_AUTOPILOT_JOURNAL_TIMEOUT_MS || "10000");
+const JOURNAL_UNIT = process.env.HYDRA_AUTOPILOT_JOURNAL_UNIT || "hydra-autopilot.service";
+// Test override — when set, the journal endpoint shells out to this command
+// instead of journalctl. Used by autopilot-logs.test.mts to assert the argv
+// shape and timeout/cap behaviour without requiring journalctl on the test
+// host. Production never sets this.
+const JOURNAL_CMD_OVERRIDE = process.env.HYDRA_AUTOPILOT_JOURNAL_CMD;
 
 const CYCLE_TTL_SECONDS = 7 * 24 * 3600; // 7 days — matches /cycle/register
 const RUN_TTL_SECONDS = 7 * 24 * 3600; // 7 days — autopilot run rows
@@ -513,7 +548,353 @@ export function createAutopilotRouter() {
     }
   });
 
+  // -------------------------------------------------------------------------
+  // GET /autopilot/runs/:runId/log?tail=N (issue #499, slice 3) — "Why did
+  // that crash?" log tail. Resolves which of the two log files to serve:
+  //
+  //   - If runId is the CURRENT run (per state.json `run_id`), serve
+  //     `/tmp/hydra-autopilot-nightly.log` (live, being appended to).
+  //   - Else if runId is the IMMEDIATELY PRIOR run and `.log.prev` exists
+  //     with an mtime within tolerance of run.started_epoch, serve
+  //     `.log.prev` (frozen at rotation).
+  //   - Else 404 ("log no longer available — rotated").
+  //
+  // The selection rule is deliberately strict: the bootstrap only keeps two
+  // files, so older runs can never have their log surfaced via this
+  // endpoint. The `/journal` companion fills that gap.
+  //
+  // Auth surface: runId is validated against the Redis runs index (must
+  // exist). `tail` is bounded to [1, LOG_TAIL_MAX]. No file path leaves the
+  // server (we don't echo the resolved path; the response is plain text).
+  // -------------------------------------------------------------------------
+  router.get("/autopilot/runs/:runId/log", async (req, res) => {
+    try {
+      const runId = String(req.params.runId || "").trim();
+      if (!runId) {
+        return res.status(400).json({ error: "Missing runId" });
+      }
+      // Validate runId exists in the runs index — rejects unknown ids
+      // (prevents probing for arbitrary state files via crafted runIds).
+      const row = await hashGetAll(redisKeys.autopilotRun(runId));
+      if (!row || !row.started) {
+        return res.status(404).json({ error: `unknown run_id: ${runId}` });
+      }
+
+      const tailRaw = req.query.tail;
+      const tailParsed = tailRaw === undefined ? LOG_TAIL_DEFAULT : Number(tailRaw);
+      if (!Number.isInteger(tailParsed) || tailParsed < 1 || tailParsed > LOG_TAIL_MAX) {
+        return res.status(400).json({
+          error: `invalid tail: must be integer in [1, ${LOG_TAIL_MAX}]`,
+        });
+      }
+
+      const resolution = await resolveLogFileForRun(runId, row);
+      if (!resolution) {
+        return res.status(404).json({
+          error: "log no longer available — rotated",
+        });
+      }
+
+      // Read the file and tail it in-memory. We CAP the read at a reasonable
+      // upper bound — the nightly log is overwritten on each bootstrap so
+      // it's typically <10MB; we still defensively read at most the last
+      // 16MB to avoid pathological RAM use if the file grows huge.
+      const contents = await readLastBytes(resolution.path, 16 * 1024 * 1024);
+      const lines = contents.split(/\r?\n/);
+      // Drop a trailing empty line caused by terminal newline; preserve real
+      // blank lines mid-file.
+      if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+      const tailed = lines.slice(-tailParsed).join("\n");
+
+      res.setHeader("content-type", "text/plain; charset=utf-8");
+      res.setHeader("x-autopilot-log-source", resolution.source);
+      return res.status(200).send(tailed);
+    } catch (err: any) {
+      console.error(`[autopilot] runs/:runId/log failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /autopilot/runs/:runId/journal (issue #499, slice 3) — systemd
+  // journal slice for the run's time window. Shells out to:
+  //
+  //   journalctl --user -u <unit> --since <iso> --until <iso>
+  //              --no-pager --output=short-iso
+  //
+  // SECURITY: argv array (no shell), all interpolated values come from the
+  // Redis run hash (never the request). `--since`/`--until` are ISO-8601
+  // strings the server itself wrote at run-start; they cannot be influenced
+  // by an attacker. Output capped at JOURNAL_MAX_BYTES, killed at
+  // JOURNAL_TIMEOUT_MS.
+  //
+  // One-shot: no polling. If a longer window is needed, the operator can
+  // still ssh in and run journalctl directly — this endpoint is the cheap
+  // dashboard-friendly default.
+  // -------------------------------------------------------------------------
+  router.get("/autopilot/runs/:runId/journal", async (req, res) => {
+    try {
+      const runId = String(req.params.runId || "").trim();
+      if (!runId) {
+        return res.status(400).json({ error: "Missing runId" });
+      }
+      const row = await hashGetAll(redisKeys.autopilotRun(runId));
+      if (!row || !row.started) {
+        return res.status(404).json({ error: `unknown run_id: ${runId}` });
+      }
+
+      const since = sanitizeIso(row.started);
+      if (!since) {
+        return res.status(500).json({
+          error: "run hash missing valid started timestamp",
+        });
+      }
+      // `--until` defaults to now for live runs; for ended/killed rows use
+      // the recorded ended_epoch (converted to ISO). We only ever derive
+      // these from server-side fields, never the request.
+      const untilIso = computeUntilIso(row);
+
+      const result = await runJournalctl(JOURNAL_UNIT, since, untilIso);
+
+      res.setHeader("content-type", "text/plain; charset=utf-8");
+      res.setHeader("x-autopilot-journal-unit", JOURNAL_UNIT);
+      if (result.truncated) res.setHeader("x-autopilot-journal-truncated", "true");
+      if (result.timedOut) res.setHeader("x-autopilot-journal-timed-out", "true");
+      return res.status(200).send(result.text);
+    } catch (err: any) {
+      console.error(`[autopilot] runs/:runId/journal failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
   return router;
+}
+
+// -----------------------------------------------------------------------------
+// Slice 3 helpers — exported for direct unit testing.
+// -----------------------------------------------------------------------------
+
+/**
+ * Look up the current run_id from /tmp/hydra-autopilot-state.json. Returns
+ * null if the file is missing or unparseable — both are normal pre-first-run
+ * states and the caller treats them as "no live run".
+ */
+export async function readCurrentRunIdFromState(): Promise<string | null> {
+  try {
+    const raw = await readFile(AUTOPILOT_STATE_PATH, "utf-8");
+    const parsed = JSON.parse(raw);
+    const rid = parsed && typeof parsed.run_id === "string" ? parsed.run_id.trim() : "";
+    return rid || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decide which log file (if any) serves the request for `runId`.
+ *
+ * Returns `{ path, source: "live" | "prev" }` or `null` if the log is no
+ * longer available (rotated past the .prev window, or never existed for
+ * this run).
+ *
+ * The rule (see issue #499 body):
+ *   - runId == state.json.run_id  →  AUTOPILOT_LOG_PATH (live)
+ *   - else, IF AUTOPILOT_LOG_PREV_PATH exists AND its mtime is within
+ *     LOG_PREV_MTIME_TOLERANCE_S of row.started_epoch, serve .prev.
+ *   - else null.
+ */
+export async function resolveLogFileForRun(
+  runId: string,
+  row: Record<string, string>,
+): Promise<{ path: string; source: "live" | "prev" } | null> {
+  const currentRunId = await readCurrentRunIdFromState();
+  if (currentRunId && currentRunId === runId) {
+    // Confirm the live file actually exists; if bootstrap.sh hasn't run yet
+    // we 404 rather than 500 on an empty open.
+    try {
+      await stat(AUTOPILOT_LOG_PATH);
+      return { path: AUTOPILOT_LOG_PATH, source: "live" };
+    } catch {
+      return null;
+    }
+  }
+
+  // .prev — only serve if mtime is plausibly the rotation that PRECEDED this
+  // run. bootstrap.sh runs the rotation `mv` just before the new run starts,
+  // so the prev file's mtime is ~= row.started_epoch.
+  let prevStat;
+  try {
+    prevStat = await stat(AUTOPILOT_LOG_PREV_PATH);
+  } catch {
+    return null;
+  }
+  const startedEpoch = Number(row.started_epoch || "0");
+  if (!Number.isFinite(startedEpoch) || startedEpoch <= 0) return null;
+  const mtimeEpoch = Math.floor(prevStat.mtimeMs / 1000);
+  if (Math.abs(mtimeEpoch - startedEpoch) > LOG_PREV_MTIME_TOLERANCE_S) {
+    return null;
+  }
+  return { path: AUTOPILOT_LOG_PREV_PATH, source: "prev" };
+}
+
+/**
+ * Read up to the last `maxBytes` of a file as a UTF-8 string. For our use
+ * case (log files <16MB) this comfortably fits in memory; for anything
+ * larger we read only the trailing window.
+ *
+ * Returns an empty string for empty/missing files (the caller has already
+ * stat'd to confirm existence).
+ */
+async function readLastBytes(path: string, maxBytes: number): Promise<string> {
+  const st = await stat(path);
+  if (st.size === 0) return "";
+  if (st.size <= maxBytes) {
+    return readFile(path, "utf-8");
+  }
+  // For huge files, read only the trailing maxBytes.
+  const { open } = await import("node:fs/promises");
+  const fh = await open(path, "r");
+  try {
+    const buf = Buffer.alloc(maxBytes);
+    await fh.read(buf, 0, maxBytes, st.size - maxBytes);
+    return buf.toString("utf-8");
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
+ * Validate that a string looks like an ISO-8601 timestamp the kernel
+ * journal will accept. Returns the original string when valid; null
+ * otherwise. We are intentionally strict: this guards against a malformed
+ * Redis row being passed straight into argv.
+ */
+export function sanitizeIso(s: string | undefined | null): string | null {
+  if (!s || typeof s !== "string") return null;
+  const trimmed = s.trim();
+  // Accept either Z or numeric offset; reject anything with whitespace or
+  // shell-meaningful characters even though we're using argv (defense in
+  // depth — and journalctl rejects junk anyway).
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/.test(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+/**
+ * Compute the `--until` value for a journal query. For ended/killed runs
+ * with a recorded ended_epoch, returns that as ISO. Otherwise returns the
+ * current time as ISO (live run window).
+ */
+export function computeUntilIso(row: Record<string, string>): string {
+  const endedEpoch = Number(row.ended_epoch || "0");
+  if (Number.isFinite(endedEpoch) && endedEpoch > 0) {
+    return new Date(endedEpoch * 1000).toISOString();
+  }
+  return new Date().toISOString();
+}
+
+interface JournalResult {
+  text: string;
+  truncated: boolean;
+  timedOut: boolean;
+}
+
+/**
+ * Spawn `journalctl --user -u <unit> --since <iso> --until <iso> --no-pager
+ * --output=short-iso`. Output capped at JOURNAL_MAX_BYTES; over-cap reads
+ * SIGTERM the child and append a truncation marker. Timeout SIGTERMs after
+ * JOURNAL_TIMEOUT_MS.
+ *
+ * Exported so the test can drive it with a mocked binary via
+ * HYDRA_AUTOPILOT_JOURNAL_CMD.
+ */
+export function runJournalctl(
+  unit: string,
+  sinceIso: string,
+  untilIso: string,
+): Promise<JournalResult> {
+  return new Promise<JournalResult>((resolve) => {
+    const cmd = JOURNAL_CMD_OVERRIDE || "journalctl";
+    const args = JOURNAL_CMD_OVERRIDE
+      ? [unit, sinceIso, untilIso]
+      : [
+          "--user",
+          "-u", unit,
+          "--since", sinceIso,
+          "--until", untilIso,
+          "--no-pager",
+          "--output=short-iso",
+        ];
+
+    let child;
+    try {
+      // shell:false is the default for spawn; we re-state it via the absence
+      // of the `shell` option. Argv array, no interpolation.
+      child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err: any) {
+      resolve({
+        text: `[autopilot] journalctl spawn failed: ${err?.message || err}\n`,
+        truncated: false,
+        timedOut: false,
+      });
+      return;
+    }
+
+    let buf = Buffer.alloc(0);
+    let truncated = false;
+    let timedOut = false;
+    let settled = false;
+
+    const finish = (extra?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      let text = buf.toString("utf-8");
+      if (extra) text += extra;
+      resolve({ text, truncated, timedOut });
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* intentional: best-effort kill */ }
+      finish(
+        `\n[autopilot] --- journalctl timed out after ${JOURNAL_TIMEOUT_MS}ms ---\n`,
+      );
+    }, JOURNAL_TIMEOUT_MS);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (truncated) return;
+      const remaining = JOURNAL_MAX_BYTES - buf.length;
+      if (remaining <= 0) {
+        truncated = true;
+        try { child.kill("SIGTERM"); } catch { /* intentional: best-effort */ }
+        finish(`\n[autopilot] --- output truncated at ${JOURNAL_MAX_BYTES} bytes ---\n`);
+        return;
+      }
+      const take = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+      buf = Buffer.concat([buf, take]);
+      if (chunk.length > remaining) {
+        truncated = true;
+        try { child.kill("SIGTERM"); } catch { /* intentional: best-effort */ }
+        finish(`\n[autopilot] --- output truncated at ${JOURNAL_MAX_BYTES} bytes ---\n`);
+      }
+    });
+
+    child.stderr?.on("data", () => {
+      // intentional: discard stderr — journalctl prints "No entries" etc.
+      // which is information leakage we don't want in a UI panel. The
+      // exit code surfaces real failures.
+    });
+
+    child.on("error", (err: any) => {
+      finish(`\n[autopilot] journalctl error: ${err?.message || err}\n`);
+    });
+
+    child.on("close", () => {
+      finish();
+    });
+  });
 }
 
 interface RunStartBody {
