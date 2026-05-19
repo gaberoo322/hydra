@@ -514,6 +514,72 @@ describe("autopilot history API (issue #500)", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // AC11 (issue #527) — stamped `worktreeBranch` on dispatch actions
+  // round-trips through `fetchTurnsWithJoins` unchanged, so the dashboard's
+  // slice-4 "Watch stream" cross-link can compute a valid AgentStream href.
+  //
+  // This is the consumer-side closure for issue #527. The producer-side
+  // (decide.py stamping) is asserted in test/autopilot-decide.test.mts. Here
+  // we seed a turn-row with `worktreeBranch` on the dispatch action and
+  // verify the API surface preserves it on the joined action object — the
+  // exact shape Autopilot.jsx's resolution chain reads.
+  // ---------------------------------------------------------------------------
+  test("AC11 (issue #527): worktreeBranch on dispatch action round-trips through detail endpoint", async () => {
+    await seedRunRow("run-527", {
+      run_id: "run-527",
+      started: "2026-05-19T10:00:00Z",
+      started_epoch: 1747648800,
+      status: "ended",
+      trigger: "manual",
+      turns: 1,
+      dispatches: 1,
+      cumulative_tokens: 200,
+      ended_epoch: 1747652400,
+      exit_code: 0,
+    });
+    await seedCycle("cyc-527", { status: "merged", costUsd: "0.10" });
+    await seedTurn("run-527", 1, [
+      {
+        type: "dispatch",
+        slot: "dev_orch",
+        skill: "hydra-dev",
+        cycleId: "cyc-527",
+        worktreeBranch: "worktree-agent-abcdef12-t1-dev_orch",
+      },
+    ]);
+
+    const res = mockRes();
+    await runDetail(mockReq({ runId: "run-527" }, {}), res);
+    assert.equal(res._status, 200);
+    const action = (res._body.turns[0] as any).actions[0];
+    assert.equal(action.type, "dispatch");
+    assert.equal(
+      action.worktreeBranch,
+      "worktree-agent-abcdef12-t1-dev_orch",
+      "worktreeBranch must survive the join unchanged so AgentStream cross-link renders",
+    );
+
+    // Mirror the dashboard's resolution chain (Autopilot.jsx:236-237) and
+    // confirm the resulting href is well-formed. This is the load-bearing
+    // assertion for the slice-4 AC ("Watch stream button navigates to
+    // AgentStream with correct branch filter").
+    const branch =
+      action.worktreeBranch ||
+      action.worktree_branch ||
+      action.branch ||
+      action.outcome?.worktreeBranch ||
+      action.outcome?.worktree_branch ||
+      null;
+    assert.ok(branch, "dashboard's resolution chain must surface a branch");
+    const href = `/agents/stream?agent=${encodeURIComponent(branch)}`;
+    assert.equal(
+      href,
+      "/agents/stream?agent=worktree-agent-abcdef12-t1-dev_orch",
+      "AgentStream href must encode the stamped worktree branch",
+    );
+  });
+
+  // ---------------------------------------------------------------------------
   // Bonus — /runs/current also surfaces the cost breakdown (so the LIVE
   // header strip can render it identically to the detail page).
   // ---------------------------------------------------------------------------

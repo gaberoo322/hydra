@@ -55,6 +55,8 @@ STATE SCHEMA (post-migration, issue #426)
 state.json {
   "started":          ISO8601 start time
   "started_epoch":    int unix-epoch start
+  "run_id":           str  # uuid stamped by bootstrap.sh; consumed by
+                           # _synthesize_worktree_branch (issue #527)
   "turn":             int
   "limits": { ... }   # unchanged from #410 / #413
   "cumulative_tokens": int
@@ -95,7 +97,7 @@ ACTION CATALOG
 Every Action is a dict with a "type" key plus type-specific payload.
 Helpers `make_*` construct them so call sites stay typed.
 
-  dispatch              { type, slot, skill, prompt_args, reason }
+  dispatch              { type, slot, skill, prompt_args, reason, worktreeBranch }
   queue-decision        { type, pr_number, tier, reason, recommendation, link }
   auto-merge            { type, pr_number, tier, reason }
   apply-operator-approved { type, pr_number, tier, reason, mechanical }
@@ -244,14 +246,37 @@ DEFAULT_FAILURE_LOG = "/tmp/hydra-autopilot-failures.jsonl"
 # Action constructors (one per action type — keep the type literal greppable)
 # ---------------------------------------------------------------------------
 
-def make_dispatch(slot: str, skill: str, *, prompt_args: dict | None = None, reason: str = "") -> dict:
-    return {
+def make_dispatch(
+    slot: str,
+    skill: str,
+    *,
+    prompt_args: dict | None = None,
+    reason: str = "",
+    worktree_branch: str | None = None,
+) -> dict:
+    """Construct a `dispatch` action.
+
+    `worktree_branch` (issue #527) is the branch name the dispatched
+    subagent will run under. When None at construction time, `decide()`
+    stamps a deterministic synthesised name (`_synthesize_worktree_branch`)
+    before the plan is returned so every dispatch action carries the
+    field. The dashboard's "Watch stream" cross-link (slice 4 of #496,
+    PR #526) reads this to scope `/agents/stream?agent=<branch>`.
+
+    The field name uses camelCase (`worktreeBranch`) because that's the
+    schema the dashboard / `fetchTurnsWithJoins` consumers expect. The
+    Python kwarg is snake_case for callsite ergonomics.
+    """
+    action: dict = {
         "type": "dispatch",
         "slot": slot,
         "skill": skill,
         "prompt_args": prompt_args or {},
         "reason": reason,
     }
+    if worktree_branch:
+        action["worktreeBranch"] = worktree_branch
+    return action
 
 
 def make_queue_decision(pr_number: int | str, tier: int | str, reason: str, recommendation: str, link: str | None = None) -> dict:
@@ -322,6 +347,35 @@ def make_wait_or_reap(slot: str, task_id: str, age_seconds: int, reason: str = "
         "age_seconds": int(age_seconds),
         "reason": reason,
     }
+
+
+def _synthesize_worktree_branch(state: dict, slot: str) -> str:
+    """Deterministic branch name for a dispatch action (issue #527).
+
+    The Claude harness's `Agent(isolation="worktree", ...)` creates a fresh
+    `worktree-agent-<hash>` branch at dispatch time — decide.py can't see
+    that hash because it runs before the Agent call. Instead we stamp a
+    deterministic name the playbook can also derive: the prefix matches
+    `collect-state.sh`'s recognised set (`worktree-agent-*`) and the suffix
+    embeds `runId`/`turn`/`slot` so the dashboard's "Watch stream" link
+    has a stable `?agent=<branch>` value to filter on.
+
+    runId is shortened to the first 8 hex chars of the UUID to keep the
+    branch name terse — the dashboard only needs a stable identifier per
+    dispatch, not the full UUID. If state lacks a run_id (legacy / test
+    callers), we fall back to a `local` token so the prefix stays valid.
+    """
+    run_id = state.get("run_id") or ""
+    if isinstance(run_id, str) and len(run_id) >= 8:
+        run_token = run_id.replace("-", "")[:8]
+    else:
+        run_token = "local"
+    turn = state.get("turn", 0)
+    try:
+        turn_token = str(int(turn))
+    except (TypeError, ValueError):
+        turn_token = "0"
+    return f"worktree-agent-{run_token}-t{turn_token}-{slot}"
 
 
 # Sentinel set of valid action types — used by INV-checks and tests.
@@ -866,6 +920,33 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     plan.debug["best_score"] = best_score
     plan.debug["occupied_slots"] = occupied
     plan.debug["scope"] = scope
+
+    # 7. Stamp `worktreeBranch` on every dispatch action (issue #527).
+    #
+    # The dashboard's slice-4 "Watch stream" cross-link (PR #526) reads
+    # `action.worktreeBranch` to scope `/agents/stream?agent=<branch>`. We
+    # stamp the field here — once per plan, after dispatch decisions are
+    # finalised — so every code-writing / signal-class dispatch carries a
+    # stable identifier. Skip actions that already supply one (forward-compat
+    # for selectors that learn the harness-generated branch name later).
+    #
+    # AC10 / AC12 / AC9 schema-closure note: `worktreeBranch` goes on the
+    # turn-row JSON inside an action; it is NEVER written as a top-level
+    # field on `hydra:autopilot:run:<id>`. The slice-2 turn writer
+    # serialises actions verbatim, so this stamp flows through to
+    # /api/autopilot/runs/:runId without further changes.
+    for action in plan.actions:
+        if not isinstance(action, dict):
+            continue
+        if action.get("type") != "dispatch":
+            continue
+        if action.get("worktreeBranch"):
+            continue
+        slot = action.get("slot")
+        if not isinstance(slot, str) or not slot:
+            continue
+        action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+
     return plan
 
 
