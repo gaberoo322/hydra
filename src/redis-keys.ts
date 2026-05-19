@@ -71,6 +71,10 @@ export const redisKeys = {
   memoryPatterns: (agent: string) => `hydra:memory:${agent}:patterns`,
   memoryRules: (agent: string) => `hydra:memory:${agent}:rules`,
   memoryLastConsolidation: () => "hydra:memory:last-consolidation",
+  // Issue #512 — Friction patterns. Same shape as memoryPatterns but a
+  // distinct namespace so soft-friction items captured from subagents don't
+  // pollute the planner/executor learning sets that drive prompt promotion.
+  frictionPatterns: (skill: string) => `hydra:friction:${skill}:patterns`,
 
   // ---------------------------------------------------------------------------
   // Reflections

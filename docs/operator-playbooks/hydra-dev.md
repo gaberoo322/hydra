@@ -256,3 +256,63 @@ The endpoint is idempotent on `(skill, outcome, cue)` — multiple calls for
 the same logical event merge into one pattern (hit count increments). Don't
 call it on success, and don't call it on infrastructure aborts (the
 isolation-abort path in Step 6) — those aren't agent-fixable.
+
+### 9. Friction Report (issue #512 — ALWAYS, even on success)
+
+Hard failures are not the whole picture. The child agent ALSO emits a
+`## Friction Report` section at the bottom of its return — even on a clean
+success. Each item describes a piece of soft friction the agent worked
+around without failing, so the next dispatch doesn't re-discover it.
+
+**Child-prompt contract (the dispatched BG agent MUST emit this):**
+
+```markdown
+## Friction Report
+
+- cue: orchestrator-watchdog-units-not-in-repo
+  workaround: added new install block to scripts/deploy.sh
+  context: scripts/deploy.sh, scripts/hydra-orchestrator-watchdog.sh
+- cue: hook-registration-location-unspecified
+  workaround: chose sibling .settings.json + extended sync-skills.sh
+  context: .claude/hooks/, scripts/sync-skills.sh
+- cue: stale-local-master-ref
+  workaround: used origin/master for diff base instead of master
+  context: git rev-parse origin/master
+- cue: scheduler-stop-semantics-test-flake
+  workaround: confirmed pre-existing flake unrelated to this work
+  context: test/scheduler-stop-semantics.test.mts
+```
+
+Rules:
+- `cue` MUST be kebab-case and stable across runs (so multiple runs that
+  hit the same friction merge into the same pattern). NOT free text.
+- `workaround` is exactly one line.
+- `context` is exactly one line — file paths or commands where relevant.
+- If there was no friction worth noting, emit `## Friction Report` with the
+  literal body `- (none)` so the parent knows the section is intentional.
+
+**Parent post-flight (the dispatching parent MUST do this):**
+
+After the BG agent returns (success OR failure), parse the `## Friction
+Report` section from the response and POST each item to
+`/api/memory/subagent-friction`:
+
+```bash
+# Pseudocode — one POST per friction item.
+curl -fsS -X POST http://localhost:4000/api/memory/subagent-friction \
+  -H 'content-type: application/json' \
+  -d "$(jq -n \
+    --arg skill "hydra-dev" \
+    --arg cue "$CUE" \
+    --arg workaround "$WORKAROUND" \
+    --arg context "$CONTEXT" \
+    --arg cycleId "hydra-dev-${issue_number}-$(date +%s)" \
+    '{skill: $skill, cue: $cue, workaround: $workaround, context: $context, cycleId: $cycleId}')"
+```
+
+The endpoint is idempotent on `(skill, cue)` — multiple dispatches that
+re-hit the same friction increment the hit count. When the count crosses
+the promotion threshold (3 hits, `PROMOTION_THRESHOLD`), a
+`meta-friction` GitHub issue is auto-opened (or comment-bumped if one
+already exists for that cue). Failure to POST is logged but does NOT
+fail the build — friction capture is best-effort.

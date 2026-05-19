@@ -165,5 +165,44 @@ export function createMiscRouter(eventBus: any) {
     }
   });
 
+  // POST /memory/subagent-friction (issue #512) — soft-friction capture for
+  // autopilot-dispatched subagents. Distinct from /memory/subagent-lesson
+  // (which captures hard failures). Friction items land in
+  // hydra:friction:{skill}:patterns and don't promote to to-{agent}.md, but
+  // they do fire the GitHub-issue escalation hook on threshold-cross so
+  // chronic friction becomes tracked work.
+  router.post("/memory/subagent-friction", async (req, res) => {
+    try {
+      const { skill, cue, workaround, context, cycleId } = req.body || {};
+      const { captureSubagentFriction, isValidSkill } = await import(
+        "../learning/subagent-capture.ts"
+      );
+
+      if (!isValidSkill(skill)) {
+        return res.status(400).json({
+          error: `Invalid or missing 'skill' — expected hydra-qa | hydra-dev | hydra-target-build`,
+        });
+      }
+      if (typeof cue !== "string" || cue.trim().length === 0) {
+        return res.status(400).json({ error: "Missing 'cue' (non-empty string)" });
+      }
+      if (typeof workaround !== "string" || workaround.trim().length === 0) {
+        return res.status(400).json({ error: "Missing 'workaround' (non-empty string)" });
+      }
+
+      const result = await captureSubagentFriction({
+        skill,
+        cue,
+        workaround,
+        context: typeof context === "string" ? context : "",
+        cycleId: typeof cycleId === "string" ? cycleId : undefined,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      console.error(`[api/memory/subagent-friction] failed:`, err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   return router;
 }

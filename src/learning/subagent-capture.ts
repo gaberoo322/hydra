@@ -170,3 +170,71 @@ export async function captureSubagentLesson(lesson: SubagentLesson): Promise<{
 
   return { agent, category };
 }
+
+// ===========================================================================
+// Issue #512 — Friction capture (soft friction, not hard failure)
+// ===========================================================================
+
+/**
+ * Friction items are the soft surface — anything an agent worked AROUND
+ * without failing. Captured even on success runs so successor agents
+ * don't re-discover the same friction.
+ *
+ * Stored in the `hydra:friction:{skill}:patterns` namespace (NOT the
+ * planner/executor memory keys) so friction doesn't pollute the
+ * lesson-promotion pipeline. Threshold-cross still fires the GitHub
+ * escalation hook to surface chronic friction as tracked work.
+ */
+export type SubagentFriction = {
+  skill: SubagentSkill;
+  /** kebab-case identifier, stable across runs (e.g. `stale-local-master-ref`). */
+  cue: string;
+  /** One line — what the agent did to work around the friction. */
+  workaround: string;
+  /** One line — file paths or other identifying context. */
+  context: string;
+  /** Optional cycle/run ID. Auto-generated if omitted. */
+  cycleId?: string;
+};
+
+/**
+ * Capture a soft-friction item from a subagent run. Friction items don't
+ * promote to feedback files (there is no per-skill feedback file) but they
+ * DO escalate to GitHub when the same cue crosses the promotion threshold.
+ *
+ * Idempotent on `(skill, cue)` — multiple calls merge into one pattern
+ * (hit count increments, workarounds roll into the examples list).
+ */
+export async function captureSubagentFriction(item: SubagentFriction): Promise<{
+  skill: SubagentSkill;
+  category: string;
+}> {
+  if (!isValidSkill(item.skill)) {
+    throw new Error(`captureSubagentFriction: invalid skill "${item.skill}"`);
+  }
+  if (typeof item.cue !== "string" || item.cue.trim().length === 0) {
+    throw new Error("captureSubagentFriction: cue is required");
+  }
+  if (typeof item.workaround !== "string" || item.workaround.trim().length === 0) {
+    throw new Error("captureSubagentFriction: workaround is required");
+  }
+
+  const category = item.cue.trim();
+  const cycleId =
+    item.cycleId && item.cycleId.trim().length > 0
+      ? item.cycleId
+      : `friction-${item.skill}-${Date.now()}`;
+
+  // The `agent` slot in the namespace is reused as the skill name — friction
+  // is scoped per-skill, not per-agent-role.
+  await recordPattern(item.skill, category, {
+    severity: "prevent",
+    action: item.workaround.trim(),
+    example: item.context ? item.context.trim() : "",
+    cycleId,
+    source: "subagent",
+    namespace: "friction",
+  });
+
+  return { skill: item.skill, category };
+}

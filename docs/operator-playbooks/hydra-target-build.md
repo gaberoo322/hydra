@@ -319,6 +319,52 @@ API failures: log but don't fail the build. The endpoint is idempotent on
 `(skill, outcome, cue)` — multiple calls for the same logical event merge
 into one pattern (hit count increments).
 
+### 9.5. Friction Report (issue #512 — ALWAYS, even on success)
+
+The child agent ALSO emits a `## Friction Report` section in its return,
+even on a clean merge. Each item is a piece of soft friction the agent
+worked around without failing — captured so successor dispatches don't
+re-discover it.
+
+**Child-prompt contract (the dispatched BG agent MUST emit this):**
+
+```markdown
+## Friction Report
+
+- cue: stale-local-master-ref
+  workaround: used origin/master for diff base
+  context: git rev-parse origin/master
+- cue: vitest-flake-in-foo-spec
+  workaround: re-ran the specific suite; passed on second attempt
+  context: src/foo/__tests__/foo.spec.ts
+```
+
+Rules:
+- `cue` MUST be kebab-case, stable across runs.
+- `workaround` is exactly one line.
+- `context` is exactly one line.
+- If no friction worth noting, emit `- (none)`.
+
+**Parent post-flight:**
+
+After the BG returns, parse each `## Friction Report` item and POST to
+`/api/memory/subagent-friction`:
+
+```bash
+hydra raw POST /memory/subagent-friction "{
+  \"skill\":\"hydra-target-build\",
+  \"cue\":\"$CUE\",
+  \"workaround\":\"$WORKAROUND\",
+  \"context\":\"$CONTEXT\",
+  \"cycleId\":\"$CYCLE_ID\"
+}"
+```
+
+Idempotent on `(skill, cue)`. When the same cue crosses the
+`PROMOTION_THRESHOLD` (3 hits), a `meta-friction` GitHub issue is
+auto-opened (or comment-bumped). Failure to POST is logged but never
+fails the build.
+
 ### 10. Report (summary table only)
 
 | Step | Result |
