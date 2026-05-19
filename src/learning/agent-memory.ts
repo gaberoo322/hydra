@@ -173,12 +173,20 @@ async function sweepStalePromotions(agentName: string) {
   for (const p of patterns) {
     if (p.hitCount >= PROMOTION_THRESHOLD && !p.promoted) {
       try {
-        await promoteToFeedback(agentName, p);
+        // Issue #524 — metadata cues skip the feedback-file write but still
+        // get the `promoted` stamp so we don't re-enter this branch.
+        const metadataOnly = await isMetadataCueForCategory(p.category);
+        if (!metadataOnly) {
+          await promoteToFeedback(agentName, p);
+        }
         p.promoted = true;
         p.promotedAt = new Date().toISOString().split("T")[0];
         p.hitsAtPromotion = p.hitCount;
         changed = true;
-        console.log(`[Learning] Retroactive promotion: "${p.category}" to to-${agentName}.md (${p.hitCount} hits)`);
+        const target = metadataOnly
+          ? "(metadata-only — feedback-file write skipped)"
+          : `to-${agentName}.md`;
+        console.log(`[Learning] Retroactive promotion: "${p.category}" to ${target} (${p.hitCount} hits)`);
       } catch (err: any) {
         console.error(`[Learning] Retroactive promotion failed for "${p.category}": ${err.message}`);
       }
@@ -528,14 +536,20 @@ export async function recordPattern(
     if (details.source) existing.source = details.source;
 
     if (existing.hitCount >= PROMOTION_THRESHOLD && !existing.promoted) {
-      if (namespace === "memory") {
+      // Issue #524 — metadata cues (acceptance-criterion-deferred) record
+      // hits and stamp `promoted: true` so we don't re-evaluate, but skip
+      // the feedback-file write because they aren't defects.
+      const metadataOnly = await isMetadataCueForCategory(category);
+      if (namespace === "memory" && !metadataOnly) {
         await promoteToFeedback(agentName, existing);
       }
       existing.promoted = true;
       existing.promotedAt = today;
       existing.hitsAtPromotion = existing.hitCount;
       crossedThreshold = true;
-      const target = namespace === "memory" ? `to-${agentName}.md` : `friction:${agentName}`;
+      const target = metadataOnly
+        ? `(metadata-only — feedback-file write skipped)`
+        : namespace === "memory" ? `to-${agentName}.md` : `friction:${agentName}`;
       console.log(`[Learning] Promoted "${category}" to ${target} (${existing.hitCount} hits)`);
     }
 
@@ -573,10 +587,13 @@ async function maybeEscalate(
   crossedThreshold: boolean,
 ): Promise<void> {
   try {
-    const { shouldEscalateAtHitCount, escalatePatternToIssue } = await import(
-      "./escalation.ts"
-    );
-    if (!shouldEscalateAtHitCount(pattern.hitCount, PROMOTION_THRESHOLD)) return;
+    const { shouldEscalateAtHitCount, escalatePatternToIssue, escalationThresholdForCue } =
+      await import("./escalation.ts");
+    // Issue #524 — per-cue escalation threshold. `acceptance-criterion-deferred`
+    // uses a much higher threshold (20+) so it doesn't fire on every PR with
+    // operator-observable ACs; everything else keeps the legacy 3-hit threshold.
+    const threshold = escalationThresholdForCue(pattern.category, PROMOTION_THRESHOLD);
+    if (!shouldEscalateAtHitCount(pattern.hitCount, threshold)) return;
     void crossedThreshold; // currently informational; kept for future routing
     await escalatePatternToIssue({
       kind: namespace === "friction" ? "friction" : "lesson",
@@ -588,6 +605,21 @@ async function maybeEscalate(
     });
   } catch (err: any) {
     console.error(`[Learning] maybeEscalate(${namespace}/${name}/${pattern.category}) failed: ${err?.message || err}`);
+  }
+}
+
+/**
+ * Issue #524 — lazy lookup of the metadata-cue flag. Lives in escalation.ts
+ * (the cue taxonomy) but imported lazily so the hot path doesn't pay the
+ * load cost when no escalation work is happening.
+ */
+async function isMetadataCueForCategory(category: string): Promise<boolean> {
+  try {
+    const { isMetadataCue } = await import("./escalation.ts");
+    return isMetadataCue(category);
+  } catch (err: any) {
+    console.error(`[Learning] isMetadataCueForCategory(${category}) failed: ${err?.message || err}`);
+    return false;
   }
 }
 

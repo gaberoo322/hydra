@@ -156,6 +156,10 @@ The legacy in-process agent personalities (`config/agents/{planner,executor,skep
 
 2. **Redis patterns (fallback):** Consolidated patterns in `hydra:memory:{agent}:patterns` with hit counts. Similar incidents merge into one pattern. When a pattern reaches `PROMOTION_THRESHOLD` (3) occurrences, it auto-promotes to a durable lesson file (e.g. `~/.claude/skills/<skill>/lessons.md`) as a cardinal rule, AND a `meta-friction` GitHub issue is opened so chronic problems become tracked work (issue #512). Stale one-offs are pruned after 14 days.
 
+   **Cue taxonomy (issue #524).** Two QA cues are split because they describe different things:
+   - `acceptance-criterion-unmet` — the diff didn't satisfy the criterion (true defect). Default threshold (3): auto-promotes to `to-planner.md` and escalates to a GitHub issue.
+   - `acceptance-criterion-deferred` — the criterion can only be verified post-deploy / at runtime / by an operator (metadata, not a defect). Escalation threshold is 20+ and the cue does NOT write a rule to `to-planner.md`. The per-cue table lives in `src/learning/escalation.ts::CUE_ESCALATION_THRESHOLDS`. Existing pre-split entries can be migrated with `bash scripts/cleanup/reclassify-deferred-acs.sh --apply`.
+
 3. **Episodic reflections:** When a subagent fails, a structured reflection (what was attempted, why it failed, what should change) is stored in `hydra:reflections:{ref}` with 7-day TTL. When the same anchor/issue is retried, reflections are injected as subagent context.
 
 ## Model Tiers

@@ -47,6 +47,72 @@ const REPO = process.env.HYDRA_GH_REPO || "gaberoo322/hydra";
 const META_FRICTION_LABEL = "meta-friction";
 const META_LESSON_LABEL = "meta-friction"; // share the label; titles distinguish
 
+// ---------------------------------------------------------------------------
+// Cue taxonomy (issue #524)
+// ---------------------------------------------------------------------------
+//
+// The lesson-capture pipeline emits kebab-case `cue` strings that become the
+// pattern category. Two cues are special-cased because QA reports them on
+// nearly every PR with non-trivial acceptance criteria; conflating them caused
+// the auto-escalation to fire on every operator-observable AC (issue #516):
+//
+//   acceptance-criterion-unmet     — the implementation didn't satisfy the
+//                                    criterion. This is a true planner-quality
+//                                    signal; promote + escalate aggressively.
+//
+//   acceptance-criterion-deferred  — the criterion requires post-deploy /
+//                                    runtime / manual observation that
+//                                    pre-merge QA *cannot* verify. This is
+//                                    metadata about the AC's shape, not a
+//                                    defect. The actionable signal is "the
+//                                    pattern of deferred ACs has changed at
+//                                    scale", not "this PR had a deferred AC."
+//                                    Surface only at much higher thresholds.
+//
+// Any other cue uses the default threshold (`PROMOTION_THRESHOLD` = 3).
+export const ACCEPTANCE_CRITERION_UNMET_CUE = "acceptance-criterion-unmet";
+export const ACCEPTANCE_CRITERION_DEFERRED_CUE = "acceptance-criterion-deferred";
+
+/**
+ * Per-cue escalation thresholds. Cues not listed fall back to the caller's
+ * `defaultThreshold` (currently `PROMOTION_THRESHOLD = 3` for both the
+ * memory and friction namespaces).
+ *
+ * `acceptance-criterion-deferred` is the only escalator-only override today —
+ * 20+ hits across distinct skills before opening a GitHub issue, because the
+ * cue is expected to fire on nearly every PR with operator-observable ACs.
+ */
+const CUE_ESCALATION_THRESHOLDS: Record<string, number> = {
+  [ACCEPTANCE_CRITERION_DEFERRED_CUE]: 20,
+};
+
+/**
+ * Resolve the escalation threshold for a given cue. Returns the cue's
+ * override when one is registered, otherwise the supplied default. Exported
+ * for tests and for `agent-memory.ts`'s `maybeEscalate()`.
+ */
+export function escalationThresholdForCue(
+  cue: string,
+  defaultThreshold: number,
+): number {
+  if (typeof cue !== "string") return defaultThreshold;
+  const override = CUE_ESCALATION_THRESHOLDS[cue];
+  return typeof override === "number" && override > 0 ? override : defaultThreshold;
+}
+
+/**
+ * True when a cue is metadata about the AC's shape rather than a defect
+ * signal. Used by `agent-memory.ts` to skip the `to-{agent}.md` feedback-file
+ * promotion — deferred ACs aren't actionable rules for the planner, so
+ * surfacing them as cardinal rules would just create noise (issue #524).
+ *
+ * Pattern recording still happens, so the dashboard / friction-patterns
+ * endpoint can show deferred-cue hit counts; only the file write is skipped.
+ */
+export function isMetadataCue(cue: string): boolean {
+  return cue === ACCEPTANCE_CRITERION_DEFERRED_CUE;
+}
+
 export type EscalationKind = "friction" | "lesson";
 
 export type EscalationInput = {
