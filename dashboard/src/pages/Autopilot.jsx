@@ -1,10 +1,19 @@
 import { useState, useMemo, useEffect, useRef } from "react";
+import { Link, useParams } from "react-router-dom";
 import { useApi } from "../hooks/useApi.js";
 
 // Slice 1 of epic #496 — "Is it alive?" header strip.
 // Slice 2 of epic #496 (issue #498) — pipeline snapshot + turn timeline.
 // Slice 3 of epic #496 (issue #499) — "Why did that crash?" log tail + journal.
-// Slice #500 follows.
+// Slice 4 of epic #496 (issue #500) — previous runs + cost breakdown +
+// cross-links. Closes the loop. The Autopilot page now operates in two modes:
+//
+//   - LIVE   — mounted at `/autopilot`. Polls /api/autopilot/runs/current
+//              every 5s. Renders header + pipeline + timeline + logs + a
+//              history table of the last 14 runs.
+//   - DETAIL — mounted at `/autopilot/:runId`. One-shot fetch of
+//              /api/autopilot/runs/:runId. Same four sections in frozen
+//              (non-polling) mode. No history table (it's already on /autopilot).
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
@@ -218,6 +227,14 @@ function ActionRow({ action }) {
     const anchor = action.prompt_args?.anchor || action.anchor || "—";
     const reason = action.reason || "";
     const outcome = action.outcome;
+    // Slice 4 cross-link — "Watch stream" jumps to AgentStream filtered to
+    // this dispatch's worktree branch. Branch comes from the action payload
+    // (decide.py stamps `worktreeBranch` on dispatch actions) or the joined
+    // outcome (the cycle record carries it too). If neither is present we
+    // omit the link rather than fall back to an unscoped /agents/stream.
+    const branch =
+      action.worktreeBranch || action.worktree_branch || action.branch ||
+      outcome?.worktreeBranch || outcome?.worktree_branch || null;
     return (
       <div className="border-l-2 border-emerald-600/50 pl-3 py-1.5 text-xs space-y-1">
         <div className="text-emerald-300 font-mono">
@@ -243,6 +260,16 @@ function ActionRow({ action }) {
           </div>
         ) : (
           <div className="text-[11px] text-zinc-600 italic">outcome: pending</div>
+        )}
+        {branch && (
+          <div className="text-[11px]">
+            <Link
+              to={`/agents/stream?agent=${encodeURIComponent(branch)}`}
+              className="text-blue-400 hover:underline"
+            >
+              Watch stream →
+            </Link>
+          </div>
         )}
       </div>
     );
@@ -549,72 +576,207 @@ function LogsSection({ runId }) {
   );
 }
 
-export default function Autopilot() {
-  const { data, error, loading } = useApi("/autopilot/runs/current", { poll: 5000 });
+// ---------------------------------------------------------------------------
+// Slice 4 — Cost breakdown subsection
+//
+// Renders the two-line cost summary spec'd by issue #500: orchestration
+// (always $0 — subscription-billed) and dispatched-subagent total (joined
+// from cycle records). Tooltip explains the #471 surrogate caveat for any
+// rows whose cycle record didn't include a costUsd.
+// ---------------------------------------------------------------------------
 
-  if (loading && !data) {
-    return (
-      <div className="p-6">
-        <h1 className="text-2xl font-bold text-white mb-4">Autopilot</h1>
-        <div className="text-zinc-500 text-sm">Loading…</div>
+function CostBreakdown({ run }) {
+  const cost = run.cost || { orchestration_cost_usd: 0, dispatched_cost_usd: 0, dispatch_count: 0, dispatch_count_with_cost: 0 };
+  const tokens = Number(run.cumulative_tokens || 0);
+  const limits = run.limits || {};
+  const tokenBudget = Number(limits.token_budget) || 0;
+  const incompleteCost =
+    cost.dispatch_count > 0 && cost.dispatch_count_with_cost < cost.dispatch_count;
+  return (
+    <div className="pt-3 border-t border-zinc-800/60 space-y-1.5">
+      <div className="flex items-baseline gap-2 text-xs">
+        <span className="text-zinc-500 uppercase tracking-widest text-[10px]">Cost</span>
+        <span className="text-zinc-200">
+          Orchestration:{" "}
+          <span className="font-mono">$0.00</span>{" "}
+          <span className="text-zinc-500">(subscription); tokens {tokens.toLocaleString()} / {tokenBudget.toLocaleString()}</span>
+        </span>
       </div>
-    );
-  }
+      <div className="flex items-baseline gap-2 text-xs">
+        <span className="text-zinc-500 uppercase tracking-widest text-[10px]">Subagents</span>
+        <span className="text-zinc-200">
+          Dispatched: <span className="font-mono">${cost.dispatched_cost_usd.toFixed(2)}</span>{" "}
+          <span className="text-zinc-500">({cost.dispatch_count_with_cost}/{cost.dispatch_count} dispatches with cost)</span>
+        </span>
+        {incompleteCost && (
+          <span
+            className="text-[10px] text-amber-400 cursor-help"
+            title="costUsd is $0 for many cycles until the surrogate lands — see #471"
+          >
+            ⚠ incomplete
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
 
-  // 404 (no run yet) bubbles up as `error`. Render a friendly empty state
-  // rather than a red error — backfill: the first row appears at next bootstrap.
-  if (error || !data) {
-    const isNoRun = error && /404|no autopilot runs/i.test(error);
-    return (
-      <div className="p-6">
-        <h1 className="text-2xl font-bold text-white mb-2">Autopilot</h1>
-        <p className="text-sm text-zinc-500 mb-6">Slices 1+2+3 — header strip · pipeline snapshot · turn timeline · log tail + journal.</p>
-        <div className="border border-zinc-800 rounded-lg p-6 bg-zinc-900/50">
-          {isNoRun ? (
-            <>
-              <h2 className="text-base font-semibold text-zinc-200 mb-1">No autopilot run recorded yet</h2>
-              <p className="text-sm text-zinc-500">
-                The first row appears when bootstrap.sh runs at the start of the next
-                <code className="mx-1 px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-xs">hydra-autopilot</code>
-                invocation.
-              </p>
-            </>
-          ) : (
-            <>
-              <h2 className="text-base font-semibold text-red-400 mb-1">Failed to load run</h2>
-              <p className="text-sm text-zinc-500 font-mono">{error}</p>
-            </>
-          )}
+// ---------------------------------------------------------------------------
+// Slice 4 — History table
+//
+// Last 14 runs from /api/autopilot/runs, polled every 60s. Row click
+// navigates to /autopilot/:runId for the detail page. "see cycles" link
+// scopes the /metrics view to cycles whose autopilotTurnId starts with
+// "<runId>:".
+// ---------------------------------------------------------------------------
+
+function StatusPillSmall({ row }) {
+  const key = row.status === "running" ? "running" : row.status === "killed" ? "killed" : "ended";
+  const style = STATUS_STYLES[key];
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded text-[10px] font-semibold border ${style.bg} ${style.border} ${style.text}`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />
+      {(row.status || "ended").toUpperCase()}
+    </span>
+  );
+}
+
+function relativeTime(epoch) {
+  if (!Number.isFinite(epoch) || epoch <= 0) return "—";
+  const delta = Math.max(0, Math.floor(Date.now() / 1000) - epoch);
+  if (delta < 60) return `${delta}s ago`;
+  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+  return `${Math.floor(delta / 86400)}d ago`;
+}
+
+function HistoryTable() {
+  const { data, error, loading } = useApi("/autopilot/runs", { poll: 60000 });
+  const runs = Array.isArray(data?.runs) ? data.runs : [];
+
+  return (
+    <div className="border border-zinc-800 rounded-lg p-5 bg-zinc-900/40 space-y-3">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-base font-semibold text-zinc-100">Previous runs</h2>
+        <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+          last {runs.length} · polls every 60s
+        </span>
+      </div>
+      {loading && !data && (
+        <div className="text-sm text-zinc-500">Loading…</div>
+      )}
+      {error && (
+        <div className="text-xs text-red-400 font-mono">{error}</div>
+      )}
+      {!loading && !error && runs.length === 0 && (
+        <div className="text-sm text-zinc-500 italic">
+          No previous runs recorded. The first row appears at the next bootstrap.
         </div>
-      </div>
-    );
-  }
+      )}
+      {runs.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-zinc-500 text-[10px] uppercase tracking-widest border-b border-zinc-800">
+                <th className="text-left py-2 pr-3 font-semibold">Started</th>
+                <th className="text-left py-2 pr-3 font-semibold">Duration</th>
+                <th className="text-left py-2 pr-3 font-semibold">Status</th>
+                <th className="text-left py-2 pr-3 font-semibold">Term</th>
+                <th className="text-left py-2 pr-3 font-semibold">Trigger</th>
+                <th className="text-right py-2 pr-3 font-semibold">Turns</th>
+                <th className="text-right py-2 pr-3 font-semibold">Disp (M/F)</th>
+                <th className="text-right py-2 pr-3 font-semibold">Tokens</th>
+                <th className="text-right py-2 pr-3 font-semibold">Cost</th>
+                <th className="text-right py-2 pr-1 font-semibold">Cycles</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((r) => (
+                <tr
+                  key={r.run_id}
+                  className="border-b border-zinc-800/40 hover:bg-zinc-800/30 transition-colors"
+                >
+                  <td className="py-2 pr-3">
+                    <Link
+                      to={`/autopilot/${encodeURIComponent(r.run_id)}`}
+                      className="text-zinc-300 hover:text-emerald-300"
+                      title={r.started}
+                    >
+                      {relativeTime(r.started_epoch)}
+                    </Link>
+                  </td>
+                  <td className="py-2 pr-3 font-mono text-zinc-400">
+                    {r.duration_s !== null && r.duration_s !== undefined ? formatElapsed(r.duration_s) : "—"}
+                  </td>
+                  <td className="py-2 pr-3">
+                    <StatusPillSmall row={r} />
+                  </td>
+                  <td className="py-2 pr-3 text-zinc-400">{r.term_reason || "—"}</td>
+                  <td className="py-2 pr-3 text-zinc-400">{r.trigger || "—"}</td>
+                  <td className="py-2 pr-3 text-right font-mono text-zinc-300">{r.turns}</td>
+                  <td className="py-2 pr-3 text-right font-mono text-zinc-300">
+                    {r.dispatches}{" "}
+                    <span className="text-[10px] text-zinc-500">
+                      ({r.merged_count}/{r.failed_count})
+                    </span>
+                  </td>
+                  <td className="py-2 pr-3 text-right font-mono text-zinc-300">
+                    {formatTokens(r.total_tokens)}
+                  </td>
+                  <td className="py-2 pr-3 text-right font-mono text-zinc-300">
+                    ${Number(r.total_cost_usd || 0).toFixed(2)}
+                  </td>
+                  <td className="py-2 pr-1 text-right">
+                    <Link
+                      to={`/metrics?run=${encodeURIComponent(r.run_id)}`}
+                      className="text-[10px] text-blue-400 hover:underline"
+                    >
+                      see cycles
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
 
-  const run = data;
+// ---------------------------------------------------------------------------
+// Shared render for the four-section "run view" (header + pipeline + timeline
+// + logs). Used by both the LIVE page (mode="live") and the DETAIL page
+// (mode="detail"). The only difference between modes is that the live header
+// renders the wedge badge + budget bars dynamically, while detail freezes
+// everything to the run's final state.
+// ---------------------------------------------------------------------------
+
+function RunView({ run, turns, mode }) {
   const limits = run.limits || {};
   const tokenBudget = Number(limits.token_budget) || 0;
   const wallClockMax = Number(limits.wall_clock_max_sec) || 0;
   const idleDrainMax = Number(limits.idle_drain_turns) || 0;
   const key = statusKey(run);
-  const turns = Array.isArray(run.turns) ? run.turns : [];
   const latestTurn = turns[0] || null;
+  const isLive = mode === "live";
 
   return (
-    <div className="p-6 space-y-5">
-      <div>
-        <div className="flex items-baseline justify-between mb-1">
-          <h1 className="text-2xl font-bold text-white">Autopilot</h1>
-          <span className="text-xs text-zinc-500 font-mono">polls every 5s</span>
-        </div>
-        <p className="text-sm text-zinc-500">Slices 1+2+3 — header strip · pipeline snapshot · turn timeline · log tail + journal.</p>
-      </div>
-
+    <>
       <div className="border border-zinc-800 rounded-lg p-5 bg-zinc-900/40 space-y-5">
         <div className="flex items-center gap-3 flex-wrap">
-          <StatusPill run={run} />
+          {/* Detail mode: never show WEDGE LIKELY (terminal runs cannot wedge). */}
+          <StatusPill run={isLive ? run : { ...run, wedge_likely: false }} />
           <span className="text-xs text-zinc-500 font-mono" title={run.run_id}>
             run_id: {truncId(run.run_id)}
           </span>
+          {!isLive && (
+            <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+              static · no polling
+            </span>
+          )}
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
@@ -623,7 +785,7 @@ export default function Autopilot() {
           <MetaCell
             label="PID"
             value={
-              key === "running"
+              isLive && key === "running"
                 ? `${run.pid} ${run.pid_alive ? "(alive)" : "(dead)"}`
                 : String(run.pid || "—")
             }
@@ -661,6 +823,8 @@ export default function Autopilot() {
           <MetaCell label="Cum. tokens" value={formatTokens(run.cumulative_tokens || 0)} mono />
           <MetaCell label="Idle turns" value={String(run.idle_turns || 0)} mono />
         </div>
+
+        <CostBreakdown run={run} />
       </div>
 
       <PipelineSnapshot run={run} latestTurn={latestTurn} />
@@ -668,6 +832,150 @@ export default function Autopilot() {
       <TurnTimeline turns={turns} />
 
       <LogsSection runId={run.run_id} />
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LIVE page mounted at `/autopilot`.
+// ---------------------------------------------------------------------------
+
+function AutopilotLive() {
+  const { data, error, loading } = useApi("/autopilot/runs/current", { poll: 5000 });
+
+  if (loading && !data) {
+    return (
+      <div className="p-6">
+        <h1 className="text-2xl font-bold text-white mb-4">Autopilot</h1>
+        <div className="text-zinc-500 text-sm">Loading…</div>
+      </div>
+    );
+  }
+
+  // 404 (no run yet) bubbles up as `error`. Friendly empty state — but we
+  // STILL render the history table below in case prior runs exist with
+  // expired live-row TTLs.
+  const isNoRun = error && /404|no autopilot runs/i.test(error);
+
+  if (error || !data) {
+    return (
+      <div className="p-6 space-y-5">
+        <div>
+          <div className="flex items-baseline justify-between mb-1">
+            <h1 className="text-2xl font-bold text-white">Autopilot</h1>
+          </div>
+          <p className="text-sm text-zinc-500">Header · pipeline · timeline · logs · history.</p>
+        </div>
+        <div className="border border-zinc-800 rounded-lg p-6 bg-zinc-900/50">
+          {isNoRun ? (
+            <>
+              <h2 className="text-base font-semibold text-zinc-200 mb-1">No autopilot run recorded yet</h2>
+              <p className="text-sm text-zinc-500">
+                The first row appears when bootstrap.sh runs at the start of the next
+                <code className="mx-1 px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-xs">hydra-autopilot</code>
+                invocation.
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 className="text-base font-semibold text-red-400 mb-1">Failed to load run</h2>
+              <p className="text-sm text-zinc-500 font-mono">{error}</p>
+            </>
+          )}
+        </div>
+        <HistoryTable />
+      </div>
+    );
+  }
+
+  const run = data;
+  const turns = Array.isArray(run.turns) ? run.turns : [];
+
+  return (
+    <div className="p-6 space-y-5">
+      <div>
+        <div className="flex items-baseline justify-between mb-1">
+          <h1 className="text-2xl font-bold text-white">Autopilot</h1>
+          <span className="text-xs text-zinc-500 font-mono">polls every 5s</span>
+        </div>
+        <p className="text-sm text-zinc-500">Header · pipeline · timeline · logs · history.</p>
+      </div>
+      <RunView run={run} turns={turns} mode="live" />
+      <HistoryTable />
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// DETAIL page mounted at `/autopilot/:runId`. One-shot fetch (no polling) —
+// the run is terminal by definition. If you land here while a run is still
+// going, the data is just a snapshot.
+// ---------------------------------------------------------------------------
+
+function AutopilotDetail({ runId }) {
+  const { data, error, loading } = useApi(`/autopilot/runs/${encodeURIComponent(runId)}`);
+
+  if (loading && !data) {
+    return (
+      <div className="p-6">
+        <h1 className="text-2xl font-bold text-white mb-4">Autopilot run</h1>
+        <div className="text-zinc-500 text-sm">Loading…</div>
+      </div>
+    );
+  }
+
+  if (error || !data) {
+    const is404 = error && /404|unknown run_id/i.test(error);
+    return (
+      <div className="p-6">
+        <h1 className="text-2xl font-bold text-white mb-2">Autopilot run</h1>
+        <p className="text-sm text-zinc-500 mb-6">
+          <Link to="/autopilot" className="text-blue-400 hover:underline">← Back to live</Link>
+        </p>
+        <div className="border border-zinc-800 rounded-lg p-6 bg-zinc-900/50">
+          {is404 ? (
+            <>
+              <h2 className="text-base font-semibold text-zinc-200 mb-1">Run not found</h2>
+              <p className="text-sm text-zinc-500">
+                Run <code className="font-mono">{runId}</code> is not in Redis. Records expire after 7 days.
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 className="text-base font-semibold text-red-400 mb-1">Failed to load run</h2>
+              <p className="text-sm text-zinc-500 font-mono">{error}</p>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const run = data.run;
+  const turns = Array.isArray(data.turns) ? data.turns : [];
+
+  return (
+    <div className="p-6 space-y-5">
+      <div>
+        <div className="flex items-baseline justify-between mb-1">
+          <h1 className="text-2xl font-bold text-white">Autopilot run</h1>
+          <Link to="/autopilot" className="text-xs text-blue-400 hover:underline">← Back to live</Link>
+        </div>
+        <p className="text-sm text-zinc-500">
+          Detail view · <Link to={`/metrics?run=${encodeURIComponent(run.run_id)}`} className="text-blue-400 hover:underline">see cycles for this run</Link>
+        </p>
+      </div>
+      <RunView run={run} turns={turns} mode="detail" />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Default export routes between live and detail based on the `:runId` param.
+// ---------------------------------------------------------------------------
+
+export default function Autopilot() {
+  const params = useParams();
+  const runId = params?.runId;
+  return runId ? <AutopilotDetail runId={runId} /> : <AutopilotLive />;
 }

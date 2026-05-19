@@ -1,4 +1,6 @@
 import { useApi } from "../hooks/useApi.js";
+import { useSearchParams, Link } from "react-router-dom";
+import { useMemo } from "react";
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import AbandonmentPanel from "../components/AbandonmentPanel.jsx";
 import QualityGatesPanel from "../components/QualityGatesPanel.jsx";
@@ -7,11 +9,40 @@ import CostWidget from "../components/CostWidget.jsx";
 import DesignConceptTelemetry from "../components/DesignConceptTelemetry.jsx";
 
 export default function Metrics() {
-  const { data: metricsData } = useApi("/metrics?count=30");
-  const { data: spendData } = useApi("/spending?count=30");
+  // Slice 4 (issue #500) — `?run=<runId>` scopes the metrics list to cycles
+  // whose `autopilotTurnId` starts with "<runId>:". Linked from the autopilot
+  // history table's "see cycles" cell. Baseline (no param) renders the full
+  // metrics view unchanged.
+  const [searchParams] = useSearchParams();
+  const runFilter = searchParams.get("run");
 
-  const metrics = (metricsData?.trend || metricsData?.metrics || []).reverse();
-  const spending = (spendData?.perCycle || []).reverse();
+  // Pull a wider window when filtering so we don't accidentally truncate the
+  // run's cycles. 30 is plenty for an unfiltered view; 200 covers worst-case
+  // long autopilot runs.
+  const fetchCount = runFilter ? 200 : 30;
+  const { data: metricsData } = useApi(`/metrics?count=${fetchCount}`);
+  const { data: spendData } = useApi(`/spending?count=${fetchCount}`);
+
+  const allMetrics = (metricsData?.trend || metricsData?.metrics || []).reverse();
+  const allSpending = (spendData?.perCycle || []).reverse();
+
+  // Apply the run filter on the client. The /metrics endpoint doesn't know
+  // about runs natively, so we filter by autopilotTurnId prefix here.
+  const metrics = useMemo(() => {
+    if (!runFilter) return allMetrics;
+    const prefix = `${runFilter}:`;
+    return allMetrics.filter(
+      (m) => typeof m.autopilotTurnId === "string" && m.autopilotTurnId.startsWith(prefix),
+    );
+  }, [allMetrics, runFilter]);
+
+  const spending = useMemo(() => {
+    if (!runFilter) return allSpending;
+    const prefix = `${runFilter}:`;
+    return allSpending.filter(
+      (s) => typeof s.autopilotTurnId === "string" && s.autopilotTurnId.startsWith(prefix),
+    );
+  }, [allSpending, runFilter]);
 
   const chartData = metrics.map((m) => ({
     name: m.cycleId?.replace("cycle-", "").slice(0, 10) || "",
@@ -30,7 +61,20 @@ export default function Metrics() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Metrics</h1>
+      <div className="flex items-baseline justify-between flex-wrap gap-2">
+        <h1 className="text-2xl font-bold">Metrics</h1>
+        {runFilter && (
+          <div className="flex items-baseline gap-2">
+            <span className="text-xs font-mono px-2 py-1 rounded bg-blue-500/10 border border-blue-500/30 text-blue-300">
+              filtered: run {runFilter} ({metrics.length} cycle{metrics.length === 1 ? "" : "s"})
+            </span>
+            <Link to="/metrics" className="text-xs text-zinc-400 hover:underline">clear</Link>
+            <Link to={`/autopilot/${encodeURIComponent(runFilter)}`} className="text-xs text-blue-400 hover:underline">
+              ← back to run
+            </Link>
+          </div>
+        )}
+      </div>
 
       {/* Aggregate stats */}
       {(metricsData?.stats || metricsData?.aggregate) && (

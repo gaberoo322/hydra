@@ -1,16 +1,30 @@
 import { useEffect, useState, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 
 export default function AgentStream({ ws }) {
   const [events, setEvents] = useState([]);
   const [activeAgents, setActiveAgents] = useState({});
   const bottomRef = useRef(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  // Slice 4 (issue #500) — `?agent=<worktreeBranch>` scopes the stream to one
+  // subagent. Linked from the autopilot turn-timeline "Watch stream" button.
+  // When absent the view shows the full unscoped stream (baseline behaviour).
+  const [searchParams] = useSearchParams();
+  const agentFilter = searchParams.get("agent");
 
   useEffect(() => {
     return ws.subscribe("agent:stream", (data) => {
       const evt = data.event || {};
       const agent = data.agent || "unknown";
       const text = evt.item?.text || evt.message || "";
+
+      // Slice 4 filter — when `?agent=` is set, only retain events whose
+      // agent label matches the filter (matched against the agent name OR
+      // its worktree branch label, since the WS frame's `agent` field can
+      // carry either depending on which event source emits it).
+      if (agentFilter && agent !== agentFilter && data.worktreeBranch !== agentFilter) {
+        return;
+      }
 
       // Track active agents
       setActiveAgents((prev) => {
@@ -50,7 +64,7 @@ export default function AgentStream({ ws }) {
         }].slice(-200));
       }
     });
-  }, [ws]);
+  }, [ws, agentFilter]);
 
   useEffect(() => {
     if (autoScroll && bottomRef.current) {
@@ -77,7 +91,14 @@ export default function AgentStream({ ws }) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Agent Activity</h1>
+        <div className="flex items-baseline gap-3">
+          <h1 className="text-2xl font-bold">Agent Activity</h1>
+          {agentFilter && (
+            <span className="text-xs font-mono px-2 py-1 rounded bg-blue-500/10 border border-blue-500/30 text-blue-300">
+              filtered: {agentFilter}
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-xs text-zinc-500">
             <input
