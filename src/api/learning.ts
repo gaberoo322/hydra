@@ -2,7 +2,10 @@ import { Router } from "express";
 import {
   getIneffectivePromotedPatterns,
   getRuleActionLog,
+  listFrictionPatterns,
 } from "../learning/agent-memory.ts";
+
+const FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const;
 
 /**
  * GET /learning/ineffective-rules — patterns that were auto-promoted to a
@@ -65,6 +68,31 @@ export function createLearningRouter() {
     } catch (err: any) {
       console.error(`[learning-api] rule-action-log failed: ${err?.message || String(err)}`);
       res.status(500).json({ entries: [], count: 0, errors: [err?.message || String(err)] });
+    }
+  });
+
+  /**
+   * GET /learning/friction-patterns — observability surface for the soft
+   * friction items captured from subagent runs (issue #512). Returns the
+   * aggregated friction patterns keyed by skill, mirroring the shape of
+   * `/learning/ineffective-rules` for symmetry.
+   */
+  router.get("/learning/friction-patterns", async (_req, res) => {
+    try {
+      const out: Record<string, unknown[]> = {};
+      let total = 0;
+      for (const skill of FRICTION_SKILLS) {
+        const patterns = await listFrictionPatterns(skill);
+        out[skill] = patterns;
+        total += patterns.length;
+      }
+      res.json({ ...out, totalPatterns: total });
+    } catch (err: any) {
+      console.error(`[learning-api] friction-patterns failed: ${err?.message || String(err)}`);
+      res.status(500).json({
+        totalPatterns: 0,
+        errors: [err?.message || String(err)],
+      });
     }
   });
 

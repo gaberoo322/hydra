@@ -134,7 +134,8 @@ The legacy in-process agent personalities (`config/agents/{planner,executor,skep
 - Research reports — `hydra:reports:research:*` (Redis keys, kept 20)
 - Proposals — `hydra:proposals:*` (Redis hashes)
 - Specs — `hydra:specs:*` (Redis hashes, 30-day TTL) + `hydra:specs:index` (sorted set)
-- Lessons (subagent capture) — `hydra:lessons:*` (per-agent rolling JSON; promotes into operator-facing lesson files at 5 hits)
+- Lessons (subagent capture) — `hydra:lessons:*` (per-agent rolling JSON; promotes into operator-facing lesson files at 3 hits — `PROMOTION_THRESHOLD` in `src/learning/agent-memory.ts`)
+- Friction patterns (issue #512) — `hydra:friction:{skill}:patterns` (per-skill soft-friction items; threshold-crosses auto-open a `meta-friction` GitHub issue)
 
 **Specs (multi-cycle task decomposition):**
 - Created by research loop (complex opportunities) or operator (POST /api/specs)
@@ -158,7 +159,7 @@ The legacy in-process agent personalities (`config/agents/{planner,executor,skep
 
 1. **OpenViking (primary):** Each autopilot tick or subagent dispatch creates an OV session (`ov-session.ts`). Subagent interactions are logged as session messages. At session close, `ovSession.commit()` triggers automatic memory extraction — OV analyzes the full conversation and stores learned patterns as searchable embeddings. Subagents query `getAgentContext()` and `searchKnowledge()` for relevant past experience.
 
-2. **Redis patterns (fallback):** Consolidated patterns in `hydra:memory:{agent}:patterns` with hit counts. Similar incidents merge into one pattern. When a pattern reaches 5 occurrences, it auto-promotes to a durable lesson file (e.g. `~/.claude/skills/<skill>/lessons.md`) as a cardinal rule. Stale one-offs are pruned after 14 days.
+2. **Redis patterns (fallback):** Consolidated patterns in `hydra:memory:{agent}:patterns` with hit counts. Similar incidents merge into one pattern. When a pattern reaches `PROMOTION_THRESHOLD` (3) occurrences, it auto-promotes to a durable lesson file (e.g. `~/.claude/skills/<skill>/lessons.md`) as a cardinal rule, AND a `meta-friction` GitHub issue is opened so chronic problems become tracked work (issue #512). Stale one-offs are pruned after 14 days.
 
 3. **Episodic reflections:** When a subagent fails, a structured reflection (what was attempted, why it failed, what should change) is stored in `hydra:reflections:{ref}` with 7-day TTL. When the same anchor/issue is retried, reflections are injected as subagent context.
 

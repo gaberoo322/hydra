@@ -35,19 +35,42 @@ export async function setPatternCooldown(pattern: string, timestamp: string): Pr
 }
 
 /**
- * Load raw patterns JSON for an agent.
+ * Issue #512 — pattern namespace selector. `"memory"` is the historical
+ * planner/executor/skeptic pattern set keyed under
+ * `hydra:memory:{agent}:patterns`. `"friction"` is the soft-friction set
+ * keyed under `hydra:friction:{skill}:patterns`. The two share schema +
+ * promotion math but live in distinct Redis keys so they can be queried,
+ * pruned, and observed independently.
  */
-export async function loadPatternsRaw(agent: string): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.memoryPatterns(agent));
+export type PatternNamespace = "memory" | "friction";
+
+function patternsKey(namespace: PatternNamespace, name: string): string {
+  return namespace === "friction"
+    ? redisKeys.frictionPatterns(name)
+    : redisKeys.memoryPatterns(name);
 }
 
 /**
- * Save patterns JSON for an agent.
+ * Load raw patterns JSON for an agent (or skill, when `namespace="friction"`).
  */
-export async function savePatternsRaw(agent: string, json: string): Promise<void> {
+export async function loadPatternsRaw(
+  agent: string,
+  namespace: PatternNamespace = "memory",
+): Promise<string | null> {
   const r = getRedisConnection();
-  await r.set(redisKeys.memoryPatterns(agent), json);
+  return r.get(patternsKey(namespace, agent));
+}
+
+/**
+ * Save patterns JSON for an agent (or skill, when `namespace="friction"`).
+ */
+export async function savePatternsRaw(
+  agent: string,
+  json: string,
+  namespace: PatternNamespace = "memory",
+): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(patternsKey(namespace, agent), json);
 }
 
 /**

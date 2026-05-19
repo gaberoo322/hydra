@@ -131,8 +131,22 @@ const RULE_ACTION_LOG_KEY = "hydra:learning:rule-actions";
 // Pattern storage
 // ===========================================================================
 
-async function loadPatterns(agentName: string): Promise<MemoryPattern[]> {
-  const raw = await loadPatternsRaw(agentName);
+/**
+ * Issue #512 — pattern namespace. The legacy planner/executor/skeptic
+ * patterns live under `hydra:memory:{agent}:patterns` (namespace="memory").
+ * Friction patterns from subagent friction-reports live under
+ * `hydra:friction:{skill}:patterns` (namespace="friction"). The two share
+ * schema and promotion math, but only `memory` patterns write to the
+ * `config/feedback/to-{agent}.md` files. Both fire the GitHub escalation
+ * hook when their hit count crosses PROMOTION_THRESHOLD.
+ */
+export type PatternNamespace = "memory" | "friction";
+
+async function loadPatterns(
+  agentName: string,
+  namespace: PatternNamespace = "memory",
+): Promise<MemoryPattern[]> {
+  const raw = await loadPatternsRaw(agentName, namespace);
   if (!raw) return [];
   try {
     return JSON.parse(raw);
@@ -141,11 +155,15 @@ async function loadPatterns(agentName: string): Promise<MemoryPattern[]> {
   }
 }
 
-async function savePatterns(agentName: string, patterns: MemoryPattern[]) {
+async function savePatterns(
+  agentName: string,
+  patterns: MemoryPattern[],
+  namespace: PatternNamespace = "memory",
+) {
   const sorted = patterns
     .sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime())
     .slice(0, MAX_PATTERNS);
-  await savePatternsRaw(agentName, JSON.stringify(sorted));
+  await savePatternsRaw(agentName, JSON.stringify(sorted), namespace);
 }
 
 async function sweepStalePromotions(agentName: string) {
@@ -470,8 +488,17 @@ export function formatMemoryForPrompt(memory: string, agentName: string): string
  * The optional `source` discriminator (issue #392) lets callers tag whether
  * the pattern came from the in-process codex cycle or from an autopilot
  * subagent. It is metadata only — the consolidation/promotion pipeline is
- * unchanged so existing 5-hit auto-promotion continues to apply regardless
+ * unchanged so existing 3-hit auto-promotion continues to apply regardless
  * of who recorded the hits.
+ *
+ * Issue #512 — `namespace` selects the Redis key family. `"memory"` (the
+ * default) keeps the legacy behaviour: patterns land under
+ * `hydra:memory:{agent}:patterns` and a promotion writes through to
+ * `config/feedback/to-{agent}.md`. `"friction"` lands patterns under
+ * `hydra:friction:{skill}:patterns` and skips the feedback-file write
+ * (there is no `to-{skill}.md` for arbitrary subagent skills). Both
+ * namespaces fire the GitHub-issue escalation hook on threshold-cross
+ * and every multiple of 10 thereafter.
  */
 export async function recordPattern(
   agentName: string,
@@ -482,12 +509,15 @@ export async function recordPattern(
     example: string;
     cycleId: string;
     source?: "codex-cycle" | "subagent";
+    namespace?: PatternNamespace;
   },
 ) {
-  const patterns = await loadPatterns(agentName);
+  const namespace: PatternNamespace = details.namespace || "memory";
+  const patterns = await loadPatterns(agentName, namespace);
   const today = new Date().toISOString().split("T")[0];
 
   const existing = patterns.find(p => p.category === category);
+  let crossedThreshold = false;
 
   if (existing) {
     existing.hitCount++;
@@ -498,12 +528,20 @@ export async function recordPattern(
     if (details.source) existing.source = details.source;
 
     if (existing.hitCount >= PROMOTION_THRESHOLD && !existing.promoted) {
-      await promoteToFeedback(agentName, existing);
+      if (namespace === "memory") {
+        await promoteToFeedback(agentName, existing);
+      }
       existing.promoted = true;
       existing.promotedAt = today;
       existing.hitsAtPromotion = existing.hitCount;
-      console.log(`[Learning] Promoted "${category}" to to-${agentName}.md (${existing.hitCount} hits)`);
+      crossedThreshold = true;
+      const target = namespace === "memory" ? `to-${agentName}.md` : `friction:${agentName}`;
+      console.log(`[Learning] Promoted "${category}" to ${target} (${existing.hitCount} hits)`);
     }
+
+    // Issue #512 — fire escalation hook on threshold-cross AND on every
+    // multiple-of-10 thereafter (13, 23, ...). Best-effort: never throws.
+    await maybeEscalate(namespace, agentName, existing, crossedThreshold);
   } else {
     patterns.push({
       category,
@@ -519,7 +557,49 @@ export async function recordPattern(
     });
   }
 
-  await savePatterns(agentName, patterns);
+  await savePatterns(agentName, patterns, namespace);
+}
+
+/**
+ * Issue #512 — fire the GitHub-escalation hook when a pattern hits an
+ * "interesting" count. Lazy-imports so the hot path doesn't pay the
+ * escalation-module load cost on every record. Best-effort: any error
+ * inside the hook is logged but never propagated.
+ */
+async function maybeEscalate(
+  namespace: PatternNamespace,
+  name: string,
+  pattern: MemoryPattern,
+  crossedThreshold: boolean,
+): Promise<void> {
+  try {
+    const { shouldEscalateAtHitCount, escalatePatternToIssue } = await import(
+      "./escalation.ts"
+    );
+    if (!shouldEscalateAtHitCount(pattern.hitCount, PROMOTION_THRESHOLD)) return;
+    void crossedThreshold; // currently informational; kept for future routing
+    await escalatePatternToIssue({
+      kind: namespace === "friction" ? "friction" : "lesson",
+      cue: pattern.category,
+      hitCount: pattern.hitCount,
+      skills: [name],
+      workarounds: pattern.examples.filter(e => typeof e === "string" && e.trim().length > 0),
+      lastReference: pattern.lastCycleId,
+    });
+  } catch (err: any) {
+    console.error(`[Learning] maybeEscalate(${namespace}/${name}/${pattern.category}) failed: ${err?.message || err}`);
+  }
+}
+
+/**
+ * Issue #512 — list all friction patterns across all known skills.
+ * Exported so the `/api/learning/friction-patterns` endpoint can render
+ * an observability view without bespoke Redis access.
+ */
+export async function listFrictionPatterns(
+  skill: string,
+): Promise<MemoryPattern[]> {
+  return loadPatterns(skill, "friction");
 }
 
 // ===========================================================================
