@@ -282,7 +282,7 @@ gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA f
 Returning to ready-for-agent for retry."
 ```
 
-### 11. Lesson capture on FAIL (issue #392)
+### 11. Lesson capture on FAIL (issue #392, refined by #524)
 
 After a FAIL verdict — before returning — record a planner pattern so the
 agent-memory write path keeps producing durable rules in
@@ -290,15 +290,40 @@ agent-memory write path keeps producing durable rules in
 `hydra:memory:planner:patterns` for Claude-driven QA after #383 deleted
 codex-runner.
 
+**Classify each failed criterion** before emitting the cue (issue #524):
+
+- `acceptance-criterion-unmet` — the implementation actually didn't satisfy
+  the criterion. The diff is wrong, missing, or contradicts the spec. This
+  is the planner-quality signal the friction system is built to surface;
+  the existing 3-hit threshold applies.
+- `acceptance-criterion-deferred` — the criterion requires post-deploy /
+  runtime / manual observation that pre-merge QA *cannot* verify from a
+  diff. Marker phrases (case-insensitive): "after Nh post-deploy",
+  "manually verify", "manually induce", "manually inducing", "operator
+  observes", "operator confirms", "operator verifies", "in production",
+  "post-deploy", "production runtime", "production logs", "runtime
+  observation". This cue is metadata about the AC's shape, not a defect;
+  the auto-escalation threshold is 20+ (much higher than `unmet`) and it
+  does NOT auto-promote to `to-planner.md`.
+
 ```bash
 # One call per failed criterion (the endpoint dedupes on cue).
 for failed in "${FAILED_CRITERIA[@]}"; do
+  # Classify: deferred-ish text → acceptance-criterion-deferred, else unmet.
+  shopt -s nocasematch
+  if [[ "$failed" =~ (after\ [0-9]+h\ post-deploy|manually\ verify|manually\ induc|operator\ (observe|confirm|verifie)|in\ production|post-deploy|production\ (runtime|logs)|runtime\ observation) ]]; then
+    cue="acceptance-criterion-deferred"
+  else
+    cue="acceptance-criterion-unmet"
+  fi
+  shopt -u nocasematch
+
   curl -fsS -X POST http://localhost:4000/api/memory/subagent-lesson \
     -H 'content-type: application/json' \
     -d "$(jq -n \
       --arg skill "hydra-qa" \
       --arg outcome "qa-fail" \
-      --arg cue "acceptance-criterion-unmet" \
+      --arg cue "$cue" \
       --arg context "PR #${pr_number}: ${failed}" \
       --arg cycleId "hydra-qa-${issue_number}-$(date +%s)" \
       '{skill: $skill, outcome: $outcome, cue: $cue, context: $context, cycleId: $cycleId}')" \
@@ -307,9 +332,9 @@ done
 ```
 
 API failures are non-fatal — log and continue. The endpoint validates inputs
-and forwards to `recordPattern()` so the existing 3-hit auto-promotion
-pipeline still applies. Don't call this on PASS / PASS-pending-CI (positive
-QA outcomes currently don't train a memory).
+and forwards to `recordPattern()` so the existing auto-promotion
+pipeline still applies (with the per-cue threshold from #524). Don't call this
+on PASS / PASS-pending-CI (positive QA outcomes currently don't train a memory).
 
 Relay the QA report to the user.
 

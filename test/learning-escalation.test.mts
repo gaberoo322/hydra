@@ -32,6 +32,8 @@ let originalRepo: string | undefined;
 let escalatePatternToIssue: typeof import("../src/learning/escalation.ts").escalatePatternToIssue;
 let shouldEscalateAtHitCount: typeof import("../src/learning/escalation.ts").shouldEscalateAtHitCount;
 let findExistingIssue: typeof import("../src/learning/escalation.ts").findExistingIssue;
+let escalationThresholdForCue: typeof import("../src/learning/escalation.ts").escalationThresholdForCue;
+let isMetadataCue: typeof import("../src/learning/escalation.ts").isMetadataCue;
 
 /** Render a fake gh script that dispatches by SCENARIO env var. */
 async function writeFakeGh(path: string, invocationsLog: string) {
@@ -126,6 +128,8 @@ describe("escalation to GitHub (issue #512)", () => {
     escalatePatternToIssue = mod.escalatePatternToIssue;
     shouldEscalateAtHitCount = mod.shouldEscalateAtHitCount;
     findExistingIssue = mod.findExistingIssue;
+    escalationThresholdForCue = mod.escalationThresholdForCue;
+    isMetadataCue = mod.isMetadataCue;
   });
 
   beforeEach(async () => {
@@ -289,6 +293,81 @@ describe("escalation to GitHub (issue #512)", () => {
       skills: ["hydra-dev"],
     });
     assert.equal(result.status, "skipped");
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue #524 — acceptance-criterion-deferred vs unmet cue split
+  // -------------------------------------------------------------------------
+
+  test("escalationThresholdForCue: acceptance-criterion-unmet keeps the default (3)", () => {
+    assert.equal(escalationThresholdForCue("acceptance-criterion-unmet", 3), 3);
+  });
+
+  test("escalationThresholdForCue: acceptance-criterion-deferred uses the higher 20-hit threshold", () => {
+    assert.equal(escalationThresholdForCue("acceptance-criterion-deferred", 3), 20);
+  });
+
+  test("escalationThresholdForCue: unknown cues fall back to the default", () => {
+    assert.equal(escalationThresholdForCue("scope-creep", 3), 3);
+    assert.equal(escalationThresholdForCue("verification-failure", 3), 3);
+    // Falsy/odd inputs also fall back.
+    assert.equal(escalationThresholdForCue("", 3), 3);
+    assert.equal(escalationThresholdForCue(undefined as unknown as string, 7), 7);
+  });
+
+  test("isMetadataCue: deferred is metadata, unmet and others are not", () => {
+    assert.equal(isMetadataCue("acceptance-criterion-deferred"), true);
+    assert.equal(isMetadataCue("acceptance-criterion-unmet"), false);
+    assert.equal(isMetadataCue("scope-creep"), false);
+    assert.equal(isMetadataCue(""), false);
+  });
+
+  test("shouldEscalateAtHitCount with deferred threshold (20): silent below 20", () => {
+    for (const n of [1, 3, 5, 10, 15, 19]) {
+      assert.equal(
+        shouldEscalateAtHitCount(n, 20),
+        false,
+        `hitCount=${n} should NOT escalate at threshold=20`,
+      );
+    }
+  });
+
+  test("shouldEscalateAtHitCount with deferred threshold (20): fires at 20", () => {
+    assert.equal(shouldEscalateAtHitCount(20, 20), true);
+  });
+
+  test("shouldEscalateAtHitCount with deferred threshold (20): fires on +10 multiples", () => {
+    assert.equal(shouldEscalateAtHitCount(30, 20), true);
+    assert.equal(shouldEscalateAtHitCount(40, 20), true);
+    assert.equal(shouldEscalateAtHitCount(50, 20), true);
+    // Off-by-one sanity checks — must remain silent between decade marks.
+    assert.equal(shouldEscalateAtHitCount(21, 20), false);
+    assert.equal(shouldEscalateAtHitCount(29, 20), false);
+    assert.equal(shouldEscalateAtHitCount(31, 20), false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Integration-ish: agent-memory.maybeEscalate() should suppress escalation
+  // for the deferred cue at hit 3 (the unmet threshold), but the unmet cue
+  // should still fire at hit 3 as it always has.
+  //
+  // We exercise this via the threshold-resolution helpers rather than running
+  // through Redis, because the escalation hook itself is well-covered by the
+  // create/comment/reopen tests above.
+  // -------------------------------------------------------------------------
+
+  test("deferred cue suppresses escalation at hit 3 (unmet still fires)", () => {
+    const unmetThreshold = escalationThresholdForCue("acceptance-criterion-unmet", 3);
+    const deferredThreshold = escalationThresholdForCue("acceptance-criterion-deferred", 3);
+
+    // Hit 3 (the legacy `PROMOTION_THRESHOLD`) — unmet fires, deferred does not.
+    assert.equal(shouldEscalateAtHitCount(3, unmetThreshold), true);
+    assert.equal(shouldEscalateAtHitCount(3, deferredThreshold), false);
+
+    // Hit 20 — deferred fires for the first time; unmet would NOT (only
+    // multiples of 10 above its threshold of 3 fire, i.e. 13, 23, 33...).
+    assert.equal(shouldEscalateAtHitCount(20, deferredThreshold), true);
+    assert.equal(shouldEscalateAtHitCount(20, unmetThreshold), false);
   });
 
   test("uses meta(lesson) title for kind=lesson, meta(friction) for kind=friction", async () => {

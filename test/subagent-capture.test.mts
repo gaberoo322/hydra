@@ -38,6 +38,11 @@ import Redis from "ioredis";
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
 
+// Suppress the GitHub-escalation hook so these tests don't shell out to `gh`.
+// The escalation pipeline has its own dedicated regression in
+// test/learning-escalation.test.mts.
+process.env.HYDRA_ESCALATION_DISABLED = "1";
+
 let tempConfigRoot: string;
 let originalConfigPath: string | undefined;
 let redis: any;
@@ -250,6 +255,74 @@ describe("subagent lesson capture (issue #392)", () => {
       after.includes("(3x"),
       "feedback file should record the hit count at promotion",
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue #524 — acceptance-criterion-deferred is metadata, not a defect.
+  // The pattern is recorded and hit count climbs, but the auto-promotion
+  // to to-planner.md must NOT happen at the 3-hit unmet threshold.
+  // -------------------------------------------------------------------------
+
+  test("acceptance-criterion-deferred records hits but does NOT auto-promote at 3 hits", async () => {
+    const feedbackPath = join(tempConfigRoot, "feedback", "to-planner.md");
+
+    // 3 hits with the deferred cue. Same shape as the unmet test above,
+    // except the cue string changes — the writer should classify this as
+    // metadata and skip the feedback-file write.
+    for (let i = 1; i <= 3; i++) {
+      await captureSubagentLesson({
+        skill: "hydra-qa",
+        outcome: "qa-fail",
+        cue: "acceptance-criterion-deferred",
+        context: `PR #${600 + i}: manually verify after 24h post-deploy`,
+        cycleId: `qa-cycle-deferred-${i}`,
+      });
+    }
+
+    const patterns = await loadPatterns("planner");
+    assert.equal(patterns.length, 1);
+    assert.equal(patterns[0].category, "acceptance-criterion-deferred");
+    assert.equal(patterns[0].hitCount, 3);
+    // `promoted: true` is stamped so we don't re-evaluate, but the feedback
+    // file write was skipped (the cue is metadata).
+    assert.equal(patterns[0].promoted, true);
+
+    const after = await readFile(feedbackPath, "utf-8");
+    assert.equal(
+      after.includes("Auto-Promoted Rules"),
+      false,
+      "deferred cue must NOT add an Auto-Promoted Rules section",
+    );
+    assert.equal(
+      after.includes("acceptance-criterion-deferred"),
+      false,
+      "deferred cue text must NOT leak into to-planner.md",
+    );
+  });
+
+  test("acceptance-criterion-unmet still auto-promotes at 3 hits (regression guard)", async () => {
+    // Same flow as the unmet test above — duplicated here so this test file
+    // can be read as a single before/after for the cue split.
+    const feedbackPath = join(tempConfigRoot, "feedback", "to-planner.md");
+
+    for (let i = 1; i <= 3; i++) {
+      await captureSubagentLesson({
+        skill: "hydra-qa",
+        outcome: "qa-fail",
+        cue: "acceptance-criterion-unmet",
+        context: `PR #${700 + i}: missing X behaviour in diff`,
+        cycleId: `qa-cycle-unmet-${i}`,
+      });
+    }
+
+    const patterns = await loadPatterns("planner");
+    assert.equal(patterns[0].promoted, true);
+    const after = await readFile(feedbackPath, "utf-8");
+    assert.ok(
+      after.includes("Auto-Promoted Rules"),
+      "unmet cue MUST still promote — only deferred is metadata",
+    );
+    assert.ok(after.includes("acceptance-criterion-unmet"));
   });
 
   // -------------------------------------------------------------------------
