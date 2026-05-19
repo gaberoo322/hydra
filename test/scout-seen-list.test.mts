@@ -39,22 +39,14 @@ const {
   WONTFIX_COOLDOWN_DAYS,
 } = await import("../src/scout/seen-list.ts");
 
-let testRedis: any;
+let testRedis: any = null;
 
 function getTestRedis(): any {
-  // Each describe block's `after` hook disconnects the connection. If a later
-  // describe runs its `beforeEach`, the prior connection is dead — so we
-  // transparently re-connect here. Two re-connects are expected per file.
-  // ioredis status can be "ready", "connecting", "connect", "reconnecting",
-  // "end", "wait", or "close" — only "ready" / "connect" / "connecting" /
-  // "reconnecting" are safe to reuse.
-  const status = testRedis?.status;
-  if (
-    !testRedis ||
-    status === "end" ||
-    status === "close" ||
-    status === "wait"
-  ) {
+  // Single shared connection for the file. The file-level `after` hook below
+  // is the only place that closes it. Per-describe disconnect was brittle and
+  // left the runner hanging on the production-singleton ioredis socket — see
+  // PR #518 friction items 2/3 and the follow-up commit.
+  if (!testRedis) {
     testRedis = new Redis("redis://localhost:6379/1");
   }
   return testRedis;
@@ -65,6 +57,29 @@ async function cleanTestKeys(): Promise<void> {
   const keys = await r.keys("hydra:scout:tools-considered:*");
   if (keys.length > 0) await r.del(...keys);
 }
+
+// File-level teardown — node:test runs top-level `after` hooks even when
+// subtests fail, so this is the only place that needs to close sockets.
+// Closes both:
+//   1. The test-owned ioredis connection (created in getTestRedis()).
+//   2. The production singleton in src/redis/connection.ts that
+//      `recordDecision` / `getSeen` / `eligibleForReEval` pull through
+//      `src/redis/kv.ts`. Without this, the node:test runner stays alive on
+//      the open socket and CI's count-regression check fails because the
+//      final `# pass NN` line never gets emitted before --test-force-exit
+//      cuts the process.
+after(async () => {
+  if (testRedis && testRedis.status !== "end") {
+    testRedis.disconnect();
+    testRedis = null;
+  }
+  try {
+    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    closeRedisConnections();
+  } catch (err) {
+    console.error("scout-seen-list teardown: closeRedisConnections failed", err);
+  }
+});
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -129,8 +144,7 @@ describe("seen-list.recordDecision (issue #484)", () => {
 
   after(async () => {
     await cleanTestKeys();
-    // NOTE: do NOT disconnect testRedis here — the next describe block reuses
-    // it. The final describe's `after` hook performs the single disconnect.
+    // Connection disconnect happens in the file-level `after` hook above.
   });
 
   test("writes a 'filed' entry with all fields", async () => {
@@ -456,7 +470,7 @@ describe("seen-list.eligibleForReEval (Redis round-trip)", () => {
 
   after(async () => {
     await cleanTestKeys();
-    if (testRedis) testRedis.disconnect();
+    // Connection disconnect happens in the file-level `after` hook above.
   });
 
   test("no record — eligible", async () => {
