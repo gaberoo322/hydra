@@ -24,10 +24,9 @@
 
 export type PriorityTier =
   | "explicit-operator"   // 1 — opts.anchor (operator passes it in)
-  | "capacity-floor"      // 1.2 — stuckness / spec-starvation pre-emption
+  | "capacity-floor"      // 1.2 — stuckness-driven self-improvement pre-emption
   | "failing-test"        // 2.7 / 2.8 — failing tests or typecheck errors
   | "kanban-queued"       // 2 — claimed from Kanban queued lane
-  | "active-spec"         // 2.5 — next unchecked task from oldest spec
   | "work-queue"          // 3 — POST /queue or research auto-queue
   | "reframe-queue"       // 4.5 — failed-repeatedly items getting a fresh prompt
   | "prior-failure"       // 5 — Redis prior-failures (capped at 2 retries)
@@ -51,7 +50,6 @@ export const PRIORITY_TIER_BASE_SCORE: Record<PriorityTier, number> = {
   "capacity-floor":    0.95,
   "failing-test":      0.95,
   "kanban-queued":     0.85,
-  "active-spec":       0.80,
   "work-queue":        0.70,
   "reframe-queue":     0.55,
   "prior-failure":     0.45,

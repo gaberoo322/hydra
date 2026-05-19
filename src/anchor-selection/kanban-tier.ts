@@ -29,7 +29,7 @@ export interface KanbanResult {
  * Try to claim the next queued backlog item. Returns:
  *   - anchor: the claimed item, or null if none claimed (no item, drift, or WIP)
  *   - wipBlocked: true when the atomic claim reports WIP-limit, so the caller
- *     can short-circuit subsequent WIP-gated tiers (active specs).
+ *     can short-circuit subsequent WIP-gated tiers.
  */
 export async function selectKanbanAnchor(): Promise<KanbanResult> {
   try {

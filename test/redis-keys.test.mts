@@ -34,7 +34,6 @@ describe("redisKeys naming convention", () => {
     ["backlogItems", redisKeys.backlogItems],
     ["backlogCounter", redisKeys.backlogCounter],
     ["proposalsIndex", redisKeys.proposalsIndex],
-    ["specsIndex", redisKeys.specsIndex],
     ["schedulerState", redisKeys.schedulerState],
     ["schedulerDailySpend", redisKeys.schedulerDailySpend],
     ["mergeLock", redisKeys.mergeLock],
@@ -84,7 +83,6 @@ describe("redisKeys naming convention", () => {
     ["reflection", redisKeys.reflection("some-anchor-ref")],
     ["backlogLane", redisKeys.backlogLane("queued")],
     ["proposal", redisKeys.proposal("prop-1")],
-    ["spec", redisKeys.spec("my-spec")],
     ["planCache", redisKeys.planCache("abc123")],
     ["stream", redisKeys.stream("notifications")],
   ];
@@ -119,7 +117,6 @@ describe("redisKeys uniqueness", () => {
       ["backlogItems", redisKeys.backlogItems()],
       ["backlogCounter", redisKeys.backlogCounter()],
       ["proposalsIndex", redisKeys.proposalsIndex()],
-      ["specsIndex", redisKeys.specsIndex()],
       ["schedulerState", redisKeys.schedulerState()],
       ["schedulerDailySpend", redisKeys.schedulerDailySpend()],
       ["mergeLock", redisKeys.mergeLock()],
@@ -174,7 +171,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.backlogItems(), "hydra:backlog:items");
     assert.equal(redisKeys.backlogCounter(), "hydra:backlog:counter");
     assert.equal(redisKeys.proposalsIndex(), "hydra:proposals:index");
-    assert.equal(redisKeys.specsIndex(), "hydra:specs:index");
     assert.equal(redisKeys.schedulerState(), "hydra:scheduler:state");
     assert.equal(redisKeys.schedulerDailySpend(), "hydra:scheduler:daily-spend");
     assert.equal(redisKeys.mergeLock(), "hydra:merge:lock");
@@ -200,7 +196,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.reflection("test-ref"), "hydra:reflections:test-ref");
     assert.equal(redisKeys.backlogLane("queued"), "hydra:backlog:lane:queued");
     assert.equal(redisKeys.proposal("p1"), "hydra:proposals:p1");
-    assert.equal(redisKeys.spec("my-spec"), "hydra:specs:my-spec");
     assert.equal(redisKeys.planCache("abc"), "hydra:plans:cache:abc");
     assert.equal(redisKeys.anchorAbandonmentCount("ref"), "hydra:anchors:abandonment-count:ref");
     assert.equal(redisKeys.anchorPermSkip("ref"), "hydra:anchors:perm-skip:ref");

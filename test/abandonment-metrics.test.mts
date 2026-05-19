@@ -140,10 +140,10 @@ describe("abandonment metrics aggregation (issue #195)", () => {
     assert.equal(preflight.pct, Math.round((5 / 11) * 100));
     assert.equal(preflight.sampleReasons.length, 3, "should keep up to 3 sample reasons");
 
-    const autoDecomposed = breakdown.byCategory.find((c) => c.category === "Auto-decomposed into smaller tasks");
-    assert.ok(autoDecomposed, "Auto-decomposed category should be present");
-    assert.equal(autoDecomposed.count, 4);
-    assert.equal(autoDecomposed.pct, Math.round((4 / 11) * 100));
+    const decomposedCategory = breakdown.byCategory.find((c) => c.category === "Auto-decomposed into smaller tasks");
+    assert.ok(decomposedCategory, "Auto-decomposed category should be present");
+    assert.equal(decomposedCategory.count, 4);
+    assert.equal(decomposedCategory.pct, Math.round((4 / 11) * 100));
 
     const noWork = breakdown.byCategory.find((c) => c.category === "Planner noWork");
     assert.ok(noWork, "Planner noWork category should be present");

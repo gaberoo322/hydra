@@ -97,16 +97,11 @@ export const redisKeys = {
   proposal: (id: string) => `hydra:proposals:${id}`,
 
   // ---------------------------------------------------------------------------
-  // Specs
+  // Specs — RETIRED (issue #513). The Specs subsystem was deleted; key
+  // builders were removed. Existing `hydra:specs:*` keys remain in Redis
+  // but are no longer read or written. See scripts/cleanup/retire-specs.sh
+  // for one-shot cleanup.
   // ---------------------------------------------------------------------------
-  specsIndex: () => "hydra:specs:index",
-  spec: (slug: string) => `hydra:specs:${slug}`,
-  // Spec-starvation instrumentation (issue #301) — tracks how often the spec
-  // tier is passed over and why, plus the running "cycles since a spec was
-  // last served" gauge used by the capacity-floor.
-  specsPassedReasons: () => "hydra:specs:passed-reasons",
-  specsCyclesSinceServed: () => "hydra:specs:cycles-since-served",
-  specsLastServedAt: () => "hydra:specs:last-served-at",
 
   // ---------------------------------------------------------------------------
   // Scheduler

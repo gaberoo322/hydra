@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 //
 // Background
-//   Two pre-emption mechanisms had grown side-by-side in `selectAnchor()`:
+//   `selectAnchor()` historically grew two pre-emption mechanisms:
 //
 //     1. Stuckness-driven research (issue #253 / #245 / ADR-0003 vision
 //        vector 1): when a Target Outcome has been stuck for N cycles,
@@ -11,13 +11,15 @@
 //        25% self-improvement share is actually enforced in the selector.
 //
 //     2. Spec capacity-floor (issue #301 / #308): every Nth eligible cycle,
-//        pre-empt the kanban tier with the next active-spec task so the
-//        specs lane can't be indefinitely shadowed.
+//        pre-empt the kanban tier with the next active-spec task. RETIRED
+//        in issue #513 along with the rest of the Specs subsystem.
 //
 //   They lived as two independent branches in `select.ts`. Each independently
 //   stole cycles from kanban; they never saw each other's state. The original
 //   #301 issue called this out and asked for a unified `capacity-floors`
-//   block. This module is that unification.
+//   block. This module is that unification — even though only one floor
+//   (stuckness / self-improvement) remains today, the scaffolding is kept
+//   so future floors can plug in without re-introducing the stacking bug.
 //
 // Shape
 //   A *declaration*-driven dispatcher. Each floor is described by:
@@ -31,28 +33,10 @@
 //   picks the floor with the highest positive `deficit` (ties broken by
 //   `priority`), invokes `buildAnchor()`, and returns the anchor. If no
 //   floor is ready, returns `null` and the caller falls through to the
-//   normal priority chain (kanban → specs → failing tests → …).
-//
-//   The dispatcher is the ONLY place that decides which floor pre-empts
-//   kanban. Per-floor modules keep their predicates (we want them testable
-//   in isolation) but no longer dispatch themselves.
-//
-// Preservation
-//   This refactor is intentionally behavior-preserving. The dispatcher's
-//   tiebreak is set so that when BOTH floors are ready in the same cycle,
-//   the spec floor wins — matching the pre-refactor flow where the
-//   `forceSpec` branch gated the stuckness check.
+//   normal priority chain (kanban → failing tests → …).
 
 import { getAllStuckness, type StucknessResult } from "../stuckness.ts";
-import { getNextSpecTask } from "../specs.ts";
-import {
-  getCyclesSinceSpecServed,
-  getSpecCapacityFloorN,
-  recordSpecPassedReason,
-  recordSpecServed,
-} from "./spec-starvation.ts";
 import { pickStuckOutcome, buildStucknessAnchor } from "./stuckness-routing.ts";
-import { buildSpecAnchor } from "./build-spec-anchor.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -80,7 +64,7 @@ export interface FloorReadiness<P = unknown> {
 
 export interface FloorDecl<P = unknown> {
   name: string;
-  /** Lower priority = wins ties. (Spec floor uses priority 1, stuckness 2.) */
+  /** Lower priority = wins ties. */
   priority: number;
   /** Cheap reads only — no anchor build. Return `null` if not applicable. */
   prepare(): Promise<FloorReadiness<P> | null>;
@@ -122,43 +106,23 @@ export interface DispatchResult {
 export interface CapacityFloorsConfig {
   /** Self-improvement floor (stuckness-driven research). */
   selfImprovement: { targetShare: number };
-  /** Specs floor — pre-empt kanban every N cycles when specs exist. */
-  specs: { targetShare: number; cadenceN: number };
   /** Rolling window for realised-share computation. */
   windowCycles: number;
 }
 
 export const DEFAULT_CAPACITY_FLOORS_CONFIG: CapacityFloorsConfig = {
   selfImprovement: { targetShare: 0.25 }, // ADR-0003 vision vector 1
-  specs: { targetShare: 1 / 3, cadenceN: 3 }, // historical HYDRA_SPEC_CAPACITY_FLOOR_N default
   windowCycles: 20,
 };
 
 /**
- * Build the runtime config, honoring legacy env vars for one release.
- * Logs a deprecation notice when a legacy var is read so operators see it
- * once. The new env var names take precedence when both are set.
+ * Build the runtime config from environment variables.
  */
 export function loadCapacityFloorsConfig(env: NodeJS.ProcessEnv = process.env): CapacityFloorsConfig {
   const cfg: CapacityFloorsConfig = {
     selfImprovement: { ...DEFAULT_CAPACITY_FLOORS_CONFIG.selfImprovement },
-    specs: { ...DEFAULT_CAPACITY_FLOORS_CONFIG.specs },
     windowCycles: DEFAULT_CAPACITY_FLOORS_CONFIG.windowCycles,
   };
-
-  // Spec cadence — new var takes precedence, legacy supported with deprecation
-  // log so existing operator setups keep working through one release.
-  const newSpecN = parseIntSafe(env.HYDRA_CAPACITY_FLOOR_SPEC_N);
-  const legacySpecN = parseIntSafe(env.HYDRA_SPEC_CAPACITY_FLOOR_N);
-  if (newSpecN !== null) {
-    cfg.specs.cadenceN = newSpecN;
-  } else if (legacySpecN !== null) {
-    cfg.specs.cadenceN = legacySpecN;
-    console.warn(
-      "[capacity-floors] HYDRA_SPEC_CAPACITY_FLOOR_N is deprecated; use HYDRA_CAPACITY_FLOOR_SPEC_N. " +
-      "Legacy var will be removed after one release.",
-    );
-  }
 
   const newWindow = parseIntSafe(env.HYDRA_CAPACITY_FLOORS_WINDOW);
   if (newWindow !== null) cfg.windowCycles = newWindow;
@@ -177,63 +141,8 @@ function parseIntSafe(raw: string | undefined): number | null {
 // Default floor declarations
 // ---------------------------------------------------------------------------
 
-interface SpecsPayload {
-  spec: any;
-  task: any;
-}
-
 interface StucknessPayload {
   row: StucknessResult;
-}
-
-/**
- * Build the spec-floor declaration. The cadence and target share come from
- * the resolved config; the legacy `getSpecCapacityFloorN()` reader is kept
- * for the case where callers need to know the effective cadence without
- * pulling the full config (e.g. tests that exercise the predicate alone).
- */
-export function specsFloorDecl(
-  cfg: CapacityFloorsConfig = DEFAULT_CAPACITY_FLOORS_CONFIG,
-): FloorDecl<SpecsPayload> {
-  return {
-    name: "specs",
-    // Tiebreak: when both floors are ready in the same cycle the specs floor
-    // wins. Pre-refactor behaviour gated stuckness on `!forceSpec`, so this
-    // preserves it.
-    priority: 1,
-    async prepare(): Promise<FloorReadiness<SpecsPayload> | null> {
-      const [nextSpec, cyclesSinceServed] = await Promise.all([
-        getNextSpecTask(),
-        getCyclesSinceSpecServed(),
-      ]);
-      if (!nextSpec) return null;
-      // The cadence may have been overridden in the env between calls; respect
-      // the version on `cfg` first, fall back to the legacy reader so existing
-      // tests that set HYDRA_SPEC_CAPACITY_FLOOR_N keep working.
-      const cadence = cfg.specs.cadenceN || getSpecCapacityFloorN();
-      const deficit = cyclesSinceServed - cadence;
-      return {
-        deficit,
-        // Realised share is computed by the dispatcher across all floors; per
-        // floor we report the simple gauge ratio so the API has a number even
-        // before the first window is complete.
-        share: cadence > 0 ? Math.min(1, 1 / Math.max(1, cyclesSinceServed + 1)) : 0,
-        targetShare: cfg.specs.targetShare,
-        payload: { spec: nextSpec.spec, task: nextSpec.task },
-      };
-    },
-    async buildAnchor(payload, _eventBus) {
-      await recordSpecServed();
-      await recordSpecPassedReason("force_floor");
-      return buildSpecAnchor({ spec: payload.spec, task: payload.task });
-    },
-    async onPassedOver(reason: string) {
-      // The spec module distinguishes a handful of pass-over reasons. The
-      // dispatcher maps its broader outcomes onto those reasons so the
-      // existing /metrics/spec-starvation surface stays compatible.
-      if (reason === "stuckness_won") await recordSpecPassedReason("stuckness_won");
-    },
-  };
 }
 
 /**
@@ -359,12 +268,12 @@ export async function dispatchCapacityFloor(
 
 /**
  * Convenience constructor: build the default-config dispatcher with the
- * stock pair of floors. The selector uses this; tests can substitute custom
- * floors via `dispatchCapacityFloor()` directly.
+ * stock floor. The selector uses this; tests can substitute custom floors
+ * via `dispatchCapacityFloor()` directly.
  */
 export function defaultCapacityFloors(env: NodeJS.ProcessEnv = process.env): FloorDecl<any>[] {
   const cfg = loadCapacityFloorsConfig(env);
-  return [specsFloorDecl(cfg), stucknessFloorDecl(cfg)];
+  return [stucknessFloorDecl(cfg)];
 }
 
 // ---------------------------------------------------------------------------
@@ -375,9 +284,8 @@ export function defaultCapacityFloors(env: NodeJS.ProcessEnv = process.env): Flo
  * Aggregate the realised share of recent cycles per floor. The dispatcher
  * doesn't write a dedicated history list — it reuses the existing
  * `capacity-floor.ts` cycle-side history (orchestrator vs target) for the
- * self-improvement floor and the spec-starvation gauge for the specs floor.
- * This avoids a new Redis write on every cycle for a metric that's
- * inherently approximate.
+ * self-improvement floor. This avoids a new Redis write on every cycle for
+ * a metric that's inherently approximate.
  */
 export interface CapacityFloorsSnapshot {
   config: CapacityFloorsConfig;
@@ -392,10 +300,9 @@ export interface CapacityFloorsSnapshot {
 }
 
 /**
- * Read the current capacity-floors state for the API surface. Combines:
- *   - the self-improvement realised share from `capacity-floor.ts`
- *     (orchestrator vs target cycles over the rolling window)
- *   - the spec-starvation gauge from `spec-starvation.ts`.
+ * Read the current capacity-floors state for the API surface. Combines the
+ * self-improvement realised share from `capacity-floor.ts` (orchestrator
+ * vs target cycles over the rolling window) with the declared config.
  *
  * This is intentionally a "thin aggregator over existing surfaces" — the
  * dispatcher already reads these on the hot path; the snapshot is read-only.
@@ -407,40 +314,18 @@ export async function getCapacityFloorsSnapshot(
 
   // Imported inline to keep this module's import graph small for tests that
   // exercise the pure dispatcher without bringing in Redis-backed history.
-  const [{ getSelfImprovementShare }, { getSpecStarvationStats }] = await Promise.all([
-    import("../capacity-floor.ts"),
-    import("./spec-starvation.ts"),
-  ]);
+  const { getSelfImprovementShare } = await import("../capacity-floor.ts");
 
-  const [selfImprovement, specs] = await Promise.all([
-    getSelfImprovementShare(cfg.windowCycles).catch((err: any) => {
+  const selfImprovement = await getSelfImprovementShare(cfg.windowCycles).catch(
+    (err: any) => {
       console.error(`[capacity-floors] selfImprovement share read failed: ${err.message}`);
       return null;
-    }),
-    getSpecStarvationStats().catch((err: any) => {
-      console.error(`[capacity-floors] specs starvation read failed: ${err.message}`);
-      return null;
-    }),
-  ]);
+    },
+  );
 
   return {
     config: cfg,
     floors: [
-      {
-        name: "specs",
-        targetShare: cfg.specs.targetShare,
-        realisedShare: specs && specs.cyclesSinceServed >= 0
-          ? null // Realised share isn't tracked yet for specs — gauge only.
-          : null,
-        details: specs
-          ? {
-              cadenceN: cfg.specs.cadenceN,
-              cyclesSinceServed: specs.cyclesSinceServed,
-              lastServedAt: specs.lastServedAt,
-              reasons: specs.reasons,
-            }
-          : { cadenceN: cfg.specs.cadenceN },
-      },
       {
         name: "self-improvement",
         targetShare: cfg.selfImprovement.targetShare,

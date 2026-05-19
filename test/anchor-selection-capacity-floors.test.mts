@@ -2,19 +2,17 @@
  * Regression tests for the unified capacity-floor dispatcher (issue #321).
  *
  * Background
- *   PR #308 (#301 fix) and issue #245 each added an independent pre-emption
- *   branch in `selectAnchor()`. They didn't see each other's state, so a
- *   stuckness fire and a spec-floor fire could stack within a couple of
- *   cycles. The fix unifies both behind a single dispatcher that fires AT
- *   MOST one floor per cycle.
+ *   Two pre-emption branches in `selectAnchor()` (stuckness-driven research
+ *   from #245 and the spec capacity-floor from #301/#308) didn't see each
+ *   other's state, so floors could stack within a couple of cycles. #321
+ *   unified them behind a single dispatcher that fires AT MOST one floor
+ *   per cycle. The spec floor itself was retired in issue #513 — the
+ *   dispatcher scaffolding stays so future floors plug in cleanly without
+ *   reintroducing the stacking bug.
  *
  * These tests pin:
  *   - The pure dispatcher's tiebreak rules (highest deficit, then priority).
  *   - The default floor declarations' readiness predicates.
- *   - The legacy env-var bridge (`HYDRA_SPEC_CAPACITY_FLOOR_N` →
- *     `HYDRA_CAPACITY_FLOOR_SPEC_N`).
- *   - Behaviour preservation: when only one floor is ready the dispatcher
- *     fires the same anchor the pre-refactor code would have fired.
  */
 
 import { test, describe, beforeEach, after } from "node:test";
@@ -171,49 +169,12 @@ describe("dispatchCapacityFloor — pure dispatcher (issue #321)", () => {
 
 describe("loadCapacityFloorsConfig — env vars (issue #321)", () => {
   test("default config is stable across releases", async () => {
-    const { loadCapacityFloorsConfig, DEFAULT_CAPACITY_FLOORS_CONFIG } = await import(
+    const { loadCapacityFloorsConfig } = await import(
       "../src/anchor-selection/capacity-floors.ts"
     );
     const cfg = loadCapacityFloorsConfig({});
-    assert.equal(cfg.specs.cadenceN, DEFAULT_CAPACITY_FLOORS_CONFIG.specs.cadenceN);
-    assert.equal(cfg.specs.cadenceN, 3);
     assert.equal(cfg.selfImprovement.targetShare, 0.25);
     assert.equal(cfg.windowCycles, 20);
-  });
-
-  test("HYDRA_CAPACITY_FLOOR_SPEC_N overrides cadence", async () => {
-    const { loadCapacityFloorsConfig } = await import(
-      "../src/anchor-selection/capacity-floors.ts"
-    );
-    const cfg = loadCapacityFloorsConfig({ HYDRA_CAPACITY_FLOOR_SPEC_N: "7" });
-    assert.equal(cfg.specs.cadenceN, 7);
-  });
-
-  test("legacy HYDRA_SPEC_CAPACITY_FLOOR_N is still honoured (deprecation path)", async () => {
-    const { loadCapacityFloorsConfig } = await import(
-      "../src/anchor-selection/capacity-floors.ts"
-    );
-    const cfg = loadCapacityFloorsConfig({ HYDRA_SPEC_CAPACITY_FLOOR_N: "5" });
-    assert.equal(cfg.specs.cadenceN, 5);
-  });
-
-  test("new env var takes precedence over legacy when both are set", async () => {
-    const { loadCapacityFloorsConfig } = await import(
-      "../src/anchor-selection/capacity-floors.ts"
-    );
-    const cfg = loadCapacityFloorsConfig({
-      HYDRA_SPEC_CAPACITY_FLOOR_N: "5",
-      HYDRA_CAPACITY_FLOOR_SPEC_N: "7",
-    });
-    assert.equal(cfg.specs.cadenceN, 7);
-  });
-
-  test("invalid values fall back to default", async () => {
-    const { loadCapacityFloorsConfig } = await import(
-      "../src/anchor-selection/capacity-floors.ts"
-    );
-    const cfg = loadCapacityFloorsConfig({ HYDRA_CAPACITY_FLOOR_SPEC_N: "abc" });
-    assert.equal(cfg.specs.cadenceN, 3);
   });
 
   test("HYDRA_CAPACITY_FLOORS_WINDOW overrides the rolling window", async () => {
@@ -226,37 +187,19 @@ describe("loadCapacityFloorsConfig — env vars (issue #321)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Floor declarations (behaviour preservation)
+// Default floor composition
 // ---------------------------------------------------------------------------
 
-describe("specsFloorDecl — behaviour preservation (issue #321)", () => {
-  beforeEach(async () => {
-    await cleanKeys();
-  });
-
-  test("not ready when there's no active spec task", async () => {
-    const { specsFloorDecl, loadCapacityFloorsConfig } = await import(
-      "../src/anchor-selection/capacity-floors.ts"
-    );
-    const decl = specsFloorDecl(loadCapacityFloorsConfig({}));
-    const readiness = await decl.prepare();
-    // No spec exists in Redis, so prepare returns null. The pre-refactor
-    // `shouldForceSpecPriority(_, hasSpecTask=false, _) === false` matches.
-    assert.equal(readiness, null);
-  });
-});
-
 describe("default floors composition (issue #321)", () => {
-  test("defaultCapacityFloors returns [specs, self-improvement] in priority order", async () => {
+  test("defaultCapacityFloors returns the stuckness/self-improvement floor", async () => {
     const { defaultCapacityFloors } = await import(
       "../src/anchor-selection/capacity-floors.ts"
     );
     const floors = defaultCapacityFloors({});
-    assert.equal(floors.length, 2);
-    assert.equal(floors[0].name, "specs");
-    assert.equal(floors[1].name, "self-improvement");
-    // Spec floor's tiebreak priority is lower so it wins on equal deficit.
-    assert.ok(floors[0].priority < floors[1].priority);
+    // Specs floor retired in #513; self-improvement is the only declared
+    // floor today. The scaffolding remains so future floors plug in.
+    assert.equal(floors.length, 1);
+    assert.equal(floors[0].name, "self-improvement");
   });
 });
 
@@ -362,10 +305,9 @@ describe("getCapacityFloorsSnapshot — API surface (issue #321)", () => {
       "../src/anchor-selection/capacity-floors.ts"
     );
     const snap = await getCapacityFloorsSnapshot({});
-    assert.equal(snap.config.specs.cadenceN, 3);
     assert.equal(snap.config.selfImprovement.targetShare, 0.25);
     const names = snap.floors.map((f) => f.name);
-    assert.deepEqual(names, ["specs", "self-improvement"]);
+    assert.deepEqual(names, ["self-improvement"]);
     // Empty Redis → realised share is null (no data yet).
     const si = snap.floors.find((f) => f.name === "self-improvement")!;
     assert.equal(si.realisedShare, null);
