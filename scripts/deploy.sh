@@ -26,6 +26,18 @@ bash scripts/sync-skills.sh
 echo "==> Building dashboard..."
 cd dashboard && npm ci && npm run build && cd ..
 
+echo "==> Installing autopilot watchdog (issue #508)..."
+# External liveness watchdog for the hydra-autopilot Claude Code session.
+# The autopilot can wedge while the parent process stays "active" — systemd
+# doesn't restart it because by its accounting nothing has failed. The
+# watchdog reads the heartbeat file (scripts/autopilot/heartbeat.py) and
+# kills the wedged PID; the unit's Restart=on-failure then brings it back.
+install -D -m 0755 scripts/hydra-autopilot-watchdog.sh "$HOME/.local/bin/hydra-autopilot-watchdog.sh"
+install -D -m 0644 scripts/systemd/hydra-autopilot-watchdog.service "$HOME/.config/systemd/user/hydra-autopilot-watchdog.service"
+install -D -m 0644 scripts/systemd/hydra-autopilot-watchdog.timer "$HOME/.config/systemd/user/hydra-autopilot-watchdog.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now hydra-autopilot-watchdog.timer
+
 echo "==> Restarting service..."
 systemctl --user restart hydra-orchestrator.service
 
