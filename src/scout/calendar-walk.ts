@@ -69,10 +69,13 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * Research question #1: ~4% of the $50/day cap (≈ \$2/day). Each scout
  * dispatch consumes ~30–50K tokens; a weekly walk over 10 categories +
  * 2 dep manifests ≈ 12 dispatches / 7 days ≈ 1.7 dispatches/day. Operators
- * override via `state.limits.scout_cost_share` (autopilot reads this in
- * Phase B follow-up — the constant here is the documented default).
+ * override via `state.limits.scout_cost_share` — `decide.py:_select_for_signal`
+ * reads it at runtime (issue #532 wired enforcement on top of this constant).
  */
 export const SCOUT_DAILY_COST_SHARE = 0.04;
+
+/** TTL on the per-day scout spend mirror key (issue #532). 7 days. */
+const SCOUT_SPEND_DAILY_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -252,6 +255,67 @@ export async function stampCategoryWalk(
     redisKeys.scoutCategoryLastWalked(category),
     now.toISOString(),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Cost-cap accounting (issue #532) — wire-up for the daily scout-spend gate
+// ---------------------------------------------------------------------------
+
+/** UTC ISO date (YYYY-MM-DD) used to key the daily scout-spend mirror. */
+export function scoutSpendDateString(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
+/**
+ * Record (overwrite) the per-day scout token spend mirror used by the
+ * autopilot's cost-cap gate (issue #532).
+ *
+ * This is intentionally a SET (not INCR): `collect-state.sh` derives the
+ * value each turn from the authoritative `hydra:metrics:tokens:by-skill:
+ * daily:<DATE>[hydra-tool-scout]` surrogate populated by the existing
+ * `/api/metrics/tokens` writer (issue #394). A mirror keeps the gate's
+ * read path simple and centralises the TTL contract for the
+ * `hydra:scout:spend:<DATE>` key documented in the issue body.
+ *
+ * 7-day TTL matches the issue's acceptance criterion. The TTL is
+ * re-stamped on every write so the key ages out one week after the
+ * LAST mirror write, not first creation.
+ *
+ * @param tokens  total tokens consumed today by `hydra-tool-scout` (>=0)
+ * @param now     optional Date for deterministic tests
+ */
+export async function recordScoutSpend(
+  tokens: number,
+  now: Date = new Date(),
+): Promise<void> {
+  const clean = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
+  const date = scoutSpendDateString(now);
+  await setString(
+    redisKeys.scoutSpendDaily(date),
+    String(clean),
+    SCOUT_SPEND_DAILY_TTL_SECONDS,
+  );
+}
+
+/**
+ * Read the per-day scout token spend mirror for today.
+ *
+ * Returns 0 when:
+ *   - the key is absent (no scout dispatches today, or the mirror has
+ *     not been written this turn yet)
+ *   - the key's value is non-numeric or negative (corrupt-record fallback)
+ *
+ * Pure read — never writes. Network call.
+ */
+export async function getScoutSpendToday(
+  now: Date = new Date(),
+): Promise<number> {
+  const date = scoutSpendDateString(now);
+  const raw = await getString(redisKeys.scoutSpendDaily(date));
+  if (raw === null || raw === undefined) return 0;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return parsed;
 }
 
 // ---------------------------------------------------------------------------

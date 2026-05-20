@@ -83,6 +83,11 @@ describe("scripts/autopilot/args-parse.sh — slash-arg parsing", () => {
         // issue #434 — schema-version handshake. Bumped in lockstep with the
         // playbook's HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker.
         schema_version: 2,
+        // issue #532 — tool-scout cost-cap. Defaults: $50/day cap, 4% slice.
+        // Operators override via HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD /
+        // HYDRA_AUTOPILOT_SCOUT_COST_SHARE.
+        daily_spend_cap_usd: 50,
+        scout_cost_share: 0.04,
       });
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });

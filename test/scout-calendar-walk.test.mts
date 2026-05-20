@@ -36,6 +36,9 @@ const {
   CLASS_COOLDOWN_DAYS,
   CATEGORY_COOLDOWN_DAYS,
   SCOUT_DAILY_COST_SHARE,
+  recordScoutSpend,
+  getScoutSpendToday,
+  scoutSpendDateString,
 } = await import("../src/scout/calendar-walk.ts");
 
 let testRedis: any = null;
@@ -50,6 +53,8 @@ async function cleanScoutKeys(): Promise<void> {
     "hydra:scout:last-calendar-walk",
     "hydra:scout:category-last-walked:*",
     "hydra:scout:stats:*",
+    // Issue #532 — per-day scout spend mirror used by the cost-cap gate.
+    "hydra:scout:spend:*",
   ];
   for (const p of patterns) {
     const keys = await r.keys(p);
@@ -383,5 +388,70 @@ describe("planWalk (Redis-backed)", () => {
       () => stampCategoryWalk("", new Date()),
       TypeError,
     );
+  });
+});
+
+// ===========================================================================
+// Issue #532 — per-day scout spend mirror used by the cost-cap gate.
+// `recordScoutSpend(tokens)` writes hydra:scout:spend:<UTC-date> with 7d TTL.
+// `getScoutSpendToday()` reads it back (0 on missing / corrupt).
+// ===========================================================================
+
+describe("recordScoutSpend / getScoutSpendToday (issue #532)", () => {
+  beforeEach(async () => {
+    await cleanScoutKeys();
+  });
+
+  test("scoutSpendDateString returns YYYY-MM-DD UTC", () => {
+    const d = new Date("2026-05-19T23:55:00Z");
+    assert.equal(scoutSpendDateString(d), "2026-05-19");
+  });
+
+  test("getScoutSpendToday returns 0 when no record exists", async () => {
+    const v = await getScoutSpendToday(new Date("2026-05-19T12:00:00Z"));
+    assert.equal(v, 0);
+  });
+
+  test("recordScoutSpend + getScoutSpendToday round-trip", async () => {
+    const now = new Date("2026-05-19T10:00:00Z");
+    await recordScoutSpend(35_000, now);
+    assert.equal(await getScoutSpendToday(now), 35_000);
+  });
+
+  test("recordScoutSpend overwrites (not increments) so collect-state mirror is idempotent", async () => {
+    const now = new Date("2026-05-19T10:00:00Z");
+    await recordScoutSpend(10_000, now);
+    await recordScoutSpend(45_000, now);
+    // Second call replaces the first — the mirror is a snapshot of the
+    // authoritative by-skill surrogate, not an incrementer.
+    assert.equal(await getScoutSpendToday(now), 45_000);
+  });
+
+  test("recordScoutSpend clamps negative / NaN to 0", async () => {
+    const now = new Date("2026-05-19T10:00:00Z");
+    await recordScoutSpend(-100 as any, now);
+    assert.equal(await getScoutSpendToday(now), 0);
+    await recordScoutSpend(Number.NaN as any, now);
+    assert.equal(await getScoutSpendToday(now), 0);
+  });
+
+  test("recordScoutSpend sets 7d TTL on the key (acceptance criterion)", async () => {
+    const now = new Date("2026-05-19T10:00:00Z");
+    await recordScoutSpend(20_000, now);
+    const r = getTestRedis();
+    const ttl = await r.ttl(`hydra:scout:spend:2026-05-19`);
+    // 7 days = 604800 seconds. We assert a sensible upper bound (≤ 7d)
+    // and a wide lower bound to absorb any small clock skew at test time.
+    assert.ok(ttl > 0 && ttl <= 7 * 24 * 60 * 60,
+      `TTL must be > 0 and <= 7d (got ${ttl}s)`);
+    assert.ok(ttl > 7 * 24 * 60 * 60 - 60,
+      `TTL must be close to 7d (got ${ttl}s) — re-stamp on every write keeps it fresh`);
+  });
+
+  test("getScoutSpendToday handles corrupt non-numeric record gracefully", async () => {
+    const r = getTestRedis();
+    await r.set("hydra:scout:spend:2026-05-19", "not-a-number");
+    const v = await getScoutSpendToday(new Date("2026-05-19T10:00:00Z"));
+    assert.equal(v, 0);
   });
 });

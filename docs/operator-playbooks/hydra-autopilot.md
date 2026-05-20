@@ -73,6 +73,34 @@ Each tick:
 > (operator preference: fewer issues). Steady-state cost slice: ~4% of
 > the \$50/day cap (`SCOUT_DAILY_COST_SHARE` in `calendar-walk.ts`);
 > operators override via `state.limits.scout_cost_share`.
+>
+> **Cost-cap gate (issue #532).** The 4% share is now enforced at
+> dispatch time, NOT just documented. `decide.py:_select_for_signal`
+> for `scout_orch` reads `state.limits.scout_cost_share` (default
+> `SCOUT_DAILY_COST_SHARE = 0.04`) and `state.limits.daily_spend_cap_usd`
+> (default `$50.0`) — computes `cap_usd = share * daily_cap` — reads
+> `state.scout_spend_usd_today` (emitted by `collect-state.sh` from the
+> `hydra:metrics:tokens:by-skill:daily:<DATE>[hydra-tool-scout]`
+> surrogate, USD via `HYDRA_TOKEN_USD_RATE`) — and suppresses dispatch
+> when `spend_usd >= cap_usd`. The check fires BEFORE the 7d class
+> cooldown (cap is the harder limit): if the cap is exceeded the
+> dispatch is suppressed even when the cooldown has elapsed.
+>
+> Two operator escape hatches:
+> - **Tightening:** `state.limits.scout_cost_share = 0.0` is the
+>   intentional kill-switch — `cap_usd` resolves to `0.0` and the
+>   `>=` check suppresses every dispatch. Set this if a runaway scout
+>   needs to be muted while keeping the walk infrastructure intact.
+> - **Loosening:** `state.limits.daily_spend_cap_usd = 0.0` (or an
+>   unset `HYDRA_TOKEN_USD_RATE`, which produces \$0 surrogate spend) is
+>   treated as "rate not configured" and the gate becomes a no-op.
+>   This preserves Phase B's pre-#532 behaviour for operators who
+>   haven't opted in to a per-token USD rate yet.
+>
+> The daily mirror at `hydra:scout:spend:<YYYY-MM-DD>` (7d TTL) is
+> populated by `collect-state.sh` each turn from the existing
+> `/api/metrics/tokens` accumulator (`hydra-tool-scout` skill) — no
+> separate writer is needed and the gate sees real usage.
 
 > **Phase B wiring (issue #466, sub of #437):** `design_concept_orch`
 > fires before `dev_orch` for an orch anchor when the artifact is
@@ -394,6 +422,8 @@ regression test `test/autopilot-hooks.test.mts` enforces this.
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_COUNT` | `100` | Max events per `XREAD` batch |
 | `HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN` | `1000` | `XADD MAXLEN ~` cap |
 | `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `3600` | Silent-wedge fallback cap (`decide.py` only) |
+| `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD` | `50.0` | Total daily spend cap (issue #532; bootstrap writes into `state.limits.daily_spend_cap_usd`) |
+| `HYDRA_AUTOPILOT_SCOUT_COST_SHARE` | `0.04` | Scout slice of the daily cap (issue #532; `0` = kill-switch). Writes `state.limits.scout_cost_share` |
 
 ## Signal wiring (state.signals)
 
@@ -410,6 +440,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `health=FAIL` or `failed_services>0` | `health_fail` | `health` |
 | `scout_last_walk_iso` >7d old or empty | `scout_walk_due` | `scout_orch` (issue #485) |
 | `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
+| `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
 
 Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
 received target-product anchors (item-26x). Post-#458, candidates are
