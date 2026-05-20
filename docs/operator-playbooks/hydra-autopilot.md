@@ -1,7 +1,7 @@
 ---
 name: hydra-autopilot
-description: Event-driven autonomous decision loop. A single Claude Code session orchestrates Hydra work via decide.py — the L2 decision brain — and executes typed action plans. Token-budgeted; designed to run unattended for ~8 hours (e.g., overnight).
-when_to_use: "When the user wants autonomous overnight operation, says 'autopilot', 'run overnight', 'autonomous mode', or wants a single skill to manage all hydra operations."
+description: Event-driven autonomous decision loop. A single Claude Code session orchestrates Hydra work via decide.py — the L2 decision brain — and executes typed action plans. Token-budgeted; each invocation runs unattended for up to ~8 hours. Invoked manually by the operator OR fired on a schedule (multiple times per day — not night-only).
+when_to_use: "When the user wants an autonomous decision loop to advance Hydra work, says 'autopilot', 'autonomous mode', or wants a single skill to manage all hydra operations. Also fired by the systemd timers documented in the Scheduling section."
 allowed-tools: Read(*) Glob(*) Grep(*) Bash(*) Edit(*) Write(*) Agent(*)
 claude_only: true
 ---
@@ -223,7 +223,7 @@ alive: `checkCostCap()` now sums the legacy `costMicrodollars` reader and
 the surrogate so a runaway subagent can still trip
 `HYDRA_PER_CYCLE_COST_CAP_USD` even though codex is gone.
 
-- **Phase 7** — `drain.sh <merged_prs>` + final `hydra-digest` dispatch
+- **Phase 7** — `drain.sh <merged_prs>` + final `hydra-digest` dispatch (end-of-run summary; the morning timer's digest lands around 19:00, the evening timer's around 05:00)
 
 ## Phase 0 schema-version handshake (issue #434)
 
@@ -286,7 +286,7 @@ No fallback. No `git checkout` in the main tree.
 - Heartbeat: `cat /tmp/hydra-autopilot-heartbeat.txt`
 - Liveness probe: `find /tmp/hydra-autopilot-heartbeat.txt -mmin -10` — the model writes the heartbeat every decision turn (Phase 5a). An empty result means no turn completed in the last 10 minutes.
 - Live state: `jq '.slots,.signal_last_fired,.burned_classes' /tmp/hydra-autopilot-state.json`
-- Run log: `tail -100 /tmp/hydra-autopilot-nightly.log`
+- Run log: `tail -100 /tmp/hydra-autopilot-nightly.log` (filename is historical from when there was only a 22:00 fire; both timers still write here)
 - Last decision plan: `jq . /tmp/hydra-autopilot-plan.json`
 - Failure ledger: `tail /tmp/hydra-autopilot-failures.jsonl`
 
@@ -328,7 +328,15 @@ fi
 
 `scripts/autopilot/status.sh` runs the above automatically.
 
-## Manual invocation
+## Invocation
+
+The skill is operator-invocable AND scheduled. Both paths run the same
+`/hydra-autopilot` entrypoint and obey the same token / wall-clock budgets.
+
+### Manual
+
+Invoke from an interactive Claude Code session with `/hydra-autopilot`, or
+headless from the shell:
 
 ```bash
 claude --dangerously-skip-permissions -p "/hydra-autopilot"
@@ -341,6 +349,53 @@ HYDRA_AUTOPILOT_SCOPE=orch-only claude --dangerously-skip-permissions -p "/hydra
 Slash-args (`--scope=`, `--tokens=`, `--max-sec=`, `--idle-turns=`,
 `--subagent-soft=`, `--subagent-hard=`, `--unattended=`) parse via
 `args-parse.sh` and override env vars.
+
+### Scheduling
+
+Two systemd user timers fire the autopilot on a daily cadence — it is NOT
+night-only. Both target the same `hydra-autopilot.service` oneshot (with
+its 9h `RuntimeMaxSec` and 8h internal budget), and the morning run
+typically finishes by ~19:00 so the two never overlap.
+
+| Unit | Fires | File |
+|---|---|---|
+| `hydra-autopilot-morning.timer` | 10:00 local | `scripts/systemd/hydra-autopilot-morning.timer` |
+| `hydra-autopilot.timer` | 22:00 local | `scripts/systemd/hydra-autopilot.timer` |
+
+Operator install (one-time):
+
+```bash
+cp scripts/systemd/hydra-autopilot.service \
+   scripts/systemd/hydra-autopilot.timer \
+   scripts/systemd/hydra-autopilot-morning.timer \
+   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now hydra-autopilot.timer hydra-autopilot-morning.timer
+```
+
+Inspect: `systemctl --user list-timers | grep autopilot` and
+`journalctl --user -u hydra-autopilot.service` after a fire.
+
+Adding more fires (e.g. a midday run) is a one-line `OnCalendar=` change in
+a copy of the morning timer — `Unit=hydra-autopilot.service` ties them all
+to the same oneshot. Two cautions:
+
+1. Each fire is sized for up to 8h of work — overlapping fires fight for
+   the same `[Service] Type=oneshot` slot. Stagger them by at least 9h or
+   use `RandomizedDelaySec=` to avoid stomping.
+2. The autopilot self-terminates on `idle_drain_turns` when there's nothing
+   to do, so an empty-queue fire is cheap — but every fire still pays the
+   bootstrap + Phase 0 schema handshake cost. Don't fire it every 5
+   minutes; the heartbeat housekeeping inside `scheduler.ts` covers that
+   frequency.
+
+The choice of two daily long runs (rather than many short runs) is
+deliberate: the L2 decision brain in `decide.py` benefits from a stable
+in-process view of pipeline state across many turns. Short bursts would
+re-pay the Phase 0 / Phase 1 collect-state cost without amortising it
+across enough decisions to matter. If short-burst mode becomes useful
+later, document the tuning in a follow-up section here — don't replace
+the long-run schedule.
 
 ## Slot lifecycle events (issue #509)
 
@@ -462,4 +517,4 @@ a hint, and a low best-score forces `research_target` (not `research_orch`).
 3. One subagent per pipeline slot.
 4. Token budget is a hard cap; subagent caps (#395) bound a single misbehaving subagent.
 5. `hydra-architect` is operator-only.
-6. Phase 7 is the only path to the morning digest (idempotent shutdown).
+6. Phase 7 is the only path to the end-of-run digest (idempotent shutdown).
