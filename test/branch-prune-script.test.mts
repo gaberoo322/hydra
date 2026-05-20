@@ -35,13 +35,20 @@ function readScript(): string {
 }
 
 describe("scripts/branch-prune.sh — per-branch errors are non-fatal (issue #494)", () => {
-  test("the ERRORS > 0 branch exits 0, not 1", () => {
+  // After issue #542 the script was refactored into a `prune_repo` function
+  // that runs against both ~/hydra and ~/hydra-betting. Per-branch errors
+  // from each pass are aggregated into a top-level `TOTAL_SOFT_ERRORS`
+  // counter, and the issue-#494 non-fatal contract is enforced there. The
+  // tests below were updated to look at the new top-level counter; the
+  // contract (exit 0 on per-branch errors, WARNING logged, rationale present)
+  // is unchanged.
+  test("the soft-error branch exits 0, not 1", () => {
     const text = readScript();
-    // Locate the `if [ "$ERRORS" -gt 0 ]; then` block and verify its `exit`
-    // statement is `exit 0`. We match on the surrounding shape to avoid a
-    // false positive on some other `exit 0` elsewhere in the script.
-    const match = text.match(/if \[ "\$ERRORS" -gt 0 \]; then[\s\S]*?\n\s*exit\s+(\d+)\s*\n\s*fi/);
-    assert.ok(match, "expected an `if [ \"$ERRORS\" -gt 0 ]; then ... exit N; fi` block");
+    // Locate the `if [ "$TOTAL_SOFT_ERRORS" -gt 0 ]; then` block and verify
+    // its `exit` statement is `exit 0`. We match on the surrounding shape to
+    // avoid a false positive on some other `exit 0` elsewhere in the script.
+    const match = text.match(/if \[ "\$TOTAL_SOFT_ERRORS" -gt 0 \]; then[\s\S]*?\n\s*exit\s+(\d+)\s*\n\s*fi/);
+    assert.ok(match, "expected an `if [ \"$TOTAL_SOFT_ERRORS\" -gt 0 ]; then ... exit N; fi` block");
     assert.equal(
       match![1],
       "0",
@@ -49,16 +56,16 @@ describe("scripts/branch-prune.sh — per-branch errors are non-fatal (issue #49
     );
   });
 
-  test("the ERRORS > 0 branch logs a WARNING (so the operator can still see it)", () => {
+  test("the soft-error branch logs a WARNING (so the operator can still see it)", () => {
     const text = readScript();
     // The warning has to be loud enough that journalctl/hydra-doctor still
     // surface it — exit 0 doesn't mean silent. We require the literal token
     // "WARNING" in the error-path echo so log scrapers can match on it.
-    const block = text.match(/if \[ "\$ERRORS" -gt 0 \]; then([\s\S]*?)\n\s*exit\s+0\s*\n\s*fi/);
-    assert.ok(block, "expected the ERRORS > 0 branch to be present");
+    const block = text.match(/if \[ "\$TOTAL_SOFT_ERRORS" -gt 0 \]; then([\s\S]*?)\n\s*exit\s+0\s*\n\s*fi/);
+    assert.ok(block, "expected the TOTAL_SOFT_ERRORS > 0 branch to be present");
     const body = block![1];
-    assert.match(body, /WARNING/, "the ERRORS > 0 branch must log a WARNING (operator visibility)");
-    assert.match(body, /\$ERRORS/, "the warning must include the error count");
+    assert.match(body, /WARNING/, "the soft-error branch must log a WARNING (operator visibility)");
+    assert.match(body, /\$TOTAL_SOFT_ERRORS/, "the warning must include the error count");
   });
 
   test("hard-failure exits remain non-zero (worktree refusal, jq/npx missing, classifier empty)", () => {
@@ -92,11 +99,13 @@ describe("scripts/branch-prune.sh — per-branch errors are non-fatal (issue #49
 
   test("the success path still exits 0 (regression guard against accidentally inverting the change)", () => {
     const text = readScript();
-    // The success exit comes right after a `branch-prune: done.` log line.
+    // The success exit comes right after a final `all passes done.` log line
+    // (post-#542 the script runs two passes — orchestrator + target — and
+    // the trailing log line was updated to reflect that).
     assert.match(
       text,
-      /branch-prune: done\.[\s\S]*?\n\s*exit\s+0\s*$/m,
-      "successful run must still exit 0 with a `done.` log line",
+      /branch-prune: all passes done\.[\s\S]*?\n\s*exit\s+0\s*$/m,
+      "successful run must still exit 0 with a final `all passes done.` log line",
     );
   });
 
@@ -104,10 +113,10 @@ describe("scripts/branch-prune.sh — per-branch errors are non-fatal (issue #49
     const text = readScript();
     // The ExecStart comment in ~/.config/systemd/user/hydra-branch-prune.service
     // says "don't fail the service — the next run picks them up". The script
-    // must explain WHY ERRORS > 0 is non-fatal so a future maintainer doesn't
+    // must explain WHY soft errors are non-fatal so a future maintainer doesn't
     // "fix" the exit code back to 1 thinking it's a bug.
-    const block = text.match(/if \[ "\$ERRORS" -gt 0 \]; then([\s\S]*?)\n\s*exit\s+0/);
-    assert.ok(block, "expected the ERRORS > 0 branch to be present");
+    const block = text.match(/if \[ "\$TOTAL_SOFT_ERRORS" -gt 0 \]; then([\s\S]*?)\n\s*exit\s+0/);
+    assert.ok(block, "expected the TOTAL_SOFT_ERRORS > 0 branch to be present");
     const body = block![1];
     assert.match(
       body,

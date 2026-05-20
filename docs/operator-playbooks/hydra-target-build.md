@@ -50,11 +50,57 @@ Spawn the child with the prompt below. Pass `$task` if provided. The child retur
 <child-prompt>
 Full autonomy: pick the task, plan, challenge your own plan, execute, verify, merge, sync state, report. Don't ask the user. If you hit a blocker, solve it.
 
+## CRITICAL SAFETY RULE — READ FIRST (issue #542)
+
+Two repos are in play: `~/hydra` (orchestrator) and `~/hydra-betting` (target). The harness `isolation: "worktree"` ONLY creates a worktree of the orchestrator repo (`~/hydra`). Writes to `~/hydra-betting` paths bypass that isolation and land on the main hydra-betting checkout — that is the bug fixed by this preamble.
+
+Before running ANY `git`, `npm`, `Edit`, or `Write` against the target repo:
+
+1. Run `pwd` and `git rev-parse --git-dir`. If cwd is `/home/gabe/hydra-betting` (the main target tree), ABORT. If cwd is `/home/gabe/hydra-betting/web`, ABORT — same tree.
+2. Create a dedicated hydra-betting worktree (Step 0.6 below) and `cd` into it.
+3. Verify isolation: inside the new worktree, `git rev-parse --git-common-dir` must resolve to `/home/gabe/hydra-betting/.git` AND `git rev-parse --git-dir` must contain `.git/worktrees/`. ABORT otherwise.
+4. From that point on, every Edit/Write/Bash file mutation against the target uses **the worktree path only** — never construct absolute paths under `/home/gabe/hydra-betting/...` directly. If you must use an absolute path, anchor it to `$TARGET_WT/...`.
+
+No fallback. No `cd ~/hydra-betting` in any step below — those bare paths are historical and have been replaced by `$TARGET_WT` references. If `$TARGET_WT` is unset when a step needs it, ABORT — that means Step 0.6 was skipped.
+
 ### 0. Register cycle
 ```bash
 CYCLE_ID="claude-cycle-$(date -u +%Y-%m-%d-%H%M)"
 hydra raw POST /cycle/register "{\"cycleId\":\"$CYCLE_ID\",\"source\":\"claude\"}"
 ```
+
+### 0.6. Create hydra-betting worktree (issue #542)
+
+Symmetric with how `hydra-dev` worktree-isolates `~/hydra`. The target repo (`~/hydra-betting`) is a separate git repo — the harness can't isolate it for us. Create one ourselves:
+
+```bash
+TARGET_WT="/dev/shm/hydra-worktrees/hydra-betting-worktree-${CYCLE_ID}"
+mkdir -p "$(dirname "$TARGET_WT")"
+
+# Ensure base is fresh before branching off.
+git -C ~/hydra-betting fetch origin main --prune
+git -C ~/hydra-betting worktree add -b "feature/${CYCLE_ID}" "$TARGET_WT" origin/main
+
+cd "$TARGET_WT"
+
+# Verify isolation — ABORT if either check fails. Do NOT proceed on the main checkout.
+COMMON_DIR=$(git rev-parse --git-common-dir)
+GIT_DIR=$(git rev-parse --git-dir)
+case "$COMMON_DIR" in
+  /home/gabe/hydra-betting/.git|*/hydra-betting/.git) ;;
+  *) echo "ABORT: hydra-betting worktree common-dir is $COMMON_DIR (expected ~/hydra-betting/.git)" >&2; exit 1 ;;
+esac
+case "$GIT_DIR" in
+  *"/.git/worktrees/"*) ;;
+  *) echo "ABORT: hydra-betting cwd is not a worktree (git-dir=$GIT_DIR)" >&2; exit 1 ;;
+esac
+
+# Worktrees do not share node_modules with the main checkout — install once per worktree.
+# Cost: ~30–60s. Acceptable; this is the price of parallel-safe target builds.
+(cd "$TARGET_WT/web" && npm ci --prefer-offline --no-audit --no-fund)
+```
+
+`scripts/branch-prune.sh` (issue #443) sweeps `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` so we don't have to clean these up on the happy path. We DO remove the worktree in Step 9 on success — leaking is only acceptable on crash.
 
 ### 0.5. Drift check
 ```bash
@@ -68,8 +114,9 @@ if recent:
 "
 ```
 
-### 1. Ground (read-only, in ~/hydra-betting/web/)
+### 1. Ground (read-only, in $TARGET_WT/web/)
 ```bash
+cd "$TARGET_WT/web"
 npm test
 npm run typecheck
 git log --oneline -5
@@ -150,11 +197,15 @@ If rejected, replan narrower.
 ### 5. Execute
 
 Read `~/hydra/config/agents/executor.md` and `~/hydra/config/feedback/to-executor.md`.
+
+Step 0.6 already created `$TARGET_WT` on branch `feature/$CYCLE_ID` off `origin/main`. Stay in that worktree — do NOT `cd ~/hydra-betting`, do NOT `git checkout main`, do NOT `git pull` from the main checkout (that's the race that #542 is fixing).
+
 ```bash
-cd ~/hydra-betting
-git checkout main && git pull origin main
-git checkout -b feature/cycle-$(date -u +%Y-%m-%d-%H%M)-slug
+cd "$TARGET_WT"
+git status --short    # must be clean — we just branched off origin/main
 ```
+
+**Path discipline for Edit/Write tools (issue #542):** every `file_path` argument MUST be either repo-relative (e.g. `web/src/foo.ts`) when cwd is `$TARGET_WT`, OR an absolute path anchored to `$TARGET_WT/...`. Do NOT construct paths like `/home/gabe/hydra-betting/web/...` — those bypass the worktree and write to the main checkout (the exact bug behind #542).
 
 Rules:
 - Smallest change wins (20 lines > 200 lines).
@@ -169,9 +220,16 @@ Rules:
 
 ### 6. Verify (NOT an agent)
 ```bash
-cd ~/hydra-betting/web
+cd "$TARGET_WT/web"
 npm run typecheck    # must pass
 npm test             # must pass; count must not decrease
+```
+
+After the first edit batch, sanity-check that the edits actually landed in the worktree (cheap canary against the #542 ghost-edit symptom):
+```bash
+( cd "$TARGET_WT" && git diff --name-only ) | head
+# If this is empty when Edit calls were made, edits leaked to the main checkout —
+# ABORT and do not push. Run `git -C ~/hydra-betting status --short` to confirm.
 ```
 
 Fail → fix → re-verify. After 2 failed fixes, abandon branch.
@@ -203,12 +261,19 @@ for attempt in 1 2 3; do
   sleep $((attempt * 10))
 done
 
+# Push the worktree's feature branch first so the main checkout can merge a remote ref.
+( cd "$TARGET_WT" && git push -u origin "feature/$CYCLE_ID" )
+
+# Merge on the main checkout — the worktree itself is on the feature branch, so we
+# can't merge into main from inside it. The merge-lock serialises this step across
+# concurrent dispatches.
 cd ~/hydra-betting
-git checkout main && git pull origin main
-git merge --no-ff feature/<branch> -m "merge: claude cycle — <task title>" \
+git fetch origin main
+git checkout main && git pull --ff-only origin main
+git merge --no-ff "feature/$CYCLE_ID" -m "merge: claude cycle — <task title>" \
   -m "## Files in scope" -m "$SCOPE_IN_LIST" -m "$SCOPE_JUSTIFICATIONS"
 git push origin main
-git branch -d feature/<branch>
+git branch -d "feature/$CYCLE_ID"
 
 hydra raw POST /merge/unlock
 ```
@@ -226,7 +291,7 @@ done
 if [ "$STATUS" != "active" ]; then
   echo "DEPLOY FAILED: service not active after 90s"
   journalctl --user -u hydra-betting-web.service --no-pager -n 20 2>&1 | grep -iE "error|fail|exit" | tail -5
-  cd ~/hydra-betting
+  cd ~/hydra-betting    # revert runs against the main checkout — merge has already landed there
   git revert --no-edit -m 1 HEAD
   git push origin main
   systemctl --user restart hydra-betting-web.service
@@ -249,6 +314,15 @@ npm test    # compare to pre-merge
 ```
 
 Regression → revert + restart + report.
+
+### 8.5. Worktree cleanup (issue #542)
+
+On success, remove the hydra-betting worktree we created in Step 0.6. On failure, `scripts/branch-prune.sh` will GC it on the next daily sweep — leaking is acceptable on crash but not on the happy path.
+
+```bash
+git -C ~/hydra-betting worktree remove --force "$TARGET_WT" 2>&1 || \
+  echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
+```
 
 ### 9. State sync (critical)
 
