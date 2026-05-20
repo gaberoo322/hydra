@@ -1,5 +1,5 @@
 [Unit]
-Description=Hydra Autopilot — long-running autonomous decision loop (overnight)
+Description=Hydra Autopilot — long-running autonomous decision loop
 Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/operator-playbooks/hydra-autopilot.md
 After=network-online.target hydra-orchestrator.service
 Wants=network-online.target
