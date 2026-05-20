@@ -30,6 +30,10 @@
 #     and `_get` now detects HTML / non-2xx responses and exits non-zero so
 #     callers (skills, operators) don't silently consume error pages.
 #   hydra backlog ls | counts | move <id> <lane>
+#     Issue #537: move routes to PATCH /backlog/:id/move with body
+#     {"lane":"<lane>"}. The bare PATCH /backlog/:id (updateItem)
+#     silently ignored the lane field and returned ok:true while the
+#     backlog state was unchanged.
 #   hydra queue ls | add <reference>
 #   hydra metrics [--count N]
 #   hydra alerts ls [--limit N]
@@ -155,9 +159,13 @@ cmd_backlog() {
     ls|""  ) _get "/backlog" ;;
     counts ) _get "/backlog/counts" ;;
     move   )
+      # Issue #537: must route to /backlog/:id/move (not the bare
+      # /backlog/:id update endpoint, which silently ignores `lane` and
+      # returns ok:true while the backlog state is unchanged). The move
+      # handler expects {"lane": "..."} — never `{"to": "..."}`.
       shift
       [ "$#" -ge 2 ] || { echo "hydra backlog move: need <id> <lane>" >&2; exit 2; }
-      _patch "/backlog/$1" "{\"lane\":\"$2\"}" ;;
+      _patch "/backlog/$1/move" "{\"lane\":\"$2\"}" ;;
     *      ) echo "hydra backlog: need ls|counts|move" >&2; exit 2 ;;
   esac
 }
