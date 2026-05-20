@@ -237,6 +237,17 @@ DEV_CONFIDENCE_THRESHOLD = 0.5
 # Daily research-force cap (grilled decision 6).
 RESEARCH_FORCE_DAILY_CAP = 4
 
+# Tool-scout cost-cap defaults (issue #532). Mirror the constants in
+# src/scout/calendar-walk.ts so the gate has sane fallbacks when state.json
+# lacks the limits keys (e.g. legacy state from a v1 schema).
+#
+# `SCOUT_DAILY_COST_SHARE_DEFAULT` matches `SCOUT_DAILY_COST_SHARE` in TS —
+# 4% of the daily budget. `DAILY_SPEND_CAP_USD_DEFAULT` matches the
+# operator-facing $50/day cap documented in the dashboard. Both can be
+# overridden via state.limits or the bootstrap env vars.
+SCOUT_DAILY_COST_SHARE_DEFAULT = 0.04
+DAILY_SPEND_CAP_USD_DEFAULT = 50.0
+
 # Slots that are scope-disallowed exclusion mask. Scope filter is an
 # exclusion mask (grilled decision 3); `health` and `qa_*` are always
 # allowed regardless of scope (qa reviews any PR, health is whole-system).
@@ -876,6 +887,18 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
             continue
         if sig in burned:
             continue
+        # Cost-cap gate (issue #532) — checked BEFORE _select_for_signal so
+        # it fires before the cooldown read. Per AC: "cost-cap gate fires
+        # before cooldown gate (cap is the harder limit)". Only `scout_orch`
+        # has a cost-cap today; other signal classes fall through.
+        if sig == "scout_orch" and scout_cost_cap_exceeded(state):
+            cap = scout_cost_cap_state(state)
+            plan.debug.setdefault("scout_cost_cap_skipped", {
+                "share": cap["share"],
+                "cap_usd": cap["cap_usd"],
+                "spend_usd": cap["spend_usd"],
+            })
+            continue
         action = _select_for_signal(sig, state, events, now)
         if action is None:
             continue
@@ -1232,6 +1255,79 @@ def _research_force_allowed(state: dict, slot: str, now: int) -> bool:
     counters = state.get("research_force_counter") or {}
     by_day = counters.get(today) or {}
     return int(by_day.get(slot, 0)) < RESEARCH_FORCE_DAILY_CAP
+
+
+def scout_cost_cap_state(state: dict) -> dict:
+    """Resolve the tool-scout cost-cap inputs from state (issue #532).
+
+    Reads (with sane fallbacks for legacy state shapes):
+      - state.limits.scout_cost_share        (default SCOUT_DAILY_COST_SHARE_DEFAULT)
+      - state.limits.daily_spend_cap_usd     (default DAILY_SPEND_CAP_USD_DEFAULT)
+      - state.scout_spend_usd_today          (default 0.0)
+
+    Returns a dict with the resolved floats AND a boolean `enforced` flag.
+    `enforced` is False when the resolved daily cap is <= 0 (rate not
+    configured) — in that case the gate is a no-op and we treat any spend
+    value as below the (non-existent) cap. A `scout_cost_share` of exactly
+    zero is treated as the documented kill-switch: `enforced` is True and
+    `cap_usd` is 0.0, so the >= check suppresses every dispatch.
+
+    Pure: no side effects.
+    """
+    limits = state.get("limits") or {}
+
+    try:
+        share = float(limits.get("scout_cost_share", SCOUT_DAILY_COST_SHARE_DEFAULT))
+    except (TypeError, ValueError):
+        share = SCOUT_DAILY_COST_SHARE_DEFAULT
+    if not (share >= 0.0):  # NaN-safe
+        share = SCOUT_DAILY_COST_SHARE_DEFAULT
+
+    try:
+        cap_total = float(limits.get("daily_spend_cap_usd", DAILY_SPEND_CAP_USD_DEFAULT))
+    except (TypeError, ValueError):
+        cap_total = DAILY_SPEND_CAP_USD_DEFAULT
+    if not (cap_total >= 0.0):
+        cap_total = DAILY_SPEND_CAP_USD_DEFAULT
+
+    try:
+        spend = float(state.get("scout_spend_usd_today", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        spend = 0.0
+    if not (spend >= 0.0):
+        spend = 0.0
+
+    cap_usd = cap_total * share
+
+    # `enforced=True` when the operator explicitly configured a kill-switch
+    # (share == 0.0) OR when there is a non-zero cap to compare against.
+    # When cap_total is 0 (no rate configured) AND share > 0, the gate is a
+    # no-op — `enforced=False` keeps Phase B's current behaviour intact for
+    # operators who haven't opted in to HYDRA_TOKEN_USD_RATE yet.
+    if share == 0.0:
+        enforced = True
+    else:
+        enforced = cap_total > 0.0
+
+    return {
+        "share": share,
+        "cap_total_usd": cap_total,
+        "cap_usd": cap_usd,
+        "spend_usd": spend,
+        "enforced": enforced,
+    }
+
+
+def scout_cost_cap_exceeded(state: dict) -> bool:
+    """True when the scout-orch cost-cap gate should suppress dispatch.
+
+    Pure wrapper over `scout_cost_cap_state` — separated so callers can
+    log either the bool decision or the full breakdown.
+    """
+    s = scout_cost_cap_state(state)
+    if not s["enforced"]:
+        return False
+    return s["spend_usd"] >= s["cap_usd"]
 
 
 def _check_termination(state: dict, now: int) -> dict | None:

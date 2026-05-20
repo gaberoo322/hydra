@@ -185,6 +185,22 @@ export const redisKeys = {
   scoutCategoryLastWalked: (category: string) => `hydra:scout:category-last-walked:${category}`,
   scoutStatsDaily: (isoDate: string) => `hydra:scout:stats:${isoDate}`,
 
+  // Tool Scout — Phase B cost-cap gate (issue #532).
+  //
+  // Per-day per-class scout token spend mirror, written by
+  // `collect-state.sh` from the existing `hydra:metrics:tokens:by-skill:
+  // daily:<DATE>[hydra-tool-scout]` surrogate (issue #394 accumulator).
+  // The gate in `scripts/autopilot/decide.py:_select_for_signal("scout_orch")`
+  // reads this via `state.scout_spend_usd_today` and suppresses dispatch
+  // when daily scout spend ≥ `scout_cost_share * daily_spend_cap_usd`.
+  //
+  // Value is an INT-string of tokens consumed today by `hydra-tool-scout`
+  // dispatches; the dollar conversion uses `HYDRA_TOKEN_USD_RATE` at the
+  // emitter (collect-state.sh) so the gate's input is already in USD. 7d
+  // TTL keeps Redis tidy; one week of audit headroom matches the
+  // `/api/scout/stats` window.
+  scoutSpendDaily: (isoDate: string) => `hydra:scout:spend:${isoDate}`,
+
   // ---------------------------------------------------------------------------
   // Locks
   // ---------------------------------------------------------------------------

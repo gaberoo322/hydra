@@ -814,6 +814,148 @@ describe("decide.py — signal classes with cooldowns", () => {
     assert.equal(reap.slot, "scout_orch");
     assert.equal(reap.skill, "hydra-tool-scout");
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #532 — scout_orch cost-cap gate. The gate fires BEFORE the
+  // cooldown check (cap is the harder limit), suppresses dispatch when
+  // `scout_spend_usd_today >= scout_cost_share * daily_spend_cap_usd`, and
+  // honours `scout_cost_share = 0` as an operator kill-switch.
+  // -------------------------------------------------------------------------
+
+  function costCapState(o: {
+    scope?: string;
+    scoutCostShare?: number;
+    dailySpendCapUsd?: number;
+    scoutSpendUsdToday?: number;
+    signals?: Record<string, unknown>;
+  }): any {
+    const s = baseState({
+      scope: o.scope,
+      signals: o.signals ?? { scout_walk_due: true },
+    });
+    if (o.scoutCostShare !== undefined) s.limits.scout_cost_share = o.scoutCostShare;
+    if (o.dailySpendCapUsd !== undefined) s.limits.daily_spend_cap_usd = o.dailySpendCapUsd;
+    if (o.scoutSpendUsdToday !== undefined) s.scout_spend_usd_today = o.scoutSpendUsdToday;
+    return s;
+  }
+
+  test("cost-cap suppresses scout_orch when spend >= share * daily_cap (issue #532)", () => {
+    // 4% of $50 = $2 cap; spend $2.50 → exceeds.
+    const state = costCapState({
+      dailySpendCapUsd: 50.0,
+      scoutCostShare: 0.04,
+      scoutSpendUsdToday: 2.5,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "spend $2.50 above $2.00 cap (4% of $50) must suppress scout_orch dispatch",
+    );
+    assert.ok(plan.debug?.scout_cost_cap_skipped,
+      "plan.debug should record the cost-cap skip reason for operator audit");
+  });
+
+  test("cost-cap allows scout_orch when spend below share * daily_cap", () => {
+    // 4% of $50 = $2 cap; spend $1.00 → under.
+    const state = costCapState({
+      dailySpendCapUsd: 50.0,
+      scoutCostShare: 0.04,
+      scoutSpendUsdToday: 1.0,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      "spend $1.00 below $2.00 cap (4% of $50) must allow scout_orch dispatch",
+    );
+  });
+
+  test("cost-cap kill-switch: scout_cost_share = 0 suppresses every dispatch (issue #532 AC)", () => {
+    // share=0 → cap=0; any spend (incl. 0) is >= 0, so every dispatch is suppressed.
+    const state = costCapState({
+      dailySpendCapUsd: 50.0,
+      scoutCostShare: 0,
+      scoutSpendUsdToday: 0,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "scout_cost_share=0 is the operator kill-switch — must suppress all scout_orch dispatch",
+    );
+  });
+
+  test("cost-cap fires BEFORE the 7d cooldown gate (issue #532 AC: cap is the harder limit)", () => {
+    // Set up: cooldown has elapsed (8d ago) AND spend exceeds cap.
+    // Verify: dispatch is suppressed by the cap, not gated by cooldown.
+    // The signal proves cap is checked first because both gates would
+    // otherwise allow dispatch (cooldown elapsed) — only the cap can
+    // produce the skip.
+    const now = Math.floor(Date.now() / 1000);
+    const state = costCapState({
+      scoutCostShare: 0.04,
+      dailySpendCapUsd: 50.0,
+      scoutSpendUsdToday: 10.0,  // way over $2 cap
+    });
+    state.signal_last_fired = {
+      health: 0, sweep_orch: 0, sweep_target: 0,
+      discover_orch: 0, discover_target: 0,
+      scout_orch: now - 8 * 24 * 60 * 60,  // past 7d cooldown
+    };
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "cost-cap must fire before cooldown — cap suppresses even when cooldown elapsed",
+    );
+    assert.ok(plan.debug?.scout_cost_cap_skipped,
+      "the skip reason must surface as cost-cap, not cooldown");
+  });
+
+  test("cost-cap is inactive (no-op) when daily_spend_cap_usd is 0 (rate not configured)", () => {
+    // dailySpendCapUsd=0 → rate unconfigured (default HYDRA_TOKEN_USD_RATE=0).
+    // Phase B's pre-#532 behaviour must be preserved.
+    const state = costCapState({
+      dailySpendCapUsd: 0,
+      scoutCostShare: 0.04,
+      scoutSpendUsdToday: 0,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      "cap of 0 with non-zero share is 'rate unconfigured' — gate must be a no-op",
+    );
+  });
+
+  test("cost-cap reads limits.scout_cost_share override (issue #532 AC)", () => {
+    // Operator override: bump share to 10% → cap is $5.00, $4 spend allowed.
+    const state = costCapState({
+      dailySpendCapUsd: 50.0,
+      scoutCostShare: 0.10,
+      scoutSpendUsdToday: 4.0,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      "10% of $50 = $5 cap, $4 spend → allow",
+    );
+  });
+
+  test("cost-cap default values: share 0.04 + cap $50 → $2/day (issue #532 documented default)", () => {
+    // No explicit limits → defaults kick in: 4% * $50 = $2 cap.
+    // Spend $3 → over default cap → suppress.
+    const state = baseState({ signals: { scout_walk_due: true } });
+    // Don't set scout_cost_share or daily_spend_cap_usd — let decide.py
+    // fall back to its defaults (SCOUT_DAILY_COST_SHARE_DEFAULT,
+    // DAILY_SPEND_CAP_USD_DEFAULT).
+    state.scout_spend_usd_today = 3.0;
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "default 4% of $50 = $2 cap; $3 spend exceeds → suppress",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

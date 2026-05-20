@@ -83,6 +83,43 @@ echo -n "scout_last_walk_iso="; docker exec hydra-redis-1 redis-cli GET hydra:sc
 echo -n "scout_board_open_enhancements="
 gh issue list --repo gaberoo322/hydra --state open --label enhancement --json number --jq 'length' 2>/dev/null || echo 0
 
+# Tool Scout — Phase B cost-cap (issue #532).
+#
+# Mirror today's scout token spend into `hydra:scout:spend:<DATE>` (7d TTL)
+# and emit a USD-converted value so decide.py's `scout_orch` selector can
+# enforce `scout_cost_share * daily_spend_cap_usd` before dispatch.
+#
+# Source of truth: `hydra:metrics:tokens:by-skill:daily:<DATE>` HASH, field
+# `hydra-tool-scout`, populated by the existing /api/metrics/tokens writer
+# (issue #394). We mirror rather than read the surrogate directly because
+# the gate documented in the issue body keys off `hydra:scout:spend:<DATE>`
+# explicitly, and a tiny derived projection keeps the gate's read path
+# free of cross-namespace coupling.
+#
+# Dollar conversion uses `HYDRA_TOKEN_USD_RATE` (USD per million tokens,
+# matching src/cost-surrogate.ts). When the rate is 0 or unset, USD
+# evaluates to 0 — decide.py treats that as "rate not configured" and
+# skips the cap (the gate is opt-in on the rate, mirroring the dashboard).
+SCOUT_TODAY_DATE="$(date -u +%Y-%m-%d)"
+SCOUT_TOKENS_TODAY=$(docker exec hydra-redis-1 redis-cli HGET "hydra:metrics:tokens:by-skill:daily:${SCOUT_TODAY_DATE}" hydra-tool-scout 2>/dev/null | tr -d '"' || true)
+if [ -z "$SCOUT_TOKENS_TODAY" ] || ! [[ "$SCOUT_TOKENS_TODAY" =~ ^[0-9]+$ ]]; then
+  SCOUT_TOKENS_TODAY=0
+fi
+# Mirror into hydra:scout:spend:<DATE> with 7d TTL. SETEX is atomic; a
+# Redis outage here is non-fatal because the next collect tick will retry.
+docker exec hydra-redis-1 redis-cli SET "hydra:scout:spend:${SCOUT_TODAY_DATE}" "$SCOUT_TOKENS_TODAY" EX 604800 >/dev/null 2>&1 || true
+# Convert to USD via HYDRA_TOKEN_USD_RATE (USD per million tokens; default 0
+# = unconfigured). `awk` keeps this hermetic — no python boot just for one
+# multiply. When the rate is 0 (or unset/non-numeric), spend evaluates to
+# 0.00 and decide.py treats the cap as inactive.
+SCOUT_USD_RATE="${HYDRA_TOKEN_USD_RATE:-0}"
+SCOUT_SPEND_USD=$(awk -v t="$SCOUT_TOKENS_TODAY" -v r="$SCOUT_USD_RATE" 'BEGIN {
+  if (r+0 <= 0 || t+0 <= 0) { printf "0.00"; }
+  else { printf "%.6f", (t+0) / 1000000.0 * (r+0); }
+}')
+echo "scout_tokens_today=${SCOUT_TOKENS_TODAY}"
+echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
+
 # capacity-floor (orchestrator self-improvement share)
 hydra raw GET /capacity 2>/dev/null | python3 -c "
 import json,sys

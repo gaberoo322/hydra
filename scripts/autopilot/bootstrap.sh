@@ -94,6 +94,18 @@ if [ "$SUBAGENT_MAX_TOKENS" -gt "$SUBAGENT_HARD_MAX_TOKENS" ]; then
   exit 1
 fi
 
+# Tool-scout cost-cap knobs (issue #532). Both are first-class members of
+# `state.limits` so the same Phase 0 schema-handshake covers them. Defaults:
+#   daily_spend_cap_usd = 50.0  — operator-facing daily Claude Code budget
+#                                  (matches the dashboard's $50/day cap).
+#   scout_cost_share    = 0.04  — documented 4% slice; mirrors
+#                                  src/scout/calendar-walk.ts:SCOUT_DAILY_COST_SHARE.
+#                                  Setting to 0 is an intentional kill-switch.
+# Operators override either via env (per-run) or — for the share — by
+# editing state.json mid-run.
+DAILY_SPEND_CAP_USD="${HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD:-50.0}"
+SCOUT_COST_SHARE="${HYDRA_AUTOPILOT_SCOUT_COST_SHARE:-0.04}"
+
 # Resolve scope from env. Allowed: all | orch-only | target-only. Default: all.
 SCOPE="${HYDRA_AUTOPILOT_SCOPE:-all}"
 case "$SCOPE" in
@@ -191,7 +203,9 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
     "subagent_max_tokens": ${SUBAGENT_MAX_TOKENS},
     "subagent_hard_max_tokens": ${SUBAGENT_HARD_MAX_TOKENS},
     "unattended": ${UNATTENDED},
-    "schema_version": ${SCHEMA_VERSION}
+    "schema_version": ${SCHEMA_VERSION},
+    "daily_spend_cap_usd": ${DAILY_SPEND_CAP_USD},
+    "scout_cost_share": ${SCOUT_COST_SHARE}
   },
   "cumulative_tokens": 0,
   "dispatches": 0,
@@ -220,7 +234,7 @@ cat > /tmp/hydra-autopilot-state.json <<EOF
 EOF
 
 # Echo resolved limits so the model captures them in conversation context
-echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION}"
+echo "[autopilot] limits resolved: token_budget=${TOKEN_BUDGET} wall_clock_max_sec=${WALL_CLOCK_MAX_SEC} idle_drain_turns=${IDLE_DRAIN_TURNS} scope=${SCOPE} subagent_soft=${SUBAGENT_MAX_TOKENS} subagent_hard=${SUBAGENT_HARD_MAX_TOKENS} unattended=${UNATTENDED} schema_version=${SCHEMA_VERSION} daily_spend_cap_usd=${DAILY_SPEND_CAP_USD} scout_cost_share=${SCOUT_COST_SHARE}"
 echo "[autopilot] state schema_version=${SCHEMA_VERSION} (playbook must match HYDRA_AUTOPILOT_PLAYBOOK_SCHEMA marker; see Phase 0 handshake)"
 
 # Issue #435 — overwrite the Phase 0 heartbeat with the structured
