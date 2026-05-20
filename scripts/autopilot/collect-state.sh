@@ -120,6 +120,24 @@ SCOUT_SPEND_USD=$(awk -v t="$SCOUT_TOKENS_TODAY" -v r="$SCOUT_USD_RATE" 'BEGIN {
 echo "scout_tokens_today=${SCOUT_TOKENS_TODAY}"
 echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
 
+# Tool Scout — Phase C alert-driven trigger (issue #486).
+#
+# `scout_alert_eligible_count` is the number of recent `hydra:alerts`
+# entries whose pattern is in PATTERN_CATEGORY_MAP AND clear the
+# 24h per-pattern + per-category dedup gates. When >0, decide.py
+# fires a scout_orch dispatch with `trigger: "alert"` so the
+# scout investigates the failing category within hours, not days.
+#
+# Sourced from `/api/scout/alert-plan` (read-only — doesn't advance
+# the cursor or stamp any cooldown). The actual stamping happens
+# inside the dispatched scout skill after a successful run, so a
+# crash here doesn't suppress the next tick's retry.
+echo -n "scout_alert_eligible_count="
+hydra raw GET /scout/alert-plan 2>/dev/null | python3 -c "
+import json,sys
+try: d=json.load(sys.stdin); print(len(d.get('eligible',[])))
+except: print(0)" || echo 0
+
 # capacity-floor (orchestrator self-improvement share)
 hydra raw GET /capacity 2>/dev/null | python3 -c "
 import json,sys
