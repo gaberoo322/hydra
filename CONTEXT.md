@@ -26,9 +26,17 @@ _Avoid_: metrics, KPIs, success criteria
 The set of orchestrator files Hydra cannot modify via its own PR pipeline — only the operator can. Protects the merge gate, rollback, watchdog, cost guardrails, and the untouchable list itself.
 _Avoid_: protected paths (unless referring specifically to the file pattern), frozen code
 
-**Gate**:
-The frozen module owning the merge gate: grounding, verification, scope enforcement, mutation kill-rate, merge lock, rollback. Called from the control loop; cannot be bypassed.
-_Avoid_: verification (too narrow)
+**Pre-merge Gate**:
+The set of CI jobs that must pass before a PR can merge: test, typecheck, dashboard-build, mutation kill-rate (`scripts/ci/mutation-check.ts`), scope enforcement (`scripts/ci/scope-check.ts`), tier-gate (untouchable + tier-classifier). Defined by `.github/workflows/ci.yml`; cannot be bypassed. Disassembled from the in-process Gate module by ADR-0006.
+_Avoid_: Gate (ambiguous post-ADR-0006 — the in-process Gate module was disassembled into CI jobs + Merge Lock + Post-merge Regression Check), verification (too narrow), merge gate (overloaded with Merge Lock)
+
+**Merge Lock**:
+The Redis primitive (`hydra:merge:lock`, 60s TTL) preventing concurrent merges. Acquired by autopilot subagents via `/api/merge-lock`. Distinct from the **Pre-merge Gate** — the lock serialises merges; the Gate decides whether a merge is allowed at all.
+_Avoid_: merge gate (overloaded with Pre-merge Gate)
+
+**Post-merge Regression Check**:
+The `hydra-qa` subagent's verification that a merged PR did not regress **Target Outcomes** or the test count. Runs after merge; can trigger a rollback PR. Replaced the deleted in-process Outcome Holdback watcher (`src/holdback.ts`, removed in the ADR-0006 cut-over). Distinct from **Outcome Holdback** (ADR-0004) — the holdback is the *policy* declaring which tiers warrant a watch window; this is the *mechanism* that runs the check.
+_Avoid_: rollback (too narrow — this is the check, not the action), holdback watcher (no longer exists as a module)
 
 **Stuckness**:
 The orchestrator's diagnostic for silent failure: cycles elapsed since any **Target Outcome** moved favorably and stayed moved. Distinct from cycle failure — green cycles can be stuck.
