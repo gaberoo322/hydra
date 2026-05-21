@@ -454,7 +454,12 @@ export async function loadAgentMemory(agentName: string): Promise<string> {
 
   // Also load from OpenViking (with tracked metrics + fallback)
   try {
-    const { trackedOvSearch } = await import("./ov-search.ts");
+    // Cross-cluster reach into the Knowledge Base — formatMemoryForPrompt
+    // composes Pattern Memory (Redis patterns above) with OpenViking memory
+    // search to build the agent's lesson prompt. Kept as a dynamic import so
+    // OV outages don't load the module at all; the cluster boundary remains
+    // visible in the path.
+    const { trackedOvSearch } = await import("../knowledge-base/ov-search.ts");
     const { memories } = await trackedOvSearch(
       `${agentName} agent lessons failures prevention`,
       5,

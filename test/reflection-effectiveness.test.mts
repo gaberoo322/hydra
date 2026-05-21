@@ -17,7 +17,11 @@ import Redis from "ioredis";
 // Set REDIS_URL before any import of learning.ts so the singleton picks up DB 1
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
+// Cross-cutting orchestration (recordOutcome / clearOutcomes) lives in the
+// barrel; reflection-cluster queries (getReflectionEffectiveness) live in the
+// reflections module. Both are needed by this test.
 let learning: typeof import("../src/learning.ts");
+let reflections: typeof import("../src/reflections/reflections.ts");
 let redis: any;
 let redisAvailable = false;
 
@@ -47,6 +51,7 @@ describe("reflection effectiveness (issue #150)", () => {
         return;
       }
       learning = await import("../src/learning.ts");
+      reflections = await import("../src/reflections/reflections.ts");
     }
     if (!redisAvailable) return;
     await cleanKeys();
@@ -125,7 +130,7 @@ describe("reflection effectiveness (issue #150)", () => {
       await redis.zadd(OUTCOMES_KEY, Date.now() + i, JSON.stringify(outcomes[i]));
     }
 
-    const result = await learning.getReflectionEffectiveness();
+    const result = await reflections.getReflectionEffectiveness();
     assert.ok(result.anchors.length === 2, "should have 2 anchors");
 
     const payments = result.anchors.find(a => a.ref === "payments module");
@@ -206,7 +211,7 @@ describe("reflection effectiveness (issue #150)", () => {
   test("AC2: getReflectionEffectiveness returns empty anchors when no outcomes", async (t) => {
     requireRedis(t);
 
-    const result = await learning.getReflectionEffectiveness();
+    const result = await reflections.getReflectionEffectiveness();
     assert.deepEqual(result.anchors, []);
     // Issue #193: response now also includes an injection summary block.
     // Don't assert exact values — depends on what cycle metrics happen to

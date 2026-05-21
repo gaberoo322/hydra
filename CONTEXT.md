@@ -58,6 +58,18 @@ _Avoid_: design doc (overloaded), plan (informal), spec (overloaded with `src/sp
 The closed list of categories where Hydra escalates to the operator instead of attempting autonomous remedy: credentials/secrets, external-account actions, Tier 0 changes, vision-level conflicts. Everything else Hydra researches and tries. Defined by ADR-0005.
 _Avoid_: blocker (overloaded), needs-human (informal)
 
+**Pattern Memory**:
+The Redis-backed per-agent / per-skill pattern store (`hydra:memory:{agent}:patterns`, `hydra:friction:{skill}:patterns`) that captures recurring lessons and friction from cycle outcomes. Auto-promotes patterns to `config/feedback/to-{agent}.md` at the 3-hit threshold and dispatches recurring friction to GitHub issues via the **Escalation** seam at the same threshold (+ every multiple of 10 thereafter). Lives in `src/pattern-memory/`.
+_Avoid_: agent memory (one of several Redis keys it manages, not the whole concept), lessons (only one of the namespaces — `memory` vs `friction`)
+
+**Reflections**:
+The per-anchor and per-file Reflexion-style episodic store (`hydra:reflections:{anchor}`, 7-day TTL by default; extends to 30 days when the reflection has >50% recurrence-success rate). Records *what failed, why, and what to try differently* after a non-merged cycle outcome; loaded into the next attempt at the same anchor (or any anchor touching the same files, post-#326). Distinct from **Pattern Memory** — patterns are durable behaviour rules, reflections are episodic narrative tied to specific cycle attempts. Lives in `src/reflections/`.
+_Avoid_: memory (overloaded with Pattern Memory), retrospective (informal)
+
+**Knowledge Base**:
+The OpenViking-backed semantic store of indexed source code, reality reports, and subagent session transcripts (`src/knowledge-base/`). Subagents query it for relevant past experience; the indexer watches files and Redis report keys to keep embeddings current. Distinct from **Pattern Memory** (Redis hash store of structured patterns) and **Reflections** (Redis key/value store of episodic narrative) — the Knowledge Base is the semantic / embeddings tier and lives outside Redis (HTTP to the OV service).
+_Avoid_: OV (insider shorthand), embeddings store (too narrow — it also holds raw transcripts)
+
 ## Relationships
 
 - An **Orchestrator** builds one **Target** at a time; running a second target means a second orchestrator instance, not multi-tenant inside one
@@ -66,6 +78,7 @@ _Avoid_: blocker (overloaded), needs-human (informal)
 - The **Gate** is the only path to merge; **Untouchable Core** includes the **Gate**
 - **Stuckness** is computed from **Target Outcomes**, not from cycle status
 - A **Design Concept** is the prerequisite for any code-writing dispatch; PR-time review consumes it as ground truth
+- **Pattern Memory**, **Reflections**, and **Knowledge Base** are three independent learning surfaces — patterns are structural rules, reflections are episodic narrative, the Knowledge Base is semantic search. `src/learning.ts` orchestrates them but owns none.
 
 ## Example dialogue
 

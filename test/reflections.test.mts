@@ -14,7 +14,11 @@ const BUFFER_KEY = "hydra:reflections:buffer";
 // Set REDIS_URL before any import of learning.ts so the singleton picks up DB 1
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
-let reflections;
+let reflections: typeof import("../src/reflections/reflections.ts");
+// Cross-cutting orchestration (recordOutcome / clearOutcomes) lives in the
+// barrel; reflection-cluster operations live in the reflections module. Both
+// are exercised in this file.
+let learning: typeof import("../src/learning.ts");
 let redis: any;
 let redisAvailable = false;
 
@@ -42,7 +46,8 @@ describe("reflections buffer", () => {
         console.error("Redis unavailable at localhost:6379/1, skipping reflections tests");
         return;
       }
-      reflections = await import("../src/learning.ts");
+      reflections = await import("../src/reflections/reflections.ts");
+      learning = await import("../src/learning.ts");
     }
     if (!redisAvailable) return;
     await cleanReflectionKeys();
@@ -229,7 +234,7 @@ describe("reflections buffer", () => {
     const anchorRef = "auth login broken";
 
     // Record a failure reflection (both per-anchor and global)
-    await reflections.recordOutcome({
+    await learning.recordOutcome({
       agents: [],
       cycleId: "cycle-merge-test-1",
       task: { title: "fix auth bug" },
@@ -254,14 +259,14 @@ describe("reflections buffer", () => {
     assert.ok(globalBefore.some((r: any) => r.anchorReference === anchorRef), "global buffer should contain anchor before clearOutcomes");
 
     // Simulate successful merge: clear outcomes
-    await reflections.clearOutcomes(anchorRef);
+    await learning.clearOutcomes(anchorRef);
 
     // Verify per-anchor reflections key is deleted
     const entriesAfter = await redis.lrange(perAnchorKey, 0, -1);
     assert.equal(entriesAfter.length, 0, "per-anchor reflection should be empty after clearOutcomes");
 
     // Verify getContext returns no PRIOR ATTEMPTS text
-    const contextAfter = await reflections.getContext("planner", {
+    const contextAfter = await learning.getContext("planner", {
       type: "failing-test",
       reference: anchorRef,
     });
@@ -287,7 +292,7 @@ describe("reflections buffer", () => {
     assert.equal(allBefore.length, 2);
 
     // clearOutcomes should clear per-anchor key AND global buffer entries
-    await reflections.clearOutcomes("payments broken");
+    await learning.clearOutcomes("payments broken");
 
     // Only auth should remain in global buffer
     const allAfter = await reflections.getAllReflections();

@@ -18,7 +18,7 @@ import {
 } from "../redis-adapter.ts";
 import { getTargetServiceName } from "../target-config.ts";
 // Issue #231: shared OV credential — health probe must use the same key as agent searches.
-import { OPENVIKING_API_KEY } from "../learning/ov-config.ts";
+import { OPENVIKING_API_KEY } from "../knowledge-base/ov-config.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");

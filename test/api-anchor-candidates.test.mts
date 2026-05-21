@@ -302,7 +302,7 @@ describe("GET /anchor/candidates — endpoint integration (#424)", () => {
 
     // Inject a reflection for this anchor reference via the same adapter
     // the endpoint reads.
-    const { recordAnchorReflection } = await import("../src/learning/reflections.ts");
+    const { recordAnchorReflection } = await import("../src/reflections/reflections.ts");
     await recordAnchorReflection({
       anchorRef: "Has failure history",
       cycleId: "cycle-test",

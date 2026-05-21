@@ -1,9 +1,10 @@
 import { Router } from "express";
-import { getOvSearchMetrics, getCoverageStats } from "../learning.ts";
+import { getOvSearchMetrics } from "../knowledge-base/ov-search.ts";
+import { getCoverageStats } from "../knowledge-base/source-indexer.ts";
 // Issue #231: shared OV connection config — the previous local default literal
 // for OPENVIKING_API_KEY in misc.ts was the WRONG key (returned 401), so the
 // dashboard search proxy silently broke whenever the env var was absent.
-import { OPENVIKING_URL, OPENVIKING_API_KEY } from "../learning/ov-config.ts";
+import { OPENVIKING_URL, OPENVIKING_API_KEY } from "../knowledge-base/ov-config.ts";
 
 /**
  * OpenViking proxy + knowledge metrics routes.

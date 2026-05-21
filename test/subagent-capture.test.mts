@@ -47,10 +47,10 @@ let tempConfigRoot: string;
 let originalConfigPath: string | undefined;
 let redis: any;
 
-let captureSubagentLesson: typeof import("../src/learning/subagent-capture.ts").captureSubagentLesson;
-let agentForSkill: typeof import("../src/learning/subagent-capture.ts").agentForSkill;
-let isValidSkill: typeof import("../src/learning/subagent-capture.ts").isValidSkill;
-let isValidOutcome: typeof import("../src/learning/subagent-capture.ts").isValidOutcome;
+let captureSubagentLesson: typeof import("../src/pattern-memory/subagent-capture.ts").captureSubagentLesson;
+let agentForSkill: typeof import("../src/pattern-memory/subagent-capture.ts").agentForSkill;
+let isValidSkill: typeof import("../src/pattern-memory/subagent-capture.ts").isValidSkill;
+let isValidOutcome: typeof import("../src/pattern-memory/subagent-capture.ts").isValidOutcome;
 
 async function loadPatterns(agent: string): Promise<any[]> {
   const raw = await redis.get(`hydra:memory:${agent}:patterns`);
@@ -86,7 +86,7 @@ describe("subagent lesson capture (issue #392)", () => {
 
     // Import AFTER setting HYDRA_CONFIG_PATH so the module's CONFIG_PATH
     // constant points at our temp dir.
-    const mod = await import("../src/learning/subagent-capture.ts");
+    const mod = await import("../src/pattern-memory/subagent-capture.ts");
     captureSubagentLesson = mod.captureSubagentLesson;
     agentForSkill = mod.agentForSkill;
     isValidSkill = mod.isValidSkill;
@@ -373,7 +373,7 @@ describe("subagent lesson capture (issue #392)", () => {
   // -------------------------------------------------------------------------
 
   test("existing recordPattern (codex-cycle path) still records without a source tag", async () => {
-    const { recordPattern } = await import("../src/learning/agent-memory.ts");
+    const { recordPattern } = await import("../src/pattern-memory/agent-memory.ts");
     await recordPattern("executor", "no-diff", {
       action: "Write actual code.",
       example: "cycle-99: no files modified",
@@ -396,7 +396,7 @@ describe("subagent lesson capture (issue #392)", () => {
   // -------------------------------------------------------------------------
 
   test("recordPattern returns escalation: null below threshold, populated at threshold", async () => {
-    const { recordPattern, PROMOTION_THRESHOLD } = await import("../src/learning/agent-memory.ts");
+    const { recordPattern, PROMOTION_THRESHOLD } = await import("../src/pattern-memory/agent-memory.ts");
 
     const args = (i: number) => ["planner", "scope-creep", {
       action: "Narrow scope.",

@@ -32,7 +32,7 @@ let tempConfigRoot: string;
 let originalConfigPath: string | undefined;
 let redis: any;
 
-let captureSubagentFriction: typeof import("../src/learning/subagent-capture.ts").captureSubagentFriction;
+let captureSubagentFriction: typeof import("../src/pattern-memory/subagent-capture.ts").captureSubagentFriction;
 
 async function loadFrictionPatterns(skill: string): Promise<any[]> {
   const raw = await redis.get(`hydra:friction:${skill}:patterns`);
@@ -65,7 +65,7 @@ describe("subagent friction capture (issue #512)", () => {
     process.env.HYDRA_CONFIG_PATH = tempConfigRoot;
 
     redis = new Redis(REDIS_URL);
-    const mod = await import("../src/learning/subagent-capture.ts");
+    const mod = await import("../src/pattern-memory/subagent-capture.ts");
     captureSubagentFriction = mod.captureSubagentFriction;
   });
 

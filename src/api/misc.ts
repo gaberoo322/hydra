@@ -100,8 +100,8 @@ export function createMiscRouter(eventBus: any) {
       if (!category || !action) {
         return res.status(400).json({ error: "Missing category or action" });
       }
-      const { recordPattern } = await import("../learning.ts");
-      const { escalateIfNeeded } = await import("../learning/escalation.ts");
+      const { recordPattern } = await import("../pattern-memory/agent-memory.ts");
+      const { escalateIfNeeded } = await import("../pattern-memory/escalation.ts");
       const r = await recordPattern(agentName, category, {
         severity: severity || "prevent",
         action,
@@ -117,7 +117,7 @@ export function createMiscRouter(eventBus: any) {
 
   router.get("/memory/:agent", async (req, res) => {
     try {
-      const { loadAgentMemory } = await import("../learning.ts");
+      const { loadAgentMemory } = await import("../pattern-memory/agent-memory.ts");
       const memory = await loadAgentMemory(req.params.agent);
       res.type("text/plain").send(memory);
     } catch (err: any) {
@@ -135,7 +135,7 @@ export function createMiscRouter(eventBus: any) {
     try {
       const { skill, outcome, cue, context, action, severity, cycleId } = req.body || {};
       const { captureSubagentLesson, isValidSkill, isValidOutcome } =
-        await import("../learning/subagent-capture.ts");
+        await import("../pattern-memory/subagent-capture.ts");
 
       if (!isValidSkill(skill)) {
         return res.status(400).json({
@@ -177,7 +177,7 @@ export function createMiscRouter(eventBus: any) {
     try {
       const { skill, cue, workaround, context, cycleId } = req.body || {};
       const { captureSubagentFriction, isValidSkill } = await import(
-        "../learning/subagent-capture.ts"
+        "../pattern-memory/subagent-capture.ts"
       );
 
       if (!isValidSkill(skill)) {

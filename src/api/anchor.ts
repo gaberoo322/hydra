@@ -27,7 +27,7 @@ import {
   getString,
 } from "../redis-adapter.ts";
 import { _admin } from "../backlog.ts";
-import { loadAnchorReflectionsRaw } from "../learning/reflections.ts";
+import { loadAnchorReflectionsRaw } from "../reflections/reflections.ts";
 import {
   REFRAME_QUEUE,
   PRIOR_FAILURES_KEY,

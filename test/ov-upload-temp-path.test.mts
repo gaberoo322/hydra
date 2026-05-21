@@ -22,7 +22,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { indexText } from "../src/learning/ov-upload.ts";
+import { indexText } from "../src/knowledge-base/ov-upload.ts";
 
 type FetchCall = { url: string; init: any };
 
