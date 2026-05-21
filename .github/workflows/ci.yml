@@ -341,8 +341,21 @@ jobs:
     needs: [test, dashboard-build, npm-audit-orchestrator, npm-audit-dashboard]
     runs-on: self-hosted
     steps:
-      - name: Pull latest code
-        run: cd /home/gabe/hydra && git pull --ff-only origin master
+      - name: Sync to master
+        # Self-healing: /home/gabe/hydra may be sitting on a feature branch from
+        # an interactive operator session. A direct `git pull --ff-only` aborts
+        # in that state. Switch to master first, but never silently clobber
+        # operator WIP — fail loud if there are uncommitted tracked changes.
+        run: |
+          cd /home/gabe/hydra
+          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            echo "ERROR: /home/gabe/hydra has uncommitted tracked changes — refusing to deploy."
+            git status
+            exit 1
+          fi
+          git fetch --quiet origin master
+          git checkout master
+          git pull --ff-only origin master
 
       - name: Install dependencies
         run: cd /home/gabe/hydra && npm ci
