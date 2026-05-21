@@ -370,3 +370,30 @@ export function shouldEscalateAtHitCount(
   if (hitCount > promotionThreshold && (hitCount - promotionThreshold) % 10 === 0) return true;
   return false;
 }
+
+/**
+ * Dispatch helper — call from a `recordPattern()` caller that wants the
+ * default "fire if the recording produced an escalation intent" behaviour.
+ *
+ * The seam is intentional: `recordPattern()` is a pure Redis writer that
+ * returns an optional `EscalationInput`; this helper turns that intent into a
+ * GitHub-side write. Callers that don't want the dispatch (notably tests
+ * exercising pattern accounting in isolation) simply don't call this.
+ *
+ * Best-effort by design: errors are logged with the caller-supplied `context`
+ * label and swallowed. Never throws.
+ */
+export async function escalateIfNeeded(
+  escalation: EscalationInput | null,
+  context: string,
+): Promise<void> {
+  if (!escalation) return;
+  try {
+    await escalatePatternToIssue(escalation);
+  } catch (err: any) {
+    // `escalatePatternToIssue` already swallows its own errors and returns an
+    // EscalationResult, so this catch is defence-in-depth for a programming
+    // error in the dispatcher itself.
+    console.error(`[escalation] escalateIfNeeded(${context}) failed: ${err?.message || err}`);
+  }
+}
