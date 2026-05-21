@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const SRC_DIR = join(__dirname, "..", "src");
-const OV_CONFIG_FILE = join(SRC_DIR, "learning", "ov-config.ts");
+const OV_CONFIG_FILE = join(SRC_DIR, "knowledge-base", "ov-config.ts");
 
 // 64-char hex string — the shape of an OV API key. The regex is intentionally
 // broad (any 64-hex-char run) so future key rotations are also caught if a
@@ -53,14 +53,14 @@ describe("issue #231: OPENVIKING_API_KEY single source of truth", () => {
     assert.deepEqual(
       offenders,
       [],
-      `Found 64-hex API-key literals outside src/learning/ov-config.ts. ` +
+      `Found 64-hex API-key literals outside src/knowledge-base/ov-config.ts. ` +
         `These should be removed and the value imported from ov-config.ts:\n` +
         offenders.map((o) => `  - ${o.file}: ${o.matches.join(", ")}`).join("\n"),
     );
   });
 
   test("ov-config.ts exports the canonical OV constants", async () => {
-    const mod = await import("../src/learning/ov-config.ts");
+    const mod = await import("../src/knowledge-base/ov-config.ts");
     assert.equal(typeof mod.OPENVIKING_URL, "string", "OPENVIKING_URL must be exported");
     assert.equal(typeof mod.OPENVIKING_API_KEY, "string", "OPENVIKING_API_KEY must be exported");
     assert.ok(
@@ -75,8 +75,8 @@ describe("issue #231: OPENVIKING_API_KEY single source of truth", () => {
   });
 
   test("ov-search re-exports stay aligned with ov-config", async () => {
-    const cfg = await import("../src/learning/ov-config.ts");
-    const search = await import("../src/learning/ov-search.ts");
+    const cfg = await import("../src/knowledge-base/ov-config.ts");
+    const search = await import("../src/knowledge-base/ov-search.ts");
     assert.equal(search.OV_KEY, cfg.OPENVIKING_API_KEY, "OV_KEY must match canonical key");
     assert.equal(search.OV_URL, cfg.OPENVIKING_URL, "OV_URL must match canonical URL");
   });

@@ -23,7 +23,7 @@ import {
   runSourceInitialPass,
   getCoverageStats,
   resetCoverageStats,
-} from "../src/learning.ts";
+} from "../src/knowledge-base/source-indexer.ts";
 
 // Use a unique temp root for each describe block so we don't collide with
 // other tests in the suite.

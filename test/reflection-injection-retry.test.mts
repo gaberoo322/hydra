@@ -156,7 +156,7 @@ describe("reflection injection on retry (issue #193)", () => {
 
   test("getReflectionEffectiveness returns injection stats (issue #193)", async (t) => {
     requireRedis(t);
-    const learning = await import("../src/learning.ts");
+    const learning = await import("../src/reflections/reflections.ts");
 
     const result = await learning.getReflectionEffectiveness();
 

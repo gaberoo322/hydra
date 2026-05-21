@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getAllReflections, getReflectionEffectiveness } from "../learning.ts";
+import { getAllReflections, getReflectionEffectiveness } from "../reflections/reflections.ts";
 import { getTargetName } from "../target-config.ts";
 
 /**

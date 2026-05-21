@@ -15,7 +15,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { indexerTargetUri } from "../src/learning/ov-upload.ts";
+import { indexerTargetUri } from "../src/knowledge-base/ov-upload.ts";
 
 describe("OV indexer target URI", () => {
   test("nested config path becomes nested viking URI", () => {

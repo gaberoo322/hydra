@@ -16,7 +16,7 @@ import {
   buildFallbackQuery,
   getOvSearchMetrics,
   resetOvSearchMetrics,
-} from "../src/learning.ts";
+} from "../src/knowledge-base/ov-search.ts";
 
 describe("OV search metrics", () => {
   test("getOvSearchMetrics returns zeroes when no searches have occurred", () => {

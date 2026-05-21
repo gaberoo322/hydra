@@ -1,44 +1,37 @@
 /**
- * learning.ts — Facade for the Hydra learning system
+ * learning.ts — Cross-cluster orchestration for Hydra's learning subsystems
  *
- * After the issue #219 split, this module is a thin orchestrator that
- * composes the learning subsystems:
+ * Post-split (this PR), `src/learning/` is gone. The three learning clusters
+ * live as sibling top-level modules:
  *
- *   - learning/agent-memory.ts        — Redis-backed pattern memory + auto-promotion
- *   - learning/reflections.ts         — per-anchor + global Reflexion-style storage
- *   - learning/ov-search.ts           — OpenViking search wrapper + cycle sessions
- *   - learning/knowledge-indexer.ts   — fs.watch + Redis polling background process
- *   - learning/skill-registration.ts  — OV skill catalog
- *   - learning/source-indexer.ts + learning/ov-upload.ts — already split (#210/#217)
+ *   - src/pattern-memory/  — Redis-backed pattern store, promotion, escalation
+ *   - src/reflections/     — per-anchor + global Reflexion-style storage
+ *   - src/knowledge-base/  — OpenViking search + indexers (source, knowledge)
  *
- * Public API (kept stable for callers):
- *   recordOutcome()  — record agent lessons + reflections after a cycle
- *   getContext()     — load all learning context for an agent prompt
- *   consolidate()    — prune stale patterns + auto-promoted rules (daily)
- *   initLearning()   — start knowledge indexer, register OV skills, migrate rules
- *   clearOutcomes()  — drop reflections for an anchor after a successful merge
+ * This file owns the genuinely cross-cluster orchestration that composes them
+ * — nothing else. Callers that want a single cluster's API should import from
+ * that cluster directly, not from here.
  *
- * All other exports are pass-throughs from the subsystem modules so existing
- * callers (codex-runner, control-loop, api/*, tests) keep working without
- * needing to update their imports.
+ * Public API:
+ *   recordOutcome()   — record agent lessons (Pattern Memory) + reflections after a cycle
+ *   getContext()      — load all learning context for an agent prompt (Pattern Memory + Reflections)
+ *   consolidate()     — prune stale patterns + auto-promoted rules (daily)
+ *   initLearning()    — start knowledge indexer, register OV skills, migrate rules
+ *   clearOutcomes()   — drop reflections for an anchor after a successful merge
  */
 
 import {
-  loadAgentMemory,
-  formatMemoryForPrompt,
   recordPlannerLesson,
   recordExecutorLesson,
   recordSkepticLesson,
-  recordPattern as recordPatternImpl,
   consolidateAgentPatterns,
   consolidateStalePromotedRules,
   consolidatePromotedRuleEffectiveness,
   migrateRulesToPatterns,
   backfillPromotionMetadata,
-  PROMOTION_THRESHOLD as PROMOTION_THRESHOLD_VALUE,
-  detectStalePromotedRules as detectStalePromotedRulesImpl,
-  processStaleRules as processStaleRulesImpl,
-} from "./learning/agent-memory.ts";
+  loadAgentMemory,
+  formatMemoryForPrompt,
+} from "./pattern-memory/agent-memory.ts";
 import {
   recordAnchorReflection,
   loadAnchorReflections,
@@ -46,94 +39,16 @@ import {
   backfillByFileIndex,
   extractFilesFromAnchor,
   recordGlobalReflection,
-  loadRelevantReflections as loadRelevantReflectionsImpl,
-  formatReflectionsForPrompt as formatReflectionsForPromptImpl,
-  clearReflectionsForAnchor as clearReflectionsForAnchorImpl,
-  recordReflection as recordReflectionImpl,
+  loadRelevantReflections,
+  formatReflectionsForPrompt,
+  clearReflectionsForAnchor,
   recordReflectionOutcome,
   deleteAnchorReflections,
   extendAnchorReflectionsTTL,
-  getAllReflections as getAllReflectionsImpl,
-  closeReflectionsRedis as closeReflectionsRedisImpl,
-  getReflectionEffectiveness as getReflectionEffectivenessImpl,
-} from "./learning/reflections.ts";
-import {
-  trackedOvSearch as trackedOvSearchImpl,
-  buildFallbackQuery as buildFallbackQueryImpl,
-  getOvSearchMetrics as getOvSearchMetricsImpl,
-  resetOvSearchMetrics as resetOvSearchMetricsImpl,
-  createCycleSession as createCycleSessionImpl,
-  type OvSearchMetrics,
-} from "./learning/ov-search.ts";
-import { registerSkills } from "./learning/skill-registration.ts";
-import { startKnowledgeIndexer } from "./learning/knowledge-indexer.ts";
-import type { SourcePath } from "./learning/source-indexer.ts";
-import {
-  parseSourcePaths,
-  shouldIndexSource,
-  enumerateSourceFiles,
-  buildSourceTitle,
-  runSourceInitialPass,
-  getCoverageStats,
-  resetCoverageStats,
-} from "./learning/source-indexer.ts";
-
-// ===========================================================================
-// Re-exports — keep public surface stable for existing callers / tests
-// ===========================================================================
-
-export const PROMOTION_THRESHOLD = PROMOTION_THRESHOLD_VALUE;
-export type { SourcePath, OvSearchMetrics };
-export {
-  // source indexer (issue #210/#211)
-  parseSourcePaths,
-  shouldIndexSource,
-  enumerateSourceFiles,
-  buildSourceTitle,
-  runSourceInitialPass,
-  getCoverageStats,
-  resetCoverageStats,
-};
-
-// OV search (issue #219)
-export const trackedOvSearch = trackedOvSearchImpl;
-export const buildFallbackQuery = buildFallbackQueryImpl;
-export const getOvSearchMetrics = getOvSearchMetricsImpl;
-export const resetOvSearchMetrics = resetOvSearchMetricsImpl;
-export const createCycleSession = createCycleSessionImpl;
-
-// Reflection storage (issue #219)
-export const recordReflection = recordReflectionImpl;
-// Issue #326: surface the file-extraction helper so anchor-selection and
-// planner-prompt callers can pre-compute scope hints when needed.
-export { extractFilesFromAnchor, loadAnchorReflectionsByFile, backfillByFileIndex };
-export const getAllReflections = getAllReflectionsImpl;
-export const closeReflectionsRedis = closeReflectionsRedisImpl;
-export const loadRelevantReflections = loadRelevantReflectionsImpl;
-export const formatReflectionsForPrompt = formatReflectionsForPromptImpl;
-export const clearReflectionsForAnchor = clearReflectionsForAnchorImpl;
-export const getReflectionEffectiveness = getReflectionEffectivenessImpl;
-
-// Agent memory (issue #219)
-export { loadAgentMemory, formatMemoryForPrompt };
-export const recordPattern = recordPatternImpl;
-export const detectStalePromotedRules = detectStalePromotedRulesImpl;
-export const processStaleRules = processStaleRulesImpl;
-export type { StaleRule } from "./learning/agent-memory.ts";
-export {
-  getIneffectivePromotedPatterns,
-  evaluatePromotedPatternEffectiveness,
-  MIN_DAYS_POST_PROMOTION,
-} from "./learning/agent-memory.ts";
-export type {
-  IneffectivePromotedPattern,
-  MemoryPattern,
-} from "./learning/agent-memory.ts";
-export type {
-  GlobalReflection,
-  ReflectionOutcome,
-  ReflectionEffectiveness,
-} from "./learning/reflections.ts";
+  getReflectionEffectiveness,
+} from "./reflections/reflections.ts";
+import { registerSkills } from "./knowledge-base/skill-registration.ts";
+import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
 
 // ===========================================================================
 // Public types
@@ -314,8 +229,8 @@ export async function getContext(
 
   // 4. Global relevant reflections (Reflexion pattern)
   try {
-    const relevant = await loadRelevantReflectionsImpl(anchor);
-    const formatted = formatReflectionsForPromptImpl(relevant);
+    const relevant = await loadRelevantReflections(anchor);
+    const formatted = formatReflectionsForPrompt(relevant);
     if (formatted) parts.push(formatted);
   } catch (err: any) {
     console.error(`[Learning] getContext: global reflections failed for "${anchor.reference}": ${err.message}`);
@@ -400,7 +315,7 @@ export async function initLearning(): Promise<void> {
 export async function clearOutcomes(anchorRef: string): Promise<void> {
   try {
     // Check effectiveness before deciding to delete or extend
-    const effectiveness = await getReflectionEffectivenessImpl();
+    const effectiveness = await getReflectionEffectiveness();
     const anchorStats = effectiveness.anchors.find(a => a.ref === anchorRef);
 
     if (anchorStats && anchorStats.successRate > 0.5) {
@@ -416,7 +331,7 @@ export async function clearOutcomes(anchorRef: string): Promise<void> {
   }
 
   try {
-    await clearReflectionsForAnchorImpl(anchorRef);
+    await clearReflectionsForAnchor(anchorRef);
   } catch (err: any) {
     console.error(`[Learning] Failed to clear global reflections for "${anchorRef}": ${err.message}`);
   }

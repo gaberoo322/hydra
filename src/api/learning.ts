@@ -3,7 +3,7 @@ import {
   getIneffectivePromotedPatterns,
   getRuleActionLog,
   listFrictionPatterns,
-} from "../learning/agent-memory.ts";
+} from "../pattern-memory/agent-memory.ts";
 
 const FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const;
 

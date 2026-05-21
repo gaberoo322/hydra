@@ -53,7 +53,7 @@ describe("issue #326: reflection by-file index", () => {
         console.error("Redis unavailable at localhost:6379/1, skipping by-file reflection tests");
         return;
       }
-      reflections = await import("../src/learning/reflections.ts");
+      reflections = await import("../src/reflections/reflections.ts");
       learning = await import("../src/learning.ts");
       cb = await import("../src/context-builder.ts");
       metrics = await import("../src/metrics.ts");
@@ -260,18 +260,18 @@ describe("issue #326: reflection by-file index", () => {
     // production failure mode that motivated this issue).
     await reflections.recordAnchorReflection({
       cycleId: "cycle-prev",
-      anchorRef: "Fix deep-review finding in src/learning/reflections.ts: extractFilesFromAnchor edge case",
+      anchorRef: "Fix deep-review finding in src/reflections/reflections.ts: extractFilesFromAnchor edge case",
       taskTitle: "Fix extractFilesFromAnchor edge case",
       outcome: "verification-failed",
       reason: "regression in adjacent helper",
-      scopeFiles: ["src/learning/reflections.ts"],
+      scopeFiles: ["src/reflections/reflections.ts"],
     });
 
     // Now a different planner pass picks up a completely different anchor that
     // touches the same file.
     const ctx = await learning.getContext("planner", {
       type: "codebase-health",
-      reference: "Codebase health: consolidate small helpers in src/learning/reflections.ts",
+      reference: "Codebase health: consolidate small helpers in src/reflections/reflections.ts",
     });
 
     assert.ok(ctx.includes("RELATED FILES"), "context should include by-file section");

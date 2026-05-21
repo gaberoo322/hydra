@@ -20,7 +20,7 @@ import {
   backfillPatternPromotionMetadata,
   evaluatePromotedPatternEffectiveness,
   type MemoryPattern,
-} from "../src/learning/agent-memory.ts";
+} from "../src/pattern-memory/agent-memory.ts";
 
 function makePattern(overrides: Partial<MemoryPattern>): MemoryPattern {
   return {
