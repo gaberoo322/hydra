@@ -67,11 +67,17 @@ describe("scheduler stop semantics (issue #385)", () => {
     await cleanKeys();
     // Ensure scheduler is stopped before each test — silent failure is
     // intentional because most tests start from a stopped baseline.
-    try { stop(); } catch { /* intentional: not running */ }
+    //
+    // stop() became `async` in #468 (deliberate-stop marker persistence).
+    // Awaiting here is required so the in-memory flip + Redis marker
+    // settle before the next test starts; otherwise a not-yet-resolved
+    // stop promise can race the next `start()` and the assertions below
+    // observe a stale `state.running`.
+    try { await stop(); } catch { /* intentional: not running */ }
   });
 
   after(async () => {
-    try { stop(); } catch { /* intentional: may not be running */ }
+    try { await stop(); } catch { /* intentional: may not be running */ }
     if (testRedis) {
       await cleanKeys();
       testRedis.disconnect();
@@ -134,7 +140,11 @@ describe("scheduler stop semantics (issue #385)", () => {
     // Stop the scheduler. The in-flight cycle may still be running its
     // housekeeping; the guard at line 785 ensures it WILL NOT chain a
     // new timer once it reaches its tail.
-    const stopResult = stop();
+    //
+    // stop() became `async` in #468 — it awaits a Redis `setString` to
+    // persist the deliberate-stop marker. Must be awaited here or
+    // `stopResult` is a Promise and `.stopped` is undefined.
+    const stopResult = await stop();
     assert.ok(stopResult.stopped, "stop should succeed");
 
     const cyclesRunAtStop = stopResult.cyclesRun;
@@ -179,7 +189,11 @@ describe("scheduler stop semantics (issue #385)", () => {
 
   test("AC3 — double-stop returns an explicit error", async () => {
     // Initial state: not running. stop() should report the error.
-    const first = stop();
+    //
+    // stop() is async since #468; without await, `first` is a Promise
+    // and `"error" in first` is false. Awaiting unwraps to the
+    // `{ error: "Scheduler is not running" }` short-circuit.
+    const first = await stop();
     assert.ok("error" in first, "stop while not running should return an error");
     assert.match(first.error, /not running/i);
   });
