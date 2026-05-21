@@ -18,7 +18,6 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
-import { createMockCycleContext, createMockAnchor } from "./helpers/mock-context.ts";
 
 let redis: any;
 
