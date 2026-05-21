@@ -347,13 +347,14 @@ describe("escalation to GitHub (issue #512)", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Integration-ish: agent-memory.maybeEscalate() should suppress escalation
-  // for the deferred cue at hit 3 (the unmet threshold), but the unmet cue
-  // should still fire at hit 3 as it always has.
+  // Integration-ish: agent-memory.recordPattern() should populate
+  // `result.escalation` as null for the deferred cue at hit 3 (its threshold
+  // is higher), while the unmet cue still fires at hit 3 as it always has.
   //
-  // We exercise this via the threshold-resolution helpers rather than running
-  // through Redis, because the escalation hook itself is well-covered by the
-  // create/comment/reopen tests above.
+  // We exercise this via the pure threshold-resolution helpers rather than
+  // running through Redis. The seam between recordPattern (pure accounting)
+  // and escalateIfNeeded (the dispatch) means the decision under test here is
+  // the same decision recordPattern uses to populate its return.
   // -------------------------------------------------------------------------
 
   test("deferred cue suppresses escalation at hit 3 (unmet still fires)", () => {

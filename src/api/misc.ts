@@ -101,12 +101,14 @@ export function createMiscRouter(eventBus: any) {
         return res.status(400).json({ error: "Missing category or action" });
       }
       const { recordPattern } = await import("../learning.ts");
-      await recordPattern(agentName, category, {
+      const { escalateIfNeeded } = await import("../learning/escalation.ts");
+      const r = await recordPattern(agentName, category, {
         severity: severity || "prevent",
         action,
         example: example || "",
         cycleId: cycleId || `claude-${Date.now()}`,
       });
+      await escalateIfNeeded(r.escalation, `${agentName}/${category}`);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

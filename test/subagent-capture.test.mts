@@ -386,4 +386,38 @@ describe("subagent lesson capture (issue #392)", () => {
     // source is optional — codex-cycle callers don't set it.
     assert.equal(patterns[0].source, undefined);
   });
+
+  // -------------------------------------------------------------------------
+  // The recordPattern() return contract: pre-threshold calls return
+  // `escalation: null`; the threshold-crossing call returns a populated
+  // EscalationInput. This is the seam between pattern accounting (Redis-only)
+  // and the GitHub-side dispatch (escalateIfNeeded). Tests can exercise either
+  // half independently because of the split.
+  // -------------------------------------------------------------------------
+
+  test("recordPattern returns escalation: null below threshold, populated at threshold", async () => {
+    const { recordPattern, PROMOTION_THRESHOLD } = await import("../src/learning/agent-memory.ts");
+
+    const args = (i: number) => ["planner", "scope-creep", {
+      action: "Narrow scope.",
+      example: `cycle-${i}: scope-creep`,
+      cycleId: `cycle-${i}`,
+    }] as const;
+
+    const r1 = await recordPattern(...args(1));
+    assert.equal(r1.escalation, null, "1st hit should not request escalation");
+    assert.equal(r1.crossedThreshold, false);
+
+    const r2 = await recordPattern(...args(2));
+    assert.equal(r2.escalation, null, "2nd hit should not request escalation");
+    assert.equal(r2.crossedThreshold, false);
+
+    const r3 = await recordPattern(...args(3));
+    assert.equal(r3.crossedThreshold, true, "3rd hit promotes for the first time");
+    assert.ok(r3.escalation, "3rd hit (== threshold) should request escalation");
+    assert.equal(r3.escalation!.kind, "lesson");
+    assert.equal(r3.escalation!.cue, "scope-creep");
+    assert.equal(r3.escalation!.hitCount, PROMOTION_THRESHOLD);
+    assert.deepEqual(r3.escalation!.skills, ["planner"]);
+  });
 });

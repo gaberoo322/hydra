@@ -32,6 +32,13 @@ import {
   deleteOldRules,
 } from "../redis-adapter.ts";
 import { keyExists, setString, listLPush, listRange, listTrim } from "../redis/kv.ts";
+import {
+  escalateIfNeeded,
+  escalationThresholdForCue,
+  isMetadataCue,
+  shouldEscalateAtHitCount,
+  type EscalationInput,
+} from "./escalation.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
 
@@ -78,6 +85,30 @@ export type MemoryPattern = {
    * only — does not alter the consolidation/promotion math.
    */
   source?: "codex-cycle" | "subagent";
+};
+
+/**
+ * Return shape of `recordPattern()`. The escalation field carries the
+ * caller-decided side-effect: it's non-null when the recorded hit count is one
+ * that merits a GitHub-issue dispatch. The caller passes it to
+ * `escalateIfNeeded()` (from `escalation.ts`) to fire the dispatch — or omits
+ * the dispatch entirely (e.g. in tests) to keep the call pure.
+ *
+ * This split is the seam the codebase used to elide via an inline
+ * `maybeEscalate()` hook inside `recordPattern`: pattern accounting and
+ * GitHub-issue accounting are two lifecycles, and joining them under one
+ * function name hid the second from callers and tests.
+ */
+export type RecordPatternResult = {
+  pattern: MemoryPattern;
+  /** True when this call promoted the pattern to "cardinal" for the first time. */
+  crossedThreshold: boolean;
+  /**
+   * Non-null when this hit count merits a GitHub-side dispatch. Pre-decision
+   * (threshold lookup, kind mapping, input shaping) lives in `recordPattern`;
+   * the caller just hands this to `escalateIfNeeded()`.
+   */
+  escalation: EscalationInput | null;
 };
 
 /**
@@ -175,7 +206,7 @@ async function sweepStalePromotions(agentName: string) {
       try {
         // Issue #524 — metadata cues skip the feedback-file write but still
         // get the `promoted` stamp so we don't re-enter this branch.
-        const metadataOnly = await isMetadataCueForCategory(p.category);
+        const metadataOnly = isMetadataCue(p.category);
         if (!metadataOnly) {
           await promoteToFeedback(agentName, p);
         }
@@ -519,13 +550,14 @@ export async function recordPattern(
     source?: "codex-cycle" | "subagent";
     namespace?: PatternNamespace;
   },
-) {
+): Promise<RecordPatternResult> {
   const namespace: PatternNamespace = details.namespace || "memory";
   const patterns = await loadPatterns(agentName, namespace);
   const today = new Date().toISOString().split("T")[0];
 
   const existing = patterns.find(p => p.category === category);
   let crossedThreshold = false;
+  let pattern: MemoryPattern;
 
   if (existing) {
     existing.hitCount++;
@@ -539,7 +571,7 @@ export async function recordPattern(
       // Issue #524 — metadata cues (acceptance-criterion-deferred) record
       // hits and stamp `promoted: true` so we don't re-evaluate, but skip
       // the feedback-file write because they aren't defects.
-      const metadataOnly = await isMetadataCueForCategory(category);
+      const metadataOnly = isMetadataCue(category);
       if (namespace === "memory" && !metadataOnly) {
         await promoteToFeedback(agentName, existing);
       }
@@ -552,12 +584,9 @@ export async function recordPattern(
         : namespace === "memory" ? `to-${agentName}.md` : `friction:${agentName}`;
       console.log(`[Learning] Promoted "${category}" to ${target} (${existing.hitCount} hits)`);
     }
-
-    // Issue #512 — fire escalation hook on threshold-cross AND on every
-    // multiple-of-10 thereafter (13, 23, ...). Best-effort: never throws.
-    await maybeEscalate(namespace, agentName, existing, crossedThreshold);
+    pattern = existing;
   } else {
-    patterns.push({
+    pattern = {
       category,
       severity: details.severity || "prevent",
       hitCount: 1,
@@ -568,59 +597,34 @@ export async function recordPattern(
       examples: [details.example],
       promoted: false,
       source: details.source,
-    });
+    };
+    patterns.push(pattern);
   }
 
   await savePatterns(agentName, patterns, namespace);
-}
 
-/**
- * Issue #512 — fire the GitHub-escalation hook when a pattern hits an
- * "interesting" count. Lazy-imports so the hot path doesn't pay the
- * escalation-module load cost on every record. Best-effort: any error
- * inside the hook is logged but never propagated.
- */
-async function maybeEscalate(
-  namespace: PatternNamespace,
-  name: string,
-  pattern: MemoryPattern,
-  crossedThreshold: boolean,
-): Promise<void> {
-  try {
-    const { shouldEscalateAtHitCount, escalatePatternToIssue, escalationThresholdForCue } =
-      await import("./escalation.ts");
-    // Issue #524 — per-cue escalation threshold. `acceptance-criterion-deferred`
-    // uses a much higher threshold (20+) so it doesn't fire on every PR with
-    // operator-observable ACs; everything else keeps the legacy 3-hit threshold.
-    const threshold = escalationThresholdForCue(pattern.category, PROMOTION_THRESHOLD);
-    if (!shouldEscalateAtHitCount(pattern.hitCount, threshold)) return;
-    void crossedThreshold; // currently informational; kept for future routing
-    await escalatePatternToIssue({
-      kind: namespace === "friction" ? "friction" : "lesson",
-      cue: pattern.category,
-      hitCount: pattern.hitCount,
-      skills: [name],
-      workarounds: pattern.examples.filter(e => typeof e === "string" && e.trim().length > 0),
-      lastReference: pattern.lastCycleId,
-    });
-  } catch (err: any) {
-    console.error(`[Learning] maybeEscalate(${namespace}/${name}/${pattern.category}) failed: ${err?.message || err}`);
-  }
-}
+  // Issue #512 — decide whether the caller should dispatch a GitHub-issue
+  // escalation. Threshold-cross plus every multiple of 10 thereafter
+  // (hitCount = threshold, threshold+10, threshold+20, ...). The decision and
+  // input shaping live here so callers stay one-liners; the dispatch itself
+  // is the caller's choice via `escalateIfNeeded(result.escalation, ctx)`.
+  //
+  // Issue #524 — per-cue threshold override. `acceptance-criterion-deferred`
+  // uses a much higher threshold (20+) so it doesn't fire on every PR with
+  // operator-observable ACs; everything else keeps the legacy 3-hit threshold.
+  const threshold = escalationThresholdForCue(category, PROMOTION_THRESHOLD);
+  const escalation: EscalationInput | null = shouldEscalateAtHitCount(pattern.hitCount, threshold)
+    ? {
+        kind: namespace === "friction" ? "friction" : "lesson",
+        cue: category,
+        hitCount: pattern.hitCount,
+        skills: [agentName],
+        workarounds: pattern.examples.filter(e => typeof e === "string" && e.trim().length > 0),
+        lastReference: pattern.lastCycleId,
+      }
+    : null;
 
-/**
- * Issue #524 — lazy lookup of the metadata-cue flag. Lives in escalation.ts
- * (the cue taxonomy) but imported lazily so the hot path doesn't pay the
- * load cost when no escalation work is happening.
- */
-async function isMetadataCueForCategory(category: string): Promise<boolean> {
-  try {
-    const { isMetadataCue } = await import("./escalation.ts");
-    return isMetadataCue(category);
-  } catch (err: any) {
-    console.error(`[Learning] isMetadataCueForCategory(${category}) failed: ${err?.message || err}`);
-    return false;
-  }
+  return { pattern, crossedThreshold, escalation };
 }
 
 /**
@@ -641,56 +645,62 @@ export async function listFrictionPatterns(
 export async function recordPlannerLesson(cycleId: string, task: any, finalState: string, context: any = {}) {
   if (finalState === "merged") {
     if (context.scopeCreep?.length > 0) {
-      await recordPattern("planner", "scope-creep", {
+      const r = await recordPattern("planner", "scope-creep", {
         action: `Include adjacent test files and shared modules in scopeBoundary.in. The executor went outside scope: ${context.scopeCreep.slice(0, 3).join(", ")}`,
         example: `${cycleId}: "${task.title}" — ${context.scopeCreep.length} file(s) outside scope`,
         cycleId,
       });
+      await escalateIfNeeded(r.escalation, "planner/scope-creep");
     }
     if (task.scopeBoundary?.in?.length > 4) {
-      await recordPattern("planner", "broad-scope-success", {
+      const r = await recordPattern("planner", "broad-scope-success", {
         severity: "reinforce",
         action: `Broad scope (${task.scopeBoundary.in.length} files) can work when each file is needed`,
         example: `${cycleId}: "${task.title}" — ${task.scopeBoundary.in.length} files`,
         cycleId,
       });
+      await escalateIfNeeded(r.escalation, "planner/broad-scope-success");
     }
     return;
   }
 
   if (finalState === "failed") {
     const failedSteps = context.failedSteps || [];
-    await recordPattern("planner", "verification-failure", {
+    const r = await recordPattern("planner", "verification-failure", {
       action: `Ensure ${failedSteps.join(" + ") || "verification"} will pass before proposing. ${task.scopeBoundary?.in?.length > 3 ? `Scope was broad (${task.scopeBoundary.in.length} files) — consider narrowing.` : ""}`,
       example: `${cycleId}: "${task.title}" failed — ${context.failReason || "verification failed"}`,
       cycleId,
     });
+    await escalateIfNeeded(r.escalation, "planner/verification-failure");
     return;
   }
 
   if (finalState === "rolled-back") {
-    await recordPattern("planner", "rollback", {
+    const r = await recordPattern("planner", "rollback", {
       action: `Changes to ${(task.scopeBoundary?.in || []).slice(0, 3).join(", ") || "these files"} caused test regressions. Verify test stability before proposing changes here.`,
       example: `${cycleId}: "${task.title}" — auto-reverted`,
       cycleId,
     });
+    await escalateIfNeeded(r.escalation, "planner/rollback");
     return;
   }
 
   if (finalState === "abandoned") {
     const reason = context.reason || "rejected or drift";
     if (reason.includes("Drift")) {
-      await recordPattern("planner", "drift", {
+      const r = await recordPattern("planner", "drift", {
         action: `Check recent cycle history for duplicates before proposing work similar to "${task.title}"`,
         example: `${cycleId}: abandoned — ${reason}`,
         cycleId,
       });
+      await escalateIfNeeded(r.escalation, "planner/drift");
     } else if (reason.includes("Review rejected:")) {
-      await recordPattern("planner", "high-risk-rejection", {
+      const r = await recordPattern("planner", "high-risk-rejection", {
         action: `High-risk review flagged a safety concern: ${reason.replace("Review rejected: ", "").slice(0, 200)}`,
         example: `${cycleId}: "${task.title}" — ${reason}`,
         cycleId,
       });
+      await escalateIfNeeded(r.escalation, "planner/high-risk-rejection");
     }
   }
 }
@@ -700,47 +710,52 @@ export async function recordExecutorLesson(cycleId: string, task: any, finalStat
 
   if (finalState === "failed") {
     if (context.noDiff) {
-      await recordPattern("executor", "no-diff", {
+      const r = await recordPattern("executor", "no-diff", {
         action: `Actually write code and commit. Previous attempt produced zero changes.`,
         example: `${cycleId}: "${task.title}" — no files modified`,
         cycleId,
       });
+      await escalateIfNeeded(r.escalation, "executor/no-diff");
     } else if (context.failedSteps?.length > 0) {
-      await recordPattern("executor", "verification-failure", {
+      const r = await recordPattern("executor", "verification-failure", {
         action: `Run npm test and npm run typecheck before committing. ${context.failedSteps.join(" + ")} failed.`,
         example: `${cycleId}: ${context.failedSteps.join(", ")} failed${context.verificationStderr ? " — " + context.verificationStderr.slice(0, 100) : ""}`,
         cycleId,
       });
+      await escalateIfNeeded(r.escalation, "executor/verification-failure");
     }
     return;
   }
 
   if (finalState === "rolled-back") {
-    await recordPattern("executor", "rollback", {
+    const r = await recordPattern("executor", "rollback", {
       action: `Run the FULL test suite when modifying ${(task.scopeBoundary?.in || []).slice(0, 3).join(", ") || "these files"}. A previous change broke tests elsewhere.`,
       example: `${cycleId}: tests ${context.testsBefore} → ${context.testsAfter} — auto-reverted`,
       cycleId,
     });
+    await escalateIfNeeded(r.escalation, "executor/rollback");
   }
 }
 
 export async function recordSkepticLesson(cycleId: string, task: any, skepticVerdict: string, finalState: string) {
   if (skepticVerdict === "approve" && (finalState === "failed" || finalState === "rolled-back")) {
-    await recordPattern("skeptic", "skeptic-miss", {
+    const r = await recordPattern("skeptic", "skeptic-miss", {
       action: `You approved a task that ${finalState}. Check scope boundary and verification plan more carefully for similar tasks.`,
       example: `${cycleId}: approved "${task.title}" — it ${finalState}`,
       cycleId,
     });
+    await escalateIfNeeded(r.escalation, "skeptic/skeptic-miss");
     return;
   }
 
   if (skepticVerdict === "reject" && finalState === "abandoned") {
-    await recordPattern("skeptic", "correct-rejection", {
+    const r = await recordPattern("skeptic", "correct-rejection", {
       severity: "reinforce",
       action: `Rejection in this area was correct. Keep standards high for ${(task.scopeBoundary?.in || []).slice(0, 2).join(", ") || "similar work"}.`,
       example: `${cycleId}: correctly rejected "${task.title}"`,
       cycleId,
     });
+    await escalateIfNeeded(r.escalation, "skeptic/correct-rejection");
   }
 }
 
