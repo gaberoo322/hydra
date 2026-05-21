@@ -182,7 +182,7 @@ function buildBody(input: EscalationInput): string {
   }
   parts.push("");
   parts.push(
-    "<!-- escalated by src/learning/escalation.ts. Idempotent: re-runs comment-bump or reopen instead of duplicating. -->",
+    "<!-- escalated by src/pattern-memory/escalation.ts. Idempotent: re-runs comment-bump or reopen instead of duplicating. -->",
   );
   return parts.join("\n");
 }
