@@ -8,7 +8,20 @@ set -euo pipefail
 HYDRA_ROOT="${HYDRA_ROOT:-/home/gabe/hydra}"
 cd "$HYDRA_ROOT"
 
-echo "==> Pulling latest..."
+echo "==> Syncing to master..."
+# Self-healing: this deploy path runs from $HYDRA_ROOT, which may be sitting on
+# a feature branch from an interactive operator session. A direct
+# `git pull --ff-only origin master` aborts in that state (diverged refs).
+# Switch to master first, but never silently clobber operator WIP — fail loud
+# if there are uncommitted tracked changes.
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "ERROR: $HYDRA_ROOT has uncommitted tracked changes — refusing to deploy."
+  echo "       Stash or commit them, then re-run."
+  git status
+  exit 1
+fi
+git fetch --quiet origin master
+git checkout master
 git pull --ff-only origin master
 
 echo "==> Installing orchestrator deps..."
