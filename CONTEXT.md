@@ -70,6 +70,10 @@ _Avoid_: memory (overloaded with Pattern Memory), retrospective (informal)
 The OpenViking-backed semantic store of indexed source code, reality reports, and subagent session transcripts (`src/knowledge-base/`). Subagents query it for relevant past experience; the indexer watches files and Redis report keys to keep embeddings current. Distinct from **Pattern Memory** (Redis hash store of structured patterns) and **Reflections** (Redis key/value store of episodic narrative) — the Knowledge Base is the semantic / embeddings tier and lives outside Redis (HTTP to the OV service).
 _Avoid_: OV (insider shorthand), embeddings store (too narrow — it also holds raw transcripts)
 
+**Redis Adapters**:
+The `src/redis/*` Module family — each owns a domain slice of Redis state (cycles, scheduler, work-queue, reflections, plan-cache, …) and exposes typed read/write accessors. Keys (`src/redis/keys.ts`) and raw primitives (`src/redis/kv.ts`) are private to the family. The single Seam for Redis access: TTL, key shape, JSON schema, and index maintenance live behind the Module, not at the call site. Stream keys are an exception by design — they live in `src/event-bus.ts`, which owns the Event Bus alphabet and uses Redis as the implementation. The legacy `src/redis-keys.ts` and `src/redis-adapter.ts` files are migration shims, retired in the final PR of the Seam closure (ADR-0009). Pre-merge Gate job `redis-seam-check` forbids imports of `redis/keys`, `redis/kv`, `redis-keys`, or `redis-adapter` from any file outside `src/redis/`.
+_Avoid_: "Redis layer" (too generic), DAO (overloaded), "Redis adapter" (singular — there are 18, not 1), "redis-adapter.ts" (the legacy shim, not the family)
+
 ## Relationships
 
 - An **Orchestrator** builds one **Target** at a time; running a second target means a second orchestrator instance, not multi-tenant inside one
@@ -79,6 +83,7 @@ _Avoid_: OV (insider shorthand), embeddings store (too narrow — it also holds 
 - **Stuckness** is computed from **Target Outcomes**, not from cycle status
 - A **Design Concept** is the prerequisite for any code-writing dispatch; PR-time review consumes it as ground truth
 - **Pattern Memory**, **Reflections**, and **Knowledge Base** are three independent learning surfaces — patterns are structural rules, reflections are episodic narrative, the Knowledge Base is semantic search. `src/learning.ts` orchestrates them but owns none.
+- **Pattern Memory**, **Reflections**, and every other Redis-resident state described above are read and written through the **Redis Adapters**. The raw `hydra:…` keys that appear in their definitions are documentation of today's storage shape, not a public surface — callers obtain values through typed accessors on `src/redis/*`.
 
 ## Example dialogue
 
