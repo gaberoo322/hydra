@@ -30,6 +30,13 @@
 #     and `_get` now detects HTML / non-2xx responses and exits non-zero so
 #     callers (skills, operators) don't silently consume error pages.
 #   hydra backlog ls | counts | move <id> <lane>
+#     move semantics (issue #537): PATCHes `/backlog/:id/move` with
+#     `{"lane": "<lane>"}`. Pre-fix, the CLI PATCHed `/backlog/:id` which
+#     routes to `updateItem` — and `updateItem`'s ALLOWED list does not
+#     include `lane`, so every move silently no-op'd while returning
+#     `ok:true`. Always use this command (or `hydra raw PATCH
+#     /backlog/<id>/move --json '{"lane":"<lane>"}'`) — never PATCH the
+#     bare `/backlog/<id>` to change a lane.
 #   hydra queue ls | add <reference>
 #   hydra metrics [--count N]
 #   hydra alerts ls [--limit N]
@@ -157,7 +164,11 @@ cmd_backlog() {
     move   )
       shift
       [ "$#" -ge 2 ] || { echo "hydra backlog move: need <id> <lane>" >&2; exit 2; }
-      _patch "/backlog/$1" "{\"lane\":\"$2\"}" ;;
+      # Issue #537: the move sub-route is `/backlog/:id/move`. Hitting
+      # `/backlog/:id` (updateItem) silently drops `lane` because it's not
+      # on updateItem's ALLOWED list — every move returned ok:true while
+      # the backlog state was unchanged. Always use the /move suffix.
+      _patch "/backlog/$1/move" "{\"lane\":\"$2\"}" ;;
     *      ) echo "hydra backlog: need ls|counts|move" >&2; exit 2 ;;
   esac
 }
