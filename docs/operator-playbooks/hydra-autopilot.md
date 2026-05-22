@@ -280,6 +280,19 @@ Run `pwd` and `git rev-parse --git-dir` first.
 No fallback. No `git checkout` in the main tree.
 ```
 
+The preamble catches cwd-confusion. The companion guard is the PreToolUse
+**worktree-write-fence** (issue #549), which catches the more insidious
+failure: cwd is correct, but an `Edit`/`Write`/`MultiEdit` tool call
+passes a `file_path` that resolves outside the worktree (the bug observed
+on the PR #548 dispatch). Operators install it once with `bash
+scripts/setup-claude-hooks.sh`; the hook source-of-truth lives at
+`scripts/claude-hooks/worktree-write-fence.sh`. When active, the hook
+denies any out-of-worktree write from a worktree-cwd session and the
+agent must self-correct. `scripts/audit-ghost-writes.py` walks the
+JSONL transcript history to quantify ghost-write incidents across past
+dispatches (useful as a before/after measurement when the hook is rolled
+out).
+
 ## Inspecting a run
 
 - **One-shot status:** `bash scripts/autopilot/status.sh` — pretty-prints the heartbeat (+ wedge verdict), the compact state, and the log tail. Safe to wire to a shell prompt.

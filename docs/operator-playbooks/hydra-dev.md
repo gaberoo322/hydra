@@ -225,6 +225,31 @@ fi
 
 This catches the case where isolation silently failed and the BG agent ran in the main tree anyway (the #245 failure mode).
 
+#### 7a. Ghost-write canary (issue #549)
+
+The `cwd` check above catches cwd-confusion, but NOT the more insidious failure: cwd is the worktree, but an `Edit`/`Write`/`MultiEdit` call landed a write in the main tree via an absolute `file_path` argument. The primary guard is the PreToolUse hook installed by `bash scripts/setup-claude-hooks.sh` (see `scripts/claude-hooks/worktree-write-fence.sh`). The skill-side canary is belt-and-braces in case the hook is uninstalled or a future write-tool slips past the matcher:
+
+```bash
+# Snapshot the main-tree dirty-set BEFORE dispatching the BG agent.
+PRE_GHOST_SNAPSHOT=$(git -C ~/hydra diff --name-only HEAD 2>/dev/null || true)
+
+# ... dispatch the BG agent ...
+
+# Compare AFTER. New modifications to tracked files in the main tree that
+# weren't dirty before == ghost write.
+POST_GHOST_SNAPSHOT=$(git -C ~/hydra diff --name-only HEAD 2>/dev/null || true)
+NEW_DIRTY=$(comm -13 <(printf '%s\n' "$PRE_GHOST_SNAPSHOT" | sort -u) \
+                     <(printf '%s\n' "$POST_GHOST_SNAPSHOT" | sort -u))
+if [ -n "$NEW_DIRTY" ]; then
+  echo "WARN: main tree gained dirty files during this dispatch — likely an issue #549 ghost-write:"
+  printf '%s\n' "$NEW_DIRTY"
+  echo "WARN: Run 'python3 scripts/audit-ghost-writes.py' for forensic detail."
+  # Surface to operator. Do NOT auto-revert — the operator may have legitimate WIP.
+fi
+```
+
+The diff-against-HEAD form deliberately includes only changes to tracked files; an operator's untracked WIP scratch in the main tree isn't a ghost-write signal. The snapshot-diff approach also tolerates a dirty main tree at dispatch time (the operator's pre-existing WIP shows up in both snapshots and cancels out).
+
 ### 8. Lesson capture on verification failure (issue #392)
 
 When the BG agent returns a **failure** with `verification-failure`, `no-diff`,
