@@ -6,8 +6,8 @@
  * outcomes.yaml` seeds one leading outcome — `orchestrator-self-improvement-
  * share` — backed by `source: file` reading `metrics/orchestrator-share.txt`.
  * Until that file exists, the adapter logs an ENOENT every Meta-analysis
- * tick and the stuckness detector (ADR-0003 / #242) plus the 25% capacity
- * floor (#245) have no signal to fire on.
+ * tick. (The stuckness detector that originally consumed this signal was
+ * retired in ADR-0010; the metric still has value as a read-only outcome.)
  *
  * On each cycle completion we compute the current orchestrator-side share
  * from `getSelfImprovementShare()` and write it to disk so the outcomes
@@ -94,10 +94,9 @@ export interface PublishShareResult {
  *
  * Always writes a finite number. When no cycles have been recorded yet
  * (windowCount === 0), the share is 0 by definition — writing 0 is still
- * useful: it tells the file adapter "the answer is currently zero", which
- * the stuckness detector compares against the configured baseline (0) and
- * treats as "no movement yet". The alternative — not writing at all — is
- * exactly the failure mode this issue exists to fix.
+ * useful: it tells the file adapter "the answer is currently zero". The
+ * alternative — not writing at all — is exactly the failure mode this issue
+ * exists to fix.
  */
 export async function publishOrchestratorShareMetric(
   opts: { filePath?: string; windowCycles?: number } = {},

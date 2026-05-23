@@ -38,10 +38,6 @@ _Avoid_: merge gate (overloaded with Pre-merge Gate)
 The `hydra-qa` subagent's verification that a merged PR did not regress **Target Outcomes** or the test count. Runs after merge; can trigger a rollback PR. Replaced the deleted in-process Outcome Holdback watcher (`src/holdback.ts`, removed in the ADR-0006 cut-over). Distinct from **Outcome Holdback** (ADR-0004) — the holdback is the *policy* declaring which tiers warrant a watch window; this is the *mechanism* that runs the check.
 _Avoid_: rollback (too narrow — this is the check, not the action), holdback watcher (no longer exists as a module)
 
-**Stuckness**:
-The orchestrator's diagnostic for silent failure: cycles elapsed since any **Target Outcome** moved favorably and stayed moved. Distinct from cycle failure — green cycles can be stuck.
-_Avoid_: blocked (already means something else in the issue tracker), stalled
-
 **Modification Tier**:
 The blast-radius classification of a self-modification (Tier 0 Untouchable / 1 auto-merge / 2 auto-merge with outcome holdback / 3 operator review). Determines who merges the PR and whether outcome regression triggers auto-revert. Defined by ADR-0004.
 _Avoid_: risk level, severity
@@ -79,15 +75,14 @@ _Avoid_: "Redis layer" (too generic), DAO (overloaded), "Redis adapter" (singula
 - An **Orchestrator** builds one **Target** at a time; running a second target means a second orchestrator instance, not multi-tenant inside one
 - A **Target** has one **Target Vision** (prose) and one **Target Outcomes** (config)
 - The **Orchestrator** has its own **Orchestrator Vision**
-- The **Gate** is the only path to merge; **Untouchable Core** includes the **Gate**
-- **Stuckness** is computed from **Target Outcomes**, not from cycle status
+- The **Gate** is the only path to merge; the **Untouchable Core** includes the **Gate**
 - A **Design Concept** is the prerequisite for any code-writing dispatch; PR-time review consumes it as ground truth
 - **Pattern Memory**, **Reflections**, and **Knowledge Base** are three independent learning surfaces — patterns are structural rules, reflections are episodic narrative, the Knowledge Base is semantic search. `src/learning.ts` orchestrates them but owns none.
 - **Pattern Memory**, **Reflections**, and every other Redis-resident state described above are read and written through the **Redis Adapters**. The raw `hydra:…` keys that appear in their definitions are documentation of today's storage shape, not a public surface — callers obtain values through typed accessors on `src/redis/*`.
 
 ## Example dialogue
 
-> **Operator:** "Hydra is stuck."
-> **Maintainer:** "Stuck how? Cycles are green."
-> **Operator:** "Right — green but no **Target Outcomes** moving for 30 cycles. The dashboard is lying."
-> **Maintainer:** "OK, so stuckness fired. Autopilot should now either escalate to me, propose an **Orchestrator** self-modification, or research *why* outcomes aren't moving — not pick up the next backlog item."
+> **Operator:** "This **Target** PR has been sitting in **Outcome Holdback** for two days."
+> **Maintainer:** "Which Tier was it classified?"
+> **Operator:** "Tier 2 — leading outcome regressed slightly on the second cycle post-merge."
+> **Maintainer:** "OK. The **Post-merge Regression Check** should have already opened a rollback PR if it crossed the threshold. If it didn't, the holdback policy says we ride the watch window to completion — the regression has to be both leading AND a real move beyond `noise_epsilon` for the auto-revert to fire."

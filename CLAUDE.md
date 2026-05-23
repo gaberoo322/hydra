@@ -9,7 +9,7 @@ Autonomous software-building framework. The orchestrator is a control plane for 
 Read these first when working on the orchestrator:
 
 - [`README.md`](./README.md) — system overview, dashboard/API surface, design principles
-- [`CONTEXT.md`](./CONTEXT.md) — **canonical glossary**. Use these terms exactly (Target, Orchestrator, Untouchable Core, Gate, Stuckness, Modification Tier, Outcome Holdback, Operator-Required Intervention)
+- [`CONTEXT.md`](./CONTEXT.md) — **canonical glossary**. Use these terms exactly (Target, Orchestrator, Untouchable Core, Pre-merge Gate, Modification Tier, Outcome Holdback, Operator-Required Intervention)
 - [`docs/adr/`](./docs/adr/) — architectural decision records:
   - ADR-0001 — Untouchable Core & gate extraction (protected paths, operator-only)
   - ADR-0002 — Single target per orchestrator instance
@@ -17,10 +17,11 @@ Read these first when working on the orchestrator:
   - ADR-0004 — Self-modification tiers (Tier 0/1/2/3 + Outcome Holdback)
   - ADR-0005 — Operator escalation is narrow (closed list)
   - ADR-0006 — Codex CLI fully removed; autopilot is the only execution path
+  - ADR-0010 — Stuckness detector retired; self-improvement floor is operator-curated
 - [`docs/codex-removal-measurement.md`](./docs/codex-removal-measurement.md) — the original Phase A/B/C measurement plan and the cut-over outcome
 - [`config/direction/vision.md`](./config/direction/vision.md) — **target product** vision (what hydra-betting should become)
 - [`config/orchestrator/vision.md`](./config/orchestrator/vision.md) — **orchestrator-self** vision (what good autonomous building looks like)
-- [`config/direction/outcomes.yaml`](./config/direction/outcomes.yaml) — structured Target Outcome metrics that drive Stuckness detection
+- [`config/direction/outcomes.yaml`](./config/direction/outcomes.yaml) — structured Target Outcome metrics
 - [`docs/operator-playbooks/hydra-autopilot.md`](./docs/operator-playbooks/hydra-autopilot.md) — the autopilot class taxonomy + dispatch contract
 
 ## Architecture
@@ -118,7 +119,7 @@ Always run `npm test` before committing.
 
 **Operator edits these (or uses dashboard):**
 - `config/direction/vision.md` — **target product** vision (prose; what hydra-betting should become)
-- `config/direction/outcomes.yaml` — structured Target Outcome metrics (drives Stuckness; see ADR-0003)
+- `config/direction/outcomes.yaml` — structured Target Outcome metrics (see ADR-0003)
 - `config/orchestrator/vision.md` — **orchestrator-self** vision (trade-offs the orchestrator makes when ambiguous)
 - `config/direction/priorities.md` — what Hydra should work on next. Refreshed by the operator-scheduled `/hydra-target-research` skill.
 - `config/direction/goals.md` — high-level project goals

@@ -110,10 +110,10 @@ function startConsumers(eventBus) {
         // Issue #315: publish the current self-improvement share to disk so
         // the outcomes file adapter (config/direction/outcomes.yaml ->
         // metrics/orchestrator-share.txt) has a real value to read. Without
-        // this, the only seeded Target Outcome is permanently unobservable
-        // and the stuckness detector (ADR-0003, #242) plus 25% capacity
-        // floor (#245) have no signal to fire on. Best-effort — publisher
-        // logs and never throws.
+        // this, the only seeded Target Outcome is permanently unobservable.
+        // (The stuckness detector + 25% capacity floor that originally
+        // consumed this signal were retired in ADR-0010.) Best-effort —
+        // publisher logs and never throws.
         await publishOrchestratorShareMetric();
       }
 

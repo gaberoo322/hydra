@@ -4,8 +4,7 @@
  * Bug class this guards against:
  *   - `metrics/orchestrator-share.txt` missing on disk because the
  *     orchestrator never publishes it -> outcomes file adapter logs ENOENT
- *     every Meta-analysis tick and the stuckness detector (ADR-0003) +
- *     25% capacity floor (#245) lose their only signal.
+ *     every Meta-analysis tick.
  *   - Non-finite values (NaN, Infinity) silently written -> file adapter
  *     returns null and the outcome is permanently unobservable.
  *   - Missing `metrics/` directory crashing the publisher (it has to
@@ -90,7 +89,6 @@ describe("round-trip — writer + outcomes file adapter", () => {
       query: filePath,
       baseline: 0,
       target: 0.25,
-      stuckness_threshold_cycles: 20,
       noise_epsilon: 0.01,
     };
     const reading = await getOutcomeValue(outcome);
@@ -101,10 +99,9 @@ describe("round-trip — writer + outcomes file adapter", () => {
 
   test("zero share is a valid reading (not null, not error)", async () => {
     // When no cycles have recorded yet, share is 0. Writing 0 must still
-    // produce a parseable file — the file adapter treats 0 as a real value,
-    // and the stuckness detector compares it against the baseline (also 0)
-    // and concludes "no movement". The alternative — refusing to write —
-    // was the bug this issue exists to fix.
+    // produce a parseable file — the file adapter treats 0 as a real value
+    // and reports it honestly. The alternative — refusing to write — was
+    // the bug this issue exists to fix.
     const filePath = join(tmpDir, "zero.txt");
     assert.equal(await writeMetricFile(0, filePath), true);
 
@@ -116,7 +113,6 @@ describe("round-trip — writer + outcomes file adapter", () => {
       query: filePath,
       baseline: 0,
       target: 0.25,
-      stuckness_threshold_cycles: 20,
       noise_epsilon: 0,
     };
     const reading = await getOutcomeValue(outcome);

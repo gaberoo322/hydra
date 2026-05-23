@@ -68,14 +68,14 @@ function validInput(overrides: Partial<PrdInput> = {}): PrdInput {
     title: "Add foo to the Orchestrator",
     problem:
       "The Orchestrator cannot currently bar without manual operator " +
-      "intervention. Stuckness fires for any Target relying on bar-shaped " +
-      "Target Outcomes.",
+      "intervention. Every Target relying on bar-shaped Target Outcomes " +
+      "stalls.",
     rationale:
       "Closing the gap removes an Operator-Required Intervention category " +
       "and unblocks the Modification Tier 2 holdback path for follow-on " +
       "changes.",
     slices: [slice("alpha"), slice("beta"), slice("gamma")],
-    expectedGlossaryTerms: ["Orchestrator", "Target", "Stuckness"],
+    expectedGlossaryTerms: ["Orchestrator", "Target", "Outcome Holdback"],
     ...overrides,
   };
 }
@@ -185,11 +185,11 @@ describe("validatePrdInput — per-slice rules", () => {
 describe("vocabularyCheck", () => {
   test("returns missing glossary terms from the parent narrative", () => {
     const narrative =
-      "The Orchestrator handles foo. Stuckness fires when bar.";
+      "The Orchestrator handles foo. The Modification Tier classifier runs on every PR.";
     const missing = vocabularyCheck(narrative, [
       "Orchestrator",
       "Target",
-      "Stuckness",
+      "Modification Tier",
       "Outcome Holdback",
     ]);
     assert.deepEqual(missing, ["Target", "Outcome Holdback"]);

@@ -21,7 +21,6 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:anchors:prior-failures` | Redis list -- failed tasks for retry |
 | `hydra:anchors:reframe-queue` | Redis list -- tasks needing diagnosis after repeated failure |
 | `hydra:anchors:abandonment-count:{ref}` | Counter per anchor, 24h TTL. Circuit breaker at 3. |
-| `hydra:stuckness:cooldown:{outcome}` | Cooldown flag (30-min TTL ≈ 5 cycles). Suppresses stuckness-driven re-selection of the same outcome. Issue #253. |
 | `hydra:merge:lock` | Short-lived merge serialization lock (60s TTL) |
 | `hydra:metrics:{id}` | Cycle metrics hash |
 | `hydra:metrics:index` | Sorted set of cycle IDs by timestamp |
@@ -101,34 +100,32 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 | `query` | yes | string | Source-specific lookup (URL path, file path, SQL string, prom expression) |
 | `baseline` | yes | number | Starting reference |
 | `target` | yes | number | Goal value |
-| `stuckness_threshold_cycles` | yes | number | Cycles without sustained favorable movement before #242 fires |
 | `noise_epsilon` | no (default 0) | number | Absolute change below this is treated as no-move |
 
-**Source adapters:** `file` is implemented (reads a number from a path resolved against `HYDRA_ROOT`). `api`, `prometheus`, and `sql` are stubbed — they return `null` and log a warning rather than throwing, so downstream consumers (#242 stuckness, #244 holdback) treat them as no-data instead of synthetic regressions.
+(The `stuckness_threshold_cycles` field was removed in ADR-0010 along with the detector it fed.)
+
+**Source adapters:** `file` is implemented (reads a number from a path resolved against `HYDRA_ROOT`). `api`, `prometheus`, and `sql` are stubbed — they return `null` and log a warning rather than throwing, so downstream consumers (#244 holdback) treat them as no-data instead of synthetic regressions.
 
 **Error handling:** `loadOutcomes()` never throws. Returns `{ ok: false, errors: string[] }` on parse / schema violations. Missing file is `{ ok: true, outcomes: [] }` so projects start with no outcomes declared without crashing.
 
-**Dependency chain:** Foundational for ADR-0004 work-order — #242 (stuckness detector) and #244 (Tier-2 outcome holdback) import `loadOutcomes` and `getOutcomeValue`.
+**Dependency chain:** Foundational for ADR-0004 work-order — #244 (Tier-2 outcome holdback) imports `loadOutcomes` and `getOutcomeValue`.
 
 ## Anchor Selection Priority
 
 Order enforced by `selectAnchor()` in `src/anchor-selection.ts`:
 
 1. **Explicit operator request** — `opts.anchor`
-2. **Stuckness-driven research** (#253) — when any fired outcome from `getAllStuckness()` lacks a cooldown entry. Builds a `research`-type anchor with reference `outcome-stuckness:<name>` and `domain: orchestrator-self-improvement`. Leading outcomes outrank terminal; within a kind, most-stuck wins (lex name tiebreak). Sets 30-min cooldown (~5 cycles) to prevent thrashing on the same signal. Enforces ADR-0003 vision vector 1.
+2. **Capacity-floor pre-emption** (#321) — the dispatcher in `src/anchor-selection/capacity-floors.ts` runs the registered floor declarations and fires at most one per cycle. Post-ADR-0010 the only registered floor is the **reframe-queue floor** (#377): when `cyclesSinceReframeServed >= cadenceN` AND the reframe queue has a candidate, pre-empt kanban with the next reframe item. The stuckness-driven self-improvement floor (originally slot 2) and the specs floor (#301/#308) were both retired.
 3. **Kanban queued lane** — atomic Lua claim, WIP-gated
-4. **Active specs** — next unchecked task from oldest active spec
-5. **Failing tests** — from grounding
-6. **Typecheck errors** — from grounding
-7. **Work queue** (`POST /api/queue`, research auto-queue) — LMOVE to processing
-8. **Reframe queue** — repeated failures awaiting diagnosis
-9. **Prior failures** — Redis-tracked; cap 2 retries
-10. **TODO/FIXME markers** — from codebase
-11. **Regression hunt** — every 10 merges
-12. **Codebase health** — reductive improvements
-13. **Priorities doc** — `config/direction/priorities.md`, auto-refreshed if stale
-
-**Notifications stream emits** `anchor.selected.stuckness` `{outcomeName, cycles, threshold, kind}` when slot 2 fires (issue #253). Dashboard + digest consume via existing `hydra:notifications` subscription.
+4. **Failing tests** — from grounding
+5. **Typecheck errors** — from grounding
+6. **Work queue** (`POST /api/queue`, research auto-queue) — LMOVE to processing
+7. **Reframe queue** — repeated failures awaiting diagnosis
+8. **Prior failures** — Redis-tracked; cap 2 retries
+9. **TODO/FIXME markers** — from codebase
+10. **Regression hunt** — every 10 merges
+11. **Codebase health** — reductive improvements
+12. **Priorities doc** — `config/direction/priorities.md`, auto-refreshed if stale
 
 ## ADR-0002 target swap (issue #258 / #259)
 
@@ -342,7 +339,7 @@ Every PR is classified into one of four tiers based on the files it touches. The
 
 ## Tier-2 outcome-holdback watcher (issue #244, ADR-0004 step 4)
 
-Tier-2 self-modifications ship as soon as CI is green, but the orchestrator watches the **leading** Target Outcomes (declared in `config/direction/outcomes.yaml`, kind `leading`) for 5 cycles after the merge. If any leading outcome regresses unfavorably for ≥2 consecutive cycle readings (matching the `SUSTAIN_WINDOW=2` semantics from the stuckness detector #242), the commit is **auto-reverted** via `git revert <sha> && git push` on the orchestrator's master, taken under the existing `hydra:merge:lock` so concurrent control-loop merges cannot race the revert.
+Tier-2 self-modifications ship as soon as CI is green, but the orchestrator watches the **leading** Target Outcomes (declared in `config/direction/outcomes.yaml`, kind `leading`) for 5 cycles after the merge. If any leading outcome regresses unfavorably for ≥2 consecutive cycle readings (a sustain window of 2 — a transient blip on a single reading is not enough to trigger), the commit is **auto-reverted** via `git revert <sha> && git push` on the orchestrator's master, taken under the existing `hydra:merge:lock` so concurrent control-loop merges cannot race the revert.
 
 Implementation: `src/holdback.ts`. Snapshot wired in `src/post-merge.ts` (only fires when `verification.filesChanged` classifies as Tier 2). Evaluation wired in `src/control-loop.ts` after `groundProject` so a revert this cycle restarts grounded next cycle.
 

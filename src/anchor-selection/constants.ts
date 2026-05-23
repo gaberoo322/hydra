@@ -51,10 +51,6 @@ export const DRIFT_PREFILTER_TYPES = new Set([
   "doc",
 ]);
 
-// Stuckness cooldown (issue #253, ADR-0003 vision vector 1)
-export const STUCKNESS_COOLDOWN_PREFIX = "hydra:stuckness:cooldown:";
-export const STUCKNESS_COOLDOWN_TTL_SECONDS = 30 * 60; // ~5 cycles at average pace
-
 // Codebase-health permanent-skip & metrics index
 export const PERM_SKIP_PREFIX = "hydra:anchors:perm-skip:";
 export const METRICS_INDEX_KEY = "hydra:metrics:index";
@@ -75,8 +71,3 @@ export function anchorKey(anchorRef: string | undefined | null): string {
   );
 }
 
-export function stucknessCooldownKey(outcomeName: string): string {
-  return (
-    STUCKNESS_COOLDOWN_PREFIX + outcomeName.replace(/\s+/g, "-").slice(0, 120)
-  );
-}

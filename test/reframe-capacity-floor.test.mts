@@ -186,19 +186,15 @@ describe("dispatchCapacityFloor — reframe floor wiring (issue #377)", () => {
     assert.equal(result.anchor.type, "reframe");
   });
 
-  test("defaultCapacityFloors contains self-improvement, reframe", async () => {
+  test("defaultCapacityFloors contains reframe (post-ADR-0010)", async () => {
     const { defaultCapacityFloors } = await import(
       "../src/anchor-selection/capacity-floors.ts"
     );
     const floors = defaultCapacityFloors({});
     const names = floors.map((f: any) => f.name).sort();
-    // Specs floor retired in #513; reframe added in #377.
-    assert.deepEqual(names, ["reframe", "self-improvement"]);
-
-    // Priorities: self-improvement(1) < reframe(2).
-    const byName = Object.fromEntries(floors.map((f: any) => [f.name, f.priority]));
-    assert.equal(byName["self-improvement"], 1);
-    assert.equal(byName.reframe, 2);
+    // Specs floor retired in #513; self-improvement/stuckness floor retired
+    // in ADR-0010. The reframe floor (#377) is the only remaining declaration.
+    assert.deepEqual(names, ["reframe"]);
   });
 
   test("loadCapacityFloorsConfig honours HYDRA_REFRAME_FLOOR_N env override", async () => {

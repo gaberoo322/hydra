@@ -71,21 +71,6 @@ describe("anchor-selection/constants — key helpers (issue #288)", () => {
     assert.equal(key.length, ABANDONMENT_COUNTER_PREFIX.length + 120);
   });
 
-  test("stucknessCooldownKey normalises whitespace + truncates", async () => {
-    const { stucknessCooldownKey, STUCKNESS_COOLDOWN_PREFIX } = await import(
-      "../src/anchor-selection/constants.ts"
-    );
-    assert.equal(
-      stucknessCooldownKey("kelly-clip-rate"),
-      `${STUCKNESS_COOLDOWN_PREFIX}kelly-clip-rate`,
-    );
-    // Internal whitespace is normalised to hyphens.
-    assert.equal(
-      stucknessCooldownKey("kelly  clip   rate"),
-      `${STUCKNESS_COOLDOWN_PREFIX}kelly-clip-rate`,
-    );
-  });
-
   test("taskKey produces hydra:task:<id> format", async () => {
     const { taskKey } = await import("../src/anchor-selection/constants.ts");
     assert.equal(taskKey("abc123"), "hydra:task:abc123");

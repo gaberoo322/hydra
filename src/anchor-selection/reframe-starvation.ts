@@ -23,7 +23,7 @@
 //        no_reframe_candidate — reframe queue is empty
 //        wip_full             — WIP limit reached, reframe tier skipped
 //        spec_won             — specs floor (or non-floor selection) won
-//        stuckness_won        — stuckness-driven research short-circuited
+//                                (legacy enum value — specs retired in #513)
 //        failing_tests_won    — grounding had failing tests
 //        work_queue_won       — work-queue tier served an item
 //        prior_failure_won    — prior-failure tier served an item
@@ -66,7 +66,6 @@ export type ReframePassedReason =
   | "no_reframe_candidate"
   | "wip_full"
   | "spec_won"
-  | "stuckness_won"
   | "failing_tests_won"
   | "work_queue_won"
   | "prior_failure_won"

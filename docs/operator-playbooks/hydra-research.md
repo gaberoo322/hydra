@@ -149,8 +149,8 @@ Build a `PrdInput` JSON object from the finding (see `scripts/ci/hydra-prd-rende
 {
   "title": "<parent epic title>",
   "problem": "<problem statement using Hydra glossary terms>",
-  "rationale": "<why ship this now; link to Target Outcomes / Stuckness>",
-  "expectedGlossaryTerms": ["Orchestrator", "Target", "Stuckness"],
+  "rationale": "<why ship this now; link to Target Outcomes / Modification Tier>",
+  "expectedGlossaryTerms": ["Orchestrator", "Target", "Modification Tier"],
   "sourceRef": "hydra:reports:research:<ISO timestamp>",
   "slices": [
     {
