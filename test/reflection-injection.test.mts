@@ -147,8 +147,7 @@ describe("issue #221: regression — task tagging contract", () => {
     task.__hadReflections = stats.count > 0;
     task.__reflectionSources = stats.sources.slice();
 
-    // Simulate metric writer (cycle-helpers.ts:298, verification.ts:317,
-    // post-merge.ts:393) reading those flags
+    // Simulate metric writer reading those flags (post-merge / verification path)
     const metric = {
       reflectionInjected: task.__hadReflections ? "true" : "false",
       reflectionCount: task.__reflectionsInjected || 0,
