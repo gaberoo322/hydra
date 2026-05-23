@@ -85,19 +85,16 @@ export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any
     return { ...opts.anchor, whyNow: "Explicit operator request" };
   }
 
-  // 1.2. Capacity-floor dispatcher (issue #321; spec floor retired in #513).
-  //      Two floors remain: self-improvement (stuckness-driven research)
-  //      and the reframe-queue floor (issue #377). The dispatcher fires at
-  //      most one floor per cycle; when none are ready we fall through to
+  // 1.2. Capacity-floor dispatcher (issue #321; spec floor retired in #513,
+  //      self-improvement/stuckness floor retired in ADR-0010). One floor
+  //      remains: the reframe-queue floor (issue #377). The dispatcher fires
+  //      at most one floor per cycle; when none are ready we fall through to
   //      the existing tier chain (kanban → failing tests → …).
   try {
     const dispatch = await dispatchCapacityFloor(defaultCapacityFloors(), eventBus);
     if (dispatch.anchor) {
       // If the reframe floor fired, its buildAnchor() already recorded
       // recordReframeServed + recordReframePassedReason("force_floor").
-      // For any other floor winning, the floor's onPassedOver hook handled
-      // the reframe pass-over recording (see reframeFloorDecl). No
-      // further bookkeeping needed here.
       return dispatch.anchor;
     }
   } catch (err: any) {

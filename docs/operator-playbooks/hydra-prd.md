@@ -34,9 +34,9 @@ The skill reads a `PrdInput` JSON object — from a file (`--input=/tmp/prd.json
 ```json
 {
   "title": "Add foo to the Orchestrator",
-  "problem": "Prose using Hydra glossary terms (Orchestrator, Target, Stuckness, ...). At least one sentence.",
+  "problem": "Prose using Hydra glossary terms (Orchestrator, Target, Modification Tier, ...). At least one sentence.",
   "rationale": "Why ship this now. Links to Target Outcomes, Outcome Holdback, or Modification Tier where relevant.",
-  "expectedGlossaryTerms": ["Orchestrator", "Target", "Stuckness"],
+  "expectedGlossaryTerms": ["Orchestrator", "Target", "Modification Tier"],
   "sourceRef": "hydra:reports:research:2026-05-18T00:00:00Z",
   "slices": [
     {
@@ -247,7 +247,7 @@ The emitted child issues each carry an `Expected tier: N` line stamped from `/ap
 - **Dry-run default.** Only `--apply` creates GitHub issues. A dry-run on `gaberoo322/hydra` is always safe.
 - **3-slice minimum.** Fewer slices mean the work hasn't been decomposed. Send it back through research instead.
 - **Dependency order.** Slices must be listed earliest-first. The validator rejects any slice with a `dependsOn` that points at a later or self index.
-- **Hydra glossary.** The parent narrative uses **Orchestrator**, **Target**, **Stuckness**, **Modification Tier**, **Outcome Holdback** verbatim where applicable. The vocabulary check flags gaps as a soft warning.
+- **Hydra glossary.** The parent narrative uses **Orchestrator**, **Target**, **Modification Tier**, **Outcome Holdback**, **Untouchable Core** verbatim where applicable. The vocabulary check flags gaps as a soft warning.
 - **Files in scope on every child.** The issue-label-validation workflow (#396) requires it; the validator pre-enforces it so the skill never produces an invalid child.
 - **One pass.** The skill creates the parent and N children, then exits. It does not poll, retry, or watch.
 

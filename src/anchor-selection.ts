@@ -10,13 +10,12 @@
 // Sub-modules:
 //   - anchor-selection/constants.ts        — Redis keys, thresholds, key helpers
 //   - anchor-selection/drift-filter.ts     — pre-planner near-duplicate rejection
-//   - anchor-selection/stuckness-routing.ts — Target-Outcome stuckness anchors
 //   - anchor-selection/reframe-queue.ts    — reframe queue maintenance
 //   - anchor-selection/prior-failures.ts   — prior-failure escalation + persist
 //   - anchor-selection/abandonment.ts      — circuit breaker + processing cleanup
 //   - anchor-selection/low-confidence.ts   — perm-skip for dead-on-arrival anchors
 //   - anchor-selection/outcome.ts          — unified reportOutcome dispatcher
-//   - anchor-selection/select.ts           — selectAnchor (13-tier priority chain)
+//   - anchor-selection/select.ts           — selectAnchor priority chain
 //
 // All exports below are pure re-exports. No logic lives in this file.
 
@@ -38,19 +37,12 @@ import {
   DRIFT_PREFILTER_LOOKBACK,
   DRIFT_PREFILTER_THRESHOLD,
   DRIFT_PREFILTER_TYPES,
-  STUCKNESS_COOLDOWN_PREFIX,
-  STUCKNESS_COOLDOWN_TTL_SECONDS,
   anchorKey,
-  stucknessCooldownKey,
 } from "./anchor-selection/constants.ts";
 import {
   isAnchorDriftDuplicate,
   consumeDriftPreFilteredCount,
 } from "./anchor-selection/drift-filter.ts";
-import {
-  pickStuckOutcome,
-  buildStucknessAnchor,
-} from "./anchor-selection/stuckness-routing.ts";
 import {
   pruneReframeQueue,
   getReframeQueueLen,
@@ -147,10 +139,5 @@ export const _testing = {
   pruneReframeQueue,
   getReframeQueueLen,
   isAnchorDriftDuplicate,
-  STUCKNESS_COOLDOWN_PREFIX,
-  STUCKNESS_COOLDOWN_TTL_SECONDS,
-  stucknessCooldownKey,
-  pickStuckOutcome,
-  buildStucknessAnchor,
   _resetReframeStarvationForTests,
 };

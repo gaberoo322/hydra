@@ -24,7 +24,7 @@
 
 export type PriorityTier =
   | "explicit-operator"   // 1 — opts.anchor (operator passes it in)
-  | "capacity-floor"      // 1.2 — stuckness-driven self-improvement pre-emption
+  | "capacity-floor"      // 1.2 — reframe-queue pre-emption (post-ADR-0010)
   | "failing-test"        // 2.7 / 2.8 — failing tests or typecheck errors
   | "kanban-queued"       // 2 — claimed from Kanban queued lane
   | "work-queue"          // 3 — POST /queue or research auto-queue

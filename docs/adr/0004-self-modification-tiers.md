@@ -9,7 +9,7 @@ Hydra's modifications to itself are bucketed into four tiers, distinguished by b
 
 Tier 2 is the tier where Hydra learns from outcomes about its own changes — Tier 1 changes too often (signal-to-noise too low), Tier 3 the operator controls. A global kill switch (operator-toggled Redis flag) pauses Tier-2 auto-merge and forces everything to Tier 3 until cleared.
 
-**Work order dependency:** Tier 2 requires functioning **Target Outcomes** + **Stuckness** instrumentation before it can fire. The build order is: outcomes.yaml + parser → stuckness detector → tier classifier + CI check → Tier 2 holdback/revert → kill switch.
+**Work order dependency:** Tier 2 requires functioning **Target Outcomes** instrumentation before it can fire. The original build order included a stuckness detector between outcomes and the tier classifier; ADR-0010 retired that detector, so the live order is: outcomes.yaml + parser → tier classifier + CI check → Tier 2 holdback/revert → kill switch.
 
 ## Considered options
 

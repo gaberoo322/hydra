@@ -2,13 +2,14 @@
  * Regression tests for the unified capacity-floor dispatcher (issue #321).
  *
  * Background
- *   Two pre-emption branches in `selectAnchor()` (stuckness-driven research
- *   from #245 and the spec capacity-floor from #301/#308) didn't see each
- *   other's state, so floors could stack within a couple of cycles. #321
- *   unified them behind a single dispatcher that fires AT MOST one floor
- *   per cycle. The spec floor itself was retired in issue #513 — the
- *   dispatcher scaffolding stays so future floors plug in cleanly without
- *   reintroducing the stacking bug.
+ *   Three pre-emption branches in `selectAnchor()` historically existed —
+ *   the stuckness-driven self-improvement floor (#245, retired in ADR-0010),
+ *   the spec capacity-floor (#301/#308, retired in #513), and the
+ *   reframe-queue floor (#377). The first two could stack within a couple
+ *   of cycles because they didn't see each other's state. #321 unified them
+ *   behind a single dispatcher that fires AT MOST one floor per cycle.
+ *   Today only the reframe floor remains; the dispatcher scaffolding stays
+ *   so future floors plug in cleanly without reintroducing the stacking bug.
  *
  * These tests pin:
  *   - The pure dispatcher's tiebreak rules (highest deficit, then priority).
@@ -122,19 +123,19 @@ describe("dispatchCapacityFloor — pure dispatcher (issue #321)", () => {
     );
     const result = await dispatchCapacityFloor([
       {
-        name: "self-improvement",
+        name: "senior",
         priority: 1, // wins ties
         async prepare() { return { deficit: 3, share: 0, targetShare: 0.25, payload: {} }; },
-        async buildAnchor() { return { type: "user-request", reference: "self-improvement" }; },
+        async buildAnchor() { return { type: "user-request", reference: "senior" }; },
       },
       {
-        name: "reframe",
+        name: "junior",
         priority: 2,
         async prepare() { return { deficit: 3, share: 0, targetShare: 1 / 5, payload: {} }; },
         async buildAnchor() { throw new Error("loser should not build"); },
       },
     ]);
-    assert.equal(result.firedFloor, "self-improvement");
+    assert.equal(result.firedFloor, "senior");
   });
 
   test("a failing prepare() is logged and skipped, doesn't poison the dispatcher", async () => {
@@ -173,7 +174,7 @@ describe("loadCapacityFloorsConfig — env vars (issue #321)", () => {
       "../src/anchor-selection/capacity-floors.ts"
     );
     const cfg = loadCapacityFloorsConfig({});
-    assert.equal(cfg.selfImprovement.targetShare, 0.25);
+    assert.equal(cfg.reframe.cadenceN, 5);
     assert.equal(cfg.windowCycles, 20);
   });
 
@@ -191,20 +192,16 @@ describe("loadCapacityFloorsConfig — env vars (issue #321)", () => {
 // ---------------------------------------------------------------------------
 
 describe("default floors composition (issue #321)", () => {
-  test("defaultCapacityFloors returns [self-improvement, reframe] in priority order", async () => {
+  test("defaultCapacityFloors returns [reframe] post-ADR-0010", async () => {
     const { defaultCapacityFloors } = await import(
       "../src/anchor-selection/capacity-floors.ts"
     );
     const floors = defaultCapacityFloors({});
-    // Specs floor retired in #513; issue #377 added the reframe floor as
-    // the second declaration. The dispatcher scaffolding stays so future
-    // floors plug in cleanly without reintroducing the stacking bug.
-    assert.equal(floors.length, 2);
-    assert.equal(floors[0].name, "self-improvement");
-    assert.equal(floors[1].name, "reframe");
-    // Tiebreak priorities are strictly ordered: self-improvement (1) wins
-    // ties against reframe (2). The 25% vision floor is the senior floor.
-    assert.ok(floors[0].priority < floors[1].priority);
+    // Specs floor retired in #513; self-improvement/stuckness floor retired
+    // in ADR-0010. The dispatcher scaffolding stays so future floors plug
+    // in cleanly without reintroducing the stacking bug.
+    assert.equal(floors.length, 1);
+    assert.equal(floors[0].name, "reframe");
   });
 });
 
@@ -215,10 +212,9 @@ describe("default floors composition (issue #321)", () => {
 describe("floors compete for the same non-kanban budget (issue #321)", () => {
   // The "stacking" regression: with the pre-refactor code, on a cycle where
   // BOTH a stuckness outcome was fired AND the spec cadence had elapsed,
-  // the spec floor would fire AND on the next cycle stuckness would still
-  // fire — two floors back-to-back. The dispatcher should fire at most one
-  // per cycle. We prove this with synthetic floor decls that just count
-  // their own fires.
+  // both floors would fire — two floors back-to-back. The dispatcher should
+  // fire at most one per cycle. We prove this with synthetic floor decls
+  // that just count their own fires.
 
   test("at most one floor fires per cycle even when multiple are ready", async () => {
     const { dispatchCapacityFloor } = await import(
@@ -310,27 +306,9 @@ describe("getCapacityFloorsSnapshot — API surface (issue #321)", () => {
       "../src/anchor-selection/capacity-floors.ts"
     );
     const snap = await getCapacityFloorsSnapshot({});
-    assert.equal(snap.config.selfImprovement.targetShare, 0.25);
-    // Issue #377 added the reframe floor with cadence default 5.
+    // Issue #377 left the reframe floor with cadence default 5.
     assert.equal(snap.config.reframe.cadenceN, 5);
-    const names = snap.floors.map((f) => f.name).sort();
-    assert.deepEqual(names, ["reframe", "self-improvement"]);
-    // Empty Redis → realised share is null (no data yet).
-    const si = snap.floors.find((f) => f.name === "self-improvement")!;
-    assert.equal(si.realisedShare, null);
-  });
-
-  test("self-improvement realised share is computed from capacity-floor history", async () => {
-    const { getCapacityFloorsSnapshot } = await import(
-      "../src/anchor-selection/capacity-floors.ts"
-    );
-    const { recordCycleSide } = await import("../src/capacity-floor.ts");
-    // Stamp two orchestrator cycles and six target cycles → share = 0.25.
-    for (let i = 0; i < 2; i++) await recordCycleSide(`o${i}`, "orchestrator");
-    for (let i = 0; i < 6; i++) await recordCycleSide(`t${i}`, "target");
-    const snap = await getCapacityFloorsSnapshot({});
-    const si = snap.floors.find((f) => f.name === "self-improvement")!;
-    assert.ok(si.realisedShare !== null, "realisedShare should be populated");
-    assert.equal(si.realisedShare, 0.25);
+    const names = snap.floors.map((f) => f.name);
+    assert.deepEqual(names, ["reframe"]);
   });
 });

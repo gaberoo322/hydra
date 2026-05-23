@@ -6,9 +6,9 @@
  * validates schema, and exposes a typed value-fetch dispatcher per source
  * adapter (`prometheus`, `api`, `sql`, `file`).
  *
- * Foundational dependency for #242 (stuckness detector), #243/#244 (Tier-2
- * outcome holdback), and #245 (capacity floor classifier). Per CLAUDE.md
- * conventions:
+ * Foundational dependency for #243/#244 (Tier-2 outcome holdback) and
+ * the capacity-floor dispatcher (#245). (#242 stuckness detector retired
+ * in ADR-0010.) Per CLAUDE.md conventions:
  *   - Never throws. All error paths return structured `{ ok: false, errors }`.
  *   - All errors logged with `[outcomes]` prefix.
  *   - Zero new dependencies — uses node:fs + a hand-rolled YAML subset parser
@@ -39,7 +39,6 @@ export interface Outcome {
   query: string;
   baseline: number;
   target: number;
-  stuckness_threshold_cycles: number;
   noise_epsilon: number;
 }
 
@@ -230,7 +229,6 @@ function validateOutcome(
   const query = requireString("query");
   const baseline = requireNumber("baseline");
   const target = requireNumber("target");
-  const stuckness = requireNumber("stuckness_threshold_cycles");
 
   // noise_epsilon defaults to 0 if omitted.
   let noiseEpsilon = 0;
@@ -250,8 +248,7 @@ function validateOutcome(
     source === null ||
     query === null ||
     baseline === null ||
-    target === null ||
-    stuckness === null
+    target === null
   ) {
     // Defensive — should be unreachable because errors would be non-empty.
     return { ok: false, errors: [`${ctx}: schema violation (unknown reason)`] };
@@ -267,7 +264,6 @@ function validateOutcome(
       query,
       baseline,
       target,
-      stuckness_threshold_cycles: stuckness,
       noise_epsilon: noiseEpsilon,
     },
   };
@@ -370,7 +366,7 @@ async function readFileAdapter(query: string): Promise<OutcomeReading | null> {
 
 async function apiAdapter(query: string): Promise<OutcomeReading | null> {
   // Stub: real wiring is operator-defined. We log + return null so callers
-  // (#242 stuckness detector) treat unreachable as no-data, never crash.
+  // treat unreachable as no-data, never crash.
   console.error(`[outcomes] api adapter: not yet implemented (query='${query}'); returning null`);
   return null;
 }
@@ -389,8 +385,8 @@ async function sqlAdapter(query: string): Promise<OutcomeReading | null> {
  * Read the current value of an outcome from its declared source.
  *
  * Returns `null` when the source is unreachable / not yet adapted — never
- * throws. The downstream stuckness detector (#242) treats null as no-data
- * (does NOT count as a regression) per acceptance criteria of that issue.
+ * throws. Downstream consumers treat null as no-data (does NOT count as a
+ * regression).
  */
 export async function getOutcomeValue(outcome: Outcome): Promise<OutcomeReading | null> {
   try {

@@ -822,7 +822,7 @@ export function scoreFileAgainstTokens(filePath: string, tokens: string[]): numb
  * a signal to omit the scoped file tree from the prompt entirely.
  *
  * @param anchorReference - The anchor.reference string (e.g.
- *   "outcome-stuckness:execution-cost" or "kalshi-price-format implementation")
+ *   "reframe:execution-cost" or "kalshi-price-format implementation")
  * @param fileTreeLines   - Lines of `git ls-files` output (one path per line)
  * @param limit           - Max files to return (default 50)
  */

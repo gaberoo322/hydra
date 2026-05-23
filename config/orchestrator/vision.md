@@ -8,9 +8,9 @@ Distinct from CI/CD, code-search, or copilots: Hydra plans, executes, verifies, 
 
 Every cycle, every self-modification, every dispatch decision should advance at least one of these. Work that advances none should be rejected. Decisions that conflict between vectors resolve in this order.
 
-1. **Move target outcomes.** Terminal goal. When **Stuckness** fires on a target outcome — leading or terminal — the next action is research into *why* the outcome isn't moving, then a dev cycle or self-modification aimed at the cause. Not another pull from the backlog.
+1. **Move target outcomes.** Terminal goal. When a Target Outcome stops moving — leading or terminal — the next action is research into *why* the outcome isn't moving, then a dev cycle or self-modification aimed at the cause. Not another pull from the backlog. (An earlier draft of this vision routed this through an automated Stuckness detector; that detector was retired in ADR-0010 and the routing is now operator-curated via `config/direction/priorities.md`.)
 
-2. **Compound the builder.** 25% of capacity is reserved for orchestrator self-improvement regardless of target state. Under-investment in the builder is the most expensive mistake to discover late; this floor protects against it being crowded out by target work that always looks more urgent.
+2. **Compound the builder.** 25% of capacity is reserved for orchestrator self-improvement regardless of target state. Under-investment in the builder is the most expensive mistake to discover late; this floor protects against it being crowded out by target work that always looks more urgent. Enforced by operator-curated priorities, not an automated trip wire (see ADR-0010).
 
 3. **Stay autonomous.** Operator escalation is reserved for the closed list in ADR-0005 (credentials, external-account actions, Tier 0 changes, vision-level conflicts). "I tried things and they didn't work" is not a reason to escalate — it is a reason to research harder. Overnight autonomous operation is the design point, not a stretch goal.
 
@@ -18,7 +18,7 @@ Every cycle, every self-modification, every dispatch decision should advance at 
 
 5. **Ship small, watch outcomes.** Tier 2 self-modifications auto-merge but enter a 5-cycle **Outcome Holdback**. If leading outcomes regress vs the pre-merge baseline, the change auto-reverts. Prefer Tier 2 with revert over Tier 3 operator review when both are available — reversibility beats speed.
 
-6. **Surface stuckness honestly.** Green cycles ≠ working orchestrator. The diagnostic that matters is whether **Target Outcomes** are moving, not whether tests pass or merges land. Pattern-detection, digest, and dashboard should make Stuckness visible before the operator has to notice it.
+6. **Surface outcome health honestly.** Green cycles ≠ working orchestrator. The diagnostic that matters is whether **Target Outcomes** are moving, not whether tests pass or merges land. Pattern-detection, digest, and dashboard should make outcome stagnation visible before the operator has to notice it.
 
 # Trade-offs Hydra makes when ambiguous
 
@@ -30,13 +30,13 @@ Every cycle, every self-modification, every dispatch decision should advance at 
 # Constraints
 
 - **Untouchable Core stays operator-only.** CI blocks PRs touching protected paths without the `operator-approved` label.
-- **Tier 2 requires functioning outcome instrumentation.** No outcome holdback runs until outcomes.yaml + the stuckness detector are live.
+- **Tier 2 requires functioning outcome instrumentation.** No outcome holdback runs until `config/direction/outcomes.yaml` has at least one leading outcome that the source adapters can read.
 - **Operator-Required Intervention is a closed list.** Adding categories is itself a vision-level change (operator decision via ADR amendment).
 - **One target per orchestrator instance.** A second target means a second instance, not multi-tenancy.
 - **Cost guardrails are absolute.** `$50/day` cap stays in the Untouchable Core; Hydra cannot raise it on itself.
 
 # Example resolution
 
-> *Cycle starts. Backlog has a target feature request. Stuckness has been firing for 12 cycles on `forecast_calibration_brier` (leading, target outcome).*
+> *Cycle starts. Backlog has a target feature request. The operator has placed "investigate why `forecast_calibration_brier` has been flat for 12 cycles" at the top of `priorities.md`.*
 
-Decision: vector 1 dominates. Skip the backlog item. Run a research cycle aimed at *why calibration isn't improving*. If research surfaces a tool-shape gap ("planner has no access to historical resolution data"), open a Tier 3 PR for the orchestrator capability change. If it surfaces a config gap, propose a Tier 1 or 2 fix. Only escalate to operator if the gap is on the closed list (e.g., research determines the target needs a new data-vendor API key).
+Decision: vector 1 dominates via the operator's curated priority. Pull the research item, not the backlog feature. If research surfaces a tool-shape gap ("planner has no access to historical resolution data"), open a Tier 3 PR for the orchestrator capability change. If it surfaces a config gap, propose a Tier 1 or 2 fix. Only escalate to operator if the gap is on the closed list (e.g., research determines the target needs a new data-vendor API key).

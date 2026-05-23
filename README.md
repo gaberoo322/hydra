@@ -65,25 +65,22 @@ For the language and architectural decisions that shape the codebase, see [CONTE
 - [`config/orchestrator/vision.md`](./config/orchestrator/vision.md) — what good autonomous building looks like
 - [`config/direction/outcomes.yaml`](./config/direction/outcomes.yaml) (when configured) — structured *target outcome metrics* the orchestrator optimizes against
 
-**Anchor Selection** — `selectAnchor()` in `src/anchor-selection.ts` runs a 13-priority waterfall, first-match-wins. Notable slots:
+**Anchor Selection** — `selectAnchor()` in `src/anchor-selection.ts` runs a priority waterfall, first-match-wins. Notable slots:
 1. Explicit operator request (passed via `opts.anchor`)
-2. **Stuckness-driven research** — when a target outcome stops moving, return a research anchor instead of pulling backlog (per ADR-0003)
+2. Capacity-floor pre-emption (reframe-queue floor; see `src/anchor-selection/capacity-floors.ts`)
 3. Kanban queued lane (atomic Lua-script claim, gated by WIP limit)
-4. Active specs (next unchecked task)
-5. Failing tests / 6. Typecheck errors (from grounding)
-7. Work queue (LMOVE to processing)
-8. Reframe queue (failed 3+ times)
-9. Prior failures (capped at 2 retries)
-10. TODO/FIXME markers
-11. Regression hunt (every 10 merges)
-12. Codebase health
-13. Priorities doc
+4. Failing tests / Typecheck errors (from grounding)
+5. Work queue (LMOVE to processing)
+6. Reframe queue (failed 3+ times)
+7. Prior failures (capped at 2 retries)
+8. TODO/FIXME markers
+9. Regression hunt (every 10 merges)
+10. Codebase health
+11. Priorities doc
 
 **Untouchable Core** — A designated set of files Hydra cannot self-modify (only the operator can): the merge gate, rollback, watchdog, cost guardrails, and the protected-paths list itself. Enforced via CI: PRs touching protected paths require an `operator-approved` label. See [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md) and `src/untouchable.ts`.
 
 **Self-Modification Tiers** — Hydra's PRs against itself are classified by blast radius. Tier 0 = Untouchable, operator-only. Tier 1 = prompt-shaped changes, auto-merge. Tier 2 = skill / weight / verification-additions, auto-merge with **Outcome Holdback** (5-cycle watch + auto-revert on regression). Tier 3 = everything else in `src/`, operator merges. See [ADR-0004](./docs/adr/0004-self-modification-tiers.md).
-
-**Stuckness Detection** — `src/stuckness.ts` tracks cycles-since-favorable-movement per target outcome. Distinct from cycle failure — green cycles can be stuck. Fires drive anchor selection to research/self-improvement rather than the next backlog item.
 
 **Evidence-Backed State** — Every task transition stores proof in Redis (`hydra:task:{id}:evidence:{state}`). Verification output, test results, diffs, preflight verdicts, mutation kill rates.
 
@@ -207,7 +204,7 @@ config/
 
 - **Target vision** — Edit `config/direction/vision.md` (or via dashboard) to set what the target product should become
 - **Orchestrator vision** — Edit `config/orchestrator/vision.md` to set the trade-offs Hydra makes when ambiguous
-- **Outcomes** — Declare named target metrics in `config/direction/outcomes.yaml` (role: leading | terminal, direction, threshold, window). Stuckness fires when leading outcomes stop moving.
+- **Outcomes** — Declare named target metrics in `config/direction/outcomes.yaml` (role: leading | terminal, direction, baseline, target). Surfaced on the dashboard and consumed by the Tier-2 outcome holdback watcher.
 - **Feedback** — Edit `config/feedback/to-*.md` to correct agent behavior
 - **Queue** — `POST /api/queue` for specific work items (highest priority)
 - **Backlog** — Add/prioritize items via dashboard Kanban board
@@ -303,7 +300,7 @@ All changes to `master` go through a PR; branch protection enforces CI passing b
 3. **Hard verification** — Real commands, real output, real exit codes. Not an agent claiming tests pass.
 4. **Fail forward** — Failed tasks become prior-failures with context for the next cycle.
 5. **Never bypass the gate** — The Untouchable Core stays operator-only. Better slow than brakes-less.
-6. **Outcome signal over cycle metrics** — Green cycles ≠ working orchestrator. Stuckness fires on target outcomes, not on test status.
+6. **Outcome signal over cycle metrics** — Green cycles ≠ working orchestrator. Target outcomes are the success signal, not test status. The Tier-2 outcome holdback watcher reads them to auto-revert regressions.
 7. **Reversibility over speed** — Tier-2 with outcome holdback + auto-revert is preferred over Tier-3 operator review when both are options.
 8. **Stay autonomous** — Operator escalation is reserved for a narrow closed list (creds, external accounts, Tier-0 changes, vision conflicts). Everything else, Hydra researches and tries.
 

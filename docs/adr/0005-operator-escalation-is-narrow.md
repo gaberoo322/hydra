@@ -1,6 +1,8 @@
 # Operator escalation only when no autonomous remedy exists
 
-When **Stuckness** fires — whether on a leading or terminal **Target Outcome** — autopilot's default response is autonomous: research into *why* the outcome isn't moving, then a corresponding dev cycle or orchestrator self-modification. Terminal-metric stuckness raises priority but does not change the response policy.
+When a **Target Outcome** stops moving — whether leading or terminal — autopilot's default response is autonomous: research into *why* the outcome isn't moving, then a corresponding dev cycle or orchestrator self-modification. A regressing terminal metric raises priority but does not change the response policy.
+
+(An earlier draft of this ADR routed escalation through an automated **Stuckness** detector; that detector was retired in ADR-0010 because it was orphaned in the codex cut-over. The policy in this ADR — research first, escalate only for the closed list below — is unchanged.)
 
 Operator escalation is reserved for interventions only the operator can perform. Initial closed list:
 
@@ -13,4 +15,4 @@ Hydra exhausts autonomous options before raising any of these. "I tried things a
 
 ## Considered options
 
-Default-to-escalate-on-stuckness was considered and rejected: it makes overnight autonomous operation impossible (the whole point of `/hydra-autopilot`), and turns the operator into the bottleneck for problems Hydra could have researched its way through.
+Default-to-escalate-on-outcome-stagnation was considered and rejected: it makes overnight autonomous operation impossible (the whole point of `/hydra-autopilot`), and turns the operator into the bottleneck for problems Hydra could have researched its way through.

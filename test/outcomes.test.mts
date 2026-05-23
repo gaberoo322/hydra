@@ -3,10 +3,8 @@
  *
  * Bug class this guards against:
  *   - Schema drift in `config/direction/outcomes.yaml` silently producing
- *     malformed Outcome[] that downstream consumers (#242 stuckness, #244
- *     Tier-2 holdback) crash on.
- *   - Adapter unreachability throwing instead of returning null (would
- *     poison stuckness history with synthetic regressions).
+ *     malformed Outcome[] that downstream consumers crash on.
+ *   - Adapter unreachability throwing instead of returning null.
  *   - Missing file crashing instead of returning empty array (the project
  *     starts with no outcomes declared on day one).
  */
@@ -94,7 +92,6 @@ outcomes:
     query: metrics/clv.txt
     baseline: 0.0
     target: 0.05
-    stuckness_threshold_cycles: 10
     noise_epsilon: 0.001
 `;
     const r = parseOutcomesYaml(raw);
@@ -105,7 +102,6 @@ outcomes:
     assert.equal(o.kind, "leading");
     assert.equal(o.baseline, 0);
     assert.equal(o.target, 0.05);
-    assert.equal(o.stuckness_threshold_cycles, 10);
     assert.equal(o.noise_epsilon, 0.001);
   });
 
@@ -120,7 +116,6 @@ outcomes:
     query: y
     baseline: 0
     target: 1
-    stuckness_threshold_cycles: 5
 `;
     const r = parseOutcomesYaml(raw);
     assert.equal(r.ok, true);
@@ -137,7 +132,6 @@ outcomes:
     query: "/api/foo?bar=baz"
     baseline: 0
     target: 1
-    stuckness_threshold_cycles: 5
 `;
     const r = parseOutcomesYaml(raw);
     assert.equal(r.ok, true);
@@ -173,7 +167,6 @@ outcomes:
     query: metrics/clv.txt
     baseline: 0
     target: 0.05
-    stuckness_threshold_cycles: 10
   - name: bankroll-pnl
     kind: terminal
     direction: up
@@ -181,7 +174,6 @@ outcomes:
     query: /api/pnl
     baseline: 0
     target: 1000
-    stuckness_threshold_cycles: 50
     noise_epsilon: 0.5
 `);
     const r = await loadOutcomes(path);
@@ -205,7 +197,6 @@ outcomes:
     query: y
     baseline: 0
     target: 1
-    stuckness_threshold_cycles: 5
 `);
     const r = await loadOutcomes(path);
     assert.equal(r.ok, false);
@@ -222,7 +213,6 @@ outcomes:
     source: file
     query: y
     baseline: 0
-    stuckness_threshold_cycles: 5
 `);
     const r = await loadOutcomes(path);
     assert.equal(r.ok, false);
@@ -240,7 +230,6 @@ outcomes:
     query: a
     baseline: 0
     target: 1
-    stuckness_threshold_cycles: 5
   - name: dup
     kind: leading
     direction: up
@@ -248,7 +237,6 @@ outcomes:
     query: b
     baseline: 0
     target: 1
-    stuckness_threshold_cycles: 5
 `);
     const r = await loadOutcomes(path);
     assert.equal(r.ok, false);
@@ -273,7 +261,6 @@ describe("getOutcomeValue — source adapters", () => {
       query: valFile,
       baseline: 0,
       target: 1,
-      stuckness_threshold_cycles: 5,
       noise_epsilon: 0,
     };
     const reading = await getOutcomeValue(outcome);
@@ -291,7 +278,6 @@ describe("getOutcomeValue — source adapters", () => {
       query: join(tmpDir, "definitely-not-here.txt"),
       baseline: 0,
       target: 1,
-      stuckness_threshold_cycles: 5,
       noise_epsilon: 0,
     };
     const reading = await getOutcomeValue(outcome);
@@ -309,7 +295,6 @@ describe("getOutcomeValue — source adapters", () => {
       query: valFile,
       baseline: 0,
       target: 1,
-      stuckness_threshold_cycles: 5,
       noise_epsilon: 0,
     };
     const reading = await getOutcomeValue(outcome);
@@ -327,7 +312,6 @@ describe("getOutcomeValue — source adapters", () => {
         query: "anything",
         baseline: 0,
         target: 1,
-        stuckness_threshold_cycles: 5,
         noise_epsilon: 0,
       };
       const reading = await getOutcomeValue(outcome);
@@ -341,7 +325,7 @@ describe("getOutcomeValue — source adapters", () => {
 // ---------------------------------------------------------------------------
 
 describe("GET /outcomes — API round-trip", () => {
-  test("returns shape {outcomes: [{name, current, ts, lastMovedAt, ...}]}", async () => {
+  test("returns shape {outcomes: [{name, current, ts, ...}]}", async () => {
     const valFile = join(tmpDir, "rt-val.txt");
     await writeFile(valFile, "7\n");
     const outcomesPath = await fixture("rt-outcomes.yaml", `
@@ -353,7 +337,6 @@ outcomes:
     query: ${valFile}
     baseline: 0
     target: 10
-    stuckness_threshold_cycles: 5
 `);
 
     const router = createOutcomesRouter(outcomesPath);
@@ -371,7 +354,6 @@ outcomes:
     assert.equal(row.name, "roundtrip");
     assert.equal(row.current, 7);
     assert.ok(row.ts, "ts should be populated when reading available");
-    assert.equal(row.lastMovedAt, null, "lastMovedAt is null until #242 ships");
     assert.equal(row.baseline, 0);
     assert.equal(row.target, 10);
   });
@@ -386,7 +368,6 @@ outcomes:
     query: y
     baseline: 0
     target: 1
-    stuckness_threshold_cycles: 5
 `);
 
     const router = createOutcomesRouter(outcomesPath);

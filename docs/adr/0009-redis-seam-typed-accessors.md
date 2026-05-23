@@ -35,12 +35,12 @@ the cheap path keeps the Seam from closing.
 The cost shows up as:
 
 - **Locality.** A key-shape change — extending the **Merge Lock** TTL,
-  moving a **Stuckness** counter, adding a TTL refresh on an index —
-  has to touch every caller, not one Module. Bugs that hide in the
-  implicit composition of key + TTL + index update have no owning
+  moving an **Outcome Holdback** baseline, adding a TTL refresh on an
+  index — has to touch every caller, not one Module. Bugs that hide in
+  the implicit composition of key + TTL + index update have no owning
   Module.
-- **Test surface.** Tests of the **Pre-merge Gate**, **Stuckness**, and
-  **Pattern Memory** end up re-asserting key strings instead of
+- **Test surface.** Tests of the **Pre-merge Gate**, the work queue,
+  and **Pattern Memory** end up re-asserting key strings instead of
   asserting behaviour.
 - **AI navigability.** When a subagent reads
   `hydra:scheduler:deliberate-stop` it can't follow a single interface
