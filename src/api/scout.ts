@@ -6,6 +6,10 @@ import {
 } from "../scout/stats.ts";
 import { getString } from "../redis/kv.ts";
 import { redisKeys } from "../redis-keys.ts";
+import {
+  listDispatchAudits,
+  planAlertDispatches,
+} from "../scout/alert-listener.ts";
 
 /**
  * Tool-scout API surface (issue #485, Phase B).
@@ -63,6 +67,47 @@ export function createScoutRouter() {
     } catch (err) {
       console.error("/api/scout/stats failed:", err);
       res.status(500).json({ error: "scout-stats failed" });
+    }
+  });
+
+  // GET /scout/dispatches?limit=N — Phase C (issue #486) audit trail of
+  // every scout invocation (calendar + alert). Newest-first. Returns:
+  //
+  //   {
+  //     limit: 50,
+  //     entries: [
+  //       { triggeredBy, category, dispatchedAt, cost, outcome, detail },
+  //       ...
+  //     ]
+  //   }
+  //
+  // Lets operators answer "did the test_decline alert last Tuesday
+  // actually trigger a scout, and what came out of it?" without
+  // dredging the Redis stream by hand.
+  router.get("/scout/dispatches", async (req, res) => {
+    try {
+      const rawLimit = parseInt(String(req.query.limit ?? ""), 10);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 50;
+      const entries = await listDispatchAudits(limit);
+      res.json({ limit, entries });
+    } catch (err) {
+      console.error("/api/scout/dispatches failed:", err);
+      res.status(500).json({ error: "scout-dispatches failed" });
+    }
+  });
+
+  // GET /scout/alert-plan — Phase C (issue #486) read-only preview of what
+  // the alert listener WOULD dispatch right now. The autopilot consumes
+  // this via collect-state.sh; operators can hit it directly to debug
+  // why a known alert pattern didn't fire a scout. Doesn't advance the
+  // cursor or stamp any cooldown — purely diagnostic.
+  router.get("/scout/alert-plan", async (_req, res) => {
+    try {
+      const plan = await planAlertDispatches();
+      res.json(plan);
+    } catch (err) {
+      console.error("/api/scout/alert-plan failed:", err);
+      res.status(500).json({ error: "scout-alert-plan failed" });
     }
   });
 

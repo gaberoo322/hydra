@@ -201,6 +201,26 @@ export const redisKeys = {
   // `/api/scout/stats` window.
   scoutSpendDaily: (isoDate: string) => `hydra:scout:spend:${isoDate}`,
 
+  // Tool Scout — Phase C alert-driven trigger (issue #486).
+  //
+  // `scoutDispatches`: Redis stream of audit-trail entries — one XADD per
+  //   scout invocation (calendar OR alert). Fields documented in
+  //   src/scout/alert-listener.ts. Read by `/api/scout/dispatches`.
+  //   Capped via MAXLEN ~ 1000 so the stream stays bounded.
+  //
+  // `scoutAlertCursor`: ISO-8601 UTC timestamp — the most recent alert
+  //   timestamp the alert-listener has already processed. Acts as a
+  //   high-water-mark cursor over `hydra:alerts` so re-runs of the
+  //   listener don't re-fire on alerts they already handled. Not TTLed.
+  //
+  // `scoutPatternLastFired`: ISO-8601 UTC of the most recent scout
+  //   dispatch attributed to a given alert pattern (debouncing key —
+  //   24h cap per pattern). One key per pattern, TTL 48h (twice the
+  //   dedup window so a forgotten pattern self-cleans).
+  scoutDispatches: () => "hydra:scout:dispatches",
+  scoutAlertCursor: () => "hydra:scout:alert-cursor",
+  scoutPatternLastFired: (pattern: string) => `hydra:scout:pattern-last-fired:${pattern}`,
+
   // ---------------------------------------------------------------------------
   // Locks
   // ---------------------------------------------------------------------------

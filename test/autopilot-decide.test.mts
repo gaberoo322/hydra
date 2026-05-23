@@ -744,6 +744,56 @@ describe("decide.py — signal classes with cooldowns", () => {
     );
   });
 
+  // -------------------------------------------------------------------------
+  // Issue #486 (Phase C of /hydra-tool-scout). Alert-driven dispatch:
+  // `scout_alert_eligible_count > 0` AND board not saturated → dispatch
+  // with trigger="alert". Preferred over calendar when both are available
+  // (acute pain beats calendar cadence).
+  // -------------------------------------------------------------------------
+
+  test("scout_orch fires with trigger=alert when scout_alert_eligible_count > 0 (issue #486)", () => {
+    const state = baseState({ signals: { scout_alert_eligible_count: 3 } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "scout_orch");
+    assert.ok(a, "scout_orch must dispatch on alert-driven signal");
+    assert.equal(a.skill, "hydra-tool-scout");
+    assert.equal(a.prompt_args.trigger, "alert",
+      "alert-driven dispatch must pass trigger=alert to the skill");
+  });
+
+  test("scout_orch prefers alert over calendar when both signals present (issue #486)", () => {
+    const state = baseState({
+      signals: { scout_walk_due: true, scout_alert_eligible_count: 1 },
+    });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "scout_orch");
+    assert.ok(a, "scout_orch must dispatch when alert is eligible");
+    assert.equal(a.prompt_args.trigger, "alert",
+      "alert path wins — acute pain beats calendar cadence");
+  });
+
+  test("scout_orch alert path is suppressed by scout_board_saturated (issue #486)", () => {
+    const state = baseState({
+      signals: { scout_alert_eligible_count: 5, scout_board_saturated: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "saturated board suppresses BOTH calendar and alert triggers",
+    );
+  });
+
+  test("scout_alert_eligible_count=0 does NOT fire (calendar still gates that path)", () => {
+    const state = baseState({ signals: { scout_alert_eligible_count: 0 } });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "scout_orch"),
+      undefined,
+      "zero eligible alerts must NOT trigger an alert dispatch",
+    );
+  });
+
   test("scout_orch fires after 7d cooldown elapses", () => {
     const now = Math.floor(Date.now() / 1000);
     const state = baseState({
