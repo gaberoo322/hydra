@@ -293,6 +293,18 @@ JSONL transcript history to quantify ghost-write incidents across past
 dispatches (useful as a before/after measurement when the hook is rolled
 out).
 
+**`dev_target` dispatches need a SECOND check (issue #542).** The harness `isolation: "worktree"` only worktree-isolates the orchestrator repo (`~/hydra`). When `hydra-target-build` then writes to `~/hydra-betting`, those edits land on the main hydra-betting checkout unless the skill explicitly creates a hydra-betting worktree. The `hydra-target-build` playbook now does this in Step 0.6 — every `dev_target` dispatch MUST go through Step 0.6 before any Edit/Write against the target.
+
+```
+## TARGET-REPO SAFETY RULE — applies to dev_target only
+Before writing to ~/hydra-betting:
+- Create a hydra-betting worktree (see hydra-target-build Step 0.6).
+- Verify `git -C <worktree> rev-parse --git-common-dir` resolves to ~/hydra-betting/.git
+  AND `git -C <worktree> rev-parse --git-dir` contains `.git/worktrees/`.
+- Use ONLY worktree-anchored paths for Edit/Write — never raw `/home/gabe/hydra-betting/...`.
+- ABORT if any check fails. The two-repo asymmetry was the silent-leak failure mode in #542.
+```
+
 ## Inspecting a run
 
 - **One-shot status:** `bash scripts/autopilot/status.sh` — pretty-prints the heartbeat (+ wedge verdict), the compact state, and the log tail. Safe to wire to a shell prompt.
