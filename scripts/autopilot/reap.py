@@ -85,13 +85,6 @@ REAPED_TASK_IDS_CAP = 1000
 CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill"}
 CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
 
-# Issue #466: Redis keys for the design-concept counter family.
-# `hydra:dc:counter:{name}:{YYYY-MM-DD}` is the daily-rollup shape;
-# B-4's read path expects 14d TTL.
-DC_COUNTER_KEY_PREFIX = "hydra:dc:counter:"
-DC_COUNTER_TTL_SECONDS = 14 * 24 * 60 * 60  # 14 days
-
-
 def _append_log(line: str) -> None:
     """Append one line to the run log, best-effort. Never raises."""
     try:
@@ -128,42 +121,6 @@ def _bound_reaped(ids: list[str]) -> list[str]:
     if len(ids) > REAPED_TASK_IDS_CAP:
         return ids[-REAPED_TASK_IDS_CAP:]
     return ids
-
-
-def _bump_dc_counter(name: str) -> None:
-    """Best-effort INCR of a `hydra:dc:counter:{name}:{YYYY-MM-DD}` Redis key.
-
-    Issue #466 (Phase B of #437): grill outcomes need to land in the
-    design-concept counter family so B-4's dashboard can show grill
-    timeout / crash rates per day. The shape mirrors the other counters
-    populated by saveDesignConcept() and the autopilot-side helpers.
-
-    Failures are swallowed — counters are observability, not correctness,
-    and a missing redis-cli must never block a reap. The 14d TTL is
-    refreshed on every call so a counter that fires once per day stays
-    visible for the full window even if the day's first hit is the last.
-    """
-    if not name:
-        return
-    from datetime import datetime, timezone
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    key = f"{DC_COUNTER_KEY_PREFIX}{name}:{day}"
-    try:
-        subprocess.run(
-            ["docker", "exec", "hydra-redis-1", "redis-cli", "INCR", key],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-        subprocess.run(
-            ["docker", "exec", "hydra-redis-1", "redis-cli",
-             "EXPIRE", key, str(DC_COUNTER_TTL_SECONDS)],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        _append_log(f"dc_counter_bump_skipped key={key} err={exc}")
 
 
 def _fire_cycle_record(
@@ -254,13 +211,6 @@ def run_hardcap() -> int:
         # task_id was captured before the slot was cleared so dedup holds
         # across re-runs of the hard-cap pass.
         _fire_cycle_record(task_id, skill, "failed", tokens)
-        # Issue #466 (Phase B of #437): a hard-cap trip on a `hydra-grill`
-        # dispatch is a TIMEOUT outcome per the issue's retry-policy
-        # taxonomy (case 1 — 5-min wall-clock or 30k token cap mid-Q&A).
-        # Increment the daily counter so the design-concept dashboard can
-        # surface grill timeout rate.
-        if cls == "design_concept_orch" or skill == "hydra-grill":
-            _bump_dc_counter("grill_timeout_count")
     return 0
 
 
@@ -392,7 +342,6 @@ def run_grill_crash(task_id: str) -> int:
         reaped.append(task_id)
         s["reaped_task_ids"] = _bound_reaped(reaped)
         _save_state(s)
-    _bump_dc_counter("grill_crash_count")
     _fire_cycle_record(task_id, "hydra-grill", "failed", 0)
     line = f"grill_crash task_id={task_id}"
     print(f"[autopilot] {line}")
