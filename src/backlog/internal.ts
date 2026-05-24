@@ -7,7 +7,7 @@
  * Module through the role-keyed surface files (reads/items/lanes/claims/wip/
  * reaper).
  *
- * Redis schema (informational — actual access goes through redis-adapter):
+ * Redis schema (informational — actual access goes through src/redis/backlog.ts):
  *   hydra:backlog:items         → Hash: itemId → JSON item
  *   hydra:backlog:lane:{lane}   → Sorted Set: itemId scored by position timestamp
  *   hydra:backlog:counter       → Auto-increment ID counter
@@ -17,7 +17,7 @@ import {
   getBacklogItemRaw, saveBacklogItem, removeBacklogItem as removeBacklogItemAdapter,
   getBacklogLaneIds,
   incrBacklogCounter,
-} from "../redis-adapter.ts";
+} from "../redis/backlog.ts";
 
 export const LANES = ["triage", "backlog", "queued", "blocked", "inProgress", "done"];
 export const DONE_RETENTION_DAYS = 7;

@@ -2,7 +2,7 @@
  * Backlog item lifecycle — creation (with fuzzy dedup) and field-level updates.
  */
 
-import { addToBacklogLane } from "../redis-adapter.ts";
+import { addToBacklogLane } from "../redis/backlog.ts";
 import {
   LANES, applyLaneTransition, getItem, saveItem, nextId,
 } from "./internal.ts";

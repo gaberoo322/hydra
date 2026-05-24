@@ -2,7 +2,7 @@
  * Backlog reads — non-mutating queries the dashboard and scheduler consume.
  */
 
-import { getBacklogLaneCount } from "../redis-adapter.ts";
+import { getBacklogLaneCount } from "../redis/backlog.ts";
 import { LANES, getLaneItems, sortByQueuePriority } from "./internal.ts";
 
 /**
@@ -92,7 +92,7 @@ export async function getCurrentMilestoneProgress() {
 
 /**
  * Close the Redis connection (for tests/cleanup). No-op: Redis connection
- * is managed by the shared redis-adapter singleton.
+ * is managed by the shared src/redis/connection.ts singleton.
  */
 export async function closeBacklogRedis() {
   // intentional: kept as a no-op so call sites that previously expected a
