@@ -13,7 +13,7 @@ import {
   incrKey,
   expireKey,
 } from "../redis-adapter.ts";
-import { block } from "../backlog.ts";
+import { blockByTitle } from "../backlog/lanes.ts";
 import {
   REFRAME_QUEUE,
   PROCESSING_QUEUE,
@@ -54,7 +54,7 @@ export async function trackAbandonment(
     // Blocking it lets the reframe queue item (lower priority in selectAnchor)
     // get processed instead.
     try {
-      await block(anchorRef, `Circuit breaker: abandoned ${count}x — escalated to reframe queue`);
+      await blockByTitle(anchorRef, `Circuit breaker: abandoned ${count}x — escalated to reframe queue`);
       console.log(`[ControlLoop] Blocked Kanban item "${anchorRef}" to unblock reframe processing`);
     } catch (err: any) {
       // Not all anchors have a Kanban item (e.g. work queue items, failing tests)

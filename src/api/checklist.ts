@@ -8,8 +8,7 @@ const execFileAsync = promisify(execFile);
 
 import { getAggregateStats } from "../metrics.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler.ts";
-import { _admin as backlogAdmin } from "../backlog.ts";
-const { getBacklogCounts } = backlogAdmin;
+import { getBacklogCounts } from "../backlog/reads.ts";
 import {
   listLen, getWorkQueueLen,
 } from "../redis-adapter.ts";

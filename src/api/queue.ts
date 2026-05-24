@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { getWorkQueueItems, pushToWorkQueue, getWorkQueueLen, findWorkQueueDuplicate } from "../redis-adapter.ts";
-import { _admin } from "../backlog.ts";
-const { getBacklogCounts, loadBacklog } = _admin;
+import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
 
 export function createQueueRouter() {
   const router = Router();

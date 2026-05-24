@@ -216,8 +216,13 @@ describe("GET /anchor/candidates — endpoint integration (#424)", () => {
       createAnchorRouter = mod.createAnchorRouter;
     }
     if (!backlogAdmin) {
-      const mod = await import("../src/backlog.ts");
-      backlogAdmin = mod._admin;
+      const reads = await import("../src/backlog/reads.ts");
+      const items = await import("../src/backlog/items.ts");
+      const lanes = await import("../src/backlog/lanes.ts");
+      const claims = await import("../src/backlog/claims.ts");
+      const wip = await import("../src/backlog/wip.ts");
+      const reaper = await import("../src/backlog/reaper.ts");
+      backlogAdmin = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
     }
   });
 

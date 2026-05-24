@@ -2,8 +2,8 @@
  * Backlog Redis ops. Extracted from redis-adapter.ts (issue #269).
  *
  * NOTE: This is the low-level Redis backlog adapter, not the higher-level
- * src/backlog.ts which uses these primitives. Naming kept to satisfy the
- * issue's acceptance criteria.
+ * Backlog Module (src/backlog/) which uses these primitives. Naming kept
+ * to satisfy issue #269's acceptance criteria.
  */
 
 import { redisKeys } from "../redis-keys.ts";

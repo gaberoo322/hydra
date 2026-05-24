@@ -7,10 +7,9 @@
 // duplicate items are blocked in Kanban so subsequent cycles fall through to
 // other sources.
 
-import { _admin, block } from "../backlog.ts";
+import { blockByTitle } from "../backlog/lanes.ts";
+import { claimNextQueuedItem } from "../backlog/claims.ts";
 import { isAnchorDriftDuplicate } from "./drift-filter.ts";
-
-const { claimNextQueuedItem } = _admin;
 
 export interface KanbanAnchor {
   type: "user-request";
@@ -49,7 +48,7 @@ export async function selectKanbanAnchor(): Promise<KanbanResult> {
       const driftResult = await isAnchorDriftDuplicate(candidate);
       if (driftResult.drift) {
         try {
-          await block(
+          await blockByTitle(
             queuedItem.title,
             `Drift pre-filter: ${Math.round(driftResult.match!.similarity * 100)}% similar to "${driftResult.match!.taskTitle}" from ${driftResult.match!.cycleId}`,
           );

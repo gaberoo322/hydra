@@ -10,8 +10,7 @@
  * This module just orchestrates the scheduled cleanup calls.
  */
 
-import { _admin } from "./backlog.ts";
-const { pruneOldDoneItems } = _admin;
+import { pruneOldDoneItems } from "./backlog/lanes.ts";
 import { redisKeys } from "./redis-keys.ts";
 import {
   pruneMetricsIndex,

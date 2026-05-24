@@ -1,5 +1,5 @@
 /**
- * Regression tests for src/backlog.ts — stale-claim reaper (issue #374).
+ * Regression tests for src/backlog/reaper.ts — stale-claim reaper (issue #374).
  *
  * Background: three inProgress items (240, 243, 244) were wedged in the
  * `inProgress` lane with `claimedBy: codex` after the Phase-A codex-removal
@@ -21,7 +21,6 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-let backlog: any;
 let admin: any;
 let redis: any;
 let redisAvailable = false;
@@ -61,9 +60,13 @@ describe("backlog stale-claim reaper (issue #374)", () => {
         console.error("Redis unavailable at localhost:6379/1, skipping reaper tests");
         return;
       }
-      const mod = await import("../src/backlog.ts");
-      backlog = mod;
-      admin = mod._admin;
+      const reads = await import("../src/backlog/reads.ts");
+      const items = await import("../src/backlog/items.ts");
+      const lanes = await import("../src/backlog/lanes.ts");
+      const claims = await import("../src/backlog/claims.ts");
+      const wip = await import("../src/backlog/wip.ts");
+      const reaper = await import("../src/backlog/reaper.ts");
+      admin = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
     }
     if (!redisAvailable) return;
     await cleanBacklogKeys();

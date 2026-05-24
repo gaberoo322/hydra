@@ -1,5 +1,5 @@
 /**
- * Regression tests for src/backlog.mjs — Redis-backed Kanban state machine.
+ * Regression tests for src/backlog/ — Redis-backed Kanban state machine.
  *
  * Requires Redis running on localhost:6379 (default).
  * Uses Redis DB 1 for tests — cleaned up between tests via hydra:backlog:* key flush.
@@ -9,12 +9,11 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-let backlog;
-let admin;
+let admin: any;
 let redis: any;
 let redisAvailable = false;
 
-// Set REDIS_URL before any import of backlog.ts so the singleton picks up DB 1
+// Set REDIS_URL before any import of backlog modules so the singleton picks up DB 1
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
 async function cleanBacklogKeys() {
@@ -40,9 +39,13 @@ describe("backlog state machine", () => {
         console.error("Redis unavailable at localhost:6379/1, skipping backlog tests");
         return;
       }
-      const mod = await import("../src/backlog.ts");
-      backlog = mod;
-      admin = mod._admin;
+      const reads = await import("../src/backlog/reads.ts");
+      const items = await import("../src/backlog/items.ts");
+      const lanes = await import("../src/backlog/lanes.ts");
+      const claims = await import("../src/backlog/claims.ts");
+      const wip = await import("../src/backlog/wip.ts");
+      const reaper = await import("../src/backlog/reaper.ts");
+      admin = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
     }
     if (!redisAvailable) return;
     await cleanBacklogKeys();
@@ -470,13 +473,13 @@ describe("backlog state machine", () => {
     assert.equal(item.claimedAt, null, "returning to backlog must clear claimedAt");
   });
 
-  test("issue #191: moveToBlocked stamps movedAt", async (t) => {
+  test("issue #191: blockByTitle stamps movedAt", async (t) => {
     requireRedis(t);
     await admin.addToBacklog({ title: "Block stamp 191", category: "test" });
-    await admin.moveToBlocked("Block stamp 191", "needs-info");
+    await admin.blockByTitle("Block stamp 191", "needs-info");
     const lanes = await admin.loadBacklog();
     const item = lanes.blocked.find((i: any) => i.title === "Block stamp 191");
-    assert.ok(item.movedAt, "moveToBlocked must set movedAt");
+    assert.ok(item.movedAt, "blockByTitle must set movedAt");
   });
 
   test("issue #191: moveToInProgress refuses claim when WIP cap is reached", async (t) => {
@@ -503,23 +506,6 @@ describe("backlog state machine", () => {
     const counts = await admin.getBacklogCounts();
     assert.equal(counts.inProgress, limit);
     assert.equal(counts.backlog, 1);
-  });
-
-  test("issue #191: claim() facade surfaces wip-limit rejection without throwing", async (t) => {
-    requireRedis(t);
-    const limit = admin.WIP_LIMIT;
-    for (let i = 0; i < limit; i++) {
-      await admin.addToBacklog({ title: `Facade fill ${i}`, category: "test" });
-      await admin.moveToInProgress(`Facade fill ${i}`);
-    }
-    await admin.addToBacklog({ title: "Facade overflow", category: "test" });
-
-    // Public facade `claim` is the top-level export, not on _admin.
-    const result = await backlog.claim("Facade overflow", { claimedBy: "claude" });
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, "wip-limit");
-    assert.equal(result.count, limit);
-    assert.equal(result.limit, limit);
   });
 
   test("issue #191: GET /api/backlog surfaces movedAt, claimedAt, claimedBy on every item", async (t) => {

@@ -1,5 +1,5 @@
 /**
- * Regression tests for src/backlog.ts — stale-claim reaper open-PR guard (issue #490).
+ * Regression tests for src/backlog/reaper.ts — stale-claim reaper open-PR guard (issue #490).
  *
  * Background: on 2026-05-17 the autopilot dispatched a dev_target subagent
  * against backlog item-302. The work was already shipped in
@@ -28,7 +28,6 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-let backlog: any;
 let admin: any;
 let redis: any;
 let redisAvailable = false;
@@ -67,9 +66,13 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
         console.error("Redis unavailable at localhost:6379/1, skipping open-PR guard tests");
         return;
       }
-      const mod = await import("../src/backlog.ts");
-      backlog = mod;
-      admin = mod._admin;
+      const reads = await import("../src/backlog/reads.ts");
+      const items = await import("../src/backlog/items.ts");
+      const lanes = await import("../src/backlog/lanes.ts");
+      const claims = await import("../src/backlog/claims.ts");
+      const wip = await import("../src/backlog/wip.ts");
+      const reaper = await import("../src/backlog/reaper.ts");
+      admin = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
     }
     if (!redisAvailable) return;
     await cleanBacklogKeys();
