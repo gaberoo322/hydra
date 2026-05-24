@@ -5,7 +5,6 @@ import { EventBus, STREAMS } from "./event-bus.ts";
 import { createApi } from "./api.ts";
 import { createTracker, getTracker } from "./task-tracker.ts";
 import { initMetrics } from "./metrics.ts";
-import { watchApprovals } from "./proposals.ts";
 import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule } from "./cleanup.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler.ts";
@@ -65,7 +64,6 @@ function formatAlertMessage(event) {
     case "cycle:stalled": return `Cycle stalled: ${p.inProgress || 0} tasks running for ${p.elapsed || "?"}`;
     case "dlq:alert": return `Dead letter: ${p.eventType || "unknown"} failed ${p.deliveryCount || 0}x — ${p.error || ""}`;
     case "consumer:dead": return `Consumer ${p.consumer || "unknown"} died after ${p.restarts || 0} restarts`;
-    case "proposal:created": return `New proposal: ${p.title || "untitled"} (${p.risk || "?"} risk)`;
     case "research:completed": return `Research cycle complete: ${p.opportunityCount || 0} opportunities found`;
     case "scheduler:error": return `Scheduler error: ${p.message || p.error || "unknown"}`;
     case "cycle:operator_blocked": return `BLOCKED — needs your action: "${p.title}" — ${p.blockedReason}`;
@@ -77,7 +75,7 @@ function startConsumers(eventBus) {
   // Notification consumer — stores alerts in Redis for dashboard + digest
   const ALERT_TYPES = new Set([
     "cycle:failed", "cycle:rolled_back", "cycle:auto_killed", "cycle:stalled",
-    "dlq:alert", "consumer:dead", "proposal:created",
+    "dlq:alert", "consumer:dead",
     "research:completed", "scheduler:error", "cycle:operator_blocked",
     "pattern:low_merge_rate", "pattern:consecutive_failures",
     "pattern:recurring_regressions", "pattern:anchor_stuck",
@@ -224,11 +222,6 @@ async function main() {
 
   // Start digest notifications (4h summaries instead of per-event messages)
   startDigest();
-
-  // Start the proposal approval watcher (polls reports/proposals/approved/)
-  watchApprovals();
-  console.log("[Hydra] Proposal approval watcher started");
-
 
   // Agent streaming was wired through codex-runner's setAgentStreamCallback,
   // both removed in PR-3 (issue #383). Autopilot subagents own execution

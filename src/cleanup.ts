@@ -3,7 +3,6 @@
  *
  * Reality reports: trimmed to 50 most recent inline during writes.
  * Cycle summaries: auto-expire via Redis TTL (2 days).
- * Proposals: old approved/rejected cleaned by archiveApprovedProposals().
  * Backlog done items: pruned by pruneOldDoneItems().
  * Stale Redis keys: cycle/task/metrics keys older than 7 days.
  * Stale inProgress items: returned to queued after 24 hours.
@@ -11,7 +10,6 @@
  * This module just orchestrates the scheduled cleanup calls.
  */
 
-import { archiveApprovedProposals } from "./proposals.ts";
 import { _admin } from "./backlog.ts";
 const { pruneOldDoneItems } = _admin;
 import { redisKeys } from "./redis-keys.ts";
@@ -158,14 +156,12 @@ async function runCleanup() {
 function startCleanupSchedule() {
   // Run immediately on startup
   runCleanup();
-  archiveApprovedProposals();
 
   // Then daily
   setInterval(() => {
     runCleanup();
-    archiveApprovedProposals();
   }, 24 * 60 * 60 * 1000);
-  console.log("[Cleanup] Scheduled (daily): backlog prune, proposal archive, stale Redis/inProgress cleanup");
+  console.log("[Cleanup] Scheduled (daily): backlog prune, stale Redis/inProgress cleanup");
 }
 
 export { startCleanupSchedule, runCleanup };

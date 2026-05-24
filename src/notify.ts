@@ -118,14 +118,6 @@ function formatMessage(event) {
     case "architect:review_completed":
       return `🏗️ *Architect Review*\n${payload.researchCyclesReviewed} research + ${payload.executionCyclesReviewed} execution cycles reviewed\n${payload.updatesApplied} methodology updates\nCalibration: ${payload.calibration}`;
 
-    // --- Proposals ---
-
-    case "proposal:created":
-      return `💡 *New Proposal*\n${payload.proposalId || `#${payload.id}`}\nTitle: ${payload.title}\nType: ${payload.type} | Risk: ${payload.risk}`;
-
-    case "proposal:approved":
-      return `✅ *Proposal Approved*\n${payload.proposalId || `#${payload.id}`}: ${payload.title}`;
-
     // --- Deploy ---
 
     case "deploy:completed":

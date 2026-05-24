@@ -8,7 +8,6 @@ const STREAMS = {
   CYCLE: redisKeys.streamCycle(),        // cycle start events (used by cycle.mjs)
   TASKS: redisKeys.streamTasks(),        // task events (used by legacy pipeline if HYDRA_LEGACY_PIPELINE=1)
   META: redisKeys.streamMeta(),
-  PROPOSALS: redisKeys.streamProposals(),
   NOTIFICATIONS: redisKeys.streamNotifications(),
   DLQ: redisKeys.streamDlq(),
 };
@@ -17,7 +16,6 @@ const STREAMS = {
 // META consumer removed in #345 (meta agent deleted); stream key retained
 // for back-compat with any external listeners.
 const CONSUMER_GROUPS = {
-  [STREAMS.PROPOSALS]: ["orchestrator"],
   [STREAMS.NOTIFICATIONS]: ["telegram"],
   [STREAMS.DLQ]: ["dlq-processor"],
 };

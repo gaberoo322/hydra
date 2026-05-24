@@ -8,7 +8,6 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 import { getMetricsTrend, getAggregateStats } from "../metrics.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler.ts";
-import { listProposals } from "../proposals.ts";
 import { _admin as backlogAdmin } from "../backlog.ts";
 const getBacklogCounts = backlogAdmin.getBacklogCounts;
 import { redisKeys } from "../redis-keys.ts";
@@ -242,20 +241,7 @@ export function createHealthRouter(eventBus: any) {
   router.get("/recommendations", async (req, res) => {
     const recs = [];
     try {
-      // 1. Pending proposals awaiting review
-      const proposals = await listProposals("pending");
-      if (proposals.length > 0) {
-        recs.push({
-          type: "review",
-          priority: 2,
-          title: `${proposals.length} proposal${proposals.length > 1 ? "s" : ""} awaiting review`,
-          description: proposals.map(p => p.title).join(", "),
-          action: "Review on the Proposals page",
-          link: "/proposals",
-        });
-      }
-
-      // 2. Triage items awaiting approval
+      // 1. Triage items awaiting approval
       const counts = await getBacklogCounts();
       if (counts.triage > 0) {
         recs.push({
@@ -268,7 +254,7 @@ export function createHealthRouter(eventBus: any) {
         });
       }
 
-      // 3. Blocked backlog items
+      // 2. Blocked backlog items
       if (counts.blocked > 0) {
         recs.push({
           type: "action",
@@ -280,7 +266,7 @@ export function createHealthRouter(eventBus: any) {
         });
       }
 
-      // 4. Scheduler not running
+      // 3. Scheduler not running
       const sched = await getSchedulerStatus();
       if (!sched.running) {
         recs.push({
@@ -293,7 +279,7 @@ export function createHealthRouter(eventBus: any) {
         });
       }
 
-      // 5. Empty work pipeline
+      // 4. Empty work pipeline
       if (counts.total === 0 && counts.inProgress === 0 && counts.triage === 0) {
         recs.push({
           type: "info",
@@ -305,7 +291,7 @@ export function createHealthRouter(eventBus: any) {
         });
       }
 
-      // 6. Check priorities.md for BLOCKED items
+      // 5. Check priorities.md for BLOCKED items
       try {
         const prioritiesContent = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
         const blockedHeaders = prioritiesContent.match(/^##.*\[BLOCKED\].*$/gim) || [];
@@ -324,7 +310,7 @@ export function createHealthRouter(eventBus: any) {
         }
       } catch { /* intentional: no priorities file present yet — degrade silently */ }
 
-      // 7. Kill file present
+      // 6. Kill file present
       if (existsSync(KILL_FILE)) {
         recs.push({
           type: "action",

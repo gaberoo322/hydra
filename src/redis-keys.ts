@@ -116,12 +116,6 @@ export const redisKeys = {
   backlogLane: (lane: string) => `hydra:backlog:lane:${lane}`,
 
   // ---------------------------------------------------------------------------
-  // Proposals
-  // ---------------------------------------------------------------------------
-  proposalsIndex: () => "hydra:proposals:index",
-  proposal: (id: string) => `hydra:proposals:${id}`,
-
-  // ---------------------------------------------------------------------------
   // Specs — RETIRED (issue #513). The Specs subsystem was deleted; key
   // builders were removed. Existing `hydra:specs:*` keys remain in Redis
   // but are no longer read or written. See scripts/cleanup/retire-specs.sh
@@ -287,7 +281,6 @@ export const redisKeys = {
   streamCycle: () => "hydra:cycle",
   streamTasks: () => "hydra:tasks",
   streamMeta: () => "hydra:meta",
-  streamProposals: () => "hydra:proposals",
   streamNotifications: () => "hydra:notifications",
   streamDlq: () => "hydra:dlq",
   streamAgentStream: () => "hydra:agent-stream",
