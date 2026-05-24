@@ -10,11 +10,11 @@ import { getMetricsTrend } from "../metrics/trend.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler/loop.ts";
 import { getBacklogCounts } from "../backlog/reads.ts";
-import { redisKeys } from "../redis-keys.ts";
-import {
-  listLen, getMemoryPatterns, scanKeys, redisInfo as getRedisInfo,
-  getWorkQueueLen,
-} from "../redis-adapter.ts";
+import { getMemoryPatterns } from "../redis/agent-memory.ts";
+import { redisInfo as getRedisInfo } from "../redis/utility.ts";
+import { getWorkQueueLen } from "../redis/work-queue.ts";
+import { getPriorFailuresLen } from "../redis/anchors.ts";
+import { countReflectionKeys } from "../redis/reflections.ts";
 import { getTargetServiceName } from "../target-config.ts";
 // Issue #231: shared OV credential — health probe must use the same key as agent searches.
 import { OPENVIKING_API_KEY } from "../knowledge-base/ov-config.ts";
@@ -98,7 +98,7 @@ export function createHealthRouter(eventBus: any) {
       /* 2 */ getSchedulerStatus(),
       /* 3 */ Promise.resolve({ status: "idle" }),
       /* 4 */ getWorkQueueLen(),
-      /* 5 */ listLen(redisKeys.anchorPriorFailures()),
+      /* 5 */ getPriorFailuresLen(),
       /* 6 */ getBacklogCounts(),
       /* 7 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
       /* 8 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
@@ -111,10 +111,7 @@ export function createHealthRouter(eventBus: any) {
         const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };
         return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
       })(),
-      /* 14 */ (async () => {
-        const keys = await scanKeys(redisKeys.reflection("*"));
-        return keys.length;
-      })(),
+      /* 14 */ countReflectionKeys(),
       /* 15 */ (async () => {
         try {
           const ovKey = OPENVIKING_API_KEY;

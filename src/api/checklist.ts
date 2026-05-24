@@ -9,10 +9,8 @@ const execFileAsync = promisify(execFile);
 import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler/loop.ts";
 import { getBacklogCounts } from "../backlog/reads.ts";
-import {
-  listLen, getWorkQueueLen,
-} from "../redis-adapter.ts";
-import { redisKeys } from "../redis-keys.ts";
+import { getWorkQueueLen } from "../redis/work-queue.ts";
+import { getPriorFailuresLen, getReframeQueueLength } from "../redis/anchors.ts";
 import { getTargetWorkspace } from "../target-config.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
@@ -123,8 +121,8 @@ async function checkQueues(): Promise<ChecklistItem[]> {
   const items: ChecklistItem[] = [];
   try {
     const workQueueLen = await getWorkQueueLen();
-    const priorFailures = await listLen(redisKeys.anchorPriorFailures());
-    const reframeLen = await listLen("hydra:anchors:reframe-queue");
+    const priorFailures = await getPriorFailuresLen();
+    const reframeLen = await getReframeQueueLength();
 
     if (workQueueLen === 0) {
       items.push({

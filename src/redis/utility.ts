@@ -5,6 +5,12 @@
 
 import { getRedisConnection } from "./connection.ts";
 
+/** Read a Redis INFO section (e.g. "memory", "stats"). Diagnostic helper. */
+export async function redisInfo(section: string): Promise<string> {
+  const r = getRedisConnection();
+  return r.info(section);
+}
+
 /**
  * Scan for keys matching a pattern with cursor-based iteration.
  * Returns all matching keys.

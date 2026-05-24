@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { startCycle, getCycleStatus, getCycleHistory, killCycle } from "../cycle.ts";
 import { getTracker } from "../task-tracker.ts";
-import { getRealityReport } from "../redis-adapter.ts";
+import { getRealityReport } from "../redis/reality-reports.ts";
 import {
   registerCycleSource,
   releaseCycleSource,

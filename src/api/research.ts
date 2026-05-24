@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { runResearchLoop, getLatestResearch, listResearchReports, vetoOpportunity } from "../research-loop.ts";
-import { setResearchForceOnce } from "../redis-adapter.ts";
+import { setResearchForceOnce } from "../redis/scheduler.ts";
 
 export function createResearchRouter(eventBus: any) {
   const router = Router();

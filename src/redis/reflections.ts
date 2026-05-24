@@ -13,6 +13,23 @@ import { getRedisConnection } from "./connection.ts";
 export const REFLECTION_PREFIX = redisKeys.reflectionPrefix();
 
 /**
+ * Count the per-anchor reflection keys via SCAN. Used by the health probe
+ * to expose `reflectionKeys` without unbounded KEYS calls.
+ */
+export async function countReflectionKeys(): Promise<number> {
+  const r = getRedisConnection();
+  const pattern = redisKeys.reflection("*");
+  let cursor = "0";
+  let count = 0;
+  do {
+    const [next, batch] = await r.scan(cursor, "MATCH", pattern, "COUNT", 200);
+    cursor = next;
+    count += batch.length;
+  } while (cursor !== "0");
+  return count;
+}
+
+/**
  * Append a reflection to the global buffer list and cap at maxSize.
  */
 export async function pushReflection(json: string, maxSize: number): Promise<void> {
