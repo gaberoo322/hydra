@@ -50,6 +50,10 @@ _Avoid_: canary, soak (overloaded with deploy meanings)
 The structured, persisted alignment artifact (`src/design-concept.ts`, `hydra:design-concept:{anchorRef}`) that a code-writing subagent must produce — and an automated gate must accept — before any `dev_orch` / `dev_target` dispatch. Schema includes glossary terms grounded, glossary gaps, modules touched (with interface-impact and depth classification), invariants, rejected alternatives, Q&A trace, and prototype snippets. The same artifact is the ground truth for PR-time two-axis review (Standards + Spec). Defined by ADR-0008 (see epic #437). Phase A (issue #438) ships persistence + API only; autopilot wiring is Phase B, CI hook is Phase C.
 _Avoid_: design doc (overloaded), plan (informal), spec (overloaded with `src/specs.ts` — multi-cycle task decomposition, a different thing)
 
+**Reframe Queue**:
+The Redis-backed retry lane (`hydra:anchors:reframe-queue`) holding tasks that have been abandoned or have failed past the prior-failure retry cap. The planner gets a fresh diagnostic prompt for each item instead of looping forever on the same approach. Sits below kanban / work-queue / failing-tests in the anchor-selection priority chain; protected from indefinite shadowing by a capacity-floor cadence (`HYDRA_REFRAME_FLOOR_N`, default every 5 eligible cycles). NOT WIP-gated — bypasses the WIP cap because a reframe item already represents a stuck task. Owned end-to-end by `src/anchor-selection/reframe.ts` (maintenance + selection + starvation instrumentation). Issues #57, #233, #288, #377.
+_Avoid_: reframe lane (informal), retry queue (overloaded — distinct from prior-failures queue, which feeds it)
+
 **Operator-Required Intervention**:
 The closed list of categories where Hydra escalates to the operator instead of attempting autonomous remedy: credentials/secrets, external-account actions, Tier 0 changes, vision-level conflicts. Everything else Hydra researches and tries. Defined by ADR-0005.
 _Avoid_: blocker (overloaded), needs-human (informal)

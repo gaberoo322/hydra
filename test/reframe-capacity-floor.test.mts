@@ -100,7 +100,7 @@ describe("reframeFloorDecl.prepare — readiness (issue #377)", () => {
       "../src/anchor-selection/capacity-floors.ts"
     );
     const { recordReframePassedReason } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     await pushReframeItem("starved-reframe");
 
@@ -126,7 +126,7 @@ describe("reframeFloorDecl.buildAnchor — consume path (issue #377)", () => {
     const {
       recordReframePassedReason,
       getCyclesSinceReframeServed,
-    } = await import("../src/anchor-selection/reframe-starvation.ts");
+    } = await import("../src/anchor-selection/reframe.ts");
 
     await pushReframeItem("hot-reframe");
     for (let i = 0; i < 6; i++) await recordReframePassedReason("kanban_won");
@@ -174,7 +174,7 @@ describe("dispatchCapacityFloor — reframe floor wiring (issue #377)", () => {
       "../src/anchor-selection/capacity-floors.ts"
     );
     const { recordReframePassedReason } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
 
     await pushReframeItem("solo-reframe");
@@ -224,7 +224,7 @@ describe("Capacity-floors snapshot exposes the reframe floor (issue #377)", () =
       "../src/anchor-selection/capacity-floors.ts"
     );
     const { recordReframePassedReason } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     await recordReframePassedReason("kanban_won");
     await recordReframePassedReason("spec_won");

@@ -34,11 +34,9 @@ import {
   recordReframePassedReason,
   recordReframeServed,
   DEFAULT_REFRAME_FLOOR_N,
-} from "./reframe-starvation.ts";
-import {
   hasReframeCandidate,
   selectReframeAnchor,
-} from "./reframe-queue-tier.ts";
+} from "./reframe.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -331,7 +329,7 @@ export async function getCapacityFloorsSnapshot(
 ): Promise<CapacityFloorsSnapshot> {
   const cfg = loadCapacityFloorsConfig(env);
 
-  const { getReframeStarvationStats } = await import("./reframe-starvation.ts");
+  const { getReframeStarvationStats } = await import("./reframe.ts");
 
   const reframe = await getReframeStarvationStats().catch((err: any) => {
     console.error(`[capacity-floors] reframe starvation read failed: ${err.message}`);

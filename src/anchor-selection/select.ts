@@ -18,16 +18,14 @@ import { selectWorkQueueAnchor } from "./work-queue-tier.ts";
 import {
   selectReframeAnchor,
   hasReframeCandidate,
-} from "./reframe-queue-tier.ts";
-import { selectPriorFailureAnchor } from "./prior-failures-tier.ts";
-import { selectRegressionHuntAnchor } from "./regression-hunt-tier.ts";
-import { selectCodebaseHealthAnchor } from "./codebase-health-tier.ts";
-import { selectPrioritiesDocAnchor } from "./priorities-doc-tier.ts";
-import {
   recordReframePassedReason,
   recordReframeServed,
   type ReframePassedReason,
-} from "./reframe-starvation.ts";
+} from "./reframe.ts";
+import { selectPriorFailureAnchor } from "./prior-failures.ts";
+import { selectRegressionHuntAnchor } from "./regression-hunt-tier.ts";
+import { selectCodebaseHealthAnchor } from "./codebase-health-tier.ts";
+import { selectPrioritiesDocAnchor } from "./priorities-doc-tier.ts";
 import {
   dispatchCapacityFloor,
   defaultCapacityFloors,

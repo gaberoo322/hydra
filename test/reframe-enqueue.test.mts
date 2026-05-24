@@ -119,7 +119,7 @@ describe("trackAbandonment → reframe queue enqueue (issue #377)", () => {
       "../src/anchor-selection/capacity-floors.ts"
     );
     const { recordReframePassedReason } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
 
     const task = { title: "starved-then-served", taskId: "t-4", anchorType: "user-request" };

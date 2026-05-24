@@ -10,7 +10,7 @@
 // Sub-modules:
 //   - anchor-selection/constants.ts        — Redis keys, thresholds, key helpers
 //   - anchor-selection/drift-filter.ts     — pre-planner near-duplicate rejection
-//   - anchor-selection/reframe-queue.ts    — reframe queue maintenance
+//   - anchor-selection/reframe.ts          — reframe queue: maintenance, selection, starvation
 //   - anchor-selection/prior-failures.ts   — prior-failure escalation + persist
 //   - anchor-selection/abandonment.ts      — circuit breaker + processing cleanup
 //   - anchor-selection/low-confidence.ts   — perm-skip for dead-on-arrival anchors
@@ -46,8 +46,6 @@ import {
 import {
   pruneReframeQueue,
   getReframeQueueLen,
-} from "./anchor-selection/reframe-queue.ts";
-import {
   recordReframePassedReason,
   recordReframeServed,
   getCyclesSinceReframeServed,
@@ -58,7 +56,7 @@ import {
   _resetReframeStarvationForTests,
   type ReframePassedReason,
   type ReframeStarvationStats,
-} from "./anchor-selection/reframe-starvation.ts";
+} from "./anchor-selection/reframe.ts";
 import {
   escalateStalePriorFailures,
   storePriorFailure,

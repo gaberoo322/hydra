@@ -5,7 +5,7 @@ import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../r
 import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost-attribution.ts";
 import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
 import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost-surrogate.ts";
-import { getReframeStarvationStats } from "../anchor-selection/reframe-starvation.ts";
+import { getReframeStarvationStats } from "../anchor-selection/reframe.ts";
 import { REFRAME_QUEUE } from "../anchor-selection/constants.ts";
 
 /**
