@@ -31,7 +31,7 @@
  * The classifier is the fallback (and what the tests exercise).
  */
 
-import { getRedisConnection } from "./redis-adapter.ts";
+import { getRedisConnection } from "./redis/connection.ts";
 import { classifyChange } from "./tier-classifier.ts";
 
 // ---------------------------------------------------------------------------

@@ -20,9 +20,7 @@ const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2
 import { runResearchLoop } from "../research-loop.ts";
 import { getPerCycleCostCapUsd } from "../cost/cap.ts";
 import { getTargetName } from "../target-config.ts";
-import {
-  pushToWorkQueue,
-} from "../redis-adapter.ts";
+import { pushToWorkQueue } from "../redis/work-queue.ts";
 import {
   recordResearchEvent,
   getResearchEventCount24h, getBuildEventCount24h,
