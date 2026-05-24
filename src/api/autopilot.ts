@@ -31,20 +31,30 @@
 import { Router } from "express";
 import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
-import { redisKeys } from "../redis-keys.ts";
 import {
-  hashSet,
-  hashGetAll,
-  hashSetField,
-  hashIncrBy,
-  zAdd,
-  zRevRange,
-  expireKey,
   incrSchedulerCyclesRun,
   incrSchedulerCyclesMerged,
   incrSchedulerCyclesFailed,
-} from "../redis-adapter.ts";
-import { getRedisConnection } from "../redis/connection.ts";
+} from "../redis/scheduler.ts";
+import {
+  initCycleHash,
+  getCycleHash,
+  addCycleToIndex,
+  getCycleHashesBatch,
+} from "../redis/cycle-tracking.ts";
+import {
+  getAutopilotRun,
+  initAutopilotRun,
+  updateAutopilotRunFields,
+  setAutopilotRunField,
+  incrAutopilotRunField,
+  refreshAutopilotRunTTL,
+  addAutopilotRunToIndex,
+  listRecentAutopilotRunIds,
+  addAutopilotRunTurn,
+  hasAutopilotRunTurnAt,
+  listAutopilotRunTurnsDesc,
+} from "../redis/autopilot-runs.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
 
 // -----------------------------------------------------------------------------
@@ -168,7 +178,7 @@ export function createAutopilotRouter() {
       // record was filed by an earlier Phase 6 call — skip all writes.
       // (Avoids double-counting on autopilot retries; see issue #430 impl
       // notes about keying by autopilot turn ID / worktree branch.)
-      const existing = await hashGetAll(redisKeys.cycle(cycleId));
+      const existing = await getCycleHash(cycleId);
       if (existing && existing.status) {
         return res.json({ ok: true, cycleId, status: existing.status, deduped: true });
       }
@@ -190,19 +200,17 @@ export function createAutopilotRouter() {
       // 1. Per-cycle hash + cycle index. The hash is what `/api/cycle/history`
       //    surfaces today (via a KEYS scan in `src/cycle.ts`); the ZSET is
       //    the forward-compat index callers can paginate against.
-      await hashSet(
-        redisKeys.cycle(cycleId),
-        "status", status,
-        "startedAt", startedAt,
-        "completedAt", completedAt,
-        "source", source,
-        "total", String(total),
-        "completed", String(completed),
-        "failed", String(failed),
-        "abandoned", String(abandoned),
-      );
-      await expireKey(redisKeys.cycle(cycleId), CYCLE_TTL_SECONDS);
-      await zAdd(redisKeys.cycleIndex(), Date.now(), cycleId);
+      await initCycleHash(cycleId, {
+        status,
+        startedAt,
+        completedAt,
+        source,
+        total: String(total),
+        completed: String(completed),
+        failed: String(failed),
+        abandoned: String(abandoned),
+      }, CYCLE_TTL_SECONDS);
+      await addCycleToIndex(cycleId, Date.now());
 
       // 2. Per-cycle metric — feeds `/api/metrics` and the rolling
       //    mergeRateWindow in /scheduler/status.
@@ -286,31 +294,28 @@ export function createAutopilotRouter() {
 
       // Idempotency — if run row exists and is `running` (or any status with
       // a populated `started` field), skip the write. Re-POST is a no-op.
-      const existing = await hashGetAll(redisKeys.autopilotRun(runId));
+      const existing = await getAutopilotRun(runId);
       if (existing && existing.started) {
         return res.json({ ok: true, run_id: runId, deduped: true });
       }
 
-      await hashSet(
-        redisKeys.autopilotRun(runId),
-        "run_id", runId,
-        "started", started,
-        "started_epoch", String(startedEpoch),
-        "status", "running",
-        "trigger", trigger,
-        "pid", String(pid),
-        "limits", JSON.stringify(limits),
-        "turns", "0",
-        "dispatches", "0",
-        "cumulative_tokens", "0",
-        "idle_turns", "0",
-        "last_heartbeat_epoch", String(startedEpoch),
-      );
-      await expireKey(redisKeys.autopilotRun(runId), RUN_TTL_SECONDS);
-      await zAdd(redisKeys.autopilotRunsIndex(), startedEpoch, runId);
-      // Index doesn't natively TTL — refresh expiry so the ZSET tracks the
+      await initAutopilotRun(runId, {
+        run_id: runId,
+        started,
+        started_epoch: String(startedEpoch),
+        status: "running",
+        trigger,
+        pid: String(pid),
+        limits: JSON.stringify(limits),
+        turns: "0",
+        dispatches: "0",
+        cumulative_tokens: "0",
+        idle_turns: "0",
+        last_heartbeat_epoch: String(startedEpoch),
+      }, RUN_TTL_SECONDS);
+      // The index TTL is refreshed alongside the row so the ZSET tracks the
       // 7d retention of the underlying hashes.
-      await expireKey(redisKeys.autopilotRunsIndex(), RUN_TTL_SECONDS);
+      await addAutopilotRunToIndex(runId, startedEpoch, RUN_TTL_SECONDS);
 
       return res.json({ ok: true, run_id: runId, deduped: false });
     } catch (err: any) {
@@ -337,7 +342,7 @@ export function createAutopilotRouter() {
         return res.status(400).json({ error: "Missing run_id" });
       }
 
-      const existing = await hashGetAll(redisKeys.autopilotRun(runId));
+      const existing = await getAutopilotRun(runId);
       if (!existing || !existing.started) {
         return res.status(404).json({ error: `unknown run_id: ${runId}` });
       }
@@ -355,14 +360,12 @@ export function createAutopilotRouter() {
       );
       const exitCode = body.exit_code !== undefined ? numberOrDefault(body.exit_code, 0) : 0;
 
-      await hashSet(
-        redisKeys.autopilotRun(runId),
-        "status", "ended",
-        "term_reason", termReason,
-        "ended_epoch", String(endedEpoch),
-        "exit_code", String(exitCode),
-      );
-      await expireKey(redisKeys.autopilotRun(runId), RUN_TTL_SECONDS);
+      await updateAutopilotRunFields(runId, {
+        status: "ended",
+        term_reason: termReason,
+        ended_epoch: String(endedEpoch),
+        exit_code: String(exitCode),
+      }, RUN_TTL_SECONDS);
 
       return res.json({
         ok: true,
@@ -423,19 +426,13 @@ export function createAutopilotRouter() {
       }
       const epoch = numberOrDefault(body.epoch, Math.floor(Date.now() / 1000));
 
-      const runRow = await hashGetAll(redisKeys.autopilotRun(runId));
+      const runRow = await getAutopilotRun(runId);
       if (!runRow || !runRow.started) {
         return res.status(404).json({ error: `unknown run_id: ${runId}` });
       }
 
       // Idempotency check — has this (run_id, turn_n) already been written?
-      const r = getRedisConnection();
-      const existingAtScore: string[] = await r.zrangebyscore(
-        redisKeys.autopilotRunTurns(runId),
-        turnN,
-        turnN,
-      );
-      if (existingAtScore && existingAtScore.length > 0) {
+      if (await hasAutopilotRunTurnAt(runId, turnN)) {
         return res.json({ ok: true, run_id: runId, turn_n: turnN, deduped: true });
       }
 
@@ -467,30 +464,21 @@ export function createAutopilotRouter() {
       });
 
       // 1. Append the immutable turn row.
-      await zAdd(redisKeys.autopilotRunTurns(runId), turnN, turnMember);
-      await expireKey(redisKeys.autopilotRunTurns(runId), RUN_TTL_SECONDS);
+      await addAutopilotRunTurn(runId, turnN, turnMember, RUN_TTL_SECONDS);
 
       // 2. Counter updates — single-field writes so we don't clobber slice-1
       //    fields (PR #522 design promise). HINCRBY for additive counters.
       const currentTurns = Number(runRow.turns || "0");
       if (turnN > currentTurns) {
-        await hashSetField(redisKeys.autopilotRun(runId), "turns", String(turnN));
+        await setAutopilotRunField(runId, "turns", String(turnN));
       }
       if (dispatchCount > 0) {
-        await hashIncrBy(redisKeys.autopilotRun(runId), "dispatches", dispatchCount);
+        await incrAutopilotRunField(runId, "dispatches", dispatchCount);
       }
-      await hashSetField(
-        redisKeys.autopilotRun(runId),
-        "cumulative_tokens",
-        String(tokensAfter),
-      );
-      await hashSetField(redisKeys.autopilotRun(runId), "idle_turns", String(idleTurns));
-      await hashSetField(
-        redisKeys.autopilotRun(runId),
-        "last_heartbeat_epoch",
-        String(epoch),
-      );
-      await expireKey(redisKeys.autopilotRun(runId), RUN_TTL_SECONDS);
+      await setAutopilotRunField(runId, "cumulative_tokens", String(tokensAfter));
+      await setAutopilotRunField(runId, "idle_turns", String(idleTurns));
+      await setAutopilotRunField(runId, "last_heartbeat_epoch", String(epoch));
+      await refreshAutopilotRunTTL(runId, RUN_TTL_SECONDS);
 
       return res.json({
         ok: true,
@@ -536,14 +524,14 @@ export function createAutopilotRouter() {
       );
 
       // ZREVRANGE 0 limit-1 → most recent N by started_epoch score.
-      const runIds = await zRevRange(redisKeys.autopilotRunsIndex(), 0, limit - 1);
+      const runIds = await listRecentAutopilotRunIds(limit);
       if (!runIds || runIds.length === 0) {
         return res.json({ runs: [] });
       }
 
       const digests: Array<Record<string, unknown>> = [];
       for (const runId of runIds) {
-        const row = await hashGetAll(redisKeys.autopilotRun(runId));
+        const row = await getAutopilotRun(runId);
         if (!row || !row.started) continue; // index ahead of hash (TTL race)
         // Apply the same read-time sweeper used on /runs/current — dead-pid
         // `running` rows in history must show as killed/crash, not running.
@@ -583,12 +571,12 @@ export function createAutopilotRouter() {
   router.get("/autopilot/runs/current", async (_req, res) => {
     try {
       // ZREVRANGE 0 0 → most recent by started_epoch score.
-      const recent = await zRevRange(redisKeys.autopilotRunsIndex(), 0, 0);
+      const recent = await listRecentAutopilotRunIds(1);
       if (!recent || recent.length === 0) {
         return res.status(404).json({ error: "no autopilot runs recorded yet" });
       }
       const runId = recent[0];
-      const row = await hashGetAll(redisKeys.autopilotRun(runId));
+      const row = await getAutopilotRun(runId);
       if (!row || !row.started) {
         // Index ahead of the hash (TTL race) — treat as none.
         return res.status(404).json({ error: "no autopilot runs recorded yet" });
@@ -645,7 +633,7 @@ export function createAutopilotRouter() {
       }
       // Validate runId exists in the runs index — rejects unknown ids
       // (prevents probing for arbitrary state files via crafted runIds).
-      const row = await hashGetAll(redisKeys.autopilotRun(runId));
+      const row = await getAutopilotRun(runId);
       if (!row || !row.started) {
         return res.status(404).json({ error: `unknown run_id: ${runId}` });
       }
@@ -708,7 +696,7 @@ export function createAutopilotRouter() {
       if (!runId) {
         return res.status(400).json({ error: "Missing runId" });
       }
-      const row = await hashGetAll(redisKeys.autopilotRun(runId));
+      const row = await getAutopilotRun(runId);
       if (!row || !row.started) {
         return res.status(404).json({ error: `unknown run_id: ${runId}` });
       }
@@ -767,7 +755,7 @@ export function createAutopilotRouter() {
         return res.status(400).json({ error: "use GET /autopilot/runs/current" });
       }
 
-      const row = await hashGetAll(redisKeys.autopilotRun(runId));
+      const row = await getAutopilotRun(runId);
       if (!row || !row.started) {
         return res.status(404).json({ error: `unknown run_id: ${runId}` });
       }
@@ -1071,16 +1059,7 @@ export async function fetchTurnsWithJoins(
   runId: string,
   limit: number,
 ): Promise<Array<Record<string, unknown>>> {
-  const r = getRedisConnection();
-  // ZREVRANGEBYSCORE +inf -inf LIMIT 0 N → most recent turn_n first.
-  const raw: string[] = await r.zrevrangebyscore(
-    redisKeys.autopilotRunTurns(runId),
-    "+inf",
-    "-inf",
-    "LIMIT",
-    0,
-    limit,
-  );
+  const raw = await listAutopilotRunTurnsDesc(runId, limit);
   if (!raw || raw.length === 0) return [];
 
   // Parse + collect the cycle IDs we need to look up. Each dispatch action
@@ -1115,24 +1094,8 @@ export async function fetchTurnsWithJoins(
     turns.push(parsed);
   }
 
-  // Batch-fetch all cycle hashes in a single pipeline.
-  const cycleMap: Record<string, Record<string, string>> = {};
-  if (cycleIdsToFetch.length > 0) {
-    const pipeline = r.pipeline();
-    const uniqueIds = Array.from(new Set(cycleIdsToFetch));
-    for (const cid of uniqueIds) {
-      pipeline.hgetall(redisKeys.cycle(cid));
-    }
-    const results: any[] = await pipeline.exec();
-    uniqueIds.forEach((cid, i) => {
-      const entry = results?.[i];
-      // ioredis pipeline result shape: [err, value]
-      const hash = entry && Array.isArray(entry) ? entry[1] : null;
-      if (hash && typeof hash === "object" && Object.keys(hash).length > 0) {
-        cycleMap[cid] = hash as Record<string, string>;
-      }
-    });
-  }
+  // Batch-fetch all cycle hashes (pipelined inside the accessor).
+  const cycleMap = await getCycleHashesBatch(cycleIdsToFetch);
 
   // Attach outcomes onto the dispatch actions and strip the temporary _cycleId.
   for (const turn of turns) {
@@ -1207,10 +1170,11 @@ export async function sweepRunIfDead(
     Number(row.last_heartbeat_epoch || "0") || Number(row.started_epoch || "0") ||
     Math.floor(Date.now() / 1000);
 
-  await hashSetField(redisKeys.autopilotRun(runId), "status", "killed");
-  await hashSetField(redisKeys.autopilotRun(runId), "term_reason", "crash");
-  await hashSetField(redisKeys.autopilotRun(runId), "ended_epoch", String(endedEpoch));
-  await expireKey(redisKeys.autopilotRun(runId), RUN_TTL_SECONDS);
+  await updateAutopilotRunFields(runId, {
+    status: "killed",
+    term_reason: "crash",
+    ended_epoch: String(endedEpoch),
+  }, RUN_TTL_SECONDS);
 
   const mutated = {
     ...row,

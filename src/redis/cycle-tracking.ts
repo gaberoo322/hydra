@@ -131,3 +131,41 @@ export async function releaseMergeLock(): Promise<void> {
   const r = getRedisConnection();
   await r.del(redisKeys.mergeLock());
 }
+
+// ---------------------------------------------------------------------------
+// Cycle index (ZSET scored by completed-at epoch)
+// ---------------------------------------------------------------------------
+
+/** Add a cycle to the recent-cycles ZSET index. */
+export async function addCycleToIndex(cycleId: string, score: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.zadd(redisKeys.cycleIndex(), score, cycleId);
+}
+
+/**
+ * Pipelined fetch of multiple cycle hashes — used by autopilot's
+ * /runs/current to attach outcomes onto dispatch actions in one Redis
+ * round-trip rather than N. Returns a map of cycleId → hash; cycles
+ * with no recorded hash are absent from the map.
+ */
+export async function getCycleHashesBatch(
+  cycleIds: string[],
+): Promise<Record<string, Record<string, string>>> {
+  if (cycleIds.length === 0) return {};
+  const r = getRedisConnection();
+  const uniqueIds = Array.from(new Set(cycleIds));
+  const pipeline = r.pipeline();
+  for (const cid of uniqueIds) {
+    pipeline.hgetall(redisKeys.cycle(cid));
+  }
+  const results: any[] = await pipeline.exec();
+  const out: Record<string, Record<string, string>> = {};
+  uniqueIds.forEach((cid, i) => {
+    const entry = results?.[i];
+    const hash = entry && Array.isArray(entry) ? entry[1] : null;
+    if (hash && typeof hash === "object" && Object.keys(hash).length > 0) {
+      out[cid] = hash as Record<string, string>;
+    }
+  });
+  return out;
+}
