@@ -12,22 +12,20 @@
 //     next retryable item.
 
 import {
-  listRange,
-  listRPush,
-  listRem,
-  listLPop,
-  listLen,
-  hashGetAll,
-  keyExists,
-} from "../redis-adapter.ts";
+  appendPriorFailure,
+  getPriorFailures,
+  getPriorFailuresLen,
+  getTaskHash,
+  popOldestPriorFailure,
+  pushReframeItem,
+  removePriorFailure,
+  taskHashExists,
+} from "../redis/anchors.ts";
 import { invalidatePlanCacheForAnchor } from "../plan-cache.ts";
 import {
-  REFRAME_QUEUE,
-  PRIOR_FAILURES_KEY,
   PRIOR_FAILURE_AGE_LIMIT_MS,
   PRIOR_FAILURE_CAP,
   MAX_PRIOR_FAILURE_RETRIES,
-  taskKey,
 } from "./constants.ts";
 
 /**
@@ -36,8 +34,7 @@ import {
  * item, so stale items are cleaned up every cycle.
  */
 export async function escalateStalePriorFailures(): Promise<number> {
-  const key = PRIOR_FAILURES_KEY;
-  const all = await listRange(key, 0, -1);
+  const all = await getPriorFailures();
   if (all.length === 0) return 0;
 
   const now = Date.now();
@@ -49,7 +46,7 @@ export async function escalateStalePriorFailures(): Promise<number> {
       const age = now - new Date(item.timestamp).getTime();
       if (age > PRIOR_FAILURE_AGE_LIMIT_MS) {
         // Escalate to reframe queue with age reason
-        await listRPush(REFRAME_QUEUE, JSON.stringify({
+        await pushReframeItem(JSON.stringify({
           originalTaskId: item.taskId,
           originalTitle: item.title || item.taskId,
           originalDescription: item.description || "",
@@ -65,7 +62,7 @@ export async function escalateStalePriorFailures(): Promise<number> {
           escalationSource: "prior-failure-age-limit",
           escalationReason: `Auto-escalated: item aged ${Math.round(age / 3600000)}h, exceeds ${PRIOR_FAILURE_AGE_LIMIT_MS / 3600000}h limit`,
         }));
-        await listRem(key, 1, raw);
+        await removePriorFailure(raw);
         escalated++;
         console.log(`[ControlLoop] Prior-failure "${item.taskId}" auto-escalated to reframe (age: ${Math.round(age / 3600000)}h)`);
       }
@@ -103,7 +100,7 @@ export async function storePriorFailure(
   // Before issue #93, the popped item's retryCount was lost because selectAnchor removed it
   // from the queue before storePriorFailure scanned. Now we accept priorRetryCount from the
   // caller so the count accumulates correctly.
-  const existing = await listRange(PRIOR_FAILURES_KEY, 0, -1);
+  const existing = await getPriorFailures();
   const queueMatches = existing.filter(raw => {
     try { return JSON.parse(raw).taskId === taskId; } catch { /* intentional: unparseable prior-failure entry is not a match */ return false; }
   }).length;
@@ -111,7 +108,7 @@ export async function storePriorFailure(
 
   // Read task hash now — embed title/description in the prior-failure entry so it
   // remains self-contained after the task hash expires (7-day TTL). (issue #188)
-  const task = await hashGetAll(taskKey(taskId));
+  const task = await getTaskHash(taskId);
 
   if (priorAttempts >= MAX_PRIOR_FAILURE_RETRIES) {
     // Escalate to reframe queue — planner will diagnose and rewrite the task
@@ -122,7 +119,7 @@ export async function storePriorFailure(
       .map(raw => { try { return JSON.parse(raw); } catch { /* intentional: drop unparseable history entries */ return null; } })
       .filter(f => f?.taskId === taskId);
 
-    await listRPush(REFRAME_QUEUE, JSON.stringify({
+    await pushReframeItem(JSON.stringify({
       originalTaskId: taskId,
       originalTitle: task?.title || taskId,
       originalDescription: task?.description || "",
@@ -142,7 +139,7 @@ export async function storePriorFailure(
     return;
   }
 
-  await listRPush(PRIOR_FAILURES_KEY, JSON.stringify({
+  await appendPriorFailure(JSON.stringify({
     taskId,
     title: task?.title || "",
     description: task?.description || "",
@@ -154,15 +151,15 @@ export async function storePriorFailure(
 
   // Enforce hard cap — escalate oldest items when queue exceeds limit (issue #18)
   try {
-    const queueLen = await listLen(PRIOR_FAILURES_KEY);
+    const queueLen = await getPriorFailuresLen();
     if (queueLen > PRIOR_FAILURE_CAP) {
       const overflow = queueLen - PRIOR_FAILURE_CAP;
       for (let i = 0; i < overflow; i++) {
-        const raw = await listLPop(PRIOR_FAILURES_KEY);
+        const raw = await popOldestPriorFailure();
         if (!raw) break;
         try {
           const item = JSON.parse(raw);
-          await listRPush(REFRAME_QUEUE, JSON.stringify({
+          await pushReframeItem(JSON.stringify({
             originalTaskId: item.taskId,
             originalTitle: item.title || item.taskId,
             originalDescription: item.description || "",
@@ -220,7 +217,7 @@ export async function selectPriorFailureAnchor(): Promise<PriorFailureAnchor | n
   // Items with retryCount >= MAX_PRIOR_FAILURE_RETRIES are escalated to reframe immediately
   // instead of burning another cycle.
   // Items whose task hash has expired are pruned silently (issue #188).
-  const allPriorFailures = await listRange(PRIOR_FAILURES_KEY, 0, -1);
+  const allPriorFailures = await getPriorFailures();
   for (const raw of allPriorFailures) {
     try {
       const failure = JSON.parse(raw);
@@ -231,9 +228,9 @@ export async function selectPriorFailureAnchor(): Promise<PriorFailureAnchor | n
       // check the self-contained fields first, then fall back to the task hash.
       const hasContext = !!(failure.title && failure.description);
       if (!hasContext) {
-        const taskExists = await keyExists(taskKey(failure.taskId));
+        const taskExists = await taskHashExists(failure.taskId);
         if (!taskExists) {
-          await listRem(PRIOR_FAILURES_KEY, 1, raw);
+          await removePriorFailure(raw);
           console.log(`[ControlLoop] Pruned orphan prior-failure "${failure.taskId}" — task hash expired, no embedded context`);
           continue;
         }
@@ -241,8 +238,8 @@ export async function selectPriorFailureAnchor(): Promise<PriorFailureAnchor | n
 
       if ((failure.retryCount || 0) >= MAX_PRIOR_FAILURE_RETRIES) {
         // Exceeded retry cap — escalate to reframe, don't retry
-        await listRem(PRIOR_FAILURES_KEY, 1, raw);
-        await listRPush(REFRAME_QUEUE, JSON.stringify({
+        await removePriorFailure(raw);
+        await pushReframeItem(JSON.stringify({
           originalTaskId: failure.taskId,
           originalTitle: failure.title || failure.taskId,
           originalDescription: failure.description || "",
@@ -262,7 +259,7 @@ export async function selectPriorFailureAnchor(): Promise<PriorFailureAnchor | n
         continue;
       }
       // Found a retryable item — pop it and return as anchor
-      await listRem(PRIOR_FAILURES_KEY, 1, raw);
+      await removePriorFailure(raw);
       return {
         type: "prior-failure",
         reference: failure.taskId,
@@ -271,7 +268,7 @@ export async function selectPriorFailureAnchor(): Promise<PriorFailureAnchor | n
       };
     } catch (err: any) {
       console.error(`[ControlLoop] Corrupt prior-failure in queue: ${err.message}. Removing.`);
-      await listRem(PRIOR_FAILURES_KEY, 1, raw);
+      await removePriorFailure(raw);
     }
   }
 

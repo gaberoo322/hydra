@@ -7,14 +7,12 @@
 // still in its cooldown window.
 
 import {
-  getString,
-  setString,
-  zRevRange,
   getCycleMetrics,
-  getRealityReport,
-  getRecentReportIds,
-} from "../redis-adapter.ts";
-import { METRICS_INDEX_KEY, REGRESSION_HUNT_LAST_KEY } from "./constants.ts";
+  getRecentMetricIds,
+  getRegressionHuntLast,
+  setRegressionHuntLast,
+} from "../redis/anchors.ts";
+import { getRealityReport, getRecentReportIds } from "../redis/reality-reports.ts";
 
 export interface RegressionHuntAnchor {
   type: "regression-hunt";
@@ -29,13 +27,13 @@ const HUNT_COOLDOWN_SECONDS = 86400 * 3; // 3 days
 
 export async function selectRegressionHuntAnchor(): Promise<RegressionHuntAnchor | null> {
   try {
-    const recentMetrics = await zRevRange(METRICS_INDEX_KEY, 0, 9);
+    const recentMetrics = await getRecentMetricIds(10);
     let recentMergeCount = 0;
     for (const id of recentMetrics) {
       const raw = await getCycleMetrics(id);
       if (parseInt(raw.tasksMerged || "0") > 0) recentMergeCount++;
     }
-    const lastRegressionHunt = await getString(REGRESSION_HUNT_LAST_KEY);
+    const lastRegressionHunt = await getRegressionHuntLast();
     if (recentMergeCount >= HUNT_INTERVAL && !lastRegressionHunt) {
       // Time for a regression hunt
       console.log(`[ControlLoop] Regression hunt triggered (${recentMergeCount} merges since last hunt)`);
@@ -54,7 +52,7 @@ export async function selectRegressionHuntAnchor(): Promise<RegressionHuntAnchor
         } catch { /* intentional: skip unparseable reality report when scanning merged tasks */ }
       }
 
-      await setString(REGRESSION_HUNT_LAST_KEY, new Date().toISOString(), HUNT_COOLDOWN_SECONDS);
+      await setRegressionHuntLast(new Date().toISOString(), HUNT_COOLDOWN_SECONDS);
 
       return {
         type: "regression-hunt",

@@ -7,33 +7,24 @@
 // Also handles clearing the per-cycle processing-queue marker.
 
 import {
-  listRem,
-  listRPush,
-  delKey,
-  incrKey,
-  expireKey,
-} from "../redis-adapter.ts";
+  clearAbandonment,
+  incrAbandonment,
+  pushReframeItem,
+  removeFromProcessingQueue,
+} from "../redis/anchors.ts";
 import { blockByTitle } from "../backlog/lanes.ts";
-import {
-  REFRAME_QUEUE,
-  PROCESSING_QUEUE,
-  ABANDONMENT_COUNTER_TTL,
-  MAX_CONSECUTIVE_ABANDONMENTS,
-  anchorKey,
-} from "./constants.ts";
+import { MAX_CONSECUTIVE_ABANDONMENTS } from "./constants.ts";
 
 export async function trackAbandonment(
   anchorRef: string,
   task: any,
   reason: string,
 ): Promise<boolean> {
-  const key = anchorKey(anchorRef);
-  const count = await incrKey(key);
-  await expireKey(key, ABANDONMENT_COUNTER_TTL);
+  const count = await incrAbandonment(anchorRef);
 
   if (count >= MAX_CONSECUTIVE_ABANDONMENTS) {
     console.log(`[ControlLoop] Circuit breaker: anchor "${anchorRef}" abandoned ${count}x — escalating to reframe queue`);
-    await listRPush(REFRAME_QUEUE, JSON.stringify({
+    await pushReframeItem(JSON.stringify({
       originalTaskId: task.taskId || "unknown",
       originalTitle: task.title || anchorRef,
       originalDescription: task.description || "",
@@ -68,14 +59,14 @@ export async function trackAbandonment(
       console.log(`[ControlLoop] No Kanban item to block for "${anchorRef}" (no match in inProgress/queued/backlog)`);
     }
     // Reset counter so the reframe gets one clean shot
-    await delKey(key);
+    await clearAbandonment(anchorRef);
     return true; // escalated
   }
   return false; // not yet escalated
 }
 
 export async function clearAbandonmentCounter(anchorRef: string): Promise<void> {
-  await delKey(anchorKey(anchorRef));
+  await clearAbandonment(anchorRef);
 }
 
 /**
@@ -86,7 +77,7 @@ export async function clearAbandonmentCounter(anchorRef: string): Promise<void> 
 export async function clearProcessingItem(anchor: any): Promise<void> {
   if (anchor?._workQueueRaw) {
     try {
-      await listRem(PROCESSING_QUEUE, 1, anchor._workQueueRaw);
+      await removeFromProcessingQueue(anchor._workQueueRaw);
     } catch (err: any) {
       console.error(`[ControlLoop] Failed to clear processing queue item: ${err.message}`);
     }

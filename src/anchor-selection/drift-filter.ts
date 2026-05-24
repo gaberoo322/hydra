@@ -10,7 +10,7 @@
 //   - `findRecentDriftMatch`   — scan recent cycles for the first match above threshold
 //   - `isAnchorDriftDuplicate` — the pre-filter the selector calls
 
-import { getRecentMetricIds, getCycleMetrics } from "../redis-adapter.ts";
+import { getRecentMetricIds, getCycleMetrics } from "../redis/cycle-metrics.ts";
 import {
   DRIFT_PREFILTER_LOOKBACK,
   DRIFT_PREFILTER_THRESHOLD,

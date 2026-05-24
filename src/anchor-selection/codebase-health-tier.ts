@@ -8,8 +8,8 @@
 //   - circuit-breaker counter > 0 OR permanent-skip >= 2 (issue #147)
 //   - confidence gate: no failing tests AND no type errors (issue #147)
 
-import { getString, isHealthAnchorResolved } from "../redis-adapter.ts";
-import { PERM_SKIP_PREFIX, anchorKey } from "./constants.ts";
+import { readAbandonment, readPermSkip } from "../redis/anchors.ts";
+import { isHealthAnchorResolved } from "../redis/health-anchor.ts";
 import { markLowConfidenceSkip } from "./low-confidence.ts";
 
 export interface CodebaseHealthAnchor {
@@ -42,11 +42,8 @@ export async function selectCodebaseHealthAnchor(
         continue;
       }
       // Check both the circuit-breaker counter AND a permanent skip counter
-      const abandonCount = parseInt(
-        await getString(anchorKey(ref)) || "0",
-      );
-      const permSkipKey = PERM_SKIP_PREFIX + (ref.replace(/\s+/g, "-").slice(0, 120));
-      const permSkipCount = parseInt(await getString(permSkipKey) || "0");
+      const abandonCount = await readAbandonment(ref);
+      const permSkipCount = await readPermSkip(ref);
       if (abandonCount > 0 || permSkipCount >= 2) {
         console.log(`[ControlLoop] Skipping codebase-health issue "${ref}" (abandoned=${abandonCount}, permSkip=${permSkipCount}) — falling through`);
         continue;
