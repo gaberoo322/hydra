@@ -16,7 +16,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getContext } from "./learning.ts";
-import { getCumulativeAccomplishments } from "./metrics.ts";
+import { getCumulativeAccomplishments } from "./metrics/aggregate.ts";
 import { summarizeForPrompt, getDiff } from "./grounding.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { getTargetWorkspace } from "./target-config.ts";

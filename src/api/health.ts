@@ -6,7 +6,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-import { getMetricsTrend, getAggregateStats } from "../metrics.ts";
+import { getMetricsTrend } from "../metrics/trend.ts";
+import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler/loop.ts";
 import { getBacklogCounts } from "../backlog/reads.ts";
 import { redisKeys } from "../redis-keys.ts";

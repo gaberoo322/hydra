@@ -13,7 +13,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { getMetricsTrend } from "./metrics.ts";
+import { getMetricsTrend } from "./metrics/trend.ts";
 import {
   getRecentResearchIds, getResearchReport as getResearchReportAdapter,
   getWorkQueueItems, removeFromWorkQueue,

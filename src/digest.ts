@@ -286,7 +286,8 @@ export async function sendDigestNow() {
  * Build a weekly progress summary for the operator.
  */
 export async function buildWeeklySummary() {
-  const { getMetricsTrend, getFixFeatureRatio } = await import("./metrics.ts");
+  const { getMetricsTrend } = await import("./metrics/trend.ts");
+  const { getFixFeatureRatio } = await import("./metrics/aggregate.ts");
   const { getCurrentMilestoneProgress, getBacklogCounts } = await import("./backlog/reads.ts");
 
   const trend = await getMetricsTrend(50);

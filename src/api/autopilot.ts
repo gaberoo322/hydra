@@ -45,7 +45,7 @@ import {
   incrSchedulerCyclesFailed,
 } from "../redis-adapter.ts";
 import { getRedisConnection } from "../redis/connection.ts";
-import { recordCycleMetrics } from "../metrics.ts";
+import { recordCycleMetrics } from "../metrics/record.ts";
 
 // -----------------------------------------------------------------------------
 // Slice 3 (issue #499) — log-tail + journal endpoints.

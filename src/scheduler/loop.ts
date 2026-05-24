@@ -10,7 +10,7 @@
 
 import * as Sentry from "@sentry/node";
 import { sendNotification } from "../notify.ts";
-import { getMetricsTrend } from "../metrics.ts";
+import { getMetricsTrend } from "../metrics/trend.ts";
 import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
 import { promoteToQueued, pruneOldDoneItems } from "../backlog/lanes.ts";
 import { reapStaleClaims } from "../backlog/reaper.ts";
