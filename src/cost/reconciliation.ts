@@ -75,8 +75,7 @@
  * Per CLAUDE.md conventions:
  *   - Tier 3 (new module, new API route, external file I/O). Operator merges.
  *   - Never throws — returns `{ ok: false, reason }` on every failure path.
- *   - Inline Redis access via `getRedisConnection()` per the holdback.ts
- *     precedent — redis-adapter.ts is Tier 0, frozen.
+ *   - Typed Redis access via the `src/redis/cost.ts` seam per ADR-0009.
  *   - All `catch` blocks `console.error` with context or are annotated
  *     `/* intentional: ... *\/`.
  *
@@ -88,11 +87,22 @@
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { homedir } from "node:os";
 
 import { MODEL_PRICING } from "../llm/pricing.ts";
-import { getRedisConnection } from "../redis-adapter.ts";
+import {
+  RECONCILIATION_KILL_FLAG_KEY,
+  getReconciliationRecord,
+  getRecentReconciliationDates,
+  isReconciliationDisabled as isReconciliationKillSwitchOn,
+  saveReconciliationRecord,
+  sumCycleCostsInRange,
+} from "../redis/cost.ts";
+
+/** Re-exported for the test surface that asserts the kill-flag key shape. */
+export const KILL_FLAG_KEY = RECONCILIATION_KILL_FLAG_KEY;
+import { getDailySpendRaw } from "../redis/scheduler.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -101,28 +111,12 @@ import { getRedisConnection } from "../redis-adapter.ts";
 /** Redis TTL for reconciliation records: 90 days. */
 export const RECONCILIATION_TTL_SECONDS = 60 * 60 * 24 * 90;
 
-/** Kill-switch flag (planned for the scheduler-hook follow-up; checked here
- *  defensively so the future scheduler wire-up is purely additive). */
-export const KILL_FLAG_KEY = "hydra:cost-reconciliation:disabled";
-
 /** Threshold for declaring two cost figures divergent. Used to flag the
  *  result; the future scheduler hook will emit an event on the same flag. */
 export const DIVERGENCE_THRESHOLD = 0.10; // 10%
 
 /** Maximum number of recent reconciliation records returned by the read API. */
 export const MAX_HISTORY_DAYS = 30;
-
-// ---------------------------------------------------------------------------
-// Redis key generators (inlined per holdback.ts precedent)
-// ---------------------------------------------------------------------------
-
-function reconciliationKey(date: string): string {
-  return `hydra:cost:reconciliation:${date}`;
-}
-
-function reconciliationIndexKey(): string {
-  return "hydra:cost:reconciliation:index";
-}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -382,9 +376,7 @@ export function aggregateByModel(sessions: SessionAggregate[]): ByModelUsage[] {
 
 export async function isReconciliationDisabled(): Promise<boolean> {
   try {
-    const r = getRedisConnection();
-    const v = await r.get(KILL_FLAG_KEY);
-    return v === "1" || v === "true";
+    return await isReconciliationKillSwitchOn();
   } catch (err: any) {
     /* intentional: if Redis is unreachable, treat as disabled so a future
        scheduler hook doesn't loop on broken infra. */
@@ -503,8 +495,7 @@ export async function scanCodexLogsForDate(date: string): Promise<CodexLogScan &
  */
 async function getSchedulerDailySpendForDate(date: string): Promise<number | null> {
   try {
-    const r = getRedisConnection();
-    const raw = await r.get("hydra:scheduler:daily-spend");
+    const raw = await getDailySpendRaw();
     if (!raw) return null;
     let parsed: any;
     try { parsed = JSON.parse(raw); } catch { return null; }
@@ -529,21 +520,7 @@ async function getMetricsCostForDate(date: string): Promise<number | null> {
   const startMs = Date.UTC(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10), 0, 0, 0, 0);
   const endMs = startMs + 24 * 60 * 60 * 1000 - 1;
   try {
-    const r = getRedisConnection();
-    const cycleIds = await r.zrangebyscore("hydra:metrics:index", startMs, endMs);
-    if (!Array.isArray(cycleIds) || cycleIds.length === 0) return 0;
-    let microSum = 0;
-    for (const cid of cycleIds) {
-      try {
-        const v = await r.hget(`hydra:cycle:${cid}:costs`, "costMicrodollars");
-        if (v) {
-          const n = parseInt(v, 10);
-          if (Number.isFinite(n)) microSum += n;
-        }
-      } catch (err: any) {
-        console.error(`[cost-reconciliation] cycle-cost read failed for ${cid}: ${err?.message || String(err)}`);
-      }
-    }
+    const microSum = await sumCycleCostsInRange(startMs, endMs);
     return Math.round(microSum) / 1_000_000;
   } catch (err: any) {
     console.error(`[cost-reconciliation] metrics aggregate read failed: ${err?.message || String(err)}`);
@@ -621,14 +598,12 @@ export async function reconcileDailyCosts(date: string): Promise<ReconciliationR
   // Persist. A Redis write failure does not invalidate the in-memory result
   // — callers (manual run, future scheduler hook) still see ok=true.
   try {
-    const r = getRedisConnection();
-    await r.set(reconciliationKey(date), JSON.stringify(result), "EX", RECONCILIATION_TTL_SECONDS);
     // ZSet score = epoch-ms of the calendar date so range scans (last N days)
     // are O(log N). Using Date.UTC keeps the score stable regardless of when
     // the run actually happens.
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date)!;
     const score = Date.UTC(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
-    await r.zadd(reconciliationIndexKey(), score, date);
+    await saveReconciliationRecord(date, JSON.stringify(result), RECONCILIATION_TTL_SECONDS, score);
   } catch (err: any) {
     console.error(`[cost-reconciliation] redis persist failed for ${date}: ${err?.message || String(err)}`);
     // Don't flip ok=false — the analysis succeeded; persistence is a separate
@@ -647,13 +622,12 @@ export async function reconcileDailyCosts(date: string): Promise<ReconciliationR
 export async function getReconciliationHistory(limit: number = MAX_HISTORY_DAYS): Promise<ReconciliationResult[]> {
   const capped = Math.min(Math.max(1, Math.floor(limit)), MAX_HISTORY_DAYS);
   try {
-    const r = getRedisConnection();
-    const dates = await r.zrevrange(reconciliationIndexKey(), 0, capped - 1);
+    const dates = await getRecentReconciliationDates(capped);
     if (!Array.isArray(dates) || dates.length === 0) return [];
     const out: ReconciliationResult[] = [];
     for (const d of dates) {
       try {
-        const raw = await r.get(reconciliationKey(d));
+        const raw = await getReconciliationRecord(d);
         if (raw) out.push(JSON.parse(raw));
       } catch (err: any) {
         console.error(`[cost-reconciliation] history: parse failed for ${d}: ${err?.message || String(err)}`);
@@ -671,8 +645,6 @@ export async function getReconciliationHistory(limit: number = MAX_HISTORY_DAYS)
 // ---------------------------------------------------------------------------
 
 export const _internal = {
-  reconciliationKey,
-  reconciliationIndexKey,
   getSchedulerDailySpendForDate,
   getMetricsCostForDate,
 };

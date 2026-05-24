@@ -36,36 +36,28 @@
  *      by `recordSubagentTokens(..., cycleId)`. Used by the per-cycle
  *      cost-cap path to make the cap aware of post-cut spend.
  *
- * Module is dependency-light: only `redis/kv.ts` primitives + redis-keys.
+ * Module is dependency-light: only typed accessors from `src/redis/cost.ts`
+ * (and `getDailySpendRaw` for the legacy `recordSpend` compatibility blob).
  * No control-loop hooks, no event-bus writes — those happen at the call
  * site (autopilot reap → POST /api/metrics/tokens → recordSubagentTokens).
  */
 
 import {
-  getString,
-  hashGetAll,
-} from "../redis/kv.ts";
-import { hashGet } from "../redis/utility.ts";
-import { getRedisConnection } from "../redis/connection.ts";
+  getAutopilotDailyTokensRaw,
+  getCycleTokensRaw,
+  getSkillTokensAll,
+  getSkillTokensRaw,
+  incrTokensBatch,
+  tokensAutopilotDailyKey,
+  tokensBySkillDailyKey,
+  tokensByCycleKey,
+} from "../redis/cost.ts";
+import { getDailySpendRaw } from "../redis/scheduler.ts";
 
-// ---------------------------------------------------------------------------
-// Key shapes
-// ---------------------------------------------------------------------------
-
-/** Daily-total tokens key. INT string. */
-export function tokensAutopilotDailyKey(date: string): string {
-  return `hydra:metrics:tokens:autopilot:daily:${date}`;
-}
-
-/** Daily by-skill breakdown hash key. Fields are skill names, values INT strings. */
-export function tokensBySkillDailyKey(date: string): string {
-  return `hydra:metrics:tokens:by-skill:daily:${date}`;
-}
-
-/** Per-cycle subagent token hash key. Fields: tokens, skill. */
-export function tokensByCycleKey(cycleId: string): string {
-  return `hydra:metrics:tokens:by-cycle:${cycleId}`;
-}
+// Re-export the key helpers for tests that probe Redis directly with a
+// raw client. The seam module owns the shapes; this file is the import
+// surface the rest of src/ already uses.
+export { tokensAutopilotDailyKey, tokensBySkillDailyKey, tokensByCycleKey };
 
 /** 30 days — long enough for week-over-week reads, short enough to keep Redis tidy. */
 const DAILY_KEY_TTL_SECONDS = 30 * 24 * 3600;
@@ -165,52 +157,20 @@ export async function recordSubagentTokens(
       date,
       skill: cleanSkill,
       tokens: 0,
-      dailyTotal: await readIntKey(tokensAutopilotDailyKey(date)),
+      dailyTotal: await readDailyTokens(date),
       skillTotal: await readSkillHashField(date, cleanSkill),
       cycleTotal: opts.cycleId ? await readCycleTokens(opts.cycleId) : null,
     };
   }
 
-  const dailyKey = tokensAutopilotDailyKey(date);
-  const bySkillKey = tokensBySkillDailyKey(date);
-
-  // INCRBY the daily total — pipeline doesn't return a value the same way
-  // hashIncrBy does, so use the raw connection. Single round-trip pipeline
-  // keeps this cheap.
-  const r = getRedisConnection();
-  const pipe = r.pipeline();
-  pipe.incrby(dailyKey, cleanTokens);
-  pipe.expire(dailyKey, DAILY_KEY_TTL_SECONDS);
-  pipe.hincrby(bySkillKey, cleanSkill, cleanTokens);
-  pipe.expire(bySkillKey, DAILY_KEY_TTL_SECONDS);
-
-  let cycleHashKey: string | null = null;
-  if (opts.cycleId) {
-    cycleHashKey = tokensByCycleKey(opts.cycleId);
-    pipe.hincrby(cycleHashKey, "tokens", cleanTokens);
-    pipe.hset(cycleHashKey, "skill", cleanSkill);
-    pipe.expire(cycleHashKey, CYCLE_KEY_TTL_SECONDS);
-  }
-
-  const results = await pipe.exec();
-  // pipeline().exec() returns [[err, val], ...]; pluck the integer return
-  // values we care about. Failure on any single op is logged but doesn't
-  // throw — the surrogate is best-effort by design.
-  let dailyTotal = 0;
-  let skillTotal = 0;
-  let cycleTotal: number | null = null;
-  if (Array.isArray(results)) {
-    const [dailyRes, , skillRes, , cycleRes] = results;
-    if (Array.isArray(dailyRes) && dailyRes[0] == null && typeof dailyRes[1] === "number") {
-      dailyTotal = dailyRes[1];
-    }
-    if (Array.isArray(skillRes) && skillRes[0] == null && typeof skillRes[1] === "number") {
-      skillTotal = skillRes[1];
-    }
-    if (cycleHashKey && Array.isArray(cycleRes) && cycleRes[0] == null && typeof cycleRes[1] === "number") {
-      cycleTotal = cycleRes[1];
-    }
-  }
+  const { dailyTotal, skillTotal, cycleTotal } = await incrTokensBatch({
+    date,
+    skill: cleanSkill,
+    tokens: cleanTokens,
+    cycleId: opts.cycleId,
+    dailyTtlSeconds: DAILY_KEY_TTL_SECONDS,
+    cycleTtlSeconds: CYCLE_KEY_TTL_SECONDS,
+  });
 
   return {
     date,
@@ -226,21 +186,21 @@ export async function recordSubagentTokens(
 // Read path
 // ---------------------------------------------------------------------------
 
-async function readIntKey(key: string): Promise<number> {
+async function readDailyTokens(date: string): Promise<number> {
   try {
-    const raw = await getString(key);
+    const raw = await getAutopilotDailyTokensRaw(date);
     if (!raw) return 0;
     const n = parseInt(raw, 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
   } catch (err: any) {
-    console.error(`[cost-surrogate] readIntKey ${key} failed: ${err?.message || err}`);
+    console.error(`[cost-surrogate] readDailyTokens ${date} failed: ${err?.message || err}`);
     return 0;
   }
 }
 
 async function readSkillHashField(date: string, skill: string): Promise<number> {
   try {
-    const v = await hashGet(tokensBySkillDailyKey(date), skill);
+    const v = await getSkillTokensRaw(date, skill);
     if (!v) return 0;
     const n = parseInt(v, 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
@@ -252,7 +212,7 @@ async function readSkillHashField(date: string, skill: string): Promise<number> 
 
 async function readCycleTokens(cycleId: string): Promise<number> {
   try {
-    const v = await hashGet(tokensByCycleKey(cycleId), "tokens");
+    const v = await getCycleTokensRaw(cycleId);
     if (!v) return 0;
     const n = parseInt(v, 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
@@ -305,9 +265,9 @@ export async function getDailySpendSurrogate(
   const ratePerMillion = getTokenUsdRate();
 
   const [tokens, bySkillRaw, legacyJson] = await Promise.all([
-    readIntKey(tokensAutopilotDailyKey(date)),
-    safeHashGetAll(tokensBySkillDailyKey(date)),
-    getString("hydra:scheduler:daily-spend").catch(() => null),
+    readDailyTokens(date),
+    safeSkillTokensAll(date),
+    getDailySpendRaw().catch(() => null),
   ]);
 
   // Parse legacy recordSpend payload. Shape: { date, usd, updatedAt }.
@@ -327,7 +287,7 @@ export async function getDailySpendSurrogate(
   const bySkillEntries: Array<{ skill: string; tokens: number; pct: number; costUsd: number }> = [];
   if (bySkillRaw) {
     for (const [skill, raw] of Object.entries(bySkillRaw)) {
-      const n = parseInt(raw, 10);
+      const n = parseInt(String(raw), 10);
       if (!Number.isFinite(n) || n <= 0) continue;
       bySkillEntries.push({
         skill,
@@ -358,11 +318,11 @@ export async function getDailySpendSurrogate(
   };
 }
 
-async function safeHashGetAll(key: string): Promise<Record<string, string> | null> {
+async function safeSkillTokensAll(date: string): Promise<Record<string, string> | null> {
   try {
-    return await hashGetAll(key);
+    return await getSkillTokensAll(date);
   } catch (err: any) {
-    console.error(`[cost-surrogate] hashGetAll ${key} failed: ${err?.message || err}`);
+    console.error(`[cost-surrogate] getSkillTokensAll ${date} failed: ${err?.message || err}`);
     return null;
   }
 }
