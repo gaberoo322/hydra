@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { redisKeys } from "../redis-keys.ts";
+import { STREAMS, streamKey } from "../event-bus.ts";
 
 /**
  * Event bus stream routes.
@@ -11,9 +11,8 @@ export function createEventsRouter(eventBus: any) {
 
   // GET /events/:stream — Read recent events from a stream
   router.get("/events/:stream", async (req, res) => {
-    const stream = redisKeys.stream(req.params.stream);
-    // @ts-expect-error — migrate to proper types
-    const count = parseInt(req.query.count) || 10;
+    const stream = streamKey(req.params.stream);
+    const count = parseInt(String(req.query.count ?? ""), 10) || 10;
     try {
       const events = await eventBus.readRecent(stream, count);
       res.json(events);
@@ -29,7 +28,7 @@ export function createEventsRouter(eventBus: any) {
       if (!type) {
         return res.status(400).json({ error: "Missing type" });
       }
-      await eventBus.publish(redisKeys.streamNotifications(), {
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type,
         source: "claude-build",
         correlationId: correlationId || null,

@@ -1,6 +1,12 @@
 import { Router } from "express";
-import { redisKeys } from "../redis-keys.ts";
-import { pushToWorkQueue } from "../redis-adapter.ts";
+import {
+  clearAlerts,
+  pushAlert,
+  readAllAlerts,
+  readRecentAlerts,
+  setAlertAt,
+} from "../redis/alerts.ts";
+import { pushToWorkQueue } from "../redis/work-queue.ts";
 
 /**
  * Alerts + Sentry webhook routes.
@@ -9,18 +15,16 @@ import { pushToWorkQueue } from "../redis-adapter.ts";
  * list (`hydra:alerts`); Sentry webhook posts both queue an alert and enqueue
  * a work item.
  */
-export function createAlertsRouter(eventBus: any) {
+export function createAlertsRouter(_eventBus: any) {
   const router = Router();
 
-  const ALERTS_KEY = redisKeys.alerts();
   const ALERTS_MAX = 100;
 
   // GET /alerts — List recent alerts
   router.get("/alerts", async (req, res) => {
     try {
-      const r = eventBus.publisher;
-    // @ts-expect-error — migrate to proper types
-      const raw = await r.lrange(ALERTS_KEY, 0, parseInt(req.query.limit) || 50);
+      const limit = parseInt(String(req.query.limit ?? ""), 10) || 50;
+      const raw = await readRecentAlerts(limit + 1);
       res.json(raw.map(s => JSON.parse(s)));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -30,13 +34,12 @@ export function createAlertsRouter(eventBus: any) {
   // POST /alerts/:id/dismiss — Dismiss an alert
   router.post("/alerts/:id/dismiss", async (req, res) => {
     try {
-      const r = eventBus.publisher;
-      const all = await r.lrange(ALERTS_KEY, 0, -1);
+      const all = await readAllAlerts();
       for (let i = 0; i < all.length; i++) {
         const alert = JSON.parse(all[i]);
         if (alert.id === req.params.id) {
           alert.dismissed = true;
-          await r.lset(ALERTS_KEY, i, JSON.stringify(alert));
+          await setAlertAt(i, JSON.stringify(alert));
           return res.json({ ok: true });
         }
       }
@@ -47,9 +50,9 @@ export function createAlertsRouter(eventBus: any) {
   });
 
   // POST /alerts/dismiss-all — Dismiss all alerts
-  router.post("/alerts/dismiss-all", async (req, res) => {
+  router.post("/alerts/dismiss-all", async (_req, res) => {
     try {
-      await eventBus.publisher.del(ALERTS_KEY);
+      await clearAlerts();
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -95,8 +98,7 @@ export function createAlertsRouter(eventBus: any) {
         source: "sentry",
       }));
 
-      const r = eventBus.publisher;
-      await r.lpush(redisKeys.alerts(), JSON.stringify({
+      await pushAlert(JSON.stringify({
         id: `sentry-${Date.now()}`,
         type: "sentry:issue",
         timestamp: new Date().toISOString(),
@@ -104,8 +106,7 @@ export function createAlertsRouter(eventBus: any) {
         severity: level === "fatal" ? "error" : "warning",
         dismissed: false,
         payload: { project, title, culprit, url },
-      }));
-      await r.ltrim(redisKeys.alerts(), 0, 99);
+      }), ALERTS_MAX);
 
       console.log(`[Sentry Webhook] Queued: "${title}" from ${project}`);
       res.json({ queued: true, title });

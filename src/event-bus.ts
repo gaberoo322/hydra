@@ -1,16 +1,25 @@
 import { randomUUID } from "node:crypto";
 
-import { redisKeys } from "./redis-keys.ts";
 import { getRedisConnection, getRedisSubscriber, closeRedisConnections } from "./redis-adapter.ts";
 
-// Stream topology — V2 control loop
+// Stream topology — V2 control loop.
+//
+// Stream key shapes live here (not in redis-keys.ts) because the event bus
+// IS the owner of these names — every reader/writer goes through the bus,
+// not through the key registry. Adding a new stream means adding it here
+// AND wiring a publisher/consumer, not just registering a key.
 const STREAMS = {
-  CYCLE: redisKeys.streamCycle(),        // cycle start events (used by cycle.mjs)
-  TASKS: redisKeys.streamTasks(),        // task events (used by legacy pipeline if HYDRA_LEGACY_PIPELINE=1)
-  META: redisKeys.streamMeta(),
-  NOTIFICATIONS: redisKeys.streamNotifications(),
-  DLQ: redisKeys.streamDlq(),
+  CYCLE: "hydra:cycle",                 // cycle start events (used by cycle.mjs)
+  TASKS: "hydra:tasks",                 // task events (used by legacy pipeline if HYDRA_LEGACY_PIPELINE=1)
+  META: "hydra:meta",
+  NOTIFICATIONS: "hydra:notifications",
+  DLQ: "hydra:dlq",
 };
+
+/** Dynamic stream name lookup for `/events/:stream` and similar surfaces. */
+export function streamKey(name: string): string {
+  return `hydra:${name}`;
+}
 
 // Consumer groups — only streams with active consumers.
 // META consumer removed in #345 (meta agent deleted); stream key retained
