@@ -8,7 +8,7 @@
 
 import {
   addToBacklogLane, removeFromBacklogLane, getBacklogLaneIds, getBacklogLaneCount,
-} from "../redis-adapter.ts";
+} from "../redis/backlog.ts";
 import {
   LANES, DONE_RETENTION_DAYS, WIP_LIMIT,
   applyLaneTransition, getItem, saveItem, removeItem, sortByQueuePriority,

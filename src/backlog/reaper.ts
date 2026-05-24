@@ -14,13 +14,11 @@ import { promisify } from "node:util";
 
 import {
   addToBacklogLane, removeFromBacklogLane, getBacklogLaneIds,
-  pushAlert,
-} from "../redis-adapter.ts";
-import {
   incrClaimsReapedLifetime,
   incrClaimsReapedDay,
   setClaimsReapedLast,
 } from "../redis/backlog.ts";
+import { pushAlert } from "../redis/alerts.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
 import {
   applyLaneTransition, getItem, saveItem, getLaneItems,

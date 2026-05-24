@@ -11,7 +11,7 @@
 
 import {
   addToBacklogLane, removeFromBacklogLane, getBacklogLaneIds, getBacklogLaneCount,
-} from "../redis-adapter.ts";
+} from "../redis/backlog.ts";
 import {
   WIP_LIMIT, applyLaneTransition, getItem, saveItem, getLaneItems,
 } from "./internal.ts";
