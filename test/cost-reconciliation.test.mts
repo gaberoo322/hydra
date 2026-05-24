@@ -37,7 +37,7 @@ import {
   MAX_HISTORY_DAYS,
   RECONCILIATION_TTL_SECONDS,
   KILL_FLAG_KEY,
-} from "../src/cost-reconciliation.ts";
+} from "../src/cost/reconciliation.ts";
 
 // ---------------------------------------------------------------------------
 // Constants / contract sanity

@@ -41,7 +41,7 @@ describe("tier classifier — Tier 0 (Untouchable Core)", () => {
     // the files themselves (the in-process codex control loop is gone).
     assert.equal(isUntouchable("src/grounding.ts"), true);
     assert.equal(isUntouchable("src/redis-adapter.ts"), true);
-    assert.equal(isUntouchable("src/cost-cap.ts"), true);
+    assert.equal(isUntouchable("src/cost/cap.ts"), true);
     assert.equal(isUntouchable("scripts/deploy.sh"), true);
     assert.equal(isUntouchable(".github/workflows/ci.yml"), true);
 

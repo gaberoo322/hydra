@@ -1,5 +1,5 @@
 /**
- * cost-surrogate.ts — subscription-aware spend surrogate (issue #394).
+ * surrogate.ts — subscription-aware spend surrogate (issue #394).
  *
  * After PR-3 (issue #383, ADR-0006) deleted `codex-runner.ts`, the only
  * writer that populated `hydra:metrics:cost:daily:*` and the per-cycle
@@ -44,9 +44,9 @@
 import {
   getString,
   hashGetAll,
-} from "./redis/kv.ts";
-import { hashGet } from "./redis/utility.ts";
-import { getRedisConnection } from "./redis/connection.ts";
+} from "../redis/kv.ts";
+import { hashGet } from "../redis/utility.ts";
+import { getRedisConnection } from "../redis/connection.ts";
 
 // ---------------------------------------------------------------------------
 // Key shapes
@@ -371,7 +371,7 @@ async function safeHashGetAll(key: string): Promise<Record<string, string> | nul
  * Per-cycle surrogate cost in USD. Returns 0 when no tokens recorded for the
  * cycle or no rate configured.
  *
- * Used by `cost-cap.ts:getCycleCostWithSurrogateUsd()` so the per-cycle cap
+ * Used by `cost/cap.ts:getCycleCostWithSurrogateUsd()` so the per-cycle cap
  * can include post-cut subagent spend without breaking the legacy codex
  * `getCycleCostMicrodollars()` reader.
  */

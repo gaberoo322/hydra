@@ -18,7 +18,7 @@ import { reapStaleClaims } from "../backlog/reaper.ts";
 // Stale-claim reaper threshold (issue #374). Default 2h.
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
 import { runResearchLoop } from "../research-loop.ts";
-import { getPerCycleCostCapUsd } from "../cost-cap.ts";
+import { getPerCycleCostCapUsd } from "../cost/cap.ts";
 import { redisKeys } from "../redis-keys.ts";
 import { getTargetName } from "../target-config.ts";
 import {

@@ -6,7 +6,7 @@
  * still tracks per-cycle spend and the reconciliation report needs a
  * lookup table mapping `model` → `(input, output)` USD-per-million-tokens
  * rates. Keep this in sync with `MODEL_NAME_TO_TIER` in
- * `src/cost-attribution.ts` — both tables describe the same set of models
+ * `src/cost/attribution.ts` — both tables describe the same set of models
  * from different angles.
  *
  * Rates mirror CLAUDE.md "Model Tiers": frontier (gpt-5.4/5.5), codex

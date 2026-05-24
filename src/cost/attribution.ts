@@ -1,5 +1,5 @@
 /**
- * cost-attribution.ts — Pure aggregation logic for /api/metrics/cost-attribution
+ * attribution.ts — Pure aggregation logic for /api/metrics/cost-attribution
  *
  * Issue #271: cost-per-merge regressed from $2.21 to $11.68 (5.3x). We need
  * to attribute spend to agent role, model tier, anchor type, and complexity
