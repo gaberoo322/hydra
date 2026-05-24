@@ -9,7 +9,7 @@
  * Covered sub-modules:
  *   - src/anchor-selection/constants.ts       — keys, thresholds, key helpers
  *   - src/anchor-selection/drift-filter.ts    — pre-planner drift counter
- *   - src/anchor-selection/reframe-queue.ts   — queue length helper
+ *   - src/anchor-selection/reframe.ts   — queue length helper
  *   - src/anchor-selection/abandonment.ts     — clearProcessingItem idempotency
  *   - src/anchor-selection/low-confidence.ts  — perm-skip non-applicable types
  */
@@ -138,7 +138,7 @@ describe("anchor-selection/reframe-queue — length helper (issue #288)", () => 
 
   test("getReframeQueueLen returns 0 for empty queue", async () => {
     const { getReframeQueueLen } = await import(
-      "../src/anchor-selection/reframe-queue.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     const len = await getReframeQueueLen();
     assert.equal(len, 0);
@@ -146,7 +146,7 @@ describe("anchor-selection/reframe-queue — length helper (issue #288)", () => 
 
   test("getReframeQueueLen counts items pushed to the queue", async () => {
     const { getReframeQueueLen } = await import(
-      "../src/anchor-selection/reframe-queue.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     const { REFRAME_QUEUE } = await import("../src/anchor-selection/constants.ts");
     await redis.rpush(REFRAME_QUEUE, JSON.stringify({ originalTitle: "a", totalAttempts: 1 }));
@@ -157,7 +157,7 @@ describe("anchor-selection/reframe-queue — length helper (issue #288)", () => 
 
   test("pruneReframeQueue is a no-op on an empty queue", async () => {
     const { pruneReframeQueue } = await import(
-      "../src/anchor-selection/reframe-queue.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     const result = await pruneReframeQueue();
     assert.deepEqual(result, { pruned: 0, dropped: 0 });

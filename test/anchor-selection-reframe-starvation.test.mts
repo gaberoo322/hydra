@@ -8,7 +8,7 @@
  * a queue that often had ~10 candidates. The REFRAME_INTERLEAVE_INTERVAL
  * constant existed but no consumer enforced it.
  *
- * Fix: reframe-starvation module (src/anchor-selection/reframe-starvation.ts)
+ * Fix: reframe-starvation module (src/anchor-selection/reframe.ts)
  *   - records *why* the reframe tier was passed each cycle
  *   - maintains a "cycles since reframe last served" gauge
  *   - exposes a capacity-floor predicate the dispatcher uses to pre-empt
@@ -48,7 +48,7 @@ after(async () => {
 describe("shouldForceReframePriority — pure predicate (issue #377)", () => {
   test("returns false when no reframe candidate is available", async () => {
     const { shouldForceReframePriority } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     assert.equal(shouldForceReframePriority(0, false, 5), false);
     assert.equal(shouldForceReframePriority(5, false, 5), false);
@@ -57,7 +57,7 @@ describe("shouldForceReframePriority — pure predicate (issue #377)", () => {
 
   test("returns false until floorN cycles have passed", async () => {
     const { shouldForceReframePriority } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     assert.equal(shouldForceReframePriority(0, true, 5), false);
     assert.equal(shouldForceReframePriority(1, true, 5), false);
@@ -66,7 +66,7 @@ describe("shouldForceReframePriority — pure predicate (issue #377)", () => {
 
   test("returns true once cyclesSinceServed >= floorN", async () => {
     const { shouldForceReframePriority } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     assert.equal(shouldForceReframePriority(5, true, 5), true);
     assert.equal(shouldForceReframePriority(50, true, 5), true);
@@ -74,7 +74,7 @@ describe("shouldForceReframePriority — pure predicate (issue #377)", () => {
 
   test("returns false for non-positive or non-finite floorN", async () => {
     const { shouldForceReframePriority } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     assert.equal(shouldForceReframePriority(100, true, 0), false);
     assert.equal(shouldForceReframePriority(100, true, -1), false);
@@ -85,7 +85,7 @@ describe("shouldForceReframePriority — pure predicate (issue #377)", () => {
 describe("getReframeFloorN — env override (issue #377)", () => {
   test("default is 5 when env var is absent", async () => {
     const { getReframeFloorN, DEFAULT_REFRAME_FLOOR_N } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     assert.equal(DEFAULT_REFRAME_FLOOR_N, 5);
     assert.equal(getReframeFloorN({}), 5);
@@ -93,7 +93,7 @@ describe("getReframeFloorN — env override (issue #377)", () => {
 
   test("honours numeric env var", async () => {
     const { getReframeFloorN } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     assert.equal(getReframeFloorN({ HYDRA_REFRAME_FLOOR_N: "7" }), 7);
     assert.equal(getReframeFloorN({ HYDRA_REFRAME_FLOOR_N: "10" }), 10);
@@ -101,7 +101,7 @@ describe("getReframeFloorN — env override (issue #377)", () => {
 
   test("falls back to default on garbage values", async () => {
     const { getReframeFloorN } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     assert.equal(getReframeFloorN({ HYDRA_REFRAME_FLOOR_N: "" }), 5);
     assert.equal(getReframeFloorN({ HYDRA_REFRAME_FLOOR_N: "abc" }), 5);
@@ -117,7 +117,7 @@ describe("recordReframePassedReason / recordReframeServed (issue #377)", () => {
 
   test("recordReframePassedReason increments the per-reason hash and the gauge", async () => {
     const { recordReframePassedReason, getCyclesSinceReframeServed } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
 
     await recordReframePassedReason("kanban_won");
@@ -134,7 +134,7 @@ describe("recordReframePassedReason / recordReframeServed (issue #377)", () => {
 
   test("force_floor records the reason hash but does NOT advance the gauge", async () => {
     const { recordReframePassedReason, getCyclesSinceReframeServed } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
 
     await recordReframePassedReason("force_floor");
@@ -152,7 +152,7 @@ describe("recordReframePassedReason / recordReframeServed (issue #377)", () => {
       recordReframePassedReason,
       recordReframeServed,
       getCyclesSinceReframeServed,
-    } = await import("../src/anchor-selection/reframe-starvation.ts");
+    } = await import("../src/anchor-selection/reframe.ts");
 
     await recordReframePassedReason("kanban_won");
     await recordReframePassedReason("spec_won");
@@ -179,7 +179,7 @@ describe("getReframeStarvationStats — API surface (issue #377)", () => {
 
   test("returns zero-state when nothing recorded yet", async () => {
     const { getReframeStarvationStats } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     const stats = await getReframeStarvationStats();
     assert.deepEqual(stats, {
@@ -195,7 +195,7 @@ describe("getReframeStarvationStats — API surface (issue #377)", () => {
       recordReframePassedReason,
       recordReframeServed,
       getReframeStarvationStats,
-    } = await import("../src/anchor-selection/reframe-starvation.ts");
+    } = await import("../src/anchor-selection/reframe.ts");
 
     await recordReframePassedReason("kanban_won");
     await recordReframePassedReason("spec_won");
@@ -215,7 +215,7 @@ describe("getReframeStarvationStats — API surface (issue #377)", () => {
 describe("REFRAME_INTERLEAVE_INTERVAL parity (issue #377)", () => {
   test("DEFAULT_REFRAME_FLOOR_N matches the legacy interleave constant", async () => {
     const { DEFAULT_REFRAME_FLOOR_N } = await import(
-      "../src/anchor-selection/reframe-starvation.ts"
+      "../src/anchor-selection/reframe.ts"
     );
     const { _testing } = await import("../src/anchor-selection.ts");
     assert.equal(
