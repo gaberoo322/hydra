@@ -60,8 +60,6 @@ The orchestrator service still owns:
 - Dashboard + REST API
 - Merge-gate facade (`src/gate.ts`), tier classifier, and Tier-2 outcome holdback
 
-> **Why `src/codex-otel.ts` is still in the tree.** PR-3 deleted the codex runtime but intentionally kept `src/codex-otel.ts` and its `buildTraceUrl` helper. Historical SigNoz/Tempo spans emitted before the cut-over are still queried by operators via the trace-UI link in `/cycles`. The file is now legacy telemetry attribution — no new spans are produced. A follow-up issue will retire it once the retention window on the historical traces expires.
-
 ## Key Files
 
 See `docs/reference.md` for the file inventory, Redis keys, event bus streams, and API endpoints.

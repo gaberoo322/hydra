@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { isOtelEnabled, buildTraceUrl } from "../codex-otel.ts";
 
 /**
  * Observability surface (issue #207, Tier-3).
@@ -15,8 +14,25 @@ import { isOtelEnabled, buildTraceUrl } from "../codex-otel.ts";
  *   - GET /observability/trace-url?cycleId=<id> — resolved deep-link or null
  *
  * The template may contain `{cycleId}`; if absent, the cycle ID is appended
- * as `?hydra_cycle_id=<id>`. See `buildTraceUrl` in `src/codex-otel.ts`.
+ * as `?hydra_cycle_id=<id>`.
  */
+
+export function isOtelEnabled(): boolean {
+  return process.env.HYDRA_OTEL_ENABLED === "true" || process.env.HYDRA_OTEL_ENABLED === "1";
+}
+
+export function buildTraceUrl(cycleId: string | null | undefined, template?: string | undefined): string | null {
+  const tpl = (template ?? process.env.HYDRA_TRACE_UI_URL ?? "").trim();
+  if (!tpl) return null;
+  const id = (cycleId ?? "").toString().trim();
+  if (!id) return null;
+  const encoded = encodeURIComponent(id);
+  if (tpl.includes("{cycleId}")) {
+    return tpl.replace(/\{cycleId\}/g, encoded);
+  }
+  const sep = tpl.includes("?") ? "&" : "?";
+  return `${tpl}${sep}hydra_cycle_id=${encoded}`;
+}
 export function createObservabilityRouter() {
   const router = Router();
 
