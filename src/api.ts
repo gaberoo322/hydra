@@ -26,7 +26,6 @@ import { createReflectionsRouter } from "./api/reflections.ts";
 import { createMergeLockRouter } from "./api/merge-lock.ts";
 import { createCapacityRouter } from "./api/capacity.ts";
 import { createObservabilityRouter } from "./api/observability.ts";
-import { createHoldbackRouter } from "./api/holdback.ts";
 import { createLearningRouter } from "./api/learning.ts";
 import { createCostRouter } from "./api/cost.ts";
 import { createAnchorRouter } from "./api/anchor.ts";
@@ -77,7 +76,6 @@ function createApi(eventBus) {
   api.use(createMergeLockRouter());
   api.use(createCapacityRouter());
   api.use(createObservabilityRouter());
-  api.use(createHoldbackRouter());
   api.use(createLearningRouter());
   api.use(createCostRouter());
   api.use(createAnchorRouter());
