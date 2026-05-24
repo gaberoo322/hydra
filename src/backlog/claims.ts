@@ -3,8 +3,7 @@
  * either claim different items or one gets a `wip-limit` / `empty` signal.
  */
 
-import { evalScript } from "../redis-adapter.ts";
-import { redisKeys } from "../redis-keys.ts";
+import { claimNextQueuedBacklogItem } from "../redis/backlog.ts";
 import { WIP_LIMIT, applyLaneTransition, saveItem } from "./internal.ts";
 
 const LUA_CLAIM_NEXT_QUEUED = `
@@ -53,15 +52,7 @@ export async function claimNextQueuedItem(claimedBy: string): Promise<{
   reason?: string;
   count?: number;
 }> {
-  const result = await evalScript(
-    LUA_CLAIM_NEXT_QUEUED,
-    3,
-    redisKeys.backlogLane("queued"),
-    redisKeys.backlogItems(),
-    redisKeys.backlogLane("inProgress"),
-    Date.now(),
-    WIP_LIMIT,
-  );
+  const result = await claimNextQueuedBacklogItem(LUA_CLAIM_NEXT_QUEUED, Date.now(), WIP_LIMIT);
 
   if (!result) return { claimed: false, reason: "no-result" };
 

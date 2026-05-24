@@ -347,3 +347,52 @@ export async function cleanWorkQueue(): Promise<{ removedCompleted: number; remo
 
   return { removedCompleted, removedDuplicates };
 }
+
+// ---------------------------------------------------------------------------
+// Anchor reframe state (issue #377) — starvation-floor instrumentation
+// ---------------------------------------------------------------------------
+
+export async function incrAnchorReframePassedReason(reason: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.hincrby(redisKeys.anchorReframePassedReasons(), reason, 1);
+}
+
+export async function getAnchorReframePassedReasons(): Promise<Record<string, string>> {
+  const r = getRedisConnection();
+  return r.hgetall(redisKeys.anchorReframePassedReasons());
+}
+
+export async function incrAnchorReframeCyclesSinceServed(): Promise<void> {
+  const r = getRedisConnection();
+  await r.incr(redisKeys.anchorReframeCyclesSinceServed());
+}
+
+export async function resetAnchorReframeCyclesSinceServed(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.anchorReframeCyclesSinceServed());
+}
+
+export async function getAnchorReframeCyclesSinceServed(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.anchorReframeCyclesSinceServed());
+}
+
+export async function setAnchorReframeLastServedAt(iso: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.anchorReframeLastServedAt(), iso);
+}
+
+export async function getAnchorReframeLastServedAt(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.anchorReframeLastServedAt());
+}
+
+/** Test helper: wipe all reframe-starvation state. */
+export async function _resetAnchorReframeState(): Promise<void> {
+  const r = getRedisConnection();
+  await Promise.all([
+    r.del(redisKeys.anchorReframePassedReasons()),
+    r.del(redisKeys.anchorReframeCyclesSinceServed()),
+    r.del(redisKeys.anchorReframeLastServedAt()),
+  ]);
+}

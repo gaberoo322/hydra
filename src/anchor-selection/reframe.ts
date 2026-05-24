@@ -29,17 +29,21 @@
 
 import {
   delKey,
-  getString,
-  hashGetAll,
-  hashIncrBy,
-  incrKey,
   listLen,
   listLPop,
   listRange,
   listRPush,
-  setString,
 } from "../redis-adapter.ts";
-import { redisKeys } from "../redis-keys.ts";
+import {
+  incrAnchorReframePassedReason,
+  getAnchorReframePassedReasons,
+  incrAnchorReframeCyclesSinceServed,
+  resetAnchorReframeCyclesSinceServed,
+  getAnchorReframeCyclesSinceServed,
+  setAnchorReframeLastServedAt,
+  getAnchorReframeLastServedAt,
+  _resetAnchorReframeState,
+} from "../redis/work-queue.ts";
 import {
   REFRAME_QUEUE,
   REFRAME_QUEUE_CAP,
@@ -266,11 +270,11 @@ export async function selectReframeAnchor(): Promise<ReframeAnchor | null> {
  */
 export async function recordReframePassedReason(reason: ReframePassedReason): Promise<void> {
   try {
-    await hashIncrBy(redisKeys.anchorReframePassedReasons(), reason, 1);
+    await incrAnchorReframePassedReason(reason);
     // The "force_floor" path is recorded for parity but does NOT advance the
     // cycles-since-served gauge — that's reset by recordReframeServed().
     if (reason !== "force_floor") {
-      await incrKey(redisKeys.anchorReframeCyclesSinceServed());
+      await incrAnchorReframeCyclesSinceServed();
     }
   } catch (err: any) {
     console.error(`[ReframeStarvation] recordReframePassedReason(${reason}) failed: ${err.message}`);
@@ -283,8 +287,8 @@ export async function recordReframePassedReason(reason: ReframePassedReason): Pr
  */
 export async function recordReframeServed(): Promise<void> {
   try {
-    await delKey(redisKeys.anchorReframeCyclesSinceServed());
-    await setString(redisKeys.anchorReframeLastServedAt(), new Date().toISOString());
+    await resetAnchorReframeCyclesSinceServed();
+    await setAnchorReframeLastServedAt(new Date().toISOString());
   } catch (err: any) {
     console.error(`[ReframeStarvation] recordReframeServed failed: ${err.message}`);
   }
@@ -296,7 +300,7 @@ export async function recordReframeServed(): Promise<void> {
  */
 export async function getCyclesSinceReframeServed(): Promise<number> {
   try {
-    const raw = await getString(redisKeys.anchorReframeCyclesSinceServed());
+    const raw = await getAnchorReframeCyclesSinceServed();
     if (raw === null || raw === undefined) return 0;
     const n = parseInt(String(raw), 10);
     return Number.isFinite(n) && n >= 0 ? n : 0;
@@ -316,8 +320,8 @@ export async function getCyclesSinceReframeServed(): Promise<number> {
 export async function getReframeStarvationStats(): Promise<ReframeStarvationStats> {
   const [cyclesSinceServed, lastServedAt, reasonsHash] = await Promise.all([
     getCyclesSinceReframeServed(),
-    getString(redisKeys.anchorReframeLastServedAt()).catch(() => null),
-    hashGetAll(redisKeys.anchorReframePassedReasons()).catch(() => ({})),
+    getAnchorReframeLastServedAt().catch(() => null),
+    getAnchorReframePassedReasons().catch(() => ({})),
   ]);
   const reasons: Record<string, number> = {};
   for (const [k, v] of Object.entries(reasonsHash || {})) {
@@ -337,7 +341,5 @@ export async function getReframeStarvationStats(): Promise<ReframeStarvationStat
  * isolate behaviour between cases.
  */
 export async function _resetReframeStarvationForTests(): Promise<void> {
-  await delKey(redisKeys.anchorReframePassedReasons());
-  await delKey(redisKeys.anchorReframeCyclesSinceServed());
-  await delKey(redisKeys.anchorReframeLastServedAt());
+  await _resetAnchorReframeState();
 }
