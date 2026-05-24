@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getWorkQueueItems, pushToWorkQueue, getWorkQueueLen, findWorkQueueDuplicate } from "../redis-adapter.ts";
 import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
+import { QueuePostBodySchema } from "../schemas/queue.ts";
 
 export function createQueueRouter() {
   const router = Router();
@@ -8,10 +9,17 @@ export function createQueueRouter() {
   // POST /queue — Queue a work item for the next cycle
   router.post("/queue", async (req, res) => {
     try {
-      const { reference, reason, context } = req.body || {};
-      if (!reference) {
-        return res.status(400).json({ error: "Missing 'reference' field — what should Hydra work on?" });
+      // Zod boundary parse (issue #562 seed PR). Replaces the prior
+      // hand-rolled `if (!reference)` check with a structured 400 that
+      // downstream agents/clients can pattern-match on.
+      const parsed = QueuePostBodySchema.safeParse(req.body || {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          code: "schema-validation-failed",
+          issues: parsed.error.issues,
+        });
       }
+      const { reference, reason, context } = parsed.data;
 
       // Dedup: fuzzy check if a similar item already exists in the queue
       const matchedRef = await findWorkQueueDuplicate(reference);
