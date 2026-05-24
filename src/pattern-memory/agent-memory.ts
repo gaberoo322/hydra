@@ -19,14 +19,17 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
-  loadPatternsRaw,
-  savePatternsRaw,
-  getOldRulesCount,
-  patternsExist,
-  getOldRules,
+  appendRuleAction,
+  backfillPromotionMetaDone,
   deleteOldRules,
-} from "../redis-adapter.ts";
-import { keyExists, setString, listLPush, listRange, listTrim } from "../redis/kv.ts";
+  getOldRules,
+  getOldRulesCount,
+  loadPatternsRaw,
+  patternsExist,
+  readRecentRuleActions,
+  savePatternsRaw,
+  setBackfillPromotionMetaDone,
+} from "../redis/agent-memory.ts";
 import {
   escalationThresholdForCue,
   isMetadataCue,
@@ -150,7 +153,6 @@ export const ABSOLUTE_AGE_DAYS = 14;
 export const EFFECTIVENESS_CHECK_COOLDOWN_HOURS = 24;
 /** Cap on the rule-action audit log to keep the Redis list bounded. */
 export const RULE_ACTION_LOG_CAP = 200;
-const RULE_ACTION_LOG_KEY = "hydra:learning:rule-actions";
 
 // ===========================================================================
 // Pattern storage
@@ -778,12 +780,6 @@ export async function getIneffectivePromotedPatterns(
 // ===========================================================================
 
 /**
- * Redis flag indicating the one-time promotion-metadata backfill has run.
- * Exposed for tests; production code should not branch on this directly.
- */
-export const BACKFILL_PROMOTION_META_KEY = "hydra:learning:backfill:promotion-meta:done";
-
-/**
  * Pure helper — mutate-in-place backfill of `promotedAt` / `hitsAtPromotion`
  * for legacy promoted patterns. Exported for unit testing without Redis.
  *
@@ -841,7 +837,7 @@ export function backfillPatternPromotionMetadata(
 /**
  * One-time startup migration: scan planner/executor/skeptic patterns and
  * backfill missing promotion metadata. Idempotent — guarded by the
- * `BACKFILL_PROMOTION_META_KEY` Redis flag.
+ * `hydra:learning:backfill:promotion-meta:done` Redis flag.
  *
  * Safe to call on every boot. Once the flag is set, this is a single Redis
  * lookup; the underlying Redis writes only happen on the first invocation
@@ -849,7 +845,7 @@ export function backfillPatternPromotionMetadata(
  */
 export async function backfillPromotionMetadata(): Promise<void> {
   try {
-    if (await keyExists(BACKFILL_PROMOTION_META_KEY)) return;
+    if (await backfillPromotionMetaDone()) return;
   } catch (err: any) {
     console.error(`[Learning] backfillPromotionMetadata: flag lookup failed: ${err.message}`);
     return;
@@ -872,7 +868,7 @@ export async function backfillPromotionMetadata(): Promise<void> {
   }
 
   try {
-    await setString(BACKFILL_PROMOTION_META_KEY, new Date().toISOString());
+    await setBackfillPromotionMetaDone(new Date().toISOString());
     if (totalMutated > 0) {
       console.log(`[Learning] Promotion-metadata backfill complete (${totalMutated} pattern(s) updated)`);
     }
@@ -985,8 +981,7 @@ export async function demotePromotedRuleFromFeedbackFile(
  */
 export async function recordRuleAction(entry: RuleActionLogEntry): Promise<void> {
   try {
-    await listLPush(RULE_ACTION_LOG_KEY, JSON.stringify(entry));
-    await listTrim(RULE_ACTION_LOG_KEY, 0, RULE_ACTION_LOG_CAP - 1);
+    await appendRuleAction(JSON.stringify(entry), RULE_ACTION_LOG_CAP);
   } catch (err: any) {
     console.error(`[Learning] recordRuleAction failed: ${err.message}`);
   }
@@ -995,7 +990,7 @@ export async function recordRuleAction(entry: RuleActionLogEntry): Promise<void>
 /** Fetch the rule-action audit log (newest first), up to `limit` entries. */
 export async function getRuleActionLog(limit = 50): Promise<RuleActionLogEntry[]> {
   try {
-    const raw = await listRange(RULE_ACTION_LOG_KEY, 0, Math.max(0, limit - 1));
+    const raw = await readRecentRuleActions(limit);
     const out: RuleActionLogEntry[] = [];
     for (const r of raw) {
       try {

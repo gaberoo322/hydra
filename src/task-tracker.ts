@@ -1,31 +1,27 @@
-import { redisKeys } from "./redis-keys.ts";
 import { canTransitionTo, isTerminal, TERMINAL_STATES, VALID_TARGETS } from "./task-machine.ts";
 import type { TaskState } from "./task-machine.ts";
-import {
-  getString, setString, delKey, hashGetAll, hashSet, hashSetField,
-  hashIncrBy, expireKey, listRange, listRPush, setMembers, setAdd, setRem,
-  keyExists, createPipeline,
-} from "./redis/kv.ts";
+import { getRedisConnection } from "./redis/connection.ts";
 
-const KEY_ACTIVE = redisKeys.cycleActive();
-const KEY_LAST = redisKeys.cycleLast();
-const cycleKey = (id) => redisKeys.cycle(id);
-const tasksKey = (id) => redisKeys.cycleTasks(id);
-const taskKey = (id) => redisKeys.task(id);
-const agentsKey = (id) => redisKeys.cycleAgents(id);
-const costsKey = (id) => redisKeys.cycleCosts(id);
+// Inline key shapes — task-tracker is the canonical domain owner for cycle
+// progress, per-task state, evidence, and dependency-hold state. Keeping the
+// strings local (rather than importing from redis/keys.ts) means every key
+// this module owns is defined alongside the code that reads and writes it.
+const KEY_ACTIVE = "hydra:cycle:active";
+const KEY_LAST = "hydra:cycle:last";
+const cycleKey = (id: string) => `hydra:cycle:${id}`;
+const tasksKey = (id: string) => `hydra:cycle:${id}:tasks`;
+const taskKey = (id: string) => `hydra:task:${id}`;
+const agentsKey = (id: string) => `hydra:cycle:${id}:agents`;
+const costsKey = (id: string) => `hydra:cycle:${id}:costs`;
+const evidenceKey = (taskId: string, state: string) => `hydra:task:${taskId}:evidence:${state}`;
+const DEPS_COMPLETED = "hydra:deps:completed";
+const DEPS_INDEX = "hydra:deps:index";
+const heldKey = (id: string) => `hydra:deps:held:${id}`;
 
 /** TTL for cycle-related Redis keys: 7 days in seconds */
 const CYCLE_KEY_TTL = 7 * 24 * 60 * 60; // 604800
 
 const TERMINAL = new Set(["completed", "failed", "timed_out", "shelved"]);
-
-const evidenceKey = (taskId, state) => redisKeys.taskEvidence(taskId, state);
-
-// Dependency tracking keys
-const DEPS_COMPLETED = redisKeys.depsCompleted();
-const DEPS_INDEX = redisKeys.depsIndex();
-const heldKey = (id) => redisKeys.depsHeld(id);
 
 class TaskTracker {
   /**
@@ -33,14 +29,15 @@ class TaskTracker {
    * Each task gets a hash with status, stage, title, etc.
    */
   async initCycle(cycleId, tasks) {
+    const r = getRedisConnection();
     // Clear dependency state from previous cycle
-    const oldHeld = await setMembers(DEPS_INDEX);
-    const cleanPipe = createPipeline();
+    const oldHeld = await r.smembers(DEPS_INDEX);
+    const cleanPipe = r.pipeline();
     cleanPipe.del(DEPS_COMPLETED, DEPS_INDEX);
     for (const id of oldHeld) cleanPipe.del(heldKey(id));
     await cleanPipe.exec();
 
-    const pipe = createPipeline();
+    const pipe = r.pipeline();
     pipe.set(KEY_ACTIVE, cycleId);
     pipe.hset(cycleKey(cycleId),
       "status", "running",
@@ -81,9 +78,10 @@ class TaskTracker {
    * Update a task's pipeline stage (e.g., "builder", "reviewer", "tester").
    */
   async updateTaskStage(taskId, stage, agent) {
-    const exists = await keyExists(taskKey(taskId));
+    const r = getRedisConnection();
+    const exists = await r.exists(taskKey(taskId));
     if (!exists) return;
-    await hashSet(taskKey(taskId),
+    await r.hset(taskKey(taskId),
       "stage", stage,
       "agent", agent,
       "status", "in_progress",
@@ -97,14 +95,15 @@ class TaskTracker {
    * Idempotent — skips if the task is already terminal.
    */
   async markTaskDone(taskId, status, eventBus) {
-    const task = await hashGetAll(taskKey(taskId));
+    const r = getRedisConnection();
+    const task = await r.hgetall(taskKey(taskId));
     if (!task.cycleId) return null;
     if (TERMINAL.has(task.status)) {
       console.log(`[TaskTracker] Task ${taskId} already ${task.status} — skipping`);
       return null;
     }
 
-    await hashSet(taskKey(taskId),
+    await r.hset(taskKey(taskId),
       "status", status,
       "stage", status,
       "completedAt", new Date().toISOString(),
@@ -112,14 +111,14 @@ class TaskTracker {
     );
 
     const field = status === "completed" ? "completed" : status === "timed_out" ? "timedOut" : "failed";
-    await hashIncrBy(cycleKey(task.cycleId), field, 1);
+    await r.hincrby(cycleKey(task.cycleId), field, 1);
 
     // Cascade: block any held tasks that depend on this failed/shelved task
     if ((status === "shelved" || status === "failed") && task.title) {
       await this.blockDependentsOf(task.title, eventBus);
     }
 
-    const cycle = await hashGetAll(cycleKey(task.cycleId));
+    const cycle = await r.hgetall(cycleKey(task.cycleId));
     const total = parseInt(cycle.total);
     const done = parseInt(cycle.completed) + parseInt(cycle.failed) + parseInt(cycle.timedOut);
     console.log(`[TaskTracker] Task ${taskId} → ${status} | Cycle progress: ${done}/${total}`);
@@ -131,12 +130,13 @@ class TaskTracker {
   }
 
   async _completeCycle(cycleId, eventBus) {
-    const cycle = await hashGetAll(cycleKey(cycleId));
-    await hashSet(cycleKey(cycleId), "status", "completed", "completedAt", new Date().toISOString());
+    const r = getRedisConnection();
+    const cycle = await r.hgetall(cycleKey(cycleId));
+    await r.hset(cycleKey(cycleId), "status", "completed", "completedAt", new Date().toISOString());
     // Refresh TTL so the 7-day window starts from cycle completion
-    await expireKey(cycleKey(cycleId), CYCLE_KEY_TTL);
-    await setString(KEY_LAST, cycleId);
-    await delKey(KEY_ACTIVE);
+    await r.expire(cycleKey(cycleId), CYCLE_KEY_TTL);
+    await r.set(KEY_LAST, cycleId);
+    await r.del(KEY_ACTIVE);
 
     const completed = parseInt(cycle.completed || "0");
     const failed = parseInt(cycle.failed || "0");
@@ -154,10 +154,11 @@ class TaskTracker {
    * Returns the number of tasks timed out.
    */
   async timeoutStaleTasks(cycleId, eventBus) {
-    const taskIds = await setMembers(tasksKey(cycleId));
+    const r = getRedisConnection();
+    const taskIds = await r.smembers(tasksKey(cycleId));
     let count = 0;
     for (const taskId of taskIds) {
-      const task = await hashGetAll(taskKey(taskId));
+      const task = await r.hgetall(taskKey(taskId));
       if (!TERMINAL.has(task.status)) {
         await this.markTaskDone(taskId, "timed_out", eventBus);
         count++;
@@ -175,7 +176,8 @@ class TaskTracker {
    * Pre-#271 entries lack the field — src/cost/attribution.ts handles that.
    */
   async logAgentRun(cycleId, agentName, taskId, duration, verdict, usage, costUsd, model) {
-    await listRPush(agentsKey(cycleId), JSON.stringify({
+    const r = getRedisConnection();
+    await r.rpush(agentsKey(cycleId), JSON.stringify({
       agent: agentName, task: taskId, duration,
       verdict: verdict || "completed",
       costUsd: costUsd || 0,
@@ -183,9 +185,9 @@ class TaskTracker {
       timestamp: new Date().toISOString(),
     }));
     // Ensure agents list has TTL (created on first rpush)
-    await expireKey(agentsKey(cycleId), CYCLE_KEY_TTL);
+    await r.expire(agentsKey(cycleId), CYCLE_KEY_TTL);
     if (usage) {
-      const pipe = createPipeline();
+      const pipe = r.pipeline();
       pipe.hincrby(costsKey(cycleId), "inputTokens", usage.inputTokens || 0);
       pipe.hincrby(costsKey(cycleId), "outputTokens", usage.outputTokens || 0);
       pipe.hincrby(costsKey(cycleId), "cachedInputTokens", usage.cachedInputTokens || 0);
@@ -199,14 +201,15 @@ class TaskTracker {
    * Get full cycle state including per-task detail.
    */
   async getCycleState() {
-    const cycleId = await getString(KEY_ACTIVE);
+    const r = getRedisConnection();
+    const cycleId = await r.get(KEY_ACTIVE);
     if (!cycleId) return { status: "idle" };
 
-    const cycle = await hashGetAll(cycleKey(cycleId));
-    const taskIds = await setMembers(tasksKey(cycleId));
+    const cycle = await r.hgetall(cycleKey(cycleId));
+    const taskIds = await r.smembers(tasksKey(cycleId));
     const tasks = [];
     for (const id of taskIds) {
-      tasks.push({ taskId: id, ...(await hashGetAll(taskKey(id))) });
+      tasks.push({ taskId: id, ...(await r.hgetall(taskKey(id))) });
     }
 
     return {
@@ -226,14 +229,15 @@ class TaskTracker {
    * Get a structured cycle report (active or last completed).
    */
   async getCycleReport(cycleId) {
-    const id = cycleId || await getString(KEY_ACTIVE) || await getString(KEY_LAST);
+    const r = getRedisConnection();
+    const id = cycleId || await r.get(KEY_ACTIVE) || await r.get(KEY_LAST);
     if (!id) return { cycleId: null, tasks: {}, agents: [], costs: {} };
 
-    const cycle = await hashGetAll(cycleKey(id));
-    const agents = (await listRange(agentsKey(id), 0, -1))
+    const cycle = await r.hgetall(cycleKey(id));
+    const agents = (await r.lrange(agentsKey(id), 0, -1))
       .map((e) => { try { return JSON.parse(e); } catch { return null; } })
       .filter(Boolean);
-    const costs = await hashGetAll(costsKey(id));
+    const costs = await r.hgetall(costsKey(id));
     const total = parseInt(cycle.total || "0");
     const completed = parseInt(cycle.completed || "0");
     const failed = parseInt(cycle.failed || "0");
@@ -263,7 +267,8 @@ class TaskTracker {
    * Get a single task's state.
    */
   async getTaskState(taskId) {
-    return hashGetAll(taskKey(taskId));
+    const r = getRedisConnection();
+    return r.hgetall(taskKey(taskId));
   }
 
   // ---------------------------------------------------------------------------
@@ -275,8 +280,9 @@ class TaskTracker {
    * Used by the new control loop. Coexists with initCycle() for backward compat.
    */
   async initTaskV2(cycleId, task) {
+    const r = getRedisConnection();
     const taskId = task.taskId || task.id;
-    const pipe = createPipeline();
+    const pipe = r.pipeline();
 
     pipe.sadd(tasksKey(cycleId), taskId);
     pipe.hset(taskKey(taskId),
@@ -314,7 +320,8 @@ class TaskTracker {
    * @returns {{ ok: boolean, error?: string }}
    */
   async transitionTask(taskId, newState, evidence = {}) {
-    const task = await hashGetAll(taskKey(taskId));
+    const r = getRedisConnection();
+    const task = await r.hgetall(taskKey(taskId));
     if (!task.cycleId) return { ok: false, error: `Task ${taskId} not found` };
 
     const currentState = (task.state || task.status || "proposed") as TaskState;
@@ -336,7 +343,7 @@ class TaskTracker {
     // @ts-expect-error — migrate to proper types
       updates.completedAt = new Date().toISOString();
     }
-    await hashSet(taskKey(taskId), ...Object.entries(updates).flat());
+    await r.hset(taskKey(taskId), ...Object.entries(updates).flat());
 
     // Store evidence
     if (Object.keys(evidence).length > 0) {
@@ -346,7 +353,7 @@ class TaskTracker {
         from: currentState,
         to: newState,
       });
-      await setString(evidenceKey(taskId, newState), evidenceJson, CYCLE_KEY_TTL);
+      await r.set(evidenceKey(taskId, newState), evidenceJson, "EX", CYCLE_KEY_TTL);
     }
 
     console.log(`[TaskTracker] ${taskId}: ${currentState} → ${newState}`);
@@ -360,10 +367,10 @@ class TaskTracker {
           : newState === "abandoned"
             ? "abandoned"
             : "failed";
-        await hashIncrBy(cycleKey(task.cycleId), field, 1);
+        await r.hincrby(cycleKey(task.cycleId), field, 1);
       }
 
-      const cycle = await hashGetAll(cycleKey(task.cycleId));
+      const cycle = await r.hgetall(cycleKey(task.cycleId));
       const total = parseInt(cycle.total);
       const done = parseInt(cycle.completed || "0") + parseInt(cycle.failed || "0") + parseInt(cycle.abandoned || "0") + parseInt(cycle.timedOut || "0");
       console.log(`[TaskTracker] Cycle progress: ${done}/${total}`);
@@ -380,11 +387,12 @@ class TaskTracker {
    * Get a task's full evidence chain — all state transitions with their proof.
    */
   async getTaskEvidence(taskId) {
+    const r = getRedisConnection();
     const states = ["proposed", "approved", "in-progress", "changed-code", "verified", "merged", "blocked", "failed", "abandoned"];
     const evidence: Record<string, any> = {};
 
     for (const state of states) {
-      const data = await getString(evidenceKey(taskId, state));
+      const data = await r.get(evidenceKey(taskId, state));
       if (data) {
         try { evidence[state] = JSON.parse(data); } catch { evidence[state] = data; }
       }
@@ -411,7 +419,8 @@ class TaskTracker {
   async checkDependenciesMet(dependencies) {
     if (!dependencies || dependencies.length === 0) return { proceed: true, unmet: [] };
 
-    const completed = await setMembers(DEPS_COMPLETED);
+    const r = getRedisConnection();
+    const completed = await r.smembers(DEPS_COMPLETED);
     const completedSet = new Set(completed);
     const unmet = dependencies.filter((d) => !completedSet.has(d));
 
@@ -423,11 +432,12 @@ class TaskTracker {
    * The full event is stored so it can be re-published on release.
    */
   async holdTask(taskId, event, unmetDeps) {
-    await hashSet(heldKey(taskId),
+    const r = getRedisConnection();
+    await r.hset(heldKey(taskId),
       "event", JSON.stringify(event),
       "deps", JSON.stringify(unmetDeps),
     );
-    await setAdd(DEPS_INDEX, taskId);
+    await r.sadd(DEPS_INDEX, taskId);
     console.log(`[TaskTracker] Holding ${taskId} — waiting for: ${unmetDeps.join(", ")}`);
   }
 
@@ -436,13 +446,14 @@ class TaskTracker {
    * dependencies are now fully met. Returns the events to re-publish.
    */
   async releaseByTitle(completedTitle) {
-    await setAdd(DEPS_COMPLETED, completedTitle);
+    const r = getRedisConnection();
+    await r.sadd(DEPS_COMPLETED, completedTitle);
 
-    const heldIds = await setMembers(DEPS_INDEX);
+    const heldIds = await r.smembers(DEPS_INDEX);
     const released = [];
 
     for (const taskId of heldIds) {
-      const held = await hashGetAll(heldKey(taskId));
+      const held = await r.hgetall(heldKey(taskId));
       if (!held.deps) continue;
 
       let deps;
@@ -454,11 +465,11 @@ class TaskTracker {
         let event;
         try { event = JSON.parse(held.event); } catch { continue; }
         released.push(event);
-        await delKey(heldKey(taskId));
-        await setRem(DEPS_INDEX, taskId);
+        await r.del(heldKey(taskId));
+        await r.srem(DEPS_INDEX, taskId);
         console.log(`[TaskTracker] Released ${taskId} — all dependencies met`);
       } else {
-        await hashSetField(heldKey(taskId), "deps", JSON.stringify(remaining));
+        await r.hset(heldKey(taskId), "deps", JSON.stringify(remaining));
       }
     }
 
@@ -470,10 +481,11 @@ class TaskTracker {
    * Cascade: blocked tasks trigger further blocks on their dependents.
    */
   async blockDependentsOf(failedTitle, eventBus) {
-    const heldIds = await setMembers(DEPS_INDEX);
+    const r = getRedisConnection();
+    const heldIds = await r.smembers(DEPS_INDEX);
 
     for (const taskId of heldIds) {
-      const held = await hashGetAll(heldKey(taskId));
+      const held = await r.hgetall(heldKey(taskId));
       if (!held.deps) continue;
 
       let deps;
@@ -483,8 +495,8 @@ class TaskTracker {
         console.log(`[TaskTracker] Blocking ${taskId} — dependency "${failedTitle}" failed`);
 
         // Clean up held state before markTaskDone (which cascades recursively)
-        await delKey(heldKey(taskId));
-        await setRem(DEPS_INDEX, taskId);
+        await r.del(heldKey(taskId));
+        await r.srem(DEPS_INDEX, taskId);
 
         // markTaskDone with "failed" will cascade to further dependents
         await this.markTaskDone(taskId, "failed", eventBus);
@@ -497,16 +509,17 @@ class TaskTracker {
    * Returns events that should be re-published to STREAMS.TASKS.
    */
   async recoverHeldTasks() {
-    const heldIds = await setMembers(DEPS_INDEX);
+    const r = getRedisConnection();
+    const heldIds = await r.smembers(DEPS_INDEX);
     if (heldIds.length === 0) return [];
 
     console.log(`[TaskTracker] Checking ${heldIds.length} held tasks for recovery...`);
-    const completed = await setMembers(DEPS_COMPLETED);
+    const completed = await r.smembers(DEPS_COMPLETED);
     const completedSet = new Set(completed);
     const released = [];
 
     for (const taskId of heldIds) {
-      const held = await hashGetAll(heldKey(taskId));
+      const held = await r.hgetall(heldKey(taskId));
       if (!held.deps) continue;
 
       let deps;
@@ -518,8 +531,8 @@ class TaskTracker {
         let event;
         try { event = JSON.parse(held.event); } catch { continue; }
         released.push(event);
-        await delKey(heldKey(taskId));
-        await setRem(DEPS_INDEX, taskId);
+        await r.del(heldKey(taskId));
+        await r.srem(DEPS_INDEX, taskId);
         console.log(`[TaskTracker] Recovered held task ${taskId} — all dependencies now met`);
       }
     }

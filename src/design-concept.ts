@@ -33,14 +33,13 @@
 import { createHash } from "node:crypto";
 
 import {
-  hashSet,
-  hashSetField,
-  hashGetAll,
-  expireKey,
-  zAdd,
-  zRem,
-  zRevRange,
-} from "./redis-adapter.ts";
+  getDesignConceptHash,
+  listAllDesignConceptRefs,
+  listRecentDesignConceptRefs,
+  removeDesignConceptFromIndex,
+  saveDesignConceptHash,
+  setDesignConceptField,
+} from "./redis/design-concept.ts";
 import { classifyChange } from "./tier-classifier.ts";
 
 // ---------------------------------------------------------------------------
@@ -55,9 +54,6 @@ const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /** Minimum Q&A trace depth for the gate. From the ADR-0008 schema. */
 const MIN_QA_TRACE_LENGTH = 6;
-
-const INDEX_KEY = "hydra:design-concept:index";
-const dcKey = (anchorRef: string): string => `hydra:design-concept:${anchorRef}`;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -207,26 +203,26 @@ export async function saveDesignConcept(
   const artifactHash = computeArtifactHash(draft);
   const concept: DesignConcept = { ...draft, artifactHash };
 
-  const key = dcKey(concept.anchorRef);
-
-  await hashSet(
-    key,
-    "anchorRef", concept.anchorRef,
-    "scope", concept.scope,
-    "createdAt", String(concept.createdAt),
-    "artifactHash", concept.artifactHash,
-    "glossaryTerms", JSON.stringify(concept.glossaryTerms),
-    "glossaryGaps", JSON.stringify(concept.glossaryGaps),
-    "modulesTouched", JSON.stringify(concept.modulesTouched),
-    "invariants", JSON.stringify(concept.invariants),
-    "rejectedAlternatives", JSON.stringify(concept.rejectedAlternatives),
-    "qaTrace", JSON.stringify(concept.qaTrace),
-    "prototypes", JSON.stringify(concept.prototypes),
-    "status", concept.status,
-    "approvedBy", concept.approvedBy,
+  await saveDesignConceptHash(
+    concept.anchorRef,
+    concept.createdAt,
+    [
+      "anchorRef", concept.anchorRef,
+      "scope", concept.scope,
+      "createdAt", String(concept.createdAt),
+      "artifactHash", concept.artifactHash,
+      "glossaryTerms", JSON.stringify(concept.glossaryTerms),
+      "glossaryGaps", JSON.stringify(concept.glossaryGaps),
+      "modulesTouched", JSON.stringify(concept.modulesTouched),
+      "invariants", JSON.stringify(concept.invariants),
+      "rejectedAlternatives", JSON.stringify(concept.rejectedAlternatives),
+      "qaTrace", JSON.stringify(concept.qaTrace),
+      "prototypes", JSON.stringify(concept.prototypes),
+      "status", concept.status,
+      "approvedBy", concept.approvedBy,
+    ],
+    DESIGN_CONCEPT_TTL_SECONDS,
   );
-  await expireKey(key, DESIGN_CONCEPT_TTL_SECONDS);
-  await zAdd(INDEX_KEY, concept.createdAt, concept.anchorRef);
 
   return concept;
 }
@@ -270,7 +266,7 @@ export async function getDesignConcept(
   anchorRef: string,
 ): Promise<DesignConcept | null> {
   if (!anchorRef) return null;
-  const raw = await hashGetAll(dcKey(anchorRef));
+  const raw = await getDesignConceptHash(anchorRef);
   return hydrate(raw);
 }
 
@@ -285,14 +281,14 @@ export async function getDesignConcept(
  */
 async function pruneStaleIndex(now: number): Promise<number> {
   const cutoff = now - DESIGN_CONCEPT_MAX_AGE_MS;
-  const allRefs = await zRevRange(INDEX_KEY, 0, -1);
+  const allRefs = await listAllDesignConceptRefs();
   let pruned = 0;
   for (const ref of allRefs) {
-    const raw = await hashGetAll(dcKey(ref));
+    const raw = await getDesignConceptHash(ref);
     const createdAt = Number(raw?.createdAt) || 0;
     // Either the hash is gone (TTL'd out) or it's older than the cutoff.
     if (!raw?.anchorRef || createdAt < cutoff) {
-      await zRem(INDEX_KEY, ref);
+      await removeDesignConceptFromIndex(ref);
       pruned += 1;
     }
   }
@@ -316,7 +312,7 @@ export async function listDesignConcepts(opts: {
   await pruneStaleIndex(now);
 
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
-  const refs = await zRevRange(INDEX_KEY, 0, limit - 1);
+  const refs = await listRecentDesignConceptRefs(limit);
   const out: DesignConcept[] = [];
   for (const ref of refs) {
     const dc = await getDesignConcept(ref);
@@ -347,9 +343,8 @@ export async function approveDesignConcept(
     );
   }
   const approvedBy = by as DesignConcept["approvedBy"];
-  const key = dcKey(anchorRef);
-  await hashSetField(key, "status", "approved");
-  await hashSetField(key, "approvedBy", approvedBy);
+  await setDesignConceptField(anchorRef, "status", "approved");
+  await setDesignConceptField(anchorRef, "approvedBy", approvedBy);
   return { ...existing, status: "approved", approvedBy };
 }
 
