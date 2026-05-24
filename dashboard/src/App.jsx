@@ -5,7 +5,6 @@ import Layout from "./components/Layout.jsx";
 import Overview from "./pages/Overview.jsx";
 import Backlog from "./pages/Backlog.jsx";
 import Metrics from "./pages/Metrics.jsx";
-import Proposals from "./pages/Proposals.jsx";
 import Queue from "./pages/Queue.jsx";
 import Search from "./pages/Search.jsx";
 import Health from "./pages/Health.jsx";
@@ -34,7 +33,6 @@ export default function App() {
           <Route path="/backlog" element={<Backlog />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/metrics" element={<Metrics />} />
-          <Route path="/proposals" element={<Proposals />} />
           <Route path="/queue" element={<Queue />} />
           <Route path="/search" element={<Search />} />
           <Route path="/health" element={<Health />} />

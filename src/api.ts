@@ -10,7 +10,6 @@ import { createResearchRouter } from "./api/research.ts";
 import { createBacklogRouter } from "./api/backlog.ts";
 import { createDesignConceptsRouter } from "./api/design-concepts.ts";
 import { createSchedulerRouter } from "./api/scheduler.ts";
-import { createProposalsRouter } from "./api/proposals.ts";
 import { createMetricsRouter } from "./api/metrics.ts";
 import { createMiscRouter } from "./api/misc.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
@@ -62,7 +61,6 @@ function createApi(eventBus) {
   api.use(createBacklogRouter());
   api.use(createDesignConceptsRouter());
   api.use(createSchedulerRouter(eventBus));
-  api.use(createProposalsRouter(eventBus));
   api.use(createMetricsRouter());
   api.use(createArchitectureRouter(eventBus));
   // Routes split out of misc.ts per issue #268 — each owns one domain.

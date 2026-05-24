@@ -12,7 +12,6 @@
  *   - redis/cycle-metrics.ts     — metrics index, cycle costs
  *   - redis/reality-reports.ts   — reality report storage + index
  *   - redis/backlog.ts           — backlog lanes + items
- *   - redis/proposals.ts         — proposal hashes + index
  *   - redis/agent-memory.ts      — pattern persistence + cooldowns
  *   - redis/reflections.ts       — reflection buffer + per-anchor + outcomes
  *   - redis/utility.ts           — scan, ttl, type, batch delete, hash field get
@@ -133,17 +132,6 @@ export {
   removeFromBacklogLane,
   evalScript,
 } from "./redis/backlog.ts";
-
-// Proposals
-export {
-  getProposalHash,
-  saveProposalHash,
-  getProposalIdsDesc,
-  getProposalIdsAsc,
-  deleteProposal,
-  removeProposalFromIndex,
-  getProposalIdsByTimeRange,
-} from "./redis/proposals.ts";
 
 // Cycle tracking + merge lock
 export {
