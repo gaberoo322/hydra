@@ -5,13 +5,12 @@ import { recordCycleMetrics } from "../metrics/record.ts";
 import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { loadCycleSummaries, loadCycleSpending } from "../metrics/cycle-summary.ts";
-import { redisKeys } from "../redis-keys.ts";
-import { getWorkQueueLen, listLen } from "../redis-adapter.ts";
+import { getWorkQueueLen } from "../redis/work-queue.ts";
+import { getPriorFailuresLen, getReframeQueueLength } from "../redis/anchors.ts";
 import { aggregateCostAttribution } from "../cost/attribution.ts";
 import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
 import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost/surrogate.ts";
 import { getReframeStarvationStats } from "../anchor-selection/reframe.ts";
-import { REFRAME_QUEUE } from "../anchor-selection/constants.ts";
 
 /**
  * Pick the highest-count reason from a starvation-reasons hash, skipping
@@ -40,7 +39,7 @@ export function createMetricsRouter() {
       const stats = await getAggregateStats(20);
       const acc = await getCumulativeAccomplishments(20);
       const queueLen = await getWorkQueueLen();
-      const priorFails = await listLen(redisKeys.anchorPriorFailures());
+      const priorFails = await getPriorFailuresLen();
 
       const lines = [
         `Hydra V2 — ${stats.cycles} cycles completed`,
@@ -184,7 +183,7 @@ export function createMetricsRouter() {
           console.error(`[api/metrics] anchor-distribution: reframe stats failed: ${err.message}`);
           return null;
         }),
-        listLen(REFRAME_QUEUE).catch((err: any) => {
+        getReframeQueueLength().catch((err: any) => {
           console.error(`[api/metrics] anchor-distribution: reframe queue len failed: ${err.message}`);
           return 0;
         }),

@@ -21,18 +21,14 @@ import {
   type PriorityTier,
   type ScoreSignals,
 } from "../anchor-selection.ts";
+import { getWorkQueueItems } from "../redis/work-queue.ts";
 import {
-  listRange,
-  getWorkQueueItems,
-  getString,
-} from "../redis-adapter.ts";
+  getPriorFailures,
+  getReframeQueueItems,
+  readAbandonment,
+} from "../redis/anchors.ts";
 import { loadBacklog } from "../backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "../reflections/reflections.ts";
-import {
-  REFRAME_QUEUE,
-  PRIOR_FAILURES_KEY,
-  anchorKey as abandonmentCounterKey,
-} from "../anchor-selection/constants.ts";
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
@@ -144,7 +140,7 @@ export function createAnchorRouter() {
       // Source 4: Reframe queue
       // ---------------------------------------------------------------------
       try {
-        const rawItems = await listRange(REFRAME_QUEUE, 0, -1);
+        const rawItems = await getReframeQueueItems();
         for (const r of rawItems) {
           let item: any;
           try { item = JSON.parse(r); } catch { continue; }
@@ -167,7 +163,7 @@ export function createAnchorRouter() {
       // Source 5: Prior failures
       // ---------------------------------------------------------------------
       try {
-        const rawItems = await listRange(PRIOR_FAILURES_KEY, 0, -1);
+        const rawItems = await getPriorFailures();
         for (const r of rawItems) {
           let item: any;
           try { item = JSON.parse(r); } catch { continue; }
@@ -276,10 +272,7 @@ function isBlockerJustCleared(item: any, now: number): boolean {
  */
 async function loadAbandonments(anchorRef: string): Promise<number> {
   try {
-    const raw = await getString(abandonmentCounterKey(anchorRef));
-    if (!raw) return 0;
-    const n = parseInt(raw, 10);
-    return Number.isFinite(n) ? n : 0;
+    return await readAbandonment(anchorRef);
   } catch (err: any) {
     console.error(`[AnchorAPI] abandonment load failed for "${anchorRef.slice(0, 60)}": ${err.message}`);
     return 0;

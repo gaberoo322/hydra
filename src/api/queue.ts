@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getWorkQueueItems, pushToWorkQueue, getWorkQueueLen, findWorkQueueDuplicate } from "../redis-adapter.ts";
+import { getWorkQueueItems, pushToWorkQueue, getWorkQueueLen, findWorkQueueDuplicate } from "../redis/work-queue.ts";
 import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
 import { QueuePostBodySchema } from "../schemas/queue.ts";
 
