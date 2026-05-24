@@ -14,7 +14,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { pushTrackedMerge, getTrackedMerges, setAdversarialStats } from "./redis-adapter.ts";
+import { pushTrackedMerge, getTrackedMerges, setAdversarialStats } from "./redis/adversarial.ts";
 
 const execFileAsync = promisify(execFile);
 

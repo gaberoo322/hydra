@@ -31,7 +31,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { normalizeReference } from "./anchor-selection/normalize-reference.ts";
-import { getRecentMetricIds, getCycleMetrics } from "./redis-adapter.ts";
+import { getRecentMetricIds, getCycleMetrics } from "./redis/cycle-metrics.ts";
 
 // Anchor types that should pass through the actionability gate. Anything not
 // listed here is left untouched (recovery/retry flows + specific anchors that

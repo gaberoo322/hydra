@@ -27,7 +27,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { setCalibrationOutcome } from "./redis-adapter.ts";
+import { setCalibrationOutcome } from "./redis/calibration.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -384,10 +384,11 @@ async function loadReframeQueueDepth(): Promise<number> {
   try {
     // Dynamic import to keep the heuristic path free of redis startup cost
     // when only `scoreHeuristic` is exercised (the common case in tests).
-    const adapter = await import("./redis-adapter.ts");
-    const fn = (adapter as any).listLen ?? (adapter as any).llen;
-    if (typeof fn !== "function") return 0;
-    const depth = await fn("hydra:reframe:queue");
+    // NOTE: reads `hydra:reframe:queue` (legacy/empty key) not the live
+    // `hydra:anchors:reframe-queue` — preserved verbatim to avoid changing
+    // refineScore behavior in this refactor. See the latent-bug TODO below.
+    const { getRedisConnection } = await import("./redis/connection.ts");
+    const depth = await getRedisConnection().llen("hydra:reframe:queue");
     return typeof depth === "number" && depth >= 0 ? depth : 0;
   } catch (err: any) {
     // Redis unavailable in tests/local — refinement just skips the reframe bump.

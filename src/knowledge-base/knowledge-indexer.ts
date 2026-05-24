@@ -23,8 +23,8 @@ import {
   getReportIdsByScore,
   getRealityReport,
   getReportScore,
-  getMemoryPatterns,
-} from "../redis-adapter.ts";
+} from "../redis/reality-reports.ts";
+import { getMemoryPatterns } from "../redis/agent-memory.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
 const INDEXABLE_EXTS = new Set([".md", ".txt", ".json", ".yaml", ".yml"]);

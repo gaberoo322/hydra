@@ -15,9 +15,10 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getMetricsTrend } from "./metrics/trend.ts";
 import {
-  getRecentResearchIds, getResearchReport as getResearchReportAdapter,
-  getWorkQueueItems, removeFromWorkQueue,
-} from "./redis-adapter.ts";
+  getRecentResearchIds,
+  getResearchReport as getResearchReportAdapter,
+} from "./redis/research-reports.ts";
+import { getWorkQueueItems, removeFromWorkQueue } from "./redis/work-queue.ts";
 import { getTargetWorkspace } from "./target-config.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");

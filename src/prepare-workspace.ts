@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { acquireWorkspaceLock, releaseWorkspaceLock } from "./redis-adapter.ts";
+import { acquireWorkspaceLock, releaseWorkspaceLock } from "./redis/connection.ts";
 
 const execFileAsync = promisify(execFile);
 
