@@ -1,44 +1,37 @@
 /**
  * learning/reflections.ts — Per-anchor episodic + global reflection storage
  *
- * Extracted from learning.ts (issue #219). Holds the Reflexion-style
- * reflection state used to inject failure context into future planner calls
- * for the same anchor (per-anchor) or the same anchor type (global buffer).
+ * Holds the Reflexion-style reflection state used to inject failure context
+ * into future planner calls for the same anchor (per-anchor) or the same
+ * anchor type (global buffer).
  *
  * Public API used outside this module:
- *   recordAnchorReflection / loadAnchorReflections / reflectionKey
- *   recordGlobalReflection / loadRelevantReflections / formatReflectionsForPrompt
+ *   recordAnchorReflection / loadAnchorReflections / loadAnchorReflectionsRaw
+ *   loadAnchorReflectionsByFile / backfillByFileIndex / reflectionKey
+ *   recordReflection / loadRelevantReflections / formatReflectionsForPrompt
  *   clearReflectionsForAnchor — clears the global buffer entries for an anchor
- *   recordReflection           — global-only convenience wrapper (legacy)
  *   getAllReflections          — GET /api/reflections
  *   closeReflectionsRedis      — kept for test back-compat (no-op)
  *   getReflectionEffectiveness — per-anchor success/failure stats + injection rate
- *   recordReflectionOutcome    — write `{anchorRef, outcome}` to outcome list
  *
  * Constants (REFLECTION_TTL etc.) live here so callers don't reach into
  * learning.ts internals.
- *
- * Behavior preserved 1:1 from the previous learning.ts implementation.
  */
 
 import { redisKeys } from "../redis-keys.ts";
 import {
   getAnchorReflections,
   pushAnchorReflection,
-  deleteReflectionKey,
   pushReflection,
   getReflectionBuffer,
   replaceReflectionBuffer,
-  pushReflectionOutcome,
   getReflectionOutcomes,
-  setReflectionKeyTTL,
 } from "../redis-adapter.ts";
 // Issue #326: by-file secondary index — additive, imported directly from the
 // domain module so the change does not touch the Tier-0 redis-adapter shim.
 import {
   addReflectionToFileIndex,
   getReflectionKeysByFile,
-  removeReflectionFromFileIndex,
 } from "../redis/reflections.ts";
 
 // ===========================================================================
@@ -46,7 +39,6 @@ import {
 // ===========================================================================
 
 export const REFLECTION_TTL = 7 * 24 * 60 * 60; // 7 days
-export const REFLECTION_TTL_EXTENDED = 30 * 24 * 60 * 60; // 30 days for effective reflections
 export const MAX_REFLECTIONS_PER_ANCHOR = 5;
 export const MAX_BUFFER_SIZE = 20;
 
@@ -300,23 +292,6 @@ export async function loadAnchorReflections(anchorRef: string): Promise<string> 
  * might be a member of, so cleared reflections do not surface via the
  * secondary index. Best-effort — failures here are logged and ignored.
  */
-export async function deleteAnchorReflections(
-  anchorRef: string,
-  files?: string[] | null,
-): Promise<void> {
-  const key = reflectionKey(anchorRef);
-  await deleteReflectionKey(key);
-
-  try {
-    const indexedFiles = files && files.length > 0 ? files : extractFilesFromAnchor(anchorRef);
-    for (const file of indexedFiles) {
-      await removeReflectionFromFileIndex(file, key);
-    }
-  } catch (err: any) {
-    console.error(`[Learning] By-file index cleanup failed for "${anchorRef.slice(0, 60)}": ${err.message}`);
-  }
-}
-
 /**
  * Load per-anchor reflections that match by-file (issue #326).
  *
@@ -432,19 +407,11 @@ export async function backfillByFileIndex(
   }
 }
 
-/**
- * Extend the TTL on a per-anchor reflection key. Used when reflections have
- * proven effective (>50% retry success rate).
- */
-export async function extendAnchorReflectionsTTL(anchorRef: string): Promise<void> {
-  await setReflectionKeyTTL(reflectionKey(anchorRef), REFLECTION_TTL_EXTENDED);
-}
-
 // ===========================================================================
 // Global reflection buffer
 // ===========================================================================
 
-export async function recordGlobalReflection(opts: {
+export async function recordReflection(opts: {
   cycleId: string;
   anchorType: string;
   anchorReference: string;
@@ -466,22 +433,6 @@ export async function recordGlobalReflection(opts: {
 
   await pushReflection(JSON.stringify(reflection), MAX_BUFFER_SIZE);
   console.log(`[Learning] Recorded global reflection for cycle ${opts.cycleId}: ${opts.failureMode}`);
-}
-
-/**
- * Backwards-compat alias for `recordGlobalReflection`.
- * Tests + direct API callers used `recordReflection` historically.
- */
-export async function recordReflection(opts: {
-  cycleId: string;
-  anchorType: string;
-  anchorReference: string;
-  failureMode: string;
-  whatFailed: string;
-  whyItFailed: string;
-  whatToTryDifferently: string;
-}): Promise<void> {
-  await recordGlobalReflection(opts);
 }
 
 export async function loadRelevantReflections(
@@ -587,31 +538,8 @@ export function closeReflectionsRedis() {
 }
 
 // ===========================================================================
-// Reflection outcomes / effectiveness
+// Reflection effectiveness
 // ===========================================================================
-
-/**
- * Record that an anchor with prior reflections completed in `outcome` state.
- * Used to compute reflection effectiveness over time.
- */
-export async function recordReflectionOutcome(opts: {
-  anchorRef: string;
-  outcome: "merged" | "failed" | "abandoned";
-  cycleId: string;
-}): Promise<number> {
-  const existingReflections = await getAnchorReflections(reflectionKey(opts.anchorRef));
-  if (existingReflections.length === 0) return 0;
-
-  const outcome: ReflectionOutcome = {
-    anchorRef: opts.anchorRef,
-    hadReflections: true,
-    outcome: opts.outcome,
-    cycleId: opts.cycleId,
-    timestamp: new Date().toISOString(),
-  };
-  await pushReflectionOutcome(JSON.stringify(outcome), Date.now());
-  return existingReflections.length;
-}
 
 /**
  * Compute per-anchor effectiveness scores from reflection outcomes.
