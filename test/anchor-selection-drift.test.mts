@@ -43,7 +43,7 @@ async function seedCycleMetric(cycleId: string, taskTitle: string, score = Date.
 
 describe("computeTitleSimilarity (pure helper, issue #233)", () => {
   test("identical strings score 1.0", async () => {
-    const { computeTitleSimilarity } = await import("../src/metrics.ts");
+    const { computeTitleSimilarity } = await import("../src/anchor-selection/drift-filter.ts");
     const score = computeTitleSimilarity(
       "Rank Polymarket reward windows by bankroll fit",
       "Rank Polymarket reward windows by bankroll fit",
@@ -52,7 +52,7 @@ describe("computeTitleSimilarity (pure helper, issue #233)", () => {
   });
 
   test("80% overlap scores above 0.7", async () => {
-    const { computeTitleSimilarity } = await import("../src/metrics.ts");
+    const { computeTitleSimilarity } = await import("../src/anchor-selection/drift-filter.ts");
     // 4 of 5 long words shared
     const score = computeTitleSimilarity(
       "Rank Polymarket reward windows by bankroll fit",
@@ -62,7 +62,7 @@ describe("computeTitleSimilarity (pure helper, issue #233)", () => {
   });
 
   test("disjoint titles score 0", async () => {
-    const { computeTitleSimilarity } = await import("../src/metrics.ts");
+    const { computeTitleSimilarity } = await import("../src/anchor-selection/drift-filter.ts");
     const score = computeTitleSimilarity(
       "Rank Polymarket reward windows by bankroll fit",
       "Refactor authentication module for OAuth integration",
@@ -71,14 +71,14 @@ describe("computeTitleSimilarity (pure helper, issue #233)", () => {
   });
 
   test("empty input is safe", async () => {
-    const { computeTitleSimilarity } = await import("../src/metrics.ts");
+    const { computeTitleSimilarity } = await import("../src/anchor-selection/drift-filter.ts");
     assert.equal(computeTitleSimilarity("", "anything else"), 0);
     assert.equal(computeTitleSimilarity("anything", ""), 0);
     assert.equal(computeTitleSimilarity("", ""), 0);
   });
 
   test("non-string input is safe", async () => {
-    const { computeTitleSimilarity } = await import("../src/metrics.ts");
+    const { computeTitleSimilarity } = await import("../src/anchor-selection/drift-filter.ts");
     // @ts-expect-error — runtime guard
     assert.equal(computeTitleSimilarity(null, "x"), 0);
     // @ts-expect-error — runtime guard
