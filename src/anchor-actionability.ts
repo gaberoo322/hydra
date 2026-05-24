@@ -22,14 +22,15 @@
  * `codebase-health`, or `regression-hunt` anchors. Those are recovery flows that
  * legitimately retry against known-failed work.
  *
- * The token normalization reuses `normalizeReference()` from `plan-cache.ts`
- * (issue #192) — same logic that backs the plan cache key, so a planner-style
- * reference variant collides with the completed-work entry that retired it.
+ * The token normalization reuses `normalizeReference()` from
+ * `anchor-selection/normalize-reference.ts` (issue #192) — same logic that
+ * backs the plan cache key, so a planner-style reference variant collides
+ * with the completed-work entry that retired it.
  */
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { normalizeReference } from "./plan-cache.ts";
+import { normalizeReference } from "./anchor-selection/normalize-reference.ts";
 import { getRecentMetricIds, getCycleMetrics } from "./redis-adapter.ts";
 
 // Anchor types that should pass through the actionability gate. Anything not
