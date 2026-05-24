@@ -102,3 +102,63 @@ export async function evalScript(
   const r = getRedisConnection();
   return r.eval(script, numKeys, ...args);
 }
+
+// ---------------------------------------------------------------------------
+// Claim-next-queued Lua claim — script body owned by caller (domain logic),
+// the three backlog keys it needs are owned here.
+// ---------------------------------------------------------------------------
+
+export async function claimNextQueuedBacklogItem(
+  lua: string,
+  nowMs: number,
+  wipLimit: number,
+): Promise<string | null> {
+  const r = getRedisConnection();
+  const result = await r.eval(
+    lua,
+    3,
+    redisKeys.backlogLane("queued"),
+    redisKeys.backlogItems(),
+    redisKeys.backlogLane("inProgress"),
+    nowMs,
+    wipLimit,
+  );
+  return result === null || result === undefined ? null : String(result);
+}
+
+// ---------------------------------------------------------------------------
+// Claims-reaper counters (issue #374)
+// ---------------------------------------------------------------------------
+
+export async function getClaimsReapedLifetime(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.claimsReapedLifetime());
+}
+
+export async function incrClaimsReapedLifetime(): Promise<void> {
+  const r = getRedisConnection();
+  await r.incr(redisKeys.claimsReapedLifetime());
+}
+
+export async function getClaimsReapedDay(isoDate: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.claimsReapedDay(isoDate));
+}
+
+/** Increment today's reaped counter and stamp its TTL so the per-day bucket ages out. */
+export async function incrClaimsReapedDay(isoDate: string, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  const key = redisKeys.claimsReapedDay(isoDate);
+  await r.incr(key);
+  await r.expire(key, ttlSeconds);
+}
+
+export async function getClaimsReapedLast(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.claimsReapedLast());
+}
+
+export async function setClaimsReapedLast(iso: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.claimsReapedLast(), iso);
+}

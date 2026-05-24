@@ -5,8 +5,11 @@ import { moveItemToLane, deleteItem } from "../backlog/lanes.ts";
 import { isWipLimitReached } from "../backlog/wip.ts";
 import { claimNextQueuedItem } from "../backlog/claims.ts";
 import { getStaleClaims, reapStaleClaims } from "../backlog/reaper.ts";
-import { getString } from "../redis-adapter.ts";
-import { redisKeys } from "../redis-keys.ts";
+import {
+  getClaimsReapedLifetime,
+  getClaimsReapedDay,
+  getClaimsReapedLast,
+} from "../redis/backlog.ts";
 
 export function createBacklogRouter() {
   const router = Router();
@@ -195,10 +198,10 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
       const envMax = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
       const maxAgeMs = Number.isFinite(rawMax) && rawMax > 0 ? rawMax : envMax;
       const { all, stale, maxAgeMs: usedMax } = await getStaleClaims({ maxAgeMs });
-      const lifetime = await getString(redisKeys.claimsReapedLifetime());
+      const lifetime = await getClaimsReapedLifetime();
       const isoDate = new Date().toISOString().split("T")[0];
-      const day = await getString(redisKeys.claimsReapedDay(isoDate));
-      const last = await getString(redisKeys.claimsReapedLast());
+      const day = await getClaimsReapedDay(isoDate);
+      const last = await getClaimsReapedLast();
       res.json({
         maxAgeMs: usedMax,
         inProgress: all,

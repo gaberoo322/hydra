@@ -14,9 +14,13 @@ import { promisify } from "node:util";
 
 import {
   addToBacklogLane, removeFromBacklogLane, getBacklogLaneIds,
-  incrKey, setString, expireKey, pushAlert,
+  pushAlert,
 } from "../redis-adapter.ts";
-import { redisKeys } from "../redis-keys.ts";
+import {
+  incrClaimsReapedLifetime,
+  incrClaimsReapedDay,
+  setClaimsReapedLast,
+} from "../redis/backlog.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
 import {
   applyLaneTransition, getItem, saveItem, getLaneItems,
@@ -212,12 +216,10 @@ export async function reapStaleClaims(opts: {
     );
 
     try {
-      await incrKey(redisKeys.claimsReapedLifetime());
+      await incrClaimsReapedLifetime();
       const isoDate = new Date().toISOString().split("T")[0];
-      const dayKey = redisKeys.claimsReapedDay(isoDate);
-      await incrKey(dayKey);
-      await expireKey(dayKey, CLAIMS_REAPED_DAY_TTL_S);
-      await setString(redisKeys.claimsReapedLast(), new Date().toISOString());
+      await incrClaimsReapedDay(isoDate, CLAIMS_REAPED_DAY_TTL_S);
+      await setClaimsReapedLast(new Date().toISOString());
     } catch (err: any) {
       console.error(`[Backlog] reapStaleClaims metrics failed for ${id}: ${err.message}`);
     }
