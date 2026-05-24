@@ -47,13 +47,16 @@ export async function selectKanbanAnchor(): Promise<KanbanResult> {
       // near-duplicate of a recent cycle so we don't burn planner cost.
       const driftResult = await isAnchorDriftDuplicate(candidate);
       if (driftResult.drift) {
-        try {
-          await blockByTitle(
-            queuedItem.title,
-            `Drift pre-filter: ${Math.round(driftResult.match!.similarity * 100)}% similar to "${driftResult.match!.taskTitle}" from ${driftResult.match!.cycleId}`,
-          );
-        } catch (err: any) {
-          console.error(`[ControlLoop] Failed to block drift-duplicate kanban item: ${err.message}`);
+        // blockByTitle returns false silently for not-found rather than
+        // throwing (see src/backlog/lanes.ts). Inspect the return value —
+        // a false here is unexpected because the item was just claimed
+        // from the queued lane and should still be findable in inProgress.
+        const blocked = await blockByTitle(
+          queuedItem.title,
+          `Drift pre-filter: ${Math.round(driftResult.match!.similarity * 100)}% similar to "${driftResult.match!.taskTitle}" from ${driftResult.match!.cycleId}`,
+        );
+        if (!blocked) {
+          console.error(`[ControlLoop] Failed to block drift-duplicate kanban item "${queuedItem.title}" — not found in inProgress/queued/backlog (item may have already transitioned)`);
         }
         // Fall through to subsequent sources rather than returning null —
         // a non-duplicate may still be available below.

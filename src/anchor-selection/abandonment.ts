@@ -53,13 +53,19 @@ export async function trackAbandonment(
     // because it's a pure peek — the item stays in the queued lane.
     // Blocking it lets the reframe queue item (lower priority in selectAnchor)
     // get processed instead.
-    try {
-      await blockByTitle(anchorRef, `Circuit breaker: abandoned ${count}x — escalated to reframe queue`);
+    //
+    // blockByTitle returns false silently when no matching Kanban item exists
+    // (e.g. work queue items, failing-test anchors). Inspect the return value
+    // rather than wrapping in try/catch — the function does not throw for the
+    // not-found case (see src/backlog/lanes.ts:blockByTitle).
+    const blocked = await blockByTitle(
+      anchorRef,
+      `Circuit breaker: abandoned ${count}x — escalated to reframe queue`,
+    );
+    if (blocked) {
       console.log(`[ControlLoop] Blocked Kanban item "${anchorRef}" to unblock reframe processing`);
-    } catch (err: any) {
-      // Not all anchors have a Kanban item (e.g. work queue items, failing tests)
-      // — this is expected and safe to ignore
-      console.log(`[ControlLoop] No Kanban item to block for "${anchorRef}" (${err.message})`);
+    } else {
+      console.log(`[ControlLoop] No Kanban item to block for "${anchorRef}" (no match in inProgress/queued/backlog)`);
     }
     // Reset counter so the reframe gets one clean shot
     await delKey(key);
