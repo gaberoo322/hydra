@@ -1,8 +1,9 @@
 import { Router } from "express";
-import { redisKeys } from "../redis-keys.ts";
 import {
-  setNX, getMergeLockHolder, releaseMergeLock,
-} from "../redis-adapter.ts";
+  acquireMergeLock,
+  getMergeLockHolder,
+  releaseMergeLock,
+} from "../redis/cycle-tracking.ts";
 
 /**
  * Merge lock routes.
@@ -17,7 +18,7 @@ export function createMergeLockRouter() {
   router.post("/merge/lock", async (req, res) => {
     try {
       const { cycleId } = req.body || {};
-      const acquired = await setNX(redisKeys.mergeLock(), cycleId || "unknown", 60);
+      const acquired = await acquireMergeLock(cycleId || "unknown", 60);
       if (!acquired) {
         const holder = await getMergeLockHolder();
         return res.status(409).json({ locked: true, holder });

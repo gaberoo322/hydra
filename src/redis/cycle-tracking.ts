@@ -12,6 +12,49 @@ export async function setCycleActive(cycleId: string): Promise<void> {
   await r.set(redisKeys.cycleActive(), cycleId);
 }
 
+/** Read the active cycle ID, or null if none. */
+export async function getActiveCycleId(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.cycleActive());
+}
+
+/** Read the full cycle hash for the given ID. Returns an empty object when absent. */
+export async function getCycleHash(cycleId: string): Promise<Record<string, string>> {
+  const r = getRedisConnection();
+  return r.hgetall(redisKeys.cycle(cycleId));
+}
+
+/**
+ * List all cycle IDs (newest-first by ID), stripped of the `hydra:cycle:` prefix
+ * and filtered to exclude per-cycle sub-keys (`:agents`, `:costs`, `:tasks`).
+ *
+ * Used by `getCycleHistory()` to enumerate completed cycles for the /cycle/history
+ * endpoint. The scan + filter + prefix-strip composition lives behind one
+ * accessor so the storage shape isn't re-encoded at the call site.
+ */
+export async function listCycleIds(): Promise<string[]> {
+  const r = getRedisConnection();
+  const pattern = redisKeys.cycle("cycle-*");
+  const prefix = redisKeys.cycle("");
+  const fullKeys: string[] = [];
+  let cursor = "0";
+  do {
+    const [nextCursor, batch] = await r.scan(cursor, "MATCH", pattern, "COUNT", 100);
+    fullKeys.push(...batch);
+    cursor = nextCursor;
+  } while (cursor !== "0");
+
+  const ids = fullKeys
+    .filter((k) => !k.endsWith(":agents") && !k.endsWith(":costs") && !k.endsWith(":tasks"))
+    .map((k) => k.startsWith(prefix) ? k.slice(prefix.length) : k);
+
+  // Sort newest-first. Cycle IDs are ISO-timestamp-shaped so lexical reverse-sort
+  // gives chronological reverse — same behaviour as the legacy implementation
+  // in src/cycle.ts which used `.sort().reverse()`.
+  ids.sort().reverse();
+  return ids;
+}
+
 /** Clear the active cycle. */
 export async function clearCycleActive(): Promise<void> {
   const r = getRedisConnection();
