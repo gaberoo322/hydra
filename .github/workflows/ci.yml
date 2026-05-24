@@ -29,6 +29,8 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - name: Redis-seam check (ADR-0009 closure ratchet)
+        run: npx tsx scripts/ci/redis-seam-check.ts
       - name: Run tests and verify count
         run: |
           npm test 2>&1 | tee test-output.txt

@@ -18,18 +18,14 @@
  * learning.ts internals.
  */
 
-import { redisKeys } from "../redis-keys.ts";
 import {
+  REFLECTION_PREFIX,
   getAnchorReflections,
   pushAnchorReflection,
   pushReflection,
   getReflectionBuffer,
   replaceReflectionBuffer,
   getReflectionOutcomes,
-} from "../redis-adapter.ts";
-// Issue #326: by-file secondary index — additive, imported directly from the
-// domain module so the change does not touch the Tier-0 redis-adapter shim.
-import {
   addReflectionToFileIndex,
   getReflectionKeysByFile,
 } from "../redis/reflections.ts";
@@ -94,8 +90,6 @@ export type ReflectionEffectiveness = {
 // ===========================================================================
 // Per-anchor episodic reflections
 // ===========================================================================
-
-const REFLECTION_PREFIX = redisKeys.reflectionPrefix();
 
 export function reflectionKey(anchorRef: string): string {
   return REFLECTION_PREFIX + (anchorRef || "unknown").replace(/\s+/g, "-").toLowerCase().slice(0, 120);

@@ -47,6 +47,9 @@ export type PlanCacheMissReason =
 /** Per-day key TTL — keeps storage bounded while allowing 24h windows. */
 const STAT_DAY_TTL_SECONDS = 7 * 24 * 60 * 60;
 
+/** Shared prefix all plan-cache entries (and the `stats:` sub-namespace) live under. */
+export const PLAN_CACHE_PREFIX = redisKeys.planCachePrefix();
+
 /** UTC ISO date (YYYY-MM-DD) used to suffix per-day stat keys. */
 export function statDayKey(date: Date = new Date()): string {
   return date.toISOString().slice(0, 10);

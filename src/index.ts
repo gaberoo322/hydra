@@ -9,8 +9,8 @@ import { startCleanupSchedule } from "./cleanup.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/loop.ts";
 import { startDigest, stopDigest, recordEvent } from "./digest.ts";
 import { initLearning } from "./learning.ts";
-import { redisKeys } from "./redis-keys.ts";
-import { cleanWorkQueue } from "./redis-adapter.ts";
+import { pushAlert } from "./redis/alerts.ts";
+import { cleanWorkQueue } from "./redis/work-queue.ts";
 import { recordCycleSide, classifySide } from "./capacity-floor.ts";
 import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
@@ -80,8 +80,6 @@ function startConsumers(eventBus) {
     "pattern:recurring_regressions", "pattern:anchor_stuck",
     "pattern:test_decline", "pattern:high_abandonment",
   ]);
-  const ALERTS_KEY = redisKeys.alerts();
-
   startConsumerWithRecovery("notifications", () =>
     eventBus.consume(STREAMS.NOTIFICATIONS, "openclaw", `notify-${process.pid}`, async (event) => {
       recordEvent(event);
@@ -127,8 +125,7 @@ function startConsumers(eventBus) {
           dismissed: false,
           payload: event.payload,
         };
-        await eventBus.publisher.lpush(ALERTS_KEY, JSON.stringify(alert));
-        await eventBus.publisher.ltrim(ALERTS_KEY, 0, 99); // keep 100 most recent
+        await pushAlert(JSON.stringify(alert), 100);
       }
     }, { count: 1, blockMs: 5000 }),
   );

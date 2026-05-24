@@ -10,14 +10,14 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { redisKeys } from "./redis-keys.ts";
 import {
   getPlanCacheEntry,
   setPlanCacheEntry,
   deletePlanCacheEntry,
   findPlanCacheKeys,
-  deleteKeys,
-} from "./redis-adapter.ts";
+  PLAN_CACHE_PREFIX,
+} from "./redis/plan-cache.ts";
+import { deleteKeys } from "./redis/utility.ts";
 import {
   incrPlanCacheStat,
   incrPlanCacheMissReason,
@@ -34,8 +34,6 @@ import { normalizeReference } from "./anchor-selection/normalize-reference.ts";
 const execFileAsync = promisify(execFile);
 
 const PROJECT_WORKSPACE = getTargetWorkspace();
-
-const CACHE_PREFIX = redisKeys.planCachePrefix();
 
 // TTL by anchor type (seconds)
 const TTL_STANDARD = 12 * 60 * 60; // 12 hours
@@ -241,7 +239,7 @@ export async function getPlanCacheStatsFull(): Promise<PlanCacheStatsFull> {
 function cacheKey(anchor: { type: string; reference: string }): string {
   const normalized = `${anchor.type}:${normalizeReference(anchor.type, anchor.reference)}`;
   const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
-  return `${CACHE_PREFIX}${hash}`;
+  return `${PLAN_CACHE_PREFIX}${hash}`;
 }
 
 // -------------------------------------------------------------------------
@@ -417,11 +415,11 @@ export async function invalidatePlanCacheForAnchor(
 
 export async function invalidatePlanCache(): Promise<number> {
   try {
-    const allKeys = await findPlanCacheKeys(CACHE_PREFIX);
+    const allKeys = await findPlanCacheKeys(PLAN_CACHE_PREFIX);
     // Exclude persisted stats keys (hydra:plans:cache:stats:*) — issue #325.
     // Otherwise bulk invalidation would wipe the lifetime counters that exist
     // to outlive cache flushes/restarts.
-    const STATS_PREFIX = `${CACHE_PREFIX}stats:`;
+    const STATS_PREFIX = `${PLAN_CACHE_PREFIX}stats:`;
     const keys = allKeys.filter((k) => !k.startsWith(STATS_PREFIX));
     if (keys.length > 0) {
       await deleteKeys(keys);

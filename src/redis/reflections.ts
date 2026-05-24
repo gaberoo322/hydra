@@ -9,6 +9,9 @@
 import { redisKeys } from "../redis-keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
+/** Shared prefix all per-anchor reflection keys live under. */
+export const REFLECTION_PREFIX = redisKeys.reflectionPrefix();
+
 /**
  * Append a reflection to the global buffer list and cap at maxSize.
  */

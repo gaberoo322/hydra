@@ -13,7 +13,7 @@ import { CYCLE_KEY_TTL } from "../task-tracker.ts";
 import {
   getCycleAgentRuns,
   setCycleMetrics,
-} from "../redis-adapter.ts";
+} from "../redis/cycle-metrics.ts";
 import { deriveQualityGateCoverage } from "./quality-gates.ts";
 
 /**

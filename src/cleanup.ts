@@ -11,20 +11,24 @@
  */
 
 import { pruneOldDoneItems } from "./backlog/lanes.ts";
-import { redisKeys } from "./redis-keys.ts";
+import { redisKeys } from "./redis/keys.ts";
 import {
   pruneMetricsIndex,
   getMetricsIndexSize,
   trimMetricsIndex,
+} from "./redis/cycle-metrics.ts";
+import {
   scanKeys,
   getKeyTTL,
   getKeyType,
   hashGet,
   deleteKeysBatch,
+} from "./redis/utility.ts";
+import {
   getBacklogLaneWithScores,
   getBacklogItem,
   moveBacklogItem,
-} from "./redis-adapter.ts";
+} from "./redis/backlog.ts";
 
 const STALE_KEY_RETENTION_DAYS = 7;
 const STALE_IN_PROGRESS_MS = 24 * 60 * 60 * 1000; // 24 hours

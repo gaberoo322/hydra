@@ -90,11 +90,20 @@ Close the Seam at `src/redis/*`.
       and `api/alerts.ts`.
    6. **Final closure.** Sweeps the misc bootstrap one-offs
       (`index.ts`, `cleanup.ts`, `context-builder.ts`,
-      `task-tracker.ts`, `plan-cache.ts`, `metrics.ts`,
-      `reflections/reflections.ts`, and the remaining four
-      `api/*.ts` callers), moves `src/redis-keys.ts` →
-      `src/redis/keys.ts`, retires `src/redis-adapter.ts`, lands the
-      lint rule.
+      `task-tracker.ts`, `plan-cache.ts`, `metrics/{record,trend,cycle-summary}.ts`,
+      `reflections/reflections.ts`), moves `src/redis-keys.ts` →
+      `src/redis/keys.ts` (with a thin re-export shim left at the
+      legacy path), and lands the lint rule via
+      `scripts/ci/redis-seam-check.ts`. **Closure is enforced by a
+      shrink-only baseline ratchet**, not by retiring the legacy
+      modules wholesale: 39 callers still reach for `redis-keys` /
+      `redis-adapter` / `redis/keys` / `redis/kv` at slice-6 land time
+      (anchors, backlog internals, cost/*, the api router family).
+      They live in `scripts/ci/redis-seam-baseline.json`. New
+      violations fail CI; the baseline can shrink (via
+      `--write-baseline` after a migration) but cannot grow. The two
+      legacy files survive as re-export shims and will retire
+      organically once the baseline is empty.
 
 The slicing is recorded here so it isn't re-debated each PR.
 
