@@ -11,12 +11,21 @@
  */
 
 import { pruneOldDoneItems } from "./backlog/lanes.ts";
-import { redisKeys } from "./redis/keys.ts";
 import {
   pruneMetricsIndex,
   getMetricsIndexSize,
   trimMetricsIndex,
 } from "./redis/cycle-metrics.ts";
+
+// Prefix shapes used by the stale-key sweep. Kept inline (rather than
+// importing from redis/keys.ts) because cleanup.ts is a housekeeping
+// orchestrator, not a domain owner — these strings describe what to
+// scan for, not how to use the keys.
+const CYCLE_KEY_PREFIX = "hydra:cycle:";
+const TASK_KEY_PREFIX = "hydra:task:";
+const METRICS_KEY_PREFIX = "hydra:metrics:";
+const CYCLE_ACTIVE_KEY = "hydra:cycle:active";
+const CYCLE_LAST_KEY = "hydra:cycle:last";
 import {
   scanKeys,
   getKeyTTL,
@@ -64,14 +73,14 @@ async function pruneStaleRedisKeys() {
   // For non-hash keys and hashes without a timestamp field, extract the date from
   // the key name pattern (YYYY-MM-DD) and use that as the age indicator.
   const dateInKeyPattern = /(\d{4}-\d{2}-\d{2})/;
-  for (const prefix of [redisKeys.cycle(""), redisKeys.task(""), redisKeys.metrics("")]) {
+  for (const prefix of [CYCLE_KEY_PREFIX, TASK_KEY_PREFIX, METRICS_KEY_PREFIX]) {
     try {
       const keys = await scanKeys(`${prefix}*`);
       const toDelete: string[] = [];
 
       for (const key of keys) {
         // Skip index/counter keys and active/last pointers
-        if (key.endsWith(":index") || key.endsWith(":counter") || key === redisKeys.cycleActive() || key === redisKeys.cycleLast()) continue;
+        if (key.endsWith(":index") || key.endsWith(":counter") || key === CYCLE_ACTIVE_KEY || key === CYCLE_LAST_KEY) continue;
         const ttl = await getKeyTTL(key);
         if (ttl !== -1) continue; // Already has TTL, skip
 
