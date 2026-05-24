@@ -10,13 +10,11 @@
 #      AND no cycle is currently in progress
 #   3. Redis disconnected — /health returns redis:false
 #
-# Issue #397: liveness now keys off `lastTickAt` (heartbeat of the
-# scheduler's housekeeping loop), not `lastCycleAt`. After the codex
-# cut-over (#383) `lastCycleAt` is permanently null because no in-process
-# control loop runs, so checking it would treat every healthy scheduler
-# as stale. `lastTickAt` advances on every housekeeping pass regardless
-# of codexCycleEnabled, which is what we actually want for "is the
-# scheduler still breathing".
+# Issue #397: liveness keys off `lastTickAt` (heartbeat of the scheduler's
+# housekeeping loop). The in-process control loop's `lastCycleAt` field was
+# removed in the scheduler-junk-drawer retirement (follow-up to ADR-0010);
+# `lastTickAt` advances on every housekeeping pass, which is what we
+# actually want for "is the scheduler still breathing".
 #
 # Ticks run every 5 minutes, so 15 minutes = ~3x safety margin. A
 # legitimate long-running operation that pauses the tick (e.g. a research

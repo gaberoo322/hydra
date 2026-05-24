@@ -5,13 +5,9 @@ export function createSchedulerRouter(eventBus: any) {
   const router = Router();
 
   // POST /scheduler/start — Start automatic cycle scheduling
-  // Issue #222: `forceClearNoOpHalt` lets the operator acknowledge a no-op-merge
-  // halt and resume cycles. Without this flag, start() returns 409 if the
-  // scheduler is halted for consecutive no-op merges.
   router.post("/scheduler/start", async (req, res) => {
     const intervalMs = req.body?.intervalMs;
-    const forceClearNoOpHalt = req.body?.forceClearNoOpHalt === true;
-    const result = await startScheduler(eventBus, { intervalMs, forceClearNoOpHalt });
+    const result = await startScheduler(eventBus, { intervalMs });
     if (result.error) {
       res.status(409).json(result);
     } else {

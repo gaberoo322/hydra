@@ -125,10 +125,9 @@ describe("Scheduler API routes (issue #164)", () => {
         "cyclesFailed", "mergeRate",
         // Issue #232: rolling/lifetime split for operator-visible metrics
         "mergeRateLifetime", "mergeRateWindow", "mergeRateCyclesInWindow",
-        "lastCycleAt", "lastError",
-        "startedAt", "consecutiveErrors", "consecutiveNonMerges",
-        "stallAlertThreshold", "zeroOutputThreshold",
-        "research", "repetition",
+        "lastTickAt", "lastError",
+        "startedAt", "consecutiveErrors",
+        "research",
       ];
       for (const field of requiredFields) {
         assert.ok(field in body, `status response should contain '${field}' field`);
@@ -167,33 +166,6 @@ describe("Scheduler API routes (issue #164)", () => {
       for (const field of researchFields) {
         assert.ok(field in research, `research should contain '${field}' field`);
       }
-    });
-
-    test("repetition sub-object is null when codexCycleEnabled=false (issue #397)", async () => {
-      // Post-#383 / #397: the repetition detector only fires inside the
-      // in-process control loop's planner/executor path. With codex
-      // disabled, there is no plan stream to detect repetition in, and
-      // the API reports `repetition: null` rather than the old codex-era
-      // sub-object. If a future change re-enables the control loop this
-      // test will need to assert the populated shape under that flag.
-      const eventBus = { publisher: redis };
-      const router = createSchedulerRouter(eventBus);
-      const handler = findHandler(router, "GET", "/scheduler/status");
-
-      const req = mockReq();
-      const res = mockRes();
-      await handler(req, res);
-
-      assert.equal(
-        res._body.codexCycleEnabled,
-        false,
-        "precondition — post-#383 the flag is hard-coded false",
-      );
-      assert.equal(
-        res._body.repetition,
-        null,
-        "repetition must be null when codexCycleEnabled=false (issue #397)",
-      );
     });
 
     test("mergeRate is 0 when no cycles have run", async () => {
@@ -350,55 +322,5 @@ describe("Scheduler API routes (issue #164)", () => {
       assert.equal(res._body.consecutiveErrors, 0);
     });
 
-    test("consecutiveNonMerges is null when codexCycleEnabled=false (issue #397)", async () => {
-      // Post-#383 / #397: consecutiveNonMerges keyed off the in-process
-      // control loop's merge result. With the control loop gone the
-      // counter can never advance OR reset, so the API reports `null`
-      // instead of freezing on the last codex-era value. Downstream
-      // consumers (api/checklist.ts's "idle-spinning" check) treat null
-      // as "n/a" and skip the alert.
-      const eventBus = { publisher: redis };
-      const router = createSchedulerRouter(eventBus);
-      const handler = findHandler(router, "GET", "/scheduler/status");
-
-      const req = mockReq();
-      const res = mockRes();
-      await handler(req, res);
-
-      assert.equal(res._body.codexCycleEnabled, false, "precondition");
-      assert.equal(
-        res._body.consecutiveNonMerges,
-        null,
-        "consecutiveNonMerges must be null when codexCycleEnabled=false (issue #397)",
-      );
-    });
-
-    test("stall threshold fields are null when codexCycleEnabled=false (issue #397)", async () => {
-      // Post-#383 / #397: stallAlertThreshold / zeroOutputThreshold are
-      // surfaced for dashboards to render alongside the live counter.
-      // When the counter itself is null (consecutiveNonMerges) the
-      // thresholds are reported as null too so the dashboard renders
-      // "n/a" instead of a misleading "alert at 5" badge that can never
-      // trigger.
-      const eventBus = { publisher: redis };
-      const router = createSchedulerRouter(eventBus);
-      const handler = findHandler(router, "GET", "/scheduler/status");
-
-      const req = mockReq();
-      const res = mockRes();
-      await handler(req, res);
-
-      assert.equal(res._body.codexCycleEnabled, false, "precondition");
-      assert.equal(
-        res._body.stallAlertThreshold,
-        null,
-        "stallAlertThreshold must be null when codexCycleEnabled=false (issue #397)",
-      );
-      assert.equal(
-        res._body.zeroOutputThreshold,
-        null,
-        "zeroOutputThreshold must be null when codexCycleEnabled=false (issue #397)",
-      );
-    });
   });
 });

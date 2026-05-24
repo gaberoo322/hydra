@@ -21,15 +21,14 @@ import { getPerCycleCostCapUsd } from "./cost-cap.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { getTargetName } from "./target-config.ts";
 import {
-  getString, setString, delKey, getWorkQueueLen, pushToWorkQueue,
+  getString, setString, delKey, pushToWorkQueue,
   hashGet, hashSetField,
-  recordResearchEvent, recordBuildEvent,
+  recordResearchEvent,
   getResearchEventCount24h, getBuildEventCount24h,
   consumeResearchForceOnce,
-  listLPop, listLen,
-  incrSchedulerCyclesRun, getSchedulerCyclesRun,
-  incrSchedulerCyclesMerged, getSchedulerCyclesMerged,
-  incrSchedulerCyclesFailed, getSchedulerCyclesFailed,
+  getSchedulerCyclesRun,
+  getSchedulerCyclesMerged,
+  getSchedulerCyclesFailed,
   atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
   saveSchedulerStateVersioned, getSchedulerStateVersion,
 } from "./redis-adapter.ts";
@@ -53,38 +52,13 @@ import {
   getResearchFloorStats,
   RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD,
 } from "./scheduler-research-floor.ts";
-// Reframe queue key + interleave interval (internalized in anchor-selection.ts, issue #70)
-const REFRAME_QUEUE = "hydra:anchors:reframe-queue";
-const REFRAME_INTERLEAVE_INTERVAL = 5;
-// research-architect removed — methodology files are frozen at current state
-
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
-const COOLDOWN_ON_ERROR_MS = 60 * 1000; // 1 minute cooldown after errors
 
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 6;
 const RESEARCH_BUILD_RATIO_MAX = parseFloat(process.env.HYDRA_RESEARCH_BUILD_RATIO_MAX) || 3;
 const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 2 * 60 * 60 * 1000; // 2 hours
-// ARCHITECT_EVERY_N_RESEARCH removed — research-architect module disconnected
 const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || Infinity;
-const REPETITION_WINDOW = parseInt(process.env.HYDRA_REPETITION_WINDOW) || 5; // Check last N cycles
-const REPETITION_THRESHOLD = parseFloat(process.env.HYDRA_REPETITION_THRESHOLD) || 0.5; // Pause if >50% of recent titles are similar
-
-// Zero-output stall detection (issue #24): consecutive cycles that produce no
-// merge indicate the system is churning on work it cannot complete. At the
-// alert threshold we notify the operator and begin exponential backoff; at the
-// hard-stop threshold we pause the scheduler entirely.
-const STALL_ALERT_THRESHOLD = parseInt(process.env.HYDRA_STALL_ALERT_THRESHOLD) || 5;
-const ZERO_OUTPUT_THRESHOLD = parseInt(process.env.HYDRA_ZERO_OUTPUT_THRESHOLD) || 8;
-const MAX_STALL_BACKOFF_MS = 30 * 60 * 1000; // 30 minutes max backoff
-
-// No-op merge detection (issue #222): cycles that report a merge but write
-// zero files indicate a phantom-merge bug (verification or merge-extraction).
-// Three consecutive no-op merges halt the scheduler — running more cycles
-// burns money for no output. Threshold matches existing stall-detection
-// pattern but is much more aggressive because a no-op merge is unambiguous
-// evidence of system rot, not just slow work.
-const NO_OP_MERGE_HALT_THRESHOLD = parseInt(process.env.HYDRA_NO_OP_MERGE_HALT_THRESHOLD) || 3;
 
 // Rolling merge-rate window (issue #232): the operator-visible mergeRate is
 // computed from the last N cycles in cycle-history (same source as
@@ -133,48 +107,6 @@ async function computeRollingMergeRate(window: number = ROLLING_MERGE_RATE_WINDO
   }
 }
 
-/**
- * Compute exponential backoff delay for stall detection.
- * Exported for testability (issue #24 test coverage).
- */
-function computeStallBackoffMs(consecutiveNonMerges: number): number {
-  const backoffExponent = consecutiveNonMerges - STALL_ALERT_THRESHOLD;
-  return Math.min(
-    COOLDOWN_ON_ERROR_MS * Math.pow(2, backoffExponent),
-    MAX_STALL_BACKOFF_MS,
-  );
-}
-
-/**
- * Determine whether a stall alert notification should fire.
- * Fires on the first hit (threshold) and every 5 non-merge cycles after.
- */
-function shouldSendStallAlert(consecutiveNonMerges: number): boolean {
-  if (consecutiveNonMerges < STALL_ALERT_THRESHOLD) return false;
-  const backoffExponent = consecutiveNonMerges - STALL_ALERT_THRESHOLD;
-  return backoffExponent === 0 || consecutiveNonMerges % 5 === 0;
-}
-
-/**
- * Classify the stall state based on consecutiveNonMerges.
- * Returns "ok" | "alert" | "hard-stop".
- */
-function classifyStallState(consecutiveNonMerges: number): "ok" | "alert" | "hard-stop" {
-  if (consecutiveNonMerges >= ZERO_OUTPUT_THRESHOLD) return "hard-stop";
-  if (consecutiveNonMerges >= STALL_ALERT_THRESHOLD) return "alert";
-  return "ok";
-}
-
-/**
- * Classify the no-op-merge state (issue #222).
- * Returns "ok" | "halt" — there's no intermediate alert tier because every
- * no-op merge already triggers a per-cycle critical alert in post-merge.ts.
- * The scheduler-level halt fires once the run hits NO_OP_MERGE_HALT_THRESHOLD.
- */
-function classifyNoOpMergeState(consecutiveNoOpMerges: number): "ok" | "halt" {
-  return consecutiveNoOpMerges >= NO_OP_MERGE_HALT_THRESHOLD ? "halt" : "ok";
-}
-
 let state = {
   running: false,
   intervalMs: parseInt(process.env.HYDRA_AUTO_CYCLE_INTERVAL_MS) || 0,
@@ -182,23 +114,14 @@ let state = {
   cyclesRun: 0,
   cyclesMerged: 0,
   cyclesFailed: 0,
-  // Issue #397: post-#383 the in-process control loop is gone. `lastCycleAt`
-  // is preserved for backward-compat readers but is null whenever
-  // codexCycleEnabled is false (which it always is now) — it never
-  // advances because no `runControlLoop` invocation ever happens.
-  // The watchdog must read `lastTickAt` for genuine liveness instead.
-  lastCycleAt: null,
   // Issue #397: heartbeat for the scheduler's housekeeping loop. Updated on
-  // every `runScheduledCycle` entry regardless of codexCycleEnabled, so the
-  // watchdog can distinguish "scheduler is alive" from "control loop ran
-  // recently". This is the field external liveness probes should read.
+  // every `runScheduledCycle` entry so the watchdog can tell "scheduler is
+  // alive" from "scheduler is wedged". This is the field external liveness
+  // probes should read.
   lastTickAt: null,
   lastError: null,
   startedAt: null,
   consecutiveErrors: 0,
-  consecutiveNonMerges: 0,
-  consecutiveNoOpMerges: 0,
-  haltedForNoOpMerges: false,
   researchCyclesRun: 0,
   lastResearchAt: null,
   _stateVersion: 0, // optimistic locking version (issue #140 — AC3)
@@ -399,70 +322,6 @@ async function recordSpend(amountUsd) {
     console.error(`[Scheduler] Failed to record spend: ${err.message}`);
     return null;
   }
-}
-
-/**
- * Detect if recent cycles are producing repetitive work.
- * Alerts the operator but does NOT stop the scheduler.
- * Instead, triggers a research cycle to find fresh work.
- *
- * Returns true if repetition was detected (caller should add delay).
- */
-async function detectRepetition(eventBus) {
-  try {
-    const trend = await getMetricsTrend(REPETITION_WINDOW);
-    if (trend.length < REPETITION_WINDOW) return false;
-
-    const titles = trend.map(m => m.taskTitle).filter(Boolean);
-    if (titles.length < REPETITION_WINDOW) return false;
-
-    let similarPairs = 0;
-    let totalPairs = 0;
-    for (let i = 0; i < titles.length; i++) {
-      for (let j = i + 1; j < titles.length; j++) {
-        totalPairs++;
-        const wordsA = new Set(titles[i].toLowerCase().split(/\s+/).filter(w => w.length > 3));
-        const wordsB = new Set(titles[j].toLowerCase().split(/\s+/).filter(w => w.length > 3));
-        if (wordsA.size === 0 || wordsB.size === 0) continue;
-        const overlap = [...wordsA].filter(w => wordsB.has(w)).length;
-        const similarity = overlap / Math.max(wordsA.size, wordsB.size);
-        if (similarity > 0.6) similarPairs++;
-      }
-    }
-
-    const repetitionRate = totalPairs > 0 ? similarPairs / totalPairs : 0;
-
-    if (repetitionRate >= REPETITION_THRESHOLD) {
-      console.log(`[Scheduler] REPETITION ALERT: ${Math.round(repetitionRate * 100)}% of last ${REPETITION_WINDOW} cycle pairs are similar — triggering research for fresh work`);
-      console.log(`[Scheduler] Recent titles: ${titles.map(t => `"${t.slice(0, 60)}"`).join(", ")}`);
-
-      await sendNotification({
-        type: "scheduler:repetition_alert",
-        payload: {
-          reason: `${Math.round(repetitionRate * 100)}% of the last ${REPETITION_WINDOW} cycles produced similar tasks. Triggering research for fresh work.`,
-          recentTitles: titles.slice(0, 5),
-          cyclesRun: state.cyclesRun,
-        },
-      });
-
-      // Trigger research instead of stopping — find fresh work
-      try {
-        console.log(`[Scheduler] Running research cycle to break repetition pattern`);
-        await runResearchLoop(eventBus);
-        state.researchCyclesRun++;
-        await setLastResearchAt(); // AC2: atomic timestamp
-        state.lastResearchAt = new Date().toISOString();
-        await saveSchedulerState();
-      } catch (err: any) {
-        console.error(`[Scheduler] Repetition-break research failed: ${err.message}`);
-      }
-
-      return true; // signal caller to add delay before next cycle
-    }
-  } catch (err: any) {
-    console.error(`[Scheduler] Repetition detection error: ${err.message}`);
-  }
-  return false;
 }
 
 async function maybeRunResearch(eventBus) {
@@ -876,20 +735,6 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   // unwanted research cycle by losing lastResearchAt.
   await loadSchedulerState();
 
-  // Issue #222: if the scheduler is halted for consecutive no-op merges,
-  // refuse to start until the operator explicitly clears it. The watchdog
-  // and the dashboard read this state from /api/scheduler/status — auto-
-  // restart is suppressed here so silent rot does not resume.
-  if (state.haltedForNoOpMerges && !opts.forceClearNoOpHalt) {
-    return {
-      error: `Scheduler halted for ${state.consecutiveNoOpMerges} consecutive no-op merges. ` +
-        `Investigate post-merge.ts / merge.ts (verification.filesChanged extraction), ` +
-        `then restart with { forceClearNoOpHalt: true } to acknowledge.`,
-      haltedForNoOpMerges: true,
-      consecutiveNoOpMerges: state.consecutiveNoOpMerges,
-    };
-  }
-
   const intervalMs = opts.intervalMs || state.intervalMs || DEFAULT_INTERVAL_MS;
   if (intervalMs < MIN_INTERVAL_MS) {
     return { error: `Interval must be at least ${MIN_INTERVAL_MS}ms (${MIN_INTERVAL_MS / 1000}s)` };
@@ -899,9 +744,6 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   state.intervalMs = intervalMs;
   state.startedAt = new Date().toISOString();
   state.consecutiveErrors = 0;
-  state.consecutiveNonMerges = 0;
-  state.consecutiveNoOpMerges = 0;
-  state.haltedForNoOpMerges = false;
   // Issue #388: explicit operator intent — clear any deliberate-stop marker
   // so the watchdog regains its auto-restart authority. Failures here are
   // logged but do not block start() (the in-memory flip is the source of
@@ -1030,53 +872,8 @@ async function getStatus() {
   // so existing consumers that read `mergeRate` keep getting a number.
   const mergeRate = rolling.mergeRate ?? lifetimeMergeRate;
 
-  // Issue #383 (codex cut-over PR-3): the in-process codex control loop is
-  // gone — the scheduler ticks for housekeeping only. The legacy
-  // `codexCycleEnabled` flag is hard-coded to `false`; if a future change
-  // resurrects an in-process control loop, this constant moves back to
-  // reading a runtime flag.
-  //
-  // Issue #397: a single source of truth for "what is this scheduler
-  // doing?" — read by the dashboard banner and by anything that needs to
-  // decide whether codex-shaped fields are meaningful.
-  //   - "scheduler-only" — running=true, no control loop. Current default.
-  //   - "disabled"       — running=false. Heartbeat is not advancing.
-  // ("codex-cycle" is intentionally absent — it would only return if a
-  //  future change re-enables an in-process control loop.)
-  const codexCycleEnabled = false;
-  const mode: "scheduler-only" | "disabled" = state.running
-    ? "scheduler-only"
-    : "disabled";
-
-  // When the in-process control loop is disabled, the codex-specific
-  // counters / breakers no longer have meaning — `consecutiveNonMerges`
-  // can't advance because nothing merges through the scheduler, and the
-  // stall backoff / circuit breaker / repetition detector all key off
-  // that counter. Surfacing the frozen values from before PR-3 confuses
-  // operators (the watchdog and dashboard would alert on stale state
-  // that no live code path can ever clear). Report `null` for those
-  // fields when codex is disabled so the dashboard can render "n/a"
-  // instead of a misleading number.
-  const codexFields = codexCycleEnabled
-    ? {
-        consecutiveNonMerges: state.consecutiveNonMerges,
-        stallAlertThreshold: STALL_ALERT_THRESHOLD,
-        zeroOutputThreshold: ZERO_OUTPUT_THRESHOLD,
-        stallBackoffMs: computeStallBackoffMs(state.consecutiveNonMerges),
-        stallState: classifyStallState(state.consecutiveNonMerges),
-      }
-    : {
-        consecutiveNonMerges: null,
-        stallAlertThreshold: null,
-        zeroOutputThreshold: null,
-        stallBackoffMs: null,
-        stallState: null,
-      };
-
   return {
     running: state.running,
-    codexCycleEnabled,
-    mode,
     // Issue #388: surface why the scheduler is stopped so consumers
     // (especially the watchdog) can distinguish operator-deliberate stops
     // from self-stops. `null` when running, or when start() was the last
@@ -1096,24 +893,13 @@ async function getStatus() {
     // Lifetime counter ratio — kept for audit / debugging only. Do not use
     // for alerts, stall detection, or operator dashboards (see issue #232).
     mergeRateLifetime: lifetimeMergeRate,
-    // Issue #397: `lastCycleAt` is the timestamp of the last in-process
-    // control loop run. Under PR-3 (#383) it never advances and is
-    // reported as null. Legacy field kept for callers that still read
-    // it — new callers should use `lastTickAt` for liveness.
-    lastCycleAt: codexCycleEnabled ? state.lastCycleAt : null,
     // Issue #397: heartbeat for the housekeeping tick. The watchdog
-    // reads this to distinguish "scheduler alive" from "control loop
-    // ran". Always present, always advancing when running=true.
+    // reads this to distinguish "scheduler alive" from "scheduler wedged".
+    // Always present, always advancing when running=true.
     lastTickAt: state.lastTickAt,
     lastError: state.lastError,
     startedAt: state.startedAt,
     consecutiveErrors: state.consecutiveErrors,
-    ...codexFields,
-    // Issue #222: surface no-op-merge counter so dashboards and operator
-    // checklist can display the silent-rot guardrail status.
-    consecutiveNoOpMerges: state.consecutiveNoOpMerges,
-    noOpMergeHaltThreshold: NO_OP_MERGE_HALT_THRESHOLD,
-    haltedForNoOpMerges: state.haltedForNoOpMerges,
     // Issue #209: per-cycle cost cap (separate from daily research cap).
     // null when the cap is Infinity / disabled.
     perCycleCostCapUsd: Number.isFinite(perCycleCostCapUsd) ? perCycleCostCapUsd : null,
@@ -1155,18 +941,6 @@ async function getStatus() {
           }
         : null,
     },
-    // Issue #397: repetition detector only fires inside the in-process
-    // control loop's planner/executor path. When codex is disabled there
-    // is no plan stream to detect repetition in, so report `null` rather
-    // than freezing the dashboard on the last codex-era value.
-    repetition: codexCycleEnabled
-      ? {
-          window: REPETITION_WINDOW,
-          threshold: `${Math.round(REPETITION_THRESHOLD * 100)}%`,
-        // @ts-expect-error — migrate to proper types
-          pausedForRepetition: state.pausedForRepetition || false,
-        }
-      : null,
   };
 }
 
@@ -1225,10 +999,7 @@ export {
   start, stop, getStatus, autoStart, getDailySpend, DAILY_COST_CAP_USD,
   RESEARCH_BUILD_RATIO_MAX, RESEARCH_QUEUE_THRESHOLD,
   shouldSuppressResearch,
-  // Exported for test coverage (issue #24):
-  computeStallBackoffMs, shouldSendStallAlert, classifyStallState, formatDuration,
-  // Exported for test coverage (issue #222):
-  classifyNoOpMergeState, NO_OP_MERGE_HALT_THRESHOLD,
+  formatDuration,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,
 };
