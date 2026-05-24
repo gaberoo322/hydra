@@ -327,7 +327,7 @@ Every PR is classified into one of four tiers based on the files it touches. The
 
 **Multi-file PRs:** Tier 0 short-circuits everything else. Otherwise the highest tier number wins (most operator scrutiny).
 
-**Tier 0 list (`UNTOUCHABLE_PATHS`):** `src/gate.ts` (proactive — protected before extraction), `src/grounding.ts`, `src/verification.ts`, `src/post-merge.ts`, `src/redis-adapter.ts`, `src/cost-cap.ts`, `src/control-loop.ts`, `scripts/deploy.sh`, `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/untouchable.ts`, `src/tier-classifier.ts`. Out-of-repo: `~/.local/bin/hydra-orchestrator-watchdog.sh` (the watchdog script — `gh pr diff` won't surface it, so it's protected by location rather than by the classifier).
+**Tier 0 list (`UNTOUCHABLE_PATHS`):** `src/gate.ts` (proactive — protected before extraction), `src/grounding.ts`, `src/verification.ts`, `src/post-merge.ts`, `src/redis-adapter.ts`, `src/cost/cap.ts`, `src/control-loop.ts`, `scripts/deploy.sh`, `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/untouchable.ts`, `src/tier-classifier.ts`. Out-of-repo: `~/.local/bin/hydra-orchestrator-watchdog.sh` (the watchdog script — `gh pr diff` won't surface it, so it's protected by location rather than by the classifier).
 
 **The `operator-approved` label:** GitHub doesn't enforce per-user labels natively. The convention is that only the operator account (gaberoo322) applies it. The `tier-gate` CI job fails any Tier-0 PR without the label; merging anyway requires admin override, which only the operator has. Do not attempt CODEOWNERS-based simulation — keep the gate dumb and auditable.
 
@@ -399,7 +399,7 @@ Target-project file changes (the default `verification.filesChanged` output) nev
 
 > **Historical, scoped to codex-era data.** With the Codex CLI runtime
 > removed on 2026-05-14 ([ADR-0006](adr/0006-codex-cli-removed-autopilot-only.md))
-> there is no on-disk JSONL session log to replay. `src/cost-reconciliation.ts`
+> there is no on-disk JSONL session log to replay. `src/cost/reconciliation.ts`
 > still runs and can produce reports for *dates that fall in the codex era*; for
 > dates after the cut-over it returns an empty result (no session files match).
 > The module and its `GET /api/cost/reconciliation` endpoint are retained so
@@ -410,7 +410,7 @@ Hydra's local cost accounting has two independent figures that historically disa
 - `/api/scheduler/status.dailySpendUsd` — rolling counter incremented per agent call
 - sum of `/api/metrics` `costMicrodollars` — per-cycle metrics aggregation
 
-`src/cost-reconciliation.ts` adds a third, independent figure: replay Codex CLI's own on-disk session JSONL logs, aggregate authoritative token counts per model, and multiply by `MODEL_PRICING` from the historical pricing table. The three figures can then be compared to find which side of Hydra's accounting drifted.
+`src/cost/reconciliation.ts` adds a third, independent figure: replay Codex CLI's own on-disk session JSONL logs, aggregate authoritative token counts per model, and multiply by `MODEL_PRICING` from the historical pricing table. The three figures can then be compared to find which side of Hydra's accounting drifted.
 
 ### Env vars
 
@@ -431,7 +431,7 @@ Verified against Codex CLI 0.125.0:
   - `event_msg` with `payload.type === "token_count"` — carries authoritative usage in `payload.info.total_token_usage.{input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens, total_tokens}`
 - `total_token_usage` is **cumulative** within the session; the last `token_count` event with non-null `info` is the session total. Earlier events are subsets and must not be summed.
 
-If the CLI changes this schema, the parser at the top of `src/cost-reconciliation.ts` documents the contract and tests in `test/cost-reconciliation.test.mts` will catch regressions in the cumulative-vs-incremental handling.
+If the CLI changes this schema, the parser at the top of `src/cost/reconciliation.ts` documents the contract and tests in `test/cost-reconciliation.test.mts` will catch regressions in the cumulative-vs-incremental handling.
 
 ### Pricing source
 

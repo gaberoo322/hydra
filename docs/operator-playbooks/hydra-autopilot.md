@@ -218,7 +218,7 @@ surrogate USD for real billed spend. Dollar conversion uses
 `HYDRA_TOKEN_USD_RATE` (USD per million tokens, default 0 — operators must
 opt in to a rate they trust).
 
-The per-cycle write keeps the per-cycle cost-cap in `src/cost-cap.ts`
+The per-cycle write keeps the per-cycle cost-cap in `src/cost/cap.ts`
 alive: `checkCostCap()` now sums the legacy `costMicrodollars` reader and
 the surrogate so a runaway subagent can still trip
 `HYDRA_PER_CYCLE_COST_CAP_USD` even though codex is gone.

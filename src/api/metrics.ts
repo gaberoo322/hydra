@@ -2,9 +2,9 @@ import { Router } from "express";
 import { getMetricsTrend, getAggregateStats, recordCycleMetrics, getAbandonmentBreakdown, getQualityGateTrend } from "../metrics.ts";
 import { redisKeys } from "../redis-keys.ts";
 import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../redis-adapter.ts";
-import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost-attribution.ts";
+import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost/attribution.ts";
 import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
-import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost-surrogate.ts";
+import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost/surrogate.ts";
 import { getReframeStarvationStats } from "../anchor-selection/reframe.ts";
 import { REFRAME_QUEUE } from "../anchor-selection/constants.ts";
 
@@ -252,7 +252,7 @@ export function createMetricsRouter() {
       ]);
 
       // Bucket cycles by anchorType. Mirrors the byAnchorType shape in
-      // cost-attribution.ts but counts cycles only (no cost).
+      // src/cost/attribution.ts but counts cycles only (no cost).
       const served: Record<string, number> = {};
       for (const m of trend) {
         const type = (m.anchorType && String(m.anchorType).trim()) || "unknown";

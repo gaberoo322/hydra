@@ -31,7 +31,7 @@ export const UNTOUCHABLE_PATHS: readonly string[] = Object.freeze([
   "src/redis-adapter.ts",
 
   // Cost guardrails — the $50/day cap referenced in operator vision.
-  "src/cost-cap.ts",
+  "src/cost/cap.ts",
 
   // CI/CD scripts and workflows — the deploy path and the gate that
   // gates the gate.

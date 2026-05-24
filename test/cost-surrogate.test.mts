@@ -17,7 +17,7 @@
  *      on which writer(s) contributed data.
  *   4. `getCycleSubagentCostUsd` reads the per-cycle hash so the cost-cap
  *      can include surrogate spend.
- *   5. `checkCostCap` (in cost-cap.ts) sees the surrogate via the new
+ *   5. `checkCostCap` (in cost/cap.ts) sees the surrogate via the new
  *      `getCycleCostWithSurrogateUsd` helper — a tokens-only cycle trips
  *      the cap when the surrogate USD exceeds the threshold, even when
  *      no legacy codex `costMicrodollars` is recorded.
@@ -44,11 +44,11 @@ const {
   tokensBySkillDailyKey,
   tokensByCycleKey,
   getTokenUsdRate,
-} = await import("../src/cost-surrogate.ts");
+} = await import("../src/cost/surrogate.ts");
 
 // Pre-imported here so the describe() block below stays sync (top-level
 // `await` inside a non-async callback breaks the esbuild transform).
-const { checkCostCap, getCycleCostWithSurrogateUsd } = await import("../src/cost-cap.ts");
+const { checkCostCap, getCycleCostWithSurrogateUsd } = await import("../src/cost/cap.ts");
 
 let testRedis: any;
 

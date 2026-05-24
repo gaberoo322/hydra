@@ -29,7 +29,7 @@ const {
   getCycleCostUsd,
   checkCostCap,
   COST_CAP_REASON_PREFIX,
-} = await import("../src/cost-cap.ts");
+} = await import("../src/cost/cap.ts");
 
 let testRedis: any;
 

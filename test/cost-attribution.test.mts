@@ -21,7 +21,7 @@ import {
   deriveOutcome,
   KNOWN_AGENT_ROLES,
   type CycleSummary,
-} from "../src/cost-attribution.ts";
+} from "../src/cost/attribution.ts";
 
 describe("cost-attribution aggregation (issue #271)", () => {
   // --------------------------------------------------------------------

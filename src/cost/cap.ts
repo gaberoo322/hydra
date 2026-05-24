@@ -1,5 +1,5 @@
 /**
- * cost-cap.ts — Per-cycle cost cap circuit breaker (issue #209, #286)
+ * cap.ts — Per-cycle cost cap circuit breaker (issue #209, #286)
  *
  * Bug: There was no per-cycle cost cap on the build loop. Abandoned cycles
  * could consume up to $56 each before hitting their abandonment gate
@@ -39,8 +39,8 @@
  *   cycle than to bleed past it.
  */
 
-import { getCycleCostMicrodollars } from "./redis-adapter.ts";
-import { getCycleSubagentCostUsd } from "./cost-surrogate.ts";
+import { getCycleCostMicrodollars } from "../redis-adapter.ts";
+import { getCycleSubagentCostUsd } from "./surrogate.ts";
 
 /**
  * Stable abandonment reason prefix. Tests assert on this; do NOT change
