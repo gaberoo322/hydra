@@ -39,7 +39,7 @@
  *   cycle than to bleed past it.
  */
 
-import { getCycleCostMicrodollars } from "../redis-adapter.ts";
+import { getCycleCostMicrodollars } from "../redis/cycle-metrics.ts";
 import { getCycleSubagentCostUsd } from "./surrogate.ts";
 
 /**
