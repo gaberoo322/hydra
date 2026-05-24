@@ -202,33 +202,18 @@ describe("/api/scheduler/status rolling merge rate (issue #232)", () => {
 });
 
 /**
- * Regression tests for /api/scheduler/status post-codex shape (issue #397).
+ * Regression tests for /api/scheduler/status shape post-ADR-0006 / ADR-0010.
  *
- * After #383 deleted the in-process control loop, the scheduler ticks for
- * housekeeping only — no `runControlLoop` invocation ever happens. The
- * codex-shaped fields (`lastCycleAt`, `consecutiveNonMerges`,
+ * The in-process control loop was removed in PR-3 (#383) and the dead
+ * codex-shaped fields it left behind (`lastCycleAt`, `consecutiveNonMerges`,
  * `stallBackoffMs`, `stallAlertThreshold`, `zeroOutputThreshold`,
- * `stallState`, `repetition`) all keyed off counters that the cycle path
- * used to advance. Surfacing their last-codex-era values from `state`
- * would lie to the dashboard ("scheduler healthy, 30 consecutive
- * non-merges, halt imminent") and would defeat the watchdog
- * (`lastCycleAt` advances every tick → genuine stalls are never detected).
+ * `stallState`, `repetition`, `mode`, `codexCycleEnabled`, no-op-merge
+ * fields) were dropped entirely in the scheduler-junk-drawer retirement.
  *
- * Fix:
- *   - `lastTickAt`        : new heartbeat field, updated every tick.
- *                           Watchdog reads this.
- *   - `lastCycleAt`       : null while codexCycleEnabled=false.
- *   - `mode`              : "scheduler-only" when running, "disabled" otherwise.
- *   - codex-only counters : null when codexCycleEnabled=false.
- *   - `repetition`        : null when codexCycleEnabled=false.
- *
- * These tests live below the issue-#232 block but use the same Redis DB 1
- * and the same `getStatus()` import.
+ * These tests pin the *live* shape — the housekeeping fields the dashboard
+ * and watchdog actually rely on — so an over-eager future cleanup doesn't
+ * delete them by accident.
  */
-// Issue #397: a fresh Redis handle for the second block. The first block's
-// `after()` hook disconnects `testRedis`, so reusing that variable here
-// throws "Connection is closed" on the first cleanKeys() call. Keep the
-// lifecycle local to this describe.
 let postCodexRedis: any;
 
 async function cleanKeysPostCodex() {
@@ -236,7 +221,7 @@ async function cleanKeysPostCodex() {
   if (keys.length > 0) await postCodexRedis.del(...keys);
 }
 
-describe("/api/scheduler/status post-codex shape (issue #397)", () => {
+describe("/api/scheduler/status live shape", () => {
   beforeEach(async () => {
     if (!postCodexRedis) {
       postCodexRedis = new Redis("redis://localhost:6379/1");
@@ -251,117 +236,19 @@ describe("/api/scheduler/status post-codex shape (issue #397)", () => {
     }
   });
 
-  // -------------------------------------------------------------------------
-  // AC: codexCycleEnabled is always false post-#383
-  // -------------------------------------------------------------------------
-
-  test("status surfaces codexCycleEnabled=false", async () => {
-    const status = await getStatus();
-    assert.equal(
-      status.codexCycleEnabled,
-      false,
-      "post-#383 the in-process control loop is gone — flag must be false",
-    );
-  });
-
-  // -------------------------------------------------------------------------
-  // AC: mode field is one of the two valid post-#383 strings
-  // -------------------------------------------------------------------------
-
-  test("status surfaces a `mode` string", async () => {
-    const status = await getStatus();
-    assert.ok("mode" in status, "status must contain mode field");
-    assert.ok(
-      status.mode === "scheduler-only" || status.mode === "disabled",
-      `mode must be one of {scheduler-only, disabled}, got: ${status.mode}`,
-    );
-  });
-
-  // -------------------------------------------------------------------------
-  // AC: lastTickAt is exposed (heartbeat surface for the watchdog)
-  // -------------------------------------------------------------------------
-
-  test("status exposes lastTickAt field", async () => {
+  test("status exposes lastTickAt field (watchdog liveness surface)", async () => {
     const status = await getStatus();
     assert.ok(
       "lastTickAt" in status,
       "status must contain lastTickAt — watchdog reads this for liveness",
     );
-    // lastTickAt is null until the first runScheduledCycle invocation. The
-    // important contract is that the field exists in the response shape.
     assert.ok(
       status.lastTickAt === null || typeof status.lastTickAt === "string",
       "lastTickAt must be null or ISO string",
     );
   });
 
-  // -------------------------------------------------------------------------
-  // AC: lastCycleAt is null while codex is disabled (the primary issue #397
-  // regression — the old code reported a stale heartbeat value here that
-  // misled the watchdog into thinking cycles were running)
-  // -------------------------------------------------------------------------
-
-  test("lastCycleAt is null when codexCycleEnabled=false", async () => {
-    const status = await getStatus();
-    assert.equal(status.codexCycleEnabled, false, "precondition for the regression");
-    assert.equal(
-      status.lastCycleAt,
-      null,
-      "lastCycleAt must be null when no in-process control loop runs — otherwise the watchdog reads stale data",
-    );
-  });
-
-  // -------------------------------------------------------------------------
-  // AC: codex-only counters report null while codex is disabled
-  // (consecutiveNonMerges / stallBackoffMs / stallAlertThreshold /
-  //  zeroOutputThreshold / stallState).
-  //
-  // Reporting last-codex-era integers here would make api/checklist.ts
-  // (`consecutiveNonMerges >= 5`) fire "idle-spinning" warnings forever
-  // and would let `stallBackoffMs` re-enter exponential backoff math
-  // against a counter that no live code path can ever advance or reset.
-  // -------------------------------------------------------------------------
-
-  test("codex-only stall fields are null when codexCycleEnabled=false", async () => {
-    const status = await getStatus();
-    assert.equal(status.codexCycleEnabled, false, "precondition");
-    for (const field of [
-      "consecutiveNonMerges",
-      "stallAlertThreshold",
-      "zeroOutputThreshold",
-      "stallBackoffMs",
-      "stallState",
-    ]) {
-      assert.equal(
-        status[field],
-        null,
-        `${field} must be null when codexCycleEnabled=false (no live counter feeds it)`,
-      );
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // AC: repetition detector block is null when codex is disabled
-  // -------------------------------------------------------------------------
-
-  test("repetition block is null when codexCycleEnabled=false", async () => {
-    const status = await getStatus();
-    assert.equal(status.codexCycleEnabled, false, "precondition");
-    assert.equal(
-      status.repetition,
-      null,
-      "repetition detector has no plan-stream to watch when codex is off — must be null",
-    );
-  });
-
-  // -------------------------------------------------------------------------
-  // AC: getStatus() still exposes the housekeeping fields the dashboard /
-  // watchdog / metrics consumer rely on — running, cyclesRun,
-  // mergeRate, intervalMs, research.dailySpendUsd.
-  // This is a guard against an over-eager null sweep deleting legit fields.
-  // -------------------------------------------------------------------------
-
-  test("housekeeping fields survive the post-codex shape change", async () => {
+  test("housekeeping fields survive", async () => {
     const status = await getStatus();
     assert.ok("running" in status);
     assert.ok("cyclesRun" in status);
@@ -370,5 +257,28 @@ describe("/api/scheduler/status post-codex shape (issue #397)", () => {
     assert.ok(status.research, "research block must still be present");
     assert.ok("dailySpendUsd" in status.research);
     assert.ok("dailyCostCapUsd" in status.research);
+  });
+
+  test("retired codex-era fields are absent (not just null)", async () => {
+    const status = await getStatus();
+    for (const field of [
+      "codexCycleEnabled",
+      "mode",
+      "lastCycleAt",
+      "consecutiveNonMerges",
+      "stallAlertThreshold",
+      "zeroOutputThreshold",
+      "stallBackoffMs",
+      "stallState",
+      "consecutiveNoOpMerges",
+      "noOpMergeHaltThreshold",
+      "haltedForNoOpMerges",
+      "repetition",
+    ]) {
+      assert.ok(
+        !(field in status),
+        `${field} should have been removed from the API surface (ADR-0010 follow-up)`,
+      );
+    }
   });
 });

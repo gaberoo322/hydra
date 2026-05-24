@@ -56,9 +56,6 @@ export default function Overview({ ws }) {
   const { data: backlog } = useApi("/backlog/counts", { poll: 30000 });
   const { data: metrics } = useApi("/metrics?count=10", { poll: 30000 });
   const { data: alertsData, refresh: refreshAlerts } = useApi("/alerts?limit=50", { poll: 10000 });
-  // Issue #252 — surface stuckness count in header so the operator notices
-  // when cycles are green but outcomes aren't moving (vision pain-point 3).
-  const { data: stucknessData } = useApi("/stuckness", { poll: 30000 });
   const [startingCycle, setStartingCycle] = useState(false);
   const [togglingScheduler, setTogglingScheduler] = useState(false);
   const [runningResearch, setRunningResearch] = useState(false);
@@ -140,11 +137,6 @@ export default function Overview({ ws }) {
     .slice(0, 5);
   const undismissedAlerts = (alertsData || []).filter(a => !a.dismissed);
 
-  // Stuckness summary for the header badge (issue #252).
-  const stucknessRows = Array.isArray(stucknessData?.outcomes) ? stucknessData.outcomes : [];
-  const stucknessFiredCount = stucknessRows.filter((r) => r?.fired).length;
-  const stucknessTotal = stucknessRows.length;
-
   async function handleStartCycle() {
     setStartingCycle(true);
     try {
@@ -205,19 +197,12 @@ export default function Overview({ ws }) {
     refreshAlerts();
   }
 
-  // Issue #397: when the in-process control loop is disabled (the post-#383
-  // default), surface that explicitly so dashboard widgets that show
-  // "0 cycles / merge rate 0% / last cycle: never" are not misread as
-  // a degraded scheduler — work happens via autopilot subagents instead.
-  const codexCycleDisabled = scheduler && scheduler.codexCycleEnabled === false;
-
   return (
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold">Dashboard</h1>
-          <StucknessBadge firedCount={stucknessFiredCount} total={stucknessTotal} onClick={() => navigate("/outcomes")} />
         </div>
         <div className="flex items-center gap-2">
           {cycleRunning && (
@@ -231,16 +216,14 @@ export default function Overview({ ws }) {
         </div>
       </div>
 
-      {/* Issue #397: codex-disabled / autopilot-mode banner */}
-      {codexCycleDisabled && (
-        <div
-          className="bg-amber-900/20 border border-amber-700/40 rounded-lg px-4 py-2 text-xs text-amber-200"
-          title="In-process codex control loop disabled — code-writing work happens via autopilot subagents, not the legacy cycle. Cycle-shaped widgets below reflect housekeeping ticks only."
-        >
-          <span className="font-semibold">Autopilot mode</span>
-          <span className="text-amber-300/80"> — in-process control loop disabled. Cycle counters reflect housekeeping ticks; actual code-writing runs as Claude Code subagents.</span>
-        </div>
-      )}
+      {/* Autopilot-mode banner (permanent post-ADR-0006). */}
+      <div
+        className="bg-amber-900/20 border border-amber-700/40 rounded-lg px-4 py-2 text-xs text-amber-200"
+        title="In-process control loop retired — code-writing work happens via autopilot subagents. Cycle-shaped widgets below reflect housekeeping ticks only."
+      >
+        <span className="font-semibold">Autopilot mode</span>
+        <span className="text-amber-300/80"> — cycle counters reflect housekeeping ticks; actual code-writing runs as Claude Code subagents.</span>
+      </div>
 
       {/* Active Cycle — full width hero */}
       <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
@@ -712,33 +695,6 @@ export default function Overview({ ws }) {
         onCancel={() => setShowKillDialog(false)}
       />
     </div>
-  );
-}
-
-/**
- * Stuckness summary badge for the header (issue #252).
- * - 0 outcomes total → don't render (no signal to show)
- * - 0 fired → muted/grey "all clear"
- * - N fired → red, alert icon, clickable link to /outcomes
- */
-function StucknessBadge({ firedCount, total, onClick }) {
-  if (total === 0) return null;
-  const stuck = firedCount > 0;
-  const classes = stuck
-    ? "bg-red-500/10 border-red-500/50 text-red-300 hover:bg-red-500/20"
-    : "bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700/70";
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title="View outcomes"
-      className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded border transition-colors ${classes}`}
-    >
-      <span className={`w-1.5 h-1.5 rounded-full ${stuck ? "bg-red-400 animate-pulse" : "bg-zinc-500"}`} />
-      <span className="font-medium">
-        {firedCount} of {total} outcomes stuck
-      </span>
-    </button>
   );
 }
 
