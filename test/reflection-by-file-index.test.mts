@@ -278,23 +278,4 @@ describe("issue #326: reflection by-file index", () => {
     assert.ok(ctx.includes("cycle-prev"), "should surface the prior reflection across anchors");
   });
 
-  test("clearOutcomes removes the by-file index membership", async (t) => {
-    requireRedis(t);
-    const anchorRef = "Fix bug in src/cleanup/thing.ts";
-    await reflections.recordAnchorReflection({
-      cycleId: "cycle-merge",
-      anchorRef,
-      taskTitle: "Fix bug",
-      outcome: "verification-failed",
-      reason: "tests broke",
-      scopeFiles: ["src/cleanup/thing.ts"],
-    });
-
-    let members = await redis.smembers("hydra:reflections:by-file:src/cleanup/thing.ts");
-    assert.equal(members.length, 1);
-
-    await learning.clearOutcomes(anchorRef);
-    members = await redis.smembers("hydra:reflections:by-file:src/cleanup/thing.ts");
-    assert.equal(members.length, 0);
-  });
 });

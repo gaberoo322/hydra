@@ -1,8 +1,7 @@
 /**
  * learning.ts — Cross-cluster orchestration for Hydra's learning subsystems
  *
- * Post-split (this PR), `src/learning/` is gone. The three learning clusters
- * live as sibling top-level modules:
+ * The three learning clusters live as sibling top-level modules:
  *
  *   - src/pattern-memory/  — Redis-backed pattern store, promotion, escalation
  *   - src/reflections/     — per-anchor + global Reflexion-style storage
@@ -13,17 +12,12 @@
  * that cluster directly, not from here.
  *
  * Public API:
- *   recordOutcome()   — record agent lessons (Pattern Memory) + reflections after a cycle
  *   getContext()      — load all learning context for an agent prompt (Pattern Memory + Reflections)
  *   consolidate()     — prune stale patterns + auto-promoted rules (daily)
  *   initLearning()    — start knowledge indexer, register OV skills, migrate rules
- *   clearOutcomes()   — drop reflections for an anchor after a successful merge
  */
 
 import {
-  recordPlannerLesson,
-  recordExecutorLesson,
-  recordSkepticLesson,
   consolidateAgentPatterns,
   consolidateStalePromotedRules,
   consolidatePromotedRuleEffectiveness,
@@ -33,136 +27,15 @@ import {
   formatMemoryForPrompt,
 } from "./pattern-memory/agent-memory.ts";
 import {
-  recordAnchorReflection,
   loadAnchorReflections,
   loadAnchorReflectionsByFile,
   backfillByFileIndex,
   extractFilesFromAnchor,
-  recordGlobalReflection,
   loadRelevantReflections,
   formatReflectionsForPrompt,
-  clearReflectionsForAnchor,
-  recordReflectionOutcome,
-  deleteAnchorReflections,
-  extendAnchorReflectionsTTL,
-  getReflectionEffectiveness,
 } from "./reflections/reflections.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
 import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
-
-// ===========================================================================
-// Public types
-// ===========================================================================
-
-export type OutcomeAgent = "planner" | "executor" | "skeptic";
-
-export interface OutcomeOpts {
-  agents: OutcomeAgent[];
-  cycleId: string;
-  task: any;
-  finalState: string;
-  anchorRef: string;
-  anchorType: string;
-  context?: any;
-  skepticVerdict?: string;
-  /**
-   * Issue #326: files the task touched (planner `scopeBoundary.in` or
-   * actual changed files). Used to populate the by-file reflection index so
-   * future anchors touching the same files can match.
-   */
-  scopeFiles?: string[];
-  reflection?: {
-    failureMode: string;
-    whatFailed: string;
-    whyItFailed: string;
-    whatToTryDifferently: string;
-    verificationErrors?: string[];
-  };
-}
-
-// ===========================================================================
-// Public API — recordOutcome
-// ===========================================================================
-
-/**
- * Record outcome for one or more agents + optional reflections.
- * Never throws — all errors are logged with context.
- */
-export async function recordOutcome(opts: OutcomeOpts): Promise<void> {
-  const {
-    agents, cycleId, task, finalState, anchorRef, anchorType,
-    context = {}, skepticVerdict, reflection, scopeFiles,
-  } = opts;
-
-  // AC1: Check if anchor had existing reflections — if so, record the outcome
-  try {
-    const outcome = finalState === "merged"
-      ? "merged"
-      : finalState === "abandoned" ? "abandoned" : "failed";
-    const priorCount = await recordReflectionOutcome({ anchorRef, outcome, cycleId });
-    if (priorCount > 0) {
-      console.log(`[Learning] Recorded reflection outcome for "${anchorRef.slice(0, 60)}": ${outcome} (had ${priorCount} prior reflections)`);
-    }
-  } catch (err: any) {
-    console.error(`[Learning] Failed to record reflection outcome for ${cycleId}: ${err.message}`);
-  }
-
-  // Record per-agent lessons
-  for (const agent of agents) {
-    try {
-      switch (agent) {
-        case "planner":
-          await recordPlannerLesson(cycleId, task, finalState, context);
-          break;
-        case "executor":
-          await recordExecutorLesson(cycleId, task, finalState, context);
-          break;
-        case "skeptic":
-          await recordSkepticLesson(cycleId, task, skepticVerdict ?? "approve", finalState);
-          break;
-      }
-    } catch (err: any) {
-      console.error(`[Learning] Failed to record ${agent} lesson for ${cycleId}: ${err.message}`);
-    }
-  }
-
-  // Record reflections (both per-anchor and global) if provided
-  if (reflection) {
-    try {
-      // Issue #326: derive scope files from explicit scopeFiles opt, the
-      // task's scopeBoundary.in (planner-supplied), or fall back to extraction
-      // from anchorRef.
-      const derivedScope: string[] = Array.isArray(scopeFiles) && scopeFiles.length > 0
-        ? scopeFiles
-        : (Array.isArray(task?.scopeBoundary?.in) ? task.scopeBoundary.in : []);
-      await recordAnchorReflection({
-        cycleId,
-        anchorRef,
-        taskTitle: reflection.whatFailed,
-        outcome: reflection.failureMode,
-        reason: reflection.whyItFailed,
-        verificationErrors: reflection.verificationErrors,
-        scopeFiles: derivedScope,
-      });
-    } catch (err: any) {
-      console.error(`[Learning] Failed to record per-anchor reflection for ${cycleId}: ${err.message}`);
-    }
-
-    try {
-      await recordGlobalReflection({
-        cycleId,
-        anchorType,
-        anchorReference: anchorRef,
-        failureMode: reflection.failureMode,
-        whatFailed: reflection.whatFailed,
-        whyItFailed: reflection.whyItFailed,
-        whatToTryDifferently: reflection.whatToTryDifferently,
-      });
-    } catch (err: any) {
-      console.error(`[Learning] Failed to record global reflection for ${cycleId}: ${err.message}`);
-    }
-  }
-}
 
 // ===========================================================================
 // Public API — getContext
@@ -301,38 +174,3 @@ export async function initLearning(): Promise<void> {
   startKnowledgeIndexer();
 }
 
-// ===========================================================================
-// Public API — clearOutcomes (post-merge cleanup)
-// ===========================================================================
-
-/**
- * Clear per-anchor and global reflections for an anchor reference.
- * Called after a successful merge. Never throws.
- *
- * AC3: If the reflection has >50% success rate, extend TTL to 30 days
- * instead of deleting — preserving effective reflections longer.
- */
-export async function clearOutcomes(anchorRef: string): Promise<void> {
-  try {
-    // Check effectiveness before deciding to delete or extend
-    const effectiveness = await getReflectionEffectiveness();
-    const anchorStats = effectiveness.anchors.find(a => a.ref === anchorRef);
-
-    if (anchorStats && anchorStats.successRate > 0.5) {
-      // Effective reflections: extend TTL instead of deleting
-      await extendAnchorReflectionsTTL(anchorRef);
-      console.log(`[Learning] Extended TTL for effective reflections "${anchorRef.slice(0, 60)}" to 30 days (${Math.round(anchorStats.successRate * 100)}% success rate)`);
-    } else {
-      // Ineffective or no data: delete as before
-      await deleteAnchorReflections(anchorRef);
-    }
-  } catch (err: any) {
-    console.error(`[Learning] Failed to clear per-anchor reflections for "${anchorRef}": ${err.message}`);
-  }
-
-  try {
-    await clearReflectionsForAnchor(anchorRef);
-  } catch (err: any) {
-    console.error(`[Learning] Failed to clear global reflections for "${anchorRef}": ${err.message}`);
-  }
-}

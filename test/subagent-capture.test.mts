@@ -199,8 +199,7 @@ describe("subagent lesson capture (issue #392)", () => {
   // Acceptance criterion #5: 3rd occurrence promotes to feedback file
   //
   // PROMOTION_THRESHOLD is 3 (test/learning-promotion-threshold.test.mts).
-  // This test proves the existing pipeline still fires when the writer is
-  // captureSubagentLesson() instead of recordPlannerLesson().
+  // This test proves the pipeline fires through captureSubagentLesson().
   // -------------------------------------------------------------------------
 
   test("3rd lesson with the same cue auto-promotes to to-planner.md (5-hit AC is satisfied at threshold)", async () => {
