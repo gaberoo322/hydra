@@ -6,7 +6,7 @@
 // working tree. Each tier delegates to a dedicated sub-module so this file
 // stays a thin dispatcher of "try tier N, otherwise fall through".
 
-import { _admin } from "../backlog.ts";
+import { isWipLimitReached, requeueStaleInProgressItems } from "../backlog/wip.ts";
 import {
   listRange,
   listRPush,
@@ -30,8 +30,6 @@ import {
   dispatchCapacityFloor,
   defaultCapacityFloors,
 } from "./capacity-floors.ts";
-
-const { isWipLimitReached, requeueStaleInProgressItems } = _admin;
 
 /**
  * Select the next anchor based on priority:

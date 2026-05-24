@@ -11,8 +11,9 @@
 import * as Sentry from "@sentry/node";
 import { sendNotification } from "./notify.ts";
 import { getMetricsTrend } from "./metrics.ts";
-import { _admin } from "./backlog.ts";
-const { getBacklogCounts, promoteToQueued, pruneOldDoneItems, reapStaleClaims } = _admin;
+import { getBacklogCounts, loadBacklog } from "./backlog/reads.ts";
+import { promoteToQueued, pruneOldDoneItems } from "./backlog/lanes.ts";
+import { reapStaleClaims } from "./backlog/reaper.ts";
 
 // Stale-claim reaper threshold (issue #374). Default 2h.
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
@@ -586,8 +587,7 @@ const BLOCKED_COOLDOWN_KEY = redisKeys.blockedLastEscalation();
 
 async function checkBlockedEscalation(eventBus) {
   try {
-    const { _admin: backlogAdmin } = await import("./backlog.ts");
-    const lanes = await backlogAdmin.loadBacklog() as Record<string, any[]>;
+    const lanes = await loadBacklog();
     // AC5 (issue #140): freeze snapshot so iteration doesn't see mutations
     const blocked = [...(lanes.blocked || [])];
     if (blocked.length === 0) return;

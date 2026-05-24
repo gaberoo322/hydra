@@ -1,8 +1,12 @@
 import { Router } from "express";
-import { _admin } from "../backlog.ts";
+import { loadBacklog, getBacklogCounts, getItemsByParent } from "../backlog/reads.ts";
+import { addToBacklog, updateItem } from "../backlog/items.ts";
+import { moveItemToLane, deleteItem } from "../backlog/lanes.ts";
+import { isWipLimitReached } from "../backlog/wip.ts";
+import { claimNextQueuedItem } from "../backlog/claims.ts";
+import { getStaleClaims, reapStaleClaims } from "../backlog/reaper.ts";
 import { getString } from "../redis-adapter.ts";
 import { redisKeys } from "../redis-keys.ts";
-const { loadBacklog, getBacklogCounts, addToBacklog, moveItemToLane, deleteItem, updateItem, getItemsByParent, isWipLimitReached, claimNextQueuedItem, getStaleClaims, reapStaleClaims } = _admin;
 
 export function createBacklogRouter() {
   const router = Router();

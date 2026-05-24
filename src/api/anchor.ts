@@ -26,15 +26,13 @@ import {
   getWorkQueueItems,
   getString,
 } from "../redis-adapter.ts";
-import { _admin } from "../backlog.ts";
+import { loadBacklog } from "../backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "../reflections/reflections.ts";
 import {
   REFRAME_QUEUE,
   PRIOR_FAILURES_KEY,
   anchorKey as abandonmentCounterKey,
 } from "../anchor-selection/constants.ts";
-
-const { loadBacklog } = _admin;
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
