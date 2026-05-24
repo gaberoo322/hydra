@@ -18,8 +18,11 @@
  * stringify themselves.
  */
 
-import { redisKeys } from "../redis-keys.ts";
-import { hashGetAll, hashSet, keyExists } from "../redis/kv.ts";
+import {
+  getScoutToolsConsidered,
+  scoutToolsConsideredExists,
+  setScoutToolsConsidered,
+} from "../redis/scout.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -108,12 +111,11 @@ export async function getSeen(slug: string): Promise<ScoutSeenEntry | null> {
   if (!slug || typeof slug !== "string") {
     throw new TypeError(`getSeen: expected non-empty slug, got ${typeof slug}`);
   }
-  const key = redisKeys.scoutToolsConsidered(slug);
-  const exists = await keyExists(key);
+  const exists = await scoutToolsConsideredExists(slug);
   if (!exists) return null;
 
-  const raw = await hashGetAll(key);
-  // hashGetAll returns {} for empty hashes; treat that the same as missing.
+  const raw = await getScoutToolsConsidered(slug);
+  // empty hash → treat the same as missing.
   if (!raw || Object.keys(raw).length === 0) return null;
 
   return parseEntry(slug, raw);
@@ -207,7 +209,7 @@ export async function recordDecision(
   for (const [k, v] of Object.entries(fields)) {
     flat.push(k, v);
   }
-  await hashSet(redisKeys.scoutToolsConsidered(slug), ...flat);
+  await setScoutToolsConsidered(slug, ...flat);
 }
 
 // ---------------------------------------------------------------------------

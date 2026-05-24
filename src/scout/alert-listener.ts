@@ -66,13 +66,17 @@
  * to the map is a deliberate operator action.
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { readRecentAlerts } from "../redis/alerts.ts";
 import {
-  getString,
-  setString,
-  listRange,
-} from "../redis/kv.ts";
-import { getRedisConnection } from "../redis/connection.ts";
+  getScoutAlertCursor,
+  getScoutCategoryLastWalked,
+  getScoutPatternLastFired,
+  setScoutAlertCursor,
+  setScoutCategoryLastWalked,
+  setScoutPatternLastFired,
+  xaddScoutDispatch,
+  xrevrangeScoutDispatches,
+} from "../redis/scout.ts";
 
 // ---------------------------------------------------------------------------
 // Pattern → category map (starter, per issue body)
@@ -427,11 +431,11 @@ export async function planAlertDispatches(
   now: Date = new Date(),
 ): Promise<AlertPlan> {
   // 1. Read the cursor (high-water-mark over the alert list).
-  const cursorIso = await getString(redisKeys.scoutAlertCursor());
+  const cursorIso = await getScoutAlertCursor();
 
   // 2. Read the most recent ALERT_SCAN_BATCH alerts. The list is LPUSH-ed
   //    (newest at index 0).
-  const rawAlerts = await listRange(redisKeys.alerts(), 0, ALERT_SCAN_BATCH - 1);
+  const rawAlerts = await readRecentAlerts(ALERT_SCAN_BATCH);
 
   // Parse + drop unparseable entries.
   const parsed: RawAlert[] = [];
@@ -462,12 +466,12 @@ export async function planAlertDispatches(
 
   const patternLastFired: Record<string, string | null> = {};
   for (const p of distinctPatterns) {
-    patternLastFired[p] = await getString(redisKeys.scoutPatternLastFired(p));
+    patternLastFired[p] = await getScoutPatternLastFired(p);
   }
 
   const categoryLastWalked: Record<string, string | null> = {};
   for (const c of distinctCategories) {
-    categoryLastWalked[c] = await getString(redisKeys.scoutCategoryLastWalked(c));
+    categoryLastWalked[c] = await getScoutCategoryLastWalked(c);
   }
 
   // 4. Classify each alert.
@@ -545,15 +549,11 @@ export async function recordDispatch(
   if (outcome === "error") return;
 
   // 2. Per-pattern dedup, 48h TTL (twice the cooldown — see ALERT_PATTERN_KEY_TTL_SECONDS).
-  await setString(
-    redisKeys.scoutPatternLastFired(target.pattern),
-    nowIso,
-    ALERT_PATTERN_KEY_TTL_SECONDS,
-  );
+  await setScoutPatternLastFired(target.pattern, nowIso, ALERT_PATTERN_KEY_TTL_SECONDS);
 
   // 3. Per-category cooldown — shares the calendar walk's key so both
   // triggers honor each other.
-  await setString(redisKeys.scoutCategoryLastWalked(target.category), nowIso);
+  await setScoutCategoryLastWalked(target.category, nowIso);
 }
 
 /**
@@ -589,12 +589,12 @@ export async function advanceAlertCursor(iso: string): Promise<void> {
   if (!iso || typeof iso !== "string") {
     throw new TypeError("advanceAlertCursor: iso required");
   }
-  await setString(redisKeys.scoutAlertCursor(), iso);
+  await setScoutAlertCursor(iso);
 }
 
 /** Read the current cursor. Diagnostic helper. */
 export async function getAlertCursor(): Promise<string | null> {
-  return getString(redisKeys.scoutAlertCursor());
+  return getScoutAlertCursor();
 }
 
 // ---------------------------------------------------------------------------
@@ -607,9 +607,8 @@ export async function getAlertCursor(): Promise<string | null> {
  */
 export async function listDispatchAudits(limit: number = 50): Promise<DispatchAuditEntry[]> {
   const n = Math.max(1, Math.min(1000, Math.floor(limit) || 50));
-  const r = getRedisConnection();
   // XREVRANGE returns newest-first.
-  const entries = await r.xrevrange(redisKeys.scoutDispatches(), "+", "-", "COUNT", n);
+  const entries = await xrevrangeScoutDispatches(n);
   const out: DispatchAuditEntry[] = [];
   for (const [, fields] of entries) {
     out.push(parseAuditFields(fields));
@@ -622,7 +621,6 @@ export async function listDispatchAudits(limit: number = 50): Promise<DispatchAu
 // ---------------------------------------------------------------------------
 
 async function xaddDispatchAudit(entry: DispatchAuditEntry): Promise<void> {
-  const r = getRedisConnection();
   const fields: string[] = [
     "triggeredBy", entry.triggeredBy,
     "category", entry.category,
@@ -632,12 +630,7 @@ async function xaddDispatchAudit(entry: DispatchAuditEntry): Promise<void> {
     "detail", entry.detail,
   ];
   // MAXLEN ~ N keeps the stream bounded; ~ is approximate (faster trim).
-  await r.xadd(
-    redisKeys.scoutDispatches(),
-    "MAXLEN", "~", String(SCOUT_DISPATCHES_MAXLEN),
-    "*",
-    ...fields,
-  );
+  await xaddScoutDispatch(SCOUT_DISPATCHES_MAXLEN, fields);
 }
 
 function parseAuditFields(fields: string[]): DispatchAuditEntry {
