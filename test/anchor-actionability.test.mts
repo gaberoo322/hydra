@@ -8,7 +8,7 @@
  *
  * Fix: `isAnchorActionable()` runs BEFORE the planner. For research,
  * user-request, and doc anchors it normalises the anchor reference (reusing
- * `plan-cache.normalizeReference`) and checks against:
+ * `anchor-selection/normalize-reference.ts`) and checks against:
  *   1. The "What's been completed" section of priorities.md
  *   2. The titles of the last 50 merged cycles (Redis metrics).
  *
