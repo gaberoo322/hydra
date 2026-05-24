@@ -2,23 +2,18 @@
  * learning/agent-memory.ts — Per-agent pattern memory + auto-promotion
  *
  * Extracted from learning.ts (issue #219). Owns the Redis-backed pattern
- * tier (planner/executor/skeptic), promotion to feedback files, stale-rule
- * detection, the legacy `hydra:rules:*` migration, and per-agent lesson
- * recording (`recordPlannerLesson` / `recordExecutorLesson` /
- * `recordSkepticLesson`).
+ * tier, promotion to feedback files, stale-rule detection, and the legacy
+ * `hydra:rules:*` migration.
  *
  * Public API used outside this module:
  *   PROMOTION_THRESHOLD            — exported constant
  *   recordPattern                  — POST /api/memory/:agent/pattern
  *   loadAgentMemory                — used by getContext()
  *   formatMemoryForPrompt          — formats raw memory string for prompts
- *   recordPlannerLesson / recordExecutorLesson / recordSkepticLesson
  *   consolidateAgentPatterns       — daily prune driven by consolidate()
  *   detectStalePromotedRules       — pure helper (tests)
  *   processStaleRules              — pure helper (tests)
  *   migrateRulesToPatterns         — one-time startup migration
- *
- * Behavior preserved 1:1 from the previous learning.ts implementation.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -33,7 +28,6 @@ import {
 } from "../redis-adapter.ts";
 import { keyExists, setString, listLPush, listRange, listTrim } from "../redis/kv.ts";
 import {
-  escalateIfNeeded,
   escalationThresholdForCue,
   isMetadataCue,
   shouldEscalateAtHitCount,
@@ -79,10 +73,10 @@ export type MemoryPattern = {
   /**
    * Issue #392 — discriminator identifying which call path produced this
    * pattern. `codex-cycle` is the historical in-process control-loop writer
-   * (recordPlannerLesson / recordExecutorLesson / recordSkepticLesson) and
-   * `subagent` covers Claude-driven autopilot skills (hydra-dev / hydra-qa /
-   * hydra-target-build) that POST to /api/memory/subagent-lesson. Metadata
-   * only — does not alter the consolidation/promotion math.
+   * (retired with ADR-0006) and `subagent` covers Claude-driven autopilot
+   * skills (hydra-dev / hydra-qa / hydra-target-build) that POST to
+   * /api/memory/subagent-lesson. Metadata only — does not alter the
+   * consolidation/promotion math.
    */
   source?: "codex-cycle" | "subagent";
 };
@@ -641,127 +635,6 @@ export async function listFrictionPatterns(
   skill: string,
 ): Promise<MemoryPattern[]> {
   return loadPatterns(skill, "friction");
-}
-
-// ===========================================================================
-// Per-agent lesson recorders
-// ===========================================================================
-
-export async function recordPlannerLesson(cycleId: string, task: any, finalState: string, context: any = {}) {
-  if (finalState === "merged") {
-    if (context.scopeCreep?.length > 0) {
-      const r = await recordPattern("planner", "scope-creep", {
-        action: `Include adjacent test files and shared modules in scopeBoundary.in. The executor went outside scope: ${context.scopeCreep.slice(0, 3).join(", ")}`,
-        example: `${cycleId}: "${task.title}" — ${context.scopeCreep.length} file(s) outside scope`,
-        cycleId,
-      });
-      await escalateIfNeeded(r.escalation, "planner/scope-creep");
-    }
-    if (task.scopeBoundary?.in?.length > 4) {
-      const r = await recordPattern("planner", "broad-scope-success", {
-        severity: "reinforce",
-        action: `Broad scope (${task.scopeBoundary.in.length} files) can work when each file is needed`,
-        example: `${cycleId}: "${task.title}" — ${task.scopeBoundary.in.length} files`,
-        cycleId,
-      });
-      await escalateIfNeeded(r.escalation, "planner/broad-scope-success");
-    }
-    return;
-  }
-
-  if (finalState === "failed") {
-    const failedSteps = context.failedSteps || [];
-    const r = await recordPattern("planner", "verification-failure", {
-      action: `Ensure ${failedSteps.join(" + ") || "verification"} will pass before proposing. ${task.scopeBoundary?.in?.length > 3 ? `Scope was broad (${task.scopeBoundary.in.length} files) — consider narrowing.` : ""}`,
-      example: `${cycleId}: "${task.title}" failed — ${context.failReason || "verification failed"}`,
-      cycleId,
-    });
-    await escalateIfNeeded(r.escalation, "planner/verification-failure");
-    return;
-  }
-
-  if (finalState === "rolled-back") {
-    const r = await recordPattern("planner", "rollback", {
-      action: `Changes to ${(task.scopeBoundary?.in || []).slice(0, 3).join(", ") || "these files"} caused test regressions. Verify test stability before proposing changes here.`,
-      example: `${cycleId}: "${task.title}" — auto-reverted`,
-      cycleId,
-    });
-    await escalateIfNeeded(r.escalation, "planner/rollback");
-    return;
-  }
-
-  if (finalState === "abandoned") {
-    const reason = context.reason || "rejected or drift";
-    if (reason.includes("Drift")) {
-      const r = await recordPattern("planner", "drift", {
-        action: `Check recent cycle history for duplicates before proposing work similar to "${task.title}"`,
-        example: `${cycleId}: abandoned — ${reason}`,
-        cycleId,
-      });
-      await escalateIfNeeded(r.escalation, "planner/drift");
-    } else if (reason.includes("Review rejected:")) {
-      const r = await recordPattern("planner", "high-risk-rejection", {
-        action: `High-risk review flagged a safety concern: ${reason.replace("Review rejected: ", "").slice(0, 200)}`,
-        example: `${cycleId}: "${task.title}" — ${reason}`,
-        cycleId,
-      });
-      await escalateIfNeeded(r.escalation, "planner/high-risk-rejection");
-    }
-  }
-}
-
-export async function recordExecutorLesson(cycleId: string, task: any, finalState: string, context: any = {}) {
-  if (finalState === "merged") return;
-
-  if (finalState === "failed") {
-    if (context.noDiff) {
-      const r = await recordPattern("executor", "no-diff", {
-        action: `Actually write code and commit. Previous attempt produced zero changes.`,
-        example: `${cycleId}: "${task.title}" — no files modified`,
-        cycleId,
-      });
-      await escalateIfNeeded(r.escalation, "executor/no-diff");
-    } else if (context.failedSteps?.length > 0) {
-      const r = await recordPattern("executor", "verification-failure", {
-        action: `Run npm test and npm run typecheck before committing. ${context.failedSteps.join(" + ")} failed.`,
-        example: `${cycleId}: ${context.failedSteps.join(", ")} failed${context.verificationStderr ? " — " + context.verificationStderr.slice(0, 100) : ""}`,
-        cycleId,
-      });
-      await escalateIfNeeded(r.escalation, "executor/verification-failure");
-    }
-    return;
-  }
-
-  if (finalState === "rolled-back") {
-    const r = await recordPattern("executor", "rollback", {
-      action: `Run the FULL test suite when modifying ${(task.scopeBoundary?.in || []).slice(0, 3).join(", ") || "these files"}. A previous change broke tests elsewhere.`,
-      example: `${cycleId}: tests ${context.testsBefore} → ${context.testsAfter} — auto-reverted`,
-      cycleId,
-    });
-    await escalateIfNeeded(r.escalation, "executor/rollback");
-  }
-}
-
-export async function recordSkepticLesson(cycleId: string, task: any, skepticVerdict: string, finalState: string) {
-  if (skepticVerdict === "approve" && (finalState === "failed" || finalState === "rolled-back")) {
-    const r = await recordPattern("skeptic", "skeptic-miss", {
-      action: `You approved a task that ${finalState}. Check scope boundary and verification plan more carefully for similar tasks.`,
-      example: `${cycleId}: approved "${task.title}" — it ${finalState}`,
-      cycleId,
-    });
-    await escalateIfNeeded(r.escalation, "skeptic/skeptic-miss");
-    return;
-  }
-
-  if (skepticVerdict === "reject" && finalState === "abandoned") {
-    const r = await recordPattern("skeptic", "correct-rejection", {
-      severity: "reinforce",
-      action: `Rejection in this area was correct. Keep standards high for ${(task.scopeBoundary?.in || []).slice(0, 2).join(", ") || "similar work"}.`,
-      example: `${cycleId}: correctly rejected "${task.title}"`,
-      cycleId,
-    });
-    await escalateIfNeeded(r.escalation, "skeptic/correct-rejection");
-  }
 }
 
 // ===========================================================================
