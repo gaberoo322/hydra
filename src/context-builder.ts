@@ -18,7 +18,10 @@ import { join, resolve } from "node:path";
 import { getContext } from "./learning.ts";
 import { getCumulativeAccomplishments } from "./metrics/aggregate.ts";
 import { summarizeForPrompt, getDiff } from "./grounding.ts";
-import { redisKeys } from "./redis-keys.ts";
+import {
+  getRecentReportIdsDesc,
+  getRealityReport,
+} from "./redis/reality-reports.ts";
 import { getTargetWorkspace } from "./target-config.ts";
 import { findRelatedFiles, formatScopedFileTree } from "./repo-map.ts";
 
@@ -472,22 +475,14 @@ function formatCycleReport(report: any): string {
 }
 
 async function loadLastCycleReportFull(): Promise<any> {
-  let rConn: any;
   try {
-    const Redis = (await import("ioredis")).default;
-    rConn = new (Redis as any)(process.env.REDIS_URL || "redis://localhost:6379", {
-      maxRetriesPerRequest: 1,
-      retryStrategy: () => null,
-    });
-    const recentIds = await rConn.zrevrange(redisKeys.realityReportIndex(), 0, 0);
+    const recentIds = await getRecentReportIdsDesc(1);
     if (recentIds.length === 0) return null;
-    const raw = await rConn.get(redisKeys.realityReport(recentIds[0]));
+    const raw = await getRealityReport(recentIds[0]);
     return raw ? JSON.parse(raw) : null;
   } catch (err: any) {
     console.error(`[ContextBuilder] loadLastCycleReportFull failed: ${err.message}`);
     return null;
-  } finally {
-    rConn?.disconnect();
   }
 }
 

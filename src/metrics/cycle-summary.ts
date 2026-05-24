@@ -12,7 +12,7 @@
 import {
   getCycleAgentRuns,
   getCycleCosts,
-} from "../redis-adapter.ts";
+} from "../redis/cycle-metrics.ts";
 import { getMetricsTrend } from "./trend.ts";
 import type { AgentRun, CycleSummary } from "../cost/attribution.ts";
 

@@ -5,7 +5,7 @@ import {
   getString, setString, delKey, hashGetAll, hashSet, hashSetField,
   hashIncrBy, expireKey, listRange, listRPush, setMembers, setAdd, setRem,
   keyExists, createPipeline,
-} from "./redis-adapter.ts";
+} from "./redis/kv.ts";
 
 const KEY_ACTIVE = redisKeys.cycleActive();
 const KEY_LAST = redisKeys.cycleLast();

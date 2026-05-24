@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { getRedisConnection, getRedisSubscriber, closeRedisConnections } from "./redis-adapter.ts";
+import { getRedisConnection, getRedisSubscriber, closeRedisConnections } from "./redis/connection.ts";
 
 // Stream topology — V2 control loop.
 //

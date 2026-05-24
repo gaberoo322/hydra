@@ -1,10 +1,13 @@
 /**
- * Redis Adapter — facade re-exporting domain-grouped Redis primitives.
+ * DEPRECATED — facade re-exporting domain-grouped Redis primitives.
  *
  * The original 1582-line file was split into `src/redis/*` modules in
- * issue #269. This shim preserves the existing import surface so callers
- * can continue `import { fn } from "./redis-adapter.ts"` while we migrate
- * them to the domain-specific paths in follow-up PRs.
+ * issue #269. ADR-0009 made the seam private; this shim survives only
+ * for the back-compat tail tracked in
+ * `scripts/ci/redis-seam-baseline.json`. New code MUST NOT import from
+ * here — `scripts/ci/redis-seam-check.ts` enforces a shrink-only
+ * ratchet against new violations. Import directly from the matching
+ * `src/redis/<domain>.ts` accessor (or add one if missing).
  *
  * Domain modules:
  *   - redis/connection.ts        — singleton + workspace lock

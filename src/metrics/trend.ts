@@ -11,7 +11,7 @@
 import {
   getRecentMetricIds,
   getCycleMetrics,
-} from "../redis-adapter.ts";
+} from "../redis/cycle-metrics.ts";
 
 /**
  * Numeric fields known to live on the cycle-metrics hash. Parsed back from
