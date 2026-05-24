@@ -28,12 +28,11 @@
 //      the "fixes proceed even when full" semantics in select.ts.
 
 import {
-  delKey,
-  listLen,
-  listLPop,
-  listRange,
-  listRPush,
-} from "../redis-adapter.ts";
+  getReframeQueueItems,
+  getReframeQueueLength,
+  popReframeQueueHead,
+  replaceReframeQueue,
+} from "../redis/anchors.ts";
 import {
   incrAnchorReframePassedReason,
   getAnchorReframePassedReasons,
@@ -45,7 +44,6 @@ import {
   _resetAnchorReframeState,
 } from "../redis/work-queue.ts";
 import {
-  REFRAME_QUEUE,
   REFRAME_QUEUE_CAP,
   REFRAME_QUEUE_MAX_AGE_MS,
 } from "./constants.ts";
@@ -132,7 +130,7 @@ export async function pruneReframeQueue(): Promise<{ pruned: number; dropped: nu
   let dropped = 0;
 
   try {
-    const all = await listRange(REFRAME_QUEUE, 0, -1);
+    const all = await getReframeQueueItems();
     if (all.length === 0) return { pruned, dropped };
 
     const now = Date.now();
@@ -174,10 +172,7 @@ export async function pruneReframeQueue(): Promise<{ pruned: number; dropped: nu
 
     // Only rewrite the list if something changed
     if (pruned > 0 || dropped > 0) {
-      await delKey(REFRAME_QUEUE);
-      if (kept.length > 0) {
-        await listRPush(REFRAME_QUEUE, ...kept);
-      }
+      await replaceReframeQueue(kept);
     }
   } catch (err: any) {
     console.error(`[ControlLoop] Reframe queue pruning failed: ${err.message}`);
@@ -188,7 +183,7 @@ export async function pruneReframeQueue(): Promise<{ pruned: number; dropped: nu
 
 /** Current length of the reframe queue. */
 export async function getReframeQueueLen(): Promise<number> {
-  return listLen(REFRAME_QUEUE);
+  return getReframeQueueLength();
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +207,7 @@ export async function hasReframeCandidate(): Promise<boolean> {
     console.error(`[ControlLoop] hasReframeCandidate prune failed: ${err.message}`);
   }
   try {
-    const len = await listLen(REFRAME_QUEUE);
+    const len = await getReframeQueueLength();
     return len > 0;
   } catch (err: any) {
     console.error(`[ControlLoop] hasReframeCandidate len failed: ${err.message}`);
@@ -231,12 +226,11 @@ export async function selectReframeAnchor(): Promise<ReframeAnchor | null> {
     console.error(`[ControlLoop] Reframe queue maintenance failed: ${err.message}`);
   }
 
-  const reframeItems = await listRange(REFRAME_QUEUE, 0, 0);
-  if (reframeItems.length === 0) return null;
+  const head = await popReframeQueueHead();
+  if (!head) return null;
 
   try {
-    const item = JSON.parse(reframeItems[0]);
-    await listLPop(REFRAME_QUEUE);
+    const item = JSON.parse(head);
     const candidate: ReframeAnchor = {
       type: "reframe",
       reference: item.originalTitle,
@@ -252,7 +246,6 @@ export async function selectReframeAnchor(): Promise<ReframeAnchor | null> {
     return candidate;
   } catch (err: any) {
     console.error(`[ControlLoop] Corrupt reframe item: ${err.message}`);
-    await listLPop(REFRAME_QUEUE);
     return null;
   }
 }

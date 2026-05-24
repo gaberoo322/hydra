@@ -8,11 +8,10 @@
 
 import { isWipLimitReached, requeueStaleInProgressItems } from "../backlog/wip.ts";
 import {
-  listRange,
-  listRPush,
-  delKey,
-} from "../redis-adapter.ts";
-import { WORK_QUEUE, PROCESSING_QUEUE } from "./constants.ts";
+  clearProcessingQueue,
+  getProcessingQueueItems,
+  pushToAnchorWorkQueue,
+} from "../redis/anchors.ts";
 import { selectKanbanAnchor } from "./kanban-tier.ts";
 import { selectWorkQueueAnchor } from "./work-queue-tier.ts";
 import {
@@ -41,13 +40,13 @@ import {
 export async function selectAnchor(grounding: any, opts: any = {}, eventBus: any = null) {
   // 0. Recover items stuck in processing queue from a prior crash
   try {
-    const stuckItems = await listRange(PROCESSING_QUEUE, 0, -1);
+    const stuckItems = await getProcessingQueueItems();
     if (stuckItems.length > 0) {
       console.log(`[ControlLoop] Recovering ${stuckItems.length} items from processing queue`);
       for (const item of stuckItems) {
-        await listRPush(WORK_QUEUE, item);
+        await pushToAnchorWorkQueue(item);
       }
-      await delKey(PROCESSING_QUEUE);
+      await clearProcessingQueue();
     }
   } catch (err: any) {
     console.error(`[ControlLoop] Processing queue recovery failed: ${err.message}`);

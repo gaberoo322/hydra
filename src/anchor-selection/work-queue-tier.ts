@@ -10,8 +10,10 @@
 // priorities doc. The Kanban queued tier is still WIP-gated since it
 // represents heavier new-work intake.
 
-import { listMove, listRem } from "../redis-adapter.ts";
-import { WORK_QUEUE, PROCESSING_QUEUE } from "./constants.ts";
+import {
+  claimNextWorkQueueItem,
+  removeFromProcessingQueue,
+} from "../redis/anchors.ts";
 import { isAnchorDriftDuplicate } from "./drift-filter.ts";
 
 export interface WorkQueueAnchor {
@@ -24,7 +26,7 @@ export interface WorkQueueAnchor {
 }
 
 export async function selectWorkQueueAnchor(): Promise<WorkQueueAnchor | null> {
-  const queued = await listMove(WORK_QUEUE, PROCESSING_QUEUE, "LEFT", "RIGHT");
+  const queued = await claimNextWorkQueueItem();
   if (!queued) return null;
 
   try {
@@ -56,7 +58,7 @@ export async function selectWorkQueueAnchor(): Promise<WorkQueueAnchor | null> {
     const driftResult = await isAnchorDriftDuplicate(candidate);
     if (driftResult.drift) {
       try {
-        await listRem(PROCESSING_QUEUE, 1, queued);
+        await removeFromProcessingQueue(queued);
       } catch (err: any) {
         console.error(`[ControlLoop] Failed to drop drift-duplicate work-queue item: ${err.message}`);
       }
@@ -66,7 +68,7 @@ export async function selectWorkQueueAnchor(): Promise<WorkQueueAnchor | null> {
   } catch (err: any) {
     console.error(`[ControlLoop] Corrupt work-queue item dropped: ${err.message} — data: ${queued.slice(0, 200)}`);
     // Remove corrupt item from processing queue — it cannot be recovered
-    await listRem(PROCESSING_QUEUE, 1, queued);
+    await removeFromProcessingQueue(queued);
     return null;
   }
 }
