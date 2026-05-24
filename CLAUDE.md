@@ -178,7 +178,7 @@ Daily spend tracking still flows through `hydra:scheduler:daily-spend` (renamed 
 ## Coding Conventions
 
 - **TypeScript** (.ts, import/export). Source in `src/`, tests in `test/*.test.mts`.
-- **Four runtime dependencies**: `express`, `ioredis`, `ws`, plus `@sentry/node` for error tracking. Use Node.js stdlib for everything else. (`@openai/codex-sdk` was removed in PR-3 of the cut-over.)
+- **Runtime dependencies are operator-approved only** (ADR-0005). Today: `express`, `ioredis`, `ws`, `@sentry/node` for error tracking, plus `zod` for typed-schema parsing at boundaries (approved 2026-05-24 in #562; seed PR pending — `src/schemas/`). Use Node.js stdlib for everything else. (`@openai/codex-sdk` was removed in PR-3 of the cut-over.)
 - **Never throw from merge/grounding/verification** — return result objects so callers decide how to report failures.
 - **Fail loud**: every `catch` must either log `console.error` with context or be annotated `/* intentional: reason */`. Silent catches caused every major incident in the 2026-04-07/08 debug session.
 - **Kanban updates go through `safeKanban()`** — logs errors AND publishes events. Never call moveToInProgress/moveToDone/returnToBacklog directly without error handling.
