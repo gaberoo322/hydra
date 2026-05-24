@@ -85,7 +85,7 @@ describe("Scheduler API routes (issue #164)", () => {
     if (!createSchedulerRouter) {
       const routerMod = await import("../src/api/scheduler.ts");
       createSchedulerRouter = routerMod.createSchedulerRouter;
-      const schedMod = await import("../src/scheduler.ts");
+      const schedMod = await import("../src/scheduler/loop.ts");
       stopScheduler = schedMod.stop;
     }
     // Ensure scheduler is stopped before each test

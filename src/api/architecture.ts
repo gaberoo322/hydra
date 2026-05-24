@@ -17,7 +17,7 @@ const GROUP_MAP: Record<string, { id: string; label: string; color: string }> = 
 // graph.
 const GROUPS = [
   { id: "core", label: "Core Loop", color: "emerald",
-    modules: ["index", "cycle", "scheduler"] },
+    modules: ["index", "cycle"] },
   { id: "agents", label: "Agents (legacy / stubs)", color: "blue",
     modules: ["context-builder"] },
   { id: "quality", label: "Quality & Verification", color: "amber",

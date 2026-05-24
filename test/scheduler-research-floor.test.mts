@@ -28,7 +28,7 @@ import Redis from "ioredis";
 
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
-const floorMod = await import("../src/scheduler-research-floor.ts");
+const floorMod = await import("../src/scheduler/research-floor.ts");
 const {
   shouldForceResearchFloor,
   getResearchBuildRatioMin,

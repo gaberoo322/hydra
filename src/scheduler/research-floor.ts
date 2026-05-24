@@ -61,8 +61,8 @@ import {
   setString,
   getString,
   delKey,
-} from "./redis-adapter.ts";
-import { redisKeys } from "./redis-keys.ts";
+} from "../redis-adapter.ts";
+import { redisKeys } from "../redis-keys.ts";
 
 /** Default minimum research:build ratio over the rolling 24h window.
  *  0.05 == 1 research per 20 builds. */
