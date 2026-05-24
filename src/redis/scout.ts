@@ -12,12 +12,12 @@
  *                               `hydra:scout:pattern-last-fired:<pattern>`)
  *   - Dispatch audit stream    (`hydra:scout:dispatches`)
  *
- * Callers (src/scout/*.ts, src/api/scout.ts) import these accessors instead
- * of `redis-keys.ts` + raw kv primitives. Key shapes live ONLY in
- * `src/redis-keys.ts` (until slice 6 moves it to `src/redis/keys.ts`).
+ * Callers (src/scout/*.ts, src/api/scout.ts) import these typed accessors
+ * instead of reaching into raw kv primitives. Key shapes live ONLY in
+ * `src/redis/keys.ts`.
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 import {
   expireKey,

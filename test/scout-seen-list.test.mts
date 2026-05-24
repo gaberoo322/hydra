@@ -74,7 +74,7 @@ after(async () => {
     testRedis = null;
   }
   try {
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   } catch (err) {
     console.error("scout-seen-list teardown: closeRedisConnections failed", err);

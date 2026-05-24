@@ -72,7 +72,7 @@ describe("reflection injection on retry (issue #193)", () => {
       if (redisAvailable) await cleanReflections();
       redis.disconnect();
     }
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

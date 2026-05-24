@@ -18,7 +18,7 @@
  * Read-only. No mutations.
  */
 
-import { findKeys, listRange } from "../src/redis-adapter.ts";
+import { findKeys, listRange } from "../src/redis/kv.ts";
 import { agentRoleToTier } from "../src/cost/attribution.ts";
 
 interface RoleRow {

@@ -6,7 +6,7 @@
  * src/learning/reflections.ts.
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 /** Shared prefix all per-anchor reflection keys live under. */

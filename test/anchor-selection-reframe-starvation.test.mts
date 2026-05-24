@@ -25,7 +25,7 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
-import { redisKeys } from "../src/redis-keys.ts";
+import { redisKeys } from "../src/redis/keys.ts";
 
 let redis: any;
 

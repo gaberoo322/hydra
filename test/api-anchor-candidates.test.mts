@@ -231,7 +231,7 @@ describe("GET /anchor/candidates — endpoint integration (#424)", () => {
       await cleanKeys();
       redis.disconnect();
     }
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

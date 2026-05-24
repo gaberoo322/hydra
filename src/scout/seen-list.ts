@@ -6,7 +6,7 @@
  * re-filing issues. Schema documented inline below.
  *
  * Storage: one Redis hash per canonical slug at
- *   `hydra:scout:tools-considered:<slug>`  (see redis-keys.ts)
+ *   `hydra:scout:tools-considered:<slug>`  (see src/redis/keys.ts)
  *
  * The keys are NOT TTLed — we want a permanent record of every
  * consideration. "Re-eval eligibility" is computed from the hash

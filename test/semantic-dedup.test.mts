@@ -16,7 +16,7 @@ import {
   searchOVForDedup,
   indexWorkItem,
   isFuzzyDuplicate,
-} from "../src/redis-adapter.ts";
+} from "../src/redis/work-queue.ts";
 
 describe("SEMANTIC_DEDUP_THRESHOLD", () => {
   test("default threshold is 0.85", () => {

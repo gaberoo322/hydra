@@ -40,7 +40,9 @@ describe("tier classifier — Tier 0 (Untouchable Core)", () => {
     // removed from the protected-paths list in PR-3 (issue #383) along with
     // the files themselves (the in-process codex control loop is gone).
     assert.equal(isUntouchable("src/grounding.ts"), true);
-    assert.equal(isUntouchable("src/redis-adapter.ts"), true);
+    // redis-adapter.ts was retired in the ADR-0009 closure (shim deleted; all
+    // callers go directly to src/redis/<domain>.ts).
+    assert.equal(isUntouchable("src/redis-adapter.ts"), false);
     assert.equal(isUntouchable("src/cost/cap.ts"), true);
     assert.equal(isUntouchable("scripts/deploy.sh"), true);
     assert.equal(isUntouchable(".github/workflows/ci.yml"), true);

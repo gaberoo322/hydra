@@ -27,8 +27,10 @@ export const UNTOUCHABLE_PATHS: readonly string[] = Object.freeze([
   // branch protection.)
   "src/grounding.ts",
 
-  // State contract — the adapter every Redis access funnels through.
-  "src/redis-adapter.ts",
+  // (`src/redis-adapter.ts` was previously listed here as the canonical
+  // Redis seam. It was retired in the ADR-0009 closure — the typed
+  // accessors in `src/redis/<domain>.ts` are now the contract, and the
+  // legacy shim is deleted. No single file funnels Redis access anymore.)
 
   // Cost guardrails — the $50/day cap referenced in operator vision.
   "src/cost/cap.ts",

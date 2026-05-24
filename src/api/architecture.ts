@@ -25,7 +25,7 @@ const GROUPS = [
   { id: "knowledge", label: "Knowledge & Learning", color: "purple",
     modules: ["knowledge-indexer", "learning", "reflections", "agent-memory", "pattern-detector", "prompt-evolution", "repo-map", "grounding", "ov-session"] },
   { id: "state", label: "State & Data", color: "cyan",
-    modules: ["redis-adapter", "redis-keys", "event-bus", "task-tracker", "task-machine", "metrics"] },
+    modules: ["redis", "event-bus", "task-tracker", "task-machine", "metrics"] },
   { id: "planning", label: "Planning & Research", color: "rose",
     modules: ["research-loop", "project-goals", "anchor-selection", "anchor-scorer", "plan-cache"] },
   { id: "infra", label: "Infrastructure", color: "zinc",

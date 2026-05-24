@@ -54,7 +54,7 @@ describe("reflection effectiveness (issue #150)", () => {
       if (redisAvailable) await cleanKeys();
       redis.disconnect();
     }
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

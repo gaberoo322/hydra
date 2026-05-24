@@ -541,7 +541,7 @@ class TaskTracker {
   }
 
   async close() {
-    /* no-op: connection owned by redis-adapter singleton */
+    /* no-op: connection owned by src/redis/connection.ts singleton */
   }
 }
 

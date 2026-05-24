@@ -438,7 +438,7 @@ describe("anchor-scorer scoreAnchor end-to-end", () => {
 
   after(async () => {
     try { await rm(configDir, { recursive: true, force: true }); } catch { /* intentional: cleanup */ }
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

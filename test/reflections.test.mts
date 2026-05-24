@@ -53,7 +53,7 @@ describe("reflections buffer", () => {
     if (reflections?.closeReflectionsRedis) {
       reflections.closeReflectionsRedis();
     }
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

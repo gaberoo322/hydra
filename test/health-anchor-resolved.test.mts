@@ -32,7 +32,7 @@ describe("codebase-health anchor resolved skip (issue #25)", () => {
       const redisUrl = process.env.REDIS_URL || "redis://localhost:6379/1";
       process.env.REDIS_URL = redisUrl;
       redis = new Redis(redisUrl);
-      const adapter = await import("../src/redis-adapter.ts");
+      const adapter = await import("../src/redis/health-anchor.ts");
       markHealthAnchorResolved = adapter.markHealthAnchorResolved;
       isHealthAnchorResolved = adapter.isHealthAnchorResolved;
     }

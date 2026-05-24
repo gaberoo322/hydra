@@ -37,7 +37,7 @@ process.env.REDIS_URL = "redis://localhost:6379/1";
 
 const schedulerMod = await import("../src/scheduler/loop.ts");
 const { start, stop, getStatus } = schedulerMod as any;
-const redisKeysMod = await import("../src/redis-keys.ts");
+const redisKeysMod = await import("../src/redis/keys.ts");
 const { redisKeys } = redisKeysMod;
 
 // Minimal event bus stub. The scheduler's `start()` accepts whatever shape;
