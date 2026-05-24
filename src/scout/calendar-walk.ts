@@ -49,8 +49,14 @@
 
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
-import { redisKeys } from "../redis-keys.ts";
-import { getString, setString } from "../redis/kv.ts";
+import {
+  getScoutCategoryLastWalked,
+  getScoutLastCalendarWalk,
+  getScoutSpendDaily,
+  setScoutCategoryLastWalked,
+  setScoutLastCalendarWalk,
+  setScoutSpendDaily,
+} from "../redis/scout.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -222,7 +228,7 @@ export function isCooledDown(
 
 /** Read the per-class (`scout_orch`) cooldown state. Network call. */
 export async function isClassCooledDown(now: Date = new Date()): Promise<boolean> {
-  const last = await getString(redisKeys.scoutLastCalendarWalk());
+  const last = await getScoutLastCalendarWalk();
   return isCooledDown(last, CLASS_COOLDOWN_DAYS, now);
 }
 
@@ -232,7 +238,7 @@ export async function isCategoryCooledDown(
   now: Date = new Date(),
 ): Promise<boolean> {
   if (!category) throw new TypeError("isCategoryCooledDown: category required");
-  const last = await getString(redisKeys.scoutCategoryLastWalked(category));
+  const last = await getScoutCategoryLastWalked(category);
   return isCooledDown(last, CATEGORY_COOLDOWN_DAYS, now);
 }
 
@@ -242,7 +248,7 @@ export async function isCategoryCooledDown(
 
 /** Record that the weekly walk fired (resets the 7d class cooldown). */
 export async function stampClassWalk(now: Date = new Date()): Promise<void> {
-  await setString(redisKeys.scoutLastCalendarWalk(), now.toISOString());
+  await setScoutLastCalendarWalk(now.toISOString());
 }
 
 /** Record that a specific category was walked (resets the 30d category cooldown). */
@@ -251,10 +257,7 @@ export async function stampCategoryWalk(
   now: Date = new Date(),
 ): Promise<void> {
   if (!category) throw new TypeError("stampCategoryWalk: category required");
-  await setString(
-    redisKeys.scoutCategoryLastWalked(category),
-    now.toISOString(),
-  );
+  await setScoutCategoryLastWalked(category, now.toISOString());
 }
 
 // ---------------------------------------------------------------------------
@@ -290,11 +293,7 @@ export async function recordScoutSpend(
 ): Promise<void> {
   const clean = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
   const date = scoutSpendDateString(now);
-  await setString(
-    redisKeys.scoutSpendDaily(date),
-    String(clean),
-    SCOUT_SPEND_DAILY_TTL_SECONDS,
-  );
+  await setScoutSpendDaily(date, String(clean), SCOUT_SPEND_DAILY_TTL_SECONDS);
 }
 
 /**
@@ -311,7 +310,7 @@ export async function getScoutSpendToday(
   now: Date = new Date(),
 ): Promise<number> {
   const date = scoutSpendDateString(now);
-  const raw = await getString(redisKeys.scoutSpendDaily(date));
+  const raw = await getScoutSpendDaily(date);
   if (raw === null || raw === undefined) return 0;
   const parsed = parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;

@@ -16,12 +16,10 @@
  * is enough headroom for late writes / clock drift.
  */
 
-import { redisKeys } from "../redis-keys.ts";
 import {
-  expireKey,
-  hashGetAll,
-  hashIncrBy,
-} from "../redis/kv.ts";
+  getScoutStatsHash,
+  incrScoutStatsField,
+} from "../redis/scout.ts";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -74,13 +72,10 @@ export async function incrStat(
     throw new TypeError(`incrStat: delta must be finite, got ${delta}`);
   }
   const day = toIsoDay(now);
-  const key = redisKeys.scoutStatsDaily(day);
   const field = `${category}:${metric}`;
-  const next = await hashIncrBy(key, field, delta);
   // Refresh TTL on every write — a hash that hasn't been touched in 14d
   // will expire naturally.
-  await expireKey(key, STATS_TTL_SECONDS);
-  return next;
+  return incrScoutStatsField(day, field, delta, STATS_TTL_SECONDS);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +97,7 @@ export async function getStatsRollup(
   const out: Record<string, Record<ScoutMetric, number>> = {};
   for (let i = 0; i < w; i++) {
     const day = toIsoDay(addDays(now, -i));
-    const raw = await hashGetAll(redisKeys.scoutStatsDaily(day));
+    const raw = await getScoutStatsHash(day);
     if (!raw) continue;
     for (const [field, val] of Object.entries(raw)) {
       const idx = field.lastIndexOf(":");

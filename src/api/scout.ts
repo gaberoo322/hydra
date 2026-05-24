@@ -4,8 +4,7 @@ import {
   MAX_ROLLUP_WINDOW_DAYS,
   SCOUT_METRICS,
 } from "../scout/stats.ts";
-import { getString } from "../redis/kv.ts";
-import { redisKeys } from "../redis-keys.ts";
+import { getScoutLastCalendarWalk } from "../redis/scout.ts";
 import {
   listDispatchAudits,
   planAlertDispatches,
@@ -54,7 +53,7 @@ export function createScoutRouter() {
       const since = new Date(now.getTime() - (window - 1) * 24 * 60 * 60 * 1000);
       since.setUTCHours(0, 0, 0, 0);
 
-      const lastWalk = await getString(redisKeys.scoutLastCalendarWalk());
+      const lastWalk = await getScoutLastCalendarWalk();
 
       res.json({
         window,
