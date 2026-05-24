@@ -16,7 +16,7 @@ import {
   shouldSuppressResearch,
   RESEARCH_BUILD_RATIO_MAX,
   RESEARCH_QUEUE_THRESHOLD,
-} from "../src/scheduler.ts";
+} from "../src/scheduler/loop.ts";
 
 describe("shouldSuppressResearch — queue depth gate", () => {
   test("suppresses when queue depth equals threshold", () => {

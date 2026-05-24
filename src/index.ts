@@ -7,7 +7,7 @@ import { createTracker, getTracker } from "./task-tracker.ts";
 import { initMetrics } from "./metrics.ts";
 import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule } from "./cleanup.ts";
-import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler.ts";
+import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/loop.ts";
 import { startDigest, stopDigest, recordEvent } from "./digest.ts";
 import { initLearning } from "./learning.ts";
 import { redisKeys } from "./redis-keys.ts";

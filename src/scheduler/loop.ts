@@ -9,18 +9,18 @@
  */
 
 import * as Sentry from "@sentry/node";
-import { sendNotification } from "./notify.ts";
-import { getMetricsTrend } from "./metrics.ts";
-import { getBacklogCounts, loadBacklog } from "./backlog/reads.ts";
-import { promoteToQueued, pruneOldDoneItems } from "./backlog/lanes.ts";
-import { reapStaleClaims } from "./backlog/reaper.ts";
+import { sendNotification } from "../notify.ts";
+import { getMetricsTrend } from "../metrics.ts";
+import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
+import { promoteToQueued, pruneOldDoneItems } from "../backlog/lanes.ts";
+import { reapStaleClaims } from "../backlog/reaper.ts";
 
 // Stale-claim reaper threshold (issue #374). Default 2h.
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
-import { runResearchLoop } from "./research-loop.ts";
-import { getPerCycleCostCapUsd } from "./cost-cap.ts";
-import { redisKeys } from "./redis-keys.ts";
-import { getTargetName } from "./target-config.ts";
+import { runResearchLoop } from "../research-loop.ts";
+import { getPerCycleCostCapUsd } from "../cost-cap.ts";
+import { redisKeys } from "../redis-keys.ts";
+import { getTargetName } from "../target-config.ts";
 import {
   getString, setString, delKey, pushToWorkQueue,
   hashGet, hashSetField,
@@ -32,13 +32,13 @@ import {
   getSchedulerCyclesFailed,
   atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
   saveSchedulerStateVersioned, getSchedulerStateVersion,
-} from "./redis-adapter.ts";
+} from "../redis-adapter.ts";
 // Issue #457: new call site — import the source-aware live-count helper
 // directly from the domain module per CLAUDE.md guidance (post-#269 split,
 // redis-adapter.ts is a thin re-export shim and is Tier-0 / operator-only,
 // so new helpers should be imported from the domain modules rather than
 // re-exported through the shim).
-import { countLiveWorkQueueItems } from "./redis/work-queue.ts";
+import { countLiveWorkQueueItems } from "../redis/work-queue.ts";
 import {
   shouldForceResearchFloor,
   getResearchBuildRatioMin,
@@ -52,7 +52,7 @@ import {
   recordResearchFloorTriggered,
   getResearchFloorStats,
   RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD,
-} from "./scheduler-research-floor.ts";
+} from "./research-floor.ts";
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
@@ -606,7 +606,7 @@ async function checkBlockedEscalation(eventBus) {
       await hashSetField(BLOCKED_COOLDOWN_KEY, item.id, now.toString());
       const ageDays = Math.round(age / (24 * 60 * 60 * 1000));
 
-      const { STREAMS } = await import("./event-bus.ts");
+      const { STREAMS } = await import("../event-bus.ts");
       await eventBus.publish(STREAMS.NOTIFICATIONS, {
         type: "cycle:operator_blocked",
         source: "scheduler",
@@ -666,10 +666,10 @@ async function runScheduledCycle(eventBus) {
     const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
     const lastWeekly = await getString(WEEKLY_KEY);
     if (!lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS) {
-      const { buildWeeklySummary } = await import("./digest.ts");
+      const { buildWeeklySummary } = await import("../digest.ts");
       const summary = await buildWeeklySummary();
       if (summary) {
-        const { sendToTelegram } = await import("./notify.ts");
+        const { sendToTelegram } = await import("../notify.ts");
         await sendToTelegram(summary);
         await setString(WEEKLY_KEY, Date.now().toString());
         console.log("[Scheduler] Sent weekly summary");
@@ -686,7 +686,7 @@ async function runScheduledCycle(eventBus) {
     const DAY_MS = 24 * 60 * 60 * 1000;
     const lastConsolidation = await getString(MEMORY_CONSOLIDATION_KEY);
     if (!lastConsolidation || Date.now() - parseInt(lastConsolidation) >= DAY_MS) {
-      const { consolidate } = await import("./learning.ts");
+      const { consolidate } = await import("../learning.ts");
       await consolidate();
       await setString(MEMORY_CONSOLIDATION_KEY, Date.now().toString());
     }

@@ -341,7 +341,7 @@ function parseAgentJson(output) {
 // priorities.md / roadmap.md / research-journal.md directly.
 //
 // runResearchLoop() is preserved as a no-op shim so the scheduler call site
-// (`maybeRunResearch()` in src/scheduler.ts) continues to type-check and
+// (`maybeRunResearch()` in src/scheduler/loop.ts) continues to type-check and
 // returns a structured "skipped" result. Removing the call site itself is
 // deferred to a follow-up issue.
 //
