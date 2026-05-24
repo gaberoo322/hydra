@@ -600,7 +600,7 @@ export async function getReflectionEffectiveness(): Promise<{
  */
 async function computeInjectionStats(): Promise<{ totalCycles: number; cyclesWithReflections: number; injectionRate: number }> {
   try {
-    const { getMetricsTrend } = await import("../metrics.ts");
+    const { getMetricsTrend } = await import("../metrics/trend.ts");
     const recent = await getMetricsTrend(50);
     const totalCycles = recent.length;
     const cyclesWithReflections = recent.filter((m: any) => m.reflectionInjected === "true").length;

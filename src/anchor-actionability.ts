@@ -223,7 +223,7 @@ function containsAll(haystack: Set<string>, needles: Set<string>): boolean {
 // `HYDRA_DOC_SATURATION_THRESHOLD` (default 2).
 // ---------------------------------------------------------------------------
 
-import { getMetricsTrend } from "./metrics.ts";
+import { getMetricsTrend } from "./metrics/trend.ts";
 
 const DOC_SATURATION_LOOKBACK = 10;
 const DOC_SATURATION_DEFAULT_THRESHOLD = 2;

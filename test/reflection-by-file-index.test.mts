@@ -56,7 +56,7 @@ describe("issue #326: reflection by-file index", () => {
       reflections = await import("../src/reflections/reflections.ts");
       learning = await import("../src/learning.ts");
       cb = await import("../src/context-builder.ts");
-      metrics = await import("../src/metrics.ts");
+      metrics = await import("../src/metrics/trend.ts");
     }
     if (!redisAvailable) return;
     await cleanReflectionKeys();

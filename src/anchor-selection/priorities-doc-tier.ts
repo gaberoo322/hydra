@@ -57,7 +57,7 @@ export async function selectPrioritiesDocAnchor(
     // for visibility only — staleness no longer triggers an inline refresh.
     const recentDocCycles = await (async () => {
       try {
-        const { getMetricsTrend } = await import("../metrics.ts");
+        const { getMetricsTrend } = await import("../metrics/trend.ts");
         const trend = await getMetricsTrend(10);
         return trend.filter((m: any) => m.anchorType === "doc" && m.anchorReference === DOC_REF).length;
       } catch (err: any) {

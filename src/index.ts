@@ -4,7 +4,6 @@ import { Sentry } from "./instrument.ts";
 import { EventBus, STREAMS } from "./event-bus.ts";
 import { createApi } from "./api.ts";
 import { createTracker, getTracker } from "./task-tracker.ts";
-import { initMetrics } from "./metrics.ts";
 import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule } from "./cleanup.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/loop.ts";
@@ -13,7 +12,7 @@ import { initLearning } from "./learning.ts";
 import { redisKeys } from "./redis-keys.ts";
 import { cleanWorkQueue } from "./redis-adapter.ts";
 import { recordCycleSide, classifySide } from "./capacity-floor.ts";
-import { publishOrchestratorShareMetric } from "./metrics-publisher.ts";
+import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 
 import { createServer } from "node:net";
@@ -194,8 +193,7 @@ async function main() {
   console.log("[Hydra] Event bus initialized (Redis Streams ready)");
 
   createTracker(REDIS_URL);
-  initMetrics(REDIS_URL);
-  console.log("[Hydra] Task tracker + metrics initialized (Redis-backed)");
+  console.log("[Hydra] Task tracker initialized (Redis-backed)");
 
   // Initialize learning system (migrates rules, registers OV skills, starts indexer)
   await initLearning();

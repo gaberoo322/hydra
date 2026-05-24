@@ -18,7 +18,8 @@ import Redis from "ioredis";
 // Set test DB before any adapter imports
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
-const { recordCycleMetrics, getAbandonmentBreakdown, categorizeAbandonReason } = await import("../src/metrics.ts");
+const { recordCycleMetrics } = await import("../src/metrics/record.ts");
+const { getAbandonmentBreakdown, categorizeAbandonReason } = await import("../src/metrics/abandonment.ts");
 
 let testRedis: any;
 

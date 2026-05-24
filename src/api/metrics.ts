@@ -1,8 +1,13 @@
 import { Router } from "express";
-import { getMetricsTrend, getAggregateStats, recordCycleMetrics, getAbandonmentBreakdown, getQualityGateTrend } from "../metrics.ts";
+import { getMetricsTrend } from "../metrics/trend.ts";
+import { getAggregateStats, getCumulativeAccomplishments } from "../metrics/aggregate.ts";
+import { recordCycleMetrics } from "../metrics/record.ts";
+import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
+import { getQualityGateTrend } from "../metrics/quality-gates.ts";
+import { loadCycleSummaries, loadCycleSpending } from "../metrics/cycle-summary.ts";
 import { redisKeys } from "../redis-keys.ts";
-import { getWorkQueueLen, listLen, getCycleCosts, getCycleAgentRuns } from "../redis-adapter.ts";
-import { aggregateCostAttribution, type AgentRun, type CycleSummary } from "../cost/attribution.ts";
+import { getWorkQueueLen, listLen } from "../redis-adapter.ts";
+import { aggregateCostAttribution } from "../cost/attribution.ts";
 import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
 import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost/surrogate.ts";
 import { getReframeStarvationStats } from "../anchor-selection/reframe.ts";
@@ -32,9 +37,8 @@ export function createMetricsRouter() {
   // GET /summary — Human-readable system summary
   router.get("/summary", async (req, res) => {
     try {
-      const { getAggregateStats: gas, getCumulativeAccomplishments: gca } = await import("../metrics.ts");
-      const stats = await gas(20);
-      const acc = await gca(20);
+      const stats = await getAggregateStats(20);
+      const acc = await getCumulativeAccomplishments(20);
       const queueLen = await getWorkQueueLen();
       const priorFails = await listLen(redisKeys.anchorPriorFailures());
 
@@ -72,49 +76,8 @@ export function createMetricsRouter() {
     try {
     // @ts-expect-error — migrate to proper types
       const count = parseInt(req.query.count) || 20;
-      const trend = await getMetricsTrend(count);
-
-      let totalInputTokens = 0;
-      let totalOutputTokens = 0;
-      let totalCostUsd = 0;
-      let totalAgentTimeMs = 0;
-      const perCycle = [];
-
-      for (const m of trend) {
-        const costs = await getCycleCosts(m.cycleId);
-        const input = parseInt(costs.inputTokens) || 0;
-        const output = parseInt(costs.outputTokens) || 0;
-        const costMicro = parseInt(costs.costMicrodollars) || 0;
-        const costUsd = costMicro / 1_000_000;
-
-        totalInputTokens += input;
-        totalOutputTokens += output;
-        totalCostUsd += costUsd;
-        totalAgentTimeMs += m.totalDurationMs || 0;
-
-        perCycle.push({
-          cycleId: m.cycleId,
-          inputTokens: input,
-          outputTokens: output,
-          costUsd: Math.round(costUsd * 1_000_000) / 1_000_000,
-          durationMs: m.totalDurationMs || 0,
-          task: m.taskTitle,
-        });
-      }
-
-      res.json({
-        recentCycles: trend.length,
-        totalInputTokens,
-        totalOutputTokens,
-        totalTokens: totalInputTokens + totalOutputTokens,
-        totalCostUsd: Math.round(totalCostUsd * 100) / 100,
-        totalAgentTimeMs,
-        totalAgentTimeHuman: `${Math.round(totalAgentTimeMs / 1000)}s`,
-        avgCostPerCycle: trend.length > 0
-          ? Math.round((totalCostUsd / trend.length) * 100) / 100
-          : 0,
-        perCycle,
-      });
+      const report = await loadCycleSpending(count);
+      res.json(report);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -163,31 +126,7 @@ export function createMetricsRouter() {
     try {
       // @ts-expect-error — req.query.count is a string at runtime
       const count = parseInt(req.query.count) || 50;
-      const trend = await getMetricsTrend(count);
-
-      const cycles: CycleSummary[] = [];
-      for (const m of trend) {
-        const rawRuns = await getCycleAgentRuns(m.cycleId);
-        const agentRuns: AgentRun[] = [];
-        for (const raw of rawRuns) {
-          try {
-            agentRuns.push(JSON.parse(raw));
-          } catch { /* intentional: skip corrupt agent-run entries */ }
-        }
-        cycles.push({
-          cycleId: m.cycleId,
-          taskTitle: m.taskTitle,
-          anchorType: m.anchorType,
-          complexity: m.complexity,
-          tasksMerged: m.tasksMerged,
-          tasksFailed: m.tasksFailed,
-          tasksAbandoned: m.tasksAbandoned,
-          plannerModel: m.plannerModel,
-          executorModel: m.executorModel,
-          agentRuns,
-        });
-      }
-
+      const cycles = await loadCycleSummaries(count);
       const result = aggregateCostAttribution(cycles);
       res.json(result);
     } catch (err: any) {

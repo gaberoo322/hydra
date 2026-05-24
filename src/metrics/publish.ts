@@ -28,7 +28,7 @@ import {
   DEFAULT_WINDOW_CYCLES,
   getSelfImprovementShare,
   type ShareResult,
-} from "./capacity-floor.ts";
+} from "../capacity-floor.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 

@@ -17,7 +17,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { writeMetricFile } from "../src/metrics-publisher.ts";
+import { writeMetricFile } from "../src/metrics/publish.ts";
 import { getOutcomeValue, type Outcome } from "../src/outcomes.ts";
 
 let tmpDir: string;
