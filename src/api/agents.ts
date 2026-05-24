@@ -35,8 +35,10 @@
 // `src/api/autopilot.ts` for the dispatch→cycle join.
 
 import { Router } from "express";
-import { redisKeys } from "../redis-keys.ts";
-import { hashGetAll, zRevRange } from "../redis-adapter.ts";
+import {
+  getAutopilotRun,
+  listRecentAutopilotRunIds,
+} from "../redis/autopilot-runs.ts";
 import { fetchTurnsWithJoins } from "./autopilot.ts";
 
 // How many recent runs to scan when resolving a stamped branch. The branch
@@ -97,11 +99,7 @@ export function createAgentsRouter() {
       // `runtoken-t<turn>-<slot>` shape is run-scoped, so it would be unusual
       // — though not impossible — for the same branch to appear in two runs.
       // We return the first (newest) match.
-      const recentRunIds = await zRevRange(
-        redisKeys.autopilotRunsIndex(),
-        0,
-        MAX_RUNS_SCANNED - 1,
-      );
+      const recentRunIds = await listRecentAutopilotRunIds(MAX_RUNS_SCANNED);
 
       if (!recentRunIds || recentRunIds.length === 0) {
         return res.status(404).json({
@@ -114,7 +112,7 @@ export function createAgentsRouter() {
       for (const runId of recentRunIds) {
         // Cheap row existence check before the per-turn scan. If the index is
         // ahead of the hash (TTL race) skip silently.
-        const runRow = await hashGetAll(redisKeys.autopilotRun(runId));
+        const runRow = await getAutopilotRun(runId);
         if (!runRow || !runRow.started) continue;
 
         const turns = await fetchTurnsWithJoins(runId, MAX_TURNS_PER_RUN);

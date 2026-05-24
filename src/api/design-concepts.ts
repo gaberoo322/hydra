@@ -31,17 +31,9 @@ import {
   type DesignConceptScope,
 } from "../design-concept.ts";
 import {
-  listLPush,
-  listRange,
-} from "../redis-adapter.ts";
-
-/**
- * Redis LIST holding `design-concept-exempt` audit entries.
- * Newest first (LPUSH on write, LRANGE 0 .. limit-1 on read). LIST is
- * intentional — the operator wants chronological audit-trail semantics
- * with a cheap append. See issue #464.
- */
-const EXEMPT_LOG_KEY = "hydra:dc:exempt_log";
+  appendExemptLogEntry,
+  readRecentExemptLogEntries,
+} from "../redis/design-concept.ts";
 
 /** Maximum number of audit entries the read endpoint will return. */
 const EXEMPT_LOG_DEFAULT_LIMIT = 50;
@@ -85,7 +77,7 @@ export function createDesignConceptsRouter() {
           ? Math.min(limitParam, EXEMPT_LOG_MAX_LIMIT)
           : EXEMPT_LOG_DEFAULT_LIMIT;
 
-      const rawEntries = await listRange(EXEMPT_LOG_KEY, 0, limit - 1);
+      const rawEntries = await readRecentExemptLogEntries(limit);
       const items: ExemptLogEntry[] = [];
       for (const raw of rawEntries) {
         try {
@@ -157,7 +149,7 @@ export function createDesignConceptsRouter() {
       };
 
       // LPUSH so reads return newest-first.
-      await listLPush(EXEMPT_LOG_KEY, JSON.stringify(entry));
+      await appendExemptLogEntry(JSON.stringify(entry));
       res.status(201).json(entry);
     } catch (err: any) {
       console.error("[api/design-concepts] exempt-log write failed", err);
