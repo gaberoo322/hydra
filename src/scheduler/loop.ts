@@ -19,11 +19,11 @@ import { reapStaleClaims } from "../backlog/reaper.ts";
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
 import { runResearchLoop } from "../research-loop.ts";
 import { getPerCycleCostCapUsd } from "../cost/cap.ts";
-import { redisKeys } from "../redis-keys.ts";
 import { getTargetName } from "../target-config.ts";
 import {
-  getString, setString, delKey, pushToWorkQueue,
-  hashGet, hashSetField,
+  pushToWorkQueue,
+} from "../redis-adapter.ts";
+import {
   recordResearchEvent,
   getResearchEventCount24h, getBuildEventCount24h,
   consumeResearchForceOnce,
@@ -32,7 +32,13 @@ import {
   getSchedulerCyclesFailed,
   atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
   saveSchedulerStateVersioned, getSchedulerStateVersion,
-} from "../redis-adapter.ts";
+  getSchedulerStateRaw,
+  getDailySpendRaw, setDailySpendRaw,
+  getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
+  getBlockedLastEscalation, setBlockedLastEscalation,
+  getDigestLastWeekly, setDigestLastWeekly,
+  getMemoryLastConsolidation, setMemoryLastConsolidation,
+} from "../redis/scheduler.ts";
 // Issue #457: new call site — import the source-aware live-count helper
 // directly from the domain module per CLAUDE.md guidance (post-#269 split,
 // redis-adapter.ts is a thin re-export shim and is Tier-0 / operator-only,
@@ -171,11 +177,9 @@ const DELIBERATE_STOP_TTL_SECONDS = 24 * 60 * 60;
 // the Redis counters when they're non-zero so /api/scheduler/status reports
 // stable lifetime metrics immediately after restart.
 
-const SCHEDULER_STATE_KEY = redisKeys.schedulerState();
-
 async function loadSchedulerState() {
   try {
-    const raw = await getString(SCHEDULER_STATE_KEY);
+    const raw = await getSchedulerStateRaw();
     if (!raw) {
       console.log("[Scheduler] No persisted state in Redis — starting fresh");
     } else {
@@ -213,7 +217,7 @@ async function loadSchedulerState() {
     // running=false (loadSchedulerState doesn't auto-start) and surface the
     // reason so the watchdog still refuses to restart after a service bounce.
     try {
-      const rawDeliberateStop = await getString(redisKeys.schedulerDeliberateStop());
+      const rawDeliberateStop = await getSchedulerDeliberateStop();
       if (rawDeliberateStop) {
         const parsed = JSON.parse(rawDeliberateStop);
         if (parsed && typeof parsed.reason === "string") {
@@ -282,8 +286,6 @@ async function saveSchedulerState() {
 // (research) rather than trying to be a perfect budget. Accept the
 // incompleteness in exchange for no changes to the control-loop hot path.
 
-const SCHEDULER_SPEND_KEY = redisKeys.schedulerDailySpend();
-
 function todayLocalDate() {
   // Use local date so the counter resets at local midnight, not UTC midnight.
   const now = new Date();
@@ -295,7 +297,7 @@ function todayLocalDate() {
 
 async function getDailySpend() {
   try {
-    const raw = await getString(SCHEDULER_SPEND_KEY);
+    const raw = await getDailySpendRaw();
     if (!raw) return { date: todayLocalDate(), usd: 0 };
     const stored = JSON.parse(raw);
     if (stored.date !== todayLocalDate()) {
@@ -317,7 +319,7 @@ async function recordSpend(amountUsd) {
       usd: (current.usd || 0) + (amountUsd || 0),
       updatedAt: new Date().toISOString(),
     };
-    await setString(SCHEDULER_SPEND_KEY, JSON.stringify(updated));
+    await setDailySpendRaw(JSON.stringify(updated));
     return updated;
   } catch (err: any) {
     console.error(`[Scheduler] Failed to record spend: ${err.message}`);
@@ -583,7 +585,6 @@ function generateUnblockCommands(blockedReason: string, title: string): string[]
 
 // Check for blocked items that need re-escalation (every 12h per item).
 const BLOCKED_REESCALATE_MS = 12 * 60 * 60 * 1000;
-const BLOCKED_COOLDOWN_KEY = redisKeys.blockedLastEscalation();
 
 async function checkBlockedEscalation(eventBus) {
   try {
@@ -600,10 +601,10 @@ async function checkBlockedEscalation(eventBus) {
       const age = now - blockedAt;
       if (age < BLOCKED_REESCALATE_MS) continue;
 
-      const lastEsc = await hashGet(BLOCKED_COOLDOWN_KEY, item.id);
+      const lastEsc = await getBlockedLastEscalation(item.id);
       if (lastEsc && now - parseInt(lastEsc) < BLOCKED_REESCALATE_MS) continue;
 
-      await hashSetField(BLOCKED_COOLDOWN_KEY, item.id, now.toString());
+      await setBlockedLastEscalation(item.id, now.toString());
       const ageDays = Math.round(age / (24 * 60 * 60 * 1000));
 
       const { STREAMS } = await import("../event-bus.ts");
@@ -662,16 +663,15 @@ async function runScheduledCycle(eventBus) {
 
   // Weekly summary — send once per week
   try {
-    const WEEKLY_KEY = redisKeys.digestLastWeekly();
     const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-    const lastWeekly = await getString(WEEKLY_KEY);
+    const lastWeekly = await getDigestLastWeekly();
     if (!lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS) {
       const { buildWeeklySummary } = await import("../digest.ts");
       const summary = await buildWeeklySummary();
       if (summary) {
         const { sendToTelegram } = await import("../notify.ts");
         await sendToTelegram(summary);
-        await setString(WEEKLY_KEY, Date.now().toString());
+        await setDigestLastWeekly(Date.now().toString());
         console.log("[Scheduler] Sent weekly summary");
       }
     }
@@ -682,13 +682,12 @@ async function runScheduledCycle(eventBus) {
 
   // Daily memory consolidation — prune stale patterns
   try {
-    const MEMORY_CONSOLIDATION_KEY = redisKeys.memoryLastConsolidation();
     const DAY_MS = 24 * 60 * 60 * 1000;
-    const lastConsolidation = await getString(MEMORY_CONSOLIDATION_KEY);
+    const lastConsolidation = await getMemoryLastConsolidation();
     if (!lastConsolidation || Date.now() - parseInt(lastConsolidation) >= DAY_MS) {
       const { consolidate } = await import("../learning.ts");
       await consolidate();
-      await setString(MEMORY_CONSOLIDATION_KEY, Date.now().toString());
+      await setMemoryLastConsolidation(Date.now().toString());
     }
   } catch (err: any) {
     console.error(`[Scheduler] Memory consolidation failed: ${err.message}`);
@@ -751,7 +750,7 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   state.stopReason = null;
   state.deliberateStoppedAt = null;
   try {
-    await delKey(redisKeys.schedulerDeliberateStop());
+    await clearSchedulerDeliberateStop();
   } catch (err: any) {
     console.error(`[Scheduler] Failed to clear deliberate-stop marker: ${err.message}`);
   }
@@ -812,8 +811,7 @@ async function stop(opts: { reason?: "deliberate" | "circuit-breaker" | "error-c
     state.stopReason = "deliberate";
     state.deliberateStoppedAt = stoppedAt;
     try {
-      await setString(
-        redisKeys.schedulerDeliberateStop(),
+      await setSchedulerDeliberateStop(
         JSON.stringify({ reason: "deliberate", stoppedAt }),
         DELIBERATE_STOP_TTL_SECONDS,
       );

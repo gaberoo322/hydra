@@ -56,13 +56,18 @@
 // ---------------------------------------------------------------------------
 
 import {
-  hashIncrBy,
-  hashGetAll,
-  setString,
-  getString,
-  delKey,
-} from "../redis-adapter.ts";
-import { redisKeys } from "../redis-keys.ts";
+  incrResearchFloorEmptyStreak as _incrResearchFloorEmptyStreak,
+  resetResearchFloorEmptyStreak as _resetResearchFloorEmptyStreak,
+  getResearchFloorEmptyStreak as _getResearchFloorEmptyStreak,
+  setResearchFloorSuppressedUntilMs as _setResearchFloorSuppressedUntilMs,
+  getResearchFloorSuppressedUntilMs as _getResearchFloorSuppressedUntilMs,
+  clearResearchFloorSuppressedUntil,
+  incrResearchFloorStat,
+  setResearchFloorLastTriggeredAt,
+  getResearchFloorStatsHash,
+  getResearchFloorLastTriggeredAt,
+  _resetAllResearchFloorState,
+} from "../redis/scheduler.ts";
 
 /** Default minimum research:build ratio over the rolling 24h window.
  *  0.05 == 1 research per 20 builds. */
@@ -233,13 +238,7 @@ export function shouldForceResearchFloor(args: {
  *  caller should set a suppression window via `setResearchFloorSuppressedUntilMs`. */
 export async function incrResearchFloorEmptyStreak(): Promise<number> {
   try {
-    const key = redisKeys.researchFloorEmptyStreak();
-    const cur = await getString(key);
-    const next = (cur ? parseInt(cur, 10) : 0) + 1;
-    // No TTL — the counter is reset explicitly by a successful (non-empty)
-    // forced research cycle, or implicitly when the suppression expires.
-    await setString(key, String(next));
-    return next;
+    return await _incrResearchFloorEmptyStreak();
   } catch (err: any) {
     console.error(`[ResearchFloor] incrResearchFloorEmptyStreak failed: ${err.message}`);
     return 0;
@@ -250,7 +249,7 @@ export async function incrResearchFloorEmptyStreak(): Promise<number> {
  *  queue new opportunities). */
 export async function resetResearchFloorEmptyStreak(): Promise<void> {
   try {
-    await delKey(redisKeys.researchFloorEmptyStreak());
+    await _resetResearchFloorEmptyStreak();
   } catch (err: any) {
     console.error(`[ResearchFloor] resetResearchFloorEmptyStreak failed: ${err.message}`);
   }
@@ -259,10 +258,7 @@ export async function resetResearchFloorEmptyStreak(): Promise<void> {
 /** Read the current empty-streak length. */
 export async function getResearchFloorEmptyStreak(): Promise<number> {
   try {
-    const raw = await getString(redisKeys.researchFloorEmptyStreak());
-    if (!raw) return 0;
-    const n = parseInt(raw, 10);
-    return Number.isFinite(n) && n >= 0 ? n : 0;
+    return await _getResearchFloorEmptyStreak();
   } catch (err: any) {
     console.error(`[ResearchFloor] getResearchFloorEmptyStreak failed: ${err.message}`);
     return 0;
@@ -272,7 +268,7 @@ export async function getResearchFloorEmptyStreak(): Promise<number> {
 /** Set the suppression deadline (epoch ms). */
 export async function setResearchFloorSuppressedUntilMs(deadlineMs: number): Promise<void> {
   try {
-    await setString(redisKeys.researchFloorSuppressedUntil(), String(deadlineMs));
+    await _setResearchFloorSuppressedUntilMs(deadlineMs);
   } catch (err: any) {
     console.error(`[ResearchFloor] setResearchFloorSuppressedUntilMs failed: ${err.message}`);
   }
@@ -281,13 +277,11 @@ export async function setResearchFloorSuppressedUntilMs(deadlineMs: number): Pro
 /** Read the suppression deadline (epoch ms) or null when unset / expired. */
 export async function getResearchFloorSuppressedUntilMs(): Promise<number | null> {
   try {
-    const raw = await getString(redisKeys.researchFloorSuppressedUntil());
-    if (!raw) return null;
-    const n = parseInt(raw, 10);
-    if (!Number.isFinite(n)) return null;
+    const n = await _getResearchFloorSuppressedUntilMs();
+    if (n === null) return null;
     if (n < Date.now()) {
       // Expired — clean up so /status doesn't surface stale values.
-      try { await delKey(redisKeys.researchFloorSuppressedUntil()); }
+      try { await clearResearchFloorSuppressedUntil(); }
       catch { /* intentional: best-effort cleanup */ }
       return null;
     }
@@ -301,8 +295,8 @@ export async function getResearchFloorSuppressedUntilMs(): Promise<number | null
 /** Bump per-reason counters when the floor fires (or is suppressed). */
 export async function recordResearchFloorTriggered(): Promise<void> {
   try {
-    await hashIncrBy(redisKeys.researchFloorStats(), "triggered", 1);
-    await setString(redisKeys.researchFloorLastTriggeredAt(), new Date().toISOString());
+    await incrResearchFloorStat("triggered", 1);
+    await setResearchFloorLastTriggeredAt(new Date().toISOString());
   } catch (err: any) {
     console.error(`[ResearchFloor] recordResearchFloorTriggered failed: ${err.message}`);
   }
@@ -320,8 +314,8 @@ export interface ResearchFloorStats {
 /** Aggregate read for the API surface. */
 export async function getResearchFloorStats(): Promise<ResearchFloorStats> {
   const [hash, lastTriggeredAt, emptyStreak, suppressedUntilMs] = await Promise.all([
-    hashGetAll(redisKeys.researchFloorStats()).catch(() => ({})),
-    getString(redisKeys.researchFloorLastTriggeredAt()).catch(() => null),
+    getResearchFloorStatsHash().catch(() => ({})),
+    getResearchFloorLastTriggeredAt().catch(() => null),
     getResearchFloorEmptyStreak(),
     getResearchFloorSuppressedUntilMs(),
   ]);
@@ -340,8 +334,5 @@ export async function getResearchFloorStats(): Promise<ResearchFloorStats> {
 
 /** Test-only: wipe all floor state. */
 export async function _resetResearchFloorForTests(): Promise<void> {
-  await delKey(redisKeys.researchFloorStats());
-  await delKey(redisKeys.researchFloorLastTriggeredAt());
-  await delKey(redisKeys.researchFloorEmptyStreak());
-  await delKey(redisKeys.researchFloorSuppressedUntil());
+  await _resetAllResearchFloorState();
 }

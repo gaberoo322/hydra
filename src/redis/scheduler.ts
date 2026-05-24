@@ -217,3 +217,165 @@ export async function getSchedulerStateVersion(): Promise<number> {
   const val = await r.get(redisKeys.schedulerStateVersion());
   return val ? parseInt(val, 10) : 0;
 }
+
+// ---------------------------------------------------------------------------
+// Scheduler state + spend blobs (caller owns JSON shape; this owns key+TTL)
+// ---------------------------------------------------------------------------
+
+/** Read the raw scheduler-state JSON blob, or null when unset. */
+export async function getSchedulerStateRaw(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.schedulerState());
+}
+
+/** Write the raw scheduler-state JSON blob. */
+export async function setSchedulerStateRaw(payload: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.schedulerState(), payload);
+}
+
+/** Read the raw daily-spend JSON blob, or null when unset. */
+export async function getDailySpendRaw(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.schedulerDailySpend());
+}
+
+/** Write the raw daily-spend JSON blob. */
+export async function setDailySpendRaw(payload: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.schedulerDailySpend(), payload);
+}
+
+// ---------------------------------------------------------------------------
+// Deliberate-stop flag (issue #388 — survives a 24h restart window)
+// ---------------------------------------------------------------------------
+
+/** Set the deliberate-stop sentinel with a TTL. */
+export async function setSchedulerDeliberateStop(payload: string, ttlSeconds: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.schedulerDeliberateStop(), payload, "EX", ttlSeconds);
+}
+
+/** Read the deliberate-stop sentinel, or null when absent / expired. */
+export async function getSchedulerDeliberateStop(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.schedulerDeliberateStop());
+}
+
+/** Clear the deliberate-stop sentinel. */
+export async function clearSchedulerDeliberateStop(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.schedulerDeliberateStop());
+}
+
+// ---------------------------------------------------------------------------
+// Blocked-issue escalation cooldown (per-item timestamp hash)
+// ---------------------------------------------------------------------------
+
+/** Read the last-escalation timestamp for a blocked item, or null when absent. */
+export async function getBlockedLastEscalation(itemId: string): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.hget(redisKeys.blockedLastEscalation(), itemId);
+}
+
+/** Record the last-escalation timestamp for a blocked item. */
+export async function setBlockedLastEscalation(itemId: string, value: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.hset(redisKeys.blockedLastEscalation(), itemId, value);
+}
+
+// ---------------------------------------------------------------------------
+// Weekly digest + memory consolidation timestamps
+// ---------------------------------------------------------------------------
+
+export async function getDigestLastWeekly(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.digestLastWeekly());
+}
+
+export async function setDigestLastWeekly(value: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.digestLastWeekly(), value);
+}
+
+export async function getMemoryLastConsolidation(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.memoryLastConsolidation());
+}
+
+export async function setMemoryLastConsolidation(value: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.memoryLastConsolidation(), value);
+}
+
+// ---------------------------------------------------------------------------
+// Research floor (issue #84) — empty-streak + suppression-until + stats
+// ---------------------------------------------------------------------------
+
+/** Atomic INCR returning new streak length. */
+export async function incrResearchFloorEmptyStreak(): Promise<number> {
+  const r = getRedisConnection();
+  return r.incr(redisKeys.researchFloorEmptyStreak());
+}
+
+export async function resetResearchFloorEmptyStreak(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.researchFloorEmptyStreak());
+}
+
+export async function getResearchFloorEmptyStreak(): Promise<number> {
+  const r = getRedisConnection();
+  const raw = await r.get(redisKeys.researchFloorEmptyStreak());
+  if (!raw) return 0;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+export async function setResearchFloorSuppressedUntilMs(deadlineMs: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.researchFloorSuppressedUntil(), String(deadlineMs));
+}
+
+export async function getResearchFloorSuppressedUntilMs(): Promise<number | null> {
+  const r = getRedisConnection();
+  const raw = await r.get(redisKeys.researchFloorSuppressedUntil());
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+export async function clearResearchFloorSuppressedUntil(): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.researchFloorSuppressedUntil());
+}
+
+export async function incrResearchFloorStat(name: string, by: number): Promise<void> {
+  const r = getRedisConnection();
+  await r.hincrby(redisKeys.researchFloorStats(), name, by);
+}
+
+export async function setResearchFloorLastTriggeredAt(iso: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.researchFloorLastTriggeredAt(), iso);
+}
+
+export async function getResearchFloorStatsHash(): Promise<Record<string, string>> {
+  const r = getRedisConnection();
+  return r.hgetall(redisKeys.researchFloorStats());
+}
+
+export async function getResearchFloorLastTriggeredAt(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.researchFloorLastTriggeredAt());
+}
+
+/** Test helper: wipe all research-floor state. */
+export async function _resetAllResearchFloorState(): Promise<void> {
+  const r = getRedisConnection();
+  await Promise.all([
+    r.del(redisKeys.researchFloorStats()),
+    r.del(redisKeys.researchFloorLastTriggeredAt()),
+    r.del(redisKeys.researchFloorEmptyStreak()),
+    r.del(redisKeys.researchFloorSuppressedUntil()),
+  ]);
+}
