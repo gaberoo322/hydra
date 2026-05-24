@@ -1,11 +1,13 @@
 import { Router } from "express";
 import { startCycle, getCycleStatus, getCycleHistory, killCycle } from "../cycle.ts";
 import { getTracker } from "../task-tracker.ts";
-import { redisKeys } from "../redis-keys.ts";
+import { getRealityReport } from "../redis-adapter.ts";
 import {
-  getRealityReport, setString, delKey, hashSet, expireKey,
-  registerCycleSource, releaseCycleSource,
-} from "../redis-adapter.ts";
+  registerCycleSource,
+  releaseCycleSource,
+  initCycleHash,
+  updateCycleHash,
+} from "../redis/cycle-tracking.ts";
 
 export function createCyclesRouter(eventBus: any) {
   const router = Router();
@@ -85,16 +87,15 @@ export function createCyclesRouter(eventBus: any) {
         return res.status(400).json({ error: "Missing cycleId or source" });
       }
       await registerCycleSource(source, cycleId, 900);
-      await hashSet(redisKeys.cycle(cycleId),
-        "status", "running",
-        "startedAt", new Date().toISOString(),
-        "source", source,
-        "total", "1",
-        "completed", "0",
-        "failed", "0",
-        "abandoned", "0",
-      );
-      await expireKey(redisKeys.cycle(cycleId), 604800); // 7 days
+      await initCycleHash(cycleId, {
+        status: "running",
+        startedAt: new Date().toISOString(),
+        source,
+        total: "1",
+        completed: "0",
+        failed: "0",
+        abandoned: "0",
+      }, 604800); // 7 days
       res.json({ ok: true, cycleId });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -109,10 +110,10 @@ export function createCyclesRouter(eventBus: any) {
         return res.status(400).json({ error: "Missing cycleId" });
       }
       await releaseCycleSource(source || "claude");
-      await hashSet(redisKeys.cycle(cycleId),
-        "status", status || "completed",
-        "completedAt", new Date().toISOString(),
-      );
+      await updateCycleHash(cycleId, {
+        status: status || "completed",
+        completedAt: new Date().toISOString(),
+      });
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

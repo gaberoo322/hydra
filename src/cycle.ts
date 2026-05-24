@@ -17,8 +17,11 @@
  * Keep this module dumb. Real cycle tracking lives in the autopilot.
  */
 
-import { redisKeys } from "./redis-keys.ts";
-import { getString, hashGetAll, findKeys } from "./redis-adapter.ts";
+import {
+  getActiveCycleId,
+  getCycleHash,
+  listCycleIds,
+} from "./redis/cycle-tracking.ts";
 
 interface CycleRecord {
   id: string;
@@ -46,10 +49,10 @@ async function startCycle(_eventBus: unknown, _opts: any = {}) {
 }
 
 async function getCycleStatus(): Promise<CycleRecord | { status: string }> {
-  const activeId = await getString(redisKeys.cycleActive());
+  const activeId = await getActiveCycleId();
   if (!activeId) return { status: "idle" };
 
-  const cycle = await hashGetAll(redisKeys.cycle(activeId));
+  const cycle = await getCycleHash(activeId);
   if (!cycle || !cycle.status) return { status: "idle" };
 
   return {
@@ -69,19 +72,15 @@ async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
   let ids: string[] = [];
 
   try {
-    ids = await findKeys(redisKeys.cycle("cycle-*"));
+    ids = await listCycleIds();
   } catch (err: any) {
-    console.error(`[Cycle] Failed to list cycle keys from Redis: ${err.message}`);
+    console.error(`[Cycle] Failed to list cycle IDs from Redis: ${err.message}`);
   }
 
-  const seen = new Set<string>();
   const records: CycleRecord[] = [];
 
-  for (const id of ids.filter((k: string) => !k.endsWith(":agents") && !k.endsWith(":costs") && !k.endsWith(":tasks")).sort().reverse()) {
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const cycleId = id.replace(new RegExp(`^${redisKeys.cycle("")}`), "");
-    const cycle = await hashGetAll(id);
+  for (const cycleId of ids) {
+    const cycle = await getCycleHash(cycleId);
     if (!cycle || !cycle.status) continue;
     records.push({
       id: cycleId,
