@@ -6,7 +6,7 @@
  */
 
 import Redis from "ioredis";
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 
 let _instance: any = null;
 let _subscriber: any = null;

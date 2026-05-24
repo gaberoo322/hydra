@@ -3,7 +3,7 @@
  */
 
 import { getRedisConnection } from "./connection.ts";
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 
 /** Metric names for persisted plan-cache counters (issue #325). */
 export type PlanCacheStatMetric = "hits" | "misses" | "stored" | "invalidated" | "stale";

@@ -525,10 +525,10 @@ export async function getAllReflections(): Promise<GlobalReflection[]> {
 
 /**
  * Close the Redis connection — kept for backward compatibility with tests.
- * The shared connection is managed by redis-adapter.
+ * The shared connection is managed by src/redis/connection.ts.
  */
 export function closeReflectionsRedis() {
-  // No-op: connection managed by redis-adapter singleton
+  // No-op: connection managed by src/redis/connection.ts singleton
 }
 
 // ===========================================================================

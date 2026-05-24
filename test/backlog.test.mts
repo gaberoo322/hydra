@@ -57,7 +57,7 @@ describe("backlog state machine", () => {
       redis.disconnect();
     }
     // Close the shared redis-adapter connection used by backlog.ts
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

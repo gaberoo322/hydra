@@ -25,7 +25,7 @@ import Redis from "ioredis";
 // Set test DB before any adapter imports
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
-const adapter = await import("../src/redis-adapter.ts");
+const adapter = await import("../src/redis/scheduler.ts");
 
 let testRedis: any;
 

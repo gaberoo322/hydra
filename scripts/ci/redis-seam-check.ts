@@ -74,8 +74,6 @@ async function findViolations(): Promise<string[]> {
   for (const relPath of tracked) {
     const abs = join(REPO_ROOT, relPath);
     if (isInsideRedisDir(abs)) continue;
-    // The shim itself re-exports the legacy module; don't flag it.
-    if (relPath === "src/redis-keys.ts" || relPath === "src/redis-adapter.ts") continue;
     let body: string;
     try {
       body = await readFile(abs, "utf8");

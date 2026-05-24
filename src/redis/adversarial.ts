@@ -3,7 +3,7 @@
  * Extracted from redis-adapter.ts (issue #269).
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 /**

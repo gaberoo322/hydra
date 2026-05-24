@@ -10,7 +10,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeForDedup, isFuzzyDuplicate } from "../src/redis-adapter.ts";
+import { normalizeForDedup, isFuzzyDuplicate } from "../src/redis/work-queue.ts";
 
 describe("normalizeForDedup", () => {
   test("lowercases and trims", () => {

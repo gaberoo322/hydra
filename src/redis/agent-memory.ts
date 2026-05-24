@@ -6,7 +6,7 @@
  * learning logic lives in src/learning/agent-memory.ts.
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 /**

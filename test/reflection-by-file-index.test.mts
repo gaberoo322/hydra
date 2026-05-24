@@ -67,7 +67,7 @@ describe("issue #326: reflection by-file index", () => {
       if (redisAvailable) await cleanReflectionKeys();
       redis.disconnect();
     }
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

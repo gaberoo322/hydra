@@ -9,7 +9,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { redisKeys } from "../src/redis-keys.ts";
+import { redisKeys } from "../src/redis/keys.ts";
 
 // ---------------------------------------------------------------------------
 // Snapshot: every generator matches hydra:{domain}:* pattern

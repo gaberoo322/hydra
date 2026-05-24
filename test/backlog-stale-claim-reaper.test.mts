@@ -77,7 +77,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
       if (redisAvailable) await cleanBacklogKeys();
       redis.disconnect();
     }
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

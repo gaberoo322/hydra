@@ -83,7 +83,7 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
       if (redisAvailable) await cleanBacklogKeys();
       redis.disconnect();
     }
-    const { closeRedisConnections } = await import("../src/redis-adapter.ts");
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
   });
 

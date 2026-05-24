@@ -3,7 +3,7 @@
  * Extracted from redis-adapter.ts (issue #269).
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 // Issue #231: shared OV connection config — no local literal default.
 import { OPENVIKING_URL as OV_DEDUP_URL, OPENVIKING_API_KEY as OV_DEDUP_KEY } from "../knowledge-base/ov-config.ts";
 import { getRedisConnection } from "./connection.ts";

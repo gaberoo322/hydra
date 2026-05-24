@@ -57,7 +57,7 @@ const {
   DEFAULT_RESEARCH_FLOOR_SILENCE_MS,
 } = floorMod as any;
 
-const redisKeysMod = await import("../src/redis-keys.ts");
+const redisKeysMod = await import("../src/redis/keys.ts");
 const { redisKeys } = redisKeysMod;
 
 // -----------------------------------------------------------------------------

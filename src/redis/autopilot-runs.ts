@@ -13,7 +13,7 @@
  *   hydra:autopilot:run:{runId}:turns      — sorted set scored by turn_n, 7d TTL
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 // ---------------------------------------------------------------------------

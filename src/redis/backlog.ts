@@ -6,7 +6,7 @@
  * to satisfy issue #269's acceptance criteria.
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 /**

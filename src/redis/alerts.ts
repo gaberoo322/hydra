@@ -4,7 +4,7 @@
  * api/alerts.ts no longer touches the raw key.
  */
 
-import { redisKeys } from "../redis-keys.ts";
+import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
 /**
