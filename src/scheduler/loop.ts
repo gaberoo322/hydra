@@ -19,6 +19,11 @@ import { reapStaleClaims } from "../backlog/reaper.ts";
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
 import { runResearchLoop } from "../research-loop.ts";
 import { getPerCycleCostCapUsd } from "../cost/cap.ts";
+import {
+  getDailySpendSurrogate,
+  todayDateString,
+  type DailySpendSurrogate,
+} from "../cost/surrogate.ts";
 import { getTargetName } from "../target-config.ts";
 import { pushToWorkQueue } from "../redis/work-queue.ts";
 import {
@@ -300,28 +305,66 @@ function todayLocalDate() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-async function getDailySpend() {
+/**
+ * Today's spend in USD, with a `source` discriminator that says where
+ * the number came from so the spend-cap decision is auditable.
+ *
+ * Reads through `getDailySpendSurrogate` — the canonical daily-spend
+ * aggregator. The surrogate combines two writer streams:
+ *
+ *   - autopilot subagent tokens × `HYDRA_TOKEN_USD_RATE` (post-cutover real spend)
+ *   - the legacy `hydra:scheduler:daily-spend` blob written by `recordSpend()`
+ *     (research-loop USD spend; only writer left for that path)
+ *
+ * `source` ∈ { "autopilot-surrogate" | "codex-recorded" | "mixed" | "none" }.
+ * When `none`, the rate isn't configured AND nobody's called recordSpend —
+ * the spend gate effectively disables itself, matching the prior behaviour.
+ *
+ * UTC date scheme matches the surrogate (whose Redis keys are UTC-dated).
+ * The pre-canonicalisation code used a *local* date — the local/UTC
+ * mismatch is a known operator-facing trade-off and is documented in
+ * `surrogate.ts::todayDateString`; we follow the surrogate's convention so
+ * the scheduler and `/api/metrics/cost` agree on what "today" means.
+ */
+async function getDailySpend(): Promise<{ usd: number; date: string; source: DailySpendSurrogate["source"] }> {
   try {
-    const raw = await getDailySpendRaw();
-    if (!raw) return { date: todayLocalDate(), usd: 0 };
-    const stored = JSON.parse(raw);
-    if (stored.date !== todayLocalDate()) {
-      // Roll over — return a fresh zero for today
-      return { date: todayLocalDate(), usd: 0 };
-    }
-    return stored;
+    const s = await getDailySpendSurrogate();
+    return { usd: s.costUsd, date: s.date, source: s.source };
   } catch (err: any) {
-    /* intentional: fallback to zero spend on parse/Redis failure — non-critical for cycle operation */
-    return { date: todayLocalDate(), usd: 0 };
+    /* intentional: fallback to zero spend on Redis failure — non-critical for cycle operation */
+    console.error(`[Scheduler] getDailySpend via surrogate failed: ${err.message}`);
+    return { usd: 0, date: todayDateString(), source: "none" };
   }
 }
 
+/**
+ * Increment the legacy `hydra:scheduler:daily-spend` JSON blob — the
+ * research-loop's spend channel into the surrogate (`legacyRecordSpendUsd`).
+ *
+ * Reads `getDailySpendRaw` directly (not `getDailySpend`) on purpose: the
+ * canonical reader returns the *combined* surrogate figure, so feeding
+ * that back into the legacy blob would double-count autopilot subagent
+ * tokens on the next read. This writer owns one stream — the
+ * research-loop's USD spend — and adds to that stream alone.
+ *
+ * Uses local-date rollover so the existing operator intuition ("daily
+ * cap resets at local midnight") holds. The reader-side UTC mismatch is
+ * documented on `getDailySpend`.
+ */
 async function recordSpend(amountUsd) {
   try {
-    const current = await getDailySpend();
+    const today = todayLocalDate();
+    let priorUsd = 0;
+    const raw = await getDailySpendRaw();
+    if (raw) {
+      try {
+        const stored = JSON.parse(raw);
+        if (stored.date === today) priorUsd = stored.usd || 0;
+      } catch { /* intentional: corrupt blob → start a fresh day */ }
+    }
     const updated = {
-      date: current.date,
-      usd: (current.usd || 0) + (amountUsd || 0),
+      date: today,
+      usd: priorUsd + (amountUsd || 0),
       updatedAt: new Date().toISOString(),
     };
     await setDailySpendRaw(JSON.stringify(updated));
@@ -448,7 +491,7 @@ async function executeResearchAction(
           console.log(`[Scheduler] Queue low (${snap.queueLen}) but research throttled — next research in ~${Math.round(action.remainingMs / 60_000)}min`);
           break;
         case "spend-cap":
-          console.log(`[Scheduler] Daily spend cap reached — $${action.spentUsd.toFixed(2)} >= $${action.capUsd.toFixed(2)}, skipping research`);
+          console.log(`[Scheduler] Daily spend cap reached — $${action.spentUsd.toFixed(2)} >= $${action.capUsd.toFixed(2)} (source: ${action.source}), skipping research`);
           try {
             await sendNotification({
               type: "scheduler:spend_cap_reached",
@@ -969,6 +1012,10 @@ async function getStatus() {
       dailyCostCapUsd: DAILY_COST_CAP_USD,
       dailySpendUsd: spend.usd,
       dailySpendDate: spend.date,
+      /** Which accounting stream produced `dailySpendUsd` — let the dashboard
+       *  label the number so operators don't have to guess. Matches the
+       *  surrogate's `source` discriminator. */
+      dailySpendSource: spend.source,
       // Issue #327: floor telemetry — surfaces how often the capacity-floor
       // override has fired and whether it's currently suppressed because of
       // back-to-back empty forced cycles.
