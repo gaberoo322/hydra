@@ -52,6 +52,11 @@ import {
   getResearchFloorStats,
   RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD,
 } from "./research-floor.ts";
+import {
+  decideResearchAction,
+  type ResearchSnapshot,
+  type ResearchAction,
+} from "./research-decision.ts";
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
@@ -136,6 +141,13 @@ let state = {
   // marker survives an orchestrator restart.
   stopReason: null as "deliberate" | "circuit-breaker" | "error-cap" | null,
   deliberateStoppedAt: null as string | null,
+  /**
+   * The most recent verdict from `decideResearchAction`. Surfaced via
+   * `getStatus()` so operators can see exactly why the scheduler did
+   * (or didn't) run research without grepping logs. Reset to `null`
+   * on cold start; updated on every tick that runs the research path.
+   */
+  lastResearchDecision: null as ResearchAction | null,
 };
 
 // Issue #388: TTL for the deliberate-stop Redis marker. 24h is the
@@ -320,62 +332,25 @@ async function recordSpend(amountUsd) {
   }
 }
 
-async function maybeRunResearch(eventBus) {
-  // Prune old done items from backlog
-  try { await pruneOldDoneItems(); } catch (err: any) {
-    console.error(`[Scheduler] Failed to prune old done items: ${err.message}`);
-    Sentry.addBreadcrumb({ category: "scheduler", message: `pruneOldDoneItems failed: ${err.message}`, level: "error" });
-  }
-
-  // Check if operator forced a research cycle (bypasses all throttles)
+/**
+ * Snapshot the inputs the research-decision function needs. All Redis
+ * reads happen here; the decision itself is pure (see
+ * scheduler/research-decision.ts).
+ *
+ * `forced` consumes the operator force-once flag as a side effect —
+ * matching the legacy `maybeRunResearch` semantics where reading the
+ * flag also clears it. If you snapshot but don't act, the flag is lost.
+ * That's the same trade-off the original code made.
+ */
+async function loadResearchSnapshot(): Promise<ResearchSnapshot> {
   const forced = await consumeResearchForceOnce();
-  if (forced) {
-    console.log(`[Scheduler] Research FORCED by operator — bypassing all throttles`);
-    try {
-      const research = await runResearchLoop(eventBus);
-      state.researchCyclesRun++;
-      await setLastResearchAt(); // AC2: atomic timestamp
-      state.lastResearchAt = new Date().toISOString();
-      await recordResearchEvent();
-      await saveSchedulerState();
-      // @ts-expect-error — migrate to proper types
-      console.log(`[Scheduler] Forced research complete — ${research.autoQueued || 0} items auto-queued`);
-    } catch (err: any) {
-      console.error(`[Scheduler] Forced research cycle failed: ${err.message}`);
-    }
-    return;
-  }
-
-  // Check queue depth + ratio caps. Both are *soft* gates that the research
-  // capacity floor (#327) can override when the realised research:build ratio
-  // is starving research below the configured minimum.
-  //
-  // Issue #457: gate on the *live* queue depth, not the raw LLEN. Items with
-  // a source whose producer no longer exists (`code-reviewer`,
-  // `adversarial-validation`; both deleted in PR-3 / issue #383) are orphans
-  // that anchor-selection drains slowly as `user-request` work. They should
-  // not permanently throttle research — the throttle's purpose is to gauge
-  // live work pressure, and orphan items represent frozen pre-cutover work,
-  // not live demand.
   const liveCounts = await countLiveWorkQueueItems();
   const queueLen = liveCounts.live;
   const queueLenTotal = liveCounts.total;
   const orphanLen = liveCounts.orphan;
-  const orphanAnnotation = orphanLen > 0
-    ? ` (${orphanLen} orphan items excluded; total LLEN=${queueLenTotal})`
-    : "";
   const researchCount24h = await getResearchEventCount24h();
   const buildCount24h = await getBuildEventCount24h();
   const ratio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
-
-  // Compute the floor decision once so the soft-gate overrides and the
-  // post-throttle logging both reference the same value.
-  //
-  // Issue #457: feed the wall-clock since last research into the floor
-  // predicate so the silence-based override can fire even when build volume
-  // is below `floorWindow`. Without this, a queue full of orphan items can
-  // suppress queue-depth gating for >24h while the floor sits inert because
-  // `buildCount24h < floorWindow`.
   const floorSuppressedUntilMs = await getResearchFloorSuppressedUntilMs();
   const lastResearchAtMs = await getLastResearchAtMs();
   const floor = shouldForceResearchFloor({
@@ -387,45 +362,118 @@ async function maybeRunResearch(eventBus) {
     lastResearchAtMs,
     silenceMs: getResearchFloorSilenceMs(),
   });
-
-  if (queueLen >= RESEARCH_QUEUE_THRESHOLD) {
-    if (!floor.shouldFire) {
-      console.log(`[Scheduler] Research suppressed: queue depth ${queueLen} >= threshold ${RESEARCH_QUEUE_THRESHOLD}${orphanAnnotation}`);
-      return;
-    }
-    console.log(`[Scheduler] research floor fired: ${floor.reason} — overriding queue depth ${queueLen} >= ${RESEARCH_QUEUE_THRESHOLD}${orphanAnnotation}`);
-  }
-
-  if (researchCount24h > 0 && ratio > RESEARCH_BUILD_RATIO_MAX) {
-    if (!floor.shouldFire) {
-      console.log(`[Scheduler] Research suppressed: ratio ${ratio.toFixed(1)} exceeds max ${RESEARCH_BUILD_RATIO_MAX} (${researchCount24h} research / ${buildCount24h} builds in 24h)`);
-      return;
-    }
-    console.log(`[Scheduler] research floor fired: ${floor.reason} — overriding ratio ceiling`);
-  }
-
-  // Ratio throttle: if queue still has items, prefer building over researching.
-  // Research should only run when the queue is nearly empty (< 3 items) —
-  // unless the floor is firing, in which case the starvation override wins.
-  const RESEARCH_QUEUE_LOW_WATERMARK = Math.min(3, Math.floor(RESEARCH_QUEUE_THRESHOLD / 2));
-  if (queueLen >= RESEARCH_QUEUE_LOW_WATERMARK) {
-    if (!floor.shouldFire) {
-      console.log(`[Scheduler] Queue has ${queueLen} items (>= ${RESEARCH_QUEUE_LOW_WATERMARK}) — prefer building over researching${orphanAnnotation}`);
-      return;
-    }
-    console.log(`[Scheduler] research floor fired: ${floor.reason} — overriding low-watermark ${RESEARCH_QUEUE_LOW_WATERMARK}`);
-  }
-
-  // If queue is low but backlog has items, promote from backlog first.
-  // Skip this branch when the floor is firing — the whole point of the floor
-  // is to run research even when there's plenty of buildable work.
+  // Backlog totals — best-effort. A read failure isn't fatal; treat the
+  // backlog as empty so the decision falls through to throttle/spend/run
+  // rather than blocking research on a phantom backlog.
+  let backlog = { total: 0, queued: 0, inProgress: 0 };
   try {
     const counts = await getBacklogCounts();
-    if (!floor.shouldFire && counts.backlog > 0) {
-      const needed = RESEARCH_QUEUE_THRESHOLD - queueLen;
-      const promoted = await promoteToQueued(needed);
-      if (promoted.length > 0) {
-        // Push promoted items into Redis queue with full context
+    backlog = { total: counts.backlog, queued: counts.queued, inProgress: counts.inProgress };
+  } catch (err: any) {
+    console.error(`[Scheduler] Backlog count read failed: ${err.message}`);
+  }
+  const spend = await getDailySpend();
+  return {
+    forced,
+    queueLen,
+    queueLenTotal,
+    orphanLen,
+    researchCount24h,
+    buildCount24h,
+    ratio,
+    floor,
+    lastResearchAtMs,
+    researchMinIntervalMs: RESEARCH_MIN_INTERVAL_MS,
+    nowMs: Date.now(),
+    dailySpend: spend,
+    dailySpendCap: DAILY_COST_CAP_USD,
+    backlog,
+    queueThreshold: RESEARCH_QUEUE_THRESHOLD,
+    ratioMax: RESEARCH_BUILD_RATIO_MAX,
+    lowWatermark: Math.min(3, Math.floor(RESEARCH_QUEUE_THRESHOLD / 2)),
+  };
+}
+
+function orphanAnnotation(snap: ResearchSnapshot): string {
+  return snap.orphanLen > 0
+    ? ` (${snap.orphanLen} orphan items excluded; total LLEN=${snap.queueLenTotal})`
+    : "";
+}
+
+/**
+ * Carry out the decision. Side effects only — the policy already ran
+ * upstream in `decideResearchAction`.
+ *
+ * Returns `true` when the caller should treat the tick as "research
+ * handled for now" (force/run/promotion/cap/throttle). The only `false`
+ * case is `promote-backlog` with 0 items actually promoted, signalling
+ * the caller to re-decide with `skipBacklogPromotion: true`.
+ */
+async function executeResearchAction(
+  action: ResearchAction,
+  snap: ResearchSnapshot,
+  eventBus,
+): Promise<boolean> {
+  switch (action.kind) {
+    case "force-once": {
+      console.log(`[Scheduler] Research FORCED by operator — bypassing all throttles`);
+      try {
+        const research = await runResearchLoop(eventBus);
+        state.researchCyclesRun++;
+        await setLastResearchAt();
+        state.lastResearchAt = new Date().toISOString();
+        await recordResearchEvent();
+        await saveSchedulerState();
+        // @ts-expect-error — migrate to proper types
+        console.log(`[Scheduler] Forced research complete — ${research.autoQueued || 0} items auto-queued`);
+      } catch (err: any) {
+        console.error(`[Scheduler] Forced research cycle failed: ${err.message}`);
+      }
+      return true;
+    }
+    case "skip": {
+      // Branch on `reason` so each skip case logs in a way operators can
+      // recognise from the pre-refactor scheduler.
+      switch (action.reason) {
+        case "queue-not-low":
+          console.log(`[Scheduler] Research suppressed: queue depth ${action.queueLen} >= threshold ${action.threshold}${orphanAnnotation(snap)}`);
+          break;
+        case "ratio-cap":
+          console.log(`[Scheduler] Research suppressed: ratio ${action.ratio.toFixed(1)} exceeds max ${action.max} (${action.researchCount24h} research / ${action.buildCount24h} builds in 24h)`);
+          break;
+        case "low-watermark":
+          console.log(`[Scheduler] Queue has ${action.queueLen} items (>= ${action.watermark}) — prefer building over researching${orphanAnnotation(snap)}`);
+          break;
+        case "throttled":
+          console.log(`[Scheduler] Queue low (${snap.queueLen}) but research throttled — next research in ~${Math.round(action.remainingMs / 60_000)}min`);
+          break;
+        case "spend-cap":
+          console.log(`[Scheduler] Daily spend cap reached — $${action.spentUsd.toFixed(2)} >= $${action.capUsd.toFixed(2)}, skipping research`);
+          try {
+            await sendNotification({
+              type: "scheduler:spend_cap_reached",
+              payload: {
+                message: `Daily research spend cap reached: $${action.spentUsd.toFixed(2)} of $${action.capUsd.toFixed(2)}. Research paused until local midnight.`,
+                date: snap.dailySpend.date,
+                spentUsd: action.spentUsd,
+                capUsd: action.capUsd,
+              },
+            });
+          } catch (err: any) {
+            console.error(`[Scheduler] Failed to send spend cap notification: ${err.message}`);
+          }
+          break;
+      }
+      return true;
+    }
+    case "promote-backlog": {
+      try {
+        const promoted = await promoteToQueued(action.needed);
+        if (promoted.length === 0) {
+          // Backlog had items but none were promotable. Signal the caller
+          // to re-decide without the promotion option.
+          return false;
+        }
         for (const item of promoted) {
           await pushToWorkQueue(JSON.stringify({
             reference: item.title,
@@ -443,121 +491,109 @@ async function maybeRunResearch(eventBus) {
           }));
         }
         console.log(`[Scheduler] Promoted ${promoted.length} items from backlog to queue`);
-        return; // Queue is now filled, no need for research
+        return true;
+      } catch (err: any) {
+        console.error(`[Scheduler] Backlog promotion failed: ${err.message}`);
+        // Don't recurse on Redis errors — bail out for this tick.
+        return true;
       }
     }
-
-    // Log if backlog AND queue are both empty (no notification — too noisy)
-    if (counts.total === 0 && counts.inProgress === 0) {
-      console.log(`[Scheduler] Backlog and queue are both empty — will pick from priorities doc`);
-    }
-  } catch (err: any) {
-    console.error(`[Scheduler] Backlog check failed: ${err.message}`);
-  }
-
-  // Check throttle — don't run research more often than the minimum interval
-  // AC2 (issue #140): atomic check-then-set via Lua script in Redis
-  const researchClaimed = await atomicClaimResearch(RESEARCH_MIN_INTERVAL_MS);
-  if (!researchClaimed) {
-    const lastMs = await getLastResearchAtMs();
-    const remaining = lastMs ? Math.round((RESEARCH_MIN_INTERVAL_MS - (Date.now() - lastMs)) / 60_000) : 0;
-    console.log(`[Scheduler] Queue low (${queueLen}) but research throttled — next research in ~${remaining}min`);
-    return;
-  }
-
-  // Check daily spend cap — refuse to start research if today's budget is exhausted.
-  // Reason: the Codex weekly quota caught us on 2026-04-02/08. See kanban-scope
-  // decision + Spending dashboard.
-  const spend = await getDailySpend();
-  if (spend.usd >= DAILY_COST_CAP_USD) {
-    console.log(`[Scheduler] Daily spend cap reached — $${spend.usd.toFixed(2)} >= $${DAILY_COST_CAP_USD.toFixed(2)}, skipping research`);
-    try {
-      await sendNotification({
-        type: "scheduler:spend_cap_reached",
-        payload: {
-          message: `Daily research spend cap reached: $${spend.usd.toFixed(2)} of $${DAILY_COST_CAP_USD.toFixed(2)}. Research paused until local midnight.`,
-          date: spend.date,
-          spentUsd: spend.usd,
-          capUsd: DAILY_COST_CAP_USD,
-        },
-      });
-    } catch (err: any) {
-      console.error(`[Scheduler] Failed to send spend cap notification: ${err.message}`);
-    }
-    return;
-  }
-
-  if (floor.shouldFire) {
-    // Per-cycle telemetry counter (issue #327 acceptance: "researchFloorTriggered: boolean").
-    // Recorded BEFORE runResearchLoop so a crashing research call still leaves
-    // a fingerprint in the metrics — otherwise the floor-fired evidence would
-    // disappear with the error.
-    await recordResearchFloorTriggered();
-    console.log(`[Scheduler] Queue has ${queueLen} items, but research floor fired (${floor.reason}) — running research cycle (daily spend: $${spend.usd.toFixed(2)} of $${DAILY_COST_CAP_USD.toFixed(2)})`);
-  } else {
-    console.log(`[Scheduler] Queue has ${queueLen} items (threshold: ${RESEARCH_QUEUE_THRESHOLD}) — running research cycle (daily spend: $${spend.usd.toFixed(2)} of $${DAILY_COST_CAP_USD.toFixed(2)})`);
-  }
-  try {
-    const research = await runResearchLoop(eventBus);
-    state.researchCyclesRun++;
-    // AC2: lastResearchAt already set atomically by atomicClaimResearch() above
-    state.lastResearchAt = new Date().toISOString();
-    await recordResearchEvent();
-    // research-architect counter removed
-    await saveSchedulerState();
-
-    // Track research spend against the daily cap.
-    // @ts-expect-error — migrate to proper types
-    const researchCost = research?.cost?.totalUsd || 0;
-    if (researchCost > 0) {
-      const updated = await recordSpend(researchCost);
-      if (updated) {
-        console.log(`[Scheduler] Daily research spend: $${updated.usd.toFixed(2)} of $${DAILY_COST_CAP_USD.toFixed(2)}`);
+    case "run": {
+      // Atomic throttle claim — TOCTOU-safe even though the decision
+      // already verified the time window. If another scheduler beat us
+      // here, treat it as throttled and bail.
+      const claimed = await atomicClaimResearch(RESEARCH_MIN_INTERVAL_MS);
+      if (!claimed) {
+        const lastMs = await getLastResearchAtMs();
+        const remaining = lastMs ? Math.round((RESEARCH_MIN_INTERVAL_MS - (Date.now() - lastMs)) / 60_000) : 0;
+        console.log(`[Scheduler] Throttle race: research already claimed by a concurrent scheduler — next research in ~${remaining}min`);
+        return true;
       }
-    }
-    // @ts-expect-error — migrate to proper types
-    const autoQueued = research?.autoQueued || 0;
-    console.log(`[Scheduler] Research complete — ${autoQueued} items auto-queued`);
 
-    // Floor-specific accounting (issue #327): if the cycle was forced by the
-    // capacity floor and returned 0 new opportunities, bump the empty-streak
-    // counter. When two consecutive forced cycles come up empty, suppress the
-    // floor for 24h and alert the operator — otherwise the system pays for
-    // research it can't use.
-    if (floor.shouldFire) {
-      if (autoQueued === 0) {
-        const streak = await incrResearchFloorEmptyStreak();
-        if (streak >= RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD) {
-          const suppressMs = getResearchFloorEmptySuppressMs();
-          const deadlineMs = Date.now() + suppressMs;
-          await setResearchFloorSuppressedUntilMs(deadlineMs);
-          await resetResearchFloorEmptyStreak();
-          console.warn(`[Scheduler] research floor suppressed for ${Math.round(suppressMs / 3600_000)}h — ${streak} consecutive forced cycles returned no new opportunities`);
-          try {
-            await sendNotification({
-              type: "scheduler:research_floor_empty_suppression",
-              payload: {
-                reason: `${streak} consecutive forced research cycles returned no new opportunities. Floor suppressed until ${new Date(deadlineMs).toISOString()}.`,
-                suppressedUntil: new Date(deadlineMs).toISOString(),
-                streak,
-              },
-            });
-          } catch (notifyErr: any) {
-            console.error(`[Scheduler] research floor suppression notification failed: ${notifyErr.message}`);
-          }
-        } else {
-          console.log(`[Scheduler] research floor empty result (streak=${streak}/${RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD})`);
-        }
+      if (action.reason === "floor-fire") {
+        // Per-cycle telemetry counter (issue #327): record BEFORE
+        // runResearchLoop so a crashing research call still leaves a
+        // fingerprint in the metrics.
+        await recordResearchFloorTriggered();
+        console.log(`[Scheduler] Queue has ${action.queueLen} items, but research floor fired (${action.floorReason}) — running research cycle (daily spend: $${snap.dailySpend.usd.toFixed(2)} of $${snap.dailySpendCap.toFixed(2)})`);
       } else {
-        await resetResearchFloorEmptyStreak();
+        console.log(`[Scheduler] Queue has ${action.queueLen} items (threshold: ${snap.queueThreshold}) — running research cycle (daily spend: $${snap.dailySpend.usd.toFixed(2)} of $${snap.dailySpendCap.toFixed(2)})`);
       }
+
+      try {
+        const research = await runResearchLoop(eventBus);
+        state.researchCyclesRun++;
+        state.lastResearchAt = new Date().toISOString();
+        await recordResearchEvent();
+        await saveSchedulerState();
+
+        // @ts-expect-error — migrate to proper types
+        const researchCost = research?.cost?.totalUsd || 0;
+        if (researchCost > 0) {
+          const updated = await recordSpend(researchCost);
+          if (updated) {
+            console.log(`[Scheduler] Daily research spend: $${updated.usd.toFixed(2)} of $${snap.dailySpendCap.toFixed(2)}`);
+          }
+        }
+        // @ts-expect-error — migrate to proper types
+        const autoQueued = research?.autoQueued || 0;
+        console.log(`[Scheduler] Research complete — ${autoQueued} items auto-queued`);
+
+        // Floor-specific empty-streak accounting (issue #327). Observes the
+        // outcome of running research; not part of the decision policy.
+        if (action.reason === "floor-fire") {
+          if (autoQueued === 0) {
+            const streak = await incrResearchFloorEmptyStreak();
+            if (streak >= RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD) {
+              const suppressMs = getResearchFloorEmptySuppressMs();
+              const deadlineMs = Date.now() + suppressMs;
+              await setResearchFloorSuppressedUntilMs(deadlineMs);
+              await resetResearchFloorEmptyStreak();
+              console.warn(`[Scheduler] research floor suppressed for ${Math.round(suppressMs / 3600_000)}h — ${streak} consecutive forced cycles returned no new opportunities`);
+              try {
+                await sendNotification({
+                  type: "scheduler:research_floor_empty_suppression",
+                  payload: {
+                    reason: `${streak} consecutive forced research cycles returned no new opportunities. Floor suppressed until ${new Date(deadlineMs).toISOString()}.`,
+                    suppressedUntil: new Date(deadlineMs).toISOString(),
+                    streak,
+                  },
+                });
+              } catch (notifyErr: any) {
+                console.error(`[Scheduler] research floor suppression notification failed: ${notifyErr.message}`);
+              }
+            } else {
+              console.log(`[Scheduler] research floor empty result (streak=${streak}/${RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD})`);
+            }
+          } else {
+            await resetResearchFloorEmptyStreak();
+          }
+        }
+      } catch (err: any) {
+        console.error(`[Scheduler] Research cycle failed: ${err.message}`);
+      }
+      return true;
     }
-    // Priorities refresh is handled inside the research loop by the
-    // research-strategist (Step 5.5) — it has the richest context.
-    // Research architect removed — methodology files are frozen at current state.
-  } catch (err: any) {
-    console.error(`[Scheduler] Research cycle failed: ${err.message}`);
   }
+}
+
+async function maybeRunResearch(eventBus) {
+  const snap = await loadResearchSnapshot();
+  let action = decideResearchAction(snap);
+  state.lastResearchDecision = action;
+  // Log "backlog and queue both empty" — preserved from the legacy code path.
+  if (snap.backlog.total === 0 && snap.backlog.inProgress === 0 && snap.queueLen === 0) {
+    console.log(`[Scheduler] Backlog and queue are both empty — will pick from priorities doc`);
+  }
+  const handled = await executeResearchAction(action, snap, eventBus);
+  if (handled) return;
+  // promote-backlog returned 0; re-decide without the promotion option so we
+  // can fall through to throttle/spend/run gates with the post-promotion
+  // snapshot (which is functionally unchanged — promotion mutated state but
+  // not the gates the remaining decision branches consult).
+  action = decideResearchAction(snap, { skipBacklogPromotion: true });
+  state.lastResearchDecision = action;
+  await executeResearchAction(action, snap, eventBus);
 }
 
 // Generate actionable unblock commands based on the blocked reason.
@@ -652,6 +688,16 @@ async function runScheduledCycle(eventBus) {
   } catch (err: any) {
     console.error(`[Scheduler] reapStaleClaims failed: ${err.message}`);
     Sentry.addBreadcrumb({ category: "scheduler", message: `reapStaleClaims failed: ${err.message}`, level: "error" });
+  }
+
+  // Prune old done-lane items from the backlog. Lives at the tick level
+  // rather than wedged inside `maybeRunResearch` so it still runs when the
+  // research path early-exits on any of its skip gates.
+  try {
+    await pruneOldDoneItems();
+  } catch (err: any) {
+    console.error(`[Scheduler] Failed to prune old done items: ${err.message}`);
+    Sentry.addBreadcrumb({ category: "scheduler", message: `pruneOldDoneItems failed: ${err.message}`, level: "error" });
   }
 
   // Weekly summary — send once per week
@@ -914,6 +960,12 @@ async function getStatus() {
       minIntervalHuman: formatDuration(RESEARCH_MIN_INTERVAL_MS),
       cyclesRun: state.researchCyclesRun,
       lastResearchAt: state.lastResearchAt,
+      /**
+       * Most recent verdict from `decideResearchAction`. Operators reading
+       * this can answer "what did the scheduler decide last tick, and why?"
+       * without grepping logs. `null` on cold start.
+       */
+      lastResearchDecision: state.lastResearchDecision,
       dailyCostCapUsd: DAILY_COST_CAP_USD,
       dailySpendUsd: spend.usd,
       dailySpendDate: spend.date,
@@ -953,43 +1005,9 @@ async function autoStart(eventBus) {
   return null;
 }
 
-/**
- * Determine whether research should be suppressed based on queue depth and ratio.
- * Pure function — exported for testability (issue #84).
- *
- * Returns { suppressed: true, reason: string } or { suppressed: false }.
- */
-function shouldSuppressResearch(
-  queueLen: number,
-  researchCount24h: number,
-  buildCount24h: number,
-  opts?: { queueThreshold?: number; ratioMax?: number },
-): { suppressed: boolean; reason?: string } {
-  const threshold = opts?.queueThreshold ?? RESEARCH_QUEUE_THRESHOLD;
-  const ratioMax = opts?.ratioMax ?? RESEARCH_BUILD_RATIO_MAX;
-
-  if (queueLen >= threshold) {
-    return {
-      suppressed: true,
-      reason: `Research suppressed: queue depth ${queueLen} >= threshold ${threshold}`,
-    };
-  }
-
-  const ratio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
-  if (researchCount24h > 0 && ratio > ratioMax) {
-    return {
-      suppressed: true,
-      reason: `Research suppressed: ratio ${ratio.toFixed(1)} exceeds max ${ratioMax} (${researchCount24h} research / ${buildCount24h} builds in 24h)`,
-    };
-  }
-
-  return { suppressed: false };
-}
-
 export {
   start, stop, getStatus, autoStart, getDailySpend, DAILY_COST_CAP_USD,
   RESEARCH_BUILD_RATIO_MAX, RESEARCH_QUEUE_THRESHOLD,
-  shouldSuppressResearch,
   formatDuration,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,
