@@ -6,37 +6,32 @@
  * (Preflight, Auto-decompose, Planner noWork). With ~31 abandoned cycles
  * in 50, this was the dominant cost-leak class.
  *
- * Issue #286: Even with the inter-step `runCostCapCheck` gate, a *single*
- * planner call can stream past the cap (one observed cycle burned $60+ in
- * one shot). The cap previously fired only AFTER the call completed, so
- * the spend was already gone. This module now exposes `StreamingBudget`,
- * a mid-stream projector wired into `codex-runner.runAgent` that aborts
- * the SDK call once projected total cost exceeds the cap.
- *
  * Fix: Track accumulated agent cost per cycle (via the existing
  * `costMicrodollars` Redis field that `task-tracker.logAgentRun` already
- * maintains). After every agent invocation in `control-loop.ts`, check if
- * the cumulative spend has exceeded `HYDRA_PER_CYCLE_COST_CAP_USD`
- * (default $25). If so, abandon the cycle with reason
+ * maintains). Reading this module's `checkCostCap()` after each agent
+ * invocation tells the caller whether `HYDRA_PER_CYCLE_COST_CAP_USD`
+ * (default $25) has been exceeded; callers abandon the cycle with reason
  * `Cost cap exceeded: $X.XX >= $Y` so it shows up as a distinct
  * abandonment category in `/api/metrics/abandonment`.
+ *
+ * Post-cutover surface
+ * --------------------
+ * Issue #286 ("Mid-stream projection") and the inter-step `runCostCapCheck`
+ * gate it referenced both lived inside `codex-runner.ts`, which was deleted
+ * in PR-3 (issue #383, ADR-0006). Streaming-projection abort was a codex-
+ * SDK feature that has no analogue under autopilot subagents — the harness,
+ * not this module, owns mid-call abort. Today this module exposes only the
+ * post-call cap reads: `getCycleCostUsd`, `getCycleCostWithSurrogateUsd`,
+ * and `checkCostCap`.
  *
  * Design notes
  * ------------
  * - This module is environment-driven and side-effect-free aside from
  *   reading from Redis. The check is cheap (one HGET).
- * - The abort happens BEFORE the executor — the most expensive call —
- *   if the planner + preflight already burned through the budget. This
- *   is the bail-out that saves the most money.
  * - We still record cycle metrics on abort so we keep observability
  *   into how much each abort cost.
  * - Honors `Infinity` semantics consistent with `HYDRA_DAILY_COST_CAP_USD`:
  *   absent or non-finite env value → cap is `Infinity` (effectively off).
- * - Mid-stream projection (issue #286) uses a conservative chars/token
- *   ratio of 4 (≈OpenAI tokenizer average for English prose + JSON). The
- *   estimate is intentionally an OVER-estimate so we trip slightly early
- *   rather than slightly late: better to abandon a marginally-under-cap
- *   cycle than to bleed past it.
  */
 
 import { getCycleCostMicrodollars } from "../redis/cycle-metrics.ts";

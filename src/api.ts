@@ -26,7 +26,6 @@ import { createMergeLockRouter } from "./api/merge-lock.ts";
 import { createCapacityRouter } from "./api/capacity.ts";
 import { createObservabilityRouter } from "./api/observability.ts";
 import { createLearningRouter } from "./api/learning.ts";
-import { createCostRouter } from "./api/cost.ts";
 import { createAnchorRouter } from "./api/anchor.ts";
 import { createAutopilotRouter } from "./api/autopilot.ts";
 import { createAgentsRouter } from "./api/agents.ts";
@@ -75,7 +74,6 @@ function createApi(eventBus) {
   api.use(createCapacityRouter());
   api.use(createObservabilityRouter());
   api.use(createLearningRouter());
-  api.use(createCostRouter());
   api.use(createAnchorRouter());
   api.use(createAutopilotRouter());
   api.use(createAgentsRouter());
