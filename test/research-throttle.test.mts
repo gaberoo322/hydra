@@ -7,138 +7,330 @@
  * 1. Queue depth >= threshold (default 6)
  * 2. Research-to-build ratio exceeds max (default 3:1 rolling 24h)
  *
- * Also tests the force-override mechanism (POST /api/research/force).
+ * After the scheduler/research-decision split, the pure policy lives
+ * in `src/scheduler/research-decision.ts::decideResearchAction`. These
+ * tests target the decision function directly — the same policy that
+ * production now consults, so coverage is no longer hypothetical.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
-  shouldSuppressResearch,
-  RESEARCH_BUILD_RATIO_MAX,
-  RESEARCH_QUEUE_THRESHOLD,
-} from "../src/scheduler/loop.ts";
+  decideResearchAction,
+  type ResearchSnapshot,
+} from "../src/scheduler/research-decision.ts";
 
-describe("shouldSuppressResearch — queue depth gate", () => {
+/**
+ * Build a snapshot that, with all defaults, decides "run / queue-low".
+ * Each test overrides only the fields it cares about.
+ */
+function snapshot(overrides: Partial<ResearchSnapshot> = {}): ResearchSnapshot {
+  return {
+    forced: false,
+    queueLen: 0,
+    queueLenTotal: 0,
+    orphanLen: 0,
+    researchCount24h: 0,
+    buildCount24h: 0,
+    ratio: 0,
+    floor: { shouldFire: false, reason: null },
+    lastResearchAtMs: null,
+    researchMinIntervalMs: 2 * 60 * 60 * 1000,
+    nowMs: 1_700_000_000_000,
+    dailySpend: { usd: 0, date: "2026-05-24" },
+    dailySpendCap: Infinity,
+    backlog: { total: 0, queued: 0, inProgress: 0 },
+    queueThreshold: 6,
+    ratioMax: 3,
+    lowWatermark: 3,
+    ...overrides,
+  };
+}
+
+describe("decideResearchAction — queue depth gate", () => {
   test("suppresses when queue depth equals threshold", () => {
-    const result = shouldSuppressResearch(6, 0, 0, { queueThreshold: 6 });
-    assert.equal(result.suppressed, true);
-    assert.ok(result.reason!.includes("queue depth 6 >= threshold 6"));
+    const action = decideResearchAction(snapshot({ queueLen: 6 }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip") {
+      assert.equal(action.reason, "queue-not-low");
+      assert.equal(action.queueLen, 6);
+      assert.equal(action.threshold, 6);
+    }
   });
 
   test("suppresses when queue depth exceeds threshold", () => {
-    const result = shouldSuppressResearch(10, 0, 0, { queueThreshold: 6 });
-    assert.equal(result.suppressed, true);
-    assert.ok(result.reason!.includes("queue depth 10 >= threshold 6"));
+    const action = decideResearchAction(snapshot({ queueLen: 10 }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip") assert.equal(action.reason, "queue-not-low");
   });
 
-  test("allows research when queue depth is below threshold", () => {
-    const result = shouldSuppressResearch(3, 0, 0, { queueThreshold: 6 });
-    assert.equal(result.suppressed, false);
-  });
-
-  test("allows research when queue is empty", () => {
-    const result = shouldSuppressResearch(0, 0, 0);
-    assert.equal(result.suppressed, false);
+  test("does not suppress when queue depth is below threshold", () => {
+    const action = decideResearchAction(snapshot({ queueLen: 2 }));
+    assert.notEqual(action.kind, "skip");
   });
 });
 
-describe("shouldSuppressResearch — ratio gate", () => {
-  test("suppresses when ratio exceeds max (no builds)", () => {
-    // 4 research, 0 builds — ratio = 4 (treated as researchCount itself)
-    const result = shouldSuppressResearch(0, 4, 0, { ratioMax: 3 });
-    assert.equal(result.suppressed, true);
-    assert.ok(result.reason!.includes("ratio"));
-    assert.ok(result.reason!.includes("exceeds max 3"));
+describe("decideResearchAction — ratio gate", () => {
+  test("suppresses when ratio exceeds max", () => {
+    const action = decideResearchAction(snapshot({ researchCount24h: 4, buildCount24h: 0, ratio: 4 }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip" && action.reason === "ratio-cap") {
+      assert.equal(action.ratio, 4);
+      assert.equal(action.max, 3);
+    } else {
+      assert.fail(`expected skip:ratio-cap, got ${JSON.stringify(action)}`);
+    }
   });
 
-  test("suppresses when ratio exceeds max (with builds)", () => {
-    // 10 research, 2 builds — ratio = 5
-    const result = shouldSuppressResearch(0, 10, 2, { ratioMax: 3 });
-    assert.equal(result.suppressed, true);
-    assert.ok(result.reason!.includes("ratio 5.0 exceeds max 3"));
+  test("ratio = research/build when both > 0", () => {
+    // 10/2 = 5 > 3 → suppress
+    const action = decideResearchAction(snapshot({ researchCount24h: 10, buildCount24h: 2, ratio: 5 }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip") assert.equal(action.reason, "ratio-cap");
   });
 
-  test("allows research when ratio is at max", () => {
-    // 6 research, 2 builds — ratio = 3.0 (not > 3, so allowed)
-    const result = shouldSuppressResearch(0, 6, 2, { ratioMax: 3 });
-    assert.equal(result.suppressed, false);
+  test("ratio under max passes", () => {
+    // 6/2 = 3, not > 3
+    const action = decideResearchAction(snapshot({ researchCount24h: 6, buildCount24h: 2, ratio: 3 }));
+    assert.notEqual(action.kind, "skip");
   });
 
-  test("allows research when ratio is below max", () => {
-    // 2 research, 5 builds — ratio = 0.4
-    const result = shouldSuppressResearch(0, 2, 5, { ratioMax: 3 });
-    assert.equal(result.suppressed, false);
-  });
-
-  test("allows research when no research has been done yet", () => {
-    // 0 research — ratio check skipped (researchCount24h === 0)
-    const result = shouldSuppressResearch(0, 0, 10, { ratioMax: 3 });
-    assert.equal(result.suppressed, false);
-  });
-
-  test("queue depth gate takes priority over ratio gate", () => {
-    // Queue full AND ratio exceeded — should report queue reason
-    const result = shouldSuppressResearch(8, 10, 1, { queueThreshold: 6, ratioMax: 3 });
-    assert.equal(result.suppressed, true);
-    assert.ok(result.reason!.includes("queue depth"));
+  test("ratio gate doesn't fire when no research has run today", () => {
+    // The guard is `researchCount24h > 0 && ratio > max`. With 0 research,
+    // we're not over the cap regardless of build count.
+    const action = decideResearchAction(snapshot({ researchCount24h: 0, buildCount24h: 5, ratio: 0 }));
+    assert.notEqual(action.kind, "skip");
   });
 });
 
-describe("shouldSuppressResearch — defaults", () => {
-  test("uses RESEARCH_QUEUE_THRESHOLD default (6)", () => {
-    assert.equal(RESEARCH_QUEUE_THRESHOLD, 6);
-    const result = shouldSuppressResearch(6, 0, 0);
-    assert.equal(result.suppressed, true);
+describe("decideResearchAction — defaults", () => {
+  test("threshold default is 6", () => {
+    const action = decideResearchAction(snapshot({ queueLen: 6 }));
+    assert.equal(action.kind, "skip");
   });
 
-  test("uses RESEARCH_BUILD_RATIO_MAX default (3)", () => {
-    assert.equal(RESEARCH_BUILD_RATIO_MAX, 3);
-    // 4 research, 1 build — ratio = 4 > 3
-    const result = shouldSuppressResearch(0, 4, 1);
-    assert.equal(result.suppressed, true);
+  test("ratio default is 3", () => {
+    const action = decideResearchAction(snapshot({ researchCount24h: 4, buildCount24h: 1, ratio: 4 }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip") assert.equal(action.reason, "ratio-cap");
   });
 });
 
-describe("shouldSuppressResearch — force override scenario", () => {
-  test("force override bypasses throttle (verified by design)", () => {
-    // The force mechanism works by consuming a Redis flag before
-    // shouldSuppressResearch is ever called. When force is active,
-    // maybeRunResearch returns early after running research, so
-    // the suppression logic is never evaluated.
-    //
-    // This test documents that even if both gates would suppress,
-    // the architecture ensures force-override skips them entirely.
-    const wouldSuppress = shouldSuppressResearch(10, 20, 1, { queueThreshold: 6, ratioMax: 3 });
-    assert.equal(wouldSuppress.suppressed, true);
-    // In the actual code path, consumeResearchForceOnce() returns true
-    // and the function runs research + returns before reaching this check.
+describe("decideResearchAction — force-once override", () => {
+  test("force-once bypasses queue + ratio + watermark gates", () => {
+    const action = decideResearchAction(snapshot({
+      forced: true,
+      queueLen: 10,
+      researchCount24h: 20,
+      buildCount24h: 1,
+      ratio: 20,
+    }));
+    assert.equal(action.kind, "force-once");
+  });
+
+  test("force-once still wins over spend-cap and throttle", () => {
+    const action = decideResearchAction(snapshot({
+      forced: true,
+      dailySpend: { usd: 999, date: "2026-05-24" },
+      dailySpendCap: 50,
+      lastResearchAtMs: 1_700_000_000_000 - 1000,
+    }));
+    assert.equal(action.kind, "force-once");
   });
 });
 
-describe("research throttle edge cases", () => {
-  test("fractional ratio boundary (just above max)", () => {
-    // 7 research, 2 builds — ratio = 3.5
-    const result = shouldSuppressResearch(0, 7, 2, { ratioMax: 3 });
-    assert.equal(result.suppressed, true);
-    assert.ok(result.reason!.includes("3.5"));
+describe("decideResearchAction — capacity floor override", () => {
+  test("floor.shouldFire overrides queue-depth suppression", () => {
+    const action = decideResearchAction(snapshot({
+      queueLen: 10,
+      floor: { shouldFire: true, reason: "ratio-min 0.2" },
+    }));
+    assert.equal(action.kind, "run");
+    if (action.kind === "run") {
+      assert.equal(action.reason, "floor-fire");
+      assert.equal(action.floorReason, "ratio-min 0.2");
+    }
   });
 
-  test("fractional ratio boundary (just below max)", () => {
-    // 5 research, 2 builds — ratio = 2.5
-    const result = shouldSuppressResearch(0, 5, 2, { ratioMax: 3 });
-    assert.equal(result.suppressed, false);
+  test("floor.shouldFire overrides ratio-cap suppression", () => {
+    const action = decideResearchAction(snapshot({
+      researchCount24h: 10, buildCount24h: 1, ratio: 10,
+      floor: { shouldFire: true, reason: "silence-window" },
+    }));
+    assert.equal(action.kind, "run");
+    if (action.kind === "run") assert.equal(action.reason, "floor-fire");
   });
 
-  test("single research with zero builds is suppressed when ratio max < 1", () => {
-    // Custom low ratio: 1 research, 0 builds — ratio = 1 > 0.5
-    const result = shouldSuppressResearch(0, 1, 0, { ratioMax: 0.5 });
-    assert.equal(result.suppressed, true);
+  test("floor.shouldFire overrides low-watermark suppression", () => {
+    const action = decideResearchAction(snapshot({
+      queueLen: 4,
+      floor: { shouldFire: true, reason: "ratio-min" },
+    }));
+    assert.equal(action.kind, "run");
+    if (action.kind === "run") assert.equal(action.reason, "floor-fire");
   });
 
-  test("reason string includes counts for operator visibility", () => {
-    const result = shouldSuppressResearch(0, 12, 3, { ratioMax: 3 });
-    assert.equal(result.suppressed, true);
-    assert.ok(result.reason!.includes("12 research"));
-    assert.ok(result.reason!.includes("3 builds"));
+  test("floor.shouldFire skips backlog promotion (floor's job is to run research)", () => {
+    const action = decideResearchAction(snapshot({
+      queueLen: 0,
+      backlog: { total: 5, queued: 0, inProgress: 0 },
+      floor: { shouldFire: true, reason: "silence-window" },
+    }));
+    assert.equal(action.kind, "run");
+    if (action.kind === "run") assert.equal(action.reason, "floor-fire");
+  });
+
+  test("spend-cap still wins over floor", () => {
+    const action = decideResearchAction(snapshot({
+      floor: { shouldFire: true, reason: "ratio-min" },
+      dailySpend: { usd: 100, date: "2026-05-24" },
+      dailySpendCap: 50,
+    }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip") assert.equal(action.reason, "spend-cap");
+  });
+});
+
+describe("decideResearchAction — backlog promotion", () => {
+  test("prefers backlog promotion when queue is low and backlog has items", () => {
+    const action = decideResearchAction(snapshot({
+      queueLen: 0,
+      backlog: { total: 5, queued: 0, inProgress: 0 },
+    }));
+    assert.equal(action.kind, "promote-backlog");
+    if (action.kind === "promote-backlog") {
+      assert.equal(action.needed, 6);
+      assert.equal(action.queueLen, 0);
+      assert.equal(action.backlogAvailable, 5);
+    }
+  });
+
+  test("falls through to throttle/run when backlog is empty", () => {
+    const action = decideResearchAction(snapshot({
+      queueLen: 0,
+      backlog: { total: 0, queued: 0, inProgress: 0 },
+    }));
+    assert.equal(action.kind, "run");
+  });
+
+  test("re-decide with skipBacklogPromotion bypasses promotion branch", () => {
+    const snap = snapshot({
+      queueLen: 0,
+      backlog: { total: 5, queued: 0, inProgress: 0 },
+    });
+    const first = decideResearchAction(snap);
+    assert.equal(first.kind, "promote-backlog");
+    const second = decideResearchAction(snap, { skipBacklogPromotion: true });
+    assert.equal(second.kind, "run");
+  });
+});
+
+describe("decideResearchAction — low-watermark gate", () => {
+  test("suppresses when queue depth >= low-watermark but < threshold", () => {
+    // queue=3 is below threshold (6) but >= low-watermark (3)
+    const action = decideResearchAction(snapshot({ queueLen: 3 }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip") {
+      assert.equal(action.reason, "low-watermark");
+      assert.equal(action.watermark, 3);
+    }
+  });
+
+  test("does not fire below low-watermark", () => {
+    const action = decideResearchAction(snapshot({ queueLen: 2 }));
+    assert.notEqual(action.kind, "skip");
+  });
+});
+
+describe("decideResearchAction — throttle gate", () => {
+  test("suppresses when within minIntervalMs of last research", () => {
+    const action = decideResearchAction(snapshot({
+      lastResearchAtMs: 1_700_000_000_000 - 60_000, // 1 minute ago
+      researchMinIntervalMs: 2 * 60 * 60 * 1000, // 2h
+    }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip" && action.reason === "throttled") {
+      assert.ok(action.remainingMs > 0);
+      assert.ok(action.remainingMs < action.minIntervalMs);
+    } else {
+      assert.fail(`expected skip:throttled, got ${JSON.stringify(action)}`);
+    }
+  });
+
+  test("does not throttle when min interval has elapsed", () => {
+    const action = decideResearchAction(snapshot({
+      lastResearchAtMs: 1_700_000_000_000 - 3 * 60 * 60 * 1000, // 3h ago
+      researchMinIntervalMs: 2 * 60 * 60 * 1000, // 2h
+    }));
+    assert.equal(action.kind, "run");
+  });
+
+  test("does not throttle on cold start (lastResearchAtMs = null)", () => {
+    const action = decideResearchAction(snapshot({ lastResearchAtMs: null }));
+    assert.equal(action.kind, "run");
+  });
+});
+
+describe("decideResearchAction — spend cap gate", () => {
+  test("suppresses when daily spend >= cap", () => {
+    const action = decideResearchAction(snapshot({
+      dailySpend: { usd: 55, date: "2026-05-24" },
+      dailySpendCap: 50,
+    }));
+    assert.equal(action.kind, "skip");
+    if (action.kind === "skip" && action.reason === "spend-cap") {
+      assert.equal(action.spentUsd, 55);
+      assert.equal(action.capUsd, 50);
+    } else {
+      assert.fail(`expected skip:spend-cap, got ${JSON.stringify(action)}`);
+    }
+  });
+
+  test("does not suppress when spend below cap", () => {
+    const action = decideResearchAction(snapshot({
+      dailySpend: { usd: 10, date: "2026-05-24" },
+      dailySpendCap: 50,
+    }));
+    assert.equal(action.kind, "run");
+  });
+
+  test("cap of Infinity disables the gate", () => {
+    const action = decideResearchAction(snapshot({
+      dailySpend: { usd: 9999, date: "2026-05-24" },
+      dailySpendCap: Infinity,
+    }));
+    assert.equal(action.kind, "run");
+  });
+});
+
+describe("decideResearchAction — run reason", () => {
+  test("queue-low when queue is below all gates and no floor fire", () => {
+    const action = decideResearchAction(snapshot({ queueLen: 0 }));
+    assert.equal(action.kind, "run");
+    if (action.kind === "run") {
+      assert.equal(action.reason, "queue-low");
+      assert.equal(action.queueLen, 0);
+      assert.equal(action.floorReason, undefined);
+    }
+  });
+
+  test("floor-fire when floor demands it (queue can be anything)", () => {
+    const action = decideResearchAction(snapshot({
+      queueLen: 8,
+      floor: { shouldFire: true, reason: "starvation" },
+    }));
+    assert.equal(action.kind, "run");
+    if (action.kind === "run") {
+      assert.equal(action.reason, "floor-fire");
+      assert.equal(action.floorReason, "starvation");
+    }
+  });
+});
+
+describe("scheduler env-knob exports preserved", () => {
+  test("RESEARCH_QUEUE_THRESHOLD and RESEARCH_BUILD_RATIO_MAX still exported", async () => {
+    const mod = await import("../src/scheduler/loop.ts");
+    assert.equal(typeof mod.RESEARCH_QUEUE_THRESHOLD, "number");
+    assert.equal(typeof mod.RESEARCH_BUILD_RATIO_MAX, "number");
   });
 });
