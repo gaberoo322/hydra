@@ -33,7 +33,12 @@ export const UNTOUCHABLE_PATHS: readonly string[] = Object.freeze([
   // legacy shim is deleted. No single file funnels Redis access anymore.)
 
   // Cost guardrails — the $50/day cap referenced in operator vision.
-  "src/cost/cap.ts",
+  // The whole `src/cost/` Module is Tier 0 (mirrors `src/redis/`'s treatment)
+  // so changes to the spend-accounting Interface always require operator
+  // approval. Pre-#576 this entry pointed at the now-deleted
+  // `src/cost/cap.ts`; the consolidated Module is the new untouchable
+  // surface (issue #576).
+  "src/cost/",
 
   // CI/CD scripts and workflows — the deploy path and the gate that
   // gates the gate.

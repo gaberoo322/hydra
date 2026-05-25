@@ -18,12 +18,12 @@ import { reapStaleClaims } from "../backlog/reaper.ts";
 // Stale-claim reaper threshold (issue #374). Default 2h.
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
 import { runResearchLoop } from "../research-loop.ts";
-import { getPerCycleCostCapUsd } from "../cost/cap.ts";
 import {
+  getDailyCapUsd,
   getDailySpendSurrogate,
   todayDateString,
   type DailySpendSurrogate,
-} from "../cost/surrogate.ts";
+} from "../cost/index.ts";
 import { getTargetName } from "../target-config.ts";
 import { pushToWorkQueue } from "../redis/work-queue.ts";
 import {
@@ -928,7 +928,11 @@ async function getStatus() {
   const researchCount24h = await getResearchEventCount24h().catch(() => 0);
   const buildCount24h = await getBuildEventCount24h().catch(() => 0);
   const currentRatio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
-  const perCycleCostCapUsd = getPerCycleCostCapUsd();
+  // Issue #576: surface the daily-spend cap the autopilot enforces against
+  // (HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD, default $50). The pre-cutover
+  // per-cycle codex cap was retired with the cost-cap module; the orchestrator
+  // never enforced this one — it only mirrors it for dashboard visibility.
+  const dailySpendCapUsd = getDailyCapUsd();
   const floorStats = await getResearchFloorStats().catch((err: any) => {
     console.error(`[Scheduler] getResearchFloorStats failed: ${err.message}`);
     return null;
@@ -980,9 +984,11 @@ async function getStatus() {
     lastError: state.lastError,
     startedAt: state.startedAt,
     consecutiveErrors: state.consecutiveErrors,
-    // Issue #209: per-cycle cost cap (separate from daily research cap).
-    // null when the cap is Infinity / disabled.
-    perCycleCostCapUsd: Number.isFinite(perCycleCostCapUsd) ? perCycleCostCapUsd : null,
+    // Issue #576: daily-spend cap the autopilot enforces against
+    // (HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD, default $50). null when the cap
+    // is `Infinity` (operator opt-out). Renamed from `perCycleCostCapUsd`
+    // which surfaced the retired pre-cutover per-cycle codex circuit breaker.
+    dailySpendCapUsd: Number.isFinite(dailySpendCapUsd) ? dailySpendCapUsd : null,
     research: {
       queueThreshold: RESEARCH_QUEUE_THRESHOLD,
       buildRatioMax: RESEARCH_BUILD_RATIO_MAX,

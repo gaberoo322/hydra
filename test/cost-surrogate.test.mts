@@ -15,12 +15,13 @@
  *      + per-cycle hash atomically; subsequent reads see the rolling sum.
  *   3. `getDailySpendSurrogate` returns the correct `source` label based
  *      on which writer(s) contributed data.
- *   4. `getCycleSubagentCostUsd` reads the per-cycle hash so the cost-cap
- *      can include surrogate spend.
- *   5. `checkCostCap` (in cost/cap.ts) sees the surrogate via the new
- *      `getCycleCostWithSurrogateUsd` helper — a tokens-only cycle trips
- *      the cap when the surrogate USD exceeds the threshold, even when
- *      no legacy codex `costMicrodollars` is recorded.
+ *   4. `getCycleSubagentCostUsd` reads the per-cycle hash so callers can
+ *      attribute spend to a specific autopilot turn.
+ *
+ * (Point 5 — the cap-integration assertion — was deleted with the cap
+ * module itself in issue #576. The orchestrator no longer runs a
+ * per-cycle circuit breaker; the autopilot enforces the daily cap
+ * directly via `state.limits.daily_spend_cap_usd` in `decide.py`.)
  *
  * Requires Redis on localhost:6379. Uses DB 1 (test DB) — never touches DB 0.
  */
@@ -44,11 +45,12 @@ const {
   tokensBySkillDailyKey,
   tokensByCycleKey,
   getTokenUsdRate,
-} = await import("../src/cost/surrogate.ts");
+} = await import("../src/cost/index.ts");
 
-// Pre-imported here so the describe() block below stays sync (top-level
-// `await` inside a non-async callback breaks the esbuild transform).
-const { checkCostCap, getCycleCostWithSurrogateUsd } = await import("../src/cost/cap.ts");
+// (The `cost-cap integration` describe block that lived here was deleted
+// alongside `src/cost/cap.ts` itself in issue #576 — the per-cycle codex
+// circuit breaker no longer exists in this codebase. The surrogate writes
+// remain; only the consumer was retired.)
 
 let testRedis: any;
 
@@ -285,49 +287,8 @@ describe("getCycleSubagentCostUsd", () => {
   });
 });
 
-describe("cost-cap integration (issue #394 acceptance: cap reads surrogate)", () => {
-  test("checkCostCap sees surrogate-only cycle spend", async () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "100"; // aggressive rate so tests are deterministic
-    process.env.HYDRA_PER_CYCLE_COST_CAP_USD = "5";
-
-    const cycleId = "cycle-surrogate-trip";
-    // 60k tokens × $100/M = $6 — over the $5 cap.
-    await recordSubagentTokens("hydra-dev", 60_000, { cycleId });
-
-    const status = await checkCostCap(cycleId);
-    assert.equal(status.exceeded, true);
-    assert.equal(status.source, "autopilot-surrogate");
-    assert.ok(status.surrogateUsd! >= 5);
-    assert.match(status.reason, /Cost cap exceeded/);
-
-    delete process.env.HYDRA_PER_CYCLE_COST_CAP_USD;
-    delete process.env.HYDRA_TOKEN_USD_RATE;
-  });
-
-  test("checkCostCap stays under cap when no surrogate writer has fired", async () => {
-    process.env.HYDRA_PER_CYCLE_COST_CAP_USD = "5";
-    const status = await checkCostCap("cycle-empty");
-    assert.equal(status.exceeded, false);
-    assert.equal(status.source, "none");
-    assert.equal(status.costUsd, 0);
-    delete process.env.HYDRA_PER_CYCLE_COST_CAP_USD;
-  });
-
-  test("getCycleCostWithSurrogateUsd labels source correctly", async () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "10";
-    const cycleId = "cycle-mixed";
-    // Surrogate contribution
-    await recordSubagentTokens("hydra-dev", 100_000, { cycleId });
-    // Legacy codex contribution — write directly to the cycle-costs hash
-    // that getCycleCostMicrodollars reads (key shape: hydra:cycle:<id>:costs).
-    await testRedis.hset(`hydra:cycle:${cycleId}:costs`, "costMicrodollars", String(2_000_000)); // $2
-
-    const combined = await getCycleCostWithSurrogateUsd(cycleId);
-    // Surrogate: 100k × $10/M = $1. Legacy: $2. Total: $3.
-    assert.equal(combined.legacyUsd, 2);
-    assert.equal(combined.surrogateUsd, 1);
-    assert.equal(combined.costUsd, 3);
-    assert.equal(combined.source, "mixed");
-    delete process.env.HYDRA_TOKEN_USD_RATE;
-  });
-});
+// The former cost-cap integration describe block — which verified that the
+// cap reader saw surrogate-only spend via the combined surrogate helper —
+// was deleted alongside `src/cost/cap.ts` itself in issue #576. The
+// per-cycle codex circuit breaker is gone; daily-spend enforcement lives
+// in the autopilot (`scripts/autopilot/decide.py`), not in the orchestrator.

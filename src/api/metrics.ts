@@ -7,9 +7,13 @@ import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { loadCycleSummaries, loadCycleSpending } from "../metrics/cycle-summary.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
 import { getPriorFailuresLen, getReframeQueueLength } from "../redis/anchors.ts";
-import { aggregateCostAttribution } from "../cost/attribution.ts";
+import {
+  aggregateCostAttribution,
+  getDailySpendSurrogate,
+  recordSubagentTokens,
+  todayDateString,
+} from "../cost/index.ts";
 import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
-import { getDailySpendSurrogate, recordSubagentTokens, todayDateString } from "../cost/surrogate.ts";
 import { getReframeStarvationStats } from "../anchor-selection/reframe.ts";
 
 /**

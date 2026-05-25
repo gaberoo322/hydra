@@ -19,7 +19,7 @@
  */
 
 import { findKeys, listRange } from "../src/redis/kv.ts";
-import { agentRoleToTier } from "../src/cost/attribution.ts";
+import { agentRoleToTier } from "../src/cost/index.ts";
 
 interface RoleRow {
   role: string;
