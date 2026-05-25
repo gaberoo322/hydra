@@ -69,12 +69,12 @@ export interface CostAttributionResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Authoritative model-name -> tier table. Mirrors `MODEL_PRICING` in
- * `src/llm/pricing.ts`. Keep in sync when adding a new model id to the
- * routing table — otherwise its spend lands in `byTier` as "unknown"
- * and the cost-attribution dashboard becomes unreliable (issue #303:
- * 38-48% of runs were classified "unknown" because the planner was
- * bumped to `gpt-5.5` but `modelToTier` only matched 5.4).
+ * Authoritative model-name -> tier table. Keep in sync when adding a
+ * new model id to the routing table — otherwise its spend lands in
+ * `byTier` as "unknown" and the cost-attribution dashboard becomes
+ * unreliable (issue #303: 38-48% of runs were classified "unknown"
+ * because the planner was bumped to `gpt-5.5` but `modelToTier` only
+ * matched 5.4).
  */
 const MODEL_NAME_TO_TIER: Record<string, string> = {
   // Frontier — planner default
@@ -105,10 +105,9 @@ const TIER_ALIAS_TO_TIER: Record<string, string> = {
  * Map model string -> tier label. Accepts either a raw model name
  * (`"gpt-5.5"`, `"gpt-5.3-codex-spark"`) or a tier alias (`"frontier"`,
  * `"codex"`, `"mini"`). Unknown / missing values fall back to `"unknown"`
- * — but every model id used by the autopilot subagents should be
- * enumerated above (see `src/llm/pricing.ts` for the authoritative
- * pricing table), so seeing "unknown" in production is a regression
- * worth fixing.
+ * — every model id used by the autopilot subagents should be enumerated
+ * in `MODEL_NAME_TO_TIER` above, so seeing "unknown" in production is a
+ * regression worth fixing.
  */
 export function modelToTier(model: string | undefined | null): string {
   if (!model) return "unknown";
