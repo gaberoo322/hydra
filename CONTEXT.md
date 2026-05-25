@@ -81,7 +81,7 @@ _Avoid_: "Redis layer" (too generic), DAO (overloaded), "Redis adapter" (singula
 - The **Orchestrator** has its own **Orchestrator Vision**
 - The **Gate** is the only path to merge; the **Untouchable Core** includes the **Gate**
 - A **Design Concept** is the prerequisite for any code-writing dispatch; PR-time review consumes it as ground truth
-- **Pattern Memory**, **Reflections**, and **Knowledge Base** are three independent learning surfaces — patterns are structural rules, reflections are episodic narrative, the Knowledge Base is semantic search. `src/learning.ts` orchestrates them but owns none.
+- **Pattern Memory**, **Reflections**, and **Knowledge Base** are three independent learning surfaces — patterns are structural rules, reflections are episodic narrative, the Knowledge Base is semantic search. They sit at two different seams: **Pattern Memory** and **Reflections** are composed at agent-dispatch time by `src/learning.ts::getContext()`, which injects them into the subagent prompt; the **Knowledge Base** is queried by subagents directly via OV HTTP at their own discretion during their work. `src/learning.ts` owns neither surface — it composes the first two and exposes the composition's diagnostic trace.
 - **Pattern Memory**, **Reflections**, and every other Redis-resident state described above are read and written through the **Redis Adapters**. The raw `hydra:…` keys that appear in their definitions are documentation of today's storage shape, not a public surface — callers obtain values through typed accessors on `src/redis/*`.
 
 ## Example dialogue
