@@ -269,10 +269,10 @@ describe("issue #326: reflection by-file index", () => {
 
     // Now a different planner pass picks up a completely different anchor that
     // touches the same file.
-    const ctx = await learning.getContext("planner", {
+    const ctx = (await learning.getContext("planner", {
       type: "codebase-health",
       reference: "Codebase health: consolidate small helpers in src/reflections/reflections.ts",
-    });
+    })).toPrompt();
 
     assert.ok(ctx.includes("RELATED FILES"), "context should include by-file section");
     assert.ok(ctx.includes("cycle-prev"), "should surface the prior reflection across anchors");

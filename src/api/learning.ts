@@ -4,6 +4,7 @@ import {
   getRuleActionLog,
   listFrictionPatterns,
 } from "../pattern-memory/agent-memory.ts";
+import { getContext } from "../learning.ts";
 
 const FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const;
 
@@ -93,6 +94,62 @@ export function createLearningRouter() {
         totalPatterns: 0,
         errors: [err?.message || String(err)],
       });
+    }
+  });
+
+  /**
+   * GET /learning/context-trace — diagnostic view of `getContext()`'s
+   * composition. Answers "why was this prompt's learning context shallow?"
+   * without the operator having to grep server logs.
+   *
+   * Query params (required):
+   *   agent     — agent name (e.g. "planner")
+   *   reference — anchor reference string
+   *   type      — anchor type (e.g. "codebase-health")
+   *
+   * Optional:
+   *   files — comma-separated file path hint for the by-file index
+   *
+   * Response:
+   *   {
+   *     blocks: [
+   *       { source, status: "hit" | "miss" | "error",
+   *         contentBytes: number, error?: string }
+   *     ],
+   *     promptBytes: number,   // size of the composed prompt
+   *   }
+   *
+   * `content` itself is omitted — the trace is for diagnostics, not for
+   * exfiltrating prompts. Operators can still read prompts through normal
+   * cycle inspection endpoints.
+   */
+  router.get("/learning/context-trace", async (req, res) => {
+    const agent = typeof req.query.agent === "string" ? req.query.agent : "";
+    const reference = typeof req.query.reference === "string" ? req.query.reference : "";
+    const type = typeof req.query.type === "string" ? req.query.type : "";
+    if (!agent || !reference || !type) {
+      res.status(400).json({ error: "agent, reference, and type query params are required" });
+      return;
+    }
+    const filesParam = typeof req.query.files === "string" ? req.query.files : "";
+    const files = filesParam
+      ? filesParam.split(",").map(s => s.trim()).filter(Boolean)
+      : undefined;
+
+    try {
+      const ctx = await getContext(agent, { type, reference, files });
+      res.json({
+        blocks: ctx.blocks.map(b => ({
+          source: b.source,
+          status: b.status,
+          contentBytes: b.content.length,
+          ...(b.error ? { error: b.error } : {}),
+        })),
+        promptBytes: ctx.toPrompt().length,
+      });
+    } catch (err: any) {
+      console.error(`[learning-api] context-trace failed: ${err?.message || String(err)}`);
+      res.status(500).json({ error: err?.message || String(err) });
     }
   });
 

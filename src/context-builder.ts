@@ -185,8 +185,8 @@ export async function buildPlannerContext(
   // otherwise the planner produces the same plan that failed last time. Without
   // this, prior-failure retries had a 0% merge rate (measured 2026-05-09).
   if (isQuickFixAnchor) {
-    const plannerMemory = await loadSource("planner-context", () =>
-      getContext("planner", anchor), warnings) || "";
+    const plannerMemory = await loadSource("planner-context", async () =>
+      (await getContext("planner", anchor)).toPrompt(), warnings) || "";
     const reflectionStats = inspectReflections(plannerMemory as string);
     if (reflectionStats.count > 0) {
       console.log(`[Planner] Injected ${reflectionStats.count} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type}, sources=${reflectionStats.sources.join(",")})`);
@@ -216,8 +216,8 @@ export async function buildPlannerContext(
       readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8"), warnings),
     loadSource("feedback", () =>
       readFile(join(CONFIG_PATH, "feedback", "to-planner.md"), "utf-8"), warnings),
-    loadSource("planner-context", () =>
-      getContext("planner", anchor), warnings),
+    loadSource("planner-context", async () =>
+      (await getContext("planner", anchor)).toPrompt(), warnings),
     loadSource("openviking-context", () =>
       ovSession?.getAgentContext?.("planner", anchor) || Promise.resolve({ formatted: "" }), warnings),
   ]);
