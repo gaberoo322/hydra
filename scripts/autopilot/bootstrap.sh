@@ -27,10 +27,26 @@
 #
 # Unknown args are warned-and-ignored (e.g. trailing `focus=...` tokens).
 #
-# Side effects:
+# Side effects (default paths; override via env vars below):
 #   /tmp/hydra-autopilot-heartbeat.txt       (overwritten)
 #   /tmp/hydra-autopilot-nightly.log         (truncated; old → .prev)
 #   /tmp/hydra-autopilot-state.json          (initialized)
+#
+# Test-isolation env vars (added to fix the run-start spam / state-clobber
+# bug seen on 2026-05-25 and re-observed on 2026-05-26 — the autopilot
+# test suite invoked bootstrap.sh with no isolation and stomped the live
+# autopilot's /tmp state files AND POSTed fake runs to the live
+# /api/autopilot/run-start, which made the dashboard report autopilot as
+# "not running"):
+#   HYDRA_AUTOPILOT_STATE       state.json path (default /tmp/...)
+#   HYDRA_AUTOPILOT_HEARTBEAT   heartbeat.txt path (default /tmp/...)
+#   HYDRA_AUTOPILOT_LOG         run-log path (default /tmp/...)
+#
+# When ANY of the three paths is non-default, bootstrap also skips the
+# run-start POST to ${HYDRA_API_BASE}/api/autopilot/run-start — the
+# semantic is "you are isolated from prod, so don't touch prod surfaces
+# either." Production deployment sets none of these vars and gets the
+# historical behavior unchanged.
 #
 # Behavior-preserving extraction of the Phase 0 heredoc (issue #409),
 # with slash-arg parsing layered on top (issue #410).
@@ -43,6 +59,23 @@ set -euo pipefail
 # shellcheck source=./args-parse.sh
 . "$(dirname "$0")/args-parse.sh" "$@"
 
+# Resolve file paths from env (test-isolation knobs). Mirrors the
+# convention already established in heartbeat.py / term-check.py /
+# reap.py — the only outlier was bootstrap.sh.
+DEFAULT_STATE_PATH="/tmp/hydra-autopilot-state.json"
+DEFAULT_HEARTBEAT_PATH="/tmp/hydra-autopilot-heartbeat.txt"
+DEFAULT_LOG_PATH="/tmp/hydra-autopilot-nightly.log"
+STATE_PATH="${HYDRA_AUTOPILOT_STATE:-$DEFAULT_STATE_PATH}"
+HEARTBEAT_PATH="${HYDRA_AUTOPILOT_HEARTBEAT:-$DEFAULT_HEARTBEAT_PATH}"
+LOG_PATH="${HYDRA_AUTOPILOT_LOG:-$DEFAULT_LOG_PATH}"
+if [ "${STATE_PATH}" != "${DEFAULT_STATE_PATH}" ] \
+  || [ "${HEARTBEAT_PATH}" != "${DEFAULT_HEARTBEAT_PATH}" ] \
+  || [ "${LOG_PATH}" != "${DEFAULT_LOG_PATH}" ]; then
+  ISOLATED_RUN=1
+else
+  ISOLATED_RUN=0
+fi
+
 # Heartbeat — Phase 0 marker.
 #
 # This is the FIRST write; subsequent decision turns must call
@@ -52,7 +85,7 @@ set -euo pipefail
 # the kernel for a pid that may have already exec'd into a child.
 RUN_ID="$(uuidgen)"
 PID=$$
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=${PID} run_id=${RUN_ID}" > /tmp/hydra-autopilot-heartbeat.txt
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=${PID} run_id=${RUN_ID}" > "${HEARTBEAT_PATH}"
 
 # Concurrent-run guard. If an existing state.json's owner PID is still alive,
 # refuse to overwrite — that is a real collision and the second instance
@@ -61,12 +94,12 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=${PID} run_id=${RUN_ID}" > /tmp/h
 # 5xx, its state.json was left stamped with the dead PID, and the auto-retry
 # misread that as a live duplicate). Best-effort: a missing jq is treated
 # as "no prior state" rather than aborting bootstrap.
-if [ -f /tmp/hydra-autopilot-state.json ] && command -v jq >/dev/null 2>&1; then
-  PRIOR_PID=$(jq -r '.pid // 0' /tmp/hydra-autopilot-state.json 2>/dev/null || echo 0)
+if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
+  PRIOR_PID=$(jq -r '.pid // 0' "${STATE_PATH}" 2>/dev/null || echo 0)
   if [ "${PRIOR_PID}" -gt 0 ] && [ "${PRIOR_PID}" != "${PID}" ]; then
     if kill -0 "${PRIOR_PID}" 2>/dev/null; then
-      echo "[autopilot] FATAL: prior autopilot pid=${PRIOR_PID} is alive; refusing to overwrite state.json"
-      echo "[autopilot]   to force, kill ${PRIOR_PID} or remove /tmp/hydra-autopilot-state.json"
+      echo "[autopilot] FATAL: prior autopilot pid=${PRIOR_PID} is alive; refusing to overwrite ${STATE_PATH}"
+      echo "[autopilot]   to force, kill ${PRIOR_PID} or remove ${STATE_PATH}"
       exit 1
     fi
     echo "[autopilot] recovering from stale state (prior pid=${PRIOR_PID} is dead)"
@@ -74,8 +107,8 @@ if [ -f /tmp/hydra-autopilot-state.json ] && command -v jq >/dev/null 2>&1; then
 fi
 
 # Run log (overwrites previous run; previous-run content rotated to .prev)
-[ -f /tmp/hydra-autopilot-nightly.log ] && mv /tmp/hydra-autopilot-nightly.log /tmp/hydra-autopilot-nightly.log.prev
-: > /tmp/hydra-autopilot-nightly.log
+[ -f "${LOG_PATH}" ] && mv "${LOG_PATH}" "${LOG_PATH}.prev"
+: > "${LOG_PATH}"
 
 # Resolve budget knobs from env (per-run override) with hardcoded defaults
 TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-2000000}"
@@ -189,7 +222,7 @@ SCHEMA_VERSION=2
 # legacy state.json (or a v2 state.json with `slots: {}` empty) is
 # clobbered on each bootstrap, so no migration path is needed —
 # bootstrap is always run before the brain reads state.
-cat > /tmp/hydra-autopilot-state.json <<EOF
+cat > "${STATE_PATH}" <<EOF
 {
   "started": "${STARTED_AT}",
   "started_epoch": ${STARTED_EPOCH},
@@ -256,18 +289,27 @@ python3 "$(dirname "$0")/heartbeat.py" --last-action=bootstrap || \
 #   09:00–11:59 → morning-timer
 #   21:00–23:59 → overnight-timer
 #   else         → manual
-HOUR_UTC=$(date -u +%H)
-HOUR_NUM=$((10#${HOUR_UTC}))
-if [ "${HOUR_NUM}" -ge 9 ] && [ "${HOUR_NUM}" -lt 12 ]; then
-  TRIGGER="morning-timer"
-elif [ "${HOUR_NUM}" -ge 21 ] && [ "${HOUR_NUM}" -le 23 ]; then
-  TRIGGER="overnight-timer"
+#
+# Isolated runs (non-default STATE/HEARTBEAT/LOG path) skip this POST
+# entirely. The test suite frequently invokes bootstrap.sh and was
+# spamming the live /api/autopilot/run-start endpoint with fake runs,
+# which made the dashboard's "current run" widget report autopilot as
+# down (root cause of the 2026-05-26 dashboard ghost-outage).
+if [ "${ISOLATED_RUN}" = "1" ]; then
+  echo "[autopilot] isolated run (non-default state/heartbeat/log path) — skipping run-start POST"
 else
-  TRIGGER="manual"
-fi
+  HOUR_UTC=$(date -u +%H)
+  HOUR_NUM=$((10#${HOUR_UTC}))
+  if [ "${HOUR_NUM}" -ge 9 ] && [ "${HOUR_NUM}" -lt 12 ]; then
+    TRIGGER="morning-timer"
+  elif [ "${HOUR_NUM}" -ge 21 ] && [ "${HOUR_NUM}" -le 23 ]; then
+    TRIGGER="overnight-timer"
+  else
+    TRIGGER="manual"
+  fi
 
-HYDRA_API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
-RUN_START_PAYLOAD=$(cat <<JSON
+  HYDRA_API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
+  RUN_START_PAYLOAD=$(cat <<JSON
 {
   "run_id": "${RUN_ID}",
   "started": "${STARTED_AT}",
@@ -287,8 +329,9 @@ RUN_START_PAYLOAD=$(cat <<JSON
 }
 JSON
 )
-curl -sf --max-time 5 -X POST \
-  -H "content-type: application/json" \
-  -d "${RUN_START_PAYLOAD}" \
-  "${HYDRA_API_BASE}/api/autopilot/run-start" >/dev/null 2>&1 || \
-  echo "[autopilot] run-start POST failed (orchestrator down?); continuing run_id=${RUN_ID} trigger=${TRIGGER}"
+  curl -sf --max-time 5 -X POST \
+    -H "content-type: application/json" \
+    -d "${RUN_START_PAYLOAD}" \
+    "${HYDRA_API_BASE}/api/autopilot/run-start" >/dev/null 2>&1 || \
+    echo "[autopilot] run-start POST failed (orchestrator down?); continuing run_id=${RUN_ID} trigger=${TRIGGER}"
+fi

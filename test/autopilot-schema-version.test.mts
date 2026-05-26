@@ -29,7 +29,7 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -46,19 +46,47 @@ const BOOTSTRAP = join(SCRIPTS, "bootstrap.sh");
  */
 const CURRENT_SCHEMA_VERSION = 2;
 
-function runBootstrap(env: Record<string, string> = {}): {
+interface BootstrapRun {
   status: number;
   stdout: string;
   stderr: string;
-} {
+  statePath: string;
+  heartbeatPath: string;
+  logPath: string;
+  cleanup: () => void;
+}
+
+/**
+ * Run bootstrap.sh with isolated state/heartbeat/log paths so each test
+ * is independent and never touches the live /tmp/hydra-autopilot-state.json
+ * or POSTs to the live /api/autopilot/run-start endpoint. Returns the
+ * temp paths so the caller can read them back; the caller must invoke
+ * `cleanup()` to remove the temp dir.
+ */
+function runBootstrap(env: Record<string, string> = {}): BootstrapRun {
+  const dir = mkdtempSync(join(tmpdir(), "autopilot-schema-bootstrap-"));
+  const statePath = join(dir, "state.json");
+  const heartbeatPath = join(dir, "heartbeat.txt");
+  const logPath = join(dir, "nightly.log");
   const r = spawnSync(BOOTSTRAP, [], {
-    env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
+    env: {
+      ...process.env,
+      HYDRA_AUTOPILOT_STATE: statePath,
+      HYDRA_AUTOPILOT_HEARTBEAT: heartbeatPath,
+      HYDRA_AUTOPILOT_LOG: logPath,
+      ...env,
+      PATH: process.env.PATH ?? "",
+    },
     encoding: "utf-8",
   });
   return {
     status: r.status ?? -1,
     stdout: r.stdout ?? "",
     stderr: r.stderr ?? "",
+    statePath,
+    heartbeatPath,
+    logPath,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
 }
 
@@ -145,38 +173,50 @@ describe("issue #434 — schema_version handshake", () => {
   describe("bootstrap.sh writes schema_version into state.json", () => {
     test("state.limits.schema_version equals the current version", () => {
       const r = runBootstrap();
-      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
-      assert.ok(
-        existsSync("/tmp/hydra-autopilot-state.json"),
-        "bootstrap should write /tmp/hydra-autopilot-state.json",
-      );
-      const s = JSON.parse(readFileSync("/tmp/hydra-autopilot-state.json", "utf-8"));
-      assert.equal(
-        s.limits.schema_version,
-        CURRENT_SCHEMA_VERSION,
-        "state.limits.schema_version must be the current version",
-      );
+      try {
+        assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+        assert.ok(
+          existsSync(r.statePath),
+          "bootstrap should write state.json at the isolated path",
+        );
+        const s = JSON.parse(readFileSync(r.statePath, "utf-8"));
+        assert.equal(
+          s.limits.schema_version,
+          CURRENT_SCHEMA_VERSION,
+          "state.limits.schema_version must be the current version",
+        );
+      } finally {
+        r.cleanup();
+      }
     });
 
     test("bootstrap echoes schema_version on stdout for operator visibility", () => {
       const r = runBootstrap();
-      assert.equal(r.status, 0);
-      assert.match(
-        r.stdout,
-        new RegExp(`schema_version=${CURRENT_SCHEMA_VERSION}`),
-        "bootstrap should echo schema_version in the limits-resolved line",
-      );
+      try {
+        assert.equal(r.status, 0);
+        assert.match(
+          r.stdout,
+          new RegExp(`schema_version=${CURRENT_SCHEMA_VERSION}`),
+          "bootstrap should echo schema_version in the limits-resolved line",
+        );
+      } finally {
+        r.cleanup();
+      }
     });
   });
 
   describe("Phase 0 handshake — matching versions proceed", () => {
     test("fresh bootstrap output passes the handshake", () => {
       const r = runBootstrap();
-      assert.equal(r.status, 0);
-      const result = runHandshake("/tmp/hydra-autopilot-state.json");
-      assert.equal(result.ok, true, `handshake should pass: ${result.message}`);
-      assert.match(result.message, /schema handshake OK/);
-      assert.match(result.message, new RegExp(`v${CURRENT_SCHEMA_VERSION}`));
+      try {
+        assert.equal(r.status, 0);
+        const result = runHandshake(r.statePath);
+        assert.equal(result.ok, true, `handshake should pass: ${result.message}`);
+        assert.match(result.message, /schema handshake OK/);
+        assert.match(result.message, new RegExp(`v${CURRENT_SCHEMA_VERSION}`));
+      } finally {
+        r.cleanup();
+      }
     });
   });
 
@@ -257,21 +297,35 @@ describe("issue #434 — schema_version handshake", () => {
     });
 
     test("a fresh bootstrap.sh run upgrades a legacy state by writing v2 on top", () => {
-      // bootstrap.sh is the single writer for /tmp/hydra-autopilot-state.json;
-      // it OVERWRITES the file with the current schema on every run. So the
+      // bootstrap.sh is the single writer for its state.json target; it
+      // OVERWRITES the file with the current schema on every run. So the
       // operator remediation for a v1-legacy stall is exactly the documented
       // one: rerun bootstrap, which now writes schema_version=2.
-      writeFileSync(
-        "/tmp/hydra-autopilot-state.json",
-        JSON.stringify({ limits: { token_budget: 1 } }),
-      );
-      const r = runBootstrap();
-      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
-      const s = JSON.parse(readFileSync("/tmp/hydra-autopilot-state.json", "utf-8"));
-      assert.equal(s.limits.schema_version, CURRENT_SCHEMA_VERSION);
-      // Re-running the handshake against the freshly bootstrapped state passes.
-      const result = runHandshake("/tmp/hydra-autopilot-state.json");
-      assert.equal(result.ok, true, `post-rebootstrap handshake should pass: ${result.message}`);
+      const dir = mkdtempSync(join(tmpdir(), "autopilot-schema-legacy-"));
+      const statePath = join(dir, "state.json");
+      const heartbeatPath = join(dir, "heartbeat.txt");
+      const logPath = join(dir, "nightly.log");
+      try {
+        writeFileSync(statePath, JSON.stringify({ limits: { token_budget: 1 } }));
+        const r = spawnSync(BOOTSTRAP, [], {
+          env: {
+            ...process.env,
+            HYDRA_AUTOPILOT_STATE: statePath,
+            HYDRA_AUTOPILOT_HEARTBEAT: heartbeatPath,
+            HYDRA_AUTOPILOT_LOG: logPath,
+            PATH: process.env.PATH ?? "",
+          },
+          encoding: "utf-8",
+        });
+        assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+        const s = JSON.parse(readFileSync(statePath, "utf-8"));
+        assert.equal(s.limits.schema_version, CURRENT_SCHEMA_VERSION);
+        // Re-running the handshake against the freshly bootstrapped state passes.
+        const result = runHandshake(statePath);
+        assert.equal(result.ok, true, `post-rebootstrap handshake should pass: ${result.message}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 
