@@ -41,11 +41,12 @@ const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 const REAP = join(SCRIPTS, "reap.py");
 const BOOTSTRAP = join(SCRIPTS, "bootstrap.sh");
 
-function makeTempState(): { dir: string; state: string; log: string } {
+function makeTempState(): { dir: string; state: string; heartbeat: string; log: string } {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-dedup-test-"));
   return {
     dir,
     state: join(dir, "state.json"),
+    heartbeat: join(dir, "heartbeat.txt"),
     log: join(dir, "nightly.log"),
   };
 }
@@ -110,18 +111,24 @@ function runReap(
 
 describe("scripts/autopilot/bootstrap.sh initializes reaped_task_ids (issue #411)", () => {
   test("fresh state.json contains a top-level reaped_task_ids: []", () => {
-    // bootstrap.sh writes to /tmp/hydra-autopilot-state.json directly,
-    // mirroring the pattern in autopilot-scripts.test.mts. Copy out for
-    // isolation and inspection.
+    // Isolate via HYDRA_AUTOPILOT_STATE/HEARTBEAT/LOG so the test never
+    // touches the live /tmp/hydra-autopilot-state.json or POSTs a fake
+    // run to the live API (root cause of 2026-05-26 dashboard ghost-outage).
     const tmp = makeTempState();
     try {
       const r = spawnSync(BOOTSTRAP, [], {
-        env: { ...process.env, PATH: process.env.PATH ?? "" },
+        env: {
+          ...process.env,
+          HYDRA_AUTOPILOT_STATE: tmp.state,
+          HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+          HYDRA_AUTOPILOT_LOG: tmp.log,
+          PATH: process.env.PATH ?? "",
+        },
         encoding: "utf-8",
       });
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
-      assert.ok(existsSync("/tmp/hydra-autopilot-state.json"));
-      const s = JSON.parse(readFileSync("/tmp/hydra-autopilot-state.json", "utf-8"));
+      assert.ok(existsSync(tmp.state), "bootstrap should write state.json at the isolated path");
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.ok(
         Array.isArray(s.reaped_task_ids),
         "reaped_task_ids must be an array at bootstrap",

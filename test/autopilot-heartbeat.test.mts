@@ -56,12 +56,14 @@ function makeTmp(): {
   dir: string;
   state: string;
   heartbeat: string;
+  log: string;
 } {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-heartbeat-"));
   return {
     dir,
     state: join(dir, "state.json"),
     heartbeat: join(dir, "heartbeat.txt"),
+    log: join(dir, "nightly.log"),
   };
 }
 
@@ -369,18 +371,30 @@ describe("scripts/autopilot/heartbeat.py", () => {
 });
 
 describe("scripts/autopilot/bootstrap.sh — heartbeat integration (issue #435)", () => {
+  /**
+   * Helper: invoke bootstrap.sh with HYDRA_AUTOPILOT_STATE/HEARTBEAT/LOG
+   * pointing at the temp dir, so each test is isolated from the live
+   * /tmp/hydra-autopilot-state.json and skips the live run-start POST.
+   */
+  function runBootstrap(tmp: { state: string; heartbeat: string; log: string }) {
+    return spawnSync(BOOTSTRAP_SH, [], {
+      env: {
+        ...process.env,
+        HYDRA_AUTOPILOT_STATE: tmp.state,
+        HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+        HYDRA_AUTOPILOT_LOG: tmp.log,
+        PATH: process.env.PATH ?? "",
+      },
+      encoding: "utf-8",
+    });
+  }
+
   test("records pid + run_id into state.json", () => {
-    // bootstrap.sh hardcodes /tmp/hydra-autopilot-state.json; we let it
-    // write there then copy and clean up so the live autopilot isn't
-    // disturbed. Same pattern as autopilot-scripts.test.mts.
     const tmp = makeTmp();
     try {
-      const r = spawnSync(BOOTSTRAP_SH, [], {
-        env: { ...process.env, PATH: process.env.PATH ?? "" },
-        encoding: "utf-8",
-      });
+      const r = runBootstrap(tmp);
       assert.equal(r.status, 0, `bootstrap failed: ${r.stderr}`);
-      const s = JSON.parse(readFileSync("/tmp/hydra-autopilot-state.json", "utf-8"));
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
       assert.equal(typeof s.pid, "number", "state.pid is a number");
       assert.ok(s.pid > 0, "state.pid > 0");
       assert.equal(typeof s.run_id, "string", "state.run_id is a string");
@@ -391,37 +405,30 @@ describe("scripts/autopilot/bootstrap.sh — heartbeat integration (issue #435)"
   });
 
   /**
-   * Pins the file-redirect operator on bootstrap.sh line 55 (issue #447
-   * mutation-gate fix):
-   *   echo "$(date ...) start pid=${PID} run_id=${RUN_ID}" > /tmp/...
+   * Pins the file-redirect operator on bootstrap.sh's heartbeat seed
+   * write (issue #447 mutation-gate fix):
+   *   echo "$(date ...) start pid=${PID} run_id=${RUN_ID}" > "${HEARTBEAT_PATH}"
    * A `swap-comparison` mutant turns the `>` into `<`, which under
-   * `set -euo pipefail` (line 38) attempts to open the heartbeat file
-   * as STDIN of `echo`. If the path doesn't exist (clean run), bash
-   * errors out before any of the rest of bootstrap can execute and the
-   * script exits non-zero. We force the clean-run condition by deleting
-   * the heartbeat file (best-effort — we don't fail the test if it's
-   * absent already) before invoking bootstrap, then asserting bootstrap
-   * exits 0 AND the heartbeat file is non-empty afterwards.
+   * `set -euo pipefail` attempts to open the heartbeat file as STDIN of
+   * `echo`. If the path doesn't exist (clean run), bash errors out
+   * before any of the rest of bootstrap can execute and the script
+   * exits non-zero. We force the clean-run condition by NOT creating
+   * the heartbeat file in our temp dir, then asserting bootstrap exits
+   * 0 AND the heartbeat file is non-empty afterwards.
    */
   test("bootstrap's heartbeat seed-write uses `>` (kills `<` mutant on heredoc line)", () => {
-    const HB_PATH = "/tmp/hydra-autopilot-heartbeat.txt";
     const tmp = makeTmp();
     try {
-      // Remove the heartbeat file so a `<`-mutant has no file to read.
-      // best-effort: ignore ENOENT.
-      try { rmSync(HB_PATH, { force: true }); } catch { /* intentional: file may not exist */ }
-
-      const r = spawnSync(BOOTSTRAP_SH, [], {
-        env: { ...process.env, PATH: process.env.PATH ?? "" },
-        encoding: "utf-8",
-      });
+      // tmp dir is fresh — heartbeat file does not exist, so a `<`-mutant
+      // would fail to open it for reading and bootstrap would exit non-zero.
+      const r = runBootstrap(tmp);
       assert.equal(
         r.status,
         0,
         `bootstrap exited non-zero (likely a <-mutant on heartbeat seed write): ${r.stderr}`,
       );
-      assert.ok(existsSync(HB_PATH), "heartbeat file must be created by bootstrap");
-      const body = readFileSync(HB_PATH, "utf-8");
+      assert.ok(existsSync(tmp.heartbeat), "heartbeat file must be created by bootstrap");
+      const body = readFileSync(tmp.heartbeat, "utf-8");
       assert.ok(body.length > 0, "heartbeat file must be non-empty after bootstrap");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
@@ -431,12 +438,9 @@ describe("scripts/autopilot/bootstrap.sh — heartbeat integration (issue #435)"
   test("Phase 0 heartbeat carries the per-turn format with last_action=bootstrap", () => {
     const tmp = makeTmp();
     try {
-      const r = spawnSync(BOOTSTRAP_SH, [], {
-        env: { ...process.env, PATH: process.env.PATH ?? "" },
-        encoding: "utf-8",
-      });
+      const r = runBootstrap(tmp);
       assert.equal(r.status, 0, `bootstrap failed: ${r.stderr}`);
-      const body = readFileSync("/tmp/hydra-autopilot-heartbeat.txt", "utf-8").trim();
+      const body = readFileSync(tmp.heartbeat, "utf-8").trim();
       const m = body.match(HEARTBEAT_LINE_RE);
       assert.ok(m, `Phase 0 heartbeat is not in per-turn format: ${JSON.stringify(body)}`);
       assert.equal(m![9], "bootstrap", "Phase 0 stamps last_action=bootstrap");

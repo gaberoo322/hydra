@@ -48,12 +48,18 @@ const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 interface Tmp {
   dir: string;
   state: string;
+  heartbeat: string;
   log: string;
 }
 
 function makeTempState(): Tmp {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-unattended-test-"));
-  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log") };
+  return {
+    dir,
+    state: join(dir, "state.json"),
+    heartbeat: join(dir, "heartbeat.txt"),
+    log: join(dir, "nightly.log"),
+  };
 }
 
 function runBootstrap(
@@ -61,11 +67,15 @@ function runBootstrap(
   argv: string[],
   tmp: Tmp,
 ): { status: number; stdout: string; stderr: string; limits?: Record<string, unknown> } {
-  if (existsSync("/tmp/hydra-autopilot-state.json")) {
-    rmSync("/tmp/hydra-autopilot-state.json");
-  }
   const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), argv, {
-    env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
+    env: {
+      ...process.env,
+      HYDRA_AUTOPILOT_STATE: tmp.state,
+      HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+      HYDRA_AUTOPILOT_LOG: tmp.log,
+      ...env,
+      PATH: process.env.PATH ?? "",
+    },
     encoding: "utf-8",
   });
   const out: { status: number; stdout: string; stderr: string; limits?: Record<string, unknown> } = {
@@ -73,9 +83,8 @@ function runBootstrap(
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
   };
-  if (out.status === 0 && existsSync("/tmp/hydra-autopilot-state.json")) {
-    const raw = readFileSync("/tmp/hydra-autopilot-state.json", "utf-8");
-    writeFileSync(tmp.state, raw);
+  if (out.status === 0 && existsSync(tmp.state)) {
+    const raw = readFileSync(tmp.state, "utf-8");
     out.limits = JSON.parse(raw).limits;
   }
   return out;

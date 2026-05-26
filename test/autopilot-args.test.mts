@@ -19,35 +19,42 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const SCRIPTS = join(REPO_ROOT, "scripts", "autopilot");
 
-interface Tmp { dir: string; state: string; log: string }
+interface Tmp { dir: string; state: string; heartbeat: string; log: string }
 
 function makeTempState(): Tmp {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-args-test-"));
-  return { dir, state: join(dir, "state.json"), log: join(dir, "nightly.log") };
+  return {
+    dir,
+    state: join(dir, "state.json"),
+    heartbeat: join(dir, "heartbeat.txt"),
+    log: join(dir, "nightly.log"),
+  };
 }
 
 interface BootstrapResult { status: number; stdout: string; stderr: string; limits?: Record<string, unknown> }
 
 /**
- * Run bootstrap.sh with the given env and argv, then capture the
- * resulting /tmp/hydra-autopilot-state.json into tmp.state for
- * inspection. Mirrors the test pattern used in autopilot-scripts.test.mts.
+ * Run bootstrap.sh with the given env and argv, isolated via
+ * HYDRA_AUTOPILOT_STATE / HEARTBEAT / LOG so the test does not stomp the
+ * live /tmp/hydra-autopilot-state.json or POST a bogus run to the live
+ * /api/autopilot/run-start endpoint (the 2026-05-26 dashboard
+ * ghost-outage root cause).
  */
 function runBootstrap(env: Record<string, string>, argv: string[], tmp: Tmp): BootstrapResult {
-  // Wipe any stale state from a prior test run so absence-of-success
-  // means absence-of-state-file.
-  if (existsSync("/tmp/hydra-autopilot-state.json")) {
-    rmSync("/tmp/hydra-autopilot-state.json");
-  }
+  const isolatedEnv = {
+    HYDRA_AUTOPILOT_STATE: tmp.state,
+    HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+    HYDRA_AUTOPILOT_LOG: tmp.log,
+  };
   const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), argv, {
-    env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
+    env: { ...process.env, ...isolatedEnv, ...env, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
   });
   const out: BootstrapResult = {
@@ -55,9 +62,8 @@ function runBootstrap(env: Record<string, string>, argv: string[], tmp: Tmp): Bo
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
   };
-  if (out.status === 0 && existsSync("/tmp/hydra-autopilot-state.json")) {
-    const raw = readFileSync("/tmp/hydra-autopilot-state.json", "utf-8");
-    writeFileSync(tmp.state, raw);
+  if (out.status === 0 && existsSync(tmp.state)) {
+    const raw = readFileSync(tmp.state, "utf-8");
     out.limits = JSON.parse(raw).limits;
   }
   return out;
