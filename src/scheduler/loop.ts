@@ -18,7 +18,6 @@ import { reapStaleClaims } from "../backlog/reaper.ts";
 // Stale-claim reaper threshold (issue #374). Default 2h.
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
 import { runResearchLoop } from "../research-loop.ts";
-import { getPerCycleCostCapUsd } from "../cost/cap.ts";
 import { getTargetName } from "../target-config.ts";
 import { pushToWorkQueue } from "../redis/work-queue.ts";
 import {
@@ -822,7 +821,6 @@ async function getStatus() {
   const researchCount24h = await getResearchEventCount24h().catch(() => 0);
   const buildCount24h = await getBuildEventCount24h().catch(() => 0);
   const currentRatio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
-  const perCycleCostCapUsd = getPerCycleCostCapUsd();
   const floorStats = await getResearchFloorStats().catch((err: any) => {
     console.error(`[Scheduler] getResearchFloorStats failed: ${err.message}`);
     return null;
@@ -874,9 +872,9 @@ async function getStatus() {
     lastError: state.lastError,
     startedAt: state.startedAt,
     consecutiveErrors: state.consecutiveErrors,
-    // Issue #209: per-cycle cost cap (separate from daily research cap).
-    // null when the cap is Infinity / disabled.
-    perCycleCostCapUsd: Number.isFinite(perCycleCostCapUsd) ? perCycleCostCapUsd : null,
+    // Issue #576: per-cycle cost cap (the codex-era circuit breaker) was
+    // retired with `src/cost/cap.ts`. Quota gating now lives in the
+    // Subscription Usage Tracker (`/api/usage`, `/api/usage/eligibility`).
     research: {
       queueThreshold: RESEARCH_QUEUE_THRESHOLD,
       buildRatioMax: RESEARCH_BUILD_RATIO_MAX,

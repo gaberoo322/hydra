@@ -331,9 +331,9 @@ async function safeSkillTokensAll(date: string): Promise<Record<string, string> 
  * Per-cycle surrogate cost in USD. Returns 0 when no tokens recorded for the
  * cycle or no rate configured.
  *
- * Used by `cost/cap.ts:getCycleCostWithSurrogateUsd()` so the per-cycle cap
- * can include post-cut subagent spend without breaking the legacy codex
- * `getCycleCostMicrodollars()` reader.
+ * Originally consumed by the per-cycle cost cap (`src/cost/cap.ts`) which
+ * was retired with the codex-era cleanup. Kept for the `/api/metrics/cost*`
+ * dashboard tiles that still want a per-cycle dollar estimate.
  */
 export async function getCycleSubagentCostUsd(cycleId: string): Promise<{
   tokens: number;

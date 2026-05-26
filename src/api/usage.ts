@@ -14,7 +14,7 @@
  */
 
 import { Router } from "express";
-import { getUsage, projectEligibility } from "../cost/usage-tracker.ts";
+import { getUsage, projectEligibility } from "../cost/index.ts";
 
 export function createUsageRouter() {
   const router = Router();

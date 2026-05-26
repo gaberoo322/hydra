@@ -12,7 +12,7 @@ import {
   projectEligibility,
   PACING_SHEDDABLE_CLASSES,
   type UsageSnapshot,
-} from "../src/cost/usage-tracker.ts";
+} from "../src/cost/index.ts";
 
 interface TokenInput {
   in?: number;

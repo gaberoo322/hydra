@@ -32,8 +32,13 @@ export const UNTOUCHABLE_PATHS: readonly string[] = Object.freeze([
   // accessors in `src/redis/<domain>.ts` are now the contract, and the
   // legacy shim is deleted. No single file funnels Redis access anymore.)
 
-  // Cost guardrails — the $50/day cap referenced in operator vision.
-  "src/cost/cap.ts",
+  // Cost guardrails — the **Cost** Module. The dollar-based per-cycle
+  // and daily-spend caps were retired (codex-era circuit breakers,
+  // ADR-0006), but the Subscription Usage Tracker (`usage-tracker.ts`)
+  // is now the quota guardrail — same role, real Anthropic-quota
+  // signal. Whole Module is Tier 0 (mirrors the `src/redis/` pattern);
+  // the directory-prefix matcher already handles `src/cost/`.
+  "src/cost/",
 
   // CI/CD scripts and workflows — the deploy path and the gate that
   // gates the gate.
