@@ -25,12 +25,58 @@ export interface WorkQueueAnchor {
   _workQueueRaw: string;
 }
 
+/**
+ * Allowlist of `source` values that selectWorkQueueAnchor() will surface
+ * as anchors (issue #449). Anything outside this set is treated as an
+ * orphan emitted by a producer that no longer exists (e.g. the deleted
+ * in-process `code-reviewer` and `adversarial-validation` agents retired
+ * in PR-3 / issue #383) and is LREM'd in place so it can't reappear.
+ *
+ * `undefined` is intentionally allowed because the no-source-field shape
+ * is what operator-queued items look like today — dropping those would
+ * be a behaviour change far beyond the issue's scope.
+ */
+export const WORK_QUEUE_SOURCE_ALLOWLIST: ReadonlySet<string> = new Set([
+  "research",
+  "user-request",
+  "operator",
+]);
+
+/**
+ * True when an item's `source` value should be surfaced as an anchor.
+ * Items with no source field (undefined / null / missing key) are
+ * preserved — that's how operator-queued items look on the wire today.
+ */
+export function isAllowedWorkQueueSource(source: unknown): boolean {
+  if (source === undefined || source === null) return true;
+  if (typeof source !== "string") return false;
+  return WORK_QUEUE_SOURCE_ALLOWLIST.has(source);
+}
+
 export async function selectWorkQueueAnchor(): Promise<WorkQueueAnchor | null> {
   const queued = await claimNextWorkQueueItem();
   if (!queued) return null;
 
   try {
     const item = JSON.parse(queued);
+
+    // Source allowlist (issue #449). Items emitted by retired in-process
+    // agents (code-reviewer, adversarial-validation) have no live producer
+    // and must not be surfaced as anchors; drop them in place so they
+    // can't be recovered on next cycle. Logged loudly per CLAUDE.md
+    // "Fail loud" rule so the drop is visible in journalctl.
+    if (!isAllowedWorkQueueSource(item.source)) {
+      console.error(
+        `[WorkQueueTier] Dropping orphan-source work-queue item: source=${JSON.stringify(item.source)} reference=${JSON.stringify(item.reference || item.description || "")}`,
+      );
+      try {
+        await removeFromProcessingQueue(queued);
+      } catch (err: any) {
+        console.error(`[WorkQueueTier] Failed to LREM orphan-source item: ${err.message}`);
+      }
+      return null;
+    }
+
     // Parse research context if present
     let parsedContext = item.context;
     if (typeof parsedContext === "string") {
