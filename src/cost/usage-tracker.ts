@@ -320,6 +320,77 @@ async function listJsonlFiles(root: string): Promise<string[]> {
   return out;
 }
 
+/**
+ * Autopilot classes the orchestrator sheds when the **Subscription Usage
+ * Tracker** projects we'll exceed the weekly quota at the current rate.
+ *
+ * Keep `dev_*`, `qa_*`, `research_*`, `design_concept_*`, and `health` —
+ * those are the value-bearing and safety-critical paths. Drop the
+ * board-hygiene + discovery + scout classes when pacing is over because
+ * they're high-volume signal-driven dispatches that don't directly move
+ * Target Outcomes. This list is policy, not measurement; if you change
+ * it, also update the autopilot playbook table that documents class
+ * eligibility.
+ */
+export const PACING_SHEDDABLE_CLASSES: readonly string[] = Object.freeze([
+  "sweep_orch",
+  "sweep_target",
+  "discover_orch",
+  "discover_target",
+  "scout_orch",
+]);
+
+export interface UsageEligibility {
+  /**
+   * False when the tracker reports `emergencyStop` (5h consumption at
+   * or above 90% of calibrated quota). The autopilot turn MUST NOT
+   * dispatch anything when `allow` is false — every dispatch class is
+   * blocked, not just sheddable ones, because we're about to hit the
+   * Anthropic 5h session cap and want to leave headroom for whatever
+   * the operator dispatches manually.
+   */
+  allow: boolean;
+  /**
+   * Classes the autopilot turn must skip. Empty unless pacingState is
+   * "over", in which case it carries `PACING_SHEDDABLE_CLASSES`. Has no
+   * meaning when `allow` is false (every class is blocked).
+   */
+  shed: readonly string[];
+  reasons: {
+    emergencyStop: boolean;
+    pacingShed: boolean;
+    calibrated: boolean;
+  };
+  usage: UsageSnapshot;
+}
+
+/**
+ * Pure projection from a snapshot to an autopilot-facing eligibility
+ * verdict. Surfaces three independent facts:
+ *   - `allow` (the hard-stop signal)
+ *   - `shed` (the soft-throttle list)
+ *   - `reasons` (so callers can log *why* without re-deriving)
+ *
+ * Uncalibrated snapshots always return `{ allow: true, shed: [] }` —
+ * the tracker stays out of the way until the operator's env-var
+ * calibration confirms it's reading real ground truth.
+ */
+export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
+  const allow = !snapshot.emergencyStop;
+  const pacingShed = snapshot.pacingState === "over";
+  const shed = pacingShed ? PACING_SHEDDABLE_CLASSES : [];
+  return {
+    allow,
+    shed,
+    reasons: {
+      emergencyStop: snapshot.emergencyStop,
+      pacingShed,
+      calibrated: snapshot.calibrated,
+    },
+    usage: snapshot,
+  };
+}
+
 async function walk(dir: string, out: string[]): Promise<void> {
   let entries: Dirent[];
   try {
