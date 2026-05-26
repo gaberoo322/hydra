@@ -29,7 +29,7 @@ const GROUPS = [
   { id: "planning", label: "Planning & Research", color: "rose",
     modules: ["research-loop", "project-goals", "anchor-selection", "anchor-scorer", "plan-cache"] },
   { id: "infra", label: "Infrastructure", color: "zinc",
-    modules: ["api", "notify", "digest", "cleanup", "instrument", "merge", "prepare-workspace"] },
+    modules: ["api", "notify", "digest", "cleanup", "instrument", "merge"] },
 ];
 
 for (const g of GROUPS) {
