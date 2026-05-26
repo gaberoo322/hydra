@@ -30,6 +30,7 @@ import { createAnchorRouter } from "./api/anchor.ts";
 import { createAutopilotRouter } from "./api/autopilot.ts";
 import { createAgentsRouter } from "./api/agents.ts";
 import { createScoutRouter } from "./api/scout.ts";
+import { createUsageRouter } from "./api/usage.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -78,6 +79,7 @@ function createApi(eventBus) {
   api.use(createAutopilotRouter());
   api.use(createAgentsRouter());
   api.use(createScoutRouter());
+  api.use(createUsageRouter());
   api.use(createMiscRouter(eventBus));
   api.use(createChecklistRouter());
   api.use(createOutcomesRouter());
