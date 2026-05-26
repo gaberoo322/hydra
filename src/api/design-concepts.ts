@@ -27,13 +27,17 @@ import {
   listDesignConcepts,
   approveDesignConcept,
   gateCheck,
-  type DesignConceptInput,
   type DesignConceptScope,
 } from "../design-concept.ts";
 import {
   appendExemptLogEntry,
   readRecentExemptLogEntries,
 } from "../redis/design-concept.ts";
+import {
+  DesignConceptInputSchema,
+  DesignConceptApproveBodySchema,
+  ExemptLogEntryInputSchema,
+} from "../schemas/design-concept.ts";
 
 /** Maximum number of audit entries the read endpoint will return. */
 const EXEMPT_LOG_DEFAULT_LIMIT = 50;
@@ -107,44 +111,33 @@ export function createDesignConceptsRouter() {
 
   router.post("/design-concepts/exempt-log", async (req, res) => {
     try {
-      const body = (req.body ?? {}) as Partial<ExemptLogEntry>;
-      const pr = typeof body.pr === "number" ? body.pr : NaN;
-      const applier = typeof body.applier === "string" ? body.applier : "";
-      const anchorRef =
-        typeof body.anchorRef === "string" ? body.anchorRef : "";
-      const reasonsRaw = Array.isArray(body.gate_fail_reasons)
-        ? body.gate_fail_reasons
-        : [];
-      const gate_fail_reasons = reasonsRaw
-        .filter((r): r is string => typeof r === "string")
-        // Truncate each reason — the audit log doesn't need full paragraphs.
-        .map((r) => (r.length > 500 ? `${r.slice(0, 497)}...` : r));
+      // Zod boundary parse (ADR-0011, slice 1). Replaces the hand-rolled
+      // `typeof body.pr === "number"` / falsy-string checks with a
+      // structured 400 that downstream clients can pattern-match on.
+      const parsed = ExemptLogEntryInputSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({
+          code: "schema-validation-failed",
+          issues: parsed.error.issues,
+        });
+        return;
+      }
+      const body = parsed.data;
 
-      if (!Number.isFinite(pr) || pr <= 0) {
-        res.status(400).json({ error: "pr (positive number) is required" });
-        return;
-      }
-      if (!applier) {
-        res.status(400).json({ error: "applier (non-empty string) is required" });
-        return;
-      }
-      if (!anchorRef) {
-        res
-          .status(400)
-          .json({ error: "anchorRef (non-empty string) is required" });
-        return;
-      }
+      // Truncate each reason — the audit log doesn't need full paragraphs.
+      // This is a transformation, not a validation, so it stays in the
+      // handler rather than the schema.
+      const gate_fail_reasons = body.gate_fail_reasons.map((r) =>
+        r.length > 500 ? `${r.slice(0, 497)}...` : r,
+      );
 
-      const ts =
-        typeof body.ts === "number" && Number.isFinite(body.ts) && body.ts > 0
-          ? body.ts
-          : Date.now();
+      const ts = typeof body.ts === "number" ? body.ts : Date.now();
 
       const entry: ExemptLogEntry = {
-        pr,
-        applier,
+        pr: body.pr,
+        applier: body.applier,
         ts,
-        anchorRef,
+        anchorRef: body.anchorRef,
         gate_fail_reasons,
       };
 
@@ -195,17 +188,18 @@ export function createDesignConceptsRouter() {
 
   router.post("/design-concepts", async (req, res) => {
     try {
-      const body = (req.body ?? {}) as Partial<DesignConceptInput>;
-      if (!body.anchorRef || typeof body.anchorRef !== "string") {
-        res.status(400).json({ error: "anchorRef (string) is required" });
+      // Zod boundary parse (ADR-0011, slice 1). The schema enforces both
+      // anchorRef (non-empty string) and scope (orch | target), so the
+      // hand-rolled prose 400s are gone.
+      const parsed = DesignConceptInputSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({
+          code: "schema-validation-failed",
+          issues: parsed.error.issues,
+        });
         return;
       }
-      if (body.scope !== "orch" && body.scope !== "target") {
-        res
-          .status(400)
-          .json({ error: "scope must be 'orch' or 'target'" });
-        return;
-      }
+      const body = parsed.data;
 
       const dc = await saveDesignConcept({
         anchorRef: body.anchorRef,
@@ -229,17 +223,19 @@ export function createDesignConceptsRouter() {
 
   router.post("/design-concepts/:anchorRef/approve", async (req, res) => {
     try {
-      const by =
-        typeof req.body?.by === "string" && req.body.by.length > 0
-          ? req.body.by
-          : "auto-gate";
-
-      if (by !== "auto-gate" && !by.startsWith("operator:")) {
-        res
-          .status(400)
-          .json({ error: "by must be 'auto-gate' or 'operator:<name>'" });
+      // Zod boundary parse (ADR-0011, slice 1). `by` is optional on the
+      // wire — when omitted it defaults to "auto-gate" (preserving the
+      // pre-migration behaviour). When supplied, the schema enforces the
+      // "auto-gate" | "operator:<name>" union.
+      const parsed = DesignConceptApproveBodySchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({
+          code: "schema-validation-failed",
+          issues: parsed.error.issues,
+        });
         return;
       }
+      const by = parsed.data.by ?? "auto-gate";
 
       const dc = await approveDesignConcept(req.params.anchorRef, by);
       const gate = gateCheck(dc, Date.now());

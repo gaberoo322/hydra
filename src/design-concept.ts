@@ -40,7 +40,15 @@ import {
   saveDesignConceptHash,
   setDesignConceptField,
 } from "./redis/design-concept.ts";
+import {
+  type DesignConceptInput as DesignConceptInputType,
+} from "./schemas/design-concept.ts";
 import { classifyChange } from "./tier-classifier.ts";
+
+// `DesignConceptInput` is owned by `src/schemas/design-concept.ts` per
+// ADR-0011 (single source of truth: the schema is also the type). The
+// re-export below keeps the historical import path working.
+export type { DesignConceptInput } from "./schemas/design-concept.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -101,15 +109,8 @@ export type DesignConcept = {
   approvedBy: "auto-gate" | `operator:${string}` | "";
 };
 
-/** Caller-supplied body when creating/overwriting an artifact. The store
- *  computes `createdAt` and `artifactHash`. */
-export type DesignConceptInput = Omit<
-  DesignConcept,
-  "createdAt" | "artifactHash" | "status" | "approvedBy"
-> & {
-  status?: DesignConceptStatus;
-  approvedBy?: DesignConcept["approvedBy"];
-};
+/* `DesignConceptInput` is now defined (and re-exported above) by
+ * `src/schemas/design-concept.ts` — see ADR-0011. */
 
 // ---------------------------------------------------------------------------
 // Canonical JSON + artifact hash
@@ -172,7 +173,7 @@ export function computeArtifactHash(d: Omit<DesignConcept, "artifactHash">): str
  * Idempotent on `anchorRef`: a second call replaces the prior artifact.
  */
 export async function saveDesignConcept(
-  input: DesignConceptInput,
+  input: DesignConceptInputType,
   now: number = Date.now(),
 ): Promise<DesignConcept> {
   if (!input.anchorRef || typeof input.anchorRef !== "string") {
