@@ -521,6 +521,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `scout_last_walk_iso` >7d old or empty | `scout_walk_due` | `scout_orch` (issue #485) |
 | `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
 | `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
+| `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1) |
 
 Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
 received target-product anchors (item-26x). Post-#458, candidates are

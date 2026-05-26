@@ -229,6 +229,39 @@ def _subagent_max_wall_seconds(state: dict | None = None) -> int:
 # an 8-hour run.
 SLOT_HISTORY_MAX_ENTRIES = 50
 
+
+def _normalize_usage_eligibility(raw) -> dict:
+    """Normalize the Subscription Usage Tracker payload (PR B1).
+
+    `state.usage_eligibility` is sourced from the
+    `usage_eligibility_json=` line emitted by collect-state.sh, which
+    in turn comes from `GET /api/usage/eligibility`. The orchestrator
+    side guarantees a stable shape, but the autopilot side has to
+    tolerate missing / malformed input because:
+      - the orchestrator can be unreachable mid-bootstrap
+      - the playbook is a prompt and may drop the field on a bad turn
+      - older state.json files (pre-PR-B1) won't have the field at all
+
+    Returns the canonical shape:
+        {"allow": bool, "shed": set[str], "reasons": dict}
+
+    Missing / malformed input → {"allow": True, "shed": set(),
+    "reasons": {}} so the tracker stays informational, not load-bearing.
+    """
+    if not isinstance(raw, dict):
+        return {"allow": True, "shed": set(), "reasons": {}}
+    allow = raw.get("allow")
+    if not isinstance(allow, bool):
+        allow = True
+    shed_raw = raw.get("shed")
+    if isinstance(shed_raw, list):
+        shed = {s for s in shed_raw if isinstance(s, str)}
+    else:
+        shed = set()
+    reasons_raw = raw.get("reasons")
+    reasons = reasons_raw if isinstance(reasons_raw, dict) else {}
+    return {"allow": allow, "shed": shed, "reasons": reasons}
+
 # Confidence threshold: candidates below this don't justify a dev dispatch;
 # we force research instead (grilled decision 6, AC: research dispatched
 # when no candidate >= 0.5, capped at 4/day).
@@ -828,6 +861,31 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
             )
         # "hold" → no action (qa hasn't passed yet)
 
+    # 3.5. Subscription Usage Tracker eligibility gate (PR B1).
+    #
+    # `state.usage_eligibility` is populated by the playbook from the
+    # `usage_eligibility_json=` line that collect-state.sh emits each
+    # turn. The verdict has two independent levels:
+    #
+    #   - `allow == False`  → hard stop. The tracker reports the 5h
+    #     consumption is at or above 90% of the calibrated quota. We
+    #     do not dispatch any class this turn — every class is blocked.
+    #   - `shed: [...]`     → soft throttle. Projected weekly consumption
+    #     is over 100%. Skip those classes (today: sweep_*, discover_*,
+    #     scout_orch) but keep dev_*, qa_*, research_*, design_concept_*,
+    #     health.
+    #
+    # Missing, malformed, or uncalibrated payloads are treated as "no
+    # signal" — the tracker is informational, not load-bearing for
+    # correctness. We dispatch normally and let the operator notice.
+    usage_eligibility = _normalize_usage_eligibility(state.get("usage_eligibility"))
+    dispatch_blocked = not usage_eligibility["allow"]
+    shed_classes = usage_eligibility["shed"]
+    if dispatch_blocked:
+        plan.debug["usage_dispatch_blocked"] = usage_eligibility["reasons"]
+    if shed_classes:
+        plan.debug["usage_shed"] = sorted(shed_classes)
+
     # 4. Pipeline dispatch
     slots = state.get("slots") or {}
     burned = set(state.get("burned_classes") or [])
@@ -853,6 +911,10 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     dispatched_any = False
 
     for cls in pipeline_priority:
+        if dispatch_blocked:
+            break
+        if cls in shed_classes:
+            continue
         if slots.get(cls) is not None:
             continue  # slot busy
         if cls in burned:
@@ -883,6 +945,10 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         # back-stop in parallel.
         "scout_orch",
     ):
+        if dispatch_blocked:
+            break
+        if sig in shed_classes:
+            continue
         if scope_excluded(scope, sig):
             continue
         if sig in burned:

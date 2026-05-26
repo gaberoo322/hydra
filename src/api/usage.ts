@@ -14,7 +14,7 @@
  */
 
 import { Router } from "express";
-import { getUsage } from "../cost/usage-tracker.ts";
+import { getUsage, projectEligibility } from "../cost/usage-tracker.ts";
 
 export function createUsageRouter() {
   const router = Router();
@@ -26,6 +26,25 @@ export function createUsageRouter() {
       return res.json(snapshot);
     } catch (err: any) {
       console.error(`[usage] /api/usage failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  /**
+   * GET /api/usage/eligibility — autopilot dispatch verdict.
+   *
+   * Consumed by `scripts/autopilot/collect-state.sh` once per turn; the
+   * playbook merges the response under `state.usage_eligibility` so
+   * `decide.py` can gate dispatches without re-fetching. `?force=1`
+   * bypasses the 60s tracker cache for the underlying snapshot.
+   */
+  router.get("/usage/eligibility", async (req, res) => {
+    const force = req.query.force === "1" || req.query.force === "true";
+    try {
+      const snapshot = await getUsage({ force });
+      return res.json(projectEligibility(snapshot));
+    } catch (err: any) {
+      console.error(`[usage] /api/usage/eligibility failed: ${err?.message || err}`);
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });

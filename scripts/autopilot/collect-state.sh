@@ -138,6 +138,21 @@ import json,sys
 try: d=json.load(sys.stdin); print(len(d.get('eligible',[])))
 except: print(0)" || echo 0
 
+# Subscription Usage Tracker — PR B1 eligibility verdict.
+#
+# `GET /api/usage/eligibility` (src/api/usage.ts) returns the autopilot-
+# facing projection of the Subscription Usage Tracker
+# (src/cost/usage-tracker.ts):
+#
+#   {"allow": bool, "shed": [...], "reasons": {...}, "usage": {...snapshot}}
+#
+# The playbook merges this into state.json as `state.usage_eligibility`.
+# decide.py's normalize pass tolerates a missing field (defaults to
+# {"allow": true, "shed": []}), so an orchestrator-down condition here
+# is non-fatal — we just dispatch normally.
+echo -n "usage_eligibility_json="
+hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"reasons":{"calibrated":false}}'
+
 # capacity-floor (orchestrator self-improvement share)
 hydra raw GET /capacity 2>/dev/null | python3 -c "
 import json,sys

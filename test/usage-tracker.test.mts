@@ -9,6 +9,9 @@ import {
   getWeeklyQuotaTokens,
   getFiveHourQuotaTokens,
   parseUsageLine,
+  projectEligibility,
+  PACING_SHEDDABLE_CLASSES,
+  type UsageSnapshot,
 } from "../src/cost/usage-tracker.ts";
 
 interface TokenInput {
@@ -380,6 +383,92 @@ describe("usage-tracker", () => {
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe("projectEligibility", () => {
+    function snapshotWith(overrides: Partial<UsageSnapshot>): UsageSnapshot {
+      const empty = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 };
+      const base: UsageSnapshot = {
+        tokensLast5h: empty,
+        tokensLast7d: empty,
+        tokensLast24h: 0,
+        percentLast5h: 0,
+        percentLast7d: 0,
+        projectedWeeklyPercent: 0,
+        pacingState: "under",
+        emergencyStop: false,
+        calibrated: false,
+        weeklyQuotaTokens: 0,
+        fiveHourQuotaTokens: 0,
+        filesScanned: 0,
+        filesSkippedByMtime: 0,
+        linesParsed: 0,
+        linesWithUsage: 0,
+        parseErrors: 0,
+        generatedAt: "2026-05-26T00:00:00.000Z",
+      };
+      return { ...base, ...overrides };
+    }
+
+    test("uncalibrated: allow=true, shed=[], pacing/emergency false", () => {
+      const v = projectEligibility(snapshotWith({ calibrated: false }));
+      assert.equal(v.allow, true);
+      assert.deepEqual([...v.shed], []);
+      assert.equal(v.reasons.emergencyStop, false);
+      assert.equal(v.reasons.pacingShed, false);
+      assert.equal(v.reasons.calibrated, false);
+    });
+
+    test("calibrated + under: allow=true, shed=[]", () => {
+      const v = projectEligibility(
+        snapshotWith({ calibrated: true, pacingState: "under", emergencyStop: false })
+      );
+      assert.equal(v.allow, true);
+      assert.deepEqual([...v.shed], []);
+      assert.equal(v.reasons.pacingShed, false);
+    });
+
+    test("calibrated + on (80–100%): allow=true, shed=[] — 'on' is informational only", () => {
+      const v = projectEligibility(
+        snapshotWith({ calibrated: true, pacingState: "on", emergencyStop: false })
+      );
+      assert.equal(v.allow, true);
+      assert.deepEqual([...v.shed], []);
+      assert.equal(v.reasons.pacingShed, false);
+    });
+
+    test("calibrated + over: allow=true, shed includes all sheddable classes", () => {
+      const v = projectEligibility(
+        snapshotWith({ calibrated: true, pacingState: "over", emergencyStop: false })
+      );
+      assert.equal(v.allow, true);
+      // Sheddable list should match the exported constant exactly.
+      assert.deepEqual([...v.shed], [...PACING_SHEDDABLE_CLASSES]);
+      assert.equal(v.reasons.pacingShed, true);
+      // Sanity: dev_* and qa_* are never shed.
+      assert.equal(v.shed.includes("dev_orch"), false);
+      assert.equal(v.shed.includes("dev_target"), false);
+      assert.equal(v.shed.includes("qa_orch"), false);
+      assert.equal(v.shed.includes("health"), false);
+    });
+
+    test("calibrated + emergencyStop: allow=false (regardless of pacing)", () => {
+      const v = projectEligibility(
+        snapshotWith({ calibrated: true, pacingState: "under", emergencyStop: true })
+      );
+      assert.equal(v.allow, false);
+      assert.equal(v.reasons.emergencyStop, true);
+    });
+
+    test("calibrated + emergencyStop + over: allow=false AND shed populated (emergency takes precedence semantically)", () => {
+      const v = projectEligibility(
+        snapshotWith({ calibrated: true, pacingState: "over", emergencyStop: true })
+      );
+      assert.equal(v.allow, false);
+      // shed is still populated — callers MUST honor `allow` first; if
+      // they did go ahead, the shed list remains the right second filter.
+      assert.deepEqual([...v.shed], [...PACING_SHEDDABLE_CLASSES]);
     });
   });
 });
