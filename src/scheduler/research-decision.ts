@@ -62,19 +62,6 @@ export interface ResearchSnapshot {
   researchMinIntervalMs: number;
   /** Wall-clock at snapshot time — used by the throttle check. */
   nowMs: number;
-  /**
-   * Today's daily spend, the rollover key, and the `source` discriminator
-   * from the surrogate aggregator. `source` is propagated all the way to
-   * the `skip:spend-cap` action so the operator-facing trace says *which*
-   * accounting stream drove the decision.
-   */
-  dailySpend: {
-    usd: number;
-    date: string;
-    source: "autopilot-surrogate" | "codex-recorded" | "mixed" | "none";
-  };
-  /** Daily spend cap (Infinity disables the gate). */
-  dailySpendCap: number;
   /** Backlog lane totals; only `total` is consumed today. */
   backlog: { total: number; queued: number; inProgress: number };
   /** Configured queue-depth threshold above which queueLen suppresses research. */
@@ -136,17 +123,6 @@ export type ResearchAction =
       lastResearchAtMs: number;
       minIntervalMs: number;
       remainingMs: number;
-    }
-  | {
-      kind: "skip";
-      reason: "spend-cap";
-      spentUsd: number;
-      capUsd: number;
-      /** Which accounting stream contributed the `spentUsd` value. Useful
-       *  for diagnosing "the gate fired but I expected the number to be
-       *  zero" — `source: "none"` means HYDRA_TOKEN_USD_RATE is unset
-       *  *and* no legacy recordSpend has happened today. */
-      source: "autopilot-surrogate" | "codex-recorded" | "mixed" | "none";
     };
 
 /**
@@ -234,18 +210,16 @@ export function decideResearchAction(
     }
   }
 
-  // 7. Daily spend cap. Hard gate; even the floor can't punch through.
-  if (snap.dailySpend.usd >= snap.dailySpendCap) {
-    return {
-      kind: "skip",
-      reason: "spend-cap",
-      spentUsd: snap.dailySpend.usd,
-      capUsd: snap.dailySpendCap,
-      source: snap.dailySpend.source,
-    };
-  }
-
-  // 8. Run. Either the floor demanded it, or the queue is genuinely low.
+  // 7. Run. Either the floor demanded it, or the queue is genuinely low.
+  //
+  // Note: the legacy dollar-based daily-spend cap (HYDRA_DAILY_COST_CAP_USD)
+  // was retired in favour of the **Subscription Usage Tracker** (PR B-series).
+  // The autopilot consumes `/api/usage/eligibility` for hard-stop and
+  // shedding; the scheduler is not in that path because the scheduler
+  // doesn't dispatch Claude Code subagents — it does Redis housekeeping
+  // and orchestrates research cycles. Research itself runs against the
+  // operator's quota, but that's an autopilot dispatch and the autopilot
+  // already gates it.
   return {
     kind: "run",
     reason: floorFiring ? "floor-fire" : "queue-low",

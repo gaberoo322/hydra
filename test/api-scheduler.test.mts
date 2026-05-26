@@ -161,7 +161,10 @@ describe("Scheduler API routes (issue #164)", () => {
         "queueThreshold", "buildRatioMax", "currentRatio",
         "researchCount24h", "buildCount24h", "minIntervalHuman",
         "cyclesRun", "lastResearchAt",
-        "dailyCostCapUsd", "dailySpendUsd", "dailySpendDate",
+        // dailyCostCapUsd / dailySpendUsd / dailySpendDate retired with
+        // the dollar-based daily-spend cap (Subscription Usage Tracker
+        // B-series). The new quota surface is `/api/usage`; the scheduler
+        // status no longer carries those fields.
       ];
       for (const field of researchFields) {
         assert.ok(field in research, `research should contain '${field}' field`);
