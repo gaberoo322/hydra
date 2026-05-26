@@ -258,8 +258,10 @@ describe("/api/scheduler/status live shape", () => {
     assert.ok("mergeRate" in status);
     assert.ok("intervalMs" in status);
     assert.ok(status.research, "research block must still be present");
-    assert.ok("dailySpendUsd" in status.research);
-    assert.ok("dailyCostCapUsd" in status.research);
+    // dailySpendUsd / dailyCostCapUsd retired with the dollar-based
+    // daily-spend cap (Subscription Usage Tracker B-series). The new
+    // quota surface lives at `/api/usage`; the scheduler status is no
+    // longer the cost-of-research surface.
   });
 
   test("retired codex-era fields are absent (not just null)", async () => {

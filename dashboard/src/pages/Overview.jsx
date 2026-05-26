@@ -53,6 +53,10 @@ export default function Overview({ ws }) {
   const { data: cycle, refresh: refreshCycle } = useApi("/cycle/status", { poll: 5000 });
   const { data: report } = useApi("/cycle/report", { poll: 5000 });
   const { data: scheduler, refresh: refreshScheduler } = useApi("/scheduler/status", { poll: 10000 });
+  // Subscription Usage Tracker (PR A/B-series) replaces the dollar-based
+  // daily-spend tile. `percentLast7d` is the same number `/usage` shows
+  // in the CLI; uncalibrated installs show 0% with the calibration hint.
+  const { data: usage } = useApi("/usage", { poll: 60000 });
   const { data: backlog } = useApi("/backlog/counts", { poll: 30000 });
   const { data: metrics } = useApi("/metrics?count=10", { poll: 30000 });
   const { data: alertsData, refresh: refreshAlerts } = useApi("/alerts?limit=50", { poll: 10000 });
@@ -325,14 +329,18 @@ export default function Overview({ ws }) {
           </p>
         </div>
 
-        {/* Daily Spend */}
+        {/* Weekly Quota — Subscription Usage Tracker (PR B-series) */}
         <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3">
-          <p className="text-xs font-semibold text-zinc-500 mb-2">Daily Spend</p>
+          <p className="text-xs font-semibold text-zinc-500 mb-2">Weekly Quota</p>
           <p className="text-lg font-bold text-white">
-            ${Number(scheduler?.research?.dailySpendUsd || 0).toFixed(2)}
+            {usage?.calibrated
+              ? `${Number(usage?.percentLast7d || 0).toFixed(0)}%`
+              : "—"}
           </p>
           <p className="text-xs text-zinc-600 mt-1">
-            of ${Number(scheduler?.research?.dailyCostCapUsd || 50).toFixed(0)} cap
+            {usage?.calibrated
+              ? `${Number(usage?.projectedWeeklyPercent || 0).toFixed(0)}% projected · ${usage?.pacingState}`
+              : "uncalibrated · set HYDRA_USAGE_WEEKLY_QUOTA_TOKENS"}
           </p>
         </div>
 

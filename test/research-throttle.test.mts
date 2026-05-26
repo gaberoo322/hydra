@@ -37,8 +37,9 @@ function snapshot(overrides: Partial<ResearchSnapshot> = {}): ResearchSnapshot {
     lastResearchAtMs: null,
     researchMinIntervalMs: 2 * 60 * 60 * 1000,
     nowMs: 1_700_000_000_000,
-    dailySpend: { usd: 0, date: "2026-05-25", source: "none" },
-    dailySpendCap: Infinity,
+    // dailySpend / dailySpendCap retired in the B-series (Subscription
+    // Usage Tracker took over Anthropic-quota gating from the dead
+    // codex-era dollar surrogate). Snapshot no longer carries them.
     backlog: { total: 0, queued: 0, inProgress: 0 },
     queueThreshold: 6,
     ratioMax: 3,
@@ -128,11 +129,9 @@ describe("decideResearchAction — force-once override", () => {
     assert.equal(action.kind, "force-once");
   });
 
-  test("force-once still wins over spend-cap and throttle", () => {
+  test("force-once still wins over throttle", () => {
     const action = decideResearchAction(snapshot({
       forced: true,
-      dailySpend: { usd: 999, date: "2026-05-25", source: "mixed" },
-      dailySpendCap: 50,
       lastResearchAtMs: 1_700_000_000_000 - 1000,
     }));
     assert.equal(action.kind, "force-once");
@@ -180,15 +179,6 @@ describe("decideResearchAction — capacity floor override", () => {
     if (action.kind === "run") assert.equal(action.reason, "floor-fire");
   });
 
-  test("spend-cap still wins over floor", () => {
-    const action = decideResearchAction(snapshot({
-      floor: { shouldFire: true, reason: "ratio-min" },
-      dailySpend: { usd: 100, date: "2026-05-25", source: "mixed" },
-      dailySpendCap: 50,
-    }));
-    assert.equal(action.kind, "skip");
-    if (action.kind === "skip") assert.equal(action.reason, "spend-cap");
-  });
 });
 
 describe("decideResearchAction — backlog promotion", () => {
@@ -271,57 +261,14 @@ describe("decideResearchAction — throttle gate", () => {
   });
 });
 
-describe("decideResearchAction — spend cap gate", () => {
-  test("suppresses when daily spend >= cap and carries the source through", () => {
-    const action = decideResearchAction(snapshot({
-      dailySpend: { usd: 55, date: "2026-05-25", source: "autopilot-surrogate" },
-      dailySpendCap: 50,
-    }));
-    assert.equal(action.kind, "skip");
-    if (action.kind === "skip" && action.reason === "spend-cap") {
-      assert.equal(action.spentUsd, 55);
-      assert.equal(action.capUsd, 50);
-      // Source flows from the surrogate snapshot through into the verdict
-      // so operators can see which accounting stream tripped the gate
-      // without re-reading env vars.
-      assert.equal(action.source, "autopilot-surrogate");
-    } else {
-      assert.fail(`expected skip:spend-cap, got ${JSON.stringify(action)}`);
-    }
-  });
-
-  test("source 'none' surfaces when neither writer has contributed", () => {
-    // The realistic post-cutover default: HYDRA_TOKEN_USD_RATE unset AND
-    // no legacy recordSpend has fired today → the gate effectively reports
-    // "zero spend from no known source", which matches the pre-PR behavior
-    // where the gate was silently disabled.
-    const action = decideResearchAction(snapshot({
-      dailySpend: { usd: 200, date: "2026-05-25", source: "none" },
-      dailySpendCap: 50,
-    }));
-    if (action.kind === "skip" && action.reason === "spend-cap") {
-      assert.equal(action.source, "none");
-    } else {
-      assert.fail(`expected skip:spend-cap, got ${JSON.stringify(action)}`);
-    }
-  });
-
-  test("does not suppress when spend below cap", () => {
-    const action = decideResearchAction(snapshot({
-      dailySpend: { usd: 10, date: "2026-05-25", source: "autopilot-surrogate" },
-      dailySpendCap: 50,
-    }));
-    assert.equal(action.kind, "run");
-  });
-
-  test("cap of Infinity disables the gate", () => {
-    const action = decideResearchAction(snapshot({
-      dailySpend: { usd: 9999, date: "2026-05-25", source: "mixed" },
-      dailySpendCap: Infinity,
-    }));
-    assert.equal(action.kind, "run");
-  });
-});
+// The dollar-based daily-spend cap was retired with the Subscription
+// Usage Tracker (PR B-series). The autopilot's `/api/usage/eligibility`
+// now gates dispatches against real Anthropic-quota percentages, not
+// the codex-era HYDRA_TOKEN_USD_RATE × token estimate. The block of
+// tests that exercised the old `spend-cap` skip variant was removed
+// alongside the variant; no replacement here because the new gate
+// lives entirely in the autopilot path, exercised in
+// `test/usage-tracker.test.mts::projectEligibility`.
 
 describe("decideResearchAction — run reason", () => {
   test("queue-low when queue is below all gates and no floor fire", () => {

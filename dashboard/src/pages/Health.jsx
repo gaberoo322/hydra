@@ -109,7 +109,8 @@ export default function Health() {
             } : {}),
             ...(svc.scheduler?.consecutiveErrors > 0 ? { errors: `${svc.scheduler.consecutiveErrors} consecutive` } : {}),
             ...(svc.scheduler?.lastError ? { "last error": svc.scheduler.lastError.slice(0, 80) } : {}),
-            spend: `$${(svc.scheduler?.research?.dailySpendUsd || 0).toFixed(2)} / $${svc.scheduler?.research?.dailyCostCapUsd || 50}`,
+            // Subscription Usage Tracker replaced the dollar spend tile;
+            // the live weekly-quota % is on the Overview page (`/api/usage`).
           }} />
           <ServiceCard name="VikingDB" port={5000} status={svc.vikingdb?.status} details={svc.vikingdb?.latencyMs != null ? { latency: `${svc.vikingdb.latencyMs}ms` } : {}} />
           <ServiceCard name="OpenViking" port={1933} status={svc.openviking?.status} details={{

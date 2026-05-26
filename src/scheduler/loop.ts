@@ -19,11 +19,6 @@ import { reapStaleClaims } from "../backlog/reaper.ts";
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
 import { runResearchLoop } from "../research-loop.ts";
 import { getPerCycleCostCapUsd } from "../cost/cap.ts";
-import {
-  getDailySpendSurrogate,
-  todayDateString,
-  type DailySpendSurrogate,
-} from "../cost/surrogate.ts";
 import { getTargetName } from "../target-config.ts";
 import { pushToWorkQueue } from "../redis/work-queue.ts";
 import {
@@ -36,7 +31,6 @@ import {
   atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
   saveSchedulerStateVersioned, getSchedulerStateVersion,
   getSchedulerStateRaw,
-  getDailySpendRaw, setDailySpendRaw,
   getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
   getBlockedLastEscalation, setBlockedLastEscalation,
   getDigestLastWeekly, setDigestLastWeekly,
@@ -68,7 +62,14 @@ const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 6;
 const RESEARCH_BUILD_RATIO_MAX = parseFloat(process.env.HYDRA_RESEARCH_BUILD_RATIO_MAX) || 3;
 const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 2 * 60 * 60 * 1000; // 2 hours
-const DAILY_COST_CAP_USD = parseFloat(process.env.HYDRA_DAILY_COST_CAP_USD) || Infinity;
+
+// Note: the legacy `HYDRA_DAILY_COST_CAP_USD` env var, the dollar-based
+// daily-spend cap, and the `recordSpend`/`getDailySpend` helpers were
+// retired in the Subscription Usage Tracker B-series PRs. Quota gating
+// is now done by the autopilot via `/api/usage/eligibility` (PR B1),
+// using real Anthropic-quota numbers from `~/.claude/projects/*.jsonl`
+// instead of a HYDRA_TOKEN_USD_RATE × token estimate. The env var is
+// inert if still set.
 
 // Rolling merge-rate window (issue #232): the operator-visible mergeRate is
 // computed from the last N cycles in cycle-history (same source as
@@ -279,101 +280,22 @@ async function saveSchedulerState() {
 // Daily Codex spend cap
 // ---------------------------------------------------------------------------
 //
-// Hydra's Codex usage is bucketed on a weekly quota (ChatGPT subscription),
-// and in practice the bucket has been exhausted in ~3 days of unconstrained
-// research runs. The 2026-04-02/04 window saw $118+ of research spend and
-// then locked the quota until 2026-04-08 01:03 PDT, during which every
-// research cycle and every architect review failed silently.
+// Daily-spend cap retired (Subscription Usage Tracker B-series). The
+// historical context: between 2026-04-02 and 2026-04-04 the codex weekly
+// quota was exhausted in ~3 days of unconstrained research, and every
+// subsequent research cycle failed silently until the quota reset on
+// 2026-04-08. The dollar-based cap (HYDRA_DAILY_COST_CAP_USD) was the
+// fix for that.
 //
-// To prevent that recurrence: track daily research spend in Redis under
-// SCHEDULER_SPEND_KEY. Before each research cycle, check against
-// DAILY_COST_CAP_USD. If exceeded, skip research and notify the operator.
-// After each research cycle, add the reported cost to the counter. Counter
-// resets automatically when the date rolls over (in local time).
-//
-// Control-loop agents (planner / skeptic / executor) don't self-report cost,
-// so they aren't counted — this cap gates the largest single cost driver
-// (research) rather than trying to be a perfect budget. Accept the
-// incompleteness in exchange for no changes to the control-loop hot path.
-
-function todayLocalDate() {
-  // Use local date so the counter resets at local midnight, not UTC midnight.
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const dd = String(now.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-/**
- * Today's spend in USD, with a `source` discriminator that says where
- * the number came from so the spend-cap decision is auditable.
- *
- * Reads through `getDailySpendSurrogate` — the canonical daily-spend
- * aggregator. The surrogate combines two writer streams:
- *
- *   - autopilot subagent tokens × `HYDRA_TOKEN_USD_RATE` (post-cutover real spend)
- *   - the legacy `hydra:scheduler:daily-spend` blob written by `recordSpend()`
- *     (research-loop USD spend; only writer left for that path)
- *
- * `source` ∈ { "autopilot-surrogate" | "codex-recorded" | "mixed" | "none" }.
- * When `none`, the rate isn't configured AND nobody's called recordSpend —
- * the spend gate effectively disables itself, matching the prior behaviour.
- *
- * UTC date scheme matches the surrogate (whose Redis keys are UTC-dated).
- * The pre-canonicalisation code used a *local* date — the local/UTC
- * mismatch is a known operator-facing trade-off and is documented in
- * `surrogate.ts::todayDateString`; we follow the surrogate's convention so
- * the scheduler and `/api/metrics/cost` agree on what "today" means.
- */
-async function getDailySpend(): Promise<{ usd: number; date: string; source: DailySpendSurrogate["source"] }> {
-  try {
-    const s = await getDailySpendSurrogate();
-    return { usd: s.costUsd, date: s.date, source: s.source };
-  } catch (err: any) {
-    /* intentional: fallback to zero spend on Redis failure — non-critical for cycle operation */
-    console.error(`[Scheduler] getDailySpend via surrogate failed: ${err.message}`);
-    return { usd: 0, date: todayDateString(), source: "none" };
-  }
-}
-
-/**
- * Increment the legacy `hydra:scheduler:daily-spend` JSON blob — the
- * research-loop's spend channel into the surrogate (`legacyRecordSpendUsd`).
- *
- * Reads `getDailySpendRaw` directly (not `getDailySpend`) on purpose: the
- * canonical reader returns the *combined* surrogate figure, so feeding
- * that back into the legacy blob would double-count autopilot subagent
- * tokens on the next read. This writer owns one stream — the
- * research-loop's USD spend — and adds to that stream alone.
- *
- * Uses local-date rollover so the existing operator intuition ("daily
- * cap resets at local midnight") holds. The reader-side UTC mismatch is
- * documented on `getDailySpend`.
- */
-async function recordSpend(amountUsd) {
-  try {
-    const today = todayLocalDate();
-    let priorUsd = 0;
-    const raw = await getDailySpendRaw();
-    if (raw) {
-      try {
-        const stored = JSON.parse(raw);
-        if (stored.date === today) priorUsd = stored.usd || 0;
-      } catch { /* intentional: corrupt blob → start a fresh day */ }
-    }
-    const updated = {
-      date: today,
-      usd: priorUsd + (amountUsd || 0),
-      updatedAt: new Date().toISOString(),
-    };
-    await setDailySpendRaw(JSON.stringify(updated));
-    return updated;
-  } catch (err: any) {
-    console.error(`[Scheduler] Failed to record spend: ${err.message}`);
-    return null;
-  }
-}
+// Post-codex (ADR-0006), `HYDRA_TOKEN_USD_RATE` was never set in
+// production, so the surrogate-converted dollar spend was always $0 and
+// the cap never fired. The Subscription Usage Tracker
+// (src/cost/usage-tracker.ts) replaces this entirely: it reads real
+// Anthropic-quota percentages from the JSONL transcripts and exposes
+// `/api/usage/eligibility` for autopilot dispatch gating (PR B1). The
+// scheduler itself doesn't dispatch Claude Code subagents — research
+// runs via runResearchLoop, which goes through the autopilot path on
+// next dispatch, so the autopilot's eligibility gate covers it.
 
 /**
  * Snapshot the inputs the research-decision function needs. All Redis
@@ -415,7 +337,6 @@ async function loadResearchSnapshot(): Promise<ResearchSnapshot> {
   } catch (err: any) {
     console.error(`[Scheduler] Backlog count read failed: ${err.message}`);
   }
-  const spend = await getDailySpend();
   return {
     forced,
     queueLen,
@@ -428,8 +349,6 @@ async function loadResearchSnapshot(): Promise<ResearchSnapshot> {
     lastResearchAtMs,
     researchMinIntervalMs: RESEARCH_MIN_INTERVAL_MS,
     nowMs: Date.now(),
-    dailySpend: spend,
-    dailySpendCap: DAILY_COST_CAP_USD,
     backlog,
     queueThreshold: RESEARCH_QUEUE_THRESHOLD,
     ratioMax: RESEARCH_BUILD_RATIO_MAX,
@@ -490,22 +409,6 @@ async function executeResearchAction(
         case "throttled":
           console.log(`[Scheduler] Queue low (${snap.queueLen}) but research throttled — next research in ~${Math.round(action.remainingMs / 60_000)}min`);
           break;
-        case "spend-cap":
-          console.log(`[Scheduler] Daily spend cap reached — $${action.spentUsd.toFixed(2)} >= $${action.capUsd.toFixed(2)} (source: ${action.source}), skipping research`);
-          try {
-            await sendNotification({
-              type: "scheduler:spend_cap_reached",
-              payload: {
-                message: `Daily research spend cap reached: $${action.spentUsd.toFixed(2)} of $${action.capUsd.toFixed(2)}. Research paused until local midnight.`,
-                date: snap.dailySpend.date,
-                spentUsd: action.spentUsd,
-                capUsd: action.capUsd,
-              },
-            });
-          } catch (err: any) {
-            console.error(`[Scheduler] Failed to send spend cap notification: ${err.message}`);
-          }
-          break;
       }
       return true;
     }
@@ -558,9 +461,9 @@ async function executeResearchAction(
         // runResearchLoop so a crashing research call still leaves a
         // fingerprint in the metrics.
         await recordResearchFloorTriggered();
-        console.log(`[Scheduler] Queue has ${action.queueLen} items, but research floor fired (${action.floorReason}) — running research cycle (daily spend: $${snap.dailySpend.usd.toFixed(2)} of $${snap.dailySpendCap.toFixed(2)})`);
+        console.log(`[Scheduler] Queue has ${action.queueLen} items, but research floor fired (${action.floorReason}) — running research cycle`);
       } else {
-        console.log(`[Scheduler] Queue has ${action.queueLen} items (threshold: ${snap.queueThreshold}) — running research cycle (daily spend: $${snap.dailySpend.usd.toFixed(2)} of $${snap.dailySpendCap.toFixed(2)})`);
+        console.log(`[Scheduler] Queue has ${action.queueLen} items (threshold: ${snap.queueThreshold}) — running research cycle`);
       }
 
       try {
@@ -570,14 +473,6 @@ async function executeResearchAction(
         await recordResearchEvent();
         await saveSchedulerState();
 
-        // @ts-expect-error — migrate to proper types
-        const researchCost = research?.cost?.totalUsd || 0;
-        if (researchCost > 0) {
-          const updated = await recordSpend(researchCost);
-          if (updated) {
-            console.log(`[Scheduler] Daily research spend: $${updated.usd.toFixed(2)} of $${snap.dailySpendCap.toFixed(2)}`);
-          }
-        }
         // @ts-expect-error — migrate to proper types
         const autoQueued = research?.autoQueued || 0;
         console.log(`[Scheduler] Research complete — ${autoQueued} items auto-queued`);
@@ -924,7 +819,6 @@ async function stop(opts: { reason?: "deliberate" | "circuit-breaker" | "error-c
 }
 
 async function getStatus() {
-  const spend = await getDailySpend();
   const researchCount24h = await getResearchEventCount24h().catch(() => 0);
   const buildCount24h = await getBuildEventCount24h().catch(() => 0);
   const currentRatio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
@@ -1009,13 +903,12 @@ async function getStatus() {
        * without grepping logs. `null` on cold start.
        */
       lastResearchDecision: state.lastResearchDecision,
-      dailyCostCapUsd: DAILY_COST_CAP_USD,
-      dailySpendUsd: spend.usd,
-      dailySpendDate: spend.date,
-      /** Which accounting stream produced `dailySpendUsd` — let the dashboard
-       *  label the number so operators don't have to guess. Matches the
-       *  surrogate's `source` discriminator. */
-      dailySpendSource: spend.source,
+      // Dollar-based daily-spend cap retired (Subscription Usage Tracker
+      // B-series). Operators consume `/api/usage` and
+      // `/api/usage/eligibility` for the new quota view; the historical
+      // `dailyCostCapUsd` / `dailySpendUsd` / `dailySpendDate` /
+      // `dailySpendSource` fields are gone — dashboard now points at
+      // `/api/usage`.
       // Issue #327: floor telemetry — surfaces how often the capacity-floor
       // override has fired and whether it's currently suppressed because of
       // back-to-back empty forced cycles.
@@ -1053,7 +946,7 @@ async function autoStart(eventBus) {
 }
 
 export {
-  start, stop, getStatus, autoStart, getDailySpend, DAILY_COST_CAP_USD,
+  start, stop, getStatus, autoStart,
   RESEARCH_BUILD_RATIO_MAX, RESEARCH_QUEUE_THRESHOLD,
   formatDuration,
   // Exported for test coverage (issue #381 / #383):
