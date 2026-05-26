@@ -17,8 +17,8 @@
  *      on which writer(s) contributed data.
  *   4. `getCycleSubagentCostUsd` reads the per-cycle hash so the cost-cap
  *      can include surrogate spend.
- *   5. `checkCostCap` (in cost/cap.ts) sees the surrogate via the new
- *      `getCycleCostWithSurrogateUsd` helper — a tokens-only cycle trips
+ *   5. `checkCostCap` integration was retired with `src/cost/cap.ts` —
+ *      the per-cycle codex circuit breaker is gone (ADR-0006).
  *      the cap when the surrogate USD exceeds the threshold, even when
  *      no legacy codex `costMicrodollars` is recorded.
  *
@@ -46,9 +46,10 @@ const {
   getTokenUsdRate,
 } = await import("../src/cost/surrogate.ts");
 
-// Pre-imported here so the describe() block below stays sync (top-level
-// `await` inside a non-async callback breaks the esbuild transform).
-const { checkCostCap, getCycleCostWithSurrogateUsd } = await import("../src/cost/cap.ts");
+// `src/cost/cap.ts` (the per-cycle codex circuit breaker) was retired
+// in the Cost-Module consolidation PR. The cap-integration test block
+// at the end of this file was deleted with it; only the surrogate
+// behavior tests remain.
 
 let testRedis: any;
 
@@ -285,49 +286,8 @@ describe("getCycleSubagentCostUsd", () => {
   });
 });
 
-describe("cost-cap integration (issue #394 acceptance: cap reads surrogate)", () => {
-  test("checkCostCap sees surrogate-only cycle spend", async () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "100"; // aggressive rate so tests are deterministic
-    process.env.HYDRA_PER_CYCLE_COST_CAP_USD = "5";
-
-    const cycleId = "cycle-surrogate-trip";
-    // 60k tokens × $100/M = $6 — over the $5 cap.
-    await recordSubagentTokens("hydra-dev", 60_000, { cycleId });
-
-    const status = await checkCostCap(cycleId);
-    assert.equal(status.exceeded, true);
-    assert.equal(status.source, "autopilot-surrogate");
-    assert.ok(status.surrogateUsd! >= 5);
-    assert.match(status.reason, /Cost cap exceeded/);
-
-    delete process.env.HYDRA_PER_CYCLE_COST_CAP_USD;
-    delete process.env.HYDRA_TOKEN_USD_RATE;
-  });
-
-  test("checkCostCap stays under cap when no surrogate writer has fired", async () => {
-    process.env.HYDRA_PER_CYCLE_COST_CAP_USD = "5";
-    const status = await checkCostCap("cycle-empty");
-    assert.equal(status.exceeded, false);
-    assert.equal(status.source, "none");
-    assert.equal(status.costUsd, 0);
-    delete process.env.HYDRA_PER_CYCLE_COST_CAP_USD;
-  });
-
-  test("getCycleCostWithSurrogateUsd labels source correctly", async () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "10";
-    const cycleId = "cycle-mixed";
-    // Surrogate contribution
-    await recordSubagentTokens("hydra-dev", 100_000, { cycleId });
-    // Legacy codex contribution — write directly to the cycle-costs hash
-    // that getCycleCostMicrodollars reads (key shape: hydra:cycle:<id>:costs).
-    await testRedis.hset(`hydra:cycle:${cycleId}:costs`, "costMicrodollars", String(2_000_000)); // $2
-
-    const combined = await getCycleCostWithSurrogateUsd(cycleId);
-    // Surrogate: 100k × $10/M = $1. Legacy: $2. Total: $3.
-    assert.equal(combined.legacyUsd, 2);
-    assert.equal(combined.surrogateUsd, 1);
-    assert.equal(combined.costUsd, 3);
-    assert.equal(combined.source, "mixed");
-    delete process.env.HYDRA_TOKEN_USD_RATE;
-  });
-});
+// The cost-cap integration block (3 tests) was retired with
+// `src/cost/cap.ts`. The dollar-based per-cycle cap surfaced the
+// codex-era circuit breaker; codex is gone (ADR-0006), and the
+// Subscription Usage Tracker now owns Anthropic-quota gating (PR A/B
+// series — exercised by `test/usage-tracker.test.mts`).

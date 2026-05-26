@@ -14,7 +14,7 @@ import {
   getCycleCosts,
 } from "../redis/cycle-metrics.ts";
 import { getMetricsTrend } from "./trend.ts";
-import type { AgentRun, CycleSummary } from "../cost/attribution.ts";
+import type { AgentRun, CycleSummary } from "../cost/index.ts";
 
 /**
  * Load the last N cycles as `CycleSummary[]`, joining the metrics trend with

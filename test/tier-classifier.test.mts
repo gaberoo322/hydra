@@ -43,7 +43,11 @@ describe("tier classifier — Tier 0 (Untouchable Core)", () => {
     // redis-adapter.ts was retired in the ADR-0009 closure (shim deleted; all
     // callers go directly to src/redis/<domain>.ts).
     assert.equal(isUntouchable("src/redis-adapter.ts"), false);
-    assert.equal(isUntouchable("src/cost/cap.ts"), true);
+    // src/cost/cap.ts was retired with the codex-era cleanup; the whole
+    // src/cost/ directory is now Tier 0 via the directory-prefix matcher.
+    assert.equal(isUntouchable("src/cost/surrogate.ts"), true);
+    assert.equal(isUntouchable("src/cost/usage-tracker.ts"), true);
+    assert.equal(isUntouchable("src/cost/index.ts"), true);
     assert.equal(isUntouchable("scripts/deploy.sh"), true);
     assert.equal(isUntouchable(".github/workflows/ci.yml"), true);
 
