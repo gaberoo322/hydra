@@ -2,14 +2,15 @@ import { useSpriteAnimations } from "../../hooks/useSpriteAnimations.js";
 import AutopilotPavilion from "./AutopilotPavilion.jsx";
 import ActiveDispatchesStrip from "./ActiveDispatchesStrip.jsx";
 import HabitatGrid from "./HabitatGrid.jsx";
+import OakTownCrier from "./OakTownCrier.jsx";
 import Attribution from "./Attribution.jsx";
 
 /**
  * NowPixel — pixel-art habitat dashboard at /now-pixel.
  *
- * Slice 4 of /now-pixel (#642, #646). The page now owns the sprite-
- * animation hook so HabitatGrid + AutopilotPavilion can share the same
- * map of per-class animations (excited / cheering / hurt / thinking).
+ * Slice 5 of /now-pixel (#642, #647). Layout now includes the Infirmary
+ * (services HP bars) in HabitatGrid's center column, the alerts notice
+ * board pinned to the Pavilion, and Oak town crier on the right edge.
  *
  * The route is intentionally NOT linked from the main nav — reachable
  * only by typing /now-pixel into the address bar. The atomic swap to
@@ -28,7 +29,12 @@ export default function NowPixel({ ws }) {
         </p>
       </header>
       <AutopilotPavilion />
-      <HabitatGrid anim={anim} />
+      <div className="flex gap-4 items-stretch">
+        <div className="flex-1 min-w-0">
+          <HabitatGrid anim={anim} />
+        </div>
+        <OakTownCrier ws={ws} />
+      </div>
       <ActiveDispatchesStrip />
       <Attribution />
     </div>

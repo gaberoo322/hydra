@@ -182,3 +182,54 @@ export const CLASS_SIDE: Record<ClassName, Side> = {
   discover_target: "target",
   health: "center",
 };
+
+/**
+ * Class → speech-bubble color for the Oak town crier (slice 5 of #642).
+ * Picked so orch-side and target-side classes have visually distinct
+ * families: orch = forge/blue family, target = green/amber family,
+ * health = healer pink. Values are CSS color strings.
+ */
+export const CLASS_BUBBLE_COLOR: Record<ClassName, string> = {
+  // Orch side — blue / orange "Forge" family
+  dev_orch: "#fb923c", // orange-400 (the "Forge" mentioned in the spec)
+  qa_orch: "#60a5fa", // blue-400
+  research_orch: "#a78bfa", // violet-400
+  design_concept_orch: "#f472b6", // pink-400
+  sweep_orch: "#7dd3fc", // sky-300
+  discover_orch: "#c084fc", // purple-400
+  // Target side — green / amber family
+  dev_target: "#4ade80", // green-400
+  qa_target: "#facc15", // yellow-400
+  research_target: "#34d399", // emerald-400
+  sweep_target: "#86efac", // green-300
+  discover_target: "#fbbf24", // amber-400
+  // Healer pink for the central health signal.
+  health: "#f9a8d4", // pink-300
+};
+
+/**
+ * Map any source identifier (`subagent_type`, slot name, free-form
+ * "source") to a known class for color lookup. Falls back to a neutral
+ * grey when nothing matches so the bubble still renders.
+ */
+export function resolveBubbleColor(source: string | null | undefined): string {
+  if (!source) return "#9ca3af"; // zinc-400 fallback
+  const key = source as ClassName;
+  if (key in CLASS_BUBBLE_COLOR) return CLASS_BUBBLE_COLOR[key];
+  // Some events come in with the skill name (hydra-dev, hydra-target-build,
+  // etc.) instead of the class. Best-effort map them too.
+  const fromSkill: Record<string, ClassName> = {
+    "hydra-dev": "dev_orch",
+    "hydra-qa": "qa_orch",
+    "hydra-research": "research_orch",
+    "hydra-target-build": "dev_target",
+    "hydra-target-research": "research_target",
+    "hydra-doctor": "health",
+    "hydra-sweep": "sweep_orch",
+    "hydra-target-sweep": "sweep_target",
+    "hydra-discover": "discover_orch",
+    "hydra-target-discover": "discover_target",
+  };
+  const resolved = fromSkill[source];
+  return resolved ? CLASS_BUBBLE_COLOR[resolved] : "#9ca3af";
+}
