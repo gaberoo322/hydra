@@ -161,6 +161,100 @@ export function deriveDispatchesStripState(
 }
 
 // ---------------------------------------------------------------------------
+// ZoneState — derived from /api/autopilot/runs/current's last turn snapshot.
+// Drives HabitatGrid.jsx (slice 3 of #642, #645).
+// ---------------------------------------------------------------------------
+
+import {
+  PIPELINE_CLASSES,
+  SIGNAL_CLASSES,
+  type PipelineClass,
+  type SignalClass,
+  type ClassName,
+} from "./sprite-map.ts";
+
+export type ZoneStatus = "sleeping" | "active";
+
+export interface ZoneState {
+  /** Map of class → "active" / "sleeping". Covers all 12 classes. */
+  zones: Record<ClassName, ZoneStatus>;
+  /**
+   * Last-fired epoch (Unix seconds) for each signal class — propagated
+   * through so the sprite picker can seed pool selection on the same
+   * epoch the cooldown logic ran on.
+   */
+  signalSeeds: Record<SignalClass, number>;
+  scope: "all" | "orch-only" | "target-only";
+  /**
+   * `null` when /api/autopilot/runs/current returns no run (autopilot
+   * idle). Caller renders everything as sleeping.
+   */
+  runStatus: string | null;
+}
+
+/**
+ * Subset of /api/autopilot/runs/current we actually depend on. Keeping
+ * the shape narrow here means a server-side payload change only has to
+ * preserve THIS subset to stay compatible.
+ */
+export interface AutopilotRunPayload {
+  status?: string;
+  limits?: { scope?: "all" | "orch-only" | "target-only" };
+  turns?: Array<{
+    slots_snapshot?: Partial<Record<PipelineClass, unknown>>;
+    signals_snapshot?: Partial<Record<SignalClass, number>>;
+  }>;
+}
+
+/**
+ * Window (seconds) within which a signal class is "active" after its
+ * last fire. Operator's grilling session locked this at 60s.
+ */
+export const SIGNAL_ACTIVE_WINDOW_SEC = 60;
+
+/**
+ * Derive per-class zone status from the autopilot run snapshot.
+ *
+ * - Pipeline class is "active" iff `slots_snapshot[cls]` is a non-null
+ *   object (the autopilot writes `null` for empty slots).
+ * - Signal class is "active" iff `signals_snapshot[cls]` was within the
+ *   last `SIGNAL_ACTIVE_WINDOW_SEC` seconds relative to `nowEpoch`.
+ *
+ * Pure function — `nowEpoch` is an explicit input so tests can pin time.
+ */
+export function deriveZoneState(
+  payload: AutopilotRunPayload | null | undefined,
+  nowEpoch: number,
+): ZoneState {
+  const lastTurn = payload?.turns?.[payload.turns.length - 1];
+  const slots = lastTurn?.slots_snapshot ?? {};
+  const signals = lastTurn?.signals_snapshot ?? {};
+  const scope = payload?.limits?.scope ?? "all";
+  const runStatus = payload?.status ?? null;
+  // When the run isn't currently running, fall back to all-sleeping —
+  // a stale snapshot from a long-dead run would otherwise paint the
+  // habitat as eternally-busy.
+  const stale = !runStatus || runStatus !== "running";
+
+  const zones = {} as Record<ClassName, ZoneStatus>;
+  for (const cls of PIPELINE_CLASSES) {
+    zones[cls] = !stale && slots[cls] != null ? "active" : "sleeping";
+  }
+  const signalSeeds = {} as Record<SignalClass, number>;
+  for (const cls of SIGNAL_CLASSES) {
+    const fired = Number(signals[cls] ?? 0);
+    signalSeeds[cls] = Number.isFinite(fired) ? fired : 0;
+    const within =
+      !stale &&
+      Number.isFinite(fired) &&
+      fired > 0 &&
+      nowEpoch - fired < SIGNAL_ACTIVE_WINDOW_SEC;
+    zones[cls] = within ? "active" : "sleeping";
+  }
+  return { zones, signalSeeds, scope, runStatus };
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
