@@ -6,6 +6,17 @@ on:
   push:
     branches: [master]
 
+# Issue #629: cancel superseded CI runs on the same ref. With a single
+# self-hosted runner handling all 7 parallel jobs sequentially, a force-push
+# during a rebase used to leave the prior run queued — burning runner
+# capacity on a sha nobody cares about anymore. Grouping by workflow + ref
+# means each PR keeps at most one in-flight CI run (the newest), while
+# master's CI is unaffected because its `github.ref` is distinct from any
+# PR ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 # Minimum permissions required by the workflow:
 # - `contents: read` for actions/checkout and `gh pr diff` (REST).
 # - `pull-requests: read` for `gh pr view --json body` (GraphQL) used by the
