@@ -1,0 +1,181 @@
+/**
+ * Schemas for the Dashboard v2 Now page (issue #618, PRD #615).
+ *
+ * Slice 3 — five endpoints under `/api/v2/now/*`:
+ *
+ *   GET /api/v2/now/service-strip       → ServiceStripResponse
+ *   GET /api/v2/now/autopilot-tick      → AutopilotTickResponse (thin wrapper)
+ *   GET /api/v2/now/active-dispatches   → ActiveDispatchesResponse
+ *   GET /api/v2/now/cost-burn           → CostBurnResponse
+ *   GET /api/v2/now/alerts              → AlertsNowResponse
+ *
+ * Schema discipline mirrors `v2/today.ts` (issue #616, ADR-0011): `.strict()`
+ * objects, `z.infer<>` for canonical types, structured
+ * `schema-validation-failed` error envelope at the route boundary.
+ */
+
+import { z } from "zod";
+
+// ---------------------------------------------------------------------------
+// Service strip
+// ---------------------------------------------------------------------------
+
+export const ServiceStatusSchema = z.enum(["ok", "degraded", "down"]);
+
+export const ServiceRowSchema = z
+  .object({
+    service: z.string(),
+    status: ServiceStatusSchema,
+    lastChecked: z.string(),
+    lastError: z.string().optional(),
+    latencyMs: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export const ServiceStripResponseSchema = z
+  .object({
+    rows: z.array(ServiceRowSchema),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type ServiceStripResponse = z.infer<typeof ServiceStripResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Autopilot tick (thin wrapper)
+// ---------------------------------------------------------------------------
+
+/**
+ * Shape returned by `GET /api/v2/now/autopilot-tick`. This is a thin
+ * adapter over the existing `/api/scheduler/status` + `/api/autopilot/runs/current`
+ * surfaces — the dashboard widget needs at most a handful of fields, so
+ * we project them into a stable shape rather than passing the underlying
+ * payloads through unchanged.
+ *
+ * - `running` — scheduler `running` flag.
+ * - `lastTickAt` — heartbeat surface for the housekeeping tick (issue #397).
+ *   May be `null` when the scheduler hasn't ticked yet this process.
+ * - `currentRun` — projected current autopilot run, when one is in
+ *   `status: running`. `null` otherwise.
+ */
+export const AutopilotCurrentRunSchema = z
+  .object({
+    id: z.string(),
+    startedAt: z.string(),
+    trigger: z.string(),
+    turns: z.number().int().nonnegative(),
+    dispatches: z.number().int().nonnegative(),
+    elapsedSeconds: z.number().int().nonnegative(),
+    ageSeconds: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const AutopilotTickResponseSchema = z
+  .object({
+    running: z.boolean(),
+    lastTickAt: z.string().nullable(),
+    currentRun: AutopilotCurrentRunSchema.nullable(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type AutopilotTickResponse = z.infer<typeof AutopilotTickResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Active dispatches
+// ---------------------------------------------------------------------------
+
+export const DispatchSourceSchema = z.enum(["autopilot", "operator"]);
+
+export const DispatchSchema = z
+  .object({
+    id: z.string(),
+    classLabel: z.string(),
+    source: DispatchSourceSchema,
+    startedAt: z.string(),
+    currentStep: z.string().optional(),
+    issueRef: z.string().optional(),
+    prRef: z.string().optional(),
+  })
+  .strict();
+
+export const ActiveDispatchesResponseSchema = z
+  .object({
+    items: z.array(DispatchSchema),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type ActiveDispatchesResponse = z.infer<typeof ActiveDispatchesResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Cost burn
+// ---------------------------------------------------------------------------
+
+export const CostBurnResponseSchema = z
+  .object({
+    /** Coarse burn-rate spark — see `src/aggregators/cost-burn.ts` JSDoc. */
+    lastHourSpark: z.array(z.number()),
+    daySpent: z.number().nonnegative(),
+    dailyBudget: z.number().nonnegative(),
+    headroomPct: z.number().min(0).max(100),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type CostBurnResponse = z.infer<typeof CostBurnResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Alerts (thin wrapper)
+// ---------------------------------------------------------------------------
+
+/**
+ * Query schema for `GET /api/v2/now/alerts`. Defaults to a 60-minute
+ * window and a 25-item limit — the Now page widget is small.
+ */
+export const AlertsNowQuerySchema = z
+  .object({
+    limit: z.coerce
+      .number({ message: "limit must be a number" })
+      .int({ message: "limit must be an integer" })
+      .min(1, { message: "limit must be >= 1" })
+      .max(100, { message: "limit must be <= 100" })
+      .default(25),
+    sinceMinutes: z.coerce
+      .number({ message: "sinceMinutes must be a number" })
+      .int({ message: "sinceMinutes must be an integer" })
+      .min(1, { message: "sinceMinutes must be >= 1" })
+      .max(24 * 60, { message: "sinceMinutes must be <= 1440" })
+      .default(60),
+  })
+  .strict();
+
+export type AlertsNowQuery = z.infer<typeof AlertsNowQuerySchema>;
+
+/**
+ * One alert row. Alerts are stored as opaque JSON in `hydra:alerts`; we
+ * pass through the fields we know about and tolerate extras with
+ * `.passthrough()` so the dashboard can render newly-added fields without
+ * a schema change.
+ *
+ * Required fields (the existing `/api/alerts` writers always set them):
+ *   id, timestamp, message, severity
+ */
+export const AlertRowSchema = z
+  .object({
+    id: z.string(),
+    timestamp: z.string(),
+    message: z.string(),
+    severity: z.string(),
+  })
+  .passthrough();
+
+export const AlertsNowResponseSchema = z
+  .object({
+    items: z.array(AlertRowSchema),
+    windowMinutes: z.number().int().positive(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type AlertsNowResponse = z.infer<typeof AlertsNowResponseSchema>;

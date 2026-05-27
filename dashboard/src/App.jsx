@@ -22,6 +22,7 @@ import AgentStream from "./pages/AgentStream.jsx";
 // Dashboard v2 — issue #616 / PRD #615. Slice 1 ships /v2/today only,
 // reachable by URL. Sidebar wiring + atomic swap arrive in later slices.
 import Today from "./pages/v2/Today.jsx";
+import Now from "./pages/v2/Now.jsx";
 
 export default function App() {
   const ws = useWebSocket();
@@ -54,6 +55,8 @@ export default function App() {
           <Route path="/agents/stream" element={<AgentStream ws={ws} />} />
           {/* Dashboard v2 — slice 1 tracer-bullet (issue #616 / PRD #615). */}
           <Route path="/v2/today" element={<Today />} />
+          {/* Dashboard v2 — slice 3 (issue #618 / PRD #615). */}
+          <Route path="/v2/now" element={<Now ws={ws} />} />
         </Routes>
       </Layout>
     </ToastProvider>

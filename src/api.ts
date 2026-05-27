@@ -32,6 +32,7 @@ import { createAgentsRouter } from "./api/agents.ts";
 import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
 import { createV2TodayRouter } from "./api/v2/today.ts";
+import { createV2NowRouter } from "./api/v2/now.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -84,6 +85,8 @@ function createApi(eventBus) {
   // Dashboard v2 — issue #616 / PRD #615. New surface at /api/v2/*; existing
   // routes unchanged. Atomic swap to v2-only happens in a later slice.
   api.use(createV2TodayRouter());
+  // Now page — slice 3 (issue #618).
+  api.use(createV2NowRouter());
   api.use(createMiscRouter(eventBus));
   api.use(createChecklistRouter());
   api.use(createOutcomesRouter());
