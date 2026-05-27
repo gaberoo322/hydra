@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
 import HabitatZone from "./HabitatZone.jsx";
+import Infirmary from "./Infirmary.jsx";
 import { deriveZoneState } from "./derive-sprite-state.ts";
 
 /**
@@ -100,17 +101,14 @@ export default function HabitatGrid({ anim = null }) {
           </div>
         </div>
 
-        <div className="flex flex-col items-center min-w-[120px]">
-          <ColumnHeader>Infirmary</ColumnHeader>
+        <div className="flex flex-col items-center min-w-[130px] gap-2">
           <HabitatZone
             className="health"
             status={zoneState.zones.health}
             signalSeed={zoneState.signalSeeds.health}
             animation={animFor("health")}
           />
-          <div className="text-[9px] text-zinc-600 mt-2 text-center max-w-[110px]">
-            Services strip lands in slice 5
-          </div>
+          <Infirmary />
         </div>
 
         <div

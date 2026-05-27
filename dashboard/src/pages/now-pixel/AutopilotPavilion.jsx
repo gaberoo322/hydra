@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
 import { derivePavilionState } from "./derive-sprite-state.ts";
+import AlertsNoticeBoard from "./AlertsNoticeBoard.jsx";
 
 /**
  * AutopilotPavilion — blonde-mustache-Ash trainer sprite + run stats.
@@ -35,13 +36,16 @@ export default function AutopilotPavilion() {
         <h2 className="text-sm uppercase tracking-wide text-zinc-400">
           Autopilot Pavilion
         </h2>
-        <span className="text-xs text-zinc-500">
-          {state.mode === "running"
-            ? "trainer is on the job"
-            : state.mode === "stopped"
-              ? "trainer is asleep"
-              : "trainer is waiting"}
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-zinc-500">
+            {state.mode === "running"
+              ? "trainer is on the job"
+              : state.mode === "stopped"
+                ? "trainer is asleep"
+                : "trainer is waiting"}
+          </span>
+          <AlertsNoticeBoard />
+        </div>
       </header>
       <div className="flex items-center gap-6">
         <div className="shrink-0">
