@@ -32,7 +32,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../..");
 const pagesRoot = path.join(repoRoot, "dashboard/src/pages");
 
-const NOW_CLASSIC_ENTRY = path.join(pagesRoot, "Now.jsx");
+// Slice 7 PR2 renamed Now.jsx → NowClassic.jsx as part of the atomic
+// swap (epic #642 / #649). NowPixel.jsx is now the canonical /now; the
+// audit still runs so a future regression that drops an endpoint from
+// /now while it still lives on /now-classic gets caught.
+const NOW_CLASSIC_ENTRY = path.join(pagesRoot, "NowClassic.jsx");
 const NOW_PIXEL_ENTRY = path.join(pagesRoot, "now-pixel/NowPixel.jsx");
 
 // Match useApi("/foo/bar") and apiFetch("/foo/bar") — handles backticks +
