@@ -19,6 +19,9 @@ import Checklist from "./pages/Checklist.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
 import AgentStream from "./pages/AgentStream.jsx";
+// Dashboard v2 — issue #616 / PRD #615. Slice 1 ships /v2/today only,
+// reachable by URL. Sidebar wiring + atomic swap arrive in later slices.
+import Today from "./pages/v2/Today.jsx";
 
 export default function App() {
   const ws = useWebSocket();
@@ -49,6 +52,8 @@ export default function App() {
               cross-link filter. The bare /agents route still maps to the
               memory page. */}
           <Route path="/agents/stream" element={<AgentStream ws={ws} />} />
+          {/* Dashboard v2 — slice 1 tracer-bullet (issue #616 / PRD #615). */}
+          <Route path="/v2/today" element={<Today />} />
         </Routes>
       </Layout>
     </ToastProvider>
