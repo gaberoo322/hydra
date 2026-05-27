@@ -2,22 +2,24 @@ import { useEffect, useRef, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
 import HabitatZone from "./HabitatZone.jsx";
 import Infirmary from "./Infirmary.jsx";
-import { deriveZoneState } from "./derive-sprite-state.ts";
+import { deriveZoneState, deriveCooldown } from "./derive-sprite-state.ts";
 
 /**
  * HabitatGrid — 2-column habitat layout for /now-pixel.
  *
- * Slice 3 (#645) introduced the layout. Slice 4 (#646) plugs in sprite
- * animations: cheering/hurt come in via the `anim` prop from the parent
- * (WS-driven, see useSpriteAnimations); excited is poll-driven here by
- * watching slots_snapshot for null → occupied transitions.
+ * Slice 6 of /now-pixel (#642, #648) — threads the autopilot run payload
+ * (`runs/current`) down so each zone can render its subagent occupant
+ * + HP bar + cooldown clock without an extra fetch.
  *
- * `anim` is an opaque hook handle from useSpriteAnimations. We call
- * `anim.fireExcited(cls)` on each transition. If anim is missing (e.g.
- * the page is mounted without a WS hook in test), excited gating still
- * works — the rest of the animations just won't fire.
+ * Hover-link: `hoveredSubagentId` / `onSubagentHover` come from NowPixel
+ * so the in-zone sprite and the ActiveDispatchesStrip mirror highlight
+ * together when one is hovered.
  */
-export default function HabitatGrid({ anim = null }) {
+export default function HabitatGrid({
+  anim = null,
+  hoveredSubagentId = null,
+  onSubagentHover = () => {},
+}) {
   const { data } = useApi("/autopilot/runs/current", { poll: 10_000 });
 
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
@@ -29,9 +31,16 @@ export default function HabitatGrid({ anim = null }) {
   const zoneState = deriveZoneState(data, now);
   const scope = zoneState.scope;
 
-  // Track previous occupancy per class so we can fire "excited" on
-  // null → occupied transitions. The autopilot doesn't XADD a "slot
-  // opened" event, so poll-derived is the only path.
+  // Pull out the latest slot snapshot so we can hand each zone its
+  // subagent details (skill, task_id, partial_tokens).
+  const lastTurn = data?.turns?.[data.turns.length - 1] ?? null;
+  const slotsSnapshot = lastTurn?.slots_snapshot ?? {};
+  const signalsSnapshot = lastTurn?.signals_snapshot ?? {};
+  const hardMax =
+    data?.limits?.subagent_hard_max_tokens ??
+    data?.limits?.subagent_max_tokens ??
+    800_000;
+
   const prevOccupancyRef = useRef({});
   useEffect(() => {
     if (!anim?.fireExcited) return;
@@ -44,23 +53,26 @@ export default function HabitatGrid({ anim = null }) {
     }
   }, [zoneState.zones, anim]);
 
-  const orchClasses = [
+  const orchPipelineClasses = [
     "dev_orch",
     "qa_orch",
     "research_orch",
     "design_concept_orch",
-    "sweep_orch",
-    "discover_orch",
   ];
-  const targetClasses = [
-    "dev_target",
-    "qa_target",
-    "research_target",
-    "sweep_target",
-    "discover_target",
-  ];
+  const orchSignalClasses = ["sweep_orch", "discover_orch"];
+  const targetPipelineClasses = ["dev_target", "qa_target", "research_target"];
+  const targetSignalClasses = ["sweep_target", "discover_target"];
 
   const animFor = (cls) => anim?.animations?.[cls] ?? null;
+  const subagentFor = (cls) => slotsSnapshot[cls] ?? null;
+  const cooldownFor = (cls) =>
+    deriveCooldown(cls, Number(signalsSnapshot[cls] ?? 0), now);
+
+  const sharedZoneProps = {
+    hoveredSubagentId,
+    onSubagentHover,
+    hardMax,
+  };
 
   return (
     <section
@@ -89,13 +101,26 @@ export default function HabitatGrid({ anim = null }) {
         >
           <ColumnHeader>Orchestrator</ColumnHeader>
           <div className="grid grid-cols-3 gap-2">
-            {orchClasses.map((cls) => (
+            {orchPipelineClasses.map((cls) => (
               <HabitatZone
                 key={cls}
                 className={cls}
                 status={zoneState.zones[cls]}
                 signalSeed={zoneState.signalSeeds[cls] ?? null}
                 animation={animFor(cls)}
+                subagent={subagentFor(cls)}
+                {...sharedZoneProps}
+              />
+            ))}
+            {orchSignalClasses.map((cls) => (
+              <HabitatZone
+                key={cls}
+                className={cls}
+                status={zoneState.zones[cls]}
+                signalSeed={zoneState.signalSeeds[cls] ?? null}
+                animation={animFor(cls)}
+                cooldown={cooldownFor(cls)}
+                {...sharedZoneProps}
               />
             ))}
           </div>
@@ -107,6 +132,8 @@ export default function HabitatGrid({ anim = null }) {
             status={zoneState.zones.health}
             signalSeed={zoneState.signalSeeds.health}
             animation={animFor("health")}
+            cooldown={cooldownFor("health")}
+            {...sharedZoneProps}
           />
           <Infirmary />
         </div>
@@ -119,13 +146,26 @@ export default function HabitatGrid({ anim = null }) {
         >
           <ColumnHeader>Target</ColumnHeader>
           <div className="grid grid-cols-3 gap-2">
-            {targetClasses.map((cls) => (
+            {targetPipelineClasses.map((cls) => (
               <HabitatZone
                 key={cls}
                 className={cls}
                 status={zoneState.zones[cls]}
                 signalSeed={zoneState.signalSeeds[cls] ?? null}
                 animation={animFor(cls)}
+                subagent={subagentFor(cls)}
+                {...sharedZoneProps}
+              />
+            ))}
+            {targetSignalClasses.map((cls) => (
+              <HabitatZone
+                key={cls}
+                className={cls}
+                status={zoneState.zones[cls]}
+                signalSeed={zoneState.signalSeeds[cls] ?? null}
+                animation={animFor(cls)}
+                cooldown={cooldownFor(cls)}
+                {...sharedZoneProps}
               />
             ))}
             <HabitatZone
