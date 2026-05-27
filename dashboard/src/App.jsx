@@ -28,7 +28,7 @@ export default function App() {
           {/* /now-pixel — Pokemon-habitat preview (epic #642, slice 2).
               Reachable by direct URL only; the nav link arrives in slice 7
               and the atomic swap to /now ships after that. */}
-          <Route path="/now-pixel" element={<NowPixel />} />
+          <Route path="/now-pixel" element={<NowPixel ws={ws} />} />
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/explore" element={<Explore />} />
           <Route path="/explore/:tab" element={<Explore />} />
