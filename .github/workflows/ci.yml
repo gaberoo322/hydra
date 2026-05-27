@@ -343,32 +343,16 @@ jobs:
     needs: [test, dashboard-build, npm-audit-orchestrator, npm-audit-dashboard]
     runs-on: self-hosted
     steps:
-      - name: Sync to master
-        # Self-healing: /home/gabe/hydra may be sitting on a feature branch from
-        # an interactive operator session. A direct `git pull --ff-only` aborts
-        # in that state. Switch to master first, but never silently clobber
-        # operator WIP — fail loud if there are uncommitted tracked changes.
-        run: |
-          cd /home/gabe/hydra
-          if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-            echo "ERROR: /home/gabe/hydra has uncommitted tracked changes — refusing to deploy."
-            git status
-            exit 1
-          fi
-          git fetch --quiet origin master
-          git checkout master
-          git pull --ff-only origin master
-
-      - name: Install dependencies
-        run: cd /home/gabe/hydra && npm ci
-
-      - name: Build dashboard
-        run: cd /home/gabe/hydra/dashboard && npm ci && npm run build
-
-      - name: Restart service
-        run: systemctl --user restart hydra-orchestrator.service
-
-      - name: Verify health
-        run: |
-          sleep 5
-          curl -sf http://localhost:4000/api/health | grep -q '"status":"ok"'
+      # Issue #631: delegate the full deploy flow (sync → npm ci → sync-skills
+      # → dashboard build → autopilot-watchdog install → service restart →
+      # health check) to scripts/deploy.sh. Previously the workflow inlined a
+      # truncated 5-step version that diverged from the script — most
+      # dangerously, the inline path was missing `bash scripts/sync-skills.sh`
+      # (the documented step 3 of the deploy flow, introduced in #444 after
+      # the 2026-05-15 silent-wedge incident) and missed the
+      # hydra-autopilot-watchdog systemd unit install (#508). The script is
+      # the single source of truth for what runs on every deploy — manual
+      # and automatic must take the same path. The script handles its own
+      # `cd "$HYDRA_ROOT"` and master-sync guard internally.
+      - name: Deploy
+        run: bash /home/gabe/hydra/scripts/deploy.sh
