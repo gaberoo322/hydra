@@ -12,6 +12,7 @@ export default function HabitatZone({
   status,
   signalSeed = null,
   placeholder = null,
+  animation = null,
 }) {
   return (
     <div
@@ -42,6 +43,7 @@ export default function HabitatZone({
           className={className}
           status={status}
           signalSeed={signalSeed}
+          animation={animation}
         />
       )}
       <div

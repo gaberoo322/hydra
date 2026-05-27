@@ -14,6 +14,7 @@ import { cleanWorkQueue } from "./redis/work-queue.ts";
 import { recordCycleSide, classifySide } from "./capacity-floor.ts";
 import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
+import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
 
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
@@ -146,7 +147,15 @@ function startConsumers(eventBus) {
     }, { count: 1, blockMs: 10000 }),
   );
 
-  console.log("[Hydra] Background consumers started (meta, notifications, dlq)");
+  // Slot-events bridge — re-broadcasts hydra:autopilot:slot-events over WS
+  // for the /now-pixel dashboard's one-shot sprite animations (epic #642,
+  // slice 4 of #646). Read-only — the autopilot's own consumer group is
+  // unaffected.
+  startConsumerWithRecovery("slot-events-bridge", () =>
+    startSlotEventsBridge(eventBus),
+  );
+
+  console.log("[Hydra] Background consumers started (notifications, dlq, slot-events-bridge)");
 }
 
 // ---------------------------------------------------------------------------
