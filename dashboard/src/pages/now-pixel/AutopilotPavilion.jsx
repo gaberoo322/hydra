@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
-import { derivePavilionState } from "./derive-sprite-state.ts";
+import { derivePavilionState, deriveExp } from "./derive-sprite-state.ts";
 import AlertsNoticeBoard from "./AlertsNoticeBoard.jsx";
+import HpBar from "./HpBar.jsx";
 
 /**
  * AutopilotPavilion — blonde-mustache-Ash trainer sprite + run stats.
@@ -17,6 +18,14 @@ import AlertsNoticeBoard from "./AlertsNoticeBoard.jsx";
 export default function AutopilotPavilion() {
   const { data, error } = useApi("/now/autopilot-tick", { poll: 5_000 });
   const state = derivePavilionState(data);
+  // Slice 6: fetch the run row in parallel for LV/EXP derivation. The
+  // poll cadence is half as frequent as the tick to keep the request
+  // budget reasonable; LV moves slowly anyway.
+  const { data: runData } = useApi("/autopilot/runs/current", { poll: 10_000 });
+  const exp = deriveExp(
+    Number(runData?.cumulative_tokens ?? 0),
+    Number(runData?.limits?.token_budget ?? 0),
+  );
 
   const [pulseKey, setPulseKey] = useState(0);
   const prevTickRef = useRef(state.lastTickAt);
@@ -64,7 +73,7 @@ export default function AutopilotPavilion() {
         </div>
         <div className="flex-1 min-w-0">
           {state.mode === "running" ? (
-            <PavilionStats state={state} />
+            <PavilionStats state={state} exp={exp} />
           ) : (
             <p className="text-sm text-zinc-400">
               {error ? `Error: ${error}` : state.emptyMessage}
@@ -90,18 +99,31 @@ export default function AutopilotPavilion() {
   );
 }
 
-function PavilionStats({ state }) {
+function PavilionStats({ state, exp }) {
   return (
     <div className="space-y-2">
       <div className="font-mono text-xs text-zinc-100 truncate">
         {state.runId}
         <span className="ml-2 text-zinc-500">trigger: {state.trigger}</span>
       </div>
-      <div className="grid grid-cols-4 gap-3 text-sm">
+      <div className="grid grid-cols-5 gap-3 text-sm">
         <Stat label="Elapsed" value={state.elapsedLabel} />
         <Stat label="Turns" value={state.turns} />
         <Stat label="Dispatches" value={state.dispatches} />
         <Stat label="Heartbeat" value={`${state.heartbeatAgeLabel} ago`} />
+        <div>
+          <div className="text-xs uppercase tracking-wide text-zinc-500">
+            LV {exp.level}
+          </div>
+          <HpBar
+            percent={exp.expPercent}
+            color="green"
+            flashing={false}
+            width={64}
+            height={5}
+            label="EXP"
+          />
+        </div>
       </div>
     </div>
   );

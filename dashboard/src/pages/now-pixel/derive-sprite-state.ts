@@ -255,6 +255,125 @@ export function deriveZoneState(
 }
 
 // ---------------------------------------------------------------------------
+// HP / EXP / Cooldown derivations (slice 6 of #642, #648).
+// ---------------------------------------------------------------------------
+
+import { SIGNAL_COOLDOWNS } from "./sprite-map.ts";
+
+export interface HpState {
+  percent: number; // 0..100
+  color: "green" | "yellow" | "red" | "grey";
+  flashing: boolean;
+}
+
+/**
+ * Derive a subagent's HP bar from its token usage. The autopilot's
+ * `state.limits.subagent_hard_max_tokens` is the ceiling at which
+ * reap.py force-stops the subagent; we map remaining headroom to HP %.
+ *
+ * Grading:
+ *   - >= 50%       → green
+ *   - >= 20%       → yellow
+ *   - >= 10%       → red, no flash
+ *   - <  10%       → red, flashing (spec requirement)
+ *   - hardMax <= 0 → grey (unknown ceiling)
+ */
+export function deriveHp(tokensUsed: number, hardMax: number): HpState {
+  if (!Number.isFinite(hardMax) || hardMax <= 0) {
+    return { percent: 100, color: "grey", flashing: false };
+  }
+  const used = Number.isFinite(tokensUsed) ? Math.max(0, tokensUsed) : 0;
+  const remaining = Math.max(0, hardMax - used);
+  const pct = Math.min(100, (remaining / hardMax) * 100);
+  if (pct < 10) return { percent: pct, color: "red", flashing: true };
+  if (pct < 20) return { percent: pct, color: "red", flashing: false };
+  if (pct < 50) return { percent: pct, color: "yellow", flashing: false };
+  return { percent: pct, color: "green", flashing: false };
+}
+
+export interface ExpState {
+  level: number; // 1..50
+  expPercent: number; // 0..100 — progress to next level
+  cumulativeTokens: number;
+  tokenBudget: number;
+}
+
+/**
+ * Trainer LV/EXP derivation. Acceptance criterion:
+ *   LV = floor((cumulative_tokens / token_budget) * 50)
+ * EXP bar = position within the current half-percent band.
+ *
+ * Clamped to LV 1..50 so the bar never empties or overshoots the cap;
+ * once the run hits 100% budget LV is 50 and the bar is full.
+ */
+export function deriveExp(cumulativeTokens: number, tokenBudget: number): ExpState {
+  if (!Number.isFinite(tokenBudget) || tokenBudget <= 0) {
+    return {
+      level: 1,
+      expPercent: 0,
+      cumulativeTokens: cumulativeTokens || 0,
+      tokenBudget: 0,
+    };
+  }
+  const ratio = Math.min(
+    1,
+    Math.max(0, (cumulativeTokens || 0) / tokenBudget),
+  );
+  const rawLevel = ratio * 50;
+  const level = Math.min(50, Math.max(1, Math.floor(rawLevel) || 1));
+  // Position within the current LV band. Each level spans 1/50 of the
+  // budget; if we're past level 1, the band starts at (level/50) and
+  // ends at ((level+1)/50). We render the percent-within-band.
+  const bandStart = level / 50;
+  const bandEnd = (level + 1) / 50;
+  const bandWidth = bandEnd - bandStart;
+  const within = bandWidth > 0 ? (ratio - bandStart) / bandWidth : 0;
+  const expPercent = Math.min(100, Math.max(0, within * 100));
+  return {
+    level,
+    expPercent,
+    cumulativeTokens: cumulativeTokens || 0,
+    tokenBudget,
+  };
+}
+
+export interface CooldownState {
+  /** Seconds remaining until the next fire is eligible. <= 0 means ready. */
+  secondsRemaining: number;
+  ready: boolean;
+  /** Cooldown total (seconds) for the source class. 0 → no cooldown. */
+  totalSeconds: number;
+}
+
+/**
+ * Cooldown derivation for signal classes. `lastFiredEpoch` is Unix
+ * seconds; `nowEpoch` lets tests pin the clock.
+ *
+ * health has cooldown 0 — `ready: true` and `secondsRemaining: 0` always.
+ */
+export function deriveCooldown(
+  cls: SignalClass,
+  lastFiredEpoch: number,
+  nowEpoch: number,
+): CooldownState {
+  const totalSeconds = SIGNAL_COOLDOWNS[cls] ?? 0;
+  if (totalSeconds <= 0) {
+    return { secondsRemaining: 0, ready: true, totalSeconds: 0 };
+  }
+  const fired = Number.isFinite(lastFiredEpoch) ? lastFiredEpoch : 0;
+  if (fired <= 0) {
+    // Never fired → cooldown not "in progress"; class is ready to fire.
+    return { secondsRemaining: 0, ready: true, totalSeconds };
+  }
+  const remaining = Math.max(0, fired + totalSeconds - nowEpoch);
+  return {
+    secondsRemaining: remaining,
+    ready: remaining <= 0,
+    totalSeconds,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 

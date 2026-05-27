@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useSpriteAnimations } from "../../hooks/useSpriteAnimations.js";
 import AutopilotPavilion from "./AutopilotPavilion.jsx";
 import ActiveDispatchesStrip from "./ActiveDispatchesStrip.jsx";
@@ -8,9 +9,10 @@ import Attribution from "./Attribution.jsx";
 /**
  * NowPixel — pixel-art habitat dashboard at /now-pixel.
  *
- * Slice 5 of /now-pixel (#642, #647). Layout now includes the Infirmary
- * (services HP bars) in HabitatGrid's center column, the alerts notice
- * board pinned to the Pavilion, and Oak town crier on the right edge.
+ * Slice 6 of /now-pixel (#642, #648) — owns the shared
+ * `hoveredSubagentId` so the in-zone SubagentSprite + the bottom
+ * ActiveDispatchesStrip highlight together when the operator hovers
+ * either.
  *
  * The route is intentionally NOT linked from the main nav — reachable
  * only by typing /now-pixel into the address bar. The atomic swap to
@@ -18,6 +20,7 @@ import Attribution from "./Attribution.jsx";
  */
 export default function NowPixel({ ws }) {
   const anim = useSpriteAnimations(ws);
+  const [hoveredSubagentId, setHoveredSubagentId] = useState(null);
 
   return (
     <div className="space-y-4">
@@ -31,11 +34,18 @@ export default function NowPixel({ ws }) {
       <AutopilotPavilion />
       <div className="flex gap-4 items-stretch">
         <div className="flex-1 min-w-0">
-          <HabitatGrid anim={anim} />
+          <HabitatGrid
+            anim={anim}
+            hoveredSubagentId={hoveredSubagentId}
+            onSubagentHover={setHoveredSubagentId}
+          />
         </div>
         <OakTownCrier ws={ws} />
       </div>
-      <ActiveDispatchesStrip />
+      <ActiveDispatchesStrip
+        hoveredSubagentId={hoveredSubagentId}
+        onSubagentHover={setHoveredSubagentId}
+      />
       <Attribution />
     </div>
   );

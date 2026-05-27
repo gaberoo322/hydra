@@ -48,6 +48,10 @@ export type ClassName = PipelineClass | SignalClass;
  * spell "025-pikachu" wrong.
  */
 const POKEDEX: Record<number, string> = {
+  // Pre-evolutions used by EVOLUTION_CHAINS below — needed for slice 6's
+  // subagent-sprite rendering.
+  4: "004-charmander.png",
+  5: "005-charmeleon.png",
   6: "006-charizard.png",
   10: "010-caterpie.png",
   13: "013-weedle.png",
@@ -56,6 +60,8 @@ const POKEDEX: Record<number, string> = {
   21: "021-spearow.png",
   41: "041-zubat.png",
   54: "054-psyduck.png",
+  63: "063-abra.png",
+  64: "064-kadabra.png",
   65: "065-alakazam.png",
   79: "079-slowpoke.png",
   92: "092-gastly.png",
@@ -158,6 +164,61 @@ export const SIGNAL_CLASSES: readonly SignalClass[] = [
   "discover_orch",
   "discover_target",
 ];
+
+/**
+ * Per-signal-class cooldown in seconds. Mirrors `decide.py:SIGNAL_COOLDOWNS`
+ * (scripts/autopilot/decide.py). Slice 6 of /now-pixel uses this to drive
+ * the ⏳ overlay on signal sprites: time-until-next-eligible-fire =
+ * (last_fired_epoch + cooldown) - now.
+ *
+ * scout_orch is intentionally omitted — it's not surfaced on the habitat
+ * grid.
+ */
+export const SIGNAL_COOLDOWNS: Record<SignalClass, number> = {
+  health: 0, // always allowed; rate-limited by the signal itself
+  sweep_orch: 900, // 15 min
+  sweep_target: 900,
+  discover_orch: 1800, // 30 min
+  discover_target: 1800,
+};
+
+/**
+ * Pokemon evolution chain — pre-evolution lookup.
+ *
+ * Slice 6 (#648) uses this to render subagent sprites as one stage
+ * below their slot's parent. e.g. dev_target's parent is Charizard (6),
+ * so subagents in that slot render as Charmeleon (5). qa_orch's parent
+ * is Alakazam (65), so subagents render as Kadabra (64).
+ *
+ * Where a class's parent has no Gen-1 pre-evolution (Mewtwo, Eevee,
+ * Snorlax, Lapras, Mr-mime), the consumer falls back to rendering the
+ * parent at 75% scale + desaturated.
+ */
+export const EVOLUTION_CHAINS: Record<number, number> = {
+  // Charmander → Charmeleon → Charizard
+  6: 5,
+  5: 4,
+  // Abra → Kadabra → Alakazam
+  65: 64,
+  64: 63,
+};
+
+/**
+ * Resolve the sprite filename for a subagent occupying a pipeline class
+ * slot. Returns the pre-evolution if one exists; otherwise the parent.
+ * Callers should set `desaturate: true` when no pre-evo was used.
+ */
+export function subagentSpriteFile(parentClass: PipelineClass): {
+  spriteFile: string;
+  desaturate: boolean;
+} {
+  const parentId = CLASS_TO_SPRITE[parentClass];
+  const preEvoId = EVOLUTION_CHAINS[parentId];
+  if (preEvoId != null) {
+    return { spriteFile: spriteFile(preEvoId), desaturate: false };
+  }
+  return { spriteFile: spriteFile(parentId), desaturate: true };
+}
 
 /**
  * Side classification for the 2-column habitat layout. The Infirmary
