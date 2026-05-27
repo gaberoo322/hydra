@@ -4,9 +4,14 @@ import { NavLink } from "react-router-dom";
 // flat items — no section headers, no badge. The previous Monitor/Work/
 // Strategy/System grouping (and the useAlertCount badge on /alerts) was
 // retired with the legacy pages it linked to.
+// /now-pixel epic (#642) — slice 7 (#649) adds Pixel View as a sibling
+// of Now during the preview window. It will be removed when the atomic
+// swap (separate PR) makes Pixel View the canonical /now and renames
+// the old view to /now-classic.
 const NAV_ITEMS = [
   { to: "/", label: "Today", end: true, icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" },
   { to: "/now", label: "Now", icon: "M13 10V3L4 14h7v7l9-11h-7z" },
+  { to: "/now-pixel", label: "Pixel View", icon: "M4 4h6v6H4V4zm10 0h6v6h-6V4zM4 14h6v6H4v-6zm10 0h6v6h-6v-6z" },
   { to: "/outcomes", label: "Outcomes", icon: "M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" },
   { to: "/explore", label: "Explore", icon: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" },
 ];
