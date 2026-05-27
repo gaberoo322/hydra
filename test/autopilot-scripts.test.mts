@@ -115,6 +115,49 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     }
   });
 
+  /**
+   * Regression for 2026-05-27 dashboard ghost-outage: bootstrap.sh stamped
+   * its own bash $$ pid into state.json + the /api/autopilot/run-start
+   * payload. That pid dies within seconds of Phase 0 completing, so the
+   * orchestrator's `sweepRunIfDead()` immediately promoted every run to
+   * `status: killed, term_reason: crash`, and `/api/now/active-dispatches`
+   * reported "Active dispatches: 0" even when autopilot was looping
+   * healthily.
+   *
+   * The fix walks up the process tree from $$ looking for a `claude`
+   * ancestor (the long-lived autopilot CLI session) and stamps THAT pid.
+   * Falls back to $$ when no `claude` ancestor exists (manual / test
+   * invocations), which is still safe because isolated runs skip the
+   * run-start POST entirely.
+   *
+   * This test runs bootstrap from a node:test child (no `claude` ancestor
+   * unless the operator invokes `npm test` from inside a Claude Code
+   * session, which is the normal hydra dev loop). In both shapes the
+   * recorded pid MUST be a positive integer that's alive at the moment
+   * bootstrap exits — anything else means the resolver short-circuited
+   * or wrote the dead bash pid.
+   */
+  test("records an alive owning-pid (not bootstrap.sh's short-lived $$)", () => {
+    const tmp = makeTempState();
+    try {
+      const r = runBootstrap({}, tmp);
+      assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
+      const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
+      assert.equal(typeof s.pid, "number", "state.pid must be a number");
+      assert.ok(s.pid > 0, "state.pid must be positive");
+      // The recorded pid MUST be alive at the moment we read it. The
+      // bug we're guarding against wrote $$ (bootstrap's own pid), which
+      // is dead by the time the test reads state.json a few ms later.
+      // Use process.kill(pid, 0) — throws ESRCH if dead, succeeds otherwise.
+      assert.doesNotThrow(
+        () => process.kill(s.pid, 0),
+        `state.pid=${s.pid} is dead at read-time — bootstrap stamped its own $$ instead of walking up to the owning process`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("respects env-var overrides for budget knobs", () => {
     const tmp = makeTempState();
     try {
