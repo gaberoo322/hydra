@@ -84,7 +84,42 @@ fi
 # per-turn updater can re-emit them on every line without re-querying
 # the kernel for a pid that may have already exec'd into a child.
 RUN_ID="$(uuidgen)"
-PID=$$
+
+# Resolve the OWNING pid for this autopilot run — NOT $$ (bootstrap.sh's
+# own bash pid), which dies within seconds of Phase 0 completing and
+# would make `sweepRunIfDead()` in src/autopilot/runs.ts immediately
+# promote every run to `status: killed, term_reason: crash`. That
+# caused the 2026-05-27 dashboard ghost-outage where /now showed
+# "Active dispatches: 0" even though the autopilot was looping
+# healthily — the recorded pid was always a dead bootstrap pid.
+#
+# The owning pid is the long-running `claude` CLI ancestor that hosts
+# the autopilot session. Walk up the process tree looking for it.
+# Fall back to $$ when no `claude` ancestor exists (manual invocations
+# / tests / standalone runs) so the script still works in those
+# contexts — `sweepRunIfDead()` will treat the bootstrap pid as dead
+# almost immediately, but isolated runs already skip the run-start POST
+# (see ISOLATED_RUN block below) so the sweeper never sees them.
+resolve_autopilot_pid() {
+  local candidate ppid comm
+  candidate="$$"
+  # Walk up at most 8 levels to avoid pathological loops on weird
+  # process trees. 8 is generous — typical chain is bash → zsh → claude.
+  for _ in 1 2 3 4 5 6 7 8; do
+    ppid="$(ps -o ppid= -p "${candidate}" 2>/dev/null | tr -d ' ')"
+    if [ -z "${ppid}" ] || [ "${ppid}" = "0" ] || [ "${ppid}" = "1" ]; then
+      break
+    fi
+    comm="$(ps -o comm= -p "${ppid}" 2>/dev/null | tr -d ' ')"
+    if [ "${comm}" = "claude" ]; then
+      printf '%s' "${ppid}"
+      return 0
+    fi
+    candidate="${ppid}"
+  done
+  printf '%s' "$$"
+}
+PID="$(resolve_autopilot_pid)"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start pid=${PID} run_id=${RUN_ID}" > "${HEARTBEAT_PATH}"
 
 # Concurrent-run guard. If an existing state.json's owner PID is still alive,
