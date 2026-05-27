@@ -52,30 +52,60 @@ relax `--audit-level` in the workflow (and then revert).
 ### `mutation-test`
 
 **What it does.** Runs the in-tree mutation runner (`src/mutation.ts`,
-`runMutationTests()`) against the files changed in the PR diff, then fails when
-the kill rate is below the configured floor.
+`runMutationTests()`) against the **`src/**/*.ts` files changed in the
+PR diff**, then fails when the kill rate is below the configured floor.
+
+**Diff scoping (issue #653).** The gate is diff-only — it never mutates
+the full source tree. The workflow computes the changed-file set as
+`git diff --name-only $(git merge-base origin/master HEAD)...HEAD`
+(falling back from `gh pr diff --name-only` when GH is unreachable).
+`scripts/ci/mutation-check.ts::filterMutationCandidates()` then:
+
+1. Keeps only paths that start with `src/` and end in `.ts` (positive
+   allowlist — `dashboard/**`, `scripts/**`, `test/**`, `docs/**`,
+   `config/**`, asset files, lockfile bumps all drop out).
+2. Re-applies `shouldSkipMutation()` from `src/mutation.ts` to strip
+   co-located `*.test.ts` / `*.spec.ts` / `*.d.ts` files that pass the
+   `src/.../*.ts` prefix but aren't real source.
+
+**Empty-set skip (NOT a silent pass).** When the filtered list is empty
+the gate writes `status: "skipped"` with a clear reason (`"no
+src/**/*.ts files changed"`) to stdout and a `mutation-gate: skipped —
+…` line to stderr, and exits 0. The CI step summary surfaces the
+skipped status so reviewers see exactly why the gate didn't run.
+Common skip scenarios:
+
+- Asset-only PRs (PNG sprites, JSON fixtures, lockfile bumps)
+- Doc-only PRs (`.md`, `docs/**`, ADRs)
+- Dashboard-only PRs (`dashboard/**` — the dashboard has its own
+  build / typecheck step)
+- Test-only PRs (test additions live under `test/**`, never in `src/`)
+
+The kill-rate threshold itself is unchanged. A PR that touches even one
+`src/**/*.ts` file runs the full gate against that file's mutants.
 
 **Threshold.** `MUTATION_KILL_RATE_FLOOR` repo variable (integer percent).
 Default: `30`. Matches the pre-cut-over in-cycle gate
-(`DEFAULT_STANDARD_KILL_THRESHOLD = 30` in `src/mutation.ts`).
+(`DEFAULT_STANDARD_KILL_THRESHOLD = 30` in `src/mutation.ts`). Issue #653
+did NOT change this — diff scoping only changes WHAT is mutated, not the
+acceptance bar.
 
 **Budget.** `MUTATION_TIME_BUDGET_MS` env var (default `540_000` = 9 minutes).
 The CI step itself has a hard 10-minute `timeout-minutes: 10` ceiling.
 
-**Inputs.** Diff vs the base branch (`git diff <base>...HEAD --name-only`),
-filtered through `SKIP_PATTERNS` (tests, configs, migrations, `.d.ts`,
-`node_modules`).
-
 **No-signal behaviour.** When the diff yields zero compilable mutants
 (comment-only / formatting changes, or every generated mutant fails to compile)
-the gate exits `0` with a `neutral` status. Implemented in
+the gate exits `0` with a `neutral` status. This is distinct from `skipped`:
+`skipped` means "no src/**/*.ts files in diff, runner never invoked";
+`neutral` means "runner ran, couldn't produce a signal." Implemented in
 `scripts/ci/mutation-check.ts` (the historical in-cycle helper
 `classifyNoSignalDecision` in `src/mutation.ts` was removed by issue #476
 along with the rest of the orphaned gate orchestration).
 
 **Quick-fix bypass.** PR bodies containing the literal token `[quick-fix]` skip
 the gate with a `neutral` status. Matches the existing in-cycle exemption for
-quick-fix anchors.
+quick-fix anchors and the `scope-check` gate's `[quick-fix]` semantics
+(symmetric — issue #653 acceptance criterion 4).
 
 ### `scope-check`
 
