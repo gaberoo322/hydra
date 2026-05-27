@@ -230,6 +230,22 @@ CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
 
 ### 10. Verdict routing
 
+**Source-issue `needs-qa` label discipline (issue #638).** Before #638, the skill
+filed verdicts on the **PR** but left `needs-qa` sitting on the **source issue**.
+`scripts/autopilot/collect-state.sh` counts `needs-qa` on issues (not PRs), so
+`signals.needs_qa_orch` stayed `true` and the autopilot re-dispatched
+`hydra-qa` every tick — burning 30-65k tokens per re-dispatch with no progress
+while the PR sat awaiting merge or pending CI. The fix is to clear `needs-qa`
+from the linked source issue on **every** PASS-class verdict (`PASS` and
+`PASS-pending-CI`). The QA verdict has been filed; the issue is no longer
+"awaiting QA". Re-dispatch is gated by re-applying `needs-qa` later (e.g.
+after a CI failure flips the verdict to `FAIL`) — not by the label leaking.
+
+Use `$PARENT_ISSUE` resolved in Step 4 as the source-issue handle. If
+`$PARENT_ISSUE` is empty (PR has no `Closes #N` / `Fixes #N` / `Refs #N`
+back-reference) skip the label-clear with an audit log — there's nothing to
+clear, and we never want to guess the linkage.
+
 **Verdict `PASS`** (both axes pass + all required checks green):
 ```bash
 gh pr review $pr_number --repo gaberoo322/hydra --approve --body "> *Automated QA — two-axis review*
@@ -241,6 +257,16 @@ $REVIEW_REPORT
 **Verdict:** \`PASS\` — ${VERDICT_REASON}
 
 $CHECKS_BLOCK"
+# Clear needs-qa from the source issue BEFORE the merge call, so even if
+# the merge fails (e.g. mergeability flips, branch protection rejects), the
+# autopilot doesn't see a stale needs-qa and re-dispatch. The issue will
+# auto-close via `closes #N` once the merge lands.
+if [ -n "${PARENT_ISSUE:-}" ]; then
+  gh issue edit "$PARENT_ISSUE" --repo gaberoo322/hydra --remove-label "needs-qa" 2>/dev/null \
+    || echo "WARN: failed to remove needs-qa from issue #${PARENT_ISSUE} (non-fatal — verdict already filed on PR)"
+else
+  echo "WARN: PR #${pr_number} has no parent issue back-reference — skipping source-issue needs-qa clear (issue #638)"
+fi
 gh pr merge $pr_number --repo gaberoo322/hydra --squash --delete-branch
 ```
 Issue auto-closes via `closes #N` in PR body.
@@ -260,7 +286,18 @@ Code review **PASS**. Awaiting CI:
 $CHECKS_BLOCK
 
 Verdict: \`PASS-pending-CI\`. Autopilot will re-evaluate once required checks conclude. **The QA subagent has exited — no background wait.**"
-# Leave the needs-qa label in place so autopilot re-dispatches on the next tick.
+# Clear needs-qa from the source issue (issue #638). The QA verdict is filed
+# on the PR; the issue is no longer awaiting QA. Leaving needs-qa on the
+# issue causes collect-state.sh `needs_qa_orch` to stay true and re-dispatches
+# hydra-qa on every autopilot tick — a 30-65k-token-per-tick busy loop.
+# Autopilot polls CI directly via the PR's check status; it doesn't need
+# needs-qa on the issue as the re-poll signal.
+if [ -n "${PARENT_ISSUE:-}" ]; then
+  gh issue edit "$PARENT_ISSUE" --repo gaberoo322/hydra --remove-label "needs-qa" 2>/dev/null \
+    || echo "WARN: failed to remove needs-qa from issue #${PARENT_ISSUE} (non-fatal — verdict already filed on PR)"
+else
+  echo "WARN: PR #${pr_number} has no parent issue back-reference — skipping source-issue needs-qa clear (issue #638)"
+fi
 ```
 
 **Verdict `FAIL` or `FAIL-pending-CI`** (any axis has hard findings, or a required check has already failed):
