@@ -24,6 +24,7 @@ import AgentStream from "./pages/AgentStream.jsx";
 import Today from "./pages/v2/Today.jsx";
 import Now from "./pages/v2/Now.jsx";
 import OutcomesV2 from "./pages/v2/Outcomes.jsx";
+import Explore from "./pages/v2/Explore.jsx";
 
 export default function App() {
   const ws = useWebSocket();
@@ -60,6 +61,9 @@ export default function App() {
           <Route path="/v2/now" element={<Now ws={ws} />} />
           {/* Slice 4 (issue #619) — Outcomes page on v2. */}
           <Route path="/v2/outcomes" element={<OutcomesV2 />} />
+          {/* Dashboard v2 — slice 5 Explore tabbed hub (issue #620). */}
+          <Route path="/v2/explore" element={<Explore />} />
+          <Route path="/v2/explore/:tab" element={<Explore />} />
         </Routes>
       </Layout>
     </ToastProvider>

@@ -34,6 +34,7 @@ import { createUsageRouter } from "./api/usage.ts";
 import { createV2TodayRouter } from "./api/v2/today.ts";
 import { createV2NowRouter } from "./api/v2/now.ts";
 import { createV2OutcomesRouter } from "./api/v2/outcomes.ts";
+import { createV2ExploreRouter } from "./api/v2/explore.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -90,6 +91,8 @@ function createApi(eventBus) {
   api.use(createV2NowRouter());
   // Slice 4 (issue #619) — Outcomes page: 4 weekly-trend endpoints.
   api.use(createV2OutcomesRouter());
+  // Explore tabbed hub — slice 5 (issue #620).
+  api.use(createV2ExploreRouter());
   api.use(createMiscRouter(eventBus));
   api.use(createChecklistRouter());
   api.use(createOutcomesRouter());

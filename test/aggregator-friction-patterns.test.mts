@@ -1,0 +1,220 @@
+/**
+ * Regression tests for the friction-patterns aggregator (issue #620, PRD #615).
+ *
+ * Pure helpers (`liftFrictionPatterns`, `parseMetaFrictionIssues`) tested
+ * directly. Integration shape tested with stubs for both the Redis reader
+ * and `gh issue list`.
+ */
+
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  getFrictionPatterns,
+  liftFrictionPatterns,
+  parseMetaFrictionIssues,
+  type RawFrictionPattern,
+} from "../src/aggregators/friction-patterns.ts";
+import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
+
+const NOW = new Date("2026-05-26T12:00:00.000Z");
+
+function rawPattern(overrides: Partial<RawFrictionPattern> = {}): RawFrictionPattern {
+  return {
+    category: "stub-cue",
+    severity: "prevent",
+    hitCount: 1,
+    promoted: false,
+    lastSeen: "2026-05-26T10:00:00Z",
+    firstSeen: "2026-05-20T00:00:00Z",
+    examples: [],
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+describe("liftFrictionPatterns — pure helper", () => {
+  test("nearThreshold true when un-promoted and one hit shy", () => {
+    const rows = liftFrictionPatterns(
+      "hydra-dev",
+      [rawPattern({ category: "x", hitCount: PROMOTION_THRESHOLD - 1 })],
+      1,
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].nearThreshold, true);
+    assert.equal(rows[0].hitsToPromotion, 1);
+  });
+
+  test("nearThreshold false once promoted, even with hits below threshold", () => {
+    const rows = liftFrictionPatterns(
+      "hydra-dev",
+      [rawPattern({ category: "x", hitCount: PROMOTION_THRESHOLD - 1, promoted: true })],
+      1,
+    );
+    assert.equal(rows[0].nearThreshold, false);
+    assert.equal(rows[0].promoted, true);
+  });
+
+  test("nearThreshold false at or above threshold (no longer a candidate)", () => {
+    const rows = liftFrictionPatterns(
+      "hydra-dev",
+      [rawPattern({ category: "x", hitCount: PROMOTION_THRESHOLD })],
+      1,
+    );
+    assert.equal(rows[0].nearThreshold, false);
+    assert.equal(rows[0].hitsToPromotion, 0);
+  });
+
+  test("drops rows with non-finite hitCount", () => {
+    const rows = liftFrictionPatterns(
+      "hydra-dev",
+      [rawPattern({ hitCount: NaN as unknown as number })],
+      1,
+    );
+    assert.deepEqual(rows, []);
+  });
+
+  test("sorts newest-lastSeen first", () => {
+    const rows = liftFrictionPatterns(
+      "hydra-dev",
+      [
+        rawPattern({ category: "old", hitCount: 1, lastSeen: "2026-05-20T00:00:00Z" }),
+        rawPattern({ category: "fresh", hitCount: 1, lastSeen: "2026-05-26T11:00:00Z" }),
+      ],
+      1,
+    );
+    assert.deepEqual(rows.map((r) => r.cue), ["fresh", "old"]);
+  });
+
+  test("clamps examples to 3 and drops non-string entries", () => {
+    const rows = liftFrictionPatterns(
+      "hydra-dev",
+      [
+        rawPattern({
+          category: "ex",
+          hitCount: 1,
+          examples: ["a", "b", "c", "d", null as any, 42 as any],
+        }),
+      ],
+      1,
+    );
+    assert.deepEqual(rows[0].examples, ["a", "b", "c"]);
+  });
+
+  test("returns [] when patterns isn't an array", () => {
+    assert.deepEqual(liftFrictionPatterns("hydra-dev", null as any, 1), []);
+  });
+});
+
+describe("parseMetaFrictionIssues — pure helper", () => {
+  test("returns [] on empty / non-array", () => {
+    assert.deepEqual(parseMetaFrictionIssues("", NOW), []);
+    assert.deepEqual(parseMetaFrictionIssues("{}", NOW), []);
+  });
+
+  test("filters by createdAt against windowStart", () => {
+    const windowStart = new Date("2026-05-25T00:00:00Z");
+    const stdout = JSON.stringify([
+      { number: 1, title: "in window", url: "u1", createdAt: "2026-05-25T12:00:00Z" },
+      { number: 2, title: "before", url: "u2", createdAt: "2026-05-24T00:00:00Z" },
+    ]);
+    const out = parseMetaFrictionIssues(stdout, windowStart);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].number, 1);
+  });
+
+  test("sorts newest-first", () => {
+    const stdout = JSON.stringify([
+      { number: 1, title: "older", url: "u1", createdAt: "2026-05-25T01:00:00Z" },
+      { number: 2, title: "newer", url: "u2", createdAt: "2026-05-25T20:00:00Z" },
+    ]);
+    const out = parseMetaFrictionIssues(stdout, new Date("2026-05-25T00:00:00Z"));
+    assert.deepEqual(out.map((i) => i.number), [2, 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Happy path
+// ---------------------------------------------------------------------------
+
+describe("getFrictionPatterns — happy path", () => {
+  test("returns groups + candidates + meta-friction issues", async () => {
+    const reader = async () => [
+      {
+        skill: "hydra-dev",
+        patterns: [
+          rawPattern({ category: "stale-master-ref", hitCount: PROMOTION_THRESHOLD - 1, lastSeen: "2026-05-26T10:00:00Z" }),
+          rawPattern({ category: "first-time", hitCount: 1, lastSeen: "2026-05-25T00:00:00Z" }),
+        ],
+      },
+      {
+        skill: "hydra-qa",
+        patterns: [
+          rawPattern({ category: "ac-deferred", hitCount: 5, promoted: true, lastSeen: "2026-05-26T11:00:00Z" }),
+        ],
+      },
+    ];
+    const exec = async () => ({
+      stdout: JSON.stringify([
+        { number: 555, title: "meta", url: "u", createdAt: "2026-05-25T00:00:00Z" },
+      ]),
+      stderr: "",
+    });
+    const snapshot = await getFrictionPatterns({
+      now: NOW,
+      readFrictionPatterns: reader,
+      execFileAsync: exec,
+    });
+
+    assert.equal(snapshot.bySkill.length, 2);
+    assert.equal(snapshot.thresholdCandidates.length, 1);
+    assert.equal(snapshot.thresholdCandidates[0].cue, "stale-master-ref");
+    assert.equal(snapshot.recentMetaFrictionIssues.length, 1);
+    assert.equal(snapshot.promotionThreshold, PROMOTION_THRESHOLD);
+    assert.ok(snapshot.bySkill[0].patterns.length > 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sub-source failure isolation
+// ---------------------------------------------------------------------------
+
+describe("getFrictionPatterns — sub-source failure isolation", () => {
+  test("gh failure → groups still ship; meta-friction empty", async () => {
+    const reader = async () => [
+      { skill: "hydra-dev", patterns: [rawPattern({ hitCount: 1 })] },
+    ];
+    const exec = async () => {
+      throw new Error("gh broken");
+    };
+    const snapshot = await getFrictionPatterns({
+      now: NOW,
+      readFrictionPatterns: reader,
+      execFileAsync: exec,
+    });
+    assert.equal(snapshot.bySkill.length, 1);
+    assert.deepEqual(snapshot.recentMetaFrictionIssues, []);
+  });
+
+  test("Redis reader failure → groups empty but meta-friction ships", async () => {
+    const reader = async () => {
+      throw new Error("redis broken");
+    };
+    const exec = async () => ({
+      stdout: JSON.stringify([
+        { number: 1, title: "ok", url: "u", createdAt: "2026-05-25T00:00:00Z" },
+      ]),
+      stderr: "",
+    });
+    const snapshot = await getFrictionPatterns({
+      now: NOW,
+      readFrictionPatterns: reader,
+      execFileAsync: exec,
+    });
+    assert.deepEqual(snapshot.bySkill, []);
+    assert.equal(snapshot.recentMetaFrictionIssues.length, 1);
+  });
+});
