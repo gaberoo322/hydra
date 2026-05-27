@@ -219,12 +219,21 @@ jobs:
           fi
           exit $STATUS
 
-  # Mutation testing gate (issue #382, codex cut-over PR-2). Re-homes step
-  # 6.7 of the in-cycle codex loop (runMutationGate in src/mutation.ts) to
-  # CI so every PR — codex, hydra-dev, hydra-target-build, manual — gets the
-  # same kill-rate gate after the codex CLI is removed (PR-3). See
-  # docs/quality-gates.md for thresholds, overrides, and the [quick-fix]
-  # bypass.
+  # Mutation testing gate (issues #382, #653). Re-homes step 6.7 of the
+  # in-cycle codex loop (runMutationGate in src/mutation.ts) to CI so every
+  # PR — codex, hydra-dev, hydra-target-build, manual — gets the same
+  # kill-rate gate after the codex CLI is removed (PR-3).
+  #
+  # Issue #653 scoped this gate to diff-only:
+  # - Diff is computed against `git merge-base origin/master HEAD` so the
+  #   set is stable across rebases (an upstream master advance that adds
+  #   unrelated files doesn't widen the PR's mutation set).
+  # - `scripts/ci/mutation-check.ts` filters to `src/**/*.ts` and emits
+  #   `status: "skipped"` with a clear reason when the set is empty
+  #   (asset-only / doc-only / dashboard-only PRs). NOT a silent pass.
+  #
+  # See docs/quality-gates.md for thresholds, overrides, and the
+  # [quick-fix] bypass.
   mutation-test:
     if: github.event_name == 'pull_request'
     runs-on: self-hosted
@@ -237,15 +246,25 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      - name: Compute changed files
+      - name: Compute changed files (diff vs merge-base on master)
         id: diff
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh pr diff --name-only "${{ github.event.pull_request.number }}" > changed-files.txt || \
-            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > changed-files.txt
+          # Issue #653: prefer `gh pr diff` (already merge-base scoped). Fall
+          # back to a local merge-base computation so the gate stays correct
+          # when GH is unreachable or for rebased branches where base.sha is
+          # the OLD base ref. We deliberately use `merge-base origin/master
+          # HEAD` rather than `BASE_SHA HEAD` because a rebased PR can have a
+          # stale base.sha that no longer matches the actual fork point.
+          git fetch origin master --depth=0 || git fetch origin master
+          if ! gh pr diff --name-only "${{ github.event.pull_request.number }}" > changed-files.txt; then
+            MERGE_BASE="$(git merge-base origin/master HEAD)"
+            echo "gh pr diff unavailable; falling back to local merge-base: $MERGE_BASE"
+            git diff --name-only "$MERGE_BASE"...HEAD > changed-files.txt
+          fi
           echo "Files changed:"
           cat changed-files.txt
 

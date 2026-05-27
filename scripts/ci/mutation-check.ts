@@ -1,10 +1,16 @@
 #!/usr/bin/env -S npx tsx
 /**
- * scripts/ci/mutation-check.ts — Mutation testing CI gate (issue #382).
+ * scripts/ci/mutation-check.ts — Mutation testing CI gate (issues #382, #653).
  *
  * Re-homes the in-cycle mutation gate (was step 6.7 of the codex control
  * loop, runMutationGate() in src/mutation.ts) so PRs from any source get
  * the same kill-rate gate after the codex CLI is removed (PR-3).
+ *
+ * Issue #653: diff-scoped mutation. The gate ONLY mutates `src/**\/*.ts`
+ * files that changed in the PR (computed by the workflow as
+ * `git diff --name-only $(git merge-base origin/master HEAD)...HEAD`).
+ * If the filtered list is empty (asset/doc-only PR) the gate emits a
+ * `skipped` status with a clear reason and exits 0 — never a silent pass.
  *
  * Reuses the existing pure runner `runMutationTests()` from src/mutation.ts
  * — only the orchestration around it is rewritten here for a CI context
@@ -28,6 +34,26 @@
  */
 
 import { runMutationTests, shouldSkipMutation } from "../../src/mutation.ts";
+
+/**
+ * Filter a list of changed paths down to the files the mutation gate
+ * should actually mutate (issue #653).
+ *
+ * The contract is a positive allowlist: only `src/**\/*.ts` source files
+ * survive. The legacy denylist (`shouldSkipMutation`) is applied as a
+ * second pass so co-located `src/foo.test.ts` and `src/foo.d.ts` stay
+ * excluded even though they pass the allowlist prefix.
+ *
+ * Pure — no filesystem, no git, no env. Test it by passing in arbitrary
+ * string lists.
+ */
+export function filterMutationCandidates(changedFiles: string[]): string[] {
+  return changedFiles
+    .map((f) => f.trim())
+    .filter((f) => f.length > 0)
+    .filter((f) => f.startsWith("src/") && f.endsWith(".ts"))
+    .filter((f) => !shouldSkipMutation(f));
+}
 
 const DEFAULT_KILL_FLOOR = 30;
 const DEFAULT_TIME_BUDGET_MS = 540_000;
@@ -56,7 +82,10 @@ async function main(): Promise<number> {
   const changed = readChangedFiles();
 
   if (changed.length === 0) {
-    process.stdout.write(JSON.stringify({ status: "pass", reason: "no changed files" }) + "\n");
+    process.stdout.write(
+      JSON.stringify({ status: "skipped", reason: "no changed files" }) + "\n",
+    );
+    process.stderr.write("mutation-gate: skipped — no changed files in diff\n");
     return 0;
   }
 
@@ -72,22 +101,22 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const inspectable = changed.filter((f) => !shouldSkipMutation(f));
+  // Issue #653: positive allowlist — only mutate src/**/*.ts files actually
+  // changed in this diff. Asset-only PRs (PNGs, JSON fixtures), doc-only PRs
+  // (.md / docs/**), and dashboard-only PRs (dashboard/**) collapse to an
+  // empty list and skip cleanly with a clear log line.
+  const inspectable = filterMutationCandidates(changed);
   if (inspectable.length === 0) {
-    // Issue #402: surface a clear "no inspectable source files" reason so the
-    // CI status check explains why the gate passed (docs-only / config-only /
-    // tests-only diff). All filtered paths come from SKIP_PATTERNS (tests,
-    // configs, migrations, .md, docs/, config/).
     process.stdout.write(
       JSON.stringify({
-        status: "pass",
-        reason: "no inspectable source files",
+        status: "skipped",
+        reason: "no src/**/*.ts files changed",
         changed: changed.length,
         inspectable: 0,
       }) + "\n",
     );
     process.stderr.write(
-      `Mutation gate: no inspectable source files in ${changed.length} changed path(s) — gate passes.\n`,
+      `mutation-gate: skipped — no src/**/*.ts files changed (${changed.length} non-src path(s) in diff)\n`,
     );
     return 0;
   }
