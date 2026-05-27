@@ -1,12 +1,26 @@
 import { useApi } from "../../hooks/useApi.js";
+import { OperatorDecisionQueue } from "../../components/v2/today/OperatorDecisionQueue.jsx";
+import { StuckItems } from "../../components/v2/today/StuckItems.jsx";
+import { RecentMerges } from "../../components/v2/today/RecentMerges.jsx";
+import { NewTargetFindings } from "../../components/v2/today/NewTargetFindings.jsx";
+import { LessonsOvernight } from "../../components/v2/today/LessonsOvernight.jsx";
 
 /**
- * Dashboard v2 — `/v2/today` page (issue #616, PRD #615).
+ * Dashboard v2 — `/v2/today` page (issues #616, #617, PRD #615).
  *
- * Slice 1 — tracer-bullet: renders ONE section, the OvernightBanner,
- * fed by `GET /api/v2/today/summary`. No sidebar entry, no other
- * sections. Visiting `/v2/today` by URL is the only way to reach it
- * until slice 2 wires it into the layout.
+ * Slice 1 shipped the OvernightBanner. Slice 2 adds five more sections
+ * in the order specified by the PRD:
+ *
+ *   1. OvernightBanner (banner — fed by /v2/today/summary)
+ *   2. OperatorDecisionQueue
+ *   3. StuckItems
+ *   4. RecentMerges
+ *   5. NewTargetFindings
+ *   6. LessonsOvernight
+ *
+ * Each section lives in `dashboard/src/components/v2/today/` and owns
+ * its own poll cadence (30s for the operator-attention sections, 60s for
+ * the slower-moving merges section).
  */
 
 const HEADROOM_STYLES = {
@@ -87,7 +101,8 @@ export default function Today() {
       <div>
         <h1 className="text-2xl font-bold">Today</h1>
         <p className="text-sm text-zinc-400">
-          Dashboard v2 — slice 1 (tracer-bullet). One banner, one endpoint.
+          Dashboard v2 — overnight banner, decision queue, stuck items, recent merges, target
+          findings, and overnight lessons.
         </p>
       </div>
 
@@ -103,6 +118,12 @@ export default function Today() {
       )}
 
       {data && <OvernightBanner summary={data} />}
+
+      <OperatorDecisionQueue />
+      <StuckItems />
+      <RecentMerges />
+      <NewTargetFindings />
+      <LessonsOvernight />
     </div>
   );
 }
