@@ -6,14 +6,10 @@ import { useApi } from "../hooks/useApi.js";
 // Slice 2 of epic #496 (issue #498) — pipeline snapshot + turn timeline.
 // Slice 3 of epic #496 (issue #499) — "Why did that crash?" log tail + journal.
 // Slice 4 of epic #496 (issue #500) — previous runs + cost breakdown +
-// cross-links. Closes the loop. The Autopilot page now operates in two modes:
-//
-//   - LIVE   — mounted at `/autopilot`. Polls /api/autopilot/runs/current
-//              every 5s. Renders header + pipeline + timeline + logs + a
-//              history table of the last 14 runs.
-//   - DETAIL — mounted at `/autopilot/:runId`. One-shot fetch of
-//              /api/autopilot/runs/:runId. Same four sections in frozen
-//              (non-polling) mode. No history table (it's already on /autopilot).
+// cross-links. Dashboard v2 atomic swap (issue #621) removed the LIVE list
+// route at `/autopilot`; the live view now lives on the Now page. Only the
+// per-run DETAIL route at `/autopilot/:runId` remains — one-shot fetch of
+// /api/autopilot/runs/:runId, frozen (non-polling) mode.
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
@@ -227,11 +223,12 @@ function ActionRow({ action }) {
     const anchor = action.prompt_args?.anchor || action.anchor || "—";
     const reason = action.reason || "";
     const outcome = action.outcome;
-    // Slice 4 cross-link — "Watch stream" jumps to AgentStream filtered to
-    // this dispatch's worktree branch. Branch comes from the action payload
-    // (decide.py stamps `worktreeBranch` on dispatch actions) or the joined
-    // outcome (the cycle record carries it too). If neither is present we
-    // omit the link rather than fall back to an unscoped /agents/stream.
+    // Slice 4 (#500) stamped `worktreeBranch` on dispatch actions for the
+    // "Watch stream" cross-link to the legacy AgentStream page. That page
+    // was retired in slice 6 of the v2 swap (issue #621); the branch is
+    // still surfaced as plain text below so operators can correlate by
+    // grep. The `/api/agents/stream` resolver itself is retained pending a
+    // follow-up that re-homes the correlation feature.
     const branch =
       action.worktreeBranch || action.worktree_branch || action.branch ||
       outcome?.worktreeBranch || outcome?.worktree_branch || null;
@@ -262,13 +259,8 @@ function ActionRow({ action }) {
           <div className="text-[11px] text-zinc-600 italic">outcome: pending</div>
         )}
         {branch && (
-          <div className="text-[11px]">
-            <Link
-              to={`/agents/stream?agent=${encodeURIComponent(branch)}`}
-              className="text-blue-400 hover:underline"
-            >
-              Watch stream →
-            </Link>
+          <div className="text-[11px] text-zinc-500 font-mono">
+            branch: {branch}
           </div>
         )}
       </div>
@@ -930,7 +922,7 @@ function AutopilotDetail({ runId }) {
       <div className="p-6">
         <h1 className="text-2xl font-bold text-white mb-2">Autopilot run</h1>
         <p className="text-sm text-zinc-500 mb-6">
-          <Link to="/autopilot" className="text-blue-400 hover:underline">← Back to live</Link>
+          <Link to="/now" className="text-blue-400 hover:underline">← Back to Now</Link>
         </p>
         <div className="border border-zinc-800 rounded-lg p-6 bg-zinc-900/50">
           {is404 ? (
@@ -959,10 +951,10 @@ function AutopilotDetail({ runId }) {
       <div>
         <div className="flex items-baseline justify-between mb-1">
           <h1 className="text-2xl font-bold text-white">Autopilot run</h1>
-          <Link to="/autopilot" className="text-xs text-blue-400 hover:underline">← Back to live</Link>
+          <Link to="/now" className="text-xs text-blue-400 hover:underline">← Back to Now</Link>
         </div>
         <p className="text-sm text-zinc-500">
-          Detail view · <Link to={`/metrics?run=${encodeURIComponent(run.run_id)}`} className="text-blue-400 hover:underline">see cycles for this run</Link>
+          Detail view
         </p>
       </div>
       <RunView run={run} turns={turns} mode="detail" />
@@ -971,7 +963,12 @@ function AutopilotDetail({ runId }) {
 }
 
 // ---------------------------------------------------------------------------
-// Default export routes between live and detail based on the `:runId` param.
+// Default export is the per-run detail page. The legacy `/autopilot` live
+// list route was retired in slice 6 (issue #621); AutopilotLive is kept in
+// this file (rather than deleted) because its sub-components (RunView,
+// LogsSection, JournalPanel, history table) are still consumed by the
+// detail view. If a runId is somehow missing we fall back to AutopilotLive
+// for diagnostics, but this path is no longer mounted in App.jsx.
 // ---------------------------------------------------------------------------
 
 export default function Autopilot() {

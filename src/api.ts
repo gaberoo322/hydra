@@ -13,7 +13,6 @@ import { createSchedulerRouter } from "./api/scheduler.ts";
 import { createMetricsRouter } from "./api/metrics.ts";
 import { createMiscRouter } from "./api/misc.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
-import { createChecklistRouter } from "./api/checklist.ts";
 import { createOutcomesRouter } from "./api/outcomes.ts";
 import { createOpenVikingRouter } from "./api/openviking.ts";
 import { createGoalsRouter } from "./api/goals.ts";
@@ -31,10 +30,10 @@ import { createAutopilotRouter } from "./api/autopilot.ts";
 import { createAgentsRouter } from "./api/agents.ts";
 import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
-import { createV2TodayRouter } from "./api/v2/today.ts";
-import { createV2NowRouter } from "./api/v2/now.ts";
-import { createV2OutcomesRouter } from "./api/v2/outcomes.ts";
-import { createV2ExploreRouter } from "./api/v2/explore.ts";
+import { createTodayPageRouter } from "./api/today-page.ts";
+import { createNowPageRouter } from "./api/now-page.ts";
+import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
+import { createExplorePageRouter } from "./api/explore-page.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -84,17 +83,19 @@ function createApi(eventBus) {
   api.use(createAgentsRouter());
   api.use(createScoutRouter());
   api.use(createUsageRouter());
-  // Dashboard v2 — issue #616 / PRD #615. New surface at /api/v2/*; existing
-  // routes unchanged. Atomic swap to v2-only happens in a later slice.
-  api.use(createV2TodayRouter());
+  // Dashboard pages (PRD #615). After the slice-6 atomic swap (#621) the
+  // routes are mounted at their final names; the historical `/api/v2/*`
+  // incremental-delivery prefix is gone.
+  api.use(createTodayPageRouter());
   // Now page — slice 3 (issue #618).
-  api.use(createV2NowRouter());
+  api.use(createNowPageRouter());
   // Slice 4 (issue #619) — Outcomes page: 4 weekly-trend endpoints.
-  api.use(createV2OutcomesRouter());
+  api.use(createOutcomesPageRouter());
   // Explore tabbed hub — slice 5 (issue #620).
-  api.use(createV2ExploreRouter());
+  api.use(createExplorePageRouter());
   api.use(createMiscRouter(eventBus));
-  api.use(createChecklistRouter());
+  // /api/checklist sub-router retired in slice 6 of the dashboard
+  // simplification (issue #621). Only the deleted Checklist page consumed it.
   api.use(createOutcomesRouter());
 
   // Sentry error handler — must be after all routes, before other error handlers
