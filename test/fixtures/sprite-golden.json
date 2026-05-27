@@ -1,0 +1,27 @@
+{
+  "width": 8,
+  "height": 4,
+  "frameCount": 2,
+  "background": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "frames": [
+    {
+      "name": "01-red.png",
+      "x": 0,
+      "y": 0,
+      "w": 4,
+      "h": 4
+    },
+    {
+      "name": "02-blue.png",
+      "x": 4,
+      "y": 0,
+      "w": 4,
+      "h": 4
+    }
+  ]
+}
