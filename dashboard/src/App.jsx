@@ -4,6 +4,7 @@ import { ToastProvider } from "./hooks/useToast.jsx";
 import Layout from "./components/Layout.jsx";
 import Today from "./pages/Today.jsx";
 import Now from "./pages/Now.jsx";
+import NowPixel from "./pages/now-pixel/NowPixel.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
 import Explore from "./pages/Explore.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
@@ -24,6 +25,10 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Today />} />
           <Route path="/now" element={<Now ws={ws} />} />
+          {/* /now-pixel — Pokemon-habitat preview (epic #642, slice 2).
+              Reachable by direct URL only; the nav link arrives in slice 7
+              and the atomic swap to /now ships after that. */}
+          <Route path="/now-pixel" element={<NowPixel />} />
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/explore" element={<Explore />} />
           <Route path="/explore/:tab" element={<Explore />} />
