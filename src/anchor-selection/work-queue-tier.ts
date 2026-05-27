@@ -25,12 +25,61 @@ export interface WorkQueueAnchor {
   _workQueueRaw: string;
 }
 
+/**
+ * Allowlist of `source` values that may produce an anchor (issue #449).
+ *
+ * Pre-cutover the orchestrator's in-process Codex agents (`code-reviewer`,
+ * `adversarial-validation`) enqueued findings here. Those agents were
+ * deleted with PR #383 / issues #343–#344, but no migration drained their
+ * residual items, so 20 of 31 work-queue entries on 2026-05-15 were
+ * orphan-source items being mis-mapped to `user-request` anchors. The
+ * operator manually drained the historical items on 2026-05-26; this
+ * allowlist is the durable guard that stops them re-accumulating if an
+ * out-of-tree producer ever enqueues with a deprecated source again.
+ *
+ * `undefined` is intentionally allowed: existing operator-queued items
+ * (e.g. `POST /api/queue` without an explicit source field) fall through
+ * to the `user-request` mapping below and must keep working.
+ */
+const ALLOWED_SOURCES = new Set<string>([
+  "research",
+  "user-request",
+  "operator",
+]);
+
+function isAllowedSource(source: unknown): boolean {
+  if (source === undefined || source === null) return true;
+  if (typeof source !== "string") return false;
+  return ALLOWED_SOURCES.has(source);
+}
+
 export async function selectWorkQueueAnchor(): Promise<WorkQueueAnchor | null> {
   const queued = await claimNextWorkQueueItem();
   if (!queued) return null;
 
   try {
     const item = JSON.parse(queued);
+
+    // Source allowlist (issue #449) — reject items emitted by deleted
+    // in-process agents (`code-reviewer`, `adversarial-validation`, etc.)
+    // before they get mapped to a `user-request` anchor and lose their
+    // provenance.
+    if (!isAllowedSource(item?.source)) {
+      console.error(
+        `[ControlLoop] Dropping work-queue item with disallowed source=${JSON.stringify(
+          item?.source,
+        )} reference=${JSON.stringify(item?.reference || item?.description || "")}`,
+      );
+      try {
+        await removeFromProcessingQueue(queued);
+      } catch (err: any) {
+        console.error(
+          `[ControlLoop] Failed to LREM disallowed-source work-queue item: ${err.message}`,
+        );
+      }
+      return null;
+    }
+
     // Parse research context if present
     let parsedContext = item.context;
     if (typeof parsedContext === "string") {
