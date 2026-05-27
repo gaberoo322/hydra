@@ -87,3 +87,196 @@ export const OvernightSummaryResponseSchema = z
   .strict();
 
 export type OvernightSummaryResponse = z.infer<typeof OvernightSummaryResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Slice-2 schemas (issue #617)
+// ---------------------------------------------------------------------------
+
+/** Source vocabulary for `DecisionItem.source` — mirror of the aggregator type. */
+export const DecisionItemSourceSchema = z.enum([
+  "operator-decision-queue",
+  "ready-for-human",
+  "needs-info",
+]);
+
+/**
+ * Response body for `GET /api/v2/today/decision-queue`. The aggregator
+ * returns an array — the schema wraps it under `{ items }` so the route
+ * has a place to grow other top-level fields (counts, generatedAt) later
+ * without breaking clients.
+ */
+export const DecisionItemSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    createdAt: z.string(),
+    labels: z.array(z.string()),
+    source: DecisionItemSourceSchema,
+    sources: z.array(DecisionItemSourceSchema),
+  })
+  .strict();
+
+export const DecisionQueueResponseSchema = z
+  .object({
+    items: z.array(DecisionItemSchema),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type DecisionQueueResponse = z.infer<typeof DecisionQueueResponseSchema>;
+
+/**
+ * Response body for `GET /api/v2/today/stuck`. Three pre-classified
+ * buckets plus the thresholds used so the dashboard can render labels
+ * like "blocked > 2d".
+ */
+export const StuckIssueSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    createdAt: z.string(),
+    ageDays: z.number().int().nonnegative(),
+    labels: z.array(z.string()),
+  })
+  .strict();
+
+export const StuckPrSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    failedChecks: z.array(z.string()),
+    updatedAt: z.string(),
+  })
+  .strict();
+
+export const StuckThresholdsSchema = z
+  .object({
+    blockedDays: z.number().int().positive(),
+    needsInfoDays: z.number().int().positive(),
+  })
+  .strict();
+
+export const StuckItemsResponseSchema = z
+  .object({
+    blockedOver2d: z.array(StuckIssueSchema),
+    needsInfoWaiting: z.array(StuckIssueSchema),
+    prsWithFailedCi: z.array(StuckPrSchema),
+    thresholds: StuckThresholdsSchema,
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type StuckItemsResponse = z.infer<typeof StuckItemsResponseSchema>;
+
+/**
+ * Query schema for `GET /api/v2/today/merges`. `limit` defaults to 10
+ * and is clamped at [1, 50] — same bound as the aggregator's `clampLimit`.
+ */
+export const RecentMergesQuerySchema = z
+  .object({
+    limit: z.coerce
+      .number({ message: "limit must be a number" })
+      .int({ message: "limit must be an integer" })
+      .min(1, { message: "limit must be >= 1" })
+      .max(50, { message: "limit must be <= 50" })
+      .default(10),
+  })
+  .strict();
+
+export type RecentMergesQuery = z.infer<typeof RecentMergesQuerySchema>;
+
+export const MergeItemSchema = z
+  .object({
+    prNumber: z.number().int().positive(),
+    title: z.string(),
+    tier: z.number().int().nullable(),
+    classLabel: z.string().nullable(),
+    mergedAt: z.string(),
+    url: z.string(),
+  })
+  .strict();
+
+export const RecentMergesResponseSchema = z
+  .object({
+    items: z.array(MergeItemSchema),
+    limit: z.number().int().positive(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type RecentMergesResponse = z.infer<typeof RecentMergesResponseSchema>;
+
+/**
+ * Query schema for window-scoped endpoints — reused by `findings` and
+ * `lessons-overnight`. Same bounds as the overnight-summary query, but
+ * defaulted to 24h since both endpoints describe "recent" findings rather
+ * than the 12h overnight window of the summary.
+ */
+export const WindowedQuerySchema = z
+  .object({
+    windowHours: z.coerce
+      .number({ message: "windowHours must be a number" })
+      .int({ message: "windowHours must be an integer" })
+      .min(1, { message: "windowHours must be >= 1" })
+      .max(168, { message: "windowHours must be <= 168" })
+      .default(24),
+  })
+  .strict();
+
+export type WindowedQuery = z.infer<typeof WindowedQuerySchema>;
+
+export const FindingSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    createdAt: z.string(),
+    labels: z.array(z.string()),
+    excerpt: z.string(),
+  })
+  .strict();
+
+export const FindingsResponseSchema = z
+  .object({
+    items: z.array(FindingSchema),
+    windowHours: z.number().int().positive(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type FindingsResponse = z.infer<typeof FindingsResponseSchema>;
+
+export const PromotionCandidateSchema = z
+  .object({
+    skill: z.string(),
+    cue: z.string(),
+    hitCount: z.number().int().nonnegative(),
+    hitsToPromotion: z.number().int().positive(),
+    lastSeen: z.string(),
+    examples: z.array(z.string()),
+  })
+  .strict();
+
+export const MetaFrictionIssueSchema = z
+  .object({
+    number: z.number().int().positive(),
+    title: z.string(),
+    url: z.string(),
+    createdAt: z.string(),
+  })
+  .strict();
+
+export const LessonsOvernightResponseSchema = z
+  .object({
+    promotionCandidates: z.array(PromotionCandidateSchema),
+    metaFrictionOpened: z.array(MetaFrictionIssueSchema),
+    windowHours: z.number().int().positive(),
+    generatedAt: z.string(),
+    promotionThreshold: z.number().int().positive(),
+  })
+  .strict();
+
+export type LessonsOvernightResponse = z.infer<typeof LessonsOvernightResponseSchema>;
