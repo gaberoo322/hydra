@@ -269,6 +269,47 @@ export async function clearSchedulerDeliberateStop(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Budget-threshold idempotency (issue #673)
+// ---------------------------------------------------------------------------
+
+/**
+ * Atomically claim a budget-threshold crossing. Uses SET NX EX so the first
+ * caller for a (date, thresholdPct) pair wins and every subsequent caller
+ * for the rest of the TTL window is a no-op.
+ *
+ * Returns true when the caller is the FIRST to cross this threshold today
+ * (i.e. the caller should emit the event), false otherwise.
+ */
+export async function claimBudgetThresholdSeen(
+  isoDate: string,
+  thresholdPct: number,
+  ttlSeconds: number,
+): Promise<boolean> {
+  const r = getRedisConnection();
+  const key = redisKeys.budgetThresholdSeen(isoDate, thresholdPct);
+  const result = await r.set(key, Date.now().toString(), "NX", "EX", ttlSeconds);
+  return result === "OK";
+}
+
+/** Read the budget-threshold sentinel, or null when absent. Exposed for tests. */
+export async function getBudgetThresholdSeen(
+  isoDate: string,
+  thresholdPct: number,
+): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.budgetThresholdSeen(isoDate, thresholdPct));
+}
+
+/** Test helper: wipe a single budget-threshold sentinel. */
+export async function _clearBudgetThresholdSeen(
+  isoDate: string,
+  thresholdPct: number,
+): Promise<void> {
+  const r = getRedisConnection();
+  await r.del(redisKeys.budgetThresholdSeen(isoDate, thresholdPct));
+}
+
+// ---------------------------------------------------------------------------
 // Blocked-issue escalation cooldown (per-item timestamp hash)
 // ---------------------------------------------------------------------------
 
