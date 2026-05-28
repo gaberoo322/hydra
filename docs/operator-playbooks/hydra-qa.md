@@ -242,6 +242,15 @@ $REVIEW_REPORT
 
 $CHECKS_BLOCK"
 gh pr merge $pr_number --repo gaberoo322/hydra --squash --delete-branch
+
+# Belt-and-braces (issue #638): the merge above auto-closes the issue via
+# `Closes #N` in the PR body, which also removes labels on close — but if
+# the merge call fails (branch protection edge case, network blip) the
+# issue keeps `needs-qa` and causes the same busy-loop the PASS-pending-CI
+# branch fixes. Clearing the label explicitly here makes the post-state
+# the same regardless of whether auto-merge succeeded.
+gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" 2>/dev/null \
+  || true  # already cleared by auto-close — expected and non-fatal
 ```
 Issue auto-closes via `closes #N` in PR body.
 
@@ -260,7 +269,23 @@ Code review **PASS**. Awaiting CI:
 $CHECKS_BLOCK
 
 Verdict: \`PASS-pending-CI\`. Autopilot will re-evaluate once required checks conclude. **The QA subagent has exited — no background wait.**"
-# Leave the needs-qa label in place so autopilot re-dispatches on the next tick.
+
+# Clear needs-qa from the source issue (issue #638) — the diff-review portion
+# of QA is complete; what remains is CI polling, which the autopilot does
+# directly via `gh pr view --json statusCheckRollup` without re-running this
+# skill. Leaving `needs-qa` on the issue caused `signals.needs_qa_orch=True`
+# to fire on every autopilot tick (`scripts/autopilot/collect-state.sh:33`
+# counts `needs-qa` on issues), and decide.py re-dispatched hydra-qa every
+# turn — a busy-loop that burned ~30-65k tokens per tick while the PR sat
+# waiting on CI or operator merge.
+#
+# The PR keeps its own status via the verdict comment above; when CI goes
+# green and the PR is merged, `Closes #N` in the PR body auto-closes the
+# issue. If CI later FAILS, the autopilot poll loop (which reads
+# statusCheckRollup directly, not labels) re-labels the issue
+# `ready-for-agent` for retry — the same path as a fresh FAIL verdict.
+gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" 2>/dev/null \
+  || echo "WARN: failed to clear needs-qa from issue #${issue_number} (non-fatal)"
 ```
 
 **Verdict `FAIL` or `FAIL-pending-CI`** (any axis has hard findings, or a required check has already failed):
