@@ -1,6 +1,7 @@
 import ClassSprite from "./ClassSprite.jsx";
 import SubagentSprite from "./SubagentSprite.jsx";
 import CooldownClock from "./CooldownClock.jsx";
+import ReapingFade from "./ReapingFade.jsx";
 import { SIGNAL_CLASSES } from "./sprite-map.ts";
 
 /**
@@ -30,6 +31,12 @@ export default function HabitatZone({
   hardMax = 800_000,
   hoveredSubagentId = null,
   onSubagentHover = () => {},
+  // Reaping (#661): when the parent grid detects an occupied → null
+  // slot transition it passes { subagent, status } here so we can
+  // render the 800ms fade-out next to the parent ClassSprite. The live
+  // `subagent` prop above is already null at this point, so the two
+  // never render at the same time.
+  reaping = null,
 }) {
   const isSignal = SIGNAL_SET.has(className);
   return (
@@ -76,6 +83,18 @@ export default function HabitatZone({
               hoveredId={hoveredSubagentId}
               onHover={onSubagentHover}
             />
+          )}
+          {!isSignal && !subagent && reaping && reaping.subagent && (
+            <ReapingFade status={reaping.status}>
+              <SubagentSprite
+                parentClass={className}
+                taskId={reaping.subagent.task_id}
+                tokens={Number(reaping.subagent.partial_tokens ?? 0)}
+                hardMax={hardMax}
+                hoveredId={hoveredSubagentId}
+                onHover={onSubagentHover}
+              />
+            </ReapingFade>
           )}
           {isSignal && status === "sleeping" && cooldown && (
             <CooldownClock
