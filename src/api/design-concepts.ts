@@ -32,6 +32,8 @@ import {
 import {
   appendExemptLogEntry,
   readRecentExemptLogEntries,
+  readDailySnapshots,
+  getDesignConceptIndexSize,
 } from "../redis/design-concept.ts";
 import {
   DesignConceptInputSchema,
@@ -72,6 +74,39 @@ export function createDesignConceptsRouter() {
   // `/:anchorRef` routes so the literal "exempt-log" path is not
   // captured as an anchorRef param.
   // ---------------------------------------------------------------------------
+
+  /**
+   * GET /api/design-concepts/snapshots (issue #628)
+   *
+   * Returns the daily-snapshot HASH as `{ snapshots: [{date, count}, ...],
+   * consecutiveGreenDays, indexSizeNow, greenLightReady }` — the
+   * green-light criterion for Phase C of #437 is `consecutiveGreenDays
+   * >= 7`. Newest-first.
+   */
+  router.get("/design-concepts/snapshots", async (_req, res) => {
+    try {
+      const snapshots = await readDailySnapshots();
+      const indexSizeNow = await getDesignConceptIndexSize();
+      // Count consecutive non-zero days from the newest snapshot backwards.
+      // The "newest-first" sort from readDailySnapshots() means we just
+      // walk until we hit a zero or run out.
+      let consecutiveGreenDays = 0;
+      for (const s of snapshots) {
+        if (s.count > 0) consecutiveGreenDays += 1;
+        else break;
+      }
+      const greenLightReady = consecutiveGreenDays >= 7;
+      res.json({
+        snapshots,
+        consecutiveGreenDays,
+        indexSizeNow,
+        greenLightReady,
+      });
+    } catch (err: any) {
+      console.error("[api/design-concepts] snapshots read failed", err);
+      res.status(500).json({ error: err?.message ?? "snapshots read failed" });
+    }
+  });
 
   router.get("/design-concepts/exempt-log", async (req, res) => {
     try {
