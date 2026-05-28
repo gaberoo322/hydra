@@ -22,11 +22,18 @@ import { useEffect, useRef, useState, useCallback } from "react";
  *     failure } OR by an explicit `fireHurt(cls)` call (e.g. burned-
  *     classes membership). Persists until `clearAnimation(cls)` is
  *     called or another success cheering supersedes it.
- *   - thinking: NOT implemented in slice 4. The full design (slot
- *     occupied + no token delta in 30s) needs per-slot partial_tokens
- *     diffing; slice 6 (#648) introduces subagent stats and will own
- *     the thinking-state derivation. The hook reserves the literal so
- *     future callers don't have to refactor.
+ *   - thinking: persistent (NOT one-shot). Fired by the consumer
+ *     (HabitatGrid) via `fireThinking(cls)` whenever its per-slot
+ *     `deriveThinking` derivation flips that class into the inactivity
+ *     window (slot occupied ≥30s, no token-delta). Cleared explicitly
+ *     by the consumer via `clearAnimation(cls)` once tokens move again
+ *     or the slot empties. Priority rules (issue #660 follow-up):
+ *       - `hurt` MUST win — a failing subagent stays red even if it
+ *         also went quiet. `fireThinking` is a no-op when the current
+ *         animation is `hurt`.
+ *       - one-shot success animations (`excited`, `cheering`) override
+ *         `thinking` for their 1s lifetime; the consumer re-fires
+ *         `thinking` on the next poll if the slot is still quiet.
  *
  * Graceful degradation: if the WebSocket disconnects, the hook stays
  * functional (it just stops receiving events). Excited triggered by
@@ -80,6 +87,22 @@ export function useSpriteAnimations(ws) {
     setAnimations((prev) => ({ ...prev, [cls]: "hurt" }));
   }, []);
 
+  /**
+   * Persistent (not one-shot) animation — set the class into "thinking"
+   * until the caller explicitly clears it. Hurt wins: if the current
+   * animation is `hurt`, this is a no-op so a failing subagent stays
+   * red. Idempotent — re-firing while already thinking does not nudge
+   * the state object (preserves referential equality so consumers don't
+   * re-render needlessly).
+   */
+  const fireThinking = useCallback((cls) => {
+    setAnimations((prev) => {
+      if (prev[cls] === "hurt") return prev;
+      if (prev[cls] === "thinking") return prev;
+      return { ...prev, [cls]: "thinking" };
+    });
+  }, []);
+
   // WS subscription — slot-event frames carry the slot name + status.
   useEffect(() => {
     if (!ws || typeof ws.subscribe !== "function") return undefined;
@@ -116,6 +139,7 @@ export function useSpriteAnimations(ws) {
     fireExcited,
     fireCheering,
     fireHurt,
+    fireThinking,
     clearAnimation,
   };
 }
