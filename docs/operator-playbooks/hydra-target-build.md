@@ -217,6 +217,7 @@ Rules:
 - `vi.mock("server-only", () => ({}))` in tests importing server modules.
 - Read `web/AGENTS.md` — Next.js 16 APIs may differ from training.
 - **Stay in scope.** If you must touch a file outside the Step 3.5 in-scope list, append it to `SCOPE_JUSTIFICATIONS` with a one-line reason before continuing.
+- **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The design-concept artifact (if present at `hydra:design-concept:$ANCHOR`) already carries the issue-relevant terms forward — the co-located read is the residual case for files the artifact didn't anticipate.
 
 ### 6. Verify (NOT an agent)
 ```bash
@@ -235,6 +236,27 @@ After the first edit batch, sanity-check that the edits actually landed in the w
 Fail → fix → re-verify. After 2 failed fixes, abandon branch.
 
 For orchestrator changes (~/hydra/): `node --check src/<file>.ts` + `npm test` + restart service.
+
+### 6.5. Glossary / ADR gate (per target `docs/agents/domain.md`)
+
+Before opening the code PR (or pushing the feature branch), answer the WRITE protocol's two yes/no questions documented in `~/hydra-betting/docs/agents/domain.md`. Both answers go in the code PR body (or merge commit body, for direct-to-main merges) **even when both are "none"** — the declaration is the audit trail.
+
+```
+Glossary impact: <term — one-line gloss | none>
+ADR impact:     <one-line description | none>
+```
+
+If "Glossary impact" is not `none`:
+- Identify the right file per the target's domain.md ("Where the glossary/ADR change lands" section).
+- Open a **separate** PR from a sibling branch (`feature/$CYCLE_ID-glossary` off the same base) containing **only** the CONTEXT.md / CONTEXT-MAP.md delta.
+- Label it `ubiquitous-language`.
+- Reference its number from the code PR body. Do NOT bundle the glossary change into the code PR.
+
+If "ADR impact" is not `none`:
+- Same separate-PR pattern. ADR file is `docs/adr/NNNN-kebab-slug.md` or `web/src/lib/<context>/docs/adr/NNNN-kebab-slug.md` per scope.
+- Same `ubiquitous-language` label. Same code-PR reference.
+
+Gating discipline: the criteria are deliberately strict. **Both** ADR criteria must hold (hard-to-reverse AND surprising-to-a-reader AND has a real trade-off). Glossary updates fire only when you can write the one-line gloss now — if you can't, there's no glossary entry to add. Most builds will declare `none / none` — that's the expected steady state. The design-concept gate (hydra-grill) already caught the anticipated terms upfront; this step covers only the residual case where new vocabulary surfaced during implementation.
 
 ### 7. Merge (with merge lock)
 

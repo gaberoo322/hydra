@@ -60,6 +60,17 @@ The orchestrator service still owns:
 - Dashboard + REST API
 - Merge-gate facade (`src/gate.ts`), tier classifier, and Tier-2 outcome holdback
 
+## Target conventions
+
+The target (`~/hydra-betting`) has its own agent-facing documentation contract that orchestrator-dispatched subagents (`hydra-target-build`, `hydra-target-sweep`, `hydra-target-research`, etc.) follow:
+
+- **`~/hydra-betting/CONTEXT-MAP.md`** — index of per-context glossaries (multi-context layout).
+- **`~/hydra-betting/web/src/lib/<context>/CONTEXT.md`** — per-context glossary, glossary-only (no implementation prose).
+- **`~/hydra-betting/docs/adr/`** — system-wide ADRs (cross-context decisions). **`~/hydra-betting/web/src/lib/<context>/docs/adr/`** — context-scoped ADRs. Filenames: `NNNN-kebab-slug.md`.
+- **`~/hydra-betting/docs/agents/domain.md`** — the canonical READ + WRITE contract subagents follow. Defines when to open a `ubiquitous-language`-labelled PR for glossary or ADR deltas (separate from the code PR; do not bundle).
+
+`hydra-grill` (scope=target) carries the structural READ load — when the autopilot dispatches a target build, the design-concept artifact already contains the issue-relevant vocabulary. `hydra-target-build` then applies a co-located rule (read any `CONTEXT.md` sibling of an edited file) for residual terms and declares `Glossary impact` / `ADR impact` in every code PR body.
+
 ## Key Files
 
 See `docs/reference.md` for the file inventory, Redis keys, event bus streams, and API endpoints.

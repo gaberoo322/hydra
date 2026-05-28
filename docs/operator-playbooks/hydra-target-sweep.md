@@ -159,3 +159,4 @@ Scan all active lanes for items whose title matches recent merge titles. Move co
 - Re-queuing reframe items: always narrow the scope in the reference
 - Log every action for the report
 - Unsure if completed → leave it. False negatives are safer than false positives.
+- **Vocabulary.** When narrowing a reframe item or promoting a triage item, name it using the target's canonical vocabulary — `~/hydra-betting/CONTEXT-MAP.md` and the per-context `CONTEXT.md` files. Don't invent synonyms; if the noun you need isn't in the glossary, leave the item for the operator instead of inventing language. The per-context layout is documented in `~/hydra-betting/docs/agents/domain.md`.
