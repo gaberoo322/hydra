@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
 import HabitatZone from "./HabitatZone.jsx";
 import Infirmary from "./Infirmary.jsx";
-import { deriveZoneState, deriveCooldown } from "./derive-sprite-state.ts";
+import {
+  deriveZoneState,
+  deriveCooldown,
+  deriveThinking,
+} from "./derive-sprite-state.ts";
 
 /**
  * HabitatGrid — 2-column habitat layout for /now-pixel.
@@ -52,6 +56,36 @@ export default function HabitatGrid({
       prevOccupancyRef.current[cls] = status;
     }
   }, [zoneState.zones, anim]);
+
+  // Thinking-state — slot occupied ≥30s with no partial_tokens delta.
+  // We tick the same 1Hz `now` clock above for cooldowns so the
+  // derivation re-runs cheaply on every second the page is open. The
+  // tracker lives in a ref so the per-slot inactivity watermark
+  // survives re-renders. Issue #660.
+  const thinkingTrackerRef = useRef({});
+  const prevThinkingRef = useRef({});
+  useEffect(() => {
+    if (!anim?.fireThinking) return;
+    const { thinking, nextTracker } = deriveThinking(
+      slotsSnapshot,
+      now,
+      thinkingTrackerRef.current,
+    );
+    thinkingTrackerRef.current = nextTracker;
+    for (const [cls, isThinking] of Object.entries(thinking)) {
+      const wasThinking = prevThinkingRef.current[cls] === true;
+      if (isThinking && !wasThinking) {
+        anim.fireThinking(cls);
+      } else if (!isThinking && wasThinking) {
+        // Only clear if the hook currently shows thinking — never
+        // stomp on a hurt or one-shot that took over in the meantime.
+        if (anim.animations?.[cls] === "thinking") {
+          anim.clearAnimation(cls);
+        }
+      }
+      prevThinkingRef.current[cls] = isThinking;
+    }
+  }, [slotsSnapshot, now, anim]);
 
   const orchPipelineClasses = [
     "dev_orch",

@@ -255,6 +255,155 @@ export function deriveZoneState(
 }
 
 // ---------------------------------------------------------------------------
+// Thinking-state derivation (issue #660 follow-up to /now-pixel slice 4/6).
+//
+// A pipeline slot is "thinking" when it has been occupied for ≥30s with
+// **no token-delta on the run row** in that window. We do not have a
+// "tokens went up at T" event from the autopilot — the signal lives in
+// `slots_snapshot[cls].partial_tokens` from /api/autopilot/runs/current.
+// The derivation diffs successive polls per slot and flips the slot into
+// thinking once a configurable inactivity window has elapsed with no
+// delta.
+//
+// Pure function — explicit `now` for test pinning. The caller threads
+// the previous `tracker` value back in on each poll; the function
+// returns the next tracker alongside the per-class thinking map.
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-slot bookkeeping for thinking-state derivation. The caller (the
+ * `HabitatGrid` component) holds this in a `useRef` and threads it back
+ * through `deriveThinking` on every /api/autopilot/runs/current poll.
+ */
+export interface ThinkingSlotState {
+  /** Last seen partial_tokens value for this slot. Used to detect deltas. */
+  lastTokens: number;
+  /** Epoch (Unix seconds) at which `lastTokens` last changed. */
+  lastChangeAt: number;
+  /** Subagent task_id observed when `lastTokens` was last updated. */
+  taskId: string | null;
+}
+
+export type ThinkingTracker = Partial<Record<PipelineClass, ThinkingSlotState>>;
+
+/**
+ * Inactivity window (seconds) before a still-occupied slot tips into
+ * "thinking". The spec on issue #660 locks this at 30s — exposed as a
+ * named export so tests don't hard-code the literal.
+ */
+export const THINKING_WINDOW_SEC = 30;
+
+/**
+ * Slim shape we accept off each `slots_snapshot[cls]` entry. The
+ * autopilot writes the full slot row (skill, task_id, started_at, etc.);
+ * we only need the bits that matter for thinking-state.
+ */
+interface ThinkingSlotInput {
+  skill?: string;
+  task_id?: string | null;
+  partial_tokens?: number | null | undefined;
+}
+
+type SlotsSnapshotInput = Partial<Record<PipelineClass, ThinkingSlotInput | null>>;
+
+export interface DeriveThinkingResult {
+  /** Per-class thinking boolean. All seven pipeline classes are keyed. */
+  thinking: Record<PipelineClass, boolean>;
+  /**
+   * Next tracker state — caller stores this and threads it back on the
+   * next poll. Empty slots are pruned so the tracker never grows
+   * unbounded as autopilot runs come and go.
+   */
+  nextTracker: ThinkingTracker;
+}
+
+/**
+ * Derive per-slot thinking state from a slots-snapshot poll.
+ *
+ * Inputs:
+ *   - `slotsSnapshot` — the freshest `slots_snapshot` from
+ *     /api/autopilot/runs/current (typically the last turn).
+ *   - `now` — Unix-seconds clock the caller is already ticking at 1Hz
+ *     (HabitatGrid). Explicit so the unit test can pin time.
+ *   - `prevTracker` — what the previous invocation returned in
+ *     `nextTracker`. Pass `{}` on first call.
+ *
+ * Behaviour:
+ *   - Empty slot (null/undefined) → not thinking. Tracker entry is
+ *     dropped so a fresh occupancy starts the clock from scratch.
+ *   - Slot re-occupied by a NEW task_id → not thinking (yet). Tracker
+ *     restarts at `now`.
+ *   - Same task_id with a token delta vs. `lastTokens` → not thinking.
+ *     Tracker's `lastChangeAt` advances to `now`.
+ *   - Same task_id with NO token delta and `now - lastChangeAt >=
+ *     THINKING_WINDOW_SEC` → thinking. Tracker is preserved.
+ *   - Same task_id, no token delta, but still inside the window → not
+ *     thinking (yet). Tracker is preserved.
+ *
+ * Returns both the per-class thinking map AND the next tracker. Pure —
+ * does not mutate `prevTracker`.
+ */
+export function deriveThinking(
+  slotsSnapshot: SlotsSnapshotInput | null | undefined,
+  now: number,
+  prevTracker: ThinkingTracker = {},
+): DeriveThinkingResult {
+  const snapshot = slotsSnapshot ?? {};
+  const thinking = {} as Record<PipelineClass, boolean>;
+  const nextTracker: ThinkingTracker = {};
+
+  for (const cls of PIPELINE_CLASSES) {
+    const slot = snapshot[cls];
+    if (slot == null) {
+      // Empty slot — drop the tracker entry so the next occupancy
+      // restarts the inactivity clock from zero.
+      thinking[cls] = false;
+      continue;
+    }
+
+    const tokensRaw = slot.partial_tokens;
+    const tokens =
+      typeof tokensRaw === "number" && Number.isFinite(tokensRaw) ? tokensRaw : 0;
+    const taskId = slot.task_id ?? null;
+    const prev = prevTracker[cls];
+
+    if (!prev || prev.taskId !== taskId) {
+      // New occupancy (or first poll). Seed the tracker at `now`; not
+      // yet thinking.
+      nextTracker[cls] = {
+        lastTokens: tokens,
+        lastChangeAt: now,
+        taskId,
+      };
+      thinking[cls] = false;
+      continue;
+    }
+
+    if (tokens !== prev.lastTokens) {
+      // Token-delta observed → advance the change watermark.
+      nextTracker[cls] = {
+        lastTokens: tokens,
+        lastChangeAt: now,
+        taskId,
+      };
+      thinking[cls] = false;
+      continue;
+    }
+
+    // Same task, no delta. Preserve the tracker; flip to thinking once
+    // the inactivity window has elapsed.
+    nextTracker[cls] = {
+      lastTokens: tokens,
+      lastChangeAt: prev.lastChangeAt,
+      taskId,
+    };
+    thinking[cls] = now - prev.lastChangeAt >= THINKING_WINDOW_SEC;
+  }
+
+  return { thinking, nextTracker };
+}
+
+// ---------------------------------------------------------------------------
 // HP / EXP / Cooldown derivations (slice 6 of #642, #648).
 // ---------------------------------------------------------------------------
 
