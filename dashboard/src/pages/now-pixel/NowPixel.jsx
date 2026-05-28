@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
 import { useSpriteAnimations } from "../../hooks/useSpriteAnimations.js";
 import AutopilotPavilion from "./AutopilotPavilion.jsx";
-import ActiveDispatchesStrip from "./ActiveDispatchesStrip.jsx";
+import BattleCardRow from "./BattleCardRow.jsx";
 import HabitatGrid from "./HabitatGrid.jsx";
 import OakTownCrier from "./OakTownCrier.jsx";
 import Attribution from "./Attribution.jsx";
+import DispatchTween from "./DispatchTween.jsx";
+import { shouldTweenFrame } from "./derive-dispatch-tween.ts";
 
 /**
  * NowPixel — pixel-art habitat dashboard.
@@ -15,9 +17,11 @@ import Attribution from "./Attribution.jsx";
  * the audit-now-parity.js script passes.
  *
  * NowPixel hosts the shared `hoveredSubagentId` from slice 6 so the
- * in-zone SubagentSprite and the ActiveDispatchesStrip highlight
- * together. The page is reachable at /now-pixel; slice 7 PR2 will swap
- * it to /now and rename the legacy view to /now-classic.
+ * in-zone SubagentSprite and the BattleCardRow (slice D of the
+ * /now-observability epic #667 / issue #672, which replaced the legacy
+ * ActiveDispatchesStrip) highlight together. The page is reachable at
+ * /now and the pixel route is the canonical surface (the /now-classic
+ * fallback was retired in slice 7 PR2).
  */
 function formatMoney(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "$0";
@@ -84,6 +88,41 @@ export default function NowPixel({ ws }) {
   const anim = useSpriteAnimations(ws);
   const [hoveredSubagentId, setHoveredSubagentId] = useState(null);
 
+  // Slice E of autopilot observability (#667, #670): wire up the
+  // Pavilion → HabitatZone dispatch tween. We hold a ref to the
+  // Pavilion sprite (origin point) and a Map of zone-class → element
+  // (destination points). When a dispatch_decision slot-event lands
+  // with outcome=dispatched, we read both rects at that moment (so a
+  // resized window doesn't desync the tween) and hand them to
+  // anim.fireTravel.
+  //
+  // Graceful degradation: if either rect is unresolvable (zone not yet
+  // mounted, scope=orch-only hides the target column), tweenSpec()
+  // falls back to an instant pop. Missed WS frames are picked up by
+  // HabitatGrid's existing 10s /autopilot/runs/current poll — the
+  // tween is cosmetic.
+  const pavilionSpriteRef = useRef(null);
+  const zoneRectsRef = useRef(new Map());
+
+  useEffect(() => {
+    if (!ws || typeof ws.subscribe !== "function") return undefined;
+    const off = ws.subscribe("slot-event", (frame) => {
+      const hit = shouldTweenFrame(frame);
+      if (!hit) return;
+      const pavilionEl = pavilionSpriteRef.current;
+      const fromRect = pavilionEl?.getBoundingClientRect?.() ?? null;
+      const zoneEl = zoneRectsRef.current?.get(hit.cls) ?? null;
+      const toRect = zoneEl?.getBoundingClientRect?.() ?? null;
+      anim.fireTravel(hit.cls, fromRect, toRect, {
+        turnN: hit.turnN,
+        tsEpoch: hit.tsEpoch,
+      });
+    });
+    return () => {
+      off?.();
+    };
+  }, [ws, anim]);
+
   return (
     <div className="space-y-4">
       <header>
@@ -93,7 +132,7 @@ export default function NowPixel({ ws }) {
           coexists with classic /now until the atomic swap.
         </p>
       </header>
-      <AutopilotPavilion />
+      <AutopilotPavilion spriteRef={pavilionSpriteRef} />
       <CoinBag />
       <div className="flex gap-4 items-stretch">
         <div className="flex-1 min-w-0">
@@ -101,14 +140,17 @@ export default function NowPixel({ ws }) {
             anim={anim}
             hoveredSubagentId={hoveredSubagentId}
             onSubagentHover={setHoveredSubagentId}
+            zoneRectsRef={zoneRectsRef}
           />
         </div>
         <OakTownCrier ws={ws} />
       </div>
-      <ActiveDispatchesStrip
+      <BattleCardRow
+        ws={ws}
         hoveredSubagentId={hoveredSubagentId}
         onSubagentHover={setHoveredSubagentId}
       />
+      <DispatchTween tweens={anim.tweens} />
       <Attribution />
     </div>
   );

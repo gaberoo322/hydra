@@ -1,4 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import {
+  DISPATCH_TWEEN_DURATION_MS,
+  DISPATCH_TWEEN_DUST_DURATION_MS,
+  tweenIdFor,
+  tweenSpec,
+} from "../pages/now-pixel/derive-dispatch-tween.ts";
 
 /**
  * useSpriteAnimations — manage one-shot + steady-state sprite animations
@@ -8,6 +14,13 @@ import { useEffect, useRef, useState, useCallback } from "react";
  * `slot-event` WS frames the server-side slot-events bridge broadcasts
  * (see src/autopilot/slot-events-bridge.ts) and exposes a per-class
  * animation map.
+ *
+ * Slice E of autopilot observability (#667, #670) adds `fireTravel`
+ * which spawns a transient dispatch tween: a portal-rendered sprite
+ * that tweens from the Pavilion to a destination zone, ending with a
+ * dust-puff keyframe. Tweens are keyed by a stable id (see
+ * derive-dispatch-tween.ts → tweenIdFor) so duplicate WS deliveries
+ * collapse into a single render entry instead of stacking.
  *
  * Animations:
  *   - excited: triggered when the consumer reports a new occupant for a
@@ -22,11 +35,25 @@ import { useEffect, useRef, useState, useCallback } from "react";
  *     failure } OR by an explicit `fireHurt(cls)` call (e.g. burned-
  *     classes membership). Persists until `clearAnimation(cls)` is
  *     called or another success cheering supersedes it.
- *   - thinking: NOT implemented in slice 4. The full design (slot
- *     occupied + no token delta in 30s) needs per-slot partial_tokens
- *     diffing; slice 6 (#648) introduces subagent stats and will own
- *     the thinking-state derivation. The hook reserves the literal so
- *     future callers don't have to refactor.
+ *   - thinking: persistent (NOT one-shot). Fired by the consumer
+ *     (HabitatGrid) via `fireThinking(cls)` whenever its per-slot
+ *     `deriveThinking` derivation flips that class into the inactivity
+ *     window (slot occupied ≥30s, no token-delta). Cleared explicitly
+ *     by the consumer via `clearAnimation(cls)` once tokens move again
+ *     or the slot empties. Priority rules (issue #660 follow-up):
+ *       - `hurt` MUST win — a failing subagent stays red even if it
+ *         also went quiet. `fireThinking` is a no-op when the current
+ *         animation is `hurt`.
+ *       - one-shot success animations (`excited`, `cheering`) override
+ *         `thinking` for their 1s lifetime; the consumer re-fires
+ *         `thinking` on the next poll if the slot is still quiet.
+ *
+ * Reaping (issue #661): when an occupied pipeline slot empties, the
+ * consumer fires `fireReaping(cls)` to surface an 800ms fade-out with a
+ * success/failure status icon. The status is sourced from the last
+ * `subagent_stop` we saw on the WS stream (`lastReapStatusRef`), which
+ * is why the hook tracks it even for statuses that don't drive a
+ * celebration/crash animation.
  *
  * Graceful degradation: if the WebSocket disconnects, the hook stays
  * functional (it just stops receiving events). Excited triggered by
@@ -49,9 +76,35 @@ const REAPING_ONE_SHOT_DURATION_MS = 800; // matches REAPING_DURATION_MS in reap
  *        — the useWebSocket return; pass null when the consumer doesn't
  *        have one (tests).
  */
+/**
+ * Detect prefers-reduced-motion in an SSR-safe way. The dashboard is
+ * client-rendered today but we guard window/matchMedia anyway so the
+ * helper can be reused under node:test without polyfills.
+ */
+function prefersReducedMotion() {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return false;
+  }
+  try {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches === true;
+  } catch (err) {
+    /* intentional: matchMedia can throw in obscure browser test harnesses;
+     * fall back to "no, animate" so the failure mode is more motion, not less.
+     */
+    console.error("[useSpriteAnimations] matchMedia failed:", err);
+    return false;
+  }
+}
+
 export function useSpriteAnimations(ws) {
   const [animations, setAnimations] = useState({});
   const timersRef = useRef({});
+  // tweens: id → { spec, cls, turnN, tsEpoch, startedAt }
+  // The DispatchTween component subscribes to this map and renders one
+  // portal-positioned sprite per entry. Auto-unmount is timer-driven so
+  // a closed WS / failed render doesn't leak entries.
+  const [tweens, setTweens] = useState({});
+  const tweenTimersRef = useRef({});
 
   // `lastReapStatus[cls]` is the last `subagent_stop` status we saw for
   // the class — used by HabitatGrid to pick the reaping-fade icon when
@@ -82,6 +135,75 @@ export function useSpriteAnimations(ws) {
 
   const fireExcited = useCallback((cls) => setOneShot(cls, "excited"), [setOneShot]);
   const fireCheering = useCallback((cls) => setOneShot(cls, "cheering"), [setOneShot]);
+
+  /**
+   * fireTravel(cls, fromRect, toRect, opts?) — spawn a one-shot tween
+   * from `fromRect` (Pavilion screen rect) to `toRect` (destination zone
+   * screen rect). Returns the tween-id consumed by the portal-rendered
+   * DispatchTween component, or null if the inputs are unusable (the
+   * caller doesn't usually have to handle null — it just means no
+   * tween was queued).
+   *
+   * Identity: same (turn_n, cls, ts_epoch) triple → same id, so the
+   * Strict-Mode double-invoke + the autopilot's at-least-once event
+   * delivery don't double-stack a tween. `opts.turnN` / `opts.tsEpoch`
+   * default to (0, Date.now()) for callers that don't have the WS
+   * envelope handy (e.g. tests).
+   *
+   * Lifecycle: the entry is removed `durationMs + dustDurationMs` after
+   * it lands so the dust-puff keyframe gets to finish before unmount.
+   * If the component unmounts mid-tween the cleanup effect clears every
+   * timer (no orphan unmount calls).
+   */
+  const fireTravel = useCallback((cls, fromRect, toRect, opts = {}) => {
+    if (typeof cls !== "string" || cls.length === 0) return null;
+    const turnN = typeof opts.turnN === "number" ? opts.turnN : 0;
+    const tsEpoch = typeof opts.tsEpoch === "number" ? opts.tsEpoch : Date.now();
+    const durationMs = typeof opts.durationMs === "number"
+      ? opts.durationMs
+      : DISPATCH_TWEEN_DURATION_MS;
+    const dustDurationMs = typeof opts.dustDurationMs === "number"
+      ? opts.dustDurationMs
+      : DISPATCH_TWEEN_DUST_DURATION_MS;
+
+    const reducedMotion = opts.reducedMotion ?? prefersReducedMotion();
+    const spec = tweenSpec({
+      fromRect,
+      toRect,
+      reducedMotion,
+      durationMs,
+      dustDurationMs,
+    });
+    const id = tweenIdFor(turnN, cls, tsEpoch);
+
+    setTweens((prev) => {
+      if (prev[id]) return prev; // dedupe identical envelopes
+      return {
+        ...prev,
+        [id]: { id, cls, turnN, tsEpoch, spec, startedAt: Date.now() },
+      };
+    });
+
+    if (tweenTimersRef.current[id]) {
+      clearTimeout(tweenTimersRef.current[id]);
+    }
+    // Total lifetime = travel time + dust-puff tail. instant short-
+    // circuit still gets a short visible window so the operator sees
+    // the sprite land instead of it flashing for one frame.
+    const lifetimeMs =
+      spec.kind === "instant" ? dustDurationMs : durationMs + dustDurationMs;
+    tweenTimersRef.current[id] = setTimeout(() => {
+      tweenTimersRef.current[id] = null;
+      setTweens((prev) => {
+        if (!prev[id]) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }, lifetimeMs);
+
+    return id;
+  }, []);
   const fireHurt = useCallback((cls) => {
     if (timersRef.current[cls]) {
       clearTimeout(timersRef.current[cls]);
@@ -132,6 +254,22 @@ export function useSpriteAnimations(ws) {
     });
   }, []);
 
+  /**
+   * Persistent (not one-shot) animation — set the class into "thinking"
+   * until the caller explicitly clears it. Hurt wins: if the current
+   * animation is `hurt`, this is a no-op so a failing subagent stays
+   * red. Idempotent — re-firing while already thinking does not nudge
+   * the state object (preserves referential equality so consumers don't
+   * re-render needlessly).
+   */
+  const fireThinking = useCallback((cls) => {
+    setAnimations((prev) => {
+      if (prev[cls] === "hurt") return prev;
+      if (prev[cls] === "thinking") return prev;
+      return { ...prev, [cls]: "thinking" };
+    });
+  }, []);
+
   // WS subscription — slot-event frames carry the slot name + status.
   useEffect(() => {
     if (!ws || typeof ws.subscribe !== "function") return undefined;
@@ -167,6 +305,10 @@ export function useSpriteAnimations(ws) {
       if (t) clearTimeout(t);
     }
     timersRef.current = {};
+    for (const t of Object.values(tweenTimersRef.current)) {
+      if (t) clearTimeout(t);
+    }
+    tweenTimersRef.current = {};
     for (const t of Object.values(reapingTimersRef.current)) {
       if (t) clearTimeout(t);
     }
@@ -178,7 +320,10 @@ export function useSpriteAnimations(ws) {
     fireExcited,
     fireCheering,
     fireHurt,
+    fireThinking,
     clearAnimation,
+    tweens,
+    fireTravel,
     // Reaping (issue #661):
     reaping,
     fireReaping,

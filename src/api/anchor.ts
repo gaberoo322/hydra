@@ -29,6 +29,12 @@ import {
 } from "../redis/anchors.ts";
 import { loadBacklog } from "../backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "../reflections/reflections.ts";
+import {
+  getDesignConcept,
+  gateCheck,
+  isFresh as isDesignConceptFresh,
+  type DesignConcept,
+} from "../design-concept.ts";
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
@@ -54,6 +60,30 @@ interface CandidateBase {
   blockerJustCleared?: boolean;
 }
 
+/**
+ * Design-concept annotation surfaced per candidate (issue #628).
+ *
+ * decide.py's `design_concept_orch` selector (Phase B of #437, PR #502)
+ * was shipped to consume this block from `/api/anchor/candidates`, but
+ * the data plane was never wired. The selector documents that a MISSING
+ * block means "no information" rather than "no artifact"; today we
+ * always populate the block so the selector can actually fire.
+ *
+ * Fields mirror the relevant projections from `getDesignConcept(anchorRef)`
+ * + `gateCheck(d, now)`:
+ *
+ *   - present  — artifact exists in `hydra:design-concept:{anchorRef}`
+ *   - isFresh  — within DESIGN_CONCEPT_MAX_AGE_MS (7d) of createdAt
+ *   - status   — `draft` | `approved` | `stale` | null (when absent)
+ *   - gateOk   — `gateCheck(d, now).ok` — useful for Phase C tightening
+ */
+export interface CandidateDesignConcept {
+  present: boolean;
+  isFresh: boolean;
+  status: "draft" | "approved" | "stale" | null;
+  gateOk: boolean;
+}
+
 interface ScoredCandidate {
   issue: string | number;
   title: string;
@@ -62,6 +92,10 @@ interface ScoredCandidate {
   reasons: string[];
   abandonments: number;
   last_updated: string | null;
+  /** Anchor reference used for Redis lookups — surfaced so decide.py
+   *  can stamp the dispatch with the canonical key. */
+  anchorRef: string;
+  designConcept: CandidateDesignConcept;
 }
 
 export function createAnchorRouter() {
@@ -188,6 +222,7 @@ export function createAnchorRouter() {
       for (const c of candidates) {
         const abandonments = await loadAbandonments(c.anchorRef);
         const lastReflectionAt = await loadLastReflectionAt(c.anchorRef);
+        const designConcept = await loadCandidateDesignConcept(c.anchorRef, now);
 
         const signals: ScoreSignals = {
           priorityTier: c.priority_tier,
@@ -216,6 +251,8 @@ export function createAnchorRouter() {
           reasons,
           abandonments,
           last_updated: c.last_updated,
+          anchorRef: c.anchorRef,
+          designConcept,
         });
       }
 
@@ -276,6 +313,57 @@ async function loadAbandonments(anchorRef: string): Promise<number> {
   } catch (err: any) {
     console.error(`[AnchorAPI] abandonment load failed for "${anchorRef.slice(0, 60)}": ${err.message}`);
     return 0;
+  }
+}
+
+/**
+ * Load + project the design-concept artifact for an anchor (issue #628).
+ *
+ * Always returns a fully-populated `CandidateDesignConcept` block — even
+ * when no artifact exists. That contract is intentional: decide.py's
+ * `_candidate_design_concept` treats a MISSING block as "no information"
+ * (Phase B intentional no-op) and a PRESENT block with `present:false`
+ * as "no artifact" (the trigger Phase B was always meant to gate on).
+ *
+ * Returned shape mirrors `_candidate_design_concept`'s documented contract:
+ *
+ *   { present: bool, isFresh: bool, status: string|null, gateOk: bool }
+ *
+ * On any Redis failure, returns the "no artifact" projection rather than
+ * throwing — failing this annotation should NEVER drop a candidate from
+ * the feed, since the feed is also consumed by non-grill callers.
+ */
+async function loadCandidateDesignConcept(
+  anchorRef: string,
+  now: number,
+): Promise<CandidateDesignConcept> {
+  const absent: CandidateDesignConcept = {
+    present: false,
+    isFresh: false,
+    status: null,
+    gateOk: false,
+  };
+  if (!anchorRef) return absent;
+  try {
+    const dc: DesignConcept | null = await getDesignConcept(anchorRef);
+    if (!dc) return absent;
+    const fresh = isDesignConceptFresh(dc, now);
+    const gate = gateCheck(dc, now);
+    return {
+      present: true,
+      isFresh: fresh,
+      // `stale` is a derived label, not a Redis-stored status. When the
+      // artifact exists but has aged out of the freshness window we surface
+      // it as `stale` so the selector's `present && !isFresh` branch can
+      // also reach for a human-readable label.
+      status: fresh ? dc.status : "stale",
+      gateOk: gate.ok,
+    };
+  } catch (err: any) {
+    console.error(
+      `[AnchorAPI] design-concept load failed for "${anchorRef.slice(0, 60)}": ${err.message}`,
+    );
+    return absent;
   }
 }
 

@@ -29,6 +29,16 @@ echo -n "failed_services="; systemctl --user list-units --type=service --state=f
 # selector fires. Before #458, `dev_orch` consumed /api/anchor/candidates
 # — which in this deployment is structurally a target-product feed —
 # causing hydra-dev to receive target-only anchors and escalate.
+#
+# `needs_qa` counts ISSUES with the `needs-qa` label. The hydra-qa skill
+# is responsible for clearing this label from the source issue once it
+# files a verdict (PASS / PASS-pending-CI / FAIL) — see issue #638. If
+# QA leaves `needs-qa` on an issue while the PR sits waiting on CI or
+# operator merge, decide.py will busy-loop re-dispatching hydra-qa every
+# turn (each dispatch burns 30-65k tokens). The contract is: needs-qa on
+# an issue means "diff has not yet been reviewed"; once reviewed, the PR
+# carries the pending-CI state and autopilot polls statusCheckRollup
+# directly without re-running QA.
 gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
   needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
   ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
@@ -39,6 +49,61 @@ gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedA
   stale_in_progress: [.[] | select((.labels | map(.name) | index("in-progress")) and ((now - (.updatedAt | fromdateiso8601)) > 5400))] | map(.number),
   stale_blocked: [.[] | select((.labels | map(.name) | index("blocked")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)
 }'
+
+# design-concept gate (issue #628): pick the first orch-board
+# `ready-for-agent` issue whose design-concept artifact is missing or
+# stale. The autopilot promotes this to `state.signals.orch_pending_grill_anchor`
+# which decide.py's `design_concept_orch` selector reads as the gate
+# trigger. Pre-#628 the selector only consumed `best.designConcept` from
+# /api/anchor/candidates — but `best` is structurally a target-scope
+# candidate post-#458 (see issue #628 research comment), so the selector
+# never fired on orch work even after Phase B shipped. This loop sources
+# an orch-scope anchor directly.
+#
+# Implementation notes:
+#
+#   - Top 10 ready-for-agent issue numbers (newest-first by updatedAt).
+#     The hot path is "the first one without a fresh artifact"; capping
+#     at 10 keeps this loop O(10) regardless of board size.
+#   - For each issue we curl `/api/design-concepts/issue-<N>`. A 200 with
+#     `gate.ok` true OR `status=approved` AND fresh means we skip. A 404
+#     or stale/draft-without-gate-ok means this is a grill candidate.
+#   - Emit the first matching `issue-<N>` ref, or `none`.
+#   - Best-effort: any failure prints `none` so dispatch is never blocked
+#     by a transient orchestrator outage.
+echo -n "orch_grill_pending_anchor="
+ORCH_GRILL_CANDIDATES=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --json number,updatedAt --jq '
+  sort_by(.updatedAt) | reverse | .[0:10] | map(.number) | .[]
+' 2>/dev/null || true)
+ORCH_GRILL_PICK="none"
+if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
+  for n in $ORCH_GRILL_CANDIDATES; do
+    DC_JSON=$(curl -sf --max-time 3 "http://localhost:4000/api/design-concepts/issue-${n}" 2>/dev/null || true)
+    if [ -z "$DC_JSON" ]; then
+      # 404 — no artifact at all. This is the canonical "needs grilling" case.
+      ORCH_GRILL_PICK="issue-${n}"
+      break
+    fi
+    # Artifact exists. Skip ONLY if it's both fresh AND gate.ok (Phase B
+    # warn-only: a draft/!gateOk-but-fresh artifact is still "fresh present"
+    # per the selector's contract, so we don't re-grill it here either).
+    FRESH_OK=$(printf '%s' "$DC_JSON" | python3 -c "
+import json, sys, time
+try:
+  d = json.load(sys.stdin)
+  created = int(d.get('createdAt', 0) or 0)
+  now_ms = int(time.time() * 1000)
+  fresh = (now_ms - created) <= (7 * 24 * 60 * 60 * 1000)
+  print('1' if fresh else '0')
+except Exception:
+  print('0')" 2>/dev/null || echo "0")
+    if [ "$FRESH_OK" != "1" ]; then
+      ORCH_GRILL_PICK="issue-${n}"
+      break
+    fi
+  done
+fi
+echo "$ORCH_GRILL_PICK"
 
 # active dev_orch detector (issue #412): an open PR on a hydra-dev head
 # branch updated within the last 90 minutes is the only reliable gate
