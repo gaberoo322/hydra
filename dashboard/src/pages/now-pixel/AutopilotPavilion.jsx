@@ -14,8 +14,14 @@ import HpBar from "./HpBar.jsx";
  * Pulse mechanic: the sprite element gets a `pulse` CSS class for ~600ms
  * after each lastTickAt change. We use a class-toggle keyed to a counter
  * so React's reconciliation reliably restarts the CSS animation.
+ *
+ * Slice E of autopilot observability (#667, #670) accepts an optional
+ * `spriteRef` so the parent (NowPixel) can read the sprite's screen
+ * rect for the dispatch-tween origin point. The ref is attached to the
+ * Ash <img> rather than the section so the tween starts visually at
+ * the trainer, not at the panel edge.
  */
-export default function AutopilotPavilion() {
+export default function AutopilotPavilion({ spriteRef = null } = {}) {
   const { data, error } = useApi("/now/autopilot-tick", { poll: 5_000 });
   const state = derivePavilionState(data);
   // Slice 6: fetch the run row in parallel for LV/EXP derivation. The
@@ -60,6 +66,8 @@ export default function AutopilotPavilion() {
         <div className="shrink-0">
           <img
             key={pulseKey}
+            ref={spriteRef}
+            data-testid="pavilion-trainer-sprite"
             src="/sprites/characters/ash-blonde.png"
             alt="Autopilot trainer sprite"
             className={`ash-sprite ${pulseKey > 0 ? "ash-pulse" : ""}`}
