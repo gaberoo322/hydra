@@ -1,23 +1,35 @@
 import { useEffect, useRef, useState } from "react";
 import { resolveBubbleColor } from "./sprite-map.ts";
+import RecommendationsTab from "./RecommendationsTab.jsx";
+import RecRunJournalModal from "./RecRunJournalModal.jsx";
 
 /**
- * OakTownCrier — right-edge column of scrolling speech bubbles driven
- * by the live WebSocket event stream.
+ * OakTownCrier — right-edge panel anchored on the Professor Oak sprite.
  *
- * Slice 5 of /now-pixel (#642, #647). Oak (Professor) sprite anchors the
- * column; clicking him collapses the bubbles. Collapse state persists
- * in localStorage so the operator's preference survives reloads.
+ * Slice 5 of /now-pixel (#642, #647) shipped this as a single scrolling
+ * speech-bubble column. Slice F of the autopilot-observability epic
+ * (#674) extends the panel with a tabbed mode strip so the live feed
+ * shares the rail with the LLM-driven recommendations tab. Slice B of
+ * the same epic (#669) introduces a sibling "turn journal" tab — when
+ * both slices merge, the tab list grows; this file keeps the live-feed
+ * + recs structure stable so slice B's `TurnJournalTab` slots in
+ * without touching the live-feed or recs code paths.
  *
- * Bubbles:
- *  - Last 50 events from the WS subscription (wildcard "*")
- *  - Auto-scroll to newest; pauses on hover; resumes on un-hover
- *  - Per-class color via resolveBubbleColor (orch=blue/orange, target
- *    =green/amber, health=pink)
- *  - WS-disconnect badge when ws.connected is false
+ * Tab state persists in localStorage at `hydra:now-pixel:oak-tab`. The
+ * collapse-state key is unchanged from slice 5 so existing operators'
+ * stored preferences carry over.
+ *
+ * Clicking the Oak sprite still toggles the entire panel collapsed.
+ * In the collapsed state the tab strip is hidden so the rail stays narrow.
  */
 const MAX_BUBBLES = 50;
-const STORAGE_KEY = "hydra:now-pixel:oak-collapsed";
+const COLLAPSE_STORAGE_KEY = "hydra:now-pixel:oak-collapsed";
+const TAB_STORAGE_KEY = "hydra:now-pixel:oak-tab";
+
+const TAB_LIVE = "live";
+const TAB_RECS = "recs";
+const VALID_TABS = new Set([TAB_LIVE, TAB_RECS]);
+const DEFAULT_TAB = TAB_LIVE;
 
 function isoToTime(ts) {
   try {
@@ -62,32 +74,129 @@ function eventSummary(frame) {
   };
 }
 
+function LiveFeedTab({ bubbles, scrollRef, onHover, onUnhover }) {
+  return (
+    <div
+      ref={scrollRef}
+      onMouseEnter={onHover}
+      onMouseLeave={onUnhover}
+      className="overflow-y-auto"
+      style={{ maxHeight: 360, minHeight: 120 }}
+      data-testid="oak-bubbles"
+    >
+      {bubbles.length === 0 ? (
+        <p className="text-[10px] text-zinc-500 italic">
+          Oak's listening… no events yet.
+        </p>
+      ) : (
+        <ul className="space-y-1">
+          {bubbles.map((b) => (
+            <li
+              key={b.id}
+              className="text-[10px] leading-tight"
+              style={{
+                borderLeft: `3px solid ${b.color}`,
+                paddingLeft: 6,
+                color: "#d4d4d8",
+              }}
+              title={`${b.source} · ${isoToTime(b.ts)}`}
+            >
+              <span
+                style={{
+                  color: b.color,
+                  fontFamily: "monospace",
+                  marginRight: 4,
+                }}
+              >
+                [{b.source}]
+              </span>
+              {b.text}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function TabButton({ id, current, label, onSelect }) {
+  const active = current === id;
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(id)}
+      data-testid={`oak-tab-${id}`}
+      data-active={active ? "true" : "false"}
+      aria-pressed={active}
+      className="bg-transparent border-0 cursor-pointer text-[9px] uppercase tracking-wider px-1 py-0.5"
+      style={{
+        color: active ? "#fbbf24" : "#71717a",
+        borderBottom: active ? "1px solid #fbbf24" : "1px solid transparent",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 export default function OakTownCrier({ ws }) {
   const [bubbles, setBubbles] = useState([]);
   const [collapsed, setCollapsed] = useState(() => {
     try {
-      return localStorage.getItem(STORAGE_KEY) === "1";
+      return localStorage.getItem(COLLAPSE_STORAGE_KEY) === "1";
     } catch {
       return false;
     }
   });
+  const [tab, setTab] = useState(() => {
+    try {
+      const stored = localStorage.getItem(TAB_STORAGE_KEY);
+      return VALID_TABS.has(stored) ? stored : DEFAULT_TAB;
+    } catch {
+      return DEFAULT_TAB;
+    }
+  });
   const [hovered, setHovered] = useState(false);
+  const [journalOpen, setJournalOpen] = useState(false);
+  const [restingNote, setRestingNote] = useState(null); // { spend, cap, ts } | null
   const scrollRef = useRef(null);
   const idRef = useRef(0);
 
   // Persist collapse state.
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, collapsed ? "1" : "0");
+      localStorage.setItem(COLLAPSE_STORAGE_KEY, collapsed ? "1" : "0");
     } catch {
       /* intentional: storage may be disabled */
     }
   }, [collapsed]);
 
+  // Persist tab selection.
+  useEffect(() => {
+    try {
+      localStorage.setItem(TAB_STORAGE_KEY, tab);
+    } catch {
+      /* intentional: storage may be disabled */
+    }
+  }, [tab]);
+
   // WS subscription via wildcard so we hear every event the server emits.
   useEffect(() => {
     if (!ws || typeof ws.subscribe !== "function") return undefined;
     const off = ws.subscribe("*", (frame) => {
+      // Slice F (#674): the engine broadcasts an `oak_resting` envelope
+      // when the daily cap is hit. Surface a small inline note rather
+      // than a bubble, so the operator notices without filling the live
+      // feed.
+      if (frame && frame.type === "oak_resting") {
+        const p = frame.payload || {};
+        setRestingNote({
+          spend: Number(p.daily_spend_usd ?? 0),
+          cap: Number(p.daily_cap_usd ?? 0),
+          ts: frame.timestamp || new Date().toISOString(),
+        });
+        return;
+      }
       const s = eventSummary(frame);
       if (!s) return;
       idRef.current += 1;
@@ -108,18 +217,20 @@ export default function OakTownCrier({ ws }) {
     return () => off?.();
   }, [ws]);
 
-  // Auto-scroll to newest unless the operator is hovering (paused).
+  // Auto-scroll the live feed to newest unless the operator is hovering.
+  // Only runs when the live tab is visible.
   useEffect(() => {
-    if (collapsed || hovered) return;
+    if (collapsed || hovered || tab !== TAB_LIVE) return;
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [bubbles, collapsed, hovered]);
+  }, [bubbles, collapsed, hovered, tab]);
 
   return (
     <aside
       className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 flex flex-col"
       data-testid="oak-town-crier"
       data-collapsed={collapsed}
+      data-tab={tab}
       style={{ minWidth: collapsed ? 80 : 240, maxWidth: 280 }}
     >
       <header className="flex flex-col items-center gap-1 mb-2">
@@ -151,49 +262,40 @@ export default function OakTownCrier({ ws }) {
             ws disconnected
           </div>
         )}
+        {restingNote && (
+          <div
+            data-testid="oak-resting-badge"
+            title={`Daily recs spend $${restingNote.spend.toFixed(2)} / $${restingNote.cap.toFixed(2)}`}
+            className="text-[9px] uppercase text-amber-400 border border-amber-900 rounded px-1"
+          >
+            Oak is resting
+          </div>
+        )}
       </header>
       {!collapsed && (
-        <div
-          ref={scrollRef}
-          onMouseEnter={() => setHovered(true)}
-          onMouseLeave={() => setHovered(false)}
-          className="overflow-y-auto"
-          style={{ maxHeight: 360, minHeight: 120 }}
-          data-testid="oak-bubbles"
-        >
-          {bubbles.length === 0 ? (
-            <p className="text-[10px] text-zinc-500 italic">
-              Oak's listening… no events yet.
-            </p>
-          ) : (
-            <ul className="space-y-1">
-              {bubbles.map((b) => (
-                <li
-                  key={b.id}
-                  className="text-[10px] leading-tight"
-                  style={{
-                    borderLeft: `3px solid ${b.color}`,
-                    paddingLeft: 6,
-                    color: "#d4d4d8",
-                  }}
-                  title={`${b.source} · ${isoToTime(b.ts)}`}
-                >
-                  <span
-                    style={{
-                      color: b.color,
-                      fontFamily: "monospace",
-                      marginRight: 4,
-                    }}
-                  >
-                    [{b.source}]
-                  </span>
-                  {b.text}
-                </li>
-              ))}
-            </ul>
+        <>
+          <div
+            className="flex items-center gap-2 mb-2 border-b border-zinc-900"
+            role="tablist"
+            data-testid="oak-tab-strip"
+          >
+            <TabButton id={TAB_LIVE} current={tab} label="Live feed" onSelect={setTab} />
+            <TabButton id={TAB_RECS} current={tab} label="Recs" onSelect={setTab} />
+          </div>
+          {tab === TAB_LIVE && (
+            <LiveFeedTab
+              bubbles={bubbles}
+              scrollRef={scrollRef}
+              onHover={() => setHovered(true)}
+              onUnhover={() => setHovered(false)}
+            />
           )}
-        </div>
+          {tab === TAB_RECS && (
+            <RecommendationsTab openJournal={() => setJournalOpen(true)} />
+          )}
+        </>
       )}
+      <RecRunJournalModal open={journalOpen} onClose={() => setJournalOpen(false)} />
     </aside>
   );
 }
