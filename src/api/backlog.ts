@@ -145,11 +145,17 @@ Respond with ONLY the JSON object, no markdown fences, no explanation.`;
   });
 
   // PATCH /backlog/:id/move — Move item between lanes
+  //
+  // Issue #640: also forwards an optional `claimedBy` field so callers can
+  // tag a kanban item with a PR-number marker (e.g. `pr-27`) at PR-open
+  // time. The candidates API uses this marker to hide the just-shipped
+  // anchor from decide.py until the PR merges.
   router.patch("/backlog/:id/move", async (req, res) => {
     try {
-      const { lane } = req.body || {};
+      const { lane, claimedBy } = req.body || {};
       if (!lane) return res.status(400).json({ error: "Missing 'lane'" });
-      const result = await moveItemToLane(req.params.id, lane);
+      const opts = claimedBy !== undefined ? { claimedBy } : {};
+      const result = await moveItemToLane(req.params.id, lane, opts);
       if (!result.ok) return res.status(404).json(result);
       res.json(result);
     } catch (err: any) {
