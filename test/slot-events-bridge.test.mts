@@ -106,6 +106,51 @@ test("bridgeBroadcast: drops non-string field values (Redis stream sometimes ret
   assert.equal(env.payload.weird, undefined);
 });
 
+test("bridgeBroadcast: subagent_tool_call (issue #671) round-trips category/tool/target verbatim", () => {
+  const { bus, calls } = makeMockBus();
+  // The PostToolUse hook XADDs `event=subagent_tool_call` with category/
+  // tool/target. The bridge MUST forward all of these so the dashboard can
+  // route on `category` (milestone/io/background) for the per-tool sprite
+  // animations introduced alongside slice 4 of /now-pixel.
+  const raw = {
+    event: "subagent_tool_call",
+    slot: "dev_orch",
+    task_id: "b910a44aa1b65ff7d",
+    tool: "Write",
+    category: "milestone",
+    target: "/home/gabe/hydra/src/foo.ts",
+    duration_ms: "42",
+    success: "true",
+    ts_epoch: "1779908100",
+  };
+  const env = bridgeBroadcast(bus as any, raw);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].stream, "autopilot:slot-events");
+  assert.equal(env.payload.event, "subagent_tool_call");
+  assert.equal(env.payload.tool, "Write");
+  assert.equal(env.payload.category, "milestone");
+  assert.equal(env.payload.target, "/home/gabe/hydra/src/foo.ts");
+  assert.equal(env.payload.slot, "dev_orch");
+  assert.equal(env.payload.duration_ms, "42");
+  assert.equal(env.payload.success, "true");
+});
+
+test("bridgeBroadcast: subagent_tool_call background category still broadcasts (covers Read/Grep/Glob)", () => {
+  const { bus, calls } = makeMockBus();
+  const raw = {
+    event: "subagent_tool_call",
+    slot: "qa_orch",
+    tool: "Read",
+    category: "background",
+    target: "/home/gabe/hydra/CLAUDE.md",
+    ts_epoch: "1779908200",
+  };
+  bridgeBroadcast(bus as any, raw);
+  const env = calls[0].event as { payload: Record<string, string> };
+  assert.equal(env.payload.category, "background");
+  assert.equal(env.payload.tool, "Read");
+});
+
 test("bridgeBroadcast: empty / null fields produce an empty payload but still broadcast (sentinel)", () => {
   const { bus, calls } = makeMockBus();
   bridgeBroadcast(bus as any, {});

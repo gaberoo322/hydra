@@ -160,3 +160,25 @@ Scan all active lanes for items whose title matches recent merge titles. Move co
 - Log every action for the report
 - Unsure if completed → leave it. False negatives are safer than false positives.
 - **Vocabulary.** When narrowing a reframe item or promoting a triage item, name it using the target's canonical vocabulary — `~/hydra-betting/CONTEXT-MAP.md` and the per-context `CONTEXT.md` files. Don't invent synonyms; if the noun you need isn't in the glossary, leave the item for the operator instead of inventing language. The per-context layout is documented in `~/hydra-betting/docs/agents/domain.md`.
+
+## Slot lifecycle events — PostToolUse hook (issue #671)
+
+Every tool call inside this skill emits a `subagent_tool_call` event onto the
+Redis stream `hydra:autopilot:slot-events`. The classification is done at
+emit-time so the /now-pixel dashboard can route on `category` without
+re-deriving it from the tool name:
+
+- `milestone` — Write, Edit, MultiEdit, NotebookEdit, MCP write surfaces, and
+  Bash matching `^(git commit|gh pr|npm test|npm run build|npm run typecheck)`
+- `io` — other Bash, WebFetch, WebSearch, MCP read surfaces
+- `background` — Read, Grep, Glob
+
+**Hook script:** `scripts/autopilot/hooks/on-subagent-tool-call.sh`
+**Hook registration:** sibling `<this-playbook>.settings.json` →
+`~/.claude/skills/<this-skill>/.claude/settings.json` (propagated by
+`scripts/sync-skills.sh`)
+
+The hook MUST NEVER propagate errors back to this skill's session — a Redis
+outage, a malformed payload, or a missing `jq` all result in a stderr
+warning and `exit 0`. See `test/on-subagent-tool-call.test.mts` for the
+pinned behavior.
