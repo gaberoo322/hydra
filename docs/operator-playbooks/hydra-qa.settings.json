@@ -1,0 +1,16 @@
+{
+  "_comment": "Claude Code hook registrations for the hydra-qa skill (issue #671). sync-skills.sh copies this file to ~/.claude/skills/hydra-qa/.claude/settings.json. The PostToolUse hook classifies every tool call into milestone/io/background and XADDs a subagent_tool_call event onto hydra:autopilot:slot-events. The hook script lives in the orchestrator repo at scripts/autopilot/hooks/on-subagent-tool-call.sh — path is absolute so the harness can find it regardless of subagent cwd.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/gabe/hydra/scripts/autopilot/hooks/on-subagent-tool-call.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
