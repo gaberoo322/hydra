@@ -36,6 +36,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
  */
 
 const ONE_SHOT_DURATION_MS = 1000;
+const REAPING_ONE_SHOT_DURATION_MS = 800; // matches REAPING_DURATION_MS in reaping-fade.ts
 
 /**
  * Animation states (string literals; this is a .js file so no exported
@@ -51,6 +52,15 @@ const ONE_SHOT_DURATION_MS = 1000;
 export function useSpriteAnimations(ws) {
   const [animations, setAnimations] = useState({});
   const timersRef = useRef({});
+
+  // `lastReapStatus[cls]` is the last `subagent_stop` status we saw for
+  // the class — used by HabitatGrid to pick the reaping-fade icon when
+  // an occupied slot empties (issue #661). Stored in a ref because the
+  // consumer reads it lazily inside the occupancy-transition effect and
+  // we don't want a re-render on every slot-event.
+  const lastReapStatusRef = useRef({});
+  const [reaping, setReaping] = useState({});
+  const reapingTimersRef = useRef({});
 
   const clearAnimation = useCallback((cls) => {
     setAnimations((prev) => {
@@ -80,6 +90,48 @@ export function useSpriteAnimations(ws) {
     setAnimations((prev) => ({ ...prev, [cls]: "hurt" }));
   }, []);
 
+  /**
+   * fireReaping — kick off a 800ms reaping fade for `cls`. The consumer
+   * (HabitatGrid) calls this when it detects an occupied → null slot
+   * transition; `status` defaults to whatever `lastReapStatusRef`
+   * captured from the WS slot-event stream, but callers may override
+   * (e.g. for derived statuses we don't carry on the wire).
+   *
+   * The hook surfaces an entry in `reaping[cls]` for the duration so
+   * HabitatGrid can render <ReapingFade status={...} /> while keeping
+   * the last subagent payload mounted. After REAPING_ONE_SHOT_DURATION_MS
+   * the entry auto-clears.
+   */
+  const fireReaping = useCallback((cls, status) => {
+    const resolved = status ?? lastReapStatusRef.current[cls] ?? "other";
+    setReaping((prev) => ({ ...prev, [cls]: resolved }));
+    if (reapingTimersRef.current[cls]) {
+      clearTimeout(reapingTimersRef.current[cls]);
+    }
+    reapingTimersRef.current[cls] = setTimeout(() => {
+      reapingTimersRef.current[cls] = null;
+      setReaping((prev) => {
+        if (prev[cls] == null) return prev;
+        const next = { ...prev };
+        delete next[cls];
+        return next;
+      });
+    }, REAPING_ONE_SHOT_DURATION_MS);
+  }, []);
+
+  const clearReaping = useCallback((cls) => {
+    if (reapingTimersRef.current[cls]) {
+      clearTimeout(reapingTimersRef.current[cls]);
+      reapingTimersRef.current[cls] = null;
+    }
+    setReaping((prev) => {
+      if (prev[cls] == null) return prev;
+      const next = { ...prev };
+      delete next[cls];
+      return next;
+    });
+  }, []);
+
   // WS subscription — slot-event frames carry the slot name + status.
   useEffect(() => {
     if (!ws || typeof ws.subscribe !== "function") return undefined;
@@ -89,6 +141,12 @@ export function useSpriteAnimations(ws) {
       const status = frame?.payload?.status;
       if (!slot) return;
       if (eventKind === "subagent_stop") {
+        // Remember the status so the next occupied → null transition
+        // (detected in HabitatGrid against /api/now/active-dispatches
+        // polls) can pick the right reaping-fade icon. Issue #661.
+        // We store on the unknown branch too — "no_op" / "budget_exceeded"
+        // / undefined all collapse to the neutral 💤 in reaping-fade.ts.
+        lastReapStatusRef.current[slot] = status ?? "other";
         if (status === "success") fireCheering(slot);
         else if (status === "failure") fireHurt(slot);
         // Other statuses (no_op, budget_exceeded, unknown) are
@@ -109,6 +167,10 @@ export function useSpriteAnimations(ws) {
       if (t) clearTimeout(t);
     }
     timersRef.current = {};
+    for (const t of Object.values(reapingTimersRef.current)) {
+      if (t) clearTimeout(t);
+    }
+    reapingTimersRef.current = {};
   }, []);
 
   return {
@@ -117,5 +179,10 @@ export function useSpriteAnimations(ws) {
     fireCheering,
     fireHurt,
     clearAnimation,
+    // Reaping (issue #661):
+    reaping,
+    fireReaping,
+    clearReaping,
+    lastReapStatusRef,
   };
 }
