@@ -383,3 +383,149 @@ describe("GET /anchor/candidates — endpoint integration (#424)", () => {
     assert.equal(res._body.research_recommended, true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// designConcept annotation — issue #628 data-plane fix
+// ---------------------------------------------------------------------------
+
+// Own Redis handle for the #628 block — the upstream #424 suite's `after()`
+// disconnects the module-level `redis` variable, so we can't reuse it here.
+let dcAnnotationRedis: any;
+
+async function dcAnnotationCleanKeys() {
+  const keys = await dcAnnotationRedis.keys("hydra:*");
+  if (keys.length > 0) await dcAnnotationRedis.del(...keys);
+}
+
+describe("GET /anchor/candidates — designConcept annotation (#628)", () => {
+  beforeEach(async () => {
+    if (!dcAnnotationRedis || dcAnnotationRedis.status !== "ready") {
+      dcAnnotationRedis = new Redis(REDIS_URL);
+    }
+    await dcAnnotationCleanKeys();
+    if (!createAnchorRouter) {
+      const mod = await import("../src/api/anchor.ts");
+      createAnchorRouter = mod.createAnchorRouter;
+    }
+    if (!backlogAdmin) {
+      const reads = await import("../src/backlog/reads.ts");
+      const items = await import("../src/backlog/items.ts");
+      const lanes = await import("../src/backlog/lanes.ts");
+      const claims = await import("../src/backlog/claims.ts");
+      const wip = await import("../src/backlog/wip.ts");
+      const reaper = await import("../src/backlog/reaper.ts");
+      backlogAdmin = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
+    }
+  });
+
+  after(async () => {
+    if (dcAnnotationRedis) {
+      await dcAnnotationCleanKeys();
+      dcAnnotationRedis.disconnect();
+    }
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
+    closeRedisConnections();
+  });
+
+  test("every candidate carries a designConcept block (no artifact → present:false)", async () => {
+    // Pre-#628 the block was missing entirely on every candidate, so
+    // decide.py's _candidate_design_concept returned None and
+    // design_concept_orch never fired. Now: the field is always present
+    // so decide.py can act on it.
+    await backlogAdmin.addToBacklog({ title: "Some orch task", lane: "queued", priority: 1 });
+
+    const router = createAnchorRouter();
+    const handler = findHandler(router, "GET", "/anchor/candidates");
+    const req = mockReq();
+    const res = mockRes();
+    await handler(req, res);
+
+    assert.equal(res._body.candidates.length, 1);
+    const c = res._body.candidates[0];
+    assert.ok(c.designConcept, "every candidate must carry a designConcept block");
+    assert.equal(c.designConcept.present, false);
+    assert.equal(c.designConcept.isFresh, false);
+    assert.equal(c.designConcept.status, null);
+    assert.equal(c.designConcept.gateOk, false);
+    assert.ok(c.anchorRef, "anchorRef must also be surfaced on the response");
+  });
+
+  test("artifact exists + fresh + approved → present:true, isFresh:true, gateOk:true", async () => {
+    const dc = await import("../src/design-concept.ts");
+    await backlogAdmin.addToBacklog({ title: "Approved task", lane: "queued", priority: 1 });
+
+    // Build a complete artifact (passes every gate rule).
+    await dc.saveDesignConcept({
+      anchorRef: "Approved task",
+      scope: "orch",
+      glossaryTerms: ["Target", "Orchestrator"],
+      glossaryGaps: [],
+      modulesTouched: [
+        {
+          path: "src/foo.ts",
+          interfaceImpact: "extend",
+          depthClassification: "deep",
+        },
+      ],
+      invariants: ["never throw from gate"],
+      rejectedAlternatives: [{ alt: "noop", why: "doesn't ship" }],
+      qaTrace: [
+        { q: "what is the target?", a: "hydra-betting" },
+        { q: "what module?", a: "src/foo.ts" },
+        { q: "interface impact?", a: "extend" },
+        { q: "invariants?", a: "never throw" },
+        { q: "rejected?", a: "noop" },
+        { q: "tier?", a: "3" },
+      ],
+      prototypes: [],
+    });
+    await dc.approveDesignConcept("Approved task", "operator:test");
+
+    const router = createAnchorRouter();
+    const handler = findHandler(router, "GET", "/anchor/candidates");
+    const req = mockReq();
+    const res = mockRes();
+    await handler(req, res);
+
+    const c = res._body.candidates.find((x: any) => x.title === "Approved task");
+    assert.ok(c, "candidate found");
+    assert.equal(c.designConcept.present, true);
+    assert.equal(c.designConcept.isFresh, true);
+    assert.equal(c.designConcept.status, "approved");
+    assert.equal(c.designConcept.gateOk, true);
+  });
+
+  test("artifact exists but incomplete → present:true, gateOk:false (warn-only shape)", async () => {
+    // This is the canonical Phase B "warn-only" case: artifact exists,
+    // is fresh, but fails one or more gate rules. decide.py treats this
+    // as "fresh present" and lets dev_orch proceed; Phase C will flip
+    // to require gateOk:true.
+    const dc = await import("../src/design-concept.ts");
+    await backlogAdmin.addToBacklog({ title: "Draft task", lane: "queued", priority: 1 });
+
+    await dc.saveDesignConcept({
+      anchorRef: "Draft task",
+      scope: "orch",
+      glossaryTerms: [],
+      glossaryGaps: ["unknown-term"], // gate rule 1 violation
+      modulesTouched: [],
+      invariants: [],
+      rejectedAlternatives: [],
+      qaTrace: [],
+      prototypes: [],
+    });
+
+    const router = createAnchorRouter();
+    const handler = findHandler(router, "GET", "/anchor/candidates");
+    const req = mockReq();
+    const res = mockRes();
+    await handler(req, res);
+
+    const c = res._body.candidates.find((x: any) => x.title === "Draft task");
+    assert.ok(c, "candidate found");
+    assert.equal(c.designConcept.present, true);
+    assert.equal(c.designConcept.isFresh, true);
+    assert.equal(c.designConcept.status, "draft");
+    assert.equal(c.designConcept.gateOk, false, "incomplete artifact must fail gate");
+  });
+});

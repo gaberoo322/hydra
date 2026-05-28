@@ -393,6 +393,107 @@ def make_wait_for_api(url: str, retries: int = 5, reason: str = "") -> dict:
     return {"type": "wait-for-api", "url": url, "retries": int(retries), "reason": reason}
 
 
+# ---------------------------------------------------------------------------
+# Observability event constructors (issue #668, slice A of epic #667)
+# ---------------------------------------------------------------------------
+#
+# Three new event types ride the existing `hydra:autopilot:slot-events`
+# Redis stream alongside the bash-hook events (`subagent_stop`,
+# `slot_waiting_permission`). The `slot-events-bridge.ts` consumer is
+# field-agnostic — it forwards every string/number field verbatim — so
+# the new discriminators flow to dashboard WS clients without any bridge
+# code changes. The bridge tests pin this round-trip explicitly.
+#
+# Payload shapes (each value MUST be string-serialisable for XADD):
+#
+#   turn_start         { event, turn_n, epoch, run_id, ts_epoch }
+#   turn_end           { event, turn_n, epoch, run_id, dispatches,
+#                        skipped, idle, tokens_after, ts_epoch }
+#   dispatch_decision  { event, turn_n, class, outcome, reason, ts_epoch }
+#                      outcome ∈ {dispatched, cooldown, budget, idle}
+#
+# These events do NOT replace the hook-emitted `subagent_stop` events —
+# the hook is the source of truth for subagent lifecycle. The new events
+# describe the autopilot's decision boundaries (turn-start /
+# turn-end / per-class verdict), which the hooks have no visibility
+# into.
+
+DISPATCH_DECISION_OUTCOMES = frozenset({"dispatched", "cooldown", "budget", "idle"})
+
+
+def make_turn_start_event(state: dict, now: int) -> dict:
+    """Construct the per-turn `turn_start` observability event.
+
+    Stringly-typed because the XADD path in `main()` writes field/value
+    pairs that Redis returns as bytes; the bridge stringifies on the way
+    out. We pre-stringify here so the XADD wrapper doesn't have to do
+    type coercion.
+    """
+    return {
+        "event": "turn_start",
+        "turn_n": str(int(state.get("turn", 0) or 0)),
+        "epoch": str(int(state.get("started_epoch", now) or now)),
+        "run_id": str(state.get("run_id") or ""),
+        "ts_epoch": str(now),
+    }
+
+
+def make_turn_end_event(
+    state: dict,
+    now: int,
+    *,
+    dispatches: int,
+    skipped: int,
+    idle: int,
+    tokens_after: int,
+) -> dict:
+    """Construct the per-turn `turn_end` observability event.
+
+    The four counters describe the turn's outcome:
+      dispatches    — number of `dispatch` actions emitted
+      skipped       — pipeline/signal classes considered but suppressed
+      idle          — 1 iff the only emitted action was a `wait`/`wait_or_reap`
+      tokens_after  — cumulative_tokens at the end of the turn
+    """
+    return {
+        "event": "turn_end",
+        "turn_n": str(int(state.get("turn", 0) or 0)),
+        "epoch": str(int(state.get("started_epoch", now) or now)),
+        "run_id": str(state.get("run_id") or ""),
+        "dispatches": str(int(dispatches)),
+        "skipped": str(int(skipped)),
+        "idle": str(int(idle)),
+        "tokens_after": str(int(tokens_after)),
+        "ts_epoch": str(now),
+    }
+
+
+def make_dispatch_decision_event(
+    state: dict,
+    now: int,
+    *,
+    cls: str,
+    outcome: str,
+    reason: str,
+) -> dict:
+    """Construct one `dispatch_decision` event for a candidate class.
+
+    `outcome` MUST be one of {dispatched, cooldown, budget, idle}.
+    Unknown values are coerced to "idle" because over-counting idle
+    decisions is the safe default — it never causes a stale dispatch.
+    """
+    if outcome not in DISPATCH_DECISION_OUTCOMES:
+        outcome = "idle"
+    return {
+        "event": "dispatch_decision",
+        "turn_n": str(int(state.get("turn", 0) or 0)),
+        "class": str(cls),
+        "outcome": outcome,
+        "reason": str(reason),
+        "ts_epoch": str(now),
+    }
+
+
 def make_wait_or_reap(slot: str, task_id: str, age_seconds: int, reason: str = "") -> dict:
     """Silent-wedge fallback (issue #509). Hooks are the primary slot
     accounting path; this action fires when an active slot has aged past
@@ -465,9 +566,22 @@ class Plan:
     actions: list[dict] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     debug: dict[str, Any] = field(default_factory=dict)
+    # Observability events emitted by this turn (issue #668, slice A of
+    # autopilot observability epic #667). The list contains
+    # `turn_start`, `turn_end`, and one `dispatch_decision` per candidate
+    # pipeline/signal class considered. The CLI wrapper XADDs these to
+    # `hydra:autopilot:slot-events` so `slot-events-bridge.ts` can
+    # forward them to dashboard WS clients. `decide()` itself stays pure
+    # — it only appends dicts; the side-effect lives in `main()`.
+    events: list[dict] = field(default_factory=list)
 
     def to_json(self) -> str:
-        return json.dumps({"actions": self.actions, "reasons": self.reasons, "debug": self.debug})
+        return json.dumps({
+            "actions": self.actions,
+            "reasons": self.reasons,
+            "debug": self.debug,
+            "events": self.events,
+        })
 
     def add(self, action: dict, reason: str = "") -> None:
         self.actions.append(action)
@@ -667,11 +781,30 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     limits = state.get("limits") or {}
     scope = str(limits.get("scope", "all"))
 
+    # Slice A of autopilot observability epic (#667 → issue #668):
+    # emit `turn_start` at the very top of the decision turn so dashboard
+    # WS clients can pin a "turn started" frame even if the rest of the
+    # turn terminates the loop. The matching `turn_end` is emitted just
+    # before `return plan` at the bottom of this function.
+    plan.events.append(make_turn_start_event(state, now))
+
     # 1. Termination
     term = _check_termination(state, now)
     if term is not None:
         plan.add(term, reason="termination")
         plan.debug["terminate"] = term.get("cause")
+        # Termination is a turn-ending decision in its own right — emit
+        # `turn_end` so the dashboard's per-turn counters close cleanly.
+        plan.events.append(
+            make_turn_end_event(
+                state,
+                now,
+                dispatches=0,
+                skipped=0,
+                idle=0,
+                tokens_after=int(state.get("cumulative_tokens", 0) or 0),
+            )
+        )
         return plan
 
     # 1.5. Hook-delivered slot events (issue #509).
@@ -909,22 +1042,75 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     )
 
     dispatched_any = False
+    # Slice A observability bookkeeping (issue #668): count the
+    # candidate classes that were skipped (any non-dispatched outcome)
+    # so the `turn_end` event carries `dispatches` + `skipped` totals.
+    skipped_count = 0
 
     for cls in pipeline_priority:
         if dispatch_blocked:
-            break
+            # Budget-style suppression: usage tracker said "allow=False".
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="budget",
+                    reason="usage tracker dispatch_blocked",
+                )
+            )
+            skipped_count += 1
+            continue  # do NOT break — keep emitting one event per class
         if cls in shed_classes:
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="budget",
+                    reason="usage tracker shed",
+                )
+            )
+            skipped_count += 1
             continue
         if slots.get(cls) is not None:
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="cooldown",
+                    reason="slot busy",
+                )
+            )
+            skipped_count += 1
             continue  # slot busy
         if cls in burned:
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="cooldown",
+                    reason="class burned (soft-cap)",
+                )
+            )
+            skipped_count += 1
             continue
         if scope_excluded(scope, cls):
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason=f"scope excluded ({scope})",
+                )
+            )
+            skipped_count += 1
             continue
         action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
         if action is None:
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason="selector found no eligible work",
+                )
+            )
+            skipped_count += 1
             continue
         plan.add(action, reason=f"dispatch:{cls}")
+        plan.events.append(
+            make_dispatch_decision_event(
+                state, now, cls=cls, outcome="dispatched",
+                reason=str(action.get("reason") or "dispatched"),
+            )
+        )
         dispatched_any = True
 
     # 5. Signal classes — each is independent. Health pre-empts when sick.
@@ -946,12 +1132,40 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         "scout_orch",
     ):
         if dispatch_blocked:
-            break
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="budget",
+                    reason="usage tracker dispatch_blocked",
+                )
+            )
+            skipped_count += 1
+            continue
         if sig in shed_classes:
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="budget",
+                    reason="usage tracker shed",
+                )
+            )
+            skipped_count += 1
             continue
         if scope_excluded(scope, sig):
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="idle",
+                    reason=f"scope excluded ({scope})",
+                )
+            )
+            skipped_count += 1
             continue
         if sig in burned:
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="cooldown",
+                    reason="signal class burned (soft-cap)",
+                )
+            )
+            skipped_count += 1
             continue
         # Cost-cap gate (issue #532) — checked BEFORE _select_for_signal so
         # it fires before the cooldown read. Per AC: "cost-cap gate fires
@@ -964,11 +1178,39 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
                 "cap_usd": cap["cap_usd"],
                 "spend_usd": cap["spend_usd"],
             })
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="budget",
+                    reason="scout cost-cap exceeded",
+                )
+            )
+            skipped_count += 1
             continue
         action = _select_for_signal(sig, state, events, now)
         if action is None:
+            # Could be cooldown OR idle (no signal present); inspect the
+            # state to disambiguate. signal_is_cooled returns False when
+            # we're still inside the per-class cooldown window.
+            if not signal_is_cooled(state, sig, now):
+                outcome = "cooldown"
+                reason = f"signal cooldown active ({sig})"
+            else:
+                outcome = "idle"
+                reason = "no triggering signal"
+            plan.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome=outcome, reason=reason,
+                )
+            )
+            skipped_count += 1
             continue
         plan.add(action, reason=f"signal:{sig}")
+        plan.events.append(
+            make_dispatch_decision_event(
+                state, now, cls=sig, outcome="dispatched",
+                reason=str(action.get("reason") or "dispatched"),
+            )
+        )
         dispatched_any = True
 
     # 5.5. Silent-wedge fallback (issue #509).
@@ -1065,6 +1307,23 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         if not isinstance(slot, str) or not slot:
             continue
         action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+
+    # Slice A observability close-out (issue #668). Emit `turn_end` last
+    # so the dashboard knows the turn finished decision-making cleanly
+    # (vs the termination short-circuit above, which emits its own
+    # `turn_end` before bailing). `idle` is 1 iff the turn produced no
+    # dispatch actions at all — the heartbeat / busy-wait path.
+    dispatch_count = sum(1 for a in plan.actions if isinstance(a, dict) and a.get("type") == "dispatch")
+    plan.events.append(
+        make_turn_end_event(
+            state,
+            now,
+            dispatches=dispatch_count,
+            skipped=skipped_count,
+            idle=0 if dispatch_count > 0 else 1,
+            tokens_after=int(state.get("cumulative_tokens", 0) or 0),
+        )
+    )
 
     return plan
 
@@ -1168,6 +1427,17 @@ def _select_for_slot(
         dc = _candidate_design_concept(candidates, best)
         if dc is not None and not _design_concept_is_fresh(dc):
             return None
+        # Issue #628: if `orch_pending_grill_anchor` is set, the
+        # design_concept_orch selector will dispatch hydra-grill on this
+        # turn — dev_orch MUST yield to maintain the Phase B sequencing
+        # rule (grill before dev). This mirrors the `best.designConcept`
+        # check above for the new orch-scope signal path.
+        signals = state.get("signals") if isinstance(state, dict) else None
+        orch_anchor = (
+            signals.get("orch_pending_grill_anchor") if isinstance(signals, dict) else None
+        )
+        if isinstance(orch_anchor, str) and orch_anchor and orch_anchor != "none":
+            return None
         return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
     if cls == "dev_target":
         # Use board signal (work_queue / target backlog) — dev_target dispatches
@@ -1222,11 +1492,6 @@ def _select_for_slot(
         #
         # - `orch_work_available` signal must be present (same gate as
         #   dev_orch).
-        # - The best candidate must carry a `designConcept` block (see
-        #   `_candidate_design_concept`). If the field is absent the
-        #   selector returns None and Phase B remains a no-op for that
-        #   turn — that gives the data-plane wiring (a separate sub-issue
-        #   under #437) a clean back-merge target.
         # - When the artifact is missing OR stale, dispatch
         #   `hydra-grill` with the anchorRef and scope='orch'. The
         #   pipeline_priority ordering (design_concept_orch BEFORE
@@ -1236,15 +1501,51 @@ def _select_for_slot(
         #   returns None — Phase B treats warn-only artifacts as "fresh"
         #   so dev_orch proceeds in the same plan. Phase C will tighten
         #   to gateOk-only.
+        #
+        # ISSUE #628 — TWO INPUT PATHS:
+        #
+        #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
+        #      string anchorRef set by `collect-state.sh` from the orch
+        #      GH `ready-for-agent` board. This is the orch-scope feed
+        #      the selector was missing — `best` in /api/anchor/candidates
+        #      is structurally a target-product candidate post-#458, so
+        #      reading `best.designConcept` (the pre-#628 path) never
+        #      fired on orch work. The collect-state loop already does
+        #      the artifact-freshness lookup, so the presence of this
+        #      signal IS the trigger.
+        #
+        #   2. `best.designConcept` (legacy fallback). When the new
+        #      signal is absent (e.g. a deployment running an older
+        #      collect-state), fall back to the Phase B contract. The
+        #      candidates feed now carries the `designConcept` block per
+        #      issue #628's data-plane fix, so this path also works for
+        #      the legacy "orch candidate showed up in best" case.
         if not _signal_present(state, events, "orch_work_available"):
             return None
+
+        signals = state.get("signals") if isinstance(state, dict) else None
+        orch_anchor = (
+            signals.get("orch_pending_grill_anchor") if isinstance(signals, dict) else None
+        )
+        if isinstance(orch_anchor, str) and orch_anchor and orch_anchor != "none":
+            return make_dispatch(
+                cls,
+                "hydra-grill",
+                prompt_args={"scope": "orch", "anchor": orch_anchor},
+                reason=(
+                    "orch GH ready-for-agent issue lacks fresh design-concept artifact "
+                    "(Phase B warn-only, #628 orch-scope path)"
+                ),
+            )
+
+        # Fallback: legacy `best.designConcept` path (Phase B as originally
+        # shipped). Retained so this PR can land alongside an older
+        # collect-state.sh without breaking the gate.
         dc = _candidate_design_concept(candidates, best)
         if dc is None:
             return None
         if _design_concept_is_fresh(dc):
             return None
-        # Surface the anchorRef on the dispatch — hydra-grill needs it to
-        # write the resulting artifact back to the right Redis key.
         anchor_ref = best.get("anchorRef") if best else None
         prompt_args: dict = {"scope": "orch"}
         if anchor_ref is not None:
@@ -1253,7 +1554,7 @@ def _select_for_slot(
             cls,
             "hydra-grill",
             prompt_args=prompt_args,
-            reason="orch anchor lacks fresh design-concept artifact (Phase B warn-only)",
+            reason="orch anchor lacks fresh design-concept artifact (Phase B warn-only, legacy path)",
         )
     return None
 
@@ -1512,6 +1813,67 @@ def _smoke() -> int:
     return 0
 
 
+def _xadd_observability_events(events: list[dict]) -> None:
+    """Best-effort XADD of observability events (slice A of issue #667).
+
+    Mirrors the bash hooks' XADD policy — never propagate Redis failures,
+    log to stderr and move on. The events ride
+    `hydra:autopilot:slot-events` alongside the hook-emitted lifecycle
+    events; the field-agnostic bridge forwards every key/value pair.
+
+    Honours HYDRA_REDIS_HOST / HYDRA_REDIS_PORT (and `docker` as a
+    sentinel matching the hooks), and HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM
+    for the stream key override. The XADD is fully gated behind
+    `HYDRA_AUTOPILOT_EMIT_TURN_EVENTS` — when unset / falsy, decide.py
+    stays a pure JSON emitter (existing test/playbook callers see no
+    behaviour change). The autopilot bootstrap sets it explicitly so
+    production runs emit; the test suite leaves it off.
+    """
+    if not events:
+        return
+    flag = os.environ.get("HYDRA_AUTOPILOT_EMIT_TURN_EVENTS", "").strip().lower()
+    if flag not in ("1", "true", "yes", "on"):
+        return
+    redis_host = os.environ.get("HYDRA_REDIS_HOST", "localhost")
+    redis_port = os.environ.get("HYDRA_REDIS_PORT", "6379")
+    stream_key = os.environ.get(
+        "HYDRA_AUTOPILOT_SLOT_EVENTS_STREAM",
+        "hydra:autopilot:slot-events",
+    )
+    maxlen_cap = os.environ.get("HYDRA_AUTOPILOT_SLOT_EVENTS_MAXLEN", "1000")
+    import subprocess
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        # Build `XADD <stream> MAXLEN ~ <cap> * field1 v1 field2 v2 ...`.
+        args: list[str] = [
+            "XADD", stream_key, "MAXLEN", "~", str(maxlen_cap), "*",
+        ]
+        for k, v in ev.items():
+            args.extend([str(k), str(v)])
+        try:
+            if redis_host == "docker":
+                cmd = ["docker", "exec", "hydra-redis-1", "redis-cli", *args]
+            else:
+                cmd = [
+                    "redis-cli", "-h", redis_host, "-p", str(redis_port),
+                    *args,
+                ]
+            subprocess.run(
+                cmd,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            # Mirror the bash hooks' best-effort policy — log once, move on.
+            print(
+                f"decide.py: XADD to {stream_key} failed ({exc}); event={ev.get('event')!r}",
+                file=sys.stderr,
+            )
+
+
 def main(argv: list[str]) -> int:
     if len(argv) <= 1:
         print(
@@ -1531,6 +1893,7 @@ def main(argv: list[str]) -> int:
         candidates = _load_json(argv[3]) if len(argv) > 3 else None
         events = _load_json(argv[4]) if len(argv) > 4 else None
         plan = decide(state, candidates, events)
+        _xadd_observability_events(plan.events)
         print(plan.to_json())
         return 0
     print(f"decide.py: unknown subcommand {sub!r}", file=sys.stderr)

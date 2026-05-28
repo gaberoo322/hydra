@@ -278,3 +278,104 @@ describe("decide.py — pipeline_slots contract includes design_concept_orch (#4
       "smoke catalog must list design_concept_orch as a pipeline slot");
   });
 });
+
+describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () => {
+  test("dispatches hydra-grill on the named anchor when signal is set", () => {
+    // The new orch-scope signal path: collect-state.sh emits the first
+    // orch-board ready-for-agent issue that lacks a fresh DC artifact,
+    // and decide.py grills it directly. This is the path that lets the
+    // gate fire on real orch work post-#458; pre-#628 it never could.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-628",
+    });
+    const cands = { candidates: [] }; // intentionally empty — signal alone must suffice
+    const plan = runDecide(state, cands);
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.ok(grill, "orch_pending_grill_anchor signal must trigger a grill dispatch");
+    assert.equal(grill.skill, "hydra-grill");
+    assert.equal(grill.prompt_args.scope, "orch");
+    assert.equal(grill.prompt_args.anchor, "issue-628");
+  });
+
+  test("dev_orch yields the same turn the grill fires (sequencing rule)", () => {
+    // INV: design_concept_orch and dev_orch must not co-fire on the
+    // same anchor. The signal path must enforce this exactly the way
+    // the legacy `best.designConcept` path does.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-628",
+    });
+    const cands = { candidates: [] };
+    const plan = runDecide(state, cands);
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.ok(grill, "grill should dispatch");
+    assert.equal(dev, undefined,
+      "dev_orch must NOT co-fire when orch_pending_grill_anchor is set");
+  });
+
+  test("signal=\"none\" is treated as absent (no grill, dev_orch proceeds)", () => {
+    // collect-state.sh emits the literal string "none" when no orch
+    // anchor needs grilling. decide.py MUST treat this as "no signal".
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "none",
+    });
+    const cands = { candidates: [{ anchorRef: "item-target", score: 0.9 }] };
+    const plan = runDecide(state, cands);
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(grill, undefined, "\"none\" must NOT trigger a grill");
+    assert.ok(dev, "dev_orch must proceed when no grill is pending");
+  });
+
+  test("signal absent → falls back to legacy best.designConcept path", () => {
+    // Back-compat: if a deployment hasn't rolled out the new
+    // collect-state line, decide.py should fall back to the original
+    // Phase B path (read best.designConcept). #628's data-plane fix
+    // now also populates that block, so the fallback isn't a dead
+    // letter — it's the path for deployments where `best` happens to
+    // be an orch anchor.
+    const state = baseState({ orch_work_available: true });
+    const cands = {
+      candidates: [
+        {
+          anchorRef: "issue-fallback",
+          score: 0.85,
+          designConcept: { present: false, isFresh: false, status: null, gateOk: false },
+        },
+      ],
+    };
+    const plan = runDecide(state, cands);
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.ok(grill, "missing signal → legacy best.designConcept path must still work");
+    assert.equal(grill.prompt_args.anchor, "issue-fallback");
+  });
+
+  test("orch_work_available absent → no grill even when signal points to an anchor", () => {
+    // The orch_work_available gate is sacred — if the orch board is
+    // empty there's no point grilling for downstream dev_orch work
+    // that won't happen anyway.
+    const state = baseState({ orch_pending_grill_anchor: "issue-999" });
+    const cands = { candidates: [] };
+    const plan = runDecide(state, cands);
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.equal(grill, undefined,
+      "orch_pending_grill_anchor requires orch_work_available to fire");
+  });
+
+  test("scope=target-only still excludes design_concept_orch (orch-scope class)", () => {
+    // The new signal path must not bypass the scope filter.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "issue-628",
+    });
+    state.limits.scope = "target-only";
+    const cands = { candidates: [] };
+    const plan = runDecide(state, cands);
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.equal(grill, undefined,
+      "design_concept_orch is orch-scope; target-only scope must exclude it");
+  });
+});
