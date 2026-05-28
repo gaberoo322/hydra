@@ -2,34 +2,38 @@ import { useEffect, useRef, useState } from "react";
 import { resolveBubbleColor } from "./sprite-map.ts";
 import RecommendationsTab from "./RecommendationsTab.jsx";
 import RecRunJournalModal from "./RecRunJournalModal.jsx";
+import TurnJournalTab from "./TurnJournalTab.jsx";
+import {
+  DEFAULT_OAK_TAB,
+  isOakTabId,
+  OAK_TAB_STORAGE_KEY,
+  TAB_JOURNAL,
+  TAB_LIVE,
+  TAB_RECS,
+} from "./oak-tab-state.ts";
 
 /**
  * OakTownCrier — right-edge panel anchored on the Professor Oak sprite.
  *
  * Slice 5 of /now-pixel (#642, #647) shipped this as a single scrolling
- * speech-bubble column. Slice F of the autopilot-observability epic
- * (#674) extends the panel with a tabbed mode strip so the live feed
- * shares the rail with the LLM-driven recommendations tab. Slice B of
- * the same epic (#669) introduces a sibling "turn journal" tab — when
- * both slices merge, the tab list grows; this file keeps the live-feed
- * + recs structure stable so slice B's `TurnJournalTab` slots in
- * without touching the live-feed or recs code paths.
+ * speech-bubble column. Slice B of the autopilot-observability epic
+ * (#669, parent #667) converted it into a 3-mode tabbed panel; slice F
+ * (#674) wires the live LLM-driven recommendations engine + run-journal
+ * modal into the third tab and adds an `oak_resting` badge when the
+ * daily recs budget is exhausted:
  *
- * Tab state persists in localStorage at `hydra:now-pixel:oak-tab`. The
- * collapse-state key is unchanged from slice 5 so existing operators'
- * stored preferences carry over.
+ *   1. Live feed         — last 50 WS events as colored speech bubbles
+ *   2. Turn journal      — compact one-row-per-autopilot-turn ledger
+ *   3. Recommendations   — LLM rec engine (slice F #674)
  *
- * Clicking the Oak sprite still toggles the entire panel collapsed.
- * In the collapsed state the tab strip is hidden so the rail stays narrow.
+ * Tab selection persists in localStorage at `hydra:now-pixel:oak-tab`
+ * alongside the existing collapse-state key.
+ *
+ * Clicking the Oak sprite still toggles the entire panel collapsed —
+ * the tab strip is hidden in that state so the rail stays narrow.
  */
 const MAX_BUBBLES = 50;
 const COLLAPSE_STORAGE_KEY = "hydra:now-pixel:oak-collapsed";
-const TAB_STORAGE_KEY = "hydra:now-pixel:oak-tab";
-
-const TAB_LIVE = "live";
-const TAB_RECS = "recs";
-const VALID_TABS = new Set([TAB_LIVE, TAB_RECS]);
-const DEFAULT_TAB = TAB_LIVE;
 
 function isoToTime(ts) {
   try {
@@ -150,10 +154,10 @@ export default function OakTownCrier({ ws }) {
   });
   const [tab, setTab] = useState(() => {
     try {
-      const stored = localStorage.getItem(TAB_STORAGE_KEY);
-      return VALID_TABS.has(stored) ? stored : DEFAULT_TAB;
+      const stored = localStorage.getItem(OAK_TAB_STORAGE_KEY);
+      return isOakTabId(stored) ? stored : DEFAULT_OAK_TAB;
     } catch {
-      return DEFAULT_TAB;
+      return DEFAULT_OAK_TAB;
     }
   });
   const [hovered, setHovered] = useState(false);
@@ -174,7 +178,7 @@ export default function OakTownCrier({ ws }) {
   // Persist tab selection.
   useEffect(() => {
     try {
-      localStorage.setItem(TAB_STORAGE_KEY, tab);
+      localStorage.setItem(OAK_TAB_STORAGE_KEY, tab);
     } catch {
       /* intentional: storage may be disabled */
     }
@@ -217,8 +221,8 @@ export default function OakTownCrier({ ws }) {
     return () => off?.();
   }, [ws]);
 
-  // Auto-scroll the live feed to newest unless the operator is hovering.
-  // Only runs when the live tab is visible.
+  // Auto-scroll the live feed to newest unless the operator is hovering
+  // (paused). Only runs when the live tab is the visible one.
   useEffect(() => {
     if (collapsed || hovered || tab !== TAB_LIVE) return;
     const el = scrollRef.current;
@@ -280,6 +284,7 @@ export default function OakTownCrier({ ws }) {
             data-testid="oak-tab-strip"
           >
             <TabButton id={TAB_LIVE} current={tab} label="Live feed" onSelect={setTab} />
+            <TabButton id={TAB_JOURNAL} current={tab} label="Turn journal" onSelect={setTab} />
             <TabButton id={TAB_RECS} current={tab} label="Recs" onSelect={setTab} />
           </div>
           {tab === TAB_LIVE && (
@@ -290,6 +295,7 @@ export default function OakTownCrier({ ws }) {
               onUnhover={() => setHovered(false)}
             />
           )}
+          {tab === TAB_JOURNAL && <TurnJournalTab />}
           {tab === TAB_RECS && (
             <RecommendationsTab openJournal={() => setJournalOpen(true)} />
           )}

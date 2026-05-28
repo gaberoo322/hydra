@@ -1,8 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
 import HabitatZone from "./HabitatZone.jsx";
 import Infirmary from "./Infirmary.jsx";
-import { deriveZoneState, deriveCooldown } from "./derive-sprite-state.ts";
+import {
+  deriveZoneState,
+  deriveCooldown,
+  deriveThinking,
+} from "./derive-sprite-state.ts";
 
 /**
  * HabitatGrid — 2-column habitat layout for /now-pixel.
@@ -14,11 +18,19 @@ import { deriveZoneState, deriveCooldown } from "./derive-sprite-state.ts";
  * Hover-link: `hoveredSubagentId` / `onSubagentHover` come from NowPixel
  * so the in-zone sprite and the ActiveDispatchesStrip mirror highlight
  * together when one is hovered.
+ *
+ * Slice E of autopilot observability (#667, #670) accepts a
+ * `zoneRectsRef` prop — a ref whose `.current` is a `Map<class, HTMLElement>`
+ * that NowPixel reads to compute tween destination rects. We use a ref
+ * (not state) because rect lookups are imperative: the WS frame
+ * arrives, the parent calls `el.getBoundingClientRect()`, fires the
+ * tween, and never re-renders on the rect itself.
  */
 export default function HabitatGrid({
   anim = null,
   hoveredSubagentId = null,
   onSubagentHover = () => {},
+  zoneRectsRef = null,
 }) {
   const { data } = useApi("/autopilot/runs/current", { poll: 10_000 });
 
@@ -53,6 +65,36 @@ export default function HabitatGrid({
     }
   }, [zoneState.zones, anim]);
 
+  // Thinking-state — slot occupied ≥30s with no partial_tokens delta.
+  // We tick the same 1Hz `now` clock above for cooldowns so the
+  // derivation re-runs cheaply on every second the page is open. The
+  // tracker lives in a ref so the per-slot inactivity watermark
+  // survives re-renders. Issue #660.
+  const thinkingTrackerRef = useRef({});
+  const prevThinkingRef = useRef({});
+  useEffect(() => {
+    if (!anim?.fireThinking) return;
+    const { thinking, nextTracker } = deriveThinking(
+      slotsSnapshot,
+      now,
+      thinkingTrackerRef.current,
+    );
+    thinkingTrackerRef.current = nextTracker;
+    for (const [cls, isThinking] of Object.entries(thinking)) {
+      const wasThinking = prevThinkingRef.current[cls] === true;
+      if (isThinking && !wasThinking) {
+        anim.fireThinking(cls);
+      } else if (!isThinking && wasThinking) {
+        // Only clear if the hook currently shows thinking — never
+        // stomp on a hurt or one-shot that took over in the meantime.
+        if (anim.animations?.[cls] === "thinking") {
+          anim.clearAnimation(cls);
+        }
+      }
+      prevThinkingRef.current[cls] = isThinking;
+    }
+  }, [slotsSnapshot, now, anim]);
+
   const orchPipelineClasses = [
     "dev_orch",
     "qa_orch",
@@ -73,6 +115,36 @@ export default function HabitatGrid({
     onSubagentHover,
     hardMax,
   };
+
+  /**
+   * Ref-callback factory: returns a callback that registers (or
+   * unregisters when `el === null`) the zone's outer wrapper into the
+   * shared `zoneRectsRef.current` Map. Using a per-class closure means
+   * React calls our callback exactly when the wrapper mounts /
+   * unmounts, so we never poll for rects.
+   *
+   * The factory is memoised inside `useCallback` so changing the
+   * `hoveredSubagentId` prop doesn't tear down + re-register every
+   * zone on every parent re-render.
+   */
+  const registerZoneRef = useCallback(
+    (cls) => (el) => {
+      if (!zoneRectsRef) return;
+      if (!zoneRectsRef.current) zoneRectsRef.current = new Map();
+      if (el) {
+        zoneRectsRef.current.set(cls, el);
+      } else {
+        zoneRectsRef.current.delete(cls);
+      }
+    },
+    [zoneRectsRef],
+  );
+
+  const wrapZone = (cls, node) => (
+    <div key={cls} ref={registerZoneRef(cls)} data-zone-anchor={cls}>
+      {node}
+    </div>
+  );
 
   return (
     <section
@@ -101,40 +173,49 @@ export default function HabitatGrid({
         >
           <ColumnHeader>Orchestrator</ColumnHeader>
           <div className="grid grid-cols-3 gap-2">
-            {orchPipelineClasses.map((cls) => (
-              <HabitatZone
-                key={cls}
-                className={cls}
-                status={zoneState.zones[cls]}
-                signalSeed={zoneState.signalSeeds[cls] ?? null}
-                animation={animFor(cls)}
-                subagent={subagentFor(cls)}
-                {...sharedZoneProps}
-              />
-            ))}
-            {orchSignalClasses.map((cls) => (
-              <HabitatZone
-                key={cls}
-                className={cls}
-                status={zoneState.zones[cls]}
-                signalSeed={zoneState.signalSeeds[cls] ?? null}
-                animation={animFor(cls)}
-                cooldown={cooldownFor(cls)}
-                {...sharedZoneProps}
-              />
-            ))}
+            {orchPipelineClasses.map((cls) =>
+              wrapZone(
+                cls,
+                <HabitatZone
+                  key={cls}
+                  className={cls}
+                  status={zoneState.zones[cls]}
+                  signalSeed={zoneState.signalSeeds[cls] ?? null}
+                  animation={animFor(cls)}
+                  subagent={subagentFor(cls)}
+                  {...sharedZoneProps}
+                />,
+              ),
+            )}
+            {orchSignalClasses.map((cls) =>
+              wrapZone(
+                cls,
+                <HabitatZone
+                  key={cls}
+                  className={cls}
+                  status={zoneState.zones[cls]}
+                  signalSeed={zoneState.signalSeeds[cls] ?? null}
+                  animation={animFor(cls)}
+                  cooldown={cooldownFor(cls)}
+                  {...sharedZoneProps}
+                />,
+              ),
+            )}
           </div>
         </div>
 
         <div className="flex flex-col items-center min-w-[130px] gap-2">
-          <HabitatZone
-            className="health"
-            status={zoneState.zones.health}
-            signalSeed={zoneState.signalSeeds.health}
-            animation={animFor("health")}
-            cooldown={cooldownFor("health")}
-            {...sharedZoneProps}
-          />
+          {wrapZone(
+            "health",
+            <HabitatZone
+              className="health"
+              status={zoneState.zones.health}
+              signalSeed={zoneState.signalSeeds.health}
+              animation={animFor("health")}
+              cooldown={cooldownFor("health")}
+              {...sharedZoneProps}
+            />,
+          )}
           <Infirmary />
         </div>
 
@@ -146,28 +227,34 @@ export default function HabitatGrid({
         >
           <ColumnHeader>Target</ColumnHeader>
           <div className="grid grid-cols-3 gap-2">
-            {targetPipelineClasses.map((cls) => (
-              <HabitatZone
-                key={cls}
-                className={cls}
-                status={zoneState.zones[cls]}
-                signalSeed={zoneState.signalSeeds[cls] ?? null}
-                animation={animFor(cls)}
-                subagent={subagentFor(cls)}
-                {...sharedZoneProps}
-              />
-            ))}
-            {targetSignalClasses.map((cls) => (
-              <HabitatZone
-                key={cls}
-                className={cls}
-                status={zoneState.zones[cls]}
-                signalSeed={zoneState.signalSeeds[cls] ?? null}
-                animation={animFor(cls)}
-                cooldown={cooldownFor(cls)}
-                {...sharedZoneProps}
-              />
-            ))}
+            {targetPipelineClasses.map((cls) =>
+              wrapZone(
+                cls,
+                <HabitatZone
+                  key={cls}
+                  className={cls}
+                  status={zoneState.zones[cls]}
+                  signalSeed={zoneState.signalSeeds[cls] ?? null}
+                  animation={animFor(cls)}
+                  subagent={subagentFor(cls)}
+                  {...sharedZoneProps}
+                />,
+              ),
+            )}
+            {targetSignalClasses.map((cls) =>
+              wrapZone(
+                cls,
+                <HabitatZone
+                  key={cls}
+                  className={cls}
+                  status={zoneState.zones[cls]}
+                  signalSeed={zoneState.signalSeeds[cls] ?? null}
+                  animation={animFor(cls)}
+                  cooldown={cooldownFor(cls)}
+                  {...sharedZoneProps}
+                />,
+              ),
+            )}
             <HabitatZone
               className="design_concept_target"
               status="sleeping"

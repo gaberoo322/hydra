@@ -522,6 +522,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
 | `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
 | `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1) |
+| `orch_grill_pending_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit) | `design_concept_orch` fires hydra-grill on the named anchor; `dev_orch` yields the same turn (issue #628) |
 
 Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
 received target-product anchors (item-26x). Post-#458, candidates are
