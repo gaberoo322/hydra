@@ -1168,6 +1168,17 @@ def _select_for_slot(
         dc = _candidate_design_concept(candidates, best)
         if dc is not None and not _design_concept_is_fresh(dc):
             return None
+        # Issue #628: if `orch_pending_grill_anchor` is set, the
+        # design_concept_orch selector will dispatch hydra-grill on this
+        # turn — dev_orch MUST yield to maintain the Phase B sequencing
+        # rule (grill before dev). This mirrors the `best.designConcept`
+        # check above for the new orch-scope signal path.
+        signals = state.get("signals") if isinstance(state, dict) else None
+        orch_anchor = (
+            signals.get("orch_pending_grill_anchor") if isinstance(signals, dict) else None
+        )
+        if isinstance(orch_anchor, str) and orch_anchor and orch_anchor != "none":
+            return None
         return make_dispatch(cls, "hydra-dev", reason="orch board has ready-for-agent issues")
     if cls == "dev_target":
         # Use board signal (work_queue / target backlog) — dev_target dispatches
@@ -1222,11 +1233,6 @@ def _select_for_slot(
         #
         # - `orch_work_available` signal must be present (same gate as
         #   dev_orch).
-        # - The best candidate must carry a `designConcept` block (see
-        #   `_candidate_design_concept`). If the field is absent the
-        #   selector returns None and Phase B remains a no-op for that
-        #   turn — that gives the data-plane wiring (a separate sub-issue
-        #   under #437) a clean back-merge target.
         # - When the artifact is missing OR stale, dispatch
         #   `hydra-grill` with the anchorRef and scope='orch'. The
         #   pipeline_priority ordering (design_concept_orch BEFORE
@@ -1236,15 +1242,51 @@ def _select_for_slot(
         #   returns None — Phase B treats warn-only artifacts as "fresh"
         #   so dev_orch proceeds in the same plan. Phase C will tighten
         #   to gateOk-only.
+        #
+        # ISSUE #628 — TWO INPUT PATHS:
+        #
+        #   1. `state.signals.orch_pending_grill_anchor` (preferred). A
+        #      string anchorRef set by `collect-state.sh` from the orch
+        #      GH `ready-for-agent` board. This is the orch-scope feed
+        #      the selector was missing — `best` in /api/anchor/candidates
+        #      is structurally a target-product candidate post-#458, so
+        #      reading `best.designConcept` (the pre-#628 path) never
+        #      fired on orch work. The collect-state loop already does
+        #      the artifact-freshness lookup, so the presence of this
+        #      signal IS the trigger.
+        #
+        #   2. `best.designConcept` (legacy fallback). When the new
+        #      signal is absent (e.g. a deployment running an older
+        #      collect-state), fall back to the Phase B contract. The
+        #      candidates feed now carries the `designConcept` block per
+        #      issue #628's data-plane fix, so this path also works for
+        #      the legacy "orch candidate showed up in best" case.
         if not _signal_present(state, events, "orch_work_available"):
             return None
+
+        signals = state.get("signals") if isinstance(state, dict) else None
+        orch_anchor = (
+            signals.get("orch_pending_grill_anchor") if isinstance(signals, dict) else None
+        )
+        if isinstance(orch_anchor, str) and orch_anchor and orch_anchor != "none":
+            return make_dispatch(
+                cls,
+                "hydra-grill",
+                prompt_args={"scope": "orch", "anchor": orch_anchor},
+                reason=(
+                    "orch GH ready-for-agent issue lacks fresh design-concept artifact "
+                    "(Phase B warn-only, #628 orch-scope path)"
+                ),
+            )
+
+        # Fallback: legacy `best.designConcept` path (Phase B as originally
+        # shipped). Retained so this PR can land alongside an older
+        # collect-state.sh without breaking the gate.
         dc = _candidate_design_concept(candidates, best)
         if dc is None:
             return None
         if _design_concept_is_fresh(dc):
             return None
-        # Surface the anchorRef on the dispatch — hydra-grill needs it to
-        # write the resulting artifact back to the right Redis key.
         anchor_ref = best.get("anchorRef") if best else None
         prompt_args: dict = {"scope": "orch"}
         if anchor_ref is not None:
@@ -1253,7 +1295,7 @@ def _select_for_slot(
             cls,
             "hydra-grill",
             prompt_args=prompt_args,
-            reason="orch anchor lacks fresh design-concept artifact (Phase B warn-only)",
+            reason="orch anchor lacks fresh design-concept artifact (Phase B warn-only, legacy path)",
         )
     return None
 

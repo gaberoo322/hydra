@@ -670,6 +670,37 @@ async function runScheduledCycle(eventBus) {
     Sentry.addBreadcrumb({ category: "scheduler", message: `Memory consolidation failed: ${err.message}`, level: "error" });
   }
 
+  // Daily design-concept snapshot (issue #628) — record today's index
+  // size so we can compute "≥7 consecutive non-zero days" as the
+  // green-light criterion for Phase C of #437. PR #567 retired the
+  // heavyweight B-4 telemetry endpoint; this is the lightweight
+  // replacement (one hash field per day, 14-day bounded).
+  try {
+    const {
+      getDesignConceptIndexSize,
+      writeDailySnapshot,
+      readDailySnapshots,
+    } = await import("../redis/design-concept.ts");
+    const today = new Date().toISOString().slice(0, 10);
+    const existing = await readDailySnapshots();
+    // Idempotent on today's date — only write if today's slot is empty.
+    // (A second writer landing later in the day SHOULD see a higher
+    // count, but the 7-day green-light criterion only checks for
+    // `count > 0`, so we keep the first sample of the day.)
+    const alreadyWritten = existing.some((s) => s.date === today);
+    if (!alreadyWritten) {
+      const count = await getDesignConceptIndexSize();
+      await writeDailySnapshot(today, count);
+    }
+  } catch (err: any) {
+    console.error(`[Scheduler] Design-concept daily snapshot failed: ${err.message}`);
+    Sentry.addBreadcrumb({
+      category: "scheduler",
+      message: `Design-concept daily snapshot failed: ${err.message}`,
+      level: "error",
+    });
+  }
+
   // Check if research is needed (throttled)
   try {
     await maybeRunResearch(eventBus);
