@@ -102,7 +102,7 @@ Explore the codebase before asking obvious questions.
 - **Won't do** — close, label `wontfix`
 
 #### Tracking parent
-- **Close (children done)** — if all children closed
+- **Close (children done)** — if all children closed AND no open PR references the epic (see Rules; check before closing)
 - **Unblock children** — re-triage stuck ones
 - **Restructure** — merge/split/reorder children
 - **Keep as-is** — active oversight work
@@ -140,3 +140,9 @@ Overnight queue: applied=A, overridden=O, deferred=D, dropped=R
 - "Skip" / "later" → move on without action (the queue issue stays OPEN for tomorrow if any rows were skipped).
 - Track before/after states as you go — don't re-read labels at the end.
 - If the queue issue has no rows in it (operator manually emptied it overnight), close it and continue to step 1/2.
+- **Before closing any issue, check for open PRs that reference it.** Tracking parents in particular can have in-flight work that supersedes a stale "no plan / no signal" close-comment. Run:
+  ```bash
+  gh pr list --repo gaberoo322/hydra --state open --search "#<num>" --json number,title,body \
+    --jq "[.[] | select(.body | test(\"#<num>\\\\b\"))] | .[] | \"#\(.number) \(.title)\""
+  ```
+  If any PR references the issue (in body or title), surface it before recommending close. Reason: 2026-05-28 incident — `/hydra-review` closed epic #437 claiming "Phase C has no plan / no signal" while PR #677 (already open, CLEAN, 850 lines) was actively shipping that exact plan. Reopen + correction comment cost more than the 10-second pre-close grep would have.
