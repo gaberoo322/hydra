@@ -29,6 +29,16 @@ echo -n "failed_services="; systemctl --user list-units --type=service --state=f
 # selector fires. Before #458, `dev_orch` consumed /api/anchor/candidates
 # — which in this deployment is structurally a target-product feed —
 # causing hydra-dev to receive target-only anchors and escalate.
+#
+# `needs_qa` counts ISSUES with the `needs-qa` label. The hydra-qa skill
+# is responsible for clearing this label from the source issue once it
+# files a verdict (PASS / PASS-pending-CI / FAIL) — see issue #638. If
+# QA leaves `needs-qa` on an issue while the PR sits waiting on CI or
+# operator merge, decide.py will busy-loop re-dispatching hydra-qa every
+# turn (each dispatch burns 30-65k tokens). The contract is: needs-qa on
+# an issue means "diff has not yet been reviewed"; once reviewed, the PR
+# carries the pending-CI state and autopilot polls statusCheckRollup
+# directly without re-running QA.
 gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
   needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
   ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
