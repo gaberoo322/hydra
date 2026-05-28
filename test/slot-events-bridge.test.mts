@@ -162,3 +162,95 @@ test("bridgeBroadcast: empty / null fields produce an empty payload but still br
     payload: {},
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice A of autopilot observability epic (issue #668, parent #667)
+//
+// decide.py now emits three new event types on the same
+// `hydra:autopilot:slot-events` Redis stream alongside the bash-hook
+// events. The bridge is field-agnostic — every string/number on the
+// raw event becomes a string under `payload` — so the new
+// discriminators MUST round-trip without any bridge code changes. These
+// tests pin that round-trip contract.
+// ---------------------------------------------------------------------------
+
+test("bridgeBroadcast: turn_start event round-trips under autopilot:slot-events (#668)", () => {
+  const { bus, calls } = makeMockBus();
+  const raw = {
+    event: "turn_start",
+    turn_n: "7",
+    epoch: "1700000000",
+    run_id: "abcd1234-deadbeef",
+    ts_epoch: "1700000123",
+  };
+  const env = bridgeBroadcast(bus as any, raw);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].stream, "autopilot:slot-events");
+  assert.equal(env.type, "slot-event");
+  assert.equal(env.payload.event, "turn_start");
+  assert.equal(env.payload.turn_n, "7");
+  assert.equal(env.payload.run_id, "abcd1234-deadbeef");
+  assert.equal(env.payload.epoch, "1700000000");
+  assert.equal(env.payload.ts_epoch, "1700000123");
+});
+
+test("bridgeBroadcast: turn_end event round-trips with dispatches/skipped/idle/tokens_after (#668)", () => {
+  const { bus, calls } = makeMockBus();
+  const raw = {
+    event: "turn_end",
+    turn_n: "7",
+    epoch: "1700000000",
+    run_id: "abcd1234-deadbeef",
+    dispatches: "2",
+    skipped: "11",
+    idle: "0",
+    tokens_after: "54321",
+    ts_epoch: "1700000456",
+  };
+  const env = bridgeBroadcast(bus as any, raw);
+  assert.equal(calls[0].stream, "autopilot:slot-events");
+  assert.equal(env.payload.event, "turn_end");
+  assert.equal(env.payload.dispatches, "2");
+  assert.equal(env.payload.skipped, "11");
+  assert.equal(env.payload.idle, "0");
+  assert.equal(env.payload.tokens_after, "54321");
+  assert.equal(env.payload.run_id, "abcd1234-deadbeef");
+});
+
+test("bridgeBroadcast: dispatch_decision event round-trips with class/outcome/reason (#668)", () => {
+  const { bus, calls } = makeMockBus();
+  const raw = {
+    event: "dispatch_decision",
+    turn_n: "7",
+    class: "dev_orch",
+    outcome: "cooldown",
+    reason: "slot busy",
+    ts_epoch: "1700000789",
+  };
+  const env = bridgeBroadcast(bus as any, raw);
+  assert.equal(calls[0].stream, "autopilot:slot-events");
+  assert.equal(env.payload.event, "dispatch_decision");
+  assert.equal(env.payload.class, "dev_orch");
+  assert.equal(env.payload.outcome, "cooldown");
+  assert.equal(env.payload.reason, "slot busy");
+  assert.equal(env.payload.turn_n, "7");
+});
+
+test("bridgeBroadcast: dispatch_decision with outcome=dispatched + outcome=idle both forwarded (#668)", () => {
+  // Sanity-check the four valid outcome enum values all flow through.
+  for (const outcome of ["dispatched", "cooldown", "budget", "idle"]) {
+    const { bus, calls } = makeMockBus();
+    const raw = {
+      event: "dispatch_decision",
+      turn_n: "1",
+      class: "qa_orch",
+      outcome,
+      reason: `test-${outcome}`,
+      ts_epoch: "1700000000",
+    };
+    bridgeBroadcast(bus as any, raw);
+    assert.equal(calls[0].stream, "autopilot:slot-events");
+    const env = calls[0].event as { payload: Record<string, string> };
+    assert.equal(env.payload.outcome, outcome, `outcome=${outcome} should round-trip verbatim`);
+  }
+});
