@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
 import { useSpriteAnimations } from "../../hooks/useSpriteAnimations.js";
 import AutopilotPavilion from "./AutopilotPavilion.jsx";
-import ActiveDispatchesStrip from "./ActiveDispatchesStrip.jsx";
+import BattleCardRow from "./BattleCardRow.jsx";
 import HabitatGrid from "./HabitatGrid.jsx";
 import OakTownCrier from "./OakTownCrier.jsx";
 import Attribution from "./Attribution.jsx";
@@ -15,9 +15,11 @@ import Attribution from "./Attribution.jsx";
  * the audit-now-parity.js script passes.
  *
  * NowPixel hosts the shared `hoveredSubagentId` from slice 6 so the
- * in-zone SubagentSprite and the ActiveDispatchesStrip highlight
- * together. The page is reachable at /now-pixel; slice 7 PR2 will swap
- * it to /now and rename the legacy view to /now-classic.
+ * in-zone SubagentSprite and the BattleCardRow (slice D of the
+ * /now-observability epic #667 / issue #672, which replaced the legacy
+ * ActiveDispatchesStrip) highlight together. The page is reachable at
+ * /now and the pixel route is the canonical surface (the /now-classic
+ * fallback was retired in slice 7 PR2).
  */
 function formatMoney(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return "$0";
@@ -105,7 +107,8 @@ export default function NowPixel({ ws }) {
         </div>
         <OakTownCrier ws={ws} />
       </div>
-      <ActiveDispatchesStrip
+      <BattleCardRow
+        ws={ws}
         hoveredSubagentId={hoveredSubagentId}
         onSubagentHover={setHoveredSubagentId}
       />
