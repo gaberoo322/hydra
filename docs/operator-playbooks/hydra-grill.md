@@ -96,14 +96,20 @@ PARENT_DIR=$(git -C ~/hydra rev-parse --git-dir 2>/dev/null || echo unknown)
 Four sources, read in order. Stop early as soon as enough material exists to
 seed the Q&A loop; do not exhaust all four when the first two are sufficient.
 
-1. **`CONTEXT.md`** — full file. Extracts go into `glossaryTerms` only when
-   the term is actually referenced by the issue body or comes up during the
-   Q&A loop. Do not stuff the entire glossary into `glossaryTerms` — the
-   artifact is a record of what *this* design grounded in.
+The READ scope depends on `$scope`:
 
-2. **ADRs under `docs/adr/`** — start with the ones the issue body
-   references by number or title. Then grep for any ADR mentioning a
-   module path the change is likely to touch.
+- `scope=orch` → orchestrator vocabulary: `~/hydra/CONTEXT.md` + `~/hydra/docs/adr/`.
+- `scope=target` → target's multi-context vocabulary (see Step 2.target below). Do NOT read `~/hydra/CONTEXT.md` for target anchors — the orchestrator's glossary describes the orchestrator, not the target.
+
+1. **`CONTEXT.md`** (scope=orch) / **target glossaries** (scope=target — Step 2.target).
+   Extracts go into `glossaryTerms` only when the term is actually referenced
+   by the issue body or comes up during the Q&A loop. Do not stuff the entire
+   glossary into `glossaryTerms` — the artifact is a record of what *this*
+   design grounded in.
+
+2. **ADRs** (scope=orch: `~/hydra/docs/adr/`; scope=target: see Step 2.target).
+   Start with the ones the issue body references by number or title. Then
+   grep for any ADR mentioning a module path the change is likely to touch.
 
 3. **Research report** (if present):
    ```bash
@@ -120,6 +126,37 @@ seed the Q&A loop; do not exhaust all four when the first two are sufficient.
 
 5. **OpenViking semantic search** for related past work — optional, only
    when the Q&A loop surfaces a "have we done this before?" question.
+
+#### Step 2.target — Multi-context target glossaries (scope=target only)
+
+The target (`~/hydra-betting`) uses a multi-context layout with one
+`CONTEXT.md` per context plus a root `CONTEXT-MAP.md` index. Read lazily,
+not eagerly — the autopilot dispatches grill sessions often and exhaustive
+reads are wasted tokens when the issue only touches one context.
+
+1. **Always** read `~/hydra-betting/CONTEXT-MAP.md` (the index).
+2. **Always** read `~/hydra-betting/docs/agents/domain.md` — it is the
+   agent-facing contract documenting both the READ layout and the WRITE
+   protocol that `hydra-target-build` will follow downstream. The Q&A loop
+   must respect both.
+3. Identify which contexts the issue touches by grepping the context names
+   from CONTEXT-MAP against the issue body. If no context is named, leave
+   `modulesTouched[]` to be filled by the Q&A loop and ask the operator to
+   name them.
+4. For each identified context, read `web/src/lib/<context>/CONTEXT.md`.
+   Some contexts are stubs marked _"to be grilled"_ — proceed silently if
+   the file is sparse, but record the gap in `glossaryGaps` if a term you
+   need is missing.
+5. **System-wide ADRs**: always read `~/hydra-betting/docs/adr/` (index
+   listing only; load specific files when the issue body or Q&A loop
+   references them).
+6. **Context-scoped ADRs**: for each identified context, list
+   `web/src/lib/<context>/docs/adr/` if it exists. Absence is fine — the
+   directory is created lazily.
+
+The artifact's `glossaryTerms[i]` entries should record the *source path*
+of the term (e.g. `web/src/lib/arbitrage/CONTEXT.md`) so downstream
+reviewers can navigate back to it.
 
 ### Step 3 — Q&A loop
 
@@ -192,9 +229,19 @@ For each candidate gap surfaced in Step 3:
    canonical phrasing.
 
 2. **Genuinely new term**: file a separate PR proposing the addition to
-   `CONTEXT.md`. The PR must be labelled `ubiquitous-language`. Reference
-   the PR URL in the artifact body so the gate-fail reasons cite something
-   actionable.
+   the relevant glossary. The PR must be labelled `ubiquitous-language`.
+   Reference the PR URL in the artifact body so the gate-fail reasons
+   cite something actionable.
+
+   **Where the PR lands depends on scope:**
+   - `scope=orch` → PR against `gaberoo322/hydra`, updating
+     `~/hydra/CONTEXT.md`.
+   - `scope=target` → PR against `~/hydra-betting`, updating either
+     `web/src/lib/<context>/CONTEXT.md` (term scoped to one context) or
+     `CONTEXT-MAP.md` relationships section (cross-context term). New
+     ADR? `docs/adr/NNNN-kebab-slug.md` for cross-context decisions,
+     `web/src/lib/<context>/docs/adr/NNNN-kebab-slug.md` for scoped ones.
+     The per-context CONTEXT.md is glossary-only; ADRs go in adr/.
 
    **Phase A behaviour**: the gate fails closed on any non-empty
    `glossaryGaps` (per `gateCheck()` rule 1). The whitelist-via-Redis
@@ -348,8 +395,11 @@ Side effects:
 - Autopilot wiring to refuse `dev_orch` / `dev_target` dispatch without an
   artifact. That lands in Phase B (a follow-up sub-issue of #437).
 - CI merge-gate hook to require an artifact in the PR body. Phase C.
-- Target-side mirror (`scope: 'target'` in the artifact works today, but
-  no target-side autopilot wiring consumes it yet). Phase D.
+- Target-side autopilot wiring that *refuses* `dev_target` dispatch
+  without an approved artifact. Phase D. (Target-side READ wiring — what
+  this skill reads when `scope=target` — landed via Step 2.target above;
+  the artifact carries the target vocabulary forward to
+  `hydra-target-build`.)
 
 ## Manual invocation
 
