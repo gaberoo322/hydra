@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { startCycle, getCycleStatus, getCycleHistory, killCycle } from "../cycle.ts";
+import { getCycleStatus, getCycleHistory } from "../cycle.ts";
 import { getTracker } from "../task-tracker.ts";
 import { getRealityReport } from "../redis/reality-reports.ts";
 import {
@@ -9,26 +9,8 @@ import {
   updateCycleHash,
 } from "../redis/cycle-tracking.ts";
 
-export function createCyclesRouter(eventBus: any) {
+export function createCyclesRouter(_eventBus: any) {
   const router = Router();
-
-  // POST /cycle/start — Trigger a new development cycle
-  router.post("/cycle/start", async (req, res) => {
-    try {
-      const opts: Record<string, any> = {};
-      if (req.body?.anchor) {
-        opts.anchor = req.body.anchor;
-      }
-      const result = await startCycle(eventBus, opts);
-      if (result.error) {
-        res.status(409).json(result);
-      } else {
-        res.json(result);
-      }
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
 
   // GET /cycle/status — Current cycle state
   router.get("/cycle/status", async (req, res) => {
