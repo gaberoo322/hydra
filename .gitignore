@@ -25,3 +25,9 @@ id_ed25519.*
 credentials.json
 secrets.json
 .netrc
+
+# Thermo-nuclear code quality review (local-only)
+.thermonuclear/
+
+# Agent worktrees — local per-dispatch git worktrees, never committed
+.claude/worktrees/
