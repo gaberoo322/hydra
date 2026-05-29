@@ -127,7 +127,8 @@ describe("Scheduler API routes (issue #164)", () => {
         "mergeRateLifetime", "mergeRateWindow", "mergeRateCyclesInWindow",
         "lastTickAt", "lastError",
         "startedAt", "consecutiveErrors",
-        "research",
+        // "research" sub-object removed in #706 (scheduler fold PR-1/4)
+        // along with the in-process research-decision plane.
       ];
       for (const field of requiredFields) {
         assert.ok(field in body, `status response should contain '${field}' field`);
@@ -146,7 +147,12 @@ describe("Scheduler API routes (issue #164)", () => {
       assert.equal(res._body.running, false);
     });
 
-    test("research sub-object has expected fields", async () => {
+    test("research sub-object removed (#706); lastTickAt liveness survives", async () => {
+      // #706 (scheduler fold PR-1/4): the in-process research-decision plane
+      // and its `research` status sub-object were deleted. No dashboard reader
+      // consumed it; the research-force policy now lives in the autopilot
+      // brain (`scripts/autopilot/decide.py`). The watchdog liveness field
+      // `lastTickAt` MUST still be present.
       const eventBus = { publisher: redis };
       const router = createSchedulerRouter(eventBus);
       const handler = findHandler(router, "GET", "/scheduler/status");
@@ -155,20 +161,8 @@ describe("Scheduler API routes (issue #164)", () => {
       const res = mockRes();
       await handler(req, res);
 
-      const research = res._body.research;
-      assert.ok(research, "research sub-object should exist");
-      const researchFields = [
-        "queueThreshold", "buildRatioMax", "currentRatio",
-        "researchCount24h", "buildCount24h", "minIntervalHuman",
-        "cyclesRun", "lastResearchAt",
-        // dailyCostCapUsd / dailySpendUsd / dailySpendDate retired with
-        // the dollar-based daily-spend cap (Subscription Usage Tracker
-        // B-series). The new quota surface is `/api/usage`; the scheduler
-        // status no longer carries those fields.
-      ];
-      for (const field of researchFields) {
-        assert.ok(field in research, `research should contain '${field}' field`);
-      }
+      assert.ok(!("research" in res._body), "research sub-object removed in #706");
+      assert.ok("lastTickAt" in res._body, "lastTickAt liveness surface must survive");
     });
 
     test("mergeRate is 0 when no cycles have run", async () => {

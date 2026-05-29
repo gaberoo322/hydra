@@ -7,8 +7,13 @@
  * validatePrerequisites, loadMethodologyOverrides, loadLastResearchReport,
  * scoreLastResearchOutcomes, listResearchReports, getLatestResearch,
  * vetoOpportunity) are still consumed by dashboard read-paths and by
- * /hydra-target-research output normalization. runResearchLoop() is a
- * no-op shim — see comment above its definition.
+ * /hydra-target-research output normalization.
+ *
+ * The `runResearchLoop()` no-op shim was deleted in #706 (scheduler fold
+ * PR-1/4) along with the in-process scheduler research-decision plane that
+ * was its only scheduler-side caller. The research-force policy now lives
+ * entirely in the autopilot brain (`scripts/autopilot/decide.py`
+ * `_research_force_allowed`).
  */
 
 import { readFile } from "node:fs/promises";
@@ -332,19 +337,17 @@ function parseAgentJson(output) {
 }
 
 // ---------------------------------------------------------------------------
-// Research loop shim
+// Research helpers retained for dashboard read-paths
 //
 // The in-process codex research agents (runDomainResearcher,
 // runTechnicalResearcher, runMarketResearcher, runStrategistSynthesis, and
-// the Director synthesis chain inside runResearchLoop) were removed in
-// issue #342 (Phase A codex-removal). Research is now driven by the
-// /hydra-target-research skill, which runs Claude with WebSearch and writes
-// priorities.md / roadmap.md / research-journal.md directly.
-//
-// runResearchLoop() is preserved as a no-op shim so the scheduler call site
-// (`maybeRunResearch()` in src/scheduler/loop.ts) continues to type-check and
-// returns a structured "skipped" result. Removing the call site itself is
-// deferred to a follow-up issue.
+// the Director synthesis chain inside the former runResearchLoop) were
+// removed in issue #342 (Phase A codex-removal). The no-op `runResearchLoop`
+// shim that survived that cut was deleted in #706 (scheduler fold PR-1/4),
+// together with the scheduler research-decision plane that was its only
+// scheduler-side caller. Research is driven by the /hydra-target-research
+// skill, which runs Claude with WebSearch and writes priorities.md /
+// roadmap.md / research-journal.md directly.
 //
 // Helpers kept above (normalizeOpportunity, normalizeOpportunities,
 // parseAgentJson, generateResearchId, validatePrerequisites,
@@ -352,28 +355,6 @@ function parseAgentJson(output) {
 // extractSearchTerms) are still consumed by the dashboard read-paths and by
 // /hydra-target-research output normalization.
 // ---------------------------------------------------------------------------
-
-/**
- * Run a full research cycle.
- *
- * No-op shim as of #342 — the in-process codex research agents have been
- * removed. Returns a structured "skipped" result so the scheduler can record
- * a deterministic outcome. Use the /hydra-target-research skill to drive
- * research instead.
- */
-export async function runResearchLoop(eventBus: any, opts: Record<string, any> = {}) {
-  // Codex research agents removed in #342 (Phase A codex-removal).
-  // Research is now driven by the /hydra-target-research skill, not the in-process loop.
-  return {
-    success: false,
-    skipped: true,
-    reason: "research-loop disabled in #342; use /hydra-target-research",
-    researchId: null,
-    opportunities: [],
-    costUsd: 0,
-  };
-}
-
 
 /**
  * Get the most recent research report.

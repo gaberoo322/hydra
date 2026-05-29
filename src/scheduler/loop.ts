@@ -17,17 +17,12 @@ import { reapStaleClaims } from "../backlog/reaper.ts";
 
 // Stale-claim reaper threshold (issue #374). Default 2h.
 const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
-import { runResearchLoop } from "../research-loop.ts";
 import { getTargetName } from "../target-config.ts";
-import { pushToWorkQueue } from "../redis/work-queue.ts";
 import {
-  recordResearchEvent,
-  getResearchEventCount24h, getBuildEventCount24h,
-  consumeResearchForceOnce,
   getSchedulerCyclesRun,
   getSchedulerCyclesMerged,
   getSchedulerCyclesFailed,
-  atomicClaimResearch, getLastResearchAtMs, setLastResearchAt,
+  getLastResearchAtMs,
   saveSchedulerStateVersioned, getSchedulerStateVersion,
   getSchedulerStateRaw,
   getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
@@ -35,32 +30,16 @@ import {
   getDigestLastWeekly, setDigestLastWeekly,
   getMemoryLastConsolidation, setMemoryLastConsolidation,
 } from "../redis/scheduler.ts";
-import { countLiveWorkQueueItems } from "../redis/work-queue.ts";
-import {
-  shouldForceResearchFloor,
-  getResearchBuildRatioMin,
-  getResearchFloorWindow,
-  getResearchFloorSilenceMs,
-  getResearchFloorEmptySuppressMs,
-  getResearchFloorSuppressedUntilMs,
-  setResearchFloorSuppressedUntilMs,
-  incrResearchFloorEmptyStreak,
-  resetResearchFloorEmptyStreak,
-  recordResearchFloorTriggered,
-  getResearchFloorStats,
-  RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD,
-} from "./research-floor.ts";
-import {
-  decideResearchAction,
-  type ResearchSnapshot,
-  type ResearchAction,
-} from "./research-decision.ts";
 const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
-const RESEARCH_QUEUE_THRESHOLD = parseInt(process.env.HYDRA_RESEARCH_QUEUE_THRESHOLD) || 6;
-const RESEARCH_BUILD_RATIO_MAX = parseFloat(process.env.HYDRA_RESEARCH_BUILD_RATIO_MAX) || 3;
-const RESEARCH_MIN_INTERVAL_MS = parseInt(process.env.HYDRA_RESEARCH_MIN_INTERVAL_MS) || 2 * 60 * 60 * 1000; // 2 hours
+// Note: the in-process scheduler research-decision plane (queue-depth /
+// ratio-cap / capacity-floor throttling that fed the `runResearchLoop`
+// no-op shim) was deleted in #706 (scheduler fold PR-1/4). The research-force
+// policy now lives in the autopilot brain (`scripts/autopilot/decide.py`
+// `_research_force_allowed`). The `HYDRA_RESEARCH_QUEUE_THRESHOLD`,
+// `HYDRA_RESEARCH_BUILD_RATIO_MAX`, and `HYDRA_RESEARCH_MIN_INTERVAL_MS`
+// env vars are inert if still set.
 
 // Note: the legacy `HYDRA_DAILY_COST_CAP_USD` env var, the dollar-based
 // daily-spend cap, and the `recordSpend`/`getDailySpend` helpers were
@@ -82,8 +61,8 @@ const ROLLING_MERGE_RATE_WINDOW = parseInt(process.env.HYDRA_ROLLING_MERGE_RATE_
 // kill-switch that prevented the scheduler from invoking the in-process
 // control loop. Issue #383 (PR-3) deleted the control loop entirely — the
 // scheduler now ONLY runs housekeeping (stale-claim reaper, weekly digest,
-// memory consolidation, maybeRunResearch). There is no codex cycle to gate;
-// the flag is gone. Reaching this comment in a debug session = grep for
+// memory consolidation, design-concept snapshot). There is no codex cycle to
+// gate; the flag is gone. Reaching this comment in a debug session = grep for
 // "HYDRA_CODEX_CYCLE_ENABLED" in operator runbooks and tell them it is dead.
 
 /**
@@ -146,13 +125,6 @@ let state = {
   // marker survives an orchestrator restart.
   stopReason: null as "deliberate" | "circuit-breaker" | "error-cap" | null,
   deliberateStoppedAt: null as string | null,
-  /**
-   * The most recent verdict from `decideResearchAction`. Surfaced via
-   * `getStatus()` so operators can see exactly why the scheduler did
-   * (or didn't) run research without grepping logs. Reset to `null`
-   * on cold start; updated on every tick that runs the research path.
-   */
-  lastResearchDecision: null as ResearchAction | null,
 };
 
 // Issue #388: TTL for the deliberate-stop Redis marker. 24h is the
@@ -292,246 +264,15 @@ async function saveSchedulerState() {
 // (src/cost/usage-tracker.ts) replaces this entirely: it reads real
 // Anthropic-quota percentages from the JSONL transcripts and exposes
 // `/api/usage/eligibility` for autopilot dispatch gating (PR B1). The
-// scheduler itself doesn't dispatch Claude Code subagents — research
-// runs via runResearchLoop, which goes through the autopilot path on
-// next dispatch, so the autopilot's eligibility gate covers it.
+// scheduler itself doesn't dispatch Claude Code subagents — research is
+// driven by the /hydra-target-research skill under the autopilot, so the
+// autopilot's eligibility gate covers it.
 
-/**
- * Snapshot the inputs the research-decision function needs. All Redis
- * reads happen here; the decision itself is pure (see
- * scheduler/research-decision.ts).
- *
- * `forced` consumes the operator force-once flag as a side effect —
- * matching the legacy `maybeRunResearch` semantics where reading the
- * flag also clears it. If you snapshot but don't act, the flag is lost.
- * That's the same trade-off the original code made.
- */
-async function loadResearchSnapshot(): Promise<ResearchSnapshot> {
-  const forced = await consumeResearchForceOnce();
-  const liveCounts = await countLiveWorkQueueItems();
-  const queueLen = liveCounts.live;
-  const queueLenTotal = liveCounts.total;
-  const orphanLen = liveCounts.orphan;
-  const researchCount24h = await getResearchEventCount24h();
-  const buildCount24h = await getBuildEventCount24h();
-  const ratio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
-  const floorSuppressedUntilMs = await getResearchFloorSuppressedUntilMs();
-  const lastResearchAtMs = await getLastResearchAtMs();
-  const floor = shouldForceResearchFloor({
-    researchCount24h,
-    buildCount24h,
-    ratioMin: getResearchBuildRatioMin(),
-    floorWindow: getResearchFloorWindow(),
-    suppressedUntilMs: floorSuppressedUntilMs,
-    lastResearchAtMs,
-    silenceMs: getResearchFloorSilenceMs(),
-  });
-  // Backlog totals — best-effort. A read failure isn't fatal; treat the
-  // backlog as empty so the decision falls through to throttle/spend/run
-  // rather than blocking research on a phantom backlog.
-  let backlog = { total: 0, queued: 0, inProgress: 0 };
-  try {
-    const counts = await getBacklogCounts();
-    backlog = { total: counts.backlog, queued: counts.queued, inProgress: counts.inProgress };
-  } catch (err: any) {
-    console.error(`[Scheduler] Backlog count read failed: ${err.message}`);
-  }
-  return {
-    forced,
-    queueLen,
-    queueLenTotal,
-    orphanLen,
-    researchCount24h,
-    buildCount24h,
-    ratio,
-    floor,
-    lastResearchAtMs,
-    researchMinIntervalMs: RESEARCH_MIN_INTERVAL_MS,
-    nowMs: Date.now(),
-    backlog,
-    queueThreshold: RESEARCH_QUEUE_THRESHOLD,
-    ratioMax: RESEARCH_BUILD_RATIO_MAX,
-    lowWatermark: Math.min(3, Math.floor(RESEARCH_QUEUE_THRESHOLD / 2)),
-  };
-}
-
-function orphanAnnotation(snap: ResearchSnapshot): string {
-  return snap.orphanLen > 0
-    ? ` (${snap.orphanLen} orphan items excluded; total LLEN=${snap.queueLenTotal})`
-    : "";
-}
-
-/**
- * Carry out the decision. Side effects only — the policy already ran
- * upstream in `decideResearchAction`.
- *
- * Returns `true` when the caller should treat the tick as "research
- * handled for now" (force/run/promotion/cap/throttle). The only `false`
- * case is `promote-backlog` with 0 items actually promoted, signalling
- * the caller to re-decide with `skipBacklogPromotion: true`.
- */
-async function executeResearchAction(
-  action: ResearchAction,
-  snap: ResearchSnapshot,
-  eventBus,
-): Promise<boolean> {
-  switch (action.kind) {
-    case "force-once": {
-      console.log(`[Scheduler] Research FORCED by operator — bypassing all throttles`);
-      try {
-        const research = await runResearchLoop(eventBus);
-        state.researchCyclesRun++;
-        await setLastResearchAt();
-        state.lastResearchAt = new Date().toISOString();
-        await recordResearchEvent();
-        await saveSchedulerState();
-        // @ts-expect-error — migrate to proper types
-        console.log(`[Scheduler] Forced research complete — ${research.autoQueued || 0} items auto-queued`);
-      } catch (err: any) {
-        console.error(`[Scheduler] Forced research cycle failed: ${err.message}`);
-      }
-      return true;
-    }
-    case "skip": {
-      // Branch on `reason` so each skip case logs in a way operators can
-      // recognise from the pre-refactor scheduler.
-      switch (action.reason) {
-        case "queue-not-low":
-          console.log(`[Scheduler] Research suppressed: queue depth ${action.queueLen} >= threshold ${action.threshold}${orphanAnnotation(snap)}`);
-          break;
-        case "ratio-cap":
-          console.log(`[Scheduler] Research suppressed: ratio ${action.ratio.toFixed(1)} exceeds max ${action.max} (${action.researchCount24h} research / ${action.buildCount24h} builds in 24h)`);
-          break;
-        case "low-watermark":
-          console.log(`[Scheduler] Queue has ${action.queueLen} items (>= ${action.watermark}) — prefer building over researching${orphanAnnotation(snap)}`);
-          break;
-        case "throttled":
-          console.log(`[Scheduler] Queue low (${snap.queueLen}) but research throttled — next research in ~${Math.round(action.remainingMs / 60_000)}min`);
-          break;
-      }
-      return true;
-    }
-    case "promote-backlog": {
-      try {
-        const promoted = await promoteToQueued(action.needed);
-        if (promoted.length === 0) {
-          // Backlog had items but none were promotable. Signal the caller
-          // to re-decide without the promotion option.
-          return false;
-        }
-        for (const item of promoted) {
-          await pushToWorkQueue(JSON.stringify({
-            reference: item.title,
-            reason: `Promoted from backlog (priority: ${item.priority || 0}, score: ${item.meta?.score || "?"}, ${item.meta?.confidence || "?"} confidence)`,
-            context: JSON.stringify({
-              ...item.meta,
-              description: item.description,
-              priority: item.priority,
-              estimate: item.estimate,
-              labels: item.labels,
-              parentId: item.parentId,
-            }),
-            queuedAt: new Date().toISOString(),
-            source: "backlog",
-          }));
-        }
-        console.log(`[Scheduler] Promoted ${promoted.length} items from backlog to queue`);
-        return true;
-      } catch (err: any) {
-        console.error(`[Scheduler] Backlog promotion failed: ${err.message}`);
-        // Don't recurse on Redis errors — bail out for this tick.
-        return true;
-      }
-    }
-    case "run": {
-      // Atomic throttle claim — TOCTOU-safe even though the decision
-      // already verified the time window. If another scheduler beat us
-      // here, treat it as throttled and bail.
-      const claimed = await atomicClaimResearch(RESEARCH_MIN_INTERVAL_MS);
-      if (!claimed) {
-        const lastMs = await getLastResearchAtMs();
-        const remaining = lastMs ? Math.round((RESEARCH_MIN_INTERVAL_MS - (Date.now() - lastMs)) / 60_000) : 0;
-        console.log(`[Scheduler] Throttle race: research already claimed by a concurrent scheduler — next research in ~${remaining}min`);
-        return true;
-      }
-
-      if (action.reason === "floor-fire") {
-        // Per-cycle telemetry counter (issue #327): record BEFORE
-        // runResearchLoop so a crashing research call still leaves a
-        // fingerprint in the metrics.
-        await recordResearchFloorTriggered();
-        console.log(`[Scheduler] Queue has ${action.queueLen} items, but research floor fired (${action.floorReason}) — running research cycle`);
-      } else {
-        console.log(`[Scheduler] Queue has ${action.queueLen} items (threshold: ${snap.queueThreshold}) — running research cycle`);
-      }
-
-      try {
-        const research = await runResearchLoop(eventBus);
-        state.researchCyclesRun++;
-        state.lastResearchAt = new Date().toISOString();
-        await recordResearchEvent();
-        await saveSchedulerState();
-
-        // @ts-expect-error — migrate to proper types
-        const autoQueued = research?.autoQueued || 0;
-        console.log(`[Scheduler] Research complete — ${autoQueued} items auto-queued`);
-
-        // Floor-specific empty-streak accounting (issue #327). Observes the
-        // outcome of running research; not part of the decision policy.
-        if (action.reason === "floor-fire") {
-          if (autoQueued === 0) {
-            const streak = await incrResearchFloorEmptyStreak();
-            if (streak >= RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD) {
-              const suppressMs = getResearchFloorEmptySuppressMs();
-              const deadlineMs = Date.now() + suppressMs;
-              await setResearchFloorSuppressedUntilMs(deadlineMs);
-              await resetResearchFloorEmptyStreak();
-              console.warn(`[Scheduler] research floor suppressed for ${Math.round(suppressMs / 3600_000)}h — ${streak} consecutive forced cycles returned no new opportunities`);
-              try {
-                await sendNotification({
-                  type: "scheduler:research_floor_empty_suppression",
-                  payload: {
-                    reason: `${streak} consecutive forced research cycles returned no new opportunities. Floor suppressed until ${new Date(deadlineMs).toISOString()}.`,
-                    suppressedUntil: new Date(deadlineMs).toISOString(),
-                    streak,
-                  },
-                });
-              } catch (notifyErr: any) {
-                console.error(`[Scheduler] research floor suppression notification failed: ${notifyErr.message}`);
-              }
-            } else {
-              console.log(`[Scheduler] research floor empty result (streak=${streak}/${RESEARCH_FLOOR_EMPTY_STREAK_THRESHOLD})`);
-            }
-          } else {
-            await resetResearchFloorEmptyStreak();
-          }
-        }
-      } catch (err: any) {
-        console.error(`[Scheduler] Research cycle failed: ${err.message}`);
-      }
-      return true;
-    }
-  }
-}
-
-async function maybeRunResearch(eventBus) {
-  const snap = await loadResearchSnapshot();
-  let action = decideResearchAction(snap);
-  state.lastResearchDecision = action;
-  // Log "backlog and queue both empty" — preserved from the legacy code path.
-  if (snap.backlog.total === 0 && snap.backlog.inProgress === 0 && snap.queueLen === 0) {
-    console.log(`[Scheduler] Backlog and queue are both empty — will pick from priorities doc`);
-  }
-  const handled = await executeResearchAction(action, snap, eventBus);
-  if (handled) return;
-  // promote-backlog returned 0; re-decide without the promotion option so we
-  // can fall through to throttle/spend/run gates with the post-promotion
-  // snapshot (which is functionally unchanged — promotion mutated state but
-  // not the gates the remaining decision branches consult).
-  action = decideResearchAction(snap, { skipBacklogPromotion: true });
-  state.lastResearchDecision = action;
-  await executeResearchAction(action, snap, eventBus);
-}
+// The in-process research-decision plane (loadResearchSnapshot /
+// orphanAnnotation / executeResearchAction / maybeRunResearch) was deleted
+// in #706 (scheduler fold PR-1/4). It fed the `runResearchLoop` no-op shim
+// and did nothing in production. The research-force policy now lives in the
+// autopilot brain (`scripts/autopilot/decide.py` `_research_force_allowed`).
 
 // Generate actionable unblock commands based on the blocked reason.
 function generateUnblockCommands(blockedReason: string, title: string): string[] {
@@ -701,18 +442,11 @@ async function runScheduledCycle(eventBus) {
     });
   }
 
-  // Check if research is needed (throttled)
-  try {
-    await maybeRunResearch(eventBus);
-  } catch (err: any) {
-    console.error(`[Scheduler] maybeRunResearch failed: ${err.message}`);
-    Sentry.addBreadcrumb({ category: "scheduler", message: `maybeRunResearch failed: ${err.message}`, level: "error" });
-  }
-
   // Issue #383 (codex cut-over PR-3): the in-process control loop is gone.
-  // `runScheduledCycle` now exists solely as a heartbeat for the housekeeping
-  // tasks above (stale-claim reaper, weekly digest, memory consolidation,
-  // maybeRunResearch).
+  // #706 (scheduler fold PR-1/4) additionally removed the research-decision
+  // plane that used to run here. `runScheduledCycle` now exists solely as a
+  // heartbeat for the housekeeping tasks above (stale-claim reaper, weekly
+  // digest, memory consolidation, design-concept snapshot).
   //
   // Issue #397: the heartbeat moves to `lastTickAt` so liveness probes can
   // tell "housekeeping is running" apart from "the control loop ran". The
@@ -762,7 +496,7 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
     console.error(`[Scheduler] Failed to clear deliberate-stop marker: ${err.message}`);
   }
 
-  console.log(`[Scheduler] Started — cycles every ${intervalMs / 1000}s, research throttle ${RESEARCH_MIN_INTERVAL_MS / 3600_000}h`);
+  console.log(`[Scheduler] Started — housekeeping cycles every ${intervalMs / 1000}s`);
 
   // Run first cycle immediately (fire-and-forget — errors handled inside runScheduledCycle)
   runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] First cycle failed: ${err.message}`));
@@ -849,20 +583,6 @@ async function stop(opts: { reason?: "deliberate" | "circuit-breaker" | "error-c
 }
 
 async function getStatus() {
-  const researchCount24h = await getResearchEventCount24h().catch(() => 0);
-  const buildCount24h = await getBuildEventCount24h().catch(() => 0);
-  const currentRatio = buildCount24h > 0 ? researchCount24h / buildCount24h : researchCount24h;
-  const floorStats = await getResearchFloorStats().catch((err: any) => {
-    console.error(`[Scheduler] getResearchFloorStats failed: ${err.message}`);
-    return null;
-  });
-  // Issue #457: surface live vs orphan queue depth so the dashboard can
-  // explain why the throttle isn't firing when LLEN is high.
-  const liveCounts = await countLiveWorkQueueItems().catch((err: any) => {
-    console.error(`[Scheduler] countLiveWorkQueueItems failed: ${err.message}`);
-    return { live: 0, total: 0, orphan: 0 };
-  });
-
   // Issue #232: report a rolling-window merge rate as the primary
   // operator-visible metric. The lifetime ratio is preserved as
   // `mergeRateLifetime` for audit but is heavily skewed by historical
@@ -906,53 +626,13 @@ async function getStatus() {
     // Issue #576: per-cycle cost cap (the codex-era circuit breaker) was
     // retired with `src/cost/cap.ts`. Quota gating now lives in the
     // Subscription Usage Tracker (`/api/usage`, `/api/usage/eligibility`).
-    research: {
-      queueThreshold: RESEARCH_QUEUE_THRESHOLD,
-      buildRatioMax: RESEARCH_BUILD_RATIO_MAX,
-      // Issue #327: symmetric floor companion to buildRatioMax. The floor
-      // is the *minimum* acceptable research:build ratio over the rolling
-      // 24h window — when the realised ratio dips below this, the scheduler
-      // forces a research cycle (subject to min-interval + cost cap).
-      buildRatioMin: floorStats?.ratioMin ?? getResearchBuildRatioMin(),
-      currentRatio: Math.round(currentRatio * 10) / 10,
-      researchCount24h,
-      buildCount24h,
-      // Issue #457: live vs total queue depth. The throttle gates on `live`,
-      // not `total` — items from deleted producers (orphan source) do not
-      // represent live demand and should not permanently suppress research.
-      queueDepthLive: liveCounts.live,
-      queueDepthTotal: liveCounts.total,
-      queueDepthOrphan: liveCounts.orphan,
-      minIntervalHuman: formatDuration(RESEARCH_MIN_INTERVAL_MS),
-      cyclesRun: state.researchCyclesRun,
-      lastResearchAt: state.lastResearchAt,
-      /**
-       * Most recent verdict from `decideResearchAction`. Operators reading
-       * this can answer "what did the scheduler decide last tick, and why?"
-       * without grepping logs. `null` on cold start.
-       */
-      lastResearchDecision: state.lastResearchDecision,
-      // Dollar-based daily-spend cap retired (Subscription Usage Tracker
-      // B-series). Operators consume `/api/usage` and
-      // `/api/usage/eligibility` for the new quota view; the historical
-      // `dailyCostCapUsd` / `dailySpendUsd` / `dailySpendDate` /
-      // `dailySpendSource` fields are gone — dashboard now points at
-      // `/api/usage`.
-      // Issue #327: floor telemetry — surfaces how often the capacity-floor
-      // override has fired and whether it's currently suppressed because of
-      // back-to-back empty forced cycles.
-      floor: floorStats
-        ? {
-            window: floorStats.floorWindow,
-            triggered: floorStats.triggered,
-            lastTriggeredAt: floorStats.lastTriggeredAt,
-            emptyStreak: floorStats.emptyStreak,
-            suppressedUntil: floorStats.suppressedUntilMs
-              ? new Date(floorStats.suppressedUntilMs).toISOString()
-              : null,
-          }
-        : null,
-    },
+    //
+    // #706 (scheduler fold PR-1/4): the `research` sub-object (queueThreshold,
+    // buildRatioMax/Min, currentRatio, queueDepth*, floor telemetry,
+    // lastResearchDecision) was removed along with the in-process
+    // research-decision plane. No dashboard reader consumed it. The
+    // research-force policy now lives in the autopilot brain
+    // (`scripts/autopilot/decide.py` `_research_force_allowed`).
   };
 }
 
@@ -976,7 +656,6 @@ async function autoStart(eventBus) {
 
 export {
   start, stop, getStatus, autoStart,
-  RESEARCH_BUILD_RATIO_MAX, RESEARCH_QUEUE_THRESHOLD,
   formatDuration,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,

@@ -150,14 +150,10 @@ export const redisKeys = {
   budgetThresholdSeen: (isoDate: string, thresholdPct: number) =>
     `hydra:autopilot:budget-threshold:${isoDate}:${thresholdPct}`,
 
-  // Research capacity floor (issue #327) — sibling of #245 (self-improvement
-  // floor) and #308 (spec capacity-floor). Tracks how often the floor fires,
-  // when it last fired, the empty-result streak, and the suppression deadline
-  // applied after two consecutive forced-empty cycles.
-  researchFloorStats: () => "hydra:scheduler:research-floor:stats",
-  researchFloorLastTriggeredAt: () => "hydra:scheduler:research-floor:last-triggered-at",
-  researchFloorEmptyStreak: () => "hydra:scheduler:research-floor:empty-streak",
-  researchFloorSuppressedUntil: () => "hydra:scheduler:research-floor:suppressed-until",
+  // Research capacity-floor keys (issue #327) were removed in #706 (scheduler
+  // fold PR-1/4) together with the research-decision plane that read/wrote
+  // them. Residual `hydra:scheduler:research-floor:*` keys are no longer read
+  // or written.
 
   // ---------------------------------------------------------------------------
   // Tool Scout (issue #484)
