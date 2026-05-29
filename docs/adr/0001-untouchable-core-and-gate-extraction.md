@@ -1,4 +1,10 @@
+---
+status: superseded-in-part by ADR-0015
+---
+
 # Untouchable core protects the merge gate from self-modification
+
+> **Superseded-in-part (ADR-0015):** the "operator-modifiable only" premise is retired — the former Untouchable Core is now the **Verifier Core** (T4) and auto-merges under the deepest verification. What survives and is *strengthened* below is the gate-extraction architecture and the principle that a change to the gate is verified by the live gate, not the proposed one (the **Live-Gate Invariant**).
 
 Hydra can propose changes to its own architecture via its PR pipeline, but a designated **Untouchable Core** of files is operator-modifiable only: the gate, rollback, watchdog, cost guardrails, and the protected-paths list itself. Enforced via a CI check that blocks PRs touching protected paths without an `operator-approved` label that only the operator can apply.
 

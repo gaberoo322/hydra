@@ -1,4 +1,10 @@
+---
+status: superseded by ADR-0015
+---
+
 # Self-modification tiers with outcome-holdback for the middle tier
+
+> **Superseded by ADR-0015.** The authority ladder below (Tier 0 operator-only, Tier 3 operator-review) is retired. A Modification Tier is now the *depth of verification before auto-merge*, not *who merges*; every tier auto-merges, and the kill switch becomes a manual operator-only emergency brake. The Outcome Holdback mechanism (this ADR's lasting contribution) survives and now applies to T2 and up. Kept for history.
 
 Hydra's modifications to itself are bucketed into four tiers, distinguished by blast radius and merge policy.
 
