@@ -350,73 +350,8 @@ export async function setMemoryLastConsolidation(value: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Research floor (issue #84) — empty-streak + suppression-until + stats
+// Research floor (issue #84/#327) accessors removed in #706 (scheduler fold
+// PR-1/4) together with the research-decision plane that was their only
+// consumer. The research-force policy now lives in the autopilot brain
+// (`scripts/autopilot/decide.py` `_research_force_allowed`).
 // ---------------------------------------------------------------------------
-
-/** Atomic INCR returning new streak length. */
-export async function incrResearchFloorEmptyStreak(): Promise<number> {
-  const r = getRedisConnection();
-  return r.incr(redisKeys.researchFloorEmptyStreak());
-}
-
-export async function resetResearchFloorEmptyStreak(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.researchFloorEmptyStreak());
-}
-
-export async function getResearchFloorEmptyStreak(): Promise<number> {
-  const r = getRedisConnection();
-  const raw = await r.get(redisKeys.researchFloorEmptyStreak());
-  if (!raw) return 0;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
-export async function setResearchFloorSuppressedUntilMs(deadlineMs: number): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.researchFloorSuppressedUntil(), String(deadlineMs));
-}
-
-export async function getResearchFloorSuppressedUntilMs(): Promise<number | null> {
-  const r = getRedisConnection();
-  const raw = await r.get(redisKeys.researchFloorSuppressedUntil());
-  if (!raw) return null;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-export async function clearResearchFloorSuppressedUntil(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.researchFloorSuppressedUntil());
-}
-
-export async function incrResearchFloorStat(name: string, by: number): Promise<void> {
-  const r = getRedisConnection();
-  await r.hincrby(redisKeys.researchFloorStats(), name, by);
-}
-
-export async function setResearchFloorLastTriggeredAt(iso: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.researchFloorLastTriggeredAt(), iso);
-}
-
-export async function getResearchFloorStatsHash(): Promise<Record<string, string>> {
-  const r = getRedisConnection();
-  return r.hgetall(redisKeys.researchFloorStats());
-}
-
-export async function getResearchFloorLastTriggeredAt(): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.researchFloorLastTriggeredAt());
-}
-
-/** Test helper: wipe all research-floor state. */
-export async function _resetAllResearchFloorState(): Promise<void> {
-  const r = getRedisConnection();
-  await Promise.all([
-    r.del(redisKeys.researchFloorStats()),
-    r.del(redisKeys.researchFloorLastTriggeredAt()),
-    r.del(redisKeys.researchFloorEmptyStreak()),
-    r.del(redisKeys.researchFloorSuppressedUntil()),
-  ]);
-}
