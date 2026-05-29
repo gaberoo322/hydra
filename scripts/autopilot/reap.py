@@ -57,11 +57,14 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-state.json"))
 LOG_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_LOG", "/tmp/hydra-autopilot-nightly.log"))
 REPO = os.environ.get("HYDRA_AUTOPILOT_REPO", "gaberoo322/hydra")
+HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
 
 REAPED_TASK_IDS_CAP = 1000
 
@@ -167,8 +170,44 @@ def _fire_cycle_record(
         _append_log(f"cycle_record_skipped task_id={task_id} err={exc}")
 
 
+def _reap_stale_claims() -> None:
+    """Best-effort POST to /api/backlog/stale-claims/reap (issue #721).
+
+    Scheduler fold PR-2/4: the stale-claim reaper used to run on every
+    in-process scheduler tick (every 2 min). It now runs once per autopilot
+    Phase 2 — before each dispatch decision — which is the correct cadence:
+    stale `inProgress` claims only matter when the autopilot wants to dispatch
+    into those slots.
+
+    Mirrors the file's best-effort POST convention (`_fire_cycle_record`,
+    `term-check.py::post_run_end`): a non-200, an unreachable orchestrator, a
+    malformed response, or any network error is logged to stderr/run-log and
+    swallowed. Reaping is opportunistic cleanup, NOT correctness — it must
+    never block or fail the Phase 2 reap path. The endpoint itself reads the
+    threshold from `HYDRA_CLAIM_MAX_AGE_MS` (default 2h) and is idempotent, so
+    we send an empty body and let the server pick the threshold.
+    """
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/backlog/stale-claims/reap",
+        data=b"{}",
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        msg = f"stale_claims_reap_skipped err={exc}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+
+
 def run_hardcap() -> int:
     """Default mode: hard-cap enforcement against `partial_tokens`."""
+    # Issue #721 (scheduler fold PR-2/4): release stale `inProgress` claims
+    # before the hard-cap sweep. Best-effort — never blocks the reap path.
+    _reap_stale_claims()
+
     s = _load_state()
     if s is None:
         return 0
