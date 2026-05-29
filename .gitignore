@@ -5,6 +5,10 @@ dist/
 .ov-staging/
 /metrics/
 
+# Python bytecode caches (see issue #717) — never commit compiled artifacts.
+__pycache__/
+*.pyc
+
 # Secrets / credentials — never commit (repo is public; see issue #698).
 # .env.example is the only env file that should be tracked.
 .env.*
