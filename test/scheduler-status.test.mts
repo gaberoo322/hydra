@@ -38,7 +38,7 @@ const adapter = {
   ...(await import("../src/redis/scheduler.ts")),
   ...(await import("../src/redis/cycle-metrics.ts")),
 };
-const schedulerMod = await import("../src/scheduler/loop.ts");
+const schedulerMod = await import("../src/scheduler/heartbeat.ts");
 const { getStatus } = schedulerMod as any;
 
 let testRedis: any;

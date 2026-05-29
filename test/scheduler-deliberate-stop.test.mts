@@ -35,7 +35,7 @@ import Redis from "ioredis";
 
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
-const schedulerMod = await import("../src/scheduler/loop.ts");
+const schedulerMod = await import("../src/scheduler/heartbeat.ts");
 const { start, stop, getStatus } = schedulerMod as any;
 const redisKeysMod = await import("../src/redis/keys.ts");
 const { redisKeys } = redisKeysMod;

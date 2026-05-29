@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "../scheduler/loop.ts";
+import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
 
 export function createSchedulerRouter(eventBus: any) {
   const router = Router();

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { runHousekeeping } from "../scheduler/loop.ts";
+import { runHousekeeping } from "../scheduler/heartbeat.ts";
 
 /**
  * Maintenance sub-router (issue #723 — scheduler fold PR-3/4).

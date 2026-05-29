@@ -13,7 +13,7 @@ The operator's intuition that `hydra-autopilot` "feels brittle" is rooted in **s
 
 Two control planes run on different lifecycles with no shared source of truth:
 
-- The **Orchestrator Scheduler** (`src/scheduler/loop.ts`) is a continuously-alive 15-minute loop. It tracks `lastTickAt`, merge-rate windows, daily-spend, the stale-claim reaper — and historically it also force-fires research cycles via `runResearchLoop` when `scheduler/research-floor.ts` triggers.
+- The **Orchestrator Scheduler** (the scheduler module — then `loop.ts`, since renamed to `src/scheduler/heartbeat.ts` in #725) is a continuously-alive 15-minute loop. It tracks `lastTickAt`, merge-rate windows, daily-spend, the stale-claim reaper — and historically it also force-fires research cycles via `runResearchLoop` when `scheduler/research-floor.ts` triggers.
 - The **Autopilot Run** (`scripts/autopilot/decide.py`, ADR-0007) is the L2 brain — discrete timer-fired Claude sessions (~8h) that wake, walk the decision loop, and exit.
 
 The two have **structurally-identical research-floor policy implemented twice** — once in `scheduler/research-floor.ts`, once in `decide.py:_research_force_allowed`. They cannot veto each other; they share no state about what's been decided.
@@ -58,7 +58,7 @@ The autopilot's state is observable via journalctl, `gh issue view`, dashboard w
 
 ### D1 — Scheduler is bookkeeping-only
 
-Delete `src/scheduler/research-floor.ts`, `src/scheduler/research-decision.ts`, and the `runResearchLoop` call in `src/scheduler/loop.ts`. The Scheduler retains ONLY:
+Delete `src/scheduler/research-floor.ts`, `src/scheduler/research-decision.ts`, and the `runResearchLoop` call in the scheduler module (then `loop.ts`, since renamed to `heartbeat.ts` in #725). The Scheduler retains ONLY:
 
 - `lastTickAt` heartbeat for the watchdog
 - Rolling merge-rate window (`mergeRate`, `mergeRateWindow`)
