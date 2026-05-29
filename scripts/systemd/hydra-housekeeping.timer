@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly trigger for hydra orchestrator housekeeping chores
+Documentation=https://github.com/gaberoo322/hydra/issues/723
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=hydra-housekeeping.service
+
+[Install]
+WantedBy=timers.target
