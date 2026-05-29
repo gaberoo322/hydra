@@ -10,6 +10,7 @@ import { createResearchRouter } from "./api/research.ts";
 import { createBacklogRouter } from "./api/backlog.ts";
 import { createDesignConceptsRouter } from "./api/design-concepts.ts";
 import { createSchedulerRouter } from "./api/scheduler.ts";
+import { createMaintenanceRouter } from "./api/maintenance.ts";
 import { createMetricsRouter } from "./api/metrics.ts";
 import { createMiscRouter } from "./api/misc.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
@@ -64,6 +65,8 @@ function createApi(eventBus) {
   api.use(createBacklogRouter());
   api.use(createDesignConceptsRouter());
   api.use(createSchedulerRouter(eventBus));
+  // Maintenance — hourly housekeeping endpoint (issue #723, scheduler fold PR-3/4).
+  api.use(createMaintenanceRouter(eventBus));
   api.use(createMetricsRouter());
   api.use(createArchitectureRouter(eventBus));
   // Routes split out of misc.ts per issue #268 — each owns one domain.

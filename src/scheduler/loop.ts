@@ -331,34 +331,53 @@ async function checkBlockedEscalation(eventBus) {
   }
 }
 
-async function runScheduledCycle(eventBus) {
-  if (!state.running) return;
+/**
+ * Run the five time-boxed housekeeping chores.
+ *
+ * Issue #723 (scheduler fold PR-3/4): these chores were extracted out of
+ * `runScheduledCycle` so they can be driven externally by an hourly
+ * `hydra-housekeeping.timer` POSTing to `/api/maintenance/housekeeping`,
+ * rather than riding on the 2-minute scheduler heartbeat. They still run
+ * IN the orchestrator process (they use the live `eventBus` + dynamic
+ * imports), so the endpoint approach reuses the running process rather than
+ * reconstructing eventBus/Redis in a standalone job.
+ *
+ * Each chore KEEPS its own internal time-guard verbatim (weekly/daily/
+ * per-day/per-item idempotency), so hourly invocation is safe — the guards
+ * skip work that has already run within its window. A second immediate call
+ * therefore skips the guarded chores.
+ *
+ * Returns a `{ ran, skipped }` summary so callers (the endpoint, tests) can
+ * see which chores did work this invocation vs. which were skipped by their
+ * time-guard. Never throws — each chore is independently try/caught so one
+ * failure doesn't abort the rest.
+ */
+async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: string[] }> {
+  const ran: string[] = [];
+  const skipped: string[] = [];
 
-  // Check blocked items for re-escalation
+  // Check blocked items for re-escalation. The per-item 12h guard lives
+  // inside checkBlockedEscalation (BLOCKED_REESCALATE_MS), so this is safe to
+  // call hourly. We always count it as "ran" — it iterates the blocked lane
+  // and applies its own per-item guard internally.
   try {
     await checkBlockedEscalation(eventBus);
+    ran.push("blocked-escalation");
   } catch (err: any) {
-    console.error(`[Scheduler] Blocked escalation check failed in scheduled cycle: ${err.message}`);
+    console.error(`[Scheduler] Blocked escalation check failed in housekeeping: ${err.message}`);
+    skipped.push("blocked-escalation");
   }
-
-  // Stale-claim reaper moved to the autopilot's Phase 2 reap (issue #721,
-  // scheduler fold PR-2/4). Per ADR-0012 the autopilot is the single brain,
-  // and stale `inProgress` claims only matter when the autopilot wants to
-  // dispatch into those slots — so the reaper now runs once-per-Phase-2
-  // (before each dispatch decision) via `scripts/autopilot/reap.py`'s
-  // `run_hardcap()` POSTing to `/api/backlog/stale-claims/reap`, rather than
-  // on every 2-minute scheduler tick. `reapStaleClaims` itself stays in
-  // `src/backlog/reaper.ts`, still serving that endpoint + the
-  // operator-triggered route.
 
   // Prune old done-lane items from the backlog. Lives at the tick level
   // rather than wedged inside `maybeRunResearch` so it still runs when the
   // research path early-exits on any of its skip gates.
   try {
     await pruneOldDoneItems();
+    ran.push("prune-done");
   } catch (err: any) {
     console.error(`[Scheduler] Failed to prune old done items: ${err.message}`);
     Sentry.addBreadcrumb({ category: "scheduler", message: `pruneOldDoneItems failed: ${err.message}`, level: "error" });
+    skipped.push("prune-done");
   }
 
   // Weekly summary — send once per week
@@ -374,10 +393,14 @@ async function runScheduledCycle(eventBus) {
         await setDigestLastWeekly(Date.now().toString());
         console.log("[Scheduler] Sent weekly summary");
       }
+      ran.push("weekly-summary");
+    } else {
+      skipped.push("weekly-summary");
     }
   } catch (err: any) {
     console.error(`[Scheduler] Weekly summary failed: ${err.message}`);
     Sentry.addBreadcrumb({ category: "scheduler", message: `Weekly summary failed: ${err.message}`, level: "error" });
+    skipped.push("weekly-summary");
   }
 
   // Daily memory consolidation — prune stale patterns
@@ -388,10 +411,14 @@ async function runScheduledCycle(eventBus) {
       const { consolidate } = await import("../learning.ts");
       await consolidate();
       await setMemoryLastConsolidation(Date.now().toString());
+      ran.push("memory-consolidation");
+    } else {
+      skipped.push("memory-consolidation");
     }
   } catch (err: any) {
     console.error(`[Scheduler] Memory consolidation failed: ${err.message}`);
     Sentry.addBreadcrumb({ category: "scheduler", message: `Memory consolidation failed: ${err.message}`, level: "error" });
+    skipped.push("memory-consolidation");
   }
 
   // Daily design-concept snapshot (issue #628) — record today's index
@@ -415,6 +442,9 @@ async function runScheduledCycle(eventBus) {
     if (!alreadyWritten) {
       const count = await getDesignConceptIndexSize();
       await writeDailySnapshot(today, count);
+      ran.push("design-concept-snapshot");
+    } else {
+      skipped.push("design-concept-snapshot");
     }
   } catch (err: any) {
     console.error(`[Scheduler] Design-concept daily snapshot failed: ${err.message}`);
@@ -423,20 +453,32 @@ async function runScheduledCycle(eventBus) {
       message: `Design-concept daily snapshot failed: ${err.message}`,
       level: "error",
     });
+    skipped.push("design-concept-snapshot");
   }
+
+  return { ran, skipped };
+}
+
+async function runScheduledCycle(eventBus) {
+  if (!state.running) return;
 
   // Issue #383 (codex cut-over PR-3): the in-process control loop is gone.
   // #706 (scheduler fold PR-1/4) additionally removed the research-decision
-  // plane that used to run here. `runScheduledCycle` now exists solely as a
-  // heartbeat for the housekeeping tasks above (stale-claim reaper, weekly
-  // digest, memory consolidation, design-concept snapshot).
+  // plane that used to run here. #723 (scheduler fold PR-3/4) moved the five
+  // time-boxed housekeeping chores (blocked re-escalation, done-lane pruning,
+  // weekly digest, memory consolidation, design-concept snapshot) out to an
+  // hourly `hydra-housekeeping.timer` that POSTs `/api/maintenance/housekeeping`
+  // → `runHousekeeping(eventBus)`. `runScheduledCycle` now exists solely as a
+  // heartbeat + rolling-merge-rate observability surface; PR-4 renames/slims it.
   //
   // Issue #397: the heartbeat moves to `lastTickAt` so liveness probes can
-  // tell "housekeeping is running" apart from "the control loop ran". The
-  // legacy `lastCycleAt` field is left null on purpose — under PR-3 there is
-  // no `runControlLoop` invocation to point at, so reporting a stale codex
-  // timestamp here misleads the dashboard and the watchdog. Operators that
-  // want liveness must read `lastTickAt`.
+  // tell "scheduler is alive" apart from "the control loop ran". The legacy
+  // `lastCycleAt` field is left null on purpose — there is no `runControlLoop`
+  // invocation to point at, so reporting a stale codex timestamp here misleads
+  // the dashboard and the watchdog. Operators that want liveness must read
+  // `lastTickAt`. computeRollingMergeRate is exercised here (via getStatus on
+  // the status endpoint) — the tick keeps the heartbeat advancing so the
+  // watchdog can distinguish alive from wedged.
   state.lastTickAt = new Date().toISOString();
   if (state.running) {
     const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
@@ -642,4 +684,7 @@ export {
   formatDuration,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,
+  // Issue #723 (scheduler fold PR-3/4): the five housekeeping chores, callable
+  // out-of-band by the `/api/maintenance/housekeeping` endpoint / hourly timer.
+  runHousekeeping,
 };

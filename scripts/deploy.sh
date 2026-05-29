@@ -63,6 +63,19 @@ install -D -m 0644 scripts/systemd/hydra-autopilot-watchdog.timer "$HOME/.config
 systemctl --user daemon-reload
 systemctl --user enable --now hydra-autopilot-watchdog.timer
 
+echo "==> Installing housekeeping timer (issue #723)..."
+# Scheduler fold PR-3/4 (issue #723): the five time-boxed housekeeping chores
+# (blocked re-escalation, done-lane pruning, weekly digest, memory
+# consolidation, design-concept snapshot) moved out of the 2-minute scheduler
+# tick into an hourly timer that POSTs the idempotent
+# /api/maintenance/housekeeping endpoint. This deploy step only STAGES the
+# binary + units (mirroring the autopilot-watchdog block above). Enabling the
+# timer is a deliberate HOST follow-up the operator performs post-merge:
+#   systemctl --user daemon-reload && systemctl --user enable --now hydra-housekeeping.timer
+install -D -m 0755 scripts/housekeeping.sh "$HOME/.local/bin/hydra-housekeeping.sh"
+install -D -m 0644 scripts/systemd/hydra-housekeeping.service "$HOME/.config/systemd/user/hydra-housekeeping.service"
+install -D -m 0644 scripts/systemd/hydra-housekeeping.timer "$HOME/.config/systemd/user/hydra-housekeeping.timer"
+
 echo "==> Restarting service..."
 systemctl --user restart hydra-orchestrator.service
 
