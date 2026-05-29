@@ -1,32 +1,52 @@
 /**
- * Cycle Scheduler
+ * Observability Heartbeat
  *
- * Runs development cycles on a configurable interval.
- * Auto-triggers research when the work queue runs low (throttled).
- * Auto-triggers architect review every N research cycles.
+ * NOT a decisional brain. This module makes no policy decisions, dispatches
+ * no work, and mutates no kanban/work-queue state — the autopilot
+ * (`scripts/autopilot/decide.py`) is the orchestrator's single decisional
+ * brain. This is a dumb liveness heartbeat plus a counter/observability
+ * surface:
+ *
+ *   - stamps `lastTickAt` every tick so the watchdog can tell "alive" from
+ *     "wedged" (issue #397);
+ *   - computes the rolling merge-rate window for `GET /api/scheduler/status`
+ *     (issue #232);
+ *   - holds the deliberate-stop marker so the watchdog refuses to
+ *     auto-restart an operator stop (issue #388);
+ *   - rehydrates lifetime cycle counters from Redis on start so
+ *     `/api/scheduler/status` reports stable metrics after a restart.
+ *
+ * The five time-boxed housekeeping chores were lifted out to the hourly
+ * `/api/maintenance/housekeeping` endpoint in #723 (scheduler fold PR-3/4);
+ * `runHousekeeping` lives here only because it reuses the live `eventBus` +
+ * dynamic imports, and is invoked out-of-band by that endpoint.
+ *
+ * Renamed from the former `loop.ts` in this directory in #725 (scheduler
+ * fold PR-4/4, completes PP-1) to make the "no second brain" identity
+ * explicit. The public surface is unchanged:
+ * `start`/`stop`/`getStatus`/`autoStart`.
  *
  * Controlled via API: POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status
  */
 
 import * as Sentry from "@sentry/node";
-import { sendNotification } from "../notify.ts";
 import { getMetricsTrend } from "../metrics/trend.ts";
-import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
-import { promoteToQueued, pruneOldDoneItems } from "../backlog/lanes.ts";
+import { loadBacklog } from "../backlog/reads.ts";
+import { pruneOldDoneItems } from "../backlog/lanes.ts";
 import { getTargetName } from "../target-config.ts";
 import {
   getSchedulerCyclesRun,
   getSchedulerCyclesMerged,
   getSchedulerCyclesFailed,
   getLastResearchAtMs,
-  saveSchedulerStateVersioned, getSchedulerStateVersion,
+  getSchedulerStateVersion,
   getSchedulerStateRaw,
   getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
   getBlockedLastEscalation, setBlockedLastEscalation,
   getDigestLastWeekly, setDigestLastWeekly,
   getMemoryLastConsolidation, setMemoryLastConsolidation,
 } from "../redis/scheduler.ts";
-const DEFAULT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (issue #725: slowed from 2min; watchdog staleness threshold is 15min = 3x margin)
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
 // Note: the in-process scheduler research-decision plane (queue-depth /
@@ -87,7 +107,7 @@ async function computeRollingMergeRate(window: number = ROLLING_MERGE_RATE_WINDO
       cyclesInWindow: trend.length,
     };
   } catch (err: any) {
-    console.error(`[Scheduler] Rolling merge-rate computation failed: ${err?.message || err}`);
+    console.error(`[Heartbeat] Rolling merge-rate computation failed: ${err?.message || err}`);
     return { mergeRate: null, cyclesInWindow: 0 };
   }
 }
@@ -130,20 +150,22 @@ let state = {
 const DELIBERATE_STOP_TTL_SECONDS = 24 * 60 * 60;
 
 // ---------------------------------------------------------------------------
-// Scheduler state persistence
+// Heartbeat state rehydration (read-only)
 // ---------------------------------------------------------------------------
 //
-// The scheduler's in-memory `state` was being reset on every orchestrator
-// restart, which silently cleared the research-throttle (`lastResearchAt`)
-// and the architect counter (`researchSinceLastArchitect`). On the next
-// scheduler tick after restart, an empty queue + null lastResearchAt
-// triggered an immediate, unwanted research cycle costing ~$3-8 in Codex.
+// The in-memory `state` is reset on every orchestrator restart. On startup,
+// loadSchedulerState() merges any persisted values back in before the first
+// tick so /api/scheduler/status reports stable metrics immediately.
 //
-// We now persist the research-related fields to Redis under
-// SCHEDULER_STATE_KEY. On startup, loadSchedulerState() merges the stored
-// values into `state` before the first tick. After every research cycle
-// and architect review, saveSchedulerState() writes the updated fields
-// back to Redis.
+// Historical note: the research-throttle (`lastResearchAt`) and architect
+// counter were written back via a `saveSchedulerState()` writer, because a
+// reset `lastResearchAt` used to trigger an immediate unwanted research cycle
+// (~$3-8 in Codex). That writer was removed in #725 (scheduler fold PR-4/4)
+// once the research-decision plane that called it was deleted in #706
+// (PR-1/4). The persisted `SCHEDULER_STATE_KEY` value is now read-only here —
+// loadSchedulerState() still merges any historical value in, but nothing in
+// this heartbeat writes it. The research-force policy lives in the autopilot
+// brain (`scripts/autopilot/decide.py`).
 //
 // Lifetime cycle counters (cyclesRun, cyclesMerged, cyclesFailed) are also
 // persisted via dedicated Redis atomic counters — see incrSchedulerCyclesRun /
@@ -159,7 +181,7 @@ async function loadSchedulerState() {
   try {
     const raw = await getSchedulerStateRaw();
     if (!raw) {
-      console.log("[Scheduler] No persisted state in Redis — starting fresh");
+      console.log("[Heartbeat] No persisted state in Redis — starting fresh");
     } else {
       const stored = JSON.parse(raw);
       if (stored.lastResearchAt) state.lastResearchAt = stored.lastResearchAt;
@@ -206,40 +228,12 @@ async function loadSchedulerState() {
         }
       }
     } catch (err: any) {
-      console.error(`[Scheduler] Failed to load deliberate-stop marker: ${err.message}`);
+      console.error(`[Heartbeat] Failed to load deliberate-stop marker: ${err.message}`);
     }
 
-    console.log(`[Scheduler] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, cyclesRun=${state.cyclesRun}, cyclesMerged=${state.cyclesMerged}, cyclesFailed=${state.cyclesFailed}, version=${state._stateVersion}, stopReason=${state.stopReason ?? "none"}`);
+    console.log(`[Heartbeat] Loaded persisted state — lastResearchAt=${state.lastResearchAt}, cyclesRun=${state.cyclesRun}, cyclesMerged=${state.cyclesMerged}, cyclesFailed=${state.cyclesFailed}, version=${state._stateVersion}, stopReason=${state.stopReason ?? "none"}`);
   } catch (err: any) {
-    console.error(`[Scheduler] Failed to load persisted state: ${err.message}`);
-  }
-}
-
-async function saveSchedulerState() {
-  try {
-    const payload = {
-      lastResearchAt: state.lastResearchAt,
-      researchCyclesRun: state.researchCyclesRun,
-      savedAt: new Date().toISOString(),
-    };
-    const { saved, newVersion } = await saveSchedulerStateVersioned(
-      JSON.stringify(payload),
-      state._stateVersion,
-    );
-    if (saved) {
-      state._stateVersion = newVersion;
-    } else {
-      console.error(`[Scheduler] State version conflict — expected ${state._stateVersion}, found ${newVersion}. Retrying with fresh version.`);
-      // Retry once with the current version from Redis
-      const retry = await saveSchedulerStateVersioned(JSON.stringify(payload), newVersion);
-      if (retry.saved) {
-        state._stateVersion = retry.newVersion;
-      } else {
-        console.error(`[Scheduler] State save retry failed — version ${newVersion} vs ${retry.newVersion}`);
-      }
-    }
-  } catch (err: any) {
-    console.error(`[Scheduler] Failed to save state: ${err.message}`);
+    console.error(`[Heartbeat] Failed to load persisted state: ${err.message}`);
   }
 }
 
@@ -324,10 +318,10 @@ async function checkBlockedEscalation(eventBus) {
           reescalation: true,
         },
       });
-      console.log(`[Scheduler] Re-escalated blocked item ${item.id} (${ageDays} days)`);
+      console.log(`[Heartbeat] Re-escalated blocked item ${item.id} (${ageDays} days)`);
     }
   } catch (err: any) {
-    console.error(`[Scheduler] Blocked escalation check failed: ${err.message}`);
+    console.error(`[Heartbeat] Blocked escalation check failed: ${err.message}`);
   }
 }
 
@@ -364,7 +358,7 @@ async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: stri
     await checkBlockedEscalation(eventBus);
     ran.push("blocked-escalation");
   } catch (err: any) {
-    console.error(`[Scheduler] Blocked escalation check failed in housekeeping: ${err.message}`);
+    console.error(`[Heartbeat] Blocked escalation check failed in housekeeping: ${err.message}`);
     skipped.push("blocked-escalation");
   }
 
@@ -375,7 +369,7 @@ async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: stri
     await pruneOldDoneItems();
     ran.push("prune-done");
   } catch (err: any) {
-    console.error(`[Scheduler] Failed to prune old done items: ${err.message}`);
+    console.error(`[Heartbeat] Failed to prune old done items: ${err.message}`);
     Sentry.addBreadcrumb({ category: "scheduler", message: `pruneOldDoneItems failed: ${err.message}`, level: "error" });
     skipped.push("prune-done");
   }
@@ -391,14 +385,14 @@ async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: stri
         const { sendToTelegram } = await import("../notify.ts");
         await sendToTelegram(summary);
         await setDigestLastWeekly(Date.now().toString());
-        console.log("[Scheduler] Sent weekly summary");
+        console.log("[Heartbeat] Sent weekly summary");
       }
       ran.push("weekly-summary");
     } else {
       skipped.push("weekly-summary");
     }
   } catch (err: any) {
-    console.error(`[Scheduler] Weekly summary failed: ${err.message}`);
+    console.error(`[Heartbeat] Weekly summary failed: ${err.message}`);
     Sentry.addBreadcrumb({ category: "scheduler", message: `Weekly summary failed: ${err.message}`, level: "error" });
     skipped.push("weekly-summary");
   }
@@ -416,7 +410,7 @@ async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: stri
       skipped.push("memory-consolidation");
     }
   } catch (err: any) {
-    console.error(`[Scheduler] Memory consolidation failed: ${err.message}`);
+    console.error(`[Heartbeat] Memory consolidation failed: ${err.message}`);
     Sentry.addBreadcrumb({ category: "scheduler", message: `Memory consolidation failed: ${err.message}`, level: "error" });
     skipped.push("memory-consolidation");
   }
@@ -447,7 +441,7 @@ async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: stri
       skipped.push("design-concept-snapshot");
     }
   } catch (err: any) {
-    console.error(`[Scheduler] Design-concept daily snapshot failed: ${err.message}`);
+    console.error(`[Heartbeat] Design-concept daily snapshot failed: ${err.message}`);
     Sentry.addBreadcrumb({
       category: "scheduler",
       message: `Design-concept daily snapshot failed: ${err.message}`,
@@ -484,7 +478,7 @@ async function runScheduledCycle(eventBus) {
     const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
     state.timer = setTimeout(
       () => runScheduledCycle(eventBus).catch((err: any) =>
-        console.error(`[Scheduler] Scheduled cycle failed: ${err.message}`),
+        console.error(`[Heartbeat] Scheduled cycle failed: ${err.message}`),
       ),
       delay,
     );
@@ -518,13 +512,13 @@ async function start(eventBus,  opts: Record<string, any> = {}) {
   try {
     await clearSchedulerDeliberateStop();
   } catch (err: any) {
-    console.error(`[Scheduler] Failed to clear deliberate-stop marker: ${err.message}`);
+    console.error(`[Heartbeat] Failed to clear deliberate-stop marker: ${err.message}`);
   }
 
-  console.log(`[Scheduler] Started — housekeeping cycles every ${intervalMs / 1000}s`);
+  console.log(`[Heartbeat] Started — housekeeping cycles every ${intervalMs / 1000}s`);
 
   // Run first cycle immediately (fire-and-forget — errors handled inside runScheduledCycle)
-  runScheduledCycle(eventBus).catch((err: any) => console.error(`[Scheduler] First cycle failed: ${err.message}`));
+  runScheduledCycle(eventBus).catch((err: any) => console.error(`[Heartbeat] First cycle failed: ${err.message}`));
 
   return {
     started: true,
@@ -582,7 +576,7 @@ async function stop(opts: { reason?: "deliberate" | "circuit-breaker" | "error-c
         DELIBERATE_STOP_TTL_SECONDS,
       );
     } catch (err: any) {
-      console.error(`[Scheduler] Failed to persist deliberate-stop marker: ${err.message}`);
+      console.error(`[Heartbeat] Failed to persist deliberate-stop marker: ${err.message}`);
     }
   } else if (reason === "circuit-breaker" || reason === "error-cap") {
     // Track the reason in-memory so /status surfaces it, but DO NOT write
@@ -594,7 +588,7 @@ async function stop(opts: { reason?: "deliberate" | "circuit-breaker" | "error-c
     // stop survives a clean shutdown/restart cycle via the Redis marker.
   }
 
-  console.log(`[Scheduler] Stopped after ${state.cyclesRun} cycles (reason=${reason})`);
+  console.log(`[Heartbeat] Stopped after ${state.cyclesRun} cycles (reason=${reason})`);
 
   return {
     stopped: true,
@@ -673,7 +667,7 @@ function formatDuration(ms) {
 async function autoStart(eventBus) {
   const interval = parseInt(process.env.HYDRA_AUTO_CYCLE_INTERVAL_MS);
   if (interval && interval >= MIN_INTERVAL_MS) {
-    console.log(`[Scheduler] Auto-starting from HYDRA_AUTO_CYCLE_INTERVAL_MS=${interval}`);
+    console.log(`[Heartbeat] Auto-starting from HYDRA_AUTO_CYCLE_INTERVAL_MS=${interval}`);
     return await start(eventBus, { intervalMs: interval });
   }
   return null;

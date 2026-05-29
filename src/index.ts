@@ -6,7 +6,7 @@ import { createApi } from "./api.ts";
 import { createTracker, getTracker } from "./task-tracker.ts";
 import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule } from "./cleanup.ts";
-import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/loop.ts";
+import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
 import { startDigest, stopDigest, recordEvent } from "./digest.ts";
 import { initLearning } from "./learning.ts";
 import { pushAlert } from "./redis/alerts.ts";

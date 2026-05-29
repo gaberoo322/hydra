@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
-import { getStatus as getSchedulerStatus } from "../scheduler/loop.ts";
+import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
 import { getBacklogCounts } from "../backlog/reads.ts";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import { redisInfo as getRedisInfo } from "../redis/utility.ts";
