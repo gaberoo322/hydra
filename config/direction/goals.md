@@ -54,16 +54,6 @@ The execution infrastructure is built. The focus now shifts to:
 - Must be recoverable from any crash state without manual intervention
 - NEVER delete provider or execution files
 
-## AI Provider Policy
-
-All LLM inference in this project uses **Codex** (OpenAI Codex subscription) via an OpenAI-compatible proxy. There is NO separate OpenAI API key.
-
-- `OPENAI_API_KEY` is set to a proxy auth token that routes through `http://localhost:4001/v1` (local) or `https://admin.clawstreetbets.xyz/api/openai-proxy/v1` (external).
-- The proxy translates `/chat/completions` requests into `codex exec` calls using the Codex OAuth token.
-- **Do NOT create tasks about configuring, provisioning, or checking OPENAI_API_KEY.** It is already configured and working.
-- **Do NOT propose switching to direct OpenAI API access.** Codex is the only authorized LLM provider.
-- The `isLiveNominationAvailable()` check that gates on OPENAI_API_KEY will pass because the env var is set (to the proxy token).
-
 ## Infrastructure
 
 The system runs on a dedicated Intel NUC (always-on home server). All agents, services, and the target project run locally. No Vercel — everything self-hosted behind Cloudflare tunnel.
@@ -77,10 +67,9 @@ The system runs on a dedicated Intel NUC (always-on home server). All agents, se
 - Network: Cloudflare tunnel — admin.clawstreetbets.xyz (orchestrator API), hydra.clawstreetbets.xyz (betting app)
 
 **Deployment architecture:**
-- Hydra orchestrator, Redis, OpenViking, dashboard, openai-proxy — all run locally as systemd user services
+- Hydra orchestrator, Redis, OpenViking, dashboard — all run locally as systemd user services
 - hydra-betting web app — Next.js production server locally (port 3333), served via Cloudflare tunnel
 - Checkpoint refresh, ingestion, scanner, alerts, prediction-market-cron — systemd timers
-- All LLM inference via Codex CLI (OAuth, no API key) or Codex-compatible proxy (port 4001)
 
 **Storage rules for agents:**
 - Large generated artifacts (test fixtures, execution receipts, data dumps) go to `/mnt/hydra-ssd/` not the NVMe

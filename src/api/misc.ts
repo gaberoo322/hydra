@@ -11,7 +11,7 @@ import { classifyChange } from "../tier-classifier.ts";
  * Issue #268 split this file — see api/openviking.ts, api/goals.ts,
  * api/events.ts, api/config.ts, api/alerts.ts, api/plan-cache.ts,
  * api/reflections.ts, api/merge-lock.ts. What remains here are operational
- * routes without a natural domain home: kill switch, OpenAI proxy, digest
+ * routes without a natural domain home: kill switch, digest
  * trigger, tier classifier, and agent-memory CRUD.
  *
  * New routes should prefer a domain-specific sub-router. Only land here if
@@ -42,41 +42,6 @@ export function createMiscRouter(eventBus: any) {
     const files = list.map(s => s.trim()).filter(s => s.length > 0);
     const result = classifyChange(files);
     res.json(result);
-  });
-
-  // =========================================================================
-  // OpenAI proxy — forward to localhost:4001
-  // =========================================================================
-
-  const OPENAI_PROXY_TOKEN = process.env.OPENAI_PROXY_TOKEN || "";
-  const OPENAI_PROXY_UPSTREAM = "http://localhost:4001";
-
-  router.use("/openai-proxy", async (req, res, next) => {
-    // Bearer token auth
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (!OPENAI_PROXY_TOKEN || token !== OPENAI_PROXY_TOKEN) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    // Forward full sub-path to upstream
-    const upstreamUrl = `${OPENAI_PROXY_UPSTREAM}${req.path}`;
-
-    try {
-      const upstreamRes = await fetch(upstreamUrl, {
-        method: req.method,
-        headers: { "content-type": "application/json" },
-        body: req.method !== "GET" && req.method !== "HEAD" ? JSON.stringify(req.body) : undefined,
-      });
-
-      const contentType = upstreamRes.headers.get("content-type") || "application/json";
-      res.status(upstreamRes.status).set("content-type", contentType);
-      const buffer = Buffer.from(await upstreamRes.arrayBuffer());
-      res.send(buffer);
-    } catch (err: any) {
-      console.error(`[OpenAI Proxy Route] Failed:`, err.message);
-      res.status(502).json({ error: { message: `Proxy error: ${err.message}` } });
-    }
   });
 
   // POST /digest/send — Manually trigger a digest summary now
