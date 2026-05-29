@@ -454,3 +454,57 @@ If the CLI changes this schema, the parser at the top of `src/cost/reconciliatio
 - `cost.reconciliation.divergence` event published when any pair diverges by `> DIVERGENCE_THRESHOLD` (10%)
 - Digest section surfacing divergence events from the digest window
 - Dashboard panel with the three-number side-by-side and 30-day trend
+
+## Model Tiers
+
+The orchestrator no longer routes per-call models — model selection is the harness's job. Claude Code dispatches subagents on whichever model the operator's subscription chooses. Tiers below are for accounting/limits visibility only.
+
+| Tier | Model (Claude Code) | Typical use |
+|---|---|---|
+| frontier | claude-opus (1M context) | hydra-dev, hydra-target-build, hydra-research, hydra-architect — deep multi-file edits and design work |
+| balanced | claude-sonnet | hydra-sweep, hydra-target-sweep, hydra-qa, hydra-doctor — board/health work with structured outputs |
+| fast | claude-haiku | hydra-discover, hydra-target-discover, lesson-capture hooks, classification — small/fast/cheap calls |
+
+Quota accounting flows through the **Cost** module and **Subscription Usage Tracker** (see `CONTEXT.md`); the legacy dollar-denominated `hydra:scheduler:daily-spend` surrogate was retired (see `docs/historical/`).
+
+## Learning System (operational)
+
+Conceptual definitions live in `CONTEXT.md` (**Pattern Memory**, **Reflections**, **Knowledge Base**). This is the operational detail.
+
+**OpenViking-primary, Redis-fallback. Three tiers:**
+
+1. **OpenViking (primary):** each autopilot tick / subagent dispatch creates an OV session (`ov-session.ts`); interactions are logged as session messages. At close, `ovSession.commit()` triggers memory extraction — OV stores learned patterns as searchable embeddings. Subagents query `getAgentContext()` / `searchKnowledge()`.
+2. **Redis patterns (fallback):** consolidated patterns in `hydra:memory:{agent}:patterns` with hit counts. At `PROMOTION_THRESHOLD` (3, exported from `src/pattern-memory/agent-memory.ts`) a pattern auto-promotes to a durable lesson file (`~/.claude/skills/<skill>/lessons.md`) AND opens a `meta-friction` GitHub issue (issue #512). Stale one-offs pruned after 14 days.
+3. **Episodic reflections:** on subagent failure, a structured reflection is stored in `hydra:reflections:{ref}` (7-day TTL); re-injected when the same anchor/file is retried.
+
+**Cue taxonomy (issue #524)** — two QA cues, split because they describe different things. The per-cue table is `src/pattern-memory/escalation.ts::CUE_ESCALATION_THRESHOLDS`:
+- `acceptance-criterion-unmet` — true defect; threshold 3, auto-promotes to `to-planner.md` + escalates to a GitHub issue.
+- `acceptance-criterion-deferred` — only verifiable post-deploy/runtime/by-operator (metadata, not a defect); threshold 20+, does NOT write a rule to `to-planner.md`. Migrate pre-split entries with `bash scripts/cleanup/reclassify-deferred-acs.sh --apply`.
+
+## Config (`~/hydra/config/`) — git-tracked
+
+Operator edits these (or uses the dashboard):
+
+- `config/direction/vision.md` — **target product** vision (prose)
+- `config/direction/outcomes.yaml` — structured **Target Outcomes** metrics (ADR-0003)
+- `config/orchestrator/vision.md` — **orchestrator-self** vision (trade-offs when ambiguous)
+- `config/direction/priorities.md` — what to work on next (refreshed by `/hydra-target-research`)
+- `config/direction/goals.md` — high-level goals
+- `config/research/` — research agent configs (director, domain/technical/market researchers, strategist)
+
+Runtime state is all in Redis (see the **Redis Keys** section above). The legacy in-process agent personalities and `config/feedback/to-*.md` files were retired with the codex cut-over — see `docs/historical/`.
+
+## Deploy recipe
+
+Runs automatically on merge to master via a self-hosted GitHub Actions runner on this server:
+
+1. `git pull --ff-only origin master`
+2. `npm ci` (orchestrator deps)
+3. `bash scripts/sync-skills.sh` (regenerate `~/.claude/skills/` from playbooks — fails fast on non-zero exit; introduced in #433 after the 2026-05-15 silent-wedge incident)
+4. `cd dashboard && npm ci && npm run build` (dashboard static assets)
+5. `systemctl --user restart hydra-orchestrator.service`
+6. Health check: `curl http://localhost:4000/api/health`
+
+**Operator setup (one-time):** `bash scripts/setup-git-hooks.sh` installs an opt-in `post-merge` hook that re-runs `scripts/sync-skills.sh` when a `git pull` brings in `docs/operator-playbooks/*.md` changes. Remove with `--remove`.
+
+**Emergency manual deploy:** `./scripts/deploy.sh`. Never deploy by restarting the service without building the dashboard first — Express serves `dashboard/dist/`, so stale builds mean stale UI.
