@@ -1,0 +1,11 @@
+[Unit]
+Description=Hydra consolidated watchdog (service liveness + autopilot wedge)
+Documentation=https://github.com/gaberoo322/hydra/issues/727
+After=hydra-orchestrator.service hydra-autopilot.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/hydra-watchdog.sh
+Environment=HOME=%h
+StandardOutput=journal
+StandardError=journal

@@ -39,29 +39,29 @@ bash scripts/sync-skills.sh
 echo "==> Building dashboard..."
 cd dashboard && npm ci && npm run build && cd ..
 
-echo "==> Installing consolidated watchdog (issue #705)..."
+echo "==> Installing consolidated watchdog (issue #705, cutover #727)..."
 # Consolidated watchdog (issue #705) — one script with two clearly-labelled
 # blocks: ## SERVICE LIVENESS (former hydra-orchestrator-watchdog.sh) and
 # ## AUTOPILOT WEDGE (former hydra-autopilot-watchdog.sh). Per-block stale
-# thresholds (service 15min, autopilot 25min). The surviving timer should be
-# pointed at this script. NOTE: the systemd-unit reconciliation (removing one
-# timer, pointing the survivor at hydra-watchdog.sh) is a HOST follow-up the
-# operator performs after merge — this deploy step only stages the binary.
+# thresholds (service 15min, autopilot 25min). Issue #727 is the cutover:
+# this single timer is now the live recovery mechanism, running at the
+# 2-minute cadence the consolidated script was written for. The two legacy
+# watchdogs are retired (see convergence step below).
 install -D -m 0755 scripts/hydra-watchdog.sh "$HOME/.local/bin/hydra-watchdog.sh"
 
-echo "==> Installing autopilot watchdog (issue #508)..."
-# External liveness watchdog for the hydra-autopilot Claude Code session.
-# The autopilot can wedge while the parent process stays "active" — systemd
-# doesn't restart it because by its accounting nothing has failed. The
-# watchdog reads the heartbeat file (scripts/autopilot/heartbeat.py) and
-# kills the wedged PID; the unit's Restart=on-failure then brings it back.
-# Kept alongside hydra-watchdog.sh until the operator reconciles the systemd
-# units post-merge (#705 host follow-up).
-install -D -m 0755 scripts/hydra-autopilot-watchdog.sh "$HOME/.local/bin/hydra-autopilot-watchdog.sh"
-install -D -m 0644 scripts/systemd/hydra-autopilot-watchdog.service "$HOME/.config/systemd/user/hydra-autopilot-watchdog.service"
-install -D -m 0644 scripts/systemd/hydra-autopilot-watchdog.timer "$HOME/.config/systemd/user/hydra-autopilot-watchdog.timer"
+# Defensive convergence (issue #727): retire the two legacy watchdog timers so
+# every deploy lands on EXACTLY ONE watchdog. The orchestrator-watchdog units
+# were host-only (never deploy-managed); the autopilot-watchdog units WERE
+# deploy-managed (former block here), so we also rm their unit files. Errors
+# are tolerated — a fresh host won't have these units, and that's fine.
+systemctl --user disable --now hydra-autopilot-watchdog.timer hydra-orchestrator-watchdog.timer 2>/dev/null || true
+rm -f "$HOME/.config/systemd/user/hydra-autopilot-watchdog.service" \
+      "$HOME/.config/systemd/user/hydra-autopilot-watchdog.timer"
+
+install -D -m 0644 scripts/systemd/hydra-watchdog.service "$HOME/.config/systemd/user/hydra-watchdog.service"
+install -D -m 0644 scripts/systemd/hydra-watchdog.timer "$HOME/.config/systemd/user/hydra-watchdog.timer"
 systemctl --user daemon-reload
-systemctl --user enable --now hydra-autopilot-watchdog.timer
+systemctl --user enable --now hydra-watchdog.timer
 
 echo "==> Installing housekeeping timer (issue #723)..."
 # Scheduler fold PR-3/4 (issue #723): the five time-boxed housekeeping chores
