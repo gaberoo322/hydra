@@ -126,7 +126,10 @@ export const redisKeys = {
   // Scheduler
   // ---------------------------------------------------------------------------
   schedulerState: () => "hydra:scheduler:state",
-  schedulerDailySpend: () => "hydra:scheduler:daily-spend",
+  // `schedulerDailySpend` (`hydra:scheduler:daily-spend`) removed in #704: its
+  // writer + budget-threshold bridge were deleted in #703, and its sole
+  // surviving reader (`src/cost/surrogate.ts` legacy back-compat path) was
+  // removed in #704. The live cost guardrail is `src/cost/usage-tracker.ts`.
   schedulerResearchEvents: () => "hydra:scheduler:research-events",
   schedulerBuildEvents: () => "hydra:scheduler:build-events",
   schedulerResearchForceOnce: () => "hydra:scheduler:research-force-once",

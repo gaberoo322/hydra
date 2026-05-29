@@ -85,8 +85,9 @@ export interface OvernightSummaryDeps {
    */
   countAutopilotRunsSince?: (windowStartEpoch: number) => Promise<number>;
   /**
-   * Daily spend surrogate reader. Defaults to `getDailySpendSurrogate()`
-   * from `src/cost/`.
+   * Daily USD spend reader. The surrogate's dollar machinery was removed in
+   * #704, so the default returns 0. Exposed so callers (and tests) can inject
+   * a dollar figure if they have an authoritative source.
    */
   readCostUsd?: () => Promise<number>;
   /**
@@ -194,9 +195,10 @@ async function countAutopilotRuns(windowStart: Date, deps: OvernightSummaryDeps)
 
 async function readCostUsd(deps: OvernightSummaryDeps): Promise<number> {
   if (deps.readCostUsd) return deps.readCostUsd();
-  const { getDailySpendSurrogate } = await import("../cost/index.ts");
-  const snap = await getDailySpendSurrogate();
-  return Number(snap.costUsd) || 0;
+  // The cost surrogate's dollar-conversion machinery was removed in #704
+  // (`HYDRA_TOKEN_USD_RATE` was structurally $0; no live dollar cap existed).
+  // There is no authoritative per-day dollar source, so the default is 0.
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
