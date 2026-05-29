@@ -1,0 +1,16 @@
+{
+  "_comment": "Project-scoped Claude Code settings for the Hydra orchestrator repo (issue #692). The SessionStart hook captures every autopilot-/operator-dispatched subagent session into the subagent-dispatch registry (hydra:dispatches:subagent:*) by reading the hidden `<!-- hydra-dispatch v1 ... -->` sentinel from the session transcript's first user message and POSTing it to /api/dispatches/subagent. Sessions WITHOUT a sentinel (a human running `claude` directly) silently no-op, so registering this hook globally is safe. The hook path is absolute so the harness finds it regardless of the subagent's cwd. This is intentionally PROJECT-scoped (not ~/.claude/settings.json) per the issue contract.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/gabe/hydra/scripts/hooks/session-start-capture.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

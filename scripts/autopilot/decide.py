@@ -542,6 +542,36 @@ def _synthesize_worktree_branch(state: dict, slot: str) -> str:
     return f"worktree-agent-{run_token}-t{turn_token}-{slot}"
 
 
+def make_dispatch_sentinel(skill: str, dispatch_id: str, run_id: str | None = None) -> str:
+    """Build the hidden dispatch sentinel comment (issue #692).
+
+    The autopilot playbook prepends this single line to the FIRST user
+    message of every Agent-tool dispatch prompt. A project-scoped
+    SessionStart hook (`scripts/hooks/session-start-capture.sh`) regex-
+    extracts it from the session transcript and POSTs the parsed
+    `(skill, dispatchId, runId)` tuple to `/api/dispatches/subagent`,
+    registering the subagent session into the dispatch registry.
+
+    Form (`runId` omitted when not in an autopilot run):
+
+        <!-- hydra-dispatch v1 skill={skill} dispatchId={id} runId={runId} -->
+
+    Field values are emitted verbatim; callers pass already-clean tokens
+    (the skill name and the synthesised worktree branch). The hook's
+    extractor reads each field independently, so field order is not load-
+    bearing — but we keep the canonical order for readability.
+    """
+    parts = [
+        "<!-- hydra-dispatch v1",
+        f"skill={skill}",
+        f"dispatchId={dispatch_id}",
+    ]
+    if run_id:
+        parts.append(f"runId={run_id}")
+    parts.append("-->")
+    return " ".join(parts)
+
+
 # Sentinel set of valid action types — used by INV-checks and tests.
 VALID_ACTION_TYPES = frozenset({
     "dispatch",
@@ -1282,31 +1312,48 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     plan.debug["occupied_slots"] = occupied
     plan.debug["scope"] = scope
 
-    # 7. Stamp `worktreeBranch` on every dispatch action (issue #527).
+    # 7. Stamp `worktreeBranch` + `dispatchSentinel` on every dispatch action
+    #    (issue #527 / issue #692).
     #
     # The dashboard's slice-4 "Watch stream" cross-link (PR #526) reads
     # `action.worktreeBranch` to scope `/agents/stream?agent=<branch>`. We
     # stamp the field here — once per plan, after dispatch decisions are
     # finalised — so every code-writing / signal-class dispatch carries a
-    # stable identifier. Skip actions that already supply one (forward-compat
-    # for selectors that learn the harness-generated branch name later).
+    # stable identifier. Skip stamping a fresh branch on actions that already
+    # supply one (forward-compat for selectors that learn the harness-
+    # generated branch name later).
     #
-    # AC10 / AC12 / AC9 schema-closure note: `worktreeBranch` goes on the
-    # turn-row JSON inside an action; it is NEVER written as a top-level
-    # field on `hydra:autopilot:run:<id>`. The slice-2 turn writer
-    # serialises actions verbatim, so this stamp flows through to
-    # /api/autopilot/runs/:runId without further changes.
+    # `dispatchSentinel` (issue #692) is the hidden marker the playbook
+    # prepends to the FIRST user message of the Agent-tool prompt. It uses the
+    # resolved `worktreeBranch` as the stable per-dispatch id so the
+    # SessionStart capture hook can join the subagent session back to this
+    # turn. We stamp it for EVERY dispatch action (even ones that arrived with
+    # a pre-set worktreeBranch) so no dispatch escapes session capture.
+    #
+    # AC10 / AC12 / AC9 schema-closure note: both fields go on the turn-row
+    # JSON inside an action; they are NEVER written as a top-level field on
+    # `hydra:autopilot:run:<id>`. The slice-2 turn writer serialises actions
+    # verbatim, so these stamps flow through to /api/autopilot/runs/:runId
+    # without further changes.
+    run_id = state.get("run_id") or ""
+    run_token = run_id if isinstance(run_id, str) and run_id else None
     for action in plan.actions:
         if not isinstance(action, dict):
             continue
         if action.get("type") != "dispatch":
             continue
-        if action.get("worktreeBranch"):
-            continue
         slot = action.get("slot")
         if not isinstance(slot, str) or not slot:
             continue
-        action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+        if not action.get("worktreeBranch"):
+            action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+        skill = action.get("skill")
+        if isinstance(skill, str) and skill:
+            action["dispatchSentinel"] = make_dispatch_sentinel(
+                skill,
+                action["worktreeBranch"],
+                run_token,
+            )
 
     # Slice A observability close-out (issue #668). Emit `turn_end` last
     # so the dashboard knows the turn finished decision-making cleanly
