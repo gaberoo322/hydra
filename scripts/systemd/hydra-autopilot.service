@@ -16,11 +16,21 @@ StartLimitBurst=2
 StartLimitIntervalSec=3600
 
 [Service]
-Type=oneshot
+# Type=exec (NOT oneshot). This is a long-running foreground process — the
+# claude CLI stays alive producing tool calls until the session ends — so exec
+# is the correct type. It is ALSO load-bearing for RuntimeMaxSec below:
+# systemd's RuntimeMaxSec has NO effect on Type=oneshot services (it only arms
+# once a service enters the "running" substate, which oneshot never does), and
+# oneshot's TimeoutStartSec defaults to infinity. Under the old `oneshot` a
+# hung run (e.g. a subagent's `node --test` blocking on an open Redis handle)
+# sat in `activating (start)` forever, never reaped, and blocked every
+# subsequent timer fire. With Type=exec the 9h cap below actually fires.
+Type=exec
 WorkingDirectory=/home/gabe/hydra
 
-# Soft cap above the autopilot's own 8h budget so Phase 7 (drain + digest) has
-# headroom. Beyond this, systemd hard-kills.
+# Hard cap above the autopilot's own 8h budget so Phase 7 (drain + digest) has
+# headroom. Beyond this, systemd hard-kills the run (now effective — see the
+# Type=exec note above; under oneshot this was silently ignored).
 RuntimeMaxSec=32400
 TimeoutStopSec=600
 

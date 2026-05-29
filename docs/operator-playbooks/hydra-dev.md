@@ -17,6 +17,7 @@ Autonomous implementation of GitHub issues against the Hydra orchestrator (`~/hy
 2. All implementation runs inside a worktree — Claude: `Agent(isolation: "worktree")`; Codex: `codex exec` in a fresh `git worktree add`.
 3. Dirty main tree is fine — worktrees are independent.
 4. **No silent fallback.** If the dispatched BG agent finds itself in `~/hydra` instead of a worktree, it MUST abort. Falling back to `~/hydra` left the main checkout on a feature branch on 2026-05-11 and stalled deploys for ~30 min (incident: PR #245).
+5. **Run tests via `npm test`, or pass `--test-force-exit` for a single file. NEVER run a bare `node --test <file>`.** Orchestrator modules open a long-lived `ioredis` connection and a scheduler `setTimeout`, so `node:test` keeps the event loop alive and **hangs forever** after the assertions pass (confirmed: `node --test test/scheduler-status.test.mts` → never exits; with `--test-force-exit` → clean). A hung test blocks the Bash tool call, which froze a whole autopilot session for 11h with the process never reaped (2026-05-28). `npm test` already includes `--test-force-exit`; for a subset use `node --test --test-force-exit <file>`.
 
 ## Pre-flight (parent context)
 

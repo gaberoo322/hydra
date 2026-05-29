@@ -235,6 +235,8 @@ After the first edit batch, sanity-check that the edits actually landed in the w
 
 Fail → fix → re-verify. After 2 failed fixes, abandon branch.
 
+**Run the full `npm test`, or pass `--test-force-exit` when running a single file. NEVER run a bare `node --test <file>`.** Modules that open a DB/Redis connection or a timer keep `node:test`'s event loop alive, so the process **hangs forever** after the assertions pass — which blocks the Bash tool call and froze an autopilot session for 11h with the process never reaped (2026-05-28, orchestrator side). `npm test` already includes `--test-force-exit`; for a subset use `node --test --test-force-exit <file>`.
+
 For orchestrator changes (~/hydra/): `node --check src/<file>.ts` + `npm test` + restart service.
 
 ### 6.5. Glossary / ADR gate (per target `docs/agents/domain.md`)
