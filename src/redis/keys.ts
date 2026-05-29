@@ -141,14 +141,9 @@ export const redisKeys = {
   // itself if start() is never called explicitly.
   schedulerDeliberateStop: () => "hydra:scheduler:deliberate-stop",
 
-  // Issue #673: budget-threshold idempotency sentinel. Written via SETNX
-  // by `src/autopilot/budget-threshold-bridge.ts` on the first crossing
-  // of a given (UTC-day, threshold-pct) pair so the bridge emits exactly
-  // one event per threshold per day. 30h TTL — longer than a UTC day so
-  // the sentinel survives daylight-saving-style boundary jitter, short
-  // enough to keep Redis tidy.
-  budgetThresholdSeen: (isoDate: string, thresholdPct: number) =>
-    `hydra:autopilot:budget-threshold:${isoDate}:${thresholdPct}`,
+  // Issue #673 budget-threshold idempotency sentinel removed in #703 along
+  // with the dead budget-threshold bridge that wrote it. The bridge polled
+  // `hydra:scheduler:daily-spend` (no live writer) and never emitted.
 
   // Research capacity-floor keys (issue #327) were removed in #706 (scheduler
   // fold PR-1/4) together with the research-decision plane that read/wrote

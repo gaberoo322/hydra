@@ -16,10 +16,6 @@ import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
 import {
-  startBudgetThresholdBridge,
-  type BudgetThresholdBridge,
-} from "./autopilot/budget-threshold-bridge.ts";
-import {
   startPrLifecycleBridge,
   type PrLifecycleBridge,
 } from "./autopilot/pr-lifecycle-bridge.ts";
@@ -170,16 +166,14 @@ function startConsumers(eventBus) {
 // Autopilot observability bridges (issue #673) — module-level handles so the
 // SIGTERM shutdown sequence can stop them cleanly. Polling bridges, not
 // XREADGROUP consumers, so they live outside startConsumersWithRecovery.
+//
+// The budget-threshold bridge was removed in #703 — it polled the dead
+// `hydra:scheduler:daily-spend` key (no live writer) and never emitted an
+// event. The live cost guardrail is `src/cost/usage-tracker.ts`.
 // ---------------------------------------------------------------------------
-let _budgetThresholdBridge: BudgetThresholdBridge | null = null;
 let _prLifecycleBridge: PrLifecycleBridge | null = null;
 
 async function startObservabilityBridges(): Promise<void> {
-  try {
-    _budgetThresholdBridge = await startBudgetThresholdBridge();
-  } catch (err: any) {
-    console.error(`[Hydra] budget-threshold-bridge failed to start: ${err?.message || err}`);
-  }
   try {
     _prLifecycleBridge = await startPrLifecycleBridge();
   } catch (err: any) {
@@ -188,12 +182,6 @@ async function startObservabilityBridges(): Promise<void> {
 }
 
 function stopObservabilityBridges(): void {
-  if (_budgetThresholdBridge) {
-    try { _budgetThresholdBridge.stop(); } catch (err: any) {
-      console.error(`[Hydra] budget-threshold-bridge stop failed: ${err?.message || err}`);
-    }
-    _budgetThresholdBridge = null;
-  }
   if (_prLifecycleBridge) {
     try { _prLifecycleBridge.stop(); } catch (err: any) {
       console.error(`[Hydra] pr-lifecycle-bridge stop failed: ${err?.message || err}`);
@@ -268,10 +256,11 @@ async function main() {
   // Start background consumers (notifications, meta, DLQ)
   startConsumers(eventBus);
 
-  // Issue #673: PR-lifecycle + budget-threshold observability bridges.
-  // Both publish onto `hydra:autopilot:slot-events` (the same stream the
-  // slot-events bridge re-broadcasts over WS) so dashboard tiles like
-  // CoinBag and BattleCardRow can react without round-tripping the REST API.
+  // Issue #673: PR-lifecycle observability bridge. Publishes onto
+  // `hydra:autopilot:slot-events` (the same stream the slot-events bridge
+  // re-broadcasts over WS) so dashboard tiles like BattleCardRow can react
+  // without round-tripping the REST API. (The sibling budget-threshold
+  // bridge was removed in #703 — it polled a dead Redis key.)
   await startObservabilityBridges();
 
   // Start digest notifications (4h summaries instead of per-event messages)
