@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { killCycle } from "../cycle.ts";
 import { sendDigestNow } from "../digest.ts";
 import { classifyChange } from "../tier-classifier.ts";
 
@@ -17,17 +16,18 @@ import { classifyChange } from "../tier-classifier.ts";
  * New routes should prefer a domain-specific sub-router. Only land here if
  * the route is genuinely orphan-operational.
  */
-export function createMiscRouter(eventBus: any) {
+export function createMiscRouter(_eventBus: any) {
   const router = Router();
 
   const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
   const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 
-  // POST /kill — Emergency stop
+  // POST /kill — Emergency stop. Writes the kill file that health.ts and
+  // service-strip.ts poll (~/hydra/.kill). The in-process control loop was
+  // removed in #383; the dead killCycle() call was stripped in #701.
   router.post("/kill", async (req, res) => {
     writeFileSync(KILL_FILE, new Date().toISOString());
-    const result = await killCycle(eventBus);
-    res.json({ ...result, killFile: KILL_FILE });
+    res.json({ killed: true, killFile: KILL_FILE });
   });
 
   // GET /tier?files=a,b,c — Modification tier classification (issue #243,
