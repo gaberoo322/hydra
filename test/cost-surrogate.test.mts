@@ -1,26 +1,24 @@
 /**
- * Regression tests for the cost-surrogate module (issue #394).
+ * Regression tests for the cost-surrogate module (issue #394, #704).
  *
  * After PR-3 (issue #383, ADR-0006) deleted `codex-runner.ts`, the only
- * writer that fed `costMicrodollars` per cycle and the cost-cap reader
- * was gone. This surrogate is the bridge that keeps the operator's
- * spend signal alive — token totals from autopilot subagents, converted
- * to USD via an operator-configurable `HYDRA_TOKEN_USD_RATE`.
+ * writer that fed `costMicrodollars` per cycle and the cost-cap reader was
+ * gone. This module keeps the operator's token signal alive — per-day /
+ * per-skill / per-cycle token totals from autopilot subagents.
+ *
+ * PR-2 (#704) stripped the dollar-conversion machinery (`tokensToUsd`,
+ * `getTokenUsdRate`, `getCycleSubagentCostUsd`, and the `costUsd` /
+ * `ratePerMillion` / `source` / `legacyRecordSpendUsd` fields plus the legacy
+ * `hydra:scheduler:daily-spend` blob read). `HYDRA_TOKEN_USD_RATE` was
+ * structurally $0 and no live dollar cap existed; the survivor is a pure token
+ * counter. The dollar-tests and source/legacy-blob tests were removed with it.
  *
  * Required behaviors locked here:
  *
- *   1. `tokensToUsd` is pure and returns 0 when the rate is 0 (the
- *      intentional safe default — operator must opt in to a rate).
- *   2. `recordSubagentTokens` increments per-day total + per-skill hash
+ *   1. `recordSubagentTokens` increments per-day total + per-skill hash
  *      + per-cycle hash atomically; subsequent reads see the rolling sum.
- *   3. `getDailySpendSurrogate` returns the correct `source` label based
- *      on which writer(s) contributed data.
- *   4. `getCycleSubagentCostUsd` reads the per-cycle hash so the cost-cap
- *      can include surrogate spend.
- *   5. `checkCostCap` integration was retired with `src/cost/cap.ts` —
- *      the per-cycle codex circuit breaker is gone (ADR-0006).
- *      the cap when the surrogate USD exceeds the threshold, even when
- *      no legacy codex `costMicrodollars` is recorded.
+ *   2. `getDailyTokenCounter` returns the per-day total + per-skill breakdown
+ *      (tokens + percentage), sorted by tokens desc.
  *
  * Requires Redis on localhost:6379. Uses DB 1 (test DB) — never touches DB 0.
  */
@@ -30,25 +28,18 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 
 process.env.REDIS_URL = "redis://localhost:6379/1";
-// Ensure tests run with a deterministic default rate (env may be set from
-// the operator's shell). Individual tests override as needed.
-delete process.env.HYDRA_TOKEN_USD_RATE;
 
 const {
-  tokensToUsd,
   recordSubagentTokens,
-  getDailySpendSurrogate,
-  getCycleSubagentCostUsd,
+  getDailyTokenCounter,
   todayDateString,
   tokensAutopilotDailyKey,
   tokensBySkillDailyKey,
   tokensByCycleKey,
-  getTokenUsdRate,
 } = await import("../src/cost/surrogate.ts");
 
-// `src/cost/cap.ts` (the per-cycle codex circuit breaker) was retired
-// in the Cost-Module consolidation PR. The cap-integration test block
-// at the end of this file was deleted with it; only the surrogate
+// `src/cost/cap.ts` (the per-cycle codex circuit breaker) and the dollar-
+// conversion machinery (#704) were both retired. Only the token-counter
 // behavior tests remain.
 
 let testRedis: any;
@@ -58,7 +49,6 @@ async function cleanKeys() {
     "hydra:metrics:tokens:autopilot:daily:*",
     "hydra:metrics:tokens:by-skill:daily:*",
     "hydra:metrics:tokens:by-cycle:*",
-    "hydra:scheduler:daily-spend",
     "hydra:cycle:*",
     "hydra:cycle:*:costs",
     "hydra:metrics:*",
@@ -77,51 +67,11 @@ before(async () => {
 
 beforeEach(async () => {
   await cleanKeys();
-  delete process.env.HYDRA_TOKEN_USD_RATE;
 });
 
 after(async () => {
   await cleanKeys();
   await testRedis.quit();
-});
-
-describe("tokensToUsd (pure)", () => {
-  test("returns 0 when rate is 0 (the safe default)", () => {
-    assert.equal(tokensToUsd(1_000_000, 0), 0);
-    assert.equal(tokensToUsd(0, 0), 0);
-  });
-
-  test("converts tokens via per-million rate", () => {
-    // $3 per million → 500_000 tokens = $1.50
-    assert.equal(tokensToUsd(500_000, 3), 1.5);
-    // $0.30 per million → 1.5M tokens ≈ $0.45 (float precision tolerated)
-    assert.ok(Math.abs(tokensToUsd(1_500_000, 0.3) - 0.45) < 1e-9);
-  });
-
-  test("rejects non-finite/negative inputs by clamping to 0", () => {
-    assert.equal(tokensToUsd(NaN, 5), 0);
-    assert.equal(tokensToUsd(-100, 5), 0);
-    assert.equal(tokensToUsd(100, -1), 0);
-    assert.equal(tokensToUsd(100, NaN), 0);
-  });
-
-  test("re-reads HYDRA_TOKEN_USD_RATE from env on each call", () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "5";
-    assert.equal(getTokenUsdRate(), 5);
-    assert.equal(tokensToUsd(1_000_000), 5);
-    process.env.HYDRA_TOKEN_USD_RATE = "10";
-    assert.equal(tokensToUsd(1_000_000), 10);
-    delete process.env.HYDRA_TOKEN_USD_RATE;
-    assert.equal(tokensToUsd(1_000_000), 0);
-  });
-
-  test("invalid rate string falls back to 0 (no spurious cap trips)", () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "not-a-number";
-    assert.equal(getTokenUsdRate(), 0);
-    process.env.HYDRA_TOKEN_USD_RATE = "-5";
-    assert.equal(getTokenUsdRate(), 0);
-    delete process.env.HYDRA_TOKEN_USD_RATE;
-  });
 });
 
 describe("recordSubagentTokens + read path", () => {
@@ -187,28 +137,21 @@ describe("recordSubagentTokens + read path", () => {
   });
 });
 
-describe("getDailySpendSurrogate", () => {
-  test("returns source=none with zero spend when no writers fired", async () => {
-    const snap = await getDailySpendSurrogate("2026-05-16");
-    assert.equal(snap.source, "none");
+describe("getDailyTokenCounter", () => {
+  test("returns zero tokens + empty breakdown when no writers fired", async () => {
+    const snap = await getDailyTokenCounter("2026-05-16");
+    assert.equal(snap.date, "2026-05-16");
     assert.equal(snap.tokens, 0);
-    assert.equal(snap.costUsd, 0);
     assert.deepEqual(snap.bySkill, []);
   });
 
-  test("source=autopilot-surrogate when only the token writer fired", async () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "3";
+  test("aggregates the per-day total and per-skill breakdown", async () => {
     const date = "2026-05-16";
     await recordSubagentTokens("hydra-dev", 500_000, { date });
     await recordSubagentTokens("hydra-qa", 100_000, { date });
 
-    const snap = await getDailySpendSurrogate(date);
-    assert.equal(snap.source, "autopilot-surrogate");
+    const snap = await getDailyTokenCounter(date);
     assert.equal(snap.tokens, 600_000);
-    // 600k tokens × $3/M = $1.80
-    assert.equal(snap.costUsd, 1.8);
-    assert.equal(snap.ratePerMillion, 3);
-    assert.equal(snap.legacyRecordSpendUsd, 0);
 
     // bySkill sorted by tokens desc, with correct percentages.
     assert.equal(snap.bySkill.length, 2);
@@ -217,77 +160,6 @@ describe("getDailySpendSurrogate", () => {
     assert.equal(snap.bySkill[0].pct, 83.33);
     assert.equal(snap.bySkill[1].skill, "hydra-qa");
     assert.equal(snap.bySkill[1].tokens, 100_000);
-  });
-
-  test("source=codex-recorded when only legacy daily-spend has data", async () => {
-    const date = "2026-05-16";
-    await testRedis.set(
-      "hydra:scheduler:daily-spend",
-      JSON.stringify({ date, usd: 4.25, updatedAt: new Date().toISOString() }),
-    );
-
-    const snap = await getDailySpendSurrogate(date);
-    assert.equal(snap.source, "codex-recorded");
-    assert.equal(snap.legacyRecordSpendUsd, 4.25);
-    assert.equal(snap.tokens, 0);
-    assert.equal(snap.costUsd, 0);
-  });
-
-  test("source=mixed when both writers contributed", async () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "2";
-    const date = "2026-05-16";
-    await recordSubagentTokens("hydra-dev", 1_000_000, { date });
-    await testRedis.set(
-      "hydra:scheduler:daily-spend",
-      JSON.stringify({ date, usd: 0.50, updatedAt: new Date().toISOString() }),
-    );
-
-    const snap = await getDailySpendSurrogate(date);
-    assert.equal(snap.source, "mixed");
-    assert.equal(snap.tokens, 1_000_000);
-    assert.equal(snap.costUsd, 2);
-    assert.equal(snap.legacyRecordSpendUsd, 0.5);
-  });
-
-  test("legacy blob from a different date is ignored", async () => {
-    const date = "2026-05-16";
-    await testRedis.set(
-      "hydra:scheduler:daily-spend",
-      JSON.stringify({ date: "2026-05-15", usd: 99.99 }),
-    );
-    const snap = await getDailySpendSurrogate(date);
-    assert.equal(snap.legacyRecordSpendUsd, 0);
-    assert.equal(snap.source, "none");
+    assert.equal(snap.bySkill[1].pct, 16.67);
   });
 });
-
-describe("getCycleSubagentCostUsd", () => {
-  test("returns 0 when no tokens recorded for the cycle", async () => {
-    const r = await getCycleSubagentCostUsd("nonexistent-cycle");
-    assert.equal(r.tokens, 0);
-    assert.equal(r.costUsd, 0);
-  });
-
-  test("returns tokens × rate when cycle tokens recorded", async () => {
-    process.env.HYDRA_TOKEN_USD_RATE = "4";
-    const cycleId = "cycle-abc";
-    await recordSubagentTokens("hydra-dev", 250_000, { cycleId });
-    const r = await getCycleSubagentCostUsd(cycleId);
-    assert.equal(r.tokens, 250_000);
-    // 250k × $4/M = $1
-    assert.equal(r.costUsd, 1);
-    assert.equal(r.ratePerMillion, 4);
-  });
-
-  test("empty cycleId is a no-op safe", async () => {
-    const r = await getCycleSubagentCostUsd("");
-    assert.equal(r.tokens, 0);
-    assert.equal(r.costUsd, 0);
-  });
-});
-
-// The cost-cap integration block (3 tests) was retired with
-// `src/cost/cap.ts`. The dollar-based per-cycle cap surfaced the
-// codex-era circuit breaker; codex is gone (ADR-0006), and the
-// Subscription Usage Tracker now owns Anthropic-quota gating (PR A/B
-// series — exercised by `test/usage-tracker.test.mts`).

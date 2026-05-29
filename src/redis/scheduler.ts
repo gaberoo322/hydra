@@ -234,19 +234,11 @@ export async function setSchedulerStateRaw(payload: string): Promise<void> {
   await r.set(redisKeys.schedulerState(), payload);
 }
 
-/**
- * Read the raw daily-spend JSON blob, or null when unset.
- *
- * NOTE (#703): `hydra:scheduler:daily-spend` has no live writer — the
- * `setDailySpendRaw` companion and the budget-threshold bridge that polled
- * this key were deleted. This reader survives only because the Tier-0
- * `src/cost/surrogate.ts` legacy back-compat path still reads it; that
- * consumer (and this accessor) is slated for removal in PR-2 (#704).
- */
-export async function getDailySpendRaw(): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.schedulerDailySpend());
-}
+// `getDailySpendRaw` + the `hydra:scheduler:daily-spend` key were removed in
+// #704. The key had no live writer (its writer + budget-threshold bridge were
+// deleted in #703) and its sole reader was the `src/cost/surrogate.ts` legacy
+// back-compat path, which #704 also removed. The live cost guardrail is
+// `src/cost/usage-tracker.ts`.
 
 // ---------------------------------------------------------------------------
 // Deliberate-stop flag (issue #388 — survives a 24h restart window)
