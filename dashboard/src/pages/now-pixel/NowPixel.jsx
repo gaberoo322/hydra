@@ -31,15 +31,13 @@ function formatMoney(n) {
 
 /**
  * CoinBag — daily token-burn tile. Polls `/api/now/cost-burn` every 30s
- * for the steady-state spend/budget figures, AND (issue #673) subscribes
- * to the `slot-event` WS stream for `budget_threshold` frames so the tile
- * can flash when the autopilot crosses a 50%/75%/90% threshold.
+ * for the steady-state spend/budget figures.
  *
- * The flash is a one-shot 1.2s animation on the 💰 emoji — long enough
- * to be noticed during a board-watch, short enough to not annoy. Driven
- * by a CSS class toggle (not by re-rendering every frame).
+ * The `budget_threshold` WS flash (issue #673) was removed in #703 along
+ * with the dead budget-threshold bridge that emitted those frames — the
+ * bridge polled a Redis key with no live writer and never fired.
  */
-function CoinBag({ ws }) {
+function CoinBag() {
   const { data } = useApi("/now/cost-burn", { poll: 30_000 });
   const spent = formatMoney(Number(data?.daySpent ?? 0));
   const budget = formatMoney(Number(data?.dailyBudget ?? 0));
@@ -52,58 +50,17 @@ function CoinBag({ ws }) {
   const spark = Array.isArray(data?.lastHourSpark) ? data.lastHourSpark : [];
   const [r5h, r24h] = [Number(spark[0] ?? 0), Number(spark[1] ?? 0)];
 
-  // Issue #673: one-shot flash on `budget_threshold` slot-events.
-  const [flashing, setFlashing] = useState(false);
-  const [lastThreshold, setLastThreshold] = useState(null);
-  const flashTimerRef = useRef(null);
-  useEffect(() => {
-    if (!ws || typeof ws.subscribe !== "function") return undefined;
-    const off = ws.subscribe("slot-event", (frame) => {
-      const event = frame?.payload?.event;
-      if (event !== "budget_threshold") return;
-      const threshold = Number(frame?.payload?.threshold);
-      if (Number.isFinite(threshold)) setLastThreshold(threshold);
-      setFlashing(true);
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-      flashTimerRef.current = setTimeout(() => {
-        setFlashing(false);
-        flashTimerRef.current = null;
-      }, 1200);
-    });
-    return () => {
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-      off?.();
-    };
-  }, [ws]);
-
   return (
     <section
-      className={
-        "rounded-lg border border-zinc-800 bg-zinc-950 p-3 flex items-center gap-3 transition-shadow" +
-        (flashing ? " ring-2 ring-amber-400 shadow-[0_0_24px_rgba(251,191,36,0.6)]" : "")
-      }
+      className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 flex items-center gap-3"
       data-testid="coin-bag"
-      data-flashing={flashing ? "1" : "0"}
-      data-last-threshold={lastThreshold ?? ""}
     >
-      <div
-        style={{
-          fontSize: 22,
-          transform: flashing ? "scale(1.25)" : "scale(1)",
-          transition: "transform 200ms",
-        }}
-        aria-hidden
-      >
+      <div style={{ fontSize: 22 }} aria-hidden>
         💰
       </div>
       <div className="flex-1 min-w-0">
         <div className="text-[10px] uppercase tracking-wide text-zinc-500">
           Coin bag — daily burn
-          {lastThreshold ? (
-            <span className="ml-2 text-amber-300">
-              budget {lastThreshold}% crossed
-            </span>
-          ) : null}
         </div>
         <div className="text-sm text-zinc-100 font-mono">
           {spent} <span className="text-zinc-500">/ {budget}</span>
@@ -185,7 +142,7 @@ export default function NowPixel({ ws }) {
         </p>
       </header>
       <AutopilotPavilion spriteRef={pavilionSpriteRef} />
-      <CoinBag ws={ws} />
+      <CoinBag />
       <div className="flex gap-4 items-stretch">
         <div className="flex-1 min-w-0">
           <HabitatGrid

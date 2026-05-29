@@ -234,16 +234,18 @@ export async function setSchedulerStateRaw(payload: string): Promise<void> {
   await r.set(redisKeys.schedulerState(), payload);
 }
 
-/** Read the raw daily-spend JSON blob, or null when unset. */
+/**
+ * Read the raw daily-spend JSON blob, or null when unset.
+ *
+ * NOTE (#703): `hydra:scheduler:daily-spend` has no live writer — the
+ * `setDailySpendRaw` companion and the budget-threshold bridge that polled
+ * this key were deleted. This reader survives only because the Tier-0
+ * `src/cost/surrogate.ts` legacy back-compat path still reads it; that
+ * consumer (and this accessor) is slated for removal in PR-2 (#704).
+ */
 export async function getDailySpendRaw(): Promise<string | null> {
   const r = getRedisConnection();
   return r.get(redisKeys.schedulerDailySpend());
-}
-
-/** Write the raw daily-spend JSON blob. */
-export async function setDailySpendRaw(payload: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.schedulerDailySpend(), payload);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,45 +271,11 @@ export async function clearSchedulerDeliberateStop(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Budget-threshold idempotency (issue #673)
+// Budget-threshold idempotency (issue #673) accessors removed in #703 together
+// with the dead budget-threshold bridge that was their only consumer. The
+// bridge polled `hydra:scheduler:daily-spend` (no live writer) and never
+// emitted an event. The live cost guardrail is `src/cost/usage-tracker.ts`.
 // ---------------------------------------------------------------------------
-
-/**
- * Atomically claim a budget-threshold crossing. Uses SET NX EX so the first
- * caller for a (date, thresholdPct) pair wins and every subsequent caller
- * for the rest of the TTL window is a no-op.
- *
- * Returns true when the caller is the FIRST to cross this threshold today
- * (i.e. the caller should emit the event), false otherwise.
- */
-export async function claimBudgetThresholdSeen(
-  isoDate: string,
-  thresholdPct: number,
-  ttlSeconds: number,
-): Promise<boolean> {
-  const r = getRedisConnection();
-  const key = redisKeys.budgetThresholdSeen(isoDate, thresholdPct);
-  const result = await r.set(key, Date.now().toString(), "NX", "EX", ttlSeconds);
-  return result === "OK";
-}
-
-/** Read the budget-threshold sentinel, or null when absent. Exposed for tests. */
-export async function getBudgetThresholdSeen(
-  isoDate: string,
-  thresholdPct: number,
-): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.budgetThresholdSeen(isoDate, thresholdPct));
-}
-
-/** Test helper: wipe a single budget-threshold sentinel. */
-export async function _clearBudgetThresholdSeen(
-  isoDate: string,
-  thresholdPct: number,
-): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.budgetThresholdSeen(isoDate, thresholdPct));
-}
 
 // ---------------------------------------------------------------------------
 // Blocked-issue escalation cooldown (per-item timestamp hash)

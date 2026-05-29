@@ -344,12 +344,13 @@ export function createMetricsRouter() {
   // GET /metrics/cost — Daily spend surrogate (issue #394).
   //
   // After #383 deleted codex-runner.ts, the legacy `recordSpend()` writer
-  // stopped feeding `hydra:scheduler:daily-spend` for code-writing work.
-  // This endpoint surfaces the token-based surrogate populated by autopilot
-  // subagents (writers post to /metrics/tokens, scheduler.ts still writes
-  // research-loop spend to the legacy key for back-compat). The `source`
-  // field tells the dashboard which writer(s) contributed so the operator
-  // can tell real billed spend from surrogate inflation.
+  // stopped feeding `hydra:scheduler:daily-spend` for code-writing work, and
+  // #703 removed the last remaining writers entirely (the dead
+  // budget-threshold bridge + `setDailySpendRaw`). This endpoint surfaces the
+  // token-based surrogate populated by autopilot subagents (writers post to
+  // /metrics/tokens). The `source` field tells the dashboard which writer(s)
+  // contributed so the operator can tell real billed spend from surrogate
+  // inflation.
   router.get("/metrics/cost", async (req, res) => {
     try {
       const dateRaw = req.query.date;
