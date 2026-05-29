@@ -6,7 +6,7 @@ import { createApi } from "./api.ts";
 import { createTracker, getTracker } from "./task-tracker.ts";
 import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule } from "./cleanup.ts";
-import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/loop.ts";
+import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
 import { startDigest, stopDigest, recordEvent } from "./digest.ts";
 import { initLearning } from "./learning.ts";
 import { pushAlert } from "./redis/alerts.ts";
@@ -16,6 +16,10 @@ import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
 import { startRecommendationConsumer } from "./autopilot/recommendation-engine.ts";
+import {
+  startPrLifecycleBridge,
+  type PrLifecycleBridge,
+} from "./autopilot/pr-lifecycle-bridge.ts";
 
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
@@ -170,6 +174,34 @@ function startConsumers(eventBus) {
 }
 
 // ---------------------------------------------------------------------------
+// Autopilot observability bridges (issue #673) — module-level handles so the
+// SIGTERM shutdown sequence can stop them cleanly. Polling bridges, not
+// XREADGROUP consumers, so they live outside startConsumersWithRecovery.
+//
+// The budget-threshold bridge was removed in #703 — it polled the dead
+// `hydra:scheduler:daily-spend` key (no live writer) and never emitted an
+// event. The live cost guardrail is `src/cost/usage-tracker.ts`.
+// ---------------------------------------------------------------------------
+let _prLifecycleBridge: PrLifecycleBridge | null = null;
+
+async function startObservabilityBridges(): Promise<void> {
+  try {
+    _prLifecycleBridge = await startPrLifecycleBridge();
+  } catch (err: any) {
+    console.error(`[Hydra] pr-lifecycle-bridge failed to start: ${err?.message || err}`);
+  }
+}
+
+function stopObservabilityBridges(): void {
+  if (_prLifecycleBridge) {
+    try { _prLifecycleBridge.stop(); } catch (err: any) {
+      console.error(`[Hydra] pr-lifecycle-bridge stop failed: ${err?.message || err}`);
+    }
+    _prLifecycleBridge = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -234,6 +266,13 @@ async function main() {
 
   // Start background consumers (notifications, meta, DLQ)
   startConsumers(eventBus);
+
+  // Issue #673: PR-lifecycle observability bridge. Publishes onto
+  // `hydra:autopilot:slot-events` (the same stream the slot-events bridge
+  // re-broadcasts over WS) so dashboard tiles like BattleCardRow can react
+  // without round-tripping the REST API. (The sibling budget-threshold
+  // bridge was removed in #703 — it polled a dead Redis key.)
+  await startObservabilityBridges();
 
   // Start digest notifications (4h summaries instead of per-event messages)
   startDigest();
@@ -333,6 +372,7 @@ async function main() {
     // restart the service and autoStart() will resume the scheduler. Writing
     // a deliberate-stop marker here would defeat that.
     await stopScheduler({ reason: "shutdown" });
+    stopObservabilityBridges();
     eventBus.stopConsuming();
     clearInterval(heartbeat);
     for (const ws of wss.clients) ws.close(1001, "server shutting down");

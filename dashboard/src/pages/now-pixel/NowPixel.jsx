@@ -29,6 +29,14 @@ function formatMoney(n) {
   return `$${n.toFixed(2)}`;
 }
 
+/**
+ * CoinBag — daily token-burn tile. Polls `/api/now/cost-burn` every 30s
+ * for the steady-state spend/budget figures.
+ *
+ * The `budget_threshold` WS flash (issue #673) was removed in #703 along
+ * with the dead budget-threshold bridge that emitted those frames — the
+ * bridge polled a Redis key with no live writer and never fired.
+ */
 function CoinBag() {
   const { data } = useApi("/now/cost-burn", { poll: 30_000 });
   const spent = formatMoney(Number(data?.daySpent ?? 0));
@@ -41,6 +49,7 @@ function CoinBag() {
     headroom > 50 ? "#22c55e" : headroom > 25 ? "#facc15" : "#dc2626";
   const spark = Array.isArray(data?.lastHourSpark) ? data.lastHourSpark : [];
   const [r5h, r24h] = [Number(spark[0] ?? 0), Number(spark[1] ?? 0)];
+
   return (
     <section
       className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 flex items-center gap-3"

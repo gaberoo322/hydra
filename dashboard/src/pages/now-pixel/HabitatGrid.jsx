@@ -65,6 +65,39 @@ export default function HabitatGrid({
     }
   }, [zoneState.zones, anim]);
 
+  // Reaping fade (issue #661): when a pipeline slot's subagent disappears
+  // (slotsSnapshot[cls] goes from object → null), keep the LAST subagent
+  // payload mounted for REAPING_DURATION_MS so <ReapingFade /> can render
+  // the 800ms fade-out + status icon. Tracked in a ref because we don't
+  // need re-renders for the bookkeeping itself — `anim.reaping` from the
+  // hook drives the actual render.
+  const prevSubagentsRef = useRef({});
+  const reapingSubagentsRef = useRef({});
+  useEffect(() => {
+    if (!anim?.fireReaping) {
+      // No animation harness wired up (e.g. tests) — just track prev
+      // for the next pass so we don't trigger spurious transitions.
+      prevSubagentsRef.current = { ...slotsSnapshot };
+      return;
+    }
+    const allClasses = new Set([
+      ...Object.keys(prevSubagentsRef.current),
+      ...Object.keys(slotsSnapshot),
+    ]);
+    for (const cls of allClasses) {
+      const prev = prevSubagentsRef.current[cls];
+      const curr = slotsSnapshot[cls];
+      if (prev && !curr) {
+        // Occupied → null. Capture the last subagent payload for the
+        // fade-out render, then trigger fireReaping with the status
+        // remembered from the last subagent_stop slot-event.
+        reapingSubagentsRef.current[cls] = prev;
+        anim.fireReaping(cls);
+      }
+    }
+    prevSubagentsRef.current = { ...slotsSnapshot };
+  }, [slotsSnapshot, anim]);
+
   // Thinking-state — slot occupied ≥30s with no partial_tokens delta.
   // We tick the same 1Hz `now` clock above for cooldowns so the
   // derivation re-runs cheaply on every second the page is open. The
@@ -109,6 +142,17 @@ export default function HabitatGrid({
   const subagentFor = (cls) => slotsSnapshot[cls] ?? null;
   const cooldownFor = (cls) =>
     deriveCooldown(cls, Number(signalsSnapshot[cls] ?? 0), now);
+
+  // Reaping (#661): expose the last subagent + its reap status when the
+  // hook reports `cls` is mid-fade. HabitatZone wraps a SubagentSprite
+  // in <ReapingFade /> using these props.
+  const reapingFor = (cls) => {
+    const status = anim?.reaping?.[cls];
+    if (!status) return null;
+    const subagent = reapingSubagentsRef.current[cls];
+    if (!subagent) return null;
+    return { subagent, status };
+  };
 
   const sharedZoneProps = {
     hoveredSubagentId,
@@ -183,6 +227,7 @@ export default function HabitatGrid({
                   signalSeed={zoneState.signalSeeds[cls] ?? null}
                   animation={animFor(cls)}
                   subagent={subagentFor(cls)}
+                  reaping={reapingFor(cls)}
                   {...sharedZoneProps}
                 />,
               ),
@@ -237,6 +282,7 @@ export default function HabitatGrid({
                   signalSeed={zoneState.signalSeeds[cls] ?? null}
                   animation={animFor(cls)}
                   subagent={subagentFor(cls)}
+                  reaping={reapingFor(cls)}
                   {...sharedZoneProps}
                 />,
               ),

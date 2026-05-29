@@ -40,6 +40,14 @@ const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 const RESEARCH_THRESHOLD = 0.5; // when no candidate scores >= this, recommend research
 const RECENT_UNBLOCK_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24h
+// In-flight PR freshness window (issue #640). When an inProgress backlog item
+// carries a `claimedBy = "pr-<number>"` marker that was claimed within this
+// window, the candidate is hidden from /api/anchor/candidates by default so
+// decide.py doesn't re-dispatch dev_target onto an anchor whose PR is still
+// awaiting CI + merge. 30 min covers the typical CI + operator-merge window
+// for a target PR while still surfacing genuinely stuck items (operator left
+// a PR open overnight → item resurfaces the next day → ready to retry).
+const IN_FLIGHT_PR_FRESHNESS_MS = 30 * 60 * 1000; // 30 min
 
 interface CandidateBase {
   /**
@@ -108,8 +116,13 @@ export function createAnchorRouter() {
       const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
         ? Math.min(requestedLimit, MAX_LIMIT)
         : DEFAULT_LIMIT;
+      // Issue #640 — exclude inProgress items with a fresh `pr-<n>` claim.
+      // Defaults to true (the safer behaviour for decide.py / dev_target
+      // dispatch); callers that need the raw view can pass excludeInFlight=false.
+      const excludeInFlight = String(req.query.excludeInFlight ?? "true").toLowerCase() !== "false";
 
       const candidates: CandidateBase[] = [];
+      let inFlightSuppressed = 0;
       const now = Date.now();
 
       // ---------------------------------------------------------------------
@@ -127,6 +140,10 @@ export function createAnchorRouter() {
         for (const [lane, tier] of kanbanLanes) {
           const items = (lanes as any)[lane] || [];
           for (const item of items) {
+            if (excludeInFlight && isInFlightPR(item, now)) {
+              inFlightSuppressed++;
+              continue;
+            }
             const blocker = isBlockerJustCleared(item, now);
             candidates.push({
               issue: item.id,
@@ -272,6 +289,7 @@ export function createAnchorRouter() {
         candidates: top,
         research_recommended,
         total_evaluated: scored.length,
+        in_flight_suppressed: inFlightSuppressed,
         generated_at: new Date().toISOString(),
       });
     } catch (err: any) {
@@ -286,6 +304,30 @@ export function createAnchorRouter() {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Detect an in-flight PR claim on a backlog item (issue #640).
+ *
+ * When `hydra-target-build` (or any code-writing skill) opens a PR for a
+ * kanban anchor, the convention is to mark the item with
+ * `claimedBy = "pr-<number>"` so the next decide.py tick doesn't re-dispatch
+ * onto the same just-shipped work. We honour that marker here regardless of
+ * whether the claim was set via PATCH /backlog/:id/move or via the older
+ * /backlog/claim atomic route.
+ *
+ * "Fresh" is bounded by IN_FLIGHT_PR_FRESHNESS_MS so a PR that's been sitting
+ * open for hours (e.g. operator forgot to merge overnight) eventually
+ * surfaces again — the anchor wasn't actually shipped, just claimed.
+ */
+function isInFlightPR(item: any, now: number): boolean {
+  if (!item?.claimedBy) return false;
+  if (typeof item.claimedBy !== "string") return false;
+  if (!item.claimedBy.startsWith("pr-")) return false;
+  if (!item.claimedAt) return false;
+  const claimedAt = new Date(item.claimedAt).getTime();
+  if (!Number.isFinite(claimedAt)) return false;
+  return (now - claimedAt) < IN_FLIGHT_PR_FRESHNESS_MS;
+}
 
 /**
  * Detect a recently-cleared blocker. A backlog item is "blocker just cleared"

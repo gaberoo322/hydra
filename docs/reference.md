@@ -72,7 +72,7 @@ Consumer groups: meta, orchestrator, telegram, dlq-processor. WebSocket broadcas
 
 Routes are split into domain sub-routers in `src/api/`. Each file exports a `create*Router(eventBus?)` factory.
 
-**Cycles** (`api/cycles.ts`): POST /cycle/start, GET /cycle/status, GET /cycle/history, GET /cycle/report, POST /cycle/register, POST /cycle/complete
+**Cycles** (`api/cycles.ts`): GET /cycle/status, GET /cycle/history, GET /cycle/report, POST /cycle/register, POST /cycle/complete
 **Tasks** (`api/tasks.ts`): GET /tasks, GET /tasks/:id, GET /tasks/:id/evidence
 **Queue** (`api/queue.ts`): POST /queue `{reference, reason, context}`, GET /queue
 **Scheduler** (`api/scheduler.ts`): POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status

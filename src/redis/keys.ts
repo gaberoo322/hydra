@@ -126,7 +126,10 @@ export const redisKeys = {
   // Scheduler
   // ---------------------------------------------------------------------------
   schedulerState: () => "hydra:scheduler:state",
-  schedulerDailySpend: () => "hydra:scheduler:daily-spend",
+  // `schedulerDailySpend` (`hydra:scheduler:daily-spend`) removed in #704: its
+  // writer + budget-threshold bridge were deleted in #703, and its sole
+  // surviving reader (`src/cost/surrogate.ts` legacy back-compat path) was
+  // removed in #704. The live cost guardrail is `src/cost/usage-tracker.ts`.
   schedulerResearchEvents: () => "hydra:scheduler:research-events",
   schedulerBuildEvents: () => "hydra:scheduler:build-events",
   schedulerResearchForceOnce: () => "hydra:scheduler:research-force-once",
@@ -141,14 +144,14 @@ export const redisKeys = {
   // itself if start() is never called explicitly.
   schedulerDeliberateStop: () => "hydra:scheduler:deliberate-stop",
 
-  // Research capacity floor (issue #327) — sibling of #245 (self-improvement
-  // floor) and #308 (spec capacity-floor). Tracks how often the floor fires,
-  // when it last fired, the empty-result streak, and the suppression deadline
-  // applied after two consecutive forced-empty cycles.
-  researchFloorStats: () => "hydra:scheduler:research-floor:stats",
-  researchFloorLastTriggeredAt: () => "hydra:scheduler:research-floor:last-triggered-at",
-  researchFloorEmptyStreak: () => "hydra:scheduler:research-floor:empty-streak",
-  researchFloorSuppressedUntil: () => "hydra:scheduler:research-floor:suppressed-until",
+  // Issue #673 budget-threshold idempotency sentinel removed in #703 along
+  // with the dead budget-threshold bridge that wrote it. The bridge polled
+  // `hydra:scheduler:daily-spend` (no live writer) and never emitted.
+
+  // Research capacity-floor keys (issue #327) were removed in #706 (scheduler
+  // fold PR-1/4) together with the research-decision plane that read/wrote
+  // them. Residual `hydra:scheduler:research-floor:*` keys are no longer read
+  // or written.
 
   // ---------------------------------------------------------------------------
   // Tool Scout (issue #484)

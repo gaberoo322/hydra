@@ -312,4 +312,7 @@ All changes to `master` go through a PR; branch protection enforces CI passing b
 
 ## License
 
-UNLICENSED
+[GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0-only). The AGPL's
+network-use clause (§13) is deliberate: anyone who runs a modified Hydra as a
+network service must offer their source to its users, which is the strongest
+copyleft protection for a server-side autonomous system.

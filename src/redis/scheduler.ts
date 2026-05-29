@@ -234,17 +234,11 @@ export async function setSchedulerStateRaw(payload: string): Promise<void> {
   await r.set(redisKeys.schedulerState(), payload);
 }
 
-/** Read the raw daily-spend JSON blob, or null when unset. */
-export async function getDailySpendRaw(): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.schedulerDailySpend());
-}
-
-/** Write the raw daily-spend JSON blob. */
-export async function setDailySpendRaw(payload: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.schedulerDailySpend(), payload);
-}
+// `getDailySpendRaw` + the `hydra:scheduler:daily-spend` key were removed in
+// #704. The key had no live writer (its writer + budget-threshold bridge were
+// deleted in #703) and its sole reader was the `src/cost/surrogate.ts` legacy
+// back-compat path, which #704 also removed. The live cost guardrail is
+// `src/cost/usage-tracker.ts`.
 
 // ---------------------------------------------------------------------------
 // Deliberate-stop flag (issue #388 — survives a 24h restart window)
@@ -267,6 +261,13 @@ export async function clearSchedulerDeliberateStop(): Promise<void> {
   const r = getRedisConnection();
   await r.del(redisKeys.schedulerDeliberateStop());
 }
+
+// ---------------------------------------------------------------------------
+// Budget-threshold idempotency (issue #673) accessors removed in #703 together
+// with the dead budget-threshold bridge that was their only consumer. The
+// bridge polled `hydra:scheduler:daily-spend` (no live writer) and never
+// emitted an event. The live cost guardrail is `src/cost/usage-tracker.ts`.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Blocked-issue escalation cooldown (per-item timestamp hash)
@@ -309,73 +310,8 @@ export async function setMemoryLastConsolidation(value: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Research floor (issue #84) — empty-streak + suppression-until + stats
+// Research floor (issue #84/#327) accessors removed in #706 (scheduler fold
+// PR-1/4) together with the research-decision plane that was their only
+// consumer. The research-force policy now lives in the autopilot brain
+// (`scripts/autopilot/decide.py` `_research_force_allowed`).
 // ---------------------------------------------------------------------------
-
-/** Atomic INCR returning new streak length. */
-export async function incrResearchFloorEmptyStreak(): Promise<number> {
-  const r = getRedisConnection();
-  return r.incr(redisKeys.researchFloorEmptyStreak());
-}
-
-export async function resetResearchFloorEmptyStreak(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.researchFloorEmptyStreak());
-}
-
-export async function getResearchFloorEmptyStreak(): Promise<number> {
-  const r = getRedisConnection();
-  const raw = await r.get(redisKeys.researchFloorEmptyStreak());
-  if (!raw) return 0;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
-export async function setResearchFloorSuppressedUntilMs(deadlineMs: number): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.researchFloorSuppressedUntil(), String(deadlineMs));
-}
-
-export async function getResearchFloorSuppressedUntilMs(): Promise<number | null> {
-  const r = getRedisConnection();
-  const raw = await r.get(redisKeys.researchFloorSuppressedUntil());
-  if (!raw) return null;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-export async function clearResearchFloorSuppressedUntil(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.researchFloorSuppressedUntil());
-}
-
-export async function incrResearchFloorStat(name: string, by: number): Promise<void> {
-  const r = getRedisConnection();
-  await r.hincrby(redisKeys.researchFloorStats(), name, by);
-}
-
-export async function setResearchFloorLastTriggeredAt(iso: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.researchFloorLastTriggeredAt(), iso);
-}
-
-export async function getResearchFloorStatsHash(): Promise<Record<string, string>> {
-  const r = getRedisConnection();
-  return r.hgetall(redisKeys.researchFloorStats());
-}
-
-export async function getResearchFloorLastTriggeredAt(): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.researchFloorLastTriggeredAt());
-}
-
-/** Test helper: wipe all research-floor state. */
-export async function _resetAllResearchFloorState(): Promise<void> {
-  const r = getRedisConnection();
-  await Promise.all([
-    r.del(redisKeys.researchFloorStats()),
-    r.del(redisKeys.researchFloorLastTriggeredAt()),
-    r.del(redisKeys.researchFloorEmptyStreak()),
-    r.del(redisKeys.researchFloorSuppressedUntil()),
-  ]);
-}

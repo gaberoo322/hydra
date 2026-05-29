@@ -371,6 +371,99 @@ describe("GET /anchor/candidates — endpoint integration (#424)", () => {
     assert.equal(res._body.total_evaluated, 5);
   });
 
+  test("in-flight PR claim suppresses inProgress candidate by default (#640)", async () => {
+    // Seed two backlog items, then claim one with a fresh pr-<n> marker
+    // simulating hydra-target-build opening a PR for it. The endpoint
+    // should hide that anchor and surface only the other one.
+    await backlogAdmin.addToBacklog({ title: "Shipped item — PR open", lane: "queued", priority: 1 });
+    await backlogAdmin.addToBacklog({ title: "Free anchor", lane: "queued", priority: 1 });
+
+    // Move the shipped one to inProgress with a pr-<n> claim — this is the
+    // marker dev_target sets at PR-open time.
+    const moved = await backlogAdmin.moveToInProgress("Shipped item — PR open", {
+      claimedBy: "pr-27",
+    });
+    assert.ok(moved === true || moved?.ok === true, "shipped item should move to inProgress");
+
+    const router = createAnchorRouter();
+    const handler = findHandler(router, "GET", "/anchor/candidates");
+    const req = mockReq();
+    const res = mockRes();
+    await handler(req, res);
+
+    // The shipped item should be suppressed; only the free anchor remains.
+    const titles = res._body.candidates.map((c: any) => c.title);
+    assert.ok(!titles.includes("Shipped item — PR open"),
+      `in-flight PR candidate must be suppressed, got: ${JSON.stringify(titles)}`);
+    assert.ok(titles.includes("Free anchor"),
+      "the un-claimed anchor must still surface");
+    assert.equal(res._body.in_flight_suppressed, 1,
+      "endpoint must report how many candidates were hidden");
+  });
+
+  test("excludeInFlight=false surfaces in-flight PR candidates anyway (#640 escape hatch)", async () => {
+    // Same seed, but the operator (or a debugging API consumer) asks for
+    // the raw view so they can see what would otherwise be suppressed.
+    await backlogAdmin.addToBacklog({ title: "Shipped item B", lane: "queued", priority: 1 });
+    await backlogAdmin.moveToInProgress("Shipped item B", { claimedBy: "pr-99" });
+
+    const router = createAnchorRouter();
+    const handler = findHandler(router, "GET", "/anchor/candidates");
+    const req = mockReq({ excludeInFlight: "false" });
+    const res = mockRes();
+    await handler(req, res);
+
+    const titles = res._body.candidates.map((c: any) => c.title);
+    assert.ok(titles.includes("Shipped item B"),
+      `excludeInFlight=false must surface in-flight PRs, got: ${JSON.stringify(titles)}`);
+    assert.equal(res._body.in_flight_suppressed, 0,
+      "when excludeInFlight=false the suppression counter must be zero");
+  });
+
+  test("stale PR claim (>30 min old) is NOT suppressed (#640 freshness window)", async () => {
+    // A claim older than IN_FLIGHT_PR_FRESHNESS_MS should let the anchor
+    // surface again — the operator likely abandoned the PR or it's stuck
+    // overnight, in which case re-dispatching is the right behaviour.
+    const added = await backlogAdmin.addToBacklog({ title: "Stale PR claim", lane: "queued" });
+    await backlogAdmin.moveToInProgress("Stale PR claim", { claimedBy: "pr-1" });
+
+    // Rewrite claimedAt to be 2 hours ago to simulate a long-running PR.
+    const rawKey = `hydra:backlog:items`;
+    const raw = await redis.hget(rawKey, String(added.id));
+    const item = JSON.parse(raw);
+    item.claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    await redis.hset(rawKey, String(added.id), JSON.stringify(item));
+
+    const router = createAnchorRouter();
+    const handler = findHandler(router, "GET", "/anchor/candidates");
+    const req = mockReq();
+    const res = mockRes();
+    await handler(req, res);
+
+    const titles = res._body.candidates.map((c: any) => c.title);
+    assert.ok(titles.includes("Stale PR claim"),
+      `stale PR claim should re-surface, got: ${JSON.stringify(titles)}`);
+    assert.equal(res._body.in_flight_suppressed, 0);
+  });
+
+  test("non-PR claimedBy (e.g. 'claude') does not trigger suppression", async () => {
+    // claimedBy='claude' is the legacy atomic-claim marker — it shouldn't
+    // be treated as a PR. Only the 'pr-' prefix triggers suppression.
+    await backlogAdmin.addToBacklog({ title: "Legacy claim", lane: "queued" });
+    await backlogAdmin.moveToInProgress("Legacy claim", { claimedBy: "claude" });
+
+    const router = createAnchorRouter();
+    const handler = findHandler(router, "GET", "/anchor/candidates");
+    const req = mockReq();
+    const res = mockRes();
+    await handler(req, res);
+
+    const titles = res._body.candidates.map((c: any) => c.title);
+    assert.ok(titles.includes("Legacy claim"),
+      "non-PR claims must still surface as candidates");
+    assert.equal(res._body.in_flight_suppressed, 0);
+  });
+
   test("priorities-doc only would flip research_recommended=true", async () => {
     // No backlog items, no specs, no work queue → no candidates at all
     // (we don't synthesize a priorities-doc candidate inside the endpoint

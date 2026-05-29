@@ -1,43 +1,36 @@
 /**
- * surrogate.ts — subscription-aware spend surrogate (issue #394).
+ * surrogate.ts — subscription-aware token counter (issue #394, #704).
  *
  * After PR-3 (issue #383, ADR-0006) deleted `codex-runner.ts`, the only
  * writer that populated `hydra:metrics:cost:daily:*` and the per-cycle
- * `costMicrodollars` field was gone. The daily-spend cap, the cost
- * dashboard, and the per-cycle cost-cap all started reading zeros — but
- * the orchestrator is still spending Claude Code subscription tokens
- * via autopilot subagents.
+ * `costMicrodollars` field was gone. The orchestrator is still spending
+ * Claude Code subscription tokens via autopilot subagents, so this module
+ * keeps that token signal alive.
+ *
+ * # PR-2 cleanup (#704)
+ *
+ * The dollar-conversion machinery was stripped here. `HYDRA_TOKEN_USD_RATE`
+ * was structurally pinned to $0 (the operator never opted in to a believable
+ * rate) and there is no live dollar cap — dispatch throttling is decided
+ * exclusively by the Subscription Usage Tracker (`./usage-tracker.ts`). With
+ * the dollar output dead, the `tokensToUsd` / `getTokenUsdRate` helpers, the
+ * `costUsd` / `ratePerMillion` / `source` / `legacyRecordSpendUsd` fields, the
+ * legacy `hydra:scheduler:daily-spend` blob read, and `getCycleSubagentCostUsd`
+ * were all removed. What remains is a pure token counter.
  *
  * This module is the bridge. It defines:
  *
- *   1. `recordSubagentTokens(skill, tokens, date?)` — write hook for the
- *      autopilot post-reap path. Bumps a per-day total counter and a
- *      per-skill breakdown hash. Both expire after 30 days so the dashboard
- *      shows a rolling window without unbounded Redis growth.
+ *   1. `recordSubagentTokens(skill, tokens, opts?)` — write hook for the
+ *      autopilot post-reap path. Bumps a per-day total counter, a per-skill
+ *      breakdown hash, and (optionally) a per-cycle hash. All expire after
+ *      30 days (7 for per-cycle) so the dashboard shows a rolling window
+ *      without unbounded Redis growth.
  *
- *   2. `tokensToUsd(tokens, rate?)` — pure conversion using a USD-per-
- *      million-tokens rate from `HYDRA_TOKEN_USD_RATE`. **The default is 0**:
- *      the operator must opt in to a number they actually believe. A wrong
- *      default would be worse than no number because the cost-cap circuit
- *      breaker would then trip based on imaginary spend.
+ *   2. `getDailyTokenCounter(date?)` — read aggregator. Returns the per-day
+ *      total token count + per-skill breakdown (tokens + percentage). The
+ *      anomaly detector and tool-scout consume these raw token figures.
  *
- *   3. `getDailySpendSurrogate(date?)` — read aggregator. Returns the
- *      per-day total + per-skill breakdown + computed USD figures + a
- *      `source` discriminator so dashboards can label data correctly:
- *
- *        - `"autopilot-surrogate"` when only subagent tokens contributed
- *        - `"codex-recorded"` when only the legacy recordSpend reader has
- *          data (kept for the back-compat case of mixed Redis state)
- *        - `"mixed"` when both have data
- *        - `"none"` when neither has data
- *
- *   4. `getCycleSubagentCostUsd(cycleId)` — surrogate cost for a single
- *      cycle (autopilot turn ID). Reads the per-cycle hash field populated
- *      by `recordSubagentTokens(..., cycleId)`. Used by the per-cycle
- *      cost-cap path to make the cap aware of post-cut spend.
- *
- * Module is dependency-light: only typed accessors from `src/redis/cost.ts`
- * (and `getDailySpendRaw` for the legacy `recordSpend` compatibility blob).
+ * Module is dependency-light: only typed accessors from `src/redis/cost.ts`.
  * No control-loop hooks, no event-bus writes — those happen at the call
  * site (autopilot reap → POST /api/metrics/tokens → recordSubagentTokens).
  */
@@ -52,7 +45,6 @@ import {
   tokensBySkillDailyKey,
   tokensByCycleKey,
 } from "../redis/cost.ts";
-import { getDailySpendRaw } from "../redis/scheduler.ts";
 
 // Re-export the key helpers for tests that probe Redis directly with a
 // raw client. The seam module owns the shapes; this file is the import
@@ -68,40 +60,6 @@ const CYCLE_KEY_TTL_SECONDS = 7 * 24 * 3600;
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-/**
- * USD per million tokens. Operator-configurable via `HYDRA_TOKEN_USD_RATE`.
- *
- * **Default 0** — the operator must opt in to a rate they actually believe.
- * Returning 0 means the dashboard shows tokens but $0; the cost-cap reader
- * sees $0 and never trips on surrogate-only data. That is the intentional
- * fail-safe: a wrong default rate would cause spurious cap trips OR mask
- * real overspend, both of which are worse than honest-zero.
- *
- * Re-reads env on every call so config-reload (e.g. `systemctl restart`
- * with a new EnvironmentFile=) takes effect without code changes.
- */
-export function getTokenUsdRate(): number {
-  const raw = process.env.HYDRA_TOKEN_USD_RATE;
-  if (raw === undefined || raw === "") return 0;
-  const parsed = parseFloat(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return 0;
-  return parsed;
-}
-
-/**
- * Convert tokens to USD via the per-million rate.
- *
- * Pure. Tolerates non-finite / negative input by clamping to zero — these
- * inputs are not expected from a well-behaved autopilot but a single
- * bad Redis read shouldn't poison the entire surrogate.
- */
-export function tokensToUsd(tokens: number, ratePerMillion?: number): number {
-  const t = Number.isFinite(tokens) && tokens > 0 ? tokens : 0;
-  const r = ratePerMillion !== undefined ? ratePerMillion : getTokenUsdRate();
-  if (!Number.isFinite(r) || r <= 0) return 0;
-  return (t / 1_000_000) * r;
-}
 
 /** Today's date in YYYY-MM-DD (UTC). Matches the autopilot's date semantics. */
 export function todayDateString(now: Date = new Date()): string {
@@ -134,8 +92,8 @@ export interface RecordTokensResult {
  * @param tokens  total tokens consumed by the subagent (must be >= 0)
  * @param opts.date    override date string (defaults to today UTC)
  * @param opts.cycleId optional autopilot turn ID — when present, also
- *                     bumps the per-cycle hash so the per-cycle cost-cap
- *                     can read post-cut spend.
+ *                     bumps the per-cycle hash so per-cycle token readers
+ *                     can see post-cut spend.
  *
  * Idempotency: this function is NOT idempotent on its own. Idempotency is
  * the responsibility of the caller (autopilot reap.py uses task_id dedup
@@ -222,69 +180,35 @@ async function readCycleTokens(cycleId: string): Promise<number> {
   }
 }
 
-export interface DailySpendSurrogate {
+export interface DailyTokenCounter {
   date: string;
   /** Total subagent tokens for the date. */
   tokens: number;
   /** Per-skill breakdown: array sorted by tokens desc. */
-  bySkill: Array<{ skill: string; tokens: number; pct: number; costUsd: number }>;
-  /** Configured USD-per-million rate at read time (0 if unconfigured). */
-  ratePerMillion: number;
-  /** Computed total USD (tokens × rate). 0 when rate is 0. */
-  costUsd: number;
-  /** Which writer(s) contributed data — for dashboard labeling. */
-  source: "autopilot-surrogate" | "codex-recorded" | "mixed" | "none";
-  /** Legacy recordSpend reader value (kept for back-compat audit; may be 0
-   *  in current deployments since codex-runner is gone but a forgotten
-   *  scheduler.recordSpend research-cost path still writes to it). */
-  legacyRecordSpendUsd: number;
+  bySkill: Array<{ skill: string; tokens: number; pct: number }>;
 }
 
 /**
- * Read the daily surrogate spend for the given date (defaults to today UTC).
+ * Read the daily token counter for the given date (defaults to today UTC).
  *
  * This is the central read endpoint used by `/api/metrics/cost` and the
- * dashboard `CostWidget`. It synthesises three pieces:
- *
- *   1. The per-day total token counter and per-skill breakdown hash
- *      (this module's writers).
- *   2. The legacy `hydra:scheduler:daily-spend` value (a JSON blob written
- *      by `scheduler.ts:recordSpend()`, currently fed only by research
- *      loop spend — kept around for cross-checking and to support the
- *      "mixed" source label.)
- *   3. The configured `HYDRA_TOKEN_USD_RATE` so the conversion math is
- *      reproducible by callers without re-reading env.
+ * dashboard cost tile. It synthesises the per-day total token counter and
+ * the per-skill breakdown hash (this module's writers).
  *
  * Best-effort: each Redis sub-read is wrapped so a single hiccup yields
- * partial data with `source` reflecting only what could be loaded.
+ * partial data rather than a thrown error.
  */
-export async function getDailySpendSurrogate(
+export async function getDailyTokenCounter(
   dateOverride?: string,
-): Promise<DailySpendSurrogate> {
+): Promise<DailyTokenCounter> {
   const date = dateOverride || todayDateString();
-  const ratePerMillion = getTokenUsdRate();
 
-  const [tokens, bySkillRaw, legacyJson] = await Promise.all([
+  const [tokens, bySkillRaw] = await Promise.all([
     readDailyTokens(date),
     safeSkillTokensAll(date),
-    getDailySpendRaw().catch(() => null),
   ]);
 
-  // Parse legacy recordSpend payload. Shape: { date, usd, updatedAt }.
-  let legacyUsd = 0;
-  if (legacyJson) {
-    try {
-      const parsed = JSON.parse(legacyJson);
-      if (parsed && typeof parsed === "object" && parsed.date === date) {
-        const u = parseFloat(parsed.usd);
-        if (Number.isFinite(u) && u >= 0) legacyUsd = u;
-      }
-    } catch { /* intentional: legacy blob unparseable — treat as zero */ }
-  }
-
-  const costUsd = tokensToUsd(tokens, ratePerMillion);
-
-  const bySkillEntries: Array<{ skill: string; tokens: number; pct: number; costUsd: number }> = [];
+  const bySkillEntries: Array<{ skill: string; tokens: number; pct: number }> = [];
   if (bySkillRaw) {
     for (const [skill, raw] of Object.entries(bySkillRaw)) {
       const n = parseInt(String(raw), 10);
@@ -293,28 +217,15 @@ export async function getDailySpendSurrogate(
         skill,
         tokens: n,
         pct: tokens > 0 ? Math.round((n / tokens) * 10000) / 100 : 0,
-        costUsd: tokensToUsd(n, ratePerMillion),
       });
     }
     bySkillEntries.sort((a, b) => b.tokens - a.tokens);
   }
 
-  const hasSurrogate = tokens > 0;
-  const hasLegacy = legacyUsd > 0;
-  let source: DailySpendSurrogate["source"];
-  if (hasSurrogate && hasLegacy) source = "mixed";
-  else if (hasSurrogate) source = "autopilot-surrogate";
-  else if (hasLegacy) source = "codex-recorded";
-  else source = "none";
-
   return {
     date,
     tokens,
     bySkill: bySkillEntries,
-    ratePerMillion,
-    costUsd: Math.round(costUsd * 10000) / 10000,
-    source,
-    legacyRecordSpendUsd: Math.round(legacyUsd * 10000) / 10000,
   };
 }
 
@@ -325,28 +236,4 @@ async function safeSkillTokensAll(date: string): Promise<Record<string, string> 
     console.error(`[cost-surrogate] getSkillTokensAll ${date} failed: ${err?.message || err}`);
     return null;
   }
-}
-
-/**
- * Per-cycle surrogate cost in USD. Returns 0 when no tokens recorded for the
- * cycle or no rate configured.
- *
- * Originally consumed by the per-cycle cost cap (`src/cost/cap.ts`) which
- * was retired with the codex-era cleanup. Kept for the `/api/metrics/cost*`
- * dashboard tiles that still want a per-cycle dollar estimate.
- */
-export async function getCycleSubagentCostUsd(cycleId: string): Promise<{
-  tokens: number;
-  costUsd: number;
-  ratePerMillion: number;
-}> {
-  if (!cycleId) return { tokens: 0, costUsd: 0, ratePerMillion: getTokenUsdRate() };
-  const tokens = await readCycleTokens(cycleId);
-  const ratePerMillion = getTokenUsdRate();
-  const costUsd = tokensToUsd(tokens, ratePerMillion);
-  return {
-    tokens,
-    ratePerMillion,
-    costUsd: Math.round(costUsd * 10000) / 10000,
-  };
 }

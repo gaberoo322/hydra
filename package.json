@@ -13,7 +13,7 @@
     "redis-seam-check": "npx tsx scripts/ci/redis-seam-check.ts"
   },
   "author": "Gabe",
-  "license": "UNLICENSED",
+  "license": "AGPL-3.0-only",
   "dependencies": {
     "@sentry/node": "^10.48.0",
     "express": "^5.2.1",

@@ -235,6 +235,8 @@ After the first edit batch, sanity-check that the edits actually landed in the w
 
 Fail → fix → re-verify. After 2 failed fixes, abandon branch.
 
+**Run the full `npm test`, or pass `--test-force-exit` when running a single file. NEVER run a bare `node --test <file>`.** Modules that open a DB/Redis connection or a timer keep `node:test`'s event loop alive, so the process **hangs forever** after the assertions pass — which blocks the Bash tool call and froze an autopilot session for 11h with the process never reaped (2026-05-28, orchestrator side). `npm test` already includes `--test-force-exit`; for a subset use `node --test --test-force-exit <file>`.
+
 For orchestrator changes (~/hydra/): `node --check src/<file>.ts` + `npm test` + restart service.
 
 ### 6.5. Glossary / ADR gate (per target `docs/agents/domain.md`)
@@ -362,6 +364,20 @@ for lane in ['inProgress','queued','backlog']:
 print('')" "$TASK_TITLE")
 [ -n "$ITEM_ID" ] && hydra backlog move "$ITEM_ID" done
 ```
+
+If this build opened a PR instead of merging direct-to-main (orchestrator-side changes, or any flow that produces a remote PR that has not yet merged at this point), tag the inProgress kanban item with the PR-number marker BEFORE moving it to done. This is the convention `/api/anchor/candidates` uses to suppress the just-shipped anchor between PR-open and merge (issue #640):
+
+```bash
+# Only when a PR was opened and is still open.
+PR_NUM=<pr-number>
+if [ -n "$ITEM_ID" ] && [ -n "$PR_NUM" ]; then
+  curl -fsS -X PATCH "http://localhost:4000/api/backlog/${ITEM_ID}/move" \
+    -H 'content-type: application/json' \
+    -d "{\"lane\":\"inProgress\",\"claimedBy\":\"pr-${PR_NUM}\"}" >/dev/null
+fi
+```
+
+The `pr-<n>` claimedBy marker is what the candidates API's `excludeInFlight` filter (default true, 30-min freshness window) looks for. Without it, decide.py will re-dispatch dev_target onto the same anchor every tick until the PR merges — burning 50-150k tokens per duplicate dispatch (the original failure mode in run `ab97a2d5`). The marker is cleared automatically when the next `applyLaneTransition` runs (e.g. when the item moves to `done` post-merge).
 
 Record completion:
 ```bash

@@ -38,7 +38,7 @@ const adapter = {
   ...(await import("../src/redis/scheduler.ts")),
   ...(await import("../src/redis/cycle-metrics.ts")),
 };
-const schedulerMod = await import("../src/scheduler/loop.ts");
+const schedulerMod = await import("../src/scheduler/heartbeat.ts");
 const { getStatus } = schedulerMod as any;
 
 let testRedis: any;
@@ -257,7 +257,12 @@ describe("/api/scheduler/status live shape", () => {
     assert.ok("cyclesRun" in status);
     assert.ok("mergeRate" in status);
     assert.ok("intervalMs" in status);
-    assert.ok(status.research, "research block must still be present");
+    assert.ok("lastTickAt" in status, "watchdog liveness surface must survive");
+    // #706 (scheduler fold PR-1/4): the `research` sub-object was removed
+    // along with the in-process research-decision plane. No dashboard reader
+    // consumed it; the research-force policy now lives in the autopilot brain
+    // (`scripts/autopilot/decide.py`).
+    assert.ok(!("research" in status), "research block removed in #706");
     // dailySpendUsd / dailyCostCapUsd retired with the dollar-based
     // daily-spend cap (Subscription Usage Tracker B-series). The new
     // quota surface lives at `/api/usage`; the scheduler status is no

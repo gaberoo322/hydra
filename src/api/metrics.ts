@@ -9,7 +9,7 @@ import { getWorkQueueLen } from "../redis/work-queue.ts";
 import { getPriorFailuresLen, getReframeQueueLength } from "../redis/anchors.ts";
 import {
   aggregateCostAttribution,
-  getDailySpendSurrogate,
+  getDailyTokenCounter,
   recordSubagentTokens,
   todayDateString,
 } from "../cost/index.ts";
@@ -341,22 +341,22 @@ export function createMetricsRouter() {
     }
   });
 
-  // GET /metrics/cost — Daily spend surrogate (issue #394).
+  // GET /metrics/cost — Daily token counter (issue #394, #704).
   //
   // After #383 deleted codex-runner.ts, the legacy `recordSpend()` writer
-  // stopped feeding `hydra:scheduler:daily-spend` for code-writing work.
-  // This endpoint surfaces the token-based surrogate populated by autopilot
-  // subagents (writers post to /metrics/tokens, scheduler.ts still writes
-  // research-loop spend to the legacy key for back-compat). The `source`
-  // field tells the dashboard which writer(s) contributed so the operator
-  // can tell real billed spend from surrogate inflation.
+  // stopped feeding `hydra:scheduler:daily-spend` for code-writing work, #703
+  // removed the last remaining writers (the dead budget-threshold bridge +
+  // `setDailySpendRaw`), and #704 stripped the dollar-conversion machinery
+  // entirely (`HYDRA_TOKEN_USD_RATE` was structurally $0; no live dollar cap
+  // existed). This endpoint now surfaces the per-day / per-skill token counts
+  // populated by autopilot subagents (writers post to /metrics/tokens).
   router.get("/metrics/cost", async (req, res) => {
     try {
       const dateRaw = req.query.date;
       const date = (typeof dateRaw === "string" && dateRaw)
         ? dateRaw
         : todayDateString();
-      const snapshot = await getDailySpendSurrogate(date);
+      const snapshot = await getDailyTokenCounter(date);
       res.json(snapshot);
     } catch (err: any) {
       console.error(`[api/metrics] /metrics/cost failed: ${err.message}`);

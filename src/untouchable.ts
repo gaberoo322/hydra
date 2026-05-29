@@ -50,6 +50,17 @@ export const UNTOUCHABLE_PATHS: readonly string[] = Object.freeze([
   // the gate, so it's Tier 0 itself.
   "scripts/tier-classify.ts",
 
+  // Watchdogs — the live recovery mechanism. ADR-0001 names the watchdog as
+  // Untouchable Core, but the in-repo source scripts were ABSENT from this
+  // list, so the tier-gate never actually guarded edits to them (the
+  // ADR-0001-vs-CI gap closed in issue #705). The consolidated
+  // `hydra-watchdog.sh` is the deploy artifact; the two legacy source
+  // scripts are kept for the regression test + transitional deploy. All
+  // three are Tier 0.
+  "scripts/hydra-watchdog.sh",
+  "scripts/hydra-orchestrator-watchdog.sh",
+  "scripts/hydra-autopilot-watchdog.sh",
+
   // The Untouchable Core list and its classifier — the protected-paths
   // list itself is operator-only per ADR-0001.
   "src/untouchable.ts",
@@ -64,9 +75,10 @@ export const UNTOUCHABLE_PATHS: readonly string[] = Object.freeze([
  *   2. Exact match against any entry.
  *   3. If an entry ends with "/", prefix match (treat entry as a directory).
  *
- * Out-of-repo paths (e.g. `~/.local/bin/hydra-orchestrator-watchdog.sh`)
- * are documented in `docs/reference.md` rather than listed here, since
- * `gh pr diff` will never surface them.
+ * Out-of-repo paths (e.g. `~/.local/bin/hydra-watchdog.sh`) are documented
+ * in `docs/reference.md` rather than listed here, since `gh pr diff` will
+ * never surface them. The in-repo source scripts ARE listed above (issue
+ * #705) so the tier-gate guards the source of truth.
  */
 export function isUntouchable(path: string): boolean {
   if (!path) return false;

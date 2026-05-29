@@ -2,17 +2,15 @@
  * src/cycle.ts — Read-only cycle state surface.
  *
  * Before PR-3 (issue #383) this module wrapped the in-process control loop:
- * `startCycle()` would invoke `runControlLoop()`, track an in-memory active
+ * a `startCycle()` would invoke `runControlLoop()`, track an in-memory active
  * cycle, and push completed cycles onto a history array. PR-3 deleted the
  * control loop entirely — autopilot subagents own execution now and write
  * their own cycle records straight to Redis (`hydra:cycle:*`).
  *
- * This module survives as a thin read-only adapter so the existing
- * `/api/cycle/status` and `/api/cycle/history` endpoints keep working
- * against the same Redis-backed records. `startCycle()` is preserved as a
- * stub that immediately reports the in-process loop is gone; nothing in
- * `src/` calls it any more, only the legacy `POST /api/cycle/start` route
- * does, and operators who hit it should get a clear error message.
+ * The vestigial write/trigger stubs (`startCycle()`/`killCycle()`) and the
+ * dead `POST /api/cycle/start` route were removed in issue #701. This module
+ * is now purely a read-only adapter so the existing `/api/cycle/status` and
+ * `/api/cycle/history` endpoints keep working against the Redis-backed records.
  *
  * Keep this module dumb. Real cycle tracking lives in the autopilot.
  */
@@ -33,19 +31,6 @@ interface CycleRecord {
   failed?: number;
   abandoned?: number;
   timedOut?: number;
-}
-
-/**
- * Legacy entry point. The in-process control loop was removed in PR-3
- * (issue #383). Returns an error so the operator-facing
- * `POST /api/cycle/start` route reports a clear failure instead of
- * silently no-oping.
- */
-async function startCycle(_eventBus: unknown, _opts: any = {}) {
-  return {
-    error: "In-process control loop removed (issue #383). Execution runs via autopilot subagents — see `hydra-autopilot` skill.",
-    cycle: { status: "removed" },
-  };
 }
 
 async function getCycleStatus(): Promise<CycleRecord | { status: string }> {
@@ -99,13 +84,4 @@ async function getCycleHistory(limit = 10): Promise<CycleRecord[]> {
   return records;
 }
 
-/**
- * Legacy entry point. The in-process control loop was removed in PR-3
- * (issue #383). There is no in-memory active cycle to kill. Returns the
- * no-op shape callers used to expect when the scheduler was already idle.
- */
-async function killCycle(_eventBus: unknown) {
-  return { killed: false, reason: "In-process control loop removed (issue #383)" };
-}
-
-export { startCycle, getCycleStatus, getCycleHistory, killCycle };
+export { getCycleStatus, getCycleHistory };

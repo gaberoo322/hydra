@@ -129,7 +129,7 @@ export interface NowPageRouterDeps {
   /**
    * Reader for the scheduler status — projected to the shape the
    * autopilot-tick endpoint needs. Tests stub this; production wiring
-   * defaults to `scheduler/loop.getStatus()`.
+   * defaults to `scheduler/heartbeat.getStatus()`.
    */
   readSchedulerStatus?: SchedulerStatusReader;
   /**
@@ -518,7 +518,7 @@ export function parseAlertsWindow(input: {
 // ---------------------------------------------------------------------------
 
 async function defaultReadSchedulerStatus(): Promise<{ running: boolean; lastTickAt: string | null }> {
-  const { getStatus } = await import("../scheduler/loop.ts");
+  const { getStatus } = await import("../scheduler/heartbeat.ts");
   const status = await getStatus();
   return {
     running: !!status.running,

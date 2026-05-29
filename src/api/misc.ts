@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { killCycle } from "../cycle.ts";
 import { sendDigestNow } from "../digest.ts";
 import { classifyChange } from "../tier-classifier.ts";
 
@@ -11,23 +10,24 @@ import { classifyChange } from "../tier-classifier.ts";
  * Issue #268 split this file — see api/openviking.ts, api/goals.ts,
  * api/events.ts, api/config.ts, api/alerts.ts, api/plan-cache.ts,
  * api/reflections.ts, api/merge-lock.ts. What remains here are operational
- * routes without a natural domain home: kill switch, OpenAI proxy, digest
+ * routes without a natural domain home: kill switch, digest
  * trigger, tier classifier, and agent-memory CRUD.
  *
  * New routes should prefer a domain-specific sub-router. Only land here if
  * the route is genuinely orphan-operational.
  */
-export function createMiscRouter(eventBus: any) {
+export function createMiscRouter(_eventBus: any) {
   const router = Router();
 
   const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
   const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 
-  // POST /kill — Emergency stop
+  // POST /kill — Emergency stop. Writes the kill file that health.ts and
+  // service-strip.ts poll (~/hydra/.kill). The in-process control loop was
+  // removed in #383; the dead killCycle() call was stripped in #701.
   router.post("/kill", async (req, res) => {
     writeFileSync(KILL_FILE, new Date().toISOString());
-    const result = await killCycle(eventBus);
-    res.json({ ...result, killFile: KILL_FILE });
+    res.json({ killed: true, killFile: KILL_FILE });
   });
 
   // GET /tier?files=a,b,c — Modification tier classification (issue #243,
@@ -42,41 +42,6 @@ export function createMiscRouter(eventBus: any) {
     const files = list.map(s => s.trim()).filter(s => s.length > 0);
     const result = classifyChange(files);
     res.json(result);
-  });
-
-  // =========================================================================
-  // OpenAI proxy — forward to localhost:4001
-  // =========================================================================
-
-  const OPENAI_PROXY_TOKEN = process.env.OPENAI_PROXY_TOKEN || "";
-  const OPENAI_PROXY_UPSTREAM = "http://localhost:4001";
-
-  router.use("/openai-proxy", async (req, res, next) => {
-    // Bearer token auth
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (!OPENAI_PROXY_TOKEN || token !== OPENAI_PROXY_TOKEN) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    // Forward full sub-path to upstream
-    const upstreamUrl = `${OPENAI_PROXY_UPSTREAM}${req.path}`;
-
-    try {
-      const upstreamRes = await fetch(upstreamUrl, {
-        method: req.method,
-        headers: { "content-type": "application/json" },
-        body: req.method !== "GET" && req.method !== "HEAD" ? JSON.stringify(req.body) : undefined,
-      });
-
-      const contentType = upstreamRes.headers.get("content-type") || "application/json";
-      res.status(upstreamRes.status).set("content-type", contentType);
-      const buffer = Buffer.from(await upstreamRes.arrayBuffer());
-      res.send(buffer);
-    } catch (err: any) {
-      console.error(`[OpenAI Proxy Route] Failed:`, err.message);
-      res.status(502).json({ error: { message: `Proxy error: ${err.message}` } });
-    }
   });
 
   // POST /digest/send — Manually trigger a digest summary now

@@ -1,0 +1,10 @@
+[Unit]
+Description=Hydra orchestrator housekeeping chores (PR-3/4 scheduler fold)
+Documentation=https://github.com/gaberoo322/hydra/issues/723
+After=hydra-orchestrator.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/hydra-housekeeping.sh
+StandardOutput=journal
+StandardError=journal

@@ -22,13 +22,17 @@
  *
  * # daySpent / dailyBudget
  *
- * - `daySpent` — USD spent so far today (UTC). Comes from
- *   `getDailySpendSurrogate()`. Zero when the operator hasn't set
- *   `HYDRA_TOKEN_USD_RATE` (intentional — see surrogate.ts JSDoc).
+ * - `daySpent` — USD spent so far today (UTC). The cost surrogate's
+ *   dollar-conversion machinery was removed in #704 (`HYDRA_TOKEN_USD_RATE`
+ *   was structurally $0 and no live dollar cap existed), so the default
+ *   reader now returns 0. The field is retained for shape stability; a
+ *   caller can still inject a `readDaySpentUsd` dep if it ever has an
+ *   authoritative dollar source.
  * - `dailyBudget` — operator-set daily budget in USD. Sourced from the
- *   `HYDRA_DAILY_BUDGET_USD` env var. Zero when unset. The Subscription
- *   Usage Tracker is the *enforcement* surface (`/api/usage/eligibility`);
- *   this number is operator-informational, displayed alongside the spend.
+ *   `HYDRA_DAILY_BUDGET_USD` env var (live, operator-set — unaffected by
+ *   #704). Zero when unset. The Subscription Usage Tracker is the
+ *   *enforcement* surface (`/api/usage/eligibility`); this number is
+ *   operator-informational, displayed alongside the spend.
  * - `headroomPct` — `(1 - daySpent / dailyBudget) * 100`, clamped to
  *   `[0, 100]`. Returns 100 when `dailyBudget` is 0 or unset (no budget →
  *   no headroom pressure to display).
@@ -54,7 +58,9 @@ export interface CostBurn {
    * without changing the type.
    */
   lastHourSpark: number[];
-  /** USD spent so far today (UTC). Zero when no surrogate rate calibrated. */
+  /** USD spent so far today (UTC). 0 by default — the surrogate's dollar
+   *  machinery was removed in #704; only an injected `readDaySpentUsd` dep
+   *  produces a non-zero value. */
   daySpent: number;
   /** Operator-set daily budget in USD. Zero when unset. */
   dailyBudget: number;
@@ -67,8 +73,9 @@ export interface CostBurn {
 
 export interface CostBurnDeps {
   /**
-   * Reader for the per-day surrogate USD spend. Defaults to
-   * `getDailySpendSurrogate()` from `src/cost/`.
+   * Reader for the per-day USD spend. The surrogate's dollar machinery was
+   * removed in #704, so the default returns 0. Exposed so callers (and tests)
+   * can inject a dollar figure if they have an authoritative source.
    */
   readDaySpentUsd?: () => Promise<number>;
   /**
@@ -77,9 +84,10 @@ export interface CostBurnDeps {
    */
   readUsage?: () => Promise<Pick<UsageSnapshot, "tokensLast5h" | "tokensLast24h">>;
   /**
-   * USD-per-million-tokens rate. Defaults to
-   * `getTokenUsdRate()`. Exposed so the spark math stays consistent with
-   * the daySpent figure even when callers override the surrogate.
+   * USD-per-million-tokens rate for the burn-rate spark. Defaults to a local
+   * read of `HYDRA_TOKEN_USD_RATE` (structurally $0 since #704 removed the
+   * surrogate's dollar machinery). Exposed so callers/tests can drive the
+   * spark math with a concrete rate.
    */
   getTokenUsdRate?: () => number;
   /**
@@ -131,9 +139,10 @@ function settledOr<T>(result: PromiseSettledResult<T>, fallback: T, label: strin
 
 async function readDaySpent(deps: CostBurnDeps): Promise<number> {
   if (deps.readDaySpentUsd) return deps.readDaySpentUsd();
-  const { getDailySpendSurrogate } = await import("../cost/index.ts");
-  const snap = await getDailySpendSurrogate();
-  return Number(snap.costUsd) || 0;
+  // The cost surrogate's dollar-conversion machinery was removed in #704
+  // (`HYDRA_TOKEN_USD_RATE` was structurally $0; no live dollar cap existed).
+  // There is no authoritative per-day dollar source, so the default is 0.
+  return 0;
 }
 
 async function readUsage(
@@ -146,12 +155,10 @@ async function readUsage(
 }
 
 function getDefaultRate(): number {
-  // Lazy import to keep the aggregator free of side effects at module load.
-  // We don't await this — getTokenUsdRate is sync, but the dynamic import is
-  // not. Use a synchronous env read here mirroring the surrogate's own
-  // implementation. The surrogate's getTokenUsdRate() is the canonical
-  // source; we duplicate the env read here to avoid an awkward async
-  // boundary. The duplication is contained and matches surrogate.ts:81-87.
+  // Synchronous env read for the burn-rate spark. The surrogate's
+  // `getTokenUsdRate` helper was removed in #704 (the dollar machinery was
+  // dead — `HYDRA_TOKEN_USD_RATE` was structurally $0). This local read keeps
+  // the spark self-contained; it returns 0 unless an operator sets the rate.
   const raw = process.env.HYDRA_TOKEN_USD_RATE;
   if (raw === undefined || raw === "") return 0;
   const parsed = parseFloat(raw);
@@ -172,10 +179,9 @@ function readDailyBudgetFromEnv(): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Convert tokens to USD using `rate` USD per million tokens. Mirrors
- * `tokensToUsd` from surrogate.ts but duplicated here so this aggregator
- * stays import-light. Returns 0 when the rate is 0/negative or tokens are
- * 0/negative.
+ * Convert tokens to USD using `rate` USD per million tokens. Self-contained
+ * helper for the burn-rate spark (the surrogate's `tokensToUsd` was removed
+ * in #704). Returns 0 when the rate is 0/negative or tokens are 0/negative.
  */
 export function tokensToUsdPerMillion(tokens: number, rate: number): number {
   if (!Number.isFinite(tokens) || tokens <= 0) return 0;

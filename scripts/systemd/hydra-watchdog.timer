@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic consolidated watchdog check for Hydra
+Documentation=https://github.com/gaberoo322/hydra/issues/727
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Persistent=true
+Unit=hydra-watchdog.service
+
+[Install]
+WantedBy=timers.target
