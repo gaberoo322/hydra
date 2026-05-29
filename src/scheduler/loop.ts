@@ -13,10 +13,6 @@ import { sendNotification } from "../notify.ts";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
 import { promoteToQueued, pruneOldDoneItems } from "../backlog/lanes.ts";
-import { reapStaleClaims } from "../backlog/reaper.ts";
-
-// Stale-claim reaper threshold (issue #374). Default 2h.
-const CLAIM_MAX_AGE_MS = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
 import { getTargetName } from "../target-config.ts";
 import {
   getSchedulerCyclesRun,
@@ -345,28 +341,15 @@ async function runScheduledCycle(eventBus) {
     console.error(`[Scheduler] Blocked escalation check failed in scheduled cycle: ${err.message}`);
   }
 
-  // Stale-claim reaper (issue #374) — release inProgress slots whose claimant
-  // is dead so the WIP cap stays drainable. Runs once per scheduler tick,
-  // before any work selection. Never throws; failures are logged.
-  try {
-    const reaperResult = await reapStaleClaims({ maxAgeMs: CLAIM_MAX_AGE_MS });
-    if (reaperResult.reaped.length > 0) {
-      console.log(
-        `[Scheduler] Stale-claim reaper released ${reaperResult.reaped.length} inProgress slot(s) (threshold ${CLAIM_MAX_AGE_MS}ms)`,
-      );
-    }
-    if (reaperResult.skippedOpenPr && reaperResult.skippedOpenPr.length > 0) {
-      // issue #490: items with an open implementing PR in the target repo
-      // are intentionally preserved rather than re-queued (which would
-      // trigger a duplicate dev_target dispatch).
-      console.log(
-        `[Scheduler] Stale-claim reaper preserved ${reaperResult.skippedOpenPr.length} item(s) with open target PRs: ${reaperResult.skippedOpenPr.map(s => s.id).join(", ")}`,
-      );
-    }
-  } catch (err: any) {
-    console.error(`[Scheduler] reapStaleClaims failed: ${err.message}`);
-    Sentry.addBreadcrumb({ category: "scheduler", message: `reapStaleClaims failed: ${err.message}`, level: "error" });
-  }
+  // Stale-claim reaper moved to the autopilot's Phase 2 reap (issue #721,
+  // scheduler fold PR-2/4). Per ADR-0012 the autopilot is the single brain,
+  // and stale `inProgress` claims only matter when the autopilot wants to
+  // dispatch into those slots — so the reaper now runs once-per-Phase-2
+  // (before each dispatch decision) via `scripts/autopilot/reap.py`'s
+  // `run_hardcap()` POSTing to `/api/backlog/stale-claims/reap`, rather than
+  // on every 2-minute scheduler tick. `reapStaleClaims` itself stays in
+  // `src/backlog/reaper.ts`, still serving that endpoint + the
+  // operator-triggered route.
 
   // Prune old done-lane items from the backlog. Lives at the tick level
   // rather than wedged inside `maybeRunResearch` so it still runs when the
