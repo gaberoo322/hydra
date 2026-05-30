@@ -10,6 +10,8 @@
     "dev": "node --watch --experimental-strip-types src/index.ts",
     "test": "node --experimental-strip-types --test --test-force-exit --test-concurrency=1 test/*.test.mts",
     "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc --noEmit --project tsconfig.test.json",
+    "test-typecheck-check": "npx tsx scripts/ci/test-typecheck-check.ts",
     "redis-seam-check": "npx tsx scripts/ci/redis-seam-check.ts"
   },
   "author": "Gabe",

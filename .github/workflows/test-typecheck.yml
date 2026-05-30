@@ -1,0 +1,42 @@
+name: test-typecheck
+
+# Test-typecheck ratchet (issue #750). `tsconfig.json` excludes `test/`, so
+# `npm run typecheck` (tsc, src-only) never type-checks the test suite, and
+# `npm test` runs under tsx (transpile-only, types erased). Test type errors
+# are therefore caught by NEITHER existing gate — they only surface in an
+# editor and accumulate silently.
+#
+# This lives in its own workflow file — deliberately NOT inside ci.yml —
+# because ci.yml is part of the Untouchable Core (ADR-0001 / Tier-0,
+# operator-only, exact-match). A new non-blocking verification is not a change
+# to the merge gate, so it belongs in a sibling workflow that can land as a
+# normal (non-Tier-0) change. Same pattern as secret-scan.yml.
+#
+# It is a shrink-only baseline ratchet (scripts/ci/test-typecheck-baseline.json):
+# the gate fails only when the test type-error COUNT rises above the committed
+# baseline — not on the pre-existing errors. Mirrors redis-seam-check.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: test-typecheck-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test-typecheck:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test-typecheck ratchet (shrink-only baseline)
+        run: npm run test-typecheck-check
