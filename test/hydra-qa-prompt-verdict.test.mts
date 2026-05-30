@@ -155,6 +155,88 @@ describe("classifyVerdict — pending CI does not loop", () => {
   });
 });
 
+describe("classifyVerdict — case-insensitive GitHub enum casing (issue #761)", () => {
+  // GitHub's GraphQL API (surfaced by `gh pr view --json statusCheckRollup`)
+  // returns status/conclusion as UPPERCASE enums. Before #761 the classifier
+  // matched only lowercase tokens, so an uppercase QUEUED check fell through
+  // every guard to a false-green PASS — which could let auto-merge approve a
+  // PR before CI ran. The classifier now folds casing at its boundary
+  // (defense in depth; the playbook also ascii_downcases).
+
+  test("UPPERCASE QUEUED required check → PASS-pending-CI, NOT a false-green PASS", () => {
+    const checks = [
+      { name: "typecheck", status: "COMPLETED", conclusion: "SUCCESS", required: true },
+      { name: "tests", status: "COMPLETED", conclusion: "SUCCESS", required: true },
+      { name: "mutation-test", status: "QUEUED", required: true },
+    ] as unknown as CheckState[];
+    const r = classifyVerdict("PASS", checks);
+    assert.equal(r.verdict, "PASS-pending-CI");
+    assert.equal(r.summary.requiredPending, 1);
+    assert.equal(r.summary.passed, 2);
+    assert.match(r.reason, /mutation-test/);
+  });
+
+  test("UPPERCASE IN_PROGRESS folds to pending", () => {
+    const checks = [
+      { name: "tests", status: "COMPLETED", conclusion: "SUCCESS", required: true },
+      { name: "mutation-test", status: "IN_PROGRESS", required: true },
+    ] as unknown as CheckState[];
+    assert.equal(classifyVerdict("PASS", checks).verdict, "PASS-pending-CI");
+  });
+
+  test("all UPPERCASE COMPLETED/SUCCESS → PASS", () => {
+    const checks = [
+      { name: "typecheck", status: "COMPLETED", conclusion: "SUCCESS", required: true },
+      { name: "tests", status: "COMPLETED", conclusion: "SUCCESS", required: true },
+    ] as unknown as CheckState[];
+    const r = classifyVerdict("PASS", checks);
+    assert.equal(r.verdict, "PASS");
+    assert.equal(r.summary.pending, 0);
+    assert.equal(r.summary.passed, 2);
+  });
+
+  test("UPPERCASE FAILURE conclusion on a required check → FAIL", () => {
+    const checks = [
+      { name: "typecheck", status: "COMPLETED", conclusion: "SUCCESS", required: true },
+      { name: "tests", status: "COMPLETED", conclusion: "FAILURE", required: true },
+    ] as unknown as CheckState[];
+    const r = classifyVerdict("PASS", checks);
+    assert.equal(r.verdict, "FAIL");
+    assert.match(r.reason, /tests/);
+  });
+
+  test("UPPERCASE SKIPPED / NEUTRAL conclusions count as success", () => {
+    const checks = [
+      { name: "lint", status: "COMPLETED", conclusion: "SKIPPED", required: true },
+      { name: "preview", status: "COMPLETED", conclusion: "NEUTRAL", required: false },
+    ] as unknown as CheckState[];
+    assert.equal(classifyVerdict("PASS", checks).verdict, "PASS");
+  });
+
+  test("mixed casing (real-world gh output) classifies correctly", () => {
+    // gh sometimes mixes CheckRun (UPPERCASE) and StatusContext rows.
+    const checks = [
+      { name: "ci", status: "COMPLETED", conclusion: "success", required: true },
+      { name: "mutation-test", status: "queued", required: true },
+      { name: "scope-check", status: "Completed", conclusion: "Success", required: true },
+    ] as unknown as CheckState[];
+    const r = classifyVerdict("PASS", checks);
+    assert.equal(r.verdict, "PASS-pending-CI");
+    assert.equal(r.summary.requiredPending, 1);
+    assert.equal(r.summary.passed, 2);
+  });
+
+  test("rendered checks block normalises UPPERCASE tokens to lowercase-canonical", () => {
+    const checks = [
+      { name: "tests", status: "COMPLETED", conclusion: "SUCCESS", required: true },
+      { name: "mutation-test", status: "QUEUED", required: true },
+    ] as unknown as CheckState[];
+    const md = renderChecksBlock(classifyVerdict("PASS", checks));
+    assert.match(md, /\| tests \| completed \| success \| yes \|/);
+    assert.match(md, /\| mutation-test \| queued \| — \| yes \|/);
+  });
+});
+
 describe("renderChecksBlock", () => {
   test("produces a markdown table with stable column order", () => {
     const r = classifyVerdict("PASS", [
