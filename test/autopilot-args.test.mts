@@ -79,7 +79,7 @@ describe("scripts/autopilot/args-parse.sh — slash-arg parsing", () => {
       const r = runBootstrap({ HYDRA_AUTOPILOT_UNATTENDED: "true" }, [], tmp);
       assert.equal(r.status, 0, `bootstrap failed: ${r.stderr}`);
       assert.deepEqual(r.limits, {
-        token_budget: 2000000,
+        token_budget: 10000000,
         wall_clock_max_sec: 28800,
         idle_drain_turns: 5,
         scope: "all",

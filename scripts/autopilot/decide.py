@@ -1776,7 +1776,7 @@ def _check_termination(state: dict, now: int) -> dict | None:
     """Mirror of term-check.py logic, expressed as an action."""
     limits = state.get("limits") or {}
     cumulative = int(state.get("cumulative_tokens", 0))
-    budget = int(limits.get("token_budget", 2_000_000))
+    budget = int(limits.get("token_budget", 10_000_000))
     elapsed = now - int(state.get("started_epoch", now))
     wall_max = int(limits.get("wall_clock_max_sec", 28_800))
     idle = int(state.get("idle_turns", 0))
