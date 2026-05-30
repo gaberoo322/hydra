@@ -230,7 +230,7 @@ export function createHealthRouter(eventBus: any) {
       },
       activeCycle,
       pipeline: { queueDepth, priorFailures, backlogCounts: blCounts, recentMetrics: recent, killSwitch: health.status === "killed" },
-      infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, bettingWeb: sysdWeb } },
+      infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
       intelligence: { patterns, reflections: reflCount, ovSearch },
       diagnostics,
     });

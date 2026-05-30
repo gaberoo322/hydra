@@ -120,7 +120,7 @@ export function classifySide(
 
   // No strong orchestrator evidence — defer to workspace hint, default to target.
   // (Cycles run against the target workspace; an unannotated cycle with
-  // files in `src/` is almost certainly target-side hydra-betting code.)
+  // files in `src/` is almost certainly target-side code.)
   return opts.workspaceHint || "target";
 }
 

@@ -6,8 +6,9 @@
  * # What it does
  *
  * Polls `gh pr list --json` on a configurable interval for both repos
- * (`gaberoo322/hydra` and the configured target — today `gaberoo322/hydra-betting`)
- * and diffs the result against the last-seen snapshot kept in process memory.
+ * (the orchestrator's own repo and the configured target, resolved from
+ * `target-config.ts`) and diffs the result against the last-seen snapshot
+ * kept in process memory.
  * Each new state OR transition emits a single XADD onto
  * `hydra:autopilot:slot-events` so the existing `slot-events-bridge` can
  * fan it out to dashboard WS clients. Dashboard tiles like BattleCardRow
@@ -69,6 +70,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { getRedisConnection } from "../redis/connection.ts";
+import { getTargetGithubRepo } from "../target-config.ts";
+
+/** The orchestrator's own repo — the one constant across target swaps. */
+const ORCHESTRATOR_REPO = "gaberoo322/hydra";
 
 const execFileAsync = promisify(execFile);
 
@@ -77,11 +82,15 @@ export const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // 1 minute — gh API rate-friendly.
 const STREAM_MAXLEN = 1000;
 
-/** Default repo list — orchestrator + the canonical target. */
-export const DEFAULT_REPOS = [
-  "gaberoo322/hydra",
-  "gaberoo322/hydra-betting",
-] as const;
+/**
+ * Default repo list — the orchestrator's own repo plus the configured target,
+ * resolved from `target-config.ts` (NOT hardcoded) so the bridge follows a
+ * target swap (ADR-0013, ADR-0002). Computed at call-time because the target
+ * env vars may be set after this module is imported.
+ */
+export function defaultRepos(): readonly string[] {
+  return [ORCHESTRATOR_REPO, getTargetGithubRepo()];
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers — exported for tests
@@ -268,7 +277,7 @@ export async function defaultGhFetcher(repo: string): Promise<PullRequestSnapsho
 export interface PrLifecycleBridgeOpts {
   /** Override poll interval (ms). Defaults to 60s. Tests pass tiny values. */
   pollIntervalMs?: number;
-  /** Override the repo list. Defaults to [hydra, hydra-betting]. */
+  /** Override the repo list. Defaults to [orchestrator repo, configured target]. */
   repos?: readonly string[];
   /** Inject a custom gh fetcher — tests stub this with a deterministic generator. */
   ghFetcher?: GhFetcher;
@@ -297,7 +306,7 @@ export async function startPrLifecycleBridge(
   opts: PrLifecycleBridgeOpts = {},
 ): Promise<PrLifecycleBridge> {
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-  const repos = opts.repos ?? DEFAULT_REPOS;
+  const repos = opts.repos ?? defaultRepos();
   const fetcher = opts.ghFetcher ?? defaultGhFetcher;
 
   let stopped = false;
