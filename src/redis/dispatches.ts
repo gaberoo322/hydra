@@ -188,3 +188,190 @@ export function epochFromIsoOrNow(iso: string | undefined): number {
   if (!Number.isFinite(ms)) return Math.floor(Date.now() / 1000);
   return Math.floor(ms / 1000);
 }
+
+// ===========================================================================
+// Subagent dispatch namespace (issue #692, PRD #690)
+// ===========================================================================
+//
+// Sibling to the operator namespace above. Where the operator namespace
+// tracks human-launched `claude` sessions, this tracks every *subagent*
+// session the autopilot (or an operator) dispatches via the Agent tool. The
+// SessionStart hook (`scripts/hooks/session-start-capture.sh`) scrapes a
+// hidden sentinel out of the session JSONL's first user message and POSTs it
+// to `POST /api/dispatches/subagent`, which lands here.
+//
+// # Why a separate namespace (not a `source` field on the operator one)
+//
+// - The operator namespace is keyed on a caller-chosen `id`; the subagent
+//   namespace is keyed on the harness-assigned `sessionId`. Mixing the two
+//   keying schemes into one index would make the dedup/expiry semantics
+//   ambiguous.
+// - Subagent rows carry extra fields the operator rows don't (`skill`,
+//   `dispatchId`, `runId`, `projectDir`) that join a session back to the
+//   autopilot turn that launched it. Keeping them in their own hash shape
+//   avoids polluting the operator row contract.
+//
+// # Schema
+//
+//   hydra:dispatches:subagent:{sessionId}  — hash, fields below, 24h TTL
+//   hydra:dispatches:subagent:index        — sorted set scored by startedEpoch
+//
+// Hash fields (all strings):
+//
+//   sessionId    — harness session id (the JSONL filename stem) — the key
+//   skill        — dispatched skill name ("hydra-dev", "hydra-grill", ...)
+//   dispatchId   — stable per-dispatch id (the synthesised worktree branch)
+//   runId        — optional autopilot run id (omitted for operator launches)
+//   startedAt    — ISO timestamp
+//   projectDir   — optional cwd / worktree path
+//   currentStep  — optional free-form step (last write wins)
+//   issueRef     — optional "#N" or "owner/repo#N"
+//   prRef        — optional "#N" or "owner/repo#N"
+//
+// The keys are inlined here (rather than `./keys.ts`) for exactly the same
+// reason the operator builders above are — the seam-check is happy with
+// builders that live in `src/redis/`, and inlining keeps the sibling pattern
+// symmetric. `keys.ts` reserves the namespace prefix in a comment so the two
+// stay coordinated.
+
+export function subagentDispatchKey(sessionId: string): string {
+  return `hydra:dispatches:subagent:${sessionId}`;
+}
+
+export function subagentDispatchIndexKey(): string {
+  return "hydra:dispatches:subagent:index";
+}
+
+export interface SubagentDispatch {
+  sessionId: string;
+  skill: string;
+  dispatchId: string;
+  startedAt: string;
+  runId?: string;
+  projectDir?: string;
+  currentStep?: string;
+  issueRef?: string;
+  prRef?: string;
+}
+
+/**
+ * Register (or overwrite) a subagent dispatch row. Keyed on `sessionId`.
+ * Re-registering the same sessionId is idempotent — the hook may fire more
+ * than once for a session (SessionStart + resume), and a re-register lands
+ * the same row and keeps the index score in place (ZADD without XX/NX), so
+ * the "hook is idempotent" acceptance criterion holds.
+ */
+export async function registerSubagentDispatch(
+  dispatch: SubagentDispatch,
+): Promise<void> {
+  const r = getRedisConnection();
+  const key = subagentDispatchKey(dispatch.sessionId);
+  const fields: Record<string, string> = {
+    sessionId: dispatch.sessionId,
+    skill: dispatch.skill,
+    dispatchId: dispatch.dispatchId,
+    startedAt: dispatch.startedAt,
+  };
+  if (dispatch.runId !== undefined) fields.runId = dispatch.runId;
+  if (dispatch.projectDir !== undefined) fields.projectDir = dispatch.projectDir;
+  if (dispatch.currentStep !== undefined) fields.currentStep = dispatch.currentStep;
+  if (dispatch.issueRef !== undefined) fields.issueRef = dispatch.issueRef;
+  if (dispatch.prRef !== undefined) fields.prRef = dispatch.prRef;
+
+  const startedEpoch = epochFromIsoOrNow(dispatch.startedAt);
+
+  const pipe = r.pipeline();
+  pipe.hset(key, ...Object.entries(fields).flat());
+  pipe.expire(key, TTL_SECONDS);
+  pipe.zadd(subagentDispatchIndexKey(), startedEpoch, dispatch.sessionId);
+  pipe.expire(subagentDispatchIndexKey(), TTL_SECONDS);
+  await pipe.exec();
+}
+
+/**
+ * Patch the `currentStep` of an in-flight subagent dispatch and refresh the
+ * TTL. Idempotent on an unknown sessionId — the HSET simply creates the
+ * field on a (possibly already-expired) hash; callers that care about
+ * existence should `getSubagentDispatch` first. We intentionally do NOT
+ * re-add to the index here: a step update on a row whose hash expired
+ * shouldn't resurrect an index entry that `endSubagentDispatch` removed.
+ */
+export async function setSubagentDispatchStep(
+  sessionId: string,
+  step: string,
+): Promise<void> {
+  const r = getRedisConnection();
+  const pipe = r.pipeline();
+  pipe.hset(subagentDispatchKey(sessionId), "currentStep", step);
+  pipe.expire(subagentDispatchKey(sessionId), TTL_SECONDS);
+  pipe.expire(subagentDispatchIndexKey(), TTL_SECONDS);
+  await pipe.exec();
+}
+
+/**
+ * Mark a subagent dispatch ended — drops the hash AND removes it from the
+ * index. Idempotent: calling on an unknown sessionId is a no-op.
+ */
+export async function endSubagentDispatch(sessionId: string): Promise<void> {
+  const r = getRedisConnection();
+  const pipe = r.pipeline();
+  pipe.del(subagentDispatchKey(sessionId));
+  pipe.zrem(subagentDispatchIndexKey(), sessionId);
+  await pipe.exec();
+}
+
+/**
+ * Fetch a single subagent dispatch by sessionId, or null if absent/expired.
+ */
+export async function getSubagentDispatch(
+  sessionId: string,
+): Promise<SubagentDispatch | null> {
+  const r = getRedisConnection();
+  const row = await r.hgetall(subagentDispatchKey(sessionId));
+  return projectSubagentRow(row);
+}
+
+/**
+ * List the currently-registered subagent dispatches, newest first.
+ * Mirrors `listActiveOperatorDispatches`: index ZSET scored by startedEpoch,
+ * ZREVRANGE for newest-first, partial-row tolerant (an index entry whose hash
+ * expired is skipped rather than throwing).
+ */
+export async function listActiveSubagentDispatches(): Promise<SubagentDispatch[]> {
+  const r = getRedisConnection();
+  const ids = await r.zrevrange(subagentDispatchIndexKey(), 0, -1);
+  if (!Array.isArray(ids) || ids.length === 0) return [];
+
+  const out: SubagentDispatch[] = [];
+  for (const id of ids) {
+    const row = await r.hgetall(subagentDispatchKey(id));
+    const projected = projectSubagentRow(row);
+    if (projected) out.push(projected);
+  }
+  return out;
+}
+
+/**
+ * Pure helper — exported for tests. Projects a raw Redis hash into the
+ * `SubagentDispatch` shape, returning null when the row is missing the
+ * required identity fields (so a partially-expired hash is skipped on read).
+ */
+export function projectSubagentRow(
+  row: Record<string, string> | null | undefined,
+): SubagentDispatch | null {
+  if (!row || !row.sessionId || !row.skill || !row.dispatchId || !row.startedAt) {
+    return null;
+  }
+  const dispatch: SubagentDispatch = {
+    sessionId: row.sessionId,
+    skill: row.skill,
+    dispatchId: row.dispatchId,
+    startedAt: row.startedAt,
+  };
+  if (row.runId) dispatch.runId = row.runId;
+  if (row.projectDir) dispatch.projectDir = row.projectDir;
+  if (row.currentStep) dispatch.currentStep = row.currentStep;
+  if (row.issueRef) dispatch.issueRef = row.issueRef;
+  if (row.prRef) dispatch.prRef = row.prRef;
+  return dispatch;
+}

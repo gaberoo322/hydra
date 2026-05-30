@@ -85,7 +85,10 @@ export type AutopilotTickResponse = z.infer<typeof AutopilotTickResponseSchema>;
 // Active dispatches
 // ---------------------------------------------------------------------------
 
-export const DispatchSourceSchema = z.enum(["autopilot", "operator"]);
+// "subagent" added in issue #692 — the active-dispatches aggregator now
+// merges a third source (Agent-tool subagent sessions captured by the
+// SessionStart hook) alongside autopilot runs and operator-launched sessions.
+export const DispatchSourceSchema = z.enum(["autopilot", "operator", "subagent"]);
 
 export const DispatchSchema = z
   .object({

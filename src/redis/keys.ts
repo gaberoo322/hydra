@@ -43,6 +43,19 @@ export const redisKeys = {
   autopilotRunTurns: (runId: string) => `hydra:autopilot:run:${runId}:turns`,
 
   // ---------------------------------------------------------------------------
+  // Dispatch registries (issue #618 operator namespace; issue #692 subagent
+  // namespace). The key builders for both namespaces are inlined in
+  // `src/redis/dispatches.ts` rather than here — the ADR-0009 seam-check is
+  // satisfied by builders that live anywhere under `src/redis/`, and inlining
+  // keeps the two sibling namespaces symmetric in one file. This reservation
+  // comment exists so the prefixes are discoverable from the central key
+  // surface even though the functions live next door:
+  //
+  //   hydra:dispatches:operator:{id}         + :index   (operator-launched)
+  //   hydra:dispatches:subagent:{sessionId}  + :index   (Agent-tool subagents)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
   // Tasks
   // ---------------------------------------------------------------------------
   task: (id: string) => `hydra:task:${id}`,
