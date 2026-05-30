@@ -6,14 +6,19 @@
  * because this is a weekly-review surface, not live monitoring):
  *
  *   1. OutcomeCards            — per-outcome trend + delta vs baseline
- *   2. CalibrationTrend        — tier + cost accuracy time series
- *   3. LessonsTrend            — promotion rate + top friction + meta count
- *   4. SubscriptionQuotaTrend  — % burned + headroom
+ *   2. BuilderHealth           — Builder-Health Scorecard (issue #732): the
+ *                               builder-side counterpart to OutcomeCards —
+ *                               autonomy rate, time-to-merge, self-improvement
+ *                               share, rework, scope-violations, learning.
+ *   3. CalibrationTrend        — tier + cost accuracy time series
+ *   4. LessonsTrend            — promotion rate + top friction + meta count
+ *   5. SubscriptionQuotaTrend  — % burned + headroom
  *
  * NB: the page deliberately does NOT reference `/api/stuckness` or any
  * stuckness-detector surface — that subsystem was retired by ADR-0010.
  */
 import { OutcomeCards } from "../components/pages/outcomes/OutcomeCards.jsx";
+import { BuilderHealth } from "../components/pages/outcomes/BuilderHealth.jsx";
 import { CalibrationTrend } from "../components/pages/outcomes/CalibrationTrend.jsx";
 import { LessonsTrend } from "../components/pages/outcomes/LessonsTrend.jsx";
 import { SubscriptionQuotaTrend } from "../components/pages/outcomes/SubscriptionQuotaTrend.jsx";
@@ -30,6 +35,7 @@ export default function Outcomes() {
       </div>
 
       <OutcomeCards />
+      <BuilderHealth />
       <CalibrationTrend />
       <LessonsTrend />
       <SubscriptionQuotaTrend />
