@@ -1385,6 +1385,13 @@ def _candidate_design_concept(
 ) -> dict | None:
     """Return the `designConcept` sub-object on the best candidate, if any.
 
+    ISSUE #751: no longer consumed by the decision path — the legacy
+    `best.designConcept` orch-grill / dev_orch-yield branches that called
+    this were removed (the candidates feed is target-product work, never an
+    orch-scope grill anchor). Retained as the canonical Python-side
+    description of the `designConcept` block shape that
+    `src/api/anchor.ts` documents and produces.
+
     Phase B (issue #466) wiring: the orchestrator's anchor-candidates feed
     MAY annotate each candidate with a `designConcept` block that mirrors
     the relevant fields from `getDesignConcept(anchorRef)`:
@@ -1459,26 +1466,21 @@ def _select_for_slot(
         # because the candidate feed is structurally the wrong source.
         if not _signal_present(state, events, "orch_work_available"):
             return None
-        # ISSUE #466 (Phase B, warn-only): if an orch pending-grill anchor
-        # is surfaced AND its design-concept artifact is missing/stale,
-        # SKIP dev_orch for this turn — `design_concept_orch` selector
-        # will fire instead in this same plan (it precedes dev_orch in the
-        # pipeline_priority order). Warn-only artifacts (status=draft,
-        # gateOk=false) are STILL treated as "fresh present" and dev_orch
-        # proceeds normally; Phase C will flip that.
+        # ISSUE #751: the legacy `best.designConcept` stale-suppression was
+        # REMOVED here too. It read `best` from /api/anchor/candidates —
+        # structurally a TARGET candidate post-#458 — and yielded dev_orch
+        # when that target candidate's designConcept was stale, on the
+        # assumption that `design_concept_orch` would grill it this turn.
+        # That grill no longer fires for target candidates (it never should
+        # have under orch scope), so the suppression would deadlock the orch
+        # path: dev_orch yields, no grill fires, nothing advances. dev_orch
+        # sequencing now keys ONLY off the orch-scope `orch_pending_grill_anchor`
+        # signal below — the single source of truth for orch grill anchors.
         #
-        # Defensive default: when no candidate is surfaced OR the candidate
-        # has no `designConcept` block, dev_orch proceeds as before. That
-        # keeps Phase B additive — the gate only fires when the data plane
-        # has been extended to populate the field (a follow-up sub-issue).
-        dc = _candidate_design_concept(candidates, best)
-        if dc is not None and not _design_concept_is_fresh(dc):
-            return None
-        # Issue #628: if `orch_pending_grill_anchor` is set, the
+        # Issue #628 / #751: if `orch_pending_grill_anchor` is set, the
         # design_concept_orch selector will dispatch hydra-grill on this
-        # turn — dev_orch MUST yield to maintain the Phase B sequencing
-        # rule (grill before dev). This mirrors the `best.designConcept`
-        # check above for the new orch-scope signal path.
+        # turn — dev_orch MUST yield to maintain the grill-before-dev
+        # sequencing rule. This is the ONLY remaining yield path.
         signals = state.get("signals") if isinstance(state, dict) else None
         orch_anchor = (
             signals.get("orch_pending_grill_anchor") if isinstance(signals, dict) else None
@@ -1561,12 +1563,19 @@ def _select_for_slot(
         #      the artifact-freshness lookup, so the presence of this
         #      signal IS the trigger.
         #
-        #   2. `best.designConcept` (legacy fallback). When the new
-        #      signal is absent (e.g. a deployment running an older
-        #      collect-state), fall back to the Phase B contract. The
-        #      candidates feed now carries the `designConcept` block per
-        #      issue #628's data-plane fix, so this path also works for
-        #      the legacy "orch candidate showed up in best" case.
+        #   2. `best.designConcept` (legacy fallback) — REMOVED in issue
+        #      #751. The fallback read `best` from /api/anchor/candidates,
+        #      which post-#458 is structurally target-product work
+        #      (item-<N>). Under scope='orch' it could ONLY misfire:
+        #      grilling a target candidate as an orch design concept,
+        #      burning a subagent and persisting a cross-scope artifact.
+        #      The candidate feed and the orch GH board are distinct
+        #      sources, so the fallback's stated trigger ("orch candidate
+        #      showed up in best") was structurally impossible post-#458.
+        #      `orch_pending_grill_anchor` (path 1) is now the SINGLE
+        #      source of truth for orch grill anchors. When it is absent
+        #      or 'none', this selector returns None (no grill) and
+        #      dev_orch proceeds.
         if not _signal_present(state, events, "orch_work_available"):
             return None
 
@@ -1585,24 +1594,11 @@ def _select_for_slot(
                 ),
             )
 
-        # Fallback: legacy `best.designConcept` path (Phase B as originally
-        # shipped). Retained so this PR can land alongside an older
-        # collect-state.sh without breaking the gate.
-        dc = _candidate_design_concept(candidates, best)
-        if dc is None:
-            return None
-        if _design_concept_is_fresh(dc):
-            return None
-        anchor_ref = best.get("anchorRef") if best else None
-        prompt_args: dict = {"scope": "orch"}
-        if anchor_ref is not None:
-            prompt_args["anchor"] = anchor_ref
-        return make_dispatch(
-            cls,
-            "hydra-grill",
-            prompt_args=prompt_args,
-            reason="orch anchor lacks fresh design-concept artifact (Phase B warn-only, legacy path)",
-        )
+        # No orch grill-pending anchor on the GH board → no orch grill.
+        # (Issue #751: the legacy `best.designConcept` fallback was removed
+        # because /api/anchor/candidates is target-product work, never an
+        # orch-scope grill anchor.)
+        return None
     return None
 
 
