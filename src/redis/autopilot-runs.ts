@@ -11,10 +11,87 @@
  *   hydra:autopilot:run:{runId}            — hash, 7d TTL
  *   hydra:autopilot:runs:index             — sorted set, 7d TTL refresh
  *   hydra:autopilot:run:{runId}:turns      — sorted set scored by turn_n, 7d TTL
+ *   hydra:autopilot:pr:{prNumber}          — dispatch->PR link hash, 14d TTL (issue #732)
+ *   hydra:autopilot:prs:index              — sorted set of PR numbers scored by openedAt (issue #732)
  */
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
+
+// ---------------------------------------------------------------------------
+// Dispatch -> PR link (issue #732)
+//
+// One of the two new persisted Builder-Health signals: when a dispatch opens
+// a PR we stamp a link record so the Autonomy Rate + time-to-merge metrics can
+// be derived from GitHub on read (the link supplies the PR number + the open
+// timestamp; mergedBy / labels / reviews are queried live). Kept independent
+// of the cycle-record prNumber (which is for the per-cycle dashboard join) so
+// the scorecard reader has a single, time-indexed source for "PRs a dispatch
+// opened in the last N", without enumerating every cycle hash.
+// ---------------------------------------------------------------------------
+
+/** 14 days — covers any scorecard window plus merge latency tail. */
+export const PR_LINK_TTL_SECONDS = 14 * 24 * 60 * 60;
+
+function autopilotPrKey(prNumber: number): string {
+  return `hydra:autopilot:pr:${prNumber}`;
+}
+function autopilotPrsIndexKey(): string {
+  return "hydra:autopilot:prs:index";
+}
+
+/**
+ * Record a dispatch->PR link. Idempotent on `prNumber` — a second call for the
+ * same PR refreshes the TTL and keeps the first `openedAtMs` (PR-open time is
+ * immutable). `fields` carries the dispatch provenance (runId, dispatchId,
+ * skill, issueRef) plus `openedAtMs` as a string.
+ */
+export async function putAutopilotPrLink(
+  prNumber: number,
+  fields: Record<string, string>,
+  openedAtMs: number,
+): Promise<void> {
+  const r = getRedisConnection();
+  const key = autopilotPrKey(prNumber);
+  const existing = await r.hget(key, "openedAtMs");
+  // Preserve the first-seen open time across retries.
+  const toWrite = existing
+    ? { ...fields, openedAtMs: existing }
+    : { ...fields, openedAtMs: String(openedAtMs) };
+  await r.hset(key, ...Object.entries(toWrite).flat());
+  await r.expire(key, PR_LINK_TTL_SECONDS);
+  const score = existing ? Number(existing) || openedAtMs : openedAtMs;
+  await r.zadd(autopilotPrsIndexKey(), score, String(prNumber));
+  await r.expire(autopilotPrsIndexKey(), PR_LINK_TTL_SECONDS);
+}
+
+/** List PR-link hashes opened in `[sinceMs, +inf)`, newest-first. */
+export async function listAutopilotPrLinksSince(
+  sinceMs: number,
+): Promise<Array<Record<string, string>>> {
+  const r = getRedisConnection();
+  const prNumbers: string[] = await r.zrevrangebyscore(
+    autopilotPrsIndexKey(),
+    "+inf",
+    sinceMs,
+  );
+  const out: Array<Record<string, string>> = [];
+  for (const pr of prNumbers) {
+    const hash = await r.hgetall(autopilotPrKey(Number(pr)));
+    if (hash && Object.keys(hash).length > 0) {
+      out.push({ prNumber: pr, ...hash });
+    }
+  }
+  return out;
+}
+
+/** Test-only: clear all PR-link state. */
+export async function _resetAutopilotPrLinks(): Promise<void> {
+  const r = getRedisConnection();
+  const prNumbers: string[] = await r.zrange(autopilotPrsIndexKey(), 0, -1);
+  for (const pr of prNumbers) await r.del(autopilotPrKey(Number(pr)));
+  await r.del(autopilotPrsIndexKey());
+}
 
 // ---------------------------------------------------------------------------
 // Run hash CRUD
