@@ -402,11 +402,184 @@ run_autopilot_wedge() {
 }
 
 # =============================================================================
-# Entry point — run both blocks on every tick. Each block is independent and
-# self-contained; a short-circuit in one MUST NOT skip the other.
+# ## DEPLOY DRIFT
+# =============================================================================
+#
+# Deploy-drift backstop (issue #734, split from #712 option 2).
+#
+# Why this exists
+# ---------------
+# Deploys are driven by a self-hosted GitHub Actions runner on merge to
+# master (deploy.sh). When two master merges land back-to-back, the
+# deploy workflow's concurrency group cancels the earlier job's deploy —
+# so production can silently lag master by one (or more) merge waves
+# without any health check noticing (the service stays "ok" the whole
+# time; it's just running stale code). See operator memory
+# `reference_deploy_concurrency_cancels_master`. This block is the
+# backstop: it compares the SHA the orchestrator is *running from*
+# against `origin/master` HEAD and surfaces drift.
+#
+# Read-only on the main tree (HARD invariant)
+# -------------------------------------------
+# This block NEVER mutates the $HYDRA_ROOT working tree or any local ref.
+#   - Deployed SHA: `git rev-parse HEAD` (pure read).
+#   - Remote SHA:   `git ls-remote origin master` (network read; touches
+#                   no local ref, no FETCH_HEAD, no working tree). We
+#                   deliberately do NOT `git fetch` — fetch mutates
+#                   remote-tracking refs and, worse, a stray checkout/pull
+#                   would clobber operator WIP. grounding.ts is read-only
+#                   for the same reason; this block mirrors that rule.
+#
+# Advisory by default (HARD invariant)
+# ------------------------------------
+# On drift the default action is a WARNING log line ONLY (visible in
+# `journalctl --user -u hydra-watchdog.service`). Auto-running deploy.sh
+# is an explicit, separately-gated, grace-windowed opt-in:
+#
+#   HYDRA_WATCHDOG_AUTODEPLOY=1        Enable auto-deploy on sustained drift.
+#                                      OFF by default — drift is advisory.
+#   HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS  (default 600 = 10 min)
+#                                      Drift must persist at least this long
+#                                      before auto-deploy fires. A single
+#                                      tick that catches a deploy mid-flight
+#                                      must NOT trigger a redundant deploy.
+#                                      Tracked via a marker file holding the
+#                                      epoch when the drift was first seen.
+#
+# Even with auto-deploy enabled, this block respects deliberate operator
+# stops: if the orchestrator scheduler reports stopReason="deliberate"
+# (POST /scheduler/stop, issue #388), the operator has paused the system
+# on purpose and we must NOT redeploy underneath them.
+#
+# Fail-safe (HARD invariant)
+# --------------------------
+# Any git error, network failure, unparseable SHA, or missing $HYDRA_ROOT
+# logs a WARN and returns 0. Drift detection is a backstop; it must never
+# be the thing that wedges the watchdog. The whole script ends `exit 0`.
+#
+# Testability hooks (off-by-default; pinned by test/watchdog-deploy-drift.test.mts)
+# --------------------------------------------------------------------------------
+#   HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA   Inject the "deployed" SHA, skipping
+#                                       the real `git rev-parse HEAD`.
+#   HYDRA_WATCHDOG_DRIFT_REMOTE_SHA     Inject the "origin/master" SHA,
+#                                       skipping the real `git ls-remote`.
+#   HYDRA_WATCHDOG_AUTODEPLOY_DRY_RUN=1 In the auto-deploy branch, log
+#                                       "would-deploy" and return 0 instead
+#                                       of execing deploy.sh.
+#   HYDRA_WATCHDOG_DRIFT_STATE_DIR      Override the marker-file dir (default
+#                                       /tmp) so tests don't collide with a
+#                                       live watchdog.
+
+run_deploy_drift() {
+  local HYDRA_ROOT="${HYDRA_ROOT:-/home/gabe/hydra}"
+  local STATE_DIR="${HYDRA_WATCHDOG_DRIFT_STATE_DIR:-/tmp}"
+  local DRIFT_MARKER="${STATE_DIR}/hydra-watchdog-drift-since"
+  local GRACE_SECONDS="${HYDRA_WATCHDOG_AUTODEPLOY_GRACE_SECONDS:-600}"
+
+  log() {
+    echo "hydra-deploy-drift-watchdog: $*"
+  }
+
+  # --- Resolve deployed SHA (read-only) ---
+  local deployed_sha
+  if [[ -n "${HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA:-}" ]]; then
+    deployed_sha="$HYDRA_WATCHDOG_DRIFT_DEPLOYED_SHA"
+  else
+    if [[ ! -d "$HYDRA_ROOT/.git" ]]; then
+      log "WARN $HYDRA_ROOT is not a git repo (.git missing); skipping drift check"
+      return 0
+    fi
+    deployed_sha=$(git -C "$HYDRA_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+  fi
+  if [[ -z "$deployed_sha" ]]; then
+    log "WARN could not resolve deployed SHA; skipping drift check"
+    return 0
+  fi
+
+  # --- Resolve origin/master SHA (network read-only, no local ref mutation) ---
+  local remote_sha
+  if [[ -n "${HYDRA_WATCHDOG_DRIFT_REMOTE_SHA:-}" ]]; then
+    remote_sha="$HYDRA_WATCHDOG_DRIFT_REMOTE_SHA"
+  else
+    # ls-remote touches NO local ref and NO working tree (unlike fetch/pull).
+    remote_sha=$(git -C "$HYDRA_ROOT" ls-remote origin master 2>/dev/null | awk '{print $1}' | head -n1 || echo "")
+  fi
+  if [[ -z "$remote_sha" ]]; then
+    log "WARN could not resolve origin/master SHA (network/git error); skipping drift check"
+    return 0
+  fi
+
+  # --- No drift: clear any stale marker and report healthy ---
+  if [[ "$deployed_sha" == "$remote_sha" ]]; then
+    rm -f "$DRIFT_MARKER" 2>/dev/null || true
+    log "in sync (deployed=${deployed_sha:0:8} == origin/master=${remote_sha:0:8})"
+    return 0
+  fi
+
+  # --- Drift detected (advisory) ---
+  local now first_seen drift_age
+  now=$(date +%s)
+  if [[ -f "$DRIFT_MARKER" ]]; then
+    first_seen=$(cat "$DRIFT_MARKER" 2>/dev/null || echo "$now")
+    # Guard against a garbage/non-numeric marker.
+    [[ "$first_seen" =~ ^[0-9]+$ ]] || first_seen="$now"
+  else
+    first_seen="$now"
+    echo "$now" > "$DRIFT_MARKER" 2>/dev/null || true
+  fi
+  drift_age=$((now - first_seen))
+  (( drift_age < 0 )) && drift_age=0
+
+  log "WARNING DRIFT — deployed=${deployed_sha:0:8} != origin/master=${remote_sha:0:8} (drift first seen ${drift_age}s ago). Production is running stale code; a deploy was likely cancelled by concurrency (see reference_deploy_concurrency_cancels_master)."
+
+  # --- Auto-deploy is OFF by default: advisory only ---
+  if [[ "${HYDRA_WATCHDOG_AUTODEPLOY:-0}" != "1" ]]; then
+    log "auto-deploy disabled (HYDRA_WATCHDOG_AUTODEPLOY != 1); advisory only — run scripts/deploy.sh to converge"
+    return 0
+  fi
+
+  # --- Grace window: drift must persist before auto-deploy fires ---
+  if (( drift_age < GRACE_SECONDS )); then
+    log "auto-deploy armed but within grace window (drift ${drift_age}s < ${GRACE_SECONDS}s); waiting for next tick"
+    return 0
+  fi
+
+  # --- Respect deliberate operator stops (issue #388) ---
+  local sched stop_reason
+  sched=$(curl -sS --max-time 5 "http://localhost:4000/api/scheduler/status" 2>/dev/null || echo "")
+  if [[ -n "$sched" ]]; then
+    stop_reason=$(echo "$sched" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("stopReason","") or "")' 2>/dev/null || echo "")
+    if [[ "$stop_reason" == "deliberate" ]]; then
+      log "drift sustained but scheduler stopped deliberately (stopReason=deliberate); NOT auto-deploying — operator paused the system on purpose"
+      return 0
+    fi
+  fi
+
+  # --- Auto-deploy (gated + grace-elapsed + not deliberately stopped) ---
+  if [[ "${HYDRA_WATCHDOG_AUTODEPLOY_DRY_RUN:-0}" == "1" ]]; then
+    log "would-deploy (DRY_RUN=1): drift sustained ${drift_age}s >= ${GRACE_SECONDS}s — would exec scripts/deploy.sh"
+    return 0
+  fi
+
+  log "AUTO-DEPLOY — drift sustained ${drift_age}s >= grace ${GRACE_SECONDS}s; running scripts/deploy.sh to converge to origin/master"
+  # deploy.sh is self-healing (fails loud on dirty tree); run it best-effort.
+  # Clear the marker so the next tick re-arms the grace window from scratch.
+  rm -f "$DRIFT_MARKER" 2>/dev/null || true
+  if bash "$HYDRA_ROOT/scripts/deploy.sh"; then
+    log "auto-deploy completed"
+  else
+    log "WARN auto-deploy (scripts/deploy.sh) returned non-zero; operator intervention may be needed"
+  fi
+  return 0
+}
+
+# =============================================================================
+# Entry point — run all blocks on every tick. Each block is independent and
+# self-contained; a short-circuit in one MUST NOT skip the others.
 # =============================================================================
 
 run_service_liveness
 run_autopilot_wedge
+run_deploy_drift
 
 exit 0

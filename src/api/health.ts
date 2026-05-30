@@ -23,6 +23,36 @@ const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
 
+// Issue #734 (deploy-drift backstop): expose the SHA the orchestrator is
+// running from so the watchdog (and operators) can compare it against
+// origin/master HEAD. This is a pure read — `git rev-parse HEAD` against
+// $HYDRA_ROOT, which deploy.sh leaves checked out on master. Cached for 60s
+// so the per-2-minute watchdog poll plus dashboard traffic doesn't fork a git
+// process on every /health hit. Fail-safe: any error resolves to null and is
+// simply omitted from the response (never throws, never blocks /health).
+let deployedShaCache: { sha: string | null; at: number } = { sha: null, at: 0 };
+const DEPLOYED_SHA_TTL_MS = 60_000;
+
+async function getDeployedSha(): Promise<string | null> {
+  const now = Date.now();
+  if (deployedShaCache.sha !== null && now - deployedShaCache.at < DEPLOYED_SHA_TTL_MS) {
+    return deployedShaCache.sha;
+  }
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", HYDRA_ROOT, "rev-parse", "HEAD"], { timeout: 3000 });
+    const sha = stdout.trim() || null;
+    deployedShaCache = { sha, at: now };
+    return sha;
+  } catch (err: any) {
+    // Intentional: not a git checkout, git missing, or timeout — the field is
+    // advisory. Log once-per-cache-window so a misconfigured host is visible
+    // without spamming, then omit the field.
+    console.error(`[API] /health deployedSha unavailable: ${err?.message ?? err}`);
+    deployedShaCache = { sha: null, at: now };
+    return null;
+  }
+}
+
 export function createHealthRouter(eventBus: any) {
   const router = Router();
 
@@ -35,6 +65,10 @@ export function createHealthRouter(eventBus: any) {
       redisOk = true;
     } catch { /* intentional: ping failure reflected via redisOk=false in the response */ }
 
+    // Issue #734: advisory deployed-SHA for the deploy-drift backstop. null
+    // when unresolvable (omitted-by-coalesce below); never blocks /health.
+    const deployedSha = await getDeployedSha();
+
     res.json({
       status: killFileExists ? "killed" : "ok",
       redis: redisOk,
@@ -43,6 +77,10 @@ export function createHealthRouter(eventBus: any) {
       // ever returns.
       cycle: "idle",
       uptime: process.uptime(),
+      // Issue #734: SHA the orchestrator is running from (deploy.sh leaves
+      // $HYDRA_ROOT on master HEAD). Advisory — null/absent if git is
+      // unavailable. The watchdog compares this against origin/master.
+      deployedSha,
     });
   });
 
