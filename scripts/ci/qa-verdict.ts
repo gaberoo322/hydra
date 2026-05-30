@@ -99,20 +99,49 @@ const SUCCESS_CONCLUSIONS: ReadonlySet<Exclude<CheckConclusion, null>> = new Set
   "neutral",
 ]);
 
+/**
+ * Fold caller-supplied casing to the lowercase-canonical tokens the
+ * PENDING_STATUSES / SUCCESS_CONCLUSIONS sets are keyed on. GitHub's GraphQL
+ * API (surfaced verbatim by `gh pr view --json statusCheckRollup`) returns
+ * `status` and `conclusion` as UPPERCASE enums (QUEUED, IN_PROGRESS,
+ * COMPLETED, SUCCESS, ...). Without this fold an uppercase `QUEUED` matches
+ * neither the pending nor the completed branch, so a still-queued check
+ * silently counts as "concluded" and the classifier falls through to a
+ * false-green PASS (issue #761). The CheckStatus/CheckConclusion union types
+ * stay lowercase-canonical (the domain vocabulary); casing is folded here at
+ * the external-input boundary, not modeled in the type. This is defense in
+ * depth — the hydra-qa playbook also ascii_downcases — so the classifier is
+ * correct even if a future caller forwards raw casing.
+ */
+function normaliseStatus(status: CheckState["status"]): CheckStatus {
+  return (typeof status === "string" ? status.toLowerCase() : status) as CheckStatus;
+}
+
+function normaliseConclusion(
+  conclusion: CheckState["conclusion"],
+): CheckConclusion | undefined {
+  if (conclusion === null || conclusion === undefined) return conclusion ?? undefined;
+  return (
+    typeof conclusion === "string" ? conclusion.toLowerCase() : conclusion
+  ) as CheckConclusion;
+}
+
 function isPending(c: CheckState): boolean {
-  return PENDING_STATUSES.has(c.status);
+  return PENDING_STATUSES.has(normaliseStatus(c.status));
 }
 
 function isSuccess(c: CheckState): boolean {
-  if (c.status !== "completed") return false;
-  if (c.conclusion === null || c.conclusion === undefined) return false;
-  return SUCCESS_CONCLUSIONS.has(c.conclusion);
+  if (normaliseStatus(c.status) !== "completed") return false;
+  const conclusion = normaliseConclusion(c.conclusion);
+  if (conclusion === null || conclusion === undefined) return false;
+  return SUCCESS_CONCLUSIONS.has(conclusion);
 }
 
 function isFailure(c: CheckState): boolean {
-  if (c.status !== "completed") return false;
-  if (c.conclusion === null || c.conclusion === undefined) return false;
-  return !SUCCESS_CONCLUSIONS.has(c.conclusion);
+  if (normaliseStatus(c.status) !== "completed") return false;
+  const conclusion = normaliseConclusion(c.conclusion);
+  if (conclusion === null || conclusion === undefined) return false;
+  return !SUCCESS_CONCLUSIONS.has(conclusion);
 }
 
 /**
@@ -133,8 +162,8 @@ export function classifyVerdict(
 ): VerdictResult {
   const normalised = checks.map((c) => ({
     name: c.name,
-    status: c.status,
-    conclusion: (c.conclusion ?? "—") as CheckConclusion | "—",
+    status: normaliseStatus(c.status),
+    conclusion: (normaliseConclusion(c.conclusion) ?? "—") as CheckConclusion | "—",
     required: c.required ?? false,
   }));
 

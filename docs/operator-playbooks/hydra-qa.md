@@ -140,8 +140,10 @@ The `design-concept-exempt` bypass MUST emit an audit comment so operators can r
 
 ```bash
 CHECKS_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra --json statusCheckRollup \
-  --jq '.statusCheckRollup | map({name: (.name // .context), status: (.status // "completed"), conclusion: .conclusion, required: (.isRequired // false)})')
+  --jq '.statusCheckRollup | map({name: (.name // .context), status: ((.status // "completed") | ascii_downcase), conclusion: (.conclusion | if . == null then null else ascii_downcase end), required: (.isRequired // false)})')
 ```
+
+GitHub returns `status`/`conclusion` as UPPERCASE enums (`QUEUED`, `COMPLETED`, `SUCCESS`). The `ascii_downcase` calls fold them to the lowercase-canonical tokens the classifier's `PENDING_STATUSES` / `SUCCESS_CONCLUSIONS` sets match (issue #761). The classifier ALSO folds casing internally as defense in depth, so this is belt-and-braces — but keeping the emitted JSON lowercase-canonical makes `CHECKS_JSON` self-describing and matches the documented `CheckStatus` union.
 
 Pass `CHECKS_JSON` to the verdict classifier at the end — not to the sub-agents.
 
