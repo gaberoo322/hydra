@@ -7,14 +7,16 @@
  *
  *   1. OutcomeCards            — per-outcome trend + delta vs baseline
  *   2. CalibrationTrend        — tier + cost accuracy time series
- *   3. LessonsTrend            — promotion rate + top friction + meta count
- *   4. SubscriptionQuotaTrend  — % burned + headroom
+ *   3. CacheEconomics          — point-in-time cache-hit ratio (5h / 7d)
+ *   4. LessonsTrend            — promotion rate + top friction + meta count
+ *   5. SubscriptionQuotaTrend  — % burned + headroom
  *
  * NB: the page deliberately does NOT reference `/api/stuckness` or any
  * stuckness-detector surface — that subsystem was retired by ADR-0010.
  */
 import { OutcomeCards } from "../components/pages/outcomes/OutcomeCards.jsx";
 import { CalibrationTrend } from "../components/pages/outcomes/CalibrationTrend.jsx";
+import { CacheEconomics } from "../components/pages/outcomes/CacheEconomics.jsx";
 import { LessonsTrend } from "../components/pages/outcomes/LessonsTrend.jsx";
 import { SubscriptionQuotaTrend } from "../components/pages/outcomes/SubscriptionQuotaTrend.jsx";
 
@@ -31,6 +33,7 @@ export default function Outcomes() {
 
       <OutcomeCards />
       <CalibrationTrend />
+      <CacheEconomics />
       <LessonsTrend />
       <SubscriptionQuotaTrend />
     </div>
