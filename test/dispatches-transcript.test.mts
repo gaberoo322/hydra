@@ -41,6 +41,22 @@ const {
 
 const { registerSubagentDispatch } = await import("../src/redis/dispatches.ts");
 
+type TranscriptBlock = import("../src/api/dispatches.ts").TranscriptBlock;
+
+/**
+ * Read the `text` off a transcript block in a type-safe way. `TranscriptBlock`
+ * is a discriminated union and only the text/thinking/tool_result variants
+ * carry a `text` field — `tool_use` does not — so a bare `block.text` access
+ * fails strict-test typecheck (issue #774). These assertions only ever inspect
+ * text blocks, so narrow explicitly and fail loud if the variant is wrong.
+ */
+function textOf(block: TranscriptBlock): string {
+  if (block.type === "tool_use") {
+    throw new Error(`expected a text-bearing block, got tool_use(${block.name})`);
+  }
+  return block.text;
+}
+
 const UUID = "11111111-2222-4333-8444-555555555555";
 
 // ---------------------------------------------------------------------------
@@ -183,7 +199,7 @@ describe("parseTranscript", () => {
     const out = parseTranscript(body);
     assert.equal(out.length, 2);
     assert.equal(out[0].role, "user");
-    assert.equal(out[0].blocks[0].text, "q1");
+    assert.equal(textOf(out[0].blocks[0]), "q1");
     assert.equal(out[1].role, "assistant");
   });
 
@@ -196,8 +212,8 @@ describe("parseTranscript", () => {
     const out = parseTranscript(body);
     // The bad middle line is skipped; the two valid lines survive.
     assert.equal(out.length, 2);
-    assert.equal(out[0].blocks[0].text, "before");
-    assert.equal(out[1].blocks[0].text, "after");
+    assert.equal(textOf(out[0].blocks[0]), "before");
+    assert.equal(textOf(out[1].blocks[0]), "after");
   });
 
   test("tolerates blank lines and trailing newline", () => {
@@ -218,13 +234,13 @@ describe("paginate", () => {
     const { page, total } = paginate(mk(500), 0, 200);
     assert.equal(total, 500);
     assert.equal(page.length, 200);
-    assert.equal(page[0].blocks[0].text, "m0");
+    assert.equal(textOf(page[0].blocks[0]), "m0");
   });
   test("second page slices oldest-first from the offset", () => {
     const { page, total } = paginate(mk(500), 200, 200);
     assert.equal(total, 500);
     assert.equal(page.length, 200);
-    assert.equal(page[0].blocks[0].text, "m200");
+    assert.equal(textOf(page[0].blocks[0]), "m200");
   });
   test("offset past the end yields an empty page but the true total", () => {
     const { page, total } = paginate(mk(10), 999, 200);
