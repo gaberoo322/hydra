@@ -131,6 +131,21 @@ function formatMessage(event) {
     case "dlq:alert":
       return `🔴 *Dead Letter*\nStream: ${payload.originalStream}\nEvent: ${payload.eventType}\nError: ${payload.error}\nAttempts: ${payload.deliveryCount}`;
 
+    // --- /hydra-review pickup set (issue #745) ---
+
+    case "review:pickup_ready": {
+      const count = payload.count ?? 0;
+      const lines = [
+        `📥 *Review queue — ${count} item${count === 1 ? "" : "s"} need attention*`,
+        "Run `/hydra-review` to triage.",
+      ];
+      if (payload.firstTitle) {
+        const link = payload.firstUrl ? ` — ${payload.firstUrl}` : "";
+        lines.push("", `First: ${payload.firstTitle}${link}`);
+      }
+      return lines.join("\n");
+    }
+
     // --- Operator blocked ---
 
     case "cycle:operator_blocked": {

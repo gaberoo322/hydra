@@ -46,6 +46,12 @@ import {
   getDigestLastWeekly, setDigestLastWeekly,
   getMemoryLastConsolidation, setMemoryLastConsolidation,
 } from "../redis/scheduler.ts";
+import {
+  getReviewPickupNotified,
+  setReviewPickupNotified,
+  clearReviewPickupNotified,
+} from "../redis/review.ts";
+import { getReviewPickupSet } from "../review-pickup.ts";
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (issue #725: slowed from 2min; watchdog staleness threshold is 15min = 3x margin)
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
@@ -325,8 +331,87 @@ async function checkBlockedEscalation(eventBus) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// /hydra-review pickup-set phone-notify hook (issue #745)
+// ---------------------------------------------------------------------------
+//
+// Edge-triggered: fires exactly ONE notification when the /hydra-review pickup
+// set (operator-decision-queue + ready-for-human + stale-blocked) transitions
+// from empty -> non-empty, then suppresses repeats while it stays non-empty,
+// and re-arms once it drains to empty. The armed-state flag lives in Redis
+// (`hydra:review:pickup-armed`) so the edge survives an orchestrator restart —
+// a bounce mid-non-empty must NOT re-fire.
+//
+// Reuses the existing notifications stream -> Telegram bridge (no new
+// transport; secrets via env per ADR-0005). Never throws — a failed fetch is
+// treated as "couldn't sample", which leaves the armed-state untouched so the
+// next tick re-evaluates. Better a missed alert than a spurious one.
+
 /**
- * Run the five time-boxed housekeeping chores.
+ * Sample the pickup set and fire/suppress the edge-triggered notification.
+ *
+ * Returns a small summary `{ fired, count, transitioned }` so the housekeeping
+ * caller and tests can see what happened. `transitioned` is true on either
+ * edge (empty->non-empty fires; non-empty->empty re-arms).
+ *
+ * `deps` is injectable so the test suite can stub the pickup-set fetch and the
+ * armed-state accessors without a live Redis / `gh`.
+ */
+async function checkReviewPickupNotify(
+  eventBus,
+  deps: {
+    getPickupSet?: typeof getReviewPickupSet;
+    getNotified?: typeof getReviewPickupNotified;
+    setNotified?: typeof setReviewPickupNotified;
+    clearNotified?: typeof clearReviewPickupNotified;
+  } = {},
+): Promise<{ fired: boolean; count: number; transitioned: boolean }> {
+  const getPickupSet = deps.getPickupSet ?? getReviewPickupSet;
+  const getNotified = deps.getNotified ?? getReviewPickupNotified;
+  const setNotified = deps.setNotified ?? setReviewPickupNotified;
+  const clearNotified = deps.clearNotified ?? clearReviewPickupNotified;
+
+  const items = await getPickupSet();
+  const count = items.length;
+  const alreadyNotified = await getNotified();
+
+  if (count === 0) {
+    // Set is empty — re-arm if a prior notification is still suppressing.
+    if (alreadyNotified) {
+      await clearNotified();
+      console.log("[Heartbeat] Review pickup set drained — re-armed notify hook");
+      return { fired: false, count: 0, transitioned: true };
+    }
+    return { fired: false, count: 0, transitioned: false };
+  }
+
+  // Set is non-empty.
+  if (alreadyNotified) {
+    // Already alerted for this non-empty run — suppress.
+    return { fired: false, count, transitioned: false };
+  }
+
+  // Empty -> non-empty edge: fire exactly one notification, then arm-spent.
+  const first = items[0];
+  const { STREAMS } = await import("../event-bus.ts");
+  await eventBus.publish(STREAMS.NOTIFICATIONS, {
+    type: "review:pickup_ready",
+    source: "scheduler",
+    correlationId: `review-pickup-${first.number}`,
+    payload: {
+      count,
+      firstTitle: first.title,
+      firstUrl: first.url,
+      firstNumber: first.number,
+    },
+  });
+  await setNotified();
+  console.log(`[Heartbeat] Review pickup set non-empty (${count}) — sent notify`);
+  return { fired: true, count, transitioned: true };
+}
+
+/**
+ * Run the time-boxed housekeeping chores.
  *
  * Issue #723 (scheduler fold PR-3/4): these chores were extracted out of
  * `runScheduledCycle` so they can be driven externally by an hourly
@@ -360,6 +445,20 @@ async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: stri
   } catch (err: any) {
     console.error(`[Heartbeat] Blocked escalation check failed in housekeeping: ${err.message}`);
     skipped.push("blocked-escalation");
+  }
+
+  // Issue #745: /hydra-review pickup-set phone-notify hook. The edge-trigger
+  // armed-state (Redis `hydra:review:pickup-armed`) is the idempotency guard —
+  // it only FIRES on an empty -> non-empty transition, so calling this hourly
+  // is safe (a steady non-empty set is suppressed). Counts as "ran" when it
+  // either sampled cleanly or fired; "skipped" only on an unexpected throw.
+  try {
+    await checkReviewPickupNotify(eventBus);
+    ran.push("review-pickup-notify");
+  } catch (err: any) {
+    console.error(`[Heartbeat] Review pickup notify check failed: ${err.message}`);
+    Sentry.addBreadcrumb({ category: "scheduler", message: `review-pickup-notify failed: ${err.message}`, level: "error" });
+    skipped.push("review-pickup-notify");
   }
 
   // Prune old done-lane items from the backlog. Lives at the tick level
@@ -681,7 +780,10 @@ export {
   formatDuration,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,
-  // Issue #723 (scheduler fold PR-3/4): the five housekeeping chores, callable
+  // Issue #723 (scheduler fold PR-3/4): the housekeeping chores, callable
   // out-of-band by the `/api/maintenance/housekeeping` endpoint / hourly timer.
   runHousekeeping,
+  // Issue #745: edge-triggered /hydra-review pickup-set notify hook, exported
+  // for test coverage (injectable pickup-set + armed-state deps).
+  checkReviewPickupNotify,
 };
