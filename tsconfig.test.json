@@ -1,0 +1,27 @@
+{
+  // Separate tsconfig for the test-typecheck ratchet gate (issue #750).
+  //
+  // The main tsconfig.json excludes `test/` (and never included `scripts/`), so
+  // `npm run typecheck` (`tsc --noEmit`) leaves both trees unchecked. Combined
+  // with `npm test` running through tsx (transpile-only, types erased), type
+  // errors in test and script files are invisible to every CI gate today.
+  //
+  // This config widens the include to `test/**` + `scripts/**` so a dedicated
+  // pass can type-check them. It is NOT wired into the blocking `typecheck`
+  // script — `scripts/ci/test-typecheck-check.ts` runs it as a shrink-only
+  // baseline ratchet (mirrors target-coupling-check.ts / redis-seam-check.ts):
+  // pre-existing errors are tolerated, only an INCREASE fails the gate.
+  //
+  // Inherits the main compilerOptions so the type-checking semantics match what
+  // an editor/LSP sees against the same source. `noEmit` because this config is
+  // type-check only; `rootDir` is widened to "." (the main one pins ./src, which
+  // would error on test/scripts files outside it).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false
+  },
+  "include": ["src/**/*.ts", "test/**/*.mts", "scripts/**/*.ts"],
+  "exclude": ["node_modules", "dist", "dashboard"]
+}
