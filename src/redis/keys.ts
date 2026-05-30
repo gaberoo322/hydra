@@ -157,6 +157,13 @@ export const redisKeys = {
   // itself if start() is never called explicitly.
   schedulerDeliberateStop: () => "hydra:scheduler:deliberate-stop",
 
+  // Issue #745: edge-trigger armed-state for the /hydra-review pickup-set
+  // phone-notify hook. Holds "1" while the pickup set is NON-EMPTY (a
+  // notification already fired and is suppressed). Absent means the set is
+  // empty and the hook is re-armed to fire on the next empty -> non-empty
+  // transition. A plain string flag, not a JSON blob.
+  reviewPickupArmed: () => "hydra:review:pickup-armed",
+
   // Issue #673 budget-threshold idempotency sentinel removed in #703 along
   // with the dead budget-threshold bridge that wrote it. The bridge polled
   // `hydra:scheduler:daily-spend` (no live writer) and never emitted.

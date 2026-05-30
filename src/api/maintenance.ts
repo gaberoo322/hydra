@@ -4,7 +4,7 @@ import { runHousekeeping } from "../scheduler/heartbeat.ts";
 /**
  * Maintenance sub-router (issue #723 — scheduler fold PR-3/4).
  *
- * Exposes the five time-boxed housekeeping chores (formerly riding on the
+ * Exposes the time-boxed housekeeping chores (formerly riding on the
  * 2-minute scheduler tick) as an idempotent endpoint that an hourly
  * `hydra-housekeeping.timer` triggers. Running them through the live
  * orchestrator process reuses the in-process `eventBus` + dynamic imports
@@ -17,7 +17,7 @@ import { runHousekeeping } from "../scheduler/heartbeat.ts";
 export function createMaintenanceRouter(eventBus: any) {
   const router = Router();
 
-  // POST /maintenance/housekeeping — run the five housekeeping chores.
+  // POST /maintenance/housekeeping — run the housekeeping chores.
   // Idempotent: each chore's internal time-guard means repeated calls within
   // a window are no-ops (reflected in the `skipped` array of the summary).
   router.post("/maintenance/housekeeping", async (req, res) => {
