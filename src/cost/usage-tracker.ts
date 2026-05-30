@@ -126,6 +126,19 @@ export interface UsageSnapshot {
   parseErrors: number;
   /** ISO timestamp anchor used to compute the rolling windows. */
   generatedAt: string;
+  /**
+   * Cache-hit ratio over the 5h window, in the closed interval [0, 1].
+   * Formula: cacheRead / (cacheRead + cacheCreation + input). Output
+   * tokens are excluded (not cache-eligible); cacheCreation is in the
+   * denominator on purpose so the ratio honestly accounts for the cost
+   * of warming the cache. Returns 0 when the denominator is 0 (no
+   * division by zero) — the same uncalibrated-returns-0 discipline the
+   * rest of the tracker follows. Higher is better; a falling ratio means
+   * the next window's tokens get more expensive.
+   */
+  cacheHitRatioLast5h: number;
+  /** Cache-hit ratio over the 7d window. Same formula/invariants as `cacheHitRatioLast5h`. */
+  cacheHitRatioLast7d: number;
 }
 
 const EMPTY_BREAKDOWN: TokenBreakdown = {
@@ -399,6 +412,8 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
     linesWithUsage,
     parseErrors,
     generatedAt: now.toISOString(),
+    cacheHitRatioLast5h: cacheHitRatio(acc5h),
+    cacheHitRatioLast7d: cacheHitRatio(acc7d),
   };
 }
 
@@ -454,6 +469,24 @@ export function parseUsageLine(line: string): ParsedUsageLine | "skip" | null {
     tokens: { input, output, cacheRead, cacheCreation, total },
     model,
   };
+}
+
+/**
+ * Cache-hit ratio for one accumulated window.
+ *
+ * `cacheRead / (cacheRead + cacheCreation + input)` — output tokens are
+ * NOT cache-eligible so they never enter the denominator; cacheCreation
+ * IS in the denominator so cache-warming cost is counted honestly.
+ * Returns 0 when the denominator is 0 (zero-total guard — no NaN, no
+ * division by zero). The result is always in the closed interval [0, 1].
+ *
+ * Exported so tests can pin the formula without round-tripping through
+ * the filesystem.
+ */
+export function cacheHitRatio(b: TokenBreakdown): number {
+  const denominator = b.cacheRead + b.cacheCreation + b.input;
+  if (denominator === 0) return 0;
+  return b.cacheRead / denominator;
 }
 
 function addBreakdown(target: TokenBreakdown, src: TokenBreakdown): void {

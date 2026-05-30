@@ -80,6 +80,7 @@ export {
   getQuotaWeightHaiku,
   modelToFamily,
   parseUsageLine,
+  cacheHitRatio,
   PACING_SHEDDABLE_CLASSES,
 } from "./usage-tracker.ts";
 

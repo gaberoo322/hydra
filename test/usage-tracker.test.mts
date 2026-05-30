@@ -10,10 +10,26 @@ import {
   getFiveHourQuotaTokens,
   modelToFamily,
   parseUsageLine,
+  cacheHitRatio,
   projectEligibility,
   PACING_SHEDDABLE_CLASSES,
   type UsageSnapshot,
+  type TokenBreakdown,
 } from "../src/cost/index.ts";
+
+function breakdown(p: Partial<TokenBreakdown> = {}): TokenBreakdown {
+  const input = p.input ?? 0;
+  const output = p.output ?? 0;
+  const cacheRead = p.cacheRead ?? 0;
+  const cacheCreation = p.cacheCreation ?? 0;
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheCreation,
+    total: p.total ?? input + output + cacheRead + cacheCreation,
+  };
+}
 
 interface TokenInput {
   in?: number;
@@ -156,6 +172,106 @@ describe("usage-tracker", () => {
       assert.equal(modelToFamily(""), "unknown");
       assert.equal(modelToFamily(null), "unknown");
       assert.equal(modelToFamily(undefined), "unknown");
+    });
+  });
+
+  describe("cacheHitRatio", () => {
+    // Formula: cacheRead / (cacheRead + cacheCreation + input).
+    // Output tokens are NEVER in the denominator.
+
+    test("all-cache-read → ratio = 1", () => {
+      // Pure cache reads with no creation and no fresh input: every
+      // cache-eligible token was a hit.
+      const ratio = cacheHitRatio(breakdown({ cacheRead: 1000, output: 500 }));
+      assert.equal(ratio, 1);
+    });
+
+    test("all-uncached-input → ratio = 0", () => {
+      const ratio = cacheHitRatio(breakdown({ input: 1000, output: 500 }));
+      assert.equal(ratio, 0);
+    });
+
+    test("mixed-realistic case → cacheRead / (cacheRead + cacheCreation + input)", () => {
+      // 800 read, 100 created, 100 fresh input, 1000 output (excluded).
+      // 800 / (800 + 100 + 100) = 0.8
+      const ratio = cacheHitRatio(
+        breakdown({ cacheRead: 800, cacheCreation: 100, input: 100, output: 1000 }),
+      );
+      assert.equal(ratio, 0.8);
+    });
+
+    test("zero-total → ratio = 0 (no division by zero)", () => {
+      const ratio = cacheHitRatio(breakdown({}));
+      assert.equal(ratio, 0);
+      assert.ok(Number.isFinite(ratio));
+    });
+
+    test("output tokens are NOT in the denominator", () => {
+      // Same input/cacheRead, wildly different output: ratio must not move.
+      const a = cacheHitRatio(breakdown({ cacheRead: 50, input: 50, output: 0 }));
+      const b = cacheHitRatio(breakdown({ cacheRead: 50, input: 50, output: 1_000_000 }));
+      assert.equal(a, 0.5);
+      assert.equal(b, 0.5);
+    });
+
+    test("cacheCreation IS in the denominator (cache-warming cost counted)", () => {
+      // 100 read vs 100 created, no input → 100 / 200 = 0.5, not 1.
+      const ratio = cacheHitRatio(breakdown({ cacheRead: 100, cacheCreation: 100 }));
+      assert.equal(ratio, 0.5);
+    });
+
+    test("ratio is always within the closed interval [0, 1]", () => {
+      const cases: TokenBreakdown[] = [
+        breakdown({}),
+        breakdown({ cacheRead: 1 }),
+        breakdown({ input: 1 }),
+        breakdown({ cacheRead: 3, cacheCreation: 7, input: 13, output: 999 }),
+      ];
+      for (const c of cases) {
+        const r = cacheHitRatio(c);
+        assert.ok(r >= 0 && r <= 1, `ratio ${r} out of [0,1] for ${JSON.stringify(c)}`);
+      }
+    });
+  });
+
+  describe("getUsage cache-hit ratio fields", () => {
+    let root: string;
+    let restore: () => void;
+    beforeEach(async () => {
+      restore = withEnvSnapshot();
+      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
+      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
+      root = await mkdtemp(join(tmpdir(), "usage-cache-ratio-"));
+      clearUsageCache();
+    });
+    afterEach(async () => {
+      await rm(root, { recursive: true, force: true });
+      restore();
+      clearUsageCache();
+    });
+
+    test("snapshot carries cacheHitRatioLast5h / cacheHitRatioLast7d derived from the accumulators", async () => {
+      const now = new Date("2026-05-25T12:00:00Z");
+      // One in-5h line: 800 read, 100 created, 100 input → 0.8.
+      await writeFixture(root, "p/recent.jsonl", [
+        assistantLine("2026-05-25T11:00:00Z", {
+          cacheRead: 800,
+          cacheCreation: 100,
+          in: 100,
+          out: 5000,
+        }),
+      ]);
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+      assert.equal(snap.cacheHitRatioLast5h, 0.8);
+      assert.equal(snap.cacheHitRatioLast7d, 0.8);
+      assert.ok(snap.cacheHitRatioLast5h >= 0 && snap.cacheHitRatioLast5h <= 1);
+    });
+
+    test("empty snapshot reports cache-hit ratios of 0 (no division by zero)", async () => {
+      const now = new Date("2026-05-25T12:00:00Z");
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+      assert.equal(snap.cacheHitRatioLast5h, 0);
+      assert.equal(snap.cacheHitRatioLast7d, 0);
     });
   });
 
