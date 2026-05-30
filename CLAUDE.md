@@ -9,7 +9,7 @@ Autonomous software-building framework. The orchestrator is a control plane for 
 Read these first when working on the orchestrator:
 
 - [`README.md`](./README.md) — system overview, dashboard/API surface, design principles
-- [`CONTEXT.md`](./CONTEXT.md) — **canonical glossary**. Use these terms exactly (Target, Orchestrator, Untouchable Core, Pre-merge Gate, Modification Tier, Outcome Holdback, Operator-Required Intervention)
+- [`CONTEXT.md`](./CONTEXT.md) — **canonical glossary**. Use these terms exactly (Target, Orchestrator, Verifier Core, Pre-merge Gate, Modification Tier, Outcome Holdback, Operator-Required Intervention)
 - [`docs/adr/`](./docs/adr/) — architectural decision records:
   - ADR-0001 — Untouchable Core & gate extraction (protected paths, operator-only)
   - ADR-0002 — Single target per orchestrator instance
@@ -199,20 +199,20 @@ Daily spend tracking still flows through `hydra:scheduler:daily-spend` (renamed 
 - **grounding.ts is read-only** — never mutate the workspace from inside grounding. (The workspace-mutation helper `src/prepare-workspace.ts` was the cycle-loop's pre-grounding cleanup step; it was deleted in issue #609 along with the rest of the in-process control loop. If a future cycle needs workspace prep, add it as a separate module that runs BEFORE grounding — not inside it.)
 - **eventBus scope**: `eventBus` is a parameter of `runControlLoop()` / route factories, not a module global. Helpers that need it must receive it as a parameter.
 
-## Self-Modification: Untouchable Core & Tiers
+## Self-Modification: Verifier Core & Tiers
 
-The tier system classifies every PR by blast radius, regardless of which agent proposed it (see [ADR-0004](./docs/adr/0004-self-modification-tiers.md)):
+The tier system classifies every PR by blast radius on the monotonic ladder T1 (shallowest) → T4 (deepest), regardless of which agent proposed it (see [ADR-0004](./docs/adr/0004-self-modification-tiers.md) + ADR-0015). Tiers ascend with verification depth — the deepest tier carries the most verification:
 
 | Tier | Scope | Who merges | Notes |
 |------|-------|-----------|-------|
-| 0 — Untouchable | Merge gate, rollback, watchdog, cost guardrails, the protected-paths list itself | **Operator only** | Enforced via CI; PR needs `operator-approved` label |
-| 1 — Prompt-shaped | Subagent lesson files, prompt-only tweaks under `~/.claude/skills/` | Auto-merge | |
-| 2 — Skill / verification additions | New tests, new verification steps, scoring tweaks, dashboard, `src/anchor-selection.ts` | Auto-merge with **Outcome Holdback** | 5-cycle watch + auto-revert on Target Outcome regression |
-| 3 — Everything else in `src/` | Control-loop changes, gate logic, infra | Operator merges | |
+| T1 — Prompt-shaped | Subagent lesson files, prompt-only tweaks (`config/agents/`, `config/feedback/`) | Auto-merge | Shallowest blast radius |
+| T2 — Skill / verification additions | Skills under `~/.claude/skills/`, dashboard, `src/anchor-selection.ts` | Auto-merge with **Outcome Holdback** | 5-cycle watch + auto-revert on Target Outcome regression |
+| T3 — Everything else in `src/` + demoted infra | Control-loop changes, gate logic, infra, plus `src/grounding.ts`, `src/cost/`, watchdog scripts, `scripts/deploy.sh` | Operator merges (auto-merge unless `scope-justification:`) | The 6 former-Tier-0 infra paths demoted here by ADR-0015 |
+| T4 — Verifier Core | The 5 self-referential files: `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts` | **Operator only** | Deepest tier; enforced via CI; PR needs `operator-approved` label |
 
-Protected paths live in `src/untouchable.ts` (see [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md)). Before proposing or applying a change to anything that smells load-bearing — merge, rollback, scope enforcement, mutation gate, cost caps — check the untouchable list first. **Never bypass the gate.**
+The Verifier Core path list lives in `src/untouchable.ts` (`VERIFIER_CORE_PATHS` / `isVerifierCore`; see [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md) + ADR-0015). Before proposing or applying a change to anything that smells load-bearing — the classifier, the CI workflows, the tier-classify wrapper — check the Verifier Core list first. **Never bypass the gate.** ("Untouchable Core" is the retired name for the Verifier Core.)
 
-Operator escalation is reserved for the **closed list** in [ADR-0005](./docs/adr/0005-operator-escalation-is-narrow.md): credentials/secrets, external-account actions, Tier-0 changes, vision-level conflicts. Everything else, Hydra researches and tries autonomously.
+Operator escalation is reserved for the **closed list** in [ADR-0005](./docs/adr/0005-operator-escalation-is-narrow.md): credentials/secrets, external-account actions, T4 (Verifier Core) changes, vision-level conflicts. Everything else, Hydra researches and tries autonomously.
 
 ## Common Pitfalls
 

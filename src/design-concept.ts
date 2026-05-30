@@ -433,11 +433,18 @@ export function isFresh(
  *
  * For Phase A: `interfaceImpact: 'breaking'` cross-checks against the
  * existing tier classifier in `src/tier-classifier.ts` — every breaking
- * module path must classify to tier >= 2. A "breaking" declaration on
- * a Tier-0 (untouchable) or Tier-1 (prompt-shaped, auto-merge) path is
- * always a gate failure: those paths are either operator-only or
- * low-blast-radius by definition. Tier-2 (outcome-holdback) and Tier-3
- * (operator-review) paths both clear this check.
+ * module path must classify to tier >= 2. Under the monotonic T1–T4
+ * ladder (ADR-0015) a "breaking" declaration on a T1 (prompt-shaped,
+ * auto-merge-trivial) path is the only gate failure here: T1 is the
+ * shallowest, lowest-blast-radius tier and a breaking change there is a
+ * contradiction. T2 (outcome-holdback), T3 (operator-review), and T4
+ * (Verifier Core — the deepest tier, carrying the most verification) all
+ * clear this check. NOTE (issue #737): under the old non-monotonic
+ * numbering a breaking change on a Tier-0 path FAILED this rule
+ * (0 < 2); under the monotonic ladder Verifier Core is T4 (deepest) and
+ * now PASSES — this corrects a latent inversion (the deepest tier should
+ * carry the most verification, not be rejected). Intended behavior delta,
+ * not a regression.
  */
 export function gateCheck(
   d: DesignConcept,

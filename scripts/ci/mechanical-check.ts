@@ -1,13 +1,22 @@
 /**
- * scripts/ci/mechanical-check.ts — Pure helper for the autopilot Tier-0
- * carve-out (issue #425).
+ * scripts/ci/mechanical-check.ts — Pure helper for the autopilot
+ * deepest-tier carve-out (issue #425).
  *
- * Background: under the autopilot Option C merge policy, mechanical Tier-0 PRs
- * (file deletions, renames, 1:1 substitutions, literal-to-helper replacements)
- * may auto-apply the `operator-approved` label, while non-mechanical Tier-0
- * changes (new conditionals, loops, classes, control flow) MUST queue for
- * operator review. The autopilot decision-brain rewrite (the gamma issue)
- * consumes this classifier; the gate stays under operator control either way.
+ * Terminology note (ADR-0015 / issue #737): the deepest Modification Tier
+ * was renumbered from "Tier 0" to "T4" and renamed "Untouchable Core" →
+ * "Verifier Core". The "Tier-0"/`tier0Files` names used throughout this
+ * file refer to that same deepest-tier diff — the set of paths the caller
+ * (decide.py) extracts from the Verifier Core membership. The classifier
+ * keys off the caller-supplied list, NOT a hardcoded integer, so the
+ * renumber is purely a naming change here; behavior is unchanged.
+ *
+ * Background: under the autopilot Option C merge policy, mechanical
+ * deepest-tier PRs (file deletions, renames, 1:1 substitutions,
+ * literal-to-helper replacements) may auto-apply the `operator-approved`
+ * label, while non-mechanical deepest-tier changes (new conditionals,
+ * loops, classes, control flow) MUST queue for operator review. The
+ * autopilot decision-brain consumes this classifier; the gate stays under
+ * operator control either way.
  *
  * This is the 5th deterministic pure helper in the family started by
  * `qa-verdict.ts` / `pr-rebase.ts` / `epic-close.ts` / `scope-check.ts`.

@@ -162,11 +162,11 @@ jobs:
           npm audit --omit=dev --audit-level=high || true
           exit $STATUS
 
-  # Tier gate (issue #243, ADR-0001 + ADR-0004 work-order step 3).
-  # Classifies changed files into modification tiers. Blocks Tier 0
-  # (Untouchable Core) PRs unless the `operator-approved` label is
-  # present. Echoes the result to the PR step summary so reviewers and
-  # agents see it without digging.
+  # Tier gate (issue #243, ADR-0001 + ADR-0004 + ADR-0015 work-order step 3).
+  # Classifies changed files into the monotonic Modification Tier ladder
+  # T1 (shallowest) → T4 (deepest). Blocks T4 (Verifier Core) PRs unless
+  # the `operator-approved` label is present. Echoes the result to the PR
+  # step summary so reviewers and agents see it without digging.
   tier-gate:
     if: github.event_name == 'pull_request'
     runs-on: self-hosted
