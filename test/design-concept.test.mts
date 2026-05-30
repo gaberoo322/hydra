@@ -9,6 +9,10 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+// `dc` is a runtime value namespace (dynamic import below); it cannot be used in
+// type position. Pull the type aliases in directly via `import type` so the
+// test type-checks under tsconfig.test.json (issue #750).
+import type { DesignConcept, DesignConceptInput } from "../src/design-concept.ts";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
 process.env.REDIS_URL = "redis://localhost:6379/1";
@@ -19,7 +23,7 @@ const TEST_NS = "hydra:design-concept:";
 let testRedis: any;
 
 // Build a minimal artifact that passes every gate rule by default.
-function buildComplete(overrides: Partial<dc.DesignConcept> = {}): dc.DesignConceptInput {
+function buildComplete(overrides: Partial<DesignConcept> = {}): DesignConceptInput {
   return {
     anchorRef: "test:complete",
     scope: "orch",
@@ -290,8 +294,8 @@ describe("design-concept Redis store + gate", () => {
 
   test("isFresh honors the 7-day window", () => {
     const now = 1_000_000_000_000;
-    const fresh = { createdAt: now - 6 * 24 * 60 * 60 * 1000 } as dc.DesignConcept;
-    const stale = { createdAt: now - 8 * 24 * 60 * 60 * 1000 } as dc.DesignConcept;
+    const fresh = { createdAt: now - 6 * 24 * 60 * 60 * 1000 } as DesignConcept;
+    const stale = { createdAt: now - 8 * 24 * 60 * 60 * 1000 } as DesignConcept;
     assert.equal(dc.isFresh(fresh, now), true);
     assert.equal(dc.isFresh(stale, now), false);
   });
@@ -314,7 +318,7 @@ describe("design-concept Redis store + gate", () => {
   // gateCheck — 7 failure modes
   // -------------------------------------------------------------------------
 
-  function approvedFresh(overrides: Partial<dc.DesignConcept> = {}): dc.DesignConcept {
+  function approvedFresh(overrides: Partial<DesignConcept> = {}): DesignConcept {
     const input = buildComplete(overrides as any);
     return {
       ...input,
@@ -324,7 +328,7 @@ describe("design-concept Redis store + gate", () => {
       status: "approved",
       approvedBy: "auto-gate",
       ...overrides,
-    } as dc.DesignConcept;
+    } as DesignConcept;
   }
 
   test("gateCheck fails on non-empty glossaryGaps", () => {
@@ -404,7 +408,7 @@ describe("design-concept Redis store + gate", () => {
 
   test("gateCheck fails on stale createdAt (>7 days)", () => {
     const now = Date.now();
-    const stale: dc.DesignConcept = {
+    const stale: DesignConcept = {
       ...approvedFresh(),
       createdAt: now - dc.DESIGN_CONCEPT_MAX_AGE_MS - 60_000,
     };
@@ -415,7 +419,7 @@ describe("design-concept Redis store + gate", () => {
 
   test("gateCheck fails on draft status", () => {
     const v = dc.gateCheck(
-      { ...approvedFresh(), status: "draft", approvedBy: "" } as dc.DesignConcept,
+      { ...approvedFresh(), status: "draft", approvedBy: "" } as DesignConcept,
       Date.now(),
     );
     assert.equal(v.ok, false);

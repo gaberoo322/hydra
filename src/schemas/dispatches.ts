@@ -83,3 +83,37 @@ export const SubagentDispatchStepPatchBodySchema = z
 export type SubagentDispatchStepPatchBody = z.infer<
   typeof SubagentDispatchStepPatchBodySchema
 >;
+
+/**
+ * Query params accepted by
+ * `GET /api/dispatches/:dispatchId/transcript?offset=0&limit=200` (issue #695).
+ *
+ * Both are OPTIONAL with defaults (offset=0, limit=200, oldest-first). They
+ * arrive on the wire as strings (Express `req.query`), so we coerce through
+ * `z.coerce.number()` and then constrain to non-negative integers. `limit` is
+ * additionally capped at 1000 — the page virtualizes client-side above ~1000
+ * messages, so a single response never needs to ship more than that, and the
+ * cap stops a caller from asking the server to slurp an unbounded slice.
+ *
+ * Per ADR-0011 this is the canonical source of both the runtime parser and the
+ * inferred TS type. On parse failure the route returns HTTP 400
+ * `{ code: "schema-validation-failed", issues }` like every other boundary.
+ */
+export const TranscriptQuerySchema = z
+  .object({
+    offset: z.coerce
+      .number({ message: "offset must be a number" })
+      .int({ message: "offset must be an integer" })
+      .min(0, { message: "offset must be >= 0" })
+      .default(0),
+    limit: z.coerce
+      .number({ message: "limit must be a number" })
+      .int({ message: "limit must be an integer" })
+      .min(1, { message: "limit must be >= 1" })
+      .max(1000, { message: "limit must be <= 1000" })
+      .default(200),
+  })
+  .strict();
+
+/** Inferred TS type — canonical shape of the transcript query params. */
+export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;

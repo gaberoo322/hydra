@@ -241,6 +241,41 @@ function isQuickFix(body: string): boolean {
   return /\[quick-fix\]/i.test(body || "");
 }
 
+/**
+ * Best-effort: tell the orchestrator a scope violation happened so the
+ * Builder-Health Scorecard's scope-violation-rate metric (issue #732) gets a
+ * durable, day-bucketed count. Fire-and-forget over HTTP — the CI gate stays
+ * dependency-free of ioredis, and a Redis/HTTP outage must NEVER change the
+ * gate's exit code. Skipped when `HYDRA_API_BASE` is unset (the typical CI
+ * runner has no orchestrator reachable), so this is a no-op outside the
+ * self-hosted-runner deploy box unless explicitly wired.
+ */
+export async function reportScopeViolation(
+  base: string | undefined = process.env.HYDRA_API_BASE,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (!base) return;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+      await fetchImpl(`${base.replace(/\/$/, "")}/api/builder-health/scope-violation`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (err: any) {
+    // Observability is best-effort; never fail the gate on a reporting error.
+    process.stderr.write(
+      `Scope gate: scope-violation report failed (non-fatal): ${err?.message || err}\n`,
+    );
+  }
+}
+
 function main(): number {
   const prBody = process.env.PR_BODY ?? "";
   const issueBody = process.env.ISSUE_BODY ?? "";
@@ -336,5 +371,13 @@ function main(): number {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exit(main());
+  const code = main();
+  // On a scope-gate block, record the violation (best-effort, awaited so the
+  // fire-and-forget POST isn't killed by process.exit) before exiting. The
+  // exit code is decided entirely by main(); the report can never change it.
+  if (code === 2) {
+    reportScopeViolation().finally(() => process.exit(code));
+  } else {
+    process.exit(code);
+  }
 }

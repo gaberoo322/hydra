@@ -22,6 +22,19 @@
  *     Phase B is a no-op: `dev_orch` proceeds as before, the
  *     `design_concept_orch` selector returns None.
  *
+ * ISSUE #751 — legacy fallback removed:
+ *
+ *   - The original Phase B fallback read `best` from
+ *     `/api/anchor/candidates` and grilled it when its `designConcept`
+ *     block was missing/stale. Post-#458 that feed is structurally
+ *     target-product work (item-<N>), so under orch scope the fallback
+ *     could only misfire — grilling a target candidate as an orch design
+ *     concept. It has been removed. `state.signals.orch_pending_grill_anchor`
+ *     (set by collect-state.sh scanning the orch GH board) is now the
+ *     SINGLE source of truth for orch grill anchors. When that signal is
+ *     absent or "none", `design_concept_orch` returns None and dev_orch
+ *     proceeds — regardless of any candidate's designConcept block.
+ *
  * Counters consumed by the future B-4 dashboard are written elsewhere
  * (saveDesignConcept in src/design-concept.ts; reap.py for grill
  * timeout/crash) — those have their own unit tests.
@@ -100,7 +113,13 @@ function findAction(plan: any, predicate: (a: any) => boolean): any | undefined 
 }
 
 describe("decide.py — design_concept_orch sequencing (issue #466, Phase B)", () => {
-  test("fires hydra-grill when orch_work_available AND artifact missing", () => {
+  // ISSUE #751: the legacy `best.designConcept` fallback was REMOVED.
+  // It read `best` from /api/anchor/candidates, which post-#458 is
+  // structurally target-product work, so under orch scope it could only
+  // ever misfire — grilling a target candidate as an orch design concept.
+  // The pre-#751 tests below used orch-shaped anchorRefs ("issue-NNN") and
+  // so asserted the buggy path fired; they now assert it does NOT.
+  test("does NOT grill via legacy best.designConcept path when artifact missing (#751)", () => {
     const state = baseState({ orch_work_available: true });
     const cands = {
       candidates: [
@@ -115,14 +134,14 @@ describe("decide.py — design_concept_orch sequencing (issue #466, Phase B)", (
     };
     const plan = runDecide(state, cands);
     const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
-    assert.ok(grill, "expected design_concept_orch dispatch when artifact missing");
-    assert.equal(grill.skill, "hydra-grill");
-    assert.equal(grill.prompt_args.scope, "orch");
-    assert.equal(grill.prompt_args.anchor, "issue-999",
-      "design_concept_orch dispatch must carry the anchorRef for the grill artifact");
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(grill, undefined,
+      "legacy best.designConcept fallback removed (#751): no grill without an orch_pending_grill_anchor signal");
+    assert.ok(dev,
+      "dev_orch must proceed when no orch grill is pending");
   });
 
-  test("fires hydra-grill when artifact is stale (present but isFresh:false)", () => {
+  test("does NOT grill via legacy path when artifact is stale (#751)", () => {
     const state = baseState({ orch_work_available: true });
     const cands = {
       candidates: [
@@ -135,27 +154,10 @@ describe("decide.py — design_concept_orch sequencing (issue #466, Phase B)", (
     };
     const plan = runDecide(state, cands);
     const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
-    assert.ok(grill, "stale artifact must trigger a fresh grill");
-    assert.equal(grill.prompt_args.anchor, "issue-stale");
-  });
-
-  test("SKIPS dev_orch on the same turn when grilling (sequencing rule)", () => {
-    const state = baseState({ orch_work_available: true });
-    const cands = {
-      candidates: [
-        {
-          anchorRef: "issue-skip-dev",
-          score: 0.9,
-          designConcept: { present: false, isFresh: false, status: null, gateOk: false },
-        },
-      ],
-    };
-    const plan = runDecide(state, cands);
-    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
     const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
-    assert.ok(grill, "grill should dispatch");
-    assert.equal(dev, undefined,
-      "dev_orch must NOT dispatch on the same turn the grill fires (#466 sequencing rule)");
+    assert.equal(grill, undefined,
+      "stale best.designConcept must NOT trigger a grill after the #751 fallback removal");
+    assert.ok(dev, "dev_orch proceeds");
   });
 
   test("dispatches dev_orch (not grill) when artifact is fresh AND approved", () => {
@@ -330,13 +332,13 @@ describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () 
     assert.ok(dev, "dev_orch must proceed when no grill is pending");
   });
 
-  test("signal absent → falls back to legacy best.designConcept path", () => {
-    // Back-compat: if a deployment hasn't rolled out the new
-    // collect-state line, decide.py should fall back to the original
-    // Phase B path (read best.designConcept). #628's data-plane fix
-    // now also populates that block, so the fallback isn't a dead
-    // letter — it's the path for deployments where `best` happens to
-    // be an orch anchor.
+  test("signal absent → NO grill (legacy best.designConcept fallback removed, #751)", () => {
+    // ISSUE #751: the legacy best.designConcept fallback was removed.
+    // orch_pending_grill_anchor is now the SINGLE source of truth for
+    // orch grill anchors. When the signal is absent, design_concept_orch
+    // returns None (no grill) and dev_orch proceeds — even when the best
+    // candidate carries a missing/stale designConcept block (that block
+    // describes target-product work, never an orch-scope grill anchor).
     const state = baseState({ orch_work_available: true });
     const cands = {
       candidates: [
@@ -349,8 +351,10 @@ describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () 
     };
     const plan = runDecide(state, cands);
     const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
-    assert.ok(grill, "missing signal → legacy best.designConcept path must still work");
-    assert.equal(grill.prompt_args.anchor, "issue-fallback");
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(grill, undefined,
+      "missing orch_pending_grill_anchor signal → no grill (legacy path removed in #751)");
+    assert.ok(dev, "dev_orch proceeds when no orch grill is pending");
   });
 
   test("orch_work_available absent → no grill even when signal points to an anchor", () => {
@@ -377,5 +381,72 @@ describe("decide.py — orch_pending_grill_anchor signal path (issue #628)", () 
     const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
     assert.equal(grill, undefined,
       "design_concept_orch is orch-scope; target-only scope must exclude it");
+  });
+});
+
+describe("decide.py — design_concept_orch never grills a target candidate under orch scope (issue #751)", () => {
+  // The exact repro from issue #751: orch_pending_grill_anchor is UNSET,
+  // and /api/anchor/candidates carries a target-shaped best candidate
+  // (item-<N>, a hydra-betting feature) with a missing/stale designConcept
+  // block. Pre-#751, the legacy fallback grabbed that target candidate and
+  // dispatched hydra-grill with scope=orch + anchor=<target feature title>,
+  // wasting a subagent and persisting a cross-scope artifact. The fix
+  // removes the fallback: no orch grill fires, and dev_orch proceeds.
+  test("target-shaped best candidate (item-<N>) + missing artifact → NO orch grill", () => {
+    const state = baseState({ orch_work_available: true });
+    // orch_pending_grill_anchor intentionally UNSET.
+    const cands = {
+      candidates: [
+        {
+          issue: "item-313",
+          anchorRef: "Add distributed execution-pair-lock via pg_advisory_lock or Redis SETNX",
+          score: 0.85,
+          designConcept: { present: false, isFresh: false, status: null, gateOk: false },
+        },
+      ],
+      research_recommended: false,
+    };
+    const plan = runDecide(state, cands);
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    assert.equal(grill, undefined,
+      "design_concept_orch must NOT grill a target-side candidate under orch scope (#751 repro)");
+    // Belt-and-braces: even if some future dispatch were emitted, its anchor
+    // must never be the target feature string.
+    const anyTargetAnchorGrill = findAction(
+      plan,
+      (a) =>
+        a.type === "dispatch" &&
+        a.slot === "design_concept_orch" &&
+        a.prompt_args?.anchor ===
+          "Add distributed execution-pair-lock via pg_advisory_lock or Redis SETNX",
+    );
+    assert.equal(anyTargetAnchorGrill, undefined,
+      "no orch grill may carry a target candidate string as its anchor");
+  });
+
+  test("target-shaped best candidate + 'none' signal → NO orch grill, dev_orch proceeds", () => {
+    // collect-state.sh emits the literal "none" when the orch board has no
+    // grill-pending anchor. Combined with a target best candidate, this is
+    // the steady-state repro: must be a no-op for the grill, dev_orch fires.
+    const state = baseState({
+      orch_work_available: true,
+      orch_pending_grill_anchor: "none",
+    });
+    const cands = {
+      candidates: [
+        {
+          issue: "item-271",
+          anchorRef: "Persist settlement audit trail to ledger table",
+          score: 0.78,
+          designConcept: { present: true, isFresh: false, status: "stale", gateOk: false },
+        },
+      ],
+    };
+    const plan = runDecide(state, cands);
+    const grill = findAction(plan, (a) => a.type === "dispatch" && a.slot === "design_concept_orch");
+    const dev = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch");
+    assert.equal(grill, undefined,
+      "'none' signal + target best candidate must not produce an orch grill (#751)");
+    assert.ok(dev, "dev_orch must proceed when no orch grill is pending");
   });
 });

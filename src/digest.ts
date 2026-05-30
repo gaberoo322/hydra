@@ -15,6 +15,7 @@
 import { sendToTelegram } from "./notify.ts";
 import { getTargetCommitUrl } from "./target-config.ts";
 import { getCapacitySnapshot, DEFAULT_WINDOW_CYCLES, ORCHESTRATOR_FLOOR } from "./capacity-floor.ts";
+import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
 
 const DIGEST_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const QUIET_START_HOUR = 22; // 10pm
@@ -84,12 +85,22 @@ async function sendDigest() {
     console.error(`[Digest] capacity-floor snapshot failed (non-fatal): ${err.message}`);
   }
 
-  const message = buildDigestMessage(events, capacitySnapshot);
+  // Issue #732: Builder-Health Scorecard for the digest. The aggregator
+  // never throws by contract; this try/catch is belt-and-braces so a
+  // surprise still ships the digest.
+  let builderHealth = null;
+  try {
+    builderHealth = await getBuilderHealthScorecard();
+  } catch (err: any) {
+    console.error(`[Digest] builder-health scorecard failed (non-fatal): ${err.message}`);
+  }
+
+  const message = buildDigestMessage(events, capacitySnapshot, builderHealth);
   await sendToTelegram(message);
   console.log(`[Digest] Sent digest (${events.length} events)`);
 }
 
-function buildDigestMessage(events, capacitySnapshot = null) {
+function buildDigestMessage(events, capacitySnapshot = null, builderHealth = null) {
   const lines = ["📊 *Hydra Digest*", ""];
 
   // Cycle summary
@@ -162,6 +173,10 @@ function buildDigestMessage(events, capacitySnapshot = null) {
   }
   lines.push("");
 
+  // Builder Health (issue #732) — the builder-side scorecard. Degrades to a
+  // single "no data yet" line when every sub-source is empty.
+  for (const l of formatBuilderHealthLines(builderHealth)) lines.push(l);
+
   // Research
   const researchCompletes = events.filter(e => e.type === "research:completed");
   if (researchCompletes.length > 0) {
@@ -233,6 +248,72 @@ function buildDigestMessage(events, capacitySnapshot = null) {
   }
 
   return message;
+}
+
+/**
+ * Pure helper — exported for tests. Render the Builder-Health Scorecard block
+ * for the digest. Always emits the `*Builder health:*` header; degrades to a
+ * single "no data yet" line when the scorecard is null or every metric slot
+ * is empty. Mirrors the Capacity-split block's always-render contract so the
+ * operator can see the scorecard is being tracked even when quiet.
+ */
+export function formatBuilderHealthLines(builderHealth) {
+  const lines = ["*Builder health:*"];
+  const bh = builderHealth;
+  const auto = bh?.autonomyRate;
+  const ttm = bh?.timeToMerge;
+  const rework = bh?.reworkRate;
+  const share = bh?.selfImprovementShare;
+  const scope = bh?.scopeViolations;
+  const learning = bh?.learningThroughput;
+
+  const hasData =
+    (auto && auto.total > 0) ||
+    (ttm && ttm.samples > 0) ||
+    (rework && rework.window > 0) ||
+    (share && share.window > 0) ||
+    (scope && scope.total > 0) ||
+    (learning && (learning.metaFrictionOpened > 0 || (learning.promotionRate?.length ?? 0) > 0));
+
+  if (!hasData) {
+    lines.push("• No builder-health data yet — scorecard tracking enabled");
+    lines.push("");
+    return lines;
+  }
+
+  if (auto && auto.total > 0) {
+    const pct = Math.round((auto.rate || 0) * 100);
+    lines.push(`• Autonomy: ${pct}% (${auto.autonomous}/${auto.total} merged PRs zero-intervention)`);
+  }
+  if (ttm && ttm.samples > 0 && ttm.medianMinutes != null) {
+    const med = formatMinutes(ttm.medianMinutes);
+    const p90 = ttm.p90Minutes != null ? formatMinutes(ttm.p90Minutes) : "—";
+    lines.push(`• Time-to-merge: median ${med}, p90 ${p90} (${ttm.samples} merges)`);
+  }
+  if (share && share.window > 0) {
+    const pct = Math.round((share.share || 0) * 100);
+    const mark = share.floorMet ? "✅" : "⚠️";
+    lines.push(`• Self-improvement share: ${pct}% ${mark} floor ${Math.round((share.floor || 0.25) * 100)}%`);
+  }
+  if (rework && rework.window > 0) {
+    lines.push(`• Rework: ${rework.regressionRate}% regressions, ${rework.noOpMergeRate}% no-op merges`);
+  }
+  if (scope) {
+    lines.push(`• Scope violations: ${scope.total} in last ${scope.windowDays}d`);
+  }
+  if (learning) {
+    lines.push(`• Learning: ${learning.metaFrictionOpened} meta-friction opened, ${learning.designConceptsProducedToday} design-concepts today`);
+  }
+  lines.push("");
+  return lines;
+}
+
+function formatMinutes(mins) {
+  const m = Number(mins);
+  if (!Number.isFinite(m)) return "—";
+  if (m < 60) return `${Math.round(m)}m`;
+  if (m < 24 * 60) return `${(m / 60).toFixed(1)}h`;
+  return `${(m / (24 * 60)).toFixed(1)}d`;
 }
 
 function formatCriticalAlert(event) {

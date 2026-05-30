@@ -8,6 +8,7 @@ import {
   getUsage,
   getWeeklyQuotaTokens,
   getFiveHourQuotaTokens,
+  modelToFamily,
   parseUsageLine,
   cacheHitRatio,
   projectEligibility,
@@ -37,19 +38,21 @@ interface TokenInput {
   cacheCreation?: number;
 }
 
-function assistantLine(ts: string, tokens: TokenInput = {}): string {
+function assistantLine(ts: string, tokens: TokenInput = {}, model?: string): string {
+  const message: Record<string, unknown> = {
+    role: "assistant",
+    usage: {
+      input_tokens: tokens.in ?? 0,
+      output_tokens: tokens.out ?? 0,
+      cache_read_input_tokens: tokens.cacheRead ?? 0,
+      cache_creation_input_tokens: tokens.cacheCreation ?? 0,
+    },
+  };
+  if (model !== undefined) message.model = model;
   return JSON.stringify({
     type: "assistant",
     timestamp: ts,
-    message: {
-      role: "assistant",
-      usage: {
-        input_tokens: tokens.in ?? 0,
-        output_tokens: tokens.out ?? 0,
-        cache_read_input_tokens: tokens.cacheRead ?? 0,
-        cache_creation_input_tokens: tokens.cacheCreation ?? 0,
-      },
-    },
+    message,
   });
 }
 
@@ -64,6 +67,9 @@ function withEnvSnapshot() {
     "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
     "HYDRA_USAGE_5H_QUOTA_TOKENS",
     "HYDRA_CLAUDE_PROJECTS_ROOT",
+    "HYDRA_QUOTA_WEIGHT_OPUS",
+    "HYDRA_QUOTA_WEIGHT_SONNET",
+    "HYDRA_QUOTA_WEIGHT_HAIKU",
   ];
   const prev: Record<string, string | undefined> = {};
   for (const k of keys) prev[k] = process.env[k];
@@ -131,6 +137,41 @@ describe("usage-tracker", () => {
       assert.equal(result.tokens.input, 0);
       assert.equal(result.tokens.output, 50);
       assert.equal(result.tokens.total, 50);
+    });
+
+    test("surfaces the model string when present", () => {
+      const line = assistantLine("2026-05-25T12:00:00Z", { in: 10 }, "claude-opus-4-7");
+      const result = parseUsageLine(line);
+      assert.ok(result !== null && result !== "skip");
+      assert.equal(result.model, "claude-opus-4-7");
+    });
+
+    test("model defaults to empty string when absent", () => {
+      const line = assistantLine("2026-05-25T12:00:00Z", { in: 10 });
+      const result = parseUsageLine(line);
+      assert.ok(result !== null && result !== "skip");
+      assert.equal(result.model, "");
+    });
+  });
+
+  describe("modelToFamily", () => {
+    test("maps observed opus/sonnet/haiku strings by prefix", () => {
+      assert.equal(modelToFamily("claude-opus-4-6"), "opus");
+      assert.equal(modelToFamily("claude-opus-4-7"), "opus");
+      assert.equal(modelToFamily("claude-sonnet-4-6"), "sonnet");
+      assert.equal(modelToFamily("claude-haiku-4-5"), "haiku");
+    });
+
+    test("is case-insensitive on the prefix", () => {
+      assert.equal(modelToFamily("Claude-Opus-4-7"), "opus");
+    });
+
+    test("falls back to unknown for non-claude / synthetic / missing strings", () => {
+      assert.equal(modelToFamily("<synthetic>"), "unknown");
+      assert.equal(modelToFamily("gpt-5.5"), "unknown");
+      assert.equal(modelToFamily(""), "unknown");
+      assert.equal(modelToFamily(null), "unknown");
+      assert.equal(modelToFamily(undefined), "unknown");
     });
   });
 
@@ -500,6 +541,167 @@ describe("usage-tracker", () => {
         await rm(root, { recursive: true, force: true });
       }
     });
+
+    test("byModel buckets tokens per family by prefix, including unknown fallback (always populated)", async () => {
+      delete process.env.HYDRA_QUOTA_WEIGHT_OPUS;
+      delete process.env.HYDRA_QUOTA_WEIGHT_SONNET;
+      delete process.env.HYDRA_QUOTA_WEIGHT_HAIKU;
+
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine(t, { in: 100, out: 100 }, "claude-opus-4-7"), // opus 200
+          assistantLine(t, { in: 50 }, "claude-opus-4-6"), // opus 50
+          assistantLine(t, { in: 30 }, "claude-sonnet-4-6"), // sonnet 30
+          assistantLine(t, { in: 10 }, "claude-haiku-4-5"), // haiku 10
+          assistantLine(t, { in: 5 }, "<synthetic>"), // unknown 5
+          assistantLine(t, { in: 7 }), // no model -> unknown 7
+        ]);
+
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+
+        // All four keys present (invariant: always populated).
+        assert.ok(snap.byModel.opus);
+        assert.ok(snap.byModel.sonnet);
+        assert.ok(snap.byModel.haiku);
+        assert.ok(snap.byModel.unknown);
+
+        assert.equal(snap.byModel.opus.total, 250);
+        assert.equal(snap.byModel.sonnet.total, 30);
+        assert.equal(snap.byModel.haiku.total, 10);
+        assert.equal(snap.byModel.unknown.total, 12);
+
+        // Sum of families equals the 7d aggregate.
+        assert.equal(snap.tokensLast7d.total, 250 + 30 + 10 + 12);
+
+        // Uncalibrated quota-weight: byModel still populated, weights are 0.
+        assert.equal(snap.quotaWeightCalibrated, false);
+        assert.equal(snap.quotaWeightLast5h, 0);
+        assert.equal(snap.quotaWeightLast7d, 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("byModel families are all zero-valued when no tokens were recorded", async () => {
+      const snap = await getUsage({
+        now: new Date("2026-05-25T12:00:00Z"),
+        projectsRoot: "/does/not/exist/anywhere",
+        force: true,
+      });
+      for (const family of ["opus", "sonnet", "haiku", "unknown"] as const) {
+        assert.equal(snap.byModel[family].total, 0);
+        assert.equal(snap.byModel[family].input, 0);
+      }
+    });
+
+    test("quotaWeight* stays 0 when only some of the three weights are set", async () => {
+      process.env.HYDRA_QUOTA_WEIGHT_OPUS = "5";
+      process.env.HYDRA_QUOTA_WEIGHT_SONNET = "1";
+      delete process.env.HYDRA_QUOTA_WEIGHT_HAIKU; // missing -> uncalibrated
+
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 100 }, "claude-opus-4-7"),
+        ]);
+
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        assert.equal(snap.quotaWeightCalibrated, false);
+        assert.equal(snap.quotaWeightLast5h, 0);
+        assert.equal(snap.quotaWeightLast7d, 0);
+        // byModel is unaffected by calibration.
+        assert.equal(snap.byModel.opus.total, 100);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("quotaWeight* computes the weighted family total when all three weights are set (unknown weight 1.0)", async () => {
+      process.env.HYDRA_QUOTA_WEIGHT_OPUS = "5";
+      process.env.HYDRA_QUOTA_WEIGHT_SONNET = "1";
+      process.env.HYDRA_QUOTA_WEIGHT_HAIKU = "0.2";
+
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const oneHourAgo = "2026-05-25T11:00:00Z"; // inside 5h + 7d
+        const sixHoursAgo = "2026-05-25T06:00:00Z"; // inside 7d only
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine(oneHourAgo, { in: 1000 }, "claude-opus-4-7"), // opus 1000
+          assistantLine(oneHourAgo, { in: 1000 }, "claude-sonnet-4-6"), // sonnet 1000
+          assistantLine(oneHourAgo, { in: 1000 }, "claude-haiku-4-5"), // haiku 1000
+          assistantLine(oneHourAgo, { in: 1000 }, "<synthetic>"), // unknown 1000
+          assistantLine(sixHoursAgo, { in: 500 }, "claude-opus-4-6"), // opus 500 (7d only)
+        ]);
+
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        assert.equal(snap.quotaWeightCalibrated, true);
+
+        // 5h: opus 1000*5 + sonnet 1000*1 + haiku 1000*0.2 + unknown 1000*1.0
+        //   = 5000 + 1000 + 200 + 1000 = 7200
+        assert.equal(snap.quotaWeightLast5h, 7200);
+
+        // 7d: + opus 500*5 = 2500 more -> 9700
+        assert.equal(snap.quotaWeightLast7d, 9700);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("unknown-family records trigger a once-per-scan console.warn (not per-line)", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      const warnings: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.map((a) => String(a)).join(" "));
+      };
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine(t, { in: 5 }, "<synthetic>"),
+          assistantLine(t, { in: 5 }, "<synthetic>"),
+          assistantLine(t, { in: 5 }, "gpt-5.5"),
+          assistantLine(t, { in: 5 }, "claude-opus-4-7"),
+        ]);
+
+        await getUsage({ now, projectsRoot: root, force: true });
+
+        const trackerWarnings = warnings.filter((w) => w.includes("[usage-tracker]"));
+        assert.equal(trackerWarnings.length, 1, "expected exactly one warn per scan");
+        assert.ok(trackerWarnings[0].includes("unrecognised model"));
+      } finally {
+        console.warn = originalWarn;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("no unknown-model warn fires when every model string is recognised", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      const warnings: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.map((a) => String(a)).join(" "));
+      };
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 5 }, "claude-opus-4-7"),
+          assistantLine("2026-05-25T11:00:00Z", { in: 5 }, "claude-sonnet-4-6"),
+        ]);
+
+        await getUsage({ now, projectsRoot: root, force: true });
+        const trackerWarnings = warnings.filter((w) => w.includes("[usage-tracker]"));
+        assert.equal(trackerWarnings.length, 0);
+      } finally {
+        console.warn = originalWarn;
+        await rm(root, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("projectEligibility", () => {
@@ -515,6 +717,15 @@ describe("usage-tracker", () => {
         pacingState: "under",
         emergencyStop: false,
         calibrated: false,
+        byModel: {
+          opus: { ...empty },
+          sonnet: { ...empty },
+          haiku: { ...empty },
+          unknown: { ...empty },
+        },
+        quotaWeightLast5h: 0,
+        quotaWeightLast7d: 0,
+        quotaWeightCalibrated: false,
         weeklyQuotaTokens: 0,
         fiveHourQuotaTokens: 0,
         filesScanned: 0,

@@ -1,11 +1,15 @@
 import { useApi } from "../../../hooks/useApi.js";
 import { Section } from "./Section.jsx";
 
+// Monotonic tier ladder (ADR-0015 / issue #737): T1 shallowest (green) →
+// T4 deepest = Verifier Core (red). Legacy `0` rows (pre-renumber merges)
+// map to the same deepest-tier red so historical chips render unchanged.
 const TIER_STYLE = {
-  0: "bg-red-500/10 text-red-300 border-red-500/30",
   1: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
   2: "bg-sky-500/10 text-sky-300 border-sky-500/30",
   3: "bg-amber-500/10 text-amber-300 border-amber-500/30",
+  4: "bg-red-500/10 text-red-300 border-red-500/30",
+  0: "bg-red-500/10 text-red-300 border-red-500/30",
 };
 
 function formatMergedAt(iso) {

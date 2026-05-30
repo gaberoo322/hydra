@@ -10,16 +10,17 @@
  * Output: a single JSON object on stdout with `{tier, reason, files}`.
  *
  * Exit codes:
- *   0 — non-Tier-0 result, or Tier 0 with `--operator-approved`
- *   2 — Tier 0 without `--operator-approved` (CI must fail)
+ *   0 — non-T4 result, or T4 (Verifier Core) with `--operator-approved`
+ *   2 — T4 (Verifier Core) without `--operator-approved` (CI must fail)
  *   1 — usage / unexpected error
  *
  * The script never crashes on a deleted file — `gh pr diff --name-only`
  * lists deletions and they're treated as touching the path just like
  * additions. Files don't need to exist on disk.
  *
- * This file itself is in the Untouchable Core (see `src/untouchable.ts`)
- * because bypassing the wrapper bypasses the gate.
+ * This file itself is in the Verifier Core (see `src/untouchable.ts`) —
+ * it classifies as T4, the deepest tier — because bypassing the wrapper
+ * bypasses the gate.
  */
 
 import { classifyChange } from "../src/tier-classifier.ts";
@@ -73,14 +74,14 @@ function main(): number {
   };
   process.stdout.write(JSON.stringify(out, null, 2) + "\n");
 
-  if (result.tier === 0 && !operatorApproved) {
+  if (result.tier === 4 && !operatorApproved) {
     process.stderr.write(
       "\n" +
       "============================================================\n" +
-      "TIER 0 (Untouchable Core) — operator-approved label required\n" +
+      "TIER 4 (Verifier Core) — operator-approved label required\n" +
       "============================================================\n" +
       `${result.reason}\n\n` +
-      "This PR touches the Untouchable Core (ADR-0001). Auto-merge is\n" +
+      "This PR touches the Verifier Core (ADR-0001 / ADR-0015). Auto-merge is\n" +
       "blocked. To unblock, the operator must apply the\n" +
       "`operator-approved` label to this PR. The label is operator-only\n" +
       "by convention; merging without it requires admin override.\n" +

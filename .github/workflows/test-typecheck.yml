@@ -1,0 +1,48 @@
+name: test-typecheck
+
+# Test/scripts type-check ratchet (issue #750). `tsconfig.json` excludes `test/`
+# (and never included `scripts/`), so `npm run typecheck` (`tsc --noEmit`) leaves
+# both trees unchecked. `npm test` runs through tsx (transpile-only, types
+# erased), so type errors in test and script files are caught by NEITHER gate —
+# they only surface in an editor/LSP, and type rot accumulates silently.
+#
+# This lives in its OWN workflow file — deliberately NOT inside ci.yml — because
+# ci.yml is part of the Untouchable Core (ADR-0001/ADR-0015: "the gate that gates
+# the gate", operator-only). A new type-check pass is a *new verification*, not a
+# change to the merge gate, so it belongs in a sibling workflow that can land as a
+# normal (non-Tier-0) change. Only ci.yml / deploy.yml are exact-match
+# untouchable. This mirrors the coupling-check.yml precedent.
+#
+# The check (scripts/ci/test-typecheck-check.ts) type-checks test/** + scripts/**
+# via tsconfig.test.json against a shrink-only baseline count: it fails ONLY when
+# the error count INCREASES above the committed baseline (new type rot), so it
+# closes the gap without a flag-day fix of all pre-existing errors. PR and push
+# behave identically.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: test-typecheck-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test-typecheck:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps (tsx + typescript)
+        run: npm ci
+
+      - name: Test/scripts type-check ratchet (issue #750 shrink-only baseline)
+        run: npm run typecheck:test
+
+      - name: Self-test the error-count parser (proves it catches a new error)
+        run: npx tsx scripts/ci/test-typecheck-check.ts --self-test
