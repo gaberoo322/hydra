@@ -75,6 +75,10 @@ export {
   clearUsageCache,
   getWeeklyQuotaTokens,
   getFiveHourQuotaTokens,
+  getQuotaWeightOpus,
+  getQuotaWeightSonnet,
+  getQuotaWeightHaiku,
+  modelToFamily,
   parseUsageLine,
   PACING_SHEDDABLE_CLASSES,
 } from "./usage-tracker.ts";
@@ -84,4 +88,5 @@ export type {
   UsageEligibility,
   TokenBreakdown,
   ParsedUsageLine,
+  ModelFamily,
 } from "./usage-tracker.ts";

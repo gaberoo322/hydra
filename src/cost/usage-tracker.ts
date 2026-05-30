@@ -24,6 +24,18 @@
  * When either is unset/zero, `calibrated` is false, percentages are 0,
  * pacingState stays "under", and emergencyStop stays false. Raw token
  * counts are always reported.
+ *
+ * Quota-weight env (issue #691):
+ *   - HYDRA_QUOTA_WEIGHT_OPUS    — per-token multiplier for the opus family
+ *   - HYDRA_QUOTA_WEIGHT_SONNET  — per-token multiplier for the sonnet family
+ *   - HYDRA_QUOTA_WEIGHT_HAIKU   — per-token multiplier for the haiku family
+ * These convert raw per-family token counts into a comparable
+ * **Quota Weight** burn unit (`opus*w_opus + sonnet*w_sonnet +
+ * haiku*w_haiku`; see CONTEXT.md). All-or-nothing, mirroring the existing
+ * percentage gate: `quotaWeightLast5h`/`quotaWeightLast7d` are exactly 0
+ * unless ALL THREE weights are set to positive values. `byModel` is always
+ * populated regardless. Deliberately NOT a dollar figure — under the Claude
+ * Code subscription the orchestrator pays no per-call charge.
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -45,6 +57,20 @@ export interface TokenBreakdown {
   cacheCreation: number;
   total: number;
 }
+
+/**
+ * Model families recognised by the per-model rollup. `unknown` is the
+ * catch-all for any model string that doesn't match a known prefix
+ * (synthetic messages, future model names, GPT carry-overs). Its
+ * Quota-Weight contribution uses an implicit weight of 1.0 — there is
+ * deliberately no `HYDRA_QUOTA_WEIGHT_UNKNOWN` env var because the
+ * CONTEXT.md Quota-Weight formula is opus/sonnet/haiku only; an unknown
+ * bucket above zero signals the family table needs a new prefix, which the
+ * once-per-scan `console.warn` surfaces.
+ */
+export type ModelFamily = "opus" | "sonnet" | "haiku" | "unknown";
+
+const MODEL_FAMILIES: readonly ModelFamily[] = ["opus", "sonnet", "haiku", "unknown"];
 
 export interface UsageSnapshot {
   tokensLast5h: TokenBreakdown;
@@ -74,6 +100,23 @@ export interface UsageSnapshot {
   emergencyStop: boolean;
   /** True only when both quota env vars are set to positive values. */
   calibrated: boolean;
+  /**
+   * Per-model-family token breakdown over the 7d window. ALWAYS populated
+   * with all four family keys (opus/sonnet/haiku/unknown), zero-valued when
+   * a family produced no tokens — independent of calibration. (issue #691)
+   */
+  byModel: Record<ModelFamily, TokenBreakdown>;
+  /**
+   * Quota-Weight burn over the 5h window: `Σ family.total * weight(family)`
+   * (opus/sonnet/haiku from env, unknown implicit 1.0). Exactly 0 unless ALL
+   * THREE HYDRA_QUOTA_WEIGHT_* env vars are set to positive values, mirroring
+   * the all-or-nothing percentage gate. (issue #691)
+   */
+  quotaWeightLast5h: number;
+  /** Quota-Weight burn over the 7d window; same gate as `quotaWeightLast5h`. */
+  quotaWeightLast7d: number;
+  /** True only when all three HYDRA_QUOTA_WEIGHT_* env vars are positive. */
+  quotaWeightCalibrated: boolean;
   weeklyQuotaTokens: number;
   fiveHourQuotaTokens: number;
   filesScanned: number;
@@ -113,6 +156,66 @@ function parseQuotaEnv(raw: string | undefined): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
   return parsed;
+}
+
+export function getQuotaWeightOpus(): number {
+  return parseQuotaEnv(process.env.HYDRA_QUOTA_WEIGHT_OPUS);
+}
+
+export function getQuotaWeightSonnet(): number {
+  return parseQuotaEnv(process.env.HYDRA_QUOTA_WEIGHT_SONNET);
+}
+
+export function getQuotaWeightHaiku(): number {
+  return parseQuotaEnv(process.env.HYDRA_QUOTA_WEIGHT_HAIKU);
+}
+
+/**
+ * Classify a model string into a Quota-Weight family by prefix.
+ *
+ * Pure prefix matcher: `claude-opus*` → opus, `claude-sonnet*` → sonnet,
+ * `claude-haiku*` → haiku, anything else → unknown. This is intentionally a
+ * NEW classifier and NOT `modelToTier` from `attribution.ts` — that function
+ * returns legacy tier labels (frontier/codex/mini) keyed on GPT model names
+ * and would bucket every real `claude-opus-4-7` string into `unknown`. The
+ * no-duplication intent is honoured by keeping this the ONE canonical family
+ * classifier. (issue #691)
+ */
+export function modelToFamily(model: string | null | undefined): ModelFamily {
+  const l = String(model ?? "").toLowerCase();
+  if (l.startsWith("claude-opus")) return "opus";
+  if (l.startsWith("claude-sonnet")) return "sonnet";
+  if (l.startsWith("claude-haiku")) return "haiku";
+  return "unknown";
+}
+
+/** Quota-Weight for a family. opus/sonnet/haiku from env; unknown is 1.0. */
+function familyWeight(
+  family: ModelFamily,
+  weights: { opus: number; sonnet: number; haiku: number },
+): number {
+  switch (family) {
+    case "opus":
+      return weights.opus;
+    case "sonnet":
+      return weights.sonnet;
+    case "haiku":
+      return weights.haiku;
+    case "unknown":
+      // Implicit 1.0 — no HYDRA_QUOTA_WEIGHT_UNKNOWN env var exists; the
+      // formula is three-family. Drift here is surfaced by the
+      // once-per-scan console.warn, not absorbed by a tunable.
+      return 1;
+  }
+}
+
+function emptyByModel(): Record<ModelFamily, TokenBreakdown> {
+  return {
+    opus: { ...EMPTY_BREAKDOWN },
+    sonnet: { ...EMPTY_BREAKDOWN },
+    haiku: { ...EMPTY_BREAKDOWN },
+    unknown: { ...EMPTY_BREAKDOWN },
+  };
 }
 
 function getProjectsRoot(): string {
@@ -167,9 +270,23 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
   const fiveHourQuota = getFiveHourQuotaTokens();
   const calibrated = weeklyQuota > 0 && fiveHourQuota > 0;
 
+  const weights = {
+    opus: getQuotaWeightOpus(),
+    sonnet: getQuotaWeightSonnet(),
+    haiku: getQuotaWeightHaiku(),
+  };
+  const quotaWeightCalibrated = weights.opus > 0 && weights.sonnet > 0 && weights.haiku > 0;
+
   const acc5h: TokenBreakdown = { ...EMPTY_BREAKDOWN };
   const acc7d: TokenBreakdown = { ...EMPTY_BREAKDOWN };
+  // Per-family 5h/7d accumulators. `byModel` (the snapshot field) reports the
+  // 7d window; the 5h split is internal, used only for the 5h Quota Weight.
+  const byModel5h = emptyByModel();
+  const byModel7d = emptyByModel();
   let tokens24h = 0;
+
+  // Dedup unknown-model warnings to AT MOST one per scan (never per-line).
+  const unknownModelsSeen = new Set<string>();
 
   let filesScanned = 0;
   let filesSkippedByMtime = 0;
@@ -217,10 +334,31 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
       const tsMs = parsed.tsMs;
       if (tsMs < cutoff7d) continue;
 
+      const family = modelToFamily(parsed.model);
+      if (family === "unknown" && !unknownModelsSeen.has(parsed.model)) {
+        unknownModelsSeen.add(parsed.model);
+      }
+
       addBreakdown(acc7d, parsed.tokens);
+      addBreakdown(byModel7d[family], parsed.tokens);
       if (tsMs >= cutoff24h) tokens24h += parsed.tokens.total;
-      if (tsMs >= cutoff5h) addBreakdown(acc5h, parsed.tokens);
+      if (tsMs >= cutoff5h) {
+        addBreakdown(acc5h, parsed.tokens);
+        addBreakdown(byModel5h[family], parsed.tokens);
+      }
     }
+  }
+
+  if (unknownModelsSeen.size > 0) {
+    // Once per scan, not per line. An above-zero unknown bucket means the
+    // family prefix table (modelToFamily) needs a new entry.
+    console.warn(
+      `[usage-tracker] ${unknownModelsSeen.size} unrecognised model string(s) bucketed to 'unknown' (implicit quota-weight 1.0): ${[
+        ...unknownModelsSeen,
+      ]
+        .map((m) => (m === "" ? "<missing>" : m))
+        .join(", ")}`,
+    );
   }
 
   const percentLast5h = calibrated ? (acc5h.total / fiveHourQuota) * 100 : 0;
@@ -234,6 +372,11 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
   }
   const emergencyStop = calibrated && percentLast5h >= 90;
 
+  const weightedTotal = (acc: Record<ModelFamily, TokenBreakdown>): number =>
+    MODEL_FAMILIES.reduce((sum, f) => sum + acc[f].total * familyWeight(f, weights), 0);
+  const quotaWeightLast5h = quotaWeightCalibrated ? weightedTotal(byModel5h) : 0;
+  const quotaWeightLast7d = quotaWeightCalibrated ? weightedTotal(byModel7d) : 0;
+
   return {
     tokensLast5h: acc5h,
     tokensLast7d: acc7d,
@@ -244,6 +387,10 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
     pacingState,
     emergencyStop,
     calibrated,
+    byModel: byModel7d,
+    quotaWeightLast5h,
+    quotaWeightLast7d,
+    quotaWeightCalibrated,
     weeklyQuotaTokens: weeklyQuota,
     fiveHourQuotaTokens: fiveHourQuota,
     filesScanned,
@@ -258,6 +405,13 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
 export interface ParsedUsageLine {
   tsMs: number;
   tokens: TokenBreakdown;
+  /**
+   * Raw `message.model` string verbatim (or "" when absent). The scan loop
+   * runs it through `modelToFamily()` to bucket `byModel`; surfacing the raw
+   * string keeps the parser pure and lets tests pin classification
+   * independently. (issue #691)
+   */
+  model: string;
 }
 
 /**
@@ -293,9 +447,12 @@ export function parseUsageLine(line: string): ParsedUsageLine | "skip" | null {
   const total = input + output + cacheRead + cacheCreation;
   if (total === 0) return "skip";
 
+  const model = typeof obj?.message?.model === "string" ? obj.message.model : "";
+
   return {
     tsMs,
     tokens: { input, output, cacheRead, cacheCreation, total },
+    model,
   };
 }
 
