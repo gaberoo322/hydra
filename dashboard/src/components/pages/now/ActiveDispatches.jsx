@@ -1,9 +1,11 @@
+import { Link } from "react-router-dom";
 import { useApi } from "../../../hooks/useApi.js";
 import { Section } from "./Section.jsx";
 
 const SOURCE_STYLES = {
   autopilot: "bg-sky-500/10 text-sky-300 border-sky-500/30",
   operator: "bg-amber-500/10 text-amber-300 border-amber-500/30",
+  subagent: "bg-violet-500/10 text-violet-300 border-violet-500/30",
 };
 
 function formatAge(startedAt) {
@@ -56,6 +58,18 @@ export function ActiveDispatches() {
                 {item.prRef && <span>· PR {item.prRef}</span>}
               </div>
             </div>
+            {/* Issue #695 — transcript affordance. Subagent rows are keyed on
+                the harness sessionId (item.id), which the transcript route
+                resolves; other sources have no JSONL transcript in v1. */}
+            {item.source === "subagent" && (
+              <Link
+                to={`/dispatch/${encodeURIComponent(item.id)}/transcript`}
+                className="text-[11px] px-1.5 py-0.5 rounded border border-violet-500/30 text-violet-300 hover:bg-violet-500/10 shrink-0"
+                title="View this subagent's conversation transcript"
+              >
+                transcript
+              </Link>
+            )}
             <span className="text-xs text-zinc-500 shrink-0">{formatAge(item.startedAt)}</span>
           </li>
         ))}
