@@ -64,6 +64,50 @@ const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
 const MIN_QA_TRACE_LENGTH = 6;
 
 // ---------------------------------------------------------------------------
+// AnchorRef normalization (issue #736)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonicalize an anchorRef to the `issue-<N>` form used end-to-end by the
+ * autopilot signal path (issue #736).
+ *
+ * The wedge: the grill/writer sometimes persists under a bare issue number
+ * (`"736"` → key `hydra:design-concept:736`), but every reader — the
+ * autopilot's `orch_pending_grill_anchor` signal, `collect-state.sh`'s
+ * `/api/design-concepts/issue-<N>` probe, the slot `anchor` field, and
+ * candidate refs — uses the `issue-<N>` form. The mismatch orphaned the
+ * artifact: `GET /api/design-concepts/736` → 200, `GET .../issue-736` → 404,
+ * so `design_concept_orch` re-grilled forever and `dev_orch` was starved.
+ *
+ * Normalizing at the persistence seam (used by BOTH write and read) makes
+ * the round-trip total: a bare `"736"` and the dispatched `"issue-736"`
+ * resolve to the same canonical key `issue-736`, regardless of which form
+ * the caller supplies. Non-issue refs (kanban titles, work-queue
+ * descriptions, the `test:*` refs) are passed through unchanged.
+ *
+ * Rules:
+ *   - `"736"` (pure digits)        → `"issue-736"`
+ *   - `"#736"` (leading hash)      → `"issue-736"`
+ *   - `"issue-736"` (already canon)→ `"issue-736"` (idempotent)
+ *   - `"PR-4: foo"`, `"some title"`→ unchanged (not an issue number)
+ */
+export function normalizeAnchorRef(anchorRef: string): string {
+  if (typeof anchorRef !== "string") return anchorRef;
+  const trimmed = anchorRef.trim();
+  if (trimmed === "") return trimmed;
+  // Already canonical: `issue-<digits>` (case-insensitive on the prefix).
+  if (/^issue-\d+$/i.test(trimmed)) {
+    return `issue-${trimmed.slice(trimmed.indexOf("-") + 1)}`;
+  }
+  // Bare issue number, optionally prefixed with `#` or `issue #`.
+  const m = trimmed.match(/^(?:issue\s*)?#?(\d+)$/i);
+  if (m) {
+    return `issue-${m[1]}`;
+  }
+  return trimmed;
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -186,8 +230,13 @@ export async function saveDesignConcept(
   const status: DesignConceptStatus = input.status ?? "draft";
   const approvedBy: DesignConcept["approvedBy"] = input.approvedBy ?? "";
 
+  // Canonicalize to the `issue-<N>` form the autopilot signal path reads
+  // (issue #736). A bare `"736"` and the dispatched `"issue-736"` both
+  // persist under the same key, so readers can always find the artifact.
+  const anchorRef = normalizeAnchorRef(input.anchorRef);
+
   const draft: Omit<DesignConcept, "artifactHash"> = {
-    anchorRef: input.anchorRef,
+    anchorRef,
     scope: input.scope,
     createdAt: now,
     glossaryTerms: input.glossaryTerms ?? [],
@@ -267,7 +316,9 @@ export async function getDesignConcept(
   anchorRef: string,
 ): Promise<DesignConcept | null> {
   if (!anchorRef) return null;
-  const raw = await getDesignConceptHash(anchorRef);
+  // Normalize so a lookup by either form (`"736"` or `"issue-736"`)
+  // resolves to the canonical persisted key (issue #736).
+  const raw = await getDesignConceptHash(normalizeAnchorRef(anchorRef));
   return hydrate(raw);
 }
 
@@ -344,8 +395,13 @@ export async function approveDesignConcept(
     );
   }
   const approvedBy = by as DesignConcept["approvedBy"];
-  await setDesignConceptField(anchorRef, "status", "approved");
-  await setDesignConceptField(anchorRef, "approvedBy", approvedBy);
+  // Field updates must target the same canonical key the artifact was
+  // persisted under (issue #736) — `existing.anchorRef` is already
+  // normalized by `saveDesignConcept`, but normalize the incoming ref too
+  // in case the caller passed the bare form.
+  const key = normalizeAnchorRef(anchorRef);
+  await setDesignConceptField(key, "status", "approved");
+  await setDesignConceptField(key, "approvedBy", approvedBy);
   return { ...existing, status: "approved", approvedBy };
 }
 

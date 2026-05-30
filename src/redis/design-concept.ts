@@ -7,7 +7,7 @@
  *   1. Per-anchor DC hash       — `hydra:design-concept:{anchorRef}`
  *   2. DC index ZSET            — `hydra:design-concept:index` (score = createdAt epoch ms)
  *   3. Exempt-log audit list    — `hydra:dc:exempt_log` (LPUSH-ed JSON entries)
- *   4. Daily snapshot HASH      — `hydra:dc:daily-snapshot` (issue #628; field=YYYY-MM-DD UTC, value=index size at snapshot time)
+ *   4. Daily snapshot HASH      — `hydra:dc:daily-snapshot` (issue #628; field=YYYY-MM-DD UTC, value=per-day production count since #736 — was index size)
  */
 
 import { getRedisConnection } from "./connection.ts";
@@ -21,12 +21,15 @@ const EXEMPT_LOG_KEY = "hydra:dc:exempt_log";
 const DC_INDEX_KEY = "hydra:design-concept:index";
 
 /**
- * Daily-snapshot HASH (issue #628). Fields are ISO date strings
- * (YYYY-MM-DD, UTC); values are the `ZCARD hydra:design-concept:index`
- * value at snapshot time. The 7-day green-light criterion from issue
- * #628 §Acceptance is computed by reading the last 7 fields. The HASH
- * is opportunistically pruned to MAX_SNAPSHOT_DAYS entries on every
- * write, so it stays bounded.
+ * Daily-snapshot HASH (issue #628; semantics revised in #736). Fields are
+ * ISO date strings (YYYY-MM-DD, UTC); values are the per-day *production
+ * count* — how many design concepts were CREATED that day
+ * (`getDesignConceptProductionCountForDate`), NOT the `ZCARD` of the
+ * currently-live index. The green-light criterion reads these values; the
+ * production count is durable per day, so a quiet day no longer zeroes a
+ * previously-earned green day (the #736 promotion-clock bug). The HASH is
+ * opportunistically pruned to MAX_SNAPSHOT_DAYS entries on every write, so
+ * it stays bounded.
  */
 const DC_DAILY_SNAPSHOT_KEY = "hydra:dc:daily-snapshot";
 
@@ -114,12 +117,55 @@ export async function readRecentExemptLogEntries(limit: number): Promise<string[
 // ---------------------------------------------------------------------------
 
 /**
- * Read the current size of the DC index — used by the daily-snapshot
- * writer to record how many artifacts exist at snapshot time.
+ * Read the current size of the DC index — `ZCARD` of the (currently-live)
+ * artifact index. Retained for the `indexSizeNow` field on the snapshots
+ * endpoint (an at-a-glance "how many artifacts are alive right now"), but
+ * NO LONGER the basis of the green-light streak — see
+ * `getDesignConceptProductionCountForDate` (issue #736).
  */
 export async function getDesignConceptIndexSize(): Promise<number> {
   const r = getRedisConnection();
   return r.zcard(DC_INDEX_KEY);
+}
+
+/**
+ * Count how many design concepts were CREATED on `date` (YYYY-MM-DD, UTC)
+ * — the per-day *production count* that replaces `zcard`-of-index as the
+ * daily-snapshot value (issue #736).
+ *
+ * The index ZSET is scored by `createdAt` (epoch ms), so a day's
+ * production is the number of members whose score lands in
+ * `[startOfDay, endOfDay)`. We read the score range directly via
+ * `ZCOUNT`, which is O(log N) and never has to enumerate members.
+ *
+ * Why this and not `zcard`: the old metric counted artifacts *currently
+ * alive*, which decays with the 7-day TTL — a single quiet day drained
+ * the index toward zero and reset the promotion streak even though work
+ * had been produced. A production count is monotone for a given day:
+ * once an artifact is created on day D it contributed to D's count, and
+ * the snapshot HASH records that number permanently (independent of
+ * whether the artifact has since TTL'd out of the index).
+ *
+ * Caveat: because the index entry itself is pruned at the 7-day TTL, this
+ * count is only accurate when read within the artifact's lifetime — which
+ * is exactly when the heartbeat samples it (same-day). The snapshot HASH
+ * is the durable record after that.
+ */
+export async function getDesignConceptProductionCountForDate(
+  date: string,
+): Promise<number> {
+  const r = getRedisConnection();
+  // `date` is a UTC YYYY-MM-DD string. Compute the [start, end) epoch-ms
+  // bounds for that day. `Date.parse("2026-05-30")` is interpreted as UTC
+  // midnight, which is what we want.
+  const startMs = Date.parse(`${date}T00:00:00.000Z`);
+  if (!Number.isFinite(startMs)) return 0;
+  const endMs = startMs + 24 * 60 * 60 * 1000;
+  // ZCOUNT is inclusive on both ends; use the exclusive `(` prefix on the
+  // upper bound so an artifact created at exactly the next midnight counts
+  // toward the following day, not this one.
+  const n = await r.zcount(DC_INDEX_KEY, startMs, `(${endMs}`);
+  return typeof n === "number" ? n : Number(n) || 0;
 }
 
 /**

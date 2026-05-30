@@ -85,6 +85,59 @@ describe("design-concept Redis store + gate", () => {
     assert.equal(fetched!.artifactHash, saved.artifactHash);
   });
 
+  // -------------------------------------------------------------------------
+  // #736 — anchor-ref key-format normalization (write→read round-trip on the
+  // exact string decide.py dispatches: `issue-<N>`).
+  // -------------------------------------------------------------------------
+
+  test("#736 normalizeAnchorRef canonicalizes to issue-<N>", () => {
+    assert.equal(dc.normalizeAnchorRef("736"), "issue-736");
+    assert.equal(dc.normalizeAnchorRef("#736"), "issue-736");
+    assert.equal(dc.normalizeAnchorRef("issue #736"), "issue-736");
+    assert.equal(dc.normalizeAnchorRef("issue-736"), "issue-736", "idempotent");
+    assert.equal(dc.normalizeAnchorRef("ISSUE-736"), "issue-736", "prefix case-insensitive");
+    assert.equal(dc.normalizeAnchorRef("  736  "), "issue-736", "trims");
+    // Non-issue refs pass through unchanged.
+    assert.equal(dc.normalizeAnchorRef("test:rt"), "test:rt");
+    assert.equal(dc.normalizeAnchorRef("PR-4: fold scheduler"), "PR-4: fold scheduler");
+    assert.equal(dc.normalizeAnchorRef("Some issue title 736 here"), "Some issue title 736 here");
+  });
+
+  test("#736 write under bare number → read by the dispatched issue-<N> string", async () => {
+    // This is the exact orphaning repro: the grill writes `"736"`, but
+    // collect-state.sh / decide.py read `"issue-736"`. After normalization
+    // both must resolve to the same artifact.
+    const saved = await dc.saveDesignConcept(buildComplete({ anchorRef: "736" } as any));
+    assert.equal(saved.anchorRef, "issue-736", "persisted ref is canonicalized");
+
+    // Read by the dispatched form — the form that used to 404.
+    const byIssueForm = await dc.getDesignConcept("issue-736");
+    assert.ok(byIssueForm, "GET .../issue-736 must now resolve (was 404)");
+    assert.equal(byIssueForm!.anchorRef, "issue-736");
+    assert.equal(byIssueForm!.artifactHash, saved.artifactHash);
+
+    // Read by the bare form must resolve to the same artifact.
+    const byBareForm = await dc.getDesignConcept("736");
+    assert.ok(byBareForm, "GET .../736 still resolves");
+    assert.equal(byBareForm!.artifactHash, saved.artifactHash);
+
+    // Only one underlying key exists (no orphan under the bare number).
+    const keys = await testRedis.keys(TEST_NS + "736");
+    assert.equal(keys.length, 0, "no orphaned bare-number key");
+    const canonKeys = await testRedis.keys(TEST_NS + "issue-736");
+    assert.equal(canonKeys.length, 1, "exactly one canonical key");
+  });
+
+  test("#736 approve by either form targets the canonical key", async () => {
+    await dc.saveDesignConcept(buildComplete({ anchorRef: "issue-742" } as any));
+    // Approve using the bare form — must hit the same canonical key.
+    const approved = await dc.approveDesignConcept("742", "auto-gate");
+    assert.equal(approved.status, "approved");
+    const fetched = await dc.getDesignConcept("issue-742");
+    assert.equal(fetched!.status, "approved", "approval visible under issue-<N>");
+    assert.equal(fetched!.approvedBy, "auto-gate");
+  });
+
   test("saveDesignConcept overwrites on second call (idempotent on anchorRef)", async () => {
     const a = await dc.saveDesignConcept(buildComplete({ anchorRef: "test:idem" } as any));
     const b = await dc.saveDesignConcept(

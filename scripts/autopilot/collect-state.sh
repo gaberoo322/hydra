@@ -71,7 +71,7 @@ gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedA
 #   - Emit the first matching `issue-<N>` ref, or `none`.
 #   - Best-effort: any failure prints `none` so dispatch is never blocked
 #     by a transient orchestrator outage.
-echo -n "orch_grill_pending_anchor="
+echo -n "orch_pending_grill_anchor="
 ORCH_GRILL_CANDIDATES=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --json number,updatedAt --jq '
   sort_by(.updatedAt) | reverse | .[0:10] | map(.number) | .[]
 ' 2>/dev/null || true)

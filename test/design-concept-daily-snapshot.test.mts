@@ -62,6 +62,48 @@ describe("design-concept daily snapshot (#628)", () => {
     assert.equal(size, 3);
   });
 
+  test("#736 getDesignConceptProductionCountForDate() counts entries created that UTC day", async () => {
+    // Index is scored by createdAt epoch-ms. Seed three days.
+    const may28 = Date.parse("2026-05-28T10:00:00.000Z");
+    const may29a = Date.parse("2026-05-29T01:00:00.000Z");
+    const may29b = Date.parse("2026-05-29T23:59:59.000Z");
+    const may30 = Date.parse("2026-05-30T00:00:00.000Z");
+    await testRedis.zadd(
+      DC_INDEX_KEY,
+      may28, "issue-1",
+      may29a, "issue-2",
+      may29b, "issue-3",
+      may30, "issue-4",
+    );
+    assert.equal(
+      await dcRedisMod.getDesignConceptProductionCountForDate("2026-05-28"),
+      1,
+    );
+    assert.equal(
+      await dcRedisMod.getDesignConceptProductionCountForDate("2026-05-29"),
+      2,
+      "both 05-29 entries (incl 23:59:59) count toward that day",
+    );
+    assert.equal(
+      await dcRedisMod.getDesignConceptProductionCountForDate("2026-05-30"),
+      1,
+      "the entry at exactly 05-30T00:00 belongs to 05-30, not 05-29",
+    );
+    assert.equal(
+      await dcRedisMod.getDesignConceptProductionCountForDate("2026-05-31"),
+      0,
+      "a day with no creations is zero",
+    );
+  });
+
+  test("#736 production count is a malformed-date no-op (0, not a throw)", async () => {
+    await testRedis.zadd(DC_INDEX_KEY, Date.now(), "issue-1");
+    assert.equal(
+      await dcRedisMod.getDesignConceptProductionCountForDate("not-a-date"),
+      0,
+    );
+  });
+
   test("writeDailySnapshot writes one HASH field per date", async () => {
     await dcRedisMod.writeDailySnapshot("2026-05-26", 5);
     await dcRedisMod.writeDailySnapshot("2026-05-25", 4);

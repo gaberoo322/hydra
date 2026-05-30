@@ -415,26 +415,29 @@ async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: stri
     skipped.push("memory-consolidation");
   }
 
-  // Daily design-concept snapshot (issue #628) — record today's index
-  // size so we can compute "≥7 consecutive non-zero days" as the
-  // green-light criterion for Phase C of #437. PR #567 retired the
+  // Daily design-concept snapshot (issue #628; metric revised in #736) —
+  // record today's *production count* (how many concepts were created
+  // today) so the green-light criterion measures the gate WORKING rather
+  // than "an artifact happens to be alive". PR #567 retired the
   // heavyweight B-4 telemetry endpoint; this is the lightweight
-  // replacement (one hash field per day, 14-day bounded).
+  // replacement (one hash field per day, 14-day bounded). Pre-#736 this
+  // wrote `ZCARD` of the TTL-decaying index, so a quiet day reset the
+  // streak — that is the bug being fixed.
   try {
     const {
-      getDesignConceptIndexSize,
+      getDesignConceptProductionCountForDate,
       writeDailySnapshot,
       readDailySnapshots,
     } = await import("../redis/design-concept.ts");
     const today = new Date().toISOString().slice(0, 10);
+    const count = await getDesignConceptProductionCountForDate(today);
+    // Idempotent + monotone (the #736 invariant): a same-day re-run only
+    // WRITES when the freshly-sampled production count is higher than
+    // what's already stored for today (a concept produced later today).
+    // A no-change re-run SKIPS, so hourly housekeeping stays idempotent.
     const existing = await readDailySnapshots();
-    // Idempotent on today's date — only write if today's slot is empty.
-    // (A second writer landing later in the day SHOULD see a higher
-    // count, but the 7-day green-light criterion only checks for
-    // `count > 0`, so we keep the first sample of the day.)
-    const alreadyWritten = existing.some((s) => s.date === today);
-    if (!alreadyWritten) {
-      const count = await getDesignConceptIndexSize();
+    const stored = existing.find((s) => s.date === today)?.count;
+    if (stored === undefined || count > stored) {
       await writeDailySnapshot(today, count);
       ran.push("design-concept-snapshot");
     } else {
