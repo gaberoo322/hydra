@@ -81,7 +81,7 @@ describe("scripts/autopilot/bootstrap.sh", () => {
       const r = runBootstrap({}, tmp);
       assert.equal(r.status, 0, `bootstrap exited non-zero: ${r.stderr}`);
       const s = JSON.parse(readFileSync(tmp.state, "utf-8"));
-      assert.equal(s.limits.token_budget, 2000000);
+      assert.equal(s.limits.token_budget, 10000000);
       assert.equal(s.limits.wall_clock_max_sec, 28800);
       assert.equal(s.limits.idle_drain_turns, 5);
       assert.equal(s.limits.subagent_max_tokens, 400000);

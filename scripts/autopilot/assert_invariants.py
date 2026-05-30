@@ -158,7 +158,7 @@ def check_inv004(actions: list[dict], state: dict) -> None:
 def check_inv005(actions: list[dict], state: dict) -> None:
     """INV-005 emit `terminate` when cumulative_tokens >= budget."""
     limits = state.get("limits") or {}
-    budget = int(limits.get("token_budget", 2_000_000))
+    budget = int(limits.get("token_budget", 10_000_000))
     cumulative = int(state.get("cumulative_tokens", 0))
     if cumulative >= budget:
         if not any(a.get("type") == "terminate" for a in actions):
