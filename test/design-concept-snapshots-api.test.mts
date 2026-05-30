@@ -4,11 +4,16 @@
  * The endpoint reads the `hydra:dc:daily-snapshot` HASH written by the
  * scheduler's daily tick and exposes:
  *
- *   - `snapshots[]` newest-first (`{date, count}`)
- *   - `consecutiveGreenDays` — non-zero days from newest backward
+ *   - `snapshots[]` newest-first (`{date, count}`) — `count` is the
+ *     per-day PRODUCTION count since #736 (was index ZCARD)
+ *   - `consecutiveGreenDays` — non-zero days from newest backward (legacy
+ *     visibility field; no longer gates)
+ *   - `greenDaysInWindow` / `windowDays` / `requiredGreenDays` — the
+ *     idle-tolerant criterion introduced in #736
  *   - `indexSizeNow` — current ZCARD of `hydra:design-concept:index`
- *   - `greenLightReady` — `consecutiveGreenDays >= 7` (the trigger for
- *     filing Phase C of #437)
+ *   - `greenLightReady` — `greenDaysInWindow >= requiredGreenDays`
+ *     (≥7 of the last 10 days produced a concept; the trigger for filing
+ *     Phase C of #437). Idle-tolerant per #736 so a quiet day is neutral.
  */
 
 import { test, describe, beforeEach, after } from "node:test";
@@ -120,10 +125,9 @@ describe("GET /api/design-concepts/snapshots (#628)", () => {
     assert.equal(body.greenLightReady, false);
   });
 
-  test("zero in the middle resets the streak (counts from newest non-zero run)", async () => {
+  test("zero in the middle resets consecutiveGreenDays (legacy field) but not green-light", async () => {
     await startApi();
-    // Newest-first: 26, 25 (non-zero); 24 (zero); 23..20 (non-zero — but
-    // those don't count once we hit the zero walking backwards).
+    // Newest-first: 26, 25 (non-zero); 24 (zero); 23..22 (non-zero).
     await dcRedisMod.writeDailySnapshot("2026-05-26", 3);
     await dcRedisMod.writeDailySnapshot("2026-05-25", 2);
     await dcRedisMod.writeDailySnapshot("2026-05-24", 0);
@@ -132,7 +136,52 @@ describe("GET /api/design-concepts/snapshots (#628)", () => {
 
     const res = await fetch(`${baseUrl}/api/design-concepts/snapshots`);
     const body = await res.json();
+    // consecutiveGreenDays stops at the first zero (the two newest days).
     assert.equal(body.consecutiveGreenDays, 2);
+    // 4 green of 5 days in window — still short of the 7-of-10 threshold.
+    assert.equal(body.greenDaysInWindow, 4);
+    assert.equal(body.greenLightReady, false);
+  });
+
+  test("#736 idle-tolerant: a quiet day inside a productive window stays green-light", async () => {
+    await startApi();
+    // 10 trailing days, one quiet (zero) day in the middle. 9 of 10 green
+    // ⇒ >= 7 ⇒ green-light, even though the consecutive run is broken by
+    // the zero day. This is the exact bug #736 reports: a quiet orch day
+    // used to zero the streak; it must now be neutral.
+    const days = [
+      "2026-05-30", "2026-05-29", "2026-05-28", "2026-05-27", "2026-05-26",
+      "2026-05-25", "2026-05-24", "2026-05-23", "2026-05-22", "2026-05-21",
+    ];
+    for (let i = 0; i < days.length; i += 1) {
+      // Make 2026-05-27 the quiet day (production 0).
+      const count = days[i] === "2026-05-27" ? 0 : 1;
+      await dcRedisMod.writeDailySnapshot(days[i], count);
+    }
+    const res = await fetch(`${baseUrl}/api/design-concepts/snapshots`);
+    const body = await res.json();
+    assert.equal(body.windowDays, 10);
+    assert.equal(body.requiredGreenDays, 7);
+    assert.equal(body.greenDaysInWindow, 9);
+    assert.equal(body.greenLightReady, true, "9 of 10 green days must satisfy the idle-tolerant gate");
+    // The consecutive run is broken at the quiet day, but that no longer
+    // gates the green light.
+    assert.equal(body.consecutiveGreenDays, 3);
+  });
+
+  test("#736 idle-tolerant: 4 quiet days in the window blocks green-light", async () => {
+    await startApi();
+    // 6 of 10 green ⇒ < 7 ⇒ not ready. Demands sustained production.
+    const greenDays = [
+      "2026-05-30", "2026-05-29", "2026-05-28",
+      "2026-05-25", "2026-05-24", "2026-05-23",
+    ];
+    const quietDays = ["2026-05-27", "2026-05-26", "2026-05-22", "2026-05-21"];
+    for (const d of greenDays) await dcRedisMod.writeDailySnapshot(d, 1);
+    for (const d of quietDays) await dcRedisMod.writeDailySnapshot(d, 0);
+    const res = await fetch(`${baseUrl}/api/design-concepts/snapshots`);
+    const body = await res.json();
+    assert.equal(body.greenDaysInWindow, 6);
     assert.equal(body.greenLightReady, false);
   });
 });

@@ -45,6 +45,69 @@ import {
 const EXEMPT_LOG_DEFAULT_LIMIT = 50;
 const EXEMPT_LOG_MAX_LIMIT = 500;
 
+// ---------------------------------------------------------------------------
+// Green-light criterion (issue #736)
+// ---------------------------------------------------------------------------
+
+/**
+ * The promotion clock is idle-tolerant (issue #736): Phase C of #437 may
+ * flip when at least `GREEN_LIGHT_REQUIRED_DAYS` of the most-recent
+ * `GREEN_LIGHT_WINDOW_DAYS` snapshot days produced ≥1 design concept.
+ *
+ * Chosen form: "N of last M days" rather than a pure consecutive run.
+ * Rationale (the open design choice the design-concept artifact deferred
+ * to implementation): a strict `consecutiveGreenDays >= 7` punishes
+ * legitimately-quiet orch days (no `ready-for-agent` issue lacking a fresh
+ * artifact ⇒ nothing to grill), which is exactly the failure the issue
+ * reports. "7 of last 10" tolerates up to 3 quiet days inside the window
+ * while still demanding sustained production. Both the threshold and the
+ * window stay well inside MAX_SNAPSHOT_DAYS (14) so the HASH always holds
+ * enough history to evaluate.
+ */
+const GREEN_LIGHT_WINDOW_DAYS = 10;
+const GREEN_LIGHT_REQUIRED_DAYS = 7;
+
+type GreenLightMetrics = {
+  /** Legacy field: green days counted consecutively from the newest. */
+  consecutiveGreenDays: number;
+  /** Green (production > 0) days within the trailing window. */
+  greenDaysInWindow: number;
+  windowDays: number;
+  requiredGreenDays: number;
+  greenLightReady: boolean;
+};
+
+/**
+ * Compute the green-light metrics from a newest-first snapshot list. Pure
+ * — no Redis IO — so it is unit-testable. A "green" day is one whose
+ * production count is > 0.
+ */
+export function computeGreenLight(
+  snapshots: Array<{ date: string; count: number }>,
+  windowDays: number = GREEN_LIGHT_WINDOW_DAYS,
+  requiredGreenDays: number = GREEN_LIGHT_REQUIRED_DAYS,
+): GreenLightMetrics {
+  // `consecutiveGreenDays`: walk from newest until the first zero day.
+  let consecutiveGreenDays = 0;
+  for (const s of snapshots) {
+    if (s.count > 0) consecutiveGreenDays += 1;
+    else break;
+  }
+  // `greenDaysInWindow`: count green days among the newest `windowDays`.
+  const window = snapshots.slice(0, windowDays);
+  const greenDaysInWindow = window.reduce(
+    (n, s) => (s.count > 0 ? n + 1 : n),
+    0,
+  );
+  return {
+    consecutiveGreenDays,
+    greenDaysInWindow,
+    windowDays,
+    requiredGreenDays,
+    greenLightReady: greenDaysInWindow >= requiredGreenDays,
+  };
+}
+
 export type ExemptLogEntry = {
   pr: number;
   applier: string;
@@ -76,31 +139,29 @@ export function createDesignConceptsRouter() {
   // ---------------------------------------------------------------------------
 
   /**
-   * GET /api/design-concepts/snapshots (issue #628)
+   * GET /api/design-concepts/snapshots (issue #628; metric revised in #736)
    *
    * Returns the daily-snapshot HASH as `{ snapshots: [{date, count}, ...],
-   * consecutiveGreenDays, indexSizeNow, greenLightReady }` — the
-   * green-light criterion for Phase C of #437 is `consecutiveGreenDays
-   * >= 7`. Newest-first.
+   * consecutiveGreenDays, greenDaysInWindow, windowDays, requiredGreenDays,
+   * indexSizeNow, greenLightReady }`. Snapshots newest-first.
+   *
+   * `count` is now the per-day *production count* (concepts created that
+   * day), not the index `ZCARD` — see issue #736. The green-light
+   * criterion that gates Phase C of #437 is **idle-tolerant**: at least
+   * `GREEN_LIGHT_REQUIRED_DAYS` of the last `GREEN_LIGHT_WINDOW_DAYS`
+   * snapshot days produced a concept. A legitimately-quiet orch day (no
+   * pending anchor to grill) is therefore neutral, not streak-breaking.
+   * `consecutiveGreenDays` is retained for visibility but no longer gates.
    */
   router.get("/design-concepts/snapshots", async (_req, res) => {
     try {
       const snapshots = await readDailySnapshots();
       const indexSizeNow = await getDesignConceptIndexSize();
-      // Count consecutive non-zero days from the newest snapshot backwards.
-      // The "newest-first" sort from readDailySnapshots() means we just
-      // walk until we hit a zero or run out.
-      let consecutiveGreenDays = 0;
-      for (const s of snapshots) {
-        if (s.count > 0) consecutiveGreenDays += 1;
-        else break;
-      }
-      const greenLightReady = consecutiveGreenDays >= 7;
+      const metrics = computeGreenLight(snapshots);
       res.json({
         snapshots,
-        consecutiveGreenDays,
+        ...metrics,
         indexSizeNow,
-        greenLightReady,
       });
     } catch (err: any) {
       console.error("[api/design-concepts] snapshots read failed", err);
