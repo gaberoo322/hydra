@@ -1,30 +1,43 @@
 /**
- * Modification Tier classifier (ADR-0004 work-order step 3).
+ * Modification Tier classifier (ADR-0004 / ADR-0015 work-order step 3).
  *
- * Classifies a set of changed files into one of four tiers. The tier
- * controls merge policy:
- *   - Tier 0: Untouchable Core. Operator-approved label required; the
+ * Classifies a set of changed files into one of four tiers on the
+ * monotonic ladder T1 (shallowest) → T4 (deepest). Tiers ascend with
+ * blast radius, so the deepest tier (T4) carries the most verification.
+ * The tier controls merge policy:
+ *   - T1: Auto-merge, no holdback. Prompt-shaped changes
+ *     (`config/agents/`, `config/feedback/`). Shallowest blast radius.
+ *   - T2: Auto-merge with outcome holdback. Skills, anchor weights,
+ *     additive verification rules, dashboard.
+ *   - T3: Operator review default. Everything else in `src/`, plus the
+ *     former-Tier-0 infra paths demoted by ADR-0015 (`src/grounding.ts`,
+ *     `src/cost/`, the watchdog scripts, `scripts/deploy.sh`).
+ *   - T4: Verifier Core. The 5 self-referential files that define the
+ *     verification machinery. Operator-approved label required; the
  *     `tier-gate` CI job blocks the PR otherwise.
- *   - Tier 1: Auto-merge, no holdback. Prompt-shaped changes
- *     (`config/agents/`, `config/feedback/`).
- *   - Tier 2: Auto-merge with outcome holdback. Skills, anchor weights,
- *     additive verification rules, dashboard. Implementation of the
- *     holdback watcher is a follow-up issue (work-order step 4).
- *   - Tier 3: Operator review. Everything else.
  *
- * Multi-file PRs use the highest matching tier (max of per-file tiers,
- * with Tier 0 short-circuiting).
+ * Multi-file PRs use the highest matching tier (MAX of per-file tiers).
+ * Under the monotonic numbering T4 is the natural MAX, so the Verifier
+ * Core "wins" any mixed PR without a special short-circuit — the same
+ * verdict the old non-monotonic Tier-0 short-circuit produced.
  *
  * The matcher is deliberately simple — exact paths or directory
  * prefixes — so the classification result is auditable at a glance.
  *
  * Inputs include deleted files: `gh pr diff --name-only` lists deletions
  * and they touch the path just as much as additions/edits.
+ *
+ * Renumbering note (ADR-0015 / issue #737): tiers were renumbered from
+ * the non-monotonic 0–3 to the monotonic 1–4 ladder, behavior-preserving:
+ * old Tier-0 → T4, old Tier-1 → T1, old Tier-2 → T2, old Tier-3 → T3.
+ * The merge verdict for any tier→policy mapping is identical; only the
+ * integer label of the deepest tier moved (0 → 4) and the Verifier Core
+ * membership shrank to its 5 self-referential files.
  */
 
-import { matchUntouchable } from "./untouchable.ts";
+import { matchVerifierCore } from "./untouchable.ts";
 
-export type Tier = 0 | 1 | 2 | 3;
+export type Tier = 1 | 2 | 3 | 4;
 
 export interface ClassifyResult {
   tier: Tier;
@@ -33,19 +46,19 @@ export interface ClassifyResult {
   perFile?: { path: string; tier: Tier; matched: string | null }[];
 }
 
-/** Tier 1: prompt-shaped, blast radius = one agent invocation. */
+/** T1: prompt-shaped, blast radius = one agent invocation. Shallowest. */
 const TIER_1_PREFIXES: readonly string[] = Object.freeze([
   "config/agents/",
   "config/feedback/",
 ]);
 
 /**
- * Tier 2: auto-merge with outcome holdback. Skills, anchor weight tuning,
+ * T2: auto-merge with outcome holdback. Skills, anchor weight tuning,
  * additive verification rules, dashboard.
  *
- * Initial Tier-2 file list intentionally minimal; document how to extend
+ * Initial T2 file list intentionally minimal; document how to extend
  * it in `docs/reference.md`. Removing rules from verification is NOT
- * Tier 2 — those land as Tier 3 by default.
+ * T2 — those land as T3 by default.
  */
 const TIER_2_PREFIXES: readonly string[] = Object.freeze([
   ".claude/skills/",
@@ -61,9 +74,9 @@ function classifyOne(path: string): { tier: Tier; matched: string | null } {
   if (!path) return { tier: 3, matched: null };
   const normalized = path.replace(/^\.\//, "");
 
-  // Tier 0 short-circuit.
-  const t0 = matchUntouchable(normalized);
-  if (t0) return { tier: 0, matched: t0 };
+  // T4 (Verifier Core) — the deepest tier.
+  const t4 = matchVerifierCore(normalized);
+  if (t4) return { tier: 4, matched: t4 };
 
   for (const prefix of TIER_1_PREFIXES) {
     if (normalized.startsWith(prefix)) return { tier: 1, matched: prefix };
@@ -81,21 +94,14 @@ function classifyOne(path: string): { tier: Tier; matched: string | null } {
 
 /**
  * Classify a list of changed files. Returns the highest tier across all
- * inputs, with a short reason describing what triggered it.
+ * inputs (MAX), with a short reason describing what triggered it.
  *
- * Convention: lower tier number = higher restriction. So we take MIN.
- *   - Tier 0 (untouchable) wins over Tier 3.
- *   - Mixed Tier-1 and Tier-3 PR is Tier 3 (the riskier file dominates).
- *
- * Wait — ADR-0004 says the highest-blast-radius tier should win. Tier 0
- * is the most restricted, Tier 3 is the most reviewed. We want the
- * **most restrictive merge policy** to apply, which is the LOWEST tier
- * for protection (0) but the HIGHEST review burden for risk (3).
- *
- * Resolution: use Tier 0 short-circuit, then take MAX. A PR mixing
- * Tier-1 prompts with Tier-3 src/ changes goes through operator review
- * (Tier 3). A PR touching anything Tier 0 always blocks regardless of
- * what else is in it.
+ * Monotonic convention (ADR-0015): higher tier number = deeper blast
+ * radius = more verification. T4 (Verifier Core) is the deepest, so a PR
+ * touching any T4 path classifies as T4 regardless of what else is in it
+ * — the plain MAX yields the same verdict the old Tier-0 short-circuit
+ * produced. A PR mixing T1 prompts with T3 `src/` changes classifies as
+ * T3 (the deeper file dominates).
  */
 export function classifyChange(filesChanged: string[]): ClassifyResult {
   const files = (filesChanged || []).filter(f => typeof f === "string" && f.length > 0);
@@ -108,23 +114,23 @@ export function classifyChange(filesChanged: string[]): ClassifyResult {
     return { path: p, tier: c.tier, matched: c.matched };
   });
 
-  // Tier 0 short-circuit — protected-paths trumps everything.
-  const tier0 = perFile.filter(f => f.tier === 0);
-  if (tier0.length > 0) {
-    const matched = tier0.map(f => f.matched || f.path).join(", ");
-    return {
-      tier: 0,
-      reason: `Untouchable Core path(s) modified: ${matched}`,
-      perFile,
-    };
-  }
-
-  // Otherwise take the highest tier number (most operator scrutiny).
+  // Monotonic MAX — the deepest tier (largest number) wins. T4 (Verifier
+  // Core) is the natural maximum, so this single rule subsumes the old
+  // Tier-0 short-circuit with identical results.
   let highest: Tier = 1;
   for (const f of perFile) {
     if (f.tier > highest) highest = f.tier;
   }
 
+  if (highest === 4) {
+    const tier4 = perFile.filter(f => f.tier === 4);
+    const matched = tier4.map(f => f.matched || f.path).join(", ");
+    return {
+      tier: 4,
+      reason: `Verifier Core path(s) modified: ${matched}`,
+      perFile,
+    };
+  }
   if (highest === 1) {
     return {
       tier: 1,
@@ -140,7 +146,7 @@ export function classifyChange(filesChanged: string[]): ClassifyResult {
       perFile,
     };
   }
-  // Tier 3 — find a representative path to mention.
+  // T3 — find a representative path to mention.
   const tier3Paths = perFile.filter(f => f.tier === 3).map(f => f.path);
   return {
     tier: 3,
@@ -150,4 +156,4 @@ export function classifyChange(filesChanged: string[]): ClassifyResult {
 }
 
 /** Re-exports for convenience — callers usually need both. */
-export { isUntouchable, UNTOUCHABLE_PATHS } from "./untouchable.ts";
+export { isVerifierCore, VERIFIER_CORE_PATHS } from "./untouchable.ts";

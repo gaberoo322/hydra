@@ -119,9 +119,12 @@ MERGE POLICY (Option C, issue #426 grilled decision 8)
   tier in {1, 2}                        → True
   tier == 3 and not has_scope_justif    → True
   tier == 3 and has_scope_justif        → queue-decision (operator review)
-  tier == 0 and mechanical == True      → apply-operator-approved (then auto-merge)
-  tier == 0 and mechanical == False     → queue-decision (INV-001 enforces)
-  tier == 0 and mechanical == "unclear" → queue-decision (conservative)
+  tier == 4 and mechanical == True      → apply-operator-approved (then auto-merge)
+  tier == 4 and mechanical == False     → queue-decision (INV-001 enforces)
+  tier == 4 and mechanical == "unclear" → queue-decision (conservative)
+
+  (ADR-0015 / issue #737 renumber: the deepest tier — Verifier Core — moved
+  from the old integer 0 to T4. Policy is identical; only the label moved.)
 
 ==================================================================
 FAILURE PATTERNS (self_heal.py docstring is the single source of truth)
@@ -664,7 +667,9 @@ def should_auto_merge(
         return "auto-merge"
     if t == 3:
         return "queue-decision" if has_scope_justification else "auto-merge"
-    if t == 0:
+    if t == 4:
+        # T4 = Verifier Core (deepest tier, ADR-0015). Renumbered from the old
+        # integer 0; identical policy.
         if mechanical is True:
             return "apply-operator-approved"
         # False, "unclear", None → queue-decision
@@ -1012,7 +1017,7 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
             plan.add(make_auto_merge(pr_number, tier, "qa pass + tier policy"), reason=f"auto-merge:#{pr_number}")
         elif decision == "apply-operator-approved":
             plan.add(
-                make_apply_operator_approved(pr_number, tier, "tier-0 mechanical carve-out", mechanical=True),
+                make_apply_operator_approved(pr_number, tier, "T4 Verifier Core mechanical carve-out", mechanical=True),
                 reason=f"apply-operator-approved:#{pr_number}",
             )
         elif decision == "queue-decision":
@@ -1807,8 +1812,8 @@ def _check_termination(state: dict, now: int) -> dict | None:
 
 def _queue_reason_for(tier: int | str, mechanical: bool | str | None, has_scope_justif: bool) -> str:
     t = str(tier)
-    if t == "0":
-        return "Tier-0 non-mechanical change — operator review required"
+    if t == "4":
+        return "T4 (Verifier Core) non-mechanical change — operator review required"
     if t == "3" and has_scope_justif:
         return "Tier-3 with scope-justification block — explicit operator opt-in"
     return f"Tier-{t} PR queued for operator review"
@@ -1816,7 +1821,7 @@ def _queue_reason_for(tier: int | str, mechanical: bool | str | None, has_scope_
 
 def _queue_recommendation_for(tier: int | str, mechanical: bool | str | None, has_scope_justif: bool) -> str:
     t = str(tier)
-    if t == "0":
+    if t == "4":
         return "Review diff; if clean, add `operator-approved` label; otherwise close"
     if t == "3" and has_scope_justif:
         return "Inspect scope-justification; approve or push back"

@@ -105,9 +105,10 @@ export function classifySide(
   const files = (filesChanged || []).filter(f => typeof f === "string" && f.length > 0);
   if (files.length === 0) return "idle";
 
-  // Strong orchestrator signal: tier-classifier matched a Tier-1 or Tier-2
-  // path (deliberate, narrow lists). Tier-3 is the *default*, so it isn't a
-  // signal of anything.
+  // Strong orchestrator signal: tier-classifier matched a T1 or T2 path
+  // (deliberate, narrow lists). T3 is the *default*, so it isn't a signal of
+  // anything. T4 (Verifier Core) is not counted as an orchestrator vote — it
+  // is the deepest tier, not an orchestrator-shaped self-improvement path.
   const classified = classifyChange(files);
   const orchestratorVotes = (classified.perFile || []).filter(f => f.tier === 1 || f.tier === 2).length;
   const ambiguousVotes = (classified.perFile || []).filter(f => f.tier === 3).length;

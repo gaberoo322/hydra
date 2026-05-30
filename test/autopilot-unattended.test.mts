@@ -436,7 +436,7 @@ describe("scripts/autopilot/queue-decision.sh — rolling daily issue (issue #41
     try {
       const r = runQueueDecision(
         stub.binDir,
-        ["402", "0", "merge gate change", "Tier-0 — operator-approved required"],
+        ["402", "4", "merge gate change", "T4 (Verifier Core) — operator-approved required"],
         { HYDRA_AUTOPILOT_QUEUE_DATE: "2026-05-14" },
       );
       assert.equal(r.status, 0, r.stderr);
@@ -447,7 +447,7 @@ describe("scripts/autopilot/queue-decision.sh — rolling daily issue (issue #41
       const issue = state.issues[0];
       assert.equal(issue.title, "Operator decision queue 2026-05-14");
       assert.match(issue.body, /\| PR # \| tier \| reason \| recommendation \| link \|/, "header present");
-      assert.match(issue.body, /\| #402 \| 0 \| merge gate change \| Tier-0 — operator-approved required \|/, "row present");
+      assert.match(issue.body, /\| #402 \| 4 \| merge gate change \| T4 \(Verifier Core\) — operator-approved required \|/, "row present");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
@@ -562,7 +562,7 @@ describe("queue-decision <-> /hydra-review handshake (issue #413)", () => {
     try {
       runQueueDecision(
         stub.binDir,
-        ["402", "0", "non-mechanical Tier-0 PR", "apply operator-approved"],
+        ["402", "4", "non-mechanical T4 (Verifier Core) PR", "apply operator-approved"],
         { HYDRA_AUTOPILOT_QUEUE_DATE: "2026-05-14" },
       );
       const state = getStubState(stub.stateFile);
