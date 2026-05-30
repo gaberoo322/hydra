@@ -10,7 +10,8 @@
     "dev": "node --watch --experimental-strip-types src/index.ts",
     "test": "node --experimental-strip-types --test --test-force-exit --test-concurrency=1 test/*.test.mts",
     "typecheck": "tsc --noEmit",
-    "redis-seam-check": "npx tsx scripts/ci/redis-seam-check.ts"
+    "redis-seam-check": "npx tsx scripts/ci/redis-seam-check.ts",
+    "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts"
   },
   "author": "Gabe",
   "license": "AGPL-3.0-only",
