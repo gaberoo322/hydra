@@ -8,6 +8,7 @@ import NowClassic from "./pages/NowClassic.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
 import Explore from "./pages/Explore.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
+import DispatchTranscript from "./pages/DispatchTranscript.jsx";
 
 // Dashboard atomic swap #2 (epic #642 — /now-pixel). PR2 of slice 7
 // (#649) makes the pixel-habitat view the canonical /now and renames
@@ -34,6 +35,8 @@ export default function App() {
           <Route path="/explore/:tab" element={<Explore />} />
           {/* Slice 4 (issue #500) — per-run autopilot detail page. */}
           <Route path="/autopilot/:runId" element={<Autopilot />} />
+          {/* Issue #695 — subagent transcript viewer (deep-linkable). */}
+          <Route path="/dispatch/:dispatchId/transcript" element={<DispatchTranscript />} />
         </Routes>
       </Layout>
     </ToastProvider>
