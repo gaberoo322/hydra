@@ -10,12 +10,19 @@ on:
 # self-hosted runner handling all 7 parallel jobs sequentially, a force-push
 # during a rebase used to leave the prior run queued — burning runner
 # capacity on a sha nobody cares about anymore. Grouping by workflow + ref
-# means each PR keeps at most one in-flight CI run (the newest), while
-# master's CI is unaffected because its `github.ref` is distinct from any
-# PR ref.
+# means each PR keeps at most one in-flight CI run (the newest).
+#
+# Issue #712: do NOT cancel in-progress runs on master. Two pushes to master
+# in quick succession share the same `refs/heads/master` group, so a newer
+# merge would cancel the older commit's entire CI run — including its
+# `deploy` job — leaving production silently lagging master during a merge
+# wave. Gating `cancel-in-progress` on `github.ref != 'refs/heads/master'`
+# preserves #629's PR-rebase de-dup (non-master refs still cancel superseded
+# runs) while letting every master deploy run to completion (deploys
+# serialize on the single self-hosted runner anyway).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 # Minimum permissions required by the workflow:
 # - `contents: read` for actions/checkout and `gh pr diff` (REST).
