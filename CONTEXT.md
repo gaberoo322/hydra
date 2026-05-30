@@ -22,6 +22,18 @@ _Avoid_: vision (unqualified)
 The structured config declaring the named metrics the orchestrator optimizes the target against. The contract between target vision prose and orchestrator behavior — if these metrics aren't moving, the prose is fiction.
 _Avoid_: metrics, KPIs, success criteria
 
+**Builder Health**:
+The capability of the orchestrator-as-builder, measured as a small, trended set of metrics (the **Builder-Health Scorecard**) that answers whether the 25% **Self-Improvement Share** investment is producing a measurably better builder. The builder-side counterpart to **Target Outcomes** — where Target Outcomes measure the product the orchestrator builds, Builder Health measures the orchestrator's own ability to build. Composed read-only from existing signal (capacity-floor, cycle metrics, lessons/friction trends) plus two new derivations (**Autonomy Rate**, time-to-merge); surfaced in the digest and dashboard. Grounded in ADR-0003 (the floor is an input with no output signal today) and the Orchestrator Vision mandate to surface builder health honestly.
+_Avoid_: orchestrator health (overloaded with the service-level liveness check at `/api/health`), self-improvement metrics (informal), velocity (too narrow)
+
+**Self-Improvement Share**:
+The share of recent non-idle cycles whose merged work was orchestrator-side rather than target-side, over a rolling window. The realised output signal for the 25% self-improvement floor (ADR-0003): the floor is the *input* budget, this share is the *observed* spend. Computed by `capacity-floor.ts` against `ORCHESTRATOR_FLOOR = 0.25`; the headline self-investment input to the **Builder-Health Scorecard**.
+_Avoid_: capacity split (the dashboard label, not the metric), self-improvement floor (the target, not the realised value), 25% floor (the threshold, not the measurement)
+
+**Autonomy Rate**:
+The headline **Builder Health** metric: the share of dispatches reaching a merged PR with zero **Operator-Required Intervention**, over a rolling window. A dispatch is *autonomous* iff its PR was merged by the auto-merge bot AND its issue/PR timeline never carried an `operator-approved` or `ready-for-human` label AND no human authored a review or commit on the branch — i.e. nothing on the closed escalation list (ADR-0005) was touched. An automated rebase is *not* intervention (it is autonomous self-healing). Derived from GitHub on read via the dispatch→PR link; no per-dispatch intervention flag is stored.
+_Avoid_: merge rate (whole-system, not zero-intervention — distinct metric in the scorecard), success rate (overloaded), hands-off rate (informal)
+
 **Verifier Core**:
 The five self-referential files where a bad merge would disable *future* verification: `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`. Still auto-mergeable (T4), but guarded by the **Live-Gate Invariant** and the deepest **Modification Tier** verification. Defined by ADR-0015.
 _Avoid_: Untouchable Core (retired by ADR-0015 — nothing is untouchable; T4 is touchable with the deepest verification), protected paths, frozen code, Tier 0
