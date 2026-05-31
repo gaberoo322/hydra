@@ -202,7 +202,7 @@ function generateMutations(filePath: string, content: string): Mutation[] {
 /**
  * Run mutation testing on the changed files.
  *
- * @param projectDir - Project root (~/hydra-betting)
+ * @param projectDir - Target project root (the configured target workspace)
  * @param changedFiles - List of changed file paths (from git diff)
  * @param opts.timeBudgetMs - Max time for all mutations (default 120s)
  * @param opts.testCommand - Command to run tests (default: npm test)

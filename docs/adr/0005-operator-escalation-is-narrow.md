@@ -8,7 +8,7 @@ Operator escalation is reserved for interventions only the operator can perform.
 
 - **Credentials / secrets** — new API keys, OAuth tokens, env vars
 - **External-account actions** — opening accounts on new platforms, accepting TOS, KYC steps
-- **Tier 0 Untouchable Core** changes (already operator-only per ADR-0001)
+- **Second failed Deep-QA Remediation Loop pass** on a T4 (Verifier Core) change — autonomous remediation exhausted, per ADR-0015 (replaces the retired "Tier 0 changes are operator-only" trigger)
 - **Vision-level conflicts** — when the **Target Vision** prose contradicts what **Target Outcomes** are pushing toward, the operator decides which is wrong
 
 Hydra exhausts autonomous options before raising any of these. "I tried things and they didn't work" is *not* a reason to escalate — it's a reason to research harder. The escalation channel is GitHub issues with `ready-for-human`, surfaced in the daily digest.

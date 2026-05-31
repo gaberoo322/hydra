@@ -12,7 +12,7 @@
  * Invariant IDs (kept stable for grep — same identifiers as
  * assert_invariants.py docstring):
  *
- *   INV-001 never auto-merge a Tier-0 non-mechanical PR
+ *   INV-001 never auto-merge a T4 (Verifier Core) non-mechanical PR
  *   INV-002 never dispatch into a busy pipeline slot
  *   INV-003 never re-dispatch a class in burned_classes
  *   INV-004 never re-reap a task_id already in reaped_task_ids
@@ -89,15 +89,15 @@ function runAsserts(plan: any, state: any): { status: number; stdout: string; st
 // ---------------------------------------------------------------------------
 
 describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
-  test("INV-001: auto-merge on Tier-0 PR is rejected", () => {
-    const plan = { actions: [{ type: "auto-merge", pr_number: 42, tier: 0 }] };
+  test("INV-001: auto-merge on T4 (Verifier Core) PR is rejected", () => {
+    const plan = { actions: [{ type: "auto-merge", pr_number: 42, tier: 4 }] };
     const r = runAsserts(plan, baseState());
     assert.equal(r.status, 1);
     assert.match(r.stderr, /INV-001/);
-    assert.match(r.stderr, /Tier-0/);
+    assert.match(r.stderr, /Verifier Core/);
   });
 
-  test("INV-001: auto-merge on Tier-1/2/3 PRs is allowed", () => {
+  test("INV-001: auto-merge on T1/T2/T3 PRs is allowed", () => {
     const plan = {
       actions: [
         { type: "auto-merge", pr_number: 1, tier: 1 },

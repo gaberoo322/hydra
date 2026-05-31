@@ -22,9 +22,21 @@ _Avoid_: vision (unqualified)
 The structured config declaring the named metrics the orchestrator optimizes the target against. The contract between target vision prose and orchestrator behavior — if these metrics aren't moving, the prose is fiction.
 _Avoid_: metrics, KPIs, success criteria
 
-**Untouchable Core**:
-The set of orchestrator files Hydra cannot modify via its own PR pipeline — only the operator can. Protects the merge gate, rollback, watchdog, cost guardrails, and the untouchable list itself.
-_Avoid_: protected paths (unless referring specifically to the file pattern), frozen code
+**Builder Health**:
+The capability of the orchestrator-as-builder, measured as a small, trended set of metrics (the **Builder-Health Scorecard**) that answers whether the 25% **Self-Improvement Share** investment is producing a measurably better builder. The builder-side counterpart to **Target Outcomes** — where Target Outcomes measure the product the orchestrator builds, Builder Health measures the orchestrator's own ability to build. Composed read-only from existing signal (capacity-floor, cycle metrics, lessons/friction trends) plus two new derivations (**Autonomy Rate**, time-to-merge); surfaced in the digest and dashboard. Grounded in ADR-0003 (the floor is an input with no output signal today) and the Orchestrator Vision mandate to surface builder health honestly.
+_Avoid_: orchestrator health (overloaded with the service-level liveness check at `/api/health`), self-improvement metrics (informal), velocity (too narrow)
+
+**Self-Improvement Share**:
+The share of recent non-idle cycles whose merged work was orchestrator-side rather than target-side, over a rolling window. The realised output signal for the 25% self-improvement floor (ADR-0003): the floor is the *input* budget, this share is the *observed* spend. Computed by `capacity-floor.ts` against `ORCHESTRATOR_FLOOR = 0.25`; the headline self-investment input to the **Builder-Health Scorecard**.
+_Avoid_: capacity split (the dashboard label, not the metric), self-improvement floor (the target, not the realised value), 25% floor (the threshold, not the measurement)
+
+**Autonomy Rate**:
+The headline **Builder Health** metric: the share of dispatches reaching a merged PR with zero **Operator-Required Intervention**, over a rolling window. A dispatch is *autonomous* iff its PR was merged by the auto-merge bot AND its issue/PR timeline never carried an `operator-approved` or `ready-for-human` label AND no human authored a review or commit on the branch — i.e. nothing on the closed escalation list (ADR-0005) was touched. An automated rebase is *not* intervention (it is autonomous self-healing). Derived from GitHub on read via the dispatch→PR link; no per-dispatch intervention flag is stored.
+_Avoid_: merge rate (whole-system, not zero-intervention — distinct metric in the scorecard), success rate (overloaded), hands-off rate (informal)
+
+**Verifier Core**:
+The five self-referential files where a bad merge would disable *future* verification: `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`. Still auto-mergeable (T4), but guarded by the **Live-Gate Invariant** and the deepest **Modification Tier** verification. Defined by ADR-0015.
+_Avoid_: Untouchable Core (retired by ADR-0015 — nothing is untouchable; T4 is touchable with the deepest verification), protected paths, frozen code, Tier 0
 
 **Pre-merge Gate**:
 The set of CI jobs that must pass before a PR can merge: test, typecheck, dashboard-build, mutation kill-rate (`scripts/ci/mutation-check.ts`), scope enforcement (`scripts/ci/scope-check.ts`), tier-gate (untouchable + tier-classifier). Defined by `.github/workflows/ci.yml`; cannot be bypassed. Disassembled from the in-process Gate module by ADR-0006.
@@ -39,24 +51,32 @@ The `hydra-qa` subagent's verification that a merged PR did not regress **Target
 _Avoid_: rollback (too narrow — this is the check, not the action), holdback watcher (no longer exists as a module)
 
 **Modification Tier**:
-The blast-radius classification of a self-modification (Tier 0 Untouchable / 1 auto-merge / 2 auto-merge with outcome holdback / 3 operator review). Determines who merges the PR and whether outcome regression triggers auto-revert. Defined by ADR-0004.
-_Avoid_: risk level, severity
+The depth of verification a self-modification must clear before it **auto-merges** — NOT who merges it. Every tier auto-merges; the operator is never a gate. Monotonic in blast radius: **T1** prompt-shaped (`config/agents/`, `config/feedback/`) = CI + standard QA; **T2** behaviour-shaping (`.claude/skills/`, `dashboard/`, anchor-selection) = T1 + **Outcome Holdback**; **T3** core `src/` (incl. `grounding.ts`, `src/cost/`, watchdogs, `deploy.sh`) = T2 + raised mutation floor + scope-clean + adversarial QA; **T4** **Verifier Core** = T3 + the deep-QA remediation loop + **Live-Gate Invariant**. Defined by ADR-0015 (supersedes the ADR-0004 authority ladder).
+_Avoid_: risk level, severity, "who merges" (authority is no longer an axis), Tier 0 (retired — T4 is the deepest tier)
 
 **Outcome Holdback**:
-The post-merge watch window where a Tier-2 change is monitored against **Target Outcomes**. Regression vs pre-merge baseline triggers auto-revert. Uses leading outcomes only — terminal outcomes are too slow for the watch window.
+The post-merge watch window where a merged change is monitored against **Target Outcomes**; regression vs pre-merge baseline triggers auto-revert. Uses leading outcomes only — terminal outcomes are too slow for the watch window. Applies to **T2 and up** (it carries up the ladder — every tier deeper than T1 inherits it), not T2 alone.
 _Avoid_: canary, soak (overloaded with deploy meanings)
+
+**Live-Gate Invariant**:
+The rule that a change to the **Verifier Core** is verified by the *currently-deployed* gate, never by the proposed one — CI runs the verifier scripts from the **base** ref and reviews the diff against live behaviour. The single principle that makes auto-merging `ci.yml`/`tier-classify*.ts`/`untouchable.ts` safe instead of circular: a malformed gate that "always passes" is judged by the old gate, which still works. Defined by ADR-0015.
+_Avoid_: self-check, base-ref check (too narrow — it's the invariant, not one CI flag)
+
+**Deep-QA Remediation Loop**:
+The verification escalation a **T4** change must survive: a specialized QA reviewer comments on the PR and bounces it back to a dev agent; a **second** failed pass blocks the PR and routes it to the operator via the `/hydra-review` set. The remediation loop (QA fail → bounce → retry) is universal across tiers; the block-and-escalate *teeth* and the specialized/adversarial reviewer depth are T4-only. Implemented by extending the tier-aware `hydra-qa` skill with a Verifier-Core checklist, not a separate agent. Defined by ADR-0015.
+_Avoid_: deep QA (informal), re-review loop (misses the escalation/block half)
 
 **Design Concept**:
 The structured, persisted alignment artifact (`src/design-concept.ts`, `hydra:design-concept:{anchorRef}`) that a code-writing subagent must produce — and an automated gate must accept — before any `dev_orch` / `dev_target` dispatch. Schema includes glossary terms grounded, glossary gaps, modules touched (with interface-impact and depth classification), invariants, rejected alternatives, Q&A trace, and prototype snippets. The same artifact is the ground truth for PR-time two-axis review (Standards + Spec). Defined by ADR-0008 (see epic #437). Phase A (issue #438) ships persistence + API only; autopilot wiring is Phase B, CI hook is Phase C.
 _Avoid_: design doc (overloaded), plan (informal), spec (overloaded with `src/specs.ts` — multi-cycle task decomposition, a different thing)
 
-**Reframe Queue**:
-The Redis-backed retry lane (`hydra:anchors:reframe-queue`) holding tasks that have been abandoned or have failed past the prior-failure retry cap. The planner gets a fresh diagnostic prompt for each item instead of looping forever on the same approach. Sits below kanban / work-queue / failing-tests in the anchor-selection priority chain; protected from indefinite shadowing by a capacity-floor cadence (`HYDRA_REFRAME_FLOOR_N`, default every 5 eligible cycles). NOT WIP-gated — bypasses the WIP cap because a reframe item already represents a stuck task. Owned end-to-end by `src/anchor-selection/reframe.ts` (maintenance + selection + starvation instrumentation). Issues #57, #233, #288, #377.
-_Avoid_: reframe lane (informal), retry queue (overloaded — distinct from prior-failures queue, which feeds it)
+**Candidate Feed**:
+The ranked, scored list of eligible anchors the autopilot brain (`decide.py`) reads to choose a dispatch, served at `GET /api/anchor/candidates` (issue #424). Sourced from the two live work lanes — backlog kanban ∪ work-queue (the only lanes with live writers) — scored by tier base + reflection penalty + blocker-just-cleared bonus, and filtered by eligibility (in-flight-PR freshness window, design-concept gate, research-recommended threshold). Owned end-to-end by `src/anchor-candidates.ts`; `src/api/anchor.ts` is a thin route over it. The feed carries **data, not decisions** — retry / escalation / abandonment *policy*, if ever wanted, belongs to `decide.py` per [[ADR-0012]], not to a TypeScript work-picker. Defined by [[ADR-0016]], which retired the orphaned `selectAnchor()` priority waterfall.
+_Avoid_: "priority waterfall" / "anchor selection" / "selectAnchor()" (the 13-tier chain was retired with the in-process control loop — ADR-0006/0016), "Reframe Queue" (the retry lane it described had no live writer and was deleted by ADR-0016), candidate list (too generic)
 
 **Operator-Required Intervention**:
-The closed list of categories where Hydra escalates to the operator instead of attempting autonomous remedy: credentials/secrets, external-account actions, Tier 0 changes, vision-level conflicts. Everything else Hydra researches and tries. Defined by ADR-0005.
-_Avoid_: blocker (overloaded), needs-human (informal)
+The closed list of categories where Hydra escalates to the operator instead of attempting autonomous remedy: credentials/secrets, external-account actions, vision-level conflicts, and a **second** failed **Deep-QA Remediation Loop** pass on a T4 change. Everything else Hydra researches and tries. Tier no longer triggers escalation (ADR-0015 retired the operator-only tier); only an exhausted remediation loop does. Defined by ADR-0005 (amended by ADR-0015).
+_Avoid_: blocker (overloaded), needs-human (informal), "Tier 0 changes" (retired escalation trigger)
 
 **Pattern Memory**:
 The Redis-backed per-agent / per-skill pattern store (`hydra:memory:{agent}:patterns`, `hydra:friction:{skill}:patterns`) that captures recurring lessons and friction from cycle outcomes. Auto-promotes patterns to `config/feedback/to-{agent}.md` at the 3-hit threshold and dispatches recurring friction to GitHub issues via the **Escalation** seam at the same threshold (+ every multiple of 10 thereafter). Lives in `src/pattern-memory/`.
@@ -127,7 +147,7 @@ _Avoid_: USD / dollars / spend (subscription model has no per-call cost), price 
 - An **Orchestrator** builds one **Target** at a time; running a second target means a second orchestrator instance, not multi-tenant inside one
 - A **Target** has one **Target Vision** (prose) and one **Target Outcomes** (config)
 - The **Orchestrator** has its own **Orchestrator Vision**
-- The **Gate** is the only path to merge; the **Untouchable Core** includes the **Gate**
+- The **Pre-merge Gate** is the only path to merge; the **Verifier Core** is the gate's own source, guarded by the **Live-Gate Invariant** so a change to it is judged by the live gate, not itself
 - A **Design Concept** is the prerequisite for any code-writing dispatch; PR-time review consumes it as ground truth
 - **Pattern Memory**, **Reflections**, and **Knowledge Base** are three independent learning surfaces — patterns are structural rules, reflections are episodic narrative, the Knowledge Base is semantic search. They sit at two different seams: **Pattern Memory** and **Reflections** are composed at agent-dispatch time by `src/learning.ts::getContext()`, which injects them into the subagent prompt; the **Knowledge Base** is queried by subagents directly via OV HTTP at their own discretion during their work. `src/learning.ts` owns neither surface — it composes the first two and exposes the composition's diagnostic trace.
 - **Pattern Memory**, **Reflections**, and every other Redis-resident state described above are read and written through the **Redis Adapters**. The raw `hydra:…` keys that appear in their definitions are documentation of today's storage shape, not a public surface — callers obtain values through typed accessors on `src/redis/*`.

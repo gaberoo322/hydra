@@ -43,8 +43,15 @@
 #   hydra recommendations
 #   hydra research start | force | history
 #   hydra raw GET <path>
-#   hydra raw POST <path> [--json '<body>']
-#   hydra raw PATCH <path> --json '<body>'
+#   hydra raw POST <path> ['<body>' | --json '<body>']
+#   hydra raw PATCH <path> ('<body>' | --json '<body>')
+#     body semantics (issue #779): the request body may be supplied either
+#     positionally (`hydra raw POST /x '{"a":1}'`) OR via --json. Pre-fix,
+#     only --json was honoured — a positional body was silently dropped and
+#     an EMPTY body was POSTed, which is why every dev_target state-sync
+#     write (all positional) 400'd with "Missing cycleId". curl -d forwards
+#     the body byte-for-byte, so multi-line JSON works without --json. A
+#     bodyless POST (e.g. /merge/unlock) is still valid.
 
 set -eu
 
@@ -241,10 +248,19 @@ cmd_raw() {
   local path="${2:-}"
   shift 2 || { echo "hydra raw: need <METHOD> <PATH>" >&2; exit 2; }
   local body=""
+  # Issue #779: bind the request body from EITHER the --json flag OR the
+  # first positional argument. Pre-fix, cmd_raw only honoured --json; a
+  # positional `<body>` (the form all 14 `hydra raw POST` call-sites in
+  # docs/operator-playbooks/ use) fell into the `*) shift` case and was
+  # silently discarded — curl then POSTed an EMPTY body, so endpoints like
+  # /metrics/record 400'd with "Missing cycleId". The body is forwarded
+  # byte-for-byte by `curl -d` (multi-line and single-line both arrive
+  # intact), so no stdin redirection / jq -c collapsing is needed. --json
+  # still works (backward-compatible), and a bodyless POST is still valid.
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --json) body="$2"; shift 2 ;;
-      *) shift ;;
+      *) if [ -z "$body" ]; then body="$1"; fi; shift ;;
     esac
   done
   case "$method" in

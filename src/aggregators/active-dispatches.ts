@@ -22,7 +22,12 @@
  *   sub-source can't poison the order.
  */
 
-import { listActiveOperatorDispatches, type OperatorDispatch } from "../redis/dispatches.ts";
+import {
+  listActiveOperatorDispatches,
+  listActiveSubagentDispatches,
+  type OperatorDispatch,
+  type SubagentDispatch,
+} from "../redis/dispatches.ts";
 import {
   listRecentAutopilotRunIds,
   getAutopilotRun,
@@ -32,7 +37,7 @@ import {
 // Public types
 // ---------------------------------------------------------------------------
 
-export type DispatchSource = "autopilot" | "operator";
+export type DispatchSource = "autopilot" | "operator" | "subagent";
 
 export interface Dispatch {
   id: string;
@@ -50,6 +55,11 @@ export interface ActiveDispatchesDeps {
    * accessor; tests stub this with a fixture list.
    */
   listOperatorDispatches?: () => Promise<OperatorDispatch[]>;
+  /**
+   * Reader for subagent (Agent-tool) dispatches (issue #692). Defaults to
+   * the Redis Module accessor; tests stub this with a fixture list.
+   */
+  listSubagentDispatches?: () => Promise<SubagentDispatch[]>;
   /**
    * Reader for the autopilot run-IDs index, newest first. Defaults to
    * `listRecentAutopilotRunIds(50)`.
@@ -75,15 +85,20 @@ export interface ActiveDispatchesDeps {
 export async function getActiveDispatches(
   deps: ActiveDispatchesDeps = {},
 ): Promise<Dispatch[]> {
-  const [autoResult, opResult] = await Promise.allSettled([
+  const [autoResult, opResult, subResult] = await Promise.allSettled([
     fetchAutopilotDispatches(deps),
     fetchOperatorDispatches(deps),
+    fetchSubagentDispatches(deps),
   ]);
 
   const auto = settledOrEmpty(autoResult, "active-dispatches/autopilot");
   const op = settledOrEmpty(opResult, "active-dispatches/operator");
+  const sub = settledOrEmpty(subResult, "active-dispatches/subagent");
 
-  return mergeDispatches([...auto, ...op]);
+  // Higher-fidelity source first (autopilot rows have the richest metadata),
+  // then operator, then subagent — mergeDispatches dedupes by id keeping the
+  // first occurrence.
+  return mergeDispatches([...auto, ...op, ...sub]);
 }
 
 function settledOrEmpty<T>(result: PromiseSettledResult<T[]>, label: string): T[] {
@@ -208,6 +223,41 @@ export function projectOperatorRow(row: OperatorDispatch): Dispatch {
     id: row.id,
     classLabel: row.classLabel,
     source: "operator",
+    startedAt: row.startedAt,
+  };
+  if (row.currentStep) dispatch.currentStep = row.currentStep;
+  if (row.issueRef) dispatch.issueRef = row.issueRef;
+  if (row.prRef) dispatch.prRef = row.prRef;
+  return dispatch;
+}
+
+// ---------------------------------------------------------------------------
+// Sub-source: subagent (Agent-tool) dispatches — issue #692
+// ---------------------------------------------------------------------------
+
+async function fetchSubagentDispatches(
+  deps: ActiveDispatchesDeps,
+): Promise<Dispatch[]> {
+  const list = deps.listSubagentDispatches ?? listActiveSubagentDispatches;
+  const rows = await list();
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => projectSubagentDispatchRow(row));
+}
+
+/**
+ * Pure helper — exported for tests. Projects a subagent-dispatch row into the
+ * unified `Dispatch` shape.
+ *
+ * The unified row is keyed on `id`; we use the harness `sessionId` as that id
+ * so the dedupe-by-id contract in `mergeDispatches` works across sources. The
+ * `classLabel` is the dispatched `skill` (e.g. "hydra-dev") so the dashboard
+ * renders the same label it shows for an autopilot dispatch of that skill.
+ */
+export function projectSubagentDispatchRow(row: SubagentDispatch): Dispatch {
+  const dispatch: Dispatch = {
+    id: row.sessionId,
+    classLabel: row.skill,
+    source: "subagent",
     startedAt: row.startedAt,
   };
   if (row.currentStep) dispatch.currentStep = row.currentStep;

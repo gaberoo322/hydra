@@ -6,7 +6,7 @@ import { getTargetName } from "../target-config.ts";
  * Reflections + calibration proxy routes.
  *
  * Extracted from api/misc.ts as part of issue #268. Calibration outcomes are
- * proxied from the target project (hydra-betting); reflections are the
+ * proxied from the configured target project; reflections are the
  * episodic learning surface (`hydra:reflections:{anchor}`).
  */
 export function createReflectionsRouter() {

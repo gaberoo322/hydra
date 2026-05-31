@@ -35,6 +35,8 @@ import { createTodayPageRouter } from "./api/today-page.ts";
 import { createNowPageRouter } from "./api/now-page.ts";
 import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
 import { createExplorePageRouter } from "./api/explore-page.ts";
+import { createDispatchesRouter } from "./api/dispatches.ts";
+import { createBuilderHealthRouter } from "./api/builder-health.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
@@ -86,6 +88,11 @@ function createApi(eventBus) {
   api.use(createAgentsRouter());
   api.use(createScoutRouter());
   api.use(createUsageRouter());
+  // Subagent-dispatch capture (issue #692) — SessionStart hook write surface.
+  api.use(createDispatchesRouter());
+  // Builder-Health Scorecard (issue #732) — orchestrator self-improvement
+  // made observable: the builder-side counterpart to the Outcomes surface.
+  api.use(createBuilderHealthRouter());
   // Dashboard pages (PRD #615). After the slice-6 atomic swap (#621) the
   // routes are mounted at their final names; the historical `/api/v2/*`
   // incremental-delivery prefix is gone.

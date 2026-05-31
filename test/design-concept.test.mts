@@ -9,6 +9,10 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+// `dc` is a runtime value namespace (dynamic import below); it cannot be used in
+// type position. Pull the type aliases in directly via `import type` so the
+// test type-checks under tsconfig.test.json (issue #750).
+import type { DesignConcept, DesignConceptInput } from "../src/design-concept.ts";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
 process.env.REDIS_URL = "redis://localhost:6379/1";
@@ -19,7 +23,7 @@ const TEST_NS = "hydra:design-concept:";
 let testRedis: any;
 
 // Build a minimal artifact that passes every gate rule by default.
-function buildComplete(overrides: Partial<dc.DesignConcept> = {}): dc.DesignConceptInput {
+function buildComplete(overrides: Partial<DesignConcept> = {}): DesignConceptInput {
   return {
     anchorRef: "test:complete",
     scope: "orch",
@@ -83,6 +87,59 @@ describe("design-concept Redis store + gate", () => {
     assert.equal(fetched!.invariants[0], "never throw from gate");
     assert.equal(fetched!.qaTrace.length, 6);
     assert.equal(fetched!.artifactHash, saved.artifactHash);
+  });
+
+  // -------------------------------------------------------------------------
+  // #736 — anchor-ref key-format normalization (write→read round-trip on the
+  // exact string decide.py dispatches: `issue-<N>`).
+  // -------------------------------------------------------------------------
+
+  test("#736 normalizeAnchorRef canonicalizes to issue-<N>", () => {
+    assert.equal(dc.normalizeAnchorRef("736"), "issue-736");
+    assert.equal(dc.normalizeAnchorRef("#736"), "issue-736");
+    assert.equal(dc.normalizeAnchorRef("issue #736"), "issue-736");
+    assert.equal(dc.normalizeAnchorRef("issue-736"), "issue-736", "idempotent");
+    assert.equal(dc.normalizeAnchorRef("ISSUE-736"), "issue-736", "prefix case-insensitive");
+    assert.equal(dc.normalizeAnchorRef("  736  "), "issue-736", "trims");
+    // Non-issue refs pass through unchanged.
+    assert.equal(dc.normalizeAnchorRef("test:rt"), "test:rt");
+    assert.equal(dc.normalizeAnchorRef("PR-4: fold scheduler"), "PR-4: fold scheduler");
+    assert.equal(dc.normalizeAnchorRef("Some issue title 736 here"), "Some issue title 736 here");
+  });
+
+  test("#736 write under bare number → read by the dispatched issue-<N> string", async () => {
+    // This is the exact orphaning repro: the grill writes `"736"`, but
+    // collect-state.sh / decide.py read `"issue-736"`. After normalization
+    // both must resolve to the same artifact.
+    const saved = await dc.saveDesignConcept(buildComplete({ anchorRef: "736" } as any));
+    assert.equal(saved.anchorRef, "issue-736", "persisted ref is canonicalized");
+
+    // Read by the dispatched form — the form that used to 404.
+    const byIssueForm = await dc.getDesignConcept("issue-736");
+    assert.ok(byIssueForm, "GET .../issue-736 must now resolve (was 404)");
+    assert.equal(byIssueForm!.anchorRef, "issue-736");
+    assert.equal(byIssueForm!.artifactHash, saved.artifactHash);
+
+    // Read by the bare form must resolve to the same artifact.
+    const byBareForm = await dc.getDesignConcept("736");
+    assert.ok(byBareForm, "GET .../736 still resolves");
+    assert.equal(byBareForm!.artifactHash, saved.artifactHash);
+
+    // Only one underlying key exists (no orphan under the bare number).
+    const keys = await testRedis.keys(TEST_NS + "736");
+    assert.equal(keys.length, 0, "no orphaned bare-number key");
+    const canonKeys = await testRedis.keys(TEST_NS + "issue-736");
+    assert.equal(canonKeys.length, 1, "exactly one canonical key");
+  });
+
+  test("#736 approve by either form targets the canonical key", async () => {
+    await dc.saveDesignConcept(buildComplete({ anchorRef: "issue-742" } as any));
+    // Approve using the bare form — must hit the same canonical key.
+    const approved = await dc.approveDesignConcept("742", "auto-gate");
+    assert.equal(approved.status, "approved");
+    const fetched = await dc.getDesignConcept("issue-742");
+    assert.equal(fetched!.status, "approved", "approval visible under issue-<N>");
+    assert.equal(fetched!.approvedBy, "auto-gate");
   });
 
   test("saveDesignConcept overwrites on second call (idempotent on anchorRef)", async () => {
@@ -237,8 +294,8 @@ describe("design-concept Redis store + gate", () => {
 
   test("isFresh honors the 7-day window", () => {
     const now = 1_000_000_000_000;
-    const fresh = { createdAt: now - 6 * 24 * 60 * 60 * 1000 } as dc.DesignConcept;
-    const stale = { createdAt: now - 8 * 24 * 60 * 60 * 1000 } as dc.DesignConcept;
+    const fresh = { createdAt: now - 6 * 24 * 60 * 60 * 1000 } as DesignConcept;
+    const stale = { createdAt: now - 8 * 24 * 60 * 60 * 1000 } as DesignConcept;
     assert.equal(dc.isFresh(fresh, now), true);
     assert.equal(dc.isFresh(stale, now), false);
   });
@@ -261,7 +318,7 @@ describe("design-concept Redis store + gate", () => {
   // gateCheck — 7 failure modes
   // -------------------------------------------------------------------------
 
-  function approvedFresh(overrides: Partial<dc.DesignConcept> = {}): dc.DesignConcept {
+  function approvedFresh(overrides: Partial<DesignConcept> = {}): DesignConcept {
     const input = buildComplete(overrides as any);
     return {
       ...input,
@@ -271,7 +328,7 @@ describe("design-concept Redis store + gate", () => {
       status: "approved",
       approvedBy: "auto-gate",
       ...overrides,
-    } as dc.DesignConcept;
+    } as DesignConcept;
   }
 
   test("gateCheck fails on non-empty glossaryGaps", () => {
@@ -351,7 +408,7 @@ describe("design-concept Redis store + gate", () => {
 
   test("gateCheck fails on stale createdAt (>7 days)", () => {
     const now = Date.now();
-    const stale: dc.DesignConcept = {
+    const stale: DesignConcept = {
       ...approvedFresh(),
       createdAt: now - dc.DESIGN_CONCEPT_MAX_AGE_MS - 60_000,
     };
@@ -362,7 +419,7 @@ describe("design-concept Redis store + gate", () => {
 
   test("gateCheck fails on draft status", () => {
     const v = dc.gateCheck(
-      { ...approvedFresh(), status: "draft", approvedBy: "" } as dc.DesignConcept,
+      { ...approvedFresh(), status: "draft", approvedBy: "" } as DesignConcept,
       Date.now(),
     );
     assert.equal(v.ok, false);

@@ -17,7 +17,7 @@
  *
  *   1. Pipeline-protected dispatch (qa_orch / dev_orch / research_orch / ...)
  *   2. Confidence threshold + research force-dispatch
- *   3. Option C merge policy (Tier 0/1/2/3, mechanical carve-out, scope-justif)
+ *   3. Option C merge policy (T1-T4 monotonic ladder, mechanical carve-out, scope-justif)
  *   4. Scope filter (exclusion mask, INV-008)
  *   5. Completion reap + INV-006 ordering
  *   6. Termination (budget / wall-clock / idle / failure backstop)
@@ -310,21 +310,21 @@ describe("decide.py — Option C merge policy (grilled decision 8)", () => {
     assert.equal(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 103), undefined);
   });
 
-  test("Tier 0 mechanical -> apply-operator-approved", () => {
-    const plan = runDecide(baseState(), null, [qaEvent({ pr: 200, tier: 0, mechanical: true })]);
+  test("T4 (Verifier Core) mechanical -> apply-operator-approved", () => {
+    const plan = runDecide(baseState(), null, [qaEvent({ pr: 200, tier: 4, mechanical: true })]);
     const a = findAction(plan, (x) => x.type === "apply-operator-approved" && x.pr_number === 200);
     assert.ok(a);
     assert.equal(a.mechanical, true);
   });
 
-  test("Tier 0 non-mechanical -> queue-decision (INV-001 enforces)", () => {
-    const plan = runDecide(baseState(), null, [qaEvent({ pr: 201, tier: 0, mechanical: false })]);
+  test("T4 (Verifier Core) non-mechanical -> queue-decision (INV-001 enforces)", () => {
+    const plan = runDecide(baseState(), null, [qaEvent({ pr: 201, tier: 4, mechanical: false })]);
     assert.ok(findAction(plan, (x) => x.type === "queue-decision" && x.pr_number === 201));
     assert.equal(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 201), undefined);
   });
 
-  test("Tier 0 unclear (binary / large) -> queue-decision", () => {
-    const plan = runDecide(baseState(), null, [qaEvent({ pr: 202, tier: 0, mechanical: "unclear" })]);
+  test("T4 (Verifier Core) unclear (binary / large) -> queue-decision", () => {
+    const plan = runDecide(baseState(), null, [qaEvent({ pr: 202, tier: 4, mechanical: "unclear" })]);
     assert.ok(findAction(plan, (x) => x.type === "queue-decision" && x.pr_number === 202));
   });
 
@@ -1061,7 +1061,7 @@ describe("decide.py — plan shape contract", () => {
         type: "qa-verdict", pr_number: 1, tier: 1, verdict: "PASS",
       }]),
       runDecide(baseState(), null, [{                                                          // queue-decision
-        type: "qa-verdict", pr_number: 2, tier: 0, mechanical: false, verdict: "PASS",
+        type: "qa-verdict", pr_number: 2, tier: 4, mechanical: false, verdict: "PASS",
       }]),
     ];
     for (const plan of plans) {
@@ -1115,7 +1115,7 @@ describe("decide.py — should_auto_merge() policy table", () => {
     const events = [
       qaEvent({ pr: 1, tier: 1 }),
       qaEvent({ pr: 2, tier: 2 }),
-      qaEvent({ pr: 3, tier: 0, mechanical: true }),
+      qaEvent({ pr: 3, tier: 4, mechanical: true }),
     ];
     const plan = runDecide(baseState(), null, events);
     assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 1));

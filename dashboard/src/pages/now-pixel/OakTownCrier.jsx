@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { resolveBubbleColor } from "./sprite-map.ts";
+import RecommendationsTab from "./RecommendationsTab.jsx";
+import RecRunJournalModal from "./RecRunJournalModal.jsx";
 import TurnJournalTab from "./TurnJournalTab.jsx";
 import {
   DEFAULT_OAK_TAB,
@@ -14,15 +16,15 @@ import {
  * OakTownCrier — right-edge panel anchored on the Professor Oak sprite.
  *
  * Slice 5 of /now-pixel (#642, #647) shipped this as a single scrolling
- * speech-bubble column over a wildcard WebSocket subscription. Slice B of
- * the autopilot-observability epic (#669, parent #667) converts it into
- * a 3-mode tabbed panel while preserving the live-feed behaviour
- * byte-for-byte:
+ * speech-bubble column. Slice B of the autopilot-observability epic
+ * (#669, parent #667) converted it into a 3-mode tabbed panel; slice F
+ * (#674) wires the live LLM-driven recommendations engine + run-journal
+ * modal into the third tab and adds an `oak_resting` badge when the
+ * daily recs budget is exhausted:
  *
  *   1. Live feed         — last 50 WS events as colored speech bubbles
  *   2. Turn journal      — compact one-row-per-autopilot-turn ledger
- *   3. Recommendations   — `Coming soon — Oak is studying` placeholder;
- *                          slice F (#674) wires the LLM rec engine here
+ *   3. Recommendations   — LLM rec engine (slice F #674)
  *
  * Tab selection persists in localStorage at `hydra:now-pixel:oak-tab`
  * alongside the existing collapse-state key.
@@ -121,17 +123,6 @@ function LiveFeedTab({ bubbles, scrollRef, onHover, onUnhover }) {
   );
 }
 
-function RecommendationsPlaceholder() {
-  return (
-    <div
-      data-testid="oak-recs-placeholder"
-      className="text-[10px] text-zinc-500 italic px-1 py-6 text-center"
-    >
-      Coming soon — Oak is studying.
-    </div>
-  );
-}
-
 function TabButton({ id, current, label, onSelect }) {
   const active = current === id;
   return (
@@ -170,6 +161,8 @@ export default function OakTownCrier({ ws }) {
     }
   });
   const [hovered, setHovered] = useState(false);
+  const [journalOpen, setJournalOpen] = useState(false);
+  const [restingNote, setRestingNote] = useState(null); // { spend, cap, ts } | null
   const scrollRef = useRef(null);
   const idRef = useRef(0);
 
@@ -195,6 +188,19 @@ export default function OakTownCrier({ ws }) {
   useEffect(() => {
     if (!ws || typeof ws.subscribe !== "function") return undefined;
     const off = ws.subscribe("*", (frame) => {
+      // Slice F (#674): the engine broadcasts an `oak_resting` envelope
+      // when the daily cap is hit. Surface a small inline note rather
+      // than a bubble, so the operator notices without filling the live
+      // feed.
+      if (frame && frame.type === "oak_resting") {
+        const p = frame.payload || {};
+        setRestingNote({
+          spend: Number(p.daily_spend_usd ?? 0),
+          cap: Number(p.daily_cap_usd ?? 0),
+          ts: frame.timestamp || new Date().toISOString(),
+        });
+        return;
+      }
       const s = eventSummary(frame);
       if (!s) return;
       idRef.current += 1;
@@ -260,6 +266,15 @@ export default function OakTownCrier({ ws }) {
             ws disconnected
           </div>
         )}
+        {restingNote && (
+          <div
+            data-testid="oak-resting-badge"
+            title={`Daily recs spend $${restingNote.spend.toFixed(2)} / $${restingNote.cap.toFixed(2)}`}
+            className="text-[9px] uppercase text-amber-400 border border-amber-900 rounded px-1"
+          >
+            Oak is resting
+          </div>
+        )}
       </header>
       {!collapsed && (
         <>
@@ -281,9 +296,12 @@ export default function OakTownCrier({ ws }) {
             />
           )}
           {tab === TAB_JOURNAL && <TurnJournalTab />}
-          {tab === TAB_RECS && <RecommendationsPlaceholder />}
+          {tab === TAB_RECS && (
+            <RecommendationsTab openJournal={() => setJournalOpen(true)} />
+          )}
         </>
       )}
+      <RecRunJournalModal open={journalOpen} onClose={() => setJournalOpen(false)} />
     </aside>
   );
 }

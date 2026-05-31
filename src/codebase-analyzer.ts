@@ -128,12 +128,16 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
     // Get package.json dependencies
     try {
       const pkg = JSON.parse(await readFile(join(workDir, "web", "package.json"), "utf-8"));
+      const deps = Object.keys(pkg.dependencies || {});
       state.dependencies = {
-        count: Object.keys(pkg.dependencies || {}).length,
-        key: Object.keys(pkg.dependencies || {}).filter(d =>
-          d.includes("kalshi") || d.includes("polymarket") || d.includes("drizzle") ||
-          d.includes("next") || d.includes("react") || d.includes("tailwind")
-        ),
+        count: deps.length,
+        // "Key" deps = the ones that signal what this target *is* — i.e. the
+        // domain/venue-specific packages, not the ubiquitous framework noise.
+        // Target-agnostic by construction (ADR-0013): we filter OUT a small set
+        // of common framework prefixes rather than allowlisting any particular
+        // target's domain packages. Whatever a given target depends on beyond
+        // the generic web stack surfaces automatically.
+        key: pickDistinctiveDependencies(deps),
       };
     } catch (err: any) {
       console.error(`[CodebaseAnalyzer] Failed to read package.json dependencies: ${err.message}`);
@@ -161,30 +165,65 @@ export async function analyzeCodebase(workDir = PROJECT_WORKSPACE) {
 }
 
 /**
- * Identify gaps between what exists and what a trading platform needs.
+ * Common web-framework dependency prefixes that every target sharing this
+ * Next/React/Drizzle stack carries — these say nothing distinctive about what a
+ * target *is*, so they're filtered out of the "key dependencies" signal. This
+ * is an EXCLUSION list of generic infrastructure, deliberately containing no
+ * target-domain vocabulary (ADR-0013): a new target's domain packages surface
+ * automatically because they aren't on this list.
+ */
+const GENERIC_DEP_PREFIXES = [
+  "next", "react", "react-dom", "tailwind", "drizzle", "postgres", "pg",
+  "zod", "typescript", "eslint", "prettier", "vitest", "@types/",
+  "@radix-ui/", "clsx", "tailwind-merge", "lucide-react", "ws", "dotenv",
+];
+
+/**
+ * Pick the dependencies that distinguish this target from a generic web app —
+ * i.e. everything that isn't part of the common framework stack. Target-agnostic
+ * by construction: no venue/domain names are hardcoded.
+ */
+export function pickDistinctiveDependencies(deps: string[]): string[] {
+  return deps.filter(
+    d => !GENERIC_DEP_PREFIXES.some(p => d === p || d.startsWith(p)),
+  );
+}
+
+/**
+ * Identify structural gaps between what exists and what a deployable product
+ * needs. Target-agnostic (ADR-0013): the heuristics reason about generic
+ * software structure (end-to-end runners, automation, reporting endpoints,
+ * navigation, commit cadence) — never a specific target's venues or domain
+ * vocabulary.
  */
 function identifyGaps(state) {
   const gaps = [];
 
-  // Check for execution runners
-  const hasKalshiRunner = state.runners.some(r => r.includes("kalshi-execution"));
-  const hasPolymarketRunner = state.runners.some(r => r.includes("polymarket") && r.includes("execution"));
-  if (!hasPolymarketRunner) gaps.push("No Polymarket execution runner — executor and lifecycle modules exist but no end-to-end runner");
+  // Execution wiring: lifecycle/execution modules with no end-to-end runner.
+  const hasExecutionModules = state.execution.length > 0;
+  const hasExecutionRunner = state.runners.some(r => r.includes("execution") || r.includes("runner"));
+  if (hasExecutionModules && !hasExecutionRunner) {
+    gaps.push("Execution/lifecycle modules exist but no end-to-end runner wires them together");
+  }
 
-  // Check for navigation
+  // Navigation
   if (state.pages.length > 3) {
     gaps.push(`${state.pages.length} pages exist but may lack unified navigation`);
   }
 
-  // Check for automation
-  const hasScheduler = state.runners.some(r => r.includes("run-cycle") || r.includes("scanner-runner"));
-  if (!hasScheduler) gaps.push("No automated trading schedule — runners exist but need cron/systemd integration");
+  // Automation: runners exist but nothing schedules them.
+  const hasScheduler = state.runners.some(r => r.includes("run-cycle") || r.includes("scan") || r.includes("cron") || r.includes("schedul"));
+  if (state.runners.length > 0 && !hasScheduler) {
+    gaps.push("Runners exist but no automated schedule — need cron/systemd integration");
+  }
 
-  // Check for P&L tracking
-  const hasPnL = state.apiRoutes.some(r => r.includes("bankroll") || r.includes("pnl"));
-  if (!hasPnL) gaps.push("No P&L dashboard endpoint");
+  // Reporting: API surface exists but no outcome/metrics reporting endpoint.
+  const hasReporting = state.apiRoutes.some(r => r.includes("metric") || r.includes("report") || r.includes("stat") || r.includes("dashboard"));
+  if (state.apiRoutes.length > 0 && !hasReporting) {
+    gaps.push("No outcome/metrics reporting endpoint");
+  }
 
-  // Check for live vs demo
+  // Momentum: recent work skewed toward defensive hardening over features.
   const recentWork = state.recentCommits.join(" ").toLowerCase();
   if (recentWork.includes("fail closed") || recentWork.includes("guard") || recentWork.includes("preflight")) {
     gaps.push("Recent work is predominantly defensive hardening — feature development stalled");

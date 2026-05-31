@@ -18,7 +18,7 @@ Start here; load the rest on demand.
 
 ## Architecture (one paragraph)
 
-`hydra-autopilot` is a long-running decision loop: a single Claude Code session dispatches background subagents in parallel — one per **class** — under per-class cooldowns and a token budget (full taxonomy in the autopilot playbook). Each code-writing class runs in a fresh `git worktree` and opens a PR; **CI is the merge gate**, never an in-cycle check. The orchestrator HTTP service (port 4000) is the **data plane**: Redis state, event bus (`hydra:*` streams), the observability heartbeat (`src/scheduler/heartbeat.ts`), the knowledge plane (OpenViking), the dashboard + REST API, and the merge-gate facade. It no longer runs a self-driving control loop (see [ADR-0006](./docs/adr/0006-codex-cli-removed-autopilot-only.md), [ADR-0012](./docs/adr/0012-autopilot-is-the-single-brain.md)).
+`hydra-autopilot` is a long-running decision loop: a single Claude Code session dispatches background subagents in parallel — one per **class** — under per-class cooldowns and a token budget (full taxonomy in the autopilot playbook). Each code-writing class runs in a fresh `git worktree` and opens a PR; **CI is the merge gate**, never an in-cycle check. The orchestrator HTTP service (port 4000) is the **data plane**: Redis state, event bus (`hydra:*` streams), the observability heartbeat (`src/scheduler/heartbeat.ts`), the knowledge plane (OpenViking), the dashboard + REST API, and the tier classifier (`src/tier-classifier.ts`). The **Pre-merge Gate** itself is CI jobs + branch protection, not an in-process module — `src/gate.ts` was removed with the codex control loop. It no longer runs a self-driving control loop (see [ADR-0006](./docs/adr/0006-codex-cli-removed-autopilot-only.md), [ADR-0012](./docs/adr/0012-autopilot-is-the-single-brain.md)).
 
 ## Running
 
@@ -42,6 +42,7 @@ curl http://localhost:4000/api/scheduler/status
 - **Runtime deps are operator-approved only** (ADR-0005): `express`, `ioredis`, `ws`, `@sentry/node`, `zod`. Node stdlib for everything else.
 - **Never throw from merge/grounding/verification** — return result objects so callers decide how to report failures.
 - **Fail loud**: every `catch` either logs `console.error` with context or is annotated `/* intentional: reason */`. Silent catches caused every major 2026-04 incident.
+- **Typed errors carry a machine-readable `code`** (#756) — for exceptional `throw` sites prefer a subclass from `src/errors.ts` (e.g. `InvalidArgumentError`, `RedisSeamError`) over a bare `Error`; callers/tests discriminate on `err.code`, not `err.message`. Migration is opportunistic.
 - **Kanban updates go through `safeKanban()`** — logs errors AND publishes events. Never call moveToInProgress/moveToDone/returnToBacklog directly.
 - **Redis access through `src/redis/<domain>.ts` typed accessors** — never `new Redis()` directly; never import `redis/keys` or `redis/kv` from outside `src/redis/`. See **Redis Adapters** in `CONTEXT.md`; enforced by `scripts/ci/redis-seam-check.ts`.
 - **HTTP request bodies validate through `src/schemas/<domain>.ts`** (zod `safeParse`; on failure return 400 `{code:"schema-validation-failed", issues}`). The schema is the source of truth for both the parser and the inferred type. See **Schemas** in `CONTEXT.md`.
@@ -55,16 +56,16 @@ curl http://localhost:4000/api/scheduler/status
 - **CI** (`.github/workflows/ci.yml`): typecheck + test, dashboard build, tier-gate, mutation kill-rate + scope-enforcement (see [`docs/quality-gates.md`](./docs/quality-gates.md)).
 - **Deploy** runs automatically on merge to master (self-hosted runner). **Never deploy by restarting the service without building the dashboard first** — Express serves `dashboard/dist/`, so stale builds mean stale UI. Full deploy steps + emergency manual deploy: [`docs/reference.md`](./docs/reference.md).
 
-## Self-Modification: Untouchable Core & Tiers
+## Self-Modification: Verifier Core & Tiers
 
-Every PR is classified by blast radius regardless of who proposed it ([ADR-0004](./docs/adr/0004-self-modification-tiers.md)). Protected paths live in `src/untouchable.ts` ([ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md)). **Never bypass the gate.** Operator escalation is the closed list in [ADR-0005](./docs/adr/0005-operator-escalation-is-narrow.md) (credentials/secrets, external-account actions, Tier-0 changes, vision conflicts) — everything else Hydra researches and tries autonomously.
+Every PR is classified by blast radius on the monotonic ladder T1 (shallowest) → T4 (deepest), regardless of who proposed it ([ADR-0004](./docs/adr/0004-self-modification-tiers.md) + ADR-0015) — required verification depth ascends with the tier. The **Verifier Core** path list lives in `src/untouchable.ts` (`VERIFIER_CORE_PATHS` / `isVerifierCore`; [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md) + ADR-0015 — "Untouchable Core" is the retired name). **Never bypass the gate.** Operator escalation is the closed list in [ADR-0005](./docs/adr/0005-operator-escalation-is-narrow.md) (credentials/secrets, external-account actions, T4 / Verifier-Core changes, vision conflicts) — everything else Hydra researches and tries autonomously. Full tier table + path lists: [`docs/reference.md`](./docs/reference.md).
 
 | Tier | Scope | Who merges |
 |------|-------|-----------|
-| 0 — Untouchable | Merge gate, rollback, watchdog, cost guardrails, the protected-paths list | **Operator only** (PR needs `operator-approved` label) |
-| 1 — Prompt-shaped | Lesson files, prompt-only tweaks under `~/.claude/skills/` | Auto-merge |
-| 2 — Skill / verification | New tests/verification, scoring, dashboard, `src/anchor-selection/` | Auto-merge + **Outcome Holdback** |
-| 3 — Everything else in `src/` | Control-loop, gate logic, infra | Operator merges |
+| T1 — Prompt-shaped | Lesson files, prompt-only tweaks (`config/agents/`, `config/feedback/`) | Auto-merge |
+| T2 — Skill / verification | Skills under `~/.claude/skills/`, dashboard, `src/anchor-selection/` | Auto-merge + **Outcome Holdback** |
+| T3 — Core `src/` + demoted infra | Everything else in `src/`, plus `src/grounding.ts`, `src/cost/`, watchdog scripts, `scripts/deploy.sh` | Operator merges (auto-merge unless `scope-justification:`) |
+| T4 — Verifier Core | `ci.yml`, `deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts` | **Operator only** (`operator-approved` label) |
 
 ## Common Pitfalls
 

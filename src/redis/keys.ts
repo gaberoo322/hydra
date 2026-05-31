@@ -43,6 +43,19 @@ export const redisKeys = {
   autopilotRunTurns: (runId: string) => `hydra:autopilot:run:${runId}:turns`,
 
   // ---------------------------------------------------------------------------
+  // Dispatch registries (issue #618 operator namespace; issue #692 subagent
+  // namespace). The key builders for both namespaces are inlined in
+  // `src/redis/dispatches.ts` rather than here — the ADR-0009 seam-check is
+  // satisfied by builders that live anywhere under `src/redis/`, and inlining
+  // keeps the two sibling namespaces symmetric in one file. This reservation
+  // comment exists so the prefixes are discoverable from the central key
+  // surface even though the functions live next door:
+  //
+  //   hydra:dispatches:operator:{id}         + :index   (operator-launched)
+  //   hydra:dispatches:subagent:{sessionId}  + :index   (Agent-tool subagents)
+  // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
   // Tasks
   // ---------------------------------------------------------------------------
   task: (id: string) => `hydra:task:${id}`,
@@ -143,6 +156,13 @@ export const redisKeys = {
   // auto-restart the former. 24h TTL so a stale flag eventually clears
   // itself if start() is never called explicitly.
   schedulerDeliberateStop: () => "hydra:scheduler:deliberate-stop",
+
+  // Issue #745: edge-trigger armed-state for the /hydra-review pickup-set
+  // phone-notify hook. Holds "1" while the pickup set is NON-EMPTY (a
+  // notification already fired and is suppressed). Absent means the set is
+  // empty and the hook is re-armed to fire on the next empty -> non-empty
+  // transition. A plain string flag, not a JSON blob.
+  reviewPickupArmed: () => "hydra:review:pickup-armed",
 
   // Issue #673 budget-threshold idempotency sentinel removed in #703 along
   // with the dead budget-threshold bridge that wrote it. The bridge polled

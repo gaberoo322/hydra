@@ -314,28 +314,28 @@ the in-cycle gate orchestration in `src/mutation.ts` (`runMutationGate`,
 pure helpers (`runMutationTests`, `shouldSkipMutation`, `SKIP_PATTERNS`)
 from `src/mutation.ts`.
 
-## Modification Tiers (issue #243, ADR-0001 + ADR-0004)
+## Modification Tiers (issue #243, ADR-0001 + ADR-0004 + ADR-0015)
 
-Every PR is classified into one of four tiers based on the files it touches. The classifier (`src/tier-classifier.ts`) is invoked by the `tier-gate` CI job and exposed at `GET /api/tier?files=a,b,c`.
+Every PR is classified by blast radius on the monotonic ladder **T1 (shallowest) → T4 (deepest)** based on the files it touches; required verification depth ascends with the tier (ADR-0015 replaced the old "who merges this" framing with "how much verification it must clear", and renamed the deepest tier from *Untouchable Core* to *Verifier Core*). The classifier (`src/tier-classifier.ts`) is invoked by the `tier-gate` CI job and exposed at `GET /api/tier?files=a,b,c`.
 
 | Tier | Policy | Paths |
 |---|---|---|
-| **0 — Untouchable Core** | Operator-approved label required; CI blocks otherwise | See `src/untouchable.ts` (canonical list) |
-| **1 — Auto-merge, no holdback** | Ships if CI green | `config/agents/`, `config/feedback/` |
-| **2 — Auto-merge with outcome holdback** | Ships if CI green; auto-revert if Target Outcomes regress for 5 cycles (holdback impl is a follow-up issue) | `.claude/skills/`, `dashboard/`, `src/anchor-selection.ts` |
-| **3 — Operator review** | Default; operator merges | Everything else in `src/`, new agent roles, etc. |
+| **T1 — Prompt-shaped** | Auto-merge if CI green | `config/agents/`, `config/feedback/`, subagent lesson files |
+| **T2 — Skill / verification** | Auto-merge if CI green; **Outcome Holdback** (5-cycle watch + auto-revert if Target Outcomes regress) | `~/.claude/skills/`, `dashboard/`, `src/anchor-selection/` |
+| **T3 — Core `src/` + demoted infra** | Operator merges (auto-merge unless the PR body carries a `scope-justification:`) | Everything else in `src/`, plus the ADR-0015-demoted infra paths: `src/grounding.ts`, `src/cost/`, the watchdog scripts, `scripts/deploy.sh` |
+| **T4 — Verifier Core** | **Operator only** — `operator-approved` label required; CI blocks otherwise | The 5 self-referential files (`VERIFIER_CORE_PATHS` in `src/untouchable.ts`) |
 
-**Multi-file PRs:** Tier 0 short-circuits everything else. Otherwise the highest tier number wins (most operator scrutiny).
+**Multi-file PRs:** the highest tier wins (most verification / scrutiny).
 
-**Tier 0 list (`UNTOUCHABLE_PATHS`):** `src/gate.ts` (proactive — protected before extraction), `src/grounding.ts`, `src/verification.ts`, `src/post-merge.ts`, `src/redis-adapter.ts`, `src/cost/cap.ts`, `src/control-loop.ts`, `scripts/deploy.sh`, `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/untouchable.ts`, `src/tier-classifier.ts`. Out-of-repo: `~/.local/bin/hydra-orchestrator-watchdog.sh` (the watchdog script — `gh pr diff` won't surface it, so it's protected by location rather than by the classifier).
+**Verifier Core list (`VERIFIER_CORE_PATHS` / `isVerifierCore` in `src/untouchable.ts`):** `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`. ADR-0015 (#737) shrank the deepest tier to exactly these 5 self-referential files and demoted the former Tier-0 infra paths (`src/grounding.ts`, `src/cost/`, the watchdog scripts, `scripts/deploy.sh`) down to T3. The pre-#383 entries `src/gate.ts` / `src/verification.ts` / `src/post-merge.ts` / `src/control-loop.ts` / `src/redis-adapter.ts` no longer exist (removed with the codex cut-over). "Untouchable Core" is the retired name for the Verifier Core.
 
-**The `operator-approved` label:** GitHub doesn't enforce per-user labels natively. The convention is that only the operator account (gaberoo322) applies it. The `tier-gate` CI job fails any Tier-0 PR without the label; merging anyway requires admin override, which only the operator has. Do not attempt CODEOWNERS-based simulation — keep the gate dumb and auditable.
+**The `operator-approved` label:** GitHub doesn't enforce per-user labels natively. The convention is that only the operator account (gaberoo322) applies it. The `tier-gate` CI job fails any T4 (Verifier Core) PR without the label; merging anyway requires admin override, which only the operator has. Do not attempt CODEOWNERS-based simulation — keep the gate dumb and auditable.
 
-**Extending the Tier-2 list:** add a path to `TIER_2_PREFIXES` or `TIER_2_FILES` in `src/tier-classifier.ts`. Note: `src/tier-classifier.ts` is itself Tier 0, so the change requires `operator-approved`.
+**Extending the T2 list:** add a path to `TIER_2_PREFIXES` or `TIER_2_FILES` in `src/tier-classifier.ts`. Note: `src/tier-classifier.ts` is itself a Verifier Core (T4) file, so the change requires `operator-approved`.
 
-**Adding a Tier-0 path:** modify `UNTOUCHABLE_PATHS` in `src/untouchable.ts`. Same self-protection — the file is in its own list.
+**Adding a Verifier Core path:** modify `VERIFIER_CORE_PATHS` in `src/untouchable.ts`. Same self-protection — the file is in its own list.
 
-**CLI wrapper:** `npx tsx scripts/tier-classify.ts [--operator-approved] <file1> <file2> ...` prints JSON `{tier, reason, files, operatorApproved, perFile}` and exits 2 if Tier 0 without the flag, 0 otherwise. Accepts piped input (`gh pr diff --name-only N | npx tsx scripts/tier-classify.ts`).
+**CLI wrapper:** `npx tsx scripts/tier-classify.ts [--operator-approved] <file1> <file2> ...` prints JSON `{tier, reason, files, operatorApproved, perFile}` and exits 2 if a Verifier-Core (T4) path lacks the flag, 0 otherwise. Accepts piped input (`gh pr diff --name-only N | npx tsx scripts/tier-classify.ts`).
 
 ## Tier-2 outcome-holdback watcher (issue #244, ADR-0004 step 4)
 
@@ -506,5 +506,7 @@ Runs automatically on merge to master via a self-hosted GitHub Actions runner on
 6. Health check: `curl http://localhost:4000/api/health`
 
 **Operator setup (one-time):** `bash scripts/setup-git-hooks.sh` installs an opt-in `post-merge` hook that re-runs `scripts/sync-skills.sh` when a `git pull` brings in `docs/operator-playbooks/*.md` changes. Remove with `--remove`.
+
+**Subagent session-id capture hook (issue #692):** the project-scoped `~/hydra/.claude/settings.json` registers a `SessionStart` hook (`scripts/hooks/session-start-capture.sh`) that reads the new session's transcript, extracts the hidden `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->` sentinel the autopilot injects into every dispatched subagent prompt, and POSTs it to `POST /api/dispatches/subagent` — registering the session into `hydra:dispatches:subagent:{sessionId}` (24h TTL, indexed at `hydra:dispatches:subagent:index`), making a live subagent session recoverable to `(skill, dispatchId, runId, startedAt)`. No install step — the file is checked in and Claude Code loads project settings automatically inside `~/hydra`. Sessions without the sentinel (a human running `claude`) silently no-op. Best-effort: a Redis/HTTP outage, missing sentinel, or missing `jq` logs to stderr and exits 0 without blocking the session; re-running for the same session is an idempotent no-op. Smoke-test: `redis-cli zrange hydra:dispatches:subagent:index 0 -1 WITHSCORES` should show a fresh entry within ~5s of the autopilot dispatching a `hydra-dev` subagent.
 
 **Emergency manual deploy:** `./scripts/deploy.sh`. Never deploy by restarting the service without building the dashboard first — Express serves `dashboard/dist/`, so stale builds mean stale UI.

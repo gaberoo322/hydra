@@ -85,6 +85,22 @@ Then: "I'll walk through these one at a time, starting with the overnight queue.
 7. Execute via `gh` CLI
 8. Move on
 
+**Transcript deep-link (issue #695).** Whenever a row references a subagent
+dispatch — e.g. a dev failure that names the dispatching session, or a queue
+row whose recommendation cites a subagent's run — include a transcript
+deep-link line so the operator can read the full conversation in one click:
+
+```
+- transcript: http://localhost:4000/dispatch/<sessionId>/transcript
+```
+
+`<sessionId>` is the harness session id (the unified active-dispatch row's
+`id` for `source === "subagent"`). The link resolves a known dispatch even
+after its row expires from the Now page; a registered dispatch whose JSONL was
+cleaned up renders a "transcript not available" state with metadata, never a
+500. Emit one line per dispatch the row references; omit the line for rows
+with no associated subagent dispatch.
+
 Explore the codebase before asking obvious questions.
 
 ### 4. Resolution options by entry path

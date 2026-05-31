@@ -45,6 +45,7 @@ import {
   addAutopilotRunTurn,
   hasAutopilotRunTurnAt,
   listAutopilotRunTurnsDesc,
+  putAutopilotPrLink,
 } from "../redis/autopilot-runs.ts";
 import {
   initCycleHash,
@@ -296,6 +297,51 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
     }
 
     return { ok: true, cycleId, status, bucketed, deduped: false };
+  } catch (err: any) {
+    return errRedis(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle: dispatch -> PR link (issue #732)
+// ---------------------------------------------------------------------------
+
+export interface RecordDispatchPrBody {
+  prNumber: number;
+  runId?: string;
+  dispatchId?: string;
+  skill?: string;
+  issueRef?: string;
+  openedAt?: string;
+}
+
+export type RecordDispatchPrResult =
+  | Ok<{ prNumber: number; openedAtMs: number }>
+  | Err;
+
+/**
+ * Stamp a dispatch->PR link when a dispatched subagent opens a PR. The
+ * Builder-Health Scorecard derives Autonomy Rate + time-to-merge from this
+ * link (the open timestamp + PR number) joined against GitHub on read; no
+ * per-dispatch intervention flag is stored. Idempotent on `prNumber`.
+ */
+export async function recordDispatchPr(
+  body: RecordDispatchPrBody,
+): Promise<RecordDispatchPrResult> {
+  try {
+    const prNumber = Number(body.prNumber);
+    if (!Number.isInteger(prNumber) || prNumber <= 0) {
+      return { ok: false, code: "invalid", detail: "prNumber must be a positive integer" };
+    }
+    const openedAtMs = body.openedAt ? Date.parse(body.openedAt) : Date.now();
+    const resolvedMs = Number.isFinite(openedAtMs) ? openedAtMs : Date.now();
+    const fields: Record<string, string> = {};
+    if (body.runId) fields.runId = String(body.runId);
+    if (body.dispatchId) fields.dispatchId = String(body.dispatchId);
+    if (body.skill) fields.skill = String(body.skill);
+    if (body.issueRef) fields.issueRef = String(body.issueRef);
+    await putAutopilotPrLink(prNumber, fields, resolvedMs);
+    return { ok: true, prNumber, openedAtMs: resolvedMs };
   } catch (err: any) {
     return errRedis(err);
   }

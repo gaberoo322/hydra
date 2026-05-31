@@ -15,6 +15,7 @@ import { recordCycleSide, classifySide } from "./capacity-floor.ts";
 import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
+import { startRecommendationConsumer } from "./autopilot/recommendation-engine.ts";
 import {
   startPrLifecycleBridge,
   type PrLifecycleBridge,
@@ -159,7 +160,17 @@ function startConsumers(eventBus) {
     startSlotEventsBridge(eventBus),
   );
 
-  console.log("[Hydra] Background consumers started (notifications, dlq, slot-events-bridge)");
+  // Recommendation engine — reacts to `turn_end` events from slice A
+  // (#668) by firing at most one claude-haiku-4-5 call per turn (gated on
+  // a 30s interval, a material-change predicate, and a daily USD cap).
+  // Slice F of /now-pixel observability (#674).
+  startConsumerWithRecovery("recs-engine", () =>
+    startRecommendationConsumer(eventBus),
+  );
+
+  console.log(
+    "[Hydra] Background consumers started (notifications, dlq, slot-events-bridge, recs-engine)",
+  );
 }
 
 // ---------------------------------------------------------------------------

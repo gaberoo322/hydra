@@ -9,7 +9,7 @@
 # persist between Claude turns).
 #
 # Inputs (env, all optional):
-#   HYDRA_AUTOPILOT_TOKEN_BUDGET                (default 2000000)
+#   HYDRA_AUTOPILOT_TOKEN_BUDGET                (default 10000000)
 #   HYDRA_AUTOPILOT_MAX_SEC                     (default 28800  — 8h)
 #   HYDRA_AUTOPILOT_IDLE_TURNS                  (default 5)
 #   HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS         (default 400000 — soft cap)
@@ -146,14 +146,14 @@ fi
 : > "${LOG_PATH}"
 
 # Resolve budget knobs from env (per-run override) with hardcoded defaults
-TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-2000000}"
+TOKEN_BUDGET="${HYDRA_AUTOPILOT_TOKEN_BUDGET:-10000000}"
 WALL_CLOCK_MAX_SEC="${HYDRA_AUTOPILOT_MAX_SEC:-28800}"   # 8h
 IDLE_DRAIN_TURNS="${HYDRA_AUTOPILOT_IDLE_TURNS:-5}"
 
 # Per-subagent token caps (issue #395). Soft cap = stop re-dispatching that
 # class; hard cap = abandon the in-flight slot and open a runaway issue.
 # Soft must be <= hard. Defaults bound a single misbehaving subagent to
-# ~20% of the 2M total budget at the hard cap; well-behaved subagents
+# ~8% of the 10M total budget at the hard cap; well-behaved subagents
 # (~30-150k tokens for a normal hydra-dev run) are unaffected.
 SUBAGENT_MAX_TOKENS="${HYDRA_AUTOPILOT_SUBAGENT_MAX_TOKENS:-400000}"
 SUBAGENT_HARD_MAX_TOKENS="${HYDRA_AUTOPILOT_SUBAGENT_HARD_MAX_TOKENS:-800000}"
