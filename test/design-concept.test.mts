@@ -18,8 +18,10 @@ import type { DesignConcept, DesignConceptInput } from "../src/design-concept.ts
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
 const dc = await import("../src/design-concept.ts");
+const dcSeam = await import("../src/redis/design-concept.ts");
 
 const TEST_NS = "hydra:design-concept:";
+const DC_INDEX_KEY = "hydra:design-concept:index";
 let testRedis: any;
 
 // Build a minimal artifact that passes every gate rule by default.
@@ -424,5 +426,80 @@ describe("design-concept Redis store + gate", () => {
     );
     assert.equal(v.ok, false);
     assert.ok(v.reasons.some((r) => r.includes("status")));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #797 / ADR-0018 — canonical-ref invariant lives in the persistence seam.
+// These exercise the accessor directly (not via the domain layer) to prove
+// the seam normalizes the `anchorRef` parameter at function ENTRY, so the
+// hash key AND the index ZSET member always agree.
+// ---------------------------------------------------------------------------
+
+describe("design-concept seam canonicalizes anchorRef at entry (#797)", () => {
+  let seamRedis: any;
+
+  beforeEach(async () => {
+    if (!seamRedis) seamRedis = new Redis("redis://localhost:6379/1");
+    const keys = await seamRedis.keys(TEST_NS + "*");
+    if (keys.length > 0) await seamRedis.del(...keys);
+  });
+
+  after(async () => {
+    const keys = await seamRedis.keys(TEST_NS + "*");
+    if (keys.length > 0) await seamRedis.del(...keys);
+    if (seamRedis) seamRedis.disconnect();
+  });
+
+  test('saveDesignConceptHash("736") + getDesignConceptHash("issue-736") round-trip; index has ONE member', async () => {
+    await dcSeam.saveDesignConceptHash(
+      "736",
+      Date.now(),
+      ["anchorRef", "issue-736", "scope", "orch"],
+      3600,
+    );
+
+    // Read by the dispatched `issue-<N>` form — must resolve to the same hash.
+    const byIssue = await dcSeam.getDesignConceptHash("issue-736");
+    assert.equal(byIssue.anchorRef, "issue-736", "read by issue-736 resolves");
+    assert.equal(byIssue.scope, "orch");
+
+    // Read by the bare form too — same hash.
+    const byBare = await dcSeam.getDesignConceptHash("736");
+    assert.equal(byBare.anchorRef, "issue-736", "read by 736 resolves to same hash");
+
+    // No orphaned bare-number key; exactly one canonical key.
+    const bareKeys = await seamRedis.keys(TEST_NS + "736");
+    assert.equal(bareKeys.length, 0, "no orphaned bare-number key");
+    const canonKeys = await seamRedis.keys(TEST_NS + "issue-736");
+    assert.equal(canonKeys.length, 1, "exactly one canonical hash key");
+
+    // The index has exactly ONE member, and it is the canonical form.
+    const members = await seamRedis.zrange(DC_INDEX_KEY, 0, -1);
+    assert.deepEqual(members, ["issue-736"], "index has one canonical member");
+  });
+
+  test("setDesignConceptField + removeDesignConceptFromIndex target the canonical key/member", async () => {
+    const now = Date.now();
+    await dcSeam.saveDesignConceptHash(
+      "issue-736",
+      now,
+      ["anchorRef", "issue-736", "scope", "orch", "status", "draft"],
+      3600,
+    );
+
+    // Update a field using the BARE form — must hit the canonical hash.
+    await dcSeam.setDesignConceptField("736", "status", "approved");
+    const after = await dcSeam.getDesignConceptHash("issue-736");
+    assert.equal(after.status, "approved", "field update hit the canonical hash");
+
+    // Removing by the bare form must drop the canonical index member.
+    await dcSeam.removeDesignConceptFromIndex("736");
+    const members = await seamRedis.zrange(DC_INDEX_KEY, 0, -1);
+    assert.equal(
+      members.includes("issue-736"),
+      false,
+      "canonical member removed via bare ref",
+    );
   });
 });
