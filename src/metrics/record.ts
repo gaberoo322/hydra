@@ -9,12 +9,14 @@
  * (issue #287).
  */
 
-import { CYCLE_KEY_TTL } from "../task-tracker.ts";
 import {
   getCycleAgentRuns,
   setCycleMetrics,
 } from "../redis/cycle-metrics.ts";
 import { deriveQualityGateCoverage } from "./quality-gates.ts";
+
+/** TTL for cycle metrics Redis keys: 7 days in seconds (matches redis/cycle-tracking.ts). */
+const CYCLE_KEY_TTL = 7 * 24 * 60 * 60; // 604800
 
 /**
  * Record a cycle's outcome metrics.
