@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import {
   classifyVerdict,
   renderChecksBlock,
+  aggregateAdversarialReview,
   type CheckState,
 } from "../scripts/ci/qa-verdict.ts";
 
@@ -252,6 +253,57 @@ describe("renderChecksBlock", () => {
   test("zero checks → human-readable fallback string", () => {
     const r = classifyVerdict("PASS", []);
     assert.match(renderChecksBlock(r), /No CI checks/i);
+  });
+});
+
+describe("aggregateAdversarialReview — T3 two-reviewer refutation fan-out (issue #739)", () => {
+  // T3 PASS iff BOTH independent refutation reviewers find no real blocker;
+  // any single real blocker from EITHER reviewer is a FAIL. This is the
+  // defining asymmetry of refutation framing (one refuter is enough to
+  // bounce) and the AND-gate the issue's acceptance criteria pin.
+
+  test("both reviewers PASS → PASS (neither surfaced a real blocker)", () => {
+    const r = aggregateAdversarialReview("PASS", "PASS");
+    assert.equal(r.reviewVerdict, "PASS");
+    assert.match(r.reason, /both/i);
+  });
+
+  test("reviewer A FAIL, reviewer B PASS → FAIL (single blocker bounces)", () => {
+    const r = aggregateAdversarialReview("FAIL", "PASS");
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.match(r.reason, /reviewer A/);
+  });
+
+  test("reviewer A PASS, reviewer B FAIL → FAIL (single blocker bounces)", () => {
+    const r = aggregateAdversarialReview("PASS", "FAIL");
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.match(r.reason, /reviewer B/);
+  });
+
+  test("both reviewers FAIL → FAIL (names both)", () => {
+    const r = aggregateAdversarialReview("FAIL", "FAIL");
+    assert.equal(r.reviewVerdict, "FAIL");
+    assert.match(r.reason, /both/i);
+  });
+
+  test("aggregate feeds straight into classifyVerdict without policy change", () => {
+    // The whole point: the aggregate produces the same ReviewVerdict literal
+    // classifyVerdict already consumes — the CI-state classification and the
+    // emitted FinalVerdict are untouched (INV-007 / decide.py policy intact).
+    const greenChecks: CheckState[] = [
+      { name: "tests", status: "completed", conclusion: "success", required: true },
+    ];
+    const passAgg = aggregateAdversarialReview("PASS", "PASS");
+    assert.equal(classifyVerdict(passAgg.reviewVerdict, greenChecks).verdict, "PASS");
+
+    const failAgg = aggregateAdversarialReview("PASS", "FAIL");
+    assert.equal(classifyVerdict(failAgg.reviewVerdict, greenChecks).verdict, "FAIL");
+  });
+
+  test("aggregate is pure synchronous return — never blocks", () => {
+    const r = aggregateAdversarialReview("PASS", "FAIL");
+    assert.equal(typeof r, "object");
+    assert.equal((r as { then?: unknown }).then, undefined);
   });
 });
 

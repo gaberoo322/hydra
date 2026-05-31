@@ -13,6 +13,17 @@ Automated QA verification for PRs against the Hydra orchestrator. This skill is 
 
 The Spec axis reads the **design-concept artifact** for the issue (Phase A of #437) — produced by `hydra-grill` and persisted at `GET /api/design-concepts/:anchorRef`. The Standards axis reads `CLAUDE.md`, `CONTEXT.md`, `docs/adr/`, and lint configs. The two axes deliberately do not share context.
 
+## Tier-aware verification depth (issue #739, ADR-0015)
+
+QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the single tier authority — never self-classified by path):
+
+- **T1 / T2** — exactly **one standard QA pass**: the single parallel Standards + Spec fan-out described below. Behaviour-preserving; nothing in this section changes the T1/T2 path.
+- **T3** (core `src/` + demoted infra) — an **adversarial depth gate**: run `hydra-qa` in **refutation framing** (reviewers are prompted to actively *find a reason this change is wrong / regresses something*, not to confirm it), fanned out to **2 independent reviewers**. The change PASSes only if **neither** reviewer surfaces a real blocker; a single real blocker from **either** reviewer is a FAIL. **T4 inherits the T3 depth** (it adds its own deeper gates elsewhere).
+
+This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a T3 review verdict is computed* deepens — an AND over two refutation reviewers, folded by `aggregateAdversarialReview()` in `scripts/ci/qa-verdict.ts`.
+
+A T3 FAIL **bounces** the PR back to a dev agent via the universal remediation loop (re-label `ready-for-agent` + comment failing criteria — step 10's FAIL routing), **not** block-and-escalate-to-operator (the Deep-QA Remediation Loop reserves block-and-escalate teeth for T4).
+
 ## Phase A — shadow mode (current)
 
 The design-concept gate is in **Phase A — shadow mode** (epic #437). The artifact does not yet exist for PRs whose parent issues pre-date the design-concept system. To avoid blocking the entire merge queue during cut-over, this skill is configurable:
@@ -166,9 +177,47 @@ if [ "$TIER1_ONLY" = "1" ] && [ -z "$SPEC_INPUT_JSON" ] && [ -z "$SPEC_SKIPPED_R
 fi
 ```
 
-### 7. Spawn both sub-agents in parallel (single message, two Agent calls)
+### 6.5 Resolve the PR's Modification Tier (issue #739)
 
-**This is the critical step — both `Agent` tool calls MUST be in the same assistant message** so they execute in parallel and do not pollute each other's context. The upstream `review` skill (`~/.claude/skills/review/SKILL.md`) is the contract; do not re-implement its logic — invoke its process pattern.
+Classify the diff via the live tier API — the single tier authority. Never infer tier from path patterns.
+
+```bash
+CHANGED=$(git diff --name-only "${FIXED_SHA}...HEAD" | paste -sd, -)
+TIER_JSON=$(curl -fsS --max-time 5 \
+  "http://localhost:4000/api/tier?files=$(printf '%s' "$CHANGED" | jq -sRr @uri)" \
+  2>/dev/null || echo "")
+PR_TIER=$(printf '%s' "$TIER_JSON" | jq -r '.tier // empty' 2>/dev/null)
+# Unreachable classifier → default to the deeper (adversarial) path: safer to
+# over-verify than to silently downgrade a core change to a single pass.
+ADVERSARIAL=0
+if [ -z "$PR_TIER" ]; then
+  echo "WARN: tier classifier unreachable — defaulting to T3 adversarial QA (over-verify)."
+  ADVERSARIAL=1
+elif [ "$PR_TIER" -ge 3 ] 2>/dev/null; then
+  ADVERSARIAL=1   # T3 (and T4, which inherits T3 depth)
+fi
+```
+
+- `ADVERSARIAL=0` → T1/T2: one standard pass (the single Standards + Spec fan-out, step 7 as written).
+- `ADVERSARIAL=1` → T3/T4: the two-reviewer refutation fan-out (step 7's T3 branch).
+
+### 7. Spawn the review sub-agents in parallel (single message, all Agent calls)
+
+**This is the critical step — all `Agent` tool calls MUST be in the same assistant message** so they execute in parallel and do not pollute each other's context. The upstream `review` skill (`~/.claude/skills/review/SKILL.md`) is the contract; do not re-implement its logic — invoke its process pattern.
+
+#### 7a. T1/T2 — single standard pass (`ADVERSARIAL=0`)
+
+Spawn exactly two parallel sub-agents — the **Standards** and **Spec** axes described below. This is the unchanged pre-#739 behaviour.
+
+#### 7b. T3/T4 — adversarial fan-out (`ADVERSARIAL=1`)
+
+Run the review in **refutation framing** across **2 independent reviewers**. Each reviewer is its own Standards + Spec pair (the same two-axis contract below), so a T3 fan-out spawns **four** `general-purpose` sub-agents in one message: `reviewer-A-standards`, `reviewer-A-spec`, `reviewer-B-standards`, `reviewer-B-spec`. The two reviewers are **independent** — neither is told the other exists, same context-separation rule as the Standards/Spec split — so one cannot anchor the other.
+
+Prepend the **refutation framing** to every T3 sub-agent prompt, before the axis brief:
+
+> *You are an adversarial reviewer. Your job is to actively find a concrete reason this change is wrong, regresses existing behaviour, or fails to do what it claims — not to confirm it works. Assume there IS a blocker and hunt for it. Only report a finding as a hard blocker if you can point to the specific line/behaviour that breaks; do not invent speculative concerns. If after a genuine adversarial pass you find no real blocker, say so explicitly.*
+
+Each reviewer (A and B) independently yields a per-reviewer verdict via the step-9 axis-folding rule. Then aggregate the two reviewers (step 9). **PASS requires both reviewers to find no real blocker; a single real blocker from either reviewer = FAIL.**
 
 **Standards sub-agent prompt** — include:
 
@@ -211,12 +260,30 @@ Render the aggregated comment into `$REVIEW_REPORT` for posting.
 
 ### 9. Classify the review verdict
 
-Map the two axes into a single review verdict for the classifier (`scripts/ci/qa-verdict.ts`):
+**Per-reviewer axis fold** — for each reviewer (a single reviewer for T1/T2, reviewers A and B for T3/T4), map its two axes into one verdict:
 
-- Either axis has a **hard violation / hard finding** → `REVIEW_VERDICT="FAIL"`.
-- Both axes pass (no hard findings; judgement calls are advisory) OR Spec was skipped per Phase A / exempt / Tier-1 rules → `REVIEW_VERDICT="PASS"`.
+- Either axis has a **hard violation / hard finding** → that reviewer's verdict is `FAIL`.
+- Both axes pass (no hard findings; judgement calls are advisory) OR Spec was skipped per Phase A / exempt / Tier-1 rules → that reviewer's verdict is `PASS`.
 
-Then:
+**Tier fold into `REVIEW_VERDICT`:**
+
+- **T1/T2 (`ADVERSARIAL=0`)** — `REVIEW_VERDICT` is the single reviewer's verdict.
+- **T3/T4 (`ADVERSARIAL=1`)** — AND the two independent reviewers via `aggregateAdversarialReview()`: PASS iff **both** reviewers are `PASS`; a single `FAIL` from **either** reviewer makes `REVIEW_VERDICT="FAIL"`. This is purely the review-verdict computation — the downstream `classifyVerdict` CI folding and the emitted verdict literal are unchanged.
+
+```bash
+if [ "$ADVERSARIAL" = "1" ]; then
+  # REVIEWER_A_VERDICT / REVIEWER_B_VERDICT are each "PASS" | "FAIL" from the
+  # per-reviewer axis fold above.
+  REVIEW_VERDICT=$(node --no-warnings --experimental-strip-types -e "
+    import('./scripts/ci/qa-verdict.ts').then(({aggregateAdversarialReview}) => {
+      const r = aggregateAdversarialReview(process.env.REVIEWER_A_VERDICT, process.env.REVIEWER_B_VERDICT);
+      process.stdout.write(r.reviewVerdict);
+    });
+  ")
+fi
+```
+
+Then feed `REVIEW_VERDICT` into the one-pass CI classifier (unchanged):
 
 ```bash
 node --no-warnings --experimental-strip-types -e "
