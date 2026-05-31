@@ -30,7 +30,6 @@
  */
 
 import type { EventBus } from "../event-bus.ts";
-import { getRedisConnection } from "../redis/connection.ts";
 
 export const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 const CONSUMER_GROUP = "now-pixel-bridge";
@@ -54,23 +53,11 @@ export async function startSlotEventsBridge(
   const consumerName = opts.consumerName ?? `bridge-${process.pid}`;
 
   // Ensure the stream + consumer group exist. The hooks XADD with MKSTREAM
-  // is opportunistic; we explicitly XGROUP CREATE here so the consumer can
-  // start cleanly even if no event has fired yet this session.
-  const redis = getRedisConnection();
-  try {
-    await redis.xgroup(
-      "CREATE",
-      SLOT_EVENTS_STREAM,
-      CONSUMER_GROUP,
-      "$",
-      "MKSTREAM",
-    );
-  } catch (err: any) {
-    // BUSYGROUP = group already exists, which is exactly what we want.
-    if (!err?.message?.includes("BUSYGROUP")) {
-      throw err;
-    }
-  }
+  // is opportunistic; we explicitly create the group here so the consumer can
+  // start cleanly even if no event has fired yet this session. Start at "$"
+  // (skip backlog) — this bridge only animates NEW events, replaying the
+  // backlog on every restart would re-fire stale sprite animations.
+  await eventBus.ensureConsumerGroup(SLOT_EVENTS_STREAM, CONSUMER_GROUP, "$");
 
   console.log(
     `[slot-events-bridge] consuming ${SLOT_EVENTS_STREAM} group=${CONSUMER_GROUP} consumer=${consumerName}`,

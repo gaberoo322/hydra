@@ -69,7 +69,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { getRedisConnection } from "../redis/connection.ts";
+import { EventBus } from "../event-bus.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
 
 /** The orchestrator's own repo — the one constant across target swaps. */
@@ -81,6 +81,19 @@ export const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000; // 1 minute — gh API rate-friendly.
 const STREAM_MAXLEN = 1000;
+
+/**
+ * Lazy module-singleton Event Bus used when the caller does not inject one.
+ * The bridge routes its XADD through `eventBus.publishRaw` (ADR-0017 Category
+ * B) instead of the raw connection. In production `src/index.ts` injects the
+ * service-wide bus (so `_broadcastToClients` reaches the live WS clients); the
+ * lazy fallback exists for tests and any direct `emitPrLifecycleEvent` caller.
+ */
+let _defaultEventBus: EventBus | null = null;
+function getDefaultEventBus(): EventBus {
+  if (!_defaultEventBus) _defaultEventBus = new EventBus();
+  return _defaultEventBus;
+}
 
 /**
  * Default repo list — the orchestrator's own repo plus the configured target,
@@ -286,6 +299,12 @@ export interface PrLifecycleBridgeOpts {
    * returns; otherwise spins up setInterval and returns a stop fn.
    */
   oneShot?: boolean;
+  /**
+   * Inject the Event Bus used to publish lifecycle events. Defaults to the
+   * lazy module singleton. `src/index.ts` passes the service-wide bus so the
+   * WS broadcast reaches live dashboard clients (ADR-0017 Category B).
+   */
+  eventBus?: EventBus;
 }
 
 export interface PrLifecycleBridge {
@@ -308,6 +327,7 @@ export async function startPrLifecycleBridge(
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const repos = opts.repos ?? defaultRepos();
   const fetcher = opts.ghFetcher ?? defaultGhFetcher;
+  const eventBus = opts.eventBus ?? getDefaultEventBus();
 
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
@@ -328,7 +348,7 @@ export async function startPrLifecycleBridge(
         const events = diffPrSnapshots(prev, curr, repo);
 
         for (const event of events) {
-          await emitPrLifecycleEvent(event);
+          await emitPrLifecycleEvent(event, eventBus);
         }
 
         snapshots.set(repo, curr);
@@ -382,8 +402,10 @@ export async function startPrLifecycleBridge(
  * on it. Exported for tests so the field shape is pinned independently of
  * the Redis round-trip.
  */
-export async function emitPrLifecycleEvent(event: PrLifecycleEvent): Promise<string> {
-  const r = getRedisConnection();
+export async function emitPrLifecycleEvent(
+  event: PrLifecycleEvent,
+  eventBus: EventBus = getDefaultEventBus(),
+): Promise<string> {
   const fields = [
     "event", "pr_lifecycle",
     "transition", event.transition,
@@ -395,10 +417,10 @@ export async function emitPrLifecycleEvent(event: PrLifecycleEvent): Promise<str
     "head_branch", event.head_branch,
     "ts_epoch", String(Math.floor(Date.now() / 1000)),
   ];
-  return r.xadd(
-    SLOT_EVENTS_STREAM,
-    "MAXLEN", "~", String(STREAM_MAXLEN),
-    "*",
-    ...fields,
-  );
+  // ADR-0017 Category B: route the flat, `event`-discriminated wire shape
+  // through the sanctioned Event Bus instead of the raw connection. The XADD
+  // emitted is identical (flat fields, MAXLEN ~ STREAM_MAXLEN, "*" id) — this
+  // is a wire-format-preserving migration, not a behaviour change. publishRaw
+  // also fans out to WS clients so dashboard subscribers light up live.
+  return eventBus.publishRaw(SLOT_EVENTS_STREAM, fields, { maxlen: STREAM_MAXLEN });
 }

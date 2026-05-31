@@ -31,7 +31,7 @@
  * The classifier is the fallback (and what the tests exercise).
  */
 
-import { getRedisConnection } from "./redis/connection.ts";
+import { boundedJsonList } from "./redis/bounded-list.ts";
 import { classifyChange } from "./tier-classifier.ts";
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,14 @@ const HISTORY_MAX_LEN = 200;
 
 /** Redis key for the rolling history list. */
 const HISTORY_KEY = "hydra:capacity:history";
+
+/**
+ * The rolling cycle-side history, backed by the shared bounded-JSON-list
+ * primitive (ADR-0017 Category C). Newest-first, trimmed to HISTORY_MAX_LEN,
+ * tolerant of corrupt entries on read. The cycleId/side validity filter stays
+ * at the `getCycleHistory` call site (domain validation, not list mechanics).
+ */
+const history = boundedJsonList<CycleSideEntry>(HISTORY_KEY, HISTORY_MAX_LEN);
 
 export type CycleSide = "orchestrator" | "target" | "idle";
 
@@ -147,9 +155,7 @@ export async function recordCycleSide(
       recordedAt: new Date().toISOString(),
       source: opts.source,
     };
-    const r = getRedisConnection();
-    await r.lpush(HISTORY_KEY, JSON.stringify(entry));
-    await r.ltrim(HISTORY_KEY, 0, HISTORY_MAX_LEN - 1);
+    await history.push(entry);
   } catch (err: any) {
     console.error(`[capacity-floor] recordCycleSide failed (non-fatal): ${err.message}`);
   }
@@ -178,18 +184,14 @@ export async function recordOrchestratorSideMerge(
  */
 export async function getCycleHistory(limit: number = DEFAULT_WINDOW_CYCLES): Promise<CycleSideEntry[]> {
   try {
-    const r = getRedisConnection();
-    const raw: string[] = await r.lrange(HISTORY_KEY, 0, Math.max(limit, 1) - 1);
-    const out: CycleSideEntry[] = [];
-    for (const s of raw) {
-      try {
-        const parsed = JSON.parse(s);
-        if (parsed && typeof parsed.cycleId === "string" && typeof parsed.side === "string") {
-          out.push(parsed as CycleSideEntry);
-        }
-      } catch { /* intentional: skip unparseable entries */ }
-    }
-    return out;
+    // boundedJsonList.read() does the tolerant JSON.parse (skipping corrupt
+    // entries); the cycleId/side validity filter below is domain validation
+    // that stays at the call site (ADR-0017 — mechanics vs. domain split).
+    const parsed = await history.read(Math.max(limit, 1));
+    return parsed.filter(
+      (e): e is CycleSideEntry =>
+        !!e && typeof e.cycleId === "string" && typeof e.side === "string",
+    );
   } catch (err: any) {
     console.error(`[capacity-floor] getCycleHistory failed (non-fatal): ${err.message}`);
     return [];
@@ -298,6 +300,5 @@ export async function getCapacitySnapshot(
  * Test-only: clear the history list. Production callers should not use this.
  */
 export async function _resetCapacityHistory(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(HISTORY_KEY);
+  await history.clear();
 }
