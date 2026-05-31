@@ -1,12 +1,12 @@
 import { Router } from "express";
 import { getCycleStatus, getCycleHistory } from "../cycle.ts";
-import { getTracker } from "../task-tracker.ts";
 import { getRealityReport } from "../redis/reality-reports.ts";
 import {
   registerCycleSource,
   releaseCycleSource,
   initCycleHash,
   updateCycleHash,
+  getCycleHash,
 } from "../redis/cycle-tracking.ts";
 
 export function createCyclesRouter(_eventBus: any) {
@@ -32,19 +32,39 @@ export function createCyclesRouter(_eventBus: any) {
     }
   });
 
-  // GET /cycle/report — Structured cycle report with agent runs and costs
-  router.get("/cycle/report", async (req, res) => {
-    try {
-      res.json(await getTracker().getCycleReport());
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /cycle/report/:cycleId — Report for a specific cycle (agents, costs, tasks)
+  // GET /cycle/report/:cycleId — Structured report for a specific cycle.
+  //
+  // Reads the autopilot-written cycle hash (the blessed write path —
+  // redis/cycle-tracking.ts) rather than the retired in-process tracker's raw
+  // seam (issue #792 / ADR-0016). The hash carries real task counts; per-agent
+  // runs and per-cycle cost hashes were always-empty under the autopilot
+  // recorder, so they are no longer surfaced here.
   router.get("/cycle/report/:cycleId", async (req, res) => {
     try {
-      res.json(await getTracker().getCycleReport(req.params.cycleId));
+      const hash = await getCycleHash(req.params.cycleId);
+      if (!hash || Object.keys(hash).length === 0) {
+        return res.status(404).json({ error: "Cycle not found" });
+      }
+      const total = parseInt(hash.total || "0");
+      const completed = parseInt(hash.completed || "0");
+      const failed = parseInt(hash.failed || "0");
+      const abandoned = parseInt(hash.abandoned || "0");
+      const timedOut = parseInt(hash.timedOut || "0");
+      res.json({
+        cycleId: req.params.cycleId,
+        status: hash.status,
+        startedAt: hash.startedAt,
+        completedAt: hash.completedAt,
+        source: hash.source,
+        tasks: {
+          total,
+          completed,
+          failed,
+          abandoned,
+          timedOut,
+          inProgress: Math.max(0, total - completed - failed - abandoned - timedOut),
+        },
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

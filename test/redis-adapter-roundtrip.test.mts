@@ -1,8 +1,8 @@
 /**
  * Redis adapter round-trip integration tests.
  *
- * Regression: modules used raw `new Redis()` or `getTracker().getRedisClient()`
- * to access Redis. Issue #30 migrated all access through redis-adapter.ts.
+ * Regression: modules used raw `new Redis()` connections to access Redis.
+ * Issue #30 migrated all access through redis-adapter.ts.
  * These tests verify write → read round-trips work correctly through the adapter.
  *
  * Requires Redis running on localhost:6379 (default).

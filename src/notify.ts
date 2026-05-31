@@ -43,7 +43,7 @@ function formatMessage(event) {
         lines.push(`Duration: ${dur}`);
         return lines.join("\n");
       }
-      // Fallback for task-tracker format
+      // Fallback for the count-only cycle:completed payload shape
       const total = payload.total ?? "?";
       const completed = payload.completed ?? "?";
       const failed = payload.failed ?? 0;

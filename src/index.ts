@@ -3,7 +3,6 @@ import { Sentry } from "./instrument.ts";
 
 import { EventBus, STREAMS } from "./event-bus.ts";
 import { createApi } from "./api.ts";
-import { createTracker, getTracker } from "./task-tracker.ts";
 import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule } from "./cleanup.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
@@ -26,8 +25,6 @@ import { createServer as createHttpServer } from "node:http";
 import { WebSocketServer } from "ws";
 
 const PORT = parseInt(process.env.HYDRA_PORT) || 4000;
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const CYCLE_TTL_MS = parseInt(process.env.HYDRA_CYCLE_TTL_MS) || 90 * 60 * 1000; // 90 minutes
 
 // ---------------------------------------------------------------------------
 // Background stream consumers (folded from pipeline.mjs)
@@ -145,10 +142,6 @@ function startConsumers(eventBus) {
         type: "dlq:alert",
         payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
       });
-      const taskId = originalEvent?.payload?.taskId;
-      if (taskId) {
-        await getTracker().markTaskDone(originalEvent?.payload?.originalTaskId || taskId, "failed", eventBus);
-      }
     }, { count: 1, blockMs: 10000 }),
   );
 
@@ -236,13 +229,10 @@ async function main() {
     if (stale.length > 0) console.log(`[Hydra] Startup cleanup: deleted ${stale.length} stale feature branches`);
   } catch (err: any) { console.error(`[Hydra] Startup branch cleanup failed: ${err.message}`); }
 
-  // Initialize event bus and task tracker
+  // Initialize event bus
   const eventBus = new EventBus();
   await eventBus.init();
   console.log("[Hydra] Event bus initialized (Redis Streams ready)");
-
-  createTracker(REDIS_URL);
-  console.log("[Hydra] Task tracker initialized (Redis-backed)");
 
   // Initialize learning system (migrates rules, registers OV skills, starts indexer)
   await initLearning();
@@ -252,16 +242,6 @@ async function main() {
     await cleanWorkQueue();
   } catch (err: any) {
     console.error(`[Hydra] Work queue cleanup failed: ${err.message}`);
-  }
-
-  // Recover held tasks from Redis (from previous cycle's dependency holds)
-  try {
-    const recovered = await getTracker().recoverHeldTasks();
-    if (recovered.length > 0) {
-      console.log(`[Hydra] Recovered ${recovered.length} held task(s) from Redis`);
-    }
-  } catch (err) {
-    console.error(`[Hydra] Failed to recover held tasks:`, err.message);
   }
 
   // Start background consumers (notifications, meta, DLQ)
@@ -315,49 +295,6 @@ async function main() {
   // Report cleanup (cycle-summaries 2d, reality-reports keep 50)
   startCleanupSchedule();
 
-  // Cycle watchdog — auto-kill cycles past the TTL, alert on stalls
-  setInterval(async () => {
-    try {
-      const tracker = getTracker();
-      const state = await tracker.getCycleState();
-      if (state.status !== "running") return;
-
-      const elapsed = Date.now() - new Date(state.startedAt).getTime();
-      const elapsedMin = Math.round(elapsed / 60000);
-
-      if (elapsed > CYCLE_TTL_MS) {
-        console.log(`[Watchdog] Cycle ${state.cycleId} exceeded TTL (${elapsedMin}min > ${CYCLE_TTL_MS / 60000}min) — auto-killing`);
-        const timedOut = await tracker.timeoutStaleTasks(state.cycleId, eventBus);
-        await sendNotification({
-          type: "cycle:auto_killed",
-          payload: {
-            cycleId: state.cycleId,
-            elapsed: `${elapsedMin}min`,
-            ttl: `${CYCLE_TTL_MS / 60000}min`,
-            tasksTimedOut: timedOut,
-          },
-        });
-      } else {
-        const pending = state.tasks.filter((t) => t.status === "in_progress" || t.status === "created");
-        if (pending.length > 0 && elapsed > 30 * 60 * 1000) {
-          console.log(`[Watchdog] Cycle ${state.cycleId} running ${elapsedMin}min — ${pending.length} tasks still active`);
-          await sendNotification({
-            type: "cycle:stalled",
-            payload: {
-              cycleId: state.cycleId,
-              elapsed: `${elapsedMin}min`,
-              inProgress: pending.length,
-              tasks: pending.map((t) => `${t.taskId}: ${t.stage}`),
-            },
-          });
-        }
-      }
-    } catch (err) {
-      console.error("[Watchdog] Error:", err.message);
-    }
-  }, 15 * 60 * 1000);
-  console.log("[Hydra] Cycle watchdog started (checks every 15min, TTL " + (CYCLE_TTL_MS / 60000) + "min)");
-
   // Auto-start scheduler
   const schedulerResult = await autoStartScheduler(eventBus);
   if (schedulerResult) {
@@ -378,7 +315,6 @@ async function main() {
     for (const ws of wss.clients) ws.close(1001, "server shutting down");
     wss.close();
     server.close();
-    await getTracker().close();
     await eventBus.close();
     process.exit(0);
   };
