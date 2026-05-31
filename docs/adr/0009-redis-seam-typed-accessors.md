@@ -1,6 +1,6 @@
 # ADR-0009: Redis access goes through typed domain accessors
 
-Status: Accepted
+Status: Accepted (sharpened by ADR-0017 — three access categories + sanctioned Event Bus raw-wire seam)
 Date: 2026-05-22
 Deciders: Operator + Hydra
 Issue: TBD (Redis Seam closure epic)
