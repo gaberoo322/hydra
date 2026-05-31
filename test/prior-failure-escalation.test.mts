@@ -14,10 +14,8 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
-import { createTracker, getTracker } from "../src/task-tracker.ts";
 
 let redis: any;
-let tracker: any;
 
 const PRIOR_FAILURES_KEY = "hydra:anchors:prior-failures";
 const REFRAME_QUEUE_KEY = "hydra:anchors:reframe-queue";
@@ -38,8 +36,6 @@ describe("prior-failure escalation (issue #18)", () => {
       const redisUrl = process.env.REDIS_URL || "redis://localhost:6379/1";
       process.env.REDIS_URL = redisUrl;
       redis = new Redis(redisUrl);
-      // Initialize TaskTracker singleton — required by anchor-selection.ts
-      try { getTracker(); } catch { tracker = createTracker(redisUrl); }
       anchorSelection = await import("../src/anchor-selection.ts");
     }
     await cleanKeys();
