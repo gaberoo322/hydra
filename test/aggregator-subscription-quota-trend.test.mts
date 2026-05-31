@@ -40,6 +40,7 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
       haiku: { ...zero },
       unknown: { ...zero },
     },
+    bySkillByModel: {},
     quotaWeightLast5h: 0,
     quotaWeightLast7d: 0,
     quotaWeightCalibrated: false,

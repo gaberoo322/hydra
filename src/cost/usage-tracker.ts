@@ -40,8 +40,42 @@
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import type { Dirent, Stats } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { homedir } from "node:os";
+import { getSubagentDispatch } from "../redis/dispatches.ts";
+
+/**
+ * Bucket key for sessions that have no `hydra:dispatches:subagent:{sessionId}`
+ * registry entry (legacy transcripts, or an operator-launched session whose
+ * prompt carried no hydra-dispatch sentinel). Tokens are still counted — they
+ * bucket here — so `bySkillByModel` stays reconcilable to `byModel` and to the
+ * per-skill counters in `src/redis/cost.ts`; nothing is dropped. (issue #693)
+ */
+export const UNATTRIBUTED_SKILL = "unattributed";
+
+/**
+ * Resolves a transcript's `sessionId` to the dispatching skill, or null when
+ * the session has no registry entry. The default reads the subagent-dispatch
+ * registry (`getSubagentDispatch`, a pure READ — the tracker keeps its
+ * no-Redis-WRITE posture). Injectable so tests can pin the cross-tab without
+ * standing up Redis. (issue #693)
+ */
+export type SkillResolver = (sessionId: string) => Promise<string | null>;
+
+const defaultSkillResolver: SkillResolver = async (sessionId) => {
+  try {
+    const dispatch = await getSubagentDispatch(sessionId);
+    return dispatch?.skill ?? null;
+  } catch (err: any) {
+    // A Redis hiccup must not take down the read-only usage scan; bucket the
+    // session under `unattributed` (null) and keep totals closed. Logged so a
+    // persistent registry outage is visible rather than silently swallowed.
+    console.error(
+      `[usage-tracker] skill resolution failed for session ${sessionId}: ${err?.message || err}`,
+    );
+    return null;
+  }
+};
 
 const MS_PER_HOUR = 3_600_000;
 const MS_PER_DAY = 86_400_000;
@@ -106,6 +140,20 @@ export interface UsageSnapshot {
    * a family produced no tokens — independent of calibration. (issue #691)
    */
   byModel: Record<ModelFamily, TokenBreakdown>;
+  /**
+   * Per-skill × per-model-family token breakdown over the 7d window. The outer
+   * key is the dispatching skill resolved from the subagent-dispatch registry
+   * (`getSubagentDispatch`); the inner key is the model family. Sessions with
+   * no registry entry bucket under `skill = "unattributed"` (see
+   * {@link UNATTRIBUTED_SKILL}) so totals stay reconcilable to `byModel`.
+   *
+   * Reconciliation invariant: for each family `f`,
+   * `Σ_skill bySkillByModel[skill][f].total === byModel[f].total`. Only skills
+   * that produced tokens in the window appear; each present skill carries all
+   * four family keys (zero-valued where the skill produced none). Pure
+   * read-side projection — NO new Redis writes. (issue #693)
+   */
+  bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>>;
   /**
    * Quota-Weight burn over the 5h window: `Σ family.total * weight(family)`
    * (opus/sonnet/haiku from env, unknown implicit 1.0). Exactly 0 unless ALL
@@ -253,27 +301,51 @@ export async function getUsage(opts: {
   now?: Date;
   force?: boolean;
   projectsRoot?: string;
+  /**
+   * Resolves a transcript's `sessionId` to its dispatching skill for the
+   * `bySkillByModel` cross-tab. Defaults to the subagent-dispatch registry
+   * read. Injected by tests to pin attribution without Redis. (issue #693)
+   */
+  resolveSkill?: SkillResolver;
 } = {}): Promise<UsageSnapshot> {
   const now = opts.now ?? new Date();
   const nowMs = now.getTime();
 
   const overrideRoot = opts.projectsRoot !== undefined;
-  if (!opts.force && !overrideRoot && cache) {
+  const overrideResolver = opts.resolveSkill !== undefined;
+  if (!opts.force && !overrideRoot && !overrideResolver && cache) {
     if (nowMs - cache.storedAt < CACHE_TTL_MS) {
       return cache.snapshot;
     }
   }
 
   const root = opts.projectsRoot ?? getProjectsRoot();
-  const snapshot = await scanUsage(root, now);
+  const resolveSkill = opts.resolveSkill ?? defaultSkillResolver;
+  const snapshot = await scanUsage(root, now, resolveSkill);
 
-  if (!overrideRoot) {
+  if (!overrideRoot && !overrideResolver) {
     cache = { snapshot, storedAt: nowMs };
   }
   return snapshot;
 }
 
-async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
+/**
+ * Derive a transcript's sessionId from its file path. The Claude Code layout
+ * names each transcript `<sessionId>.jsonl`, and the SessionStart capture hook
+ * (issue #692) registers the dispatch under exactly that `session_id`, so the
+ * filename basename is the join key into the dispatch registry. Resolving once
+ * per file (not per line) keeps attribution O(files), honouring the design
+ * invariant. (issue #693)
+ */
+export function sessionIdFromPath(filePath: string): string {
+  return basename(filePath, ".jsonl");
+}
+
+async function scanUsage(
+  root: string,
+  now: Date,
+  resolveSkill: SkillResolver,
+): Promise<UsageSnapshot> {
   const nowMs = now.getTime();
   const cutoff7d = nowMs - WINDOW_7D_MS;
   const cutoff24h = nowMs - WINDOW_24H_MS;
@@ -296,10 +368,17 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
   // 7d window; the 5h split is internal, used only for the 5h Quota Weight.
   const byModel5h = emptyByModel();
   const byModel7d = emptyByModel();
+  // Per-skill × per-family 7d accumulator (the `bySkillByModel` snapshot
+  // field). Skills are added lazily as transcripts resolve to them.
+  const bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
   let tokens24h = 0;
 
   // Dedup unknown-model warnings to AT MOST one per scan (never per-line).
   const unknownModelsSeen = new Set<string>();
+  // Memoise sessionId → skill within a scan so a session with many transcript
+  // shards resolves once, not once-per-shard. (Distinct files usually carry
+  // distinct sessionIds, but a resumed session can append a new shard.)
+  const skillCache = new Map<string, string | null>();
 
   let filesScanned = 0;
   let filesSkippedByMtime = 0;
@@ -331,6 +410,12 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
       continue;
     }
 
+    // Accumulate this file's in-window 7d tokens per family locally, then fold
+    // into the global per-family AND per-skill tables once the file is parsed.
+    // Resolving the skill per FILE (not per line) keeps attribution O(files).
+    const fileByFamily7d = emptyByModel();
+    let fileHadInWindow7d = false;
+
     const lines = content.split("\n");
     for (const line of lines) {
       // Fast reject: most lines are JSON objects; skip blanks instantly.
@@ -352,13 +437,30 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
         unknownModelsSeen.add(parsed.model);
       }
 
+      fileHadInWindow7d = true;
       addBreakdown(acc7d, parsed.tokens);
       addBreakdown(byModel7d[family], parsed.tokens);
+      addBreakdown(fileByFamily7d[family], parsed.tokens);
       if (tsMs >= cutoff24h) tokens24h += parsed.tokens.total;
       if (tsMs >= cutoff5h) {
         addBreakdown(acc5h, parsed.tokens);
         addBreakdown(byModel5h[family], parsed.tokens);
       }
+    }
+
+    // Bucket this file's 7d tokens into the per-skill cross-tab. Skip files
+    // with no in-window tokens so we don't conjure empty skill rows. Exactly
+    // one skill resolution per contributing file (memoised by sessionId).
+    if (fileHadInWindow7d) {
+      const sessionId = sessionIdFromPath(file);
+      let skill = skillCache.get(sessionId);
+      if (skill === undefined) {
+        skill = await resolveSkill(sessionId);
+        skillCache.set(sessionId, skill);
+      }
+      const bucket = skill ?? UNATTRIBUTED_SKILL;
+      const row = (bySkillByModel[bucket] ??= emptyByModel());
+      for (const f of MODEL_FAMILIES) addBreakdown(row[f], fileByFamily7d[f]);
     }
   }
 
@@ -401,6 +503,7 @@ async function scanUsage(root: string, now: Date): Promise<UsageSnapshot> {
     emergencyStop,
     calibrated,
     byModel: byModel7d,
+    bySkillByModel,
     quotaWeightLast5h,
     quotaWeightLast7d,
     quotaWeightCalibrated,

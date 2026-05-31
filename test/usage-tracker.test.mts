@@ -12,9 +12,12 @@ import {
   parseUsageLine,
   cacheHitRatio,
   projectEligibility,
+  sessionIdFromPath,
   PACING_SHEDDABLE_CLASSES,
+  UNATTRIBUTED_SKILL,
   type UsageSnapshot,
   type TokenBreakdown,
+  type SkillResolver,
 } from "../src/cost/index.ts";
 
 function breakdown(p: Partial<TokenBreakdown> = {}): TokenBreakdown {
@@ -704,6 +707,215 @@ describe("usage-tracker", () => {
     });
   });
 
+  describe("sessionIdFromPath", () => {
+    test("derives the sessionId from the transcript filename basename", () => {
+      assert.equal(
+        sessionIdFromPath("/root/proj/38c78e5c-884f-47ae-acb4-5d48286776b3.jsonl"),
+        "38c78e5c-884f-47ae-acb4-5d48286776b3",
+      );
+    });
+
+    test("works on a bare filename", () => {
+      assert.equal(sessionIdFromPath("abc.jsonl"), "abc");
+    });
+  });
+
+  describe("bySkillByModel cross-tab (issue #693)", () => {
+    // A SkillResolver backed by a fixed sessionId -> skill map; null for
+    // sessions absent from the map (the unattributed case). Records calls so
+    // the O(files) resolution invariant can be asserted.
+    function fakeResolver(
+      map: Record<string, string>,
+      calls?: string[],
+    ): SkillResolver {
+      return async (sessionId: string) => {
+        if (calls) calls.push(sessionId);
+        return map[sessionId] ?? null;
+      };
+    }
+
+    test("buckets each session's 7d tokens under its resolved skill × family", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        // sess-dev.jsonl -> hydra-dev; sess-qa.jsonl -> hydra-qa.
+        await writeFixture(root, "p/sess-dev.jsonl", [
+          assistantLine(t, { in: 100 }, "claude-opus-4-7"), // opus 100
+          assistantLine(t, { in: 40 }, "claude-sonnet-4-6"), // sonnet 40
+        ]);
+        await writeFixture(root, "p/sess-qa.jsonl", [
+          assistantLine(t, { in: 25 }, "claude-haiku-4-5"), // haiku 25
+          assistantLine(t, { in: 60 }, "claude-opus-4-7"), // opus 60
+        ]);
+
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          resolveSkill: fakeResolver({
+            "sess-dev": "hydra-dev",
+            "sess-qa": "hydra-qa",
+          }),
+        });
+
+        assert.ok(snap.bySkillByModel["hydra-dev"]);
+        assert.ok(snap.bySkillByModel["hydra-qa"]);
+        assert.equal(snap.bySkillByModel["hydra-dev"].opus.total, 100);
+        assert.equal(snap.bySkillByModel["hydra-dev"].sonnet.total, 40);
+        assert.equal(snap.bySkillByModel["hydra-dev"].haiku.total, 0);
+        assert.equal(snap.bySkillByModel["hydra-qa"].haiku.total, 25);
+        assert.equal(snap.bySkillByModel["hydra-qa"].opus.total, 60);
+        // No spurious unattributed bucket when every session resolved.
+        assert.equal(snap.bySkillByModel[UNATTRIBUTED_SKILL], undefined);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("sessions without a registry entry bucket under 'unattributed'", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        await writeFixture(root, "p/known.jsonl", [
+          assistantLine(t, { in: 100 }, "claude-opus-4-7"),
+        ]);
+        await writeFixture(root, "p/legacy.jsonl", [
+          assistantLine(t, { in: 70 }, "claude-sonnet-4-6"),
+        ]);
+
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          resolveSkill: fakeResolver({ known: "hydra-dev" }), // legacy unmapped
+        });
+
+        assert.equal(snap.bySkillByModel["hydra-dev"].opus.total, 100);
+        assert.ok(snap.bySkillByModel[UNATTRIBUTED_SKILL]);
+        assert.equal(snap.bySkillByModel[UNATTRIBUTED_SKILL].sonnet.total, 70);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("reconciliation: Σ over skills of bySkillByModel[*][f] === byModel[f] per family", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        await writeFixture(root, "p/a.jsonl", [
+          assistantLine(t, { in: 100 }, "claude-opus-4-7"),
+          assistantLine(t, { in: 30 }, "claude-sonnet-4-6"),
+        ]);
+        await writeFixture(root, "p/b.jsonl", [
+          assistantLine(t, { in: 50 }, "claude-opus-4-6"),
+          assistantLine(t, { in: 9 }, "<synthetic>"), // unknown
+        ]);
+        await writeFixture(root, "p/c.jsonl", [
+          assistantLine(t, { in: 11 }, "claude-haiku-4-5"),
+        ]);
+
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          resolveSkill: fakeResolver({ a: "hydra-dev", b: "hydra-qa" }), // c unattributed
+        });
+
+        for (const family of ["opus", "sonnet", "haiku", "unknown"] as const) {
+          for (const field of [
+            "input",
+            "output",
+            "cacheRead",
+            "cacheCreation",
+            "total",
+          ] as const) {
+            const summed = Object.values(snap.bySkillByModel).reduce(
+              (acc, row) => acc + row[family][field],
+              0,
+            );
+            assert.equal(
+              summed,
+              snap.byModel[family][field],
+              `cross-tab must reconcile to byModel for ${family}.${field}`,
+            );
+          }
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("resolves the skill at most once per transcript file (O(files), not O(lines))", async () => {
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        // 4 token-bearing lines in one file -> still exactly one resolution.
+        await writeFixture(root, "p/sess.jsonl", [
+          assistantLine(t, { in: 10 }, "claude-opus-4-7"),
+          assistantLine(t, { in: 10 }, "claude-opus-4-7"),
+          assistantLine(t, { in: 10 }, "claude-sonnet-4-6"),
+          assistantLine(t, { in: 10 }, "claude-haiku-4-5"),
+        ]);
+
+        const calls: string[] = [];
+        await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          resolveSkill: fakeResolver({ sess: "hydra-dev" }, calls),
+        });
+
+        assert.deepEqual(calls, ["sess"]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("calibration discipline preserved: uncalibrated still populates raw cross-tab cells, no weighting", async () => {
+      delete process.env.HYDRA_QUOTA_WEIGHT_OPUS;
+      delete process.env.HYDRA_QUOTA_WEIGHT_SONNET;
+      delete process.env.HYDRA_QUOTA_WEIGHT_HAIKU;
+
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const t = "2026-05-25T11:00:00Z";
+        await writeFixture(root, "p/sess.jsonl", [
+          assistantLine(t, { in: 100 }, "claude-opus-4-7"),
+        ]);
+
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          resolveSkill: fakeResolver({ sess: "hydra-dev" }),
+        });
+
+        // Raw cross-tab cell populated regardless of weight calibration.
+        assert.equal(snap.bySkillByModel["hydra-dev"].opus.total, 100);
+        // No quota-weight env -> uncalibrated -> no weighted burn.
+        assert.equal(snap.quotaWeightCalibrated, false);
+        assert.equal(snap.quotaWeightLast7d, 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("empty when no transcripts produced in-window tokens", async () => {
+      const snap = await getUsage({
+        now: new Date("2026-05-25T12:00:00Z"),
+        projectsRoot: "/does/not/exist/anywhere",
+        force: true,
+        resolveSkill: fakeResolver({}),
+      });
+      assert.deepEqual(snap.bySkillByModel, {});
+    });
+  });
+
   describe("projectEligibility", () => {
     function snapshotWith(overrides: Partial<UsageSnapshot>): UsageSnapshot {
       const empty = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 };
@@ -723,6 +935,7 @@ describe("usage-tracker", () => {
           haiku: { ...empty },
           unknown: { ...empty },
         },
+        bySkillByModel: {},
         quotaWeightLast5h: 0,
         quotaWeightLast7d: 0,
         quotaWeightCalibrated: false,

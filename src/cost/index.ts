@@ -81,7 +81,9 @@ export {
   modelToFamily,
   parseUsageLine,
   cacheHitRatio,
+  sessionIdFromPath,
   PACING_SHEDDABLE_CLASSES,
+  UNATTRIBUTED_SKILL,
 } from "./usage-tracker.ts";
 
 export type {
@@ -90,4 +92,5 @@ export type {
   TokenBreakdown,
   ParsedUsageLine,
   ModelFamily,
+  SkillResolver,
 } from "./usage-tracker.ts";
