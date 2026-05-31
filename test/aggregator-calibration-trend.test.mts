@@ -49,31 +49,61 @@ describe("tierAccuracyForRecord — pure helper", () => {
     );
   });
 
-  test("high tier + failed → correct (1)", () => {
-    assert.equal(
-      tierAccuracyForRecord({ cycleId: "c1", tier: 3, actualOutcome: "failed" }),
-      1,
-    );
-  });
-
-  test("low tier + failed → incorrect (0)", () => {
+  test("auto-merge tier + failed → incorrect (0)", () => {
+    // tier 1 is an auto-merge tier; predicted-merge but failed → wrong.
     assert.equal(
       tierAccuracyForRecord({ cycleId: "c1", tier: 1, actualOutcome: "failed" }),
       0,
     );
   });
 
-  test("boundary: tier 2 is still 'auto-merge' (low)", () => {
+  test("boundary: tier 2 is an auto-merge tier", () => {
     assert.equal(
       tierAccuracyForRecord({ cycleId: "c1", tier: 2, actualOutcome: "failed" }),
       0,
     );
   });
 
-  test("boundary: tier 3 is 'review' (high)", () => {
+  // ADR-0019: tier 3 is an AUTO-MERGE tier (matches the current tier
+  // table: T3 auto-merges unless scope-justification). The pre-ADR-0015
+  // calibration model treated tier 3 as "review/high" — that was the
+  // stale numbering. isAutoMergeTier({1,2,3}) realigns it.
+  test("boundary: tier 3 is an auto-merge tier — merged → correct (1)", () => {
     assert.equal(
       tierAccuracyForRecord({ cycleId: "c1", tier: 3, actualOutcome: "merged" }),
+      1,
+    );
+  });
+
+  test("boundary: tier 3 (auto-merge) + failed → incorrect (0)", () => {
+    assert.equal(
+      tierAccuracyForRecord({ cycleId: "c1", tier: 3, actualOutcome: "failed" }),
       0,
+    );
+  });
+
+  // Regression (ADR-0019 / issue #799): Tier 0 (Verifier Core /
+  // operator-only) is NOT an auto-merge tier — the calibration mismodel
+  // was `tier <= 2`, which scored Tier 0 as predicted-auto-merge.
+  // `isAutoMergeTier(0) === false` now drives `predictedAutoMerge`, so a
+  // Tier-0 PR is no longer modelled as auto-merge.
+  //
+  // With the (unchanged) `predictedAutoMerge === actualMerged` scoring:
+  //   tier 0 + merged   → predicted no-auto-merge but it merged → 0
+  //   tier 0 + failed   → predicted no-auto-merge, did not merge → 1
+  // The defect was the OLD code scoring tier-0+merged as 1 by treating
+  // Tier 0 as auto-merge; the fix removes that false credit.
+  test("regression: tier 0 + merged scores 0 (Tier 0 is not auto-merge; the merge was operator-driven)", () => {
+    assert.equal(
+      tierAccuracyForRecord({ cycleId: "c1", tier: 0, actualOutcome: "merged" }),
+      0,
+    );
+  });
+
+  test("regression: tier 0 + failed scores 1 (predicted non-auto-merge, did not merge → correct)", () => {
+    assert.equal(
+      tierAccuracyForRecord({ cycleId: "c1", tier: 0, actualOutcome: "failed" }),
+      1,
     );
   });
 });
@@ -209,8 +239,10 @@ describe("getCalibrationTrend — happy path", () => {
         recordedAt: "2026-05-26T01:00:00Z",
       },
       {
+        // Tier 0 (Verifier Core / operator-only) — NOT an auto-merge tier.
+        // A non-merged outcome confirms the non-auto-merge prediction. (ADR-0019)
         cycleId: "c2",
-        tier: 3,
+        tier: 0,
         predictedScore: 0.2,
         actualOutcome: "failed",
         recordedAt: "2026-05-26T05:00:00Z",

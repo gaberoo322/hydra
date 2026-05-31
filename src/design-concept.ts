@@ -51,6 +51,7 @@ import {
   type DesignConceptInput as DesignConceptInputType,
 } from "./schemas/design-concept.ts";
 import { classifyChange } from "./tier-classifier.ts";
+import { permitsBreakingChange } from "./tier-policy.ts";
 
 // `DesignConceptInput` is owned by `src/schemas/design-concept.ts` per
 // ADR-0011 (single source of truth: the schema is also the type). The
@@ -440,7 +441,7 @@ export function gateCheck(
     .map((m) => m.path);
   if (breakingPaths.length > 0) {
     const cls = classifyChange(breakingPaths);
-    if (cls.tier < 2) {
+    if (!permitsBreakingChange(cls.tier)) {
       reasons.push(
         `interfaceImpact: 'breaking' on tier-${cls.tier} path(s) — breaking change must classify to tier >= 2 ` +
           `(got: ${cls.reason})`,
