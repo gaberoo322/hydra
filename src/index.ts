@@ -177,9 +177,11 @@ function startConsumers(eventBus) {
 // ---------------------------------------------------------------------------
 let _prLifecycleBridge: PrLifecycleBridge | null = null;
 
-async function startObservabilityBridges(): Promise<void> {
+async function startObservabilityBridges(eventBus: EventBus): Promise<void> {
   try {
-    _prLifecycleBridge = await startPrLifecycleBridge();
+    // Pass the service-wide Event Bus so publishRaw's WS broadcast reaches the
+    // live dashboard clients registered on this bus (ADR-0017 Category B).
+    _prLifecycleBridge = await startPrLifecycleBridge({ eventBus });
   } catch (err: any) {
     console.error(`[Hydra] pr-lifecycle-bridge failed to start: ${err?.message || err}`);
   }
@@ -252,7 +254,7 @@ async function main() {
   // re-broadcasts over WS) so dashboard tiles like BattleCardRow can react
   // without round-tripping the REST API. (The sibling budget-threshold
   // bridge was removed in #703 — it polled a dead Redis key.)
-  await startObservabilityBridges();
+  await startObservabilityBridges(eventBus);
 
   // Start digest notifications (4h summaries instead of per-event messages)
   startDigest();
