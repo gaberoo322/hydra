@@ -212,6 +212,43 @@ export function classifyFile(file: string, body: string): Violation[] {
 }
 
 // ---------------------------------------------------------------------------
+// Distinctive-dependency filter — swap-seam vocabulary (ADR-0013).
+//
+// Relocated here from the (now-deleted) src/codebase-analyzer.ts in issue #785:
+// it is the only export that survived, it was consumed solely by this guard's
+// test, and the filter IS swap-seam logic — it decides which of a target's
+// package.json dependencies *distinguish* that target from a generic web app.
+// Co-locating it with the coupling check keeps that vocabulary inside the
+// swap-seam guard and CI-exercisable, instead of stranding a production src/
+// module alive only because a test borrowed one function.
+// ---------------------------------------------------------------------------
+
+/**
+ * Common web-framework dependency prefixes that every target sharing this
+ * Next/React/Drizzle stack carries — these say nothing distinctive about what a
+ * target *is*, so they're filtered out of the "key dependencies" signal. This
+ * is an EXCLUSION list of generic infrastructure, deliberately containing no
+ * target-domain vocabulary (ADR-0013): a new target's domain packages surface
+ * automatically because they aren't on this list.
+ */
+export const GENERIC_DEP_PREFIXES = [
+  "next", "react", "react-dom", "tailwind", "drizzle", "postgres", "pg",
+  "zod", "typescript", "eslint", "prettier", "vitest", "@types/",
+  "@radix-ui/", "clsx", "tailwind-merge", "lucide-react", "ws", "dotenv",
+];
+
+/**
+ * Pick the dependencies that distinguish this target from a generic web app —
+ * i.e. everything that isn't part of the common framework stack. Target-agnostic
+ * by construction: no venue/domain names are hardcoded.
+ */
+export function pickDistinctiveDependencies(deps: string[]): string[] {
+  return deps.filter(
+    d => !GENERIC_DEP_PREFIXES.some(p => d === p || d.startsWith(p)),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // File discovery + I/O
 // ---------------------------------------------------------------------------
 

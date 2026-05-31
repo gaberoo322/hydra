@@ -5,9 +5,9 @@ import {
   classifyFile,
   isCommentLine,
   violationKey,
+  pickDistinctiveDependencies,
   type Violation,
 } from "../scripts/ci/target-coupling-check.ts";
-import { pickDistinctiveDependencies } from "../src/codebase-analyzer.ts";
 
 // Acceptance criterion (issue #731): the check FAILS on a newly-introduced
 // hardcoded `hydra-betting` reference in src/. The fatal-vs-advisory split keys
