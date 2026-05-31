@@ -734,6 +734,8 @@ describe("usage-tracker", () => {
         linesWithUsage: 0,
         parseErrors: 0,
         generatedAt: "2026-05-26T00:00:00.000Z",
+        cacheHitRatioLast5h: 0,
+        cacheHitRatioLast7d: 0,
       };
       return { ...base, ...overrides };
     }
