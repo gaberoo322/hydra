@@ -448,30 +448,12 @@ export async function loadAgentMemory(agentName: string): Promise<string> {
     }
   }
 
-  // Also load from OpenViking (with tracked metrics + fallback)
-  try {
-    // Cross-cluster reach into the Knowledge Base — formatMemoryForPrompt
-    // composes Pattern Memory (Redis patterns above) with OpenViking memory
-    // search to build the agent's lesson prompt. Kept as a dynamic import so
-    // OV outages don't load the module at all; the cluster boundary remains
-    // visible in the path.
-    const { trackedOvSearch } = await import("../knowledge-base/ov-search.ts");
-    const { memories } = await trackedOvSearch(
-      `${agentName} agent lessons failures prevention`,
-      5,
-    );
-    if (memories.length > 0) {
-      parts.push(`\n# ${agentName} — Learned Patterns (from OpenViking)\n`);
-      for (const mem of memories.slice(0, 5)) {
-        const abstract = mem.abstract || mem.content || "";
-        if (abstract.trim()) {
-          parts.push(`- ${abstract.slice(0, 300)}`);
-        }
-      }
-      parts.push("");
-    }
-  } catch { /* intentional: OV unavailable */ }
-
+  // Issue #804: the OpenViking memory search that used to be folded in HERE has
+  // moved up to the composition seam (learning.ts::loadKnowledgeBaseBlock). It
+  // was dishonest for the context trace to report `agent-memory: hit` when the
+  // content was really Knowledge Base search results, and it hid the OV source
+  // from /api/learning/context-trace. `loadAgentMemory` is now exactly what its
+  // name says: promoted Pattern Memory for the agent, nothing more.
   return parts.join("\n");
 }
 

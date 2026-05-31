@@ -97,14 +97,10 @@ describe("issue #326: reflection by-file index", () => {
     assert.deepEqual(files, []);
   });
 
-  test("reflectionMatchSource buckets the source list correctly", () => {
-    assert.equal(cb.reflectionMatchSource([]), "none");
-    assert.equal(cb.reflectionMatchSource(["per-anchor"]), "by-anchor");
-    assert.equal(cb.reflectionMatchSource(["by-file"]), "by-file");
-    assert.equal(cb.reflectionMatchSource(["per-anchor", "by-file"]), "both");
-    assert.equal(cb.reflectionMatchSource(["global"]), "global");
-    assert.equal(cb.reflectionMatchSource(["per-anchor", "global"]), "mixed");
-  });
+  // Issue #804: cb.reflectionMatchSource was deleted; the categorical bucket
+  // now lives solely in metrics/trend.ts::deriveReflectionMatchSource (which
+  // reads the raw comma-separated Redis field). That bucketing is exercised by
+  // the test immediately below.
 
   test("deriveReflectionMatchSource buckets the raw comma-separated string", () => {
     assert.equal(metrics.deriveReflectionMatchSource(""), "none");
@@ -115,17 +111,16 @@ describe("issue #326: reflection by-file index", () => {
     assert.equal(metrics.deriveReflectionMatchSource(undefined), "none");
   });
 
-  test("inspectReflections detects the new by-file section", async () => {
-    const formatted = [
-      "## RELATED FILES — Prior Failures (2 matched by file)",
-      "",
-      "### cycle-1 (file: src/foo.ts)",
-      "- **Anchor**: anchor 1",
-      "",
-      "### cycle-2 (file: src/foo.ts)",
-      "- **Anchor**: anchor 2",
-    ].join("\n");
-    const result = cb.inspectReflections(formatted);
+  test("reflectionTelemetry attributes the by-file block (issue #804)", () => {
+    // Replaces the deleted inspectReflections by-file header-regex test. The
+    // by-file block's structured itemCount drives count + the "by-file" label.
+    const ctx = {
+      blocks: [
+        { source: "by-file-reflections", status: "hit", content: "## RELATED FILES …", itemCount: 2 },
+      ],
+      toPrompt: () => "",
+    };
+    const result = learning.reflectionTelemetry(ctx);
     assert.equal(result.count, 2);
     assert.deepEqual(result.sources, ["by-file"]);
   });
@@ -176,15 +171,15 @@ describe("issue #326: reflection by-file index", () => {
 
     // Second anchor — completely different reference string — touches the same file.
     const newAnchorRef = "Codebase health: split src/foo.ts module into helpers";
-    const formatted = await reflections.loadAnchorReflectionsByFile(
+    const block = await reflections.loadAnchorReflectionsByFile(
       ["src/foo.ts"],
       newAnchorRef,
     );
 
-    assert.ok(formatted.length > 0, "should retrieve at least one reflection by file");
-    assert.ok(formatted.includes("RELATED FILES"), "should use the by-file header");
-    assert.ok(formatted.includes("cycle-original"), "should include original cycleId");
-    assert.ok(formatted.includes("deriveSport"), "should include reflection content");
+    assert.ok(block.count > 0, "should retrieve at least one reflection by file");
+    assert.ok(block.content.includes("RELATED FILES"), "should use the by-file header");
+    assert.ok(block.content.includes("cycle-original"), "should include original cycleId");
+    assert.ok(block.content.includes("deriveSport"), "should include reflection content");
   });
 
   test("loadAnchorReflectionsByFile excludes the current anchor's own key", async (t) => {
@@ -199,10 +194,11 @@ describe("issue #326: reflection by-file index", () => {
       scopeFiles: ["src/foo.ts"],
     });
 
-    const formatted = await reflections.loadAnchorReflectionsByFile(["src/foo.ts"], anchorRef);
+    const block = await reflections.loadAnchorReflectionsByFile(["src/foo.ts"], anchorRef);
     // The exact-same anchor would already be loaded via the legacy key, so we
     // skip it here to avoid duplicate injection.
-    assert.equal(formatted, "");
+    assert.equal(block.content, "");
+    assert.equal(block.count, 0);
   });
 
   test("loadAnchorReflectionsByFile dedupes the same reflection seen via multiple files", async (t) => {
@@ -216,13 +212,14 @@ describe("issue #326: reflection by-file index", () => {
       scopeFiles: ["src/foo.ts", "src/bar.ts"],
     });
 
-    const formatted = await reflections.loadAnchorReflectionsByFile(
+    const block = await reflections.loadAnchorReflectionsByFile(
       ["src/foo.ts", "src/bar.ts"],
       "unrelated-anchor",
     );
     // Should appear exactly once even though indexed under both files.
-    const occurrences = formatted.match(/cycle-multi/g);
+    const occurrences = block.content.match(/cycle-multi/g);
     assert.equal(occurrences?.length, 1);
+    assert.equal(block.count, 1, "deduped count is 1");
   });
 
   test("backfillByFileIndex idempotently indexes a legacy reflection by its files", async (t) => {

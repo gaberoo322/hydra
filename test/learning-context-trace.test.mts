@@ -33,11 +33,14 @@ describe("getContext returns a structured LearningContext", () => {
       throw err;
     }
 
-    assert.equal(ctx.blocks.length, 4, "four sources contribute one block each");
+    // Issue #804: the Knowledge Base (OpenViking) is now its own honest block,
+    // composed between agent-memory and the reflection sources.
+    assert.equal(ctx.blocks.length, 5, "five sources contribute one block each");
     assert.deepEqual(
       ctx.blocks.map((b: any) => b.source),
       [
         "agent-memory",
+        "knowledge-base",
         "per-anchor-reflections",
         "by-file-reflections",
         "global-reflections",
@@ -49,12 +52,16 @@ describe("getContext returns a structured LearningContext", () => {
         ["hit", "miss", "error"].includes(block.status),
         `block ${block.source} status must be hit/miss/error, got ${block.status}`,
       );
+      // Issue #804: every block carries a numeric itemCount; 0 for miss/error.
+      assert.equal(typeof block.itemCount, "number", `block ${block.source} carries a numeric itemCount`);
       if (block.status === "miss") {
         assert.equal(block.content, "", "miss blocks carry no content");
+        assert.equal(block.itemCount, 0, "miss blocks carry itemCount 0");
         assert.equal(block.error, undefined, "miss blocks carry no error");
       }
       if (block.status === "error") {
         assert.equal(block.content, "", "error blocks carry no content");
+        assert.equal(block.itemCount, 0, "error blocks carry itemCount 0");
         assert.equal(typeof block.error, "string", "error blocks carry an error message");
       }
     }
@@ -91,10 +98,11 @@ describe("getContext returns a structured LearningContext", () => {
     }
   });
 
-  test("missing or empty agent name still returns four blocks", async (t) => {
+  test("missing or empty agent name still returns five blocks", async (t) => {
     // The function shouldn't throw on weird-but-non-crashing inputs; it
     // should return a structured trace where each source decided what
-    // to do. The contract is "four blocks, one per source."
+    // to do. The contract is "five blocks, one per source" (issue #804 added
+    // the knowledge-base block).
     let ctx;
     try {
       ctx = await learning.getContext("", {
@@ -109,7 +117,7 @@ describe("getContext returns a structured LearningContext", () => {
       throw err;
     }
 
-    assert.equal(ctx.blocks.length, 4);
+    assert.equal(ctx.blocks.length, 5);
   });
 
   test("after() — close Redis connections", () => {

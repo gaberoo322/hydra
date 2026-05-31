@@ -47,12 +47,20 @@ import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
 // ===========================================================================
 
 /**
- * The four sources getContext() composes. The names appear in the public
- * trace, so they're part of the interface — renaming one is a breaking
- * change for anything reading /api/learning/context-trace.
+ * The sources getContext() composes. The names appear in the public trace,
+ * so they're part of the interface — renaming one is a breaking change for
+ * anything reading /api/learning/context-trace.
+ *
+ * Issue #804: `"knowledge-base"` joins the union. OpenViking search used to
+ * be folded silently into the `agent-memory` block (inside `loadAgentMemory`);
+ * it now surfaces as its own honest block at this composition seam. The OV
+ * cluster is still *composed* here, not *owned* here — the dynamic import that
+ * reaches OV lives behind `loadKnowledgeBaseBlock`, keeping the cluster
+ * boundary visible (see CONTEXT.md — Learning Context).
  */
 export type LearningContextSource =
   | "agent-memory"
+  | "knowledge-base"
   | "per-anchor-reflections"
   | "by-file-reflections"
   | "global-reflections";
@@ -69,11 +77,19 @@ export type LearningContextSource =
  *               by-file index drift, etc.).
  *
  * `content` carries the raw block text for "hit"; empty otherwise.
+ *
+ * Issue #804: `itemCount` is the structured count of discrete items the block
+ * contributed — reflections for the reflection sources, OpenViking memories
+ * for `knowledge-base`, promoted-pattern groups for `agent-memory`. It is
+ * sourced from the underlying data, NOT regex-scanned out of the rendered
+ * markdown. `0` for `miss`/`error` blocks. This is the field that lets
+ * reflection-injection telemetry be exact instead of re-parsing the prompt.
  */
 export interface LearningContextBlock {
   source: LearningContextSource;
   status: "hit" | "miss" | "error";
   content: string;
+  itemCount: number;
   error?: string;
 }
 
@@ -87,6 +103,48 @@ export interface LearningContext {
   blocks: LearningContextBlock[];
   /** Join the content of every "hit" block with the legacy "\n\n" separator. */
   toPrompt(): string;
+}
+
+/**
+ * Categorical reflection-source labels used by cycle metrics. These mirror the
+ * historical `ReflectionSource` union in context-builder.ts (kept identical so
+ * the `reflectionSources` Redis field and its dashboards are unchanged).
+ */
+export type ReflectionSource = "per-anchor" | "global" | "by-file";
+
+/** Map a LearningContextSource to its metric-facing reflection label. */
+const REFLECTION_SOURCE_LABEL: Partial<Record<LearningContextSource, ReflectionSource>> = {
+  "per-anchor-reflections": "per-anchor",
+  "by-file-reflections": "by-file",
+  "global-reflections": "global",
+};
+
+/**
+ * Issue #804: derive reflection-injection telemetry directly from the
+ * structured blocks — NO regex over rendered markdown. This is the function
+ * that replaces context-builder.ts's `inspectReflections`, which used to
+ * re-parse `## PRIOR ATTEMPTS (N…` headers out of the flattened prompt string.
+ *
+ * `count` sums `itemCount` across the three reflection blocks that scored a
+ * "hit"; `sources` lists which of them contributed, in canonical order.
+ * Pattern-memory and knowledge-base blocks are NOT reflections and never count
+ * here (they were never counted by the old regex either).
+ */
+export function reflectionTelemetry(ctx: LearningContext): {
+  count: number;
+  sources: ReflectionSource[];
+} {
+  let count = 0;
+  const sources: ReflectionSource[] = [];
+  for (const block of ctx.blocks) {
+    const label = REFLECTION_SOURCE_LABEL[block.source];
+    if (!label) continue;
+    if (block.status === "hit" && block.itemCount > 0) {
+      count += block.itemCount;
+      sources.push(label);
+    }
+  }
+  return { count, sources };
 }
 
 function buildContext(blocks: LearningContextBlock[]): LearningContext {
@@ -105,11 +163,53 @@ async function loadAgentMemoryBlock(agent: string): Promise<LearningContextBlock
   try {
     const memory = await loadAgentMemory(agent);
     const formatted = formatMemoryForPrompt(memory, agent);
-    if (formatted) return { source: "agent-memory", status: "hit", content: formatted };
-    return { source: "agent-memory", status: "miss", content: "" };
+    if (formatted) {
+      // itemCount = number of formatted pattern groups. Each pattern block is
+      // rendered with an `### [severity]` header by formatMemoryForPrompt.
+      const itemCount = (formatted.match(/^### \[/gm) || []).length;
+      return { source: "agent-memory", status: "hit", content: formatted, itemCount };
+    }
+    return { source: "agent-memory", status: "miss", content: "", itemCount: 0 };
   } catch (err: any) {
     console.error(`[Learning] getContext: agent memory load failed for ${agent}: ${err.message}`);
-    return { source: "agent-memory", status: "error", content: "", error: err.message };
+    return { source: "agent-memory", status: "error", content: "", itemCount: 0, error: err.message };
+  }
+}
+
+/**
+ * Knowledge Base (OpenViking) block (issue #804). This call used to live
+ * buried inside `loadAgentMemory` (pattern-memory/agent-memory.ts), folding
+ * OV memories into the `agent-memory` block so the trace dishonestly reported
+ * `agent-memory: hit` when the content was really OV search results. Lifting
+ * it here makes the OV source a first-class, attributable block.
+ *
+ * Per CONTEXT.md, the Knowledge Base is queried by subagents directly at their
+ * own seam; this dispatch-time block only *enriches* the planner prompt. So
+ * the OV reach stays a dynamic import behind the cluster boundary — composed
+ * here, not owned here.
+ *
+ * Fail-loud: an OV outage surfaces as `status: "error"` with the message, not
+ * a silent drop (the old folded path swallowed OV errors with a bare catch).
+ */
+async function loadKnowledgeBaseBlock(agent: string): Promise<LearningContextBlock> {
+  try {
+    const { trackedOvSearch } = await import("./knowledge-base/ov-search.ts");
+    const { memories } = await trackedOvSearch(
+      `${agent} agent lessons failures prevention`,
+      5,
+    );
+    const top = memories.slice(0, 5);
+    const parts: string[] = [];
+    for (const mem of top) {
+      const abstract = mem.abstract || mem.content || "";
+      if (abstract.trim()) parts.push(`- ${abstract.slice(0, 300)}`);
+    }
+    if (parts.length === 0) return { source: "knowledge-base", status: "miss", content: "", itemCount: 0 };
+    const content = `# ${agent} — Learned Patterns (from OpenViking)\n\n${parts.join("\n")}`;
+    return { source: "knowledge-base", status: "hit", content, itemCount: parts.length };
+  } catch (err: any) {
+    console.error(`[Learning] getContext: knowledge-base (OV) search failed for ${agent}: ${err.message}`);
+    return { source: "knowledge-base", status: "error", content: "", itemCount: 0, error: err.message };
   }
 }
 
@@ -118,7 +218,7 @@ async function loadPerAnchorReflectionsBlock(
 ): Promise<LearningContextBlock> {
   try {
     const reflections = await loadAnchorReflections(anchor.reference);
-    if (!reflections) return { source: "per-anchor-reflections", status: "miss", content: "" };
+    if (reflections.count === 0) return { source: "per-anchor-reflections", status: "miss", content: "", itemCount: 0 };
     // Acceptance: "Backfill on read: when an old reflection is hit by the
     // legacy path, opportunistically index it under by-file:". Side effect
     // is intentional and bounded — pre-#326 reflections age out at TTL.
@@ -127,10 +227,10 @@ async function loadPerAnchorReflectionsBlock(
     } catch (err: any) {
       console.error(`[Learning] getContext: by-file backfill failed for "${anchor.reference}": ${err.message}`);
     }
-    return { source: "per-anchor-reflections", status: "hit", content: reflections };
+    return { source: "per-anchor-reflections", status: "hit", content: reflections.content, itemCount: reflections.count };
   } catch (err: any) {
     console.error(`[Learning] getContext: per-anchor reflections failed for "${anchor.reference}": ${err.message}`);
-    return { source: "per-anchor-reflections", status: "error", content: "", error: err.message };
+    return { source: "per-anchor-reflections", status: "error", content: "", itemCount: 0, error: err.message };
   }
 }
 
@@ -139,13 +239,13 @@ async function loadByFileReflectionsBlock(
 ): Promise<LearningContextBlock> {
   try {
     const files = extractFilesFromAnchor(anchor.reference, anchor.files);
-    if (files.length === 0) return { source: "by-file-reflections", status: "miss", content: "" };
+    if (files.length === 0) return { source: "by-file-reflections", status: "miss", content: "", itemCount: 0 };
     const byFile = await loadAnchorReflectionsByFile(files, anchor.reference);
-    if (byFile) return { source: "by-file-reflections", status: "hit", content: byFile };
-    return { source: "by-file-reflections", status: "miss", content: "" };
+    if (byFile.count > 0) return { source: "by-file-reflections", status: "hit", content: byFile.content, itemCount: byFile.count };
+    return { source: "by-file-reflections", status: "miss", content: "", itemCount: 0 };
   } catch (err: any) {
     console.error(`[Learning] getContext: by-file reflections failed for "${anchor.reference}": ${err.message}`);
-    return { source: "by-file-reflections", status: "error", content: "", error: err.message };
+    return { source: "by-file-reflections", status: "error", content: "", itemCount: 0, error: err.message };
   }
 }
 
@@ -155,11 +255,11 @@ async function loadGlobalReflectionsBlock(
   try {
     const relevant = await loadRelevantReflections(anchor);
     const formatted = formatReflectionsForPrompt(relevant);
-    if (formatted) return { source: "global-reflections", status: "hit", content: formatted };
-    return { source: "global-reflections", status: "miss", content: "" };
+    if (formatted) return { source: "global-reflections", status: "hit", content: formatted, itemCount: relevant.length };
+    return { source: "global-reflections", status: "miss", content: "", itemCount: 0 };
   } catch (err: any) {
     console.error(`[Learning] getContext: global reflections failed for "${anchor.reference}": ${err.message}`);
-    return { source: "global-reflections", status: "error", content: "", error: err.message };
+    return { source: "global-reflections", status: "error", content: "", itemCount: 0, error: err.message };
   }
 }
 
@@ -175,13 +275,16 @@ async function loadGlobalReflectionsBlock(
  * `anchor.files` (optional) hints scope files for the by-file index
  * lookup. When omitted, file paths are extracted from `anchor.reference`.
  *
- * The four sources, in prompt order:
+ * The five sources, in prompt order (issue #804 added knowledge-base):
  *
  *   1. agent-memory             — promoted pattern lessons for `agent`
- *   2. per-anchor-reflections   — legacy verbatim-key match on `reference`
- *   3. by-file-reflections      — reflections from *other* anchors that
+ *   2. knowledge-base           — OpenViking memory search (lifted out of the
+ *                                 agent-memory block so OV is honestly
+ *                                 attributed in the trace)
+ *   3. per-anchor-reflections   — legacy verbatim-key match on `reference`
+ *   4. by-file-reflections      — reflections from *other* anchors that
  *                                 touched the same files (issue #326)
- *   4. global-reflections       — Reflexion-style relevant reflections
+ *   5. global-reflections       — Reflexion-style relevant reflections
  */
 export async function getContext(
   agent: string,
@@ -190,6 +293,7 @@ export async function getContext(
   const blocks: LearningContextBlock[] = [];
 
   blocks.push(await loadAgentMemoryBlock(agent));
+  blocks.push(await loadKnowledgeBaseBlock(agent));
   blocks.push(await loadPerAnchorReflectionsBlock(anchor));
   blocks.push(await loadByFileReflectionsBlock(anchor));
   blocks.push(await loadGlobalReflectionsBlock(anchor));
