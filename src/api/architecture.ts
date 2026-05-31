@@ -21,7 +21,7 @@ const GROUPS = [
   { id: "agents", label: "Agents (legacy / stubs)", color: "blue",
     modules: ["context-builder"] },
   { id: "quality", label: "Quality & Verification", color: "amber",
-    modules: ["codebase-health", "codebase-analyzer"] },
+    modules: ["codebase-health"] },
   { id: "knowledge", label: "Knowledge & Learning", color: "purple",
     modules: ["knowledge-indexer", "learning", "reflections", "agent-memory", "pattern-detector", "prompt-evolution", "repo-map", "grounding", "ov-session"] },
   { id: "state", label: "State & Data", color: "cyan",
