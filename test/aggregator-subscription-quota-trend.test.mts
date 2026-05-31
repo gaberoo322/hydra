@@ -34,6 +34,15 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     pacingState: "under",
     emergencyStop: false,
     calibrated: true,
+    byModel: {
+      opus: { ...zero },
+      sonnet: { ...zero },
+      haiku: { ...zero },
+      unknown: { ...zero },
+    },
+    quotaWeightLast5h: 0,
+    quotaWeightLast7d: 0,
+    quotaWeightCalibrated: false,
     weeklyQuotaTokens: 1000,
     fiveHourQuotaTokens: 100,
     filesScanned: 1,
@@ -42,6 +51,8 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     linesWithUsage: 1,
     parseErrors: 0,
     generatedAt: NOW.toISOString(),
+    cacheHitRatioLast5h: 0,
+    cacheHitRatioLast7d: 0,
     ...overrides,
   };
 }
