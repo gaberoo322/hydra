@@ -84,11 +84,29 @@ Common skip scenarios:
 The kill-rate threshold itself is unchanged. A PR that touches even one
 `src/**/*.ts` file runs the full gate against that file's mutants.
 
-**Threshold.** `MUTATION_KILL_RATE_FLOOR` repo variable (integer percent).
-Default: `30`. Matches the pre-cut-over in-cycle gate
-(`DEFAULT_STANDARD_KILL_THRESHOLD = 30` in `src/mutation.ts`). Issue #653
-did NOT change this — diff scoping only changes WHAT is mutated, not the
-acceptance bar.
+**Threshold (tier-dependent — issue #778).** The floor the kill rate must
+clear depends on the PR's **Modification Tier** (computed by the workflow
+via `scripts/tier-classify.ts` → `classifyChange()`, the single tier
+authority, and passed to the gate as `PR_TIER`):
+
+| Tier band | Repo variable | Default | Applies to |
+|-----------|---------------|---------|------------|
+| T1 / T2   | `MUTATION_KILL_RATE_FLOOR`    | `30` | Prompt / skill / dashboard diffs |
+| T3 / T4   | `MUTATION_KILL_RATE_FLOOR_T3` | `55` | Core `src/` + demoted infra (T3) and Verifier Core (T4) |
+
+The predicate is `tier >= 3` (in `selectKillFloor()` in
+`scripts/ci/mutation-check.ts`), so **T4 / Verifier-Core diffs inherit the
+T3 floor and can never drop below it** — consistent with ADR-0015's
+monotonic ladder (T4 inherits T3's verification depth). The base `30`
+still matches the pre-cut-over in-cycle gate
+(`DEFAULT_STANDARD_KILL_THRESHOLD = 30` in `src/mutation.ts`).
+
+Floor selection is pure and deterministic from the tier integer — there is
+**no per-path hardcoding** in the gate. Both floors are repo-variable
+configurable, not buried magic numbers; if `PR_TIER` is missing or garbled
+the gate falls back to the conservative T3 band rather than silently
+relaxing. Issue #653 (diff scoping) changed only WHAT is mutated; issue
+#778 raises the acceptance bar for deep diffs.
 
 **Budget.** `MUTATION_TIME_BUDGET_MS` env var (default `540_000` = 9 minutes).
 The CI step itself has a hard 10-minute `timeout-minutes: 10` ceiling.

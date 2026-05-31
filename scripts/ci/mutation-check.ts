@@ -18,7 +18,15 @@
  *
  * Inputs (env):
  *   CHANGED_FILES               — newline-separated list of files in the diff
- *   MUTATION_KILL_RATE_FLOOR    — kill-rate floor as integer percent (default 30)
+ *   MUTATION_KILL_RATE_FLOOR    — base kill-rate floor as integer percent for
+ *                                 T1/T2 diffs (default 30)
+ *   MUTATION_KILL_RATE_FLOOR_T3 — kill-rate floor for T3/T4 diffs (default 55;
+ *                                 issue #778 — depth-gate protection for the
+ *                                 load-bearing core paths #767 demoted to T3)
+ *   PR_TIER                     — the Modification Tier (1|2|3|4) of this PR's
+ *                                 diff, computed by the workflow via
+ *                                 scripts/tier-classify.ts (the single tier
+ *                                 authority). tier>=3 selects the T3 floor.
  *   MUTATION_TIME_BUDGET_MS     — overall time budget (default 540_000 = 9m,
  *                                 leaves 60s buffer under the 10m CI step timeout)
  *   MUTATION_MAX_MUTANTS        — optional cap on candidate mutants
@@ -56,7 +64,33 @@ export function filterMutationCandidates(changedFiles: string[]): string[] {
 }
 
 const DEFAULT_KILL_FLOOR = 30;
+const DEFAULT_T3_KILL_FLOOR = 55;
 const DEFAULT_TIME_BUDGET_MS = 540_000;
+
+/**
+ * Select the mutation kill-rate floor for a PR from its Modification Tier
+ * (issue #778 — T3 depth-gate protection).
+ *
+ * Rule: tier>=3 (T3 core src/, and T4 which inherits T3's verification
+ * depth) must clear the raised `t3Floor`; T1/T2 retain the existing
+ * `baseFloor`. The predicate is `tier>=3`, not `tier===3`, precisely so a
+ * T4 / Verifier-Core diff never drops below the T3 bar.
+ *
+ * Pure and deterministic from the tier integer — no per-path hardcoding
+ * (AC#3). The tier is sourced upstream from classifyChange() (the single
+ * tier authority); this helper only maps tier -> floor. A non-finite or
+ * out-of-range tier (e.g. a missing/garbled PR_TIER env) is treated
+ * conservatively as the T3 band so a classification failure never
+ * silently relaxes the floor.
+ */
+export function selectKillFloor(
+  tier: number,
+  baseFloor: number,
+  t3Floor: number,
+): number {
+  if (!Number.isFinite(tier)) return t3Floor;
+  return tier >= 3 ? t3Floor : baseFloor;
+}
 
 function readChangedFiles(): string[] {
   const env = process.env.CHANGED_FILES ?? "";
@@ -121,13 +155,23 @@ async function main(): Promise<number> {
     return 0;
   }
 
-  const killFloor = parseIntEnv("MUTATION_KILL_RATE_FLOOR", DEFAULT_KILL_FLOOR);
+  // Issue #778: the floor is tier-dependent. T1/T2 keep the base floor;
+  // T3/T4 must clear the raised T3 floor. The tier is computed upstream by
+  // the workflow (scripts/tier-classify.ts → classifyChange) and passed in
+  // as PR_TIER — CI orchestration owns floor policy; the tier classifier
+  // stays a pure path->tier mapper and src/mutation.ts stays
+  // threshold-agnostic.
+  const baseFloor = parseIntEnv("MUTATION_KILL_RATE_FLOOR", DEFAULT_KILL_FLOOR);
+  const t3Floor = parseIntEnv("MUTATION_KILL_RATE_FLOOR_T3", DEFAULT_T3_KILL_FLOOR);
+  const tier = parseIntEnv("PR_TIER", 3); // missing/garbled tier → conservative T3 band
+  const killFloor = selectKillFloor(tier, baseFloor, t3Floor);
   const timeBudgetMs = parseIntEnv("MUTATION_TIME_BUDGET_MS", DEFAULT_TIME_BUDGET_MS);
   const maxMutantsRaw = process.env.MUTATION_MAX_MUTANTS;
   const maxMutants = maxMutantsRaw ? parseInt(maxMutantsRaw, 10) : undefined;
 
   process.stderr.write(
-    `Mutation gate: ${inspectable.length} inspectable file(s), floor=${killFloor}%, budget=${timeBudgetMs}ms\n`,
+    `Mutation gate: ${inspectable.length} inspectable file(s), tier=${tier}, ` +
+    `floor=${killFloor}% (base=${baseFloor}/T3=${t3Floor}), budget=${timeBudgetMs}ms\n`,
   );
 
   const projectDir = process.cwd();
@@ -165,6 +209,7 @@ async function main(): Promise<number> {
     status: killRate < killFloor ? "fail" : "pass",
     killRate,
     killFloor,
+    tier,
     killed: report.killed,
     survived: report.survived,
     testable,
