@@ -192,8 +192,13 @@ describe("Outcome Holdback producer (enroll → check)", () => {
 
   before(async () => {
     try {
-      redis = new Redis(process.env.REDIS_URL!, { lazyConnect: true, maxRetriesPerRequest: 1 });
-      await redis.connect();
+      // Use the single-string-arg ioredis overload (`new Redis(url)`) — the
+      // pattern the rest of the suite uses. The `(url-string, options)` form
+      // makes TS drop the `(path, options)` overload and fall through to
+      // `(port: number, options)`, raising TS2345 (issue #750 ratchet). ioredis
+      // connects on construction; `ping()` (guarded by the catch) surfaces an
+      // unreachable Redis so the live-DB tests skip cleanly.
+      redis = new Redis(process.env.REDIS_URL!);
       await redis.ping();
       redisUp = true;
     } catch {
