@@ -38,6 +38,39 @@ The old Tier-0 "Untouchable Core" was 11 paths conflating two different risks. T
 - **Auto-merge the verifier with no live-gate invariant.** Rejected: this is the literal circularity hole — a change to `ci.yml` verified by the proposed `ci.yml` can neuter all future verification in one merge.
 - **A weighted confidence score per tier.** Rejected in favor of explicit hard gates per tier: deterministic, auditable, and consistent with "hard verification is never an agent claim."
 
+## Live-gate invariant (implementation — issue #738)
+
+A change to the **Verifier Core** is verified by the *currently-deployed*
+gate, never by the proposed one. CI realises this in the `tier-gate` job of
+`.github/workflows/ci.yml` via `scripts/ci/live-gate.sh`:
+
+1. **The changed-file LIST is always the PR diff** (head vs base). The
+   invariant moves only the classifier *logic*, never the file list — you
+   judge the PR's files using the old rules.
+2. **"Is this a Verifier Core PR?" is decided with the BASE-ref
+   `isVerifierCore`** (extracted from `merge-base origin/master HEAD`), so a
+   PR cannot remove its own path from `VERIFIER_CORE_PATHS` on its head and
+   thereby dodge base-ref treatment.
+3. **If yes → classify with base-ref scripts.** The three import-closed
+   scripts (`scripts/tier-classify.ts → src/tier-classifier.ts →
+   src/untouchable.ts`) are extracted from the base ref into a temp tree and
+   run with the workspace's `tsx`. A neutered head classifier (e.g. one that
+   returns T1 for `ci.yml`) is still caught, because the base-ref classifier
+   — which still works — does the classifying.
+4. **If no → run the head-ref classifier exactly as today.** Zero behavior
+   change for the ~95% common case.
+
+Base ref = `git merge-base origin/master HEAD`, **not**
+`pull_request.base.sha` (which goes stale on rebased PRs) — the same
+rebase-safe pattern the `mutation-test` job uses. The verdict semantics
+(T4 → `operator-approved` required, pre-#743) are unchanged; only the
+*source* of the classifier rules moves from head to base. A regression
+fixture (`test/live-gate.test.mts`) exercises the branching — including the
+neutered-head case — without a real GitHub PR. The inline comment in
+`ci.yml`'s tier-gate job and the header of `live-gate.sh` warn future
+editors not to route Verifier Core PRs back through the head-tree
+classifier, which would re-open the circularity hole.
+
 ## Consequences
 
 - `should_auto_merge()` in `scripts/autopilot/decide.py` collapses: every tier returns a merge path; the `tier == 0 → queue-decision` and `tier == 3 + scope-justification → queue-decision` branches are replaced by tier-scaled gate requirements + the remediation loop. (The stale CLAUDE.md "Tier 3 = operator merges" table is corrected — decide.py already auto-merged most Tier 3.)
