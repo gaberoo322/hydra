@@ -41,6 +41,49 @@ function dcHashKey(anchorRef: string): string {
   return `hydra:design-concept:${anchorRef}`;
 }
 
+/**
+ * Canonicalize an anchorRef to the `issue-<N>` form used end-to-end by the
+ * autopilot signal path (issue #736). This is a *keying* concern, so it
+ * lives in the persistence seam (ADR-0018): every accessor that uses
+ * `anchorRef` in a key-shaped position normalizes the parameter at function
+ * ENTRY, so the hash key suffix and the index ZSET member can never disagree.
+ *
+ * The wedge: the grill/writer sometimes persists under a bare issue number
+ * (`"736"` → key `hydra:design-concept:736`), but every reader — the
+ * autopilot's `orch_pending_grill_anchor` signal, `collect-state.sh`'s
+ * `/api/design-concepts/issue-<N>` probe, the slot `anchor` field, and
+ * candidate refs — uses the `issue-<N>` form. The mismatch orphaned the
+ * artifact: `GET /api/design-concepts/736` → 200, `GET .../issue-736` → 404,
+ * so `design_concept_orch` re-grilled forever and `dev_orch` was starved.
+ *
+ * Normalizing at the persistence seam (used by BOTH write and read) makes
+ * the round-trip total: a bare `"736"` and the dispatched `"issue-736"`
+ * resolve to the same canonical key `issue-736`, regardless of which form
+ * the caller supplies. Non-issue refs (kanban titles, work-queue
+ * descriptions, the `test:*` refs) are passed through unchanged.
+ *
+ * Rules:
+ *   - `"736"` (pure digits)        → `"issue-736"`
+ *   - `"#736"` (leading hash)      → `"issue-736"`
+ *   - `"issue-736"` (already canon)→ `"issue-736"` (idempotent)
+ *   - `"PR-4: foo"`, `"some title"`→ unchanged (not an issue number)
+ */
+export function normalizeAnchorRef(anchorRef: string): string {
+  if (typeof anchorRef !== "string") return anchorRef;
+  const trimmed = anchorRef.trim();
+  if (trimmed === "") return trimmed;
+  // Already canonical: `issue-<digits>` (case-insensitive on the prefix).
+  if (/^issue-\d+$/i.test(trimmed)) {
+    return `issue-${trimmed.slice(trimmed.indexOf("-") + 1)}`;
+  }
+  // Bare issue number, optionally prefixed with `#` or `issue #`.
+  const m = trimmed.match(/^(?:issue\s*)?#?(\d+)$/i);
+  if (m) {
+    return `issue-${m[1]}`;
+  }
+  return trimmed;
+}
+
 // ---------------------------------------------------------------------------
 // DC hash + index accessors
 // ---------------------------------------------------------------------------
@@ -59,16 +102,19 @@ export async function saveDesignConceptHash(
   ttlSeconds: number,
 ): Promise<void> {
   const r = getRedisConnection();
-  const key = dcHashKey(anchorRef);
+  // Canonicalize once at the seam so the hash key AND the index member agree
+  // (ADR-0018 / issue #736).
+  const canonicalRef = normalizeAnchorRef(anchorRef);
+  const key = dcHashKey(canonicalRef);
   await r.hset(key, ...fields);
   await r.expire(key, ttlSeconds);
-  await r.zadd(DC_INDEX_KEY, createdAt, anchorRef);
+  await r.zadd(DC_INDEX_KEY, createdAt, canonicalRef);
 }
 
 /** Read the full DC hash for `anchorRef`. Returns {} when absent. */
 export async function getDesignConceptHash(anchorRef: string): Promise<Record<string, string>> {
   const r = getRedisConnection();
-  return r.hgetall(dcHashKey(anchorRef));
+  return r.hgetall(dcHashKey(normalizeAnchorRef(anchorRef)));
 }
 
 /** Update a single field on the DC hash (used by approval). */
@@ -78,7 +124,7 @@ export async function setDesignConceptField(
   value: string,
 ): Promise<void> {
   const r = getRedisConnection();
-  await r.hset(dcHashKey(anchorRef), field, value);
+  await r.hset(dcHashKey(normalizeAnchorRef(anchorRef)), field, value);
 }
 
 /** Read every anchorRef in the DC index, newest-first. */
@@ -96,7 +142,7 @@ export async function listRecentDesignConceptRefs(limit: number): Promise<string
 /** Drop an anchorRef from the DC index (used by stale-entry prune). */
 export async function removeDesignConceptFromIndex(anchorRef: string): Promise<void> {
   const r = getRedisConnection();
-  await r.zrem(DC_INDEX_KEY, anchorRef);
+  await r.zrem(DC_INDEX_KEY, normalizeAnchorRef(anchorRef));
 }
 
 /** Append an exempt-log entry (JSON-serialized) to the audit list. */
