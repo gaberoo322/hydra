@@ -58,7 +58,7 @@ The orchestrator service still owns:
 - Scheduler (research-floor enforcement, daily-spend tally, cycle metrics aggregation)
 - Knowledge plane (OpenViking indexing, search)
 - Dashboard + REST API
-- Merge-gate facade (`src/gate.ts`), tier classifier, and Tier-2 outcome holdback
+- Tier classifier (`src/tier-classifier.ts`) + protected-paths list (`src/untouchable.ts`) — the **Pre-merge Gate** itself is CI jobs + branch protection, not an in-process module; `src/gate.ts` was removed with the codex control loop (ADR-0006, issue #383). Post-merge regression watching is the `hydra-qa` **Post-merge Regression Check**, not an in-process holdback watcher.
 
 ## Target conventions
 
