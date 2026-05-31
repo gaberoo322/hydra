@@ -30,6 +30,22 @@
 # This file is intentionally seeded with one `kind: file` outcome so the
 # loader has a working read path with no external dependencies. Real
 # leading/terminal outcomes against the target are added by the operator.
+#
+# Outcome Holdback tunables (issue #786, ADR-0004 step 4)
+# -------------------------------------------------------
+# The Post-merge Regression Check (the Outcome Holdback producer) watches the
+# LEADING outcomes above after a merge and auto-reverts on an unfavorable move
+# past `noise_epsilon`. Its windows/caps are named, env-overridable values (not
+# magic literals) so #741 can layer a tier-aware window map on top without code
+# edits. Defaults live in `src/redis/holdback.ts`; override via env:
+#
+#   HYDRA_HOLDBACK_WINDOW_CYCLES         (default 5)   T2-floor watch window
+#   HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY   (default 3)   global per-UTC-day cap
+#   HYDRA_HOLDBACK_BASELINE_TTL_SECONDS  (default 14d) baseline-record TTL
+#   HYDRA_HOLDBACK_CYCLE_MS              (default 1h)  wall-clock per cycle
+#
+# Only `kind: leading` outcomes ever drive a holdback revert — terminal
+# outcomes are too slow for the window (see the `kind` notes above).
 
 outcomes:
   - name: orchestrator-self-improvement-share

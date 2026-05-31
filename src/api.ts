@@ -15,6 +15,7 @@ import { createMetricsRouter } from "./api/metrics.ts";
 import { createMiscRouter } from "./api/misc.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
 import { createOutcomesRouter } from "./api/outcomes.ts";
+import { createHoldbackRouter } from "./api/holdback.ts";
 import { createOpenVikingRouter } from "./api/openviking.ts";
 import { createGoalsRouter } from "./api/goals.ts";
 import { createEventsRouter } from "./api/events.ts";
@@ -107,6 +108,10 @@ function createApi(eventBus) {
   // /api/checklist sub-router retired in slice 6 of the dashboard
   // simplification (issue #621). Only the deleted Checklist page consumed it.
   api.use(createOutcomesRouter());
+  // Outcome Holdback producer (issue #786, ADR-0004 step 4) — the post-merge
+  // regression-check write surface that finally feeds digest.ts's orphaned
+  // holdback.* consumer. Needs eventBus to emit on hydra:notifications.
+  api.use(createHoldbackRouter(eventBus));
 
   // Sentry error handler — must be after all routes, before other error handlers
   Sentry.setupExpressErrorHandler(app);
