@@ -238,6 +238,80 @@ export function classifyVerdict(
 }
 
 /**
+ * T3 adversarial-QA aggregation (issue #739).
+ *
+ * Tier model (ADR-0015, monotonic T1<T2<T3<T4): a T3-classified diff must
+ * survive an *adversarial* (refutation-framed) review before it auto-merges.
+ * Instead of a single standard QA pass, the playbook fans out to TWO
+ * independent reviewers — each prompted to actively find a reason the change
+ * is wrong / regresses something, neither told the other exists. The diff
+ * passes only if BOTH reviewers surface no real blocker; a single real
+ * blocker from EITHER reviewer is a FAIL.
+ *
+ * This helper is the pure aggregation rule. It does NOT change the verdict
+ * literal consumed by decide.py — it folds the two reviewer verdicts into the
+ * single `ReviewVerdict` ("PASS" | "FAIL") that `classifyVerdict` already
+ * takes. The CI-state classification downstream is unchanged; this is purely
+ * additive verification depth (the issue: "no policy change here").
+ *
+ * Tiering is the caller's job (the playbook reads `GET /api/tier`). For T1/T2
+ * the caller passes a single reviewer verdict straight to `classifyVerdict`
+ * and never calls this; for T3 (and T4, which inherits T3 depth) the caller
+ * collects two reviewer verdicts and folds them here first.
+ */
+export interface AdversarialReviewResult {
+  /** AND over the two reviewers — PASS iff neither found a real blocker. */
+  reviewVerdict: ReviewVerdict;
+  /** Human-readable reason, naming the blocking reviewer(s) on FAIL. */
+  reason: string;
+}
+
+/**
+ * Fold two independent refutation reviewers into one review verdict.
+ *
+ * `PASS` iff BOTH reviewers returned `PASS` (neither surfaced a real
+ * blocker). Any single `FAIL` short-circuits the aggregate to `FAIL` — the
+ * defining asymmetry of refutation framing: one refuter is enough to bounce.
+ *
+ * @param reviewerA verdict from the first independent reviewer
+ * @param reviewerB verdict from the second independent reviewer
+ */
+export function aggregateAdversarialReview(
+  reviewerA: ReviewVerdict,
+  reviewerB: ReviewVerdict,
+): AdversarialReviewResult {
+  const aFail = reviewerA === "FAIL";
+  const bFail = reviewerB === "FAIL";
+
+  if (aFail && bFail) {
+    return {
+      reviewVerdict: "FAIL",
+      reason:
+        "Adversarial QA (T3): both refutation reviewers surfaced a real blocker.",
+    };
+  }
+  if (aFail) {
+    return {
+      reviewVerdict: "FAIL",
+      reason:
+        "Adversarial QA (T3): reviewer A surfaced a real blocker (reviewer B clean).",
+    };
+  }
+  if (bFail) {
+    return {
+      reviewVerdict: "FAIL",
+      reason:
+        "Adversarial QA (T3): reviewer B surfaced a real blocker (reviewer A clean).",
+    };
+  }
+  return {
+    reviewVerdict: "PASS",
+    reason:
+      "Adversarial QA (T3): both independent refutation reviewers found no real blocker.",
+  };
+}
+
+/**
  * Render the `checks:` block as a markdown table for inclusion in the
  * QA report body. Stable column ordering, deterministic for testability.
  */
