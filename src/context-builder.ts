@@ -15,7 +15,7 @@
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { getContext } from "./learning.ts";
+import { getContext, reflectionTelemetry, type ReflectionSource } from "./learning.ts";
 import { getCumulativeAccomplishments } from "./metrics/aggregate.ts";
 import { summarizeForPrompt, getDiff } from "./grounding.ts";
 import {
@@ -157,7 +157,10 @@ export interface PlannerContext {
   reflectionSources: ReflectionSource[];
 }
 
-export type ReflectionSource = "per-anchor" | "global" | "by-file";
+// Issue #804: ReflectionSource now lives in learning.ts (the composition seam
+// that owns the reflection blocks). Re-exported here so existing importers of
+// `context-builder.ts`'s ReflectionSource keep working unchanged.
+export type { ReflectionSource };
 
 // ---------------------------------------------------------------------------
 // buildPlannerContext — loads all context sources with graceful degradation
@@ -185,16 +188,21 @@ export async function buildPlannerContext(
   // otherwise the planner produces the same plan that failed last time. Without
   // this, prior-failure retries had a 0% merge rate (measured 2026-05-09).
   if (isQuickFixAnchor) {
-    const plannerMemory = await loadSource("planner-context", async () =>
-      (await getContext("planner", anchor)).toPrompt(), warnings) || "";
-    const reflectionStats = inspectReflections(plannerMemory as string);
+    // Issue #804: capture the structured LearningContext so telemetry is read
+    // off the typed blocks (reflectionTelemetry), not regex-scanned out of the
+    // flattened prompt string. getContext() never throws — sources degrade
+    // individually — so the loadSource wrapper is just here for symmetry/logging.
+    let learningCtx = await loadSource("planner-context", () => getContext("planner", anchor), warnings);
+    if (!learningCtx) learningCtx = (await getContext("planner", anchor));
+    const plannerMemory = learningCtx.toPrompt();
+    const reflectionStats = reflectionTelemetry(learningCtx);
     if (reflectionStats.count > 0) {
       console.log(`[Planner] Injected ${reflectionStats.count} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type}, sources=${reflectionStats.sources.join(",")})`);
     }
     return {
       priorities: "",
       feedback: "",
-      plannerMemory: plannerMemory as string,
+      plannerMemory,
       ovContext: "",
       milestoneContext: "",
       accomplishmentsContext: "",
@@ -210,17 +218,23 @@ export async function buildPlannerContext(
     };
   }
 
-  // Load file-based context + agent memory/reflections + OV context in parallel
-  const [priorities, feedback, plannerMemory, ovResult] = await Promise.all([
+  // Load file-based context + agent memory/reflections + OV context in parallel.
+  // Issue #804: getContext returns the structured LearningContext; we keep the
+  // object (for typed reflection telemetry) and flatten to a string separately.
+  const [priorities, feedback, learningCtx, ovResult] = await Promise.all([
     loadSource("priorities", () =>
       readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8"), warnings),
     loadSource("feedback", () =>
       readFile(join(CONFIG_PATH, "feedback", "to-planner.md"), "utf-8"), warnings),
-    loadSource("planner-context", async () =>
-      (await getContext("planner", anchor)).toPrompt(), warnings),
+    loadSource("planner-context", () => getContext("planner", anchor), warnings),
     loadSource("openviking-context", () =>
       ovSession?.getAgentContext?.("planner", anchor) || Promise.resolve({ formatted: "" }), warnings),
   ]);
+  const plannerMemory = learningCtx ? learningCtx.toPrompt() : "";
+  // Issue #804: reflection accounting is derived from the structured blocks,
+  // pre-budget. (Block-aware post-budget exactness is PR-B.)
+  const reflectionStats: { count: number; sources: ReflectionSource[] } =
+    learningCtx ? reflectionTelemetry(learningCtx) : { count: 0, sources: [] };
   const ovContext = (ovResult as any)?.formatted || "";
 
   // Load milestone progress
@@ -275,8 +289,11 @@ export async function buildPlannerContext(
 
   // Issue #193: log reflection injection count so production logs show whether
   // reflections actually reached the planner (previously silent for quick-fix).
+  // Issue #804: count + sources are read off the structured LearningContext
+  // blocks (reflectionStats, computed above), not regex-scanned out of the
+  // budgeted markdown string. NOTE this is the PRE-budget count; PR-B makes it
+  // exact post-truncation by dropping whole blocks instead of slicing.
   const finalPlannerMemory = byName.get("reflections") ?? "";
-  const reflectionStats = inspectReflections(finalPlannerMemory);
   if (reflectionStats.count > 0) {
     console.log(`[Planner] Injected ${reflectionStats.count} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type}, sources=${reflectionStats.sources.join(",")})`);
   }
@@ -336,88 +353,6 @@ export function buildScopedFileTree(
     `# These paths exist on disk at grounding time. Prefer them for scopeBoundary.in.`,
     `# Files the executor will CREATE go in scopeBoundary.creates, not "in".`,
   ].join("\n");
-}
-
-/**
- * Count reflection blocks in formatted planner context.
- * Looks for the "PRIOR ATTEMPTS" header (per-anchor) and "Recent Failures"
- * header (global). Used for telemetry and the reflectionInjected metric.
- */
-export function countReflections(plannerMemory: string): number {
-  return inspectReflections(plannerMemory).count;
-}
-
-/**
- * Inspect reflection content in formatted planner context. Returns both the
- * total count and the list of contributing sources ("per-anchor" / "global").
- *
- * Issue #221: previously only the total count was exposed; the metric pipeline
- * could not distinguish which reflection sources reached the planner.
- */
-export function inspectReflections(plannerMemory: string): {
-  count: number;
-  sources: ReflectionSource[];
-} {
-  if (!plannerMemory) return { count: 0, sources: [] };
-  let count = 0;
-  const sources: ReflectionSource[] = [];
-  // Per-anchor reflections format: "## PRIOR ATTEMPTS (N previous failures...)"
-  const priorMatch = plannerMemory.match(/## PRIOR ATTEMPTS \((\d+) previous failures?/);
-  if (priorMatch) {
-    const n = parseInt(priorMatch[1], 10) || 0;
-    if (n > 0) {
-      count += n;
-      sources.push("per-anchor");
-    }
-  }
-  // By-file reflections (issue #326) format:
-  // "## RELATED FILES — Prior Failures (N matched by file)"
-  const byFileMatch = plannerMemory.match(/## RELATED FILES — Prior Failures \((\d+) matched by file/);
-  if (byFileMatch) {
-    const n = parseInt(byFileMatch[1], 10) || 0;
-    if (n > 0) {
-      count += n;
-      sources.push("by-file");
-    }
-  }
-  // Global reflections format: each reflection starts with "### <cycleId>"
-  // under a "## Recent Failures" section
-  const recentIdx = plannerMemory.indexOf("## Recent Failures");
-  if (recentIdx >= 0) {
-    const recentSection = plannerMemory.slice(recentIdx);
-    const matches = recentSection.match(/^### /gm);
-    if (matches && matches.length > 0) {
-      count += matches.length;
-      sources.push("global");
-    }
-  }
-  return { count, sources };
-}
-
-/**
- * Issue #326: derive a single-token `reflectionMatchSource` value for cycle
- * metrics from the source list. Buckets:
- *
- *   - "none"        — no reflections injected
- *   - "by-anchor"   — only per-anchor (legacy primary key) matched
- *   - "by-file"     — only the file-based secondary index matched
- *   - "both"        — both per-anchor and by-file matched
- *   - "global"      — only the global recent-failures buffer matched
- *   - "mixed"       — any other combination involving global + one specific
- *
- * Kept narrow on purpose so the metric remains dashboardable as a categorical
- * field rather than a free-form list.
- */
-export function reflectionMatchSource(sources: ReflectionSource[]): string {
-  if (!Array.isArray(sources) || sources.length === 0) return "none";
-  const hasPerAnchor = sources.includes("per-anchor");
-  const hasByFile = sources.includes("by-file");
-  const hasGlobal = sources.includes("global");
-  if (hasPerAnchor && hasByFile && !hasGlobal) return "both";
-  if (hasPerAnchor && !hasByFile && !hasGlobal) return "by-anchor";
-  if (!hasPerAnchor && hasByFile && !hasGlobal) return "by-file";
-  if (!hasPerAnchor && !hasByFile && hasGlobal) return "global";
-  return "mixed";
 }
 
 // ---------------------------------------------------------------------------

@@ -17,8 +17,24 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+import type { LearningContext, LearningContextBlock } from "../src/learning.ts";
 
 process.env.REDIS_URL = "redis://localhost:6379/1";
+
+/** Build a minimal LearningContext from a list of blocks (issue #804). */
+function ctxOf(blocks: Partial<LearningContextBlock>[]): LearningContext {
+  const full = blocks.map((b) => ({
+    source: b.source!,
+    status: b.status ?? "hit",
+    content: b.content ?? "",
+    itemCount: b.itemCount ?? 0,
+    error: b.error,
+  })) as LearningContextBlock[];
+  return {
+    blocks: full,
+    toPrompt: () => full.filter((b) => b.status === "hit" && b.content.length > 0).map((b) => b.content).join("\n\n"),
+  };
+}
 
 let redis: any;
 let redisAvailable = false;
@@ -131,27 +147,27 @@ describe("reflection injection on retry (issue #193)", () => {
     );
   });
 
-  test("countReflections counts PRIOR ATTEMPTS and Recent Failures", async () => {
-    const cb = await import("../src/context-builder.ts");
+  test("reflectionTelemetry sums per-anchor and global block itemCounts (issue #804)", async () => {
+    const { reflectionTelemetry } = await import("../src/learning.ts");
 
-    assert.equal(cb.countReflections(""), 0, "empty input → 0");
-    assert.equal(cb.countReflections("no reflection markers here"), 0, "no markers → 0");
+    assert.deepEqual(reflectionTelemetry(ctxOf([])), { count: 0, sources: [] }, "no blocks → 0");
 
-    const priorOnly = "## PRIOR ATTEMPTS (3 previous failures for this anchor)\n\nstuff";
-    assert.equal(cb.countReflections(priorOnly), 3, "PRIOR ATTEMPTS extracts the count");
+    const priorOnly = reflectionTelemetry(ctxOf([
+      { source: "per-anchor-reflections", status: "hit", content: "## PRIOR ATTEMPTS (3…)", itemCount: 3 },
+    ]));
+    assert.equal(priorOnly.count, 3, "per-anchor itemCount is the count — no header regex");
 
-    const recentOnly = [
-      "## Recent Failures",
-      "",
-      "### cycle-1 (mode-a)",
-      "stuff",
-      "### cycle-2 (mode-b)",
-      "more",
-    ].join("\n");
-    assert.equal(cb.countReflections(recentOnly), 2, "Recent Failures counts ### entries");
+    const recentOnly = reflectionTelemetry(ctxOf([
+      { source: "global-reflections", status: "hit", content: "## Recent Failures …", itemCount: 2 },
+    ]));
+    assert.equal(recentOnly.count, 2, "global itemCount is the count");
 
-    const both = priorOnly + "\n\n" + recentOnly;
-    assert.equal(cb.countReflections(both), 5, "both sections sum");
+    const both = reflectionTelemetry(ctxOf([
+      { source: "per-anchor-reflections", status: "hit", content: "prior", itemCount: 3 },
+      { source: "global-reflections", status: "hit", content: "recent", itemCount: 2 },
+    ]));
+    assert.equal(both.count, 5, "both blocks sum");
+    assert.deepEqual(both.sources, ["per-anchor", "global"]);
   });
 
   test("getReflectionEffectiveness returns injection stats (issue #193)", async (t) => {
@@ -172,22 +188,17 @@ describe("reflection injection on retry (issue #193)", () => {
 });
 
 describe("planner result tags reflection telemetry (issue #193)", () => {
-  test("countReflections feeds task.__reflectionsInjected metric path", async () => {
-    // This is a unit-level check that the helper used by planner-prompt.ts
-    // produces the value that becomes task.__reflectionsInjected.
-    const cb = await import("../src/context-builder.ts");
+  test("reflectionTelemetry feeds task.__reflectionsInjected metric path", async () => {
+    // Unit-level check that the helper used by context-builder produces the
+    // value that becomes task.__reflectionsInjected — now off structured
+    // blocks (issue #804), not a markdown re-parse.
+    const { reflectionTelemetry } = await import("../src/learning.ts");
 
-    // Simulate what loadAnchorReflections produces (one reflection)
-    const formatted = [
-      "## PRIOR ATTEMPTS (1 previous failures for this anchor)",
-      "",
-      "### Attempt: cycle-001",
-      "- **Task**: foo",
-      "- **Outcome**: failed",
-    ].join("\n");
-
-    const count = cb.countReflections(formatted);
-    assert.equal(count, 1, "one PRIOR ATTEMPTS reflection → count is 1");
+    // Simulate what loadAnchorReflections reports (one reflection, count=1).
+    const { count } = reflectionTelemetry(ctxOf([
+      { source: "per-anchor-reflections", status: "hit", content: "## PRIOR ATTEMPTS (1…)", itemCount: 1 },
+    ]));
+    assert.equal(count, 1, "one per-anchor reflection → count is 1");
 
     // This is what task.__reflectionsInjected will be set to
     const hadReflections = count > 0;

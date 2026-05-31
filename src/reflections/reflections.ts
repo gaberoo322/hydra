@@ -7,7 +7,9 @@
  *
  * Public API used outside this module:
  *   recordAnchorReflection / loadAnchorReflections / loadAnchorReflectionsRaw
- *   loadAnchorReflectionsByFile / backfillByFileIndex / reflectionKey
+ *   loadAnchorReflectionsByFile (both return ReflectionBlock {content,count} —
+ *   the count is sourced here so callers don't regex the rendered header)
+ *   backfillByFileIndex / reflectionKey
  *   recordReflection / loadRelevantReflections / formatReflectionsForPrompt
  *   clearReflectionsForAnchor — clears the global buffer entries for an anchor
  *   getAllReflections          — GET /api/reflections
@@ -247,16 +249,30 @@ export async function loadAnchorReflectionsRaw(
   return parsed;
 }
 
-export async function loadAnchorReflections(anchorRef: string): Promise<string> {
+/**
+ * A formatted reflection block plus the structured count of items it carries.
+ *
+ * Issue #804: the count is sourced HERE — from the parsed reflection array —
+ * so downstream telemetry (`reflectionInjected` / `reflectionSources`) reads
+ * it as data instead of regex-scanning the rendered `## PRIOR ATTEMPTS (N…`
+ * header out of the formatted markdown. `content` is "" exactly when
+ * `count === 0`.
+ */
+export interface ReflectionBlock {
+  content: string;
+  count: number;
+}
+
+export async function loadAnchorReflections(anchorRef: string): Promise<ReflectionBlock> {
   const key = reflectionKey(anchorRef);
   const raw = await getAnchorReflections(key);
-  if (raw.length === 0) return "";
+  if (raw.length === 0) return { content: "", count: 0 };
 
   const reflections: AnchorReflection[] = raw.map(r => {
     try { return JSON.parse(r); } catch { return null; }
   }).filter(Boolean);
 
-  if (reflections.length === 0) return "";
+  if (reflections.length === 0) return { content: "", count: 0 };
 
   const lines = [
     `## PRIOR ATTEMPTS (${reflections.length} previous failures for this anchor)`,
@@ -274,7 +290,7 @@ export async function loadAnchorReflections(anchorRef: string): Promise<string> 
     lines.push(``);
   }
 
-  return lines.join("\n");
+  return { content: lines.join("\n"), count: reflections.length };
 }
 
 /**
@@ -302,8 +318,8 @@ export async function loadAnchorReflections(anchorRef: string): Promise<string> 
 export async function loadAnchorReflectionsByFile(
   files: string[],
   excludeAnchorRef?: string,
-): Promise<string> {
-  if (!Array.isArray(files) || files.length === 0) return "";
+): Promise<ReflectionBlock> {
+  if (!Array.isArray(files) || files.length === 0) return { content: "", count: 0 };
 
   const excludeKey = excludeAnchorRef ? reflectionKey(excludeAnchorRef) : null;
   const collected: Array<AnchorReflection & { __file: string }> = [];
@@ -337,7 +353,7 @@ export async function loadAnchorReflectionsByFile(
     }
   }
 
-  if (collected.length === 0) return "";
+  if (collected.length === 0) return { content: "", count: 0 };
 
   // Dedup by cycleId — same reflection may be indexed under multiple files.
   const byCycle = new Map<string, AnchorReflection & { __file: string }>();
@@ -370,7 +386,7 @@ export async function loadAnchorReflectionsByFile(
     lines.push(``);
   }
 
-  return lines.join("\n");
+  return { content: lines.join("\n"), count: ordered.length };
 }
 
 /**

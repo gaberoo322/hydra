@@ -114,10 +114,16 @@ export function createLearningRouter() {
    *   {
    *     blocks: [
    *       { source, status: "hit" | "miss" | "error",
-   *         contentBytes: number, error?: string }
+   *         contentBytes: number, itemCount: number, error?: string }
    *     ],
    *     promptBytes: number,   // size of the composed prompt
    *   }
+   *
+   * Issue #804: `itemCount` (additive) is the structured count of items the
+   * block contributed (reflections / OV memories / pattern groups) — sourced
+   * from data, not regex-parsed from the rendered prompt. The new
+   * `knowledge-base` source also appears here automatically (the trace maps
+   * over whatever sources getContext composes).
    *
    * `content` itself is omitted — the trace is for diagnostics, not for
    * exfiltrating prompts. Operators can still read prompts through normal
@@ -143,6 +149,7 @@ export function createLearningRouter() {
           source: b.source,
           status: b.status,
           contentBytes: b.content.length,
+          itemCount: b.itemCount,
           ...(b.error ? { error: b.error } : {}),
         })),
         promptBytes: ctx.toPrompt().length,

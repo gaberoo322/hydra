@@ -9,12 +9,33 @@
  * planner-prompt.ts copies those onto the task. control-loop.ts carries the
  * flags across the auto-decompose boundary.
  *
+ * Issue #804: the count/sources are now read off the structured LearningContext
+ * blocks via `learning.reflectionTelemetry`, NOT regex-scanned out of the
+ * flattened markdown (the deleted `inspectReflections`/`countReflections`). The
+ * helper unit tests below assert against the structured blocks directly.
+ *
  * These tests are pure (no Redis required) — they verify the contract of the
  * exported helpers and the PlannerContext shape.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import type { LearningContext, LearningContextBlock } from "../src/learning.ts";
+
+/** Build a minimal LearningContext from a list of blocks (toPrompt joins hits). */
+function ctxOf(blocks: Partial<LearningContextBlock>[]): LearningContext {
+  const full = blocks.map((b) => ({
+    source: b.source!,
+    status: b.status ?? "hit",
+    content: b.content ?? "",
+    itemCount: b.itemCount ?? 0,
+    error: b.error,
+  })) as LearningContextBlock[];
+  return {
+    blocks: full,
+    toPrompt: () => full.filter((b) => b.status === "hit" && b.content.length > 0).map((b) => b.content).join("\n\n"),
+  };
+}
 
 function makeGrounding(overrides: Record<string, any> = {}) {
   return {
@@ -33,67 +54,58 @@ function makeGrounding(overrides: Record<string, any> = {}) {
   };
 }
 
-describe("issue #221: reflection metric propagation", () => {
-  test("inspectReflections returns count and sources for per-anchor only", async () => {
-    const cb = await import("../src/context-builder.ts");
-    const formatted = [
-      "## PRIOR ATTEMPTS (3 previous failures for this anchor)",
-      "",
-      "### Attempt: cycle-001",
-      "stuff",
-    ].join("\n");
-
-    const result = cb.inspectReflections(formatted);
+describe("issue #804: reflectionTelemetry reads count + sources off structured blocks", () => {
+  test("returns count and sources for per-anchor only", async () => {
+    const { reflectionTelemetry } = await import("../src/learning.ts");
+    const result = reflectionTelemetry(ctxOf([
+      { source: "per-anchor-reflections", status: "hit", content: "## PRIOR ATTEMPTS (3…)", itemCount: 3 },
+    ]));
     assert.equal(result.count, 3);
     assert.deepEqual(result.sources, ["per-anchor"]);
   });
 
-  test("inspectReflections returns count and sources for global only", async () => {
-    const cb = await import("../src/context-builder.ts");
-    const formatted = [
-      "## Recent Failures",
-      "",
-      "### cycle-1 (mode-a)",
-      "stuff",
-      "### cycle-2 (mode-b)",
-      "more",
-    ].join("\n");
-
-    const result = cb.inspectReflections(formatted);
+  test("returns count and sources for global only", async () => {
+    const { reflectionTelemetry } = await import("../src/learning.ts");
+    const result = reflectionTelemetry(ctxOf([
+      { source: "global-reflections", status: "hit", content: "## Recent Failures …", itemCount: 2 },
+    ]));
     assert.equal(result.count, 2);
     assert.deepEqual(result.sources, ["global"]);
   });
 
-  test("inspectReflections returns both sources when both present", async () => {
-    const cb = await import("../src/context-builder.ts");
-    const formatted = [
-      "## PRIOR ATTEMPTS (1 previous failures for this anchor)",
-      "### Attempt: cycle-A",
-      "",
-      "## Recent Failures",
-      "### cycle-X (mode)",
-      "### cycle-Y (mode)",
-    ].join("\n");
-
-    const result = cb.inspectReflections(formatted);
-    assert.equal(result.count, 3, "1 per-anchor + 2 global");
-    assert.deepEqual(result.sources.sort(), ["global", "per-anchor"]);
+  test("sums across reflection sources when several are present, in block order", async () => {
+    const { reflectionTelemetry } = await import("../src/learning.ts");
+    const result = reflectionTelemetry(ctxOf([
+      { source: "agent-memory", status: "hit", content: "patterns", itemCount: 1 },
+      { source: "knowledge-base", status: "hit", content: "ov", itemCount: 5 },
+      { source: "per-anchor-reflections", status: "hit", content: "prior", itemCount: 1 },
+      { source: "global-reflections", status: "hit", content: "recent", itemCount: 2 },
+    ]));
+    assert.equal(result.count, 3, "1 per-anchor + 2 global; pattern/KB blocks are NOT reflections");
+    assert.deepEqual(result.sources, ["per-anchor", "global"], "canonical block order preserved");
   });
 
-  test("inspectReflections returns empty for blank or unrelated content", async () => {
-    const cb = await import("../src/context-builder.ts");
-
-    assert.deepEqual(cb.inspectReflections(""), { count: 0, sources: [] });
-    assert.deepEqual(cb.inspectReflections("just generic agent memory"), { count: 0, sources: [] });
-    // PRIOR ATTEMPTS with zero count must not push "per-anchor" source
-    assert.deepEqual(cb.inspectReflections("## PRIOR ATTEMPTS (0 previous failures for this anchor)"),
-      { count: 0, sources: [] });
+  test("returns empty when no reflection blocks hit (or itemCount 0)", async () => {
+    const { reflectionTelemetry } = await import("../src/learning.ts");
+    assert.deepEqual(reflectionTelemetry(ctxOf([])), { count: 0, sources: [] });
+    assert.deepEqual(
+      reflectionTelemetry(ctxOf([{ source: "agent-memory", status: "hit", content: "x", itemCount: 1 }])),
+      { count: 0, sources: [] },
+      "agent-memory is not a reflection source",
+    );
+    // A reflection source that missed (itemCount 0) must not contribute.
+    assert.deepEqual(
+      reflectionTelemetry(ctxOf([{ source: "per-anchor-reflections", status: "miss", content: "", itemCount: 0 }])),
+      { count: 0, sources: [] },
+    );
   });
 
-  test("countReflections preserves the existing numeric contract", async () => {
-    const cb = await import("../src/context-builder.ts");
-    assert.equal(cb.countReflections(""), 0);
-    assert.equal(cb.countReflections("## PRIOR ATTEMPTS (4 previous failures for this anchor)"), 4);
+  test("knowledge-base block never counts as a reflection", async () => {
+    const { reflectionTelemetry } = await import("../src/learning.ts");
+    const result = reflectionTelemetry(ctxOf([
+      { source: "knowledge-base", status: "hit", content: "ov memories", itemCount: 4 },
+    ]));
+    assert.deepEqual(result, { count: 0, sources: [] });
   });
 
   test("PlannerContext exposes reflectionInjected and reflectionSources fields", async () => {
@@ -132,14 +144,11 @@ describe("issue #221: reflection metric propagation", () => {
 
 describe("issue #221: regression — task tagging contract", () => {
   test("downstream metric writers can derive flags from ctx fields", async () => {
-    const cb = await import("../src/context-builder.ts");
+    const { reflectionTelemetry } = await import("../src/learning.ts");
 
-    const formatted = [
-      "## PRIOR ATTEMPTS (2 previous failures for this anchor)",
-      "### Attempt: cycle-A",
-    ].join("\n");
-
-    const stats = cb.inspectReflections(formatted);
+    const stats = reflectionTelemetry(ctxOf([
+      { source: "per-anchor-reflections", status: "hit", content: "## PRIOR ATTEMPTS (2…)", itemCount: 2 },
+    ]));
 
     // Simulate planner-prompt.ts assignment
     const task: any = {};
