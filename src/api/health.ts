@@ -13,7 +13,6 @@ import { getBacklogCounts } from "../backlog/reads.ts";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import { redisInfo as getRedisInfo } from "../redis/utility.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
-import { getPriorFailuresLen } from "../redis/anchors.ts";
 import { countReflectionKeys } from "../redis/reflections.ts";
 import { getTargetServiceName } from "../target-config.ts";
 // Issue #231: shared OV credential — health probe must use the same key as agent searches.
@@ -136,21 +135,20 @@ export function createHealthRouter(eventBus: any) {
       /* 2 */ getSchedulerStatus(),
       /* 3 */ Promise.resolve({ status: "idle" }),
       /* 4 */ getWorkQueueLen(),
-      /* 5 */ getPriorFailuresLen(),
-      /* 6 */ getBacklogCounts(),
-      /* 7 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
-      /* 8 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
-      /* 9 */ execFileAsync("free", ["-b"], { timeout: 3000 }).catch(() => null),
-      /* 10 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
-      /* 11 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
-      /* 12 */ execFileAsync("systemctl", ["--user", "is-active", getTargetServiceName()], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
-      /* 13 */ (async () => {
+      /* 5 */ getBacklogCounts(),
+      /* 6 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
+      /* 7 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
+      /* 8 */ execFileAsync("free", ["-b"], { timeout: 3000 }).catch(() => null),
+      /* 9 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
+      /* 10 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
+      /* 11 */ execFileAsync("systemctl", ["--user", "is-active", getTargetServiceName()], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
+      /* 12 */ (async () => {
         const [p, e, s] = await Promise.all([getMemoryPatterns("planner"), getMemoryPatterns("executor"), getMemoryPatterns("skeptic")]);
         const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };
         return { planner: cnt(p), executor: cnt(e), skeptic: cnt(s) };
       })(),
-      /* 14 */ countReflectionKeys(),
-      /* 15 */ (async () => {
+      /* 13 */ countReflectionKeys(),
+      /* 14 */ (async () => {
         try {
           const ovKey = OPENVIKING_API_KEY;
           const start = Date.now();
@@ -161,7 +159,7 @@ export function createHealthRouter(eventBus: any) {
           return { status: "running", latencyMs: lat, resultCount: (rs.memories?.length || 0) + (rs.resources?.length || 0) + (rs.skills?.length || 0) };
         } catch { return { status: "failed", latencyMs: null, resultCount: 0 }; }
       })(),
-      /* 16 */ (async () => {
+      /* 15 */ (async () => {
         try {
           const [info, clients, server] = await Promise.all([getRedisInfo("memory"), getRedisInfo("clients"), getRedisInfo("server")]);
           return { memoryHuman: info.match(/used_memory_human:(\S+)/)?.[1] || "unknown", connectedClients: parseInt(clients.match(/connected_clients:(\d+)/)?.[1] || "0"), uptimeSeconds: parseInt(server.match(/uptime_in_seconds:(\d+)/)?.[1] || "0") };
@@ -175,29 +173,28 @@ export function createHealthRouter(eventBus: any) {
     const sched = val(2) || { running: false, cyclesRun: 0, cyclesMerged: 0, cyclesFailed: 0, mergeRate: 0, consecutiveErrors: 0 };
     const cycle = val(3) || {};
     const queueDepth = val(4) || 0;
-    const priorFailures = val(5) || 0;
-    const blCounts = val(6) || { triage: 0, backlog: 0, inProgress: 0, blocked: 0, done: 0, total: 0 };
-    const mData = val(7) || { trend: [], stats: {} };
-    const patterns = val(13) || { planner: 0, executor: 0, skeptic: 0 };
-    const reflCount = val(14) || 0;
-    const ovSearch = val(15) || { status: "failed", latencyMs: null, resultCount: 0 };
-    const redisInfo = val(16);
+    const blCounts = val(5) || { triage: 0, backlog: 0, inProgress: 0, blocked: 0, done: 0, total: 0 };
+    const mData = val(6) || { trend: [], stats: {} };
+    const patterns = val(12) || { planner: 0, executor: 0, skeptic: 0 };
+    const reflCount = val(13) || 0;
+    const ovSearch = val(14) || { status: "failed", latencyMs: null, resultCount: 0 };
+    const redisInfo = val(15);
 
     // Parse disk
     let disk = { availableGb: 0, totalGb: 0, usedPercent: 0 };
-    const diskRaw = val(8);
+    const diskRaw = val(7);
     if (diskRaw?.stdout) {
       const dl = diskRaw.stdout.trim().split("\n").pop()?.trim();
       if (dl) { const p = dl.split(/\s+/); disk = { availableGb: Math.round(parseInt(p[0] || "0") / 1073741824 * 10) / 10, totalGb: Math.round(parseInt(p[1] || "0") / 1073741824 * 10) / 10, usedPercent: parseInt((p[2] || "0").replace("%", "")) || 0 }; }
     }
     // Parse memory
     let mem = { totalGb: 0, availableGb: 0, usedPercent: 0 };
-    const memRaw = val(9);
+    const memRaw = val(8);
     if (memRaw?.stdout) {
       const ml = memRaw.stdout.split("\n").find(l => l.startsWith("Mem:"));
       if (ml) { const p = ml.split(/\s+/); const t = parseInt(p[1]) || 0, a = parseInt(p[6]) || 0; mem = { totalGb: Math.round(t / 1073741824 * 10) / 10, availableGb: Math.round(a / 1073741824 * 10) / 10, usedPercent: t > 0 ? Math.round((1 - a / t) * 100) : 0 }; }
     }
-    const sysdOrch = val(10) || "unknown", sysdWatch = val(11) || "unknown", sysdWeb = val(12) || "unknown";
+    const sysdOrch = val(9) || "unknown", sysdWatch = val(10) || "unknown", sysdWeb = val(11) || "unknown";
 
     // Pipeline metrics
     const trend = mData.trend || [];
@@ -229,7 +226,7 @@ export function createHealthRouter(eventBus: any) {
     if (mem.usedPercent > 85 && mem.usedPercent <= 95) diagnostics.push({ severity: "warning", component: "memory", what: `Memory elevated: ${mem.usedPercent}%`, why: `${mem.availableGb}GB free of ${mem.totalGb}GB.`, impact: "OOM risk under load.", action: "Check resource-heavy processes", autoRecovery: false });
     if (svcProbes.openviking.status === "failed") diagnostics.push({ severity: "warning", component: "openviking", what: "OpenViking unreachable", why: "Agents run without knowledge context, reducing quality.", impact: "Degraded quality.", action: "curl http://localhost:1933/health", autoRecovery: true });
     if (svcProbes.vikingdb.status === "failed") diagnostics.push({ severity: "warning", component: "vikingdb", what: "VikingDB unreachable", why: "Embeddings storage down. Indexing and search fail.", impact: "Knowledge inoperative.", action: "docker ps | grep viking", autoRecovery: true });
-    if (queueDepth === 0 && blCounts.total === 0 && priorFailures === 0 && health.cycle !== "running") diagnostics.push({ severity: "warning", component: "pipeline", what: "Pipeline empty", why: "No queue, backlog, or failures. Falls back to priorities.md or research.", impact: "May idle.", action: "Add items or trigger research", autoRecovery: true });
+    if (queueDepth === 0 && blCounts.total === 0 && health.cycle !== "running") diagnostics.push({ severity: "warning", component: "pipeline", what: "Pipeline empty", why: "No queue or backlog. Falls back to priorities.md or research.", impact: "May idle.", action: "Add items or trigger research", autoRecovery: true });
     if (recent.noTaskRate > 40 && trend.length >= 5) diagnostics.push({ severity: "warning", component: "pipeline", what: `No-task rate: ${recent.noTaskRate}%`, why: `Planner failed in ${noTaskN}/${trend.length} cycles. Items may be stale.`, impact: "~$1.55 wasted per cycle.", action: "Clean queue, update priorities", autoRecovery: false });
     if (blCounts.blocked > 0) diagnostics.push({ severity: "warning", component: "pipeline", what: `${blCounts.blocked} blocked item(s)`, why: "Need operator action.", impact: "Work stalled.", action: "Review on Backlog page", autoRecovery: false });
     // The dollar-based daily-spend cap diagnostic was retired with the
@@ -267,7 +264,7 @@ export function createHealthRouter(eventBus: any) {
         vikingdb: svcProbes.vikingdb, openviking: svcProbes.openviking,
       },
       activeCycle,
-      pipeline: { queueDepth, priorFailures, backlogCounts: blCounts, recentMetrics: recent, killSwitch: health.status === "killed" },
+      pipeline: { queueDepth, backlogCounts: blCounts, recentMetrics: recent, killSwitch: health.status === "killed" },
       infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
       intelligence: { patterns, reflections: reflCount, ovSearch },
       diagnostics,

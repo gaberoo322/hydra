@@ -110,22 +110,35 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 
 **Dependency chain:** Foundational for ADR-0004 work-order — #244 (Tier-2 outcome holdback) imports `loadOutcomes` and `getOutcomeValue`.
 
-## Anchor Selection Priority
+## Candidate Feed (ADR-0016)
 
-Order enforced by `selectAnchor()` in `src/anchor-selection.ts`:
+The `selectAnchor()` priority waterfall (a 13-tier chain in the retired
+`src/anchor-selection/` family) was **deleted by ADR-0016**: it was orphaned at
+both ends when ADR-0006 removed the in-process control loop, and ADR-0012 made
+`decide.py` the single decisional brain. Retry / escalation / abandonment
+policy — the product intent behind the Reframe Queue — belongs to `decide.py`,
+not a dormant TypeScript store.
 
-1. **Explicit operator request** — `opts.anchor`
-2. **Capacity-floor pre-emption** (#321) — the dispatcher in `src/anchor-selection/capacity-floors.ts` runs the registered floor declarations and fires at most one per cycle. Post-ADR-0010 the only registered floor is the **reframe-queue floor** (#377): when `cyclesSinceReframeServed >= cadenceN` AND the reframe queue has a candidate, pre-empt kanban with the next reframe item. The stuckness-driven self-improvement floor (originally slot 2) and the specs floor (#301/#308) were both retired.
-3. **Kanban queued lane** — atomic Lua claim, WIP-gated
-4. **Failing tests** — from grounding
-5. **Typecheck errors** — from grounding
-6. **Work queue** (`POST /api/queue`, research auto-queue) — LMOVE to processing
-7. **Reframe queue** — repeated failures awaiting diagnosis
-8. **Prior failures** — Redis-tracked; cap 2 retries
-9. **TODO/FIXME markers** — from codebase
-10. **Regression hunt** — every 10 merges
-11. **Codebase health** — reductive improvements
-12. **Priorities doc** — `config/direction/priorities.md`, auto-refreshed if stale
+The live concept is the **Candidate Feed**: `src/anchor-candidates.ts`
+(`getCandidateFeed(opts, deps?)`), served read-only at
+`GET /api/anchor/candidates` (`src/api/anchor.ts` is a thin route over it). It
+is *data the brain reads, not a decision the orchestrator makes*. One deep
+module owns:
+
+- **Enumeration** — the only two lanes with live writers: backlog kanban
+  (`loadBacklog` — inProgress ∪ queued ∪ backlog) ∪ work-queue
+  (`getWorkQueueItems`, fed by `POST /api/queue` + research auto-queue).
+- **Scoring** — tier base (`kanban-queued` 0.85, `work-queue` 0.70) + freshness
+  penalty (>14d, −0.15) + recent-reflection penalty (<24h, −0.20) +
+  blocker-just-cleared bonus (+0.15), clamped to [0,1]. The abandonment penalty
+  and the reframe / prior-failure / regression-hunt / codebase-health /
+  priorities-doc tiers were dropped with their now-empty lanes.
+- **Eligibility** — in-flight-PR 30-min suppression (#640), blocker-just-cleared
+  detection, design-concept annotation (#628), and `research_recommended` (top
+  score < 0.5, or no candidates).
+
+`deps?` is injectable (`loadBacklog` / `getWorkQueueItems` / reflection reader /
+design-concept reader) so the feed is the unit-test surface.
 
 ## ADR-0002 target swap (issue #258 / #259)
 

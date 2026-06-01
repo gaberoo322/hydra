@@ -27,7 +27,7 @@ const GROUPS = [
   { id: "state", label: "State & Data", color: "cyan",
     modules: ["redis", "event-bus", "cycle-tracking", "metrics"] },
   { id: "planning", label: "Planning & Research", color: "rose",
-    modules: ["research-loop", "project-goals", "anchor-selection", "anchor-scorer", "plan-cache"] },
+    modules: ["research-loop", "project-goals", "anchor-candidates", "plan-cache"] },
   { id: "infra", label: "Infrastructure", color: "zinc",
     modules: ["api", "notify", "digest", "cleanup", "instrument", "merge"] },
 ];
