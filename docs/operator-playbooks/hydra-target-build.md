@@ -182,6 +182,44 @@ EOF
 
 CI's `scope-check` gate (`.github/workflows/ci.yml` in the orchestrator repo, mirrored in the target repo if present) reads these sections from the PR body. Skipping this step doesn't block the build today (no hard requirement on PR body shape for target-repo PRs), but it's how the orchestrator learns the subagent's intended blast radius — and it's the contract reviewers + `hydra-qa` use to spot scope creep.
 
+### 3.6. Inject per-anchor Reflections (issue #841)
+
+A prior **failed** attempt on the same anchor (or, post-#326, a different
+anchor that touched the same files) leaves a per-anchor **Reflection** —
+"what was attempted, why it failed, what to change". Before #841 this
+narrative reached code-writing dispatches only through the dead in-process
+`buildPlannerContext`, so retries silently lost their own failure context
+(the 0%-merge-rate condition #193 was created to fix). Fetch it live and
+weave it into the plan before executing.
+
+Fetch the per-anchor reflection narrative from the orchestrator. The endpoint
+composes the existing per-anchor + by-file reflection reads server-side, so
+the large narrative text stays out of `decide.py` (the dispatch JSON carries
+only `{anchor, score}`):
+
+```bash
+# ANCHOR_REF is the selected anchor's reference (use anchor.reference, NOT
+# task.title). FILES_CSV is the `scopeBoundary.in` list from Step 3.5,
+# comma-separated.
+REFL_JSON=$(curl -sf --max-time 5 \
+  "http://localhost:4000/api/reflections?anchor=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)&files=$(printf '%s' "$FILES_CSV" | jq -sRr @uri)")
+
+REFL_FORMATTED=$(printf '%s' "$REFL_JSON" | jq -r '.formatted // ""')
+if [ -n "$REFL_FORMATTED" ]; then
+  # This anchor (or a related file) failed before. Read the prior attempts and
+  # do NOT repeat the same approach — fold REFL_FORMATTED into the plan you
+  # hand the executor role in Step 5.
+  printf '%s\n' "$REFL_FORMATTED"
+fi
+# Empty / unreachable → graceful no-op (degrade exactly as the dead path did on
+# a miss). Never fail the build over a reflections miss.
+```
+
+To verify reflections actually reach a retry, query this `/api/reflections`
+endpoint — NOT `/api/learning/context-trace`, which reports only
+`getContext()`'s composition (a prompt no subagent receives on today's
+architecture).
+
 ### 4. Skeptic (skip for quick-fix)
 
 Read `~/hydra/config/agents/skeptic.md`. Challenge:

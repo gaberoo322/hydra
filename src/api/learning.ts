@@ -99,8 +99,25 @@ export function createLearningRouter() {
 
   /**
    * GET /learning/context-trace — diagnostic view of `getContext()`'s
-   * composition. Answers "why was this prompt's learning context shallow?"
-   * without the operator having to grep server logs.
+   * COMPOSITION. Answers "what learning context *would* `getContext()`
+   * assemble for this agent+anchor, and why is it shallow?" without the
+   * operator having to grep server logs.
+   *
+   * IMPORTANT — composition, NOT a dispatched prompt (issue #841 honesty
+   * re-scope): on today's architecture there is no in-process planner that
+   * dispatches `getContext()`'s output. `getContext()` (and its sole live
+   * caller, the dead-in-production `buildPlannerContext`) compose a prompt
+   * string that no subagent receives. A block reporting `status: "hit"` here
+   * therefore means "this source *would* contribute content if this prompt
+   * were dispatched" — it does NOT prove a subagent actually received it.
+   *
+   * The LIVE reflection-injection path is `GET /api/reflections?anchor=&files=`,
+   * which the dispatch skills (`hydra-dev`, `hydra-target-build`) fetch at
+   * planning time and weave into the real implementation prompt. Use that
+   * endpoint — not this trace — to verify reflections reach a retry dispatch.
+   * This trace remains a useful composition-level diagnostic (which sources
+   * have data for an anchor), but reading it as proof-of-delivery is the
+   * false-positive #841 documents.
    *
    * Query params (required):
    *   agent     — agent name (e.g. "planner")
@@ -116,7 +133,7 @@ export function createLearningRouter() {
    *       { source, status: "hit" | "miss" | "error",
    *         contentBytes: number, itemCount: number, error?: string }
    *     ],
-   *     promptBytes: number,   // size of the composed prompt
+   *     promptBytes: number,   // size of the COMPOSED (not dispatched) prompt
    *   }
    *
    * Issue #804: `itemCount` (additive) is the structured count of items the
