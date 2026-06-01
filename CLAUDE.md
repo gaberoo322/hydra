@@ -60,12 +60,14 @@ curl http://localhost:4000/api/scheduler/status
 
 Every PR is classified by blast radius on the monotonic ladder T1 (shallowest) → T4 (deepest), regardless of who proposed it ([ADR-0004](./docs/adr/0004-self-modification-tiers.md) + ADR-0015) — required verification depth ascends with the tier. The **Verifier Core** path list lives in `src/untouchable.ts` (`VERIFIER_CORE_PATHS` / `isVerifierCore`; [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md) + ADR-0015 — "Untouchable Core" is the retired name). **Never bypass the gate.** Operator escalation is the closed list in [ADR-0005](./docs/adr/0005-operator-escalation-is-narrow.md) (credentials/secrets, external-account actions, T4 / Verifier-Core changes, vision conflicts) — everything else Hydra researches and tries autonomously. Full tier table + path lists: [`docs/reference.md`](./docs/reference.md).
 
-| Tier | Scope | Who merges |
+Tier names verification *depth*, not merge authority (ADR-0015, #742). Every PR auto-merges once it passes the verification depth required for its tier; the only route to the operator is an exhausted Deep-QA Remediation Loop on T4 (a 2nd failed deep-QA pass, #740).
+
+| Tier | Scope | Required verification depth |
 |------|-------|-----------|
-| T1 — Prompt-shaped | Lesson files, prompt-only tweaks (`config/agents/`, `config/feedback/`) | Auto-merge |
-| T2 — Skill / verification | Skills under `~/.claude/skills/`, dashboard, `src/anchor-selection/` | Auto-merge + **Outcome Holdback** |
-| T3 — Core `src/` + demoted infra | Everything else in `src/`, plus `src/grounding.ts`, `src/cost/`, watchdog scripts, `scripts/deploy.sh` | Operator merges (auto-merge unless `scope-justification:`) |
-| T4 — Verifier Core | `ci.yml`, `deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts` | **Operator only** (`operator-approved` label) |
+| T1 — Prompt-shaped | Lesson files, prompt-only tweaks (`config/agents/`, `config/feedback/`) | QA PASS → auto-merge |
+| T2 — Skill / verification | Skills under `~/.claude/skills/`, dashboard, `src/anchor-selection/` | QA PASS + **Outcome Holdback** → auto-merge |
+| T3 — Core `src/` + demoted infra | Everything else in `src/`, plus `src/grounding.ts`, `src/cost/`, watchdog scripts, `scripts/deploy.sh` | QA PASS → auto-merge |
+| T4 — Verifier Core | `ci.yml`, `deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts` | Deep-QA pass (#740); operator only via exhausted remediation loop |
 
 ## Common Pitfalls
 
