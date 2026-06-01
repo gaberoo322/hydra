@@ -110,19 +110,30 @@ function extractSection(body: string, headerRe: RegExp): string[] {
   // (Risk / Implementation / Files in/out of scope / Acceptance), or EOF.
   const headerSource = headerRe.source.replace(/\\b/g, "");
   const re = new RegExp(
-    `(?:^|\\n)\\s*(?:##+\\s*|\\*\\*)?${headerSource}(?:\\*\\*)?\\s*[\\r\\n]+([\\s\\S]*?)(?=\\n\\s*(?:##+\\s|\\*\\*[A-Z])|\\n\\s*Files (?:in|out of) scope|\\n\\s*Risk\\b|\\n\\s*Implementation\\b|\\n\\s*Acceptance\\b|\\n\\s*$|$)`,
+    `(?:^|\\n)\\s*(?:##+\\s*|\\*\\*)?${headerSource}(?:\\*\\*)?\\s*[\\r\\n]+([\\s\\S]*?)(?=\\n\\s*(?:##+\\s|\\*\\*[A-Z])|\\n\\s*Files (?:in|out of) scope|\\n\\s*Risk\\b|\\n\\s*Implementation\\b|\\n\\s*Acceptance\\b|\\n\\s*scope-justification|\\n\\s*$|$)`,
     "i",
   );
   const m = body.match(re);
   if (!m) return [];
   const block = m[1];
-  const codeSpans = Array.from(block.matchAll(/`([^`]+)`/g)).map((x) => x[1].trim());
-  if (codeSpans.length > 0) return codeSpans.filter(looksLikePath);
-  return block
+  // Collect paths from BOTH code spans AND bullet/line entries (issue #836).
+  // A single backticked path inside the section (e.g. from a scope-justification
+  // line that the boundary lookahead failed to strip) must never suppress the
+  // plain bullet-list entries — that early-return was the #836 regression.
+  const codeSpans = Array.from(block.matchAll(/`([^`]+)`/g))
+    .map((x) => x[1].trim())
+    .filter(looksLikePath);
+  const bulletPaths = block
     .split("\n")
-    .map((l) => l.replace(/^\s*[-*]\s+/, "").trim())
+    // Strip the bullet marker, THEN strip backticks so a backticked bullet
+    // contributes the same clean path as the code-span branch (no corrupted
+    // literal-backtick duplicate), then trim.
+    .map((l) => l.replace(/^\s*[-*]\s+/, "").replace(/`/g, "").trim())
     .filter((l) => l && !l.startsWith("#"))
     .filter(looksLikePath);
+  // Union, deduped — backticked-bullet and plain-bullet sections both stay
+  // byte-identical to the pre-#836 behaviour; mixed sections now keep all paths.
+  return Array.from(new Set([...codeSpans, ...bulletPaths]));
 }
 
 function looksLikePath(s: string): boolean {
