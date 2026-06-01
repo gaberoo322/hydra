@@ -1,23 +1,7 @@
-import { useApi } from "../../../hooks/useApi.js";
+import { usePageItems } from "../../../hooks/usePageItems.js";
+import { TierBadge, ClassLabelBadge } from "../../badges/Badges.jsx";
+import { formatClock } from "../../../lib/page-item-format.ts";
 import { Section } from "./Section.jsx";
-
-// Monotonic tier ladder (ADR-0015 / issue #737): T1 shallowest (green) →
-// T4 deepest = Verifier Core (red). Legacy `0` rows (pre-renumber merges)
-// map to the same deepest-tier red so historical chips render unchanged.
-const TIER_STYLE = {
-  1: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-  2: "bg-sky-500/10 text-sky-300 border-sky-500/30",
-  3: "bg-amber-500/10 text-amber-300 border-amber-500/30",
-  4: "bg-red-500/10 text-red-300 border-red-500/30",
-  0: "bg-red-500/10 text-red-300 border-red-500/30",
-};
-
-function formatMergedAt(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime()) || d.getTime() === 0) return "";
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
 
 /**
  * RecentMerges — the most-recent merged PRs on master, each with the
@@ -25,11 +9,13 @@ function formatMergedAt(iso) {
  * can see what the system actually shipped overnight.
  *
  * Polls every 60s per PRD #615 (slower than the 30s sections — merges
- * aren't time-sensitive).
+ * aren't time-sensitive). Thin renderer over the page-item seam (issue
+ * #822): TierBadge/ClassLabelBadge + the shared clock formatter.
  */
 export function RecentMerges({ limit = 10 }) {
-  const { data, error, loading } = useApi(`/today/merges?limit=${limit}`, { poll: 60_000 });
-  const items = data?.items ?? [];
+  const { items, data, status, error, loading } = usePageItems(`/today/merges?limit=${limit}`, {
+    poll: 60_000,
+  });
 
   return (
     <Section
@@ -38,14 +24,14 @@ export function RecentMerges({ limit = 10 }) {
       count={items.length}
       loading={loading}
       error={error}
-      empty={!loading && !error && items.length === 0}
+      empty={status === "empty"}
       emptyMessage="No PRs merged recently."
     >
       <ul className="divide-y divide-zinc-700/50">
         {items.map((item) => (
           <li key={item.prNumber} className="py-2 flex items-center gap-3">
             <span className="text-xs text-zinc-500 w-12 shrink-0 text-right">
-              {formatMergedAt(item.mergedAt)}
+              {formatClock(item.mergedAt)}
             </span>
             <a
               href={item.url}
@@ -57,18 +43,8 @@ export function RecentMerges({ limit = 10 }) {
               {item.title}
             </a>
             <div className="flex items-center gap-1 shrink-0">
-              {item.tier !== null && item.tier !== undefined && (
-                <span
-                  className={`px-1.5 py-0.5 text-[10px] rounded border ${TIER_STYLE[item.tier] || "bg-zinc-700/60 text-zinc-300 border-zinc-600"}`}
-                >
-                  T{item.tier}
-                </span>
-              )}
-              {item.classLabel && (
-                <span className="px-1.5 py-0.5 text-[10px] rounded bg-zinc-700/60 text-zinc-300 border border-zinc-600">
-                  {item.classLabel}
-                </span>
-              )}
+              <TierBadge tier={item.tier} />
+              <ClassLabelBadge label={item.classLabel} />
             </div>
           </li>
         ))}

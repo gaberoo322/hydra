@@ -1,31 +1,23 @@
 import { Link } from "react-router-dom";
-import { useApi } from "../../../hooks/useApi.js";
+import { usePageItems } from "../../../hooks/usePageItems.js";
+import { SourceBadge } from "../../badges/Badges.jsx";
+import { formatAge } from "../../../lib/page-item-format.ts";
 import { Section } from "./Section.jsx";
-
-const SOURCE_STYLES = {
-  autopilot: "bg-sky-500/10 text-sky-300 border-sky-500/30",
-  operator: "bg-amber-500/10 text-amber-300 border-amber-500/30",
-  subagent: "bg-violet-500/10 text-violet-300 border-violet-500/30",
-};
-
-function formatAge(startedAt) {
-  if (!startedAt) return "";
-  const startedMs = Date.parse(startedAt);
-  if (!Number.isFinite(startedMs)) return "";
-  const ageSec = Math.max(0, Math.floor((Date.now() - startedMs) / 1000));
-  if (ageSec < 60) return `${ageSec}s`;
-  if (ageSec < 3600) return `${Math.round(ageSec / 60)}m`;
-  return `${Math.floor(ageSec / 3600)}h ${Math.round((ageSec % 3600) / 60)}m`;
-}
 
 /**
  * ActiveDispatches — every live Claude Code session known to the
  * orchestrator. Polls every 5s (PRD #615) so the operator can watch
  * sessions come and go.
+ *
+ * Thin renderer over the page-item seam (issue #822): usePageItems supplies
+ * the typed item list + status; SourceBadge/formatAge come from the shared
+ * Modules. The row markup (incl. the subagent transcript affordance) stays
+ * local — rows genuinely differ across pages.
  */
 export function ActiveDispatches() {
-  const { data, error, loading } = useApi("/now/active-dispatches", { poll: 5_000 });
-  const items = data?.items ?? [];
+  const { items, status, error, loading } = usePageItems("/now/active-dispatches", {
+    poll: 5_000,
+  });
 
   return (
     <Section
@@ -34,17 +26,13 @@ export function ActiveDispatches() {
       count={items.length}
       loading={loading}
       error={error}
-      empty={!loading && !error && items.length === 0}
+      empty={status === "empty"}
       emptyMessage="No dispatches running right now."
     >
       <ul className="divide-y divide-zinc-700/50">
         {items.map((item) => (
           <li key={item.id} className="py-2 flex items-center gap-3">
-            <span
-              className={`px-1.5 py-0.5 text-[10px] rounded border shrink-0 ${SOURCE_STYLES[item.source] || "bg-zinc-700/60 text-zinc-300 border-zinc-600"}`}
-            >
-              {item.source}
-            </span>
+            <SourceBadge source={item.source} />
             <div className="flex-1 min-w-0">
               <div className="text-sm text-zinc-100 truncate">
                 <span className="font-mono text-zinc-300 mr-2">{item.classLabel}</span>

@@ -1,28 +1,7 @@
-import { useApi } from "../../../hooks/useApi.js";
+import { usePageItems } from "../../../hooks/usePageItems.js";
+import { DecisionSourceBadge } from "../../badges/Badges.jsx";
+import { relativeAge } from "../../../lib/page-item-format.ts";
 import { Section } from "./Section.jsx";
-
-const SOURCE_LABEL = {
-  "operator-decision-queue": "queue",
-  "ready-for-human": "human",
-  "needs-info": "info",
-};
-
-const SOURCE_STYLE = {
-  "operator-decision-queue": "bg-violet-500/10 text-violet-300 border-violet-500/30",
-  "ready-for-human": "bg-yellow-500/10 text-yellow-300 border-yellow-500/30",
-  "needs-info": "bg-sky-500/10 text-sky-300 border-sky-500/30",
-};
-
-function relativeAge(iso) {
-  if (!iso) return "";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return "";
-  const minutes = Math.floor(ms / 60_000);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
-}
 
 /**
  * OperatorDecisionQueue — unifies the three operator-attention sources
@@ -30,11 +9,14 @@ function relativeAge(iso) {
  * list. Each row links to the GitHub issue and shows badges for every
  * source that surfaced it.
  *
- * Polls /api/today/decision-queue every 30s per PRD #615.
+ * Polls /api/today/decision-queue every 30s per PRD #615. Thin renderer
+ * over the page-item seam (issue #822): DecisionSourceBadge + the shared
+ * coarse-age formatter (relativeAge).
  */
 export function OperatorDecisionQueue() {
-  const { data, error, loading } = useApi("/today/decision-queue", { poll: 30_000 });
-  const items = data?.items ?? [];
+  const { items, status, error, loading } = usePageItems("/today/decision-queue", {
+    poll: 30_000,
+  });
 
   return (
     <Section
@@ -43,7 +25,7 @@ export function OperatorDecisionQueue() {
       count={items.length}
       loading={loading}
       error={error}
-      empty={!loading && !error && items.length === 0}
+      empty={status === "empty"}
       emptyMessage="Inbox zero. Nothing waiting on a human decision."
     >
       <ul className="divide-y divide-zinc-700/50">
@@ -62,12 +44,7 @@ export function OperatorDecisionQueue() {
             </div>
             <div className="flex items-center gap-1 shrink-0">
               {item.sources?.map((s) => (
-                <span
-                  key={s}
-                  className={`px-1.5 py-0.5 text-[10px] rounded border ${SOURCE_STYLE[s] || ""}`}
-                >
-                  {SOURCE_LABEL[s] || s}
-                </span>
+                <DecisionSourceBadge key={s} source={s} />
               ))}
             </div>
             <span className="text-xs text-zinc-500 w-8 text-right">{relativeAge(item.createdAt)}</span>
