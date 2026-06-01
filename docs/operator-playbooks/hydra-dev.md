@@ -75,12 +75,68 @@ The child prompt MUST include the worktree-guard preamble (see below) AND the sc
 1. Verifies it is in a worktree (NOT `/home/gabe/hydra`). Aborts if not.
 2. Reads CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs
 3. Extracts the `## Files in scope` + `## Files out of scope` lists from the issue body
-4. Greps/reads the source for context
-5. Implements the issue — touching out-of-scope files only with a `scope-justification:` block in the PR body
-6. Runs `npm test` + `npm run typecheck` + `npm run build`
-7. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
-8. Opens a PR with `closes #$issue_number` in the body, a `## Files in scope` mirror of the issue's section, and a `Tier: <0|1|2|3>` line populated from the API
-9. Returns: PR URL + summary table
+4. **Fetches per-anchor Reflections via the live API (see "Reflection injection — live API" below)** and, if any are returned, weaves the narrative into its implementation plan. Never skip — a retry of a prior-failure anchor depends on this.
+5. Greps/reads the source for context
+6. Implements the issue — touching out-of-scope files only with a `scope-justification:` block in the PR body
+7. Runs `npm test` + `npm run typecheck` + `npm run build`
+8. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
+9. Opens a PR with `closes #$issue_number` in the body, a `## Files in scope` mirror of the issue's section, and a `Tier: <0|1|2|3>` line populated from the API
+10. Returns: PR URL + summary table
+
+### Reflection injection — live API (issue #841)
+
+A prior **failed** attempt on the same anchor (or, post-#326, a different
+anchor that touched the same files) leaves a per-anchor **Reflection** —
+"what was attempted, why it failed, what to change". Before #841 this
+narrative reached code-writing dispatches only through the dead in-process
+`buildPlannerContext`, so retries silently lost their own failure context
+(the 0%-merge-rate condition #193 was created to fix). The narrative is now
+re-homed on a **live** path the child fetches itself.
+
+At **planning time** — the same point the child consults the tier API
+below — fetch the per-anchor reflection narrative and weave it into the
+implementation plan. The endpoint composes the existing per-anchor +
+by-file reflection reads server-side, so large narrative text stays out of
+`decide.py` (the dispatch JSON carries only `{anchor, score}`).
+
+**Endpoint contract:**
+
+- Method: `GET`
+- Path: `/api/reflections`
+- Query:
+  - `anchor=<anchor.reference>` (the issue ref, e.g. `issue-841` — use
+    `anchor.reference`, NOT `task.title`, matching the Kanban-key rule)
+  - `files=<csv>` (optional) — the `## Files in scope` paths, comma-separated,
+    so reflections from other anchors that touched the same files surface too
+- Response (200): `{ anchor, formatted, count, blocks: [{source, count}, ...] }`
+  - `formatted` is prompt-ready markdown (the `## PRIOR ATTEMPTS …` and
+    `## RELATED FILES — Prior Failures …` sections). `count: 0` /
+    `formatted: ""` means no prior reflections — a clean no-op.
+
+**Required child-side recipe (at planning time, before writing code):**
+
+```bash
+# anchor.reference is the issue reference, e.g. "issue-841".
+# FILES_CSV is the `## Files in scope` list, comma-separated.
+REFL_JSON=$(curl -sf --max-time 5 \
+  "http://localhost:4000/api/reflections?anchor=$(printf '%s' "$ANCHOR_REF" | jq -sRr @uri)&files=$(printf '%s' "$FILES_CSV" | jq -sRr @uri)")
+
+REFL_FORMATTED=$(printf '%s' "$REFL_JSON" | jq -r '.formatted // ""')
+if [ -n "$REFL_FORMATTED" ]; then
+  # Prepend REFL_FORMATTED to your implementation-planning context. This anchor
+  # (or a related file) failed before — read the prior attempts and do NOT
+  # repeat the same approach.
+  printf '%s\n' "$REFL_FORMATTED"
+fi
+# Empty / unreachable → graceful no-op (degrade exactly as the dead path did
+# on a miss). Never fail the dispatch over a reflections miss.
+```
+
+**Verify reflections-reach-retry with this endpoint, NOT
+`/api/learning/context-trace`.** The context-trace endpoint reports
+`getContext()`'s *composition* (a prompt no subagent receives on today's
+architecture), so a `hit` there is not proof of delivery — `/api/reflections`
+is the live path a dispatch actually consumes.
 
 ### Tier classification — live API (issue #406)
 
