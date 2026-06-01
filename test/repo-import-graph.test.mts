@@ -1,5 +1,5 @@
 /**
- * Regression tests for src/repo-map.ts — regex-based TypeScript parser.
+ * Regression tests for src/repo-import-graph.ts — regex-based TypeScript parser.
  *
  * Tests export extraction, import edge extraction, and graph construction
  * using inline fixture strings. No I/O required — all functions are pure.
@@ -19,8 +19,8 @@ import {
   clearRepoMapCache,
   isTestFile,
   findTestFileAffinity,
-} from "../src/repo-map.ts";
-import type { ExportedSymbol, ImportEdge, SymbolDetail } from "../src/repo-map.ts";
+} from "../src/repo-import-graph.ts";
+import type { ExportedSymbol, ImportEdge, SymbolDetail } from "../src/repo-import-graph.ts";
 
 // ---------------------------------------------------------------------------
 // parseExports
