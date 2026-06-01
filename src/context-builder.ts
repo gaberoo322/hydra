@@ -15,7 +15,13 @@
 
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { getContext, reflectionTelemetry, type ReflectionSource } from "./learning.ts";
+import {
+  getContext,
+  reflectionTelemetry,
+  type ReflectionSource,
+  type LearningContext,
+  type LearningContextBlock,
+} from "./learning.ts";
 import { getCumulativeAccomplishments } from "./metrics/aggregate.ts";
 import { summarizeForPrompt, getDiff } from "./grounding.ts";
 import {
@@ -145,6 +151,106 @@ export function applyContextBudget(
 }
 
 // ---------------------------------------------------------------------------
+// Block-aware budget for the learning source (issue #804 PR-B)
+// ---------------------------------------------------------------------------
+//
+// The learning bundle (the `reflections` planner-context source) is the one
+// source whose content is a *composition* of independently-meaningful blocks
+// (agent-memory, knowledge-base, per-anchor / by-file / global reflections).
+// The monolithic char-slice in applyContextBudget can sever a reflection body
+// while leaving its header intact — corrupting the post-budget count and, worse,
+// handing the planner half a reflection. PR-B replaces that slice (for the
+// learning source ONLY — the other 7 sources stay monolithic strings) with a
+// whole-block drop: shed entire blocks lowest-dropPriority-first until the
+// bundle fits, never cutting mid-block. The surviving blocks are the exact set
+// the planner sees, so reflection telemetry is read off them post-budget.
+
+/** The name of the planner-context source carrying the learning bundle. */
+export const LEARNING_SOURCE_NAME = "reflections";
+
+/**
+ * Wrap a list of blocks as a minimal LearningContext so reflectionTelemetry
+ * (which reads `.blocks` only) can be computed off the post-budget survivors.
+ * toPrompt() mirrors the canonical hit-join in case a caller renders it.
+ */
+function buildContextFromBlocks(blocks: LearningContextBlock[]): LearningContext {
+  return {
+    blocks,
+    toPrompt: () =>
+      blocks
+        .filter((b) => b.status === "hit" && b.content.length > 0)
+        .map((b) => b.content)
+        .join("\n\n"),
+  };
+}
+
+/**
+ * Render a list of hit learning blocks to the prompt string, using the same
+ * `\n\n` separator as LearningContext.toPrompt(). Miss/error blocks (empty
+ * content) are skipped. `excludeSources` drops named sources from the rendering
+ * WITHOUT dropping them from the trace — used to dedupe OpenViking when the
+ * separate `memory` source already injects it (invariant: OV injected once).
+ */
+function renderLearningBlocks(
+  blocks: LearningContextBlock[],
+  excludeSources: ReadonlySet<string> = new Set(),
+): string {
+  return blocks
+    .filter((b) => b.status === "hit" && b.content.length > 0 && !excludeSources.has(b.source))
+    .map((b) => b.content)
+    .join("\n\n");
+}
+
+/**
+ * Drop whole learning blocks lowest-dropPriority-first until the rendered
+ * bundle fits within `learningBudget` chars. Never slices a block mid-text.
+ *
+ * Returns the surviving hit-blocks (in their original order) plus the rendered
+ * string. Invariant (#193): because per-anchor-reflections carries the highest
+ * dropPriority, it is the LAST learning block shed — retry correctness holds.
+ * If a single surviving block still exceeds the budget, it is kept whole rather
+ * than sliced: a truncated reflection is worse than an over-budget one, and the
+ * monolithic sources still absorb the remaining pressure via applyContextBudget.
+ *
+ * Exported for direct unit testing of the drop order and the never-slice
+ * guarantee — the brittle header-regex tests it replaces are deleted.
+ */
+export function applyLearningBlockBudget(
+  blocks: LearningContextBlock[],
+  learningBudget: number,
+  excludeSources: ReadonlySet<string> = new Set(),
+): { survivors: LearningContextBlock[]; content: string } {
+  // Only hit blocks with content contribute to the prompt (and to the budget).
+  const hits = blocks.filter(
+    (b) => b.status === "hit" && b.content.length > 0 && !excludeSources.has(b.source),
+  );
+
+  const survive = new Set(hits);
+  const rendered = () =>
+    [...survive]
+      // preserve original block order in the output
+      .sort((a, b) => blocks.indexOf(a) - blocks.indexOf(b))
+      .map((b) => b.content)
+      .join("\n\n");
+
+  const size = () => rendered().length;
+
+  // Candidates to drop, lowest dropPriority (dropped first) → highest (last).
+  const dropOrder = [...hits].sort((a, b) => a.dropPriority - b.dropPriority);
+
+  for (const block of dropOrder) {
+    if (size() <= learningBudget) break;
+    // Keep at least one block — if only one survivor remains, stop dropping
+    // (a lone over-budget block is kept whole; never sliced).
+    if (survive.size <= 1) break;
+    survive.delete(block);
+  }
+
+  const survivors = blocks.filter((b) => survive.has(b));
+  return { survivors, content: rendered() };
+}
+
+// ---------------------------------------------------------------------------
 // PlannerContext — all context sources needed by the Planner agent
 // ---------------------------------------------------------------------------
 
@@ -260,12 +366,17 @@ export async function buildPlannerContext(
     loadSource("openviking-context", () =>
       ovSession?.getAgentContext?.("planner", anchor) || Promise.resolve({ formatted: "" }), warnings),
   ]);
-  const plannerMemory = learningCtx ? learningCtx.toPrompt() : "";
-  // Issue #804: reflection accounting is derived from the structured blocks,
-  // pre-budget. (Block-aware post-budget exactness is PR-B.)
-  const reflectionStats: { count: number; sources: ReflectionSource[] } =
-    learningCtx ? reflectionTelemetry(learningCtx) : { count: 0, sources: [] };
   const ovContext = (ovResult as any)?.formatted || "";
+
+  // Issue #804 PR-B: OpenViking is injected exactly once. The `memory` source
+  // (ovSession.getAgentContext — resources + memories) is the richer OV surface
+  // and occupies its own priority slot, so when it fires we drop the learning
+  // bundle's `knowledge-base` block from the *prompt rendering* (NOT from the
+  // trace — getContext()'s blocks are untouched, so /api/learning/context-trace
+  // still honestly reports the KB block). When `memory` is empty (no OV session,
+  // or it returned nothing) the KB block is the only OV surface and is kept.
+  const learningExclude = new Set<string>();
+  if (ovContext.length > 0) learningExclude.add("knowledge-base");
 
   // Load milestone progress
   const milestoneContext = await loadSource("milestone-progress", async () => {
@@ -300,15 +411,49 @@ export async function buildPlannerContext(
   // to its loaded content. This makes the assembled source-name list and
   // SOURCE_PRIORITY structurally identical — adding a source can no longer
   // drift the two apart.
-  const contentByName: Record<string, string> = {
+  //
+  // Issue #804 PR-B: the learning bundle (`reflections` source) is budgeted
+  // block-wise BEFORE the monolithic char-budget runs. We give it the residual
+  // budget left by the other (non-learning) sources, drop whole blocks
+  // lowest-dropPriority-first to fit, and read reflection telemetry off the
+  // SURVIVING blocks so the count is exact post-budget (no mid-text slice can
+  // corrupt a reflection header). The block-budgeted string then enters
+  // applyContextBudget alongside the monolithic sources; because it already
+  // fits its share, the slice path leaves it alone (unless the non-learning
+  // sources alone blow the whole budget, in which case the lower-priority
+  // monolithic sources absorb the pressure first — `reflections` outranks
+  // priorities/memory/accomplishments/continuity).
+  const monolithicByName: Record<string, string> = {
     grounding: groundingSummary,
     scopedFileTree,
     feedback: feedback || "",
-    reflections: plannerMemory || "",
     priorities: priorities || "",
     memory: ovContext,
     accomplishments: (accomplishmentsContext || "") + (milestoneContext || ""),
     continuity: continuityContext,
+  };
+  const monolithicTotal = Object.values(monolithicByName).reduce((sum, c) => sum + c.length, 0);
+
+  // Residual budget for the learning bundle = whole budget minus everything
+  // else, floored at MIN_TRUNCATED so a single reflection always survives.
+  const learningBudget = Math.max(MIN_TRUNCATED, CONTEXT_BUDGET - monolithicTotal);
+  const learningBlocks = learningCtx ? learningCtx.blocks : [];
+  const { survivors: survivingBlocks, content: plannerMemory } = applyLearningBlockBudget(
+    learningBlocks,
+    learningBudget,
+    learningExclude,
+  );
+
+  // Issue #804 PR-B: reflection accounting is derived from the SURVIVING blocks
+  // — exact post-budget. reflectionTelemetry only counts the three reflection
+  // sources, so the knowledge-base exclusion above never affects the count.
+  const reflectionStats: { count: number; sources: ReflectionSource[] } = reflectionTelemetry(
+    buildContextFromBlocks(survivingBlocks),
+  );
+
+  const contentByName: Record<string, string> = {
+    ...monolithicByName,
+    reflections: plannerMemory || "",
   };
   const rawSources: ContextSource[] = PLANNER_SOURCE_REGISTRY.map((spec) => ({
     name: spec.name,
@@ -328,10 +473,9 @@ export async function buildPlannerContext(
 
   // Issue #193: log reflection injection count so production logs show whether
   // reflections actually reached the planner (previously silent for quick-fix).
-  // Issue #804: count + sources are read off the structured LearningContext
-  // blocks (reflectionStats, computed above), not regex-scanned out of the
-  // budgeted markdown string. NOTE this is the PRE-budget count; PR-B makes it
-  // exact post-truncation by dropping whole blocks instead of slicing.
+  // Issue #804 PR-B: count + sources are read off the SURVIVING structured
+  // blocks (reflectionStats, computed above) — exact post-budget, never
+  // regex-scanned out of the budgeted markdown string.
   const finalPlannerMemory = byName.get("reflections") ?? "";
   if (reflectionStats.count > 0) {
     console.log(`[Planner] Injected ${reflectionStats.count} reflection(s) for anchor "${anchor.reference.slice(0, 80)}" (type=${anchor.type}, sources=${reflectionStats.sources.join(",")})`);

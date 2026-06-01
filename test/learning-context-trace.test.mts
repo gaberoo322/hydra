@@ -47,6 +47,12 @@ describe("getContext returns a structured LearningContext", () => {
       ],
       "block order is the prompt order — agent-memory first, global-reflections last",
     );
+    // Issue #804 PR-B: per-anchor carries the highest dropPriority of all five
+    // blocks (dropped last under budget pressure — #193 retry correctness).
+    const bySource = new Map(ctx.blocks.map((b: any) => [b.source, b.dropPriority]));
+    const maxDrop = Math.max(...ctx.blocks.map((b: any) => b.dropPriority));
+    assert.equal(bySource.get("per-anchor-reflections"), maxDrop,
+      "per-anchor reflections must be the last learning block dropped");
     for (const block of ctx.blocks) {
       assert.ok(
         ["hit", "miss", "error"].includes(block.status),
@@ -54,6 +60,8 @@ describe("getContext returns a structured LearningContext", () => {
       );
       // Issue #804: every block carries a numeric itemCount; 0 for miss/error.
       assert.equal(typeof block.itemCount, "number", `block ${block.source} carries a numeric itemCount`);
+      // Issue #804 PR-B: every block declares its within-bundle drop priority.
+      assert.equal(typeof block.dropPriority, "number", `block ${block.source} carries a numeric dropPriority`);
       if (block.status === "miss") {
         assert.equal(block.content, "", "miss blocks carry no content");
         assert.equal(block.itemCount, 0, "miss blocks carry itemCount 0");
