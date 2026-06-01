@@ -36,6 +36,7 @@ import { promisify } from "node:util";
 import { execFile as execFileSync } from "node:child_process";
 
 import { PROMOTION_THRESHOLD } from "../pattern-memory/agent-memory.ts";
+import { readFrictionPatterns } from "./friction-source.ts";
 
 const execFile = promisify(execFileSync);
 
@@ -142,7 +143,9 @@ async function readPromotionCandidates(
   candidateWindow: number,
   deps: LessonsOvernightDeps,
 ): Promise<PromotionCandidate[]> {
-  const reader = deps.readFrictionPatterns ?? defaultReadFrictionPatterns;
+  const reader =
+    deps.readFrictionPatterns ??
+    (() => readFrictionPatterns<FrictionPattern>("lessons-overnight"));
   const groups = await reader();
   const out: PromotionCandidate[] = [];
   for (const { skill, patterns } of groups) {
@@ -186,36 +189,6 @@ export function filterNearPromotion(
   return out;
 }
 
-async function defaultReadFrictionPatterns(): Promise<
-  Array<{ skill: string; patterns: FrictionPattern[] }>
-> {
-  // Scan all friction-pattern keys and parse each. We pull the connection
-  // through the typed seam so the import-shape rule in
-  // scripts/ci/redis-seam-check.ts is satisfied.
-  const { getRedisConnection } = await import("../redis/connection.ts");
-  const r = getRedisConnection();
-  const matches: string[] = [];
-  let cursor = "0";
-  do {
-    const [next, page] = await r.scan(cursor, "MATCH", "hydra:friction:*:patterns", "COUNT", "200");
-    cursor = next;
-    matches.push(...page);
-  } while (cursor !== "0");
-
-  const out: Array<{ skill: string; patterns: FrictionPattern[] }> = [];
-  for (const key of matches) {
-    const skill = key.replace(/^hydra:friction:/, "").replace(/:patterns$/, "");
-    const raw = await r.get(key);
-    if (!raw) continue;
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) out.push({ skill, patterns: parsed as FrictionPattern[] });
-    } catch (err: any) {
-      console.error(`[lessons-overnight] failed to parse ${key}: ${err?.message || err}`);
-    }
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // Sub-source: meta-friction issues opened in window
