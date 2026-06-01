@@ -31,21 +31,30 @@
 # loader has a working read path with no external dependencies. Real
 # leading/terminal outcomes against the target are added by the operator.
 #
-# Outcome Holdback tunables (issue #786, ADR-0004 step 4)
+# Outcome Holdback tunables (issue #786 producer, #741 tier-aware carry-up;
+# ADR-0004 step 4 + ADR-0015)
 # -------------------------------------------------------
 # The Post-merge Regression Check (the Outcome Holdback producer) watches the
 # LEADING outcomes above after a merge and auto-reverts on an unfavorable move
-# past `noise_epsilon`. Its windows/caps are named, env-overridable values (not
-# magic literals) so #741 can layer a tier-aware window map on top without code
-# edits. Defaults live in `src/redis/holdback.ts`; override via env:
+# past `noise_epsilon`. Outcome Holdback CARRIES UP the monotonic tier ladder:
+# T2, T3, and T4 merges enroll; T1 (prompt-shaped) is exempt. The watch WINDOW
+# is tier-aware and monotonic — window(T4) >= window(T3) >= window(T2), with the
+# 5-cycle T2 value as the floor (clamped at read time so an env override can
+# never invert the order). Windows/caps are named, env-overridable values (not
+# magic literals). Defaults live in `src/redis/holdback.ts`; override via env:
 #
-#   HYDRA_HOLDBACK_WINDOW_CYCLES         (default 5)   T2-floor watch window
+#   HYDRA_HOLDBACK_WINDOW_CYCLES         (default 5)   T2 watch window (floor)
+#   HYDRA_HOLDBACK_WINDOW_CYCLES_T3      (default 7)   T3 watch window (>= T2)
+#   HYDRA_HOLDBACK_WINDOW_CYCLES_T4      (default 10)  T4 watch window (>= T3)
 #   HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY   (default 3)   global per-UTC-day cap
 #   HYDRA_HOLDBACK_BASELINE_TTL_SECONDS  (default 14d) baseline-record TTL
 #   HYDRA_HOLDBACK_CYCLE_MS              (default 1h)  wall-clock per cycle
 #
 # Only `kind: leading` outcomes ever drive a holdback revert — terminal
-# outcomes are too slow for the window (see the `kind` notes above).
+# outcomes are too slow for the window (see the `kind` notes above). The
+# regression threshold + revert logic are identical across enrolled tiers;
+# #741 broadens WHICH merges enroll and HOW LONG each is watched, not HOW the
+# check works.
 
 outcomes:
   - name: orchestrator-self-improvement-share

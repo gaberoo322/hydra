@@ -49,7 +49,8 @@ import {
   getRevertCount,
   incrRevertCount,
   utcDateKey,
-  HOLDBACK_WINDOW_CYCLES,
+  isEnrolledTier,
+  windowCyclesForTier,
   HOLDBACK_MAX_REVERTS_PER_DAY,
   type HoldbackBaseline,
 } from "./redis/holdback.ts";
@@ -71,7 +72,11 @@ export interface EnrollInput {
   prNumber?: number | null;
   /** Post-#767 monotonic tier of the merged diff (T1–T4). */
   tier?: number | null;
-  /** Override the watch window length (cycles). Defaults to the T2 floor. */
+  /**
+   * Override the watch window length (cycles). When omitted, the window is
+   * derived from `tier` via the tier-aware map (deeper = at least as long;
+   * #741). An explicit override always wins (operator/test escape hatch).
+   */
   windowCycles?: number;
   /** Test seam — explicit outcomes.yaml path. */
   outcomesFile?: string;
@@ -85,6 +90,15 @@ export type EnrollResult =
 /**
  * Capture the pre-merge baseline for a just-merged commit.
  *
+ * Enrollment carries **up** the monotonic tier ladder (#741, ADR-0015): T2, T3,
+ * and T4 merges enroll; **T1 (prompt-shaped) is always exempt** and a merge
+ * whose tier is unknown does not enroll either (no signal). The watch window is
+ * tier-aware — deeper tiers watch at least as long — unless the caller passes
+ * an explicit `windowCycles` override. This is the server-side enforcement of
+ * the carry-up invariant: it holds regardless of what the playbook caller
+ * sends, so a forgotten client-side `if tier in {2,3,4}` guard cannot enroll a
+ * T1 merge.
+ *
  * Skips enrollment (does NOT persist a baseline) when no leading outcome
  * adapter returned data — recording an all-null baseline would make every
  * future "regression" unknowable, so such a merge sits as "no signal" rather
@@ -93,6 +107,19 @@ export type EnrollResult =
 export async function enrollHoldback(input: EnrollInput): Promise<EnrollResult> {
   if (!input.commitSha) {
     return { ok: false, error: "enrollHoldback: commitSha is required" };
+  }
+
+  // Carry-up predicate (#741): only T2/T3/T4 enroll. T1 and null/unknown are
+  // exempt — enforced here so the invariant cannot be bypassed by the caller.
+  if (!isEnrolledTier(input.tier)) {
+    return {
+      ok: true,
+      enrolled: false,
+      reason:
+        input.tier == null
+          ? "tier unknown — not enrolled (no signal)"
+          : `tier T${input.tier} is exempt from Outcome Holdback (only T2/T3/T4 enroll)`,
+    };
   }
 
   let leading: LeadingOutcomeSample[];
@@ -120,7 +147,7 @@ export async function enrollHoldback(input: EnrollInput): Promise<EnrollResult> 
     prNumber: input.prNumber ?? null,
     tier: input.tier ?? null,
     enrolledAt: Date.now(),
-    windowCycles: input.windowCycles ?? HOLDBACK_WINDOW_CYCLES,
+    windowCycles: input.windowCycles ?? windowCyclesForTier(input.tier),
     leading: leading.map((l) => ({
       name: l.name,
       direction: l.direction,

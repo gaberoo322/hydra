@@ -209,12 +209,14 @@ function buildDigestMessage(events, capacitySnapshot = null, builderHealth = nul
   if (rollbacks.length > 0) {
     actionItems.push(`⚠️ ${rollbacks.length} auto-rollback(s) — regressions detected and reverted`);
   }
-  // Tier-2 outcome holdback events (issue #244, ADR-0004 step 4).
+  // Outcome Holdback events (issue #244, ADR-0004 step 4; #741 carry-up).
   // These are self-modification reverts driven by leading-outcome regression,
-  // distinct from the test-regression rollbacks above.
+  // distinct from the test-regression rollbacks above. The holdback now carries
+  // up the ladder (T2/T3/T4 enroll; T1 exempt — #741), so the label is
+  // tier-neutral rather than implying Tier-2 only.
   const holdbackReverts = events.filter(e => e.type === "holdback.reverted");
   if (holdbackReverts.length > 0) {
-    actionItems.push(`⚠️ ${holdbackReverts.length} Tier-2 auto-revert(s) — leading outcomes regressed after self-mod`);
+    actionItems.push(`⚠️ ${holdbackReverts.length} Outcome Holdback auto-revert(s) — leading outcomes regressed after self-mod`);
     for (const e of holdbackReverts.slice(0, 3)) {
       const sha = (e.payload?.commitSha || "?").toString().slice(0, 7);
       const outs = Array.isArray(e.payload?.regressedOutcomes) ? e.payload.regressedOutcomes.join(", ") : "?";
@@ -223,11 +225,11 @@ function buildDigestMessage(events, capacitySnapshot = null, builderHealth = nul
   }
   const holdbackCapReached = events.filter(e => e.type === "holdback.cap-reached");
   if (holdbackCapReached.length > 0) {
-    actionItems.push(`⚠️ Per-day Tier-2 revert cap reached — additional regressions suppressed (${holdbackCapReached.length} event(s))`);
+    actionItems.push(`⚠️ Per-day Outcome Holdback revert cap reached — additional regressions suppressed (${holdbackCapReached.length} event(s))`);
   }
   const holdbackRevertFailed = events.filter(e => e.type === "holdback.revert_failed");
   if (holdbackRevertFailed.length > 0) {
-    actionItems.push(`⚠️ ${holdbackRevertFailed.length} Tier-2 revert attempt(s) failed — manual intervention needed`);
+    actionItems.push(`⚠️ ${holdbackRevertFailed.length} Outcome Holdback revert attempt(s) failed — manual intervention needed`);
   }
 
   if (actionItems.length > 0) {
