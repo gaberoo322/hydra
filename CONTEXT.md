@@ -26,6 +26,18 @@ _Avoid_: metrics, KPIs, success criteria
 The capability of the orchestrator-as-builder, measured as a small, trended set of metrics (the **Builder-Health Scorecard**) that answers whether the 25% **Self-Improvement Share** investment is producing a measurably better builder. The builder-side counterpart to **Target Outcomes** — where Target Outcomes measure the product the orchestrator builds, Builder Health measures the orchestrator's own ability to build. Composed read-only from existing signal (capacity-floor, cycle metrics, lessons/friction trends) plus two new derivations (**Autonomy Rate**, time-to-merge); surfaced in the digest and dashboard. Grounded in ADR-0003 (the floor is an input with no output signal today) and the Orchestrator Vision mandate to surface builder health honestly.
 _Avoid_: orchestrator health (overloaded with the service-level liveness check at `/api/health`), self-improvement metrics (informal), velocity (too narrow)
 
+**Health Snapshot**:
+The normalized internal model the `/api/health/deep` handler builds from its probe fan-out — everything a **Health Diagnostic** rule may read (basic health, scheduler status, service probes, queue/backlog counts, disk/mem/systemd, patterns/reflections/OV search, the emergency brake, and the `recent` pipeline metrics carrying raw counts *and* rates). Produced by `parseProbes()` in `src/health-diagnostics.ts`; the handler owns only the I/O fan-out and the HTTP wire projection. Distinct from **Builder Health** (a trended capability metric) and the `/api/health` liveness boolean (process up).
+_Avoid_: health state (vague), health payload (that is the HTTP wire envelope, a projection of the snapshot), metrics (overloaded)
+
+**Health Diagnostic**:
+One finding emitted by the `/api/health/deep` ruleset — a structured `{severity, component, what, why, impact, action, autoRecovery}` record describing a single thing that is or may be wrong. Produced by a pure rule function `(snapshot: HealthSnapshot) => HealthDiagnostic | null` in `src/health-diagnostics.ts`; adding a condition = appending one rule. Distinct from a `/recommendations` operator action item (a different surface).
+_Avoid_: alert (implies a push/notification channel we do not have), check (the probe is the check; this is its interpreted result), warning (one severity, not the category)
+
+**Health Assessment**:
+The folded result of running every **Health Diagnostic** rule over a **Health Snapshot** — `{diagnostics, status, summary}`, where `status` is the worst-severity fold (`critical > unhealthy > degraded > healthy`) and `summary` is the human banner. Produced by `assessHealth()` in `src/health-diagnostics.ts` and projected verbatim onto the `/api/health/deep` response. Distinct from **Builder Health** (capability trend, not a point-in-time fault scan).
+_Avoid_: health report (the HTTP wire envelope is the report; this is the pure core that feeds it), health score (it is a status enum + diagnostics list, not a number)
+
 **Self-Improvement Share**:
 The share of recent non-idle cycles whose merged work was orchestrator-side rather than target-side, over a rolling window. The realised output signal for the 25% self-improvement floor (ADR-0003): the floor is the *input* budget, this share is the *observed* spend. Computed by `capacity-floor.ts` against `ORCHESTRATOR_FLOOR = 0.25`; the headline self-investment input to the **Builder-Health Scorecard**.
 _Avoid_: capacity split (the dashboard label, not the metric), self-improvement floor (the target, not the realised value), 25% floor (the threshold, not the measurement)
