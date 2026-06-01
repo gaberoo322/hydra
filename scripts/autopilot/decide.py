@@ -178,6 +178,14 @@ SIGNAL_CLASSES = (
     # itself. Phase A (#484) shipped the skill + seen-list; Phase B wires
     # the autopilot dispatch so the walk runs unattended.
     "scout_orch",
+    # architecture_orch (issue #790, parent #787): idle-time fallback that
+    # dispatches the headless /hydra-architecture-scan wrapper (#788) to turn
+    # spare capacity into self-improvement issues. Fires on the first fully-
+    # idle turn when arch_fallback_due AND NOT arch_board_saturated; 24h class
+    # cooldown is the back-stop, arch_board_saturated is the primary
+    # suppressor. collect-state.sh (#789) owns signal emission; decide.py
+    # only reads the precomputed signals.
+    "architecture_orch",
 )
 
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
@@ -194,6 +202,12 @@ SIGNAL_COOLDOWNS = {
     # 30d). Per-class cooldown is the back-stop; per-category cooldown is
     # the primary suppressor. See docs/operator-playbooks/hydra-autopilot.md.
     "scout_orch":      7 * 24 * 60 * 60,
+    # architecture_orch (issue #790): 24h back-stop. The scan is an idle-time
+    # fallback meant to fire on the first fully-idle turn at most once per day;
+    # arch_board_saturated is the primary suppressor and the 24h class
+    # cooldown is the safety net (analogous to scout's per-category-vs-class
+    # split, tuned for daily idle reclamation rather than weekly walks).
+    "architecture_orch": 24 * 60 * 60,
 }
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
@@ -298,6 +312,12 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # scope work. Under `target-only` the autopilot is told to stay out
     # of orch issues; scout_orch belongs in that exclusion.
     "scout_orch",
+    # architecture_orch (issue #790) scans the orchestrator's own codebase
+    # architecture and emits orch-scope issues — orch-scope by definition.
+    # Under `target-only` the autopilot stays out of orch work, so
+    # architecture_orch is excluded (no architecture_target mirror yet; the
+    # Target has a PR merge backlog, #718).
+    "architecture_orch",
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -1165,6 +1185,12 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
         # back-stop in parallel.
         "scout_orch",
+        # architecture_orch (issue #790) — idle-time fallback. Registered in
+        # the dispatch iteration tuple so a real dispatch sets
+        # dispatched_any=True, which yields idle=0 for the turn and stops
+        # idle_turns from accumulating while a fallback is eligible (the AC
+        # is met by being a real dispatch, NOT by editing the terminate path).
+        "architecture_orch",
     ):
         if dispatch_blocked:
             plan.events.append(
@@ -1678,6 +1704,32 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                 "hydra-tool-scout",
                 prompt_args={"trigger": "calendar"},
                 reason="weekly calendar walk due",
+            )
+        return None
+    if sig == "architecture_orch":
+        # Issue #790 (parent #787). Idle-time fallback: when the orchestrator
+        # board has gone idle (collect-state.sh emits `arch_fallback_due`),
+        # reclaim spare capacity by dispatching the headless
+        # /hydra-architecture-scan wrapper (#788) to surface architecture-
+        # deepening candidates as tracked issues.
+        #
+        # arch_board_saturated is the anti-feedback-loop guard: once the board
+        # already holds enough proposal-grade architecture work (N=5-10 cap,
+        # owned by collect-state.sh #789), the scan suppresses itself. It is
+        # checked FIRST, mirroring scout_orch's scout_board_saturated early-
+        # return. The 24h per-class cooldown (SIGNAL_COOLDOWNS) is the back-
+        # stop, already honored by the signal_is_cooled guard above.
+        #
+        # decide.py reads the precomputed signals only — it never recomputes
+        # board-empty / cooldown here; that round-trip is exactly the gate-
+        # re-parsing failure mode the signal seam exists to prevent.
+        if _signal_present(state, events, "arch_board_saturated"):
+            return None
+        if _signal_present(state, events, "arch_fallback_due"):
+            return make_dispatch(
+                sig,
+                "hydra-architecture-scan",
+                reason="orch board idle — architecture fallback",
             )
         return None
     return None

@@ -1009,6 +1009,137 @@ describe("decide.py — signal classes with cooldowns", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 7b. architecture_orch signal class (issue #790, parent #787)
+// ---------------------------------------------------------------------------
+//
+// architecture_orch is an idle-time fallback that dispatches the headless
+// /hydra-architecture-scan wrapper (#788). It fires when `arch_fallback_due`
+// is present AND `arch_board_saturated` is absent; the 24h class cooldown is
+// the back-stop and arch_board_saturated is the primary suppressor. It is
+// orch-scope only (SCOPE_TARGET_ONLY_EXCLUDE; no architecture_target mirror).
+// collect-state.sh (#789) owns signal emission; decide.py only reads them.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — architecture_orch signal class (issue #790)", () => {
+  test("architecture_orch fires on arch_fallback_due signal", () => {
+    const state = baseState({ signals: { arch_fallback_due: true } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "architecture_orch");
+    assert.ok(a, "architecture_orch must dispatch on arch_fallback_due");
+    assert.equal(a.skill, "hydra-architecture-scan");
+  });
+
+  test("architecture_orch DOES NOT fire without arch_fallback_due signal", () => {
+    const state = baseState();  // no signals
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
+      undefined,
+      "architecture_orch must not dispatch when no fallback is due",
+    );
+  });
+
+  test("architecture_orch suppressed when arch_board_saturated is set", () => {
+    const state = baseState({
+      signals: { arch_fallback_due: true, arch_board_saturated: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
+      undefined,
+      "saturated arch board → suppress the fallback (anti-feedback-loop guard)",
+    );
+  });
+
+  test("architecture_orch is excluded by target-only scope (orch-scope by definition)", () => {
+    const state = baseState({
+      scope: "target-only",
+      signals: { arch_fallback_due: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
+      undefined,
+      "target-only scope must exclude architecture_orch (INV-008)",
+    );
+  });
+
+  test("architecture_orch is allowed under orch-only scope", () => {
+    const state = baseState({
+      scope: "orch-only",
+      signals: { arch_fallback_due: true },
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
+      "orch-only must NOT exclude architecture_orch",
+    );
+  });
+
+  test("architecture_orch suppressed when recently fired (within 24h cooldown)", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const state = baseState({
+      signals: { arch_fallback_due: true },
+      // Fired 1h ago → inside the 24h cooldown.
+      signal_last_fired: {
+        architecture_orch: now - 60 * 60,
+      } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
+      undefined,
+      "1h ago is inside the 24h architecture_orch cooldown",
+    );
+  });
+
+  test("architecture_orch fires after 24h cooldown elapses", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const state = baseState({
+      signals: { arch_fallback_due: true },
+      // 25h ago → past the 24h cooldown.
+      signal_last_fired: {
+        architecture_orch: now - 25 * 60 * 60,
+      } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
+      "architecture_orch must fire once the 24h cooldown has elapsed",
+    );
+  });
+
+  test("architecture_orch counts as a real dispatch (no idle-heartbeat wait emitted)", () => {
+    // A real dispatch sets dispatched_any=True, which suppresses the idle
+    // heartbeat `wait` action so idle_turns does not accumulate while a
+    // fallback is eligible. The observable proof is the ABSENCE of a
+    // heartbeat wait alongside the PRESENCE of the dispatch.
+    const state = baseState({ signals: { arch_fallback_due: true } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "architecture_orch");
+    assert.ok(a, "architecture_orch dispatch must be present");
+    assert.equal(
+      findAction(plan, (x) => x.type === "wait" && x.reason === "idle heartbeat"),
+      undefined,
+      "a real dispatch turn must NOT emit the idle-heartbeat wait",
+    );
+  });
+
+  test("architecture_orch in burned_classes is NOT re-dispatched (mirrors #432)", () => {
+    const state = baseState({
+      burned_classes: ["architecture_orch"],
+      signals: { arch_fallback_due: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
+      undefined,
+      "burned signal class architecture_orch must not be re-dispatched",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 8. Idle fallback / heartbeat wait
 // ---------------------------------------------------------------------------
 

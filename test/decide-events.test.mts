@@ -53,6 +53,7 @@ const SIGNAL_CLASSES = [
   "discover_orch",
   "discover_target",
   "scout_orch",
+  "architecture_orch",
 ] as const;
 const ALL_CLASSES = [...PIPELINE_CLASSES, ...SIGNAL_CLASSES];
 
