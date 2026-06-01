@@ -43,7 +43,7 @@ Each tick:
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
 6. **Re-enter step 1.** No inline reasoning between steps.
 
-## Class taxonomy (7 pipeline slots + 6 signal classes)
+## Class taxonomy (7 pipeline slots + 7 signal classes)
 
 | Kind | Class | Skill |
 |---|---|---|
@@ -60,6 +60,7 @@ Each tick:
 | signal | `discover_orch` | hydra-discover |
 | signal | `discover_target` | hydra-target-discover |
 | signal | `scout_orch` | hydra-tool-scout (Phase B, weekly calendar walk) |
+| signal | `architecture_orch` | hydra-architecture-scan (#788; idle-time fallback, issue-producing) |
 
 > **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
 > calendar-driven signal class — `SIGNAL_COOLDOWNS["scout_orch"] = 7d`.
@@ -101,6 +102,50 @@ Each tick:
 > populated by `collect-state.sh` each turn from the existing
 > `/api/metrics/tokens` accumulator (`hydra-tool-scout` skill) — no
 > separate writer is needed and the gate sees real usage.
+
+> **Architecture-scan wiring (issues #789/#790, parent #787):**
+> `architecture_orch` is the idle-time fallback signal class. When the
+> orchestrator board has gone fully idle, it reclaims spare capacity by
+> dispatching the headless `/hydra-architecture-scan` wrapper (#788),
+> which runs explore + emit-issues and **files orch-scope GitHub issues**
+> via `hydra-prd` / `to-issues`. It is **issue-producing, not
+> direct-dispatch** — it never dispatches `dev_orch` itself; the issues it
+> files re-enter the board as ordinary `ready-for-agent` work on a later
+> turn. `SIGNAL_COOLDOWNS["architecture_orch"] = 24h`
+> (`decide.py`) — a daily idle-reclamation cadence, in contrast to
+> `scout_orch`'s weekly 7d walk.
+>
+> Two precomputed signals from `collect-state.sh` gate it (decide.py reads
+> them verbatim, never recomputing board-empty or cooldown here — the
+> signal seam exists precisely to prevent that gate-re-parsing round-trip):
+>
+> - **`arch_board_saturated`** is the PRIMARY suppressor and is checked
+>   FIRST in `decide.py:_select_for_signal` (mirroring scout's
+>   `scout_board_saturated` early-return). It is true when the count of
+>   OPEN issues carrying the stable `architecture-scan` label exceeds
+>   `ARCH_BOARD_SATURATION_CAP = 6` (the cap lives in `collect-state.sh`,
+>   not this playbook, so the playbook never greps state JSON — the scout
+>   saturation precedent). This is the anti-feedback-loop guard: once the
+>   board already holds enough proposal-grade architecture work, the scan
+>   suppresses itself rather than manufacturing low-value work.
+> - **`arch_fallback_due`** is the "nothing else to do, go deepen" trigger:
+>   true when `ready_for_agent == 0 AND needs_research == 0 AND
+>   needs_triage == 0 AND work_queue (hydra:anchors:work-queue) == 0`.
+>
+> The 24h per-class cooldown is the BACK-STOP (honored by the shared
+> `signal_is_cooled` guard); `arch_board_saturated` is the primary
+> suppressor. `architecture_orch` is registered in `decide.py`'s
+> `SIGNAL_CLASSES` dispatch tuple and excluded under `target-only` runs
+> via `SCOPE_TARGET_ONLY_EXCLUDE` (it scans the orchestrator's own
+> codebase and emits orch-scope issues — orch-scope by definition).
+>
+> **`architecture_target` soft-dependency:** there is deliberately NO
+> `architecture_target` mirror today. It stays OUT until the Target PR
+> merge backlog (#718) drains — wiring it prematurely would manufacture
+> target work that cannot merge. When #718 clears, the mirror is added the
+> same way (`SCOPE_TARGET_ONLY_EXCLUDE` gains no target entry; a
+> target-scope saturation count + fallback predicate land in
+> `collect-state.sh`).
 
 > **Phase B wiring (issue #466, sub of #437):** `design_concept_orch`
 > fires before `dev_orch` for an orch anchor when the artifact is
@@ -521,6 +566,8 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `scout_last_walk_iso` >7d old or empty | `scout_walk_due` | `scout_orch` (issue #485) |
 | `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
 | `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
+| `arch_fallback_due` (`ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`) | `arch_fallback_due` | `architecture_orch` (issues #789/#790) |
+| `arch_board_open_scan > ARCH_BOARD_SATURATION_CAP (6)` → `arch_board_saturated` | `arch_board_saturated` | suppresses `architecture_orch` (checked FIRST) |
 | `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1) |
 | `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor; `dev_orch` yields the same turn (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. |
 
@@ -528,6 +575,17 @@ Pre-#458 `dev_orch` consumed `/api/anchor/candidates` and routinely
 received target-product anchors (item-26x). Post-#458, candidates are
 treated as target-side work: `dev_target` surfaces the top candidate as
 a hint, and a low best-score forces `research_target` (not `research_orch`).
+
+**Dormant discover signals.** The `discover_orch` / `discover_target`
+selectors in `decide.py` gate on `orch_idle` / `target_idle` respectively,
+but `collect-state.sh` emits **neither** signal today — so both discover
+signal classes are currently dormant (never fire). This is intentional for
+now: idle-time reclamation on the orch side is handled by
+`architecture_orch` (above), and the discover paths are kept wired in
+`decide.py` so re-activating them is a `collect-state.sh` emit change, not
+a selector rewrite. The signal-wiring table above has no `orch_idle` /
+`target_idle` rows precisely because nothing produces them — re-adding a
+row here is the trigger to also emit the signal in `collect-state.sh`.
 
 ## Where to look when something goes wrong
 
