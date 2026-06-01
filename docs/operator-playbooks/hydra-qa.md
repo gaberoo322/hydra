@@ -519,8 +519,8 @@ Pre-merge QA (sections 1–11) is the **Pre-merge Gate**. This section is the
 (`holdback.reverted` / `holdback.cap-reached` / `holdback.revert_failed`) that
 `src/digest.ts` has long consumed but nothing produced since the in-process
 `src/holdback.ts` watcher was deleted in the ADR-0006 cut-over. Without this,
-no Tier-2 merge is actually watched for Target-Outcome regression — the
-holdback is a no-op.
+no enrolled merge (T2/T3/T4 — see "carries up the ladder" below) is actually
+watched for Target-Outcome regression — the holdback is a no-op.
 
 **This is NOT a resurrected in-process watcher.** It is request-scoped work
 the autopilot poll loop dispatches *after* a merge. There is no timer, no
@@ -535,30 +535,46 @@ logic lives behind the orchestrator service (`src/holdback.ts` +
 strictly AFTER a merge; a merge is never blocked or delayed. The only action a
 holdback can take is to open a revert PR.
 
-### A. Enroll at merge time (Tier-2 floor)
+### A. Enroll at merge time (carries up the ladder — T2/T3/T4)
 
 Immediately after a **PASS** merge (section 10) of an **enrolled** PR, snapshot
-the pre-merge baseline of the leading Target Outcomes. Scope for this issue is
-the **T2 floor** — enroll T2 merges only; broadening to T3/T4 with tier-aware
-windows is the sibling issue #741. Skip T1 (prompt-shaped) merges entirely.
+the pre-merge baseline of the leading Target Outcomes. Outcome Holdback
+**carries up** the monotonic tier ladder (#741, ADR-0015): every tier deeper
+than T1 inherits the post-merge watch, so **T2, T3, and T4 merges all enroll**.
+**T1 (prompt-shaped) is always exempt** — too low signal-to-noise for a
+leading-outcome watch to attribute regressions (ADR-0004 reasoning). The watch
+**window length is tier-aware** — deeper blast radius watches at least as long
+(`window(T4) >= window(T3) >= window(T2)`) — and is derived server-side from
+the `tier` you pass; you do not compute the window in the playbook.
 
 ```bash
 # $merge_sha = the squash-merge commit SHA on master (gh pr merge prints it,
 # or: gh pr view $pr_number --json mergeCommit --jq .mergeCommit.oid).
 # $pr_tier   = the tier from the PR's `Tier:` line / the live classifier.
-if [ "$pr_tier" = "2" ]; then
-  curl -fsS -X POST http://localhost:4000/api/holdback/enroll \
-    -H 'content-type: application/json' \
-    -d "$(jq -n --arg sha "$merge_sha" --argjson pr "$pr_number" --argjson tier 2 \
-          '{commitSha:$sha, prNumber:$pr, tier:$tier}')" || \
-    echo "WARN: holdback enroll failed for ${merge_sha} (non-fatal — merge already landed)"
-fi
+# Enroll T2/T3/T4; skip T1 (prompt-shaped) entirely. The window is tier-aware
+# and resolved server-side from `tier` — do NOT pass windowCycles here.
+case "$pr_tier" in
+  2|3|4)
+    curl -fsS -X POST http://localhost:4000/api/holdback/enroll \
+      -H 'content-type: application/json' \
+      -d "$(jq -n --arg sha "$merge_sha" --argjson pr "$pr_number" --argjson tier "$pr_tier" \
+            '{commitSha:$sha, prNumber:$pr, tier:$tier}')" || \
+      echo "WARN: holdback enroll failed for ${merge_sha} (non-fatal — merge already landed)"
+    ;;
+  *)
+    : # T1 / unknown — exempt; no enrollment.
+    ;;
+esac
 ```
 
-`enroll` is a no-op (returns `{enrolled:false}`) when no leading outcome adapter
-returned data at merge time — recording an all-null baseline would make every
-future regression unknowable, so such a merge sits as "no signal" rather than a
-false holdback.
+`enroll` is a no-op (returns `{enrolled:false}`) when the tier is T1/unknown
+(carry-up exemption, enforced server-side regardless of this guard) OR when no
+leading outcome adapter returned data at merge time — recording an all-null
+baseline would make every future regression unknowable, so such a merge sits as
+"no signal" rather than a false holdback. The **check** mechanism (section B),
+the regression threshold, the per-day cap, and the event names are **identical
+across all enrolled tiers** — #741 broadens *which* merges enroll and *how long*
+each is watched, never *how* the regression check works.
 
 ### B. Check enrolled merges each poll (the watch)
 
@@ -610,6 +626,17 @@ esac
 
 ### Invariants (must hold)
 
+- **Carry-up enrollment (T2/T3/T4 only).** Outcome Holdback carries up the
+  monotonic ladder (#741, ADR-0015): T2, T3, and T4 merges enroll; **T1 never
+  enrolls** (prompt-shaped, too low signal-to-noise — ADR-0004). The producer
+  enforces this server-side (`enrollHoldback` rejects T1/unknown), so a missing
+  client-side guard cannot enroll a T1 merge.
+- **Tier-aware, monotonic window.** The watch window length grows with blast
+  radius: `window(T4) >= window(T3) >= window(T2)`, with the 5-cycle T2 value
+  as the floor. The window is derived server-side from the enrolled `tier`
+  (`windowCyclesForTier` in `src/redis/holdback.ts`), clamped so an env
+  override can never invert the order. Only the window varies by tier — the
+  regression threshold and revert logic are identical across enrolled tiers.
 - **Leading outcomes only.** A revert fires only when a `kind: leading` outcome
   regresses in the **unfavorable** direction by **more than** its
   `noise_epsilon`. Terminal outcomes are too slow for the window and never

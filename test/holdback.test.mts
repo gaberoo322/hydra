@@ -46,6 +46,11 @@ import {
   _resetRevertCount,
   holdbackBaselineKey,
   utcDateKey,
+  isEnrolledTier,
+  windowCyclesForTier,
+  HOLDBACK_WINDOW_CYCLES,
+  HOLDBACK_WINDOW_CYCLES_T3,
+  HOLDBACK_WINDOW_CYCLES_T4,
 } from "../src/redis/holdback.ts";
 
 // ---------------------------------------------------------------------------
@@ -183,6 +188,68 @@ describe("snapshotLeadingOutcomes — leading only, null on no-data", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Layer 1b — carry-up enrollment predicate + tier-aware window (#741, no Redis)
+// ---------------------------------------------------------------------------
+
+describe("isEnrolledTier — carry-up applies to T2/T3/T4 only (#741)", () => {
+  test("T1 (prompt-shaped) is exempt", () => {
+    assert.equal(isEnrolledTier(1), false);
+  });
+  test("T2, T3, T4 all enroll", () => {
+    assert.equal(isEnrolledTier(2), true);
+    assert.equal(isEnrolledTier(3), true);
+    assert.equal(isEnrolledTier(4), true);
+  });
+  test("null / undefined / unknown tier does not enroll (no signal)", () => {
+    assert.equal(isEnrolledTier(null), false);
+    assert.equal(isEnrolledTier(undefined), false);
+    assert.equal(isEnrolledTier(0), false);
+    assert.equal(isEnrolledTier(5), false);
+  });
+});
+
+describe("windowCyclesForTier — tier-aware + monotonic (#741)", () => {
+  test("T2 is the floor (HOLDBACK_WINDOW_CYCLES)", () => {
+    assert.equal(windowCyclesForTier(2), HOLDBACK_WINDOW_CYCLES);
+  });
+  test("T3 watches at least as long as T2", () => {
+    const w3 = windowCyclesForTier(3);
+    assert.equal(w3, Math.max(HOLDBACK_WINDOW_CYCLES_T3, HOLDBACK_WINDOW_CYCLES));
+    assert.ok(w3 >= windowCyclesForTier(2), "window(T3) >= window(T2)");
+  });
+  test("T4 watches at least as long as T3", () => {
+    const w4 = windowCyclesForTier(4);
+    assert.ok(w4 >= windowCyclesForTier(3), "window(T4) >= window(T3)");
+  });
+  test("monotonic across the whole ladder", () => {
+    const w2 = windowCyclesForTier(2);
+    const w3 = windowCyclesForTier(3);
+    const w4 = windowCyclesForTier(4);
+    assert.ok(w2 <= w3 && w3 <= w4, "window(T2) <= window(T3) <= window(T4)");
+  });
+  test("T1 / null / unknown fall back to the T2 floor", () => {
+    assert.equal(windowCyclesForTier(1), HOLDBACK_WINDOW_CYCLES);
+    assert.equal(windowCyclesForTier(null), HOLDBACK_WINDOW_CYCLES);
+    assert.equal(windowCyclesForTier(undefined), HOLDBACK_WINDOW_CYCLES);
+  });
+  test("default windows are sane and ascending (5/7/10)", (t) => {
+    // Only meaningful when no operator env override is in play — skip cleanly
+    // if the test environment has tuned the windows.
+    const overridden =
+      process.env.HYDRA_HOLDBACK_WINDOW_CYCLES != null ||
+      process.env.HYDRA_HOLDBACK_WINDOW_CYCLES_T3 != null ||
+      process.env.HYDRA_HOLDBACK_WINDOW_CYCLES_T4 != null;
+    if (overridden) {
+      t.skip("holdback window env override set — default-value assertion N/A");
+      return;
+    }
+    assert.equal(windowCyclesForTier(2), 5);
+    assert.equal(windowCyclesForTier(3), 7);
+    assert.equal(windowCyclesForTier(4), 10);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Layer 2 — producer end-to-end (live Redis DB 1, skip if unreachable)
 // ---------------------------------------------------------------------------
 
@@ -242,9 +309,9 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     assert.equal(r1.ok, true);
     assert.equal((r1 as any).enrolled, false);
 
-    // Leading outcome with data → enrolled + baseline persisted.
+    // Leading outcome with data + an enrolled tier → enrolled + baseline persisted.
     const path = await leadingYaml("e1.txt", 0.5);
-    const r2 = await enrollHoldback({ commitSha: "deadbee2", prNumber: 7, outcomesFile: path });
+    const r2 = await enrollHoldback({ commitSha: "deadbee2", prNumber: 7, tier: 2, outcomesFile: path });
     assert.equal(r2.ok, true);
     assert.equal((r2 as any).enrolled, true);
     const loaded = await loadBaseline("deadbee2");
@@ -253,11 +320,66 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     await redis.del(holdbackBaselineKey("deadbee2"));
   });
 
+  test("T1 merge is NOT enrolled even with leading data (carry-up exemption #741)", async (t) => {
+    if (!guard(t)) return;
+    const path = await leadingYaml("t1.txt", 0.5);
+    const r = await enrollHoldback({ commitSha: "t1sha001", tier: 1, outcomesFile: path });
+    assert.equal(r.ok, true);
+    assert.equal((r as any).enrolled, false, "T1 must never enroll");
+    assert.match((r as any).reason, /exempt/i);
+    // No baseline persisted.
+    const loaded = await loadBaseline("t1sha001");
+    assert.equal((loaded as any).baseline, null);
+  });
+
+  test("unknown tier (null) is NOT enrolled (no signal #741)", async (t) => {
+    if (!guard(t)) return;
+    const path = await leadingYaml("tnull.txt", 0.5);
+    const r = await enrollHoldback({ commitSha: "tnullsha", tier: null, outcomesFile: path });
+    assert.equal(r.ok, true);
+    assert.equal((r as any).enrolled, false, "unknown tier must not enroll");
+    const loaded = await loadBaseline("tnullsha");
+    assert.equal((loaded as any).baseline, null);
+  });
+
+  test("T3 / T4 enroll with the tier-aware window persisted (#741)", async (t) => {
+    if (!guard(t)) return;
+    const path3 = await leadingYaml("t3.txt", 0.5);
+    const r3 = await enrollHoldback({ commitSha: "t3sha001", tier: 3, outcomesFile: path3 });
+    assert.equal((r3 as any).enrolled, true, "T3 must enroll");
+    const b3 = await loadBaseline("t3sha001");
+    assert.equal((b3 as any).baseline.tier, 3);
+    assert.equal((b3 as any).baseline.windowCycles, windowCyclesForTier(3));
+    await redis.del(holdbackBaselineKey("t3sha001"));
+
+    const path4 = await leadingYaml("t4.txt", 0.5);
+    const r4 = await enrollHoldback({ commitSha: "t4sha001", tier: 4, outcomesFile: path4 });
+    assert.equal((r4 as any).enrolled, true, "T4 must enroll");
+    const b4 = await loadBaseline("t4sha001");
+    assert.equal((b4 as any).baseline.windowCycles, windowCyclesForTier(4));
+    // Deeper tier watches at least as long.
+    assert.ok(
+      (b4 as any).baseline.windowCycles >= (b3 as any).baseline.windowCycles,
+      "T4 window >= T3 window",
+    );
+    await redis.del(holdbackBaselineKey("t4sha001"));
+  });
+
+  test("explicit windowCycles override beats the tier-aware default", async (t) => {
+    if (!guard(t)) return;
+    const path = await leadingYaml("ovr.txt", 0.5);
+    const r = await enrollHoldback({ commitSha: "ovrsha01", tier: 2, windowCycles: 42, outcomesFile: path });
+    assert.equal((r as any).enrolled, true);
+    const loaded = await loadBaseline("ovrsha01");
+    assert.equal((loaded as any).baseline.windowCycles, 42, "explicit override wins");
+    await redis.del(holdbackBaselineKey("ovrsha01"));
+  });
+
   test("regression past epsilon emits holdback.reverted with required payload", async (t) => {
     if (!guard(t)) return;
     const enrollPath = await leadingYaml("rev.txt", 0.5);
     const sha = "revsha01";
-    await enrollHoldback({ commitSha: sha, prNumber: 42, outcomesFile: enrollPath });
+    await enrollHoldback({ commitSha: sha, prNumber: 42, tier: 2, outcomesFile: enrollPath });
 
     // Drop the value below baseline by more than epsilon, then check.
     await writeFile(join(tmpDir, "rev.txt"), "0.2");
@@ -284,7 +406,7 @@ describe("Outcome Holdback producer (enroll → check)", () => {
     if (!guard(t)) return;
     const enrollPath = await leadingYaml("fav.txt", 0.5);
     const sha = "favsha01";
-    await enrollHoldback({ commitSha: sha, outcomesFile: enrollPath });
+    await enrollHoldback({ commitSha: sha, tier: 2, outcomesFile: enrollPath });
     await writeFile(join(tmpDir, "fav.txt"), "0.9"); // favorable rise
     const { bus, events } = captureBus();
     const res = await checkHoldback(bus, { commitSha: sha, outcomesFile: enrollPath });
@@ -302,7 +424,7 @@ describe("Outcome Holdback producer (enroll → check)", () => {
 
     const enrollPath = await leadingYaml("cap.txt", 0.5);
     const sha = "capsha01";
-    await enrollHoldback({ commitSha: sha, outcomesFile: enrollPath });
+    await enrollHoldback({ commitSha: sha, tier: 2, outcomesFile: enrollPath });
     await writeFile(join(tmpDir, "cap.txt"), "0.1"); // regress
 
     const { bus, events } = captureBus();
