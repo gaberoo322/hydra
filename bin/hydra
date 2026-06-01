@@ -19,6 +19,11 @@
 #     stop semantics (issue #385): drains the in-flight cycle, no chained
 #     ticks fire after the response — scheduler is quiescent the instant
 #     stop returns. Safe to call repeatedly; second call returns "not running".
+#   hydra brake on | off | status
+#     Operator-only emergency brake (issue #744). `on` pauses ALL auto-merge
+#     regardless of tier/depth and routes open PRs to /hydra-review; `off`
+#     resumes ADR-0015 depth-gated merge; `status` reads the current state.
+#     This CLI is the ONLY write path — the autopilot can never set/clear it.
 #   hydra cycle status
 #   hydra cycle start
 #   hydra cycle reality [<cycleId>]
@@ -116,6 +121,19 @@ cmd_scheduler() {
     start ) _post "/scheduler/start" ;;
     stop  ) _post "/scheduler/stop" ;;
     *     ) echo "hydra scheduler: need status|start|stop" >&2; exit 2 ;;
+  esac
+}
+
+# Issue #744: operator-only emergency brake. `on` pauses ALL auto-merge and
+# routes open PRs to /hydra-review; `off` resumes ADR-0015 depth-gated merge;
+# `status` reads the current state. This CLI (the operator plane) is the ONLY
+# write path — the autopilot can never engage/disengage the brake.
+cmd_brake() {
+  case "${1:-}" in
+    on    ) _post "/autopilot/emergency-brake" '{"engaged":true,"engagedBy":"cli"}' ;;
+    off   ) _post "/autopilot/emergency-brake" '{"engaged":false}' ;;
+    status|"") _get "/autopilot/emergency-brake" ;;
+    *     ) echo "hydra brake: need on|off|status" >&2; exit 2 ;;
   esac
 }
 
@@ -283,6 +301,7 @@ case "$1" in
   -h|--help|help) usage 0 ;;
   health)          shift; cmd_health "$@" ;;
   scheduler)       shift; cmd_scheduler "$@" ;;
+  brake)           shift; cmd_brake "$@" ;;
   cycle)           shift; cmd_cycle "$@" ;;
   backlog)         shift; cmd_backlog "$@" ;;
   queue)           shift; cmd_queue "$@" ;;

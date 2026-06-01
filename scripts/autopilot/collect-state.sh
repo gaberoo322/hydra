@@ -277,6 +277,20 @@ except: print(0)" || echo 0
 echo -n "usage_eligibility_json="
 hydra raw GET /usage/eligibility 2>/dev/null || echo '{"allow":true,"shed":[],"reasons":{"calibrated":false}}'
 
+# Emergency brake — issue #744 (operator-only).
+#
+# `GET /api/autopilot/emergency-brake` (src/api/autopilot.ts) returns the
+# current brake state: {"engaged":bool,"since"?:ms,"engagedBy"?:str}.
+# The playbook merges this into state.json as `state.emergency_brake`.
+# decide.py's auto-merge sweep reads `state.emergency_brake.engaged`: when
+# true it emits ZERO auto-merge actions and a single `route-prs-to-review`
+# action instead. This is a READ-ONLY collector — collect-state.sh (and
+# decide.py) can never SET or CLEAR the brake; the sole write path is the
+# operator CLI (`hydra brake on|off`) / the API POST route. Orchestrator-down
+# defaults to disengaged so a transient outage never wedges auto-merge off.
+echo -n "emergency_brake_json="
+hydra raw GET /autopilot/emergency-brake 2>/dev/null || echo '{"engaged":false}'
+
 # capacity-floor (orchestrator self-improvement share)
 hydra raw GET /capacity 2>/dev/null | python3 -c "
 import json,sys

@@ -14,6 +14,7 @@ import { getMemoryPatterns } from "../redis/agent-memory.ts";
 import { redisInfo as getRedisInfo } from "../redis/utility.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
 import { countReflectionKeys } from "../redis/reflections.ts";
+import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getTargetServiceName } from "../target-config.ts";
 // Issue #231: shared OV credential — health probe must use the same key as agent searches.
 import { OPENVIKING_API_KEY } from "../knowledge-base/ov-config.ts";
@@ -68,6 +69,17 @@ export function createHealthRouter(eventBus: any) {
     // when unresolvable (omitted-by-coalesce below); never blocks /health.
     const deployedSha = await getDeployedSha();
 
+    // Issue #744: operator-only emergency-brake state. Fail-safe to
+    // disengaged if Redis is unreachable — the brake read must never block
+    // /health (the watchdog polls this surface). The brake itself still
+    // holds; this read is purely advisory observability.
+    let emergencyBrake: { engaged: boolean; since?: number; engagedBy?: string } = { engaged: false };
+    try {
+      emergencyBrake = await getEmergencyBrake();
+    } catch (err: any) {
+      console.error(`[API] /health emergency-brake read failed: ${err?.message ?? err}`);
+    }
+
     res.json({
       status: killFileExists ? "killed" : "ok",
       redis: redisOk,
@@ -80,6 +92,9 @@ export function createHealthRouter(eventBus: any) {
       // $HYDRA_ROOT on master HEAD). Advisory — null/absent if git is
       // unavailable. The watchdog compares this against origin/master.
       deployedSha,
+      // Issue #744: emergency-brake state. `{engaged:false}` by default;
+      // `{engaged:true, since, engagedBy}` while the operator holds the brake.
+      emergencyBrake,
     });
   });
 
@@ -165,6 +180,7 @@ export function createHealthRouter(eventBus: any) {
           return { memoryHuman: info.match(/used_memory_human:(\S+)/)?.[1] || "unknown", connectedClients: parseInt(clients.match(/connected_clients:(\d+)/)?.[1] || "0"), uptimeSeconds: parseInt(server.match(/uptime_in_seconds:(\d+)/)?.[1] || "0") };
         } catch { return null; }
       })(),
+      /* 16: emergency brake (issue #744) */ getEmergencyBrake(),
     ]);
 
     const val = (i) => settled[i].status === "fulfilled" ? (settled[i] as any).value : null;
@@ -179,6 +195,9 @@ export function createHealthRouter(eventBus: any) {
     const reflCount = val(13) || 0;
     const ovSearch = val(14) || { status: "failed", latencyMs: null, resultCount: 0 };
     const redisInfo = val(15);
+    // Issue #744: emergency-brake state. Fail-safe to disengaged if the read
+    // rejected (val(16) === null) so a Redis blip never reports a phantom brake.
+    const emergencyBrake = val(16) || { engaged: false };
 
     // Parse disk
     let disk = { availableGb: 0, totalGb: 0, usedPercent: 0 };
@@ -215,6 +234,10 @@ export function createHealthRouter(eventBus: any) {
     // Diagnostics engine
     const diagnostics: any[] = [];
     if (health.status === "killed") diagnostics.push({ severity: "critical", component: "orchestrator", what: "Kill switch is active", why: "A kill file blocks all cycles until removed.", impact: "No cycles can run.", action: "Investigate, then: rm ~/hydra/.kill", autoRecovery: false });
+    // Issue #744: operator-only emergency brake engaged. Surfaced as a
+    // warning (not critical) — it's a deliberate operator action, not a fault,
+    // but it suppresses ALL auto-merge so it must be visible until released.
+    if (emergencyBrake.engaged) diagnostics.push({ severity: "warning", component: "autopilot", what: "EMERGENCY BRAKE ENGAGED", why: `Operator pulled the emergency brake${emergencyBrake.engagedBy ? ` (${emergencyBrake.engagedBy})` : ""}. All auto-merge is paused and open PRs are routed to /hydra-review.`, impact: "No PR auto-merges until the brake is released.", action: "When the incident is resolved: hydra brake off", autoRecovery: false });
     if (!health.redis) diagnostics.push({ severity: "critical", component: "redis", what: "Redis disconnected", why: "Redis is the sole state store. Without it, cycles, backlog, memory, and metrics are unavailable.", impact: "All operations fail.", action: "docker exec hydra-redis-1 redis-cli ping", autoRecovery: false });
     if (sched.consecutiveErrors >= 5) diagnostics.push({ severity: "error", component: "scheduler", what: `Auto-stopped after ${sched.consecutiveErrors} errors`, why: `Last: "${sched.lastError || "unknown"}". Pauses at 5 to prevent runaway spend.`, impact: "No autonomous cycles.", action: "Check logs, then POST /api/scheduler/start", autoRecovery: false });
     else if (!sched.running && (queueDepth > 0 || blCounts.total > 0)) diagnostics.push({ severity: "error", component: "scheduler", what: "Stopped but work exists", why: `${queueDepth} queue + ${blCounts.total} backlog items waiting.`, impact: "Queue growing stale.", action: "POST /api/scheduler/start", autoRecovery: false });
@@ -264,7 +287,9 @@ export function createHealthRouter(eventBus: any) {
         vikingdb: svcProbes.vikingdb, openviking: svcProbes.openviking,
       },
       activeCycle,
-      pipeline: { queueDepth, backlogCounts: blCounts, recentMetrics: recent, killSwitch: health.status === "killed" },
+      // Issue #744: emergency-brake state alongside the kill switch — both are
+      // operator-controlled merge/cycle gates the dashboard surfaces.
+      pipeline: { queueDepth, backlogCounts: blCounts, recentMetrics: recent, killSwitch: health.status === "killed", emergencyBrake },
       infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
       intelligence: { patterns, reflections: reflCount, ovSearch },
       diagnostics,
