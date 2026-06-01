@@ -6,33 +6,12 @@ import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { loadCycleSummaries, loadCycleSpending } from "../metrics/cycle-summary.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
-import { getPriorFailuresLen, getReframeQueueLength } from "../redis/anchors.ts";
 import {
   aggregateCostAttribution,
   getDailyTokenCounter,
   recordSubagentTokens,
   todayDateString,
 } from "../cost/index.ts";
-import { getCapacityFloorsSnapshot } from "../anchor-selection/capacity-floors.ts";
-import { getReframeStarvationStats } from "../anchor-selection/reframe.ts";
-
-/**
- * Pick the highest-count reason from a starvation-reasons hash, skipping
- * keys in `exclude` (typically "force_floor" since it's bookkeeping, not
- * a real pass-over). Returns null when no reasons recorded.
- */
-function topReason(reasons: Record<string, number>, exclude: string[] = []): string | null {
-  const excludeSet = new Set(exclude);
-  let best: { name: string; count: number } | null = null;
-  for (const [name, count] of Object.entries(reasons || {})) {
-    if (excludeSet.has(name)) continue;
-    if (!Number.isFinite(count) || count <= 0) continue;
-    if (!best || count > best.count) {
-      best = { name, count };
-    }
-  }
-  return best ? best.name : null;
-}
 
 export function createMetricsRouter() {
   const router = Router();
@@ -43,13 +22,12 @@ export function createMetricsRouter() {
       const stats = await getAggregateStats(20);
       const acc = await getCumulativeAccomplishments(20);
       const queueLen = await getWorkQueueLen();
-      const priorFails = await getPriorFailuresLen();
 
       const lines = [
         `Hydra V2 — ${stats.cycles} cycles completed`,
         `Merged: ${stats.mergedRate}% | Failed: ${stats.failedRate}% | Regressed: ${stats.regressionRate}%`,
         `Avg cycle: ${stats.avgDurationHuman}`,
-        `Work queue: ${queueLen} item(s) | Prior failures: ${priorFails}`,
+        `Work queue: ${queueLen} item(s)`,
         "",
         "Accomplished:",
         ...acc.map((a) => `  - ${a.title} (tests ${a.tests})`),
@@ -138,60 +116,20 @@ export function createMetricsRouter() {
     }
   });
 
-  // GET /metrics/capacity-floors — Unified capacity-floor view (issue #321).
-  // Surfaces every declared floor (self-improvement) with its target share,
-  // realised share over the rolling window, and per-floor gauges. The
-  // legacy /metrics/spec-starvation surface was retired in issue #513.
-  router.get("/metrics/capacity-floors", async (_req, res) => {
-    try {
-      const snapshot = await getCapacityFloorsSnapshot();
-      res.json(snapshot);
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/capacity-floors failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /metrics/reframe-starvation — Why the reframe lane is/isn't being
-  // served (issue #377). Mirrors /metrics/spec-starvation. Surfaces the
-  // running cycles-since-served gauge, last-served timestamp, per-reason
-  // pass-over counts, and the configured floor cadence.
-  router.get("/metrics/reframe-starvation", async (_req, res) => {
-    try {
-      const stats = await getReframeStarvationStats();
-      res.json(stats);
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/reframe-starvation failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // GET /metrics/anchor-distribution — Per-priority view of who served what
-  // and who was passed over (issue #377). Aggregates cycle metrics from the
-  // recent window for `served`, joins with the reframe-starvation reasons
-  // hash for `suppressedReason`, and surfaces `candidatesAvailable` from
-  // the live reframe-queue length. The endpoint is intentionally read-only
-  // and best-effort — every sub-read is wrapped so a single Redis hiccup
-  // doesn't fail the whole response.
+  // over the recent window (issue #377). Aggregates cycle metrics for `served`
+  // by anchorType. The reframe / prior-failure lanes and their starvation
+  // gauges were retired in ADR-0016 (no live writer), so this surface now
+  // covers only the live priority lanes. Read-only and best-effort.
   router.get("/metrics/anchor-distribution", async (req, res) => {
     try {
       // @ts-expect-error — req.query.count is a string at runtime
       const count = parseInt(req.query.count) || 50;
 
-      const [trend, reframeStats, reframeQueueLen] = await Promise.all([
-        getMetricsTrend(count).catch((err: any) => {
-          console.error(`[api/metrics] anchor-distribution: trend read failed: ${err.message}`);
-          return [];
-        }),
-        getReframeStarvationStats().catch((err: any) => {
-          console.error(`[api/metrics] anchor-distribution: reframe stats failed: ${err.message}`);
-          return null;
-        }),
-        getReframeQueueLength().catch((err: any) => {
-          console.error(`[api/metrics] anchor-distribution: reframe queue len failed: ${err.message}`);
-          return 0;
-        }),
-      ]);
+      const trend = await getMetricsTrend(count).catch((err: any) => {
+        console.error(`[api/metrics] anchor-distribution: trend read failed: ${err.message}`);
+        return [];
+      });
 
       // Bucket cycles by anchorType. Mirrors the byAnchorType shape in
       // src/cost/attribution.ts but counts cycles only (no cost).
@@ -201,18 +139,13 @@ export function createMetricsRouter() {
         served[type] = (served[type] || 0) + 1;
       }
 
-      // Per-priority rollup. Names match the priority chain in select.ts;
-      // values are { served, candidatesAvailable, suppressedReason }.
-      // `served` is the count from the rolling window. `candidatesAvailable`
-      // is the live queue depth where we have one; otherwise null.
-      // `suppressedReason` is the most-common pass-over reason for that
-      // priority, drawn from the relevant starvation-reasons hash.
+      // Per-priority rollup over the live lanes only. `served` is the count
+      // from the rolling window.
       const distribution = [
         {
           priority: "kanban",
           served: served["kanban"] || 0,
           candidatesAvailable: null,
-          // Kanban is the natural-priority winner — no starvation gauge.
           suppressedReason: null,
         },
         {
@@ -224,22 +157,6 @@ export function createMetricsRouter() {
         {
           priority: "work-queue",
           served: served["work-queue"] || served["research"] || served["user-request"] || 0,
-          candidatesAvailable: null,
-          suppressedReason: null,
-        },
-        {
-          priority: "reframe",
-          served: served["reframe"] || 0,
-          candidatesAvailable: reframeQueueLen,
-          suppressedReason: reframeStats
-            ? topReason(reframeStats.reasons, ["force_floor"])
-            : null,
-          cyclesSinceServed: reframeStats?.cyclesSinceServed ?? null,
-          floorN: reframeStats?.floorN ?? null,
-        },
-        {
-          priority: "prior-failure",
-          served: served["prior-failure"] || 0,
           candidatesAvailable: null,
           suppressedReason: null,
         },

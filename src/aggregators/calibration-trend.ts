@@ -52,7 +52,9 @@ export interface CalibrationTrendResponse {
 
 /**
  * Minimal shape of one entry under `hydra:anchors:calibration:{cycleId}`.
- * Mirrors what `recordCalibrationOutcome()` writes in `anchor-scorer.ts`.
+ * The historical writer (`recordCalibrationOutcome` in the retired
+ * `anchor-scorer.ts`, deleted in ADR-0016) is gone, so this lane is no longer
+ * populated; the aggregator degrades to its documented empty state.
  */
 export interface CalibrationRecord {
   cycleId: string;

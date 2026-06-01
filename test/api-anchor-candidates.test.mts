@@ -1,37 +1,397 @@
 /**
- * Regression tests for the anchor-candidates API (issue #424).
+ * Regression tests for the Candidate Feed (issue #424 / ADR-0016).
  *
- * Covers:
- *   - Empty board → research_recommended=true
- *   - Mixed candidates sorted by score desc
- *   - Stale candidate downscored (>14d old)
- *   - Reflections present → recent-failure downscore
- *   - Blocker-just-cleared → upscore
+ * The deep module `src/anchor-candidates.ts` (`getCandidateFeed`) owns
+ * enumeration + scoring + eligibility behind one interface, and its injectable
+ * `deps` are the test surface. These tests drive the feed end-to-end with
+ * stubbed deps (no Redis fixture needed) and pin:
+ *   - enumeration of the two live lanes (kanban ∪ work-queue)
+ *   - the scoring formula (tier base + freshness + reflection + blocker bonus)
+ *   - eligibility (in-flight-PR suppression, blocker-just-cleared, limit/slice)
+ *   - research_recommended threshold
+ *   - the byte-compatible HTTP payload decide.py reads
  *
- * Also covers the pure scoreCandidate() helper directly so we can pin the
- * formula without a Redis fixture.
+ * A thin route smoke test confirms `api/anchor.ts` wires the module + adds
+ * `generated_at`. The metrics/health regressions pin the ADR-0016 field drops.
  */
 
-import { test, describe, beforeEach, after } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import Redis from "ioredis";
+import {
+  getCandidateFeed,
+  scoreCandidate,
+  PRIORITY_TIER_BASE_SCORE,
+  type CandidateFeedDeps,
+  type CandidateDesignConcept,
+} from "../src/anchor-candidates.ts";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
-process.env.REDIS_URL = REDIS_URL;
+const ABSENT_DC: CandidateDesignConcept = {
+  present: false,
+  isFresh: false,
+  status: null,
+  gateOk: false,
+};
 
-let redis: any;
-let createAnchorRouter: any;
-let backlogAdmin: any;
-let scoreCandidate: any;
-
-async function cleanKeys() {
-  const keys = await redis.keys("hydra:*");
-  if (keys.length > 0) await redis.del(...keys);
+/**
+ * Build a deps bundle with no candidates by default; override any field per
+ * test. Reflection + design-concept default to "nothing".
+ */
+function makeDeps(over: Partial<CandidateFeedDeps> = {}): CandidateFeedDeps {
+  return {
+    loadBacklog: async () => ({ inProgress: [], queued: [], backlog: [] }),
+    getWorkQueueItems: async () => [],
+    loadLastReflectionAt: async () => null,
+    loadDesignConcept: async () => ABSENT_DC,
+    ...over,
+  };
 }
 
-function mockReq(query: any = {}): any {
-  return { method: "GET", url: "/anchor/candidates", headers: {}, query, params: {}, body: {} };
-}
+const NOW = Date.UTC(2026, 4, 31, 12, 0, 0);
+const isoAgo = (ms: number) => new Date(NOW - ms).toISOString();
+
+// ---------------------------------------------------------------------------
+// Pure scorer — pins the formula (abandonment penalty dropped per ADR-0016).
+// ---------------------------------------------------------------------------
+
+describe("scoreCandidate — pure scoring helper (ADR-0016)", () => {
+  test("only the two live tiers exist in the base-score table", () => {
+    assert.deepEqual(
+      Object.keys(PRIORITY_TIER_BASE_SCORE).sort(),
+      ["kanban-queued", "work-queue"],
+    );
+  });
+
+  test("fresh kanban candidate scores at base 0.85", () => {
+    const r = scoreCandidate({ priorityTier: "kanban-queued", lastUpdated: isoAgo(0), now: NOW });
+    assert.equal(r.score, 0.85);
+    assert.ok(r.reasons.some((x) => x.includes("tier:kanban-queued")));
+    assert.ok(r.reasons.includes("fresh"));
+  });
+
+  test("work-queue base score is 0.70", () => {
+    const r = scoreCandidate({ priorityTier: "work-queue", lastUpdated: isoAgo(0), now: NOW });
+    assert.equal(r.score, 0.70);
+  });
+
+  test("stale candidate (>14d) loses 0.15 freshness penalty", () => {
+    const r = scoreCandidate({
+      priorityTier: "kanban-queued",
+      lastUpdated: isoAgo(15 * 24 * 60 * 60 * 1000),
+      now: NOW,
+    });
+    assert.equal(Math.round(r.score * 100) / 100, 0.70);
+    assert.ok(r.reasons.some((x) => x.startsWith("stale:")));
+  });
+
+  test("recent reflection (<24h) downscores by 0.20", () => {
+    const r = scoreCandidate({
+      priorityTier: "kanban-queued",
+      lastUpdated: isoAgo(0),
+      lastReflectionAt: isoAgo(6 * 60 * 60 * 1000),
+      now: NOW,
+    });
+    assert.equal(Math.round(r.score * 100) / 100, 0.65);
+    assert.ok(r.reasons.some((x) => x.includes("recent-failure")));
+  });
+
+  test("old reflection (>24h) does NOT downscore", () => {
+    const r = scoreCandidate({
+      priorityTier: "kanban-queued",
+      lastUpdated: isoAgo(0),
+      lastReflectionAt: isoAgo(48 * 60 * 60 * 1000),
+      now: NOW,
+    });
+    assert.equal(r.score, 0.85);
+  });
+
+  test("blocker-just-cleared upscores by 0.15 (clamped to 1)", () => {
+    const r = scoreCandidate({
+      priorityTier: "kanban-queued",
+      lastUpdated: isoAgo(0),
+      blockerJustCleared: true,
+      now: NOW,
+    });
+    assert.equal(r.score, 1.0); // 0.85 + 0.15
+    assert.ok(r.reasons.some((x) => x.includes("blocker-cleared")));
+  });
+
+  test("score clamped to [0,1]", () => {
+    // work-queue (0.70) - stale (0.15) - reflection (0.20) = 0.35
+    const r = scoreCandidate({
+      priorityTier: "work-queue",
+      lastUpdated: isoAgo(30 * 24 * 60 * 60 * 1000),
+      lastReflectionAt: isoAgo(60 * 60 * 1000),
+      now: NOW,
+    });
+    assert.equal(Math.round(r.score * 100) / 100, 0.35);
+  });
+
+  test("unknown tier returns 0 score and 'unknown-tier' reason (graceful)", () => {
+    const r = scoreCandidate({ priorityTier: "nonexistent" as any, now: NOW });
+    assert.equal(r.score, 0);
+    assert.ok(r.reasons.includes("unknown-tier"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getCandidateFeed — enumeration + scoring + eligibility through stubbed deps.
+// ---------------------------------------------------------------------------
+
+describe("getCandidateFeed — enumeration (ADR-0016)", () => {
+  test("empty board → research_recommended=true, no candidates", async () => {
+    const feed = await getCandidateFeed({ now: NOW }, makeDeps());
+    assert.equal(feed.research_recommended, true);
+    assert.deepEqual(feed.candidates, []);
+    assert.equal(feed.total_evaluated, 0);
+    assert.equal(feed.in_flight_suppressed, 0);
+  });
+
+  test("enumerates kanban lanes (inProgress ∪ queued ∪ backlog)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [{ id: 1, title: "In progress task", movedAt: isoAgo(0) }],
+        queued: [{ id: 2, title: "Queued task", movedAt: isoAgo(0) }],
+        backlog: [{ id: 3, title: "Backlog task", movedAt: isoAgo(0) }],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.total_evaluated, 3);
+    assert.equal(feed.candidates.every((c) => c.priority_tier === "kanban-queued"), true);
+    assert.equal(feed.research_recommended, false);
+  });
+
+  test("enumerates work-queue items (reference or description)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "Build feature X", queuedAt: isoAgo(0), source: "operator" }),
+        JSON.stringify({ description: "Research thing Y", queuedAt: isoAgo(0), source: "research" }),
+        "not-json",                         // skipped
+        JSON.stringify({ source: "operator" }), // no ref → skipped
+      ],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.total_evaluated, 2);
+    assert.equal(feed.candidates.every((c) => c.priority_tier === "work-queue"), true);
+  });
+
+  test("kanban outscores work-queue and sorts first", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({ inProgress: [], queued: [{ id: 1, title: "Kanban", movedAt: isoAgo(0) }], backlog: [] }),
+      getWorkQueueItems: async () => [JSON.stringify({ reference: "WorkQueue", queuedAt: isoAgo(0) })],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 2);
+    assert.equal(feed.candidates[0].title, "Kanban");
+    assert.equal(feed.candidates[0].score, 0.85);
+    assert.equal(feed.candidates[1].title, "WorkQueue");
+    assert.equal(feed.candidates[1].score, 0.70);
+  });
+
+  test("a failing lane is logged and contributes nothing (never throws)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => { throw new Error("redis down"); },
+      getWorkQueueItems: async () => [JSON.stringify({ reference: "Survivor", queuedAt: isoAgo(0) })],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.total_evaluated, 1);
+    assert.equal(feed.candidates[0].title, "Survivor");
+  });
+});
+
+describe("getCandidateFeed — scoring signals through the feed", () => {
+  test("stale kanban item is downscored", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({ inProgress: [], queued: [], backlog: [{ id: 1, title: "Old", movedAt: isoAgo(30 * 24 * 60 * 60 * 1000) }] }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(Math.round(feed.candidates[0].score * 100) / 100, 0.70);
+    assert.ok(feed.candidates[0].reasons.some((r) => r.startsWith("stale:")));
+  });
+
+  test("recent reflection on the matching anchor downscores", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({ inProgress: [], queued: [{ id: 1, title: "Has failure", movedAt: isoAgo(0) }], backlog: [] }),
+      loadLastReflectionAt: async (ref) => (ref === "Has failure" ? isoAgo(2 * 60 * 60 * 1000) : null),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(Math.round(feed.candidates[0].score * 100) / 100, 0.65);
+    assert.ok(feed.candidates[0].reasons.some((r) => r.includes("recent-failure")));
+  });
+
+  test("blocker-just-cleared kanban item is upscored", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{
+          id: 1,
+          title: "Unblocked",
+          lane: "queued",
+          movedAt: isoAgo(60 * 60 * 1000),
+          meta: { blockedReason: "Blocked by #99 (now merged)" },
+        }],
+        backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates[0].score, 1.0);
+    assert.ok(feed.candidates[0].reasons.some((r) => r.includes("blocker-cleared")));
+  });
+});
+
+describe("getCandidateFeed — eligibility", () => {
+  test("in-flight PR claim (fresh) suppresses the candidate by default (#640)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [{ id: 1, title: "Shipped — PR open", claimedBy: "pr-27", claimedAt: isoAgo(5 * 60 * 1000) }],
+        queued: [{ id: 2, title: "Free anchor", movedAt: isoAgo(0) }],
+        backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const titles = feed.candidates.map((c) => c.title);
+    assert.ok(!titles.includes("Shipped — PR open"));
+    assert.ok(titles.includes("Free anchor"));
+    assert.equal(feed.in_flight_suppressed, 1);
+  });
+
+  test("excludeInFlight=false surfaces in-flight PR candidates (#640 escape hatch)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [{ id: 1, title: "Shipped B", claimedBy: "pr-99", claimedAt: isoAgo(5 * 60 * 1000) }],
+        queued: [], backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW, excludeInFlight: false }, deps);
+    assert.ok(feed.candidates.map((c) => c.title).includes("Shipped B"));
+    assert.equal(feed.in_flight_suppressed, 0);
+  });
+
+  test("stale PR claim (>30m) is NOT suppressed (#640 freshness window)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [{ id: 1, title: "Stale PR", claimedBy: "pr-1", claimedAt: isoAgo(2 * 60 * 60 * 1000) }],
+        queued: [], backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.ok(feed.candidates.map((c) => c.title).includes("Stale PR"));
+    assert.equal(feed.in_flight_suppressed, 0);
+  });
+
+  test("non-PR claimedBy ('claude') does not trigger suppression", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [{ id: 1, title: "Legacy claim", claimedBy: "claude", claimedAt: isoAgo(5 * 60 * 1000) }],
+        queued: [], backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.ok(feed.candidates.map((c) => c.title).includes("Legacy claim"));
+    assert.equal(feed.in_flight_suppressed, 0);
+  });
+
+  test("limit caps the returned slice but total_evaluated counts all", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [], queued: [], backlog: Array.from({ length: 5 }, (_, i) => ({ id: i, title: `Task ${i}`, movedAt: isoAgo(0) })),
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW, limit: 2 }, deps);
+    assert.equal(feed.candidates.length, 2);
+    assert.equal(feed.total_evaluated, 5);
+  });
+});
+
+describe("getCandidateFeed — design-concept annotation (#628)", () => {
+  test("every candidate carries a designConcept block; absent → present:false", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({ inProgress: [], queued: [{ id: 1, title: "Some task", movedAt: isoAgo(0) }], backlog: [] }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const c = feed.candidates[0];
+    assert.deepEqual(c.designConcept, ABSENT_DC);
+    assert.ok(c.anchorRef);
+  });
+
+  test("design-concept reader receives the anchorRef and its projection is surfaced", async () => {
+    const present: CandidateDesignConcept = { present: true, isFresh: true, status: "approved", gateOk: true };
+    let sawRef: string | null = null;
+    const deps = makeDeps({
+      loadBacklog: async () => ({ inProgress: [], queued: [{ id: 1, title: "Approved task", movedAt: isoAgo(0) }], backlog: [] }),
+      loadDesignConcept: async (ref) => { sawRef = ref; return present; },
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(sawRef, "Approved task");
+    assert.deepEqual(feed.candidates[0].designConcept, present);
+  });
+
+  test("a failing design-concept read degrades the field, never drops the candidate", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({ inProgress: [], queued: [{ id: 1, title: "Task", movedAt: isoAgo(0) }], backlog: [] }),
+      loadDesignConcept: async () => { throw new Error("dc read failed"); },
+    });
+    // getCandidateFeed must not propagate the throw; the candidate stays.
+    await assert.doesNotReject(async () => {
+      const feed = await getCandidateFeed({ now: NOW }, deps);
+      assert.equal(feed.candidates.length, 1);
+    });
+  });
+});
+
+describe("getCandidateFeed — research_recommended threshold", () => {
+  test("a top score below 0.5 flips research_recommended=true", async () => {
+    // work-queue (0.70) - stale (0.15) - reflection (0.20) = 0.35 < 0.5
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [JSON.stringify({ reference: "Weak", queuedAt: isoAgo(30 * 24 * 60 * 60 * 1000) })],
+      loadLastReflectionAt: async () => isoAgo(60 * 60 * 1000),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.ok(feed.candidates[0].score < 0.5);
+    assert.equal(feed.research_recommended, true);
+  });
+
+  test("a strong kanban candidate keeps research_recommended=false", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({ inProgress: [], queued: [{ id: 1, title: "Strong", movedAt: isoAgo(0) }], backlog: [] }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.research_recommended, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HTTP contract — decide.py read-set must stay byte-compatible.
+// ---------------------------------------------------------------------------
+
+describe("getCandidateFeed — decide.py read-set contract", () => {
+  test("per-candidate shape exposes exactly the fields decide.py reads", async () => {
+    const present: CandidateDesignConcept = { present: true, isFresh: true, status: "approved", gateOk: true };
+    const deps = makeDeps({
+      loadBacklog: async () => ({ inProgress: [], queued: [{ id: 42, title: "Anchor", movedAt: isoAgo(0) }], backlog: [] }),
+      loadDesignConcept: async () => present,
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const c = feed.candidates[0];
+    // decide.py reads: score, reasons, designConcept{present,isFresh,status,gateOk}, anchorRef, issue
+    assert.equal(typeof c.score, "number");
+    assert.ok(Array.isArray(c.reasons));
+    assert.deepEqual(Object.keys(c.designConcept).sort(), ["gateOk", "isFresh", "present", "status"]);
+    assert.equal(typeof c.anchorRef, "string");
+    assert.ok(c.issue === 42);
+    // ADR-0016: the abandonments + priority_tier scoring fields are NOT
+    // required by decide.py; the abandonments field is dropped entirely.
+    assert.equal((c as any).abandonments, undefined);
+  });
+
+  test("top-level research_recommended is a boolean", async () => {
+    const feed = await getCandidateFeed({ now: NOW }, makeDeps());
+    assert.equal(typeof feed.research_recommended, "boolean");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Thin route — api/anchor.ts wires the module + adds generated_at.
+// ---------------------------------------------------------------------------
 
 function mockRes(): any {
   const res: any = {
@@ -39,9 +399,6 @@ function mockRes(): any {
     _body: null,
     status(code: number) { res._status = code; return res; },
     json(body: any) { res._body = body; return res; },
-    send(body: any) { res._body = body; return res; },
-    setHeader() { return res; },
-    end() { return res; },
   };
   return res;
 }
@@ -49,576 +406,29 @@ function mockRes(): any {
 function findHandler(router: any, method: string, path: string): Function | null {
   for (const layer of router.stack) {
     if (layer.route && layer.route.path === path) {
-      const handlers = layer.route.methods;
-      if (handlers[method.toLowerCase()]) {
-        const stack = layer.route.stack;
-        return stack[stack.length - 1].handle;
-      }
+      const stack = layer.route.stack;
+      if (layer.route.methods[method.toLowerCase()]) return stack[stack.length - 1].handle;
     }
   }
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Pure scorer tests — no Redis needed
-// ---------------------------------------------------------------------------
-
-describe("scoreCandidate — pure scoring helper (#424)", () => {
-  beforeEach(async () => {
-    if (!scoreCandidate) {
-      const mod = await import("../src/anchor-selection.ts");
-      scoreCandidate = mod.scoreCandidate;
-    }
-  });
-
-  test("fresh kanban candidate with no abandonments scores at base", () => {
-    const result = scoreCandidate({}, {
-      priorityTier: "kanban-queued",
-      lastUpdated: new Date().toISOString(),
-      abandonments: 0,
-      now: Date.now(),
-    });
-    assert.equal(result.score, 0.85);
-    assert.ok(result.reasons.some((r: string) => r.includes("tier:kanban-queued")));
-    assert.ok(result.reasons.includes("first-attempt"));
-  });
-
-  test("stale candidate (>14d) loses 0.15 freshness penalty", () => {
-    const now = Date.now();
-    const fifteenDaysAgo = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
-    const result = scoreCandidate({}, {
-      priorityTier: "kanban-queued",
-      lastUpdated: fifteenDaysAgo,
-      abandonments: 0,
-      now,
-    });
-    assert.equal(Math.round(result.score * 100) / 100, 0.70);
-    assert.ok(result.reasons.some((r: string) => r.startsWith("stale:")));
-  });
-
-  test("abandoned >=2 times loses 0.25", () => {
-    const result = scoreCandidate({}, {
-      priorityTier: "kanban-queued",
-      lastUpdated: new Date().toISOString(),
-      abandonments: 2,
-      now: Date.now(),
-    });
-    assert.equal(Math.round(result.score * 100) / 100, 0.60);
-    assert.ok(result.reasons.some((r: string) => r.includes("abandoned:2x")));
-  });
-
-  test("abandoned >=3 times loses 0.45 (circuit-breaker territory)", () => {
-    const result = scoreCandidate({}, {
-      priorityTier: "kanban-queued",
-      lastUpdated: new Date().toISOString(),
-      abandonments: 3,
-      now: Date.now(),
-    });
-    assert.equal(Math.round(result.score * 100) / 100, 0.40);
-  });
-
-  test("recent reflection (<24h) downscores by 0.20", () => {
-    const now = Date.now();
-    const result = scoreCandidate({}, {
-      priorityTier: "kanban-queued",
-      lastUpdated: new Date(now).toISOString(),
-      abandonments: 0,
-      lastReflectionAt: new Date(now - 6 * 60 * 60 * 1000).toISOString(),
-      now,
-    });
-    assert.equal(Math.round(result.score * 100) / 100, 0.65);
-    assert.ok(result.reasons.some((r: string) => r.includes("recent-failure")));
-  });
-
-  test("old reflection (>24h) does NOT downscore", () => {
-    const now = Date.now();
-    const result = scoreCandidate({}, {
-      priorityTier: "kanban-queued",
-      lastUpdated: new Date(now).toISOString(),
-      abandonments: 0,
-      lastReflectionAt: new Date(now - 48 * 60 * 60 * 1000).toISOString(),
-      now,
-    });
-    assert.equal(result.score, 0.85);
-  });
-
-  test("blocker-just-cleared upscores by 0.15", () => {
-    const result = scoreCandidate({}, {
-      priorityTier: "kanban-queued",
-      lastUpdated: new Date().toISOString(),
-      abandonments: 0,
-      blockerJustCleared: true,
-      now: Date.now(),
-    });
-    assert.equal(result.score, 1.00); // 0.85 + 0.15
-    assert.ok(result.reasons.some((r: string) => r.includes("blocker-cleared")));
-  });
-
-  test("score clamped to [0, 1]", () => {
-    // priorities-doc (0.25) - stale (0.15) - 3x abandoned (0.45) - reflection (0.20) = -0.55 → 0
-    const now = Date.now();
-    const result = scoreCandidate({}, {
-      priorityTier: "priorities-doc",
-      lastUpdated: new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString(),
-      abandonments: 3,
-      lastReflectionAt: new Date(now - 1 * 60 * 60 * 1000).toISOString(),
-      now,
-    });
-    assert.equal(result.score, 0);
-
-    // explicit-operator (1.0) + blocker-cleared (0.15) = 1.15 → clamped to 1
-    const high = scoreCandidate({}, {
-      priorityTier: "explicit-operator",
-      lastUpdated: new Date().toISOString(),
-      abandonments: 0,
-      blockerJustCleared: true,
-      now,
-    });
-    assert.equal(high.score, 1);
-  });
-
-  test("priorities-doc base score (0.25) flips research_recommended", () => {
-    // Pure helper doesn't know about the 0.5 threshold, but its base score
-    // for priorities-doc must be < 0.5 so the endpoint correctly flips.
-    const result = scoreCandidate({}, {
-      priorityTier: "priorities-doc",
-      lastUpdated: new Date().toISOString(),
-      abandonments: 0,
-      now: Date.now(),
-    });
-    assert.ok(result.score < 0.5, "priorities-doc base score must be below research threshold");
-  });
-
-  test("unknown tier returns 0 score and 'unknown-tier' reason (graceful degradation)", () => {
-    const result = scoreCandidate({}, {
-      priorityTier: "nonexistent-tier" as any,
-      lastUpdated: new Date().toISOString(),
-      abandonments: 0,
-      now: Date.now(),
-    });
-    assert.equal(result.score, 0);
-    assert.ok(result.reasons.includes("unknown-tier"));
-  });
-});
-
-// ---------------------------------------------------------------------------
-// API integration tests — requires Redis
-// ---------------------------------------------------------------------------
-
-describe("GET /anchor/candidates — endpoint integration (#424)", () => {
-  beforeEach(async () => {
-    if (!redis) {
-      redis = new Redis(REDIS_URL);
-    }
-    await cleanKeys();
-    if (!createAnchorRouter) {
-      const mod = await import("../src/api/anchor.ts");
-      createAnchorRouter = mod.createAnchorRouter;
-    }
-    if (!backlogAdmin) {
-      const reads = await import("../src/backlog/reads.ts");
-      const items = await import("../src/backlog/items.ts");
-      const lanes = await import("../src/backlog/lanes.ts");
-      const claims = await import("../src/backlog/claims.ts");
-      const wip = await import("../src/backlog/wip.ts");
-      const reaper = await import("../src/backlog/reaper.ts");
-      backlogAdmin = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
-    }
-  });
-
-  after(async () => {
-    if (redis) {
-      await cleanKeys();
-      redis.disconnect();
-    }
-    const { closeRedisConnections } = await import("../src/redis/connection.ts");
-    closeRedisConnections();
-  });
-
-  test("empty board → research_recommended=true and no candidates", async () => {
+describe("GET /anchor/candidates — thin route", () => {
+  test("route delegates to getCandidateFeed and stamps generated_at", async () => {
+    const { createAnchorRouter } = await import("../src/api/anchor.ts");
     const router = createAnchorRouter();
     const handler = findHandler(router, "GET", "/anchor/candidates");
-    assert.ok(handler);
+    assert.ok(handler, "route handler must be registered");
 
-    const req = mockReq();
+    const req: any = { query: {} };
     const res = mockRes();
     await handler(req, res);
 
-    assert.ok(res._body, "response should have body");
-    assert.equal(res._body.research_recommended, true);
-    assert.deepEqual(res._body.candidates, []);
-    assert.equal(res._body.total_evaluated, 0);
-  });
-
-  test("mixed candidates returned sorted by score desc", async () => {
-    // Add three backlog items so they enumerate as kanban-queued candidates.
-    await backlogAdmin.addToBacklog({ title: "Alpha task", lane: "queued", priority: 1 });
-    await backlogAdmin.addToBacklog({ title: "Beta task", lane: "backlog", priority: 0 });
-    await backlogAdmin.addToBacklog({ title: "Gamma task", lane: "backlog", priority: 0 });
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    assert.equal(res._body.candidates.length, 3);
-    // All three at kanban-queued tier with no penalties = same base score.
-    // The sort is stable on the secondary tiebreak (last_updated desc) so
-    // the most recently added item comes first. Either way, scores must be
-    // non-ascending.
-    for (let i = 1; i < res._body.candidates.length; i++) {
-      assert.ok(
-        res._body.candidates[i - 1].score >= res._body.candidates[i].score,
-        `candidates must be sorted by score desc: ${res._body.candidates[i - 1].score} >= ${res._body.candidates[i].score}`,
-      );
-    }
-    // Best candidate is well above research threshold.
-    assert.ok(res._body.candidates[0].score >= 0.5);
-    assert.equal(res._body.research_recommended, false);
-  });
-
-  test("stale candidate (>14d old) is downscored", async () => {
-    // Insert a backlog item, then rewrite its movedAt to be 30 days old.
-    const added = await backlogAdmin.addToBacklog({ title: "Old stale task", lane: "backlog" });
-    const rawKey = `hydra:backlog:items`;
-    const raw = await redis.hget(rawKey, String(added.id));
-    assert.ok(raw, "backlog item should be saved");
-    const item = JSON.parse(raw);
-    item.movedAt = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    await redis.hset(rawKey, String(added.id), JSON.stringify(item));
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    const stale = res._body.candidates.find((c: any) => c.title === "Old stale task");
-    assert.ok(stale, "stale candidate should appear in output");
-    // kanban-queued (0.85) - freshness (0.15) = 0.70
-    assert.equal(Math.round(stale.score * 100) / 100, 0.70);
-    assert.ok(stale.reasons.some((r: string) => r.startsWith("stale:")));
-  });
-
-  test("recent reflection downscores the matching candidate", async () => {
-    await backlogAdmin.addToBacklog({ title: "Has failure history", lane: "backlog" });
-
-    // Inject a reflection for this anchor reference via the same adapter
-    // the endpoint reads.
-    const { recordAnchorReflection } = await import("../src/reflections/reflections.ts");
-    await recordAnchorReflection({
-      anchorRef: "Has failure history",
-      cycleId: "cycle-test",
-      taskTitle: "Has failure history",
-      outcome: "failed",
-      reason: "verification-failure",
-      whatWasAttempted: "tried X",
-      whyItFailed: "Y broke",
-      whatShouldChange: "try Z",
-    });
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    const c = res._body.candidates.find((x: any) => x.title === "Has failure history");
-    assert.ok(c, "candidate should appear");
-    // kanban-queued (0.85) - recent-failure (0.20) = 0.65
-    assert.equal(Math.round(c.score * 100) / 100, 0.65);
-    assert.ok(c.reasons.some((r: string) => r.includes("recent-failure")));
-  });
-
-  test("blocker-just-cleared candidate is upscored", async () => {
-    // Seed a backlog item that was recently blocked then moved back.
-    const added = await backlogAdmin.addToBacklog({ title: "Unblocked dep", lane: "backlog" });
-    const rawKey = `hydra:backlog:items`;
-    const raw = await redis.hget(rawKey, String(added.id));
-    const item = JSON.parse(raw);
-    // Simulate: was blocked, dep merged, item now back in backlog with
-    // blockedReason still recorded and a fresh movedAt.
-    item.meta = { ...item.meta, blockedReason: "Blocked by #99 (now merged)" };
-    item.movedAt = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(); // 1h ago
-    await redis.hset(rawKey, String(added.id), JSON.stringify(item));
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    const c = res._body.candidates.find((x: any) => x.title === "Unblocked dep");
-    assert.ok(c, "unblocked candidate should appear");
-    // kanban-queued (0.85) + blocker-cleared (0.15) = 1.00
-    assert.equal(c.score, 1.00);
-    assert.ok(c.reasons.some((r: string) => r.includes("blocker-cleared")));
-  });
-
-  test("limit query param caps result count and respects max", async () => {
-    for (let i = 0; i < 5; i++) {
-      await backlogAdmin.addToBacklog({ title: `Task ${i}`, lane: "backlog" });
-    }
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-
-    const req = mockReq({ limit: "2" });
-    const res = mockRes();
-    await handler(req, res);
-    assert.equal(res._body.candidates.length, 2);
-    assert.equal(res._body.total_evaluated, 5);
-  });
-
-  test("in-flight PR claim suppresses inProgress candidate by default (#640)", async () => {
-    // Seed two backlog items, then claim one with a fresh pr-<n> marker
-    // simulating hydra-target-build opening a PR for it. The endpoint
-    // should hide that anchor and surface only the other one.
-    await backlogAdmin.addToBacklog({ title: "Shipped item — PR open", lane: "queued", priority: 1 });
-    await backlogAdmin.addToBacklog({ title: "Free anchor", lane: "queued", priority: 1 });
-
-    // Move the shipped one to inProgress with a pr-<n> claim — this is the
-    // marker dev_target sets at PR-open time.
-    const moved = await backlogAdmin.moveToInProgress("Shipped item — PR open", {
-      claimedBy: "pr-27",
-    });
-    assert.ok(moved === true || moved?.ok === true, "shipped item should move to inProgress");
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    // The shipped item should be suppressed; only the free anchor remains.
-    const titles = res._body.candidates.map((c: any) => c.title);
-    assert.ok(!titles.includes("Shipped item — PR open"),
-      `in-flight PR candidate must be suppressed, got: ${JSON.stringify(titles)}`);
-    assert.ok(titles.includes("Free anchor"),
-      "the un-claimed anchor must still surface");
-    assert.equal(res._body.in_flight_suppressed, 1,
-      "endpoint must report how many candidates were hidden");
-  });
-
-  test("excludeInFlight=false surfaces in-flight PR candidates anyway (#640 escape hatch)", async () => {
-    // Same seed, but the operator (or a debugging API consumer) asks for
-    // the raw view so they can see what would otherwise be suppressed.
-    await backlogAdmin.addToBacklog({ title: "Shipped item B", lane: "queued", priority: 1 });
-    await backlogAdmin.moveToInProgress("Shipped item B", { claimedBy: "pr-99" });
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq({ excludeInFlight: "false" });
-    const res = mockRes();
-    await handler(req, res);
-
-    const titles = res._body.candidates.map((c: any) => c.title);
-    assert.ok(titles.includes("Shipped item B"),
-      `excludeInFlight=false must surface in-flight PRs, got: ${JSON.stringify(titles)}`);
-    assert.equal(res._body.in_flight_suppressed, 0,
-      "when excludeInFlight=false the suppression counter must be zero");
-  });
-
-  test("stale PR claim (>30 min old) is NOT suppressed (#640 freshness window)", async () => {
-    // A claim older than IN_FLIGHT_PR_FRESHNESS_MS should let the anchor
-    // surface again — the operator likely abandoned the PR or it's stuck
-    // overnight, in which case re-dispatching is the right behaviour.
-    const added = await backlogAdmin.addToBacklog({ title: "Stale PR claim", lane: "queued" });
-    await backlogAdmin.moveToInProgress("Stale PR claim", { claimedBy: "pr-1" });
-
-    // Rewrite claimedAt to be 2 hours ago to simulate a long-running PR.
-    const rawKey = `hydra:backlog:items`;
-    const raw = await redis.hget(rawKey, String(added.id));
-    const item = JSON.parse(raw);
-    item.claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    await redis.hset(rawKey, String(added.id), JSON.stringify(item));
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    const titles = res._body.candidates.map((c: any) => c.title);
-    assert.ok(titles.includes("Stale PR claim"),
-      `stale PR claim should re-surface, got: ${JSON.stringify(titles)}`);
-    assert.equal(res._body.in_flight_suppressed, 0);
-  });
-
-  test("non-PR claimedBy (e.g. 'claude') does not trigger suppression", async () => {
-    // claimedBy='claude' is the legacy atomic-claim marker — it shouldn't
-    // be treated as a PR. Only the 'pr-' prefix triggers suppression.
-    await backlogAdmin.addToBacklog({ title: "Legacy claim", lane: "queued" });
-    await backlogAdmin.moveToInProgress("Legacy claim", { claimedBy: "claude" });
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    const titles = res._body.candidates.map((c: any) => c.title);
-    assert.ok(titles.includes("Legacy claim"),
-      "non-PR claims must still surface as candidates");
-    assert.equal(res._body.in_flight_suppressed, 0);
-  });
-
-  test("priorities-doc only would flip research_recommended=true", async () => {
-    // No backlog items, no specs, no work queue → no candidates at all
-    // (we don't synthesize a priorities-doc candidate inside the endpoint
-    // — the empty-board case already flips research_recommended).
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-    assert.equal(res._body.research_recommended, true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// designConcept annotation — issue #628 data-plane fix
-// ---------------------------------------------------------------------------
-
-// Own Redis handle for the #628 block — the upstream #424 suite's `after()`
-// disconnects the module-level `redis` variable, so we can't reuse it here.
-let dcAnnotationRedis: any;
-
-async function dcAnnotationCleanKeys() {
-  const keys = await dcAnnotationRedis.keys("hydra:*");
-  if (keys.length > 0) await dcAnnotationRedis.del(...keys);
-}
-
-describe("GET /anchor/candidates — designConcept annotation (#628)", () => {
-  beforeEach(async () => {
-    if (!dcAnnotationRedis || dcAnnotationRedis.status !== "ready") {
-      dcAnnotationRedis = new Redis(REDIS_URL);
-    }
-    await dcAnnotationCleanKeys();
-    if (!createAnchorRouter) {
-      const mod = await import("../src/api/anchor.ts");
-      createAnchorRouter = mod.createAnchorRouter;
-    }
-    if (!backlogAdmin) {
-      const reads = await import("../src/backlog/reads.ts");
-      const items = await import("../src/backlog/items.ts");
-      const lanes = await import("../src/backlog/lanes.ts");
-      const claims = await import("../src/backlog/claims.ts");
-      const wip = await import("../src/backlog/wip.ts");
-      const reaper = await import("../src/backlog/reaper.ts");
-      backlogAdmin = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
-    }
-  });
-
-  after(async () => {
-    if (dcAnnotationRedis) {
-      await dcAnnotationCleanKeys();
-      dcAnnotationRedis.disconnect();
-    }
-    const { closeRedisConnections } = await import("../src/redis/connection.ts");
-    closeRedisConnections();
-  });
-
-  test("every candidate carries a designConcept block (no artifact → present:false)", async () => {
-    // Pre-#628 the block was missing entirely on every candidate, so
-    // decide.py's _candidate_design_concept returned None and
-    // design_concept_orch never fired. Now: the field is always present
-    // so decide.py can act on it.
-    await backlogAdmin.addToBacklog({ title: "Some orch task", lane: "queued", priority: 1 });
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    assert.equal(res._body.candidates.length, 1);
-    const c = res._body.candidates[0];
-    assert.ok(c.designConcept, "every candidate must carry a designConcept block");
-    assert.equal(c.designConcept.present, false);
-    assert.equal(c.designConcept.isFresh, false);
-    assert.equal(c.designConcept.status, null);
-    assert.equal(c.designConcept.gateOk, false);
-    assert.ok(c.anchorRef, "anchorRef must also be surfaced on the response");
-  });
-
-  test("artifact exists + fresh + approved → present:true, isFresh:true, gateOk:true", async () => {
-    const dc = await import("../src/design-concept.ts");
-    await backlogAdmin.addToBacklog({ title: "Approved task", lane: "queued", priority: 1 });
-
-    // Build a complete artifact (passes every gate rule).
-    await dc.saveDesignConcept({
-      anchorRef: "Approved task",
-      scope: "orch",
-      glossaryTerms: ["Target", "Orchestrator"],
-      glossaryGaps: [],
-      modulesTouched: [
-        {
-          path: "src/foo.ts",
-          interfaceImpact: "extend",
-          depthClassification: "deep",
-        },
-      ],
-      invariants: ["never throw from gate"],
-      rejectedAlternatives: [{ alt: "noop", why: "doesn't ship" }],
-      qaTrace: [
-        { q: "what is the target?", a: "hydra-betting" },
-        { q: "what module?", a: "src/foo.ts" },
-        { q: "interface impact?", a: "extend" },
-        { q: "invariants?", a: "never throw" },
-        { q: "rejected?", a: "noop" },
-        { q: "tier?", a: "3" },
-      ],
-      prototypes: [],
-    });
-    await dc.approveDesignConcept("Approved task", "operator:test");
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    const c = res._body.candidates.find((x: any) => x.title === "Approved task");
-    assert.ok(c, "candidate found");
-    assert.equal(c.designConcept.present, true);
-    assert.equal(c.designConcept.isFresh, true);
-    assert.equal(c.designConcept.status, "approved");
-    assert.equal(c.designConcept.gateOk, true);
-  });
-
-  test("artifact exists but incomplete → present:true, gateOk:false (warn-only shape)", async () => {
-    // This is the canonical Phase B "warn-only" case: artifact exists,
-    // is fresh, but fails one or more gate rules. decide.py treats this
-    // as "fresh present" and lets dev_orch proceed; Phase C will flip
-    // to require gateOk:true.
-    const dc = await import("../src/design-concept.ts");
-    await backlogAdmin.addToBacklog({ title: "Draft task", lane: "queued", priority: 1 });
-
-    await dc.saveDesignConcept({
-      anchorRef: "Draft task",
-      scope: "orch",
-      glossaryTerms: [],
-      glossaryGaps: ["unknown-term"], // gate rule 1 violation
-      modulesTouched: [],
-      invariants: [],
-      rejectedAlternatives: [],
-      qaTrace: [],
-      prototypes: [],
-    });
-
-    const router = createAnchorRouter();
-    const handler = findHandler(router, "GET", "/anchor/candidates");
-    const req = mockReq();
-    const res = mockRes();
-    await handler(req, res);
-
-    const c = res._body.candidates.find((x: any) => x.title === "Draft task");
-    assert.ok(c, "candidate found");
-    assert.equal(c.designConcept.present, true);
-    assert.equal(c.designConcept.isFresh, true);
-    assert.equal(c.designConcept.status, "draft");
-    assert.equal(c.designConcept.gateOk, false, "incomplete artifact must fail gate");
+    assert.ok(res._body, "response body present");
+    assert.ok("candidates" in res._body);
+    assert.ok("research_recommended" in res._body);
+    assert.ok("total_evaluated" in res._body);
+    assert.ok("in_flight_suppressed" in res._body);
+    assert.equal(typeof res._body.generated_at, "string");
   });
 });

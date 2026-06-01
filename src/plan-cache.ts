@@ -29,7 +29,7 @@ import {
   type PlanCacheMissReason,
 } from "./redis/plan-cache.ts";
 import { getTargetWorkspace } from "./target-config.ts";
-import { normalizeReference } from "./anchor-selection/normalize-reference.ts";
+import { normalizeReference } from "./normalize-reference.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -234,7 +234,8 @@ export async function getPlanCacheStatsFull(): Promise<PlanCacheStatsFull> {
 
 // Cache key (issue #192): hash a normalized reference so semantically-equivalent
 // anchors collide on the same key. Normalization shape lives in
-// src/anchor-selection/normalize-reference.ts (shared with anchor-actionability).
+// src/normalize-reference.ts (migrated here from the retired anchor-selection
+// family, ADR-0016 — plan-cache is its sole surviving consumer).
 
 function cacheKey(anchor: { type: string; reference: string }): string {
   const normalized = `${anchor.type}:${normalizeReference(anchor.type, anchor.reference)}`;

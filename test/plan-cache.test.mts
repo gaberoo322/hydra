@@ -46,8 +46,8 @@ describe("plan cache key normalization (issue #192)", () => {
   });
 
   // -----------------------------------------------------------------------
-  // Pure normalization tests moved to test/anchor-selection-normalize-reference.test.mts
-  // when the normalizer relocated out of plan-cache.ts. The Redis-backed cache
+  // Pure normalization tests live in test/normalize-reference.test.mts (the
+  // normalizer relocated out of plan-cache.ts). The Redis-backed cache
   // round-trip + freshness + invalidation tests below still belong here.
   // -----------------------------------------------------------------------
   // End-to-end cache hit behavior via Redis — proves the fix is wired into

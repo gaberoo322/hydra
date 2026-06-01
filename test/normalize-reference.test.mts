@@ -11,14 +11,14 @@
  *  - codebase-health: parse "<category> in <file>", drop parenthetical metric.
  *  - other types: tokenize, drop stopwords + parentheticals, sort tokens.
  *
- * The normalizer moved out of plan-cache.ts into the anchor-selection
- * Module family because anchor-actionability.ts is the second consumer
- * (similarity tokenization, not caching). This file owns the contract.
+ * The normalizer migrated to src/normalize-reference.ts (ADR-0016) when the
+ * anchor-selection family was retired; plan-cache.ts is its sole surviving
+ * consumer. This file owns the contract.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeReference } from "../src/anchor-selection/normalize-reference.ts";
+import { normalizeReference } from "../src/normalize-reference.ts";
 
 describe("normalizeReference (issue #192)", () => {
   test("codebase-health: parses category+file, drops parenthetical metric", () => {

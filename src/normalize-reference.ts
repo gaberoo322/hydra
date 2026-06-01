@@ -5,15 +5,13 @@
  * titles, codebase-health diagnostic strings, user-request prose) into a
  * stable token form that small wording differences collide into.
  *
- * Two consumers today:
+ * Sole consumer today:
  *   - `src/plan-cache.ts` — used inside `cacheKey()` so "Fix the cache" and
  *     "Fix the cache please!" hit the same cached plan.
- *   - `src/anchor-actionability.ts` — used for similarity tokenization
- *     against priorities-doc lines and recent merged tasks.
  *
- * The shape is owned here, not at either call site — that's the locality
- * fix from the 2026-05 architecture review (candidate #6). Anchor-ref
- * vocabulary lives next to the rest of the anchor-selection Module family.
+ * Migrated here from the retired `src/anchor-selection/` family (ADR-0016)
+ * to live next to its surviving consumer. The shape is owned here, not at the
+ * call site — the locality fix from the 2026-05 architecture review.
  */
 
 // Common English stopwords + Hydra anchor noise words that don't affect intent.
@@ -40,10 +38,9 @@ function tokenize(text: string): string[] {
 
 /**
  * Normalize codebase-health references that follow the deterministic
- * "codebase-health: <category> in <file>" pattern emitted by
- * src/anchor-selection/codebase-health-tier.ts. Returns null if the
- * reference doesn't match the expected shape — caller falls back to
- * generic normalization.
+ * "codebase-health: <category> in <file>" pattern. Returns null if the
+ * reference doesn't match the expected shape — caller falls back to generic
+ * normalization.
  */
 function normalizeHealthReference(reference: string): string | null {
   const match = reference.match(
@@ -56,7 +53,7 @@ function normalizeHealthReference(reference: string): string | null {
 
 /**
  * Normalize an anchor reference into a stable string. Used as the plan-cache
- * key input AND as the actionability-similarity tokenization input.
+ * key input.
  *
  * The codebase-health branch is structure-preserving (parses the deterministic
  * "codebase-health: <category> in <file>" shape into a `health|cat|file` key)

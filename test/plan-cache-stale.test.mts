@@ -17,14 +17,11 @@ import Redis from "ioredis";
 
 let redis: any;
 let planCache: typeof import("../src/plan-cache.ts");
-let anchorSelection: typeof import("../src/anchor-selection.ts");
 
 async function cleanTestKeys() {
   const planKeys = await redis.keys("hydra:plans:cache:*");
-  const failureKeys = await redis.keys("hydra:anchors:prior-failures");
-  const reframeKeys = await redis.keys("hydra:anchors:reframe-queue");
   const reflKeys = await redis.keys("hydra:reflections:*");
-  const allKeys = [...planKeys, ...failureKeys, ...reframeKeys, ...reflKeys];
+  const allKeys = [...planKeys, ...reflKeys];
   if (allKeys.length > 0) await redis.del(...allKeys);
 }
 
@@ -34,7 +31,6 @@ describe("plan cache invalidation on failure (issue #22)", () => {
       redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379/1");
       process.env.REDIS_URL = "redis://localhost:6379/1";
       planCache = await import("../src/plan-cache.ts");
-      anchorSelection = await import("../src/anchor-selection.ts");
     }
     await cleanTestKeys();
   });
@@ -46,7 +42,12 @@ describe("plan cache invalidation on failure (issue #22)", () => {
     }
   });
 
-  test("storePriorFailure invalidates cached plan for the same anchor", async () => {
+  test("invalidatePlanCacheForAnchor clears the cached plan for the same anchor", async () => {
+    // Issue #22: on failure the cached plan must be invalidated so the retry
+    // doesn't serve the stale plan that bypasses reflections. The failure
+    // writer (retired with the anchor-selection family in ADR-0016) drove
+    // this through invalidatePlanCacheForAnchor — the surviving plan-cache API
+    // this test now exercises directly.
     const anchor = { type: "failing-test" as const, reference: "test-widget-render" };
     const grounding = { testReport: { passed: 50 } };
     const task = {
@@ -64,12 +65,12 @@ describe("plan cache invalidation on failure (issue #22)", () => {
     assert.ok(cached, "plan should be cached before failure");
     assert.equal(cached.title, "Fix widget render test");
 
-    // Store a prior failure for the same task reference
-    await anchorSelection._testing.storePriorFailure("test-widget-render", "No code changes produced", null);
+    // Simulate the on-failure invalidation for the same anchor.
+    await planCache.invalidatePlanCacheForAnchor(anchor);
 
     // Plan cache should now be invalidated
     const afterFailure = await planCache.getCachedPlan(anchor, grounding);
-    assert.equal(afterFailure, null, "cached plan must be invalidated after storePriorFailure");
+    assert.equal(afterFailure, null, "cached plan must be invalidated after failure");
   });
 
   test("invalidatePlanCacheForAnchor removes only the targeted entry", async () => {
