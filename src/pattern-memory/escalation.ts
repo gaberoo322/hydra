@@ -380,20 +380,31 @@ export function shouldEscalateAtHitCount(
  * GitHub-side write. Callers that don't want the dispatch (notably tests
  * exercising pattern accounting in isolation) simply don't call this.
  *
+ * Returns the **Escalation Outcome** (the `EscalationResult` produced by
+ * `escalatePatternToIssue`) so the caller can thread it up and stamp it on the
+ * pattern record (issue #843), or `null` when no escalation fired (the intent
+ * was null). Previously the outcome was discarded and this returned `void`,
+ * which left a systematic gh/auth outage invisible to operators — now an outage
+ * surfaces as a value (`{ status: "error", error }`), strictly better
+ * fail-loud posture.
+ *
  * Best-effort by design: errors are logged with the caller-supplied `context`
  * label and swallowed. Never throws.
  */
 export async function escalateIfNeeded(
   escalation: EscalationInput | null,
   context: string,
-): Promise<void> {
-  if (!escalation) return;
+): Promise<EscalationResult | null> {
+  if (!escalation) return null;
   try {
-    await escalatePatternToIssue(escalation);
+    return await escalatePatternToIssue(escalation);
   } catch (err: any) {
     // `escalatePatternToIssue` already swallows its own errors and returns an
     // EscalationResult, so this catch is defence-in-depth for a programming
-    // error in the dispatcher itself.
-    console.error(`[escalation] escalateIfNeeded(${context}) failed: ${err?.message || err}`);
+    // error in the dispatcher itself. Return the outcome as a value rather than
+    // a bare log line so the caller can stamp it (issue #843).
+    const msg = err?.message || String(err);
+    console.error(`[escalation] escalateIfNeeded(${context}) failed: ${msg}`);
+    return { status: "error", error: msg };
   }
 }

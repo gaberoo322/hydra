@@ -20,6 +20,12 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, chmod } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import Redis from "ioredis";
+
+import type {
+  EscalationInput,
+  EscalationResult,
+} from "../src/pattern-memory/escalation.ts";
 
 let workDir: string;
 let fakeGhPath: string;
@@ -385,5 +391,182 @@ describe("escalation to GitHub (issue #512)", () => {
     const createLine = invocations.find(l => l.startsWith("issue create "));
     assert.ok(createLine, "expected an issue create invocation");
     assert.ok(createLine!.includes("meta(lesson)"), `expected meta(lesson) in title, got: ${createLine}`);
+  });
+});
+
+// ===========================================================================
+// Issue #843 — Escalation Outcome threaded up + stamped on the record
+//
+// recordPattern now returns the EscalationResult (`escalationResult`) and
+// stamps `MemoryPattern.lastEscalation` via a best-effort SECOND save AFTER the
+// escalation, ONLY when an escalation actually fired. These tests inject the
+// `escalate` dep so they never shell out to `gh`, and round-trip through Redis
+// to assert the stamp is durable.
+// ===========================================================================
+
+describe("Escalation Outcome threading + stamp (issue #843)", () => {
+  const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
+  process.env.REDIS_URL = REDIS_URL;
+
+  let redis: InstanceType<typeof Redis>;
+  let recordPattern: typeof import("../src/pattern-memory/agent-memory.ts").recordPattern;
+  let originalConfigPath: string | undefined;
+  let tempConfigRoot: string;
+
+  // A friction-namespace agent so we never write to-{agent}.md feedback files.
+  const SKILL = "issue-843-skill";
+
+  async function loadFrictionPatterns(skill: string): Promise<any[]> {
+    const raw = await redis.get(`hydra:friction:${skill}:patterns`);
+    if (!raw) return [];
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+
+  async function cleanKeys() {
+    const keys = await redis.keys(`hydra:friction:${SKILL}:patterns`);
+    if (keys.length > 0) await redis.del(...keys);
+  }
+
+  before(async () => {
+    tempConfigRoot = await mkdtemp(join(tmpdir(), "hydra-esc-outcome-"));
+    await mkdir(join(tempConfigRoot, "feedback"), { recursive: true });
+    originalConfigPath = process.env.HYDRA_CONFIG_PATH;
+    process.env.HYDRA_CONFIG_PATH = tempConfigRoot;
+
+    redis = new Redis(REDIS_URL);
+    const mod = await import("../src/pattern-memory/agent-memory.ts");
+    recordPattern = mod.recordPattern;
+  });
+
+  beforeEach(async () => {
+    await cleanKeys();
+  });
+
+  after(async () => {
+    if (redis) {
+      await cleanKeys();
+      redis.disconnect();
+    }
+    if (originalConfigPath === undefined) delete process.env.HYDRA_CONFIG_PATH;
+    else process.env.HYDRA_CONFIG_PATH = originalConfigPath;
+    await rm(tempConfigRoot, { recursive: true, force: true });
+  });
+
+  /** Build a recordPattern args tuple for the friction namespace. */
+  const args = (i: number, escalate: any) =>
+    [SKILL, "issue-843-cue", {
+      namespace: "friction" as const,
+      action: "Observe the escalation outcome.",
+      example: `cycle-${i}: issue-843-cue`,
+      cycleId: `cycle-${i}`,
+      escalate,
+    }] as const;
+
+  test("escalationResult is null below threshold; lastEscalation unstamped", async () => {
+    // An escalate spy that would record if called — it must NOT fire below
+    // threshold (intent is null, so recordPattern passes null and the spy
+    // returns null without doing anything observable).
+    const escalate = async (
+      escalation: EscalationInput | null,
+    ): Promise<EscalationResult | null> => {
+      return escalation ? { status: "skipped", reason: "spy" } : null;
+    };
+
+    const r1 = await recordPattern(...args(1, escalate));
+    assert.equal(r1.escalationResult, null, "1st hit: no escalation → null result");
+    assert.equal(r1.pattern.lastEscalation, undefined, "no stamp below threshold");
+
+    const r2 = await recordPattern(...args(2, escalate));
+    assert.equal(r2.escalationResult, null);
+    assert.equal(r2.pattern.lastEscalation, undefined);
+
+    // Confirm durability: the stored record has no lastEscalation field.
+    const stored = await loadFrictionPatterns(SKILL);
+    const row = stored.find(p => p.category === "issue-843-cue");
+    assert.ok(row, "pattern should be stored");
+    assert.equal(row.lastEscalation, undefined, "below-threshold record must lack lastEscalation");
+  });
+
+  test("at threshold: escalationResult returned AND lastEscalation stamped + durable", async () => {
+    const escalate = async (
+      escalation: EscalationInput | null,
+    ): Promise<EscalationResult | null> => {
+      return escalation ? { status: "created", issueNumber: 4242 } : null;
+    };
+
+    await recordPattern(...args(1, escalate));
+    await recordPattern(...args(2, escalate));
+    const r3 = await recordPattern(...args(3, escalate)); // hit 3 == PROMOTION_THRESHOLD
+
+    assert.ok(r3.escalation, "intent should be populated at threshold");
+    assert.ok(r3.escalationResult, "outcome should be threaded up");
+    assert.equal(r3.escalationResult!.status, "created");
+    assert.equal(
+      r3.escalationResult!.status === "created" ? r3.escalationResult!.issueNumber : -1,
+      4242,
+    );
+
+    // Stamp on the in-memory pattern.
+    assert.ok(r3.pattern.lastEscalation, "lastEscalation should be stamped");
+    assert.equal(r3.pattern.lastEscalation!.status, "created");
+    assert.equal(r3.pattern.lastEscalation!.issueNumber, 4242);
+    assert.ok(
+      !Number.isNaN(Date.parse(r3.pattern.lastEscalation!.at)),
+      "lastEscalation.at must be a parseable ISO timestamp",
+    );
+
+    // Load the record back: the second best-effort save must have persisted it.
+    const stored = await loadFrictionPatterns(SKILL);
+    const row = stored.find(p => p.category === "issue-843-cue");
+    assert.ok(row?.lastEscalation, "stamp must survive the Redis round-trip");
+    assert.equal(row.lastEscalation.status, "created");
+    assert.equal(row.lastEscalation.issueNumber, 4242);
+  });
+
+  test("best-effort preserved: escalate returns error → record saved + lastEscalation.status === 'error'", async () => {
+    const escalate = async (
+      escalation: EscalationInput | null,
+    ): Promise<EscalationResult | null> => {
+      return escalation ? { status: "error", error: "simulated gh outage" } : null;
+    };
+
+    await recordPattern(...args(1, escalate));
+    await recordPattern(...args(2, escalate));
+    const r3 = await recordPattern(...args(3, escalate));
+
+    // recordPattern resolved (did not throw) and the core fields are intact.
+    assert.equal(r3.pattern.hitCount, 3, "core record fields must be durably saved");
+    assert.ok(r3.escalationResult, "error outcome is still a value");
+    assert.equal(r3.escalationResult!.status, "error");
+    assert.equal(r3.pattern.lastEscalation!.status, "error");
+    assert.equal(r3.pattern.lastEscalation!.error, "simulated gh outage");
+
+    const stored = await loadFrictionPatterns(SKILL);
+    const row = stored.find(p => p.category === "issue-843-cue");
+    assert.equal(row.hitCount, 3, "hit must never be lost to a gh outage");
+    assert.equal(row.lastEscalation.status, "error");
+  });
+
+  test("best-effort preserved: escalate THROWS → recordPattern still resolves with the hit saved", async () => {
+    // The default escalateIfNeeded never throws, but a misbehaving injected dep
+    // could. recordPattern must not throw; the hit must still be committed.
+    // Note: the throw happens during the dispatch, so the stamp-save is skipped
+    // (no result), but the FIRST save (the core record) is already committed.
+    const escalate = async (): Promise<EscalationResult | null> => {
+      throw new Error("dispatcher blew up");
+    };
+
+    await assert.doesNotReject(async () => {
+      await recordPattern(...args(1, escalate));
+    }, "recordPattern must never throw even when the injected escalate throws");
+
+    const stored = await loadFrictionPatterns(SKILL);
+    const row = stored.find(p => p.category === "issue-843-cue");
+    assert.ok(row, "the core record must be committed before the dispatch");
+    assert.equal(row.hitCount, 1);
   });
 });

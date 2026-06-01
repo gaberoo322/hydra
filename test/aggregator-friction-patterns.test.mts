@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   getFrictionPatterns,
   liftFrictionPatterns,
+  normalizeLastEscalation,
   parseMetaFrictionIssues,
   type RawFrictionPattern,
 } from "../src/aggregators/friction-patterns.ts";
@@ -106,6 +107,59 @@ describe("liftFrictionPatterns — pure helper", () => {
 
   test("returns [] when patterns isn't an array", () => {
     assert.deepEqual(liftFrictionPatterns("hydra-dev", null as any, 1), []);
+  });
+
+  // Issue #843 — Escalation Outcome surfaced per row.
+  test("surfaces lastEscalation when present (error outage shows on the row)", () => {
+    const rows = liftFrictionPatterns(
+      "hydra-dev",
+      [rawPattern({
+        category: "x",
+        hitCount: PROMOTION_THRESHOLD,
+        lastEscalation: { status: "error", error: "gh auth expired", at: "2026-05-26T11:00:00.000Z" },
+      })],
+      1,
+    );
+    assert.deepEqual(rows[0].lastEscalation, {
+      status: "error",
+      error: "gh auth expired",
+      at: "2026-05-26T11:00:00.000Z",
+    });
+  });
+
+  test("lastEscalation is null when absent (pre-#843 record)", () => {
+    const rows = liftFrictionPatterns("hydra-dev", [rawPattern({ category: "x", hitCount: 1 })], 1);
+    assert.equal(rows[0].lastEscalation, null);
+  });
+});
+
+describe("normalizeLastEscalation — pure helper (issue #843)", () => {
+  test("null/absent/malformed → null", () => {
+    assert.equal(normalizeLastEscalation(undefined), null);
+    assert.equal(normalizeLastEscalation(null as any), null);
+    assert.equal(normalizeLastEscalation({} as any), null);
+    assert.equal(normalizeLastEscalation({ status: "bogus" } as any), null);
+  });
+
+  test("created outcome keeps issueNumber, drops error", () => {
+    assert.deepEqual(
+      normalizeLastEscalation({ status: "created", issueNumber: 7, at: "2026-05-26T11:00:00.000Z" }),
+      { status: "created", issueNumber: 7, at: "2026-05-26T11:00:00.000Z" },
+    );
+  });
+
+  test("error outcome keeps error string", () => {
+    assert.deepEqual(
+      normalizeLastEscalation({ status: "error", error: "boom", at: "2026-05-26T11:00:00.000Z" }),
+      { status: "error", error: "boom", at: "2026-05-26T11:00:00.000Z" },
+    );
+  });
+
+  test("skipped outcome has neither issueNumber nor error", () => {
+    assert.deepEqual(
+      normalizeLastEscalation({ status: "skipped", at: "2026-05-26T11:00:00.000Z" }),
+      { status: "skipped", at: "2026-05-26T11:00:00.000Z" },
+    );
   });
 });
 

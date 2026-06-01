@@ -69,13 +69,15 @@ export function createMiscRouter(_eventBus: any) {
       // (record-then-escalate, best-effort). No separate escalateIfNeeded call
       // or escalation.ts import needed here.
       const { recordPattern } = await import("../pattern-memory/agent-memory.ts");
-      await recordPattern(agentName, category, {
+      // Issue #843 — surface the Escalation Outcome so a systematic gh/auth
+      // outage is observable on the caller side instead of a silent { ok: true }.
+      const result = await recordPattern(agentName, category, {
         severity: severity || "prevent",
         action,
         example: example || "",
         cycleId: cycleId || `claude-${Date.now()}`,
       });
-      res.json({ ok: true });
+      res.json({ ok: true, escalation: result.escalationResult ?? null });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
