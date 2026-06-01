@@ -174,6 +174,20 @@ jobs:
   # T1 (shallowest) → T4 (deepest). Blocks T4 (Verifier Core) PRs unless
   # the `operator-approved` label is present. Echoes the result to the PR
   # step summary so reviewers and agents see it without digging.
+  #
+  # Live-Gate Invariant (issue #738, ADR-0015 §live-gate invariant): when a
+  # PR touches a Verifier Core file (ci.yml, deploy.yml, tier-classify.ts,
+  # tier-classifier.ts, untouchable.ts) it is classified by the BASE-ref
+  # (currently-deployed / master) copy of the classifier scripts, NOT the
+  # PR-head copy. This closes the circularity hole: a PR could otherwise ship
+  # a neutered classifier on its head (e.g. one that returns T1 for ci.yml)
+  # and thereby verify its own admission. The base-ref classifier — which
+  # still works — does the classifying, so a self-weakening gate is still
+  # caught. Non-Verifier-Core PRs run the head-ref classifier exactly as
+  # today (zero behavior change for the common case). The branching +
+  # base-ref extraction lives in scripts/ci/live-gate.sh; see that file's
+  # header and ADR-0015 for the full mechanism. DO NOT route Verifier Core
+  # PRs back through the head-tree classifier — that re-opens the hole.
   tier-gate:
     if: github.event_name == 'pull_request'
     runs-on: self-hosted
@@ -190,22 +204,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # The changed-file LIST is always the PR diff (head vs base). The
+          # Live-Gate Invariant moves only the CLASSIFIER LOGIC to base-ref,
+          # never the file list — we judge the PR's files, using the old rules.
           gh pr diff --name-only "${{ github.event.pull_request.number }}" > changed-files.txt || \
             git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" > changed-files.txt
           echo "Files changed:"
           cat changed-files.txt
 
-      - name: Classify tier
+      - name: Classify tier (Live-Gate Invariant — base-ref for Verifier Core)
         env:
           OPERATOR_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'operator-approved') }}
         run: |
           set +e
-          FLAG=""
-          if [ "$OPERATOR_APPROVED" = "true" ]; then
-            FLAG="--operator-approved"
-          fi
-          mapfile -t FILES < changed-files.txt
-          npx tsx scripts/tier-classify.ts $FLAG "${FILES[@]}" > tier-result.json 2> tier-stderr.txt
+          # Compute the trusted base ref the same rebase-safe way the
+          # mutation-test job does: `git merge-base origin/master HEAD`, NOT
+          # github.event.pull_request.base.sha (which goes stale on rebased
+          # PRs and can point at an old base no longer matching the fork
+          # point). This is the live, currently-deployed gate at the fork
+          # point, and it tracks master as it advances.
+          git fetch origin master --depth=0 || git fetch origin master
+          MERGE_BASE="$(git merge-base origin/master HEAD)"
+          echo "Live-gate base ref (merge-base origin/master HEAD): $MERGE_BASE"
+
+          # scripts/ci/live-gate.sh decides "Verifier Core PR?" using the
+          # BASE-ref isVerifierCore, then classifies with base-ref scripts
+          # (Verifier Core PR) or head-ref scripts (everything else). Same
+          # JSON shape and exit codes as tier-classify.ts.
+          bash scripts/ci/live-gate.sh "$MERGE_BASE" "$OPERATOR_APPROVED" changed-files.txt \
+            > tier-result.json 2> tier-stderr.txt
           STATUS=$?
           cat tier-result.json
           {
@@ -223,9 +250,9 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ $STATUS -ne 0 ]; then
-            cat tier-stderr.txt >&2
-          fi
+          # Always surface the live-gate diagnostic (which classifier won)
+          # and any failure detail in the job log.
+          cat tier-stderr.txt >&2
           exit $STATUS
 
   # Mutation testing gate (issues #382, #653). Re-homes step 6.7 of the
