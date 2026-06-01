@@ -37,6 +37,7 @@ import { promisify } from "node:util";
 import { execFile as execFileSync } from "node:child_process";
 
 import { PROMOTION_THRESHOLD } from "../pattern-memory/agent-memory.ts";
+import { readFrictionPatterns } from "./friction-source.ts";
 
 const execFile = promisify(execFileSync);
 
@@ -279,7 +280,9 @@ async function readGroupedFrictionPatterns(
   candidateWindow: number,
   deps: FrictionPatternsDeps,
 ): Promise<FrictionGroup[]> {
-  const reader = deps.readFrictionPatterns ?? defaultReadFrictionPatterns;
+  const reader =
+    deps.readFrictionPatterns ??
+    (() => readFrictionPatterns<RawFrictionPattern>("friction-patterns"));
   const groups = await reader();
   const out: FrictionGroup[] = [];
   for (const { skill, patterns } of groups) {
@@ -294,34 +297,6 @@ async function readGroupedFrictionPatterns(
     const bMs = b.patterns[0] ? Date.parse(b.patterns[0].lastSeen) || 0 : 0;
     return bMs - aMs;
   });
-  return out;
-}
-
-async function defaultReadFrictionPatterns(): Promise<
-  Array<{ skill: string; patterns: RawFrictionPattern[] }>
-> {
-  const { getRedisConnection } = await import("../redis/connection.ts");
-  const r = getRedisConnection();
-  const matches: string[] = [];
-  let cursor = "0";
-  do {
-    const [next, page] = await r.scan(cursor, "MATCH", "hydra:friction:*:patterns", "COUNT", "200");
-    cursor = next;
-    matches.push(...page);
-  } while (cursor !== "0");
-
-  const out: Array<{ skill: string; patterns: RawFrictionPattern[] }> = [];
-  for (const key of matches) {
-    const skill = key.replace(/^hydra:friction:/, "").replace(/:patterns$/, "");
-    const raw = await r.get(key);
-    if (!raw) continue;
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) out.push({ skill, patterns: parsed as RawFrictionPattern[] });
-    } catch (err: any) {
-      console.error(`[friction-patterns] failed to parse ${key}: ${err?.message || err}`);
-    }
-  }
   return out;
 }
 
