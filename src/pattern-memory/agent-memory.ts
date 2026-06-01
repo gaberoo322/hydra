@@ -31,6 +31,7 @@ import {
   setBackfillPromotionMetaDone,
 } from "../redis/agent-memory.ts";
 import {
+  escalateIfNeeded,
   escalationThresholdForCue,
   isMetadataCue,
   shouldEscalateAtHitCount,
@@ -85,25 +86,46 @@ export type MemoryPattern = {
 };
 
 /**
- * Return shape of `recordPattern()`. The escalation field carries the
- * caller-decided side-effect: it's non-null when the recorded hit count is one
- * that merits a GitHub-issue dispatch. The caller passes it to
- * `escalateIfNeeded()` (from `escalation.ts`) to fire the dispatch — or omits
- * the dispatch entirely (e.g. in tests) to keep the call pure.
+ * Signature of the escalation dependency folded into `recordPattern()`
+ * (issue #823). Defaults to the real `escalateIfNeeded` from `escalation.ts`;
+ * tests/callers override it with a spy/no-op to assert the escalation intent
+ * without shelling out to `gh`. Matches `escalateIfNeeded`'s shape so the
+ * default is a direct reference, not an adapter.
+ */
+export type EscalateFn = (
+  escalation: EscalationInput | null,
+  context: string,
+) => Promise<void>;
+
+/**
+ * Return shape of `recordPattern()`.
  *
- * This split is the seam the codebase used to elide via an inline
- * `maybeEscalate()` hook inside `recordPattern`: pattern accounting and
- * GitHub-issue accounting are two lifecycles, and joining them under one
- * function name hid the second from callers and tests.
+ * Issue #823 folded the escalation DISPATCH into `recordPattern()` itself:
+ * the record→promote→escalate lifecycle is now owned end-to-end in one
+ * operation, so a caller can no longer record a hit and silently forget the
+ * escalation seam (the exact fail-loud-violating footgun the prior two-step
+ * `recordPattern()` + `escalateIfNeeded()` contract allowed). Escalation fires
+ * by DEFAULT, after the Redis write commits, via an injected dependency that
+ * defaults to the real `escalateIfNeeded`.
+ *
+ * The `escalation` field is RETAINED for observability and for direct-call
+ * tests: it carries the computed `EscalationInput | null` (the escalation
+ * *intent*) so callers can assert the decision even though the dispatch has
+ * already been performed internally. It is no longer a to-do the caller must
+ * action — `recordPattern` already actioned it.
  */
 export type RecordPatternResult = {
   pattern: MemoryPattern;
   /** True when this call promoted the pattern to "cardinal" for the first time. */
   crossedThreshold: boolean;
   /**
-   * Non-null when this hit count merits a GitHub-side dispatch. Pre-decision
-   * (threshold lookup, kind mapping, input shaping) lives in `recordPattern`;
-   * the caller just hands this to `escalateIfNeeded()`.
+   * The escalation intent computed for this hit: non-null when the hit count
+   * merits a GitHub-side dispatch, null otherwise. Issue #823: `recordPattern`
+   * has ALREADY dispatched this (via the injected `escalate` dep, default
+   * `escalateIfNeeded`) before returning. The field stays for observability
+   * and so direct-call tests can assert the decision without the dispatch
+   * firing (tests neutralise the real dispatch via `HYDRA_ESCALATION_DISABLED`
+   * or by injecting a no-op `escalate`).
    */
   escalation: EscalationInput | null;
 };
@@ -521,6 +543,15 @@ export function formatMemoryForPrompt(memory: string, agentName: string): string
  * (there is no `to-{skill}.md` for arbitrary subagent skills). Both
  * namespaces fire the GitHub-issue escalation hook on threshold-cross
  * and every multiple of 10 thereafter.
+ *
+ * Issue #823 — the escalation dispatch is now folded in: after the Redis
+ * write commits, `recordPattern` itself calls `details.escalate` (default
+ * `escalateIfNeeded`) with the computed `EscalationInput | null`. This makes
+ * "record without escalate" structurally impossible — there is one operation,
+ * not a returned intent the caller must remember to action. The dispatch
+ * stays best-effort and never throws (the default `escalateIfNeeded` swallows
+ * + logs, and `escalatePatternToIssue` honours `HYDRA_ESCALATION_DISABLED`).
+ * Pass a no-op `escalate` to exercise pattern accounting in isolation.
  */
 export async function recordPattern(
   agentName: string,
@@ -532,6 +563,13 @@ export async function recordPattern(
     cycleId: string;
     source?: "codex-cycle" | "subagent";
     namespace?: PatternNamespace;
+    /**
+     * Issue #823 — injected escalation dependency. Defaults to the real
+     * `escalateIfNeeded`. Override with a spy/no-op in tests to assert the
+     * escalation intent without dispatching. Production callers leave it unset
+     * and get escalate-by-default (inert under `HYDRA_ESCALATION_DISABLED=1`).
+     */
+    escalate?: EscalateFn;
   },
 ): Promise<RecordPatternResult> {
   const namespace: PatternNamespace = details.namespace || "memory";
@@ -586,11 +624,10 @@ export async function recordPattern(
 
   await savePatterns(agentName, patterns, namespace);
 
-  // Issue #512 — decide whether the caller should dispatch a GitHub-issue
-  // escalation. Threshold-cross plus every multiple of 10 thereafter
-  // (hitCount = threshold, threshold+10, threshold+20, ...). The decision and
-  // input shaping live here so callers stay one-liners; the dispatch itself
-  // is the caller's choice via `escalateIfNeeded(result.escalation, ctx)`.
+  // Issue #512 — decide whether this hit merits a GitHub-issue escalation.
+  // Threshold-cross plus every multiple of 10 thereafter (hitCount =
+  // threshold, threshold+10, threshold+20, ...). The decision and input
+  // shaping live here.
   //
   // Issue #524 — per-cue threshold override. `acceptance-criterion-deferred`
   // uses a much higher threshold (20+) so it doesn't fire on every PR with
@@ -606,6 +643,19 @@ export async function recordPattern(
         lastReference: pattern.lastCycleId,
       }
     : null;
+
+  // Issue #823 — fold the dispatch in. Record-then-escalate ordering is
+  // preserved (the savePatterns() above has already committed). The dispatch
+  // is the injected dep (default escalateIfNeeded), which is best-effort and
+  // never throws — a gh/network failure logs console.error and recordPattern
+  // still resolves with its result object. The escalation field is retained
+  // on the result for observability and direct-call test assertions.
+  const escalate = details.escalate ?? escalateIfNeeded;
+  const escalationContext =
+    namespace === "friction"
+      ? `friction/${agentName}/${category}`
+      : `${agentName}/${category}`;
+  await escalate(escalation, escalationContext);
 
   return { pattern, crossedThreshold, escalation };
 }

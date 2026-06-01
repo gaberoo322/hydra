@@ -35,7 +35,6 @@
  */
 
 import { recordPattern } from "./agent-memory.ts";
-import { escalateIfNeeded } from "./escalation.ts";
 
 /** Skills that produce subagent lessons. Keep in sync with autopilot dispatch. */
 export type SubagentSkill = "hydra-qa" | "hydra-dev" | "hydra-target-build";
@@ -161,14 +160,16 @@ export async function captureSubagentLesson(lesson: SubagentLesson): Promise<{
       ? lesson.cycleId
       : `subagent-${lesson.skill}-${Date.now()}`;
 
-  const r = await recordPattern(agent, category, {
+  // Issue #823 — recordPattern now dispatches the escalation internally
+  // (record-then-escalate, best-effort, never throws). No separate
+  // escalateIfNeeded call: the lifecycle can't be half-applied.
+  await recordPattern(agent, category, {
     severity: lesson.severity || "prevent",
     action: lesson.action || defaultAction(lesson.skill, lesson.outcome),
     example: lesson.context || "",
     cycleId,
     source: "subagent",
   });
-  await escalateIfNeeded(r.escalation, `${agent}/${category}`);
 
   return { agent, category };
 }
@@ -229,7 +230,9 @@ export async function captureSubagentFriction(item: SubagentFriction): Promise<{
 
   // The `agent` slot in the namespace is reused as the skill name — friction
   // is scoped per-skill, not per-agent-role.
-  const r = await recordPattern(item.skill, category, {
+  // Issue #823 — recordPattern dispatches the friction escalation internally
+  // (escalationContext = `friction/<skill>/<cue>`). No separate call needed.
+  await recordPattern(item.skill, category, {
     severity: "prevent",
     action: item.workaround.trim(),
     example: item.context ? item.context.trim() : "",
@@ -237,7 +240,6 @@ export async function captureSubagentFriction(item: SubagentFriction): Promise<{
     source: "subagent",
     namespace: "friction",
   });
-  await escalateIfNeeded(r.escalation, `friction/${item.skill}/${category}`);
 
   return { skill: item.skill, category };
 }

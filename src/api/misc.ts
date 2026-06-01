@@ -65,15 +65,16 @@ export function createMiscRouter(_eventBus: any) {
       if (!category || !action) {
         return res.status(400).json({ error: "Missing category or action" });
       }
+      // Issue #823 — recordPattern dispatches the escalation internally
+      // (record-then-escalate, best-effort). No separate escalateIfNeeded call
+      // or escalation.ts import needed here.
       const { recordPattern } = await import("../pattern-memory/agent-memory.ts");
-      const { escalateIfNeeded } = await import("../pattern-memory/escalation.ts");
-      const r = await recordPattern(agentName, category, {
+      await recordPattern(agentName, category, {
         severity: severity || "prevent",
         action,
         example: example || "",
         cycleId: cycleId || `claude-${Date.now()}`,
       });
-      await escalateIfNeeded(r.escalation, `${agentName}/${category}`);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
