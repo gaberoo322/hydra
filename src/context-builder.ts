@@ -35,18 +35,47 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "
 export const CONTEXT_BUDGET = 12_000;  // chars
 export const MIN_TRUNCATED = 500;      // minimum chars to keep when truncating
 
-/** Priority order: highest-priority first (grounding is never truncated). */
-export const SOURCE_PRIORITY: readonly string[] = [
-  "grounding",
-  "scopedFileTree", // issue #366: real file paths next to grounding so the
-                    // planner never falls back to hallucinated names
-  "feedback",
-  "reflections",    // plannerMemory contains reflections
-  "priorities",
-  "memory",         // ovContext
-  "accomplishments",
-  "continuity",
+// ---------------------------------------------------------------------------
+// Planner-context source registry (issue #819)
+// ---------------------------------------------------------------------------
+//
+// Single in-module registry of the planner-context sources. Each source is
+// declared ONCE, in priority order (highest-priority first; grounding is
+// never truncated). Both SOURCE_PRIORITY (the ordered priority list consulted
+// by applyContextBudget) and the rawSources array assembled in
+// buildPlannerContext() are derived from this one list — adding a source means
+// editing a single entry here, not keeping a separate constant and an array
+// literal in sync by convention. This is a registration-consolidation refactor:
+// the order, names, and budget behaviour are byte-identical to the prior
+// hand-maintained pair.
+//
+/** One planner-context source's registration: stable name + priority slot. */
+export interface PlannerSourceSpec {
+  /** Stable source name (matches the ContextSource.name used by the budget). */
+  readonly name: string;
+}
+
+/** Ordered, highest-priority-first. Index = priority (lower = higher priority). */
+export const PLANNER_SOURCE_REGISTRY: readonly PlannerSourceSpec[] = [
+  { name: "grounding" },
+  { name: "scopedFileTree" }, // issue #366: real file paths next to grounding
+                              // so the planner never falls back to hallucinated
+                              // names
+  { name: "feedback" },
+  { name: "reflections" },    // plannerMemory contains reflections
+  { name: "priorities" },
+  { name: "memory" },         // ovContext
+  { name: "accomplishments" },
+  { name: "continuity" },
 ] as const;
+
+/**
+ * Priority order: highest-priority first (grounding is never truncated).
+ * Derived from PLANNER_SOURCE_REGISTRY so there is exactly one place to edit
+ * when a source is added — no second hand-maintained list to drift out of sync.
+ */
+export const SOURCE_PRIORITY: readonly string[] =
+  PLANNER_SOURCE_REGISTRY.map((s) => s.name);
 
 /**
  * Token budget for the per-anchor scoped file-tree block injected into the
@@ -266,16 +295,25 @@ export async function buildPlannerContext(
   const scopedFileTree = buildScopedFileTree(anchor, grounding);
 
   // --- Context budget: measure, log, truncate if needed ---
-  const rawSources: ContextSource[] = [
-    { name: "grounding", content: groundingSummary },
-    { name: "scopedFileTree", content: scopedFileTree },
-    { name: "feedback", content: feedback || "" },
-    { name: "reflections", content: plannerMemory || "" },
-    { name: "priorities", content: priorities || "" },
-    { name: "memory", content: ovContext },
-    { name: "accomplishments", content: (accomplishmentsContext || "") + (milestoneContext || "") },
-    { name: "continuity", content: continuityContext },
-  ];
+  // Issue #819: rawSources is derived from PLANNER_SOURCE_REGISTRY (the single
+  // source-of-truth for source names + order) by mapping each registered name
+  // to its loaded content. This makes the assembled source-name list and
+  // SOURCE_PRIORITY structurally identical — adding a source can no longer
+  // drift the two apart.
+  const contentByName: Record<string, string> = {
+    grounding: groundingSummary,
+    scopedFileTree,
+    feedback: feedback || "",
+    reflections: plannerMemory || "",
+    priorities: priorities || "",
+    memory: ovContext,
+    accomplishments: (accomplishmentsContext || "") + (milestoneContext || ""),
+    continuity: continuityContext,
+  };
+  const rawSources: ContextSource[] = PLANNER_SOURCE_REGISTRY.map((spec) => ({
+    name: spec.name,
+    content: contentByName[spec.name] ?? "",
+  }));
 
   const sourceSizes: Record<string, number> = {};
   for (const s of rawSources) sourceSizes[s.name] = s.content.length;

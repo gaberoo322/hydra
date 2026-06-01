@@ -16,6 +16,7 @@ import {
   CONTEXT_BUDGET,
   MIN_TRUNCATED,
   SOURCE_PRIORITY,
+  PLANNER_SOURCE_REGISTRY,
   type ContextSource,
 } from "../src/context-builder.ts";
 
@@ -160,5 +161,35 @@ describe("applyContextBudget", () => {
     assert.equal(MIN_TRUNCATED, 500);
     assert.ok(SOURCE_PRIORITY.length >= 7, "should have at least 7 priority sources");
     assert.equal(SOURCE_PRIORITY[0], "grounding", "grounding should be highest priority");
+  });
+});
+
+describe("PLANNER_SOURCE_REGISTRY (issue #819: one registry, no two-places drift)", () => {
+  test("SOURCE_PRIORITY is derived from the registry — same names, same order", () => {
+    // The refactor test: SOURCE_PRIORITY and the registry's name list must be
+    // structurally identical. If a future edit adds a source to one but not the
+    // other, this assertion fails — making the two-places-in-sync drift the
+    // refactor eliminated structurally impossible to reintroduce silently.
+    assert.deepEqual(
+      SOURCE_PRIORITY.slice(),
+      PLANNER_SOURCE_REGISTRY.map((s) => s.name),
+      "SOURCE_PRIORITY must derive from PLANNER_SOURCE_REGISTRY (single source of truth)",
+    );
+  });
+
+  test("registry preserves the documented priority contract", () => {
+    // Grounding stays highest-priority (index 0, never truncated) and the
+    // registry keeps the full source set (>= 7). These pin the invariants the
+    // budget logic and #193 retry-correctness depend on.
+    assert.equal(PLANNER_SOURCE_REGISTRY[0].name, "grounding",
+      "grounding must remain the highest-priority registry entry");
+    assert.ok(PLANNER_SOURCE_REGISTRY.length >= 7,
+      "registry should declare at least 7 planner-context sources");
+  });
+
+  test("registry source names are unique (no duplicate priority slots)", () => {
+    const names = PLANNER_SOURCE_REGISTRY.map((s) => s.name);
+    assert.equal(new Set(names).size, names.length,
+      "each source name must occupy exactly one registry slot");
   });
 });
