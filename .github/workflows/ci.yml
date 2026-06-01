@@ -277,10 +277,24 @@ jobs:
           echo "Files changed:"
           cat changed-files.txt
 
+      - name: Classify PR tier (issue #778 — per-tier mutation floor)
+        id: tier
+        run: |
+          # The mutation floor is tier-dependent (issue #778): T3/T4 diffs
+          # must clear a raised floor. Source the tier from the single tier
+          # authority — scripts/tier-classify.ts → classifyChange — and pass
+          # it to the gate via PR_TIER. No per-path hardcoding in the gate.
+          mapfile -t FILES < changed-files.txt
+          TIER_JSON="$(npx tsx scripts/tier-classify.ts "${FILES[@]}" 2>/dev/null || echo '{}')"
+          PR_TIER="$(printf '%s' "$TIER_JSON" | npx tsx -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const t=JSON.parse(s).tier;process.stdout.write(Number.isInteger(t)?String(t):"3")}catch{process.stdout.write("3")}})')"
+          echo "Classified tier: ${PR_TIER}"
+          echo "PR_TIER=${PR_TIER}" >> "$GITHUB_ENV"
+
       - name: Run mutation gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MUTATION_KILL_RATE_FLOOR: ${{ vars.MUTATION_KILL_RATE_FLOOR || '30' }}
+          MUTATION_KILL_RATE_FLOOR_T3: ${{ vars.MUTATION_KILL_RATE_FLOOR_T3 || '55' }}
           MUTATION_TIME_BUDGET_MS: ${{ vars.MUTATION_TIME_BUDGET_MS || '540000' }}
         run: |
           set +e
@@ -288,6 +302,7 @@ jobs:
           export PR_BODY
           CHANGED_FILES="$(cat changed-files.txt)"
           export CHANGED_FILES
+          # PR_TIER is exported into $GITHUB_ENV by the Classify PR tier step.
           npx tsx scripts/ci/mutation-check.ts > mutation-result.json 2> mutation-stderr.txt
           STATUS=$?
           {
