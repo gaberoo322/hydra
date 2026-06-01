@@ -67,15 +67,67 @@ class EventBus {
   async init() {
     for (const [stream, groups] of Object.entries(CONSUMER_GROUPS)) {
       for (const group of groups) {
-        try {
-          await this.publisher.xgroup("CREATE", stream, group, "0", "MKSTREAM");
-        } catch (err: any) {
-          // BUSYGROUP = group already exists, which is fine
-          if (!err.message.includes("BUSYGROUP")) throw err;
-        }
+        await this.ensureConsumerGroup(stream, group, "0");
       }
     }
     return this;
+  }
+
+  /**
+   * Idempotently create a consumer group on a stream (with MKSTREAM so the
+   * stream is created if it does not yet exist). Swallows ONLY the BUSYGROUP
+   * error (group already exists) — every other error is rethrown.
+   *
+   * `startId` controls where a freshly-created group begins reading:
+   *   - "0"  → from the start of the stream (replay backlog; init() default).
+   *   - "$"  → only new messages after creation (skip backlog).
+   * Callers that need skip-backlog semantics (slot-events-bridge) MUST pass
+   * "$" explicitly so the behaviour is not silently flipped.
+   *
+   * @param {string} stream  - Stream key.
+   * @param {string} group   - Consumer group name.
+   * @param {string} startId - Group start position ("0" default | "$").
+   */
+  async ensureConsumerGroup(stream, group, startId = "0") {
+    try {
+      await this.publisher.xgroup("CREATE", stream, group, startId, "MKSTREAM");
+    } catch (err: any) {
+      // BUSYGROUP = group already exists, which is fine.
+      if (!err?.message?.includes("BUSYGROUP")) throw err;
+    }
+  }
+
+  /**
+   * Publish a RAW event to a stream — a flat field/value list with no JSON
+   * envelope, trimmed with `MAXLEN ~ <maxlen>`. This is the second sanctioned
+   * wire format (ADR-0017 Category B): it matches shell producers like
+   * `on-subagent-stop.sh` that XADD an `event`-discriminated flat field map,
+   * so a TypeScript producer can write the identical shape without the
+   * envelope that `publish()` wraps around every event.
+   *
+   * Still calls `_broadcastToClients` so dashboard WS subscribers receive the
+   * frame live, exactly as `publish()` does.
+   *
+   * @param {string}   stream - Stream key.
+   * @param {string[]} fields - Flat [k0, v0, k1, v1, ...] field list.
+   * @param {object}   opts   - { maxlen } — XADD `MAXLEN ~` cap.
+   * @returns {string} The Redis message ID.
+   */
+  async publishRaw(stream, fields: string[], opts: { maxlen?: number } = {}) {
+    const { maxlen } = opts;
+    const args: any[] =
+      maxlen != null
+        ? [stream, "MAXLEN", "~", String(maxlen), "*", ...fields]
+        : [stream, "*", ...fields];
+    const msgId = await this.publisher.xadd(...args);
+
+    // Broadcast the flat fields to connected WebSocket clients as a plain
+    // key/value object so subscribers can pattern-match on the discriminator.
+    const obj: Record<string, string> = {};
+    for (let i = 0; i < fields.length; i += 2) obj[fields[i]] = fields[i + 1];
+    this._broadcastToClients(stream, obj);
+
+    return msgId;
   }
 
   /**
