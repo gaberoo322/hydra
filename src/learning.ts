@@ -84,14 +84,45 @@ export type LearningContextSource =
  * sourced from the underlying data, NOT regex-scanned out of the rendered
  * markdown. `0` for `miss`/`error` blocks. This is the field that lets
  * reflection-injection telemetry be exact instead of re-parsing the prompt.
+ *
+ * Issue #804 (PR-B): `dropPriority` is the within-bundle drop order consulted
+ * when the assembled planner context exceeds its char budget. The learning
+ * bundle is dropped WHOLE BLOCKS at a time (never sliced mid-text — slicing a
+ * reflection body while leaving its header intact is exactly the corruption
+ * that made post-budget counts unreliable). LOWER number = dropped FIRST.
+ * The contract is the design-concept drop order:
+ *
+ *   global (0) → knowledge-base (1) → agent-memory (2) → by-file (3) → per-anchor (4)
+ *
+ * Per-anchor reflections carry the HIGHEST dropPriority so they are the LAST
+ * learning block to be shed — retry-correctness invariant (#193: prior-failure
+ * retries had a 0% merge rate without their per-anchor reflections).
  */
 export interface LearningContextBlock {
   source: LearningContextSource;
   status: "hit" | "miss" | "error";
   content: string;
   itemCount: number;
+  /** Within-bundle drop order under budget pressure; lower = dropped first. */
+  dropPriority: number;
   error?: string;
 }
+
+/**
+ * Issue #804 (PR-B): the canonical within-bundle drop order. Lower number is
+ * dropped first when the assembled context is over budget. Frozen contract —
+ * the budget logic in context-builder.ts depends on these exact values, and
+ * per-anchor MUST stay the highest (last-dropped) entry (#193 retry
+ * correctness). Exported so the budgeter and its tests share one source of
+ * truth rather than re-declaring the order.
+ */
+export const LEARNING_DROP_PRIORITY: Record<LearningContextSource, number> = {
+  "global-reflections": 0,
+  "knowledge-base": 1,
+  "agent-memory": 2,
+  "by-file-reflections": 3,
+  "per-anchor-reflections": 4,
+};
 
 /**
  * Structured result of getContext(). Callers that want the prompt string
@@ -159,6 +190,30 @@ function buildContext(blocks: LearningContextBlock[]): LearningContext {
   };
 }
 
+/**
+ * Construct a LearningContextBlock, stamping the within-bundle `dropPriority`
+ * from the frozen `LEARNING_DROP_PRIORITY` table (issue #804 PR-B). Centralised
+ * so the drop-order contract lives in exactly one place — every block flows
+ * through here and inherits its priority by source, never by hand.
+ */
+function mkBlock(
+  source: LearningContextSource,
+  status: "hit" | "miss" | "error",
+  content: string,
+  itemCount: number,
+  error?: string,
+): LearningContextBlock {
+  const block: LearningContextBlock = {
+    source,
+    status,
+    content,
+    itemCount,
+    dropPriority: LEARNING_DROP_PRIORITY[source],
+  };
+  if (error !== undefined) block.error = error;
+  return block;
+}
+
 async function loadAgentMemoryBlock(agent: string): Promise<LearningContextBlock> {
   try {
     const memory = await loadAgentMemory(agent);
@@ -167,12 +222,12 @@ async function loadAgentMemoryBlock(agent: string): Promise<LearningContextBlock
       // itemCount = number of formatted pattern groups. Each pattern block is
       // rendered with an `### [severity]` header by formatMemoryForPrompt.
       const itemCount = (formatted.match(/^### \[/gm) || []).length;
-      return { source: "agent-memory", status: "hit", content: formatted, itemCount };
+      return mkBlock("agent-memory", "hit", formatted, itemCount);
     }
-    return { source: "agent-memory", status: "miss", content: "", itemCount: 0 };
+    return mkBlock("agent-memory", "miss", "", 0);
   } catch (err: any) {
     console.error(`[Learning] getContext: agent memory load failed for ${agent}: ${err.message}`);
-    return { source: "agent-memory", status: "error", content: "", itemCount: 0, error: err.message };
+    return mkBlock("agent-memory", "error", "", 0, err.message);
   }
 }
 
@@ -204,12 +259,12 @@ async function loadKnowledgeBaseBlock(agent: string): Promise<LearningContextBlo
       const abstract = mem.abstract || mem.content || "";
       if (abstract.trim()) parts.push(`- ${abstract.slice(0, 300)}`);
     }
-    if (parts.length === 0) return { source: "knowledge-base", status: "miss", content: "", itemCount: 0 };
+    if (parts.length === 0) return mkBlock("knowledge-base", "miss", "", 0);
     const content = `# ${agent} — Learned Patterns (from OpenViking)\n\n${parts.join("\n")}`;
-    return { source: "knowledge-base", status: "hit", content, itemCount: parts.length };
+    return mkBlock("knowledge-base", "hit", content, parts.length);
   } catch (err: any) {
     console.error(`[Learning] getContext: knowledge-base (OV) search failed for ${agent}: ${err.message}`);
-    return { source: "knowledge-base", status: "error", content: "", itemCount: 0, error: err.message };
+    return mkBlock("knowledge-base", "error", "", 0, err.message);
   }
 }
 
@@ -218,7 +273,7 @@ async function loadPerAnchorReflectionsBlock(
 ): Promise<LearningContextBlock> {
   try {
     const reflections = await loadAnchorReflections(anchor.reference);
-    if (reflections.count === 0) return { source: "per-anchor-reflections", status: "miss", content: "", itemCount: 0 };
+    if (reflections.count === 0) return mkBlock("per-anchor-reflections", "miss", "", 0);
     // Acceptance: "Backfill on read: when an old reflection is hit by the
     // legacy path, opportunistically index it under by-file:". Side effect
     // is intentional and bounded — pre-#326 reflections age out at TTL.
@@ -227,10 +282,10 @@ async function loadPerAnchorReflectionsBlock(
     } catch (err: any) {
       console.error(`[Learning] getContext: by-file backfill failed for "${anchor.reference}": ${err.message}`);
     }
-    return { source: "per-anchor-reflections", status: "hit", content: reflections.content, itemCount: reflections.count };
+    return mkBlock("per-anchor-reflections", "hit", reflections.content, reflections.count);
   } catch (err: any) {
     console.error(`[Learning] getContext: per-anchor reflections failed for "${anchor.reference}": ${err.message}`);
-    return { source: "per-anchor-reflections", status: "error", content: "", itemCount: 0, error: err.message };
+    return mkBlock("per-anchor-reflections", "error", "", 0, err.message);
   }
 }
 
@@ -239,13 +294,13 @@ async function loadByFileReflectionsBlock(
 ): Promise<LearningContextBlock> {
   try {
     const files = extractFilesFromAnchor(anchor.reference, anchor.files);
-    if (files.length === 0) return { source: "by-file-reflections", status: "miss", content: "", itemCount: 0 };
+    if (files.length === 0) return mkBlock("by-file-reflections", "miss", "", 0);
     const byFile = await loadAnchorReflectionsByFile(files, anchor.reference);
-    if (byFile.count > 0) return { source: "by-file-reflections", status: "hit", content: byFile.content, itemCount: byFile.count };
-    return { source: "by-file-reflections", status: "miss", content: "", itemCount: 0 };
+    if (byFile.count > 0) return mkBlock("by-file-reflections", "hit", byFile.content, byFile.count);
+    return mkBlock("by-file-reflections", "miss", "", 0);
   } catch (err: any) {
     console.error(`[Learning] getContext: by-file reflections failed for "${anchor.reference}": ${err.message}`);
-    return { source: "by-file-reflections", status: "error", content: "", itemCount: 0, error: err.message };
+    return mkBlock("by-file-reflections", "error", "", 0, err.message);
   }
 }
 
@@ -255,11 +310,11 @@ async function loadGlobalReflectionsBlock(
   try {
     const relevant = await loadRelevantReflections(anchor);
     const formatted = formatReflectionsForPrompt(relevant);
-    if (formatted) return { source: "global-reflections", status: "hit", content: formatted, itemCount: relevant.length };
-    return { source: "global-reflections", status: "miss", content: "", itemCount: 0 };
+    if (formatted) return mkBlock("global-reflections", "hit", formatted, relevant.length);
+    return mkBlock("global-reflections", "miss", "", 0);
   } catch (err: any) {
     console.error(`[Learning] getContext: global reflections failed for "${anchor.reference}": ${err.message}`);
-    return { source: "global-reflections", status: "error", content: "", itemCount: 0, error: err.message };
+    return mkBlock("global-reflections", "error", "", 0, err.message);
   }
 }
 
