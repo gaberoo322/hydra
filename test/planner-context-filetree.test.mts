@@ -9,13 +9,13 @@
  * abandonment` showed 2/18 abandonments (~11%) coming from this failure
  * mode, each costing ~$5 in frontier planner spend.
  *
- * Fix: wire `src/repo-map.ts` into `buildPlannerContext()` so the planner
+ * Fix: wire the repo-map helpers into `buildPlannerContext()` so the planner
  * prompt includes a scoped, token-bounded list of real paths relevant to
  * the anchor reference.
  *
  * Tests cover:
- *   - the new pure helpers in repo-map.ts (tokenisation, scoring, related-
- *     file lookup, formatted output)
+ *   - the pure helpers in src/repo-file-matcher.ts (tokenisation, scoring,
+ *     related-file lookup) and src/repo-file-tree-format.ts (formatted output)
  *   - the buildScopedFileTree() builder in context-builder.ts (header,
  *     omission on doc anchors, omission when fileTree is empty)
  *   - the PlannerContext shape now exposes `scopedFileTree`
@@ -29,8 +29,8 @@ import {
   tokenizeAnchorReference,
   scoreFileAgainstTokens,
   findRelatedFiles,
-  formatScopedFileTree,
-} from "../src/repo-map.ts";
+} from "../src/repo-file-matcher.ts";
+import { formatScopedFileTree } from "../src/repo-file-tree-format.ts";
 import { buildScopedFileTree } from "../src/context-builder.ts";
 
 // Minimal grounding shaped exactly like the production grounding payload, so

@@ -23,7 +23,8 @@ import {
   getRealityReport,
 } from "./redis/reality-reports.ts";
 import { getTargetWorkspace } from "./target-config.ts";
-import { findRelatedFiles, formatScopedFileTree } from "./repo-map.ts";
+import { findRelatedFiles } from "./repo-file-matcher.ts";
+import { formatScopedFileTree } from "./repo-file-tree-format.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
 
@@ -50,7 +51,7 @@ export const SOURCE_PRIORITY: readonly string[] = [
 /**
  * Token budget for the per-anchor scoped file-tree block injected into the
  * planner prompt (issue #366). Approximation is the same ~4-chars-per-token
- * heuristic used in repo-map.ts, so 2000 tokens ≈ 8000 chars max.
+ * heuristic used in repo-file-tree-format.ts, so 2000 tokens ≈ 8000 chars max.
  */
 export const SCOPED_FILE_TREE_TOKEN_BUDGET = 2000;
 
