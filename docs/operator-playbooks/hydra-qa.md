@@ -432,6 +432,122 @@ on PASS / PASS-pending-CI (positive QA outcomes currently don't train a memory).
 
 Relay the QA report to the user.
 
+## Post-merge Regression Check — the Outcome Holdback producer (issue #786, ADR-0004 step 4)
+
+Pre-merge QA (sections 1–11) is the **Pre-merge Gate**. This section is the
+**Post-merge Regression Check**: the *producer* of the Outcome Holdback events
+(`holdback.reverted` / `holdback.cap-reached` / `holdback.revert_failed`) that
+`src/digest.ts` has long consumed but nothing produced since the in-process
+`src/holdback.ts` watcher was deleted in the ADR-0006 cut-over. Without this,
+no Tier-2 merge is actually watched for Target-Outcome regression — the
+holdback is a no-op.
+
+**This is NOT a resurrected in-process watcher.** It is request-scoped work
+the autopilot poll loop dispatches *after* a merge. There is no timer, no
+sampler, no long-lived loop — re-introducing one reintroduces the
+orphaned-recorder failure mode that retired the stuckness detector (ADR-0010)
+and violates the autopilot-only execution model (ADR-0006/0012). The producer
+logic lives behind the orchestrator service (`src/holdback.ts` +
+`src/api/holdback.ts`); this skill only drives it over HTTP and performs the
+`git revert` when told to.
+
+**Holdback is read-only with respect to merge.** Enrollment and checks run
+strictly AFTER a merge; a merge is never blocked or delayed. The only action a
+holdback can take is to open a revert PR.
+
+### A. Enroll at merge time (Tier-2 floor)
+
+Immediately after a **PASS** merge (section 10) of an **enrolled** PR, snapshot
+the pre-merge baseline of the leading Target Outcomes. Scope for this issue is
+the **T2 floor** — enroll T2 merges only; broadening to T3/T4 with tier-aware
+windows is the sibling issue #741. Skip T1 (prompt-shaped) merges entirely.
+
+```bash
+# $merge_sha = the squash-merge commit SHA on master (gh pr merge prints it,
+# or: gh pr view $pr_number --json mergeCommit --jq .mergeCommit.oid).
+# $pr_tier   = the tier from the PR's `Tier:` line / the live classifier.
+if [ "$pr_tier" = "2" ]; then
+  curl -fsS -X POST http://localhost:4000/api/holdback/enroll \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg sha "$merge_sha" --argjson pr "$pr_number" --argjson tier 2 \
+          '{commitSha:$sha, prNumber:$pr, tier:$tier}')" || \
+    echo "WARN: holdback enroll failed for ${merge_sha} (non-fatal — merge already landed)"
+fi
+```
+
+`enroll` is a no-op (returns `{enrolled:false}`) when no leading outcome adapter
+returned data at merge time — recording an all-null baseline would make every
+future regression unknowable, so such a merge sits as "no signal" rather than a
+false holdback.
+
+### B. Check enrolled merges each poll (the watch)
+
+On each autopilot poll tick, for every still-enrolled merge SHA, call `check`.
+The service re-samples the leading outcomes, compares against the persisted
+baseline, enforces the per-day revert cap, and emits the holdback.* events the
+digest reads. It returns a `decision`:
+
+```bash
+RESP=$(curl -fsS -X POST http://localhost:4000/api/holdback/check \
+  -H 'content-type: application/json' \
+  -d "$(jq -n --arg sha "$merge_sha" '{commitSha:$sha}')")
+DECISION=$(printf '%s' "$RESP" | jq -r '.decision')
+case "$DECISION" in
+  revert)
+    # A leading outcome regressed past its noise_epsilon AND the per-day cap is
+    # not yet reached. The service already emitted holdback.reverted and cleared
+    # the baseline + counted the revert. Perform the actual revert PR now.
+    REGRESSED=$(printf '%s' "$RESP" | jq -r '.regressedOutcomes | join(", ")')
+    if git -C <worktree> revert --no-edit "$merge_sha" && \
+       gh pr create --title "revert: holdback regression on ${merge_sha:0:7}" \
+         --body "Outcome Holdback auto-revert (ADR-0004 step 4). Leading outcomes regressed past noise_epsilon vs the pre-merge baseline: ${REGRESSED}."; then
+      : # revert PR opened; CI is still the merge gate for the revert itself
+    else
+      # Revert/PR-open failed — surface to the digest so the operator sees a
+      # warranted revert did not land.
+      curl -fsS -X POST http://localhost:4000/api/holdback/revert-failed \
+        -H 'content-type: application/json' \
+        -d "$(jq -n --arg sha "$merge_sha" --arg r "git revert/PR-open failed" \
+              '{commitSha:$sha, reason:$r}')" || true
+    fi
+    ;;
+  cap-reached)
+    # Per-day revert cap hit — revert SUPPRESSED, holdback.cap-reached emitted.
+    # Do NOT revert; the digest surfaces the suppressed regression. A runaway
+    # revert loop is far more expensive than missing one revert.
+    ;;
+  passed)
+    : # Window elapsed clean — baseline already cleared. Stop watching this SHA.
+    ;;
+  watching)
+    : # No regression yet — keep watching on the next poll.
+    ;;
+  no-enrollment)
+    : # Expired or never enrolled — nothing to do.
+    ;;
+esac
+```
+
+### Invariants (must hold)
+
+- **Leading outcomes only.** A revert fires only when a `kind: leading` outcome
+  regresses in the **unfavorable** direction by **more than** its
+  `noise_epsilon`. Terminal outcomes are too slow for the window and never
+  drive a revert (`outcomes.yaml` schema comment; CONTEXT.md).
+- **Adapter outage is no-data, not a regression.** A null reading on either
+  side of the comparison never counts as a regression ("no false revert").
+- **Fixed event names + payloads.** The producer emits exactly
+  `holdback.reverted` (`payload.commitSha`, `payload.regressedOutcomes`),
+  `holdback.cap-reached`, and `holdback.revert_failed` — the three names
+  `src/digest.ts` consumes. Renaming any leaves the consumer orphaned.
+- **Per-day cap precedes any revert.** Once `HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY`
+  (default 3) is reached, the producer emits `holdback.cap-reached` and
+  suppresses further reverts for the UTC day.
+- **No new runtime dependency** (ADR-0005). Events publish via the orchestrator
+  event bus; the skill only shells `curl`/`gh`/`git`. Window/cap/TTL are named,
+  env-overridable config (defaults in `src/redis/holdback.ts`, documented in
+  `config/direction/outcomes.yaml`), never magic literals.
+
 ## Why a wrapper, not a re-implementation
 
 The upstream `review` skill (`~/.claude/skills/review/SKILL.md`) is the contract. We invoke its **process pattern** — pin fixed point, identify spec, spawn parallel Standards + Spec sub-agents, aggregate verbatim — and layer Hydra-specific concerns on top: the design-concept artifact as the canonical spec source, the verdict classifier from `scripts/ci/qa-verdict.ts`, and the autopilot-friendly single-pass exit.

@@ -337,63 +337,54 @@ Every PR is classified by blast radius on the monotonic ladder **T1 (shallowest)
 
 **CLI wrapper:** `npx tsx scripts/tier-classify.ts [--operator-approved] <file1> <file2> ...` prints JSON `{tier, reason, files, operatorApproved, perFile}` and exits 2 if a Verifier-Core (T4) path lacks the flag, 0 otherwise. Accepts piped input (`gh pr diff --name-only N | npx tsx scripts/tier-classify.ts`).
 
-## Tier-2 outcome-holdback watcher (issue #244, ADR-0004 step 4)
+## Outcome Holdback — Post-merge Regression Check (issue #786, ADR-0004 step 4)
 
-Tier-2 self-modifications ship as soon as CI is green, but the orchestrator watches the **leading** Target Outcomes (declared in `config/direction/outcomes.yaml`, kind `leading`) for 5 cycles after the merge. If any leading outcome regresses unfavorably for ≥2 consecutive cycle readings (a sustain window of 2 — a transient blip on a single reading is not enough to trigger), the commit is **auto-reverted** via `git revert <sha> && git push` on the orchestrator's master, taken under the existing `hydra:merge:lock` so concurrent control-loop merges cannot race the revert.
+Tier-2 self-modifications ship as soon as CI is green, but the orchestrator then watches the **leading** Target Outcomes (declared in `config/direction/outcomes.yaml`, kind `leading`) for a watch window after the merge. If any leading outcome regresses unfavorably past its `noise_epsilon` vs the pre-merge baseline, the commit is **auto-reverted** via a `git revert` PR.
 
-Implementation: `src/holdback.ts`. Snapshot wired in `src/post-merge.ts` (only fires when `verification.filesChanged` classifies as Tier 2). Evaluation wired in `src/control-loop.ts` after `groundProject` so a revert this cycle restarts grounded next cycle.
+**This is the autopilot-only producer, not an in-process watcher.** The original in-process `src/holdback.ts` timer-watcher (with `src/post-merge.ts` / `src/control-loop.ts` wiring and the `hydra:tier2:disabled` kill switch) was **deleted in the ADR-0006 codex cut-over** and is gone. The replacement is the **hydra-qa Post-merge Regression Check** (`docs/operator-playbooks/hydra-qa.md` → "Post-merge Regression Check"): request-scoped work the autopilot poll loop dispatches *after* a merge — no timer, no sampler, no long-lived loop (reintroducing one is the orphaned-recorder failure mode that retired the stuckness detector, ADR-0010). Holdback is read-only with respect to merge; its only action is to open a revert PR.
+
+Implementation seam:
+- `src/holdback.ts` — request-scoped producer: `enrollHoldback` (snapshot baseline), `checkHoldback` (sample, detect regression, enforce cap, emit events, return a `decision`), `reportRevertFailed`.
+- `src/redis/holdback.ts` — typed Redis accessor for the per-merge baseline + per-day revert counter (ADR-0009 seam).
+- `src/outcomes.ts` — `snapshotLeadingOutcomes` / `detectRegressions` helpers (leading-only, null = no-data).
+- `src/api/holdback.ts` — `POST /api/holdback/{enroll,check,revert-failed}`, the HTTP surface the playbook drives.
+- `src/digest.ts` — the (previously orphaned) consumer of the holdback.* events.
 
 ### Redis state
 
 | Key | Type | Purpose |
 |---|---|---|
-| `hydra:holdback:{commitSha}` | string (JSON `HoldbackRecord`) | Per-commit baseline + current + regressionCounts + status. TTL 14d. |
-| `hydra:holdback:active` | sorted set (score = merge time ms) | Holdbacks currently being watched. Members are commit shas. |
-| `hydra:holdback:recent` | list (newest-first, max 50) | Recently completed holdbacks (`passed` / `reverted` / `cap-reached`). |
-| `hydra:holdback:reverts:{YYYY-MM-DD}` | counter | Per-day revert tally; reverts halt at `MAX_REVERTS_PER_DAY=3`. |
-| `hydra:tier2:disabled` | flag (`"1"` or `"true"`) | Kill switch: when set, BOTH `snapshotForHoldback` and `evaluateAllHoldbacks` short-circuit. The full operator UI for this flag is ADR-0004 work-order step 5 (separate issue); the flag check itself is in place so step 5 is purely additive. |
+| `hydra:holdback:baseline:{commitSha}` | string (JSON `HoldbackBaseline`) | Pre-merge snapshot of the leading outcomes + window/tier/prNumber. TTL `HYDRA_HOLDBACK_BASELINE_TTL_SECONDS` (default 14d). |
+| `hydra:holdback:reverts:{YYYY-MM-DD}` | counter | Per-UTC-day revert tally; reverts suppressed once it reaches `HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY` (default 3). 7d TTL. |
 
 ### Events
 
-Published on `STREAMS.NOTIFICATIONS`:
+Published on `STREAMS.NOTIFICATIONS` (consumed by `src/digest.ts`):
 
-- `holdback.reverted` — commit was auto-reverted. Payload: `{commitSha, prNumber, regressedOutcomes, baseline, current, reason}`.
-- `holdback.passed` — 5 cycles elapsed clean. Payload: `{commitSha, prNumber, cyclesElapsed}`.
-- `holdback.cap-reached` — per-day revert cap hit; further regressions suppressed today. Payload mirrors `holdback.reverted`.
-- `holdback.revert_failed` — `git revert` or `git push` failed; the watcher will retry next cycle.
+- `holdback.reverted` — a leading outcome regressed and the revert was warranted. Payload: `{commitSha, prNumber, regressedOutcomes}`.
+- `holdback.cap-reached` — per-day revert cap hit; the regression was surfaced but the revert suppressed. Payload: `{commitSha, prNumber, regressedOutcomes}`.
+- `holdback.revert_failed` — the playbook's `git revert` / PR-open failed after a warranted revert. Payload: `{commitSha, reason}`.
 
-### Kill switch
+### Tunables (named, env-overridable — ADR-0005)
 
-```bash
-# Pause the Tier-2 watcher (operator emergency stop)
-redis-cli SET hydra:tier2:disabled 1
+Defaults live in `src/redis/holdback.ts`; documented in `config/direction/outcomes.yaml`:
 
-# Resume
-redis-cli DEL hydra:tier2:disabled
-```
-
-While the flag is set, no new holdbacks are recorded and existing ones halt evaluation (state preserved — re-enabling resumes where it left off). When Redis itself is unreachable, the flag-read fails closed: the watcher behaves as if disabled, prioritizing "no false revert" over "no missed revert".
+- `HYDRA_HOLDBACK_WINDOW_CYCLES` (default 5) — T2-floor watch window length in cycles. #741 layers a tier-aware map on top.
+- `HYDRA_HOLDBACK_MAX_REVERTS_PER_DAY` (default 3) — global per-UTC-day revert cap.
+- `HYDRA_HOLDBACK_BASELINE_TTL_SECONDS` (default 14d) — baseline-record TTL.
+- `HYDRA_HOLDBACK_CYCLE_MS` (default 1h) — wall-clock per cycle, used to decide when a window has elapsed.
 
 ### Behavior guarantees
 
-- **Terminal outcomes are excluded.** Only `kind: leading` outcomes drive the holdback decision. A 5-cycle window is too short for terminal outcomes per ADR-0004 vision.
-- **Adapter outages are no-data, not regressions.** If `getOutcomeValue` returns null (prometheus blip, file missing, etc.), the holdback's regression streak for that outcome holds at its prior value rather than incrementing or resetting.
-- **Snapshot only fires when at least one leading outcome adapter returned data.** Recording a holdback whose baseline is empty means every future regression is unknowable — those merges sit as "no signal" rather than as false holdbacks.
-- **Recovery cancels the streak.** A regression that recovers within the window resets that outcome's counter to 0, so the holdback continues watching cleanly.
-- **Per-day revert cap.** Three reverts per day max. Beyond that, the holdback is marked `cap-reached` and the operator must intervene — a runaway revert loop is far more expensive than missing one regression revert.
+- **Terminal outcomes are excluded.** Only `kind: leading` outcomes drive the holdback decision — terminal outcomes are too slow for the window (ADR-0004; `outcomes.yaml` schema comment).
+- **Adapter outages are no-data, not regressions.** A null reading on either side of the comparison never counts as a regression ("no false revert").
+- **Enroll only fires when at least one leading outcome adapter returned data.** An all-null baseline makes every future regression unknowable, so such a merge sits as "no signal" rather than a false holdback.
+- **Regression = unfavorable move past epsilon.** A favorable move, or a move within `noise_epsilon`, is not a regression.
+- **Per-day revert cap precedes any revert.** Once the cap is reached the producer emits `holdback.cap-reached` and suppresses further reverts for the UTC day. The cap counter fails closed on a Redis error (treats the cap as reached) — a runaway revert loop is far more expensive than missing one revert.
 
-### API
+### Scope (recap)
 
-`GET /api/holdback` returns `{active: HoldbackRecord[], recent: HoldbackRecord[]}`. The dashboard renders these as a panel so operators see "what self-modifications are still on probation?" without forensic Redis access.
-
-### Tier-2 file scope (recap)
-
-Snapshot fires when **any** file in the merged change classifies as Tier 2 per `src/tier-classifier.ts`:
-- `.claude/skills/` (skill prompt/script changes)
-- `dashboard/` (operator UI)
-- `src/anchor-selection.ts` (anchor weight tuning)
-
-Target-project file changes (the default `verification.filesChanged` output) never match Tier-2 patterns, so the watcher is a no-op for ordinary feature-build cycles. It activates for orchestrator self-mod cycles whose verification reports Tier-2 paths.
+This issue (#786) is the **T2 floor**: only T2 merges are enrolled (the default 5-cycle window). Broadening enrollment to T3/T4 with tier-aware windows is the sibling issue **#741**, which depends on this producer. T1 (prompt-shaped) merges are never enrolled.
 
 ## Cost reconciliation (issue #296) — historical
 
