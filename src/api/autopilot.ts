@@ -23,7 +23,13 @@ import {
   RunStartBodySchema,
   RunEndBodySchema,
   TurnBodySchema,
+  EmergencyBrakeBodySchema,
 } from "../autopilot/schemas.ts";
+import {
+  getEmergencyBrake,
+  setEmergencyBrake,
+  clearEmergencyBrake,
+} from "../redis/emergency-brake.ts";
 import {
   recordCycle,
   startRun,
@@ -268,6 +274,47 @@ export function createAutopilotRouter() {
       return res.status(status).json({ error: result.detail || result.code });
     }
     return res.json({ run: result.run, turns: result.turns });
+  });
+
+  // -------------------------------------------------------------------------
+  // Emergency brake (issue #744) — the operator-only emergency brake.
+  //
+  // This router IS the sole write path for the brake flag. The autopilot
+  // (decide.py / collect-state.sh) only READS it (via /health and a state
+  // collector line); there is no engage/disengage *action type*, so the
+  // autopilot has no structural way to set or clear the brake. Pulling the
+  // brake pauses ALL auto-merge regardless of tier/depth and routes open PRs
+  // to /hydra-review; releasing it resumes ADR-0015 depth-gated merge.
+  // -------------------------------------------------------------------------
+
+  // GET /autopilot/emergency-brake — read current brake state.
+  router.get("/autopilot/emergency-brake", async (_req, res) => {
+    try {
+      const state = await getEmergencyBrake();
+      return res.json(state);
+    } catch (err: any) {
+      console.error(`[autopilot] emergency-brake read failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // POST /autopilot/emergency-brake — engage/disengage. Operator-only.
+  router.post("/autopilot/emergency-brake", async (req, res) => {
+    const parsed = EmergencyBrakeBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
+    }
+    try {
+      if (parsed.data.engaged) {
+        const state = await setEmergencyBrake(parsed.data.engagedBy ?? "operator");
+        return res.json(state);
+      }
+      await clearEmergencyBrake();
+      return res.json({ engaged: false });
+    } catch (err: any) {
+      console.error(`[autopilot] emergency-brake write failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
   });
 
   return router;

@@ -288,6 +288,31 @@ def _normalize_usage_eligibility(raw) -> dict:
     reasons = reasons_raw if isinstance(reasons_raw, dict) else {}
     return {"allow": allow, "shed": shed, "reasons": reasons}
 
+
+def _normalize_emergency_brake(raw) -> dict:
+    """Normalize the operator-only emergency-brake state (issue #744).
+
+    `state.emergency_brake` is sourced from the `emergency_brake_json=` line
+    emitted by collect-state.sh, which comes from
+    `GET /api/autopilot/emergency-brake`. The autopilot side tolerates a
+    missing / malformed field because:
+      - the orchestrator can be unreachable mid-bootstrap
+      - the playbook is a prompt and may drop the field on a bad turn
+      - older state.json files (pre-#744) won't have the field at all
+
+    Returns the canonical shape `{"engaged": bool}`.
+
+    CRITICAL fail-safe direction: missing / malformed / non-dict input →
+    `{"engaged": False}` (brake DISENGAGED). The brake is the exceptional,
+    operator-asserted state; the default and the fail-open are both "off" so a
+    transient orchestrator outage can never silently wedge auto-merge off. An
+    operator who wants the brake held will see it re-asserted from Redis on the
+    next turn once the orchestrator is reachable again.
+    """
+    if not isinstance(raw, dict):
+        return {"engaged": False}
+    return {"engaged": raw.get("engaged") is True}
+
 # Confidence threshold: candidates below this don't justify a dev dispatch;
 # we force research instead (grilled decision 6, AC: research dispatched
 # when no candidate >= 0.5, capped at 4/day).
@@ -387,6 +412,21 @@ def make_queue_decision(pr_number: int | str, tier: int | str, reason: str, reco
 
 def make_auto_merge(pr_number: int | str, tier: int | str, reason: str) -> dict:
     return {"type": "auto-merge", "pr_number": pr_number, "tier": tier, "reason": reason}
+
+
+def make_route_prs_to_review(reason: str) -> dict:
+    """Emergency-brake action (issue #744).
+
+    Emitted exactly once per turn when the operator-only emergency brake is
+    engaged, IN PLACE OF any `auto-merge` actions. decide() is pure and cannot
+    enumerate open PRs (no gh/network), so this action carries no per-PR list:
+    the playbook executes it by calling the server-side endpoint that lists
+    open PRs (gh) and arms the /hydra-review pickup set via the existing
+    reviewPickupArmed seam (src/redis/review.ts, #745). There is intentionally
+    NO `make_engage_brake` / `make_disengage_brake` counterpart — the brake is
+    operator-only and the autopilot has no write path to the flag.
+    """
+    return {"type": "route-prs-to-review", "reason": reason}
 
 
 def make_apply_operator_approved(pr_number: int | str, tier: int | str, reason: str, mechanical: bool) -> dict:
@@ -616,6 +656,11 @@ VALID_ACTION_TYPES = frozenset({
     "wait",
     "wait-for-api",
     "wait_or_reap",
+    # Issue #744: emitted (in place of auto-merge) while the operator-only
+    # emergency brake is engaged — routes open PRs to the /hydra-review pickup
+    # set. Note there is deliberately NO engage/disengage action type here:
+    # the brake is operator-only, so the autopilot has no write path to it.
+    "route-prs-to-review",
 })
 
 
@@ -1040,29 +1085,52 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
             plan.add(make_reap(slot, task_id, tokens, skill), reason=f"reap:{slot}")
 
     # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with new work.
-    for ev in events:
-        if ev.get("type") != "qa-verdict":
-            continue
-        verdict = ev.get("verdict") or "PENDING"
-        pr_number = ev.get("pr_number")
-        tier = ev.get("tier")
-        mechanical = ev.get("mechanical")
-        has_scope_justif = bool(ev.get("has_scope_justification"))
-        if pr_number is None or tier is None:
-            continue
-        decision = should_auto_merge(
-            tier,
-            mechanical=mechanical,
-            has_scope_justification=has_scope_justif,
-            qa_verdict=verdict,
+    #
+    # Emergency-brake gate (issue #744): the operator-only emergency brake
+    # overrides the ADR-0015 depth-gated verdict at THIS call site — NOT inside
+    # should_auto_merge(), which stays a pure depth-policy function with its
+    # current signature (INV-007 preserved; the depth policy remains
+    # independently testable without threading a brake arg through every
+    # call). When the brake is engaged:
+    #   - emit ZERO `auto-merge` actions (regardless of tier or QA verdict),
+    #   - emit exactly ONE `route-prs-to-review` action so the playbook routes
+    #     every open PR to the /hydra-review pickup set.
+    # decide() never reads or writes the brake from Redis — the flag arrives as
+    # the read-only `state.emergency_brake` field via collect-state.sh, keeping
+    # decide() pure and the autopilot's write-path absent (operator-only).
+    emergency_brake = _normalize_emergency_brake(state.get("emergency_brake"))
+    if emergency_brake["engaged"]:
+        plan.debug["emergency_brake_engaged"] = True
+        plan.add(
+            make_route_prs_to_review("emergency brake engaged — all auto-merge paused, routing open PRs to /hydra-review"),
+            reason="emergency-brake:route-prs-to-review",
         )
-        # Policy collapse (#742): should_auto_merge() returns only
-        # "auto-merge" or "hold" — no tier-triggered queue-decision /
-        # apply-operator-approved. Operator escalation now arrives solely
-        # via the Deep-QA Remediation Loop (#740), not from this sweep.
-        if decision == "auto-merge":
-            plan.add(make_auto_merge(pr_number, tier, "qa pass + required depth met"), reason=f"auto-merge:#{pr_number}")
-        # "hold" → no action (required verification depth not yet provably met)
+        # Skip the per-PR auto-merge sweep entirely — the brake overrides the
+        # depth verdict, so no qa-verdict event can produce an auto-merge.
+    else:
+        for ev in events:
+            if ev.get("type") != "qa-verdict":
+                continue
+            verdict = ev.get("verdict") or "PENDING"
+            pr_number = ev.get("pr_number")
+            tier = ev.get("tier")
+            mechanical = ev.get("mechanical")
+            has_scope_justif = bool(ev.get("has_scope_justification"))
+            if pr_number is None or tier is None:
+                continue
+            decision = should_auto_merge(
+                tier,
+                mechanical=mechanical,
+                has_scope_justification=has_scope_justif,
+                qa_verdict=verdict,
+            )
+            # Policy collapse (#742): should_auto_merge() returns only
+            # "auto-merge" or "hold" — no tier-triggered queue-decision /
+            # apply-operator-approved. Operator escalation now arrives solely
+            # via the Deep-QA Remediation Loop (#740), not from this sweep.
+            if decision == "auto-merge":
+                plan.add(make_auto_merge(pr_number, tier, "qa pass + required depth met"), reason=f"auto-merge:#{pr_number}")
+            # "hold" → no action (required verification depth not yet provably met)
 
     # 3.5. Subscription Usage Tracker eligibility gate (PR B1).
     #

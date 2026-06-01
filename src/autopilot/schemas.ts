@@ -107,3 +107,27 @@ export const TurnBodySchema = z
 
 export type TurnBody = z.infer<typeof TurnBodySchema>;
 export type TurnAction = z.infer<typeof TurnActionSchema>;
+
+// ---------------------------------------------------------------------------
+// Emergency brake — POST /api/autopilot/emergency-brake (issue #744)
+// ---------------------------------------------------------------------------
+
+/**
+ * Operator-only emergency-brake toggle body. NEW endpoint, so strict
+ * (per the "For NEW endpoints, follow queue.ts's strict pattern" note above):
+ * an unknown field is a caller bug we want surfaced, not silently ignored.
+ *
+ *   engaged: true  => pull the brake (pause all auto-merge, route open PRs to
+ *                     /hydra-review).
+ *   engaged: false => release the brake (resume ADR-0015 depth-gated merge).
+ *
+ * `engagedBy` is an optional operator-attribution string recorded for the
+ * incident audit trail (defaults server-side to "operator").
+ */
+export const EmergencyBrakeBodySchema = z
+  .strictObject({
+    engaged: z.boolean({ message: "engaged must be a boolean" }),
+    engagedBy: z.string().trim().min(1).optional(),
+  });
+
+export type EmergencyBrakeBody = z.infer<typeof EmergencyBrakeBodySchema>;

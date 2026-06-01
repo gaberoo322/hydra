@@ -354,6 +354,104 @@ describe("decide.py — policy collapse merge policy (#742)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 3b. Emergency brake (issue #744)
+//
+// The operator-only emergency brake overrides the ADR-0015 depth-gated
+// verdict at the decide() auto-merge sweep call site (NOT inside
+// should_auto_merge). When engaged: ZERO auto-merge actions + exactly ONE
+// route-prs-to-review action. When disengaged/absent (default-off): behaviour
+// is byte-identical to the depth-gated sweep. decide() never reads/writes the
+// brake from Redis — it arrives as the read-only `state.emergency_brake`
+// field, and there is no engage/disengage action type (operator-only).
+// ---------------------------------------------------------------------------
+
+describe("decide.py — emergency brake (#744)", () => {
+  function qaEvent(o: { pr: number; tier: number; verdict?: string }): any {
+    return {
+      type: "qa-verdict",
+      pr_number: o.pr,
+      tier: o.tier,
+      mechanical: null,
+      has_scope_justification: false,
+      verdict: o.verdict ?? "PASS",
+    };
+  }
+  function withBrake(engaged: boolean): any {
+    const s = baseState();
+    s.emergency_brake = { engaged };
+    return s;
+  }
+
+  test("engaged + qa-verdict PASS -> NO auto-merge, exactly one route-prs-to-review", () => {
+    const plan = runDecide(withBrake(true), null, [qaEvent({ pr: 100, tier: 1 })]);
+    assert.equal(
+      findAction(plan, (x) => x.type === "auto-merge"),
+      undefined,
+      "brake engaged must suppress ALL auto-merge regardless of tier/verdict",
+    );
+    const routes = (plan.actions ?? []).filter((a: any) => a.type === "route-prs-to-review");
+    assert.equal(routes.length, 1, "exactly one route-prs-to-review action when engaged");
+  });
+
+  test("engaged overrides EVERY mergeable tier (T1/T2/T3) in one tick", () => {
+    const plan = runDecide(withBrake(true), null, [
+      qaEvent({ pr: 1, tier: 1 }),
+      qaEvent({ pr: 2, tier: 2 }),
+      qaEvent({ pr: 3, tier: 3 }),
+    ]);
+    assert.equal(findAction(plan, (x) => x.type === "auto-merge"), undefined);
+    assert.equal((plan.actions ?? []).filter((a: any) => a.type === "route-prs-to-review").length, 1,
+      "still exactly one route action even with multiple PASS verdicts");
+  });
+
+  test("disengaged (explicit) -> normal depth-gated auto-merge (regression guard)", () => {
+    const plan = runDecide(withBrake(false), null, [qaEvent({ pr: 100, tier: 1 })]);
+    assert.ok(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 100),
+      "default-off: T1 PASS must still auto-merge");
+    assert.equal(findAction(plan, (x) => x.type === "route-prs-to-review"), undefined,
+      "no route action when disengaged");
+  });
+
+  test("absent emergency_brake field -> default-off, normal auto-merge (back-compat)", () => {
+    // baseState() has no emergency_brake key at all (pre-#744 state.json).
+    const plan = runDecide(baseState(), null, [qaEvent({ pr: 102, tier: 3 })]);
+    assert.ok(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 102));
+    assert.equal(findAction(plan, (x) => x.type === "route-prs-to-review"), undefined);
+  });
+
+  test("malformed emergency_brake -> fail-safe to disengaged (auto-merge proceeds)", () => {
+    const s = baseState();
+    s.emergency_brake = "ENGAGED";  // wrong type — must NOT be treated as engaged
+    const plan = runDecide(s, null, [qaEvent({ pr: 103, tier: 1 })]);
+    assert.ok(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 103),
+      "a non-dict brake field must fail safe to disengaged, never wedge auto-merge off");
+  });
+
+  test("engaged does NOT lift T4 (INV-001 unaffected) — still no auto-merge for T4", () => {
+    // T4 holds with or without the brake; the brake adds no merge authority.
+    const plan = runDecide(withBrake(true), null, [qaEvent({ pr: 200, tier: 4 })]);
+    assert.equal(findAction(plan, (x) => x.type === "auto-merge"), undefined);
+  });
+
+  test("decide() emits NO brake-write action under any input (operator-only structural guarantee)", () => {
+    // There is no engage/disengage action type. Exercise both engaged and
+    // disengaged paths and confirm no action mutates the brake.
+    for (const engaged of [true, false]) {
+      const plan = runDecide(withBrake(engaged), null, [qaEvent({ pr: 1, tier: 1 })]);
+      for (const a of plan.actions ?? []) {
+        assert.notEqual(a.type, "engage-brake");
+        assert.notEqual(a.type, "disengage-brake");
+        assert.notEqual(a.type, "set-emergency-brake");
+        // The only brake-related action is the read-and-route one.
+        if (String(a.type).includes("brake")) {
+          assert.fail(`decide() emitted an unexpected brake action: ${a.type}`);
+        }
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 4. Scope filter (exclusion mask, INV-008)
 // ---------------------------------------------------------------------------
 
@@ -1196,6 +1294,8 @@ describe("decide.py — plan shape contract", () => {
     const VALID = new Set([
       "dispatch", "queue-decision", "auto-merge", "apply-operator-approved",
       "update-branch", "reap", "terminate", "wait", "wait-for-api",
+      // Issue #744: emergency-brake route-to-review action.
+      "route-prs-to-review",
     ]);
     const plans = [
       runDecide(baseState({ cumulative_tokens: 5_000_000 })),                                  // terminate
@@ -1228,8 +1328,10 @@ describe("decide.py — plan shape contract", () => {
     // Issue #509 added the 10th action type `wait_or_reap` — the silent-
     // wedge fallback emitted when an active slot ages past
     // subagent_max_wall_seconds with no matching SubagentStop event.
-    assert.equal(firstLine.action_types.length, 10, "exactly 10 action types (9 + wait_or_reap per #509)");
+    // Issue #744 added the 11th, `route-prs-to-review` (emergency brake).
+    assert.equal(firstLine.action_types.length, 11, "exactly 11 action types (10 + route-prs-to-review per #744)");
     assert.ok(firstLine.action_types.includes("wait_or_reap"), "wait_or_reap must be in the catalog");
+    assert.ok(firstLine.action_types.includes("route-prs-to-review"), "route-prs-to-review must be in the catalog (#744)");
   });
 });
 

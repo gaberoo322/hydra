@@ -164,6 +164,17 @@ export const redisKeys = {
   // transition. A plain string flag, not a JSON blob.
   reviewPickupArmed: () => "hydra:review:pickup-armed",
 
+  // Issue #744: operator-only emergency brake. A persistent flag (no TTL —
+  // it must be held until the operator explicitly clears it, unlike the
+  // 60s-TTL merge-lock) that, while engaged, forces ALL auto-merge to pause
+  // regardless of tier/depth verdict and routes every open PR to the
+  // /hydra-review pickup set. The SOLE write path is the operator-facing API
+  // route (src/api/autopilot.ts); decide.py and collect-state.sh only READ
+  // it. Stored as a JSON blob `{engaged, since, engagedBy}` so /health can
+  // surface "since when / by whom" for incident audit. Absent => disengaged
+  // (default-off).
+  emergencyBrake: () => "hydra:autopilot:emergency-brake",
+
   // Issue #673 budget-threshold idempotency sentinel removed in #703 along
   // with the dead budget-threshold bridge that wrote it. The bridge polled
   // `hydra:scheduler:daily-spend` (no live writer) and never emitted.
