@@ -276,7 +276,7 @@ describe("decide.py — research force-dispatch when no candidate >= 0.5", () =>
 // 3. Option C merge policy
 // ---------------------------------------------------------------------------
 
-describe("decide.py — Option C merge policy (grilled decision 8)", () => {
+describe("decide.py — policy collapse merge policy (#742)", () => {
   function qaEvent(o: { pr: number; tier: number; mechanical?: boolean | string; sj?: boolean; verdict?: string }): any {
     return {
       type: "qa-verdict",
@@ -288,10 +288,14 @@ describe("decide.py — Option C merge policy (grilled decision 8)", () => {
     };
   }
 
+  // After the #742 policy collapse, should_auto_merge() returns only
+  // "auto-merge" or "hold". No tier resolves to queue-decision or
+  // apply-operator-approved — operator escalation arrives solely via the
+  // Deep-QA Remediation Loop (#740), never from tier authority.
+
   test("Tier 1 -> auto-merge", () => {
     const plan = runDecide(baseState(), null, [qaEvent({ pr: 100, tier: 1 })]);
-    const a = findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 100);
-    assert.ok(a);
+    assert.ok(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 100));
   });
 
   test("Tier 2 -> auto-merge", () => {
@@ -304,28 +308,38 @@ describe("decide.py — Option C merge policy (grilled decision 8)", () => {
     assert.ok(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 102));
   });
 
-  test("Tier 3 WITH scope-justification -> queue-decision", () => {
+  test("Tier 3 WITH scope-justification -> auto-merge (no tier-triggered queue-decision)", () => {
     const plan = runDecide(baseState(), null, [qaEvent({ pr: 103, tier: 3, sj: true })]);
-    assert.ok(findAction(plan, (x) => x.type === "queue-decision" && x.pr_number === 103));
-    assert.equal(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 103), undefined);
+    assert.ok(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 103));
+    assert.equal(findAction(plan, (x) => x.type === "queue-decision" && x.pr_number === 103), undefined);
   });
 
-  test("T4 (Verifier Core) mechanical -> apply-operator-approved", () => {
+  test("T4 (Verifier Core) mechanical -> hold (no apply-operator-approved; required depth not yet landed)", () => {
     const plan = runDecide(baseState(), null, [qaEvent({ pr: 200, tier: 4, mechanical: true })]);
-    const a = findAction(plan, (x) => x.type === "apply-operator-approved" && x.pr_number === 200);
-    assert.ok(a);
-    assert.equal(a.mechanical, true);
+    assert.equal(findAction(plan, (x) => x.pr_number === 200), undefined, "T4 produces no merge action — it holds");
   });
 
-  test("T4 (Verifier Core) non-mechanical -> queue-decision (INV-001 enforces)", () => {
+  test("T4 (Verifier Core) non-mechanical -> hold (no auto-merge, no queue-decision; INV-001 stays safe)", () => {
     const plan = runDecide(baseState(), null, [qaEvent({ pr: 201, tier: 4, mechanical: false })]);
-    assert.ok(findAction(plan, (x) => x.type === "queue-decision" && x.pr_number === 201));
-    assert.equal(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 201), undefined);
+    assert.equal(findAction(plan, (x) => x.pr_number === 201), undefined);
   });
 
-  test("T4 (Verifier Core) unclear (binary / large) -> queue-decision", () => {
+  test("T4 (Verifier Core) unclear (binary / large) -> hold", () => {
     const plan = runDecide(baseState(), null, [qaEvent({ pr: 202, tier: 4, mechanical: "unclear" })]);
-    assert.ok(findAction(plan, (x) => x.type === "queue-decision" && x.pr_number === 202));
+    assert.equal(findAction(plan, (x) => x.pr_number === 202), undefined);
+  });
+
+  test("no tier produces a tier-triggered queue-decision or apply-operator-approved", () => {
+    const events = [
+      qaEvent({ pr: 400, tier: 1 }),
+      qaEvent({ pr: 401, tier: 2 }),
+      qaEvent({ pr: 402, tier: 3, sj: true }),
+      qaEvent({ pr: 403, tier: 4, mechanical: true }),
+      qaEvent({ pr: 404, tier: 4, mechanical: false }),
+    ];
+    const plan = runDecide(baseState(), null, events);
+    assert.equal(findAction(plan, (x) => x.type === "queue-decision"), undefined, "policy collapse removed tier-triggered queue-decision");
+    assert.equal(findAction(plan, (x) => x.type === "apply-operator-approved"), undefined, "policy collapse removed tier-triggered apply-operator-approved");
   });
 
   test("QA verdict FAIL -> no merge action", () => {
@@ -1191,7 +1205,7 @@ describe("decide.py — plan shape contract", () => {
       runDecide(baseState(), null, [{                                                          // auto-merge
         type: "qa-verdict", pr_number: 1, tier: 1, verdict: "PASS",
       }]),
-      runDecide(baseState(), null, [{                                                          // queue-decision
+      runDecide(baseState(), null, [{                                                          // T4 -> hold (no action)
         type: "qa-verdict", pr_number: 2, tier: 4, mechanical: false, verdict: "PASS",
       }]),
     ];
@@ -1237,12 +1251,14 @@ describe("decide.py — should_auto_merge() policy table", () => {
     };
   }
 
-  test("unknown tier -> queue-decision (conservative)", () => {
+  test("unknown tier -> hold (fail-safe: required depth unprovable)", () => {
     const plan = runDecide(baseState(), null, [qaEvent({ pr: 999, tier: "weird" })]);
-    assert.ok(findAction(plan, (a) => a.type === "queue-decision" && a.pr_number === 999));
+    // Policy collapse (#742): an unparseable tier holds rather than emitting
+    // a tier-triggered queue-decision — the required depth cannot be proven.
+    assert.equal(findAction(plan, (a) => a.pr_number === 999), undefined);
   });
 
-  test("multiple qa-verdict events in one tick each produce a merge action", () => {
+  test("multiple qa-verdict events in one tick: mergeable tiers auto-merge, T4 holds", () => {
     const events = [
       qaEvent({ pr: 1, tier: 1 }),
       qaEvent({ pr: 2, tier: 2 }),
@@ -1251,7 +1267,8 @@ describe("decide.py — should_auto_merge() policy table", () => {
     const plan = runDecide(baseState(), null, events);
     assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 1));
     assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 2));
-    assert.ok(findAction(plan, (a) => a.type === "apply-operator-approved" && a.pr_number === 3));
+    // T4 holds post-collapse — no apply-operator-approved, no auto-merge.
+    assert.equal(findAction(plan, (a) => a.pr_number === 3), undefined);
   });
 });
 

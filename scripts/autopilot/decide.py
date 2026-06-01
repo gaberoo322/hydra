@@ -110,21 +110,30 @@ Helpers `make_*` construct them so call sites stay typed.
   wait-for-api          { type, url, retries, reason }
 
 ==================================================================
-MERGE POLICY (Option C, issue #426 grilled decision 8)
+MERGE POLICY (policy collapse, issue #742 / ADR-0015)
 ==================================================================
 
 `should_auto_merge(tier, mechanical, has_scope_justification, qa_verdict)`:
 
-  qa_verdict != PASS                    → False (INV-007 guard)
-  tier in {1, 2}                        → True
-  tier == 3 and not has_scope_justif    → True
-  tier == 3 and has_scope_justif        → queue-decision (operator review)
-  tier == 4 and mechanical == True      → apply-operator-approved (then auto-merge)
-  tier == 4 and mechanical == False     → queue-decision (INV-001 enforces)
-  tier == 4 and mechanical == "unclear" → queue-decision (conservative)
+  qa_verdict != PASS    → hold      (INV-007 guard)
+  tier in {1, 2, 3}     → auto-merge
+  tier == 4             → hold      (required depth = #740 Deep-QA loop, not yet landed)
+  unparseable tier      → hold      (fail-safe: required depth cannot be proven)
 
-  (ADR-0015 / issue #737 renumber: the deepest tier — Verifier Core — moved
-  from the old integer 0 to T4. Policy is identical; only the label moved.)
+  Merge eligibility is gated entirely by the *depth* requirements for the
+  PR's tier (the QA verdict + holdback enrollment from #739/#740/#741), NOT
+  by tier authority. Every tier resolves to `auto-merge` (depth met) or
+  `hold` (depth not yet provably met) — there is no tier-triggered
+  `queue-decision` or `apply-operator-approved` branch. The only route to
+  the operator is an exhausted Deep-QA Remediation Loop (#740), which lives
+  outside this function (CONTEXT.md:78, ADR-0005 amended closed list).
+
+  `mechanical` and `has_scope_justification` are retained in the signature
+  for call-site / test-helper stability but are no longer consulted.
+
+  (ADR-0015 / issue #737 renumber: the deepest tier — Verifier Core — is T4.
+  INV-001 in assert_invariants.py remains as defense-in-depth: no auto-merge
+  on a T4 PR. The T4 arm flips to auto-merge once #740/#743 land.)
 
 ==================================================================
 FAILURE PATTERNS (self_heal.py docstring is the single source of truth)
@@ -655,22 +664,34 @@ def should_auto_merge(
 ) -> str:
     """Return one of:
 
-      "auto-merge"               — call `gh pr review --approve && gh pr merge`
-      "apply-operator-approved"  — add the label first; auto-merge happens next tick
-      "queue-decision"           — operator review required
-      "hold"                     — qa hasn't passed yet; do nothing
+      "auto-merge"  — call `gh pr review --approve && gh pr merge`
+      "hold"        — required verification depth not (yet) provably met; do nothing
 
-    `mechanical` is the result of `scripts/ci/mechanical-check.ts classifyDiff()`:
-    `True` (mechanical), `False` (non-mechanical), or `"unclear"` (large /
-    binary / unparseable). We treat `None` the same as `"unclear"`.
-
-    `has_scope_justification` is True iff the PR body contains a
-    `scope-justification:` block (per the #404 scope-check gate). On a
-    Tier-3 PR that block opts the change INTO operator review — without it
-    Tier-3 PRs auto-merge (grilled decision 7).
+    POLICY COLLAPSE (issue #742, ADR-0015): merge eligibility is gated
+    entirely by the *depth* requirements for the PR's tier (the QA verdict +
+    holdback enrollment from #739/#740/#741) and the Deep-QA Remediation Loop
+    (#740) — NOT by tier authority. There is no longer a tier-triggered
+    `queue-decision` or `apply-operator-approved` route: every tier resolves
+    to `auto-merge` (depth met) or `hold` (depth not yet provably met). The
+    ONLY surviving route to the operator is an exhausted remediation loop
+    (a 2nd failed deep-QA pass on T4, #740) — that escalation lives outside
+    this function (CONTEXT.md:78, ADR-0005 amended closed list).
 
     `qa_verdict` is the QA-bot's structured verdict literal: PASS / FAIL /
     PENDING. Anything other than "PASS" returns "hold" so INV-007 holds.
+
+    `mechanical` and `has_scope_justification` are RETAINED for call-site /
+    test-helper stability (the qaEvent() helper still passes them) but are no
+    longer consulted by the merge policy — tier authority no longer gates the
+    decision. Keeping the signature stable avoids churning every call site in
+    this PR; dropping the params is a separate opportunistic cleanup.
+
+    T4 (Verifier Core) returns `hold` until its required-depth mechanism (the
+    Deep-QA Remediation Loop, #740) lands: a bare `qa-verdict` PASS cannot
+    *prove* the deeper T4 verification depth was met, and INV-001 (no auto-merge
+    on a T4 Verifier-Core PR) remains as defense-in-depth in
+    assert_invariants.py. Once #740/#743 land, the T4 arm flips to `auto-merge`
+    on a proven deep-QA pass. Until then a T4 PR holds — it is never bad-merged.
 
     -----------------------------------------------------
     DOCSTRING IS THE SPEC (referenced from CLAUDE.md). Update CAREFULLY.
@@ -682,20 +703,23 @@ def should_auto_merge(
     try:
         t = int(tier)
     except (TypeError, ValueError):
-        return "queue-decision"
-    if t in (1, 2):
+        # Unparseable tier → cannot prove the required verification depth was
+        # met → fail-safe to hold (never auto-merge an unknown tier).
+        return "hold"
+    if t in (1, 2, 3):
+        # T1/T2/T3: a PASS verdict at the required depth → auto-merge for
+        # every tier. Tier authority (the old T3 + scope-justification →
+        # queue-decision branch) no longer gates the decision; scope review
+        # is now a CI concern, not a merge-policy branch.
         return "auto-merge"
-    if t == 3:
-        return "queue-decision" if has_scope_justification else "auto-merge"
     if t == 4:
-        # T4 = Verifier Core (deepest tier, ADR-0015). Renumbered from the old
-        # integer 0; identical policy.
-        if mechanical is True:
-            return "apply-operator-approved"
-        # False, "unclear", None → queue-decision
-        return "queue-decision"
-    # Unknown tier → conservative
-    return "queue-decision"
+        # T4 = Verifier Core (deepest tier, ADR-0015). Its required depth is
+        # the Deep-QA Remediation Loop (#740), not yet landed — so a bare
+        # PASS cannot prove the depth was met. Hold (fail-safe), never
+        # auto-merge; INV-001 stays as defense-in-depth.
+        return "hold"
+    # Unknown tier → fail-safe hold (cannot prove required depth).
+    return "hold"
 
 
 # ---------------------------------------------------------------------------
@@ -1032,22 +1056,13 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
             has_scope_justification=has_scope_justif,
             qa_verdict=verdict,
         )
-        link = ev.get("link")
+        # Policy collapse (#742): should_auto_merge() returns only
+        # "auto-merge" or "hold" — no tier-triggered queue-decision /
+        # apply-operator-approved. Operator escalation now arrives solely
+        # via the Deep-QA Remediation Loop (#740), not from this sweep.
         if decision == "auto-merge":
-            plan.add(make_auto_merge(pr_number, tier, "qa pass + tier policy"), reason=f"auto-merge:#{pr_number}")
-        elif decision == "apply-operator-approved":
-            plan.add(
-                make_apply_operator_approved(pr_number, tier, "T4 Verifier Core mechanical carve-out", mechanical=True),
-                reason=f"apply-operator-approved:#{pr_number}",
-            )
-        elif decision == "queue-decision":
-            reason_text = ev.get("reason") or _queue_reason_for(tier, mechanical, has_scope_justif)
-            recommendation = ev.get("recommendation") or _queue_recommendation_for(tier, mechanical, has_scope_justif)
-            plan.add(
-                make_queue_decision(pr_number, tier, reason_text, recommendation, link),
-                reason=f"queue-decision:#{pr_number}",
-            )
-        # "hold" → no action (qa hasn't passed yet)
+            plan.add(make_auto_merge(pr_number, tier, "qa pass + required depth met"), reason=f"auto-merge:#{pr_number}")
+        # "hold" → no action (required verification depth not yet provably met)
 
     # 3.5. Subscription Usage Tracker eligibility gate (PR B1).
     #
