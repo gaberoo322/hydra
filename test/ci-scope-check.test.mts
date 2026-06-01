@@ -74,6 +74,79 @@ describe("extractScopeFromBody", () => {
     const scope = extractScopeFromBody(body);
     assert.deepEqual(scope, ["src/foo.ts"]);
   });
+
+  // Issue #836: a plain-bullet Files-in-scope section followed by an in-section
+  // scope-justification line (with a backticked path) used to early-return on
+  // the lone code span and DROP every plain bullet (the PR #833 failure). All
+  // bullet paths must survive, and the justification's path / prose must NOT
+  // leak a phantom `test/` into the in-scope set (boundary fix).
+  test("keeps plain bullets when an in-section scope-justification has a code span (#836)", () => {
+    const body = [
+      "## Files in scope",
+      "",
+      "- dashboard/src/pages/Now.tsx",
+      "- dashboard/src/pages/Today.tsx",
+      "- dashboard/src/pages/Outcomes.tsx",
+      "- dashboard/src/pages/Explore.tsx",
+      "- dashboard/src/components/PageItem.tsx",
+      "- dashboard/src/components/Header.tsx",
+      "- dashboard/src/lib/format.ts",
+      "- dashboard/src/lib/api.ts",
+      "- dashboard/src/index.css",
+      "",
+      "scope-justification: `test/page-item-format.test.mts` — new test, lives under `test/` per convention",
+      "",
+      "## Verification",
+      "",
+      "npm test green",
+    ].join("\n");
+    const scope = extractScopeFromBody(body);
+    assert.deepEqual(scope.sort(), [
+      "dashboard/src/components/Header.tsx",
+      "dashboard/src/components/PageItem.tsx",
+      "dashboard/src/index.css",
+      "dashboard/src/lib/api.ts",
+      "dashboard/src/lib/format.ts",
+      "dashboard/src/pages/Explore.tsx",
+      "dashboard/src/pages/Now.tsx",
+      "dashboard/src/pages/Outcomes.tsx",
+      "dashboard/src/pages/Today.tsx",
+    ]);
+    // No phantom test/* entries leaked from the justification line/prose.
+    assert.ok(!scope.includes("test/"));
+    assert.ok(!scope.includes("test/page-item-format.test.mts"));
+    // No backtick-corrupted duplicates anywhere.
+    assert.ok(scope.every((p) => !p.includes("`")));
+  });
+
+  // Issue #836: a MIXED section (backticked bullets + plain bullets) plus an
+  // in-section backticked justification path. The result is the union of all
+  // real declared paths with no corrupted or phantom entries.
+  test("unions backticked and plain bullets with no corrupted duplicates (#836)", () => {
+    const body = [
+      "## Files in scope",
+      "",
+      "- `src/foo.ts`",
+      "- src/bar.ts",
+      "- `docs/quality-gates.md`",
+      "",
+      "scope-justification: `test/helper.test.mts` — shared fixture",
+      "",
+      "## Risk",
+      "",
+      "low",
+    ].join("\n");
+    const scope = extractScopeFromBody(body);
+    assert.deepEqual(scope.sort(), [
+      "docs/quality-gates.md",
+      "src/bar.ts",
+      "src/foo.ts",
+    ]);
+    assert.ok(!scope.includes("test/helper.test.mts"));
+    // Each declared path appears exactly once — no literal-backtick twin.
+    assert.equal(scope.length, new Set(scope).size);
+    assert.ok(scope.every((p) => !p.includes("`")));
+  });
 });
 
 describe("classifyScope", () => {
