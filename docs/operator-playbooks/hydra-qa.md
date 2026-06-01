@@ -18,11 +18,30 @@ The Spec axis reads the **design-concept artifact** for the issue (Phase A of #4
 QA depth ascends with the **Modification Tier** of the PR (`GET /api/tier`, the single tier authority — never self-classified by path):
 
 - **T1 / T2** — exactly **one standard QA pass**: the single parallel Standards + Spec fan-out described below. Behaviour-preserving; nothing in this section changes the T1/T2 path.
-- **T3** (core `src/` + demoted infra) — an **adversarial depth gate**: run `hydra-qa` in **refutation framing** (reviewers are prompted to actively *find a reason this change is wrong / regresses something*, not to confirm it), fanned out to **2 independent reviewers**. The change PASSes only if **neither** reviewer surfaces a real blocker; a single real blocker from **either** reviewer is a FAIL. **T4 inherits the T3 depth** (it adds its own deeper gates elsewhere).
+- **T3** (core `src/` + demoted infra) — an **adversarial depth gate**: run `hydra-qa` in **refutation framing** (reviewers are prompted to actively *find a reason this change is wrong / regresses something*, not to confirm it), fanned out to **2 independent reviewers**. The change PASSes only if **neither** reviewer surfaces a real blocker; a single real blocker from **either** reviewer is a FAIL.
+- **T4** (Verifier Core — `ci.yml`, `deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`) — the **Deep-QA Remediation Loop**: T4 **inherits the full T3 adversarial depth** (the same 2-reviewer refutation fan-out, unchanged) and **adds** on top (a) a **Verifier-Core checklist** the reviewers must run, and (b) the **block-and-escalate teeth** no other tier has. It never weakens or replaces the T3 gate — it is strictly additive. See step 10's T4 branch.
 
-This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a T3 review verdict is computed* deepens — an AND over two refutation reviewers, folded by `aggregateAdversarialReview()` in `scripts/ci/qa-verdict.ts`.
+This is **additive verification depth, not a policy change**: the emitted verdict literal (`PASS` / `FAIL` / `PASS-pending-CI` / `FAIL-pending-CI`) is unchanged, and `decide.py`'s `should_auto_merge()` (and INV-007: `qa_verdict != PASS ⇒ hold`) are untouched. Only *how a T3 review verdict is computed* deepens — an AND over two refutation reviewers, folded by `aggregateAdversarialReview()` in `scripts/ci/qa-verdict.ts`. T4's block-and-escalate is likewise **not** a new verdict literal — it routes through the existing `ready-for-human` pickup set (see below).
 
 A T3 FAIL **bounces** the PR back to a dev agent via the universal remediation loop (re-label `ready-for-agent` + comment failing criteria — step 10's FAIL routing), **not** block-and-escalate-to-operator (the Deep-QA Remediation Loop reserves block-and-escalate teeth for T4).
+
+### T4 Verifier-Core checklist + Deep-QA Remediation Loop (issue #740)
+
+A T4 PR edits the **Verifier Core** — the 5 self-referential paths whose change alters *how every other change is verified*. The adversarial reviewers (the same A/B refutation pair as T3) MUST run this checklist in addition to the standard Standards + Spec axes; any item firing is a **hard blocker** (reviewer FAIL):
+
+1. **Live-Gate Invariant (#738 / ADR-0015).** A Verifier-Core change is verified by the **currently-deployed** gate against the diff, **never** by the *proposed* gate. Concretely: the classifier **file LIST** = the PR diff (head-vs-base merge-base), the classifier **LOGIC** = the **BASE ref** (the import-closed `scripts/tier-classify.ts` / `src/tier-classifier.ts` / `src/untouchable.ts` as they exist on the merge base). "Is this a Verifier-Core PR?" is decided with the **BASE-ref** `isVerifierCore` so a PR cannot strip its own path on head to escape classification. A diff that re-routes Verifier-Core PRs back through the **head-tree** classifier is a hard blocker.
+2. **No self-admitting gate.** No path in the diff lets the *proposed* gate verify its own admission: e.g. a `ci.yml` job that always exits 0 / is `continue-on-error` for the verification it claims to perform, a tier-classify edit that downgrades the PR's own files, or an `isVerifierCore` change that removes a path the diff itself touches. If the proposed gate would have admitted this very diff *only because of this diff's own change*, FAIL.
+3. **`untouchable.ts` path set integrity.** Any edit to `VERIFIER_CORE_PATHS` is justified in the artifact and does not silently shrink the protected set.
+4. **Operator-approval intact.** T4 still merges operator-only (`operator-approved` label); the diff must not weaken that requirement (branch protection, auto-merge enablement on T4).
+
+The fired checklist items become the **findings** in the FAIL comment.
+
+**Block-and-escalate on the 2nd consecutive fail.** T4 FAIL routing differs from T3 only at the 2nd fail:
+
+- **1st deep-QA FAIL** → identical to the universal loop: comment findings + bounce the PR to a dev agent (re-label `ready-for-agent`). It never escalates on the first fail.
+- **2nd consecutive deep-QA FAIL on the same PR** → **block** the PR (request-changes, do not re-bounce) and add the **source issue** to the `/hydra-review` pickup set: `ready-for-human` label + a structured comment (PR ref, both failing summaries, the fired Verifier-Core checklist items). This is the **existing** operator surface — no new channel, no new verdict literal. (`#745`'s phone-notify hook fires orthogonally when the pickup set goes non-empty.)
+
+**How the fail number is counted.** The bounce path is stateless on the issue (step 10 strips `needs-qa` and adds `ready-for-agent`, resetting any label-carried counter on every bounce). So the count is derived **live** from the **PR** — the durable per-attempt ledger: every T4 deep-QA FAIL comment carries the machine-greppable marker line `Verifier-Core deep-QA: FAIL`. The next pass counts prior markers: `failNumber = priorMarkers + 1`; `failNumber >= 2` ⇒ block-and-escalate, else bounce. There is **no** new Redis key and **no** issue-label counter. "Consecutive" and "total fails on this PR" coincide because a PASS merges the PR and ends the loop. The pure decision rule is `decideDeepQaAction()` in `scripts/ci/qa-verdict.ts`.
 
 ## Phase A — shadow mode (current)
 
@@ -358,6 +377,8 @@ gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" 2>
 ```
 
 **Verdict `FAIL` or `FAIL-pending-CI`** (any axis has hard findings, or a required check has already failed):
+
+For T1 / T2 / T3 (PR_TIER empty/1/2/3) — the universal remediation bounce:
 ```bash
 gh pr review $pr_number --repo gaberoo322/hydra --request-changes --body "> *Automated QA — two-axis review*
 
@@ -374,6 +395,65 @@ gh issue comment $issue_number --repo gaberoo322/hydra --body "> *Automated QA f
 **Failed axis findings:** see PR #$pr_number review comments.
 
 Returning to ready-for-agent for retry."
+```
+
+For **T4** (`PR_TIER == 4`) — the **Deep-QA Remediation Loop** (issue #740). The 1st FAIL bounces exactly like the universal loop; the 2nd consecutive FAIL on the same PR blocks and escalates to the `/hydra-review` pickup set. Derive the action LIVE from the PR's own deep-QA FAIL markers — the PR is the per-attempt ledger:
+
+```bash
+# Collect the PR's prior comment bodies — the durable per-attempt ledger.
+PRIOR_COMMENTS_JSON=$(gh pr view $pr_number --repo gaberoo322/hydra \
+  --json comments --jq '[.comments[].body]')
+
+# Pure decision: 1st FAIL => bounce, 2nd+ consecutive FAIL => block-and-escalate.
+DEEP_QA_JSON=$(PRIOR_COMMENTS_JSON="$PRIOR_COMMENTS_JSON" REVIEW_VERDICT="$REVIEW_VERDICT" \
+  node --no-warnings --experimental-strip-types -e "
+  import('./scripts/ci/qa-verdict.ts').then(({decideDeepQaAction, DEEP_QA_FAIL_MARKER}) => {
+    const prior = JSON.parse(process.env.PRIOR_COMMENTS_JSON);
+    const d = decideDeepQaAction(process.env.REVIEW_VERDICT, prior);
+    process.stdout.write(JSON.stringify({ ...d, marker: DEEP_QA_FAIL_MARKER }));
+  });
+")
+DEEP_QA_ACTION=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.action')
+DEEP_QA_FAILNO=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.failNumber')
+DEEP_QA_MARKER=$(printf '%s' "$DEEP_QA_JSON" | jq -r '.marker')
+
+# ALWAYS request-changes on the PR and ALWAYS post the FAIL marker comment so the
+# next pass can count this fail (the marker line is the ledger entry).
+gh pr review $pr_number --repo gaberoo322/hydra --request-changes --body "> *Automated QA — T4 Verifier-Core deep review*
+
+$REVIEW_REPORT
+
+---
+
+**Verdict:** \`${VERDICT}\` — ${VERDICT_REASON}
+
+${DEEP_QA_MARKER} (fail #${DEEP_QA_FAILNO} on this PR)
+
+$CHECKS_BLOCK"
+
+if [ "$DEEP_QA_ACTION" = "block-and-escalate" ]; then
+  # 2nd consecutive deep-QA FAIL — block the PR (do NOT re-bounce) and route the
+  # SOURCE ISSUE to the /hydra-review pickup set. Same surface as every other
+  # ready-for-human escalation; no new operator channel, no new verdict literal.
+  gh issue edit $issue_number --repo gaberoo322/hydra \
+    --remove-label "needs-qa" --add-label "ready-for-human"
+  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *T4 Deep-QA blocked — operator decision needed*
+
+PR #$pr_number failed the Verifier-Core deep-QA gate **twice consecutively** (fail #${DEEP_QA_FAILNO}). Per the Deep-QA Remediation Loop the PR is now **blocked** and routed to the operator instead of bouncing again.
+
+**Fired Verifier-Core checklist items / failing findings:** see the request-changes reviews on PR #$pr_number (both passes).
+
+This issue is now on the \`/hydra-review\` pickup set. Resolve by either fixing the Verifier-Core concern and re-running QA, or closing the PR."
+else
+  # 1st deep-QA FAIL — bounce to a dev agent via the universal remediation loop.
+  gh issue edit $issue_number --repo gaberoo322/hydra \
+    --remove-label "needs-qa" --add-label "ready-for-agent"
+  gh issue comment $issue_number --repo gaberoo322/hydra --body "> *T4 Deep-QA failed (1st) — bouncing to dev*
+
+**Failed Verifier-Core findings:** see PR #$pr_number review comments.
+
+Returning to ready-for-agent for remediation. A second consecutive deep-QA FAIL on this PR will block it and escalate to the operator."
+fi
 ```
 
 ### 11. Lesson capture on FAIL (issue #392, refined by #524)

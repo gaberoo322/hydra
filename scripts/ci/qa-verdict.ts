@@ -312,6 +312,118 @@ export function aggregateAdversarialReview(
 }
 
 /**
+ * T4 Deep-QA Remediation Loop (issue #740, ADR-0015).
+ *
+ * T4 inherits the full T3 adversarial depth (the two-reviewer refutation
+ * fan-out folded by `aggregateAdversarialReview` above) and ADDS the
+ * **Verifier-Core checklist** plus the block-and-escalate teeth no other tier
+ * has. This module is the pure decision rule for the *remediation* half: given
+ * the current T4 review verdict and the PR's own comment history, decide
+ * whether a FAIL bounces the PR back to a dev agent (1st fail) or blocks the PR
+ * and escalates to the operator (2nd consecutive fail).
+ *
+ * Why the count lives on the PR, not in Redis / on an issue label: the FAIL
+ * bounce path is stateless on the issue — step 10 strips `needs-qa` and adds
+ * `ready-for-agent`, resetting any label-carried counter on every bounce. A new
+ * persistent Redis key would be a state surface that can desync from PR
+ * reality. The PR is the durable per-attempt ledger: every deep-QA FAIL leaves
+ * a machine-greppable marker comment, so the next QA pass derives the fail
+ * number live by counting prior markers. "Consecutive" and "total fails on this
+ * PR" coincide because a PASS merges the PR and ends the loop — a PR never
+ * accumulates a FAIL after a PASS. See the rejected-alternatives in the #740
+ * design-concept artifact.
+ *
+ * This module stays pure — no fs/network — so it is unit-tested directly.
+ */
+
+/**
+ * The machine-greppable marker every T4 deep-QA FAIL comment MUST contain on
+ * its own line. The next deep-QA pass counts occurrences of this literal across
+ * the PR's prior comments to derive the consecutive-fail number. Changing this
+ * string is a breaking change to the per-PR ledger — the playbook's step-10 T4
+ * branch posts it verbatim and the count below greps for it verbatim.
+ */
+export const DEEP_QA_FAIL_MARKER = "Verifier-Core deep-QA: FAIL";
+
+export type DeepQaAction = "proceed" | "bounce" | "block-and-escalate";
+
+export interface DeepQaDecision {
+  /**
+   * - `proceed` — current verdict is not a FAIL; the normal step-10 routing
+   *   (PASS / PASS-pending-CI) applies, no T4-specific remediation.
+   * - `bounce` — 1st deep-QA FAIL on this PR: comment findings + re-label
+   *   `ready-for-agent` (the universal #739 remediation loop).
+   * - `block-and-escalate` — 2nd+ consecutive deep-QA FAIL: block the PR and
+   *   add the source issue to the `/hydra-review` pickup set (`ready-for-human`
+   *   + structured reason). No new operator channel, no new verdict literal.
+   */
+  action: DeepQaAction;
+  /**
+   * The 1-based fail number this verdict represents on this PR. Undefined when
+   * `action === "proceed"` (the verdict wasn't a FAIL, so nothing was counted).
+   */
+  failNumber?: number;
+  /** Human-readable reason for the routing decision (for the QA report body). */
+  reason: string;
+}
+
+/**
+ * Decide the T4 deep-QA remediation action from the current review verdict and
+ * the PR's prior comment bodies.
+ *
+ * The fail number is derived **live** from how many prior comments already
+ * carry `DEEP_QA_FAIL_MARKER` — the PR is the ledger, there is no separate
+ * counter. `failNumber = priorMarkers + 1`. The first FAIL (`failNumber === 1`)
+ * bounces; the second-or-later (`failNumber >= 2`) blocks-and-escalates.
+ *
+ * Tiering is the caller's job (the playbook reads `GET /api/tier` and only runs
+ * this branch for T4). This helper does NOT change the four-verdict literal
+ * `decide.py` consumes — block-and-escalate is expressed through the existing
+ * `ready-for-human` pickup set, not a new `FinalVerdict`.
+ *
+ * @param currentVerdict the folded T4 review verdict for this pass
+ *   (`"PASS" | "FAIL"`) — the per-reviewer/adversarial fold, before CI folding.
+ * @param priorPrComments the bodies of comments already posted on the PR (the
+ *   durable per-attempt ledger). Order does not matter; only the marker count.
+ */
+export function decideDeepQaAction(
+  currentVerdict: ReviewVerdict,
+  priorPrComments: readonly string[],
+): DeepQaDecision {
+  if (currentVerdict !== "FAIL") {
+    return {
+      action: "proceed",
+      reason:
+        "T4 deep-QA: review did not FAIL — normal verdict routing applies, no remediation.",
+    };
+  }
+
+  const priorFailMarkers = priorPrComments.filter((c) =>
+    c.includes(DEEP_QA_FAIL_MARKER),
+  ).length;
+  const failNumber = priorFailMarkers + 1;
+
+  if (failNumber >= 2) {
+    return {
+      action: "block-and-escalate",
+      failNumber,
+      reason:
+        `T4 deep-QA: ${failNumber}th consecutive Verifier-Core FAIL on this PR — ` +
+        "block the PR and add the source issue to the /hydra-review pickup set " +
+        "(ready-for-human + structured reason). No further auto-bounce.",
+    };
+  }
+
+  return {
+    action: "bounce",
+    failNumber,
+    reason:
+      "T4 deep-QA: first Verifier-Core FAIL on this PR — comment findings and " +
+      "bounce to a dev agent (re-label ready-for-agent), the universal remediation loop.",
+  };
+}
+
+/**
  * Render the `checks:` block as a markdown table for inclusion in the
  * QA report body. Stable column ordering, deterministic for testability.
  */

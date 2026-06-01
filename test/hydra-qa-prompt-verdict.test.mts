@@ -24,6 +24,8 @@ import {
   classifyVerdict,
   renderChecksBlock,
   aggregateAdversarialReview,
+  decideDeepQaAction,
+  DEEP_QA_FAIL_MARKER,
   type CheckState,
 } from "../scripts/ci/qa-verdict.ts";
 
@@ -304,6 +306,105 @@ describe("aggregateAdversarialReview — T3 two-reviewer refutation fan-out (iss
     const r = aggregateAdversarialReview("PASS", "FAIL");
     assert.equal(typeof r, "object");
     assert.equal((r as { then?: unknown }).then, undefined);
+  });
+});
+
+describe("decideDeepQaAction — T4 deep-QA remediation loop (issue #740)", () => {
+  // T4 inherits the T3 adversarial fold above, then adds block-and-escalate
+  // teeth: 1st FAIL bounces (universal #739 loop), 2nd+ consecutive FAIL blocks
+  // the PR and routes to the /hydra-review pickup set. The consecutive-fail
+  // count is derived LIVE from machine-greppable FAIL markers already on the PR
+  // (the PR is the durable per-attempt ledger) — NOT a Redis key, NOT an issue
+  // label (labels reset on every bounce). These tests pin that contract.
+
+  test("PASS verdict → proceed (no remediation, normal routing)", () => {
+    const r = decideDeepQaAction("PASS", []);
+    assert.equal(r.action, "proceed");
+    assert.equal(r.failNumber, undefined);
+  });
+
+  test("PASS verdict ignores any prior FAIL markers (loop healed)", () => {
+    // A PASS after a prior fail proceeds — and since a PASS merges the PR and
+    // ends the loop, a PR never accumulates a FAIL after a PASS in practice.
+    const r = decideDeepQaAction("PASS", [
+      `something\n${DEEP_QA_FAIL_MARKER}\nmore`,
+    ]);
+    assert.equal(r.action, "proceed");
+  });
+
+  test("1st FAIL (no prior markers) → bounce, failNumber 1", () => {
+    const r = decideDeepQaAction("FAIL", [
+      "unrelated review comment",
+      "another comment with no marker",
+    ]);
+    assert.equal(r.action, "bounce");
+    assert.equal(r.failNumber, 1);
+    assert.match(r.reason, /bounce|ready-for-agent/i);
+  });
+
+  test("2nd consecutive FAIL (one prior marker) → block-and-escalate, failNumber 2", () => {
+    const r = decideDeepQaAction("FAIL", [
+      `> *Automated QA failed*\n\n${DEEP_QA_FAIL_MARKER} — Live-Gate Invariant violated`,
+    ]);
+    assert.equal(r.action, "block-and-escalate");
+    assert.equal(r.failNumber, 2);
+    assert.match(r.reason, /hydra-review|ready-for-human|pickup set/i);
+  });
+
+  test("3rd FAIL (two prior markers) → still block-and-escalate, failNumber 3", () => {
+    const r = decideDeepQaAction("FAIL", [
+      `c1 ${DEEP_QA_FAIL_MARKER}`,
+      `c2 ${DEEP_QA_FAIL_MARKER}`,
+    ]);
+    assert.equal(r.action, "block-and-escalate");
+    assert.equal(r.failNumber, 3);
+  });
+
+  test("marker count is substring-based, robust to surrounding text", () => {
+    // The playbook posts the marker on its own line inside a larger comment;
+    // the count is a substring match so the surrounding report doesn't matter.
+    const r = decideDeepQaAction("FAIL", [
+      `# QA Report\n\nLots of findings...\n\n**Verdict:** \`FAIL\`\n\n${DEEP_QA_FAIL_MARKER}\n\n(checks table)`,
+    ]);
+    assert.equal(r.action, "block-and-escalate");
+    assert.equal(r.failNumber, 2);
+  });
+
+  test("comments WITHOUT the exact marker do not count (no false escalation)", () => {
+    // A generic FAIL comment from the T1/T2/T3 path (which does NOT post the
+    // T4 marker) must not be miscounted as a deep-QA fail — otherwise a T4 PR
+    // that previously failed a shallow check would escalate on its first deep
+    // FAIL. Only the exact T4 marker counts.
+    const r = decideDeepQaAction("FAIL", [
+      "Verdict: `FAIL` — Code review FAIL",
+      "Adversarial QA (T3): reviewer A surfaced a real blocker",
+      "Verifier-Core deep-QA: PASS", // a PASS marker, not the FAIL marker
+    ]);
+    assert.equal(r.action, "bounce");
+    assert.equal(r.failNumber, 1);
+  });
+
+  test("DEEP_QA_FAIL_MARKER is the stable greppable literal the playbook posts", () => {
+    // If this literal ever drifts, the per-PR ledger count silently breaks
+    // (prior markers stop matching) and every fail looks like a 1st fail —
+    // the PR would bounce forever instead of escalating. Pin it.
+    assert.equal(DEEP_QA_FAIL_MARKER, "Verifier-Core deep-QA: FAIL");
+  });
+
+  test("decision is a pure synchronous return — never blocks", () => {
+    const r = decideDeepQaAction("FAIL", []);
+    assert.equal(typeof r, "object");
+    assert.equal((r as { then?: unknown }).then, undefined);
+  });
+
+  test("block-and-escalate does NOT introduce a new FinalVerdict literal", () => {
+    // INV: T4 deep-QA is additive verification depth, NOT a policy change.
+    // block-and-escalate is expressed via the ready-for-human pickup set, so
+    // the four-verdict contract decide.py consumes stays intact. The decision
+    // object carries an `action`, never a verdict literal.
+    const r = decideDeepQaAction("FAIL", [`x ${DEEP_QA_FAIL_MARKER}`]);
+    assert.ok(!("verdict" in r), "deep-QA decision must not carry a verdict literal");
+    assert.equal(r.action, "block-and-escalate");
   });
 });
 
