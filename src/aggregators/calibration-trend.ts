@@ -7,8 +7,10 @@
  *
  *   - `tierAccuracy`  — did the tier classifier's predicted tier match
  *     the actual outcome bucket (merged vs failed)? A merged outcome on
- *     a low predicted tier (1/2) counts as a correct prediction
- *     ("auto-mergeable"), a failed outcome on a high tier (3) likewise.
+ *     an auto-merge tier (legacy 1/2/3, per `isAutoMergeTier` in
+ *     `tier-policy.ts`) counts as a correct prediction ("auto-mergeable");
+ *     a non-merged outcome on Tier 0 (Verifier Core / operator-only)
+ *     likewise confirms the non-auto-merge prediction. (ADR-0019)
  *   - `costAccuracy`  — did the confidence score predict the merge
  *     outcome? Predictions stored at the time of dispatch live in
  *     `predictedScore`; the actual is `actualOutcome === "merged"`. The
@@ -27,6 +29,8 @@
  * - **Daily buckets.** One point per UTC day so a 7-day window produces
  *   at most 7 points regardless of how many cycles ran that day.
  */
+
+import { isAutoMergeTier } from "../tier-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -153,12 +157,17 @@ async function defaultReadCalibrationRecords(
  * Returns 1 (correct) or 0 (incorrect) for the tier prediction on this
  * record, or null when the record can't be scored.
  *
- * Heuristic: a low-tier prediction (1 or 2) is the orchestrator saying
+ * Heuristic: an auto-merge-tier prediction (legacy 1, 2, or 3 — see
+ * `isAutoMergeTier` in `tier-policy.ts`) is the orchestrator saying
  * "this should auto-merge". A `merged` outcome confirms; anything else
- * disconfirms. A high-tier prediction (3) is "needs operator review";
- * a `merged` outcome means the agent's classifier under-estimated risk
- * (operator merged manually) and counts as incorrect, while `failed`
- * or `abandoned` confirms the high-tier flag was right to raise.
+ * disconfirms. A Tier-0 (Verifier Core / operator-only) prediction is
+ * "operator must merge"; a `merged` outcome there is the operator
+ * merging manually as designed and counts as a CORRECT non-auto-merge
+ * prediction, while `failed` or `abandoned` likewise confirm the
+ * Tier-0 flag. The previous `tier <= 2` test mismodelled this: it
+ * scored Tier-0 as predicted-auto-merge, so an operator-merged Tier-0
+ * PR counted the classifier wrong. `isAutoMergeTier` fixes that —
+ * Tier 0 is not an auto-merge tier. (ADR-0019.)
  */
 export function tierAccuracyForRecord(rec: CalibrationRecord): number | null {
   const tier = rec?.tier;
@@ -167,7 +176,7 @@ export function tierAccuracyForRecord(rec: CalibrationRecord): number | null {
   if (outcome !== "merged" && outcome !== "failed" && outcome !== "abandoned") {
     return null;
   }
-  const predictedAutoMerge = tier <= 2;
+  const predictedAutoMerge = isAutoMergeTier(tier);
   const actualMerged = outcome === "merged";
   return predictedAutoMerge === actualMerged ? 1 : 0;
 }
