@@ -54,6 +54,9 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     generatedAt: NOW.toISOString(),
     cacheHitRatioLast5h: 0,
     cacheHitRatioLast7d: 0,
+    tokensSinceReset: { ...zero },
+    percentSinceReset: 0,
+    weeklyResetAnchor: null,
     ...overrides,
   };
 }
