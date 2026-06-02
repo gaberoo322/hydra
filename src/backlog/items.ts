@@ -21,8 +21,7 @@ function titleSimilarity(a: string, b: string): number {
 
 /**
  * Add a new item to the backlog with title-based dedup (exact + fuzzy).
- * Called by research-loop when opportunities are identified, and by the
- * dashboard's POST /backlog endpoint.
+ * Called by the dashboard's POST /backlog endpoint and the work-queue API.
  */
 export async function addToBacklog(item: any): Promise<{
   added: boolean;

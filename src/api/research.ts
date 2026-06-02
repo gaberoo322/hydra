@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { getLatestResearch, listResearchReports, vetoOpportunity } from "../research-loop.ts";
 import { setResearchForceOnce } from "../redis/scheduler.ts";
 
 export function createResearchRouter(eventBus: any) {
@@ -26,51 +25,11 @@ export function createResearchRouter(eventBus: any) {
     });
   });
 
-  // GET /research/latest — Most recent research report
-  router.get("/research/latest", async (req, res) => {
-    try {
-      const report = await getLatestResearch();
-      if (!report) {
-        res.status(404).json({ error: "No research reports found. Run POST /research/start first." });
-      } else {
-        res.json(report);
-      }
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /research/history — List recent research reports (metadata)
-  router.get("/research/history", async (req, res) => {
-    try {
-    // @ts-expect-error — migrate to proper types
-      const count = parseInt(req.query.count) || 10;
-      const reports = await listResearchReports(count);
-      res.json(reports);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // POST /research/force — Force one research cycle on next scheduler tick (bypasses throttle)
   router.post("/research/force", async (req, res) => {
     try {
       await setResearchForceOnce();
       res.json({ ok: true, message: "Research force flag set — next scheduler tick will run research bypassing all throttles" });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // POST /research/veto — Remove a research-recommended item from the queue
-  router.post("/research/veto", async (req, res) => {
-    try {
-      const { title } = req.body || {};
-      if (!title) {
-        return res.status(400).json({ error: "Missing 'title' — which opportunity to veto?" });
-      }
-      const result = await vetoOpportunity(title);
-      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
