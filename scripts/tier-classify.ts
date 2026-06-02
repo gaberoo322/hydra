@@ -4,15 +4,22 @@
  *
  * Usage:
  *   tsx scripts/tier-classify.ts <file1> <file2> ...
- *   tsx scripts/tier-classify.ts --operator-approved <file1> ...
  *   gh pr diff --name-only NNN | xargs tsx scripts/tier-classify.ts
  *
  * Output: a single JSON object on stdout with `{tier, reason, files}`.
  *
  * Exit codes:
- *   0 — non-T4 result, or T4 (Verifier Core) with `--operator-approved`
- *   2 — T4 (Verifier Core) without `--operator-approved` (CI must fail)
+ *   0 — any valid classification (the gate reports the tier; it no longer
+ *       blocks T4 on a label)
  *   1 — usage / unexpected error
+ *
+ * T4 (Verifier Core) PRs no longer fail this gate for lack of an
+ * `operator-approved` label (ADR-0020 Slice 2 / #743): the T4 depth guarantee
+ * is now the base-ref `deep-qa-gate` required check (the SHA-bound Deep-QA PASS
+ * marker) plus the mutation floor (#778) and base-ref Live-Gate (#738), not a
+ * label. `operator-approved` survives only as the #744 operator emergency
+ * brake. The `--operator-approved` flag is accepted as a no-op for caller
+ * back-compat (live-gate.sh / older invocations).
  *
  * The script never crashes on a deleted file — `gh pr diff --name-only`
  * lists deletions and they're treated as touching the path just like
@@ -27,15 +34,17 @@ import { classifyChange } from "../src/tier-classifier.ts";
 
 function main(): number {
   const argv = process.argv.slice(2);
-  let operatorApproved = false;
   const files: string[] = [];
 
   for (const arg of argv) {
     if (arg === "--operator-approved") {
-      operatorApproved = true;
+      // Accepted as a no-op for caller back-compat (ADR-0020 Slice 2 / #743):
+      // T4 is no longer blocked on the label, so the flag no longer affects
+      // the exit code. Kept so older invocations don't trip "Unknown flag".
+      continue;
     } else if (arg === "--help" || arg === "-h") {
       process.stdout.write(
-        "Usage: tier-classify.ts [--operator-approved] <file1> <file2> ...\n" +
+        "Usage: tier-classify.ts [--operator-approved (no-op)] <file1> <file2> ...\n" +
         "Reads files from stdin if no positional args provided.\n",
       );
       return 0;
@@ -69,28 +78,15 @@ function main(): number {
     tier: result.tier,
     reason: result.reason,
     files,
-    operatorApproved,
     perFile: result.perFile || [],
   };
   process.stdout.write(JSON.stringify(out, null, 2) + "\n");
 
-  if (result.tier === 4 && !operatorApproved) {
-    process.stderr.write(
-      "\n" +
-      "============================================================\n" +
-      "TIER 4 (Verifier Core) — operator-approved label required\n" +
-      "============================================================\n" +
-      `${result.reason}\n\n` +
-      "This PR touches the Verifier Core (ADR-0001 / ADR-0015). Auto-merge is\n" +
-      "blocked. To unblock, the operator must apply the\n" +
-      "`operator-approved` label to this PR. The label is operator-only\n" +
-      "by convention; merging without it requires admin override.\n" +
-      "\n" +
-      "If you are the operator and this change is intentional, apply\n" +
-      "the label, then re-run this CI job.\n",
-    );
-    return 2;
-  }
+  // ADR-0020 Slice 2 (#743): the gate reports the tier but no longer blocks
+  // T4 on the operator-approved label. The T4 depth guarantee relocated to
+  // the base-ref `deep-qa-gate` required check (SHA-bound Deep-QA PASS marker)
+  // + the mutation floor (#778) + base-ref Live-Gate (#738). Any valid
+  // classification exits 0.
   return 0;
 }
 

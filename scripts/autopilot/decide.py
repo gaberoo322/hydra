@@ -116,8 +116,7 @@ MERGE POLICY (policy collapse, issue #742 / ADR-0015)
 `should_auto_merge(tier, mechanical, has_scope_justification, qa_verdict)`:
 
   qa_verdict != PASS    → hold      (INV-007 guard)
-  tier in {1, 2, 3}     → auto-merge
-  tier == 4             → hold      (required depth = #740 Deep-QA loop, not yet landed)
+  tier in {1, 2, 3, 4}  → auto-merge
   unparseable tier      → hold      (fail-safe: required depth cannot be proven)
 
   Merge eligibility is gated entirely by the *depth* requirements for the
@@ -132,8 +131,12 @@ MERGE POLICY (policy collapse, issue #742 / ADR-0015)
   for call-site / test-helper stability but are no longer consulted.
 
   (ADR-0015 / issue #737 renumber: the deepest tier — Verifier Core — is T4.
-  INV-001 in assert_invariants.py remains as defense-in-depth: no auto-merge
-  on a T4 PR. The T4 arm flips to auto-merge once #740/#743 land.)
+  ADR-0020 Slice 2 / #743: the T4 arm flips to auto-merge on a PASS, identical
+  to T1/T2/T3. decide.py stays pure and trusts the verdict; the base-ref
+  `deep-qa-gate` required CI check independently enforces the SHA-bound Deep-QA
+  PASS marker and fails closed if absent. INV-001 — the old plan-level "never
+  auto-merge a T4 PR" guard — is retired; INV-007 remains the sole brain-side
+  merge guard.)
 
 ==================================================================
 FAILURE PATTERNS (self_heal.py docstring is the single source of truth)
@@ -731,12 +734,18 @@ def should_auto_merge(
     decision. Keeping the signature stable avoids churning every call site in
     this PR; dropping the params is a separate opportunistic cleanup.
 
-    T4 (Verifier Core) returns `hold` until its required-depth mechanism (the
-    Deep-QA Remediation Loop, #740) lands: a bare `qa-verdict` PASS cannot
-    *prove* the deeper T4 verification depth was met, and INV-001 (no auto-merge
-    on a T4 Verifier-Core PR) remains as defense-in-depth in
-    assert_invariants.py. Once #740/#743 land, the T4 arm flips to `auto-merge`
-    on a proven deep-QA pass. Until then a T4 PR holds — it is never bad-merged.
+    T4 (Verifier Core) returns `auto-merge` on a PASS, identical in shape to
+    T1/T2/T3 (ADR-0020 Slice 2 / #743). The plane split is "decide.py trusts,
+    CI enforces" (ADR-0020 Decision 3/5): this function is pure over the
+    `qa-verdict` event and CANNOT see the Deep-QA PASS marker, so it *trusts*
+    that the skill ran the deep branch and emits `auto-merge` on PASS. The
+    independent enforcement of the T4 depth lives entirely in CI — the base-ref
+    `deep-qa-gate` required check verifies the SHA-bound Deep-QA PASS marker
+    and fails closed (blocking the merge in branch protection) if the marker is
+    absent, even when this function emitted `auto-merge`. INV-001 (the old
+    plan-level "never auto-merge a T4 PR" guard) is retired in this slice — a
+    guard that cannot see the marker is theater; INV-007 (`qa_verdict==PASS`)
+    is retained as the sole brain-side merge guard.
 
     -----------------------------------------------------
     DOCSTRING IS THE SPEC (referenced from CLAUDE.md). Update CAREFULLY.
@@ -751,18 +760,13 @@ def should_auto_merge(
         # Unparseable tier → cannot prove the required verification depth was
         # met → fail-safe to hold (never auto-merge an unknown tier).
         return "hold"
-    if t in (1, 2, 3):
-        # T1/T2/T3: a PASS verdict at the required depth → auto-merge for
-        # every tier. Tier authority (the old T3 + scope-justification →
-        # queue-decision branch) no longer gates the decision; scope review
-        # is now a CI concern, not a merge-policy branch.
+    if t in (1, 2, 3, 4):
+        # T1/T2/T3/T4: a PASS verdict → auto-merge for every tier. Tier
+        # authority no longer gates the decision; scope review is a CI concern
+        # and the T4 depth guarantee is the base-ref `deep-qa-gate` required
+        # check (the SHA-bound Deep-QA PASS marker), not a brain-side branch.
+        # decide.py trusts the verdict; CI enforces the marker (ADR-0020).
         return "auto-merge"
-    if t == 4:
-        # T4 = Verifier Core (deepest tier, ADR-0015). Its required depth is
-        # the Deep-QA Remediation Loop (#740), not yet landed — so a bare
-        # PASS cannot prove the depth was met. Hold (fail-safe), never
-        # auto-merge; INV-001 stays as defense-in-depth.
-        return "hold"
     # Unknown tier → fail-safe hold (cannot prove required depth).
     return "hold"
 

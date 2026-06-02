@@ -314,19 +314,28 @@ describe("decide.py — policy collapse merge policy (#742)", () => {
     assert.equal(findAction(plan, (x) => x.type === "queue-decision" && x.pr_number === 103), undefined);
   });
 
-  test("T4 (Verifier Core) mechanical -> hold (no apply-operator-approved; required depth not yet landed)", () => {
+  // ADR-0020 Slice 2 (#743): the T4 arm flips to auto-merge on PASS, identical
+  // in shape to T1/T2/T3. decide.py trusts the verdict and stays pure (it
+  // cannot see the Deep-QA PASS marker); the base-ref `deep-qa-gate` required
+  // CI check independently enforces the marker and fails closed if absent.
+  test("T4 (Verifier Core) PASS -> auto-merge (ADR-0020 flip; CI enforces the marker)", () => {
     const plan = runDecide(baseState(), null, [qaEvent({ pr: 200, tier: 4, mechanical: true })]);
-    assert.equal(findAction(plan, (x) => x.pr_number === 200), undefined, "T4 produces no merge action — it holds");
+    assert.ok(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 200), "T4 PASS now auto-merges");
   });
 
-  test("T4 (Verifier Core) non-mechanical -> hold (no auto-merge, no queue-decision; INV-001 stays safe)", () => {
+  test("T4 (Verifier Core) PASS -> auto-merge regardless of mechanical signal", () => {
     const plan = runDecide(baseState(), null, [qaEvent({ pr: 201, tier: 4, mechanical: false })]);
-    assert.equal(findAction(plan, (x) => x.pr_number === 201), undefined);
+    assert.ok(findAction(plan, (x) => x.type === "auto-merge" && x.pr_number === 201));
   });
 
-  test("T4 (Verifier Core) unclear (binary / large) -> hold", () => {
-    const plan = runDecide(baseState(), null, [qaEvent({ pr: 202, tier: 4, mechanical: "unclear" })]);
-    assert.equal(findAction(plan, (x) => x.pr_number === 202), undefined);
+  test("T4 (Verifier Core) FAIL -> hold (INV-007 preserved)", () => {
+    const plan = runDecide(baseState(), null, [qaEvent({ pr: 202, tier: 4, verdict: "FAIL" })]);
+    assert.equal(findAction(plan, (x) => x.pr_number === 202), undefined, "non-PASS T4 holds — never bad-merged");
+  });
+
+  test("T4 (Verifier Core) PENDING -> hold (INV-007 preserved)", () => {
+    const plan = runDecide(baseState(), null, [qaEvent({ pr: 203, tier: 4, verdict: "PENDING" })]);
+    assert.equal(findAction(plan, (x) => x.pr_number === 203), undefined);
   });
 
   test("no tier produces a tier-triggered queue-decision or apply-operator-approved", () => {
@@ -427,8 +436,10 @@ describe("decide.py — emergency brake (#744)", () => {
       "a non-dict brake field must fail safe to disengaged, never wedge auto-merge off");
   });
 
-  test("engaged does NOT lift T4 (INV-001 unaffected) — still no auto-merge for T4", () => {
-    // T4 holds with or without the brake; the brake adds no merge authority.
+  test("engaged suppresses a T4 PASS auto-merge (brake overrides the ADR-0020 flip)", () => {
+    // Post-#743 a T4 PASS auto-merges (decide.py flip). The emergency brake
+    // must still suppress it: the brake is the operator override that beats
+    // the depth-gated verdict at the sweep call site, for every tier incl. T4.
     const plan = runDecide(withBrake(true), null, [qaEvent({ pr: 200, tier: 4 })]);
     assert.equal(findAction(plan, (x) => x.type === "auto-merge"), undefined);
   });
@@ -1360,7 +1371,10 @@ describe("decide.py — should_auto_merge() policy table", () => {
     assert.equal(findAction(plan, (a) => a.pr_number === 999), undefined);
   });
 
-  test("multiple qa-verdict events in one tick: mergeable tiers auto-merge, T4 holds", () => {
+  test("multiple qa-verdict events in one tick: every tier (incl. T4) auto-merges on PASS", () => {
+    // ADR-0020 Slice 2 (#743): the T4 arm flips — a T4 PASS now auto-merges
+    // identically to T1/T2/T3. decide.py trusts the verdict; the base-ref
+    // deep-qa-gate CI check independently enforces the Deep-QA PASS marker.
     const events = [
       qaEvent({ pr: 1, tier: 1 }),
       qaEvent({ pr: 2, tier: 2 }),
@@ -1369,8 +1383,12 @@ describe("decide.py — should_auto_merge() policy table", () => {
     const plan = runDecide(baseState(), null, events);
     assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 1));
     assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 2));
-    // T4 holds post-collapse — no apply-operator-approved, no auto-merge.
-    assert.equal(findAction(plan, (a) => a.pr_number === 3), undefined);
+    assert.ok(findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 3), "T4 PASS now auto-merges");
+  });
+
+  test("T4 with a non-PASS verdict still holds in the policy table (INV-007)", () => {
+    const plan = runDecide(baseState(), null, [qaEvent({ pr: 4, tier: 4, verdict: "FAIL" })]);
+    assert.equal(findAction(plan, (a) => a.pr_number === 4), undefined);
   });
 });
 

@@ -29,12 +29,19 @@
 #
 # The changed-file LIST always comes from the PR diff (head vs base). Only
 # the CLASSIFIER LOGIC moves from head to base when a Verifier Core file is
-# in the diff. The verdict semantics (T4 -> operator-approved required) are
-# unchanged; only the SOURCE of the rules moves.
+# in the diff. Only the SOURCE of the rules moves.
+#
+# Note (ADR-0020 Slice 2 / #743): the gate no longer blocks T4 on an
+# `operator-approved` label. The T4 depth guarantee relocated to the base-ref
+# `deep-qa-gate` required check (the SHA-bound Deep-QA PASS marker) + the
+# mutation floor (#778) + this base-ref Live-Gate (#738). This script now just
+# classifies (base-ref scripts for a Verifier-Core PR, head-ref otherwise) and
+# reports the tier JSON; it never exits 2. The base-ref Live-Gate mechanism
+# itself is unchanged — only the operator-approved policy was removed.
 #
 # Why a legitimate PR that ADDS a path is still correct: a PR that adds a
 # new path to VERIFIER_CORE_PATHS is itself a Verifier Core PR (it edits
-# src/untouchable.ts), so it gets base-ref treatment + operator-approved.
+# src/untouchable.ts), so it gets base-ref treatment.
 # Conversely a normal PR that adds a new T2/T3 mapping to tier-classifier.ts
 # is also a Verifier Core PR and is judged by the old classifier — that is
 # correct: the new mapping is the PR's proposal, not yet the live gate.
@@ -66,33 +73,30 @@
 # without a real GitHub PR — mirrors how grounding tests test pure
 # functions instead of running real git):
 #
-#   live-gate.sh <base-ref> <operator-approved:true|false> <changed-files-file>
+#   live-gate.sh <base-ref> <changed-files-file>
 #
 #   <base-ref>            a git ref/sha for the trusted base (the CI caller
 #                         passes the merge-base; tests pass a fixture sha).
-#   <operator-approved>   "true" if the PR carries the operator-approved
-#                         label, else "false".
 #   <changed-files-file>  path to a newline-delimited file of the PR's
 #                         changed files (the head diff).
 #
 # Output: the tier-classify JSON on stdout (same shape as tier-classify.ts).
 # Exit codes: identical to tier-classify.ts —
-#   0  non-T4, or T4 with operator-approved
-#   2  T4 without operator-approved (CI must fail)
+#   0  any valid classification (the gate reports the tier; it no longer
+#      blocks T4 on a label — ADR-0020 Slice 2 / #743)
 #   1  usage / unexpected error
 #
 # A diagnostic line on stderr records which classifier (base vs head) won,
 # for auditability in the CI log.
 set -euo pipefail
 
-if [ "$#" -ne 3 ]; then
-  echo "usage: live-gate.sh <base-ref> <operator-approved:true|false> <changed-files-file>" >&2
+if [ "$#" -ne 2 ]; then
+  echo "usage: live-gate.sh <base-ref> <changed-files-file>" >&2
   exit 1
 fi
 
 BASE_REF="$1"
-OPERATOR_APPROVED="$2"
-CHANGED_FILES_FILE="$3"
+CHANGED_FILES_FILE="$2"
 
 if [ ! -f "$CHANGED_FILES_FILE" ]; then
   echo "live-gate: changed-files file not found: $CHANGED_FILES_FILE" >&2
@@ -122,12 +126,6 @@ done
 
 BASE_WRAPPER="$TMP/scripts/tier-classify.ts"
 
-# Build the FLAG once; both branches honour the same operator-approved input.
-FLAG=()
-if [ "$OPERATOR_APPROVED" = "true" ]; then
-  FLAG=(--operator-approved)
-fi
-
 mapfile -t FILES < "$CHANGED_FILES_FILE"
 # Drop blank lines so an empty/blank file list doesn't pass "" as a file.
 CLEAN_FILES=()
@@ -154,14 +152,14 @@ IS_VERIFIER_CORE="$(npx tsx "$TMP/scripts/verifier-core-probe.ts" "${CLEAN_FILES
 if [ "$IS_VERIFIER_CORE" = "yes" ]; then
   echo "live-gate: Verifier Core file in diff -> classifying with BASE-ref scripts (ref=$BASE_REF)" >&2
   set +e
-  npx tsx "$BASE_WRAPPER" "${FLAG[@]}" "${CLEAN_FILES[@]}"
+  npx tsx "$BASE_WRAPPER" "${CLEAN_FILES[@]}"
   STATUS=$?
   set -e
   exit $STATUS
 else
   echo "live-gate: no Verifier Core file in diff -> classifying with HEAD-ref scripts (unchanged path)" >&2
   set +e
-  npx tsx scripts/tier-classify.ts "${FLAG[@]}" "${CLEAN_FILES[@]}"
+  npx tsx scripts/tier-classify.ts "${CLEAN_FILES[@]}"
   STATUS=$?
   set -e
   exit $STATUS

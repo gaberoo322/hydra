@@ -171,9 +171,16 @@ jobs:
 
   # Tier gate (issue #243, ADR-0001 + ADR-0004 + ADR-0015 work-order step 3).
   # Classifies changed files into the monotonic Modification Tier ladder
-  # T1 (shallowest) → T4 (deepest). Blocks T4 (Verifier Core) PRs unless
-  # the `operator-approved` label is present. Echoes the result to the PR
-  # step summary so reviewers and agents see it without digging.
+  # T1 (shallowest) → T4 (deepest) and surfaces the result to the PR step
+  # summary so reviewers and agents see it without digging.
+  #
+  # ADR-0020 Slice 2 (#743): the tier-gate no longer blocks T4 (Verifier
+  # Core) PRs on the `operator-approved` label. The T4 depth guarantee
+  # relocated to the base-ref `deep-qa-gate` required check (the SHA-bound
+  # Deep-QA PASS marker) + the mutation floor (#778) + the base-ref Live-Gate
+  # below (#738). `operator-approved` survives only as the #744 operator
+  # emergency brake. This job now reports the classification; it does not
+  # gate the merge on the label.
   #
   # Live-Gate Invariant (issue #738, ADR-0015 §live-gate invariant): when a
   # PR touches a Verifier Core file (ci.yml, deploy.yml, tier-classify.ts,
@@ -213,8 +220,6 @@ jobs:
           cat changed-files.txt
 
       - name: Classify tier (Live-Gate Invariant — base-ref for Verifier Core)
-        env:
-          OPERATOR_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'operator-approved') }}
         run: |
           set +e
           # Compute the trusted base ref the same rebase-safe way the
@@ -230,8 +235,9 @@ jobs:
           # scripts/ci/live-gate.sh decides "Verifier Core PR?" using the
           # BASE-ref isVerifierCore, then classifies with base-ref scripts
           # (Verifier Core PR) or head-ref scripts (everything else). Same
-          # JSON shape and exit codes as tier-classify.ts.
-          bash scripts/ci/live-gate.sh "$MERGE_BASE" "$OPERATOR_APPROVED" changed-files.txt \
+          # JSON shape and exit codes as tier-classify.ts. It reports the tier;
+          # it no longer blocks T4 on a label (ADR-0020 Slice 2 / #743).
+          bash scripts/ci/live-gate.sh "$MERGE_BASE" changed-files.txt \
             > tier-result.json 2> tier-stderr.txt
           STATUS=$?
           cat tier-result.json
