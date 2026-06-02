@@ -15,7 +15,8 @@
  * carries the operator-approved gate (renumbered from the old Tier-0).
  * The Verifier Core shrank to its 5 self-referential files; the six former
  * members (`src/grounding.ts`, `src/cost/`, the watchdogs, `scripts/deploy.sh`)
- * now classify as T3.
+ * now classify as T3. ADR-0020 (#847) later added a 6th self-referential
+ * file — `.github/workflows/deep-qa-gate.yml`.
  *
  * Pure tests — no Redis, no network, no spawn. Verifies the classifier
  * function and the CLI wrapper's exit-code contract.
@@ -35,10 +36,11 @@ const REPO_ROOT = resolve(import.meta.dirname, "..");
 const WRAPPER = resolve(REPO_ROOT, "scripts/tier-classify.ts");
 
 describe("tier classifier — T4 (Verifier Core, deepest)", () => {
-  test("the 5 Verifier Core paths classify as T4", () => {
+  test("the 6 Verifier Core paths classify as T4", () => {
     const expected = [
       ".github/workflows/ci.yml",
       ".github/workflows/deploy.yml",
+      ".github/workflows/deep-qa-gate.yml",
       "scripts/tier-classify.ts",
       "src/tier-classifier.ts",
       "src/untouchable.ts",
@@ -51,9 +53,11 @@ describe("tier classifier — T4 (Verifier Core, deepest)", () => {
     }
   });
 
-  test("isVerifierCore returns true for the 5 protected paths, false otherwise", () => {
+  test("isVerifierCore returns true for the 6 protected paths, false otherwise", () => {
     assert.equal(isVerifierCore(".github/workflows/ci.yml"), true);
     assert.equal(isVerifierCore(".github/workflows/deploy.yml"), true);
+    // ADR-0020 (#847): the deep-qa-gate workflow is the 6th Verifier Core path.
+    assert.equal(isVerifierCore(".github/workflows/deep-qa-gate.yml"), true);
     assert.equal(isVerifierCore("scripts/tier-classify.ts"), true);
     assert.equal(isVerifierCore("src/tier-classifier.ts"), true);
     assert.equal(isVerifierCore("src/untouchable.ts"), true);

@@ -4,8 +4,8 @@
  *
  * The Verifier Core is the set of files that define and enforce the
  * verification machinery itself: the CI workflows, the deploy workflow,
- * the tier classifier, the tier-classify CLI wrapper, and this
- * protected-paths list. A change to one of these alters how every other
+ * the T4 deep-QA gate, the tier classifier, the tier-classify CLI wrapper,
+ * and this protected-paths list. A change to one of these alters how every other
  * change is verified, so it carries the most verification depth (T4) and,
  * under the current gate, still requires the `operator-approved` GitHub
  * label. The `tier-gate` CI job in `.github/workflows/ci.yml` enforces
@@ -17,7 +17,9 @@
  * The term "Untouchable Core" was retired in favour of "Verifier Core".
  * The membership shrank from 11 entries to the 5 self-referential files;
  * the six former members (`src/grounding.ts`, `src/cost/`, the three
- * watchdog scripts, `scripts/deploy.sh`) now classify as T3.
+ * watchdog scripts, `scripts/deploy.sh`) now classify as T3. ADR-0020
+ * (#847) later added a 6th self-referential file — the deep-qa-gate
+ * workflow — bringing the list to 6.
  *
  * Matching rules (deliberately dumb and auditable — no globs):
  *   - Exact match: `path === entry`
@@ -32,7 +34,7 @@
  */
 
 /**
- * Canonical Verifier Core path list — the 5 self-referential files that
+ * Canonical Verifier Core path list — the 6 self-referential files that
  * classify as T4 (the deepest tier). Order is illustrative; matching is
  * exact/prefix.
  */
@@ -41,6 +43,14 @@ export const VERIFIER_CORE_PATHS: readonly string[] = Object.freeze([
   // workflow it triggers.
   ".github/workflows/ci.yml",
   ".github/workflows/deploy.yml",
+
+  // The T4 deep-QA gate (ADR-0020, issue #847): the required check that
+  // verifies the SHA-bound Deep-QA PASS marker before a Verifier-Core PR may
+  // merge. Its `issue_comment`-triggered arm runs from the default branch
+  // (base-ref-protected for free), but its `pull_request`-triggered arm runs
+  // the PR-head copy — so it must be Verifier Core (T4) to prevent a PR from
+  // neutering its own gate logic on its head.
+  ".github/workflows/deep-qa-gate.yml",
 
   // CLI wrapper for the tier classifier. Bypassing the wrapper bypasses
   // the gate, so it's part of the Verifier Core itself.

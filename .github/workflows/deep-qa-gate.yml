@@ -1,0 +1,152 @@
+name: deep-qa-gate
+
+# T4 Deep-QA gate (ADR-0020 Slice 1, issue #847).
+#
+# The required CI check that enforces the SHA-bound Deep-QA PASS marker before
+# a Verifier-Core (T4) PR may merge. It is the independent CI enforcement of
+# the proof signal that `hydra-qa`'s T4 PASS path posts
+# (`Verifier-Core deep-QA: PASS @ <head-sha>`). For non-T4 PRs it reports
+# success immediately — it never blocks the ~95% common case.
+#
+# ## Why two triggers
+#
+#  - `pull_request`  — fires at open/sync/reopen so the `deep-qa-gate` status
+#    exists from the start (initially failing for a T4 PR with no marker yet),
+#    and re-evaluates on every push (a new head SHA invalidates a stale
+#    marker — the SHA-bound guarantee).
+#  - `issue_comment` — fires when QA posts the PASS marker comment, flipping
+#    the status green WITHOUT requiring a new push. A `pull_request`-only gate
+#    would be permanently red on a T4 PR, because the marker is posted AFTER
+#    PR-open (ADR-0020 Decision 4). Filtered to PR comments via
+#    `github.event.issue.pull_request`.
+#
+# ## Base-ref protection for free (ADR-0020 Decision 4)
+#
+# GitHub runs `issue_comment`-triggered workflows from the DEFAULT branch's
+# copy of this file, never the PR head — so the `issue_comment` arm's gate
+# logic is base-ref-protected for free (the same Live-Gate Invariant the
+# `tier-gate` job buys with explicit base-ref extraction; here the platform
+# hands it to us). The `pull_request` arm DOES run the PR-head copy, so this
+# workflow is registered in `VERIFIER_CORE_PATHS` (src/untouchable.ts) — a PR
+# editing it classifies T4 and is base-ref-classified by the live tier-gate,
+# preventing a PR from neutering its own gate logic on its head.
+#
+# ## Status mechanism
+#
+# Reports a commit STATUS (not a check-run) named exactly `deep-qa-gate`
+# against the PR head SHA via the commit-status REST API
+# (`POST /repos/{owner}/{repo}/statuses/{sha}`). A commit status is the right
+# primitive for a tier-conditional required check: a status the workflow
+# reports on demand can be set `success` for non-T4 PRs immediately, whereas a
+# branch-protection-required *check-run* that this workflow never produces for
+# non-T4 PRs would leave them blocked forever. The operator adds `deep-qa-gate`
+# to branch-protection required checks AFTER this lands (the ADR-0020 ordering
+# invariant); until then the status reports but does not block.
+
+on:
+  issue_comment:
+    types: [created, edited]
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened]
+
+# Cancel superseded runs on the same PR (mirrors ci.yml's PR de-dup). Group by
+# PR number so the issue_comment and pull_request arms for one PR share a lane.
+concurrency:
+  group: deep-qa-gate-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# - contents: write is required to POST a commit status.
+# - pull-requests: read for `gh pr view --json comments,headRefOid`.
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  deep-qa-gate:
+    # On issue_comment, only run for comments on PRs (not plain issues).
+    if: ${{ github.event_name == 'pull_request' || github.event.issue.pull_request }}
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Evaluate deep-qa-gate and report status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Resolve the PR's CURRENT head SHA + changed files + comment bodies.
+          # For issue_comment events there is no PR object on the event, so we
+          # resolve everything from the PR number via the API.
+          HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')"
+          echo "PR #$PR_NUMBER head SHA: $HEAD_SHA (event: $EVENT_NAME)"
+
+          gh pr diff --name-only "$PR_NUMBER" --repo "$REPO" > changed-files.txt
+          echo "Changed files:"
+          cat changed-files.txt
+
+          # Classify the PR's tier using the head-tree classifier. (This arm
+          # only runs the head copy on pull_request; the issue_comment arm runs
+          # the default-branch copy — base-ref-protected for free. Either way
+          # the SAME classifier authority is used, scripts/tier-classify.ts.)
+          mapfile -t FILES < <(grep -v '^[[:space:]]*$' changed-files.txt || true)
+          TIER_JSON="$(npx tsx scripts/tier-classify.ts "${FILES[@]}" 2>/dev/null || echo '{}')"
+          echo "Tier classification: $TIER_JSON"
+          PR_TIER="$(printf '%s' "$TIER_JSON" | jq -r '.tier // empty' 2>/dev/null || true)"
+          echo "PR tier: ${PR_TIER:-unknown}"
+
+          STATE="failure"
+          DESCRIPTION=""
+
+          if [ "$PR_TIER" != "4" ]; then
+            # Non-T4: the deep-qa-gate does not apply — report success at once.
+            STATE="success"
+            DESCRIPTION="Non-T4 PR — deep-QA gate not required."
+          else
+            # T4: pass IFF a fresh Deep-QA PASS marker (matching THIS head SHA)
+            # is present in the PR comments. Uses the shared pure helper so the
+            # marker literal is defined once (scripts/ci/qa-verdict.ts).
+            gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+              --jq '[.comments[].body]' > pr-comments.json
+            FRESH="$(HEAD_SHA="$HEAD_SHA" node --no-warnings --experimental-strip-types -e "
+              import('./scripts/ci/qa-verdict.ts').then(async ({hasFreshDeepQaPass}) => {
+                const fs = await import('node:fs');
+                const comments = JSON.parse(fs.readFileSync('pr-comments.json','utf8'));
+                process.stdout.write(hasFreshDeepQaPass(comments, process.env.HEAD_SHA) ? 'yes' : 'no');
+              });
+            ")"
+            echo "Fresh Deep-QA PASS marker present for $HEAD_SHA: $FRESH"
+            if [ "$FRESH" = "yes" ]; then
+              STATE="success"
+              DESCRIPTION="T4 deep-QA PASS marker present for current head SHA."
+            else
+              STATE="failure"
+              DESCRIPTION="T4 PR missing a Verifier-Core deep-QA PASS marker for the current head SHA."
+            fi
+          fi
+
+          echo "Reporting deep-qa-gate=$STATE on $HEAD_SHA: $DESCRIPTION"
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state="$STATE" \
+            -f context="deep-qa-gate" \
+            -f description="$DESCRIPTION"
+
+          # Fail the job if the gate is not green, so the run itself is a clear
+          # red/green signal in the Actions UI (the required check is the
+          # commit status, but a red job is the faster human signal).
+          if [ "$STATE" != "success" ]; then
+            echo "::error::deep-qa-gate failed: $DESCRIPTION"
+            exit 1
+          fi

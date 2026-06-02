@@ -26,6 +26,9 @@ import {
   aggregateAdversarialReview,
   decideDeepQaAction,
   DEEP_QA_FAIL_MARKER,
+  DEEP_QA_PASS_MARKER,
+  renderDeepQaPassMarker,
+  hasFreshDeepQaPass,
   type CheckState,
 } from "../scripts/ci/qa-verdict.ts";
 
@@ -428,5 +431,67 @@ describe("verdict tiers documentation", () => {
     assert.equal(fail, "FAIL");
     assert.equal(passPending, "PASS-pending-CI");
     assert.equal(reserved, "FAIL-pending-CI");
+  });
+});
+
+describe("Deep-QA PASS marker — emission + freshness (issue #847, ADR-0020 Slice 1)", () => {
+  const SHA = "abc1234deadbeef5678abc1234deadbeef5678ab";
+
+  test("DEEP_QA_PASS_MARKER is the exact greppable base literal", () => {
+    // Breaking-change guard: both the hydra-qa playbook and deep-qa-gate.yml
+    // depend on this exact string.
+    assert.equal(DEEP_QA_PASS_MARKER, "Verifier-Core deep-QA: PASS");
+  });
+
+  test("renderDeepQaPassMarker produces the exact `... PASS @ <sha>` line", () => {
+    assert.equal(
+      renderDeepQaPassMarker(SHA),
+      `Verifier-Core deep-QA: PASS @ ${SHA}`,
+    );
+  });
+
+  test("renderDeepQaPassMarker trims surrounding whitespace on the SHA", () => {
+    assert.equal(
+      renderDeepQaPassMarker(`  ${SHA}\n`),
+      `Verifier-Core deep-QA: PASS @ ${SHA}`,
+    );
+  });
+
+  test("hasFreshDeepQaPass is true when a comment carries the marker for THIS sha", () => {
+    const comments = [
+      "looks good to me",
+      `> *T4 PASS proof*\n\n${renderDeepQaPassMarker(SHA)}\n\nmerging`,
+    ];
+    assert.equal(hasFreshDeepQaPass(comments, SHA), true);
+  });
+
+  test("hasFreshDeepQaPass is false for a STALE-sha marker (the SHA-bound guarantee)", () => {
+    const oldSha = "0000000000000000000000000000000000000000";
+    const comments = [renderDeepQaPassMarker(oldSha)];
+    // The marker exists, but for a different head SHA — must NOT satisfy the gate.
+    assert.equal(hasFreshDeepQaPass(comments, SHA), false);
+  });
+
+  test("hasFreshDeepQaPass is false when no comment carries the marker", () => {
+    assert.equal(hasFreshDeepQaPass(["ship it", "lgtm"], SHA), false);
+    assert.equal(hasFreshDeepQaPass([], SHA), false);
+  });
+
+  test("hasFreshDeepQaPass never matches on a blank/whitespace head SHA", () => {
+    // Defensive: an unknown head SHA must never satisfy the gate, even if a
+    // comment literally contains a trailing `PASS @ `.
+    assert.equal(hasFreshDeepQaPass([`Verifier-Core deep-QA: PASS @ ${SHA}`], ""), false);
+    assert.equal(hasFreshDeepQaPass([`Verifier-Core deep-QA: PASS @ ${SHA}`], "   "), false);
+  });
+
+  test("hasFreshDeepQaPass tolerates surrounding whitespace on the query SHA", () => {
+    const comments = [renderDeepQaPassMarker(SHA)];
+    assert.equal(hasFreshDeepQaPass(comments, `  ${SHA}  `), true);
+  });
+
+  test("PASS marker base is distinct from the FAIL marker", () => {
+    assert.notEqual(DEEP_QA_PASS_MARKER, DEEP_QA_FAIL_MARKER);
+    // A FAIL marker must never be mistaken for a fresh PASS.
+    assert.equal(hasFreshDeepQaPass([`${DEEP_QA_FAIL_MARKER} (fail #1)`], SHA), false);
   });
 });
