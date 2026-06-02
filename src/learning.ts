@@ -25,12 +25,12 @@
 import {
   consolidateAgentPatterns,
   consolidateStalePromotedRules,
-  consolidatePromotedRuleEffectiveness,
   migrateRulesToPatterns,
   backfillPromotionMetadata,
   loadAgentMemory,
   formatMemoryForPrompt,
 } from "./pattern-memory/agent-memory.ts";
+import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
 import {
   loadAnchorReflections,
   loadAnchorReflectionsByFile,

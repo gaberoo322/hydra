@@ -43,8 +43,8 @@ import {
   qualifiesForRuleAction,
   removePromotedRuleFromFeedback,
   type IneffectivePromotedPattern,
-  type MemoryPattern,
-} from "../src/pattern-memory/agent-memory.ts";
+} from "../src/pattern-memory/rule-effectiveness.ts";
+import { type MemoryPattern } from "../src/pattern-memory/agent-memory.ts";
 
 function makePattern(overrides: Partial<MemoryPattern>): MemoryPattern {
   return {
