@@ -30,11 +30,14 @@
  *   matches what the dashboard renders.
  */
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
-const execFile = promisify(execFileSync);
+import { execFileViaSeam } from "../github/exec-file-compat.ts";
+
+// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
+// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
+// changes the default, not the injection seam.
+const execFile = execFileViaSeam;
 
 // ---------------------------------------------------------------------------
 // Public types

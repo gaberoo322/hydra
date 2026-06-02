@@ -9,9 +9,6 @@
  * threshold 2h; tunable via HYDRA_CLAIM_MAX_AGE_MS.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import {
   addToBacklogLane, removeFromBacklogLane, getBacklogLaneIds,
   incrClaimsReapedLifetime,
@@ -20,11 +17,11 @@ import {
 } from "../redis/backlog.ts";
 import { pushAlert } from "../redis/alerts.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
+import { ghJson } from "../github/gh.ts";
+import { isGhFailure } from "../github/exec.ts";
 import {
   applyLaneTransition, getItem, saveItem, getLaneItems,
 } from "./internal.ts";
-
-const execFileAsync = promisify(execFile);
 
 const CLAIM_MAX_AGE_MS_DEFAULT = 2 * 60 * 60 * 1000;
 const CLAIM_REAP_ESCALATE_AFTER = parseInt(process.env.HYDRA_CLAIM_REAP_ESCALATE_AFTER) || 3;
@@ -81,25 +78,30 @@ export async function getStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<
  */
 export async function fetchOpenTargetPrBlobs(): Promise<string[] | null> {
   const repo = getTargetGithubRepo();
-  try {
-    const { stdout } = await execFileAsync(
-      "gh",
-      [
-        "pr", "list",
-        "--repo", repo,
-        "--state", "open",
-        "--limit", "100",
-        "--json", "title,body,number",
-      ],
-      { timeout: 10000 },
+  // Routes through the GitHub CLI Adapter seam (issue #899). The seam never
+  // throws and owns the JSON parse + the four error modes; any failure arm
+  // (gh missing, network down, malformed/empty JSON) returns null so the caller
+  // treats it as "no information" and falls back to time-only reaping —
+  // preserving the pre-seam contract.
+  const result = await ghJson<unknown>(
+    [
+      "pr", "list",
+      "--repo", repo,
+      "--state", "open",
+      "--limit", "100",
+      "--json", "title,body,number",
+    ],
+    { timeout: 10000 },
+  );
+  if (isGhFailure(result)) {
+    console.error(
+      `[Backlog] fetchOpenTargetPrBlobs failed for ${repo} (${result.code}): ${result.stderr.slice(0, 200)}`,
     );
-    const prs = JSON.parse(stdout);
-    if (!Array.isArray(prs)) return null;
-    return prs.map((pr: any) => `${pr.title ?? ""}\n${pr.body ?? ""}`);
-  } catch (err: any) {
-    console.error(`[Backlog] fetchOpenTargetPrBlobs failed for ${repo}: ${err.message}`);
     return null;
   }
+  const prs = result.data;
+  if (!Array.isArray(prs)) return null;
+  return prs.map((pr: any) => `${pr.title ?? ""}\n${pr.body ?? ""}`);
 }
 
 /**

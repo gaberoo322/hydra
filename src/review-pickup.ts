@@ -30,17 +30,18 @@
  * - **GitHub-only.** All three sources are GitHub issues queried via `gh`.
  */
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
-
 import {
   extractIssueRefs,
   parseDigestSearchOutput,
   parseLabeledIssuesOutput,
   datedTitle,
 } from "./aggregators/decision-queue.ts";
+import { execFileViaSeam } from "./github/exec-file-compat.ts";
 
-const execFile = promisify(execFileSync);
+// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
+// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
+// changes the default, not the injection seam.
+const execFile = execFileViaSeam;
 
 const DEFAULT_REPO = "gaberoo322/hydra";
 
