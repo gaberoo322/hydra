@@ -56,11 +56,14 @@ concurrency:
   group: deep-qa-gate-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
-# - contents: write is required to POST a commit status.
+# - statuses: write is required to POST a commit status — the gate's whole job
+#   (the commit-status REST API needs the `statuses` scope, NOT `contents`).
+# - contents: read for actions/checkout.
 # - pull-requests: read for `gh pr view --json comments,headRefOid`.
 permissions:
-  contents: write
+  contents: read
   pull-requests: read
+  statuses: write
 
 jobs:
   deep-qa-gate:
