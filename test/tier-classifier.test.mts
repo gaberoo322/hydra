@@ -4,15 +4,16 @@
  *
  * Bug we're preventing: Hydra agents merging changes to the verification
  * machinery (the tier classifier, the CI workflows, the tier-classify CLI,
- * the protected-paths list) without operator review. This happened in the
- * 2026-05-10 sweep when `gh pr merge --admin` was used to bypass GitHub's
- * self-approval rule. The tier classifier + `tier-gate` CI job is the
- * structural fix: any PR touching a T4 (Verifier Core) path fails CI
- * unless the `operator-approved` label is applied.
+ * the protected-paths list) without the required verification depth. The
+ * tier classifier + `tier-gate` CI job is the structural fix: every PR is
+ * classified onto the monotonic ladder so the right depth applies.
  *
  * Numbering note (ADR-0015 / issue #737): tiers are the monotonic ladder
- * T1 (shallowest) → T4 (deepest). The deepest tier — Verifier Core —
- * carries the operator-approved gate (renumbered from the old Tier-0).
+ * T1 (shallowest) → T4 (deepest). T4 is the Verifier Core (renumbered from
+ * the old Tier-0). ADR-0020 Slice 2 (#743) retired the operator-approved
+ * label as the T4 gate — the wrapper now reports the tier and exits 0 for any
+ * valid classification; the T4 depth backstop relocated to the base-ref
+ * `deep-qa-gate` required check + mutation floor (#778).
  * The Verifier Core shrank to its 5 self-referential files; the six former
  * members (`src/grounding.ts`, `src/cost/`, the watchdogs, `scripts/deploy.sh`)
  * now classify as T3. ADR-0020 (#847) later added a 6th self-referential
@@ -229,21 +230,24 @@ describe("tier-classify.ts CLI wrapper", () => {
     assert.deepEqual(json.files, ["src/codex-runner.ts"]);
   });
 
-  test("T4 path without --operator-approved exits 2 with diagnostic", () => {
+  test("T4 path without --operator-approved exits 0 (ADR-0020 #743: no label gate)", () => {
+    // Post-#743 the wrapper reports the tier but no longer fails T4 for a
+    // missing operator-approved label. The T4 depth backstop relocated to the
+    // base-ref deep-qa-gate required check + mutation floor (#778).
     const r = runCli(["src/tier-classifier.ts"]);
-    assert.equal(r.code, 2);
+    assert.equal(r.code, 0, `stderr: ${r.stderr}`);
     const json = JSON.parse(r.stdout);
     assert.equal(json.tier, 4);
-    assert.equal(json.operatorApproved, false);
-    assert.match(r.stderr, /operator-approved label required/);
+    assert.equal(json.operatorApproved, undefined, "operatorApproved field is dropped from the output");
+    assert.doesNotMatch(r.stderr, /operator-approved label required/);
   });
 
-  test("T4 path WITH --operator-approved exits 0", () => {
+  test("--operator-approved is accepted as a no-op for back-compat (still exits 0, T4)", () => {
     const r = runCli(["--operator-approved", "src/tier-classifier.ts"]);
     assert.equal(r.code, 0, `stderr: ${r.stderr}`);
     const json = JSON.parse(r.stdout);
     assert.equal(json.tier, 4);
-    assert.equal(json.operatorApproved, true);
+    assert.doesNotMatch(r.stderr, /Unknown flag/);
   });
 
   test("demoted ex-Tier-0 path (grounding.ts) now exits 0 as T3 without label", () => {

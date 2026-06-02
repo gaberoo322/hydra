@@ -17,11 +17,15 @@
  * running real CI. No Redis, no network.
  *
  * The script's contract (see scripts/ci/live-gate.sh header):
- *   live-gate.sh <base-ref> <operator-approved:true|false> <changed-files-file>
+ *   live-gate.sh <base-ref> <changed-files-file>
  * Output: tier-classify JSON on stdout. Exit codes:
- *   0  non-T4, or T4 with operator-approved
- *   2  T4 without operator-approved (CI must fail)
+ *   0  any valid classification (ADR-0020 Slice 2 / #743: the gate reports the
+ *      tier; it no longer blocks T4 on the operator-approved label)
  *   1  usage / unexpected error
+ *
+ * The base-ref Live-Gate mechanism itself is UNCHANGED — a neutered head still
+ * gets classified by the base-ref scripts. Only the operator-approved policy
+ * (the old exit-2 path) was removed.
  */
 
 import { test, describe, before, after } from "node:test";
@@ -100,14 +104,13 @@ function makeFixture(opts: { neuter: boolean }): { dir: string; baseRef: string 
 function runLiveGate(
   dir: string,
   baseRef: string,
-  operatorApproved: boolean,
   changedFiles: string[],
 ): { status: number; stdout: string; stderr: string } {
   const cfFile = join(dir, "changed-files.txt");
   writeFileSync(cfFile, changedFiles.join("\n") + "\n");
   const r = spawnSync(
     "bash",
-    [join(dir, "scripts", "ci", "live-gate.sh"), baseRef, String(operatorApproved), cfFile],
+    [join(dir, "scripts", "ci", "live-gate.sh"), baseRef, cfFile],
     { cwd: dir, encoding: "utf-8" },
   );
   return { status: r.status ?? -1, stdout: r.stdout, stderr: r.stderr };
@@ -119,21 +122,22 @@ describe("Live-Gate Invariant — base-ref classifies Verifier Core PRs", () => 
     for (const d of fixtures) rmSync(d, { recursive: true, force: true });
   });
 
-  test("Verifier Core PR with a NEUTERED head is still caught as T4 and blocked", () => {
-    // The core security property. The head's classifier says "nothing is
-    // Verifier Core"; the base-ref classifier (correct) says ci.yml is T4.
-    // The base-ref verdict must win: T4, no operator-approved -> exit 2.
+  test("Verifier Core PR with a NEUTERED head is still classified T4 by the base-ref scripts", () => {
+    // The core security property is unchanged: the head's classifier says
+    // "nothing is Verifier Core"; the base-ref classifier (correct) says
+    // ci.yml is T4. The base-ref verdict must win. Post-#743 the gate reports
+    // the tier and exits 0 (the operator-approved exit-2 path is gone — the
+    // T4 depth backstop relocated to the base-ref deep-qa-gate required check).
     const { dir, baseRef } = makeFixture({ neuter: true });
     fixtures.push(dir);
     const { status, stdout, stderr } = runLiveGate(
       dir,
       baseRef,
-      false,
       [".github/workflows/ci.yml"],
     );
     const result = JSON.parse(stdout);
     assert.equal(result.tier, 4, "base-ref classifier must classify ci.yml as T4");
-    assert.equal(status, 2, "T4 without operator-approved must exit 2 (CI fails)");
+    assert.equal(status, 0, "T4 no longer fails the gate on a missing label (#743)");
     assert.match(
       stderr,
       /BASE-ref/,
@@ -141,27 +145,18 @@ describe("Live-Gate Invariant — base-ref classifies Verifier Core PRs", () => 
     );
   });
 
-  test("Verifier Core PR with neutered head + operator-approved is T4 but passes (exit 0)", () => {
-    const { dir, baseRef } = makeFixture({ neuter: true });
-    fixtures.push(dir);
-    const { status, stdout } = runLiveGate(dir, baseRef, true, [
-      ".github/workflows/ci.yml",
-    ]);
-    const result = JSON.parse(stdout);
-    assert.equal(result.tier, 4);
-    assert.equal(status, 0, "operator-approved unblocks the T4 verdict");
-    assert.equal(result.operatorApproved, true);
-  });
-
-  test("Verifier Core PR (un-neutered) classifies T4 from base-ref", () => {
+  test("a T4 file list WITHOUT --operator-approved no longer fails the gate (exit 0)", () => {
+    // ADR-0020 Slice 2 / #743 regression guard: the old contract failed a T4
+    // PR (exit 2) unless the operator-approved label was passed. That block is
+    // removed — a Verifier Core diff classifies T4 and exits 0.
     const { dir, baseRef } = makeFixture({ neuter: false });
     fixtures.push(dir);
-    const { status, stdout, stderr } = runLiveGate(dir, baseRef, false, [
+    const { status, stdout, stderr } = runLiveGate(dir, baseRef, [
       "src/untouchable.ts",
     ]);
     const result = JSON.parse(stdout);
     assert.equal(result.tier, 4);
-    assert.equal(status, 2);
+    assert.equal(status, 0, "T4 without operator-approved must exit 0 post-#743");
     assert.match(stderr, /BASE-ref/);
   });
 
@@ -170,7 +165,7 @@ describe("Live-Gate Invariant — base-ref classifies Verifier Core PRs", () => 
     // classifier runs exactly as today; a plain src change is T3, exit 0.
     const { dir, baseRef } = makeFixture({ neuter: false });
     fixtures.push(dir);
-    const { status, stdout, stderr } = runLiveGate(dir, baseRef, false, [
+    const { status, stdout, stderr } = runLiveGate(dir, baseRef, [
       "src/api.ts",
       "src/foo.ts",
     ]);
@@ -192,7 +187,7 @@ describe("Live-Gate Invariant — base-ref classifies Verifier Core PRs", () => 
     // its own path on the head.
     const { dir, baseRef } = makeFixture({ neuter: true });
     fixtures.push(dir);
-    const { stderr } = runLiveGate(dir, baseRef, false, [
+    const { stderr } = runLiveGate(dir, baseRef, [
       ".github/workflows/ci.yml",
     ]);
     assert.match(

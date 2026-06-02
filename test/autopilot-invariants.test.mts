@@ -1,7 +1,7 @@
 /**
  * Regression test for `scripts/autopilot/assert_invariants.py` (issue
- * #426). Each of INV-001 through INV-008 has at least one violating-plan
- * case asserting the script raises with the expected greppable ID.
+ * #426). Each live invariant has at least one violating-plan case asserting
+ * the script raises with the expected greppable ID.
  *
  * The invariants live in Python because decide.py's output is consumed
  * by both the Claude harness (model executes the plan) and by smoke
@@ -12,7 +12,9 @@
  * Invariant IDs (kept stable for grep — same identifiers as
  * assert_invariants.py docstring):
  *
- *   INV-001 never auto-merge a T4 (Verifier Core) non-mechanical PR
+ *   INV-001 RETIRED (ADR-0020 Slice 2 / #743) — a T4 auto-merge no longer
+ *           raises; the T4 depth backstop relocated to the base-ref
+ *           `deep-qa-gate` CI check + retained INV-007.
  *   INV-002 never dispatch into a busy pipeline slot
  *   INV-003 never re-dispatch a class in burned_classes
  *   INV-004 never re-reap a task_id already in reaped_task_ids
@@ -89,15 +91,27 @@ function runAsserts(plan: any, state: any): { status: number; stdout: string; st
 // ---------------------------------------------------------------------------
 
 describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
-  test("INV-001: auto-merge on T4 (Verifier Core) PR is rejected", () => {
-    const plan = { actions: [{ type: "auto-merge", pr_number: 42, tier: 4 }] };
+  test("INV-001 retired (ADR-0020 #743): a T4 auto-merge no longer raises", () => {
+    // The flip that this slice unlocks: a T4 (Verifier Core) auto-merge action
+    // with a PASS verdict must pass the invariant set. The T4 depth backstop
+    // relocated to the base-ref `deep-qa-gate` CI check; INV-001 is gone.
+    const plan = { actions: [{ type: "auto-merge", pr_number: 42, tier: 4, qa_verdict: "PASS" }] };
     const r = runAsserts(plan, baseState());
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /INV-001/);
-    assert.match(r.stderr, /Verifier Core/);
+    assert.equal(r.status, 0, `expected OK (INV-001 retired), got: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /INV-001/, "INV-001 must no longer fire");
   });
 
-  test("INV-001: auto-merge on T1/T2/T3 PRs is allowed", () => {
+  test("INV-001 retired: the identifier no longer appears in assert_invariants output", () => {
+    // Defensive: a T4 auto-merge with NO verdict (the old INV-001 trigger
+    // shape) is now governed only by INV-007 (which is silent without a
+    // non-PASS verdict). It must not raise INV-001.
+    const plan = { actions: [{ type: "auto-merge", pr_number: 7, tier: 4 }] };
+    const r = runAsserts(plan, baseState());
+    assert.equal(r.status, 0, `expected OK, got: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /INV-001/);
+  });
+
+  test("auto-merge on T1/T2/T3 PRs is allowed", () => {
     const plan = {
       actions: [
         { type: "auto-merge", pr_number: 1, tier: 1 },
