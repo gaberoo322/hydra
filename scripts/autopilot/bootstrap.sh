@@ -70,10 +70,13 @@ set -euo pipefail
 # run-end", making it useless as a health signal (issue #898).
 #
 # The reap reads the run_id + pid from the SAME state.json bootstrap wrote,
-# then POSTs run-end with a best-guess cause:
-#   - clean process exit (EXIT_STATUS unset / 0 / "exited 0")
+# then POSTs run-end with a best-guess cause (issue #898 / AC2):
+#   - clean process exit (EXIT_CODE=exited, status unset / 0)
 #       → cause=interrupted, exit_code=0  → endRun records status=ended
-#   - abnormal exit (non-zero EXIT_STATUS / "core-dump"/"signal")
+#   - signal-kill SIGTERM/SIGINT (EXIT_CODE=signal, status TERM/INT/15/2)
+#       → cause=interrupted, exit_code=0  → `systemctl restart` /
+#         RuntimeMaxSec / Ctrl-C is an interrupt, NOT a crash
+#   - any other abnormal exit (non-zero status, SEGV/KILL/etc, missing code)
 #       → cause=crash, exit_code=<n>      → endRun records the crash honestly
 #
 # Idempotent: endRun dedups on a terminal status, so if term-check.py
@@ -86,6 +89,54 @@ set -euo pipefail
 # $EXIT_CODE ("exited"/"signal"/...), and $EXIT_STATUS (the numeric code or
 # signal). We read those when present and degrade gracefully when run by
 # hand (none set → assume a clean interrupt).
+#
+# `__reap_derive_cause` is the single source of truth for the
+# EXIT_CODE/EXIT_STATUS → (cause, exit_code) mapping (issue #898 / AC2). It
+# reads $EXIT_CODE / $EXIT_STATUS and sets the globals REAP_CAUSE +
+# REAP_EXIT_NUM. Both the live `--reap` path and the `--reap-derive-cause`
+# dry-run (used by the script-level test to pin the mapping without POSTing
+# to a prod surface) call it, so the two can never drift.
+__reap_derive_cause() {
+  REAP_EXIT_STATUS="${EXIT_STATUS:-0}"
+  REAP_EXIT_CODE_KIND="${EXIT_CODE:-exited}"
+  if [ "${REAP_EXIT_CODE_KIND}" = "exited" ] && { [ -z "${REAP_EXIT_STATUS}" ] || [ "${REAP_EXIT_STATUS}" = "0" ]; }; then
+    REAP_CAUSE="interrupted"
+    REAP_EXIT_NUM=0
+  elif [ "${REAP_EXIT_CODE_KIND}" = "signal" ]; then
+    case "${REAP_EXIT_STATUS}" in
+      TERM|SIGTERM|15|INT|SIGINT|2)
+        # Operator/scheduler interrupt (SIGTERM/SIGINT) — deterministically
+        # an `interrupted` end, not a crash.
+        REAP_CAUSE="interrupted"
+        REAP_EXIT_NUM=0
+        ;;
+      *)
+        # Any other signal (SEGV, KILL, ABRT, …) is a genuine crash.
+        REAP_CAUSE="crash"
+        case "${REAP_EXIT_STATUS}" in
+          ''|*[!0-9]*) REAP_EXIT_NUM=1 ;;  # signal name → non-zero sentinel
+          *)           REAP_EXIT_NUM="${REAP_EXIT_STATUS}" ;;
+        esac
+        ;;
+    esac
+  else
+    REAP_CAUSE="crash"
+    case "${REAP_EXIT_STATUS}" in
+      ''|*[!0-9]*) REAP_EXIT_NUM=1 ;;  # signal name or junk → non-zero sentinel
+      *)           REAP_EXIT_NUM="${REAP_EXIT_STATUS}" ;;
+    esac
+  fi
+}
+
+# Dry-run: echo the derived (cause, exit_code) for the current
+# $EXIT_CODE/$EXIT_STATUS and exit. No state read, no POST — purely the
+# mapping under test. Output shape: `cause=<c> exit_code=<n>`.
+if [ "${1:-}" = "--reap-derive-cause" ]; then
+  __reap_derive_cause
+  echo "cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM}"
+  exit 0
+fi
+
 if [ "${1:-}" = "--reap" ]; then
   REAP_STATE_PATH="${HYDRA_AUTOPILOT_STATE:-/tmp/hydra-autopilot-state.json}"
   REAP_DEFAULT_STATE_PATH="/tmp/hydra-autopilot-state.json"
@@ -114,21 +165,21 @@ if [ "${1:-}" = "--reap" ]; then
     exit 0
   fi
 
-  # Best-guess cause from the systemd-provided result. A clean exit (no
-  # signal, exit status 0 or unset) is an `interrupted` end; anything else
-  # is recorded as a `crash` with the real exit status.
-  REAP_EXIT_STATUS="${EXIT_STATUS:-0}"
-  REAP_EXIT_CODE_KIND="${EXIT_CODE:-exited}"
-  if [ "${REAP_EXIT_CODE_KIND}" = "exited" ] && { [ -z "${REAP_EXIT_STATUS}" ] || [ "${REAP_EXIT_STATUS}" = "0" ]; }; then
-    REAP_CAUSE="interrupted"
-    REAP_EXIT_NUM=0
-  else
-    REAP_CAUSE="crash"
-    case "${REAP_EXIT_STATUS}" in
-      ''|*[!0-9]*) REAP_EXIT_NUM=1 ;;  # signal name or junk → non-zero sentinel
-      *)           REAP_EXIT_NUM="${REAP_EXIT_STATUS}" ;;
-    esac
-  fi
+  # Best-guess cause from the systemd-provided result (issue #898 / AC2).
+  # Two distinct kinds of non-crash exit must both map to `interrupted`,
+  # so `crash` stays a meaningful health signal:
+  #   1. Clean process exit  — EXIT_CODE=exited, status 0 or unset.
+  #   2. Signal-kill         — EXIT_CODE=signal, status in {TERM,INT,15,2}.
+  #      This is `systemctl restart` / `RuntimeMaxSec` (SIGTERM) or a
+  #      Ctrl-C (SIGINT) — an operator/scheduler interrupt, NOT a crash.
+  #      The unit is Type=exec with SuccessExitStatus=SIGTERM, so systemd
+  #      exports EXIT_CODE=signal / EXIT_STATUS=TERM on a clean stop;
+  #      without this arm every restart was mis-recorded as a crash.
+  # Anything else — non-zero exit status, a non-TERM/INT signal
+  # (e.g. SEGV/KILL/ABRT), or a missing/garbage code — stays `crash`
+  # with the real exit status preserved. Shared with the --reap-derive-cause
+  # dry-run so the test pins exactly this mapping.
+  __reap_derive_cause
   REAP_ENDED_EPOCH="$(date -u +%s)"
 
   REAP_PAYLOAD="$(jq -n \

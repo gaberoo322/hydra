@@ -74,6 +74,39 @@ function runBootstrap(env: Record<string, string>, tmp: { state: string; heartbe
   };
 }
 
+/**
+ * Invoke `bootstrap.sh --reap-derive-cause` with a simulated systemd
+ * ExecStopPost environment ($EXIT_CODE / $EXIT_STATUS) and return the
+ * derived `cause=… exit_code=…` line. This dry-run runs ONLY the
+ * EXIT_CODE/EXIT_STATUS → (cause, exit_code) mapping that the live --reap
+ * path shares — no state read, no run-end POST — so the mapping can be
+ * pinned without touching a prod surface (issue #898 / AC2).
+ */
+function deriveReapCause(exitCode: string, exitStatus: string): {
+  status: number;
+  cause: string;
+  exitCodeNum: string;
+  stdout: string;
+} {
+  const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-derive-cause"], {
+    env: {
+      ...process.env,
+      EXIT_CODE: exitCode,
+      EXIT_STATUS: exitStatus,
+      PATH: process.env.PATH ?? "",
+    },
+    encoding: "utf-8",
+  });
+  const stdout = result.stdout ?? "";
+  const m = stdout.match(/cause=(\S+)\s+exit_code=(\S+)/);
+  return {
+    status: result.status ?? -1,
+    cause: m?.[1] ?? "",
+    exitCodeNum: m?.[2] ?? "",
+    stdout,
+  };
+}
+
 describe("scripts/autopilot/bootstrap.sh", () => {
   test("initializes state.json with default limits", () => {
     const tmp = makeTempState();
@@ -170,6 +203,55 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
+  });
+
+  /**
+   * Reap cause derivation (issue #898 / AC2). The unit is Type=exec, so a
+   * `systemctl restart` / RuntimeMaxSec stop arrives as a SIGTERM and systemd
+   * exports EXIT_CODE=signal / EXIT_STATUS=TERM to the ExecStopPost reap. AC2
+   * requires that signal-kill be recorded DETERMINISTICALLY as `interrupted`,
+   * distinct from a genuine crash — the bug QA flagged was that any
+   * EXIT_CODE!=exited fell through to `crash`, making `crash` the catch-all.
+   * `--reap-derive-cause` echoes the shared mapping so we pin it directly.
+   */
+  test("SIGTERM signal-kill (EXIT_CODE=signal/EXIT_STATUS=TERM) → interrupted", () => {
+    const r = deriveReapCause("signal", "TERM");
+    assert.equal(r.status, 0, `derive exited non-zero: ${r.stdout}`);
+    assert.equal(r.cause, "interrupted",
+      "a SIGTERM (systemctl restart / RuntimeMaxSec) must be `interrupted`, not `crash`");
+    assert.equal(r.exitCodeNum, "0", "an interrupted end records exit_code 0");
+  });
+
+  test("SIGTERM by number (EXIT_STATUS=15) → interrupted", () => {
+    const r = deriveReapCause("signal", "15");
+    assert.equal(r.cause, "interrupted", "EXIT_STATUS=15 (SIGTERM numeric) must map to interrupted");
+    assert.equal(r.exitCodeNum, "0");
+  });
+
+  test("SIGINT signal-kill (EXIT_STATUS=INT / 2) → interrupted", () => {
+    for (const s of ["INT", "2"]) {
+      const r = deriveReapCause("signal", s);
+      assert.equal(r.cause, "interrupted", `EXIT_STATUS=${s} (SIGINT) must map to interrupted`);
+      assert.equal(r.exitCodeNum, "0");
+    }
+  });
+
+  test("clean exit (EXIT_CODE=exited/EXIT_STATUS=0) → interrupted", () => {
+    const r = deriveReapCause("exited", "0");
+    assert.equal(r.cause, "interrupted");
+    assert.equal(r.exitCodeNum, "0");
+  });
+
+  test("a real crash signal (EXIT_STATUS=SEGV) stays crash, not interrupted", () => {
+    const r = deriveReapCause("signal", "SEGV");
+    assert.equal(r.cause, "crash", "SEGV is a genuine crash — must NOT be reclassified as interrupted");
+    assert.equal(r.exitCodeNum, "1", "a non-numeric crash signal records the non-zero sentinel");
+  });
+
+  test("a non-zero exit status stays crash with the real code", () => {
+    const r = deriveReapCause("exited", "37");
+    assert.equal(r.cause, "crash");
+    assert.equal(r.exitCodeNum, "37", "a non-zero exit preserves the real exit status");
   });
 
   test("records an alive owning-pid (not bootstrap.sh's short-lived $$)", () => {
@@ -384,6 +466,18 @@ describe("scripts/systemd/hydra-autopilot.service (issue #898)", () => {
       unit,
       /^ExecStopPost=-/m,
       "ExecStopPost must be prefixed with `-` so a reap failure can't fail the unit stop",
+    );
+  });
+
+  // AC2: a SIGTERM stop (`systemctl restart` / RuntimeMaxSec) is a clean
+  // interrupt, not a failure. SuccessExitStatus=SIGTERM both keeps Type=exec
+  // from marking a deliberate restart as failed and stops Restart=on-failure
+  // from spuriously retrying it.
+  test("declares SuccessExitStatus=SIGTERM so a restart isn't a failure", () => {
+    assert.match(
+      unit,
+      /^SuccessExitStatus=.*SIGTERM/m,
+      "unit must treat a SIGTERM stop as success (issue #898 / AC2)",
     );
   });
 });
