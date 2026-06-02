@@ -281,6 +281,60 @@ export function getWeeklyResetAnchorMs(): number | null {
   return parsed;
 }
 
+/**
+ * Default **Pacing Ceiling** (issue #857, ADR-0021): the sub-100% fraction of
+ * the weekly quota the **Pacing Curve** climbs to by the next **Weekly Reset
+ * Anchor**. The ~8% gap below 1.0 is the **Operator Reserve** (CONTEXT.md).
+ */
+export const DEFAULT_WEEKLY_PACE_CEILING = 0.92;
+
+/**
+ * Tolerance band (in percentage points of weekly quota) around the **Pacing
+ * Curve** target within which the burn is judged "on" the curve rather than
+ * ahead/behind. ±2pp is small relative to the 0→92 ramp over a week, so it
+ * suppresses paceState flicker right at the line without materially shifting
+ * the ahead/behind verdict. (issue #857)
+ */
+export const PACE_STATE_TOLERANCE_PERCENT = 2;
+
+/**
+ * Position of total burn relative to the **Pacing Curve** target for this
+ * instant in the week (issue #857, ADR-0021):
+ *   - "behind" — sinceReset% < target% − tolerance (room to run; Pace Gate launches)
+ *   - "on"     — within ±tolerance of target%, OR neutral (anchor unset/uncalibrated)
+ *   - "ahead"  — sinceReset% > target% + tolerance (Pace Gate pauses, in #858)
+ *
+ * Neutral maps to "on": when the Anchor is unset or the quota is uncalibrated
+ * there is no curve to be ahead/behind of, and "on" is the do-nothing verdict
+ * the future Pace Gate (#858) treats as "no pacing reason to launch or pause"
+ * — mirroring how `pacingState` defaults to the inert "under" when uncalibrated.
+ * This field is ADDITIVE and does NOT yet gate dispatch (that is #858).
+ */
+export type PaceState = "behind" | "on" | "ahead";
+
+/**
+ * The operator-tunable **Pacing Ceiling** as a fraction in (0, 1], read from
+ * `HYDRA_USAGE_WEEKLY_PACE_CEILING`. Unset/empty/unparseable/out-of-range
+ * falls back to {@link DEFAULT_WEEKLY_PACE_CEILING} (a non-empty-but-bad value
+ * is logged, fail-loud, since it signals a mis-configured env var). Values
+ * above 1.0 are clamped to 1.0; values <= 0 fall back to the default. Pure +
+ * env-only so the curve math stays unit-testable. (issue #857)
+ */
+export function getWeeklyPaceCeiling(): number {
+  const raw = process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING;
+  if (raw === undefined || raw === "") return DEFAULT_WEEKLY_PACE_CEILING;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_WEEKLY_PACE_CEILING is set but not a finite number in (0, 1] (${JSON.stringify(
+        raw,
+      )}); falling back to default ${DEFAULT_WEEKLY_PACE_CEILING}`,
+    );
+    return DEFAULT_WEEKLY_PACE_CEILING;
+  }
+  return Math.min(parsed, 1);
+}
+
 export interface ResetWindow {
   /**
    * Epoch-ms of the most recent anchor + 7d*k that is <= now — the start of
@@ -865,7 +919,86 @@ export interface UsageEligibility {
     pacingShed: boolean;
     calibrated: boolean;
   };
+  /**
+   * Position of total burn relative to the **Pacing Curve** for this instant
+   * in the week (issue #857, ADR-0021). ADDITIVE — does NOT yet affect `allow`
+   * or `shed`; the Pace Gate that acts on it lands in #858. "on" when the
+   * Anchor is unset or the quota is uncalibrated (no curve to compare against).
+   */
+  paceState: PaceState;
+  /**
+   * The **Pacing Curve** target: the % of weekly quota burn that *should* have
+   * accumulated by `usage.generatedAt` — a linear ramp from 0 at the current
+   * Weekly Reset Anchor boundary to `ceiling*100` at the next boundary. 0
+   * (neutral) when the Anchor is unset. (issue #857)
+   */
+  targetPercent: number;
+  /**
+   * Actual % of weekly quota consumed since the current Weekly Reset Anchor
+   * boundary — `usage.percentSinceReset`, surfaced here so a caller comparing
+   * it against `targetPercent` needn't reach back into the snapshot. (issue #857)
+   */
+  sinceResetPercent: number;
+  /**
+   * ISO-8601 of the effective current-window Weekly Reset Anchor boundary
+   * (`usage.weeklyResetAnchor`), or `null` when the Anchor env var is
+   * unset/unparseable. (issue #857)
+   */
+  anchor: string | null;
   usage: UsageSnapshot;
+}
+
+/**
+ * Compute the **Pacing Curve** target percent and the burn's position relative
+ * to it, derived purely from the snapshot (no `Date.now()` — `now` comes from
+ * `snapshot.generatedAt`, keeping this a pure function of the snapshot).
+ *
+ * The curve is a linear ramp from 0 at the current Weekly Reset Anchor boundary
+ * to `ceiling*100` at the next boundary (7 days later):
+ *   `fraction   = clamp01((now - currentMs) / WINDOW_7D_MS)`
+ *   `targetPct  = ceiling * 100 * fraction`
+ * where `currentMs` is parsed from `snapshot.weeklyResetAnchor`.
+ *
+ * When the Anchor is unset (`weeklyResetAnchor === null`) — or its ISO is
+ * unparseable — there is no curve: `targetPercent` is 0 and `paceState` is the
+ * neutral "on". Otherwise paceState compares `percentSinceReset` to the target
+ * within ±{@link PACE_STATE_TOLERANCE_PERCENT} percentage points. (issue #857)
+ */
+function projectPacingCurve(
+  snapshot: UsageSnapshot,
+  ceiling: number,
+): { paceState: PaceState; targetPercent: number; sinceResetPercent: number } {
+  const sinceResetPercent = snapshot.percentSinceReset;
+  const anchorIso = snapshot.weeklyResetAnchor;
+
+  if (anchorIso === null) {
+    // No Weekly Reset Anchor → no curve to be ahead/behind of. Neutral.
+    return { paceState: "on", targetPercent: 0, sinceResetPercent };
+  }
+  const currentMs = Date.parse(anchorIso);
+  const nowMs = Date.parse(snapshot.generatedAt);
+  if (!Number.isFinite(currentMs) || !Number.isFinite(nowMs)) {
+    // Defensive: a malformed timestamp on a snapshot we own. Stay neutral
+    // rather than projecting a NaN curve. Logged so the bad value is visible.
+    console.error(
+      `[usage-tracker] projectPacingCurve got an unparseable timestamp ` +
+        `(weeklyResetAnchor=${JSON.stringify(anchorIso)}, generatedAt=${JSON.stringify(
+          snapshot.generatedAt,
+        )}); treating Pacing Curve as neutral`,
+    );
+    return { paceState: "on", targetPercent: 0, sinceResetPercent };
+  }
+
+  const fraction = Math.min(1, Math.max(0, (nowMs - currentMs) / WINDOW_7D_MS));
+  const targetPercent = ceiling * 100 * fraction;
+
+  let paceState: PaceState = "on";
+  if (sinceResetPercent > targetPercent + PACE_STATE_TOLERANCE_PERCENT) {
+    paceState = "ahead";
+  } else if (sinceResetPercent < targetPercent - PACE_STATE_TOLERANCE_PERCENT) {
+    paceState = "behind";
+  }
+  return { paceState, targetPercent, sinceResetPercent };
 }
 
 /**
@@ -883,6 +1016,13 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
   const allow = !snapshot.emergencyStop;
   const pacingShed = snapshot.pacingState === "over";
   const shed = pacingShed ? PACING_SHEDDABLE_CLASSES : [];
+  // Pacing Curve verdict (issue #857). ADDITIVE — does NOT touch allow/shed;
+  // the Pace Gate that acts on paceState lands in #858. Reads the ceiling from
+  // env here so callers (incl. the HTTP route) get the live verdict.
+  const { paceState, targetPercent, sinceResetPercent } = projectPacingCurve(
+    snapshot,
+    getWeeklyPaceCeiling(),
+  );
   return {
     allow,
     shed,
@@ -891,6 +1031,10 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
       pacingShed,
       calibrated: snapshot.calibrated,
     },
+    paceState,
+    targetPercent,
+    sinceResetPercent,
+    anchor: snapshot.weeklyResetAnchor,
     usage: snapshot,
   };
 }
