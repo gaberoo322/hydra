@@ -32,6 +32,7 @@ import {
   listRecentAutopilotRunIds,
   getAutopilotRun,
 } from "../redis/autopilot-runs.ts";
+import { sweepRunIfDead } from "../autopilot/runs.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -70,6 +71,20 @@ export interface ActiveDispatchesDeps {
    * `getAutopilotRun(id)`. Tests provide an in-memory map.
    */
   getAutopilotRunRow?: (id: string) => Promise<Record<string, string>>;
+  /**
+   * Liveness sweeper for a `running` autopilot run row. Defaults to
+   * `sweepRunIfDead` — the same read-time sweeper the run readers use, so
+   * the autopilot sub-source applies the canonical dead-pid rule instead
+   * of trusting `status: running` verbatim (issue #888). A `running` row
+   * whose recorded pid is dead is promoted to `killed`/`crash` (and never
+   * counted as in-flight), so a crashed run that never POSTed its run-end
+   * stops accumulating as a phantom zombie while idle. Tests stub this to
+   * exercise the liveness gate without a real pid probe.
+   */
+  sweepAutopilotRun?: (
+    id: string,
+    row: Record<string, string>,
+  ) => Promise<{ row: Record<string, string>; swept: boolean }>;
   /**
    * Cap on autopilot run-IDs fetched. Defaults to 50 — well above the
    * realistic ceiling of concurrent autopilot runs (autopilot is a single
@@ -177,15 +192,27 @@ export function projectAutopilotRow(row: Record<string, string>): Dispatch | nul
 }
 
 // ---------------------------------------------------------------------------
-// Sub-source: autopilot runs (status === "running")
+// Sub-source: autopilot runs (status === "running", liveness-aware — #888)
 // ---------------------------------------------------------------------------
 
+/**
+ * An autopilot run is in-flight only when its row reports `status:
+ * running` AND its recorded pid is alive. We don't trust `status:
+ * running` verbatim: a crashed run that never POSTed its run-end leaves a
+ * stale `running` row with a dead pid, which would otherwise count as a
+ * phantom in-flight dispatch until the 7-day TTL (observed: ~12 zombie
+ * runs accumulating while idle). For every `running` row we apply the
+ * canonical read-time sweeper (`sweepRunIfDead`), which promotes a
+ * dead-pid row to `killed`/`crash` in Redis; the row only survives as a
+ * dispatch if it is STILL `running` after the sweep (i.e. pid alive).
+ */
 async function fetchAutopilotDispatches(
   deps: ActiveDispatchesDeps,
 ): Promise<Dispatch[]> {
   const limit = deps.autopilotLimit ?? 50;
   const listIds = deps.listAutopilotRunIds ?? listRecentAutopilotRunIds;
   const getRow = deps.getAutopilotRunRow ?? getAutopilotRun;
+  const sweep = deps.sweepAutopilotRun ?? sweepRunIfDead;
 
   const ids = await listIds(limit);
   if (!Array.isArray(ids) || ids.length === 0) return [];
@@ -195,7 +222,11 @@ async function fetchAutopilotDispatches(
     const row = await getRow(id);
     if (!row || !row.status) continue;
     if (row.status !== "running") continue;
-    const projected = projectAutopilotRow(row);
+    // Liveness gate: sweep dead-pid running rows. A row whose pid is dead
+    // comes back as killed/crash and is dropped here; a live row survives.
+    const { row: swept } = await sweep(id, row);
+    if (swept.status !== "running") continue;
+    const projected = projectAutopilotRow(swept);
     if (projected) out.push(projected);
   }
   return out;

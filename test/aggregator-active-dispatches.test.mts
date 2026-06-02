@@ -176,6 +176,114 @@ describe("getActiveDispatches — autopilot-only", () => {
   });
 });
 
+describe("getActiveDispatches — autopilot liveness (#888)", () => {
+  // A no-op sweep that mirrors the live pid probe: a running row whose pid
+  // is alive comes back unchanged; a dead pid gets promoted to killed/crash.
+  // Tests stub this directly so we never touch a real process.
+  const sweepByPidAlive =
+    (alivePids: Set<number>) =>
+    async (id: string, row: Record<string, string>) => {
+      if (row.status !== "running") return { row, swept: false };
+      const pid = Number(row.pid || "0");
+      if (alivePids.has(pid)) return { row, swept: false };
+      return {
+        row: { ...row, status: "killed", term_reason: "crash", ended_epoch: "1779836400" },
+        swept: true,
+      };
+    };
+
+  test("dead-pid running row is swept and never counted as in-flight", async () => {
+    let sweptId: string | null = null;
+    const items = await getActiveDispatches({
+      listAutopilotRunIds: async () => ["ap-zombie"],
+      getAutopilotRunRow: async () => ({
+        run_id: "ap-zombie",
+        started: "2026-05-26T11:00:00Z",
+        trigger: "scheduled",
+        status: "running",
+        pid: "424242",
+      }),
+      sweepAutopilotRun: async (id, row) => {
+        sweptId = id;
+        // dead pid → promoted to killed/crash
+        return {
+          row: { ...row, status: "killed", term_reason: "crash" },
+          swept: true,
+        };
+      },
+      listOperatorDispatches: async () => [],
+    });
+    assert.deepEqual(items, [], "a dead-pid run must not appear as in-flight");
+    assert.equal(sweptId, "ap-zombie", "the running row must be passed through the sweeper");
+  });
+
+  test("live-pid running row survives the sweep and is counted", async () => {
+    const items = await getActiveDispatches({
+      listAutopilotRunIds: async () => ["ap-live"],
+      getAutopilotRunRow: async () => ({
+        run_id: "ap-live",
+        started: "2026-05-26T11:00:00Z",
+        trigger: "manual",
+        status: "running",
+        pid: "1000",
+      }),
+      sweepAutopilotRun: sweepByPidAlive(new Set([1000])),
+      listOperatorDispatches: async () => [],
+    });
+    assert.equal(items.length, 1);
+    assert.equal(items[0].id, "ap-live");
+    assert.equal(items[0].source, "autopilot");
+  });
+
+  test("phantom zombies do not accumulate: many dead-pid rows collapse to the one live run", async () => {
+    const rows: Record<string, Record<string, string>> = {
+      "ap-live": {
+        run_id: "ap-live",
+        started: "2026-05-26T12:00:00Z",
+        trigger: "manual",
+        status: "running",
+        pid: "1000",
+      },
+    };
+    // 12 zombie runs — the observed accumulation in #888 — each a stale
+    // running row whose pid is dead.
+    for (let i = 0; i < 12; i++) {
+      rows[`ap-zombie-${i}`] = {
+        run_id: `ap-zombie-${i}`,
+        started: `2026-05-26T0${i % 10}:00:00Z`,
+        trigger: "scheduled",
+        status: "running",
+        pid: String(900000 + i),
+      };
+    }
+    const items = await getActiveDispatches({
+      listAutopilotRunIds: async () => Object.keys(rows),
+      getAutopilotRunRow: async (id) => rows[id],
+      sweepAutopilotRun: sweepByPidAlive(new Set([1000])),
+      listOperatorDispatches: async () => [],
+    });
+    assert.equal(items.length, 1, "only the live run counts; 12 zombies are swept out");
+    assert.equal(items[0].id, "ap-live");
+  });
+
+  test("default sweep treats a pid-less running row as live (older writers)", async () => {
+    // No `sweepAutopilotRun` stub → the real sweepRunIfDead runs. A running
+    // row with no pid (pid <= 0) is treated as alive, so it is still counted.
+    const items = await getActiveDispatches({
+      listAutopilotRunIds: async () => ["ap-no-pid"],
+      getAutopilotRunRow: async () => ({
+        run_id: "ap-no-pid",
+        started: "2026-05-26T11:00:00Z",
+        trigger: "manual",
+        status: "running",
+      }),
+      listOperatorDispatches: async () => [],
+    });
+    assert.equal(items.length, 1);
+    assert.equal(items[0].id, "ap-no-pid");
+  });
+});
+
 describe("getActiveDispatches — operator-only", () => {
   test("returns just operator rows when no autopilot is running", async () => {
     const items = await getActiveDispatches({

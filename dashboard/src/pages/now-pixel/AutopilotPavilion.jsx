@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useApi } from "../../hooks/useApi.js";
-import { derivePavilionState, deriveExp } from "./derive-sprite-state.ts";
+import { derivePavilionState, deriveExp, formatDuration } from "./derive-sprite-state.ts";
 import AlertsNoticeBoard from "./AlertsNoticeBoard.jsx";
 import HpBar from "./HpBar.jsx";
 
@@ -21,9 +21,47 @@ import HpBar from "./HpBar.jsx";
  * Ash <img> rather than the section so the tween starts visually at
  * the trainer, not at the panel edge.
  */
+/**
+ * Render the discriminated autopilot lifecycle (issue #888) as a short
+ * status caption + an optional "last run ended N ago (<term_reason>)"
+ * line when idle/ended/crashed. Reads the `lifecycle` field added to the
+ * /now/autopilot-tick payload directly so the running indicator no longer
+ * derives from the scheduler housekeeping heartbeat.
+ */
+function lifecycleCaption(state) {
+  switch (state) {
+    case "running":
+      return "trainer is on the job";
+    case "crashed":
+      return "trainer fainted";
+    case "ended":
+      return "trainer is resting";
+    case "idle":
+    default:
+      return "trainer is waiting";
+  }
+}
+
+function relativeAgo(endedEpoch, nowEpoch) {
+  if (typeof endedEpoch !== "number" || !Number.isFinite(endedEpoch)) return "";
+  const ago = formatDuration(Math.max(0, nowEpoch - endedEpoch));
+  return ago === "—" ? "" : `${ago} ago`;
+}
+
 export default function AutopilotPavilion({ spriteRef = null } = {}) {
   const { data, error } = useApi("/now/autopilot-tick", { poll: 5_000 });
   const state = derivePavilionState(data);
+  const lifecycle = data?.lifecycle ?? null;
+  const lifecycleState = lifecycle?.state ?? "idle";
+  const isRunning = lifecycleState === "running";
+  // "last run ended N ago (<term_reason>)" — shown when the most-recent
+  // run is terminal (ended / crashed / idle-with-prior-run).
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  const endedAgo = relativeAgo(lifecycle?.endedEpoch, nowEpoch);
+  const lastRunLine =
+    !isRunning && endedAgo
+      ? `last run ended ${endedAgo}${lifecycle?.termReason ? ` (${lifecycle.termReason})` : ""}`
+      : "";
   // Slice 6: fetch the run row in parallel for LV/EXP derivation. The
   // poll cadence is half as frequent as the tick to keep the request
   // budget reasonable; LV moves slowly anyway.
@@ -52,12 +90,12 @@ export default function AutopilotPavilion({ spriteRef = null } = {}) {
           Autopilot Pavilion
         </h2>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-zinc-500">
-            {state.mode === "running"
-              ? "trainer is on the job"
-              : state.mode === "stopped"
-                ? "trainer is asleep"
-                : "trainer is waiting"}
+          <span
+            className="text-xs text-zinc-500"
+            data-testid="pavilion-lifecycle-caption"
+            data-lifecycle={lifecycleState}
+          >
+            {lifecycleCaption(lifecycleState)}
           </span>
           <AlertsNoticeBoard />
         </div>
@@ -75,17 +113,27 @@ export default function AutopilotPavilion({ spriteRef = null } = {}) {
               width: 96,
               height: 96,
               imageRendering: "pixelated",
-              filter: state.mode === "running" ? "none" : "grayscale(80%)",
+              filter: isRunning ? "none" : "grayscale(80%)",
             }}
           />
         </div>
         <div className="flex-1 min-w-0">
-          {state.mode === "running" ? (
+          {isRunning ? (
             <PavilionStats state={state} exp={exp} />
           ) : (
-            <p className="text-sm text-zinc-400">
-              {error ? `Error: ${error}` : state.emptyMessage}
-            </p>
+            <div className="space-y-1">
+              <p className="text-sm text-zinc-400">
+                {error ? `Error: ${error}` : state.emptyMessage}
+              </p>
+              {lastRunLine ? (
+                <p
+                  className="text-xs text-zinc-500"
+                  data-testid="pavilion-last-run-line"
+                >
+                  {lastRunLine}
+                </p>
+              ) : null}
+            </div>
           )}
         </div>
       </div>

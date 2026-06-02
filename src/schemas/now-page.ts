@@ -52,12 +52,34 @@ export type ServiceStripResponse = z.infer<typeof ServiceStripResponseSchema>;
  * we project them into a stable shape rather than passing the underlying
  * payloads through unchanged.
  *
- * - `running` — scheduler `running` flag.
+ * - `running` — TRUE iff `lifecycle.state === "running"` (issue #888). No
+ *   longer derived from the scheduler housekeeping heartbeat; the latest
+ *   autopilot run must be `running` with a live pid.
  * - `lastTickAt` — heartbeat surface for the housekeeping tick (issue #397).
  *   May be `null` when the scheduler hasn't ticked yet this process.
  * - `currentRun` — projected current autopilot run, when one is in
  *   `status: running`. `null` otherwise.
+ * - `lifecycle` — discriminated autopilot lifecycle truth (issue #888):
+ *   `running` | `idle` | `ended` | `crashed`, with `term_reason` +
+ *   `ended_epoch` populated when the most-recent run is terminal so the
+ *   UI can render "last run ended N ago (<term_reason>)".
  */
+export const AutopilotLifecycleStateSchema = z.enum([
+  "running",
+  "idle",
+  "ended",
+  "crashed",
+]);
+
+export const AutopilotLifecycleSchema = z
+  .object({
+    state: AutopilotLifecycleStateSchema,
+    runId: z.string().nullable(),
+    termReason: z.string().nullable(),
+    endedEpoch: z.number().int().nonnegative().nullable(),
+  })
+  .strict();
+
 export const AutopilotCurrentRunSchema = z
   .object({
     id: z.string(),
@@ -75,11 +97,13 @@ export const AutopilotTickResponseSchema = z
     running: z.boolean(),
     lastTickAt: z.string().nullable(),
     currentRun: AutopilotCurrentRunSchema.nullable(),
+    lifecycle: AutopilotLifecycleSchema,
     generatedAt: z.string(),
   })
   .strict();
 
 export type AutopilotTickResponse = z.infer<typeof AutopilotTickResponseSchema>;
+export type AutopilotLifecyclePayload = z.infer<typeof AutopilotLifecycleSchema>;
 
 // ---------------------------------------------------------------------------
 // Active dispatches

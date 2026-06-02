@@ -177,8 +177,14 @@ export function isPidAlive(pid: number): boolean {
  * Read-time sweeper. If `row.status === "running"` and the pid is
  * dead, promote to `status: killed, term_reason: crash`. Idempotent.
  * Only the `running → killed/crash` direction.
+ *
+ * Exported so other read surfaces that scan autopilot run rows (e.g. the
+ * active-dispatches aggregator's autopilot sub-source, issue #888) can
+ * apply the SAME liveness rule rather than trusting `status: running`
+ * verbatim — a crashed run that never POSTed its run-end would otherwise
+ * linger as a phantom in-flight dispatch until the 7-day TTL.
  */
-async function sweepRunIfDead(
+export async function sweepRunIfDead(
   runId: string,
   row: Record<string, string>,
 ): Promise<{ row: Record<string, string>; swept: boolean }> {
@@ -744,6 +750,144 @@ export async function projectRunDigest(
     total_cost_usd: cost.dispatched_cost_usd,
     exit_code: row.exit_code !== undefined ? Number(row.exit_code) : null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle truth (issue #888)
+// ---------------------------------------------------------------------------
+
+/**
+ * Discriminated autopilot lifecycle state derived from the most-recent
+ * run row. The data plane's single source of truth for "is autopilot
+ * running right now" — replacing the conflation of `getStatus().running`
+ * (the scheduler housekeeping heartbeat) with autopilot liveness.
+ *
+ *   - `running` — the latest run's status is `running` AND its recorded
+ *     pid is alive. A terminal most-recent run is NEVER `running`.
+ *   - `crashed` — the latest run was killed / its pid died mid-run
+ *     (status `killed` or `term_reason` `crash`). The read-time sweeper
+ *     in `sweepRunIfDead` promotes a dead-pid running row into this
+ *     shape, so a stale `running` row with a dead pid also lands here.
+ *   - `ended` — the latest run terminated cleanly (status `ended` with a
+ *     non-crash `term_reason`).
+ *   - `idle` — there is no run at all, OR the most-recent run is terminal
+ *     in a way that is neither a clean end nor a crash (defensive
+ *     fallback). The UI shows "last run ended N ago".
+ */
+export type AutopilotLifecycleState = "running" | "idle" | "ended" | "crashed";
+
+export interface AutopilotLifecycle {
+  state: AutopilotLifecycleState;
+  /** The run this state was derived from. `null` when no run exists. */
+  run_id: string | null;
+  /**
+   * `term_reason` of the most-recent terminal run, surfaced so the UI can
+   * render "last run ended N ago (<term_reason>)". `null` while running
+   * or when no terminal run exists.
+   */
+  term_reason: string | null;
+  /**
+   * Epoch (Unix seconds) the most-recent run ended. `null` while running
+   * or when no terminal run exists. Lets the UI compute "N ago".
+   */
+  ended_epoch: number | null;
+}
+
+/**
+ * Pure derivation of {@link AutopilotLifecycle} from an already-swept run
+ * row. `row` is `null` when no autopilot run has ever been recorded.
+ *
+ * Pure — no Redis, no clock — so the route layer and tests can pin it.
+ * Callers MUST pass the row AFTER `sweepRunIfDead` so a dead-pid `running`
+ * row has already been promoted to `killed`/`crash`; the pid re-check
+ * here is belt-and-braces for callers (e.g. raw projections) that skip
+ * the sweep.
+ */
+export function deriveLifecycleState(
+  row: Record<string, string> | null | undefined,
+): AutopilotLifecycle {
+  if (!row || !row.status) {
+    return { state: "idle", run_id: null, term_reason: null, ended_epoch: null };
+  }
+  const runId = row.run_id || null;
+  const status = row.status;
+  const termReason = row.term_reason || null;
+  const endedEpoch = row.ended_epoch ? Number(row.ended_epoch) : null;
+  const resolvedEnded =
+    endedEpoch !== null && Number.isFinite(endedEpoch) ? endedEpoch : null;
+
+  if (status === "running") {
+    const pid = Number(row.pid || "0");
+    if (isPidAlive(pid)) {
+      return { state: "running", run_id: runId, term_reason: null, ended_epoch: null };
+    }
+    // Dead-pid running row a sweep would have promoted — report crashed.
+    return {
+      state: "crashed",
+      run_id: runId,
+      term_reason: termReason || "crash",
+      ended_epoch: resolvedEnded,
+    };
+  }
+
+  if (status === "killed" || termReason === "crash") {
+    return {
+      state: "crashed",
+      run_id: runId,
+      term_reason: termReason || "crash",
+      ended_epoch: resolvedEnded,
+    };
+  }
+
+  if (status === "ended") {
+    return {
+      state: "ended",
+      run_id: runId,
+      term_reason: termReason,
+      ended_epoch: resolvedEnded,
+    };
+  }
+
+  // Any other terminal status — defensive idle fallback.
+  return {
+    state: "idle",
+    run_id: runId,
+    term_reason: termReason,
+    ended_epoch: resolvedEnded,
+  };
+}
+
+export type GetCurrentLifecycleResult = Ok<{ lifecycle: AutopilotLifecycle }> | Err;
+
+/**
+ * Read the most-recent run, apply the dead-pid sweeper, and derive the
+ * discriminated lifecycle state. Unlike {@link getCurrentRun}, this never
+ * 404s on a terminal most-recent run — it reports `idle` / `ended` /
+ * `crashed` for it. When no run has ever been recorded, returns the
+ * `idle` shape with `run_id: null`.
+ */
+export async function getCurrentLifecycle(): Promise<GetCurrentLifecycleResult> {
+  try {
+    const recent = await listRecentAutopilotRunIds(1);
+    if (!recent || recent.length === 0) {
+      return {
+        ok: true,
+        lifecycle: { state: "idle", run_id: null, term_reason: null, ended_epoch: null },
+      };
+    }
+    const runId = recent[0];
+    const row = await getAutopilotRun(runId);
+    if (!row || !row.started) {
+      return {
+        ok: true,
+        lifecycle: { state: "idle", run_id: null, term_reason: null, ended_epoch: null },
+      };
+    }
+    const sweepResult = await sweepRunIfDead(runId, row);
+    return { ok: true, lifecycle: deriveLifecycleState(sweepResult.row) };
+  } catch (err: any) {
+    return errRedis(err);
+  }
 }
 
 // ---------------------------------------------------------------------------
