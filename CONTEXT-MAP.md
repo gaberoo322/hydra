@@ -33,4 +33,12 @@ The deep-module discipline is the load-bearing simplicity strategy here: each Se
 
 ## When a term is missing
 
-If the concept you need isn't in any glossary, that's a signal: either you're inventing language the project doesn't use (reconsider), or there's a real gap — resolve it with `/grill-with-docs`, which writes the term into the right `CONTEXT.md` (co-located if the domain has one, else the root glossary).
+If the concept you need isn't in any glossary, that's a signal: either you're inventing language the project doesn't use (reconsider), or there's a real gap — resolve it with `/grill-with-docs`, which captures the term as a **`## Glossary delta`** (see below) for the implementing PR to land.
+
+## How a term lands
+
+Glossary and ADR deltas land per the **WRITE contract** in [`docs/agents/domain.md`](./docs/agents/domain.md): a **separate `ubiquitous-language`-labelled PR** carries the glossary/ADR delta — it is **not** bundled into the code PR. Each code PR instead **declares** `Glossary impact:` / `ADR impact:` in its body, naming the term/ADR. This keeps the delta landing through the **Pre-merge Gate** (never edited inline on `master` and left uncommitted — that orphan-on-master state is the failure this contract prevents) while keeping glossary review a separate concern from code review.
+
+`/grill-with-docs`'s generic "edit `CONTEXT.md` inline as terms resolve" instruction is **overridden here** by that contract: grilling emits a `## Glossary delta` block (full term entries in the `grill-with-docs` `CONTEXT-FORMAT.md` shape) for the `ubiquitous-language` PR to land — it does not write the live glossary directly.
+
+Prefer the **co-located** `CONTEXT.md` when the domain has one (less contention on the single root file — the ADR-0014 deep-module direction); fall back to the root glossary only for genuinely cross-cutting terms.
