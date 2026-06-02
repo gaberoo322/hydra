@@ -21,11 +21,14 @@ import { Router } from "express";
 
 import {
   AlertsNowQuerySchema,
+  AutopilotHealthQuerySchema,
   type ServiceStripResponse,
   type AutopilotTickResponse,
   type ActiveDispatchesResponse,
   type CostBurnResponse,
   type AlertsNowResponse,
+  type AutopilotHealthResponse,
+  type StuckSignal,
   type AutopilotCurrentRunSchema,
   type AutopilotLifecyclePayload,
 } from "../schemas/now-page.ts";
@@ -46,6 +49,10 @@ import {
   type CostBurnDeps,
   type CostBurn,
 } from "../aggregators/cost-burn.ts";
+import {
+  getAutopilotHealth,
+  type AutopilotHealthDeps,
+} from "../aggregators/autopilot-health.ts";
 import * as defaultRecsRedis from "../redis/recommendations.ts";
 import { RUN_TTL_SECONDS } from "../autopilot/runs.ts";
 
@@ -131,6 +138,8 @@ export interface NowPageRouterDeps {
   getActiveDispatches?: (deps?: ActiveDispatchesDeps) => Promise<Dispatch[]>;
   /** Cost-burn aggregator override. */
   getCostBurn?: (deps?: CostBurnDeps) => Promise<CostBurn>;
+  /** Autopilot-health (stuck-signals) aggregator override (issue #890). */
+  getAutopilotHealth?: (deps?: AutopilotHealthDeps) => Promise<StuckSignal[]>;
   /**
    * Reader for the scheduler status — projected to the shape the
    * autopilot-tick endpoint needs. Tests stub this; production wiring
@@ -172,6 +181,7 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   const aggregateServiceStrip = deps.getServiceStrip ?? getServiceStrip;
   const aggregateDispatches = deps.getActiveDispatches ?? getActiveDispatches;
   const aggregateCostBurn = deps.getCostBurn ?? getCostBurn;
+  const aggregateAutopilotHealth = deps.getAutopilotHealth ?? getAutopilotHealth;
   const readSchedStatus = deps.readSchedulerStatus ?? defaultReadSchedulerStatus;
   const readCurrentRun = deps.readCurrentAutopilotRun ?? defaultReadCurrentRun;
   const readLifecycle = deps.readAutopilotLifecycle ?? defaultReadAutopilotLifecycle;
@@ -288,6 +298,37 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
     } catch (err: any) {
       console.error(
         `[v2/now/cost-burn] aggregator threw despite never-throw contract: ${err?.message || err}`,
+      );
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /now/autopilot-health — ranked stuck signals (issue #890)
+  // -------------------------------------------------------------------------
+  router.get("/now/autopilot-health", async (req, res) => {
+    const parsed = AutopilotHealthQuerySchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+
+    try {
+      const signals = await aggregateAutopilotHealth({
+        historyWindow: parsed.data.historyWindow,
+        now: clock(),
+      });
+      const body: AutopilotHealthResponse = {
+        signals,
+        historyWindow: parsed.data.historyWindow,
+        generatedAt: clock().toISOString(),
+      };
+      return res.json(body);
+    } catch (err: any) {
+      console.error(
+        `[now/autopilot-health] aggregator threw despite never-throw contract: ${err?.message || err}`,
       );
       return res.status(500).json({ error: err?.message || String(err) });
     }
