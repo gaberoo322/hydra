@@ -2,12 +2,18 @@
 #
 # reap-stale-test-procs.sh — defense in depth for issue #226.
 #
-# The orchestrator's exec-with-timeout.ts helper kills the full process
-# group when an in-process timeout fires. But the orchestrator does not
-# control everything that spawns tsx/esbuild on this host — Codex CLI
-# subagents, manual `npx tsx` invocations from operator shells, and Claude
-# Code worktree sessions can all leak grandchildren in failure modes we
-# cannot fix in-process.
+# The orchestrator's own deep-tree spawns (grounding's `npm test` /
+# `npm run typecheck`, the per-mutant test runs in mutation.ts) now go
+# through src/exec-with-timeout.ts (`execWithGroupCleanup`), which kills the
+# entire process group when an in-process timeout fires (wired in issue #844;
+# before that the helper was orphaned and this primary-defense claim was
+# false). That covers what the orchestrator controls.
+#
+# But the orchestrator does NOT control everything that spawns tsx/esbuild on
+# this host — Claude Code worktree sessions and manual `npx tsx` invocations
+# from operator shells can still leak grandchildren in failure modes we cannot
+# reach in-process. This reaper is the out-of-process safety net for exactly
+# those: a delayed, heuristic sweep, not the first line of defense.
 #
 # This reaper finds tsx, esbuild --service, npm-exec, and node --test
 # processes older than $MAX_AGE_MIN minutes whose ancestor tree no longer

@@ -9,9 +9,51 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { _testing } from "../src/grounding.ts";
 
-const { stripAnsi, truncate, parseTestCounts, parseFailingTests } = _testing;
+const { stripAnsi, truncate, parseTestCounts, parseFailingTests, runCmd } = _testing;
+
+/** Existence check for a list of PIDs — true if every PID is gone. */
+async function pidsDead(pids: number[]): Promise<boolean> {
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 0); // signal 0 = existence probe
+      return false; // still alive
+    } catch (err: any) {
+      if (err.code === "EPERM") return false; // alive but unreachable
+      if (err.code !== "ESRCH") throw err;
+      // ESRCH = dead — good
+    }
+  }
+  return true;
+}
+
+async function readPidFile(path: string): Promise<number[]> {
+  const { readFileSync, existsSync } = await import("node:fs");
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf-8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => parseInt(l, 10))
+    .filter((n) => Number.isFinite(n));
+}
+
+async function waitFor(
+  predicate: () => Promise<boolean>,
+  timeoutMs: number,
+  pollMs = 50,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return true;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return predicate();
+}
 
 describe("stripAnsi", () => {
   test("removes simple ANSI color codes", () => {
@@ -188,6 +230,92 @@ describe("parseFailingTests", () => {
     assert.deepEqual(parseFailingTests("all good", ""), []);
     assert.deepEqual(parseFailingTests("", ""), []);
   });
+});
+
+// -------------------------------------------------------------------------
+// runCmd — wired through execWithGroupCleanup (issue #844)
+//
+// grounding's runCmd is no longer a thin promisify(execFile) wrapper; it
+// routes the spawn primitive through src/exec-with-timeout.ts so a hung
+// `npm test` / `npm run typecheck` reaps its full process group instead of
+// leaking tsx/vitest/esbuild grandchildren. These tests assert the live path
+// behaviour: result contract, group-kill-on-timeout, and the maxBuffer-
+// overflow → non-zero parity the old ERR_CHILD_PROCESS_STDIO_MAXBUFFER
+// special-case used to provide.
+// -------------------------------------------------------------------------
+describe("runCmd (wired through execWithGroupCleanup, issue #844)", () => {
+  test("successful command returns exitCode 0 and stdout", async () => {
+    const r = await runCmd("echo", ["hello-grounding"], { timeout: 5000 });
+    assert.equal(r.exitCode, 0);
+    assert.match(r.stdout, /hello-grounding/);
+    assert.ok(typeof r.durationMs === "number");
+  });
+
+  test("failing command yields a non-zero exitCode without throwing", async () => {
+    const r = await runCmd("/bin/sh", ["-c", "exit 3"], { timeout: 5000 });
+    assert.equal(r.exitCode, 3);
+  });
+
+  test("forces NO_COLOR / FORCE_COLOR in the child env (parser parity)", async () => {
+    const r = await runCmd(
+      "/bin/sh",
+      ["-c", "printf 'NO_COLOR=%s FORCE_COLOR=%s' \"$NO_COLOR\" \"$FORCE_COLOR\""],
+      { timeout: 5000 },
+    );
+    assert.match(r.stdout, /NO_COLOR=1 FORCE_COLOR=0/);
+  });
+
+  test(
+    "REGRESSION (issue #226/#844): a timed-out command reaps its full process group",
+    async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "grounding-reap-"));
+      const pidFile = join(tmp, "pids");
+      const script = join(tmp, "leaker.sh");
+      writeFileSync(
+        script,
+        [
+          "#!/bin/bash",
+          "set -e",
+          "(",
+          "  sleep 30 &",
+          "  echo $! >> " + JSON.stringify(pidFile),
+          "  wait",
+          ") &",
+          "echo $$ >> " + JSON.stringify(pidFile),
+          "echo $! >> " + JSON.stringify(pidFile),
+          "sleep 60",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      try {
+        // Short timeout forces the group-kill path through grounding's runCmd.
+        const r = await runCmd("/bin/bash", [script], { timeout: 600 });
+        // A timed-out / signal-killed run surfaces a non-zero exitCode so the
+        // grounding parseStatus classifies it as "errored", never a clean run.
+        assert.notEqual(r.exitCode, 0, "timed-out run must be non-zero");
+
+        const pids = await readPidFile(pidFile);
+        assert.ok(pids.length >= 2, `expected >=2 PIDs, got ${pids.length}`);
+        const allDead = await waitFor(() => pidsDead(pids), 3000);
+        if (!allDead) {
+          const stillAlive = pids.filter((pid) => {
+            try {
+              process.kill(pid, 0);
+              return true;
+            } catch {
+              return false;
+            }
+          });
+          assert.fail(
+            `#226 regression via grounding.runCmd: PIDs still alive after timeout: ${stillAlive.join(",")}`,
+          );
+        }
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 // shouldCleanWorkingTree() tests retired with src/prepare-workspace.ts

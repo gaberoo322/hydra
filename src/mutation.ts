@@ -33,11 +33,8 @@
  * does) — do not resurrect the CycleContext-coupled gate that lived here.
  */
 
-import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { execWithGroupCleanup } from "./exec-with-timeout.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -296,21 +293,31 @@ export async function runMutationTests(
     try {
       await writeFile(mutation.file, mutatedContent);
 
-      // Run tests
+      // Run tests through execWithGroupCleanup (issue #844). The adapter is
+      // passed shell:true to reproduce the previous execFile({shell:true})
+      // coercion: the whole `cmd + args` is re-joined and evaluated by
+      // `/bin/sh -c`, so a `testCommand` like "npm test" works the same way.
+      // On a per-mutant test timeout the adapter now reaps the entire process
+      // group (tsx/vitest/esbuild grandchildren) instead of leaking them.
+      //
+      // Killed-mutant classification transform (#844): the adapter never
+      // throws, so we no longer rely on a thrown exception to mean "killed".
+      // New rule — a mutant SURVIVED iff the run exited 0 AND did not time
+      // out; anything else (non-zero exit, signal, or timeout) is a KILLED
+      // mutant (the desired signal). A timed-out mutant therefore stays
+      // "killed" but its process group is reaped.
       const [cmd, ...args] = testCommand.split(/\s+/);
-      try {
-        await execFileAsync(cmd, args, {
-          cwd: appDir,
-          timeout: MT_TEST_TIMEOUT_MS,
-          env: process.env,
-          shell: true,
-          maxBuffer: 1024 * 1024 * 5,
-        });
-        // Tests passed with mutation = SURVIVED (bad)
-        results.push({ mutation, survived: true, skipped: false });
-      } catch { /* intentional: test failure under mutation = killed mutant (the desired signal) */
-        results.push({ mutation, survived: false, skipped: false });
-      }
+      const run = await execWithGroupCleanup(cmd, args, {
+        cwd: appDir,
+        timeout: MT_TEST_TIMEOUT_MS,
+        env: process.env,
+        shell: true,
+        maxBuffer: 1024 * 1024 * 5,
+      });
+      const survived = run.exitCode === 0 && !run.timedOut;
+      // survived === true  → tests still passed under the mutation (bad coverage)
+      // survived === false → mutation killed (failure, signal, or timeout)
+      results.push({ mutation, survived, skipped: false });
     } finally {
       // Always restore the original file
       await writeFile(mutation.file, originalContent);
