@@ -1,11 +1,10 @@
-import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { promisify } from "node:util";
-const execFileAsync = promisify(execFile);
+import { execWithGroupCleanup } from "./exec-with-timeout.ts";
 
 const CMD_TIMEOUT = 120_000; // 2 min per command (parallel tests complete in ~40s)
 const OUTPUT_LIMIT = 10_000; // truncate stdout/stderr to 10KB
+const RUN_CMD_MAX_BUFFER = 5 * 1024 * 1024; // 5MB — see runCmd maxBuffer-overflow note
 
 function truncate(str, limit = OUTPUT_LIMIT) {
   if (!str || str.length <= limit) return str || "";
@@ -59,27 +58,39 @@ async function runCmd(cmd, args,  opts: Record<string, any> = {}) {
     NO_COLOR: "1",
     FORCE_COLOR: "0",
   };
-  try {
-    const { stdout, stderr } = await execFileAsync(cmd, args, {
-      cwd: opts.cwd,
-      timeout,
-      env: childEnv,
-      maxBuffer: 1024 * 1024 * 5, // 5MB
-    });
-    return {
-      exitCode: 0,
-      stdout: truncate(stdout),
-      stderr: truncate(stderr),
-      durationMs: Date.now() - start,
-    };
-  } catch (err: any) {
-    return {
-      exitCode: err.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? 1 : (err.status ?? err.code ?? 1),
-      stdout: truncate(err.stdout),
-      stderr: truncate(err.stderr || err.message),
-      durationMs: Date.now() - start,
-    };
-  }
+  // Route through execWithGroupCleanup (shell:false default — these are
+  // direct execFile-style spawns: npm/tsc/git/grep with explicit args, no
+  // shell coercion). On timeout the adapter kills the entire process group
+  // (issue #226 / #844), so leaked tsx/vitest/esbuild grandchildren no longer
+  // survive a hung `npm test` / `npm run typecheck`.
+  //
+  // The adapter never throws — it resolves with a result object — so the old
+  // throw/catch error path collapses to result inspection.
+  const result = await execWithGroupCleanup(cmd, args, {
+    cwd: opts.cwd,
+    timeout,
+    env: childEnv,
+    maxBuffer: RUN_CMD_MAX_BUFFER,
+  });
+
+  // maxBuffer-overflow parity (#844): the old code special-cased
+  // ERR_CHILD_PROCESS_STDIO_MAXBUFFER → exitCode 1 so an overflowing run was
+  // never read as a clean success. The adapter instead truncates and resolves
+  // with the real exitCode, so a >5MB run that exits 0 would otherwise leak
+  // through as success. Preserve the non-zero-on-overflow contract: if either
+  // stream overflowed, force a non-zero exit (1) unless the process already
+  // reported a non-zero code (keep the more specific signal in that case).
+  const overflowed =
+    result.stdout.includes(`truncated at maxBuffer=${RUN_CMD_MAX_BUFFER}`) ||
+    result.stderr.includes(`truncated at maxBuffer=${RUN_CMD_MAX_BUFFER}`);
+  const exitCode = overflowed && result.exitCode === 0 ? 1 : result.exitCode;
+
+  return {
+    exitCode,
+    stdout: truncate(result.stdout),
+    stderr: truncate(result.stderr),
+    durationMs: Date.now() - start,
+  };
 }
 
 /**
@@ -414,4 +425,4 @@ export function summarizeForPrompt(report,  opts: Record<string, any> = {}) {
  * API — external modules should use groundProject() / summarizeForPrompt() /
  * getDiff() instead.
  */
-export const _testing = { truncate, stripAnsi, parseTestCounts, parseFailingTests };
+export const _testing = { truncate, stripAnsi, parseTestCounts, parseFailingTests, runCmd };
