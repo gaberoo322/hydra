@@ -1,9 +1,11 @@
 /**
  * Regression tests for the lessons-overnight aggregator (issue #617).
  *
- * Pure helpers (`filterNearPromotion`, `parseMetaFrictionIssues`) are
- * tested directly. Integration shape uses an exec stub and a friction-
- * patterns reader stub so no Redis is required.
+ * The pure helper `filterNearPromotion` is tested directly. The meta-friction
+ * `gh` read moved to the `friction-source.ts` seam (issue #864) — its parse /
+ * createdAt-refilter / newest-first behaviour is covered by
+ * `aggregator-friction-source.test.mts`; here it's exercised end-to-end through
+ * `getOvernightLessons` with an exec stub. No Redis required.
  */
 
 import { test, describe } from "node:test";
@@ -12,12 +14,10 @@ import assert from "node:assert/strict";
 import {
   getOvernightLessons,
   filterNearPromotion,
-  parseMetaFrictionIssues,
 } from "../src/aggregators/lessons-overnight.ts";
 import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");
-const WINDOW_START = new Date(NOW.getTime() - 24 * 60 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -56,20 +56,33 @@ describe("filterNearPromotion — pure helper", () => {
   });
 });
 
-describe("parseMetaFrictionIssues — pure helper", () => {
-  test("returns [] on empty / non-array", () => {
-    assert.deepEqual(parseMetaFrictionIssues("", WINDOW_START), []);
-    assert.deepEqual(parseMetaFrictionIssues("{}", WINDOW_START), []);
+describe("meta-friction read (via seam) — windowing through getOvernightLessons", () => {
+  test("keeps issues created inside the window, drops pre-window, sorts newest-first", async () => {
+    const exec = async () => ({
+      stdout: JSON.stringify([
+        { number: 1, title: "older meta", url: "u1", createdAt: "2026-05-25T13:00:00Z" },
+        { number: 2, title: "newer meta", url: "u2", createdAt: "2026-05-26T11:00:00Z" },
+        { number: 3, title: "before window", url: "u3", createdAt: "2026-05-24T00:00:00Z" },
+      ]),
+      stderr: "",
+    });
+    const lessons = await getOvernightLessons(24, {
+      now: NOW,
+      execFileAsync: exec,
+      readFrictionPatterns: async () => [],
+    });
+    // WINDOW_START = NOW - 24h = 2026-05-25T12:00:00Z; #3 is before it.
+    assert.deepEqual(lessons.metaFrictionOpened.map((i) => i.number), [2, 1]);
   });
 
-  test("keeps issues created inside the window, sorts newest-first", () => {
-    const stdout = JSON.stringify([
-      { number: 1, title: "older meta", url: "u1", createdAt: "2026-05-25T13:00:00Z" },
-      { number: 2, title: "newer meta", url: "u2", createdAt: "2026-05-26T11:00:00Z" },
-      { number: 3, title: "before window", url: "u3", createdAt: "2026-05-24T00:00:00Z" },
-    ]);
-    const out = parseMetaFrictionIssues(stdout, WINDOW_START);
-    assert.deepEqual(out.map((i) => i.number), [2, 1]);
+  test("non-array gh payload degrades to empty bucket (never throws)", async () => {
+    const exec = async () => ({ stdout: "{}", stderr: "" });
+    const lessons = await getOvernightLessons(24, {
+      now: NOW,
+      execFileAsync: exec,
+      readFrictionPatterns: async () => [],
+    });
+    assert.deepEqual(lessons.metaFrictionOpened, []);
   });
 });
 

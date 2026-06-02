@@ -24,21 +24,21 @@
  *
  * # Design contract
  *
- * - **Pure parsers exported.** `parseMetaFrictionIssues` and
- *   `filterNearPromotion` are tested directly.
+ * - **Pure parser exported.** `filterNearPromotion` is tested directly. The
+ *   meta-friction `gh` read lives on the `friction-source.ts` seam (issue
+ *   #864), shared with `friction-patterns.ts` and `lessons-trend.ts`.
  * - **Never throws.** Sub-fetch failure degrades to `[]` for that bucket.
  * - **Threshold is the runtime constant.** Imports `PROMOTION_THRESHOLD`
  *   from `pattern-memory/agent-memory.ts` so a future bump to the
  *   threshold flows through without a parallel edit here.
  */
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
-
 import { PROMOTION_THRESHOLD } from "../pattern-memory/agent-memory.ts";
-import { readFrictionPatterns } from "./friction-source.ts";
-
-const execFile = promisify(execFileSync);
+import {
+  readFrictionPatterns,
+  readMetaFrictionIssues,
+  type MetaFrictionIssue,
+} from "./friction-source.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -53,12 +53,7 @@ export interface PromotionCandidate {
   examples: string[];
 }
 
-export interface MetaFrictionIssue {
-  number: number;
-  title: string;
-  url: string;
-  createdAt: string;
-}
+export type { MetaFrictionIssue };
 
 export interface OvernightLessons {
   promotionCandidates: PromotionCandidate[];
@@ -115,7 +110,7 @@ export async function getOvernightLessons(
 
   const [candidatesResult, issuesResult] = await Promise.allSettled([
     readPromotionCandidates(candidateWindow, deps),
-    readMetaFrictionIssues(windowStart, deps),
+    readMetaFrictionIssues("lessons-overnight", windowStart, deps),
   ]);
 
   return {
@@ -186,85 +181,5 @@ export function filterNearPromotion(
         : [],
     });
   }
-  return out;
-}
-
-
-// ---------------------------------------------------------------------------
-// Sub-source: meta-friction issues opened in window
-// ---------------------------------------------------------------------------
-
-async function readMetaFrictionIssues(
-  windowStart: Date,
-  deps: LessonsOvernightDeps,
-): Promise<MetaFrictionIssue[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
-  if (!repo) return [];
-  const sinceDate = windowStart.toISOString().split("T")[0];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "all",
-      "--label",
-      "meta-friction",
-      "--search",
-      `created:>=${sinceDate}`,
-      "--limit",
-      "100",
-      "--json",
-      "number,title,url,createdAt",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return parseMetaFrictionIssues(stdout, windowStart);
-}
-
-/**
- * Pure helper — exported for tests. Parses `gh issue list --json` output for
- * the meta-friction label query and re-filters on createdAt so sub-day
- * windows don't include items from the search's coarser date-prefix
- * resolution.
- */
-export function parseMetaFrictionIssues(
-  jsonStdout: string,
-  windowStart: Date,
-): MetaFrictionIssue[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const startMs = windowStart.getTime();
-  const out: MetaFrictionIssue[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      title?: unknown;
-      url?: unknown;
-      createdAt?: unknown;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    const createdAt = typeof c.createdAt === "string" ? c.createdAt : "";
-    const createdMs = Date.parse(createdAt);
-    if (!Number.isFinite(createdMs) || createdMs < startMs) continue;
-    out.push({
-      number,
-      title: typeof c.title === "string" ? c.title : `Issue #${number}`,
-      url: typeof c.url === "string" ? c.url : `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt,
-    });
-  }
-  out.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   return out;
 }

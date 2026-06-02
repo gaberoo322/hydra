@@ -1,9 +1,13 @@
 /**
  * Regression tests for the lessons-trend aggregator (issue #619).
  *
- * Pure helpers (`collectPromoted`, `promotionsByDay`, `pickTopFriction`,
- * `parseMetaFrictionCount`) are tested directly. Integration uses a
- * stub friction-pattern reader + exec stub so no Redis is required.
+ * Pure helpers (`collectPromoted`, `promotionsByDay`, `pickTopFriction`) are
+ * tested directly. The meta-friction count is now derived from the
+ * `friction-source.ts` seam reader's `.length` (issue #864) — its parse /
+ * createdAt-refilter is covered by `aggregator-friction-source.test.mts` and
+ * exercised end-to-end here through `getLessonsTrend` with an exec stub.
+ * Integration uses a stub friction-pattern reader + exec stub so no Redis is
+ * required.
  */
 
 import { test, describe } from "node:test";
@@ -14,7 +18,6 @@ import {
   collectPromoted,
   promotionsByDay,
   pickTopFriction,
-  parseMetaFrictionCount,
 } from "../src/aggregators/lessons-trend.ts";
 import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
 import type { FrictionPattern } from "../src/aggregators/lessons-overnight.ts";
@@ -221,23 +224,35 @@ describe("pickTopFriction — pure helper", () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseMetaFrictionCount
+// meta-friction count (derived from the seam reader's .length, issue #864)
 // ---------------------------------------------------------------------------
 
-describe("parseMetaFrictionCount — pure helper", () => {
-  test("returns 0 on empty / non-array", () => {
-    assert.equal(parseMetaFrictionCount("", WINDOW_START), 0);
-    assert.equal(parseMetaFrictionCount("{}", WINDOW_START), 0);
+describe("metaFrictionOpened — derived from seam reader length", () => {
+  test("counts only items inside the window via getLessonsTrend", async () => {
+    // windowStart = NOW - 7d = 2026-05-19T12:00:00Z.
+    const exec = async () => ({
+      stdout: JSON.stringify([
+        { number: 1, title: "in", url: "u1", createdAt: "2026-05-26T01:00:00Z" }, // inside
+        { number: 2, title: "before", url: "u2", createdAt: "2026-05-19T11:00:00Z" }, // just BEFORE start → outside
+        { number: 3, title: "in", url: "u3", createdAt: "2026-05-20T00:00:00Z" }, // inside
+      ]),
+      stderr: "",
+    });
+    const response = await getLessonsTrend(7, {
+      now: NOW,
+      execFileAsync: exec,
+      readFrictionPatterns: async () => [],
+    });
+    assert.equal(response.metaFrictionOpened, 2);
   });
 
-  test("counts only items inside the window", () => {
-    // WINDOW_START is 7 days before NOW (2026-05-26T12:00:00Z) → 2026-05-19T12:00:00Z.
-    const json = JSON.stringify([
-      { number: 1, createdAt: "2026-05-26T01:00:00Z" }, // inside
-      { number: 2, createdAt: "2026-05-19T11:00:00Z" }, // just BEFORE start → outside
-      { number: 3, createdAt: "2026-05-20T00:00:00Z" }, // inside
-    ]);
-    assert.equal(parseMetaFrictionCount(json, WINDOW_START), 2);
+  test("non-array gh payload → count 0 (never throws)", async () => {
+    const response = await getLessonsTrend(7, {
+      now: NOW,
+      execFileAsync: async () => ({ stdout: "{}", stderr: "" }),
+      readFrictionPatterns: async () => [],
+    });
+    assert.equal(response.metaFrictionOpened, 0);
   });
 });
 
