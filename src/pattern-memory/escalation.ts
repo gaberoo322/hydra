@@ -36,12 +36,20 @@
  * When unset, the real `gh` on PATH is used. Tests also set
  * `HYDRA_ESCALATION_DISABLED=1` to disable the escalation entirely in
  * tests that exercise the threshold-cross hook without needing the gh path.
+ *
+ * GitHub CLI Adapter (issue #896)
+ * -------------------------------
+ * This module was the tracer-bullet caller migrated onto the `src/github/`
+ * seam. Its private `runGh()`/`ghBin()` folded into `github/exec.ts` +
+ * `github/gh.ts` — `gh` invocations now go through `ghExec()` / `ghJson()`,
+ * which own the `HYDRA_GH_BIN` override, the 15s timeout, and the four error
+ * modes. The accessors return a discriminated result and never throw; the
+ * existing best-effort try/catch in `escalatePatternToIssue()` is preserved as
+ * defence-in-depth, but the failure path is now driven by `result.ok === false`.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { ghExec, ghJson } from "../github/gh.ts";
+import { isGhFailure } from "../github/exec.ts";
 
 const REPO = process.env.HYDRA_GH_REPO || "gaberoo322/hydra";
 const META_FRICTION_LABEL = "meta-friction";
@@ -143,10 +151,6 @@ export type EscalationResult =
   | { status: "skipped"; reason: string }
   | { status: "error"; error: string };
 
-function ghBin(): string {
-  return process.env.HYDRA_GH_BIN || "gh";
-}
-
 function isDisabled(): boolean {
   const raw = process.env.HYDRA_ESCALATION_DISABLED;
   if (!raw) return false;
@@ -203,16 +207,28 @@ function buildCommentBody(input: EscalationInput): string {
   return parts.join("\n");
 }
 
-async function runGh(args: string[]): Promise<{ stdout: string; stderr: string }> {
-  const { stdout, stderr } = await execFileAsync(ghBin(), args, { timeout: 15000 });
-  return { stdout, stderr };
+/**
+ * Thrown when a `gh` invocation fails at the process level (non-zero exit,
+ * timeout, binary missing). Carries the seam's machine-readable `code` so the
+ * top-level `escalatePatternToIssue` catch can surface it. This is internal to
+ * escalation.ts — the seam itself never throws; this adapts the seam's
+ * result-object failure arm back onto the module's existing throw-and-catch
+ * best-effort flow.
+ */
+class GhInvocationError extends Error {
+  readonly code: string;
+  constructor(code: string, stderr: string) {
+    super(stderr || `gh failed: ${code}`);
+    this.name = "GhInvocationError";
+    this.code = code;
+  }
 }
 
 type ExistingIssue = { number: number; state: "OPEN" | "CLOSED"; title: string };
 
 /**
  * Find an existing meta-friction issue matching this cue. Returns the
- * newest match. Pure-ish — the only side effect is the gh call.
+ * newest match. Side effect: the gh call (now via the `src/github/` seam).
  */
 export async function findExistingIssue(cue: string): Promise<ExistingIssue | null> {
   // `gh issue list --search` uses GitHub's search syntax; quoting the cue
@@ -231,13 +247,16 @@ export async function findExistingIssue(cue: string): Promise<ExistingIssue | nu
     "--limit",
     "5",
   ];
-  const { stdout } = await runGh(args);
-  let parsed: any[];
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return null;
+  const result = await ghJson<any[]>(args);
+  if (isGhFailure(result)) {
+    // gh-empty / gh-malformed-json mean "no usable existing match" — degrade to
+    // null (the create path), matching the pre-seam JSON.parse-failure behavior.
+    if (result.code === "gh-empty" || result.code === "gh-malformed-json") return null;
+    // A real process failure (non-zero exit, timeout, missing binary) propagates
+    // so the top-level catch records status="error", as before.
+    throw new GhInvocationError(result.code, result.stderr);
   }
+  const parsed = result.data;
   if (!Array.isArray(parsed) || parsed.length === 0) return null;
   // gh returns newest first; pick the first whose title actually contains the cue.
   for (const row of parsed) {
@@ -258,27 +277,25 @@ export async function findExistingIssue(cue: string): Promise<ExistingIssue | nu
  * a non-zero exit which we swallow).
  */
 async function ensureLabel(): Promise<void> {
-  try {
-    await runGh([
-      "label",
-      "create",
-      META_FRICTION_LABEL,
-      "--repo",
-      REPO,
-      "--description",
-      "Auto-escalated friction or lesson pattern from the learning system (issue #512)",
-      "--color",
-      "FBCA04",
-      "--force",
-    ]);
-  } catch (err: any) {
-    // `--force` makes gh treat "exists" as success on modern gh; older gh
-    // versions exit non-zero. Either way we swallow — the create-issue call
-    // will fail loudly later if the label genuinely doesn't exist.
-    const msg = String(err?.stderr || err?.message || "");
-    if (!/already exists/i.test(msg)) {
-      console.error(`[escalation] ensureLabel best-effort error: ${msg.slice(0, 200)}`);
-    }
+  const result = await ghExec([
+    "label",
+    "create",
+    META_FRICTION_LABEL,
+    "--repo",
+    REPO,
+    "--description",
+    "Auto-escalated friction or lesson pattern from the learning system (issue #512)",
+    "--color",
+    "FBCA04",
+    "--force",
+  ]);
+  // `--force` makes gh treat "exists" as success on modern gh; older gh
+  // versions exit non-zero. Either way we swallow — the create-issue call
+  // will fail loudly later if the label genuinely doesn't exist. The seam has
+  // already logged the failure with context, so a non-"already exists" miss is
+  // visible without an extra log line here.
+  if (isGhFailure(result) && !/already exists/i.test(result.stderr)) {
+    /* intentional: best-effort label-create; seam logged it, create-issue fails loud later */
   }
 }
 
@@ -298,15 +315,16 @@ async function createIssue(input: EscalationInput): Promise<number> {
     "--label",
     META_FRICTION_LABEL,
   ];
-  const { stdout } = await runGh(args);
+  const result = await ghExec(args);
+  if (isGhFailure(result)) throw new GhInvocationError(result.code, result.stderr);
   // gh prints the issue URL on success. Parse the trailing number.
-  const m = stdout.match(/\/issues\/(\d+)/);
+  const m = result.data.stdout.match(/\/issues\/(\d+)/);
   return m ? parseInt(m[1], 10) : 0;
 }
 
 async function commentOnIssue(issueNumber: number, input: EscalationInput): Promise<void> {
   const body = buildCommentBody(input);
-  await runGh([
+  const result = await ghExec([
     "issue",
     "comment",
     String(issueNumber),
@@ -315,10 +333,12 @@ async function commentOnIssue(issueNumber: number, input: EscalationInput): Prom
     "--body",
     body,
   ]);
+  if (isGhFailure(result)) throw new GhInvocationError(result.code, result.stderr);
 }
 
 async function reopenIssue(issueNumber: number): Promise<void> {
-  await runGh(["issue", "reopen", String(issueNumber), "--repo", REPO]);
+  const result = await ghExec(["issue", "reopen", String(issueNumber), "--repo", REPO]);
+  if (isGhFailure(result)) throw new GhInvocationError(result.code, result.stderr);
 }
 
 /**
