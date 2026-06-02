@@ -442,7 +442,7 @@ const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           what: "Watchdog inactive",
           why: `Status: "${s.sysd.watchdog}". No auto-restart on hangs.`,
           impact: "No auto-recovery.",
-          action: "systemctl --user start hydra-orchestrator-watchdog.timer",
+          action: "systemctl --user start hydra-watchdog.timer",
           autoRecovery: false,
         }
       : null,

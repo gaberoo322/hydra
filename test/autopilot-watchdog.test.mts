@@ -1,15 +1,24 @@
 /**
- * Regression test for issue #508 — scripts/hydra-autopilot-watchdog.sh.
+ * Regression test for issue #508 — the AUTOPILOT WEDGE block of the
+ * consolidated scripts/hydra-watchdog.sh.
  *
- * The watchdog is an external liveness checker for the autopilot Claude
- * Code session. It observes /tmp/hydra-autopilot-heartbeat.txt (refreshed
- * every decision turn by scripts/autopilot/heartbeat.py) and kills the
- * autopilot PID if the heartbeat goes stale past the threshold AND the
- * recorded PID is still alive AND the systemd unit is meant to be
- * active. The four scenarios pinned below are exactly the cases enumerated
- * in the issue's acceptance criteria.
+ * History (issue #865): the wedge logic used to live in its own script,
+ * scripts/hydra-autopilot-watchdog.sh, which this test pinned. The
+ * watchdog consolidation (#705/#727/#728) merged that logic verbatim into
+ * the AUTOPILOT WEDGE block of scripts/hydra-watchdog.sh and the standalone
+ * script was retired. This test was re-pointed at the wedge block; the env
+ * hooks and log-line assertions transfer verbatim because the block
+ * preserves the source logic.
  *
- * The script honours two off-by-default env vars solely for this test
+ * The wedge is an external liveness checker for the autopilot Claude Code
+ * session. It observes /tmp/hydra-autopilot-heartbeat.txt (refreshed every
+ * decision turn by scripts/autopilot/heartbeat.py) and kills the autopilot
+ * PID if the heartbeat goes stale past the threshold AND the recorded PID
+ * is still alive AND the systemd unit is meant to be active. The four
+ * scenarios pinned below are exactly the cases enumerated in the issue's
+ * acceptance criteria.
+ *
+ * The block honours two off-by-default env vars solely for this test
  * (documented in the script header):
  *   HYDRA_AUTOPILOT_WATCHDOG_FORCE_SERVICE_INACTIVE=1
  *       Skip the real `systemctl is-active` call so we don't depend on
@@ -22,6 +31,15 @@
  * All cases run with HYDRA_AUTOPILOT_STATE / HYDRA_AUTOPILOT_HEARTBEAT
  * pointed at fresh per-test tempfiles to avoid colliding with any live
  * autopilot on the dev machine.
+ *
+ * Isolation method (issue #865): the consolidated script's entry point runs
+ * three blocks on every tick — run_service_liveness (which issues real
+ * `systemctl --user restart`), run_autopilot_wedge, and run_deploy_drift
+ * (which can exec deploy.sh). Running hydra-watchdog.sh bare in a test would
+ * fire all three with dangerous side effects on a degraded host. Instead we
+ * strip the three top-level dispatch lines AND the trailing `exit 0`, source
+ * the remaining function definitions, and call run_autopilot_wedge directly —
+ * exercising ONLY the wedge block.
  */
 
 import test, { describe } from "node:test";
@@ -32,7 +50,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
-const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-autopilot-watchdog.sh");
+const WATCHDOG = join(REPO_ROOT, "scripts", "hydra-watchdog.sh");
 
 function makeTemp(): { dir: string; state: string; heartbeat: string } {
   const dir = mkdtempSync(join(tmpdir(), "autopilot-watchdog-test-"));
@@ -43,11 +61,28 @@ function makeTemp(): { dir: string; state: string; heartbeat: string } {
   };
 }
 
+/**
+ * Run ONLY the AUTOPILOT WEDGE block of the consolidated watchdog.
+ *
+ * We strip the three top-level dispatch invocations and the trailing
+ * `exit 0` from scripts/hydra-watchdog.sh, source the remaining function
+ * definitions, then call run_autopilot_wedge in isolation. This prevents
+ * run_service_liveness (real `systemctl restart`) and run_deploy_drift
+ * (can exec deploy.sh) from firing during the test.
+ */
 function runWatchdog(env: Record<string, string>): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync(WATCHDOG, [], {
+  const driver = [
+    "set -euo pipefail",
+    // Source only the function definitions: strip the three top-level
+    // dispatch lines and the final `exit 0` so sourcing defines functions
+    // without running any block.
+    `source <(sed -e '/^run_service_liveness$/d' -e '/^run_autopilot_wedge$/d' -e '/^run_deploy_drift$/d' -e '/^exit 0$/d' ${JSON.stringify(WATCHDOG)})`,
+    "run_autopilot_wedge",
+  ].join("\n");
+  const r = spawnSync("bash", ["-c", driver], {
     env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
-    timeout: 15_000, // generous — script should never block in test mode
+    timeout: 15_000, // generous — wedge block should never block in test mode
   });
   return {
     status: r.status ?? -1,
@@ -69,11 +104,15 @@ function touchAgo(path: string, secondsAgo: number): void {
   utimesSync(path, t, t);
 }
 
-describe("scripts/hydra-autopilot-watchdog.sh", () => {
-  test("watchdog script exists and is executable", () => {
+describe("scripts/hydra-watchdog.sh — AUTOPILOT WEDGE block", () => {
+  test("watchdog script exists, is executable, and defines run_autopilot_wedge", () => {
     assert.ok(existsSync(WATCHDOG), "watchdog script missing");
     const mode = spawnSync("stat", ["-c", "%a", WATCHDOG], { encoding: "utf-8" }).stdout.trim();
     assert.match(mode, /^[7][0-9]{2}$/, `watchdog not executable (mode=${mode})`);
+    // The wedge logic must live in the consolidated script as a function so
+    // this test can source-and-isolate it without firing the other blocks.
+    const grep = spawnSync("grep", ["-q", "run_autopilot_wedge()", WATCHDOG]);
+    assert.equal(grep.status, 0, "run_autopilot_wedge() not found in hydra-watchdog.sh");
   });
 
   test("service inactive (hand-launched / deliberate stop): exits 0, takes no action", () => {

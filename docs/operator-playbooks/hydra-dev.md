@@ -373,7 +373,7 @@ around without failing, so the next dispatch doesn't re-discover it.
 
 - cue: orchestrator-watchdog-units-not-in-repo
   workaround: added new install block to scripts/deploy.sh
-  context: scripts/deploy.sh, scripts/hydra-orchestrator-watchdog.sh
+  context: scripts/deploy.sh, scripts/hydra-watchdog.sh
 - cue: hook-registration-location-unspecified
   workaround: chose sibling .settings.json + extended sync-skills.sh
   context: .claude/hooks/, scripts/sync-skills.sh
