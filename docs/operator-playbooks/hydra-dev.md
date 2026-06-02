@@ -78,10 +78,11 @@ The child prompt MUST include the worktree-guard preamble (see below) AND the sc
 4. **Fetches per-anchor Reflections via the live API (see "Reflection injection — live API" below)** and, if any are returned, weaves the narrative into its implementation plan. Never skip — a retry of a prior-failure anchor depends on this.
 5. Greps/reads the source for context
 6. Implements the issue — touching out-of-scope files only with a `scope-justification:` block in the PR body
-7. Runs `npm test` + `npm run typecheck` + `npm run build`
-8. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
-9. Opens a PR with `closes #$issue_number` in the body, a `## Files in scope` mirror of the issue's section, and a `Tier: <0|1|2|3>` line populated from the API
-10. Returns: PR URL + summary table
+7. **Declares glossary/ADR impact** — per the `docs/agents/domain.md` WRITE contract, add a `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved or decision made (a `## Glossary delta` in the issue or referenced ADR names it). Do **not** edit `CONTEXT.md` in this code PR — the delta lands in a **separate `ubiquitous-language`-labelled PR**.
+8. Runs `npm test` + `npm run typecheck` + `npm run build`
+9. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
+10. Opens a PR with `closes #$issue_number` in the body, a `## Files in scope` mirror of the issue's section, and a `Tier: <0|1|2|3>` line populated from the API
+11. Returns: PR URL + summary table
 
 ### Reflection injection — live API (issue #841)
 
