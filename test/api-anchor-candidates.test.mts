@@ -21,9 +21,17 @@ import {
   getCandidateFeed,
   scoreCandidate,
   PRIORITY_TIER_BASE_SCORE,
+  isMergedWork,
+  candidateMergedTokens,
+  mergedTokensFromPr,
+  mergedTokensFromGhJson,
+  normalizeIdentity,
+  loadMergedAnchorRefsImpl,
+  __resetMergedScanCacheForTests,
   type CandidateFeedDeps,
   type CandidateDesignConcept,
 } from "../src/anchor-candidates.ts";
+import { __resetForTests as __resetTargetConfig } from "../src/target-config.ts";
 
 const ABSENT_DC: CandidateDesignConcept = {
   present: false,
@@ -42,6 +50,7 @@ function makeDeps(over: Partial<CandidateFeedDeps> = {}): CandidateFeedDeps {
     getWorkQueueItems: async () => [],
     loadLastReflectionAt: async () => null,
     loadDesignConcept: async () => ABSENT_DC,
+    loadMergedAnchorRefs: async () => new Set<string>(),
     ...over,
   };
 }
@@ -302,6 +311,281 @@ describe("getCandidateFeed — eligibility", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Merged-by-cycle suppression (issue #882) — the core fix: shipped work whose
+// PR already MERGED (no lingering OPEN PR) must NOT resurface in the feed.
+// ---------------------------------------------------------------------------
+
+describe("merged-by-cycle pure helpers (#882)", () => {
+  test("normalizeIdentity lowercases, collapses whitespace, trims", () => {
+    assert.equal(normalizeIdentity("  Foo   BAR  "), "foo bar");
+    assert.equal(normalizeIdentity(undefined as any), "");
+  });
+
+  test("mergedTokensFromPr harvests #NNN, item-NNN, and the normalized title", () => {
+    const toks = mergedTokensFromPr(
+      "feat: Polymarket CLOB V2 maker order (#910)",
+      "Closes #322\n\nImplements item-322 maker stack.",
+    );
+    assert.ok(toks.includes("910"));
+    assert.ok(toks.includes("322"));
+    assert.ok(toks.includes("item-322"));
+    assert.ok(toks.includes("feat: polymarket clob v2 maker order (#910)"));
+  });
+
+  test("candidateMergedTokens emits the bare issue number for a kanban anchor", () => {
+    const toks = candidateMergedTokens({ issue: 882, title: "Some anchor", anchorRef: "Some anchor" });
+    assert.ok(toks.includes("882"));
+    assert.ok(toks.includes("some anchor"));
+  });
+
+  test("candidateMergedTokens extracts item-NNN from a target work-queue ref", () => {
+    const toks = candidateMergedTokens({
+      issue: "item-322",
+      title: "item-322 Polymarket CLOB V2 maker order placement",
+      anchorRef: "item-322 Polymarket CLOB V2 maker order placement",
+    });
+    assert.ok(toks.includes("item-322"));
+  });
+
+  test("isMergedWork: empty merged-set never suppresses", () => {
+    assert.equal(
+      isMergedWork({ issue: 1, title: "x", anchorRef: "x" }, new Set()),
+      false,
+    );
+  });
+
+  test("isMergedWork: item-NNN candidate matches a merged item-NNN token", () => {
+    const merged = new Set(["item-322"]);
+    assert.equal(
+      isMergedWork(
+        { issue: "item-322", title: "item-322 maker order", anchorRef: "item-322 maker order" },
+        merged,
+      ),
+      true,
+    );
+  });
+
+  test("isMergedWork: kanban issue number matches a merged #NNN token", () => {
+    const merged = new Set(["882"]);
+    assert.equal(isMergedWork({ issue: 882, title: "Anchor", anchorRef: "Anchor" }, merged), true);
+  });
+
+  test("item-NNN matching is whole-word: item-302 must NOT match merged item-3020 (boundary)", () => {
+    // QA-flagged boundary (#882): the `\bitem-(\d+)\b` regex must not treat
+    // item-302 and item-3020 as the same identity. A merged item-3020 should
+    // suppress ONLY item-3020 — item-302 stays live (and vice-versa).
+    const mergedLong = new Set(["item-3020"]);
+    assert.equal(
+      isMergedWork({ issue: "item-302", title: "item-302 short id", anchorRef: "item-302 short id" }, mergedLong),
+      false,
+      "item-302 must not be suppressed by a merged item-3020",
+    );
+    assert.equal(
+      isMergedWork({ issue: "item-3020", title: "item-3020 long id", anchorRef: "item-3020 long id" }, mergedLong),
+      true,
+      "item-3020 IS suppressed by the merged item-3020 token",
+    );
+
+    const mergedShort = new Set(["item-302"]);
+    assert.equal(
+      isMergedWork({ issue: "item-3020", title: "item-3020 long id", anchorRef: "item-3020 long id" }, mergedShort),
+      false,
+      "item-3020 must not be suppressed by a merged item-302 (prefix is not a match)",
+    );
+
+    // Token harvesting itself must normalize to the exact id, not a prefix.
+    // (Filter to the canonical `item-<digits>` token shape — the normalized
+    // title `item-3020 maker order` is also harvested but is not an id token.)
+    const idTok = /^item-\d+$/;
+    assert.deepEqual(candidateMergedTokens({ issue: "item-302", title: "item-302", anchorRef: "item-302" }).filter((t) => idTok.test(t)), ["item-302"]);
+    assert.deepEqual(mergedTokensFromPr("item-3020 maker order", "").filter((t) => idTok.test(t)), ["item-3020"]);
+  });
+
+  test("mergedTokensFromGhJson parses a gh pr list payload; bad input → []", () => {
+    const json = JSON.stringify([
+      { title: "fix: thing (#5)", body: "Closes #321" },
+      { title: "item-481 shipped", body: "" },
+    ]);
+    const toks = mergedTokensFromGhJson(json);
+    assert.ok(toks.includes("5"));
+    assert.ok(toks.includes("321"));
+    assert.ok(toks.includes("item-481"));
+    assert.deepEqual(mergedTokensFromGhJson("not json"), []);
+    assert.deepEqual(mergedTokensFromGhJson(""), []);
+    assert.deepEqual(mergedTokensFromGhJson("{}"), []);
+  });
+});
+
+describe("getCandidateFeed — merged-by-cycle suppression (#882)", () => {
+  test("a target item whose work merged (no open PR) is suppressed", async () => {
+    // The #882 reproduction: item-322's maker stack shipped, no open PR,
+    // claimedBy never set — yet it kept surfacing at 0.85. With the merged set
+    // carrying item-322, the work-queue candidate must drop out of the feed.
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 Polymarket CLOB V2 maker order placement", queuedAt: isoAgo(0), source: "hydra-target-research" }),
+        JSON.stringify({ reference: "item-999 genuinely unbuilt feature", queuedAt: isoAgo(0), source: "hydra-target-research" }),
+      ],
+      loadMergedAnchorRefs: async () => new Set(["item-322"]),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const refs = feed.candidates.map((c) => c.anchorRef);
+    assert.ok(!refs.some((r) => r.includes("item-322")), "merged item-322 must not appear");
+    assert.ok(refs.some((r) => r.includes("item-999")), "unbuilt item-999 still surfaces");
+    assert.equal(feed.merged_suppressed, 1);
+  });
+
+  test("a kanban anchor whose issue merged is suppressed", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [
+          { id: 882, title: "Merged anchor", movedAt: isoAgo(0) },
+          { id: 883, title: "Still open anchor", movedAt: isoAgo(0) },
+        ],
+        backlog: [],
+      }),
+      loadMergedAnchorRefs: async () => new Set(["882"]),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const issues = feed.candidates.map((c) => c.issue);
+    assert.ok(!issues.includes(882), "merged issue 882 must be suppressed");
+    assert.ok(issues.includes(883), "open issue 883 still surfaces");
+    assert.equal(feed.merged_suppressed, 1);
+  });
+
+  test("excludeMerged=false surfaces merged candidates (escape hatch)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) }),
+      ],
+      loadMergedAnchorRefs: async () => new Set(["item-322"]),
+    });
+    const feed = await getCandidateFeed({ now: NOW, excludeMerged: false }, deps);
+    assert.equal(feed.candidates.length, 1);
+    assert.equal(feed.merged_suppressed, 0);
+  });
+
+  test("a failing merged-refs reader degrades to suppress-nothing (never throws)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) }),
+      ],
+      loadMergedAnchorRefs: async () => { throw new Error("gh unreachable"); },
+    });
+    await assert.doesNotReject(async () => {
+      const feed = await getCandidateFeed({ now: NOW }, deps);
+      // Reader failure → empty merged-set → candidate survives.
+      assert.equal(feed.candidates.length, 1);
+      assert.equal(feed.merged_suppressed, 0);
+    });
+  });
+
+  test("merged_suppressed counts both lanes; in_flight and merged are independent", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [{ id: 1, title: "Open PR", claimedBy: "pr-7", claimedAt: isoAgo(5 * 60 * 1000) }],
+        queued: [{ id: 882, title: "Merged kanban", movedAt: isoAgo(0) }],
+        backlog: [],
+      }),
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) }),
+        JSON.stringify({ reference: "item-999 unbuilt", queuedAt: isoAgo(0) }),
+      ],
+      loadMergedAnchorRefs: async () => new Set(["882", "item-322"]),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.in_flight_suppressed, 1);
+    assert.equal(feed.merged_suppressed, 2);
+    assert.deepEqual(feed.candidates.map((c) => String(c.issue)), ["item-999 unbuilt"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Production merged-refs reader (#882 QA remediation): swap-seam + TTL cache.
+// ---------------------------------------------------------------------------
+
+describe("loadMergedAnchorRefsImpl — swap seam + TTL cache (#882)", () => {
+  // A fake `gh` exec that records the repos it was asked to scan and returns a
+  // canned merged-PR payload. Shaped like promisify(execFile)'s resolution.
+  function fakeExec(payloadByRepo: Record<string, string>) {
+    const calls: string[] = [];
+    const exec = (async (_cmd: string, args: string[]) => {
+      const repoIdx = args.indexOf("--repo");
+      const repo = repoIdx >= 0 ? args[repoIdx + 1] : "";
+      calls.push(repo);
+      return { stdout: payloadByRepo[repo] ?? "[]", stderr: "" };
+    }) as any;
+    return { exec, calls };
+  }
+
+  test("scans the orchestrator repo AND the swap-seam target repo (ADR-0013)", async () => {
+    __resetMergedScanCacheForTests();
+    __resetTargetConfig();
+    process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
+    try {
+      const { exec, calls } = fakeExec({
+        "gaberoo322/hydra": JSON.stringify([{ title: "fix (#100)", body: "" }]),
+        "acme/widgets": JSON.stringify([{ title: "item-322 maker", body: "" }]),
+      });
+      const refs = await loadMergedAnchorRefsImpl(exec, 1_000_000);
+      // Both the literal orchestrator repo and the CONFIGURED target repo were
+      // scanned — NOT the hardcoded gaberoo322/hydra-betting.
+      assert.deepEqual(calls.sort(), ["acme/widgets", "gaberoo322/hydra"]);
+      assert.ok(refs.has("100"));
+      assert.ok(refs.has("item-322"));
+    } finally {
+      delete process.env.HYDRA_TARGET_GITHUB_REPO;
+      __resetTargetConfig();
+      __resetMergedScanCacheForTests();
+    }
+  });
+
+  test("a fresh cache entry (<TTL) short-circuits the gh shell-out", async () => {
+    __resetMergedScanCacheForTests();
+    __resetTargetConfig();
+    process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
+    try {
+      const { exec, calls } = fakeExec({
+        "gaberoo322/hydra": JSON.stringify([{ title: "fix (#7)", body: "" }]),
+        "acme/widgets": "[]",
+      });
+      const t0 = 5_000_000;
+      const first = await loadMergedAnchorRefsImpl(exec, t0);
+      assert.ok(first.has("7"));
+      const callsAfterFirst = calls.length; // 2 (one per repo)
+
+      // Second call 30s later — within the 60s TTL — must reuse the cache.
+      const second = await loadMergedAnchorRefsImpl(exec, t0 + 30_000);
+      assert.equal(calls.length, callsAfterFirst, "no new gh calls within TTL");
+      assert.equal(second, first, "same cached Set instance returned");
+
+      // After the TTL expires, the reader scans again.
+      const third = await loadMergedAnchorRefsImpl(exec, t0 + 61_000);
+      assert.ok(calls.length > callsAfterFirst, "gh re-scanned after TTL expiry");
+      assert.ok(third.has("7"));
+    } finally {
+      delete process.env.HYDRA_TARGET_GITHUB_REPO;
+      __resetTargetConfig();
+      __resetMergedScanCacheForTests();
+    }
+  });
+
+  test("a gh failure degrades to an empty set and is cached (never throws)", async () => {
+    __resetMergedScanCacheForTests();
+    __resetTargetConfig();
+    try {
+      const exec = (async () => { throw new Error("gh: command not found"); }) as any;
+      const refs = await loadMergedAnchorRefsImpl(exec, 9_000_000);
+      assert.equal(refs.size, 0, "total failure → empty set (suppress nothing)");
+    } finally {
+      __resetTargetConfig();
+      __resetMergedScanCacheForTests();
+    }
+  });
+});
+
 describe("getCandidateFeed — design-concept annotation (#628)", () => {
   test("every candidate carries a designConcept block; absent → present:false", async () => {
     const deps = makeDeps({
@@ -420,7 +704,10 @@ describe("GET /anchor/candidates — thin route", () => {
     const handler = findHandler(router, "GET", "/anchor/candidates");
     assert.ok(handler, "route handler must be registered");
 
-    const req: any = { query: {} };
+    // excludeMerged=false avoids spawning a real `gh pr list` subprocess in
+    // the route smoke test (the merged-scan reader, #882). The merged-suppression
+    // behaviour is exercised via injected deps in the getCandidateFeed tests.
+    const req: any = { query: { excludeMerged: "false" } };
     const res = mockRes();
     await handler(req, res);
 
@@ -429,6 +716,7 @@ describe("GET /anchor/candidates — thin route", () => {
     assert.ok("research_recommended" in res._body);
     assert.ok("total_evaluated" in res._body);
     assert.ok("in_flight_suppressed" in res._body);
+    assert.ok("merged_suppressed" in res._body);
     assert.equal(typeof res._body.generated_at, "string");
   });
 });

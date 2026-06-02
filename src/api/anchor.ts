@@ -17,7 +17,7 @@ import { getCandidateFeed } from "../anchor-candidates.ts";
 export function createAnchorRouter() {
   const router = Router();
 
-  // GET /api/anchor/candidates?limit=N&excludeInFlight=true|false
+  // GET /api/anchor/candidates?limit=N&excludeInFlight=true|false&excludeMerged=true|false
   router.get("/anchor/candidates", async (req, res) => {
     try {
       const requestedLimit = parseInt(String(req.query.limit ?? ""), 10);
@@ -29,8 +29,13 @@ export function createAnchorRouter() {
       // callers that need the raw view pass excludeInFlight=false.
       const excludeInFlight =
         String(req.query.excludeInFlight ?? "true").toLowerCase() !== "false";
+      // Issue #882 — also exclude candidates whose work already MERGED with no
+      // open PR (the in-flight window only hides fresh open-PR claims). On by
+      // default; callers that need the raw view pass excludeMerged=false.
+      const excludeMerged =
+        String(req.query.excludeMerged ?? "true").toLowerCase() !== "false";
 
-      const feed = await getCandidateFeed({ limit, excludeInFlight });
+      const feed = await getCandidateFeed({ limit, excludeInFlight, excludeMerged });
 
       res.json({
         ...feed,
