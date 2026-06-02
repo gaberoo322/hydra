@@ -41,7 +41,18 @@ export type HydraErrorCode =
   | "not-found"
   | "redis-seam"
   | "untouchable-path"
-  | "gate-invariant";
+  | "gate-invariant"
+  // GitHub CLI Adapter (src/github/) result-object codes (issue #896).
+  // These are NEVER thrown — the seam never throws (CLAUDE.md). They appear
+  // only on the failure arm of the `{ ok:false; code; stderr }` result so
+  // callers discriminate on `result.code` instead of regexing stderr prose.
+  // No `GhSeamError` subclass exists by design: the seam returns, never raises.
+  | "gh-not-installed" // the gh/git binary is not on PATH (spawn ENOENT)
+  | "gh-auth-failed" // gh ran but reported an auth/permission failure
+  | "gh-empty" // the command produced no stdout where output was required
+  | "gh-malformed-json" // --json output failed to JSON.parse
+  | "gh-timeout" // the command exceeded its timeout and was killed
+  | "gh-failed"; // gh/git exited non-zero for any other reason
 
 /**
  * Base class for all Hydra typed errors. Carries a stable `code` and sets
