@@ -177,8 +177,14 @@ export function isPidAlive(pid: number): boolean {
  * Read-time sweeper. If `row.status === "running"` and the pid is
  * dead, promote to `status: killed, term_reason: crash`. Idempotent.
  * Only the `running → killed/crash` direction.
+ *
+ * Exported so other read surfaces that scan autopilot run rows (e.g. the
+ * active-dispatches aggregator's autopilot sub-source, issue #888) can
+ * apply the SAME liveness rule rather than trusting `status: running`
+ * verbatim — a crashed run that never POSTed its run-end would otherwise
+ * linger as a phantom in-flight dispatch until the 7-day TTL.
  */
-async function sweepRunIfDead(
+export async function sweepRunIfDead(
   runId: string,
   row: Record<string, string>,
 ): Promise<{ row: Record<string, string>; swept: boolean }> {
