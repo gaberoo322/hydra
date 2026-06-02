@@ -20,16 +20,18 @@
  *   blanking the whole response.
  * - **Friction reader is overridable.** Tests pass a stub so no Redis is
  *   required.
+ * - **Shared meta-friction reader.** `metaFrictionOpened` is the `.length` of
+ *   the seam's `readMetaFrictionIssues` (issue #864) — the shared reader
+ *   already re-filters by exact `createdAt`, so its count is the in-window
+ *   total without a separate count parser.
  */
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
-
 import { PROMOTION_THRESHOLD } from "../pattern-memory/agent-memory.ts";
-import { readFrictionPatterns } from "./friction-source.ts";
+import {
+  readFrictionPatterns,
+  readMetaFrictionIssues,
+} from "./friction-source.ts";
 import type { FrictionPattern } from "./lessons-overnight.ts";
-
-const execFile = promisify(execFileSync);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -84,7 +86,7 @@ export async function getLessonsTrend(
   const [patternsResult, metaResult] = await Promise.allSettled([
     (deps.readFrictionPatterns ??
       (() => readFrictionPatterns<FrictionPattern>("lessons-trend")))(),
-    countMetaFrictionIssues(windowStart, deps),
+    readMetaFrictionIssues("lessons-trend", windowStart, deps),
   ]);
 
   const groups =
@@ -94,7 +96,10 @@ export async function getLessonsTrend(
       `[lessons-trend] friction reader failed: ${patternsResult.reason?.message || patternsResult.reason}`,
     );
   }
-  const meta = metaResult.status === "fulfilled" ? metaResult.value : 0;
+  // The shared reader already never-throws + re-filters by exact createdAt, so
+  // its length is the in-window meta-friction count. The allSettled wrapper is
+  // belt-and-suspenders in case a future deps stub rejects.
+  const meta = metaResult.status === "fulfilled" ? metaResult.value.length : 0;
   if (metaResult.status === "rejected") {
     console.error(
       `[lessons-trend] meta-friction count failed: ${metaResult.reason?.message || metaResult.reason}`,
@@ -111,68 +116,6 @@ export async function getLessonsTrend(
     metaFrictionOpened: meta,
     promotionThreshold: PROMOTION_THRESHOLD,
   };
-}
-
-async function countMetaFrictionIssues(
-  windowStart: Date,
-  deps: LessonsTrendDeps,
-): Promise<number> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
-  if (!repo) return 0;
-  const sinceDate = windowStart.toISOString().split("T")[0];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "all",
-      "--label",
-      "meta-friction",
-      "--search",
-      `created:>=${sinceDate}`,
-      "--limit",
-      "200",
-      "--json",
-      "number,createdAt",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return parseMetaFrictionCount(stdout, windowStart);
-}
-
-/**
- * Pure helper — exported for tests. Counts items in the `gh issue list
- * --json number,createdAt` output that fall inside the window. The gh
- * `created:>=YYYY-MM-DD` search is coarse (day-level), so we re-filter
- * by exact timestamp.
- */
-export function parseMetaFrictionCount(
-  jsonStdout: string,
-  windowStart: Date,
-): number {
-  if (!jsonStdout.trim()) return 0;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return 0;
-  }
-  if (!Array.isArray(parsed)) return 0;
-  const startMs = windowStart.getTime();
-  let n = 0;
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const createdAt = (candidate as { createdAt?: unknown }).createdAt;
-    if (typeof createdAt !== "string") continue;
-    const ms = Date.parse(createdAt);
-    if (!Number.isFinite(ms) || ms < startMs) continue;
-    n += 1;
-  }
-  return n;
 }
 
 // ---------------------------------------------------------------------------

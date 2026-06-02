@@ -1,9 +1,11 @@
 /**
  * Regression tests for the friction-patterns aggregator (issue #620, PRD #615).
  *
- * Pure helpers (`liftFrictionPatterns`, `parseMetaFrictionIssues`) tested
- * directly. Integration shape tested with stubs for both the Redis reader
- * and `gh issue list`.
+ * Pure helpers (`liftFrictionPatterns`, `normalizeLastEscalation`) tested
+ * directly. The meta-friction `gh` read moved to the `friction-source.ts` seam
+ * (issue #864); its parse / createdAt-refilter / newest-first behaviour is
+ * covered by `aggregator-friction-source.test.mts` and exercised end-to-end
+ * here through `getFrictionPatterns` with a `gh issue list` exec stub.
  */
 
 import { test, describe } from "node:test";
@@ -13,7 +15,6 @@ import {
   getFrictionPatterns,
   liftFrictionPatterns,
   normalizeLastEscalation,
-  parseMetaFrictionIssues,
   type RawFrictionPattern,
 } from "../src/aggregators/friction-patterns.ts";
 import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
@@ -163,30 +164,35 @@ describe("normalizeLastEscalation — pure helper (issue #843)", () => {
   });
 });
 
-describe("parseMetaFrictionIssues — pure helper", () => {
-  test("returns [] on empty / non-array", () => {
-    assert.deepEqual(parseMetaFrictionIssues("", NOW), []);
-    assert.deepEqual(parseMetaFrictionIssues("{}", NOW), []);
+describe("meta-friction read (via seam) — windowing through getFrictionPatterns", () => {
+  test("filters by createdAt against the 7d window and sorts newest-first", async () => {
+    // Default windowHours = 168 (7d); windowStart = NOW - 7d = 2026-05-19T12:00Z.
+    const exec = async () => ({
+      stdout: JSON.stringify([
+        { number: 1, title: "older", url: "u1", createdAt: "2026-05-20T01:00:00Z" },
+        { number: 2, title: "newer", url: "u2", createdAt: "2026-05-25T20:00:00Z" },
+        { number: 3, title: "before window", url: "u3", createdAt: "2026-05-18T00:00:00Z" },
+      ]),
+      stderr: "",
+    });
+    const snapshot = await getFrictionPatterns({
+      now: NOW,
+      readFrictionPatterns: async () => [],
+      execFileAsync: exec,
+    });
+    assert.deepEqual(
+      snapshot.recentMetaFrictionIssues.map((i) => i.number),
+      [2, 1],
+    );
   });
 
-  test("filters by createdAt against windowStart", () => {
-    const windowStart = new Date("2026-05-25T00:00:00Z");
-    const stdout = JSON.stringify([
-      { number: 1, title: "in window", url: "u1", createdAt: "2026-05-25T12:00:00Z" },
-      { number: 2, title: "before", url: "u2", createdAt: "2026-05-24T00:00:00Z" },
-    ]);
-    const out = parseMetaFrictionIssues(stdout, windowStart);
-    assert.equal(out.length, 1);
-    assert.equal(out[0].number, 1);
-  });
-
-  test("sorts newest-first", () => {
-    const stdout = JSON.stringify([
-      { number: 1, title: "older", url: "u1", createdAt: "2026-05-25T01:00:00Z" },
-      { number: 2, title: "newer", url: "u2", createdAt: "2026-05-25T20:00:00Z" },
-    ]);
-    const out = parseMetaFrictionIssues(stdout, new Date("2026-05-25T00:00:00Z"));
-    assert.deepEqual(out.map((i) => i.number), [2, 1]);
+  test("non-array gh payload degrades to empty (never throws)", async () => {
+    const snapshot = await getFrictionPatterns({
+      now: NOW,
+      readFrictionPatterns: async () => [],
+      execFileAsync: async () => ({ stdout: "{}", stderr: "" }),
+    });
+    assert.deepEqual(snapshot.recentMetaFrictionIssues, []);
   });
 });
 

@@ -25,21 +25,21 @@
  *   `nearPromotion` filter are pure functions exported for tests.
  * - **Never throws.** Each sub-source runs under `Promise.allSettled`; a
  *   failure degrades to `[]` for that bucket.
- * - **Reuses lessons-overnight's runtime shape.** The Redis scan and the
- *   `gh issue list` parser are written here rather than re-using the
- *   lessons-overnight ones because the slice-5 surface needs the FULL set
- *   (not just promotion candidates) and a longer window (7d not 24h). The
- *   two aggregators stay independent so the Today and Explore pages can
- *   evolve their queries separately.
+ * - **Shared meta-friction reader.** The Redis scan goes through
+ *   `readFrictionPatterns` and the `gh issue list` read through
+ *   `readMetaFrictionIssues` — both on the `friction-source.ts` seam (issues
+ *   #820 / #864). The grouping still narrows the FULL set over a longer window
+ *   (7d not 24h) here; only the byte-identical read is shared. The aggregators
+ *   stay independent so the Today and Explore pages can evolve their windowing
+ *   separately.
  */
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
-
 import { PROMOTION_THRESHOLD } from "../pattern-memory/agent-memory.ts";
-import { readFrictionPatterns } from "./friction-source.ts";
-
-const execFile = promisify(execFileSync);
+import {
+  readFrictionPatterns,
+  readMetaFrictionIssues,
+  type MetaFrictionIssue,
+} from "./friction-source.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -91,12 +91,12 @@ export interface FrictionGroup {
   patterns: FrictionPatternRow[];
 }
 
-export interface MetaFrictionIssueRef {
-  number: number;
-  title: string;
-  url: string;
-  createdAt: string;
-}
+/**
+ * The Explore page's meta-friction issue row. Aliased to the seam's
+ * `MetaFrictionIssue` (issue #864) so the four-field shape lives in one place;
+ * the `MetaFrictionIssueRef` name is retained for the Explore-page surface.
+ */
+export type MetaFrictionIssueRef = MetaFrictionIssue;
 
 export interface FrictionPatternsSnapshot {
   bySkill: FrictionGroup[];
@@ -169,7 +169,7 @@ export async function getFrictionPatterns(
 
   const [groupsResult, issuesResult] = await Promise.allSettled([
     readGroupedFrictionPatterns(candidateWindow, deps),
-    readMetaFrictionIssues(windowStart, deps),
+    readMetaFrictionIssues("friction-patterns", windowStart, deps),
   ]);
 
   const bySkill = settledOrEmpty(groupsResult, "friction-patterns/by-skill");
@@ -291,49 +291,6 @@ export function normalizeLastEscalation(
   return out;
 }
 
-/**
- * Pure helper — exported for tests. Parses `gh issue list --json` output for
- * the meta-friction label query. Re-filters by `createdAt` so sub-day windows
- * don't include items from the search's coarser date-prefix resolution.
- */
-export function parseMetaFrictionIssues(
-  jsonStdout: string,
-  windowStart: Date,
-): MetaFrictionIssueRef[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const startMs = windowStart.getTime();
-  const out: MetaFrictionIssueRef[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      title?: unknown;
-      url?: unknown;
-      createdAt?: unknown;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    const createdAt = typeof c.createdAt === "string" ? c.createdAt : "";
-    const createdMs = Date.parse(createdAt);
-    if (!Number.isFinite(createdMs) || createdMs < startMs) continue;
-    out.push({
-      number,
-      title: typeof c.title === "string" ? c.title : `Issue #${number}`,
-      url: typeof c.url === "string" ? c.url : `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt,
-    });
-  }
-  out.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Sub-source: grouped friction patterns
 // ---------------------------------------------------------------------------
@@ -360,39 +317,4 @@ async function readGroupedFrictionPatterns(
     return bMs - aMs;
   });
   return out;
-}
-
-// ---------------------------------------------------------------------------
-// Sub-source: meta-friction issues opened in window
-// ---------------------------------------------------------------------------
-
-async function readMetaFrictionIssues(
-  windowStart: Date,
-  deps: FrictionPatternsDeps,
-): Promise<MetaFrictionIssueRef[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
-  if (!repo) return [];
-  const sinceDate = windowStart.toISOString().split("T")[0];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "all",
-      "--label",
-      "meta-friction",
-      "--search",
-      `created:>=${sinceDate}`,
-      "--limit",
-      "100",
-      "--json",
-      "number,title,url,createdAt",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return parseMetaFrictionIssues(stdout, windowStart);
 }
