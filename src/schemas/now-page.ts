@@ -203,3 +203,74 @@ export const AlertsNowResponseSchema = z
   .strict();
 
 export type AlertsNowResponse = z.infer<typeof AlertsNowResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Autopilot health — stuck signals (issue #890, now-console-3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Query schema for `GET /api/now/autopilot-health`. `historyWindow` caps how
+ * many recent runs the cross-run heuristics scan (the live-run heuristic
+ * always reads only the current run). Defaults to 14 runs — roughly a day or
+ * two of autopilot activity under the pace gate.
+ */
+export const AutopilotHealthQuerySchema = z
+  .object({
+    historyWindow: z.coerce
+      .number({ message: "historyWindow must be a number" })
+      .int({ message: "historyWindow must be an integer" })
+      .min(1, { message: "historyWindow must be >= 1" })
+      .max(100, { message: "historyWindow must be <= 100" })
+      .default(14),
+  })
+  .strict();
+
+export type AutopilotHealthQuery = z.infer<typeof AutopilotHealthQuerySchema>;
+
+/**
+ * The four stuck-signal heuristic types the autopilot-health aggregator
+ * computes (issue #890):
+ *   - `stalled-dispatch`   — a live dispatch running past a threshold with no
+ *                            fresh tool-call / turn activity.
+ *   - `unproductive-loop`  — a class dispatched repeatedly across the history
+ *                            window with zero merges or a high failed count.
+ *   - `idle-streak`        — consecutive no-op turns / runs terminating idle.
+ *   - `issue-pr-churn`     — the same issue or PR re-dispatched repeatedly
+ *                            without resolving.
+ */
+export const StuckSignalTypeSchema = z.enum([
+  "stalled-dispatch",
+  "unproductive-loop",
+  "idle-streak",
+  "issue-pr-churn",
+]);
+
+export const StuckSignalSeveritySchema = z.enum(["info", "warn", "critical"]);
+
+/**
+ * One ranked stuck signal. `evidence` is an open key/value bag carrying the
+ * class, counts, and issue/PR refs the operator needs to act on the signal —
+ * an `unknown`-valued record so a heuristic can attach extra evidence (a
+ * count, a class label, an array of refs) without a schema change.
+ */
+export const StuckSignalSchema = z
+  .object({
+    type: StuckSignalTypeSchema,
+    severity: StuckSignalSeveritySchema,
+    summary: z.string(),
+    evidence: z.record(z.string(), z.unknown()),
+  })
+  .strict();
+
+export const AutopilotHealthResponseSchema = z
+  .object({
+    signals: z.array(StuckSignalSchema),
+    historyWindow: z.number().int().positive(),
+    generatedAt: z.string(),
+  })
+  .strict();
+
+export type StuckSignalType = z.infer<typeof StuckSignalTypeSchema>;
+export type StuckSignalSeverity = z.infer<typeof StuckSignalSeveritySchema>;
+export type StuckSignal = z.infer<typeof StuckSignalSchema>;
+export type AutopilotHealthResponse = z.infer<typeof AutopilotHealthResponseSchema>;
