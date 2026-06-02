@@ -53,6 +53,156 @@
 
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Reap-on-exit backstop (issue #898)
+# ---------------------------------------------------------------------------
+#
+# `bootstrap.sh --reap` is the guaranteed terminal-status writer. It is
+# wired as the systemd unit's `ExecStopPost=` so it fires when the
+# long-running `claude -p /hydra-autopilot` process exits for ANY reason
+# that did not already route through a term-check stop decision:
+# print-mode session end, context/output exhaustion, SIGTERM from
+# `systemctl restart` / `RuntimeMaxSec`, a host event, or a genuine crash.
+#
+# Without this backstop the run hash is left at `status: running`, and the
+# read-time sweeper later promotes it to `killed / term_reason: crash` — so
+# "crash" became the catch-all for "the process is gone and nobody POSTed
+# run-end", making it useless as a health signal (issue #898).
+#
+# The reap reads the run_id + pid from the SAME state.json bootstrap wrote,
+# then POSTs run-end with a best-guess cause (issue #898 / AC2):
+#   - clean process exit (EXIT_CODE=exited, status unset / 0)
+#       → cause=interrupted, exit_code=0  → endRun records status=ended
+#   - signal-kill SIGTERM/SIGINT (EXIT_CODE=signal, status TERM/INT/15/2)
+#       → cause=interrupted, exit_code=0  → `systemctl restart` /
+#         RuntimeMaxSec / Ctrl-C is an interrupt, NOT a crash
+#   - any other abnormal exit (non-zero status, SEGV/KILL/etc, missing code)
+#       → cause=crash, exit_code=<n>      → endRun records the crash honestly
+#
+# Idempotent: endRun dedups on a terminal status, so if term-check.py
+# already POSTed run-end this turn the reap POST is a harmless no-op (the
+# first end's term_reason wins). Isolated runs (non-default state path) are
+# skipped — they never POSTed run-start, so there is nothing to reap. The
+# reap NEVER aborts the unit stop: every failure path logs and exits 0.
+#
+# systemd hands ExecStopPost the service result via $SERVICE_RESULT,
+# $EXIT_CODE ("exited"/"signal"/...), and $EXIT_STATUS (the numeric code or
+# signal). We read those when present and degrade gracefully when run by
+# hand (none set → assume a clean interrupt).
+#
+# `__reap_derive_cause` is the single source of truth for the
+# EXIT_CODE/EXIT_STATUS → (cause, exit_code) mapping (issue #898 / AC2). It
+# reads $EXIT_CODE / $EXIT_STATUS and sets the globals REAP_CAUSE +
+# REAP_EXIT_NUM. Both the live `--reap` path and the `--reap-derive-cause`
+# dry-run (used by the script-level test to pin the mapping without POSTing
+# to a prod surface) call it, so the two can never drift.
+__reap_derive_cause() {
+  REAP_EXIT_STATUS="${EXIT_STATUS:-0}"
+  REAP_EXIT_CODE_KIND="${EXIT_CODE:-exited}"
+  if [ "${REAP_EXIT_CODE_KIND}" = "exited" ] && { [ -z "${REAP_EXIT_STATUS}" ] || [ "${REAP_EXIT_STATUS}" = "0" ]; }; then
+    REAP_CAUSE="interrupted"
+    REAP_EXIT_NUM=0
+  elif [ "${REAP_EXIT_CODE_KIND}" = "signal" ]; then
+    case "${REAP_EXIT_STATUS}" in
+      TERM|SIGTERM|15|INT|SIGINT|2)
+        # Operator/scheduler interrupt (SIGTERM/SIGINT) — deterministically
+        # an `interrupted` end, not a crash.
+        REAP_CAUSE="interrupted"
+        REAP_EXIT_NUM=0
+        ;;
+      *)
+        # Any other signal (SEGV, KILL, ABRT, …) is a genuine crash.
+        REAP_CAUSE="crash"
+        case "${REAP_EXIT_STATUS}" in
+          ''|*[!0-9]*) REAP_EXIT_NUM=1 ;;  # signal name → non-zero sentinel
+          *)           REAP_EXIT_NUM="${REAP_EXIT_STATUS}" ;;
+        esac
+        ;;
+    esac
+  else
+    REAP_CAUSE="crash"
+    case "${REAP_EXIT_STATUS}" in
+      ''|*[!0-9]*) REAP_EXIT_NUM=1 ;;  # signal name or junk → non-zero sentinel
+      *)           REAP_EXIT_NUM="${REAP_EXIT_STATUS}" ;;
+    esac
+  fi
+}
+
+# Dry-run: echo the derived (cause, exit_code) for the current
+# $EXIT_CODE/$EXIT_STATUS and exit. No state read, no POST — purely the
+# mapping under test. Output shape: `cause=<c> exit_code=<n>`.
+if [ "${1:-}" = "--reap-derive-cause" ]; then
+  __reap_derive_cause
+  echo "cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM}"
+  exit 0
+fi
+
+if [ "${1:-}" = "--reap" ]; then
+  REAP_STATE_PATH="${HYDRA_AUTOPILOT_STATE:-/tmp/hydra-autopilot-state.json}"
+  REAP_DEFAULT_STATE_PATH="/tmp/hydra-autopilot-state.json"
+  REAP_HEARTBEAT_PATH="${HYDRA_AUTOPILOT_HEARTBEAT:-/tmp/hydra-autopilot-heartbeat.txt}"
+  REAP_LOG_PATH="${HYDRA_AUTOPILOT_LOG:-/tmp/hydra-autopilot-nightly.log}"
+  REAP_API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
+
+  # Isolation parity with the run-start skip below: a non-default state /
+  # heartbeat / log path means this is a test/isolated run that never POSTed
+  # run-start, so there is no prod run to reap.
+  if [ "${REAP_STATE_PATH}" != "${REAP_DEFAULT_STATE_PATH}" ] \
+    || [ "${REAP_HEARTBEAT_PATH}" != "/tmp/hydra-autopilot-heartbeat.txt" ] \
+    || [ "${REAP_LOG_PATH}" != "/tmp/hydra-autopilot-nightly.log" ]; then
+    echo "[autopilot] reap: isolated run (non-default state path) — nothing to reap"
+    exit 0
+  fi
+
+  if [ ! -f "${REAP_STATE_PATH}" ] || ! command -v jq >/dev/null 2>&1; then
+    echo "[autopilot] reap: no state file or jq unavailable — skipping"
+    exit 0
+  fi
+
+  REAP_RUN_ID="$(jq -r '.run_id // ""' "${REAP_STATE_PATH}" 2>/dev/null || echo "")"
+  if [ -z "${REAP_RUN_ID}" ]; then
+    echo "[autopilot] reap: no run_id in state — skipping"
+    exit 0
+  fi
+
+  # Best-guess cause from the systemd-provided result (issue #898 / AC2).
+  # Two distinct kinds of non-crash exit must both map to `interrupted`,
+  # so `crash` stays a meaningful health signal:
+  #   1. Clean process exit  — EXIT_CODE=exited, status 0 or unset.
+  #   2. Signal-kill         — EXIT_CODE=signal, status in {TERM,INT,15,2}.
+  #      This is `systemctl restart` / `RuntimeMaxSec` (SIGTERM) or a
+  #      Ctrl-C (SIGINT) — an operator/scheduler interrupt, NOT a crash.
+  #      The unit is Type=exec with SuccessExitStatus=SIGTERM, so systemd
+  #      exports EXIT_CODE=signal / EXIT_STATUS=TERM on a clean stop;
+  #      without this arm every restart was mis-recorded as a crash.
+  # Anything else — non-zero exit status, a non-TERM/INT signal
+  # (e.g. SEGV/KILL/ABRT), or a missing/garbage code — stays `crash`
+  # with the real exit status preserved. Shared with the --reap-derive-cause
+  # dry-run so the test pins exactly this mapping.
+  __reap_derive_cause
+  REAP_ENDED_EPOCH="$(date -u +%s)"
+
+  REAP_PAYLOAD="$(jq -n \
+    --arg run_id "${REAP_RUN_ID}" \
+    --arg cause "${REAP_CAUSE}" \
+    --argjson ended_epoch "${REAP_ENDED_EPOCH}" \
+    --argjson exit_code "${REAP_EXIT_NUM}" \
+    '{run_id: $run_id, cause: $cause, ended_epoch: $ended_epoch, exit_code: $exit_code}')"
+
+  # endRun is idempotent: if term-check.py already POSTed run-end this turn,
+  # the row is already terminal and this POST is a no-op (deduped=true). A
+  # failed POST is logged but never aborts the unit stop.
+  if curl -sf --max-time 5 -X POST \
+      -H "content-type: application/json" \
+      -d "${REAP_PAYLOAD}" \
+      "${REAP_API_BASE}/api/autopilot/run-end" >/dev/null 2>&1; then
+    echo "[autopilot] reap: recorded run-end run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM} (idempotent)"
+  else
+    echo "[autopilot] reap: run-end POST failed (orchestrator down?) run_id=${REAP_RUN_ID} cause=${REAP_CAUSE} — sweeper will backstop"
+  fi
+  exit 0
+fi
+
 # Slash-arg parsing — must run BEFORE env reads below so explicit args
 # override implicit env (issue #410). Sourced (not exec'd) so the
 # exports land in this shell.

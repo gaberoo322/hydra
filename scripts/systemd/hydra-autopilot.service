@@ -34,6 +34,14 @@ WorkingDirectory=/home/gabe/hydra
 RuntimeMaxSec=32400
 TimeoutStopSec=600
 
+# A SIGTERM stop (`systemctl restart` / RuntimeMaxSec / shutdown) is a clean
+# interrupt, not a failure (issue #898 / AC2). Without this, Type=exec reports
+# the SIGTERM-killed unit as failed and the reap backstop sees
+# EXIT_CODE=signal / EXIT_STATUS=TERM. The reap derivation maps that signal to
+# `interrupted` regardless; declaring it a success here also keeps Restart=
+# on-failure from spuriously retrying a deliberate restart.
+SuccessExitStatus=SIGTERM
+
 # Subscription-billed: the claude CLI uses the operator's logged-in
 # credentials in ~/.claude/. Do NOT set ANTHROPIC_API_KEY here.
 Environment=HOME=/home/gabe
@@ -52,6 +60,19 @@ Environment=PATH=/home/gabe/.npm-global/bin:/home/gabe/.local/bin:/usr/local/bin
 # subagents the autopilot dispatches return skill_denied and Phase 2 reaps
 # them as immediate failures. Observed in the 2026-05-13 v1 smoke test.
 ExecStart=/usr/bin/env claude --dangerously-skip-permissions -p "/hydra-autopilot"
+
+# Reap-on-exit backstop (issue #898). Fires when the claude session exits for
+# ANY reason that did not route through a term-check stop decision —
+# print-mode session end, context exhaustion, SIGTERM from `systemctl restart`
+# / RuntimeMaxSec, or a genuine crash. It POSTs run-end with a best-guess
+# cause derived from systemd's $EXIT_CODE / $EXIT_STATUS (clean exit OR a
+# SIGTERM/SIGINT signal-kill → `interrupted`; any other signal or non-zero
+# exit → `crash`), so the run hash gets a terminal status
+# exactly once instead of being left at `status: running` for the read-time
+# sweeper to mislabel as `crash`. Idempotent: a no-op if term-check.py already
+# POSTed run-end this turn. The `-` prefix makes a reap failure non-fatal to
+# the unit stop.
+ExecStopPost=-/usr/bin/env bash /home/gabe/hydra/scripts/autopilot/bootstrap.sh --reap
 
 StandardOutput=journal
 StandardError=journal
