@@ -42,6 +42,33 @@ name: deep-qa-gate
 # non-T4 PRs would leave them blocked forever. The operator adds `deep-qa-gate`
 # to branch-protection required checks AFTER this lands (the ADR-0020 ordering
 # invariant); until then the status reports but does not block.
+#
+# ## CheckRun rollup mirror (issue #868)
+#
+# The commit STATUS above is the SINGLE authoritative, branch-protection-required
+# primitive. But the PR checks ROLLUP (`statusCheckRollup`, which the autopilot
+# and the GitHub UI read) keys the latest result for the name `deep-qa-gate` off
+# whichever of {StatusContext, CheckRun} concluded most recently. The
+# `pull_request` arm at PR-open emits its own CheckRun named `deep-qa-gate` (the
+# Actions run itself); for a T4 PR that arm initially reports red (no marker yet)
+# and is then CANCELLED by the shared concurrency group when the `issue_comment`
+# arm fires on the PASS marker — so the rollup can keep showing that
+# stale/cancelled CheckRun as the latest `deep-qa-gate` entry even though the
+# commit status is green (the #859 dogfood; memory note
+# reference_deep_qa_gate_checkrun_vs_status).
+#
+# Fix: the `issue_comment` arm — which runs the base-ref (default-branch) copy,
+# so it is base-ref-protected for free — ALSO creates a CheckRun named
+# `deep-qa-gate` on the RESOLVED head SHA, mirroring the just-computed STATE.
+# Because it concludes AFTER the cancelled `pull_request`-arm CheckRun, it
+# becomes the latest result for the name and the rollup entry is unambiguous.
+# This CheckRun is an ADVISORY mirror: it always reports the SAME state as the
+# commit status and never contradicts it; the commit status stays the only
+# branch-protection-required check (making the CheckRun a second required check
+# would re-introduce the non-T4-blocked-forever risk ADR-0020 Decision 4
+# rejected). Creating a CheckRun needs the `checks: write` scope — a THIRD scope
+# distinct from `statuses: write` (the commit-status primitive) and `contents` —
+# added as an additive extend below.
 
 on:
   issue_comment:
@@ -58,12 +85,17 @@ concurrency:
 
 # - statuses: write is required to POST a commit status — the gate's whole job
 #   (the commit-status REST API needs the `statuses` scope, NOT `contents`).
+# - checks: write is required to create the advisory CheckRun rollup mirror
+#   (issue #868). The Checks API (`POST /repos/{owner}/{repo}/check-runs`) needs
+#   the `checks` scope — a THIRD scope distinct from `statuses` and `contents`.
+#   The commit STATUS stays the only branch-protection-required primitive.
 # - contents: read for actions/checkout.
 # - pull-requests: read for `gh pr view --json comments,headRefOid`.
 permissions:
   contents: read
   pull-requests: read
   statuses: write
+  checks: write
 
 jobs:
   deep-qa-gate:
@@ -145,6 +177,39 @@ jobs:
             -f state="$STATE" \
             -f context="deep-qa-gate" \
             -f description="$DESCRIPTION"
+
+          # CheckRun rollup mirror (issue #868). The commit status above is the
+          # single branch-protection-required primitive; this CheckRun is an
+          # ADVISORY mirror that reports the SAME state so the PR checks rollup's
+          # latest `deep-qa-gate` entry is unambiguous and supersedes any
+          # stale/cancelled `pull_request`-arm CheckRun. Emit it ONLY from the
+          # issue_comment arm: that arm runs the base-ref (default-branch) copy
+          # (base-ref-protected for free) and fires AFTER the cancelled
+          # pull_request-arm CheckRun, so its CheckRun becomes the latest result
+          # for the name. The pull_request arm already produces its own
+          # like-named CheckRun (the Actions run) and re-runs on every push, so
+          # emitting a second one there is redundant.
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            # Map the commit-status STATE onto a CheckRun conclusion; the
+            # CheckRun must NEVER contradict the status.
+            if [ "$STATE" = "success" ]; then
+              CHECK_CONCLUSION="success"
+            else
+              CHECK_CONCLUSION="failure"
+            fi
+            echo "Mirroring deep-qa-gate CheckRun=$CHECK_CONCLUSION on $HEAD_SHA"
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${REPO}/check-runs" \
+              -f name="deep-qa-gate" \
+              -f head_sha="$HEAD_SHA" \
+              -f status="completed" \
+              -f conclusion="$CHECK_CONCLUSION" \
+              -f output[title]="deep-qa-gate" \
+              -f output[summary]="$DESCRIPTION" \
+              || echo "WARN: deep-qa-gate CheckRun mirror failed (non-fatal — the commit status is authoritative)"
+          fi
 
           # Fail the job if the gate is not green, so the run itself is a clear
           # red/green signal in the Actions UI (the required check is the
