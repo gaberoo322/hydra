@@ -142,5 +142,12 @@ export function startKnowledgeIndexer() {
   pollRedisContent();
 }
 
-// Suppress unused-var lint without exporting; runtime keeps interval alive.
-void indexerInterval;
+// Issue #866: clear the Redis-poll interval so it does not survive a clean
+// shutdown. Idempotent via null-guard — a double-call (SIGINT then SIGTERM,
+// or a second stop in a test) is a safe no-op.
+export function stopKnowledgeIndexer() {
+  if (indexerInterval) {
+    clearInterval(indexerInterval);
+    indexerInterval = null;
+  }
+}

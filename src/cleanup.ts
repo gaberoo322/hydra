@@ -165,15 +165,29 @@ async function runCleanup() {
   await returnStaleInProgressItems();
 }
 
+// Issue #866: capture the daily-prune interval handle so it can be cleared on
+// a clean shutdown. Nullable module-level let, mirroring indexerInterval in
+// knowledge-indexer.ts.
+let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
 function startCleanupSchedule() {
   // Run immediately on startup
   runCleanup();
 
   // Then daily
-  setInterval(() => {
+  cleanupInterval = setInterval(() => {
     runCleanup();
   }, 24 * 60 * 60 * 1000);
   console.log("[Cleanup] Scheduled (daily): backlog prune, stale Redis/inProgress cleanup");
 }
 
-export { startCleanupSchedule, runCleanup };
+// Issue #866: clear the daily-prune interval so it does not survive a clean
+// shutdown. Idempotent via null-guard — a double-call is a safe no-op.
+function stopCleanupSchedule() {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+}
+
+export { startCleanupSchedule, stopCleanupSchedule, runCleanup };
