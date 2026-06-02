@@ -32,6 +32,7 @@ import { createAutopilotRouter } from "./api/autopilot.ts";
 import { createAgentsRouter } from "./api/agents.ts";
 import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
+import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
 import { createNowPageRouter } from "./api/now-page.ts";
 import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
@@ -89,6 +90,9 @@ function createApi(eventBus) {
   api.use(createAgentsRouter());
   api.use(createScoutRouter());
   api.use(createUsageRouter());
+  // Idle-diagnostics (issue #889, now-console-2) — *why* the Pace Gate isn't
+  // launching a run right now: the data behind an IDLE verdict on the Console.
+  api.use(createAutopilotIdleRouter());
   // Subagent-dispatch capture (issue #692) — SessionStart hook write surface.
   api.use(createDispatchesRouter());
   // Builder-Health Scorecard (issue #732) — orchestrator self-improvement
