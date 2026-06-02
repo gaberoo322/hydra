@@ -91,3 +91,5 @@ Deliver real-money cross-venue proof, hardened execution controls, and operator-
 - [-] Persist Polymarket US side-inversion evidence in run packets
 - [ ] Add venue-native sports identity matching before title fallback
 - [ ] Add OpticOdds supported-market capability gating to scanner scope
+- [x] Wire Polymarket CLOB V2 client (sdk-v2-compat, pUSD collateral) — went live upstream 2026-04-28
+- [ ] Verify Polymarket CLOB V2 live submit path end-to-end (pUSD signing, keyset≤100 pagination clamp, 2026-06-01 rate-limit ceiling) — item-402 corrected from the false "V3 / June-15" premise
