@@ -10,8 +10,11 @@ import {
   getFiveHourQuotaTokens,
   modelToFamily,
   parseUsageLine,
+  parseObservedResetMs,
   cacheHitRatio,
   projectEligibility,
+  projectResetWindow,
+  getWeeklyResetAnchorMs,
   sessionIdFromPath,
   PACING_SHEDDABLE_CLASSES,
   UNATTRIBUTED_SKILL,
@@ -69,6 +72,7 @@ function withEnvSnapshot() {
   const keys = [
     "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
     "HYDRA_USAGE_5H_QUOTA_TOKENS",
+    "HYDRA_USAGE_WEEKLY_RESET_ANCHOR",
     "HYDRA_CLAUDE_PROJECTS_ROOT",
     "HYDRA_QUOTA_WEIGHT_OPUS",
     "HYDRA_QUOTA_WEIGHT_SONNET",
@@ -949,6 +953,9 @@ describe("usage-tracker", () => {
         generatedAt: "2026-05-26T00:00:00.000Z",
         cacheHitRatioLast5h: 0,
         cacheHitRatioLast7d: 0,
+        tokensSinceReset: { ...empty },
+        percentSinceReset: 0,
+        weeklyResetAnchor: null,
       };
       return { ...base, ...overrides };
     }
@@ -1011,6 +1018,261 @@ describe("usage-tracker", () => {
       // shed is still populated — callers MUST honor `allow` first; if
       // they did go ahead, the shed list remains the right second filter.
       assert.deepEqual([...v.shed], [...PACING_SHEDDABLE_CLASSES]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Weekly Reset Anchor + since-reset fixed window (issue #856, ADR-0021)
+  // -------------------------------------------------------------------------
+  describe("projectResetWindow", () => {
+    const D7 = 7 * 86_400_000;
+
+    test("now exactly on the anchor: current=anchor, next=anchor+7d", () => {
+      const anchor = Date.parse("2026-06-01T00:00:00Z");
+      const w = projectResetWindow(anchor, anchor);
+      assert.equal(w.currentMs, anchor);
+      assert.equal(w.nextMs, anchor + D7);
+    });
+
+    test("now mid-window: snaps back to the most recent boundary", () => {
+      const anchor = Date.parse("2026-06-01T00:00:00Z");
+      const now = anchor + 3 * 86_400_000; // 3 days in
+      const w = projectResetWindow(anchor, now);
+      assert.equal(w.currentMs, anchor);
+      assert.equal(w.nextMs, anchor + D7);
+    });
+
+    test("projects forward across MULTIPLE 7d periods", () => {
+      const anchor = Date.parse("2026-06-01T00:00:00Z");
+      // ~23 days later → 3 full weeks elapsed (k=3).
+      const now = anchor + 23 * 86_400_000;
+      const w = projectResetWindow(anchor, now);
+      assert.equal(w.currentMs, anchor + 3 * D7);
+      assert.equal(w.nextMs, anchor + 4 * D7);
+      assert.ok(w.currentMs <= now && now < w.nextMs);
+    });
+
+    test("anchor in the FUTURE: k is negative, current is still <= now", () => {
+      const anchor = Date.parse("2026-06-15T00:00:00Z");
+      const now = Date.parse("2026-06-01T00:00:00Z"); // 14 days before anchor
+      const w = projectResetWindow(anchor, now);
+      // k = floor(-14d / 7d) = -2 → current = anchor - 14d = 2026-06-01
+      assert.equal(w.currentMs, anchor - 2 * D7);
+      assert.equal(w.nextMs, anchor - 1 * D7);
+      assert.ok(w.currentMs <= now && now < w.nextMs);
+    });
+  });
+
+  describe("getWeeklyResetAnchorMs", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = withEnvSnapshot();
+    });
+    afterEach(() => restore());
+
+    test("unset → null", () => {
+      delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
+      assert.equal(getWeeklyResetAnchorMs(), null);
+    });
+
+    test("empty string → null", () => {
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "";
+      assert.equal(getWeeklyResetAnchorMs(), null);
+    });
+
+    test("valid ISO → epoch-ms", () => {
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-06-01T00:00:00Z";
+      assert.equal(getWeeklyResetAnchorMs(), Date.parse("2026-06-01T00:00:00Z"));
+    });
+
+    test("garbage (set but unparseable) → null, does not throw", () => {
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "not-a-date";
+      assert.equal(getWeeklyResetAnchorMs(), null);
+    });
+  });
+
+  describe("parseObservedResetMs", () => {
+    test("returns null on malformed JSON", () => {
+      assert.equal(parseObservedResetMs("{nope"), null);
+    });
+
+    test("returns null when no reset field present", () => {
+      assert.equal(
+        parseObservedResetMs(JSON.stringify({ timestamp: "2026-06-01T00:00:00Z", message: {} })),
+        null,
+      );
+    });
+
+    test("reads message.usage.resets_at (ISO)", () => {
+      const line = JSON.stringify({
+        message: { usage: { resets_at: "2026-06-02T00:00:00Z" } },
+      });
+      assert.equal(parseObservedResetMs(line), Date.parse("2026-06-02T00:00:00Z"));
+    });
+
+    test("reads message.rate_limit.resets_at (ISO)", () => {
+      const line = JSON.stringify({
+        message: { rate_limit: { resets_at: "2026-06-03T12:00:00Z" } },
+      });
+      assert.equal(parseObservedResetMs(line), Date.parse("2026-06-03T12:00:00Z"));
+    });
+
+    test("reads top-level usageLimitResetTime", () => {
+      const line = JSON.stringify({ usageLimitResetTime: "2026-06-04T06:00:00Z" });
+      assert.equal(parseObservedResetMs(line), Date.parse("2026-06-04T06:00:00Z"));
+    });
+
+    test("coerces numeric epoch-SECONDS to ms", () => {
+      const secs = Math.floor(Date.parse("2026-06-05T00:00:00Z") / 1000);
+      const line = JSON.stringify({ resetsAt: secs });
+      assert.equal(parseObservedResetMs(line), secs * 1000);
+    });
+
+    test("coerces numeric epoch-MS as-is", () => {
+      const ms = Date.parse("2026-06-06T00:00:00Z");
+      const line = JSON.stringify({ reset_at: ms });
+      assert.equal(parseObservedResetMs(line), ms);
+    });
+  });
+
+  describe("since-reset window via getUsage", () => {
+    // Timestamps are computed RELATIVE TO REAL `Date.now()` so that fixture
+    // files (whose mtime is the real wall-clock) always fall inside the
+    // tracker's 7d mtime pre-filter, regardless of when CI runs. Helpers below
+    // build a deterministic anchor/now/offsets scenario around "now-ish".
+    const HOUR = 3_600_000;
+    const DAY = 86_400_000;
+    let restore: () => void;
+    let root: string;
+    // A stable `now` a couple of hours in the past so every fixture timestamp
+    // is < now and the fixture file's real mtime is comfortably inside 7d.
+    const nowMs = Date.now() - 2 * HOUR;
+    const now = new Date(nowMs);
+    const iso = (ms: number) => new Date(ms).toISOString();
+
+    beforeEach(async () => {
+      restore = withEnvSnapshot();
+      root = await mkdtemp(join(tmpdir(), "usage-anchor-"));
+    });
+    afterEach(async () => {
+      restore();
+      clearUsageCache();
+      await rm(root, { recursive: true, force: true });
+    });
+
+    test("anchor UNSET: since-reset fields are neutral and do not throw", async () => {
+      delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "50000";
+      await writeFixture(root, "p/s.jsonl", [
+        assistantLine(iso(nowMs - 2 * DAY), { in: 1000 }),
+      ]);
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+      assert.equal(snap.weeklyResetAnchor, null);
+      assert.equal(snap.percentSinceReset, 0);
+      assert.deepEqual(snap.tokensSinceReset, breakdown());
+      // Rolling window is unaffected and still counts the token.
+      assert.equal(snap.tokensLast7d.total, 1000);
+    });
+
+    test("since-reset sums ONLY tokens after the projected boundary (distinct from rolling 7d)", async () => {
+      // Anchor exactly 3 days before now → k=0, current boundary = anchor.
+      const anchorMs = nowMs - 3 * DAY;
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
+      await writeFixture(root, "p/s.jsonl", [
+        // BEFORE the boundary but within rolling 7d → rolling only.
+        assistantLine(iso(anchorMs - 2 * DAY), { in: 3000 }),
+        // AFTER the boundary → both rolling and since-reset.
+        assistantLine(iso(anchorMs + 6 * HOUR), { in: 1000 }),
+      ]);
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+      assert.equal(snap.weeklyResetAnchor, iso(anchorMs));
+      // since-reset: only the 1000 after the boundary.
+      assert.equal(snap.tokensSinceReset.total, 1000);
+      assert.equal(snap.percentSinceReset, (1000 / 10000) * 100);
+      // rolling 7d: both → 4000, demonstrably distinct.
+      assert.equal(snap.tokensLast7d.total, 4000);
+      assert.equal(snap.percentLast7d, (4000 / 10000) * 100);
+    });
+
+    test("multiple 7d periods: boundary projects forward across several weeks", async () => {
+      // Anchor 5 weeks + 1 day before now → k=5, boundary = anchor + 35d.
+      const anchorMs = nowMs - (5 * 7 + 1) * DAY;
+      const boundaryMs = anchorMs + 5 * 7 * DAY; // = nowMs - 1*DAY
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
+      // Sanity: the projected boundary really is one full day before now.
+      assert.equal(projectResetWindow(anchorMs, nowMs).currentMs, boundaryMs);
+      await writeFixture(root, "p/s.jsonl", [
+        // Before the boundary, within rolling 7d → rolling only.
+        assistantLine(iso(boundaryMs - 3 * DAY), { in: 500 }),
+        // After the boundary → since-reset too.
+        assistantLine(iso(boundaryMs + 6 * HOUR), { in: 700 }),
+      ]);
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+      assert.equal(snap.weeklyResetAnchor, iso(boundaryMs));
+      assert.equal(snap.tokensSinceReset.total, 700);
+      assert.equal(snap.tokensLast7d.total, 1200);
+    });
+
+    test("auto-correct: an observed reset MORE RECENT than the env projection overrides it", async () => {
+      // Env boundary = anchor (k=0); an observed reset 12h later wins.
+      const anchorMs = nowMs - 2 * DAY;
+      const observedMs = anchorMs + 12 * HOUR;
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
+      await writeFixture(root, "p/s.jsonl", [
+        // Between env boundary and observed reset → excluded by auto-correct.
+        assistantLine(iso(anchorMs + 1 * HOUR), { in: 2000 }),
+        // The observed-reset notice line (no usage block).
+        JSON.stringify({
+          timestamp: iso(observedMs),
+          message: { rate_limit: { resets_at: iso(observedMs) } },
+        }),
+        // After the observed reset → counted.
+        assistantLine(iso(observedMs + 6 * HOUR), { in: 1500 }),
+      ]);
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+      // Effective boundary tracks the observed reset, not the env projection.
+      assert.equal(snap.weeklyResetAnchor, iso(observedMs));
+      assert.equal(snap.tokensSinceReset.total, 1500);
+    });
+
+    test("auto-correct ignores an observed reset OLDER than the env projection", async () => {
+      const anchorMs = nowMs - 2 * DAY;
+      const observedOldMs = anchorMs - 1 * DAY; // older than the env boundary
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "10000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "10000000";
+      await writeFixture(root, "p/s.jsonl", [
+        JSON.stringify({
+          timestamp: iso(observedOldMs),
+          message: { usage: { resets_at: iso(observedOldMs) } },
+        }),
+        assistantLine(iso(anchorMs + 6 * HOUR), { in: 800 }),
+      ]);
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+      // Stays on the env projection boundary.
+      assert.equal(snap.weeklyResetAnchor, iso(anchorMs));
+      assert.equal(snap.tokensSinceReset.total, 800);
+    });
+
+    test("anchor set but quota uncalibrated: anchor + tokens present, percent stays 0", async () => {
+      const anchorMs = nowMs - 2 * DAY;
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = iso(anchorMs);
+      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
+      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
+      await writeFixture(root, "p/s.jsonl", [
+        assistantLine(iso(anchorMs + 6 * HOUR), { in: 900 }),
+      ]);
+      const snap = await getUsage({ now, projectsRoot: root, force: true });
+      assert.equal(snap.weeklyResetAnchor, iso(anchorMs));
+      assert.equal(snap.tokensSinceReset.total, 900);
+      assert.equal(snap.percentSinceReset, 0);
     });
   });
 });

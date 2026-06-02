@@ -25,6 +25,21 @@
  * pacingState stays "under", and emergencyStop stays false. Raw token
  * counts are always reported.
  *
+ * Weekly Reset Anchor env (issue #856, ADR-0021):
+ *   - HYDRA_USAGE_WEEKLY_RESET_ANCHOR  — an ISO-8601 instant marking ONE
+ *     observed weekly-limit reset, operator-seeded from the interactive
+ *     `/usage` view. Projected forward in 7-day multiples relative to `now`
+ *     to derive the current fixed window's reset boundary, against which
+ *     `tokensSinceReset` / `percentSinceReset` are summed. This is a
+ *     FIXED-window metric (resets every 7d at the Anchor), DISTINCT from the
+ *     rolling `tokensLast7d` trailing sum. The effective anchor auto-corrects
+ *     ON READ: if a real rate-limit reset timestamp is observed in a
+ *     transcript and is more recent than the env projection's current-window
+ *     boundary, that observed reset becomes the effective boundary. When the
+ *     env var is unset/unparseable, the since-reset fields are neutral
+ *     (null/0) and nothing throws — mirroring the uncalibrated quota behaviour.
+ *     The Module stays a PURE read-side projection: nothing is persisted.
+ *
  * Quota-weight env (issue #691):
  *   - HYDRA_QUOTA_WEIGHT_OPUS    — per-token multiplier for the opus family
  *   - HYDRA_QUOTA_WEIGHT_SONNET  — per-token multiplier for the sonnet family
@@ -187,6 +202,30 @@ export interface UsageSnapshot {
   cacheHitRatioLast5h: number;
   /** Cache-hit ratio over the 7d window. Same formula/invariants as `cacheHitRatioLast5h`. */
   cacheHitRatioLast7d: number;
+  /**
+   * Fixed-window token breakdown summed since the current **Weekly Reset
+   * Anchor** boundary (the most recent `anchor + 7d*k <= now`, auto-corrected
+   * to a more recent observed reset when one is seen in a transcript). Same
+   * shape as `tokensLast7d` but a CALENDAR-window sum, not a trailing one —
+   * it drops to ~0 right after each weekly reset. All-zero when the Anchor
+   * env var is unset/unparseable. (issue #856, ADR-0021)
+   */
+  tokensSinceReset: TokenBreakdown;
+  /**
+   * % of the weekly quota consumed since the current Weekly Reset Anchor
+   * boundary (`tokensSinceReset.total / weeklyQuota * 100`). 0 when the
+   * Anchor is unset OR the weekly quota is uncalibrated. Distinct from the
+   * rolling `percentLast7d`. (issue #856)
+   */
+  percentSinceReset: number;
+  /**
+   * ISO-8601 string of the EFFECTIVE current-window reset boundary the
+   * since-reset metric is summed from, or `null` when the Anchor env var is
+   * unset/unparseable. The effective boundary is the env projection's
+   * `currentMs`, overridden by a more recent observed rate-limit reset when
+   * one is present in the transcripts. (issue #856)
+   */
+  weeklyResetAnchor: string | null;
 }
 
 const EMPTY_BREAKDOWN: TokenBreakdown = {
@@ -217,6 +256,55 @@ function parseQuotaEnv(raw: string | undefined): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
   return parsed;
+}
+
+/**
+ * The operator-seeded **Weekly Reset Anchor** as epoch-ms, or `null` when
+ * `HYDRA_USAGE_WEEKLY_RESET_ANCHOR` is unset/empty/unparseable. A bad value
+ * is treated as unset (returns null) rather than throwing — the since-reset
+ * fields stay neutral, mirroring the uncalibrated-quota discipline. A
+ * non-empty-but-unparseable value is logged (fail-loud) since it signals a
+ * mis-configured env var the operator should fix.
+ */
+export function getWeeklyResetAnchorMs(): number | null {
+  const raw = process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
+  if (raw === undefined || raw === "") return null;
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_WEEKLY_RESET_ANCHOR is set but not a valid ISO-8601 instant (${JSON.stringify(
+        raw,
+      )}); treating Weekly Reset Anchor as unset`,
+    );
+    return null;
+  }
+  return parsed;
+}
+
+export interface ResetWindow {
+  /**
+   * Epoch-ms of the most recent anchor + 7d*k that is <= now — the start of
+   * the current fixed weekly window.
+   */
+  currentMs: number;
+  /** Epoch-ms of the next reset boundary (currentMs + 7d). */
+  nextMs: number;
+}
+
+/**
+ * Project a single seeded **Weekly Reset Anchor** forward (and backward) in
+ * 7-day multiples to find the fixed window containing `nowMs`.
+ *
+ * Returns the most recent boundary `anchorMs + 7d*k <= nowMs` (`currentMs`)
+ * and the next one (`nextMs = currentMs + 7d`). Works for anchors in the
+ * past OR the future (`k` may be negative). Pure + total: no I/O, no env
+ * reads, deterministic in its two args — so it's the unit-testable core of
+ * the Anchor math.
+ */
+export function projectResetWindow(anchorMs: number, nowMs: number): ResetWindow {
+  const k = Math.floor((nowMs - anchorMs) / WINDOW_7D_MS);
+  const currentMs = anchorMs + k * WINDOW_7D_MS;
+  return { currentMs, nextMs: currentMs + WINDOW_7D_MS };
 }
 
 export function getQuotaWeightOpus(): number {
@@ -373,6 +461,16 @@ async function scanUsage(
   const bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
   let tokens24h = 0;
 
+  // Weekly Reset Anchor (issue #856). The since-reset boundary can be moved
+  // FORWARD by an observed rate-limit reset, which we only learn mid-scan — so
+  // buffer the in-7d-window (tsMs, tokens) entries and sum them once the
+  // effective boundary is known. The set buffered is exactly the lines already
+  // iterated for the rolling 7d window, bounded by the 7d cutoff. Only buffered
+  // when the env Anchor is set, so the unset case adds zero overhead/memory.
+  const anchorEnvMs = getWeeklyResetAnchorMs();
+  const sinceResetEntries: { tsMs: number; tokens: TokenBreakdown }[] = [];
+  let mostRecentObservedResetMs: number | null = null;
+
   // Dedup unknown-model warnings to AT MOST one per scan (never per-line).
   const unknownModelsSeen = new Set<string>();
   // Memoise sessionId → skill within a scan so a session with many transcript
@@ -421,6 +519,19 @@ async function scanUsage(
       // Fast reject: most lines are JSON objects; skip blanks instantly.
       if (!line || line[0] !== "{") continue;
       linesParsed++;
+
+      // Observed rate-limit reset (issue #856). A reset notice has no usage
+      // block (so parseUsageLine would "skip" it), so probe it FIRST and only
+      // when an env Anchor exists — that's the only mode that consumes the
+      // observed reset. Track the most recent one; the effective boundary is
+      // resolved post-scan.
+      if (anchorEnvMs !== null) {
+        const observed = parseObservedResetMs(line);
+        if (observed !== null && (mostRecentObservedResetMs === null || observed > mostRecentObservedResetMs)) {
+          mostRecentObservedResetMs = observed;
+        }
+      }
+
       const parsed = parseUsageLine(line);
       if (parsed === null) {
         parseErrors++;
@@ -445,6 +556,11 @@ async function scanUsage(
       if (tsMs >= cutoff5h) {
         addBreakdown(acc5h, parsed.tokens);
         addBreakdown(byModel5h[family], parsed.tokens);
+      }
+      // Buffer for the fixed since-reset window (issue #856). Only when an env
+      // Anchor is set — keeps the unset path zero-overhead.
+      if (anchorEnvMs !== null) {
+        sinceResetEntries.push({ tsMs, tokens: parsed.tokens });
       }
     }
 
@@ -492,6 +608,38 @@ async function scanUsage(
   const quotaWeightLast5h = quotaWeightCalibrated ? weightedTotal(byModel5h) : 0;
   const quotaWeightLast7d = quotaWeightCalibrated ? weightedTotal(byModel7d) : 0;
 
+  // Weekly Reset Anchor / since-reset fixed window (issue #856, ADR-0021).
+  // Pure read-side projection: the effective boundary is derived ON READ from
+  // the env projection, overridden by a more recent observed reset. Nothing
+  // is persisted. Neutral (null/0/all-zero) when the env Anchor is unset.
+  let tokensSinceReset: TokenBreakdown = { ...EMPTY_BREAKDOWN };
+  let percentSinceReset = 0;
+  let weeklyResetAnchor: string | null = null;
+  if (anchorEnvMs !== null) {
+    const envWindow = projectResetWindow(anchorEnvMs, nowMs);
+    let effectiveBoundaryMs = envWindow.currentMs;
+    // Auto-correct: an observed reset that is more recent than the env
+    // projection (but not in the future relative to now) is the real boundary.
+    if (
+      mostRecentObservedResetMs !== null &&
+      mostRecentObservedResetMs > effectiveBoundaryMs &&
+      mostRecentObservedResetMs <= nowMs
+    ) {
+      console.warn(
+        `[usage-tracker] Weekly Reset Anchor auto-corrected: observed reset ` +
+          `${new Date(mostRecentObservedResetMs).toISOString()} overrides env projection ` +
+          `${new Date(effectiveBoundaryMs).toISOString()} (env anchor ` +
+          `${new Date(anchorEnvMs).toISOString()})`,
+      );
+      effectiveBoundaryMs = mostRecentObservedResetMs;
+    }
+    for (const e of sinceResetEntries) {
+      if (e.tsMs >= effectiveBoundaryMs) addBreakdown(tokensSinceReset, e.tokens);
+    }
+    percentSinceReset = calibrated ? (tokensSinceReset.total / weeklyQuota) * 100 : 0;
+    weeklyResetAnchor = new Date(effectiveBoundaryMs).toISOString();
+  }
+
   return {
     tokensLast5h: acc5h,
     tokensLast7d: acc7d,
@@ -517,6 +665,9 @@ async function scanUsage(
     generatedAt: now.toISOString(),
     cacheHitRatioLast5h: cacheHitRatio(acc5h),
     cacheHitRatioLast7d: cacheHitRatio(acc7d),
+    tokensSinceReset,
+    percentSinceReset,
+    weeklyResetAnchor,
   };
 }
 
@@ -572,6 +723,66 @@ export function parseUsageLine(line: string): ParsedUsageLine | "skip" | null {
     tokens: { input, output, cacheRead, cacheCreation, total },
     model,
   };
+}
+
+/**
+ * Extract an observed weekly/rate-limit RESET instant (epoch-ms) from one
+ * JSONL line, or `null` when the line carries no reset signal.
+ *
+ * Claude Code has no documented schema for this, so we probe the field names
+ * an Anthropic rate-limit payload realistically surfaces, in priority order:
+ *
+ *   1. `obj.message.usage.resets_at` / `reset_at` — usage block reset hint.
+ *   2. `obj.message.rate_limit.resets_at` / a `rate_limit_*` error block.
+ *   3. A top-level `obj.resetsAt` / `obj.reset_at` / `obj.usageLimitResetTime`
+ *      that some harness builds attach to a limit-notice line.
+ *
+ * Each candidate is accepted only if it parses to a finite instant (ISO-8601
+ * string OR epoch-seconds/ms number). This is intentionally permissive on
+ * shape and strict on parse: an unrecognised line is simply `null`, never a
+ * throw, so the scan never breaks on transcript-format drift. Exported so the
+ * auto-correct rule is unit-testable without the filesystem. (issue #856)
+ */
+export function parseObservedResetMs(line: string): number | null {
+  let obj: any;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const candidates: unknown[] = [
+    obj?.message?.usage?.resets_at,
+    obj?.message?.usage?.reset_at,
+    obj?.message?.rate_limit?.resets_at,
+    obj?.message?.rate_limit?.reset_at,
+    obj?.message?.error?.rate_limit?.resets_at,
+    obj?.rate_limit?.resets_at,
+    obj?.resetsAt,
+    obj?.reset_at,
+    obj?.usageLimitResetTime,
+  ];
+  for (const c of candidates) {
+    const ms = coerceInstantMs(c);
+    if (ms !== null) return ms;
+  }
+  return null;
+}
+
+/**
+ * Coerce a candidate reset value to epoch-ms. Accepts an ISO-8601 string or a
+ * numeric epoch (seconds if < 1e12, else milliseconds). Returns null on
+ * anything non-finite or non-positive. Pure helper for {@link parseObservedResetMs}.
+ */
+function coerceInstantMs(value: unknown): number | null {
+  if (typeof value === "string" && value !== "") {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    // Heuristic: a 2026 epoch in seconds is ~1.7e9; in ms it is ~1.7e12.
+    return value < 1e12 ? value * 1000 : value;
+  }
+  return null;
 }
 
 /**
