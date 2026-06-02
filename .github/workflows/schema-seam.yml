@@ -1,0 +1,43 @@
+name: schema-seam
+
+# Schema-Seam gate (issue #893). ADR-0011 decided that every HTTP `req.body`
+# read in `src/api/*.ts` validates through a `src/schemas/<domain>.ts` zod
+# `safeParse`. ADR-0011 itself predicted that prose discipline alone keeps the
+# Seam from closing — and the drift was growing with no CI backstop. This gate
+# freezes it: a shrink-only baseline tolerates today's known violations and
+# fails any NEW unvalidated handler.
+#
+# This lives in its OWN workflow file — deliberately NOT inside ci.yml — because
+# ci.yml is exact-match Verifier Core (ADR-0001/ADR-0015: "the gate that gates
+# the gate", Tier-4/operator-only). A schema-seam scanner is a *new
+# verification*, not a change to the merge gate, so it belongs in a sibling
+# workflow that lands as a normal Tier-3 change. Only ci.yml / deploy.yml are
+# exact-match untouchable. This mirrors the coupling-check.yml precedent and
+# diverges from ADR-0011 §3/§5's "lands in ci.yml / Tier-0" framing — the
+# divergence is recorded in ADR-0011's Amendment note.
+#
+# The check itself (scripts/ci/schema-seam-check.ts) scans the whole tracked
+# `src/api/*.ts` tree against a shrink-only baseline, so PR and push behave
+# identically: any NEW unvalidated req.body handler fails the gate.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: schema-seam-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  schema-seam:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Schema-seam check (ADR-0011 req.body validation ratchet)
+        run: npx tsx scripts/ci/schema-seam-check.ts

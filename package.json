@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:test": "npx tsx scripts/ci/test-typecheck-check.ts",
     "redis-seam-check": "npx tsx scripts/ci/redis-seam-check.ts",
+    "schema-seam-check": "npx tsx scripts/ci/schema-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts"
   },
   "author": "Gabe",

@@ -5,6 +5,8 @@ Date: 2026-05-25
 Deciders: Operator + Hydra (via `/improve-codebase-architecture` grilling session)
 Issue: TBD (Schemas Seam closure epic)
 
+> **Amendment (2026-06-02, issue #893):** The enforcement ratchet (§3/§5) lands in a separate `.github/workflows/schema-seam.yml` workflow as a Tier-3 change — NOT as a step in `ci.yml` — because `ci.yml` is exact-match Verifier Core (ADR-0015); a sibling workflow mirrors the `coupling-check.yml` precedent and keeps enforcement out of the operator-escalation path.
+
 ## Context
 
 The orchestrator's HTTP boundary access lives on two surfaces today:
