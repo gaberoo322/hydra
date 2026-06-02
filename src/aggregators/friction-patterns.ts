@@ -51,6 +51,19 @@ const execFile = promisify(execFileSync);
  * `MemoryPattern` carries promotion bookkeeping (hitsAtPromotion,
  * demotedReason, …) that the Explore tab doesn't surface.
  */
+/**
+ * Issue #843 — the **Escalation Outcome** stamped on a pattern when its most
+ * recent escalation actually fired. Mirrors `MemoryPattern.lastEscalation`;
+ * surfaced verbatim so a systematic gh/auth outage shows as a column of
+ * `error` statuses on the Explore Friction tab.
+ */
+export interface FrictionLastEscalation {
+  status: "created" | "commented" | "reopened" | "skipped" | "error";
+  issueNumber?: number;
+  error?: string;
+  at: string;
+}
+
 export interface FrictionPatternRow {
   skill: string;
   cue: string;
@@ -63,6 +76,13 @@ export interface FrictionPatternRow {
   examples: string[];
   /** True iff hitCount is in `[PROMOTION_THRESHOLD - candidateWindow, PROMOTION_THRESHOLD)` and not promoted. */
   nearThreshold: boolean;
+  /**
+   * Issue #843 — the **Escalation Outcome** of this pattern's last fired
+   * escalation, or `null` when no escalation has ever fired (pre-#843 records
+   * lack the field entirely). A column of `error` statuses across skills is the
+   * operator-visible signal of a systematic escalation outage.
+   */
+  lastEscalation: FrictionLastEscalation | null;
 }
 
 export interface FrictionGroup {
@@ -124,6 +144,13 @@ export interface RawFrictionPattern {
   lastSeen?: string;
   firstSeen?: string;
   examples?: string[];
+  /** Issue #843 — optional Escalation Outcome stamp; absent on pre-#843 records. */
+  lastEscalation?: {
+    status?: unknown;
+    issueNumber?: unknown;
+    error?: unknown;
+    at?: unknown;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +245,7 @@ export function liftFrictionPatterns(
         ? p.examples.filter((e): e is string => typeof e === "string").slice(0, 3)
         : [],
       nearThreshold,
+      lastEscalation: normalizeLastEscalation(p.lastEscalation),
     });
   }
   // Newest-lastSeen first; rows without a lastSeen sink to the bottom.
@@ -226,6 +254,40 @@ export function liftFrictionPatterns(
     const bMs = Date.parse(b.lastSeen) || 0;
     return bMs - aMs;
   });
+  return out;
+}
+
+const ESCALATION_STATUSES: ReadonlySet<string> = new Set([
+  "created",
+  "commented",
+  "reopened",
+  "skipped",
+  "error",
+]);
+
+/**
+ * Pure helper — narrow the permissive raw `lastEscalation` shape into the
+ * dashboard-facing `FrictionLastEscalation`, or `null` when absent/malformed.
+ * Issue #843. A row whose `status` isn't one of the known Escalation Outcome
+ * statuses is treated as no-stamp rather than surfaced as a half-row.
+ */
+export function normalizeLastEscalation(
+  raw: RawFrictionPattern["lastEscalation"],
+): FrictionLastEscalation | null {
+  if (!raw || typeof raw !== "object") return null;
+  const status = typeof raw.status === "string" ? raw.status : "";
+  if (!ESCALATION_STATUSES.has(status)) return null;
+  const at = typeof raw.at === "string" ? raw.at : "";
+  const out: FrictionLastEscalation = {
+    status: status as FrictionLastEscalation["status"],
+    at,
+  };
+  if (typeof raw.issueNumber === "number" && Number.isFinite(raw.issueNumber)) {
+    out.issueNumber = raw.issueNumber;
+  }
+  if (typeof raw.error === "string" && raw.error.length > 0) {
+    out.error = raw.error;
+  }
   return out;
 }
 

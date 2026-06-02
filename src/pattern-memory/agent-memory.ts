@@ -36,6 +36,7 @@ import {
   isMetadataCue,
   shouldEscalateAtHitCount,
   type EscalationInput,
+  type EscalationResult,
 } from "./escalation.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
@@ -83,6 +84,24 @@ export type MemoryPattern = {
    * consolidation/promotion math.
    */
   source?: "codex-cycle" | "subagent";
+  /**
+   * Issue #843 — the **Escalation Outcome** of the most recent escalation that
+   * actually fired for this pattern. Stamped by `recordPattern()` via a
+   * best-effort SECOND save AFTER the GitHub-side dispatch, so it is written
+   * ONLY when an escalation fired (below-threshold hits leave it untouched).
+   *
+   * `at` is a full ISO timestamp (not a date) so a column of `error` statuses
+   * in the friction-patterns surface can be correlated with a systematic
+   * gh/auth outage. Optional + additive: it rides the existing
+   * `savePatternsRaw`/`loadPatternsRaw` JSON round-trip (no new key, no
+   * migration); records written before #843 simply lack the field.
+   */
+  lastEscalation?: {
+    status: EscalationResult["status"];
+    issueNumber?: number;
+    error?: string;
+    at: string;
+  };
 };
 
 /**
@@ -95,7 +114,7 @@ export type MemoryPattern = {
 export type EscalateFn = (
   escalation: EscalationInput | null,
   context: string,
-) => Promise<void>;
+) => Promise<EscalationResult | null>;
 
 /**
  * Return shape of `recordPattern()`.
@@ -128,6 +147,16 @@ export type RecordPatternResult = {
    * or by injecting a no-op `escalate`).
    */
   escalation: EscalationInput | null;
+  /**
+   * Issue #843 — the **Escalation Outcome** of the dispatch `recordPattern`
+   * performed for this hit: the `EscalationResult` returned by the injected
+   * `escalate` dep (default `escalateIfNeeded`), or `null` when no escalation
+   * fired (below threshold). Distinct from `escalation` (the *intent*): this is
+   * the *result* of acting on that intent. The API route surfaces it so a
+   * caller can observe a systematic gh/auth outage instead of a silent
+   * `{ ok: true }`.
+   */
+  escalationResult: EscalationResult | null;
 };
 
 /**
@@ -650,14 +679,60 @@ export async function recordPattern(
   // never throws — a gh/network failure logs console.error and recordPattern
   // still resolves with its result object. The escalation field is retained
   // on the result for observability and direct-call test assertions.
+  //
+  // Issue #843 — capture the dispatch's **Escalation Outcome** so it can be
+  // threaded up (returned as `escalationResult`) AND stamped on the durable
+  // record. `escalate` resolves to an `EscalationResult` when an escalation
+  // fired, or `null` when none did (intent was null / below threshold).
   const escalate = details.escalate ?? escalateIfNeeded;
   const escalationContext =
     namespace === "friction"
       ? `friction/${agentName}/${category}`
       : `${agentName}/${category}`;
-  await escalate(escalation, escalationContext);
+  // The default `escalateIfNeeded` is best-effort and never throws, but a
+  // misbehaving injected dep could. recordPattern must NEVER throw (the #823
+  // invariant + AC), so a thrown dispatch becomes an error Escalation Outcome
+  // when an escalation was due, or null when none fired.
+  let escalationResult: EscalationResult | null;
+  try {
+    escalationResult = await escalate(escalation, escalationContext);
+  } catch (err: any) {
+    const msg = err?.message || String(err);
+    console.error(
+      `[Learning] recordPattern: escalate dispatch threw for ${escalationContext}: ${msg}`,
+    );
+    escalationResult = escalation ? { status: "error", error: msg } : null;
+  }
 
-  return { pattern, crossedThreshold, escalation };
+  // Issue #843 — stamp the outcome on the pattern via a best-effort SECOND
+  // save, ONLY when an escalation actually fired. The core record was already
+  // committed above (record-then-escalate ordering), so a stamp-save failure
+  // never loses the hit. Like the dispatch, this stays best-effort:
+  // recordPattern must never throw, so a Redis blip on the stamp logs and is
+  // swallowed. `at` is a full ISO timestamp.
+  if (escalationResult) {
+    pattern.lastEscalation = {
+      status: escalationResult.status,
+      ...(escalationResult.status === "created" ||
+      escalationResult.status === "commented" ||
+      escalationResult.status === "reopened"
+        ? { issueNumber: escalationResult.issueNumber }
+        : {}),
+      ...(escalationResult.status === "error"
+        ? { error: escalationResult.error }
+        : {}),
+      at: new Date().toISOString(),
+    };
+    try {
+      await savePatterns(agentName, patterns, namespace);
+    } catch (err: any) {
+      console.error(
+        `[Learning] recordPattern: lastEscalation stamp-save failed for ${escalationContext}: ${err?.message || err}`,
+      );
+    }
+  }
+
+  return { pattern, crossedThreshold, escalation, escalationResult };
 }
 
 /**
