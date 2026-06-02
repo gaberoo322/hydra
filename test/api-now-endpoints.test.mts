@@ -105,12 +105,23 @@ describe("Response schemas — aggregator shape pins", () => {
     assert.equal(result.success, false);
   });
 
-  test("CostBurnResponseSchema rejects out-of-band headroomPct", () => {
+  test("CostBurnResponseSchema accepts the spark-only shape", () => {
+    const result = CostBurnResponseSchema.safeParse({
+      lastHourSpark: [1.2, 0.8],
+      generatedAt: "ts",
+    });
+    assert.equal(result.success, true);
+  });
+
+  test("CostBurnResponseSchema rejects the retired USD fields (#885)", () => {
+    // The strict schema rejects daySpent / dailyBudget / headroomPct — the
+    // USD dollar-budget fiction retired in #885. Re-adding any of them is a
+    // regression the strict() catches.
     const result = CostBurnResponseSchema.safeParse({
       lastHourSpark: [],
       daySpent: 0,
       dailyBudget: 0,
-      headroomPct: 150,
+      headroomPct: 100,
       generatedAt: "ts",
     });
     assert.equal(result.success, false);
@@ -293,9 +304,6 @@ describe("GET /now/cost-burn", () => {
     const router = createNowPageRouter({
       getCostBurn: async () => ({
         lastHourSpark: [10, 8],
-        daySpent: 12.5,
-        dailyBudget: 100,
-        headroomPct: 87.5,
       }),
       now: () => new Date("2026-05-26T12:00:00.000Z"),
     });
@@ -304,8 +312,9 @@ describe("GET /now/cost-burn", () => {
     const res = mockRes();
     await handler!(mockReq(), res);
     assert.equal(res._status, 200);
-    assert.equal(res._body.daySpent, 12.5);
-    assert.equal(res._body.headroomPct, 87.5);
+    assert.deepEqual(res._body.lastHourSpark, [10, 8]);
+    assert.equal(res._body.daySpent, undefined);
+    assert.equal(res._body.headroomPct, undefined);
     assert.equal(res._body.generatedAt, "2026-05-26T12:00:00.000Z");
   });
 });

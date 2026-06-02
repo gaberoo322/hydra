@@ -119,9 +119,6 @@ export const CostBurnResponseSchema = z
   .object({
     /** Coarse burn-rate spark — see `src/aggregators/cost-burn.ts` JSDoc. */
     lastHourSpark: z.array(z.number()),
-    daySpent: z.number().nonnegative(),
-    dailyBudget: z.number().nonnegative(),
-    headroomPct: z.number().min(0).max(100),
     generatedAt: z.string(),
   })
   .strict();

@@ -30,23 +30,20 @@ function formatMoney(n) {
 }
 
 /**
- * CoinBag — daily token-burn tile. Polls `/api/now/cost-burn` every 30s
- * for the steady-state spend/budget figures.
+ * CoinBag — hourly burn-rate tile. Polls `/api/now/cost-burn` every 30s for
+ * the 5h / 24h burn-rate spark.
  *
  * The `budget_threshold` WS flash (issue #673) was removed in #703 along
  * with the dead budget-threshold bridge that emitted those frames — the
  * bridge polled a Redis key with no live writer and never fired.
+ *
+ * The USD spend / budget / headroom-bar half was retired in #885 — under
+ * the Claude Code subscription a dollar attribution is a fiction (the
+ * dollar machinery was already structurally $0 since #704). Re-expressing
+ * "headroom" in token/quota vocabulary is deferred to a separate pickup.
  */
 function CoinBag() {
   const { data } = useApi("/now/cost-burn", { poll: 30_000 });
-  const spent = formatMoney(Number(data?.daySpent ?? 0));
-  const budget = formatMoney(Number(data?.dailyBudget ?? 0));
-  const headroom = Math.max(
-    0,
-    Math.min(100, Number(data?.headroomPct ?? 100)),
-  );
-  const color =
-    headroom > 50 ? "#22c55e" : headroom > 25 ? "#facc15" : "#dc2626";
   const spark = Array.isArray(data?.lastHourSpark) ? data.lastHourSpark : [];
   const [r5h, r24h] = [Number(spark[0] ?? 0), Number(spark[1] ?? 0)];
 
@@ -60,33 +57,13 @@ function CoinBag() {
       </div>
       <div className="flex-1 min-w-0">
         <div className="text-[10px] uppercase tracking-wide text-zinc-500">
-          Coin bag — daily burn
+          Coin bag — hourly burn
         </div>
         <div className="text-sm text-zinc-100 font-mono">
-          {spent} <span className="text-zinc-500">/ {budget}</span>
-          <span className="ml-3 text-zinc-500">5h </span>
-          <span style={{ color }}>{formatMoney(r5h)}/h</span>
+          <span className="text-zinc-500">5h </span>
+          <span className="text-zinc-300">{formatMoney(r5h)}/h</span>
           <span className="ml-2 text-zinc-500">24h </span>
           <span className="text-zinc-300">{formatMoney(r24h)}/h</span>
-        </div>
-        <div
-          style={{
-            marginTop: 4,
-            height: 4,
-            width: "100%",
-            background: "#1f1f23",
-            borderRadius: 2,
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              width: `${headroom}%`,
-              height: "100%",
-              background: color,
-              transition: "width 200ms",
-            }}
-          />
         </div>
       </div>
     </section>
