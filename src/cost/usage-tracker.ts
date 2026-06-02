@@ -51,6 +51,42 @@
  * unless ALL THREE weights are set to positive values. `byModel` is always
  * populated regardless. Deliberately NOT a dollar figure — under the Claude
  * Code subscription the orchestrator pays no per-call charge.
+ *
+ * Cache-read weight env (issue #873):
+ *   - HYDRA_USAGE_CACHE_READ_WEIGHT — per-TOKEN-TYPE multiplier applied to
+ *     `cacheRead` tokens when computing the quota-burn PERCENTAGES
+ *     (`percentLast7d`, `percentSinceReset`, `projectedWeeklyPercent`). This is
+ *     a SECOND, orthogonal weighting axis (Axis A: per-token-type) layered
+ *     beneath the per-model-family **Quota Weight** (Axis B). Anthropic's real
+ *     subscription meter bills a cache read at ~0.1x base input, so summing
+ *     `cacheRead` at full weight reads ~6-7x hot on a cache-heavy week and
+ *     makes the weekly-quota calibration drift with the cache mix (non-
+ *     stationary). The weighted unit is `input + output + cacheCreation +
+ *     w_cache*cacheRead`; the two axes COMPOSE as
+ *     `Σ_family familyWeight(f) * weightedTokens(family[f], w_cache)` — the
+ *     cache weight reshapes the token-type mix INSIDE each family, the family
+ *     weight scales OUTSIDE, so they never double-count (when all family
+ *     weights are 1.0 this reduces exactly to the single-axis cache-weighted
+ *     total). Default is 1.0 (identity): unset/empty/<=0/non-finite leaves the
+ *     percentages byte-for-byte unchanged, so this PR is behaviour-neutral on
+ *     deploy and the principled production value (~0.1) is set in host config,
+ *     mirroring the all-or-nothing calibration discipline of the other quota
+ *     env vars. Raw `TokenBreakdown.total` is UNTOUCHED — only the burn
+ *     percentage NUMERATORS switch to the weighted unit; the honest on-disk
+ *     count is still reported verbatim. `cacheHitRatio` (a diagnostic, not a
+ *     burn figure) is also untouched.
+ *
+ * Drift-detection env (issue #873):
+ *   - HYDRA_USAGE_DRIFT_REFERENCE_PERCENT — an operator-seeded reference
+ *     `percentSinceReset` reading (e.g. captured from the interactive `/usage`
+ *     view). When set to a positive number AND the quota is calibrated, the
+ *     scan emits ONE fail-loud `console.warn` per scan if the tracker's
+ *     `percentSinceReset` diverges from the reference by more than a factor
+ *     (HYDRA_USAGE_DRIFT_FACTOR, default 2x) in either direction. Unset =>
+ *     inert (no false alarms), mirroring the uncalibrated-returns-neutral
+ *     discipline. Read-time detection only — nothing is persisted, no self-
+ *     recalibration (that would violate the pure read-side projection
+ *     contract, ADR-0021).
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -361,6 +397,85 @@ export function projectResetWindow(anchorMs: number, nowMs: number): ResetWindow
   return { currentMs, nextMs: currentMs + WINDOW_7D_MS };
 }
 
+/**
+ * Default per-token-type cache-read weight (issue #873): 1.0 = identity =
+ * the pre-#873 full-weight behaviour. Keeping the default at identity makes an
+ * unset `HYDRA_USAGE_CACHE_READ_WEIGHT` a pure no-op so the change is purely
+ * calibration-gated (the principled ~0.1 production value lives in host config,
+ * not a hardcoded constant fit to one week).
+ */
+export const DEFAULT_CACHE_READ_WEIGHT = 1.0;
+
+/**
+ * The operator-tunable per-token-type cache-read weight `w_cache` from
+ * `HYDRA_USAGE_CACHE_READ_WEIGHT`. Unset/empty falls back to
+ * {@link DEFAULT_CACHE_READ_WEIGHT} (identity). A non-empty-but-bad value
+ * (non-finite or <= 0) is logged (fail-loud) and also falls back to the
+ * default, since it signals a mis-configured env var the operator should fix.
+ * Pure + env-only so the weighted-unit math stays unit-testable. (issue #873)
+ */
+export function getCacheReadWeight(): number {
+  const raw = process.env.HYDRA_USAGE_CACHE_READ_WEIGHT;
+  if (raw === undefined || raw === "") return DEFAULT_CACHE_READ_WEIGHT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_CACHE_READ_WEIGHT is set but not a positive ` +
+        `finite number (${JSON.stringify(raw)}); falling back to default ` +
+        `${DEFAULT_CACHE_READ_WEIGHT}`,
+    );
+    return DEFAULT_CACHE_READ_WEIGHT;
+  }
+  return parsed;
+}
+
+/**
+ * Default factor by which the tracker's `percentSinceReset` may diverge from
+ * the operator-seeded reference reading before the once-per-scan drift warning
+ * fires (issue #873). 2x in either direction — a coarse "calibration has
+ * clearly rotted" signal, not a precise alarm.
+ */
+export const DEFAULT_DRIFT_FACTOR = 2;
+
+/**
+ * Operator-seeded reference `percentSinceReset` for drift detection, or `null`
+ * when `HYDRA_USAGE_DRIFT_REFERENCE_PERCENT` is unset/empty/non-positive. A
+ * non-empty-but-bad value is logged (fail-loud). Unset => drift detection is
+ * inert (no false alarms). (issue #873)
+ */
+export function getDriftReferencePercent(): number | null {
+  const raw = process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT;
+  if (raw === undefined || raw === "") return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_DRIFT_REFERENCE_PERCENT is set but not a ` +
+        `positive finite number (${JSON.stringify(raw)}); drift detection inert`,
+    );
+    return null;
+  }
+  return parsed;
+}
+
+/**
+ * The drift-warning divergence factor from `HYDRA_USAGE_DRIFT_FACTOR`, falling
+ * back to {@link DEFAULT_DRIFT_FACTOR}. Must be > 1 to be meaningful; a value
+ * <= 1 (or non-finite) is logged and falls back to the default. (issue #873)
+ */
+export function getDriftFactor(): number {
+  const raw = process.env.HYDRA_USAGE_DRIFT_FACTOR;
+  if (raw === undefined || raw === "") return DEFAULT_DRIFT_FACTOR;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 1) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_DRIFT_FACTOR is set but not a finite number ` +
+        `> 1 (${JSON.stringify(raw)}); falling back to default ${DEFAULT_DRIFT_FACTOR}`,
+    );
+    return DEFAULT_DRIFT_FACTOR;
+  }
+  return parsed;
+}
+
 export function getQuotaWeightOpus(): number {
   return parseQuotaEnv(process.env.HYDRA_QUOTA_WEIGHT_OPUS);
 }
@@ -410,6 +525,47 @@ function familyWeight(
       // once-per-scan console.warn, not absorbed by a tunable.
       return 1;
   }
+}
+
+/**
+ * The per-token-type weighted token count for one accumulator (issue #873):
+ * `input + output + cacheCreation + w_cache*cacheRead`. This is the quota-burn
+ * UNIT — it down-weights cache reads to match Anthropic's real meter (cache
+ * reads bill at ~0.1x base input) while counting input/output/cacheCreation at
+ * full weight. `w_cache = 1.0` (the default) reduces this exactly to `b.total`,
+ * so the change is behaviour-neutral until the operator calibrates the env var.
+ * Pure + total — the unit-testable core of the weighted-burn math.
+ */
+export function weightedTokens(b: TokenBreakdown, wCache: number): number {
+  return b.input + b.output + b.cacheCreation + wCache * b.cacheRead;
+}
+
+/**
+ * The composed two-axis quota-burn numerator over a per-family accumulator
+ * (issue #873). Axis A (per-token-type cache weight) reshapes the token mix
+ * INSIDE each family via {@link weightedTokens}; Axis B (per-model-family
+ * **Quota Weight**) scales OUTSIDE via {@link familyWeight}:
+ *
+ *   `Σ_family familyWeight(f) * weightedTokens(family[f], w_cache)`
+ *
+ * The two axes are orthogonal, so they never double-count. When all family
+ * weights are 1.0 (the dormant `quotaWeightCalibrated === false` prod state)
+ * this reduces EXACTLY to the single-axis cache-weighted total
+ * (`Σ_family weightedTokens(family[f], w_cache)`), which in turn reduces to the
+ * raw `Σ_family family[f].total` when `w_cache === 1.0`. Passing the
+ * identity-weights object `{opus:1,sonnet:1,haiku:1}` (what the caller does
+ * when quota weights are uncalibrated) keeps the percentage path honest
+ * regardless of the #691 calibration state.
+ */
+function weightedQuotaBurn(
+  byModel: Record<ModelFamily, TokenBreakdown>,
+  wCache: number,
+  weights: { opus: number; sonnet: number; haiku: number },
+): number {
+  return MODEL_FAMILIES.reduce(
+    (sum, f) => sum + familyWeight(f, weights) * weightedTokens(byModel[f], wCache),
+    0,
+  );
 }
 
 function emptyByModel(): Record<ModelFamily, TokenBreakdown> {
@@ -510,6 +666,11 @@ async function scanUsage(
   // 7d window; the 5h split is internal, used only for the 5h Quota Weight.
   const byModel5h = emptyByModel();
   const byModel7d = emptyByModel();
+  // Per-family 24h accumulator. The scalar `tokens24h` (raw .total) is kept for
+  // the unchanged `tokensLast24h` snapshot field; this per-family split feeds
+  // the WEIGHTED `projectedWeeklyPercent` numerator so the projection composes
+  // both weighting axes exactly like the 7d path. (issue #873)
+  const byModel24h = emptyByModel();
   // Per-skill × per-family 7d accumulator (the `bySkillByModel` snapshot
   // field). Skills are added lazily as transcripts resolve to them.
   const bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
@@ -522,7 +683,7 @@ async function scanUsage(
   // iterated for the rolling 7d window, bounded by the 7d cutoff. Only buffered
   // when the env Anchor is set, so the unset case adds zero overhead/memory.
   const anchorEnvMs = getWeeklyResetAnchorMs();
-  const sinceResetEntries: { tsMs: number; tokens: TokenBreakdown }[] = [];
+  const sinceResetEntries: { tsMs: number; tokens: TokenBreakdown; family: ModelFamily }[] = [];
   let mostRecentObservedResetMs: number | null = null;
 
   // Dedup unknown-model warnings to AT MOST one per scan (never per-line).
@@ -606,7 +767,10 @@ async function scanUsage(
       addBreakdown(acc7d, parsed.tokens);
       addBreakdown(byModel7d[family], parsed.tokens);
       addBreakdown(fileByFamily7d[family], parsed.tokens);
-      if (tsMs >= cutoff24h) tokens24h += parsed.tokens.total;
+      if (tsMs >= cutoff24h) {
+        tokens24h += parsed.tokens.total;
+        addBreakdown(byModel24h[family], parsed.tokens);
+      }
       if (tsMs >= cutoff5h) {
         addBreakdown(acc5h, parsed.tokens);
         addBreakdown(byModel5h[family], parsed.tokens);
@@ -614,7 +778,7 @@ async function scanUsage(
       // Buffer for the fixed since-reset window (issue #856). Only when an env
       // Anchor is set — keeps the unset path zero-overhead.
       if (anchorEnvMs !== null) {
-        sinceResetEntries.push({ tsMs, tokens: parsed.tokens });
+        sinceResetEntries.push({ tsMs, tokens: parsed.tokens, family });
       }
     }
 
@@ -646,9 +810,23 @@ async function scanUsage(
     );
   }
 
-  const percentLast5h = calibrated ? (acc5h.total / fiveHourQuota) * 100 : 0;
-  const percentLast7d = calibrated ? (acc7d.total / weeklyQuota) * 100 : 0;
-  const projectedWeeklyPercent = calibrated ? ((tokens24h * 7) / weeklyQuota) * 100 : 0;
+  // Quota-burn numerator weighting (issue #873). The burn PERCENTAGES are
+  // computed on the WEIGHTED unit `input + output + cacheCreation +
+  // w_cache*cacheRead`, composed with the per-model-family Quota Weight. When
+  // quota weights are uncalibrated (the default) the family multipliers are all
+  // 1.0 (identity) so the result reduces to the single-axis cache-weighted
+  // total; with `w_cache = 1.0` (the default) it reduces further to the raw
+  // .total — i.e. byte-for-byte the pre-#873 behaviour. Raw `.total` fields are
+  // untouched; only these numerators change.
+  const cacheReadWeight = getCacheReadWeight();
+  const burnWeights = quotaWeightCalibrated ? weights : { opus: 1, sonnet: 1, haiku: 1 };
+  const weightedBurn5h = weightedQuotaBurn(byModel5h, cacheReadWeight, burnWeights);
+  const weightedBurn7d = weightedQuotaBurn(byModel7d, cacheReadWeight, burnWeights);
+  const weightedBurn24h = weightedQuotaBurn(byModel24h, cacheReadWeight, burnWeights);
+
+  const percentLast5h = calibrated ? (weightedBurn5h / fiveHourQuota) * 100 : 0;
+  const percentLast7d = calibrated ? (weightedBurn7d / weeklyQuota) * 100 : 0;
+  const projectedWeeklyPercent = calibrated ? ((weightedBurn24h * 7) / weeklyQuota) * 100 : 0;
 
   let pacingState: "under" | "on" | "over" = "under";
   if (calibrated) {
@@ -687,11 +865,44 @@ async function scanUsage(
       );
       effectiveBoundaryMs = mostRecentObservedResetMs;
     }
+    // Accumulate the since-reset window both as a flat breakdown (the unchanged
+    // `tokensSinceReset` snapshot field, honest raw counts) AND per-family (for
+    // the WEIGHTED `percentSinceReset` numerator, which composes both weighting
+    // axes exactly like `percentLast7d`). (issue #873)
+    const byModelSinceReset = emptyByModel();
     for (const e of sinceResetEntries) {
-      if (e.tsMs >= effectiveBoundaryMs) addBreakdown(tokensSinceReset, e.tokens);
+      if (e.tsMs >= effectiveBoundaryMs) {
+        addBreakdown(tokensSinceReset, e.tokens);
+        addBreakdown(byModelSinceReset[e.family], e.tokens);
+      }
     }
-    percentSinceReset = calibrated ? (tokensSinceReset.total / weeklyQuota) * 100 : 0;
+    const weightedBurnSinceReset = weightedQuotaBurn(byModelSinceReset, cacheReadWeight, burnWeights);
+    percentSinceReset = calibrated ? (weightedBurnSinceReset / weeklyQuota) * 100 : 0;
     weeklyResetAnchor = new Date(effectiveBoundaryMs).toISOString();
+  }
+
+  // Drift detector (issue #873). Fail-loud, ONCE per scan: when an operator has
+  // seeded a reference `percentSinceReset` reading AND the quota is calibrated,
+  // warn if the tracker's `percentSinceReset` has diverged from the reference
+  // by more than `driftFactor` in either direction — a coarse "calibration has
+  // rotted" signal so it is visible, not silent. Read-time detection only:
+  // nothing is persisted and nothing self-recalibrates (the tracker stays a
+  // pure read-side projection). Inert when the reference env var is unset.
+  const driftReference = getDriftReferencePercent();
+  if (driftReference !== null && calibrated && anchorEnvMs !== null) {
+    const driftFactor = getDriftFactor();
+    const tooHigh = percentSinceReset > driftReference * driftFactor;
+    const tooLow = percentSinceReset < driftReference / driftFactor;
+    if (tooHigh || tooLow) {
+      console.warn(
+        `[usage-tracker] calibration drift: percentSinceReset ` +
+          `${percentSinceReset.toFixed(2)}% diverges from reference ` +
+          `${driftReference.toFixed(2)}% by more than ${driftFactor}x ` +
+          `(cacheReadWeight=${cacheReadWeight}, weeklyQuota=${weeklyQuota}); ` +
+          `re-derive HYDRA_USAGE_WEEKLY_QUOTA_TOKENS / HYDRA_USAGE_CACHE_READ_WEIGHT ` +
+          `against a fresh /usage reading`,
+      );
+    }
   }
 
   return {

@@ -18,6 +18,12 @@ import {
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
   PACE_STATE_TOLERANCE_PERCENT,
+  getCacheReadWeight,
+  DEFAULT_CACHE_READ_WEIGHT,
+  weightedTokens,
+  getDriftReferencePercent,
+  getDriftFactor,
+  DEFAULT_DRIFT_FACTOR,
   sessionIdFromPath,
   PACING_SHEDDABLE_CLASSES,
   UNATTRIBUTED_SKILL,
@@ -81,6 +87,9 @@ function withEnvSnapshot() {
     "HYDRA_QUOTA_WEIGHT_OPUS",
     "HYDRA_QUOTA_WEIGHT_SONNET",
     "HYDRA_QUOTA_WEIGHT_HAIKU",
+    "HYDRA_USAGE_CACHE_READ_WEIGHT",
+    "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
+    "HYDRA_USAGE_DRIFT_FACTOR",
   ];
   const prev: Record<string, string | undefined> = {};
   for (const k of keys) prev[k] = process.env[k];
@@ -1480,6 +1489,352 @@ describe("usage-tracker", () => {
       assert.equal(snap.weeklyResetAnchor, iso(anchorMs));
       assert.equal(snap.tokensSinceReset.total, 900);
       assert.equal(snap.percentSinceReset, 0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Cache-read weight + drift detection (issue #873)
+  // -------------------------------------------------------------------------
+  describe("cache-read weight env parsing", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = withEnvSnapshot();
+    });
+    afterEach(() => restore());
+
+    test("defaults to 1.0 (identity) when unset", () => {
+      delete process.env.HYDRA_USAGE_CACHE_READ_WEIGHT;
+      assert.equal(getCacheReadWeight(), DEFAULT_CACHE_READ_WEIGHT);
+      assert.equal(getCacheReadWeight(), 1.0);
+    });
+
+    test("defaults to 1.0 on non-finite or non-positive values", () => {
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "abc";
+      assert.equal(getCacheReadWeight(), 1.0);
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0";
+      assert.equal(getCacheReadWeight(), 1.0);
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "-0.5";
+      assert.equal(getCacheReadWeight(), 1.0);
+    });
+
+    test("returns the parsed positive fractional weight when set", () => {
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
+      assert.equal(getCacheReadWeight(), 0.1);
+    });
+  });
+
+  describe("weightedTokens helper", () => {
+    test("at w_cache = 1.0 reduces exactly to .total", () => {
+      const b = breakdown({ input: 100, output: 200, cacheRead: 5000, cacheCreation: 50 });
+      assert.equal(weightedTokens(b, 1.0), b.total);
+    });
+
+    test("down-weights ONLY cacheRead; input/output/cacheCreation stay full weight", () => {
+      const b = breakdown({ input: 100, output: 200, cacheRead: 1000, cacheCreation: 50 });
+      // 100 + 200 + 50 + 0.1*1000 = 450
+      assert.equal(weightedTokens(b, 0.1), 450);
+    });
+
+    test("w_cache = 0 drops cacheRead entirely", () => {
+      const b = breakdown({ input: 100, output: 200, cacheRead: 9999, cacheCreation: 50 });
+      assert.equal(weightedTokens(b, 0), 350);
+    });
+  });
+
+  describe("drift env parsing", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = withEnvSnapshot();
+    });
+    afterEach(() => restore());
+
+    test("reference is null (inert) when unset", () => {
+      delete process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT;
+      assert.equal(getDriftReferencePercent(), null);
+    });
+
+    test("reference is null on non-positive / non-finite", () => {
+      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "0";
+      assert.equal(getDriftReferencePercent(), null);
+      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "nope";
+      assert.equal(getDriftReferencePercent(), null);
+    });
+
+    test("reference is the parsed positive percent when set", () => {
+      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "5";
+      assert.equal(getDriftReferencePercent(), 5);
+    });
+
+    test("factor defaults to 2 when unset or <= 1", () => {
+      delete process.env.HYDRA_USAGE_DRIFT_FACTOR;
+      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
+      process.env.HYDRA_USAGE_DRIFT_FACTOR = "1";
+      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
+      process.env.HYDRA_USAGE_DRIFT_FACTOR = "0.5";
+      assert.equal(getDriftFactor(), DEFAULT_DRIFT_FACTOR);
+    });
+
+    test("factor is the parsed value when > 1", () => {
+      process.env.HYDRA_USAGE_DRIFT_FACTOR = "3";
+      assert.equal(getDriftFactor(), 3);
+    });
+  });
+
+  describe("weighted quota-burn percentages (issue #873)", () => {
+    let restore: () => void;
+    beforeEach(() => {
+      restore = withEnvSnapshot();
+      clearUsageCache();
+    });
+    afterEach(() => {
+      restore();
+      clearUsageCache();
+    });
+
+    // A cache-heavy fixture: cacheRead dominates the token mix, mirroring the
+    // real-world regression that motivated #873.
+    async function cacheHeavyRoot(): Promise<string> {
+      const root = await mkdtemp(join(tmpdir(), "usage-w873-"));
+      await writeFixture(root, "p/s.jsonl", [
+        // in:100 out:100 cacheCreation:100 cacheRead:9700 -> total 10000
+        assistantLine("2026-05-25T11:00:00Z", {
+          in: 100,
+          out: 100,
+          cacheCreation: 100,
+          cacheRead: 9700,
+        }),
+      ]);
+      return root;
+    }
+
+    test("default w_cache (unset) is behaviour-neutral: percent uses raw total", async () => {
+      delete process.env.HYDRA_USAGE_CACHE_READ_WEIGHT;
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      const root = await cacheHeavyRoot();
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        // raw total 10000 / 100000 = 10%
+        assert.equal(snap.percentLast7d, 10);
+        assert.equal(snap.percentLast5h, 10);
+        // raw .total fields untouched regardless
+        assert.equal(snap.tokensLast7d.total, 10000);
+        assert.equal(snap.tokensLast7d.cacheRead, 9700);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("w_cache = 0.1 down-weights the cache-heavy burn ~7x vs raw", async () => {
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      const root = await cacheHeavyRoot();
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        // weighted = 100+100+100 + 0.1*9700 = 1270; /100000 = 1.27%
+        assert.ok(Math.abs(snap.percentLast7d - 1.27) < 1e-9, `got ${snap.percentLast7d}`);
+        assert.ok(Math.abs(snap.percentLast5h - 1.27) < 1e-9);
+        // raw .total is STILL the honest on-disk count
+        assert.equal(snap.tokensLast7d.total, 10000);
+        // cacheHitRatio (a diagnostic, not a burn figure) is untouched: it uses
+        // raw cacheRead, so 9700/(9700+100+100) = 0.97979...
+        assert.ok(Math.abs(snap.cacheHitRatioLast7d - 9700 / 9900) < 1e-9);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("projectedWeeklyPercent uses the weighted 24h burn", async () => {
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      const root = await cacheHeavyRoot();
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        // weighted 24h burn 1270, *7 / 100000 = 8.89%
+        assert.ok(Math.abs(snap.projectedWeeklyPercent - 8.89) < 1e-9, `got ${snap.projectedWeeklyPercent}`);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("percentSinceReset uses the weighted unit", async () => {
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      const anchor = "2026-05-25T00:00:00Z"; // boundary earlier the same day
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = anchor;
+      const root = await cacheHeavyRoot();
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        // The single 11:00 line is after the 00:00 boundary; weighted 1270.
+        assert.equal(snap.tokensSinceReset.total, 10000); // raw honest count
+        assert.ok(Math.abs(snap.percentSinceReset - 1.27) < 1e-9, `got ${snap.percentSinceReset}`);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("composition: cache-weight (Axis A) composes with Quota Weight (Axis B) without double-counting", async () => {
+      // Two families, distinct family weights, distinct token mixes. The
+      // weighted-burn numerator must apply cache-weight INSIDE each family and
+      // the family weight OUTSIDE.
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
+      process.env.HYDRA_QUOTA_WEIGHT_OPUS = "2";
+      process.env.HYDRA_QUOTA_WEIGHT_SONNET = "1";
+      process.env.HYDRA_QUOTA_WEIGHT_HAIKU = "1";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      const root = await mkdtemp(join(tmpdir(), "usage-w873c-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          // opus: in:100 cacheRead:1000 -> weighted 100 + 0.1*1000 = 200
+          assistantLine("2026-05-25T11:00:00Z", { in: 100, cacheRead: 1000 }, "claude-opus-4-7"),
+          // sonnet: in:300 cacheRead:0 -> weighted 300
+          assistantLine("2026-05-25T11:00:00Z", { in: 300 }, "claude-sonnet-4-5"),
+        ]);
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        // composed burn = 2*200 (opus) + 1*300 (sonnet) = 700; /100000 = 0.7%
+        assert.ok(Math.abs(snap.percentLast7d - 0.7) < 1e-9, `got ${snap.percentLast7d}`);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("composition reduces to single-axis cache-weighted total when family weights are uncalibrated", async () => {
+      // No HYDRA_QUOTA_WEIGHT_* set -> family weights all 1.0 -> the composed
+      // numerator equals Σ_family weightedTokens(family, w_cache).
+      delete process.env.HYDRA_QUOTA_WEIGHT_OPUS;
+      delete process.env.HYDRA_QUOTA_WEIGHT_SONNET;
+      delete process.env.HYDRA_QUOTA_WEIGHT_HAIKU;
+      process.env.HYDRA_USAGE_CACHE_READ_WEIGHT = "0.1";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      const root = await mkdtemp(join(tmpdir(), "usage-w873r-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 100, cacheRead: 1000 }, "claude-opus-4-7"),
+          assistantLine("2026-05-25T11:00:00Z", { in: 300 }, "claude-sonnet-4-5"),
+        ]);
+        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        assert.equal(snap.quotaWeightCalibrated, false);
+        // single-axis: (100 + 0.1*1000) + 300 = 200 + 300 = 500; /100000 = 0.5%
+        assert.ok(Math.abs(snap.percentLast7d - 0.5) < 1e-9, `got ${snap.percentLast7d}`);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("drift detector warns (issue #873)", () => {
+    let restore: () => void;
+    let warnings: string[];
+    let origWarn: typeof console.warn;
+    beforeEach(() => {
+      restore = withEnvSnapshot();
+      clearUsageCache();
+      warnings = [];
+      origWarn = console.warn;
+      console.warn = (...args: unknown[]) => {
+        warnings.push(args.join(" "));
+      };
+    });
+    afterEach(() => {
+      console.warn = origWarn;
+      restore();
+      clearUsageCache();
+    });
+
+    function driftWarnings(): string[] {
+      return warnings.filter((w) => w.includes("calibration drift"));
+    }
+
+    async function rootWithBurn(): Promise<string> {
+      const root = await mkdtemp(join(tmpdir(), "usage-drift-"));
+      // 10000 tokens against a 100000 weekly quota since the anchor -> 10%.
+      await writeFixture(root, "p/s.jsonl", [
+        assistantLine("2026-05-25T11:00:00Z", { in: 10000 }),
+      ]);
+      return root;
+    }
+
+    test("inert when reference unset (no warning, no false alarm)", async () => {
+      delete process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT;
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
+      const root = await rootWithBurn();
+      try {
+        await getUsage({ now: new Date("2026-05-25T12:00:00Z"), projectsRoot: root, force: true });
+        assert.equal(driftWarnings().length, 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("fires ONCE when tracker percentSinceReset diverges > factor from reference", async () => {
+      // Reference 1%, tracker 10% -> 10x > default 2x factor -> warn.
+      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "1";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
+      const root = await rootWithBurn();
+      try {
+        await getUsage({ now: new Date("2026-05-25T12:00:00Z"), projectsRoot: root, force: true });
+        assert.equal(driftWarnings().length, 1);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("does NOT fire when within the factor band", async () => {
+      // Reference 8%, tracker 10% -> within 2x -> no warn.
+      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "8";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
+      const root = await rootWithBurn();
+      try {
+        await getUsage({ now: new Date("2026-05-25T12:00:00Z"), projectsRoot: root, force: true });
+        assert.equal(driftWarnings().length, 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("inert when the anchor is unset (no since-reset metric to compare)", async () => {
+      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "1";
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "100000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "100000";
+      delete process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
+      const root = await rootWithBurn();
+      try {
+        await getUsage({ now: new Date("2026-05-25T12:00:00Z"), projectsRoot: root, force: true });
+        assert.equal(driftWarnings().length, 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("inert when uncalibrated (percentSinceReset is 0)", async () => {
+      process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT = "1";
+      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
+      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
+      const root = await rootWithBurn();
+      try {
+        await getUsage({ now: new Date("2026-05-25T12:00:00Z"), projectsRoot: root, force: true });
+        assert.equal(driftWarnings().length, 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
   });
 });
