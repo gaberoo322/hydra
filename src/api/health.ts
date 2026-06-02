@@ -159,7 +159,7 @@ export function createHealthRouter(eventBus: any) {
       /* 7 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
       /* 8 */ execFileAsync("free", ["-b"], { timeout: 3000 }).catch(() => null),
       /* 9 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
-      /* 10 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
+      /* 10 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 11 */ execFileAsync("systemctl", ["--user", "is-active", getTargetServiceName()], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
       /* 12 */ (async () => {
         const [p, e, s] = await Promise.all([getMemoryPatterns("planner"), getMemoryPatterns("executor"), getMemoryPatterns("skeptic")]);

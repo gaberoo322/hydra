@@ -280,7 +280,7 @@ Production deployment uses systemd user services:
 | `hydra-vault-watcher` | Knowledge indexer for OpenViking |
 | `hydra-tunnel` | Cloudflare tunnel for external access |
 | `hydra-cycle.timer` | Cycle trigger (every 15 minutes) |
-| `hydra-orchestrator-watchdog.timer` | Health check (every 2 minutes) |
+| `hydra-watchdog.timer` | Health check (every 2 minutes) |
 
 ## CI/CD & Deployment
 
