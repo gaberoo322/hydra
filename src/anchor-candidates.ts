@@ -37,6 +37,7 @@
 
 import { promisify } from "node:util";
 import { execFile as execFileSync } from "node:child_process";
+import { getTargetGithubRepo } from "./target-config.ts";
 import { getWorkQueueItems } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/reflections.ts";
@@ -101,6 +102,15 @@ const MERGED_LOOKBACK_DAYS = 30;
 // #882 surfaced from items merged within the last few dozen PRs; 100 gives a
 // comfortable margin without an unbounded `gh` page walk.
 const MERGED_PR_SCAN_LIMIT = 100;
+// TTL-bounded cache for the merged-PR scan (issue #882, QA remediation). The
+// route `/api/anchor/candidates` is on the decide.py hot path; without a cache
+// every request shelled out to `gh pr list` twice (once per repo, 15s timeout
+// each) synchronously. A 60s in-memory TTL collapses the burst of polls a
+// single decide.py tick fires into one scan while still picking up freshly
+// merged PRs within a minute. Mirrors the `CACHE_TTL_MS` idiom in
+// `src/cost/usage-tracker.ts`. The merged set is small (token strings) and the
+// staleness window is bounded, so an in-memory cache is safe across requests.
+const MERGED_SCAN_CACHE_TTL_MS = 60_000;
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
@@ -345,13 +355,24 @@ async function loadDesignConceptImpl(
 
 const execFile = promisify(execFileSync);
 
+// The orchestrator's own repo. A literal is fine here — Hydra IS this repo, so
+// it is not a swappable target (mirrors `ORCHESTRATOR_REPO` in
+// `src/autopilot/pr-lifecycle-bridge.ts`). The TARGET repo, by contrast, MUST
+// resolve through the swap seam (`getTargetGithubRepo()`) per ADR-0013.
+const ORCHESTRATOR_REPO = "gaberoo322/hydra";
+
 /**
  * Repos whose merged PRs can ship a candidate's work. The orchestrator board
  * (`dev_orch`) and the target board (`dev_target`) both feed the candidate
  * feed, so both repos are scanned (issue #882: "applies to both orch and
- * target candidate surfaces").
+ * target candidate surfaces"). Resolved at CALL TIME — the target repo flows
+ * through the `target-config.ts` swap seam (ADR-0013/ADR-0002) rather than a
+ * hardcoded literal, so the merged-scan follows a target swap. Mirrors
+ * `defaultRepos()` in `src/autopilot/pr-lifecycle-bridge.ts`.
  */
-const MERGED_SCAN_REPOS = ["gaberoo322/hydra", "gaberoo322/hydra-betting"] as const;
+function mergedScanRepos(): readonly string[] {
+  return [ORCHESTRATOR_REPO, getTargetGithubRepo()];
+}
 
 /**
  * Pure helper — exported for tests. Build the normalized identifier token-set
@@ -427,22 +448,55 @@ export function isMergedWork(
 }
 
 /**
+ * TTL-bounded cache entry for the merged-PR scan (issue #882 QA remediation).
+ * `null` until the first successful-or-empty scan. We cache the resolved token
+ * set plus the wall-clock time it was stored so a burst of decide.py polls
+ * within `MERGED_SCAN_CACHE_TTL_MS` reuses one `gh` round-trip.
+ */
+interface MergedScanCacheEntry {
+  refs: Set<string>;
+  storedAt: number;
+}
+let mergedScanCache: MergedScanCacheEntry | null = null;
+
+/**
+ * Test-only: clear the merged-scan TTL cache so each test observes a cold
+ * fetch. Not for production use (the production path lets the TTL expire).
+ */
+export function __resetMergedScanCacheForTests(): void {
+  mergedScanCache = null;
+}
+
+/**
  * Production merged-refs reader. Scans recent merged PRs on both the
  * orchestrator and target repos via `gh pr list --state merged`, harvesting
  * the normalized identity tokens each PR ships (`mergedTokensFromPr`). Never
  * throws — a `gh` failure on one repo logs and contributes nothing; total
  * failure yields an empty set (suppress nothing), exactly degrading to the
  * pre-#882 behaviour on a miss.
+ *
+ * TTL-bounded (issue #882 QA remediation): a fresh cache entry (younger than
+ * `MERGED_SCAN_CACHE_TTL_MS`) short-circuits the `gh` shell-out so the hot
+ * `/api/anchor/candidates` path doesn't fork `gh` on every request. Pass
+ * `nowMs` for deterministic tests; defaults to `Date.now()`.
+ *
+ * Exported (with the injectable `exec` + `nowMs` seam) so the TTL-cache
+ * behaviour is unit-testable without forking a real `gh`.
  */
-async function loadMergedAnchorRefsImpl(
+export async function loadMergedAnchorRefsImpl(
   exec: typeof execFile = execFile,
+  nowMs: number = Date.now(),
 ): Promise<Set<string>> {
+  if (mergedScanCache && nowMs - mergedScanCache.storedAt < MERGED_SCAN_CACHE_TTL_MS) {
+    return mergedScanCache.refs;
+  }
+
   const merged = new Set<string>();
   // gh's --search uses GitHub's `merged:>=YYYY-MM-DD` qualifier.
-  const since = new Date(Date.now() - MERGED_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
+  const since = new Date(nowMs - MERGED_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
-  for (const repo of MERGED_SCAN_REPOS) {
+  for (const repo of mergedScanRepos()) {
     try {
       const { stdout } = await exec(
         "gh",
@@ -469,6 +523,10 @@ async function loadMergedAnchorRefsImpl(
       );
     }
   }
+  // Cache even an empty/degraded result: a `gh` outage should not be retried
+  // on every hot-path request within the TTL window. The set self-heals on the
+  // next scan after the TTL expires.
+  mergedScanCache = { refs: merged, storedAt: nowMs };
   return merged;
 }
 
