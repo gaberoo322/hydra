@@ -100,8 +100,11 @@ export const redisKeys = {
   realityReport: (id: string) => `hydra:reports:reality:${id}`,
   realityReportIndex: () => "hydra:reports:reality:index",
   summaryReport: (suffix: string) => `hydra:reports:summary:${suffix}`,
-  researchReport: (id: string) => `hydra:reports:research:${id}`,
-  researchReportIndex: () => "hydra:reports:research:index",
+  // `researchReport` / `researchReportIndex` removed in #863 — the in-process
+  // research read surface (research-loop.ts + redis/research-reports.ts) was
+  // deleted as the last remnant of the retired codex research subsystem
+  // (#342/#706). Residual `hydra:reports:research:*` keys remain in Redis but
+  // are no longer read or written.
 
   // ---------------------------------------------------------------------------
   // Memory

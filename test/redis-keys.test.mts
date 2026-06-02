@@ -28,7 +28,6 @@ describe("redisKeys naming convention", () => {
     ["anchorReframeQueue", redisKeys.anchorReframeQueue],
     ["metricsIndex", redisKeys.metricsIndex],
     ["realityReportIndex", redisKeys.realityReportIndex],
-    ["researchReportIndex", redisKeys.researchReportIndex],
     ["memoryLastConsolidation", redisKeys.memoryLastConsolidation],
     ["reflectionPrefix", redisKeys.reflectionPrefix],
     ["backlogItems", redisKeys.backlogItems],
@@ -74,7 +73,6 @@ describe("redisKeys naming convention", () => {
     ["metrics", redisKeys.metrics("cycle-1")],
     ["realityReport", redisKeys.realityReport("cycle-1")],
     ["summaryReport", redisKeys.summaryReport("manual-planner-abc")],
-    ["researchReport", redisKeys.researchReport("res-1")],
     ["memoryPatterns", redisKeys.memoryPatterns("planner")],
     ["memoryRules", redisKeys.memoryRules("executor")],
     ["reflection", redisKeys.reflection("some-anchor-ref")],
@@ -108,7 +106,6 @@ describe("redisKeys uniqueness", () => {
       ["anchorReframeQueue", redisKeys.anchorReframeQueue()],
       ["metricsIndex", redisKeys.metricsIndex()],
       ["realityReportIndex", redisKeys.realityReportIndex()],
-      ["researchReportIndex", redisKeys.researchReportIndex()],
       ["memoryLastConsolidation", redisKeys.memoryLastConsolidation()],
       ["backlogItems", redisKeys.backlogItems()],
       ["backlogCounter", redisKeys.backlogCounter()],
@@ -142,7 +139,6 @@ describe("redisKeys uniqueness", () => {
     // Verify that different generators with the same input produce different keys
     assert.notEqual(redisKeys.cycle("x"), redisKeys.task("x"));
     assert.notEqual(redisKeys.cycle("x"), redisKeys.metrics("x"));
-    assert.notEqual(redisKeys.realityReport("x"), redisKeys.researchReport("x"));
     assert.notEqual(redisKeys.memoryPatterns("x"), redisKeys.memoryRules("x"));
   });
 });
@@ -161,7 +157,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.anchorReframeQueue(), "hydra:anchors:reframe-queue");
     assert.equal(redisKeys.metricsIndex(), "hydra:metrics:index");
     assert.equal(redisKeys.realityReportIndex(), "hydra:reports:reality:index");
-    assert.equal(redisKeys.researchReportIndex(), "hydra:reports:research:index");
     assert.equal(redisKeys.backlogItems(), "hydra:backlog:items");
     assert.equal(redisKeys.backlogCounter(), "hydra:backlog:counter");
     assert.equal(redisKeys.schedulerState(), "hydra:scheduler:state");
@@ -182,7 +177,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.metrics("c1"), "hydra:metrics:c1");
     assert.equal(redisKeys.realityReport("c1"), "hydra:reports:reality:c1");
     assert.equal(redisKeys.summaryReport("manual-planner-abc"), "hydra:reports:summary:manual-planner-abc");
-    assert.equal(redisKeys.researchReport("r1"), "hydra:reports:research:r1");
     assert.equal(redisKeys.memoryPatterns("planner"), "hydra:memory:planner:patterns");
     assert.equal(redisKeys.memoryRules("executor"), "hydra:memory:executor:rules");
     assert.equal(redisKeys.reflection("test-ref"), "hydra:reflections:test-ref");
