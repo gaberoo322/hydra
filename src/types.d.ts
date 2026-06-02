@@ -36,6 +36,8 @@ declare module "ioredis" {
     xautoclaim(...args: any[]): Promise<any>;
     xgroup(...args: any[]): Promise<any>;
     xinfo(...args: any[]): Promise<any>;
+    xpending(...args: any[]): Promise<any>;
+    xrevrange(...args: any[]): Promise<any>;
     xlen(key: string): Promise<number>;
     duplicate(): Redis;
   }
