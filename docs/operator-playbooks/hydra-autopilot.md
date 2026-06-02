@@ -421,52 +421,64 @@ Slash-args (`--scope=`, `--tokens=`, `--max-sec=`, `--idle-turns=`,
 `--subagent-soft=`, `--subagent-hard=`, `--unattended=`) parse via
 `args-parse.sh` and override env vars.
 
-### Scheduling
+### Scheduling — the Pace Gate (ADR-0021)
 
-Two systemd user timers fire the autopilot on a daily cadence — it is NOT
-night-only. Both target the same `hydra-autopilot.service` oneshot (with
-its 9h `RuntimeMaxSec` and 8h internal budget), and the morning run
-typically finishes by ~19:00 so the two never overlap.
+The autopilot is launched by the **Pace Gate** — a usage-paced admission
+controller, NOT a fixed daily schedule. The legacy morning (10:00) and
+evening (22:00) timers are **retired** (issue #858); a single frequent
+(~15 min) timer now decides whether to launch each Autopilot Run based on
+where total weekly burn sits relative to the **Pacing Curve**.
 
 | Unit | Fires | File |
 |---|---|---|
-| `hydra-autopilot-morning.timer` | 10:00 local | `scripts/systemd/hydra-autopilot-morning.timer` |
-| `hydra-autopilot.timer` | 22:00 local | `scripts/systemd/hydra-autopilot.timer` |
+| `hydra-pace-gate.timer` | every ~15 min | `scripts/systemd/hydra-pace-gate.timer` |
+| `hydra-pace-gate.service` | (oneshot, runs the gate) | `scripts/systemd/hydra-pace-gate.service` |
 
-Operator install (one-time):
+On each tick `scripts/autopilot/pace-gate.sh`:
+
+1. **Skip if a run is already live** — the service is active OR
+   `/tmp/hydra-autopilot-state.json` carries a live owning PID (`kill -0`).
+2. **Consult `/api/usage/eligibility`** (the Pacing Curve, #857): skip when
+   `.reasons.emergencyStop == true` (5h cap ≥ 90%) or `.paceState == "ahead"`
+   (above the curve); otherwise (`on`/`behind`, not emergency) launch via
+   `systemctl --user start hydra-autopilot.service`.
+3. **Fail safe** — if the eligibility endpoint is unreachable, do NOT launch
+   (pacing is the governor; don't burn quota while blind to usage).
+
+The Gate governs *admission* only (should a run start now?), never *what work*
+to do — that stays with `decide.py` (ADR-0012). It reuses the existing
+watchdog, bootstrap concurrent-run guard, and the service's
+`Restart=on-failure` untouched; it only ever *starts* the service.
+
+`scripts/deploy.sh` installs `pace-gate.sh` to `~/.local/bin/`, retires the
+legacy launch timers, and enables `hydra-pace-gate.timer` on every deploy.
+Operator install / migration (one-time, if not relying on deploy):
 
 ```bash
-cp scripts/systemd/hydra-autopilot.service \
-   scripts/systemd/hydra-autopilot.timer \
-   scripts/systemd/hydra-autopilot-morning.timer \
+# Retire the legacy launch timers (no-op on a fresh host).
+systemctl --user disable --now hydra-autopilot-morning.timer hydra-autopilot.timer 2>/dev/null || true
+rm -f ~/.config/systemd/user/hydra-autopilot-morning.timer \
+      ~/.config/systemd/user/hydra-autopilot.timer
+
+# Install + enable the Pace Gate (hydra-autopilot.service itself is unchanged).
+install -D -m 0755 scripts/autopilot/pace-gate.sh ~/.local/bin/hydra-pace-gate.sh
+cp scripts/systemd/hydra-pace-gate.service scripts/systemd/hydra-pace-gate.timer \
    ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now hydra-autopilot.timer hydra-autopilot-morning.timer
+systemctl --user enable --now hydra-pace-gate.timer
 ```
 
-Inspect: `systemctl --user list-timers | grep autopilot` and
-`journalctl --user -u hydra-autopilot.service` after a fire.
+Inspect: `systemctl --user list-timers | grep pace-gate`,
+`journalctl --user -u hydra-pace-gate.service` (admission decisions), and
+`journalctl --user -u hydra-autopilot.service` after a launch.
 
-Adding more fires (e.g. a midday run) is a one-line `OnCalendar=` change in
-a copy of the morning timer — `Unit=hydra-autopilot.service` ties them all
-to the same oneshot. Two cautions:
-
-1. Each fire is sized for up to 8h of work — overlapping fires fight for
-   the same `[Service] Type=oneshot` slot. Stagger them by at least 9h or
-   use `RandomizedDelaySec=` to avoid stomping.
-2. The autopilot self-terminates on `idle_drain_turns` when there's nothing
-   to do, so an empty-queue fire is cheap — but every fire still pays the
-   bootstrap + Phase 0 schema handshake cost. Don't fire it every 5
-   minutes; the heartbeat housekeeping inside `scheduler.ts` covers that
-   frequency.
-
-The choice of two daily long runs (rather than many short runs) is
-deliberate: the L2 decision brain in `decide.py` benefits from a stable
-in-process view of pipeline state across many turns. Short bursts would
-re-pay the Phase 0 / Phase 1 collect-state cost without amortising it
-across enough decisions to matter. If short-burst mode becomes useful
-later, document the tuning in a follow-up section here — don't replace
-the long-run schedule.
+Each launched run is still sized for up to 8h of work (the service's 9h
+`RuntimeMaxSec` + 8h internal budget); the "already running" skip in step 1
+prevents the ~15-min timer from ever stacking a second run on top of a live
+one. The autopilot self-terminates on `idle_drain_turns` when there's nothing
+to do. The L2 decision brain in `decide.py` benefits from a stable in-process
+view of pipeline state across many turns, so the Gate launches one long run
+and lets it run to budget/clock/idle rather than firing many short bursts.
 
 ## Slot lifecycle events (issue #509)
 
