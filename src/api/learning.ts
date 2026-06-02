@@ -1,9 +1,9 @@
 import { Router } from "express";
+import { listFrictionPatterns } from "../pattern-memory/agent-memory.ts";
 import {
   getIneffectivePromotedPatterns,
   getRuleActionLog,
-  listFrictionPatterns,
-} from "../pattern-memory/agent-memory.ts";
+} from "../pattern-memory/rule-effectiveness.ts";
 import { getContext } from "../learning.ts";
 
 const FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const;
