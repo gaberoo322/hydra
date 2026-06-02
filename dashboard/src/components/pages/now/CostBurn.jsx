@@ -7,21 +7,6 @@ function formatMoney(n) {
   return `$${n.toFixed(2)}`;
 }
 
-function HeadroomBar({ pct }) {
-  const clamped = Math.max(0, Math.min(100, pct ?? 100));
-  // Color escalates as headroom shrinks. >50% remaining is green, 25-50% is
-  // yellow, <25% is red. Matches the dashboard-wide chip vocabulary.
-  const barColor = clamped > 50 ? "bg-emerald-500" : clamped > 25 ? "bg-yellow-500" : "bg-red-500";
-  return (
-    <div className="h-2 w-full bg-zinc-700/40 rounded overflow-hidden">
-      <div
-        className={`h-full ${barColor} transition-all duration-300`}
-        style={{ width: `${clamped}%` }}
-      />
-    </div>
-  );
-}
-
 /**
  * Spark — coarse two-point rate display. The aggregator returns a
  * `lastHourSpark` array of USD-per-hour averages (5h-average, 24h-average).
@@ -46,35 +31,27 @@ function Spark({ spark }) {
 }
 
 /**
- * CostBurn — daily-budget headroom + coarse hourly burn spark. Polls
- * every 30s (PRD #615) — cost moves slowly enough that 5s would just
- * spam the surrogate read.
+ * CostBurn — coarse hourly burn-rate spark. Polls every 30s (PRD #615) —
+ * cost moves slowly enough that 5s would just spam the surrogate read.
+ *
+ * The USD daily-budget / headroom half was retired in #885 — under the
+ * Claude Code subscription a dollar attribution is a fiction (the dollar
+ * machinery was already structurally $0 since #704). The re-expression of
+ * "headroom" in token/quota vocabulary is deferred to a separate pickup.
  */
 export function CostBurn() {
   const { data, error, loading } = useApi("/now/cost-burn", { poll: 30_000 });
-  const daySpent = data?.daySpent ?? 0;
-  const dailyBudget = data?.dailyBudget ?? 0;
-  const headroomPct = data?.headroomPct ?? 100;
-  const subtitle = dailyBudget > 0
-    ? `${formatMoney(daySpent)} of ${formatMoney(dailyBudget)} today · ${headroomPct.toFixed(0)}% headroom`
-    : "Daily budget not set — burn rate only.";
 
   return (
     <Section
       title="Cost burn"
-      subtitle={subtitle}
+      subtitle="Burn rate only."
       loading={loading}
       error={error}
     >
       {data && (
         <div className="space-y-3">
-          {dailyBudget > 0 && <HeadroomBar pct={headroomPct} />}
           <Spark spark={data.lastHourSpark} />
-          {dailyBudget === 0 && (
-            <p className="text-[11px] text-zinc-500">
-              Set <code className="text-zinc-400">HYDRA_DAILY_BUDGET_USD</code> to see the headroom bar.
-            </p>
-          )}
         </div>
       )}
     </Section>

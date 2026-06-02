@@ -1,11 +1,11 @@
 /**
  * Cost-burn aggregator (issue #618, PRD #615).
  *
- * Now-page widget data — answers "how fast is hydra spending right now?".
+ * Now-page widget data — answers "how fast is hydra burning right now?".
  *
  * Shape:
  *
- *   { lastHourSpark: number[], daySpent, dailyBudget, headroomPct }
+ *   { lastHourSpark: number[] }
  *
  * # Why the spark is "coarse" today
  *
@@ -20,22 +20,20 @@
  * a follow-up; documenting the shape as a `number[]` lets that future
  * change ship without a schema migration.
  *
- * # daySpent / dailyBudget
+ * # Retired: daySpent / dailyBudget / headroomPct (issue #885)
  *
- * - `daySpent` — USD spent so far today (UTC). The cost surrogate's
- *   dollar-conversion machinery was removed in #704 (`HYDRA_TOKEN_USD_RATE`
- *   was structurally $0 and no live dollar cap existed), so the default
- *   reader now returns 0. The field is retained for shape stability; a
- *   caller can still inject a `readDaySpentUsd` dep if it ever has an
- *   authoritative dollar source.
- * - `dailyBudget` — operator-set daily budget in USD. Sourced from the
- *   `HYDRA_DAILY_BUDGET_USD` env var (live, operator-set — unaffected by
- *   #704). Zero when unset. The Subscription Usage Tracker is the
- *   *enforcement* surface (`/api/usage/eligibility`); this number is
- *   operator-informational, displayed alongside the spend.
- * - `headroomPct` — `(1 - daySpent / dailyBudget) * 100`, clamped to
- *   `[0, 100]`. Returns 100 when `dailyBudget` is 0 or unset (no budget →
- *   no headroom pressure to display).
+ * The USD dollar-budget fields — `daySpent`, `dailyBudget`, `headroomPct` —
+ * were removed in #885. Under the Claude Code subscription the orchestrator
+ * pays no per-call charge, so a USD attribution is a fiction (see CONTEXT.md
+ * **Quota Weight**): the dollar-conversion machinery was deleted in #704
+ * (`HYDRA_TOKEN_USD_RATE` was structurally $0 and no live dollar cap
+ * existed), leaving `daySpent` always 0 and `headroomPct` always 100% — a
+ * display-only signal that fed no live decision. The real enforcement
+ * surface is the Subscription Usage Tracker / Pace Gate
+ * (`/api/usage/eligibility`), which is token-and-quota denominated. The
+ * re-expression of "burn + headroom" in that vocabulary is the interface-
+ * design step deferred to a separate triaged pickup; this change is the
+ * honest deletion only.
  *
  * # Design contract — same as overnight-summary.ts
  *
@@ -58,26 +56,9 @@ export interface CostBurn {
    * without changing the type.
    */
   lastHourSpark: number[];
-  /** USD spent so far today (UTC). 0 by default — the surrogate's dollar
-   *  machinery was removed in #704; only an injected `readDaySpentUsd` dep
-   *  produces a non-zero value. */
-  daySpent: number;
-  /** Operator-set daily budget in USD. Zero when unset. */
-  dailyBudget: number;
-  /**
-   * `(1 - daySpent / dailyBudget) * 100`, clamped to [0, 100]. 100 when
-   * the budget is unset.
-   */
-  headroomPct: number;
 }
 
 export interface CostBurnDeps {
-  /**
-   * Reader for the per-day USD spend. The surrogate's dollar machinery was
-   * removed in #704, so the default returns 0. Exposed so callers (and tests)
-   * can inject a dollar figure if they have an authoritative source.
-   */
-  readDaySpentUsd?: () => Promise<number>;
   /**
    * Reader for the rolling usage-tracker snapshot. Defaults to
    * `getUsage()` from `src/cost/`.
@@ -90,11 +71,6 @@ export interface CostBurnDeps {
    * spark math with a concrete rate.
    */
   getTokenUsdRate?: () => number;
-  /**
-   * Reader for the operator's daily budget in USD. Defaults to the
-   * `HYDRA_DAILY_BUDGET_USD` env var. Exposed for tests.
-   */
-  readDailyBudgetUsd?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,19 +78,14 @@ export interface CostBurnDeps {
 // ---------------------------------------------------------------------------
 
 export async function getCostBurn(deps: CostBurnDeps = {}): Promise<CostBurn> {
-  const [daySpentResult, usageResult] = await Promise.allSettled([
-    readDaySpent(deps),
-    readUsage(deps),
-  ]);
+  const usageResult = await Promise.allSettled([readUsage(deps)]).then((r) => r[0]);
 
-  const daySpent = settledOr(daySpentResult, 0, "cost-burn/daySpent");
   const usage = settledOr(
     usageResult,
     { tokensLast5h: { total: 0 } as UsageSnapshot["tokensLast5h"], tokensLast24h: 0 },
     "cost-burn/usage",
   );
 
-  const dailyBudget = (deps.readDailyBudgetUsd ?? readDailyBudgetFromEnv)();
   const rate = (deps.getTokenUsdRate ?? getDefaultRate)();
 
   const lastHourSpark = computeSpark({
@@ -123,26 +94,13 @@ export async function getCostBurn(deps: CostBurnDeps = {}): Promise<CostBurn> {
     tokenUsdRate: rate,
   });
 
-  return {
-    lastHourSpark,
-    daySpent,
-    dailyBudget,
-    headroomPct: computeHeadroomPct(daySpent, dailyBudget),
-  };
+  return { lastHourSpark };
 }
 
 function settledOr<T>(result: PromiseSettledResult<T>, fallback: T, label: string): T {
   if (result.status === "fulfilled") return result.value;
   console.error(`[cost-burn] ${label} failed: ${result.reason?.message || result.reason}`);
   return fallback;
-}
-
-async function readDaySpent(deps: CostBurnDeps): Promise<number> {
-  if (deps.readDaySpentUsd) return deps.readDaySpentUsd();
-  // The cost surrogate's dollar-conversion machinery was removed in #704
-  // (`HYDRA_TOKEN_USD_RATE` was structurally $0; no live dollar cap existed).
-  // There is no authoritative per-day dollar source, so the default is 0.
-  return 0;
 }
 
 async function readUsage(
@@ -160,14 +118,6 @@ function getDefaultRate(): number {
   // dead — `HYDRA_TOKEN_USD_RATE` was structurally $0). This local read keeps
   // the spark self-contained; it returns 0 unless an operator sets the rate.
   const raw = process.env.HYDRA_TOKEN_USD_RATE;
-  if (raw === undefined || raw === "") return 0;
-  const parsed = parseFloat(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return 0;
-  return parsed;
-}
-
-function readDailyBudgetFromEnv(): number {
-  const raw = process.env.HYDRA_DAILY_BUDGET_USD;
   if (raw === undefined || raw === "") return 0;
   const parsed = parseFloat(raw);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
@@ -198,8 +148,8 @@ export function tokensToUsdPerMillion(tokens: number, rate: number): number {
  * USD per hour, averaged over the 5h / 24h rolling window.
  *
  * Edge cases:
- *   - rate 0 → returns `[0, 0]` (caller should still render the row;
- *     headroomPct is the meaningful signal in that mode).
+ *   - rate 0 → returns `[0, 0]` (the spark collapses to a flat line; the
+ *     dashboard should still render the row).
  *   - missing 5h or 24h → that bucket goes to 0.
  */
 export function computeSpark(input: {
@@ -213,21 +163,4 @@ export function computeSpark(input: {
   const ratePerHour5h = Math.round((usd5h / 5) * 10_000) / 10_000;
   const ratePerHour24h = Math.round((usd24h / 24) * 10_000) / 10_000;
   return [ratePerHour5h, ratePerHour24h];
-}
-
-/**
- * Pure helper — compute the headroom %.
- *
- * Clamps to [0, 100]. When `dailyBudget` is 0 (unset), returns 100 —
- * "no budget set, no pressure to display." This matches the operator's
- * mental model: a dashboard widget should never claim "0% headroom" just
- * because they haven't filled in the env var.
- */
-export function computeHeadroomPct(daySpent: number, dailyBudget: number): number {
-  if (!Number.isFinite(dailyBudget) || dailyBudget <= 0) return 100;
-  if (!Number.isFinite(daySpent) || daySpent <= 0) return 100;
-  const pct = (1 - daySpent / dailyBudget) * 100;
-  if (pct <= 0) return 0;
-  if (pct >= 100) return 100;
-  return Math.round(pct * 100) / 100;
 }

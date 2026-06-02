@@ -1,11 +1,17 @@
 /**
  * Regression tests for the cost-burn aggregator (issue #618).
  *
+ * The USD dollar-budget fields (daySpent / dailyBudget / headroomPct) and
+ * the computeHeadroomPct helper were retired in #885 — under the Claude Code
+ * subscription a USD attribution is a fiction (see CONTEXT.md Quota Weight),
+ * so those tests pinned a structurally-$0 / 100%-headroom path and were
+ * deleted. The aggregator now ships only the token-derived burn-rate spark.
+ *
  * Covers:
- *   - pure helpers: tokensToUsdPerMillion, computeSpark, computeHeadroomPct
+ *   - pure helpers: tokensToUsdPerMillion, computeSpark
  *   - happy path: full deps stubbed
  *   - bucket boundary: 5h and 24h windows producing different per-hour rates
- *   - empty state: zero tokens, zero budget
+ *   - empty state: zero tokens
  *   - sub-source failure isolation
  */
 
@@ -16,7 +22,6 @@ import {
   getCostBurn,
   tokensToUsdPerMillion,
   computeSpark,
-  computeHeadroomPct,
 } from "../src/aggregators/cost-burn.ts";
 
 // ---------------------------------------------------------------------------
@@ -87,62 +92,32 @@ describe("computeSpark — pure helper", () => {
   });
 });
 
-describe("computeHeadroomPct — pure helper", () => {
-  test("100 when budget is 0 or unset", () => {
-    assert.equal(computeHeadroomPct(5, 0), 100);
-    assert.equal(computeHeadroomPct(5, -1), 100);
-  });
-
-  test("100 when daySpent is 0 or negative", () => {
-    assert.equal(computeHeadroomPct(0, 50), 100);
-    assert.equal(computeHeadroomPct(-1, 50), 100);
-  });
-
-  test("clamps at 0 when overspent", () => {
-    assert.equal(computeHeadroomPct(100, 50), 0);
-    assert.equal(computeHeadroomPct(60, 50), 0);
-  });
-
-  test("computes (1 - spent/budget) * 100 inside the band", () => {
-    // $10 of $50 → 80% headroom remaining.
-    assert.equal(computeHeadroomPct(10, 50), 80);
-    // $25 of $50 → 50% headroom remaining.
-    assert.equal(computeHeadroomPct(25, 50), 50);
-  });
-});
-
 // ---------------------------------------------------------------------------
 // getCostBurn — integration via deps
 // ---------------------------------------------------------------------------
 
 describe("getCostBurn — happy path", () => {
-  test("returns a complete CostBurn shape", async () => {
+  test("returns a complete CostBurn shape (spark only)", async () => {
     const burn = await getCostBurn({
-      readDaySpentUsd: async () => 12.5,
       readUsage: async () => ({
         tokensLast5h: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 5_000_000 },
         tokensLast24h: 24_000_000,
       }),
       getTokenUsdRate: () => 10,
-      readDailyBudgetUsd: () => 100,
     });
-    assert.equal(burn.daySpent, 12.5);
-    assert.equal(burn.dailyBudget, 100);
+    assert.deepEqual(Object.keys(burn), ["lastHourSpark"]);
     assert.deepEqual(burn.lastHourSpark, [10, 10]);
-    assert.equal(burn.headroomPct, 87.5);
   });
 });
 
 describe("getCostBurn — bucket boundary", () => {
   test("5h-only burn produces non-zero 5h spark and zero 24h spark", async () => {
     const burn = await getCostBurn({
-      readDaySpentUsd: async () => 0,
       readUsage: async () => ({
         tokensLast5h: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 5_000_000 },
         tokensLast24h: 0,
       }),
       getTokenUsdRate: () => 10,
-      readDailyBudgetUsd: () => 0,
     });
     assert.equal(burn.lastHourSpark.length, 2);
     assert.ok(burn.lastHourSpark[0] > 0);
@@ -151,52 +126,26 @@ describe("getCostBurn — bucket boundary", () => {
 });
 
 describe("getCostBurn — empty state", () => {
-  test("zero tokens + zero budget yields [0,0] spark and 100% headroom", async () => {
+  test("zero tokens yields [0,0] spark", async () => {
     const burn = await getCostBurn({
-      readDaySpentUsd: async () => 0,
       readUsage: async () => ({
         tokensLast5h: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 },
         tokensLast24h: 0,
       }),
       getTokenUsdRate: () => 10,
-      readDailyBudgetUsd: () => 0,
     });
-    assert.equal(burn.daySpent, 0);
-    assert.equal(burn.dailyBudget, 0);
     assert.deepEqual(burn.lastHourSpark, [0, 0]);
-    assert.equal(burn.headroomPct, 100);
   });
 });
 
 describe("getCostBurn — sub-source failure isolation", () => {
-  test("daySpent reader throws → daySpent degrades to 0 but spark still computes", async () => {
+  test("usage reader throws → spark degrades to [0,0]", async () => {
     const burn = await getCostBurn({
-      readDaySpentUsd: async () => {
-        throw new Error("surrogate down");
-      },
-      readUsage: async () => ({
-        tokensLast5h: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 5_000_000 },
-        tokensLast24h: 24_000_000,
-      }),
-      getTokenUsdRate: () => 10,
-      readDailyBudgetUsd: () => 50,
-    });
-    assert.equal(burn.daySpent, 0);
-    assert.deepEqual(burn.lastHourSpark, [10, 10]);
-    assert.equal(burn.headroomPct, 100);
-  });
-
-  test("usage reader throws → spark degrades to [0,0] but daySpent still ships", async () => {
-    const burn = await getCostBurn({
-      readDaySpentUsd: async () => 25,
       readUsage: async () => {
         throw new Error("usage tracker failed");
       },
       getTokenUsdRate: () => 10,
-      readDailyBudgetUsd: () => 100,
     });
-    assert.equal(burn.daySpent, 25);
     assert.deepEqual(burn.lastHourSpark, [0, 0]);
-    assert.equal(burn.headroomPct, 75);
   });
 });
