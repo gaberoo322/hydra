@@ -234,8 +234,27 @@ The CI `scope-check` job at `.github/workflows/ci.yml` enforces this contract. S
 ### 6. Post-agent
 
 **Success (PR URL returned):**
+
+Transition the source issue `ready-for-agent`/`in-progress` → `needs-qa` so
+`qa_orch` auto-fires on the open PR and the stale `ready-for-agent` can't
+re-surface the issue for a duplicate dispatch (the #770/#754 hazard, root cause
+of #846). Mirror `hydra-qa` Step 10 discipline: quote the label literals and
+make the edit non-fatal with a `|| echo WARN` guard so a transient `gh` failure
+can't abort the run. The transition is keyed by the **issue number** (exact, so
+the `anchor.reference`/title pitfall does not apply) via raw `gh issue edit` —
+NOT `safeKanban()`, which is a `src/` helper this bash playbook cannot call.
+
+CRITICAL: remove BOTH `ready-for-agent` AND `in-progress`. The #846 failures
+left issues stuck on `ready-for-agent`, so removing only `in-progress` is
+insufficient — strip both and add `needs-qa`. `gh issue edit --remove-label` is
+idempotent (removing an absent label is a no-op), so listing both is safe
+whichever label the issue currently carries.
+
 ```bash
-gh issue edit $issue_number --remove-label in-progress --add-label needs-qa
+gh issue edit "$issue_number" --repo gaberoo322/hydra \
+  --remove-label "ready-for-agent" --remove-label "in-progress" \
+  --add-label "needs-qa" \
+  || echo "WARN: failed to move issue #${issue_number} to needs-qa (non-fatal) — relabel by hand"
 ```
 
 Then unblock dependents:
