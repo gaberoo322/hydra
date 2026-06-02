@@ -8,8 +8,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { gitExec } from "./github/git.ts";
+import { isGhFailure } from "./github/exec.ts";
 import {
   getPlanCacheEntry,
   setPlanCacheEntry,
@@ -30,8 +30,6 @@ import {
 } from "./redis/plan-cache.ts";
 import { getTargetWorkspace } from "./target-config.ts";
 import { normalizeReference } from "./normalize-reference.ts";
-
-const execFileAsync = promisify(execFile);
 
 const PROJECT_WORKSPACE = getTargetWorkspace();
 
@@ -249,18 +247,17 @@ function cacheKey(anchor: { type: string; reference: string }): string {
 
 async function areScopeFilesUnmodified(scopeFiles: string[], cachedAt: string): Promise<boolean> {
   if (scopeFiles.length === 0) return true;
-  try {
-    // Check if any scope file was modified after the cache time
-    const { stdout } = await execFileAsync(
-      "git", ["log", "--oneline", "--since", cachedAt, "--", ...scopeFiles],
-      { cwd: PROJECT_WORKSPACE, timeout: 5000 },
-    );
-    // If git log returns any commits, files were modified
-    return stdout.trim().length === 0;
-  } catch {
-    // If git check fails, treat as stale (safe default)
-    return false;
-  }
+  // Check if any scope file was modified after the cache time, via the GitHub
+  // CLI Adapter seam (issue #899). The seam never throws — a failed `git log`
+  // (missing binary, timeout, non-repo) surfaces as a failure arm, which we
+  // treat as stale (the safe default the pre-seam try/catch used).
+  const result = await gitExec(
+    ["log", "--oneline", "--since", cachedAt, "--", ...scopeFiles],
+    { cwd: PROJECT_WORKSPACE, timeout: 5000 },
+  );
+  if (isGhFailure(result)) return false;
+  // If git log returns any commits, files were modified.
+  return result.data.stdout.trim().length === 0;
 }
 
 function isStale(entry: CacheEntry, grounding: { testReport: { passed: number } }): string | null {

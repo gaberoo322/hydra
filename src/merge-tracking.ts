@@ -12,11 +12,9 @@
  *     merges so the schema isn't orphaned.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { pushTrackedMerge, getTrackedMerges, setAdversarialStats } from "./redis/adversarial.ts";
-
-const execFileAsync = promisify(execFile);
+import { gitExec } from "./github/git.ts";
+import { isGhOk } from "./github/exec.ts";
 
 // ---------------------------------------------------------------------------
 // Types — preserved for compatibility with stored Redis entries.
@@ -86,10 +84,14 @@ export async function checkRevertCorrelation(projectDir: string): Promise<{
     for (const raw of rawEntries) {
       try {
         const entry: TrackedMerge = JSON.parse(raw);
-        const { stdout: revertCheck } = await execFileAsync(
-          "git", ["log", "--oneline", "--since=14 days ago", "--grep", `Revert.*${entry.commitSha.slice(0, 7)}`],
+        // Revert lookup via the GitHub CLI Adapter seam (issue #899). The seam
+        // never throws — a `git log` failure surfaces as a failure arm, which
+        // we map to the empty-stdout default the pre-seam `.catch` produced.
+        const revertResult = await gitExec(
+          ["log", "--oneline", "--since=14 days ago", "--grep", `Revert.*${entry.commitSha.slice(0, 7)}`],
           { cwd: projectDir, timeout: 5000 },
-        ).catch(() => ({ stdout: "" }));
+        );
+        const revertCheck = isGhOk(revertResult) ? revertResult.data.stdout : "";
 
         const wasReverted = revertCheck.trim().length > 0;
         if (wasReverted) {

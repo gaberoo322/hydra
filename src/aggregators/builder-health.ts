@@ -52,8 +52,7 @@
  *   and Redis readers are overridable via `deps`.
  */
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
+import { execFileViaSeam } from "../github/exec-file-compat.ts";
 
 import { getCapacitySnapshot, ORCHESTRATOR_FLOOR, DEFAULT_WINDOW_CYCLES } from "../capacity-floor.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
@@ -62,7 +61,10 @@ import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { listAutopilotPrLinksSince } from "../redis/autopilot-runs.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
 
-const execFile = promisify(execFileSync);
+// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
+// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
+// changes the default, not the injection seam.
+const execFile = execFileViaSeam;
 
 // Heartbeat merge-rate window (env-overridable, matches the rolling merge
 // rate's native window). Used for the rework metric's "of N cycles" framing.

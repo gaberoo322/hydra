@@ -27,12 +27,14 @@
  *   issues queried via `gh issue list`.
  */
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
+import { execFileViaSeam } from "../github/exec-file-compat.ts";
 
 import type { DecisionItemSource } from "./types.ts";
 
-const execFile = promisify(execFileSync);
+// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
+// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
+// changes the default, not the injection seam.
+const execFile = execFileViaSeam;
 
 // ---------------------------------------------------------------------------
 // Public types

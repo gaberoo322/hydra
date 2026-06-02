@@ -42,10 +42,12 @@
  * It touches no Redis adapter, so `scripts/ci/redis-seam-check.ts` stays green.
  */
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
+import { execFileViaSeam } from "../github/exec-file-compat.ts";
 
-const execFile = promisify(execFileSync);
+// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
+// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
+// changes the default, not the injection seam.
+const execFile = execFileViaSeam;
 
 /**
  * One `meta-friction` GitHub issue, as the dashboard aggregators render it.

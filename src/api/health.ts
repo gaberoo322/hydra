@@ -5,6 +5,10 @@ import { resolve, join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+// `df`/`free`/`systemctl` probes below stay on the raw execFile — they are
+// host-info binaries outside the GitHub CLI Adapter seam's `gh`/`git` boundary
+// (issue #899), so this file remains a known `github-seam-check` baseline
+// entry. The one `git` call (getDeployedSha) is migrated onto the seam.
 const execFileAsync = promisify(execFile);
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
@@ -22,6 +26,8 @@ import { OPENVIKING_API_KEY } from "../knowledge-base/ov-config.ts";
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
 import { parseProbes, assessHealth } from "../health-diagnostics.ts";
+import { gitExec } from "../github/git.ts";
+import { isGhFailure } from "../github/exec.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -42,19 +48,21 @@ async function getDeployedSha(): Promise<string | null> {
   if (deployedShaCache.sha !== null && now - deployedShaCache.at < DEPLOYED_SHA_TTL_MS) {
     return deployedShaCache.sha;
   }
-  try {
-    const { stdout } = await execFileAsync("git", ["-C", HYDRA_ROOT, "rev-parse", "HEAD"], { timeout: 3000 });
-    const sha = stdout.trim() || null;
-    deployedShaCache = { sha, at: now };
-    return sha;
-  } catch (err: any) {
-    // Intentional: not a git checkout, git missing, or timeout — the field is
-    // advisory. Log once-per-cache-window so a misconfigured host is visible
-    // without spamming, then omit the field.
-    console.error(`[API] /health deployedSha unavailable: ${err?.message ?? err}`);
+  // Routes the `git rev-parse HEAD` through the GitHub CLI Adapter seam (issue
+  // #899). The seam never throws; a failure arm (not a git checkout, git
+  // missing, or timeout) degrades to null — the field is advisory and must
+  // never block /health.
+  const result = await gitExec(["-C", HYDRA_ROOT, "rev-parse", "HEAD"], { timeout: 3000 });
+  if (isGhFailure(result)) {
+    // Log once-per-cache-window so a misconfigured host is visible without
+    // spamming, then omit the field.
+    console.error(`[API] /health deployedSha unavailable (${result.code}): ${result.stderr.slice(0, 200)}`);
     deployedShaCache = { sha: null, at: now };
     return null;
   }
+  const sha = result.data.stdout.trim() || null;
+  deployedShaCache = { sha, at: now };
+  return sha;
 }
 
 export function createHealthRouter(eventBus: any) {

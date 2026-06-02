@@ -66,16 +66,13 @@
  * calls it on SIGTERM. Stop is idempotent.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import { EventBus } from "../event-bus.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
+import { ghJson } from "../github/gh.ts";
+import { isGhFailure } from "../github/exec.ts";
 
 /** The orchestrator's own repo — the one constant across target swaps. */
 const ORCHESTRATOR_REPO = "gaberoo322/hydra";
-
-const execFileAsync = promisify(execFile);
 
 export const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 
@@ -251,21 +248,30 @@ export interface GhFetcher {
  * the bridge can continue against its existing snapshot.
  */
 export async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
-  try {
-    const { stdout } = await execFileAsync(
-      "gh",
-      [
-        "pr", "list",
-        "--repo", repo,
-        "--state", "all",
-        "--limit", "50",
-        "--json", "number,state,title,url,headRefName,createdAt",
-      ],
-      { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 },
+  // Routes through the GitHub CLI Adapter seam (issue #899). The seam never
+  // throws and owns the JSON parse + the four external-process error modes; a
+  // failure arm (missing `gh`, auth error, network blip, empty/malformed JSON)
+  // degrades to [] so the bridge continues against its existing snapshot —
+  // preserving the pre-seam "returns [] on any failure" contract.
+  const result = await ghJson<unknown>(
+    [
+      "pr", "list",
+      "--repo", repo,
+      "--state", "all",
+      "--limit", "50",
+      "--json", "number,state,title,url,headRefName,createdAt",
+    ],
+    { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 },
+  );
+  if (isGhFailure(result)) {
+    console.error(
+      `[pr-lifecycle-bridge] gh pr list ${repo} failed (${result.code}): ${result.stderr.slice(0, 200)}`,
     );
-    const parsed = JSON.parse(stdout);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
+    return [];
+  }
+  const parsed = result.data;
+  if (!Array.isArray(parsed)) return [];
+  return parsed
       .filter((row) => row && typeof row === "object" && Number.isFinite(row.number))
       .map((row): PullRequestSnapshot => ({
         number: Number(row.number),
@@ -279,12 +285,6 @@ export async function defaultGhFetcher(repo: string): Promise<PullRequestSnapsho
         headRefName: String(row.headRefName || ""),
         createdAt: String(row.createdAt || ""),
       }));
-  } catch (err: any) {
-    console.error(
-      `[pr-lifecycle-bridge] gh pr list ${repo} failed: ${err?.message || err}`,
-    );
-    return [];
-  }
 }
 
 export interface PrLifecycleBridgeOpts {

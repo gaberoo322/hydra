@@ -35,9 +35,8 @@
 // clock to exercise enumeration + scoring + eligibility end-to-end without a
 // Redis fixture.
 
-import { promisify } from "node:util";
-import { execFile as execFileSync } from "node:child_process";
 import { getTargetGithubRepo } from "./target-config.ts";
+import { execFileViaSeam } from "./github/exec-file-compat.ts";
 import { getWorkQueueItems } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/reflections.ts";
@@ -353,7 +352,10 @@ async function loadDesignConceptImpl(
 // Merged-by-cycle reader (issue #882).
 // ---------------------------------------------------------------------------
 
-const execFile = promisify(execFileSync);
+// The production default routes the merged-PR scan through the GitHub CLI
+// Adapter seam (issue #899). The `exec` parameter on loadMergedAnchorRefsImpl
+// remains the injectable test seam — this only changes the default.
+const execFile = execFileViaSeam;
 
 // The orchestrator's own repo. A literal is fine here — Hydra IS this repo, so
 // it is not a swappable target (mirrors `ORCHESTRATOR_REPO` in
