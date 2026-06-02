@@ -405,4 +405,130 @@ describe("autopilot runs API (issue #497)", () => {
     assert.equal(res._status, 200);
     assert.equal(res._body.term_reason, "unknown");
   });
+
+  // ---------------------------------------------------------------------------
+  // AC13 (issue #898) — run-end with cause "interrupted" (the reap-on-exit
+  //        backstop's clean-exit cause) records status=ended/interrupted, NOT
+  //        killed/crash. A run interrupted by `systemctl restart` / SIGTERM is
+  //        recorded deterministically and distinctly from a genuine crash.
+  // ---------------------------------------------------------------------------
+  test("AC13: run-end cause=interrupted → status=ended, term_reason=interrupted", async () => {
+    await runStart(
+      mockReq({
+        run_id: "run-iii",
+        started: "2026-06-02T10:00:00Z",
+        started_epoch: 1748858400,
+        pid: process.pid,
+        trigger: "morning-timer",
+        limits: {},
+      }),
+      mockRes(),
+    );
+
+    const res = mockRes();
+    await runEnd(
+      mockReq({ run_id: "run-iii", cause: "interrupted", ended_epoch: 1748862000, exit_code: 0 }),
+      res,
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.status, "ended");
+    assert.equal(res._body.term_reason, "interrupted");
+
+    const row = await redis.hgetall("hydra:autopilot:run:run-iii");
+    assert.equal(row.status, "ended");
+    assert.equal(row.term_reason, "interrupted");
+    assert.equal(row.exit_code, "0");
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC14 (issue #898) — sweeper of a dead-pid running row that carries a
+  //        recorded clean exit (exit_code === "0") promotes to
+  //        status=ended/interrupted, NOT killed/crash. This is the case where
+  //        an exit hook stamped a clean exit but the terminal run-end POST
+  //        never landed.
+  // ---------------------------------------------------------------------------
+  test("AC14: sweeper of dead-pid running row with exit_code=0 → ended/interrupted", async () => {
+    const deadPid = 2147483646;
+    const startedEpoch = Math.floor(Date.now() / 1000) - 300;
+    await runStart(
+      mockReq({
+        run_id: "run-jjj",
+        started: new Date(startedEpoch * 1000).toISOString(),
+        started_epoch: startedEpoch,
+        pid: deadPid,
+        trigger: "overnight-timer",
+        limits: {},
+      }),
+      mockRes(),
+    );
+    // Simulate an exit hook that recorded a clean exit code but whose run-end
+    // POST never flipped the status off "running".
+    await redis.hset("hydra:autopilot:run:run-jjj", "exit_code", "0");
+
+    const res = mockRes();
+    await runsCurrent({ method: "GET" } as any, res);
+    assert.equal(res._body.status, "ended");
+    assert.equal(res._body.term_reason, "interrupted");
+
+    const row = await redis.hgetall("hydra:autopilot:run:run-jjj");
+    assert.equal(row.status, "ended");
+    assert.equal(row.term_reason, "interrupted");
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC15 (issue #898) — crash is RESERVED: a dead-pid running row with NO
+  //        recorded exit code (the process is gone and nobody recorded a clean
+  //        exit) still sweeps to killed/crash. Guards against the fix
+  //        accidentally relabelling genuine crashes as clean ends.
+  // ---------------------------------------------------------------------------
+  test("AC15: sweeper of dead-pid running row with no exit_code → killed/crash", async () => {
+    const deadPid = 2147483646;
+    const startedEpoch = Math.floor(Date.now() / 1000) - 300;
+    await runStart(
+      mockReq({
+        run_id: "run-kkk",
+        started: new Date(startedEpoch * 1000).toISOString(),
+        started_epoch: startedEpoch,
+        pid: deadPid,
+        trigger: "manual",
+        limits: {},
+      }),
+      mockRes(),
+    );
+
+    const res = mockRes();
+    await runsCurrent({ method: "GET" } as any, res);
+    assert.equal(res._body.status, "killed");
+    assert.equal(res._body.term_reason, "crash");
+
+    const row = await redis.hgetall("hydra:autopilot:run:run-kkk");
+    assert.equal(row.status, "killed");
+    assert.equal(row.term_reason, "crash");
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC16 (issue #898) — sweeper of a dead-pid running row with a NON-ZERO
+  //        recorded exit code sweeps to killed/crash with the honest exit.
+  // ---------------------------------------------------------------------------
+  test("AC16: sweeper of dead-pid running row with non-zero exit_code → killed/crash", async () => {
+    const deadPid = 2147483646;
+    const startedEpoch = Math.floor(Date.now() / 1000) - 300;
+    await runStart(
+      mockReq({
+        run_id: "run-lll",
+        started: new Date(startedEpoch * 1000).toISOString(),
+        started_epoch: startedEpoch,
+        pid: deadPid,
+        trigger: "manual",
+        limits: {},
+      }),
+      mockRes(),
+    );
+    await redis.hset("hydra:autopilot:run:run-lll", "exit_code", "137");
+
+    const res = mockRes();
+    await runsCurrent({ method: "GET" } as any, res);
+    assert.equal(res._body.status, "killed");
+    assert.equal(res._body.term_reason, "crash");
+  });
 });

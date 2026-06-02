@@ -35,31 +35,72 @@ STATE_PATH = Path(os.environ.get("HYDRA_AUTOPILOT_STATE", "/tmp/hydra-autopilot-
 HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
 
 
-def post_run_end(run_id: str, cause: str, ended_epoch: int) -> None:
-    """Best-effort POST to /api/autopilot/run-end (issue #497).
+# Bounded retry for the terminal run-end POST. Three attempts with a short
+# linear backoff absorb a transient orchestrator hiccup / race against
+# shutdown without blocking the loop for long. The endpoint is idempotent on
+# run_id, so retrying after a partial success is safe.
+RUN_END_RETRIES = 3
+RUN_END_BACKOFF_SEC = 1.0
 
-    Failure is logged to stderr but never propagates — term-check.py exits 0
-    so the playbook can still terminate gracefully even if the orchestrator
-    is unreachable. The endpoint is idempotent, so playbook retries are safe.
+
+def post_run_end(run_id: str, cause: str, ended_epoch: int) -> bool:
+    """POST to /api/autopilot/run-end with a bounded retry (issue #497, #898).
+
+    Returns True iff a terminal status was recorded (a 2xx, OR a 404/409-class
+    response that means the run is already terminal — both are idempotent
+    no-ops from this caller's perspective). Returns False if every attempt
+    failed to reach the orchestrator.
+
+    Failure NEVER propagates — term-check.py exits 0 so the playbook can still
+    terminate gracefully even if the orchestrator is unreachable. But unlike
+    the pre-#898 version, a failed terminal POST is now LOUD (a clear stderr
+    summary after exhausting retries) instead of a single swallowed line, and
+    the systemd ExecStopPost reap hook (scripts/autopilot/bootstrap.sh --reap)
+    is the backstop that records the terminal status if every retry here lost.
     """
     if not run_id:
-        return
+        return False
     payload = json.dumps({
         "run_id": run_id,
         "cause": cause,
         "ended_epoch": ended_epoch,
     }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{HYDRA_API_BASE}/api/autopilot/run-end",
-        data=payload,
-        headers={"content-type": "application/json"},
-        method="POST",
+    last_exc: Exception | None = None
+    for attempt in range(1, RUN_END_RETRIES + 1):
+        req = urllib.request.Request(
+            f"{HYDRA_API_BASE}/api/autopilot/run-end",
+            data=payload,
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+            return True
+        except urllib.error.HTTPError as exc:
+            # A 4xx (e.g. 404 unknown run, 409 already-terminal) is a
+            # deterministic answer, not a transient fault — the run already
+            # has (or can never have) a terminal status from our side. Don't
+            # burn retries on it.
+            if 400 <= exc.code < 500:
+                print(
+                    f"[autopilot] term-check run-end got HTTP {exc.code} "
+                    f"(treating as already-terminal / idempotent no-op)",
+                    file=sys.stderr,
+                )
+                return True
+            last_exc = exc
+        except (urllib.error.URLError, OSError) as exc:
+            last_exc = exc
+        if attempt < RUN_END_RETRIES:
+            time.sleep(RUN_END_BACKOFF_SEC * attempt)
+    print(
+        f"[autopilot] term-check run-end POST FAILED after {RUN_END_RETRIES} "
+        f"attempts (run_id={run_id} cause={cause}): {last_exc}. The "
+        f"ExecStopPost reap hook will backstop the terminal status.",
+        file=sys.stderr,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            resp.read()
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-        print(f"[autopilot] term-check run-end POST failed: {exc}", file=sys.stderr)
+    return False
 
 
 def main() -> int:

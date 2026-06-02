@@ -89,14 +89,23 @@ export const RUN_TURNS_MAX_FETCH = 10000;
 export const WEDGE_AGE_THRESHOLD_S = 600;
 
 /**
- * `term_reason` values term-check.py is allowed to emit. Anything else
- * is normalised to `"unknown"` so a typo in the writer can't break the
- * read-back surface.
+ * `term_reason` values the autopilot writers are allowed to emit.
+ * Anything else is normalised to `"unknown"` so a typo in the writer
+ * can't break the read-back surface.
+ *
+ * `budget` / `wall_clock` / `idle` come from `term-check.py`'s in-loop
+ * stop decisions. `interrupted` is the reap-on-exit backstop's cause for
+ * a clean process exit that did NOT route through a term-check stop
+ * (print-mode session end, SIGTERM from `systemctl restart` /
+ * `RuntimeMaxSec`) — distinct from a genuine `crash` (issue #898).
+ * `crash` is reserved for an abnormal exit (non-zero exit code) that
+ * also missed a clean run-end.
  */
 export const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
   "budget",
   "wall_clock",
   "idle",
+  "interrupted",
   "failure_backstop",
   "crash",
 ]);
@@ -174,9 +183,21 @@ export function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Read-time sweeper. If `row.status === "running"` and the pid is
- * dead, promote to `status: killed, term_reason: crash`. Idempotent.
- * Only the `running → killed/crash` direction.
+ * Read-time sweeper for a dead-pid `running` row. The terminal status it
+ * writes depends on whether a clean exit was recorded:
+ *
+ *   - If the row carries `exit_code === "0"` (an exit hook stamped a
+ *     clean exit but the run-end POST that would have flipped `status`
+ *     never landed), promote to `status: ended, term_reason: interrupted`
+ *     — the process is gone but it exited cleanly.
+ *   - Otherwise (no recorded exit code, or a non-zero one), promote to
+ *     `status: killed, term_reason: crash` — the historical catch-all for
+ *     "the process is gone and nobody recorded a clean run-end."
+ *
+ * Idempotent: only fires on a `running` row, and a terminal row written
+ * once is never re-swept. With the reap-on-exit backstop (issue #898)
+ * POSTing run-end on every exit path, this sweeper is now the rare
+ * genuine-crash fallback rather than the common termination route.
  *
  * Exported so other read surfaces that scan autopilot run rows (e.g. the
  * active-dispatches aggregator's autopilot sub-source, issue #888) can
@@ -197,16 +218,24 @@ export async function sweepRunIfDead(
     Number(row.started_epoch || "0") ||
     Math.floor(Date.now() / 1000);
 
+  // A recorded clean exit (exit_code === 0) means the process ended
+  // normally even though the terminal run-end POST didn't land — treat
+  // it as a clean interrupted end, not a crash. Reserve crash for a
+  // missing or non-zero exit code.
+  const cleanExit = row.exit_code !== undefined && Number(row.exit_code) === 0;
+  const status = cleanExit ? "ended" : "killed";
+  const termReason = cleanExit ? "interrupted" : "crash";
+
   await updateAutopilotRunFields(runId, {
-    status: "killed",
-    term_reason: "crash",
+    status,
+    term_reason: termReason,
     ended_epoch: String(endedEpoch),
   }, RUN_TTL_SECONDS);
 
   const mutated = {
     ...row,
-    status: "killed",
-    term_reason: "crash",
+    status,
+    term_reason: termReason,
     ended_epoch: String(endedEpoch),
   };
   return { row: mutated, swept: true };

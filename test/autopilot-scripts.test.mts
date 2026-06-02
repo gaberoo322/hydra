@@ -137,6 +137,41 @@ describe("scripts/autopilot/bootstrap.sh", () => {
    * bootstrap exits — anything else means the resolver short-circuited
    * or wrote the dead bash pid.
    */
+  /**
+   * Reap-on-exit backstop (issue #898). `bootstrap.sh --reap` is the systemd
+   * ExecStopPost hook that guarantees a terminal run-end POST when the
+   * autopilot session exits. With a NON-DEFAULT state path (the test-isolation
+   * convention) it must short-circuit as "isolated run — nothing to reap" and
+   * exit 0 WITHOUT POSTing to the live /api/autopilot/run-end (mirroring the
+   * run-start isolation skip). This pins that it never aborts the unit stop
+   * and never touches prod surfaces under isolation.
+   */
+  test("--reap on an isolated (non-default) state path is a clean no-op", () => {
+    const tmp = makeTempState();
+    try {
+      const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap"], {
+        env: {
+          ...process.env,
+          HYDRA_AUTOPILOT_STATE: tmp.state,
+          HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+          HYDRA_AUTOPILOT_LOG: tmp.log,
+          PATH: process.env.PATH ?? "",
+        },
+        encoding: "utf-8",
+      });
+      assert.equal(result.status, 0, `reap exited non-zero: ${result.stderr}`);
+      assert.match(
+        result.stdout ?? "",
+        /isolated run/,
+        "reap on a non-default state path must short-circuit as isolated",
+      );
+      // It must NOT have created the state file — reap never writes state.
+      assert.equal(existsSync(tmp.state), false, "reap must not create state.json");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("records an alive owning-pid (not bootstrap.sh's short-lived $$)", () => {
     const tmp = makeTempState();
     try {
@@ -321,6 +356,35 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("scripts/systemd/hydra-autopilot.service (issue #898)", () => {
+  const unit = readFileSync(
+    join(REPO_ROOT, "scripts", "systemd", "hydra-autopilot.service"),
+    "utf-8",
+  );
+
+  // The reap-on-exit backstop is only guaranteed if the unit invokes the
+  // reap hook on EVERY stop. ExecStopPost= fires regardless of how the main
+  // process exited (clean, signal, crash), which is exactly the "any exit
+  // path" coverage issue #898 requires.
+  test("wires bootstrap.sh --reap as ExecStopPost", () => {
+    assert.match(
+      unit,
+      /^ExecStopPost=.*bootstrap\.sh --reap/m,
+      "unit must run `bootstrap.sh --reap` on stop so a terminal run-end is recorded on every exit path",
+    );
+  });
+
+  // The `-` prefix makes a reap failure non-fatal to the unit stop — a
+  // run-end POST failure must never leave the unit in a failed state.
+  test("the reap ExecStopPost is non-fatal (`-` prefix)", () => {
+    assert.match(
+      unit,
+      /^ExecStopPost=-/m,
+      "ExecStopPost must be prefixed with `-` so a reap failure can't fail the unit stop",
+    );
   });
 });
 
