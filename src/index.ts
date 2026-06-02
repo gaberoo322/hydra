@@ -4,7 +4,8 @@ import { Sentry } from "./instrument.ts";
 import { EventBus, STREAMS } from "./event-bus.ts";
 import { createApi } from "./api.ts";
 import { sendNotification } from "./notify.ts";
-import { startCleanupSchedule } from "./cleanup.ts";
+import { startCleanupSchedule, stopCleanupSchedule } from "./cleanup.ts";
+import { stopKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
 import { startDigest, stopDigest, recordEvent } from "./digest.ts";
 import { initLearning } from "./learning.ts";
@@ -314,6 +315,10 @@ async function main() {
     stopObservabilityBridges();
     eventBus.stopConsuming();
     clearInterval(heartbeat);
+    // Issue #866: clear the two leaked polling intervals so neither the 30s
+    // knowledge-indexer Redis poll nor the 24h cleanup prune survives shutdown.
+    stopKnowledgeIndexer();
+    stopCleanupSchedule();
     for (const ws of wss.clients) ws.close(1001, "server shutting down");
     wss.close();
     server.close();
