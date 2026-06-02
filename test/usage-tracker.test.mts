@@ -15,6 +15,9 @@ import {
   projectEligibility,
   projectResetWindow,
   getWeeklyResetAnchorMs,
+  getWeeklyPaceCeiling,
+  DEFAULT_WEEKLY_PACE_CEILING,
+  PACE_STATE_TOLERANCE_PERCENT,
   sessionIdFromPath,
   PACING_SHEDDABLE_CLASSES,
   UNATTRIBUTED_SKILL,
@@ -73,6 +76,7 @@ function withEnvSnapshot() {
     "HYDRA_USAGE_WEEKLY_QUOTA_TOKENS",
     "HYDRA_USAGE_5H_QUOTA_TOKENS",
     "HYDRA_USAGE_WEEKLY_RESET_ANCHOR",
+    "HYDRA_USAGE_WEEKLY_PACE_CEILING",
     "HYDRA_CLAUDE_PROJECTS_ROOT",
     "HYDRA_QUOTA_WEIGHT_OPUS",
     "HYDRA_QUOTA_WEIGHT_SONNET",
@@ -1018,6 +1022,209 @@ describe("usage-tracker", () => {
       // shed is still populated — callers MUST honor `allow` first; if
       // they did go ahead, the shed list remains the right second filter.
       assert.deepEqual([...v.shed], [...PACING_SHEDDABLE_CLASSES]);
+    });
+
+    // -----------------------------------------------------------------------
+    // Pacing Curve verdict (issue #857, ADR-0021). ADDITIVE fields on the
+    // eligibility projection: paceState / targetPercent / sinceResetPercent /
+    // anchor. `now` is derived from snapshot.generatedAt so the projection
+    // stays a pure function of the snapshot.
+    // -----------------------------------------------------------------------
+    describe("Pacing Curve", () => {
+      const restore = withEnvSnapshot();
+      // Use the default ceiling (0.92) unless a test overrides it.
+      beforeEach(() => {
+        delete process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING;
+      });
+      afterEach(() => restore());
+
+      const DAY = 86_400_000;
+      const isoOf = (ms: number) => new Date(ms).toISOString();
+      const anchorMs = Date.parse("2026-05-25T00:00:00.000Z");
+
+      // Build a snapshot with an Anchor boundary and a `now` (generatedAt)
+      // some fraction into the 7-day window, plus a percentSinceReset.
+      function curveSnap(opts: {
+        nowMs: number;
+        sinceResetPercent: number;
+        anchorIso?: string | null;
+      }): UsageSnapshot {
+        return snapshotWith({
+          calibrated: true,
+          generatedAt: isoOf(opts.nowMs),
+          weeklyResetAnchor: opts.anchorIso === undefined ? isoOf(anchorMs) : opts.anchorIso,
+          percentSinceReset: opts.sinceResetPercent,
+        });
+      }
+
+      test("target ≈ 0 at window start (now == anchor)", () => {
+        const v = projectEligibility(curveSnap({ nowMs: anchorMs, sinceResetPercent: 0 }));
+        assert.equal(v.targetPercent, 0);
+        // 0 vs 0 within tolerance → on.
+        assert.equal(v.paceState, "on");
+        assert.equal(v.anchor, isoOf(anchorMs));
+        assert.equal(v.sinceResetPercent, 0);
+      });
+
+      test("target ≈ ceiling*100/2 at window midpoint (3.5 days in)", () => {
+        const nowMs = anchorMs + 3.5 * DAY;
+        const v = projectEligibility(curveSnap({ nowMs, sinceResetPercent: 0 }));
+        // ceiling default 0.92 → midpoint target = 46.
+        assert.equal(v.targetPercent, 0.92 * 100 * 0.5);
+        assert.equal(v.targetPercent, 46);
+      });
+
+      test("target ≈ ceiling*100 at window end (7 days in)", () => {
+        const nowMs = anchorMs + 7 * DAY;
+        const v = projectEligibility(curveSnap({ nowMs, sinceResetPercent: 0 }));
+        assert.equal(v.targetPercent, 92);
+      });
+
+      test("target clamps to ceiling*100 past the window end (fraction clamps to 1)", () => {
+        const nowMs = anchorMs + 10 * DAY;
+        const v = projectEligibility(curveSnap({ nowMs, sinceResetPercent: 0 }));
+        assert.equal(v.targetPercent, 92);
+      });
+
+      test("target clamps to 0 before the window start (fraction clamps to 0)", () => {
+        // generatedAt earlier than the anchor boundary → fraction floors at 0.
+        const nowMs = anchorMs - 2 * DAY;
+        const v = projectEligibility(curveSnap({ nowMs, sinceResetPercent: 0 }));
+        assert.equal(v.targetPercent, 0);
+      });
+
+      test("custom ceiling flows into the target", () => {
+        process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "0.5";
+        const nowMs = anchorMs + 7 * DAY;
+        const v = projectEligibility(curveSnap({ nowMs, sinceResetPercent: 0 }));
+        assert.equal(v.targetPercent, 50);
+      });
+
+      test("paceState=behind when sinceReset well below target", () => {
+        const nowMs = anchorMs + 3.5 * DAY; // target 46
+        const v = projectEligibility(curveSnap({ nowMs, sinceResetPercent: 20 }));
+        assert.equal(v.paceState, "behind");
+      });
+
+      test("paceState=ahead when sinceReset well above target", () => {
+        const nowMs = anchorMs + 3.5 * DAY; // target 46
+        const v = projectEligibility(curveSnap({ nowMs, sinceResetPercent: 80 }));
+        assert.equal(v.paceState, "ahead");
+      });
+
+      test("paceState=on when sinceReset within ±tolerance of target", () => {
+        const nowMs = anchorMs + 3.5 * DAY; // target 46
+        // 46 + 1pp and 46 - 1pp both inside ±2pp.
+        assert.equal(
+          projectEligibility(curveSnap({ nowMs, sinceResetPercent: 47 })).paceState,
+          "on",
+        );
+        assert.equal(
+          projectEligibility(curveSnap({ nowMs, sinceResetPercent: 45 })).paceState,
+          "on",
+        );
+      });
+
+      test("tolerance edges: strictly-beyond flips, exactly-at-edge stays on", () => {
+        const nowMs = anchorMs + 3.5 * DAY; // target 46
+        const tol = PACE_STATE_TOLERANCE_PERCENT;
+        // Exactly target+tol → NOT > target+tol → still "on".
+        assert.equal(
+          projectEligibility(curveSnap({ nowMs, sinceResetPercent: 46 + tol })).paceState,
+          "on",
+        );
+        // Exactly target-tol → NOT < target-tol → still "on".
+        assert.equal(
+          projectEligibility(curveSnap({ nowMs, sinceResetPercent: 46 - tol })).paceState,
+          "on",
+        );
+        // Just past the upper edge → ahead.
+        assert.equal(
+          projectEligibility(curveSnap({ nowMs, sinceResetPercent: 46 + tol + 0.01 })).paceState,
+          "ahead",
+        );
+        // Just past the lower edge → behind.
+        assert.equal(
+          projectEligibility(curveSnap({ nowMs, sinceResetPercent: 46 - tol - 0.01 })).paceState,
+          "behind",
+        );
+      });
+
+      test("anchor unset → neutral: paceState 'on', targetPercent 0, anchor null", () => {
+        const v = projectEligibility(
+          curveSnap({ nowMs: anchorMs + 3.5 * DAY, sinceResetPercent: 50, anchorIso: null }),
+        );
+        assert.equal(v.paceState, "on");
+        assert.equal(v.targetPercent, 0);
+        assert.equal(v.anchor, null);
+        // sinceResetPercent is still surfaced verbatim even when neutral.
+        assert.equal(v.sinceResetPercent, 50);
+      });
+
+      test("uncalibrated snapshot with no anchor → neutral curve, allow unchanged", () => {
+        const v = projectEligibility(snapshotWith({ calibrated: false }));
+        assert.equal(v.paceState, "on");
+        assert.equal(v.targetPercent, 0);
+        assert.equal(v.anchor, null);
+        // Existing allow/shed semantics untouched.
+        assert.equal(v.allow, true);
+        assert.deepEqual([...v.shed], []);
+      });
+
+      test("Pacing Curve does NOT change allow/shed (additive only)", () => {
+        // Ahead of the curve must NOT block dispatch — that is #858's job.
+        const v = projectEligibility(
+          curveSnap({ nowMs: anchorMs + 1 * DAY, sinceResetPercent: 90 }),
+        );
+        assert.equal(v.paceState, "ahead");
+        assert.equal(v.allow, true);
+        assert.deepEqual([...v.shed], []);
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Pacing Ceiling env helper (issue #857, ADR-0021)
+  // -------------------------------------------------------------------------
+  describe("getWeeklyPaceCeiling", () => {
+    const restore = withEnvSnapshot();
+    afterEach(() => restore());
+
+    test("unset → default", () => {
+      delete process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING;
+      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
+    });
+
+    test("empty → default", () => {
+      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "";
+      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
+    });
+
+    test("valid fraction in (0,1] is used", () => {
+      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "0.8";
+      assert.equal(getWeeklyPaceCeiling(), 0.8);
+    });
+
+    test("1.0 boundary is allowed", () => {
+      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "1";
+      assert.equal(getWeeklyPaceCeiling(), 1);
+    });
+
+    test("above 1.0 clamps to 1.0", () => {
+      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "1.5";
+      assert.equal(getWeeklyPaceCeiling(), 1);
+    });
+
+    test("zero/negative → default", () => {
+      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "0";
+      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
+      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "-0.3";
+      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
+    });
+
+    test("non-numeric → default", () => {
+      process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING = "abc";
+      assert.equal(getWeeklyPaceCeiling(), DEFAULT_WEEKLY_PACE_CEILING);
     });
   });
 

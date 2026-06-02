@@ -77,6 +77,9 @@ export {
   getFiveHourQuotaTokens,
   getWeeklyResetAnchorMs,
   projectResetWindow,
+  getWeeklyPaceCeiling,
+  DEFAULT_WEEKLY_PACE_CEILING,
+  PACE_STATE_TOLERANCE_PERCENT,
   getQuotaWeightOpus,
   getQuotaWeightSonnet,
   getQuotaWeightHaiku,
@@ -97,4 +100,5 @@ export type {
   ModelFamily,
   SkillResolver,
   ResetWindow,
+  PaceState,
 } from "./usage-tracker.ts";
