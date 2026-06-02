@@ -1,0 +1,24 @@
+[Unit]
+Description=Hydra Pace Gate — periodic admission check (~15 min) for hydra-autopilot (ADR-0021)
+Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/adr/0021-usage-paced-autopilot-pace-gate.md
+
+[Timer]
+# The Pace Gate is the SOLE launcher of hydra-autopilot.service, replacing the
+# retired morning (10:00) / evening (22:00) timers. It fires frequently and
+# runs a small admission check: if a run is already live → skip; else consult
+# the Pacing Curve via /api/usage/eligibility and launch only when on/behind
+# the curve and not in a 5h emergencyStop. ~15 min keeps the usage-paced
+# sawtooth tight (relaunch soon after burn falls back below the curve) without
+# spamming cold starts.
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+# Small jitter so the Gate doesn't fight other timers for resources /
+# API rate-limits (mirrors the watchdog/branch-prune timers).
+RandomizedDelaySec=60
+
+Unit=hydra-pace-gate.service
+
+[Install]
+WantedBy=timers.target

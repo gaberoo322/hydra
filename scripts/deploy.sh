@@ -76,6 +76,26 @@ install -D -m 0755 scripts/housekeeping.sh "$HOME/.local/bin/hydra-housekeeping.
 install -D -m 0644 scripts/systemd/hydra-housekeeping.service "$HOME/.config/systemd/user/hydra-housekeeping.service"
 install -D -m 0644 scripts/systemd/hydra-housekeeping.timer "$HOME/.config/systemd/user/hydra-housekeeping.timer"
 
+echo "==> Installing Pace Gate (ADR-0021, issue #858)..."
+# The Pace Gate (scripts/autopilot/pace-gate.sh) is the usage-paced admission
+# controller and the SOLE launcher of hydra-autopilot.service. It replaces the
+# retired morning (10:00) / evening (22:00) autopilot timers: a ~15-min timer
+# consults the Pacing Curve via /api/usage/eligibility and launches a run only
+# when on/behind the curve and not in a 5h emergencyStop.
+install -D -m 0755 scripts/autopilot/pace-gate.sh "$HOME/.local/bin/hydra-pace-gate.sh"
+
+# Defensive convergence: retire the two legacy launch timers so every deploy
+# lands on EXACTLY ONE launcher (the Pace Gate). Errors are tolerated — a fresh
+# host won't have these units.
+systemctl --user disable --now hydra-autopilot-morning.timer hydra-autopilot.timer 2>/dev/null || true
+rm -f "$HOME/.config/systemd/user/hydra-autopilot-morning.timer" \
+      "$HOME/.config/systemd/user/hydra-autopilot.timer"
+
+install -D -m 0644 scripts/systemd/hydra-pace-gate.service "$HOME/.config/systemd/user/hydra-pace-gate.service"
+install -D -m 0644 scripts/systemd/hydra-pace-gate.timer "$HOME/.config/systemd/user/hydra-pace-gate.timer"
+systemctl --user daemon-reload
+systemctl --user enable --now hydra-pace-gate.timer
+
 echo "==> Restarting service..."
 systemctl --user restart hydra-orchestrator.service
 

@@ -270,8 +270,8 @@ print(total)
 # (added on PR #488, parallel branch fix/autopilot-transient-recovery)
 # then brings the autopilot back clean. This watchdog complements that
 # PR but does not depend on it — even without Restart=on-failure the
-# kill at least clears the wedged process so the next timer fire of
-# hydra-autopilot.timer starts cleanly.
+# kill at least clears the wedged process so the next launch by the Pace
+# Gate (hydra-pace-gate.timer, ADR-0021) starts cleanly.
 #
 # Why 25-minute staleness threshold
 # ---------------------------------

@@ -1,0 +1,18 @@
+[Unit]
+Description=Hydra Pace Gate — usage-paced admission control for hydra-autopilot (ADR-0021)
+Documentation=https://github.com/gaberoo322/hydra/blob/master/docs/adr/0021-usage-paced-autopilot-pace-gate.md
+After=hydra-orchestrator.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/hydra
+ExecStart=%h/.local/bin/hydra-pace-gate.sh
+
+# Subscription-billed: the autopilot run the Gate launches uses the
+# operator's logged-in credentials in ~/.claude/. Do NOT set
+# ANTHROPIC_API_KEY here.
+Environment=HOME=%h
+Environment=PATH=%h/.npm-global/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+StandardOutput=journal
+StandardError=journal
