@@ -85,6 +85,7 @@ describe("Response schemas — aggregator shape pins", () => {
       running: false,
       lastTickAt: null,
       currentRun: null,
+      lifecycle: { state: "idle", runId: null, termReason: null, endedEpoch: null },
       generatedAt: "ts",
     });
     assert.equal(result.success, true);
@@ -234,6 +235,14 @@ describe("GET /now/autopilot-tick", () => {
         elapsedSeconds: 1800,
         ageSeconds: 10,
       }),
+      // Stubbed so the test is hermetic — `running` now derives from the
+      // lifecycle reader, not the scheduler heartbeat (issue #888).
+      readAutopilotLifecycle: async () => ({
+        state: "running",
+        runId: "ap-1",
+        termReason: null,
+        endedEpoch: null,
+      }),
       now: () => new Date("2026-05-26T12:00:00.000Z"),
     });
     const handler = findHandler(router, "GET", "/now/autopilot-tick");
@@ -244,6 +253,7 @@ describe("GET /now/autopilot-tick", () => {
     assert.equal(res._body.running, true);
     assert.equal(res._body.lastTickAt, "2026-05-26T11:59:00Z");
     assert.equal(res._body.currentRun.id, "ap-1");
+    assert.equal(res._body.lifecycle.state, "running");
   });
 
   test("scheduler reader throws → response still ships with null run + running=false", async () => {
@@ -252,6 +262,14 @@ describe("GET /now/autopilot-tick", () => {
         throw new Error("scheduler down");
       },
       readCurrentAutopilotRun: async () => null,
+      // Stubbed idle so the test is hermetic and `running` is false
+      // independent of the live service's most-recent run (issue #888).
+      readAutopilotLifecycle: async () => ({
+        state: "idle",
+        runId: null,
+        termReason: null,
+        endedEpoch: null,
+      }),
       now: () => new Date("2026-05-26T12:00:00.000Z"),
     });
     const handler = findHandler(router, "GET", "/now/autopilot-tick");
@@ -262,6 +280,7 @@ describe("GET /now/autopilot-tick", () => {
     assert.equal(res._body.running, false);
     assert.equal(res._body.lastTickAt, null);
     assert.equal(res._body.currentRun, null);
+    assert.equal(res._body.lifecycle.state, "idle");
   });
 });
 

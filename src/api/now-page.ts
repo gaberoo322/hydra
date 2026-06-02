@@ -27,6 +27,7 @@ import {
   type CostBurnResponse,
   type AlertsNowResponse,
   type AutopilotCurrentRunSchema,
+  type AutopilotLifecyclePayload,
 } from "../schemas/now-page.ts";
 import { z } from "zod";
 
@@ -99,6 +100,10 @@ export interface CurrentAutopilotRunReader {
   (): Promise<AutopilotCurrentRun | null>;
 }
 
+export interface AutopilotLifecycleReader {
+  (): Promise<AutopilotLifecyclePayload>;
+}
+
 export interface AlertsReader {
   (limit: number): Promise<string[]>;
 }
@@ -138,6 +143,13 @@ export interface NowPageRouterDeps {
    * `status: running`.
    */
   readCurrentAutopilotRun?: CurrentAutopilotRunReader;
+  /**
+   * Reader for the discriminated autopilot lifecycle state (issue #888).
+   * This — NOT the scheduler heartbeat — is the source of truth for the
+   * `running` indicator on the autopilot-tick response. Defaults to a
+   * thin call into `autopilot/runs.getCurrentLifecycle()`.
+   */
+  readAutopilotLifecycle?: AutopilotLifecycleReader;
   /** Reader for raw alert JSON strings, newest first. */
   readRecentAlertsJson?: AlertsReader;
   /**
@@ -162,6 +174,7 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   const aggregateCostBurn = deps.getCostBurn ?? getCostBurn;
   const readSchedStatus = deps.readSchedulerStatus ?? defaultReadSchedulerStatus;
   const readCurrentRun = deps.readCurrentAutopilotRun ?? defaultReadCurrentRun;
+  const readLifecycle = deps.readAutopilotLifecycle ?? defaultReadAutopilotLifecycle;
   const readAlertsJson = deps.readRecentAlertsJson ?? defaultReadAlertsJson;
   const readCurrentRunId = deps.readCurrentRunId ?? defaultReadCurrentRunId;
   const recsRedis: RecommendationsReaderDeps = deps.recsRedis ?? defaultRecsRedis;
@@ -191,9 +204,10 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   // -------------------------------------------------------------------------
   router.get("/now/autopilot-tick", async (_req, res) => {
     try {
-      const [schedSettled, runSettled] = await Promise.allSettled([
+      const [schedSettled, runSettled, lifecycleSettled] = await Promise.allSettled([
         readSchedStatus(),
         readCurrentRun(),
+        readLifecycle(),
       ]);
       const sched =
         schedSettled.status === "fulfilled"
@@ -201,6 +215,10 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
           : { running: false, lastTickAt: null };
       const currentRun =
         runSettled.status === "fulfilled" ? runSettled.value : null;
+      const lifecycle: AutopilotLifecyclePayload =
+        lifecycleSettled.status === "fulfilled"
+          ? lifecycleSettled.value
+          : { state: "idle", runId: null, termReason: null, endedEpoch: null };
 
       if (schedSettled.status === "rejected") {
         console.error(
@@ -212,11 +230,20 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
           `[v2/now/autopilot-tick] current-run read failed: ${runSettled.reason?.message || runSettled.reason}`,
         );
       }
+      if (lifecycleSettled.status === "rejected") {
+        console.error(
+          `[v2/now/autopilot-tick] lifecycle read failed: ${lifecycleSettled.reason?.message || lifecycleSettled.reason}`,
+        );
+      }
 
+      // `running` is autopilot lifecycle truth (issue #888) — NOT the
+      // scheduler housekeeping heartbeat (`sched.running`). The heartbeat
+      // is still surfaced as `lastTickAt`.
       const body: AutopilotTickResponse = {
-        running: sched.running,
+        running: lifecycle.state === "running",
         lastTickAt: sched.lastTickAt,
         currentRun,
+        lifecycle,
         generatedAt: clock().toISOString(),
       };
       return res.json(body);
@@ -542,6 +569,21 @@ async function defaultReadCurrentRun(): Promise<AutopilotCurrentRun | null> {
     dispatches: typeof view.dispatches === "number" ? view.dispatches : 0,
     elapsedSeconds: typeof view.elapsed_s === "number" ? view.elapsed_s : 0,
     ageSeconds: typeof view.age_s === "number" ? view.age_s : 0,
+  };
+}
+
+async function defaultReadAutopilotLifecycle(): Promise<AutopilotLifecyclePayload> {
+  const { getCurrentLifecycle } = await import("../autopilot/runs.ts");
+  const result = await getCurrentLifecycle();
+  if (!result.ok) {
+    return { state: "idle", runId: null, termReason: null, endedEpoch: null };
+  }
+  const lc = result.lifecycle;
+  return {
+    state: lc.state,
+    runId: lc.run_id,
+    termReason: lc.term_reason,
+    endedEpoch: lc.ended_epoch,
   };
 }
 
