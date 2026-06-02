@@ -166,6 +166,26 @@ _Avoid_: cost module (too generic — capitalize **Cost**), cost-attribution (on
 The per-model multiplier that converts raw token counts into a comparable quota-burn unit (`opus * w_opus + sonnet * w_sonnet + haiku * w_haiku`). The operator-facing answer to "which skill / model / class burned the most subscription quota this week," independent of token mix. Lives inside the **Cost** Module family and is consumed by `/api/usage` + dashboard panels. Deliberately **not** a dollar figure — under the Claude Code subscription, the orchestrator pays no per-call charge, so USD attribution would be a fiction. Weight ratios are operator-calibrated (same shape as `HYDRA_USAGE_*_QUOTA_TOKENS`), not derived from any external price API.
 _Avoid_: USD / dollars / spend (subscription model has no per-call cost), price (implies an external rate card), cost-per-token (overloaded — we already have token counts, this is the *weighted* form)
 
+**Weekly Reset Anchor**:
+The fixed wall-clock instant the operator's Claude Code Max-5x *weekly* limit resets — the boundary the **Pacing Curve** targets. Operator-seeded once (env, read from the interactive `/usage` view), projected forward in 7-day multiples, then auto-corrected whenever a real rate-limit reset timestamp is observed in a transcript. Distinct from the **Subscription Usage Tracker**'s rolling 7-day window, which never resets: the Anchor is a *calendar* boundary, the rolling window is a *trailing sum*. Reconciling the two — rolling `percentLast7d` vs a new `percentSinceReset` — is why this term exists.
+_Avoid_: weekly window (that's the rolling 7-day trailing sum, not a reset boundary), week start (ambiguous — this is the reset instant, not a calendar Monday)
+
+**Pacing Curve**:
+The target cumulative-burn trajectory the system paces *total* quota consumption along — a linear ramp from 0 at the **Weekly Reset Anchor** to the **Pacing Ceiling** at the next Anchor. Position relative to the curve (behind / on / ahead) is the signal the **Pace Gate** acts on. Replaces the **Subscription Usage Tracker**'s older rate-projection `pacingState` (which asked "is my current *rate* sustainable for 7 days," not "am I above the *target line* right now").
+_Avoid_: pacing state (the old rate-projection enum — the Curve is position-vs-target, a different model), burn rate (the Curve is cumulative, not a rate)
+
+**Pacing Ceiling**:
+The sub-100% fraction of the weekly quota the **Pacing Curve** climbs to by end of week (default ~0.92, `HYDRA_USAGE_WEEKLY_PACE_CEILING`); the deliberate gap below 100% absorbs pacing overshoot and the independent 5-hour cliff. Its complement is the **Operator Reserve**.
+_Avoid_: budget (overloaded with the per-run token budget), 100% target (the Ceiling sits deliberately below 100%)
+
+**Operator Reserve**:
+The headroom between the **Pacing Ceiling** and the real weekly cap that autopilot will not consume for self-directed work — guaranteed quota for the operator's interactive sessions, and (by the strict-pause rule) for nothing else. Because the **Subscription Usage Tracker** measures *total* burn across all transcripts, the Reserve is what keeps the operator unlocked once autopilot has paced the shared pool up to the Ceiling.
+_Avoid_: buffer (too generic), headroom (describes it but isn't the named carve-out)
+
+**Pace Gate**:
+The admission-control supervisor that decides *whether to launch* an **Autopilot Run** — a periodic timer-fired check (not a decision brain) that skips launch when an Autopilot Run is already live, when the 5-hour `emergencyStop` is tripped, or when total burn sits at/above the **Pacing Curve**; otherwise it launches a normal finite run. The mechanism for both "stop only when usage is exceeded" (the Gate is the system's only deliberate dormancy) and "resume when usage resets" (the Gate relaunches the moment burn falls below the Curve, the 5h window drains, or the Anchor passes). Consistent with [[ADR-0012]]: it governs *admission*, never *what work to do* — that stays with `decide.py`.
+_Avoid_: scheduler (that's the observability **Heartbeat**), autopilot launcher (misses the gating role), control loop (the retired in-process brain — the Gate makes no work decisions)
+
 ## Relationships
 
 - An **Orchestrator** builds one **Target** at a time; running a second target means a second orchestrator instance, not multi-tenant inside one
@@ -178,6 +198,8 @@ _Avoid_: USD / dollars / spend (subscription model has no per-call cost), price 
 - Every HTTP request body entering `src/api/*` passes through the **Schemas** Seam before its fields are read. **Schemas** and **Redis Adapters** are sibling Seams at opposite ends of the orchestrator — Schemas hardens the *external-input* boundary; Redis Adapters hardens the *storage* boundary. Each Module's lint rule is the mechanism that converts a hypothetical Seam (one adapter) into a real one (forced multiple adapters under CI enforcement).
 - **Epic**, **Roadmap Milestone**, and **Focus Label** are three orthogonal axes of work grouping. One issue can simultaneously belong to one **Epic**, be referenced by one **Roadmap Milestone**, and carry one **Focus Label** — these are not nested, they are perpendicular. Epic is the unit-of-work axis (deliverable boundary); Milestone is the timeline axis (when do we want this shipped); Focus Label is the theme axis (what category of work is this).
 - **Autopilot Focus** is the operator-set pointer that selects one of the three axes (or `auto` for no bias). `decide.py` reads it once per turn; the **Autopilot Run** carries no other notion of "current campaign of work." Closure of focus work is the closure of the underlying object — **Epic** auto-closure via `hydra-epic-close`, milestone tickoff via roadmap.md edit, label-set drain to zero matching issues. Autopilot Focus never closes itself; the operator clears it when the focus area drains.
+- The **Pace Gate** launches **Autopilot Runs**; the **Observability Heartbeat** records what they did. Two perpendicular control-plane timers: the Gate is *admission control* (should a run start now?), the Heartbeat is *bookkeeping* (what happened?). Neither decides work — that is the Run's own `decide.py`.
+- The **Pacing Curve** governs *total* burn (as measured by the **Subscription Usage Tracker** across all transcripts) against the **Weekly Reset Anchor**, climbing to the **Pacing Ceiling** and leaving the **Operator Reserve** untouched. The independent 5-hour `emergencyStop` can pause the **Pace Gate** regardless of weekly position.
 
 ## Example dialogue
 
