@@ -21,6 +21,11 @@ import {
   getCandidateFeed,
   scoreCandidate,
   PRIORITY_TIER_BASE_SCORE,
+  isMergedWork,
+  candidateMergedTokens,
+  mergedTokensFromPr,
+  mergedTokensFromGhJson,
+  normalizeIdentity,
   type CandidateFeedDeps,
   type CandidateDesignConcept,
 } from "../src/anchor-candidates.ts";
@@ -42,6 +47,7 @@ function makeDeps(over: Partial<CandidateFeedDeps> = {}): CandidateFeedDeps {
     getWorkQueueItems: async () => [],
     loadLastReflectionAt: async () => null,
     loadDesignConcept: async () => ABSENT_DC,
+    loadMergedAnchorRefs: async () => new Set<string>(),
     ...over,
   };
 }
@@ -302,6 +308,166 @@ describe("getCandidateFeed — eligibility", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Merged-by-cycle suppression (issue #882) — the core fix: shipped work whose
+// PR already MERGED (no lingering OPEN PR) must NOT resurface in the feed.
+// ---------------------------------------------------------------------------
+
+describe("merged-by-cycle pure helpers (#882)", () => {
+  test("normalizeIdentity lowercases, collapses whitespace, trims", () => {
+    assert.equal(normalizeIdentity("  Foo   BAR  "), "foo bar");
+    assert.equal(normalizeIdentity(undefined as any), "");
+  });
+
+  test("mergedTokensFromPr harvests #NNN, item-NNN, and the normalized title", () => {
+    const toks = mergedTokensFromPr(
+      "feat: Polymarket CLOB V2 maker order (#910)",
+      "Closes #322\n\nImplements item-322 maker stack.",
+    );
+    assert.ok(toks.includes("910"));
+    assert.ok(toks.includes("322"));
+    assert.ok(toks.includes("item-322"));
+    assert.ok(toks.includes("feat: polymarket clob v2 maker order (#910)"));
+  });
+
+  test("candidateMergedTokens emits the bare issue number for a kanban anchor", () => {
+    const toks = candidateMergedTokens({ issue: 882, title: "Some anchor", anchorRef: "Some anchor" });
+    assert.ok(toks.includes("882"));
+    assert.ok(toks.includes("some anchor"));
+  });
+
+  test("candidateMergedTokens extracts item-NNN from a target work-queue ref", () => {
+    const toks = candidateMergedTokens({
+      issue: "item-322",
+      title: "item-322 Polymarket CLOB V2 maker order placement",
+      anchorRef: "item-322 Polymarket CLOB V2 maker order placement",
+    });
+    assert.ok(toks.includes("item-322"));
+  });
+
+  test("isMergedWork: empty merged-set never suppresses", () => {
+    assert.equal(
+      isMergedWork({ issue: 1, title: "x", anchorRef: "x" }, new Set()),
+      false,
+    );
+  });
+
+  test("isMergedWork: item-NNN candidate matches a merged item-NNN token", () => {
+    const merged = new Set(["item-322"]);
+    assert.equal(
+      isMergedWork(
+        { issue: "item-322", title: "item-322 maker order", anchorRef: "item-322 maker order" },
+        merged,
+      ),
+      true,
+    );
+  });
+
+  test("isMergedWork: kanban issue number matches a merged #NNN token", () => {
+    const merged = new Set(["882"]);
+    assert.equal(isMergedWork({ issue: 882, title: "Anchor", anchorRef: "Anchor" }, merged), true);
+  });
+
+  test("mergedTokensFromGhJson parses a gh pr list payload; bad input → []", () => {
+    const json = JSON.stringify([
+      { title: "fix: thing (#5)", body: "Closes #321" },
+      { title: "item-481 shipped", body: "" },
+    ]);
+    const toks = mergedTokensFromGhJson(json);
+    assert.ok(toks.includes("5"));
+    assert.ok(toks.includes("321"));
+    assert.ok(toks.includes("item-481"));
+    assert.deepEqual(mergedTokensFromGhJson("not json"), []);
+    assert.deepEqual(mergedTokensFromGhJson(""), []);
+    assert.deepEqual(mergedTokensFromGhJson("{}"), []);
+  });
+});
+
+describe("getCandidateFeed — merged-by-cycle suppression (#882)", () => {
+  test("a target item whose work merged (no open PR) is suppressed", async () => {
+    // The #882 reproduction: item-322's maker stack shipped, no open PR,
+    // claimedBy never set — yet it kept surfacing at 0.85. With the merged set
+    // carrying item-322, the work-queue candidate must drop out of the feed.
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 Polymarket CLOB V2 maker order placement", queuedAt: isoAgo(0), source: "hydra-target-research" }),
+        JSON.stringify({ reference: "item-999 genuinely unbuilt feature", queuedAt: isoAgo(0), source: "hydra-target-research" }),
+      ],
+      loadMergedAnchorRefs: async () => new Set(["item-322"]),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const refs = feed.candidates.map((c) => c.anchorRef);
+    assert.ok(!refs.some((r) => r.includes("item-322")), "merged item-322 must not appear");
+    assert.ok(refs.some((r) => r.includes("item-999")), "unbuilt item-999 still surfaces");
+    assert.equal(feed.merged_suppressed, 1);
+  });
+
+  test("a kanban anchor whose issue merged is suppressed", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [
+          { id: 882, title: "Merged anchor", movedAt: isoAgo(0) },
+          { id: 883, title: "Still open anchor", movedAt: isoAgo(0) },
+        ],
+        backlog: [],
+      }),
+      loadMergedAnchorRefs: async () => new Set(["882"]),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const issues = feed.candidates.map((c) => c.issue);
+    assert.ok(!issues.includes(882), "merged issue 882 must be suppressed");
+    assert.ok(issues.includes(883), "open issue 883 still surfaces");
+    assert.equal(feed.merged_suppressed, 1);
+  });
+
+  test("excludeMerged=false surfaces merged candidates (escape hatch)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) }),
+      ],
+      loadMergedAnchorRefs: async () => new Set(["item-322"]),
+    });
+    const feed = await getCandidateFeed({ now: NOW, excludeMerged: false }, deps);
+    assert.equal(feed.candidates.length, 1);
+    assert.equal(feed.merged_suppressed, 0);
+  });
+
+  test("a failing merged-refs reader degrades to suppress-nothing (never throws)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) }),
+      ],
+      loadMergedAnchorRefs: async () => { throw new Error("gh unreachable"); },
+    });
+    await assert.doesNotReject(async () => {
+      const feed = await getCandidateFeed({ now: NOW }, deps);
+      // Reader failure → empty merged-set → candidate survives.
+      assert.equal(feed.candidates.length, 1);
+      assert.equal(feed.merged_suppressed, 0);
+    });
+  });
+
+  test("merged_suppressed counts both lanes; in_flight and merged are independent", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [{ id: 1, title: "Open PR", claimedBy: "pr-7", claimedAt: isoAgo(5 * 60 * 1000) }],
+        queued: [{ id: 882, title: "Merged kanban", movedAt: isoAgo(0) }],
+        backlog: [],
+      }),
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) }),
+        JSON.stringify({ reference: "item-999 unbuilt", queuedAt: isoAgo(0) }),
+      ],
+      loadMergedAnchorRefs: async () => new Set(["882", "item-322"]),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.in_flight_suppressed, 1);
+    assert.equal(feed.merged_suppressed, 2);
+    assert.deepEqual(feed.candidates.map((c) => String(c.issue)), ["item-999 unbuilt"]);
+  });
+});
+
 describe("getCandidateFeed — design-concept annotation (#628)", () => {
   test("every candidate carries a designConcept block; absent → present:false", async () => {
     const deps = makeDeps({
@@ -420,7 +586,10 @@ describe("GET /anchor/candidates — thin route", () => {
     const handler = findHandler(router, "GET", "/anchor/candidates");
     assert.ok(handler, "route handler must be registered");
 
-    const req: any = { query: {} };
+    // excludeMerged=false avoids spawning a real `gh pr list` subprocess in
+    // the route smoke test (the merged-scan reader, #882). The merged-suppression
+    // behaviour is exercised via injected deps in the getCandidateFeed tests.
+    const req: any = { query: { excludeMerged: "false" } };
     const res = mockRes();
     await handler(req, res);
 
@@ -429,6 +598,7 @@ describe("GET /anchor/candidates — thin route", () => {
     assert.ok("research_recommended" in res._body);
     assert.ok("total_evaluated" in res._body);
     assert.ok("in_flight_suppressed" in res._body);
+    assert.ok("merged_suppressed" in res._body);
     assert.equal(typeof res._body.generated_at, "string");
   });
 });

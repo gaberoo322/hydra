@@ -23,9 +23,9 @@
 //      is DROPPED (dead lane). The `PriorityTier` union is the two live
 //      values only: `kanban-queued`, `work-queue`.
 //
-//   3. Eligibility — in-flight-PR 30-min suppression, blocker-just-cleared
-//      detection, design-concept annotation, and the research_recommended
-//      threshold.
+//   3. Eligibility — in-flight-PR 30-min suppression, merged-by-cycle
+//      suppression (issue #882), blocker-just-cleared detection,
+//      design-concept annotation, and the research_recommended threshold.
 //
 // The route over this module (`src/api/anchor.ts`) is thin: parse query →
 // `getCandidateFeed` → add `generated_at` → `res.json`.
@@ -35,6 +35,8 @@
 // clock to exercise enumeration + scoring + eligibility end-to-end without a
 // Redis fixture.
 
+import { promisify } from "node:util";
+import { execFile as execFileSync } from "node:child_process";
 import { getWorkQueueItems } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/reflections.ts";
@@ -82,6 +84,23 @@ const RECENT_UNBLOCK_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24h
 // typical CI + operator-merge window while still surfacing genuinely stuck
 // items (a PR left open overnight resurfaces the next day, ready to retry).
 const IN_FLIGHT_PR_FRESHNESS_MS = 30 * 60 * 1000; // 30 min
+
+// Merged-by-cycle suppression (issue #882). The in-flight window above hides
+// anchors with a *fresh, still-open* PR claim, but a claude dev-cycle that
+// merges its work leaves NO lingering open PR — the `claimedBy = "pr-<n>"`
+// marker is on a closed/merged PR, or the work merged via a target-tree commit
+// with no kanban claim at all. Those shipped items kept resurfacing at the top
+// of the feed (score 0.85), starving dev_target and tricking research into
+// re-promoting completed work. We now also suppress any candidate whose
+// identity matches a recently-MERGED PR (orchestrator OR target repo). The
+// lookback window is wide enough to cover the period a stale work-queue /
+// kanban entry can linger after its work shipped, but bounded so the merged-PR
+// scan stays cheap.
+const MERGED_LOOKBACK_DAYS = 30;
+// How many recent merged PRs to scan per repo. The maker-stack staleness in
+// #882 surfaced from items merged within the last few dozen PRs; 100 gives a
+// comfortable margin without an unbounded `gh` page walk.
+const MERGED_PR_SCAN_LIMIT = 100;
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
@@ -208,6 +227,12 @@ export interface CandidateFeed {
   research_recommended: boolean;
   total_evaluated: number;
   in_flight_suppressed: number;
+  /**
+   * Count of candidates suppressed because their work already MERGED with no
+   * lingering open PR (issue #882). Parallel to `in_flight_suppressed`, which
+   * only covers anchors with a fresh open-PR claim.
+   */
+  merged_suppressed: number;
 }
 
 export interface GetCandidateFeedOpts {
@@ -215,6 +240,11 @@ export interface GetCandidateFeedOpts {
   limit?: number;
   /** Suppress inProgress items with a fresh `pr-<n>` claim. Defaults to true. */
   excludeInFlight?: boolean;
+  /**
+   * Suppress candidates whose work already MERGED with no open PR (issue #882).
+   * Defaults to true. Callers that need the raw view pass excludeMerged=false.
+   */
+  excludeMerged?: boolean;
   /** Override of "now" for deterministic tests. Defaults to Date.now(). */
   now?: number;
 }
@@ -229,6 +259,15 @@ export interface CandidateFeedDeps {
   getWorkQueueItems: () => Promise<string[]>;
   loadLastReflectionAt: (anchorRef: string) => Promise<string | null>;
   loadDesignConcept: (anchorRef: string, now: number) => Promise<CandidateDesignConcept>;
+  /**
+   * Return the set of normalized identifiers for work that already MERGED
+   * within the lookback window, with no lingering open PR (issue #882). Each
+   * entry is a normalized token a candidate identity can match against:
+   * issue numbers (`"882"`), item references (`"item-322"`), and normalized
+   * PR titles. Must never throw — an unreachable VCS/`gh` degrades to an empty
+   * set (suppress nothing) so the feed keeps serving.
+   */
+  loadMergedAnchorRefs: () => Promise<Set<string>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,12 +339,170 @@ async function loadDesignConceptImpl(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Merged-by-cycle reader (issue #882).
+// ---------------------------------------------------------------------------
+
+const execFile = promisify(execFileSync);
+
+/**
+ * Repos whose merged PRs can ship a candidate's work. The orchestrator board
+ * (`dev_orch`) and the target board (`dev_target`) both feed the candidate
+ * feed, so both repos are scanned (issue #882: "applies to both orch and
+ * target candidate surfaces").
+ */
+const MERGED_SCAN_REPOS = ["gaberoo322/hydra", "gaberoo322/hydra-betting"] as const;
+
+/**
+ * Pure helper — exported for tests. Build the normalized identifier token-set
+ * a merged PR contributes to the suppression set. A candidate is suppressed
+ * when ANY of its identity tokens (see `candidateMergedTokens`) intersects this
+ * set. We harvest:
+ *   - every `#NNN` issue reference in the PR title + body (so a `Closes #882`
+ *     marks issue 882's anchor merged),
+ *   - every `item-NNN` reference (the target work-queue identity),
+ *   - the normalized PR title itself (so a kanban anchor whose title equals the
+ *     PR title is caught even without an explicit issue ref).
+ */
+export function mergedTokensFromPr(title: string, body: string): string[] {
+  const tokens = new Set<string>();
+  const haystack = `${title || ""}\n${body || ""}`;
+  for (const m of haystack.matchAll(/#(\d+)\b/g)) tokens.add(m[1]);
+  for (const m of haystack.matchAll(/\bitem-(\d+)\b/gi)) tokens.add(`item-${m[1]}`);
+  const normTitle = normalizeIdentity(title);
+  if (normTitle) tokens.add(normTitle);
+  return [...tokens];
+}
+
+/**
+ * Pure helper — exported for tests. Normalize a free-text identity for
+ * comparison: lowercase, collapse whitespace, trim. Mirrors
+ * `normalizeForDedup` in the work-queue adapter so the two dedup surfaces stay
+ * consistent.
+ */
+export function normalizeIdentity(s: string): string {
+  if (typeof s !== "string") return "";
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Pure helper — exported for tests. Derive the identity tokens a candidate
+ * matches against the merged-set. A candidate is "merged work" when any of
+ * these is present in the merged-token set:
+ *   - its `issue` field as a bare string (orchestrator issue number),
+ *   - any `item-NNN` reference found in its issue/title/anchorRef,
+ *   - its normalized title / anchorRef.
+ */
+export function candidateMergedTokens(c: {
+  issue: string | number;
+  title: string;
+  anchorRef: string;
+}): string[] {
+  const tokens = new Set<string>();
+  const issueStr = String(c.issue ?? "").trim();
+  // A bare numeric issue id (kanban anchor) matches a `#NNN` merge ref.
+  if (/^\d+$/.test(issueStr)) tokens.add(issueStr);
+  const fields = [issueStr, c.title || "", c.anchorRef || ""];
+  for (const f of fields) {
+    for (const m of f.matchAll(/\bitem-(\d+)\b/gi)) tokens.add(`item-${m[1]}`);
+    const norm = normalizeIdentity(f);
+    if (norm) tokens.add(norm);
+  }
+  return [...tokens];
+}
+
+/**
+ * Pure helper — exported for tests. True when the candidate's identity tokens
+ * intersect the merged-work token set. Empty merged-set → never suppresses.
+ */
+export function isMergedWork(
+  c: { issue: string | number; title: string; anchorRef: string },
+  mergedRefs: ReadonlySet<string>,
+): boolean {
+  if (mergedRefs.size === 0) return false;
+  for (const tok of candidateMergedTokens(c)) {
+    if (mergedRefs.has(tok)) return true;
+  }
+  return false;
+}
+
+/**
+ * Production merged-refs reader. Scans recent merged PRs on both the
+ * orchestrator and target repos via `gh pr list --state merged`, harvesting
+ * the normalized identity tokens each PR ships (`mergedTokensFromPr`). Never
+ * throws — a `gh` failure on one repo logs and contributes nothing; total
+ * failure yields an empty set (suppress nothing), exactly degrading to the
+ * pre-#882 behaviour on a miss.
+ */
+async function loadMergedAnchorRefsImpl(
+  exec: typeof execFile = execFile,
+): Promise<Set<string>> {
+  const merged = new Set<string>();
+  // gh's --search uses GitHub's `merged:>=YYYY-MM-DD` qualifier.
+  const since = new Date(Date.now() - MERGED_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+  for (const repo of MERGED_SCAN_REPOS) {
+    try {
+      const { stdout } = await exec(
+        "gh",
+        [
+          "pr",
+          "list",
+          "--repo",
+          repo,
+          "--state",
+          "merged",
+          "--search",
+          `merged:>=${since}`,
+          "--limit",
+          String(MERGED_PR_SCAN_LIMIT),
+          "--json",
+          "title,body",
+        ],
+        { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 },
+      );
+      for (const tok of mergedTokensFromGhJson(stdout)) merged.add(tok);
+    } catch (err: any) {
+      console.error(
+        `[CandidateFeed] merged-PR scan failed for ${repo}: ${err?.message || err}`,
+      );
+    }
+  }
+  return merged;
+}
+
+/**
+ * Pure helper — exported for tests. Parse a `gh pr list --json title,body`
+ * payload into the union of merged-identity tokens. Returns [] on any
+ * structural problem (never throws).
+ */
+export function mergedTokensFromGhJson(jsonStdout: string): string[] {
+  if (!jsonStdout || !jsonStdout.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStdout);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out = new Set<string>();
+  for (const pr of parsed) {
+    if (!pr || typeof pr !== "object") continue;
+    const title = typeof (pr as any).title === "string" ? (pr as any).title : "";
+    const body = typeof (pr as any).body === "string" ? (pr as any).body : "";
+    for (const tok of mergedTokensFromPr(title, body)) out.add(tok);
+  }
+  return [...out];
+}
+
 function resolveDeps(deps?: Partial<CandidateFeedDeps>): CandidateFeedDeps {
   return {
     loadBacklog: deps?.loadBacklog ?? loadBacklog,
     getWorkQueueItems: deps?.getWorkQueueItems ?? getWorkQueueItems,
     loadLastReflectionAt: deps?.loadLastReflectionAt ?? loadLastReflectionAtImpl,
     loadDesignConcept: deps?.loadDesignConcept ?? loadDesignConceptImpl,
+    loadMergedAnchorRefs: deps?.loadMergedAnchorRefs ?? (() => loadMergedAnchorRefsImpl()),
   };
 }
 
@@ -366,9 +563,24 @@ export async function getCandidateFeed(
     ? Math.min(opts.limit as number, MAX_LIMIT)
     : DEFAULT_LIMIT;
   const excludeInFlight = opts.excludeInFlight !== false; // defaults to true
+  const excludeMerged = opts.excludeMerged !== false; // defaults to true
+
+  // Load the merged-work token set once up front (issue #882). A failing /
+  // unreachable reader degrades to an empty set — suppress nothing, exactly the
+  // pre-#882 behaviour — and never aborts the feed.
+  let mergedRefs: Set<string> = new Set();
+  if (excludeMerged) {
+    try {
+      mergedRefs = await d.loadMergedAnchorRefs();
+    } catch (err: any) {
+      console.error(`[CandidateFeed] merged-refs load failed: ${err.message}`);
+      mergedRefs = new Set();
+    }
+  }
 
   const candidates: CandidateBase[] = [];
   let inFlightSuppressed = 0;
+  let mergedSuppressed = 0;
 
   // -------------------------------------------------------------------------
   // Lane 1: Kanban backlog/queued/inProgress lanes.
@@ -386,6 +598,16 @@ export async function getCandidateFeed(
       for (const item of items) {
         if (excludeInFlight && isInFlightPR(item, now)) {
           inFlightSuppressed++;
+          continue;
+        }
+        if (
+          excludeMerged &&
+          isMergedWork(
+            { issue: item.id, title: item.title ?? "", anchorRef: item.title ?? "" },
+            mergedRefs,
+          )
+        ) {
+          mergedSuppressed++;
           continue;
         }
         candidates.push({
@@ -413,6 +635,13 @@ export async function getCandidateFeed(
       try { item = JSON.parse(r); } catch { continue; }
       const ref = item.reference || item.description;
       if (!ref) continue;
+      if (
+        excludeMerged &&
+        isMergedWork({ issue: ref, title: ref, anchorRef: ref }, mergedRefs)
+      ) {
+        mergedSuppressed++;
+        continue;
+      }
       candidates.push({
         issue: ref,
         title: ref,
@@ -493,5 +722,6 @@ export async function getCandidateFeed(
     research_recommended,
     total_evaluated: scored.length,
     in_flight_suppressed: inFlightSuppressed,
+    merged_suppressed: mergedSuppressed,
   };
 }
