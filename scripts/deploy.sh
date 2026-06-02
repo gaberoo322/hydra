@@ -5,6 +5,23 @@ set -euo pipefail
 # Called by GitHub Actions self-hosted runner on merge to master,
 # or manually: ./scripts/deploy.sh
 
+# Serialize deploys (issue #871). The CI runner pool grew from 1 → 4 self-hosted
+# runners to parallelize the independent PR CI jobs. But the `deploy` job runs
+# THIS script against the shared real tree ($HYDRA_ROOT, an absolute path — not
+# the runner's _work checkout), so two master merges landing within a deploy's
+# runtime could now run two deploy.sh against /home/gabe/hydra at once, with
+# `git checkout/pull`, `npm ci`, and the dashboard build stomping on each other.
+# A single runner used to guarantee this serialization implicitly (ci.yml #712).
+# Re-exec under an flock so concurrent invocations serialize — the 2nd waits for
+# the 1st. This also protects a manual ./scripts/deploy.sh against a concurrent
+# auto-deploy. `-w 1200` bounds the wait (20min) so a wedged lock fails loud
+# instead of pinning a runner forever; whichever deploy ran already pulled the
+# master tip, so a timed-out 2nd deploy leaves prod at tip, not an old commit.
+LOCK_FILE="${HYDRA_DEPLOY_LOCK:-/tmp/hydra-deploy.lock}"
+if [ -z "${_HYDRA_DEPLOY_LOCKED:-}" ]; then
+  exec env _HYDRA_DEPLOY_LOCKED=1 flock -w 1200 "$LOCK_FILE" "$0" "$@"
+fi
+
 HYDRA_ROOT="${HYDRA_ROOT:-/home/gabe/hydra}"
 cd "$HYDRA_ROOT"
 
