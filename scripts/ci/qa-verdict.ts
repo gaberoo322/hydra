@@ -345,6 +345,63 @@ export function aggregateAdversarialReview(
  */
 export const DEEP_QA_FAIL_MARKER = "Verifier-Core deep-QA: FAIL";
 
+/**
+ * The base literal of the positive Deep-QA PASS marker (ADR-0020, issue #847).
+ *
+ * This is the SHA-bound proof that a T4 PR cleared the deep-QA branch — the
+ * positive counterpart to `DEEP_QA_FAIL_MARKER`, on the same PR-as-ledger
+ * surface #740 blessed (no new verdict literal, Redis key, or label). On a T4
+ * PASS, `hydra-qa` posts a PR comment carrying the rendered marker line
+ * `Verifier-Core deep-QA: PASS @ <head-sha>`; the `deep-qa-gate` required CI
+ * check (`.github/workflows/deep-qa-gate.yml`) verifies a marker matching the
+ * PR's CURRENT head SHA before a T4 PR may merge.
+ *
+ * Changing this string is a breaking change to BOTH the `hydra-qa` playbook
+ * (which posts it via `renderDeepQaPassMarker`) and the gate (which greps it
+ * via `hasFreshDeepQaPass`) — keep this constant the single source of truth.
+ */
+export const DEEP_QA_PASS_MARKER = "Verifier-Core deep-QA: PASS";
+
+/**
+ * Render the exact Deep-QA PASS marker line for a given head SHA.
+ *
+ * Produces `Verifier-Core deep-QA: PASS @ <head-sha>` — the literal line the
+ * `hydra-qa` T4 PASS path posts (on its own line) and the line
+ * `hasFreshDeepQaPass` greps for. Pure — no fs/network.
+ *
+ * @param headSha the PR's current head commit SHA (e.g. from
+ *   `gh pr view --json headRefOid`). Trimmed; passed through verbatim
+ *   otherwise so the marker is byte-for-byte reproducible by the gate.
+ */
+export function renderDeepQaPassMarker(headSha: string): string {
+  return `${DEEP_QA_PASS_MARKER} @ ${headSha.trim()}`;
+}
+
+/**
+ * True iff some comment carries a fresh Deep-QA PASS marker — one matching
+ * THIS head SHA. The freshness check is what makes the proof SHA-bound
+ * (ADR-0020 Decision 2): pushing new commits after a pass changes the head
+ * SHA, so a marker for the old SHA no longer satisfies the gate and forces
+ * re-QA. A blank/whitespace `headSha` never matches (defensive — an unknown
+ * head SHA must never satisfy the gate). Pure — no fs/network.
+ *
+ * Matching is `String.includes` of the rendered marker line, mirroring how
+ * `decideDeepQaAction` counts `DEEP_QA_FAIL_MARKER` — the marker is one line
+ * inside a larger comment body, not the whole body.
+ *
+ * @param commentBodies the PR's comment bodies (order irrelevant).
+ * @param headSha the PR's current head commit SHA the marker must match.
+ */
+export function hasFreshDeepQaPass(
+  commentBodies: readonly string[],
+  headSha: string,
+): boolean {
+  const trimmed = headSha.trim();
+  if (trimmed.length === 0) return false;
+  const marker = renderDeepQaPassMarker(trimmed);
+  return commentBodies.some((body) => body.includes(marker));
+}
+
 export type DeepQaAction = "proceed" | "bounce" | "block-and-escalate";
 
 export interface DeepQaDecision {

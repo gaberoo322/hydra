@@ -329,6 +329,31 @@ $REVIEW_REPORT
 **Verdict:** \`PASS\` — ${VERDICT_REASON}
 
 $CHECKS_BLOCK"
+# T4 PASS only — post the Deep-QA PASS marker (issue #847, ADR-0020 Slice 1).
+# This is the SHA-bound positive proof that the Verifier-Core deep branch ran
+# against EXACTLY this head SHA — the counterpart to the FAIL marker in the
+# block above. The `deep-qa-gate` required check
+# (.github/workflows/deep-qa-gate.yml) verifies a marker matching the PR's
+# CURRENT head SHA before a T4 PR may merge; pushing new commits after this
+# pass changes the head SHA and forces re-QA (the marker goes stale). Resolve
+# the live head SHA at post time (NOT $FIXED_SHA, which is the base ref) and
+# render the exact marker line via `renderDeepQaPassMarker` so the literal is
+# the single source of truth shared with the gate.
+if [ "$PR_TIER" = "4" ]; then
+  HEAD_SHA=$(gh pr view $pr_number --repo gaberoo322/hydra \
+    --json headRefOid --jq '.headRefOid')
+  DEEP_QA_PASS_LINE=$(HEAD_SHA="$HEAD_SHA" node --no-warnings --experimental-strip-types -e "
+    import('./scripts/ci/qa-verdict.ts').then(({renderDeepQaPassMarker}) => {
+      process.stdout.write(renderDeepQaPassMarker(process.env.HEAD_SHA));
+    });
+  ")
+  gh pr comment $pr_number --repo gaberoo322/hydra --body "> *T4 Verifier-Core deep-QA — PASS proof*
+
+${DEEP_QA_PASS_LINE}
+
+The Verifier-Core deep-QA branch passed against this exact head SHA. The \`deep-qa-gate\` required check verifies this marker before merge; new commits invalidate it and force re-QA."
+fi
+
 gh pr merge $pr_number --repo gaberoo322/hydra --squash --delete-branch
 
 # Belt-and-braces (issue #638): the merge above auto-closes the issue via
