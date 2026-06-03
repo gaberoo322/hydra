@@ -16,10 +16,12 @@
  *   - rehydrates lifetime cycle counters from Redis on start so
  *     `/api/scheduler/status` reports stable metrics after a restart.
  *
- * The five time-boxed housekeeping chores were lifted out to the hourly
- * `/api/maintenance/housekeeping` endpoint in #723 (scheduler fold PR-3/4);
- * `runHousekeeping` lives here only because it reuses the live `eventBus` +
- * dynamic imports, and is invoked out-of-band by that endpoint.
+ * The time-boxed housekeeping chores were lifted out to the hourly
+ * `/api/maintenance/housekeeping` endpoint in #723 (scheduler fold PR-3/4),
+ * and the chore CODE was moved into a dedicated **Housekeeping** Module
+ * (`src/scheduler/housekeeping.ts`) in #938 so this Heartbeat stays genuinely
+ * observability-only. Housekeeping is a sibling Module, not part of the
+ * Heartbeat — see CONTEXT.md ("Housekeeping").
  *
  * Renamed from the former `loop.ts` in this directory in #725 (scheduler
  * fold PR-4/4, completes PP-1) to make the "no second brain" identity
@@ -29,11 +31,7 @@
  * Controlled via API: POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status
  */
 
-import * as Sentry from "@sentry/node";
 import { getMetricsTrend } from "../metrics/trend.ts";
-import { loadBacklog } from "../backlog/reads.ts";
-import { pruneOldDoneItems } from "../backlog/lanes.ts";
-import { getTargetName } from "../target-config.ts";
 import {
   getSchedulerCyclesRun,
   getSchedulerCyclesMerged,
@@ -42,16 +40,7 @@ import {
   getSchedulerStateVersion,
   getSchedulerStateRaw,
   getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
-  getBlockedLastEscalation, setBlockedLastEscalation,
-  getDigestLastWeekly, setDigestLastWeekly,
-  getMemoryLastConsolidation, setMemoryLastConsolidation,
 } from "../redis/scheduler.ts";
-import {
-  getReviewPickupNotified,
-  setReviewPickupNotified,
-  clearReviewPickupNotified,
-} from "../redis/review.ts";
-import { getReviewPickupSet } from "../review-pickup.ts";
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (issue #725: slowed from 2min; watchdog staleness threshold is 15min = 3x margin)
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
@@ -270,302 +259,19 @@ async function loadSchedulerState() {
 // and did nothing in production. The research-force policy now lives in the
 // autopilot brain (`scripts/autopilot/decide.py` `_research_force_allowed`).
 
-// Generate actionable unblock commands based on the blocked reason.
-function generateUnblockCommands(blockedReason: string, title: string): string[] {
-  const commands: string[] = [];
-  if (/api[_ ]?key|credentials|secret.*missing|token.*expired|env.*not set|missing.*env/i.test(blockedReason)) {
-    const envVar = blockedReason.match(/\b([A-Z][A-Z_]{2,})\b/)?.[1] || "THE_MISSING_KEY";
-    commands.push(`echo '${envVar}=<value>' >> ~/${getTargetName()}/.env.local`);
-  }
-  if (/DATABASE_URL|ECONNREFUSED.*5432|connection.*refused/i.test(blockedReason)) {
-    commands.push(`cd ~/hydra && docker compose up -d postgres`);
-  }
-  // Always include the re-queue command
-  const escaped = title.replace(/"/g, '\\"').slice(0, 80);
-  commands.push(`curl -X POST http://localhost:4000/api/queue -H 'content-type:application/json' -d '{"reference":"${escaped}","reason":"Unblocked by operator","source":"operator"}'`);
-  return commands;
-}
-
-// Check for blocked items that need re-escalation (every 12h per item).
-const BLOCKED_REESCALATE_MS = 12 * 60 * 60 * 1000;
-
-async function checkBlockedEscalation(eventBus) {
-  try {
-    const lanes = await loadBacklog();
-    // AC5 (issue #140): freeze snapshot so iteration doesn't see mutations
-    const blocked = [...(lanes.blocked || [])];
-    if (blocked.length === 0) return;
-
-    const now = Date.now();
-
-    for (const item of blocked) {
-      const blockedAt = item.meta?.blockedAt ? new Date(item.meta.blockedAt).getTime() : 0;
-      if (!blockedAt) continue;
-      const age = now - blockedAt;
-      if (age < BLOCKED_REESCALATE_MS) continue;
-
-      const lastEsc = await getBlockedLastEscalation(item.id);
-      if (lastEsc && now - parseInt(lastEsc) < BLOCKED_REESCALATE_MS) continue;
-
-      await setBlockedLastEscalation(item.id, now.toString());
-      const ageDays = Math.round(age / (24 * 60 * 60 * 1000));
-
-      const { STREAMS } = await import("../event-bus.ts");
-      await eventBus.publish(STREAMS.NOTIFICATIONS, {
-        type: "cycle:operator_blocked",
-        source: "scheduler",
-        correlationId: `blocked-reescalate-${item.id}`,
-        payload: {
-          taskId: item.id,
-          title: item.title,
-          blockedReason: item.meta?.blockedReason || item.description?.slice(0, 100) || "unknown",
-          blockedDays: ageDays,
-          unblockCommands: generateUnblockCommands(item.meta?.blockedReason || "", item.title),
-          reescalation: true,
-        },
-      });
-      console.log(`[Heartbeat] Re-escalated blocked item ${item.id} (${ageDays} days)`);
-    }
-  } catch (err: any) {
-    console.error(`[Heartbeat] Blocked escalation check failed: ${err.message}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// /hydra-review pickup-set phone-notify hook (issue #745)
-// ---------------------------------------------------------------------------
-//
-// Edge-triggered: fires exactly ONE notification when the /hydra-review pickup
-// set (operator-decision-queue + ready-for-human + stale-blocked) transitions
-// from empty -> non-empty, then suppresses repeats while it stays non-empty,
-// and re-arms once it drains to empty. The armed-state flag lives in Redis
-// (`hydra:review:pickup-armed`) so the edge survives an orchestrator restart —
-// a bounce mid-non-empty must NOT re-fire.
-//
-// Reuses the existing notifications stream -> Telegram bridge (no new
-// transport; secrets via env per ADR-0005). Never throws — a failed fetch is
-// treated as "couldn't sample", which leaves the armed-state untouched so the
-// next tick re-evaluates. Better a missed alert than a spurious one.
-
-/**
- * Sample the pickup set and fire/suppress the edge-triggered notification.
- *
- * Returns a small summary `{ fired, count, transitioned }` so the housekeeping
- * caller and tests can see what happened. `transitioned` is true on either
- * edge (empty->non-empty fires; non-empty->empty re-arms).
- *
- * `deps` is injectable so the test suite can stub the pickup-set fetch and the
- * armed-state accessors without a live Redis / `gh`.
- */
-async function checkReviewPickupNotify(
-  eventBus,
-  deps: {
-    getPickupSet?: typeof getReviewPickupSet;
-    getNotified?: typeof getReviewPickupNotified;
-    setNotified?: typeof setReviewPickupNotified;
-    clearNotified?: typeof clearReviewPickupNotified;
-  } = {},
-): Promise<{ fired: boolean; count: number; transitioned: boolean }> {
-  const getPickupSet = deps.getPickupSet ?? getReviewPickupSet;
-  const getNotified = deps.getNotified ?? getReviewPickupNotified;
-  const setNotified = deps.setNotified ?? setReviewPickupNotified;
-  const clearNotified = deps.clearNotified ?? clearReviewPickupNotified;
-
-  const items = await getPickupSet();
-  const count = items.length;
-  const alreadyNotified = await getNotified();
-
-  if (count === 0) {
-    // Set is empty — re-arm if a prior notification is still suppressing.
-    if (alreadyNotified) {
-      await clearNotified();
-      console.log("[Heartbeat] Review pickup set drained — re-armed notify hook");
-      return { fired: false, count: 0, transitioned: true };
-    }
-    return { fired: false, count: 0, transitioned: false };
-  }
-
-  // Set is non-empty.
-  if (alreadyNotified) {
-    // Already alerted for this non-empty run — suppress.
-    return { fired: false, count, transitioned: false };
-  }
-
-  // Empty -> non-empty edge: fire exactly one notification, then arm-spent.
-  const first = items[0];
-  const { STREAMS } = await import("../event-bus.ts");
-  await eventBus.publish(STREAMS.NOTIFICATIONS, {
-    type: "review:pickup_ready",
-    source: "scheduler",
-    correlationId: `review-pickup-${first.number}`,
-    payload: {
-      count,
-      firstTitle: first.title,
-      firstUrl: first.url,
-      firstNumber: first.number,
-    },
-  });
-  await setNotified();
-  console.log(`[Heartbeat] Review pickup set non-empty (${count}) — sent notify`);
-  return { fired: true, count, transitioned: true };
-}
-
-/**
- * Run the time-boxed housekeeping chores.
- *
- * Issue #723 (scheduler fold PR-3/4): these chores were extracted out of
- * `runScheduledCycle` so they can be driven externally by an hourly
- * `hydra-housekeeping.timer` POSTing to `/api/maintenance/housekeeping`,
- * rather than riding on the 2-minute scheduler heartbeat. They still run
- * IN the orchestrator process (they use the live `eventBus` + dynamic
- * imports), so the endpoint approach reuses the running process rather than
- * reconstructing eventBus/Redis in a standalone job.
- *
- * Each chore KEEPS its own internal time-guard verbatim (weekly/daily/
- * per-day/per-item idempotency), so hourly invocation is safe — the guards
- * skip work that has already run within its window. A second immediate call
- * therefore skips the guarded chores.
- *
- * Returns a `{ ran, skipped }` summary so callers (the endpoint, tests) can
- * see which chores did work this invocation vs. which were skipped by their
- * time-guard. Never throws — each chore is independently try/caught so one
- * failure doesn't abort the rest.
- */
-async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: string[] }> {
-  const ran: string[] = [];
-  const skipped: string[] = [];
-
-  // Check blocked items for re-escalation. The per-item 12h guard lives
-  // inside checkBlockedEscalation (BLOCKED_REESCALATE_MS), so this is safe to
-  // call hourly. We always count it as "ran" — it iterates the blocked lane
-  // and applies its own per-item guard internally.
-  try {
-    await checkBlockedEscalation(eventBus);
-    ran.push("blocked-escalation");
-  } catch (err: any) {
-    console.error(`[Heartbeat] Blocked escalation check failed in housekeeping: ${err.message}`);
-    skipped.push("blocked-escalation");
-  }
-
-  // Issue #745: /hydra-review pickup-set phone-notify hook. The edge-trigger
-  // armed-state (Redis `hydra:review:pickup-armed`) is the idempotency guard —
-  // it only FIRES on an empty -> non-empty transition, so calling this hourly
-  // is safe (a steady non-empty set is suppressed). Counts as "ran" when it
-  // either sampled cleanly or fired; "skipped" only on an unexpected throw.
-  try {
-    await checkReviewPickupNotify(eventBus);
-    ran.push("review-pickup-notify");
-  } catch (err: any) {
-    console.error(`[Heartbeat] Review pickup notify check failed: ${err.message}`);
-    Sentry.addBreadcrumb({ category: "scheduler", message: `review-pickup-notify failed: ${err.message}`, level: "error" });
-    skipped.push("review-pickup-notify");
-  }
-
-  // Prune old done-lane items from the backlog. Lives at the tick level
-  // rather than wedged inside `maybeRunResearch` so it still runs when the
-  // research path early-exits on any of its skip gates.
-  try {
-    await pruneOldDoneItems();
-    ran.push("prune-done");
-  } catch (err: any) {
-    console.error(`[Heartbeat] Failed to prune old done items: ${err.message}`);
-    Sentry.addBreadcrumb({ category: "scheduler", message: `pruneOldDoneItems failed: ${err.message}`, level: "error" });
-    skipped.push("prune-done");
-  }
-
-  // Weekly summary — send once per week
-  try {
-    const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-    const lastWeekly = await getDigestLastWeekly();
-    if (!lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS) {
-      const { buildWeeklySummary } = await import("../digest.ts");
-      const summary = await buildWeeklySummary();
-      if (summary) {
-        const { sendToTelegram } = await import("../notify.ts");
-        await sendToTelegram(summary);
-        await setDigestLastWeekly(Date.now().toString());
-        console.log("[Heartbeat] Sent weekly summary");
-      }
-      ran.push("weekly-summary");
-    } else {
-      skipped.push("weekly-summary");
-    }
-  } catch (err: any) {
-    console.error(`[Heartbeat] Weekly summary failed: ${err.message}`);
-    Sentry.addBreadcrumb({ category: "scheduler", message: `Weekly summary failed: ${err.message}`, level: "error" });
-    skipped.push("weekly-summary");
-  }
-
-  // Daily memory consolidation — prune stale patterns
-  try {
-    const DAY_MS = 24 * 60 * 60 * 1000;
-    const lastConsolidation = await getMemoryLastConsolidation();
-    if (!lastConsolidation || Date.now() - parseInt(lastConsolidation) >= DAY_MS) {
-      const { consolidate } = await import("../learning.ts");
-      await consolidate();
-      await setMemoryLastConsolidation(Date.now().toString());
-      ran.push("memory-consolidation");
-    } else {
-      skipped.push("memory-consolidation");
-    }
-  } catch (err: any) {
-    console.error(`[Heartbeat] Memory consolidation failed: ${err.message}`);
-    Sentry.addBreadcrumb({ category: "scheduler", message: `Memory consolidation failed: ${err.message}`, level: "error" });
-    skipped.push("memory-consolidation");
-  }
-
-  // Daily design-concept snapshot (issue #628; metric revised in #736) —
-  // record today's *production count* (how many concepts were created
-  // today) so the green-light criterion measures the gate WORKING rather
-  // than "an artifact happens to be alive". PR #567 retired the
-  // heavyweight B-4 telemetry endpoint; this is the lightweight
-  // replacement (one hash field per day, 14-day bounded). Pre-#736 this
-  // wrote `ZCARD` of the TTL-decaying index, so a quiet day reset the
-  // streak — that is the bug being fixed.
-  try {
-    const {
-      getDesignConceptProductionCountForDate,
-      writeDailySnapshot,
-      readDailySnapshots,
-    } = await import("../redis/design-concept.ts");
-    const today = new Date().toISOString().slice(0, 10);
-    const count = await getDesignConceptProductionCountForDate(today);
-    // Idempotent + monotone (the #736 invariant): a same-day re-run only
-    // WRITES when the freshly-sampled production count is higher than
-    // what's already stored for today (a concept produced later today).
-    // A no-change re-run SKIPS, so hourly housekeeping stays idempotent.
-    const existing = await readDailySnapshots();
-    const stored = existing.find((s) => s.date === today)?.count;
-    if (stored === undefined || count > stored) {
-      await writeDailySnapshot(today, count);
-      ran.push("design-concept-snapshot");
-    } else {
-      skipped.push("design-concept-snapshot");
-    }
-  } catch (err: any) {
-    console.error(`[Heartbeat] Design-concept daily snapshot failed: ${err.message}`);
-    Sentry.addBreadcrumb({
-      category: "scheduler",
-      message: `Design-concept daily snapshot failed: ${err.message}`,
-      level: "error",
-    });
-    skipped.push("design-concept-snapshot");
-  }
-
-  return { ran, skipped };
-}
-
 async function runScheduledCycle(eventBus) {
   if (!state.running) return;
 
   // Issue #383 (codex cut-over PR-3): the in-process control loop is gone.
   // #706 (scheduler fold PR-1/4) additionally removed the research-decision
-  // plane that used to run here. #723 (scheduler fold PR-3/4) moved the five
+  // plane that used to run here. #723 (scheduler fold PR-3/4) moved the six
   // time-boxed housekeeping chores (blocked re-escalation, done-lane pruning,
-  // weekly digest, memory consolidation, design-concept snapshot) out to an
-  // hourly `hydra-housekeeping.timer` that POSTs `/api/maintenance/housekeeping`
-  // → `runHousekeeping(eventBus)`. `runScheduledCycle` now exists solely as a
-  // heartbeat + rolling-merge-rate observability surface; PR-4 renames/slims it.
+  // weekly digest, memory consolidation, design-concept snapshot, review-pickup
+  // notify) out to an hourly `hydra-housekeeping.timer` that POSTs
+  // `/api/maintenance/housekeeping` → `runHousekeeping(eventBus)`. #938 then
+  // moved the chore CODE into `src/scheduler/housekeeping.ts` (a sibling
+  // Module). `runScheduledCycle` now exists solely as a heartbeat +
+  // rolling-merge-rate observability surface.
   //
   // Issue #397: the heartbeat moves to `lastTickAt` so liveness probes can
   // tell "scheduler is alive" apart from "the control loop ran". The legacy
@@ -780,10 +486,4 @@ export {
   formatDuration,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,
-  // Issue #723 (scheduler fold PR-3/4): the housekeeping chores, callable
-  // out-of-band by the `/api/maintenance/housekeeping` endpoint / hourly timer.
-  runHousekeeping,
-  // Issue #745: edge-triggered /hydra-review pickup-set notify hook, exported
-  // for test coverage (injectable pickup-set + armed-state deps).
-  checkReviewPickupNotify,
 };
