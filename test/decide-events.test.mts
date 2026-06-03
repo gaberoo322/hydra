@@ -56,6 +56,9 @@ const SIGNAL_CLASSES = [
   "architecture_orch",
   // retro_orch (issue #920) — daily per-run retrospective signal class.
   "retro_orch",
+  // cleanup_orch (issue #960) — board-idle deterministic dead-code /
+  // simplification detector signal class.
+  "cleanup_orch",
 ] as const;
 const ALL_CLASSES = [...PIPELINE_CLASSES, ...SIGNAL_CLASSES];
 
@@ -254,7 +257,7 @@ describe("decide.py — dispatch_decision per candidate class", () => {
   test("emits exactly one dispatch_decision per candidate class on an idle turn", () => {
     const plan = runDecide(baseState());
     const decisions = eventsOfType(plan, "dispatch_decision");
-    // ALL_CLASSES = 7 pipeline + 8 signal = 15 total.
+    // ALL_CLASSES = 7 pipeline + 9 signal = 16 total.
     assert.equal(
       decisions.length,
       ALL_CLASSES.length,

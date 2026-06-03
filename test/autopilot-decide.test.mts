@@ -1380,6 +1380,140 @@ describe("decide.py — board-idle backfill set (issue #959)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 7d. cleanup_orch signal class (issue #960, parent #958)
+// ---------------------------------------------------------------------------
+//
+// cleanup_orch is the high-confidence mechanical backfill class: it dispatches
+// the headless /hydra-cleanup skill (a deterministic dead-code / simplification
+// detector) on the SAME unified `orch_backfill_idle` signal as the backfill set,
+// with a 1h cooldown. Its anti-flood cap is `cleanup_board_saturated`
+// (mirroring arch_board_saturated), checked FIRST. It is orch-scope only
+// (SCOPE_TARGET_ONLY_EXCLUDE; no cleanup_target mirror).
+//
+// CRITICAL DIFFERENCE from architecture_orch / discover_orch: cleanup_orch is
+// deliberately NOT in BACKFILL_SIGNAL_CLASSES, so it is EXEMPT from the
+// one-per-turn stagger guard and CO-FIRES with a staggered backfill class on the
+// same idle turn (it runs hot — epic #958). The tests below pin that co-firing.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — cleanup_orch signal class (issue #960)", () => {
+  const now = Math.floor(Date.now() / 1000);
+
+  test("cleanup_orch fires on orch_backfill_idle", () => {
+    const state = baseState({ signals: { orch_backfill_idle: true } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "cleanup_orch");
+    assert.ok(a, "cleanup_orch must dispatch on orch_backfill_idle");
+    assert.equal(a.skill, "hydra-cleanup");
+  });
+
+  test("cleanup_orch DOES NOT fire without orch_backfill_idle signal", () => {
+    const state = baseState();  // no signals
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "cleanup_orch"),
+      undefined,
+      "cleanup_orch must not dispatch when the board is not idle",
+    );
+  });
+
+  test("cleanup_orch suppressed when cleanup_board_saturated is set (cap is FIRST gate)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true, cleanup_board_saturated: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "cleanup_orch"),
+      undefined,
+      "saturated cleanup board → suppress backfill (anti-feedback-loop guard, checked before cooldown)",
+    );
+  });
+
+  test("cleanup_orch is excluded by target-only scope (orch-scope by definition)", () => {
+    const state = baseState({
+      scope: "target-only",
+      signals: { orch_backfill_idle: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "cleanup_orch"),
+      undefined,
+      "target-only scope must exclude cleanup_orch (INV-008)",
+    );
+  });
+
+  test("cleanup_orch is allowed under orch-only scope", () => {
+    const state = baseState({
+      scope: "orch-only",
+      signals: { orch_backfill_idle: true },
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "cleanup_orch"),
+      "orch-only must NOT exclude cleanup_orch",
+    );
+  });
+
+  test("cleanup_orch suppressed when recently fired (within 1h cooldown)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      // Fired 30m ago → inside the 1h cooldown.
+      signal_last_fired: { cleanup_orch: now - 30 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "cleanup_orch"),
+      undefined,
+      "30m ago is inside the 1h cleanup_orch cooldown (issue #960)",
+    );
+  });
+
+  test("cleanup_orch fires after the 1h cooldown elapses", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { cleanup_orch: now - 61 * 60 } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "cleanup_orch"),
+      "cleanup_orch must fire once the 1h cooldown has elapsed (issue #960)",
+    );
+  });
+
+  test("cleanup_orch in burned_classes is NOT re-dispatched (mirrors #432)", () => {
+    const state = baseState({
+      burned_classes: ["cleanup_orch"],
+      signals: { orch_backfill_idle: true },
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "cleanup_orch"),
+      undefined,
+      "burned signal class cleanup_orch must not be re-dispatched",
+    );
+  });
+
+  test("cleanup_orch CO-FIRES with a staggered backfill class (NOT in BACKFILL_SIGNAL_CLASSES)", () => {
+    // On a fully-idle turn with everything cooled, discover_orch wins the
+    // stagger slot for the backfill set, AND cleanup_orch dispatches in the
+    // same turn because it is exempt from the one-per-turn stagger guard.
+    const state = baseState({ signals: { orch_backfill_idle: true } });
+    const plan = runDecide(state, null);
+    const cleanup = findAction(plan, (a) => a.type === "dispatch" && a.slot === "cleanup_orch");
+    const backfill = (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && (a.slot === "discover_orch" || a.slot === "architecture_orch"),
+    );
+    assert.ok(cleanup, "cleanup_orch must dispatch on a fully-idle turn");
+    assert.equal(backfill.length, 1, "the staggered backfill set still emits exactly one dispatch");
+    assert.equal(
+      backfill[0].slot,
+      "discover_orch",
+      "the staggered set's winner is unchanged by cleanup_orch co-firing",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 8. Idle fallback / heartbeat wait
 // ---------------------------------------------------------------------------
 
