@@ -244,6 +244,37 @@ print('arch_board_open_scan=' + str(arch))
 print('arch_board_saturated=' + ('true' if saturated else 'false'))
 " 2>/dev/null || { echo "arch_fallback_due=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; }
 
+# Per-run retrospective — daily trigger (issue #920, epic #917).
+#
+# `retro_run_available` is true when at least one COMPLETED autopilot run
+# exists to analyse. The autopilot promotes it into
+# `state.signals.retro_run_available`; decide.py's `retro_orch` signal class
+# (issue #920) reads it verbatim and dispatches /hydra-retro on the most-
+# recent completed run. The 24h per-class cooldown (SIGNAL_COOLDOWNS in
+# decide.py) is what enforces the once-per-day cadence — this signal only
+# asserts that there is SOMETHING to retro, mirroring how scout_walk_due /
+# arch_fallback_due are pure board/state reads with the cooldown applied
+# downstream.
+#
+# A "completed" run is any run whose `status` is NOT `running` (the run-tree
+# writer flips it to ended/killed/completed on clean exit or read-time
+# sweep — see src/autopilot/runs.ts term_reason handling). We read the runs
+# index (`/api/autopilot/runs`, the same digest the dashboard consumes) and
+# count terminal runs. This is read-only — no Redis writes, no cursor
+# advance; the retro skill itself resolves and stamps the run it analyses.
+# Orchestrator-down / empty-index degrades to `false` (nothing to retro),
+# which suppresses the dispatch — the safe default.
+echo -n "retro_run_available="
+hydra raw GET /autopilot/runs?limit=14 2>/dev/null | python3 -c "
+import json,sys
+try:
+  d=json.load(sys.stdin)
+  runs=d.get('runs',[]) if isinstance(d,dict) else []
+  completed=[r for r in runs if isinstance(r,dict) and str(r.get('status','')).lower() not in ('','running')]
+  print('true' if completed else 'false')
+except Exception:
+  print('false')" || echo "false"
+
 # Tool Scout — Phase C alert-driven trigger (issue #486).
 #
 # `scout_alert_eligible_count` is the number of recent `hydra:alerts`

@@ -84,6 +84,8 @@ state.json {
     "discover_orch":   unix-epoch | 0
     "discover_target": unix-epoch | 0
     "scout_orch":      unix-epoch | 0
+    # architecture_orch (#790) and retro_orch (#920) also track last-fired
+    # here when they fire; absent keys default to 0 (never fired).
   }
 
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
@@ -198,6 +200,18 @@ SIGNAL_CLASSES = (
     # suppressor. collect-state.sh (#789) owns signal emission; decide.py
     # only reads the precomputed signals.
     "architecture_orch",
+    # retro_orch (issue #920, parent #917): daily per-run retrospective.
+    # Dispatches the /hydra-retro skill (#919) to turn the most-recent
+    # COMPLETED run into conservative, recurrence-gated improvement proposals.
+    # Calendar-driven, 24h cooldown — a once-per-day cadence. Fires on the
+    # `retro_run_available` signal (collect-state.sh emits it when a completed
+    # run exists to analyse). Being a signal class — no slot semantics, and
+    # decide.py dispatches all pipeline slots BEFORE signal classes — is what
+    # satisfies the issue's "spare capacity / does not preempt pipeline
+    # classes" requirement: a retro never blocks a dev/QA/research dispatch.
+    # The 24h class cooldown is the daily cadence back-stop; decide.py reads
+    # the precomputed signal verbatim and never recomputes run state here.
+    "retro_orch",
 )
 
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
@@ -220,6 +234,13 @@ SIGNAL_COOLDOWNS = {
     # cooldown is the safety net (analogous to scout's per-category-vs-class
     # split, tuned for daily idle reclamation rather than weekly walks).
     "architecture_orch": 24 * 60 * 60,
+    # retro_orch (issue #920): 24h. The per-run retrospective runs at most
+    # once per day. The `retro_run_available` signal (collect-state.sh) only
+    # asserts that a completed run EXISTS to analyse; the 24h class cooldown
+    # is what enforces the daily cadence so the same run isn't re-analysed on
+    # every idle turn. Mirrors architecture_orch's daily idle-reclamation
+    # cadence rather than scout's weekly walk.
+    "retro_orch": 24 * 60 * 60,
 }
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
@@ -355,6 +376,12 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # architecture_orch is excluded (no architecture_target mirror yet; the
     # Target has a PR merge backlog, #718).
     "architecture_orch",
+    # retro_orch (issue #920) analyses the orchestrator's OWN autopilot runs
+    # and emits orch-scope improvement proposals (prompt/doc/code fixes to the
+    # orchestrator + its subagents) — orch-scope by definition. Under
+    # `target-only` the autopilot stays out of orch work, so retro_orch is
+    # excluded, mirroring scout_orch / architecture_orch.
+    "retro_orch",
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -1278,6 +1305,13 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         # idle_turns from accumulating while a fallback is eligible (the AC
         # is met by being a real dispatch, NOT by editing the terminate path).
         "architecture_orch",
+        # retro_orch (issue #920, parent #917) — daily per-run retrospective.
+        # Registered LAST in the signal iteration so it is the lowest-priority
+        # signal class: pipeline slots dispatch first (step 4), then the other
+        # signal classes, and only then is spare capacity spent on a retro.
+        # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
+        # signal_is_cooled guard inside _select_for_signal.
+        "retro_orch",
     ):
         if dispatch_blocked:
             plan.events.append(
@@ -1817,6 +1851,37 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                 sig,
                 "hydra-architecture-scan",
                 reason="orch board idle — architecture fallback",
+            )
+        return None
+    if sig == "retro_orch":
+        # Issue #920 (parent #917). Daily per-run retrospective: dispatch the
+        # /hydra-retro skill (#919) to turn the most-recent COMPLETED run into
+        # conservative, recurrence-gated improvement proposals.
+        #
+        # Gating is intentionally minimal — a signal class has no slot
+        # semantics and decide.py dispatches every pipeline slot BEFORE the
+        # signal loop, so a retro inherently never preempts a dev/QA/research
+        # dispatch (the issue's "spare-capacity" requirement). The daily
+        # cadence is enforced by the 24h SIGNAL_COOLDOWNS["retro_orch"], which
+        # the `signal_is_cooled` guard at the top of this function already
+        # honors (so a fired retro won't re-fire for 24h even while a
+        # completed run keeps surfacing).
+        #
+        # `retro_run_available` is the precomputed signal from collect-state.sh:
+        # true iff a COMPLETED run exists to analyse. decide.py reads it
+        # verbatim and never recomputes run state here — the same signal-seam
+        # discipline as scout_orch / architecture_orch.
+        #
+        # No run_id is threaded through prompt_args: the hydra-retro skill
+        # defaults to the latest completed run when invoked with no argument
+        # (see docs/operator-playbooks/hydra-retro.md "Resolve the run id").
+        # Mirroring architecture_orch's no-args dispatch keeps decide.py pure
+        # and avoids hard-coupling to the run-id resolution path.
+        if _signal_present(state, events, "retro_run_available"):
+            return make_dispatch(
+                sig,
+                "hydra-retro",
+                reason="completed run available — daily retrospective",
             )
         return None
     return None

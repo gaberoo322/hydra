@@ -43,7 +43,7 @@ Each tick:
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
 6. **Re-enter step 1.** No inline reasoning between steps.
 
-## Class taxonomy (7 pipeline slots + 7 signal classes)
+## Class taxonomy (7 pipeline slots + 8 signal classes)
 
 | Kind | Class | Skill |
 |---|---|---|
@@ -61,6 +61,7 @@ Each tick:
 | signal | `discover_target` | hydra-target-discover |
 | signal | `scout_orch` | hydra-tool-scout (Phase B, weekly calendar walk) |
 | signal | `architecture_orch` | hydra-architecture-scan (#788; idle-time fallback, issue-producing) |
+| signal | `retro_orch` | hydra-retro (#919; daily per-run retrospective, issue-producing + ≤1 gated PR) |
 
 > **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
 > calendar-driven signal class — `SIGNAL_COOLDOWNS["scout_orch"] = 7d`.
@@ -146,6 +147,43 @@ Each tick:
 > same way (`SCOPE_TARGET_ONLY_EXCLUDE` gains no target entry; a
 > target-scope saturation count + fallback predicate land in
 > `collect-state.sh`).
+
+> **Retrospective wiring (issue #920, parent #917):** `retro_orch` is the
+> daily per-run retrospective signal class. It dispatches the `/hydra-retro`
+> skill (#919), which consumes the run-tree **retro bundle** (#918),
+> deep-reads only the flagged transcripts, and emits a **conservative,
+> recurrence-gated** set of improvement proposals (≤2 GitHub issues + ≤1
+> gated PR + artifact-only notes per run). Like `architecture_orch` it is
+> **issue-producing, not direct-dispatch** — the issues/PR it files re-enter
+> the board as ordinary work on a later turn.
+>
+> - **Cadence / cooldown:** `SIGNAL_COOLDOWNS["retro_orch"] = 24h`
+>   (`decide.py`) — a once-per-day cadence, the same daily back-stop as
+>   `architecture_orch` (in contrast to `scout_orch`'s weekly 7d walk). The
+>   24h cooldown is what enforces "at most once per day": the gating signal
+>   only asserts a completed run *exists*, so without the cooldown the same
+>   run would re-fire on every idle turn.
+> - **Spare-capacity / no-preemption:** `retro_orch` is a signal class, so it
+>   has no slot semantics and `decide.py` dispatches every pipeline slot
+>   (dev/QA/research/design-concept) BEFORE the signal loop. It is registered
+>   LAST in the `decide.py` signal iteration tuple, making it the
+>   lowest-priority signal class — a retro therefore never preempts an active
+>   or pending dev/QA/research dispatch. That ordering, not a separate
+>   capacity gate, is how the issue's "does not preempt pipeline classes"
+>   requirement is met.
+> - **Scope / target:** `retro_orch` analyses the orchestrator's OWN autopilot
+>   runs and files orch-scope improvements — orch-scope by definition. It is
+>   excluded under `target-only` runs via `SCOPE_TARGET_ONLY_EXCLUDE`,
+>   mirroring `scout_orch` / `architecture_orch`. There is no
+>   `retro_target` mirror (the Target produces no autopilot runs to retro).
+> - **Signal seam:** the single gate is **`retro_run_available`** — true when
+>   a COMPLETED run exists to analyse (`collect-state.sh` reads the
+>   `/api/autopilot/runs` index and counts non-`running` runs). `decide.py`
+>   reads it verbatim and never recomputes run state. No `run_id` is threaded
+>   through `prompt_args`: the `hydra-retro` skill defaults to the latest
+>   completed run when invoked with no argument (see
+>   `docs/operator-playbooks/hydra-retro.md` — "Resolve the run id"), so the
+>   dispatch is argument-free exactly like `architecture_orch`.
 
 > **Phase B wiring (issue #466, sub of #437):** `design_concept_orch`
 > fires before `dev_orch` for an orch anchor when the artifact is
@@ -581,6 +619,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
 | `arch_fallback_due` (`ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`) | `arch_fallback_due` | `architecture_orch` (issues #789/#790) |
 | `arch_board_open_scan > ARCH_BOARD_SATURATION_CAP (6)` → `arch_board_saturated` | `arch_board_saturated` | suppresses `architecture_orch` (checked FIRST) |
+| `/api/autopilot/runs` index has ≥1 non-`running` run | `retro_run_available` | `retro_orch` (issue #920) — daily per-run retrospective; 24h class cooldown enforces the once-per-day cadence |
 | `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1) |
 | `emergency_brake_json` | `state.emergency_brake` (object, merged verbatim) | operator-only emergency brake (issue #744): when `engaged=true`, `decide()` emits ZERO `auto-merge` actions and a single `route-prs-to-review` action that arms the /hydra-review pickup set. Default `{engaged:false}`. READ-ONLY — the autopilot can never set/clear it (no engage/disengage action type); the sole write path is `hydra brake on\|off`. |
 | `orch_pending_grill_anchor=issue-N` (or `none`) | `state.signals.orch_pending_grill_anchor` (string, or omit — verbatim, no rename) | `design_concept_orch` fires hydra-grill on the named anchor; `dev_orch` yields the same turn (issue #628). Key name aligned in #736 so collect-state emits exactly what decide.py reads — no model-mediated rename. |
