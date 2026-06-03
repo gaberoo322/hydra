@@ -21,6 +21,7 @@
  */
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
+import { resolveGithubRepo } from "../github/issues.ts";
 
 // The production default routes `gh`/`git` through the GitHub CLI Adapter seam
 // (issue #899). Tests still inject `deps.execFileAsync` directly — this only
@@ -176,7 +177,7 @@ async function fetchIssuesWithLabel(
   deps: StuckItemsDeps,
 ): Promise<RawIssue[]> {
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return [];
   const { stdout } = await exec(
     "gh",
@@ -246,7 +247,7 @@ export function parseRawIssues(jsonStdout: string): RawIssue[] {
 
 async function fetchPrsWithFailedCi(deps: StuckItemsDeps): Promise<StuckPr[]> {
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return [];
   const { stdout } = await exec(
     "gh",

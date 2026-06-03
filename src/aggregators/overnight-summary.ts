@@ -33,6 +33,7 @@
 import { resolve } from "node:path";
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
+import { resolveGithubRepo } from "../github/issues.ts";
 
 import type { HeadroomLevel } from "./types.ts";
 
@@ -209,7 +210,7 @@ async function readCostUsd(deps: OvernightSummaryDeps): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function countIssuesOpened(windowStart: Date, deps: OvernightSummaryDeps): Promise<number> {
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return 0;
   const exec = deps.execFileAsync ?? execFile;
   // `gh issue list --search "created:>=YYYY-MM-DD"` is the simplest way to
