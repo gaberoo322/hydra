@@ -216,18 +216,26 @@ SCOUT_SPEND_USD=$(awk -v t="$SCOUT_TOKENS_TODAY" -v r="$SCOUT_USD_RATE" 'BEGIN {
 echo "scout_tokens_today=${SCOUT_TOKENS_TODAY}"
 echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
 
-# Architecture pass — fallback + saturation signals (issue #789, epic #787).
+# Board-idle backfill + saturation signals (issue #789, epic #787; unified
+# under one canonical signal by issue #959, epic #958).
 #
 # These mirror the scout_board_open_enhancements / scout_board_saturated
-# precedent above. The autopilot promotes them into state.signals so
-# decide.py's `architecture_orch` selector (issue #790) can fire a
-# deepening pass ONLY when the orchestrator board is genuinely idle AND
-# the pass hasn't already flooded the board with its own proposals.
+# precedent above. The autopilot promotes them into state.signals so the
+# backfill-set selectors in decide.py (`architecture_orch` #790 and the
+# revived `discover_orch` #959) can fire a deepening / discovery pass ONLY
+# when the orchestrator board is genuinely idle AND the pass hasn't already
+# flooded the board with its own proposals.
 #
-# `arch_fallback_due` — true when the orchestrator board is empty of
-# actionable work: ready_for_agent == 0 AND needs_research == 0 AND
-# needs_triage == 0 AND work_queue == 0. This is the "nothing else to do,
-# go deepen the architecture" trigger. The per-class cooldown is applied
+# `orch_backfill_idle` — the SINGLE canonical board-empty signal: true when
+# the orchestrator board is empty of actionable work, i.e. ready_for_agent
+# == 0 AND needs_research == 0 AND needs_triage == 0 AND work_queue == 0.
+# This is the "nothing else to do, go backfill" trigger. Issue #959 renamed
+# it from `arch_fallback_due` and pointed BOTH backfill-set classes at it,
+# so the board-empty predicate is computed in exactly ONE place and emitted
+# as ONE line — decide.py never recomputes board-empty or cooldown, it reads
+# this precomputed signal only (the signal-seam discipline). The previously
+# dead `orch_idle` name that discover_orch keyed off is gone — collect-state
+# never emitted it, so discover_orch could never fire before #959. The per-class cooldown is applied
 # downstream by decide.py off `arch_last_run_iso` (mirroring how
 # `scout_last_walk_iso` gates `scout_walk_due`); the cooldown timestamp is
 # stamped by the dispatched architecture skill, not here, so a crash on
@@ -270,10 +278,10 @@ wq = int(os.environ.get('ARCH_WORK_QUEUE', '0') or 0)
 cap = int(os.environ.get('ARCH_BOARD_SATURATION_CAP', '6') or 6)
 fallback_due = (rfa == 0 and nr == 0 and nt == 0 and wq == 0)
 saturated = (arch > cap)
-print('arch_fallback_due=' + ('true' if fallback_due else 'false'))
+print('orch_backfill_idle=' + ('true' if fallback_due else 'false'))
 print('arch_board_open_scan=' + str(arch))
 print('arch_board_saturated=' + ('true' if saturated else 'false'))
-" 2>/dev/null || { echo "arch_fallback_due=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; }
+" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; }
 
 # Per-run retrospective — daily trigger (issue #920, epic #917).
 #
@@ -284,7 +292,7 @@ print('arch_board_saturated=' + ('true' if saturated else 'false'))
 # recent completed run. The 24h per-class cooldown (SIGNAL_COOLDOWNS in
 # decide.py) is what enforces the once-per-day cadence — this signal only
 # asserts that there is SOMETHING to retro, mirroring how scout_walk_due /
-# arch_fallback_due are pure board/state reads with the cooldown applied
+# orch_backfill_idle are pure board/state reads with the cooldown applied
 # downstream.
 #
 # A "completed" run is any run whose `status` is NOT `running` (the run-tree

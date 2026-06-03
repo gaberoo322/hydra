@@ -6,10 +6,13 @@
  * drive the architecture-deepening fallback, mirroring the existing
  * scout_board_open_enhancements / scout_board_saturated precedent:
  *
- *   - arch_fallback_due      — true ONLY when the orchestrator board is
+ *   - orch_backfill_idle     — true ONLY when the orchestrator board is
  *                              genuinely idle: ready_for_agent == 0 AND
  *                              needs_research == 0 AND needs_triage == 0
- *                              AND work_queue == 0.
+ *                              AND work_queue == 0. (Issue #959 renamed this
+ *                              from arch_fallback_due and made it the SINGLE
+ *                              canonical board-idle signal that BOTH
+ *                              architecture_orch and discover_orch key off.)
  *   - arch_board_saturated   — true when OPEN architecture-sourced issues
  *                              exceed the cap (6). Architecture-sourced
  *                              issues are counted via the STABLE
@@ -72,8 +75,11 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
     assert.ok(cap >= 5 && cap <= 10, `cap ${cap} must be in the 5-10 range`);
   });
 
-  test("emits all three arch_* keys and counts via the architecture-scan label", () => {
-    assert.match(src, /arch_fallback_due=/);
+  test("emits the unified orch_backfill_idle signal + arch_* keys via the architecture-scan label", () => {
+    // Issue #959: the board-idle predicate is emitted as the single canonical
+    // `orch_backfill_idle` line (renamed from arch_fallback_due).
+    assert.match(src, /orch_backfill_idle=/);
+    assert.doesNotMatch(src, /print\('arch_fallback_due=/, "the old arch_fallback_due emit must be gone (unified)");
     assert.match(src, /arch_board_saturated=/);
     assert.match(src, /arch_board_open_scan=/);
     // The arch-sourced count must select issues by the stable label.
@@ -82,31 +88,31 @@ describe("scripts/autopilot/collect-state.sh — architecture fallback signals (
 
   const env = { ARCH_WORK_QUEUE: "0", ARCH_BOARD_SATURATION_CAP: "6" };
 
-  test("arch_fallback_due=true ONLY when the board is fully idle", () => {
+  test("orch_backfill_idle=true ONLY when the board is fully idle", () => {
     const out = runEmitter(
       { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
       env,
     );
-    assert.ok(out.includes("arch_fallback_due=true"));
+    assert.ok(out.includes("orch_backfill_idle=true"));
     assert.ok(out.includes("arch_board_saturated=false"));
   });
 
-  test("arch_fallback_due=false when work_queue is non-empty", () => {
+  test("orch_backfill_idle=false when work_queue is non-empty", () => {
     const out = runEmitter(
       { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
       { ...env, ARCH_WORK_QUEUE: "3" },
     );
-    assert.ok(out.includes("arch_fallback_due=false"));
+    assert.ok(out.includes("orch_backfill_idle=false"));
   });
 
-  test("arch_fallback_due=false when any actionable label count is non-zero", () => {
+  test("orch_backfill_idle=false when any actionable label count is non-zero", () => {
     for (const label of ["ready_for_agent", "needs_research", "needs_triage"]) {
       const board = { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 };
       (board as Record<string, number>)[label] = 2;
       const out = runEmitter(board, env);
       assert.ok(
-        out.includes("arch_fallback_due=false"),
-        `non-zero ${label} must suppress fallback`,
+        out.includes("orch_backfill_idle=false"),
+        `non-zero ${label} must suppress backfill-idle`,
       );
     }
   });

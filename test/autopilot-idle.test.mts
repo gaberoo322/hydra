@@ -17,6 +17,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve, join } from "node:path";
 
 import {
   createAutopilotIdleRouter,
@@ -29,6 +32,11 @@ import {
   AutopilotIdleDiagnosticsResponseSchema,
   type IdleAutopilotLiveness,
 } from "../src/schemas/autopilot-idle.ts";
+
+// Path to the collect-state.sh emitter exercised by the issue #959 block below.
+function collectStatePath(): string {
+  return join(resolve(import.meta.dirname, ".."), "scripts", "autopilot", "collect-state.sh");
+}
 
 // ---------------------------------------------------------------------------
 // deriveBlockedBy — pure precedence
@@ -317,5 +325,80 @@ describe("GET /autopilot/idle-diagnostics — never-throw + validation (issue #8
     const res = await callRoute({ paceGateIntervalSeconds: 0 });
     assert.equal(res._body.nextPaceGateCheck, null);
     assert.equal(AutopilotIdleDiagnosticsResponseSchema.safeParse(res._body).success, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collect-state.sh — the unified orch_backfill_idle board-idle signal
+// (issue #959, epic #958)
+// ---------------------------------------------------------------------------
+//
+// The autopilot's board-idle BACKFILL trigger is produced by
+// scripts/autopilot/collect-state.sh, which emits a single canonical
+// `orch_backfill_idle` state line (true iff the orchestrator board is empty
+// of actionable work). decide.py consumes it as a precomputed signal and
+// never recomputes board-empty itself (the signal-seam discipline). This
+// block pins the EMISSION predicate: orch_backfill_idle is true iff
+// ready_for_agent == 0 AND needs_research == 0 AND needs_triage == 0 AND
+// work_queue == 0 — and false the moment any of the four is non-zero.
+//
+// We extract and run the exact python emitter the shell script ships (rather
+// than a drift-prone copy), mirroring test/autopilot-arch-fallback-signals.
+// ---------------------------------------------------------------------------
+
+describe("collect-state.sh — unified orch_backfill_idle signal (issue #959)", () => {
+  const COLLECT_STATE = collectStatePath();
+  const collectSrc = readFileSync(COLLECT_STATE, "utf-8");
+
+  function extractBackfillEmitter(): string {
+    const match = collectSrc.match(
+      /printf '%s' "\$ARCH_BOARD_JSON"[\s\S]*?python3 -c "([\s\S]*?)"\s*2>\/dev\/null/,
+    );
+    assert.ok(match, "could not locate the board-idle emitter python block in collect-state.sh");
+    return match![1];
+  }
+
+  function runEmitter(board: Record<string, number>, workQueue = "0"): string[] {
+    const r = spawnSync("python3", ["-c", extractBackfillEmitter()], {
+      input: JSON.stringify(board),
+      encoding: "utf-8",
+      env: { ...process.env, ARCH_WORK_QUEUE: workQueue, ARCH_BOARD_SATURATION_CAP: "6" },
+    });
+    assert.equal(r.status, 0, `emitter exited non-zero: ${r.stderr}`);
+    return (r.stdout ?? "").trim().split("\n");
+  }
+
+  test("emits orch_backfill_idle as the single canonical board-idle line", () => {
+    assert.match(collectSrc, /orch_backfill_idle=/);
+    // The pre-#959 name must be gone from the emit (no dual emission).
+    assert.doesNotMatch(collectSrc, /print\('arch_fallback_due=/);
+  });
+
+  test("orch_backfill_idle=true iff all four actionable counts are zero", () => {
+    const out = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
+      "0",
+    );
+    assert.ok(out.includes("orch_backfill_idle=true"), "fully-idle board → true");
+  });
+
+  test("orch_backfill_idle=false when work_queue is non-empty", () => {
+    const out = runEmitter(
+      { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 },
+      "2",
+    );
+    assert.ok(out.includes("orch_backfill_idle=false"), "non-empty work-queue → false");
+  });
+
+  test("orch_backfill_idle=false when any actionable label count is non-zero", () => {
+    for (const label of ["ready_for_agent", "needs_research", "needs_triage"]) {
+      const board = { ready_for_agent: 0, needs_research: 0, needs_triage: 0, arch_sourced: 0 };
+      (board as Record<string, number>)[label] = 1;
+      const out = runEmitter(board, "0");
+      assert.ok(
+        out.includes("orch_backfill_idle=false"),
+        `non-zero ${label} must suppress orch_backfill_idle`,
+      );
+    }
   });
 });

@@ -192,13 +192,13 @@ SIGNAL_CLASSES = (
     # itself. Phase A (#484) shipped the skill + seen-list; Phase B wires
     # the autopilot dispatch so the walk runs unattended.
     "scout_orch",
-    # architecture_orch (issue #790, parent #787): idle-time fallback that
-    # dispatches the headless /hydra-architecture-scan wrapper (#788) to turn
-    # spare capacity into self-improvement issues. Fires on the first fully-
-    # idle turn when arch_fallback_due AND NOT arch_board_saturated; 24h class
-    # cooldown is the back-stop, arch_board_saturated is the primary
-    # suppressor. collect-state.sh (#789) owns signal emission; decide.py
-    # only reads the precomputed signals.
+    # architecture_orch (issue #790, parent #787; unified by #959, epic #958):
+    # board-idle backfill that dispatches the headless /hydra-architecture-scan
+    # wrapper (#788) to turn spare capacity into self-improvement issues. Fires
+    # when orch_backfill_idle AND NOT arch_board_saturated; the 1h class
+    # cooldown is the back-stop, arch_board_saturated is the primary suppressor.
+    # collect-state.sh (#789) owns signal emission; decide.py only reads the
+    # precomputed signals.
     "architecture_orch",
     # retro_orch (issue #920, parent #917): daily per-run retrospective.
     # Dispatches the /hydra-retro skill (#919) to turn the most-recent
@@ -220,7 +220,11 @@ SIGNAL_COOLDOWNS = {
     "health":          0,      # health is always allowed; rate-limited by signal
     "sweep_orch":      900,    # 15 min
     "sweep_target":    900,
-    "discover_orch":   1800,   # 30 min
+    # discover_orch (issue #959, epic #958): 1h backfill cadence. Dropped from
+    # 30m to 3600s so it round-robins with architecture_orch off the unified
+    # `orch_backfill_idle` signal — both backfill-set classes share the same
+    # 1h cadence and the one-per-turn stagger guard picks one per idle turn.
+    "discover_orch":   3600,   # 1h (board-idle backfill set)
     "discover_target": 1800,
     # 7 days. The calendar walk takes ~a week's worth of context to digest
     # (10 categories + 2 dep manifests ≈ 12 dispatches; running it more
@@ -228,12 +232,15 @@ SIGNAL_COOLDOWNS = {
     # 30d). Per-class cooldown is the back-stop; per-category cooldown is
     # the primary suppressor. See docs/operator-playbooks/hydra-autopilot.md.
     "scout_orch":      7 * 24 * 60 * 60,
-    # architecture_orch (issue #790): 24h back-stop. The scan is an idle-time
-    # fallback meant to fire on the first fully-idle turn at most once per day;
-    # arch_board_saturated is the primary suppressor and the 24h class
-    # cooldown is the safety net (analogous to scout's per-category-vs-class
-    # split, tuned for daily idle reclamation rather than weekly walks).
-    "architecture_orch": 24 * 60 * 60,
+    # architecture_orch (issue #790; dropped to 1h by issue #959, epic #958):
+    # 1h backfill cadence. The scan is a board-idle backfill pass keyed off the
+    # unified `orch_backfill_idle` signal. arch_board_saturated stays the
+    # PRIMARY suppressor (checked FIRST in the selector) and matters MORE at
+    # hourly cadence because the class can now attempt ~24x more often; the 1h
+    # class cooldown is only the back-stop. Together with the one-per-turn
+    # stagger guard in _rule_signals, the per-class 1h cooldown makes the two
+    # backfill classes round-robin across idle turns with no persistent state.
+    "architecture_orch": 3600,
     # retro_orch (issue #920): 24h. The per-run retrospective runs at most
     # once per day. The `retro_run_available` signal (collect-state.sh) only
     # asserts that a completed run EXISTS to analyse; the 24h class cooldown
@@ -242,6 +249,18 @@ SIGNAL_COOLDOWNS = {
     # cadence rather than scout's weekly walk.
     "retro_orch": 24 * 60 * 60,
 }
+
+# Board-idle backfill set (issue #959, epic #958). Both classes key off the
+# single unified `orch_backfill_idle` signal and share a 1h cadence, so on a
+# fully-idle turn both could otherwise dispatch at once and whipsaw the board.
+# The one-per-turn stagger guard in `_rule_signals` lets at most ONE of these
+# dispatch per turn; round-robin across turns emerges for free from the
+# per-class 1h cooldowns (the class that fired stamps its cooldown, so the
+# OTHER class is the only eligible one next idle turn) — NO persistent rotation
+# state needed, keeping decide.py a pure function of (state, events, now).
+# retro_orch (run-anchored, 24h) and scout_orch (7d walk + cost-cap) are
+# deliberately NOT in this set.
+BACKFILL_SIGNAL_CLASSES = ("discover_orch", "architecture_orch")
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
 WALL_CLOCK_HEARTBEAT_SEC = 900
@@ -520,7 +539,14 @@ def make_wait_for_api(url: str, retries: int = 5, reason: str = "") -> dict:
 # turn-end / per-class verdict), which the hooks have no visibility
 # into.
 
-DISPATCH_DECISION_OUTCOMES = frozenset({"dispatched", "cooldown", "budget", "idle"})
+# `stagger` (issue #959, epic #958): a backfill-set class (BACKFILL_SIGNAL_CLASSES)
+# that WOULD have dispatched this turn but was held back because another backfill
+# class already dispatched — the one-per-turn anti-whipsaw guard. It is distinct
+# from `idle` (no triggering signal) and `cooldown` (inside the per-class window):
+# the class is fully eligible, just deferred to the next idle turn. Dashboard
+# consumers only act on outcome==="dispatched", so this new value is ignored by
+# them; it exists for turn-journal observability.
+DISPATCH_DECISION_OUTCOMES = frozenset({"dispatched", "cooldown", "budget", "idle", "stagger"})
 
 
 def make_turn_start_event(state: dict, now: int) -> dict:
@@ -1301,9 +1327,22 @@ def _rule_signal_classes(
     #432). For `scout_orch` the cost-cap gate (issue #532) fires BEFORE the
     cooldown read ("cap is the harder limit"). One `dispatch_decision` event is
     emitted per candidate signal class for observability.
+
+    Board-idle backfill stagger (issue #959, epic #958): the two backfill-set
+    classes (BACKFILL_SIGNAL_CLASSES) now share the unified `orch_backfill_idle`
+    signal at a 1h cadence, so on a fully-idle turn both would otherwise emit a
+    real dispatch and whipsaw the board. `backfill_dispatched` tracks whether a
+    backfill class has ALREADY dispatched this turn; once one has, the loop
+    records a `stagger` decision for the remaining backfill classes instead of
+    a second real dispatch. The guard is applied AFTER `_select_for_signal`
+    (so a saturated class — which returns None there — never consumes the slot,
+    keeping the saturation cap the FIRST gate) and only to a class that would
+    otherwise dispatch. Round-robin across turns emerges from the per-class 1h
+    cooldowns, with no persistent rotation state.
     """
     out = _RuleOutput()
     burned = set(state.get("burned_classes") or [])
+    backfill_dispatched = False
     for sig in (
         "health",
         "sweep_orch",
@@ -1402,6 +1441,22 @@ def _rule_signal_classes(
             )
             out.skipped += 1
             continue
+        # Board-idle backfill stagger (issue #959): at most ONE backfill-set
+        # class dispatches per turn. `action` is non-None here, so this class
+        # passed its saturation cap + cooldown + presence checks and WOULD
+        # dispatch — but if another backfill class already did so this turn,
+        # record a `stagger` decision instead of a second real dispatch.
+        if sig in BACKFILL_SIGNAL_CLASSES:
+            if backfill_dispatched:
+                out.events.append(
+                    make_dispatch_decision_event(
+                        state, now, cls=sig, outcome="stagger",
+                        reason="board-idle backfill: another backfill class already dispatched this turn",
+                    )
+                )
+                out.skipped += 1
+                continue
+            backfill_dispatched = True
         out.emit(action, reason=f"signal:{sig}")
         out.events.append(
             make_dispatch_decision_event(
@@ -1922,8 +1977,15 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
             return make_dispatch(sig, "hydra-target-sweep", reason="target board hygiene due")
         return None
     if sig == "discover_orch":
-        if _signal_present(state, events, "orch_idle"):
-            return make_dispatch(sig, "hydra-discover", reason="orch board sparse")
+        # Issue #959 (epic #958): revived. discover_orch keyed off `orch_idle`,
+        # a signal collect-state.sh never emitted, so the arm was DEAD. It now
+        # reads the unified `orch_backfill_idle` board-empty signal — the same
+        # one architecture_orch reads — making it a backfill-set class on the
+        # 1h cadence. The one-per-turn stagger guard in _rule_signals ensures
+        # discover_orch and architecture_orch don't both fire on the same idle
+        # turn; round-robin emerges from the per-class 1h cooldowns.
+        if _signal_present(state, events, "orch_backfill_idle"):
+            return make_dispatch(sig, "hydra-discover", reason="orch board idle — discovery backfill")
         return None
     if sig == "discover_target":
         if _signal_present(state, events, "target_idle"):
@@ -1980,29 +2042,31 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
             )
         return None
     if sig == "architecture_orch":
-        # Issue #790 (parent #787). Idle-time fallback: when the orchestrator
-        # board has gone idle (collect-state.sh emits `arch_fallback_due`),
-        # reclaim spare capacity by dispatching the headless
-        # /hydra-architecture-scan wrapper (#788) to surface architecture-
-        # deepening candidates as tracked issues.
+        # Issue #790 (parent #787); unified by #959 (epic #958). Board-idle
+        # backfill: when the orchestrator board has gone idle (collect-state.sh
+        # emits the unified `orch_backfill_idle` signal), reclaim spare capacity
+        # by dispatching the headless /hydra-architecture-scan wrapper (#788) to
+        # surface architecture-deepening candidates as tracked issues.
         #
         # arch_board_saturated is the anti-feedback-loop guard: once the board
         # already holds enough proposal-grade architecture work (N=5-10 cap,
         # owned by collect-state.sh #789), the scan suppresses itself. It is
-        # checked FIRST, mirroring scout_orch's scout_board_saturated early-
-        # return. The 24h per-class cooldown (SIGNAL_COOLDOWNS) is the back-
-        # stop, already honored by the signal_is_cooled guard above.
+        # checked FIRST — before the cooldown (via signal_is_cooled above) and
+        # before the one-per-turn stagger guard in _rule_signals — mirroring
+        # scout_orch's scout_board_saturated early-return. At the new 1h cadence
+        # (#959) this cap matters MORE: it is the PRIMARY suppressor, the 1h
+        # class cooldown only the back-stop. The stagger MUST NOT bypass it.
         #
         # decide.py reads the precomputed signals only — it never recomputes
         # board-empty / cooldown here; that round-trip is exactly the gate-
         # re-parsing failure mode the signal seam exists to prevent.
         if _signal_present(state, events, "arch_board_saturated"):
             return None
-        if _signal_present(state, events, "arch_fallback_due"):
+        if _signal_present(state, events, "orch_backfill_idle"):
             return make_dispatch(
                 sig,
                 "hydra-architecture-scan",
-                reason="orch board idle — architecture fallback",
+                reason="orch board idle — architecture backfill",
             )
         return None
     if sig == "retro_orch":
