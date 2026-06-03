@@ -163,6 +163,15 @@ export interface IssueRow {
   body: string;
   /** Upper-cased issue state (`OPEN` / `CLOSED`), or `""` when not requested. */
   state: string;
+  /**
+   * ISO-8601 last-updated timestamp, populated only when the caller requested
+   * `updatedAt` in its `--json` field override (it is NOT in the default
+   * {@link ISSUE_JSON_FIELDS}); omitted otherwise. Optional so the existing
+   * fixtures/aggregators that build {@link IssueRow}s without it stay valid.
+   * Consumed by staleness reads such as the autopilot board-state projection
+   * (issue #934).
+   */
+  updatedAt?: string;
 }
 
 /** One open PR as the read seam returns it, including its CI status rollup. */
@@ -228,6 +237,7 @@ export function parseIssueRows(parsed: unknown, repo: string): IssueRow[] {
       labels?: Array<{ name?: unknown }>;
       body?: unknown;
       state?: unknown;
+      updatedAt?: unknown;
     };
     const number = typeof c.number === "number" ? c.number : NaN;
     if (!Number.isFinite(number) || number <= 0) continue;
@@ -241,6 +251,7 @@ export function parseIssueRows(parsed: unknown, repo: string): IssueRow[] {
         .filter((n): n is string => typeof n === "string"),
       body: typeof c.body === "string" ? c.body : "",
       state: typeof c.state === "string" ? c.state.toUpperCase() : "",
+      updatedAt: typeof c.updatedAt === "string" ? c.updatedAt : "",
     });
   }
   return out;
@@ -371,6 +382,24 @@ export async function listIssuesBySearch(
   const extra = ["--search", search];
   if (opts.label) extra.unshift("--label", opts.label);
   const res = await ghJson<unknown>(issueListArgs(repo, extra, opts), execOpts(opts));
+  if (isGhFailure(res)) return { ok: false, code: res.code };
+  return { ok: true, rows: parseIssueRows(res.data, repo) };
+}
+
+/**
+ * List issues with no `--label`/`--search` filter — the whole open board in one
+ * fetch, bucketed client-side by the caller. This is the "single fetch, count
+ * many labels in-process" shape the autopilot board-state projection needs
+ * (issue #934): one `gh issue list` instead of N per-label calls. Reads through
+ * the Adapter's `ghJson` and parses the canonical field set (override `fields`
+ * to also capture `updatedAt` for staleness). Never throws.
+ */
+export async function listOpenIssues(
+  opts: IssueQueryOptions = {},
+): Promise<IssueReadResult<IssueRow>> {
+  const repo = resolveGithubRepo(opts.repo);
+  if (!repo) return { ok: true, rows: [] };
+  const res = await ghJson<unknown>(issueListArgs(repo, [], opts), execOpts(opts));
   if (isGhFailure(res)) return { ok: false, code: res.code };
   return { ok: true, rows: parseIssueRows(res.data, repo) };
 }
