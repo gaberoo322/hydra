@@ -34,6 +34,7 @@ import {
   classFromLabels as seamClassFromLabels,
   resolveGithubRepo,
 } from "../github/issues.ts";
+import { settledOrEmpty } from "./settle.ts";
 
 // The production default routes `gh`/`git` through the GitHub CLI Adapter seam
 // (issue #899). Tests still inject `deps.execFileAsync` directly — this only
@@ -119,14 +120,6 @@ export async function getBacklogFlow(
     totals,
     generatedAt: now.toISOString(),
   };
-}
-
-function settledOrEmpty<T>(result: PromiseSettledResult<T[]>, label: string): T[] {
-  if (result.status === "fulfilled") return result.value;
-  console.error(
-    `[backlog-flow] sub-source failed (${label}): ${result.reason?.message || result.reason}`,
-  );
-  return [];
 }
 
 // ---------------------------------------------------------------------------

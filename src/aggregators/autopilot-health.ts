@@ -34,6 +34,7 @@
  */
 
 import type { StuckSignal, StuckSignalSeverity } from "../schemas/now-page.ts";
+import { settledOrEmpty, settledOrNull } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
 // Tunable thresholds
@@ -148,22 +149,6 @@ export async function getAutopilotHealth(
   ];
 
   return rankSignals(signals);
-}
-
-function settledOrEmpty<T>(result: PromiseSettledResult<T[]>, label: string): T[] {
-  if (result.status === "fulfilled") return Array.isArray(result.value) ? result.value : [];
-  console.error(
-    `[autopilot-health] sub-source failed (${label}): ${result.reason?.message || result.reason}`,
-  );
-  return [];
-}
-
-function settledOrNull<T>(result: PromiseSettledResult<T>, label: string): T | null {
-  if (result.status === "fulfilled") return result.value ?? null;
-  console.error(
-    `[autopilot-health] sub-source failed (${label}): ${result.reason?.message || result.reason}`,
-  );
-  return null;
 }
 
 // ---------------------------------------------------------------------------

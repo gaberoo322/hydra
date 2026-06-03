@@ -39,6 +39,7 @@ import {
   readMetaFrictionIssues,
   type MetaFrictionIssue,
 } from "./friction-source.ts";
+import { settledOrEmpty } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -120,14 +121,6 @@ export async function getOvernightLessons(
     generatedAt: now.toISOString(),
     promotionThreshold: PROMOTION_THRESHOLD,
   };
-}
-
-function settledOrEmpty<T>(result: PromiseSettledResult<T[]>, label: string): T[] {
-  if (result.status === "fulfilled") return result.value;
-  console.error(
-    `[lessons-overnight] sub-source failed (${label}): ${result.reason?.message || result.reason}`,
-  );
-  return [];
 }
 
 // ---------------------------------------------------------------------------

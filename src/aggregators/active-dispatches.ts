@@ -33,6 +33,7 @@ import {
   getAutopilotRun,
 } from "../redis/autopilot-runs.ts";
 import { sweepRunIfDead } from "../autopilot/runs.ts";
+import { settledOrEmpty } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -114,14 +115,6 @@ export async function getActiveDispatches(
   // then operator, then subagent — mergeDispatches dedupes by id keeping the
   // first occurrence.
   return mergeDispatches([...auto, ...op, ...sub]);
-}
-
-function settledOrEmpty<T>(result: PromiseSettledResult<T[]>, label: string): T[] {
-  if (result.status === "fulfilled") return result.value;
-  console.error(
-    `[active-dispatches] sub-source failed (${label}): ${result.reason?.message || result.reason}`,
-  );
-  return [];
 }
 
 // ---------------------------------------------------------------------------

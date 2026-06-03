@@ -36,6 +36,7 @@ import { execFileViaSeam } from "../github/exec-file-compat.ts";
 import { resolveGithubRepo } from "../github/issues.ts";
 
 import type { HeadroomLevel } from "./types.ts";
+import { settledOr } from "./settle.ts";
 
 // The production default routes `gh`/`git` through the GitHub CLI Adapter seam
 // (issue #899). Tests still inject `deps.execFileAsync` directly — this only
@@ -142,15 +143,6 @@ export async function getOvernightSummary(
     windowHours,
     generatedAt: now.toISOString(),
   };
-}
-
-function settledOr<T>(result: PromiseSettledResult<T>, fallback: T): T {
-  if (result.status === "fulfilled") return result.value;
-  // Fail loud per CLAUDE.md: log + continue with a sentinel. The aggregator
-  // contract is "never throw" — a single source failure must not blank the
-  // whole banner.
-  console.error(`[overnight-summary] sub-source failed: ${result.reason?.message || result.reason}`);
-  return fallback;
 }
 
 // ---------------------------------------------------------------------------
