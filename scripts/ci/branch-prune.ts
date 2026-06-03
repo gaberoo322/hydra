@@ -25,6 +25,31 @@
  * `git worktree remove --force` (the dir is gone, so the next sweep doesn't
  * see it as attached).
  *
+ * ── Worktree-orphan GC (issue #911) ──────────────────────────────────────
+ *
+ * The `[gone]`-branch pass above structurally CANNOT reclaim the dominant
+ * accumulation source. A snapshot on 2026-06-02, taken immediately after a
+ * full `--apply` run, found 549 local branches / 120 worktrees of which only
+ * 4 branches were `[gone]` — and 119 of the 123 worktrees were held by a
+ * DEAD lock-file PID. The bulk are **local-only** branches (QA worktrees,
+ * crashed dev attempts) that never had an upstream, so they never become
+ * `[gone]` and the branch pass skips them forever.
+ *
+ * {@link classifyWorktreeOrphan} closes that gap. It is keyed on the
+ * WORKTREE (not the branch) and reclaims a worktree regardless of upstream
+ * state when ALL of the liveness rails hold:
+ *
+ *   - the worktree is NOT the main working tree (`isMain` false),
+ *   - it is NOT the current worktree / current branch,
+ *   - its lock-file PID is dead (or it carries no live PID at all),
+ *   - its branch is NOT the head of any OPEN PR (caller supplies the set),
+ *   - it is older than a minimum-age floor (default 6h) so an in-flight
+ *     dispatch that simply hasn't taken its lock yet is never reaped.
+ *
+ * The age floor + open-PR-head set are the two signals the `[gone]` pass
+ * never needed; the caller (the shell driver) computes both (`stat` mtime,
+ * `gh pr list`) and feeds them in, keeping this module pure.
+ *
  * This module is pure — no fs / network / git — so it can be unit tested
  * directly. See test/hydra-branch-prune.test.mts.
  */
@@ -37,6 +62,14 @@ export interface WorktreeRow {
   branch: string | null;
   /** PID of the Claude agent holding the lock file, or null if no lockfile / not lockable. */
   lockedByPid: number | null;
+  /**
+   * Age of the worktree dir in seconds (caller-computed from the dir mtime),
+   * or null if the caller could not stat it. Consumed only by the worktree-orphan
+   * GC ({@link classifyWorktreeOrphan}) — the original `[gone]`-branch pass
+   * ignores it. Optional so the older single-pass call sites (and every existing
+   * test fixture) keep compiling unchanged.
+   */
+  ageSeconds?: number | null;
 }
 
 /** Minimal branch shape — what we parse out of `git branch -vv`. */
@@ -419,6 +452,234 @@ export function renderReport(buckets: ClassifyBuckets, when: string, auditOnly: 
   if (buckets.cappedOut) {
     lines.push("");
     lines.push(`> Hit per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}). Remaining candidates will be picked up on the next run.`);
+  }
+
+  return lines.join("\n");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Worktree-orphan GC (issue #911)
+//
+// The branch pass above only ever fires on `[gone]` upstreams. Local-only
+// worktrees (no upstream → never `[gone]`) are invisible to it forever, and
+// those are the dominant accumulation source. The functions below classify by
+// WORKTREE instead, so a crashed/abandoned dispatch's dir is reclaimed on
+// liveness signals (dead lock PID + age) rather than on upstream state.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Default minimum age (seconds) before a worktree is GC-eligible. An in-flight
+ * dispatch that has just been created but has not yet written its lock file
+ * would otherwise look identical to a crashed orphan; the age floor protects
+ * it. 6h comfortably exceeds the subagent wall-clock cap
+ * (`HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS`, default 3600s) so any worktree
+ * older than this floor whose PID is also dead is unambiguously abandoned.
+ */
+export const DEFAULT_WORKTREE_MIN_AGE_SECONDS = 6 * 60 * 60;
+
+export type WorktreeOrphanAction =
+  | "delete-orphan-worktree"
+  | "skip-main-worktree"
+  | "skip-current-worktree"
+  | "skip-live-agent"
+  | "skip-open-pr-head"
+  | "skip-too-young"
+  | "skip-cap";
+
+export interface WorktreeOrphanResult {
+  action: WorktreeOrphanAction;
+  reason: string;
+  worktree: WorktreeRow;
+}
+
+export interface WorktreeOrphanContext {
+  /** Absolute path of the MAIN working tree (never reclaim it). */
+  mainWorktreePath: string;
+  /** Branch the orchestrator is currently sitting on — its worktree is preserved. */
+  currentBranch: string;
+  /** Live-PID predicate — true iff the given PID is currently running. */
+  isLivePid: LivePidCheck;
+  /**
+   * Set of branch names that are the head of an OPEN PR. A worktree whose
+   * branch is in this set is preserved even if its PID is dead — the PR may
+   * still be merged, and tearing down the local branch would orphan the PR's
+   * local checkout. Caller builds this from `gh pr list --json headRefName`.
+   */
+  openPrHeads: ReadonlySet<string>;
+  /** Minimum worktree age (seconds) before it is GC-eligible. */
+  minAgeSeconds: number;
+  /**
+   * Optional injected counter for the per-run hard cap. Shared with the branch
+   * pass so the 250-deletion ceiling spans BOTH passes in one run.
+   */
+  deletionCount?: () => number;
+}
+
+/**
+ * Classify a single worktree row for the orphan GC. Pure — no I/O.
+ *
+ * Decision order (highest priority first), mirroring {@link classifyBranch}'s
+ * never-touch-first discipline:
+ *
+ *  1. Worktree IS the main working tree                 → skip-main-worktree
+ *  2. Worktree's branch is the current branch           → skip-current-worktree
+ *  3. We already hit the per-run hard cap               → skip-cap
+ *  4. Lock-file PID is a live process                   → skip-live-agent
+ *  5. Branch is the head of an open PR                  → skip-open-pr-head
+ *  6. Worktree is younger than the age floor            → skip-too-young
+ *  7. Otherwise (dead/no PID, not an open-PR head, old) → delete-orphan-worktree
+ *
+ * Note the age floor is checked AFTER the liveness/PR rails: a freshly-created
+ * worktree held by a live agent must skip as `skip-live-agent` (the precise
+ * reason), not `skip-too-young`. Age is the LAST gate before deletion.
+ */
+export function classifyWorktreeOrphan(
+  wt: WorktreeRow,
+  ctx: WorktreeOrphanContext,
+): WorktreeOrphanResult {
+  if (wt.path === ctx.mainWorktreePath) {
+    return {
+      action: "skip-main-worktree",
+      reason: `${wt.path} is the main working tree — never reclaim.`,
+      worktree: wt,
+    };
+  }
+
+  if (wt.branch !== null && wt.branch === ctx.currentBranch) {
+    return {
+      action: "skip-current-worktree",
+      reason: `${wt.path} has the current branch ${wt.branch} checked out — refusing to remove.`,
+      worktree: wt,
+    };
+  }
+
+  if (ctx.deletionCount && ctx.deletionCount() >= HARD_CAP_DELETIONS_PER_RUN) {
+    return {
+      action: "skip-cap",
+      reason: `Per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}) reached — refusing to remove more.`,
+      worktree: wt,
+    };
+  }
+
+  if (wt.lockedByPid !== null && ctx.isLivePid(wt.lockedByPid)) {
+    return {
+      action: "skip-live-agent",
+      reason: `${wt.path} is held by live PID ${wt.lockedByPid} — leave for next run.`,
+      worktree: wt,
+    };
+  }
+
+  if (wt.branch !== null && ctx.openPrHeads.has(wt.branch)) {
+    return {
+      action: "skip-open-pr-head",
+      reason: `${wt.path} branch ${wt.branch} is the head of an open PR — preserve until the PR closes.`,
+      worktree: wt,
+    };
+  }
+
+  // Age floor — only reached once the worktree is provably not live and not an
+  // open-PR head. A null ageSeconds means the caller could not stat the dir;
+  // we treat that conservatively as "too young" (skip) rather than risk
+  // reaping a dir we know nothing about.
+  if (wt.ageSeconds === null || wt.ageSeconds === undefined || wt.ageSeconds < ctx.minAgeSeconds) {
+    const ageNote = wt.ageSeconds === null || wt.ageSeconds === undefined ? "unknown age" : `${wt.ageSeconds}s old`;
+    return {
+      action: "skip-too-young",
+      reason: `${wt.path} is ${ageNote}, under the ${ctx.minAgeSeconds}s floor — defer in case it is an in-flight dispatch.`,
+      worktree: wt,
+    };
+  }
+
+  return {
+    action: "delete-orphan-worktree",
+    reason:
+      `${wt.path} is a local-only orphan (` +
+      `${wt.lockedByPid !== null ? `dead PID ${wt.lockedByPid}` : "no live agent"}, ` +
+      `${wt.branch ? `branch ${wt.branch} not an open-PR head` : "detached"}, ${wt.ageSeconds}s old` +
+      `) — remove worktree${wt.branch ? `, then delete branch ${wt.branch}` : ""}.`,
+    worktree: wt,
+  };
+}
+
+export interface WorktreeOrphanBuckets {
+  /** Worktrees to reclaim. `branch` is null for detached worktrees (no branch -D). */
+  deleteOrphan: Array<{ worktree: WorktreeRow; branch: string | null }>;
+  skip: Array<{ worktree: WorktreeRow; action: WorktreeOrphanAction; reason: string }>;
+  /** True iff any candidate was deferred because the hard cap was reached. */
+  cappedOut: boolean;
+}
+
+/**
+ * Classify a batch of worktree rows for the orphan GC. Maintains a running
+ * deletion counter; if {@link WorktreeOrphanContext.deletionCount} is supplied
+ * it is summed with this pass's own deletions, so the 250-deletion hard cap
+ * spans BOTH the branch pass and this pass in a single run. Input order is
+ * preserved within each bucket.
+ */
+export function classifyWorktreeOrphans(
+  worktrees: readonly WorktreeRow[],
+  ctx: Omit<WorktreeOrphanContext, "deletionCount"> & { priorDeletions?: number },
+): WorktreeOrphanBuckets {
+  const buckets: WorktreeOrphanBuckets = {
+    deleteOrphan: [],
+    skip: [],
+    cappedOut: false,
+  };
+
+  let localDeletions = 0;
+  const prior = ctx.priorDeletions ?? 0;
+  const ctxWithCounter: WorktreeOrphanContext = {
+    ...ctx,
+    deletionCount: () => prior + localDeletions,
+  };
+
+  for (const wt of worktrees) {
+    const r = classifyWorktreeOrphan(wt, ctxWithCounter);
+    if (r.action === "delete-orphan-worktree") {
+      buckets.deleteOrphan.push({ worktree: wt, branch: wt.branch });
+      localDeletions++;
+    } else {
+      if (r.action === "skip-cap") buckets.cappedOut = true;
+      buckets.skip.push({ worktree: wt, action: r.action, reason: r.reason });
+    }
+  }
+
+  return buckets;
+}
+
+/**
+ * Render the worktree-orphan GC section of the report. Pure — deterministic.
+ * Designed to be appended below the existing {@link renderReport} branch
+ * section so a single run shows both passes.
+ */
+export function renderWorktreeOrphanReport(buckets: WorktreeOrphanBuckets, auditOnly: boolean): string {
+  const verb = auditOnly ? "Would reclaim" : "Reclaimed";
+  const lines: string[] = [];
+  lines.push("### Worktree-orphan GC (issue #911)");
+  lines.push("");
+
+  lines.push(`#### ${verb} (local-only orphan worktrees)`);
+  if (buckets.deleteOrphan.length === 0) {
+    lines.push("- _none_");
+  } else {
+    for (const e of buckets.deleteOrphan) {
+      lines.push(`- ${e.worktree.path}${e.branch ? `  (branch: ${e.branch})` : "  (detached)"}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("#### Skipped — worktree GC");
+  if (buckets.skip.length === 0) {
+    lines.push("- _none_");
+  } else {
+    for (const s of buckets.skip) {
+      lines.push(`- ${s.worktree.path}: ${s.reason}`);
+    }
+  }
+
+  if (buckets.cappedOut) {
+    lines.push("");
+    lines.push(`> Hit per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}). Remaining worktrees will be picked up on the next run.`);
   }
 
   return lines.join("\n");
