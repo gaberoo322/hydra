@@ -242,6 +242,31 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     assert.equal(r.exitCodeNum, "0");
   });
 
+  /**
+   * Self-propagated SIGTERM/SIGINT exit *code* (issue #925). When a child the
+   * `claude` CLI spawned (a dispatched subagent / tool) dies on SIGTERM, the
+   * parent propagates 143 (= 128+SIGTERM) as its OWN exit STATUS, so systemd
+   * reports EXIT_CODE=exited / EXIT_STATUS=143 — NOT EXIT_CODE=signal. Before
+   * #925 that fell through to the `crash` catch-all, mislabeling every clean
+   * self-exit a crash (and, via SuccessExitStatus= missing 143, arming the
+   * StartLimit lockout). It must now map to `interrupted` / exit_code 0,
+   * mirroring the EXIT_CODE=signal TERM/INT arm.
+   */
+  test("self-exit code 143 (EXIT_CODE=exited/EXIT_STATUS=143) → interrupted", () => {
+    const r = deriveReapCause("exited", "143");
+    assert.equal(r.status, 0, `derive exited non-zero: ${r.stdout}`);
+    assert.equal(r.cause, "interrupted",
+      "a code-143 self-exit (128+SIGTERM propagated by the parent) must be `interrupted`, not `crash`");
+    assert.equal(r.exitCodeNum, "0", "an interrupted end records exit_code 0");
+  });
+
+  test("self-exit code 130 (EXIT_CODE=exited/EXIT_STATUS=130) → interrupted", () => {
+    const r = deriveReapCause("exited", "130");
+    assert.equal(r.cause, "interrupted",
+      "a code-130 self-exit (128+SIGINT propagated by the parent) must be `interrupted`, not `crash`");
+    assert.equal(r.exitCodeNum, "0");
+  });
+
   test("a real crash signal (EXIT_STATUS=SEGV) stays crash, not interrupted", () => {
     const r = deriveReapCause("signal", "SEGV");
     assert.equal(r.cause, "crash", "SEGV is a genuine crash — must NOT be reclassified as interrupted");
@@ -479,6 +504,32 @@ describe("scripts/systemd/hydra-autopilot.service (issue #898)", () => {
       /^SuccessExitStatus=.*SIGTERM/m,
       "unit must treat a SIGTERM stop as success (issue #898 / AC2)",
     );
+  });
+
+  // Issue #925: the dominant termination was a `claude` self-exit with code
+  // 143 (128+SIGTERM) / 130 (128+SIGINT). `SuccessExitStatus=SIGTERM` matches
+  // a delivered *signal* only — NOT an exit *code* of 143 — so without the
+  // numeric codes here those self-exits armed Restart=on-failure → StartLimit
+  // lockout. The unit must declare the numeric codes a success too.
+  test("declares exit codes 143 and 130 as success (issue #925)", () => {
+    const m = unit.match(/^SuccessExitStatus=(.*)$/m);
+    assert.ok(m, "unit must have a SuccessExitStatus= line");
+    const tokens = (m![1] ?? "").split(/\s+/).filter(Boolean);
+    assert.ok(tokens.includes("143"),
+      "SuccessExitStatus must list 143 (128+SIGTERM self-exit) so it doesn't arm Restart=on-failure");
+    assert.ok(tokens.includes("130"),
+      "SuccessExitStatus must list 130 (128+SIGINT self-exit)");
+  });
+
+  // Issue #925: with StartLimitBurst=2 / IntervalSec=3600, two bad runs in an
+  // hour dead-zoned the Pace Gate (which fires ~every 15 min = 900s) for the
+  // rest of that hour. The window must be no wider than one Gate cycle so a
+  // transient burst cannot starve the autopilot for more than a single cycle.
+  test("StartLimit window is no wider than one Pace Gate cycle (issue #925)", () => {
+    const interval = unit.match(/^StartLimitIntervalSec=(\d+)$/m);
+    assert.ok(interval, "unit must have a StartLimitIntervalSec= line");
+    assert.ok(Number(interval![1]) <= 900,
+      `StartLimitIntervalSec must be <= 900s (one Pace Gate cycle); got ${interval![1]}`);
   });
 });
 
