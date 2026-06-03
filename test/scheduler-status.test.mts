@@ -25,14 +25,20 @@
  * - AC5: status response surfaces `mergeRateWindow` and
  *   `mergeRateCyclesInWindow` so the dashboard can label the field.
  *
- * Uses Redis DB 1 — never touches production (DB 0).
+ * Uses Redis DB 3 — never touches production (DB 0). The dedicated DB
+ * isolates this suite's seeded cycle-metrics fixtures from the bulk
+ * `keys("hydra:*")` + `del(...)` cleanup that other DB-1 suites (notably
+ * api-maintenance) run concurrently under default parallel node:test
+ * (issue #948). The env var is set before the adapter imports below so the
+ * lazily-initialized production singleton (getRedisConnection) and this
+ * suite's own client both resolve to the same isolated DB.
  */
 
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = "redis://localhost:6379/3";
 
 const adapter = {
   ...(await import("../src/redis/scheduler.ts")),
@@ -65,7 +71,7 @@ async function writeFixtureMetrics(cycleId: string, fields: Record<string, any>)
 describe("/api/scheduler/status rolling merge rate (issue #232)", () => {
   beforeEach(async () => {
     if (!testRedis) {
-      testRedis = new Redis("redis://localhost:6379/1");
+      testRedis = new Redis(process.env.REDIS_URL!);
     }
     await cleanKeys();
   });
@@ -227,7 +233,7 @@ async function cleanKeysPostCodex() {
 describe("/api/scheduler/status live shape", () => {
   beforeEach(async () => {
     if (!postCodexRedis) {
-      postCodexRedis = new Redis("redis://localhost:6379/1");
+      postCodexRedis = new Redis(process.env.REDIS_URL!);
     }
     await cleanKeysPostCodex();
   });
