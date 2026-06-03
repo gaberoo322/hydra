@@ -88,6 +88,27 @@ REAPED_TASK_IDS_CAP = 1000
 CYCLE_RECORD_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-grill"}
 CYCLE_RECORD_SCRIPT = Path(__file__).parent / "dispatch.sh"
 
+# Worktree-orphan GC trigger (issue #911).
+#
+# Every code-writing / QA dispatch runs inside a `git worktree`, but the
+# worktree is created and named by the Claude harness (`Agent(isolation:
+# "worktree")`), NOT by dispatch.sh — so reap.py never learns the worktree
+# path and cannot tear it down by path. The structural fix is the age+liveness
+# worktree-orphan GC in `scripts/ci/branch-prune.ts`, driven by
+# `scripts/branch-prune.sh`. That sweep reclaims a worktree on its OWN safety
+# rails (dead lock PID, not an open-PR head, past the age floor) regardless of
+# HOW it leaked — so it covers clean reaps AND crash-leaks (#898) uniformly.
+#
+# Rather than duplicate those rails here, a completion reap fires the same
+# sweep in --apply mode as a best-effort post-step, so a just-freed worktree is
+# reclaimed at reap time instead of waiting for the next daily timer. It is
+# fully non-fatal: a missing script, a non-zero exit, or a timeout is logged
+# and swallowed — exactly like `_fire_cycle_record`. Skipped entirely unless
+# the dispatch was a worktree-bearing class, and suppressible via
+# HYDRA_REAP_WORKTREE_GC=0 for operators who prefer the timer alone.
+WORKTREE_GC_SKILLS = {"hydra-dev", "hydra-target-build", "hydra-qa"}
+WORKTREE_GC_SCRIPT = Path(__file__).resolve().parents[1] / "branch-prune.sh"
+
 def _append_log(line: str) -> None:
     """Append one line to the run log, best-effort. Never raises."""
     try:
@@ -168,6 +189,52 @@ def _fire_cycle_record(
         )
     except (subprocess.SubprocessError, OSError) as exc:
         _append_log(f"cycle_record_skipped task_id={task_id} err={exc}")
+
+
+def _fire_worktree_gc(skill: str | None) -> None:
+    """Best-effort worktree-orphan GC after a worktree-bearing completion (issue #911).
+
+    Fires `scripts/branch-prune.sh --apply`, which classifies + reclaims
+    local-only orphan worktrees on the age+liveness rails in
+    `scripts/ci/branch-prune.ts`. This shortens the lag between a dispatch
+    reaping and its worktree being reclaimed (otherwise the daily systemd timer
+    is the only sweep). The script carries ALL the safety rails — it refuses to
+    run from inside a worktree, never touches a live-PID worktree, never deletes
+    the current branch, and caps deletions per run — so reap.py does not
+    re-implement any of them.
+
+    Strictly best-effort and non-fatal, matching `_fire_cycle_record`:
+      - Skipped unless the dispatch was a worktree-bearing class.
+      - Skipped if HYDRA_REAP_WORKTREE_GC=0 (operator opt-out; timer still runs).
+      - Skipped if the script is missing.
+      - A non-zero exit, a timeout, or any OS error is logged and swallowed.
+
+    The GC is idempotent (git worktree remove / branch -D no-op once the dir/
+    branch is gone), so overlapping invocations across rapid reaps converge
+    harmlessly on the same reclaimed set.
+    """
+    if not skill or skill not in WORKTREE_GC_SKILLS:
+        return
+    if os.environ.get("HYDRA_REAP_WORKTREE_GC", "1") == "0":
+        return
+    if not WORKTREE_GC_SCRIPT.exists():
+        return
+    try:
+        proc = subprocess.run(
+            ["bash", str(WORKTREE_GC_SCRIPT), "--apply"],
+            check=False,
+            capture_output=True,
+            timeout=120,
+        )
+        if proc.returncode != 0:
+            _append_log(
+                f"worktree_gc_nonzero rc={proc.returncode} "
+                f"stderr={proc.stderr.decode('utf-8', 'replace')[:200]!r}"
+            )
+        else:
+            _append_log("worktree_gc_ok")
+    except (subprocess.SubprocessError, OSError) as exc:
+        _append_log(f"worktree_gc_skipped err={exc}")
 
 
 def _reap_stale_claims() -> None:
@@ -351,6 +418,11 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     soft_cap_hit = soft is not None and total_tokens >= soft
     status = "failed" if soft_cap_hit else "completed"
     _fire_cycle_record(task_id, skill, status, total_tokens)
+
+    # Issue #911: reclaim the just-freed worktree (and any other orphans) at
+    # reap time rather than waiting for the daily timer. Best-effort, fully
+    # non-fatal, and only for worktree-bearing classes — see _fire_worktree_gc.
+    _fire_worktree_gc(skill)
 
     return 0
 

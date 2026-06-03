@@ -16,12 +16,7 @@
  *   sensible default for an overnight runtime-diagnostics sweep.
  */
 
-import { execFileViaSeam } from "../github/exec-file-compat.ts";
-
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
-const execFile = execFileViaSeam;
+import { listIssuesBySearchOrEmpty, type IssueRow } from "../github/issues.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -40,11 +35,12 @@ export interface Finding {
 export interface TargetFindingsDeps {
   now?: Date;
   githubRepo?: string;
-  execFileAsync?: (
-    cmd: string,
-    args: readonly string[],
-    opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Override the GitHub Issue/PR Read seam reader (issue #908/#915). Tests
+   * inject this to avoid spawning `gh`; production uses the real seam reader,
+   * which returns the canonical {@link IssueRow} shape (no local argv/parser).
+   */
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,37 +53,15 @@ export async function getNewTargetFindings(
 ): Promise<Finding[]> {
   const now = deps.now ?? new Date();
   const windowStart = new Date(now.getTime() - windowHours * 60 * 60 * 1000);
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
-  if (!repo) return [];
+  const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
 
-  try {
-    const sinceDate = windowStart.toISOString().split("T")[0];
-    const { stdout } = await exec(
-      "gh",
-      [
-        "issue",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "all",
-        "--label",
-        "target-backlog",
-        "--search",
-        `created:>=${sinceDate}`,
-        "--limit",
-        "100",
-        "--json",
-        "number,title,url,createdAt,labels,body,state",
-      ],
-      { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-    );
-    return filterUnroutedFindings(stdout, windowStart);
-  } catch (err: any) {
-    console.error(`[target-backlog-findings] gh issue list failed: ${err?.message || err}`);
-    return [];
-  }
+  const sinceDate = windowStart.toISOString().split("T")[0];
+  const rows = await listBySearch(
+    `created:>=${sinceDate}`,
+    "target-backlog-findings",
+    { label: "target-backlog", state: "all", repo: deps.githubRepo },
+  );
+  return filterUnroutedFindings(rows, windowStart);
 }
 
 // ---------------------------------------------------------------------------
@@ -95,60 +69,36 @@ export async function getNewTargetFindings(
 // ---------------------------------------------------------------------------
 
 /**
- * Pure helper — exported for tests. Filters a `gh issue list --json`
- * payload to the un-routed subset:
+ * Pure helper — exported for tests. Filters the seam's {@link IssueRow} rows
+ * to the un-routed subset:
  *
  *   - `state` is OPEN
  *   - no `in-progress` label
  *   - `createdAt` strictly within the window
  *
  * Sorted newest-first so the dashboard shows the freshest diagnostics
- * at the top of the section.
+ * at the top of the section. The canonical-field parse (number/labels/state
+ * normalization) is done by the seam's `parseIssueRows` upstream.
  */
 export function filterUnroutedFindings(
-  jsonStdout: string,
+  rows: readonly IssueRow[],
   windowStart: Date,
 ): Finding[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-
   const startMs = windowStart.getTime();
   const out: Finding[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      title?: unknown;
-      url?: unknown;
-      createdAt?: unknown;
-      labels?: Array<{ name?: unknown }>;
-      body?: unknown;
-      state?: unknown;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    const createdAt = typeof c.createdAt === "string" ? c.createdAt : "";
-    const createdMs = Date.parse(createdAt);
+  for (const row of rows) {
+    const createdMs = Date.parse(row.createdAt);
     if (!Number.isFinite(createdMs) || createdMs < startMs) continue;
-    const state = typeof c.state === "string" ? c.state.toUpperCase() : "";
-    if (state !== "OPEN") continue;
-    const labels = (c.labels ?? [])
-      .map((l) => l?.name)
-      .filter((n): n is string => typeof n === "string");
-    if (labels.includes("in-progress")) continue;
+    // The seam upper-cases `state`; OPEN-only here.
+    if (row.state !== "OPEN") continue;
+    if (row.labels.includes("in-progress")) continue;
     out.push({
-      number,
-      title: typeof c.title === "string" ? c.title : `Issue #${number}`,
-      url: typeof c.url === "string" ? c.url : `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt,
-      labels,
-      excerpt: excerptOf(typeof c.body === "string" ? c.body : ""),
+      number: row.number,
+      title: row.title,
+      url: row.url,
+      createdAt: row.createdAt,
+      labels: [...row.labels],
+      excerpt: excerptOf(row.body),
     });
   }
   out.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));

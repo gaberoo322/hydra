@@ -40,6 +40,8 @@ import {
   readMetaFrictionIssues,
   type MetaFrictionIssue,
 } from "./friction-source.ts";
+import type { listIssuesBySearchOrEmpty } from "../github/issues.ts";
+import { settledOrEmpty } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -119,11 +121,11 @@ export interface FrictionPatternsDeps {
   candidateWindow?: number;
   /** Window for `recentMetaFrictionIssues`. Default 168h (7d). */
   windowHours?: number;
-  execFileAsync?: (
-    cmd: string,
-    args: readonly string[],
-    opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Override the GitHub Issue/PR Read seam reader (issue #908/#915) used by the
+   * meta-friction read. Passed straight through to `readMetaFrictionIssues`.
+   */
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
   /**
    * Override the friction-patterns reader. Returns a list of
    * `{ skill, patterns }` tuples. Defaults to scanning Redis. Tests pass a
@@ -192,14 +194,6 @@ export async function getFrictionPatterns(
     windowHours,
     generatedAt: now.toISOString(),
   };
-}
-
-function settledOrEmpty<T>(result: PromiseSettledResult<T[]>, label: string): T[] {
-  if (result.status === "fulfilled") return result.value;
-  console.error(
-    `[friction-patterns] sub-source failed (${label}): ${result.reason?.message || result.reason}`,
-  );
-  return [];
 }
 
 // ---------------------------------------------------------------------------

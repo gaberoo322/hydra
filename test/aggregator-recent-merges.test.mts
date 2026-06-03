@@ -15,7 +15,7 @@ import {
   tierFromLabels,
   classLabelFromLabels,
   clampLimit,
-  parsePrMeta,
+  prMetaFromView,
 } from "../src/aggregators/recent-merges.ts";
 
 function makeExecStub(routes: Record<string, { stdout: string; stderr?: string }>) {
@@ -105,23 +105,24 @@ describe("classLabelFromLabels — pure helper", () => {
   });
 });
 
-describe("parsePrMeta — pure helper", () => {
-  test("returns null on empty / non-object input", () => {
-    assert.equal(parsePrMeta(""), null);
-    assert.equal(parsePrMeta("null"), null);
-  });
-
-  test("parses a typical gh pr view payload", () => {
-    const stdout = JSON.stringify({
+describe("prMetaFromView — pure helper", () => {
+  test("maps a typical viewPr object", () => {
+    const meta = prMetaFromView({
       title: "feat: thing",
       labels: [{ name: "tier:1" }, { name: "dev_orch" }],
       mergedAt: "2026-05-26T00:00:00Z",
       url: "https://example/pr/1",
     });
-    const meta = parsePrMeta(stdout);
-    assert.ok(meta);
-    assert.equal(meta?.title, "feat: thing");
-    assert.deepEqual(meta?.labels, ["tier:1", "dev_orch"]);
+    assert.equal(meta.title, "feat: thing");
+    assert.deepEqual(meta.labels, ["tier:1", "dev_orch"]);
+  });
+
+  test("defaults missing string fields to '' and flattens absent labels to []", () => {
+    const meta = prMetaFromView({});
+    assert.equal(meta.title, "");
+    assert.equal(meta.url, "");
+    assert.equal(meta.mergedAt, "");
+    assert.deepEqual(meta.labels, []);
   });
 });
 

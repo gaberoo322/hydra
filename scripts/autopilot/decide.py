@@ -84,6 +84,8 @@ state.json {
     "discover_orch":   unix-epoch | 0
     "discover_target": unix-epoch | 0
     "scout_orch":      unix-epoch | 0
+    # architecture_orch (#790) and retro_orch (#920) also track last-fired
+    # here when they fire; absent keys default to 0 (never fired).
   }
 
   # NEW IN #426 — failure-log ring buffer (used by self_heal.py)
@@ -198,6 +200,18 @@ SIGNAL_CLASSES = (
     # suppressor. collect-state.sh (#789) owns signal emission; decide.py
     # only reads the precomputed signals.
     "architecture_orch",
+    # retro_orch (issue #920, parent #917): daily per-run retrospective.
+    # Dispatches the /hydra-retro skill (#919) to turn the most-recent
+    # COMPLETED run into conservative, recurrence-gated improvement proposals.
+    # Calendar-driven, 24h cooldown — a once-per-day cadence. Fires on the
+    # `retro_run_available` signal (collect-state.sh emits it when a completed
+    # run exists to analyse). Being a signal class — no slot semantics, and
+    # decide.py dispatches all pipeline slots BEFORE signal classes — is what
+    # satisfies the issue's "spare capacity / does not preempt pipeline
+    # classes" requirement: a retro never blocks a dev/QA/research dispatch.
+    # The 24h class cooldown is the daily cadence back-stop; decide.py reads
+    # the precomputed signal verbatim and never recomputes run state here.
+    "retro_orch",
 )
 
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
@@ -220,6 +234,13 @@ SIGNAL_COOLDOWNS = {
     # cooldown is the safety net (analogous to scout's per-category-vs-class
     # split, tuned for daily idle reclamation rather than weekly walks).
     "architecture_orch": 24 * 60 * 60,
+    # retro_orch (issue #920): 24h. The per-run retrospective runs at most
+    # once per day. The `retro_run_available` signal (collect-state.sh) only
+    # asserts that a completed run EXISTS to analyse; the 24h class cooldown
+    # is what enforces the daily cadence so the same run isn't re-analysed on
+    # every idle turn. Mirrors architecture_orch's daily idle-reclamation
+    # cadence rather than scout's weekly walk.
+    "retro_orch": 24 * 60 * 60,
 }
 
 # Wall-clock heartbeat: even with no signal, wake every 15 min to re-poll.
@@ -355,6 +376,12 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # architecture_orch is excluded (no architecture_target mirror yet; the
     # Target has a PR merge backlog, #718).
     "architecture_orch",
+    # retro_orch (issue #920) analyses the orchestrator's OWN autopilot runs
+    # and emits orch-scope improvement proposals (prompt/doc/code fixes to the
+    # orchestrator + its subagents) — orch-scope by definition. Under
+    # `target-only` the autopilot stays out of orch work, so retro_orch is
+    # excluded, mirroring scout_orch / architecture_orch.
+    "retro_orch",
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -854,6 +881,651 @@ def consecutive_failures_of(state: dict, pattern: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Per-step decision rules (issue #932)
+# ---------------------------------------------------------------------------
+#
+# `decide()` (below) was historically a single ~570-line body in which nine
+# inline steps all mutated one shared `plan` accumulator and read
+# `state`/`events`/`now` inline. Each step is now lifted into its own pure
+# rule function: it takes the read-only inputs it needs and RETURNS the
+# actions / events / debug (and any rule-specific signals) it contributes,
+# rather than reaching into a shared `plan`. `decide()` stays the deep entry
+# point and the single ordered composition (the fold): it owns the decision
+# ORDER, the INV-006 "reap before dispatch" guarantee, and the
+# turn_start/turn_end bookkeeping; each rule owns its POLICY.
+#
+# This is the same deep-entry-point-over-pure-rules shape that
+# `src/health-diagnostics.ts` and `src/aggregators/autopilot-health.ts`
+# already adopted. The split is OUTPUT-EQUIVALENT — pinned by
+# `test/autopilot-decide.test.mts` (and the decide-events / invariants /
+# retro-class suites): no decision semantics change here.
+#
+# A few rules still MUTATE `state` (slot_history / failure_log appends in
+# `_rule_slot_events`, signal-last-fired stamping inside the selectors). That
+# side effect predates this refactor and the wire contract depends on it, so
+# the owning rule keeps doing it explicitly — the change is structural, not a
+# semantics change.
+
+
+@dataclass
+class _RuleOutput:
+    """The contribution a single decision rule folds into the Plan.
+
+    A rule is a pure ``(read-only inputs) -> _RuleOutput`` function. `decide()`
+    folds each output into the running `Plan` in the documented order. Keeping
+    `actions`/`reasons`/`events`/`debug` parallel to `Plan`'s own fields means
+    the fold is a straight extend/update — no rule reaches into `Plan`.
+
+    Rule-specific signals the fold needs are carried as explicit fields so the
+    ordering logic in `decide()` stays readable:
+
+      - `terminate`     — set by the termination rule; a non-None value tells
+                          `decide()` to short-circuit the turn.
+      - `dispatched`    — count of real `dispatch`/signal actions this rule
+                          emitted (folds into `dispatched_any`).
+      - `skipped`       — count of considered-but-not-dispatched classes
+                          (folds into the `turn_end` `skipped` total).
+    """
+
+    actions: list[dict] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    events: list[dict] = field(default_factory=list)
+    debug: dict[str, Any] = field(default_factory=dict)
+    terminate: dict | None = None
+    dispatched: int = 0
+    skipped: int = 0
+
+    def emit(self, action: dict, reason: str = "") -> None:
+        """Append an action (and optional reason) — mirrors Plan.add."""
+        self.actions.append(action)
+        if reason:
+            self.reasons.append(reason)
+
+
+def _rule_termination(state: dict, now: int) -> _RuleOutput:
+    """Step 1 — termination check (budget / wall-clock / idle / 5-failure backstop).
+
+    Returns a `_RuleOutput` whose `terminate` is the lone `terminate` action
+    when tripped (and an early `turn_end` event, since termination is a
+    turn-ending decision in its own right), or an empty output otherwise.
+    """
+    out = _RuleOutput()
+    term = _check_termination(state, now)
+    if term is None:
+        return out
+    out.emit(term, reason="termination")
+    out.debug["terminate"] = term.get("cause")
+    out.terminate = term
+    # Termination is a turn-ending decision in its own right — emit
+    # `turn_end` so the dashboard's per-turn counters close cleanly.
+    out.events.append(
+        make_turn_end_event(
+            state,
+            now,
+            dispatches=0,
+            skipped=0,
+            idle=0,
+            tokens_after=int(state.get("cumulative_tokens", 0) or 0),
+        )
+    )
+    return out
+
+
+def _rule_slot_events(state: dict, now: int) -> tuple[_RuleOutput, list[dict]]:
+    """Step 1.5 — hook-delivered slot events (issue #509).
+
+    Translates each `subagent_stop` event from `state.slot_events` into the
+    `completion` event shape consumed by the reap rule, AND appends a
+    structured record to `state.slot_history` for operator visibility.
+    `slot_waiting_permission` events get appended to `state.failure_log` with a
+    `permission_wait` pattern (the slot stays active — the subagent is paused,
+    not done).
+
+    This rule MUTATES `state` (slot_history / failure_log) — that telemetry
+    side effect predates the #932 refactor and the wire contract depends on it,
+    so it stays explicit here. It produces no plan actions; instead it RETURNS
+    the synthesised `completion` events as the tuple's second element so
+    `decide()` can prepend them to the event stream before the reap rule runs.
+    """
+    out = _RuleOutput()
+    slot_events_raw = state.get("slot_events") or []
+    if isinstance(slot_events_raw, dict):
+        # Tolerate the collect-state JSON shape {"events": [...], "last_id": ...}
+        slot_events_raw = slot_events_raw.get("events") or []
+    synthesised_completions: list[dict] = []
+    for raw_ev in slot_events_raw:
+        if not isinstance(raw_ev, dict):
+            continue
+        fields = raw_ev.get("fields") if "fields" in raw_ev else raw_ev
+        if not isinstance(fields, dict):
+            continue
+        kind = fields.get("event")
+        if kind == "subagent_stop":
+            slot = fields.get("slot") or "unknown"
+            status = fields.get("status") or "unknown"
+            task_id = fields.get("task_id") or ""
+            summary = fields.get("summary") or ""
+            try:
+                ts_epoch = int(fields.get("ts_epoch") or 0)
+            except (TypeError, ValueError):
+                ts_epoch = 0
+            # Append to slot_history (state mutation for telemetry).
+            history = state.get("slot_history")
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "slot": slot,
+                "status": status,
+                "task_id": task_id,
+                "summary": summary,
+                "ts_epoch": ts_epoch,
+            })
+            if len(history) > SLOT_HISTORY_MAX_ENTRIES:
+                history = history[-SLOT_HISTORY_MAX_ENTRIES:]
+            state["slot_history"] = history
+            # Failure outcomes also land in failure_log so self_heal.py
+            # sees them. We don't dedup against existing failure_log
+            # entries — the caller is expected to invoke decide once per
+            # turn with a fresh batch.
+            if status in ("failure", "budget_exceeded"):
+                flog = state.get("failure_log")
+                if not isinstance(flog, list):
+                    flog = []
+                flog.append({
+                    "ts": ts_epoch or now,
+                    "pattern": f"subagent_{status}",
+                    "slot": slot,
+                    "task_id": task_id,
+                    "action": "subagent_stop",
+                    "note": summary,
+                })
+                state["failure_log"] = flog
+            # Synthesise a `completion` event so the reap rule fires and
+            # frees the slot. We DO require a task_id for the reap to be
+            # useful — without it reap.py can't dedup.
+            if task_id:
+                # Best-effort token recovery from slot, if the harness
+                # stamped partial_tokens. The hook itself doesn't carry
+                # tokens (the harness payload doesn't expose them
+                # reliably); we trust slot.partial_tokens as the floor.
+                slot_obj = (state.get("slots") or {}).get(slot)
+                tokens = 0
+                skill = None
+                if isinstance(slot_obj, dict):
+                    try:
+                        tokens = int(slot_obj.get("partial_tokens") or 0)
+                    except (TypeError, ValueError):
+                        tokens = 0
+                    skill = slot_obj.get("skill")
+                synthesised_completions.append({
+                    "type": "completion",
+                    "slot": slot,
+                    "task_id": task_id,
+                    "total_tokens": tokens,
+                    "skill": skill,
+                    "_source": "slot_events",
+                })
+        elif kind == "slot_waiting_permission":
+            slot = fields.get("slot") or "unknown"
+            prompt = fields.get("prompt") or ""
+            try:
+                ts_epoch = int(fields.get("ts_epoch") or 0)
+            except (TypeError, ValueError):
+                ts_epoch = 0
+            flog = state.get("failure_log")
+            if not isinstance(flog, list):
+                flog = []
+            flog.append({
+                "ts": ts_epoch or now,
+                "pattern": "permission_wait",
+                "slot": slot,
+                "task_id": "",
+                "action": "slot_waiting_permission",
+                "note": prompt,
+            })
+            state["failure_log"] = flog
+    return out, synthesised_completions
+
+
+def _rule_completion_reaps(events: list[dict]) -> _RuleOutput:
+    """Step 2 — completion reaps first (INV-006 — reap before dispatch).
+
+    This rule is the ONLY producer of `reap` actions, and it MUST fire for
+    every subagent completion — pipeline OR signal class. We intentionally do
+    NOT filter by PIPELINE_SLOTS / SIGNAL_CLASSES membership: a reap for an
+    unknown class is still safer than a missed reap (reap.py is idempotent and
+    the unknown-class path is a no-op on slot bookkeeping). The `class` key is
+    accepted as a synonym of `slot`.
+    """
+    out = _RuleOutput()
+    for ev in events:
+        if ev.get("type") != "completion":
+            continue
+        slot = ev.get("slot") or ev.get("class")
+        task_id = ev.get("task_id")
+        tokens = int(ev.get("total_tokens") or 0)
+        skill = ev.get("skill")
+        if slot and task_id:
+            out.emit(make_reap(slot, task_id, tokens, skill), reason=f"reap:{slot}")
+    return out
+
+
+def _rule_auto_merge_sweep(state: dict, events: list[dict]) -> _RuleOutput:
+    """Step 3 — auto-merge sweep (before dispatch so freed PRs don't compete).
+
+    Emergency-brake gate (issue #744): the operator-only brake overrides the
+    ADR-0015 depth-gated verdict at THIS call site — NOT inside
+    `should_auto_merge()`, which stays a pure depth-policy function. When the
+    brake is engaged we emit ZERO `auto-merge` actions and exactly ONE
+    `route-prs-to-review` action. `decide()` never reads/writes the brake from
+    Redis — it arrives as the read-only `state.emergency_brake` field.
+    """
+    out = _RuleOutput()
+    emergency_brake = _normalize_emergency_brake(state.get("emergency_brake"))
+    if emergency_brake["engaged"]:
+        out.debug["emergency_brake_engaged"] = True
+        out.emit(
+            make_route_prs_to_review("emergency brake engaged — all auto-merge paused, routing open PRs to /hydra-review"),
+            reason="emergency-brake:route-prs-to-review",
+        )
+        # Skip the per-PR auto-merge sweep entirely — the brake overrides the
+        # depth verdict, so no qa-verdict event can produce an auto-merge.
+        return out
+    for ev in events:
+        if ev.get("type") != "qa-verdict":
+            continue
+        verdict = ev.get("verdict") or "PENDING"
+        pr_number = ev.get("pr_number")
+        tier = ev.get("tier")
+        mechanical = ev.get("mechanical")
+        has_scope_justif = bool(ev.get("has_scope_justification"))
+        if pr_number is None or tier is None:
+            continue
+        decision = should_auto_merge(
+            tier,
+            mechanical=mechanical,
+            has_scope_justification=has_scope_justif,
+            qa_verdict=verdict,
+        )
+        # Policy collapse (#742): should_auto_merge() returns only
+        # "auto-merge" or "hold" — no tier-triggered queue-decision /
+        # apply-operator-approved. Operator escalation now arrives solely
+        # via the Deep-QA Remediation Loop (#740), not from this sweep.
+        if decision == "auto-merge":
+            out.emit(make_auto_merge(pr_number, tier, "qa pass + required depth met"), reason=f"auto-merge:#{pr_number}")
+        # "hold" → no action (required verification depth not yet provably met)
+    return out
+
+
+def _rule_usage_eligibility(state: dict) -> tuple[_RuleOutput, bool, set[str]]:
+    """Step 3.5 — Subscription Usage Tracker eligibility gate (PR B1).
+
+    Returns `(output, dispatch_blocked, shed_classes)`. The dispatch rules
+    (pipeline + signals) consult `dispatch_blocked` (hard stop — block every
+    class this turn) and `shed_classes` (soft throttle — skip those classes).
+    Missing / malformed payloads are treated as "no signal" — the tracker is
+    informational, not load-bearing for correctness.
+    """
+    out = _RuleOutput()
+    usage_eligibility = _normalize_usage_eligibility(state.get("usage_eligibility"))
+    dispatch_blocked = not usage_eligibility["allow"]
+    shed_classes = usage_eligibility["shed"]
+    if dispatch_blocked:
+        out.debug["usage_dispatch_blocked"] = usage_eligibility["reasons"]
+    if shed_classes:
+        out.debug["usage_shed"] = sorted(shed_classes)
+    return out, dispatch_blocked, shed_classes
+
+
+def _rule_pipeline_dispatch(
+    state: dict,
+    candidates: dict | None,
+    events: list[dict],
+    scope: str,
+    now: int,
+    *,
+    dispatch_blocked: bool,
+    shed_classes: set[str],
+) -> _RuleOutput:
+    """Step 4 — pipeline dispatch over the fixed slots, in priority order.
+
+    A free slot is filled iff the class is allowed by the usage gate, the slot
+    is free, the class isn't burned (soft-cap, #395) or scope-excluded, and the
+    selector finds eligible work. One `dispatch_decision` event is emitted per
+    candidate class (dispatched OR skipped) for observability (issue #668).
+    """
+    out = _RuleOutput()
+    slots = state.get("slots") or {}
+    burned = set(state.get("burned_classes") or [])
+    best = best_candidate(candidates)
+    best_score = float(best.get("score", 0.0)) if best else 0.0
+
+    pipeline_priority = (
+        "qa_orch",
+        "qa_target",
+        # design_concept_orch precedes dev_orch in priority order (issue
+        # #466 sequencing rule): when an orch anchor needs a fresh
+        # artifact, we grill before coding. The selector below returns
+        # None for dev_orch on the same turn so they don't double-fire,
+        # and in warn-only mode the artifact's presence (even draft) lets
+        # dev_orch proceed next turn.
+        "design_concept_orch",
+        "dev_orch",
+        "dev_target",
+        "research_orch",
+        "research_target",
+    )
+
+    for cls in pipeline_priority:
+        if dispatch_blocked:
+            # Budget-style suppression: usage tracker said "allow=False".
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="budget",
+                    reason="usage tracker dispatch_blocked",
+                )
+            )
+            out.skipped += 1
+            continue  # do NOT break — keep emitting one event per class
+        if cls in shed_classes:
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="budget",
+                    reason="usage tracker shed",
+                )
+            )
+            out.skipped += 1
+            continue
+        if slots.get(cls) is not None:
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="cooldown",
+                    reason="slot busy",
+                )
+            )
+            out.skipped += 1
+            continue  # slot busy
+        if cls in burned:
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="cooldown",
+                    reason="class burned (soft-cap)",
+                )
+            )
+            out.skipped += 1
+            continue
+        if scope_excluded(scope, cls):
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason=f"scope excluded ({scope})",
+                )
+            )
+            out.skipped += 1
+            continue
+        action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
+        if action is None:
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="idle",
+                    reason="selector found no eligible work",
+                )
+            )
+            out.skipped += 1
+            continue
+        out.emit(action, reason=f"dispatch:{cls}")
+        out.events.append(
+            make_dispatch_decision_event(
+                state, now, cls=cls, outcome="dispatched",
+                reason=str(action.get("reason") or "dispatched"),
+            )
+        )
+        out.dispatched += 1
+
+    out.debug["best_score"] = best_score
+    return out
+
+
+def _rule_signal_classes(
+    state: dict,
+    events: list[dict],
+    scope: str,
+    now: int,
+    *,
+    dispatch_blocked: bool,
+    shed_classes: set[str],
+) -> _RuleOutput:
+    """Step 5 — signal classes (health / sweep_* / discover_* / scout / arch / retro).
+
+    Each is independent. Signal classes also respect `burned_classes` (issue
+    #432). For `scout_orch` the cost-cap gate (issue #532) fires BEFORE the
+    cooldown read ("cap is the harder limit"). One `dispatch_decision` event is
+    emitted per candidate signal class for observability.
+    """
+    out = _RuleOutput()
+    burned = set(state.get("burned_classes") or [])
+    for sig in (
+        "health",
+        "sweep_orch",
+        "sweep_target",
+        "discover_orch",
+        "discover_target",
+        # scout_orch (issue #485, Phase B) — calendar-driven, 7d cooldown.
+        # collect-state.sh emits `scout_walk_due` when the per-class
+        # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
+        # back-stop in parallel.
+        "scout_orch",
+        # architecture_orch (issue #790) — idle-time fallback. Registered in
+        # the dispatch iteration tuple so a real dispatch sets
+        # dispatched_any=True, which yields idle=0 for the turn and stops
+        # idle_turns from accumulating while a fallback is eligible (the AC
+        # is met by being a real dispatch, NOT by editing the terminate path).
+        "architecture_orch",
+        # retro_orch (issue #920, parent #917) — daily per-run retrospective.
+        # Registered LAST in the signal iteration so it is the lowest-priority
+        # signal class: pipeline slots dispatch first (step 4), then the other
+        # signal classes, and only then is spare capacity spent on a retro.
+        # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
+        # signal_is_cooled guard inside _select_for_signal.
+        "retro_orch",
+    ):
+        if dispatch_blocked:
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="budget",
+                    reason="usage tracker dispatch_blocked",
+                )
+            )
+            out.skipped += 1
+            continue
+        if sig in shed_classes:
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="budget",
+                    reason="usage tracker shed",
+                )
+            )
+            out.skipped += 1
+            continue
+        if scope_excluded(scope, sig):
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="idle",
+                    reason=f"scope excluded ({scope})",
+                )
+            )
+            out.skipped += 1
+            continue
+        if sig in burned:
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="cooldown",
+                    reason="signal class burned (soft-cap)",
+                )
+            )
+            out.skipped += 1
+            continue
+        # Cost-cap gate (issue #532) — checked BEFORE _select_for_signal so
+        # it fires before the cooldown read. Per AC: "cost-cap gate fires
+        # before cooldown gate (cap is the harder limit)". Only `scout_orch`
+        # has a cost-cap today; other signal classes fall through.
+        if sig == "scout_orch" and scout_cost_cap_exceeded(state):
+            cap = scout_cost_cap_state(state)
+            out.debug.setdefault("scout_cost_cap_skipped", {
+                "share": cap["share"],
+                "cap_usd": cap["cap_usd"],
+                "spend_usd": cap["spend_usd"],
+            })
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome="budget",
+                    reason="scout cost-cap exceeded",
+                )
+            )
+            out.skipped += 1
+            continue
+        action = _select_for_signal(sig, state, events, now)
+        if action is None:
+            # Could be cooldown OR idle (no signal present); inspect the
+            # state to disambiguate. signal_is_cooled returns False when
+            # we're still inside the per-class cooldown window.
+            if not signal_is_cooled(state, sig, now):
+                outcome = "cooldown"
+                reason = f"signal cooldown active ({sig})"
+            else:
+                outcome = "idle"
+                reason = "no triggering signal"
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=sig, outcome=outcome, reason=reason,
+                )
+            )
+            out.skipped += 1
+            continue
+        out.emit(action, reason=f"signal:{sig}")
+        out.events.append(
+            make_dispatch_decision_event(
+                state, now, cls=sig, outcome="dispatched",
+                reason=str(action.get("reason") or "dispatched"),
+            )
+        )
+        out.dispatched += 1
+    return out
+
+
+def _rule_silent_wedge(state: dict, events: list[dict], now: int) -> _RuleOutput:
+    """Step 5.5 — silent-wedge fallback (issue #509).
+
+    If an active slot has aged past `subagent_max_wall_seconds` AND no
+    `subagent_stop` event arrived for its task_id, emit a `wait_or_reap` so the
+    harness invokes reap.py as a forced fallback. Hooks are the primary path;
+    this only fires when the hook itself silently failed.
+
+    Checked AFTER dispatch decisions because a wait_or_reap is a slot-clear
+    action; the slot was busy at decision time so no new dispatch for that slot
+    was emitted (INV-006 reap-before-dispatch preserved).
+    """
+    out = _RuleOutput()
+    slots = state.get("slots") or {}
+    max_wall = _subagent_max_wall_seconds(state)
+    # Build a set of task_ids we already saw a completion for (this
+    # turn's batch — either via slot_events or caller-supplied events).
+    completed_task_ids: set[str] = set()
+    for ev in events:
+        if ev.get("type") == "completion":
+            tid = ev.get("task_id")
+            if tid:
+                completed_task_ids.add(tid)
+    for cls, slot_obj in (slots.items() if isinstance(slots, dict) else []):
+        if not isinstance(slot_obj, dict):
+            continue
+        started_epoch = slot_obj.get("started_epoch")
+        if started_epoch is None:
+            # Tolerate legacy `started` ISO8601 by attempting to parse.
+            started_iso = slot_obj.get("started")
+            if isinstance(started_iso, str):
+                try:
+                    from datetime import datetime
+                    started_epoch = int(datetime.fromisoformat(started_iso.replace("Z", "+00:00")).timestamp())
+                except (ValueError, TypeError):
+                    started_epoch = None
+        try:
+            started_epoch_i = int(started_epoch) if started_epoch is not None else None
+        except (TypeError, ValueError):
+            started_epoch_i = None
+        if started_epoch_i is None:
+            continue
+        age = now - started_epoch_i
+        if age < max_wall:
+            continue
+        task_id = slot_obj.get("task_id") or ""
+        if task_id and task_id in completed_task_ids:
+            continue
+        out.emit(
+            make_wait_or_reap(
+                cls,
+                task_id,
+                age,
+                f"silent-wedge fallback: {cls} active for {age}s with no SubagentStop event (cap {max_wall}s)",
+            ),
+            reason=f"silent-wedge:{cls}",
+        )
+    return out
+
+
+def _rule_idle_fallback(state: dict, *, dispatched_any: bool) -> _RuleOutput:
+    """Step 6 — idle fallback.
+
+    If nothing dispatched and no slots in flight, emit a `wait` for the
+    heartbeat interval; if the pipeline is busy but we have nothing new, emit a
+    short busy-wait nap. Also records the `occupied_slots` debug hint.
+    """
+    out = _RuleOutput()
+    slots = state.get("slots") or {}
+    occupied = sum(1 for v in slots.values() if v is not None)
+    if not dispatched_any and occupied == 0:
+        out.emit(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
+    elif not dispatched_any:
+        # Pipeline is busy but we have nothing new to do — short nap
+        out.emit(make_wait(60, "pipeline-busy nap"), reason="busy-wait")
+    out.debug["occupied_slots"] = occupied
+    return out
+
+
+def _stamp_dispatch_metadata(actions: list[dict], state: dict) -> None:
+    """Step 7 — stamp `worktreeBranch` + `dispatchSentinel` on dispatch actions.
+
+    Mutates `actions` in place (issue #527 / issue #692). The dashboard's
+    slice-4 "Watch stream" cross-link reads `action.worktreeBranch`; the
+    `dispatchSentinel` is the hidden marker the playbook prepends to the FIRST
+    user message so the SessionStart capture hook can join the subagent session
+    back to this turn. We stamp it for EVERY dispatch action (even ones that
+    arrived with a pre-set worktreeBranch) so no dispatch escapes session
+    capture. Both fields go on the turn-row JSON inside an action — NEVER as a
+    top-level field on `hydra:autopilot:run:<id>`.
+    """
+    run_id = state.get("run_id") or ""
+    run_token = run_id if isinstance(run_id, str) and run_id else None
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if action.get("type") != "dispatch":
+            continue
+        slot = action.get("slot")
+        if not isinstance(slot, str) or not slot:
+            continue
+        if not action.get("worktreeBranch"):
+            action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
+        skill = action.get("skill")
+        if isinstance(skill, str) and skill:
+            action["dispatchSentinel"] = make_dispatch_sentinel(
+                skill,
+                action["worktreeBranch"],
+                run_token,
+            )
+
+
+# ---------------------------------------------------------------------------
 # The main decision function
 # ---------------------------------------------------------------------------
 
@@ -909,6 +1581,18 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     limits = state.get("limits") or {}
     scope = str(limits.get("scope", "all"))
 
+    def fold(out: _RuleOutput) -> None:
+        """Merge a rule's contribution into the running Plan, in place.
+
+        The fold is a straight extend/update because `_RuleOutput` mirrors the
+        `Plan` fields — no rule reaches into `Plan` directly. `actions` and
+        `reasons` are already paired by the rule's `emit()`, so we extend both.
+        """
+        plan.actions.extend(out.actions)
+        plan.reasons.extend(out.reasons)
+        plan.events.extend(out.events)
+        plan.debug.update(out.debug)
+
     # Slice A of autopilot observability epic (#667 → issue #668):
     # emit `turn_start` at the very top of the decision turn so dashboard
     # WS clients can pin a "turn started" frame even if the rest of the
@@ -916,562 +1600,64 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     # before `return plan` at the bottom of this function.
     plan.events.append(make_turn_start_event(state, now))
 
-    # 1. Termination
-    term = _check_termination(state, now)
-    if term is not None:
-        plan.add(term, reason="termination")
-        plan.debug["terminate"] = term.get("cause")
-        # Termination is a turn-ending decision in its own right — emit
-        # `turn_end` so the dashboard's per-turn counters close cleanly.
-        plan.events.append(
-            make_turn_end_event(
-                state,
-                now,
-                dispatches=0,
-                skipped=0,
-                idle=0,
-                tokens_after=int(state.get("cumulative_tokens", 0) or 0),
-            )
-        )
+    # 1. Termination — a turn-ending decision; short-circuit when tripped.
+    term_out = _rule_termination(state, now)
+    fold(term_out)
+    if term_out.terminate is not None:
         return plan
 
-    # 1.5. Hook-delivered slot events (issue #509).
-    #
-    # `state.slot_events` is the per-turn batch read by collect-state.sh
-    # from the `hydra:autopilot:slot-events` Redis stream. We translate
-    # each `subagent_stop` event into the same `completion` event shape
-    # consumed by step 2, AND append a structured record to
-    # `state.slot_history` for operator visibility. We do this here (not
-    # in step 2) so the slot-history side effect happens even if the
-    # event somehow lacks the task_id required for a reap (e.g. when the
-    # subagent crashed before the harness allocated one).
-    #
-    # `slot_waiting_permission` events get appended to
-    # `state.failure_log` with a `permission_wait` pattern. The slot
-    # stays active — the subagent is paused, not done.
-    slot_events_raw = state.get("slot_events") or []
-    if isinstance(slot_events_raw, dict):
-        # Tolerate the collect-state JSON shape {"events": [...], "last_id": ...}
-        slot_events_raw = slot_events_raw.get("events") or []
-    synthesised_completions: list[dict] = []
-    for raw_ev in slot_events_raw:
-        if not isinstance(raw_ev, dict):
-            continue
-        fields = raw_ev.get("fields") if "fields" in raw_ev else raw_ev
-        if not isinstance(fields, dict):
-            continue
-        kind = fields.get("event")
-        if kind == "subagent_stop":
-            slot = fields.get("slot") or "unknown"
-            status = fields.get("status") or "unknown"
-            task_id = fields.get("task_id") or ""
-            summary = fields.get("summary") or ""
-            try:
-                ts_epoch = int(fields.get("ts_epoch") or 0)
-            except (TypeError, ValueError):
-                ts_epoch = 0
-            # Append to slot_history (state mutation for telemetry).
-            history = state.get("slot_history")
-            if not isinstance(history, list):
-                history = []
-            history.append({
-                "slot": slot,
-                "status": status,
-                "task_id": task_id,
-                "summary": summary,
-                "ts_epoch": ts_epoch,
-            })
-            if len(history) > SLOT_HISTORY_MAX_ENTRIES:
-                history = history[-SLOT_HISTORY_MAX_ENTRIES:]
-            state["slot_history"] = history
-            # Failure outcomes also land in failure_log so self_heal.py
-            # sees them. We don't dedup against existing failure_log
-            # entries — the caller is expected to invoke decide once per
-            # turn with a fresh batch.
-            if status in ("failure", "budget_exceeded"):
-                flog = state.get("failure_log")
-                if not isinstance(flog, list):
-                    flog = []
-                flog.append({
-                    "ts": ts_epoch or now,
-                    "pattern": f"subagent_{status}",
-                    "slot": slot,
-                    "task_id": task_id,
-                    "action": "subagent_stop",
-                    "note": summary,
-                })
-                state["failure_log"] = flog
-            # Synthesise a `completion` event so step 2's reap loop fires
-            # and frees the slot. We DO require a task_id for the reap
-            # to be useful — without it reap.py can't dedup.
-            if task_id:
-                # Best-effort token recovery from slot, if the harness
-                # stamped partial_tokens. The hook itself doesn't carry
-                # tokens (the harness payload doesn't expose them
-                # reliably); we trust slot.partial_tokens as the floor.
-                slot_obj = (state.get("slots") or {}).get(slot)
-                tokens = 0
-                skill = None
-                if isinstance(slot_obj, dict):
-                    try:
-                        tokens = int(slot_obj.get("partial_tokens") or 0)
-                    except (TypeError, ValueError):
-                        tokens = 0
-                    skill = slot_obj.get("skill")
-                synthesised_completions.append({
-                    "type": "completion",
-                    "slot": slot,
-                    "task_id": task_id,
-                    "total_tokens": tokens,
-                    "skill": skill,
-                    "_source": "slot_events",
-                })
-        elif kind == "slot_waiting_permission":
-            slot = fields.get("slot") or "unknown"
-            prompt = fields.get("prompt") or ""
-            try:
-                ts_epoch = int(fields.get("ts_epoch") or 0)
-            except (TypeError, ValueError):
-                ts_epoch = 0
-            flog = state.get("failure_log")
-            if not isinstance(flog, list):
-                flog = []
-            flog.append({
-                "ts": ts_epoch or now,
-                "pattern": "permission_wait",
-                "slot": slot,
-                "task_id": "",
-                "action": "slot_waiting_permission",
-                "note": prompt,
-            })
-            state["failure_log"] = flog
-
-    # Prepend synthesised completions so they precede any caller-supplied
-    # `completion` events in step 2's iteration order.
+    # 1.5. Hook-delivered slot events (issue #509). Mutates state
+    # (slot_history / failure_log) and returns synthesised `completion`
+    # events. We prepend those so they precede any caller-supplied
+    # `completion` events in the reap rule's iteration order.
+    slot_out, synthesised_completions = _rule_slot_events(state, now)
+    fold(slot_out)
     if synthesised_completions:
         events = synthesised_completions + events
 
     # 2. Completion reaps first (INV-006 — reap before dispatch).
-    #
-    # This loop is the ONLY producer of `reap` actions, and it MUST fire
-    # for every subagent completion — pipeline (dev_orch, qa_orch,
-    # research_orch + _target peers) OR signal (health, sweep_orch,
-    # sweep_target, discover_orch, discover_target).
-    #
-    # Why this is load-bearing (issue #432): cumulative_tokens is the
-    # input to the budget-exhaustion termination check (INV-005). If a
-    # completion event is dropped here, the autopilot silently
-    # mis-reports its token spend and may run past the budget.
-    #
-    # Contract — the playbook (or any caller building events.json) MUST
-    # emit one event per TaskNotification, regardless of class kind:
-    #   {"type": "completion",
-    #    "slot": "<class>",        # pipeline class OR signal class
-    #    "task_id": "<task_id>",
-    #    "total_tokens": <int>,
-    #    "skill": "<skill name>"}
-    # The `class` key is accepted as a synonym of `slot` for callers that
-    # prefer that wording for signal classes. Both work identically.
-    #
-    # We intentionally do NOT filter by PIPELINE_SLOTS / SIGNAL_CLASSES
-    # membership here. A reap for an unknown class is still safer than a
-    # missed reap — reap.py is idempotent and the unknown-class path is a
-    # no-op on slot bookkeeping. Filtering would risk silently dropping
-    # signal completions, which is exactly the bug this issue fixed.
-    for ev in events:
-        if ev.get("type") != "completion":
-            continue
-        slot = ev.get("slot") or ev.get("class")
-        task_id = ev.get("task_id")
-        tokens = int(ev.get("total_tokens") or 0)
-        skill = ev.get("skill")
-        if slot and task_id:
-            plan.add(make_reap(slot, task_id, tokens, skill), reason=f"reap:{slot}")
+    fold(_rule_completion_reaps(events))
 
-    # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with new work.
-    #
-    # Emergency-brake gate (issue #744): the operator-only emergency brake
-    # overrides the ADR-0015 depth-gated verdict at THIS call site — NOT inside
-    # should_auto_merge(), which stays a pure depth-policy function with its
-    # current signature (INV-007 preserved; the depth policy remains
-    # independently testable without threading a brake arg through every
-    # call). When the brake is engaged:
-    #   - emit ZERO `auto-merge` actions (regardless of tier or QA verdict),
-    #   - emit exactly ONE `route-prs-to-review` action so the playbook routes
-    #     every open PR to the /hydra-review pickup set.
-    # decide() never reads or writes the brake from Redis — the flag arrives as
-    # the read-only `state.emergency_brake` field via collect-state.sh, keeping
-    # decide() pure and the autopilot's write-path absent (operator-only).
-    emergency_brake = _normalize_emergency_brake(state.get("emergency_brake"))
-    if emergency_brake["engaged"]:
-        plan.debug["emergency_brake_engaged"] = True
-        plan.add(
-            make_route_prs_to_review("emergency brake engaged — all auto-merge paused, routing open PRs to /hydra-review"),
-            reason="emergency-brake:route-prs-to-review",
-        )
-        # Skip the per-PR auto-merge sweep entirely — the brake overrides the
-        # depth verdict, so no qa-verdict event can produce an auto-merge.
-    else:
-        for ev in events:
-            if ev.get("type") != "qa-verdict":
-                continue
-            verdict = ev.get("verdict") or "PENDING"
-            pr_number = ev.get("pr_number")
-            tier = ev.get("tier")
-            mechanical = ev.get("mechanical")
-            has_scope_justif = bool(ev.get("has_scope_justification"))
-            if pr_number is None or tier is None:
-                continue
-            decision = should_auto_merge(
-                tier,
-                mechanical=mechanical,
-                has_scope_justification=has_scope_justif,
-                qa_verdict=verdict,
-            )
-            # Policy collapse (#742): should_auto_merge() returns only
-            # "auto-merge" or "hold" — no tier-triggered queue-decision /
-            # apply-operator-approved. Operator escalation now arrives solely
-            # via the Deep-QA Remediation Loop (#740), not from this sweep.
-            if decision == "auto-merge":
-                plan.add(make_auto_merge(pr_number, tier, "qa pass + required depth met"), reason=f"auto-merge:#{pr_number}")
-            # "hold" → no action (required verification depth not yet provably met)
+    # 3. Auto-merge sweep — before dispatch so freed PRs don't compete with
+    #    new work; emergency brake (issue #744) overrides the depth verdict.
+    fold(_rule_auto_merge_sweep(state, events))
 
-    # 3.5. Subscription Usage Tracker eligibility gate (PR B1).
-    #
-    # `state.usage_eligibility` is populated by the playbook from the
-    # `usage_eligibility_json=` line that collect-state.sh emits each
-    # turn. The verdict has two independent levels:
-    #
-    #   - `allow == False`  → hard stop. The tracker reports the 5h
-    #     consumption is at or above 90% of the calibrated quota. We
-    #     do not dispatch any class this turn — every class is blocked.
-    #   - `shed: [...]`     → soft throttle. Projected weekly consumption
-    #     is over 100%. Skip those classes (today: sweep_*, discover_*,
-    #     scout_orch) but keep dev_*, qa_*, research_*, design_concept_*,
-    #     health.
-    #
-    # Missing, malformed, or uncalibrated payloads are treated as "no
-    # signal" — the tracker is informational, not load-bearing for
-    # correctness. We dispatch normally and let the operator notice.
-    usage_eligibility = _normalize_usage_eligibility(state.get("usage_eligibility"))
-    dispatch_blocked = not usage_eligibility["allow"]
-    shed_classes = usage_eligibility["shed"]
-    if dispatch_blocked:
-        plan.debug["usage_dispatch_blocked"] = usage_eligibility["reasons"]
-    if shed_classes:
-        plan.debug["usage_shed"] = sorted(shed_classes)
+    # 3.5. Subscription Usage Tracker eligibility gate (PR B1). The verdict
+    #      threads into the dispatch rules below as `dispatch_blocked`
+    #      (hard stop) + `shed_classes` (soft throttle).
+    usage_out, dispatch_blocked, shed_classes = _rule_usage_eligibility(state)
+    fold(usage_out)
 
-    # 4. Pipeline dispatch
-    slots = state.get("slots") or {}
-    burned = set(state.get("burned_classes") or [])
-    best = best_candidate(candidates)
-    best_score = float(best.get("score", 0.0)) if best else 0.0
-
-    pipeline_priority = (
-        "qa_orch",
-        "qa_target",
-        # design_concept_orch precedes dev_orch in priority order (issue
-        # #466 sequencing rule): when an orch anchor needs a fresh
-        # artifact, we grill before coding. The selector below returns
-        # None for dev_orch on the same turn so they don't double-fire,
-        # and in warn-only mode the artifact's presence (even draft) lets
-        # dev_orch proceed next turn.
-        "design_concept_orch",
-        "dev_orch",
-        "dev_target",
-        "research_orch",
-        "research_target",
+    # 4. Pipeline dispatch (the fixed slots, in priority order).
+    pipeline_out = _rule_pipeline_dispatch(
+        state, candidates, events, scope, now,
+        dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
     )
+    fold(pipeline_out)
 
-    dispatched_any = False
-    # Slice A observability bookkeeping (issue #668): count the
-    # candidate classes that were skipped (any non-dispatched outcome)
-    # so the `turn_end` event carries `dispatches` + `skipped` totals.
-    skipped_count = 0
+    # 5. Signal classes (health / sweep_* / discover_* / scout / arch / retro).
+    signal_out = _rule_signal_classes(
+        state, events, scope, now,
+        dispatch_blocked=dispatch_blocked, shed_classes=shed_classes,
+    )
+    fold(signal_out)
 
-    for cls in pipeline_priority:
-        if dispatch_blocked:
-            # Budget-style suppression: usage tracker said "allow=False".
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="budget",
-                    reason="usage tracker dispatch_blocked",
-                )
-            )
-            skipped_count += 1
-            continue  # do NOT break — keep emitting one event per class
-        if cls in shed_classes:
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="budget",
-                    reason="usage tracker shed",
-                )
-            )
-            skipped_count += 1
-            continue
-        if slots.get(cls) is not None:
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="cooldown",
-                    reason="slot busy",
-                )
-            )
-            skipped_count += 1
-            continue  # slot busy
-        if cls in burned:
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="cooldown",
-                    reason="class burned (soft-cap)",
-                )
-            )
-            skipped_count += 1
-            continue
-        if scope_excluded(scope, cls):
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="idle",
-                    reason=f"scope excluded ({scope})",
-                )
-            )
-            skipped_count += 1
-            continue
-        action = _select_for_slot(cls, state, candidates, events, best, best_score, now)
-        if action is None:
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=cls, outcome="idle",
-                    reason="selector found no eligible work",
-                )
-            )
-            skipped_count += 1
-            continue
-        plan.add(action, reason=f"dispatch:{cls}")
-        plan.events.append(
-            make_dispatch_decision_event(
-                state, now, cls=cls, outcome="dispatched",
-                reason=str(action.get("reason") or "dispatched"),
-            )
-        )
-        dispatched_any = True
+    dispatched_any = (pipeline_out.dispatched + signal_out.dispatched) > 0
+    skipped_count = pipeline_out.skipped + signal_out.skipped
 
-    # 5. Signal classes — each is independent. Health pre-empts when sick.
-    # Signal classes also respect `burned_classes`: if reap.py burned a
-    # signal class on soft-cap (issue #432 — a runaway hydra-discover),
-    # we must NOT re-dispatch it for the rest of this session, mirroring
-    # the pipeline-slot suppression in step 4. Before #432 this check
-    # was missing and only pipeline slots were honored.
-    for sig in (
-        "health",
-        "sweep_orch",
-        "sweep_target",
-        "discover_orch",
-        "discover_target",
-        # scout_orch (issue #485, Phase B) — calendar-driven, 7d cooldown.
-        # collect-state.sh emits `scout_walk_due` when the per-class
-        # cooldown has elapsed; this loop honors the SIGNAL_COOLDOWNS
-        # back-stop in parallel.
-        "scout_orch",
-        # architecture_orch (issue #790) — idle-time fallback. Registered in
-        # the dispatch iteration tuple so a real dispatch sets
-        # dispatched_any=True, which yields idle=0 for the turn and stops
-        # idle_turns from accumulating while a fallback is eligible (the AC
-        # is met by being a real dispatch, NOT by editing the terminate path).
-        "architecture_orch",
-    ):
-        if dispatch_blocked:
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="budget",
-                    reason="usage tracker dispatch_blocked",
-                )
-            )
-            skipped_count += 1
-            continue
-        if sig in shed_classes:
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="budget",
-                    reason="usage tracker shed",
-                )
-            )
-            skipped_count += 1
-            continue
-        if scope_excluded(scope, sig):
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="idle",
-                    reason=f"scope excluded ({scope})",
-                )
-            )
-            skipped_count += 1
-            continue
-        if sig in burned:
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="cooldown",
-                    reason="signal class burned (soft-cap)",
-                )
-            )
-            skipped_count += 1
-            continue
-        # Cost-cap gate (issue #532) — checked BEFORE _select_for_signal so
-        # it fires before the cooldown read. Per AC: "cost-cap gate fires
-        # before cooldown gate (cap is the harder limit)". Only `scout_orch`
-        # has a cost-cap today; other signal classes fall through.
-        if sig == "scout_orch" and scout_cost_cap_exceeded(state):
-            cap = scout_cost_cap_state(state)
-            plan.debug.setdefault("scout_cost_cap_skipped", {
-                "share": cap["share"],
-                "cap_usd": cap["cap_usd"],
-                "spend_usd": cap["spend_usd"],
-            })
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome="budget",
-                    reason="scout cost-cap exceeded",
-                )
-            )
-            skipped_count += 1
-            continue
-        action = _select_for_signal(sig, state, events, now)
-        if action is None:
-            # Could be cooldown OR idle (no signal present); inspect the
-            # state to disambiguate. signal_is_cooled returns False when
-            # we're still inside the per-class cooldown window.
-            if not signal_is_cooled(state, sig, now):
-                outcome = "cooldown"
-                reason = f"signal cooldown active ({sig})"
-            else:
-                outcome = "idle"
-                reason = "no triggering signal"
-            plan.events.append(
-                make_dispatch_decision_event(
-                    state, now, cls=sig, outcome=outcome, reason=reason,
-                )
-            )
-            skipped_count += 1
-            continue
-        plan.add(action, reason=f"signal:{sig}")
-        plan.events.append(
-            make_dispatch_decision_event(
-                state, now, cls=sig, outcome="dispatched",
-                reason=str(action.get("reason") or "dispatched"),
-            )
-        )
-        dispatched_any = True
+    # 5.5. Silent-wedge fallback (issue #509) — checked AFTER dispatch
+    #      decisions so a slot-clear can't race a same-slot dispatch (INV-006).
+    fold(_rule_silent_wedge(state, events, now))
 
-    # 5.5. Silent-wedge fallback (issue #509).
-    #
-    # If an active slot has aged past `subagent_max_wall_seconds` AND no
-    # `subagent_stop` event arrived for its task_id, emit a
-    # `wait_or_reap` action so the harness invokes reap.py as a forced
-    # fallback. Hooks are the primary path; this only fires when the
-    # hook itself silently failed.
-    #
-    # We check this AFTER dispatch decisions because a wait_or_reap is
-    # a slot-clear action; mixing it into the same plan as a new
-    # dispatch on the SAME slot would violate INV-006 (reap-before-
-    # dispatch). The slot was busy at decision time, so no new dispatch
-    # for that slot was emitted above.
-    max_wall = _subagent_max_wall_seconds(state)
-    # Build a set of task_ids we already saw a completion for (this
-    # turn's batch — either via slot_events or caller-supplied events).
-    completed_task_ids: set[str] = set()
-    for ev in events:
-        if ev.get("type") == "completion":
-            tid = ev.get("task_id")
-            if tid:
-                completed_task_ids.add(tid)
-    for cls, slot_obj in (slots.items() if isinstance(slots, dict) else []):
-        if not isinstance(slot_obj, dict):
-            continue
-        started_epoch = slot_obj.get("started_epoch")
-        if started_epoch is None:
-            # Tolerate legacy `started` ISO8601 by attempting to parse.
-            started_iso = slot_obj.get("started")
-            if isinstance(started_iso, str):
-                try:
-                    from datetime import datetime
-                    started_epoch = int(datetime.fromisoformat(started_iso.replace("Z", "+00:00")).timestamp())
-                except (ValueError, TypeError):
-                    started_epoch = None
-        try:
-            started_epoch_i = int(started_epoch) if started_epoch is not None else None
-        except (TypeError, ValueError):
-            started_epoch_i = None
-        if started_epoch_i is None:
-            continue
-        age = now - started_epoch_i
-        if age < max_wall:
-            continue
-        task_id = slot_obj.get("task_id") or ""
-        if task_id and task_id in completed_task_ids:
-            continue
-        plan.add(
-            make_wait_or_reap(
-                cls,
-                task_id,
-                age,
-                f"silent-wedge fallback: {cls} active for {age}s with no SubagentStop event (cap {max_wall}s)",
-            ),
-            reason=f"silent-wedge:{cls}",
-        )
+    # 6. Idle fallback (heartbeat / busy-wait nap).
+    fold(_rule_idle_fallback(state, dispatched_any=dispatched_any))
 
-    # 6. Idle fallback
-    occupied = sum(1 for v in slots.values() if v is not None)
-    if not dispatched_any and occupied == 0:
-        plan.add(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
-    elif not dispatched_any:
-        # Pipeline is busy but we have nothing new to do — short nap
-        plan.add(make_wait(60, "pipeline-busy nap"), reason="busy-wait")
-
-    plan.debug["best_score"] = best_score
-    plan.debug["occupied_slots"] = occupied
     plan.debug["scope"] = scope
 
     # 7. Stamp `worktreeBranch` + `dispatchSentinel` on every dispatch action
-    #    (issue #527 / issue #692).
-    #
-    # The dashboard's slice-4 "Watch stream" cross-link (PR #526) reads
-    # `action.worktreeBranch` to scope `/agents/stream?agent=<branch>`. We
-    # stamp the field here — once per plan, after dispatch decisions are
-    # finalised — so every code-writing / signal-class dispatch carries a
-    # stable identifier. Skip stamping a fresh branch on actions that already
-    # supply one (forward-compat for selectors that learn the harness-
-    # generated branch name later).
-    #
-    # `dispatchSentinel` (issue #692) is the hidden marker the playbook
-    # prepends to the FIRST user message of the Agent-tool prompt. It uses the
-    # resolved `worktreeBranch` as the stable per-dispatch id so the
-    # SessionStart capture hook can join the subagent session back to this
-    # turn. We stamp it for EVERY dispatch action (even ones that arrived with
-    # a pre-set worktreeBranch) so no dispatch escapes session capture.
-    #
-    # AC10 / AC12 / AC9 schema-closure note: both fields go on the turn-row
-    # JSON inside an action; they are NEVER written as a top-level field on
-    # `hydra:autopilot:run:<id>`. The slice-2 turn writer serialises actions
-    # verbatim, so these stamps flow through to /api/autopilot/runs/:runId
-    # without further changes.
-    run_id = state.get("run_id") or ""
-    run_token = run_id if isinstance(run_id, str) and run_id else None
-    for action in plan.actions:
-        if not isinstance(action, dict):
-            continue
-        if action.get("type") != "dispatch":
-            continue
-        slot = action.get("slot")
-        if not isinstance(slot, str) or not slot:
-            continue
-        if not action.get("worktreeBranch"):
-            action["worktreeBranch"] = _synthesize_worktree_branch(state, slot)
-        skill = action.get("skill")
-        if isinstance(skill, str) and skill:
-            action["dispatchSentinel"] = make_dispatch_sentinel(
-                skill,
-                action["worktreeBranch"],
-                run_token,
-            )
+    #    (issue #527 / issue #692) — once per plan, after dispatch decisions
+    #    are finalised, so every dispatch carries a stable identifier.
+    _stamp_dispatch_metadata(plan.actions, state)
 
     # Slice A observability close-out (issue #668). Emit `turn_end` last
     # so the dashboard knows the turn finished decision-making cleanly
@@ -1817,6 +2003,37 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                 sig,
                 "hydra-architecture-scan",
                 reason="orch board idle — architecture fallback",
+            )
+        return None
+    if sig == "retro_orch":
+        # Issue #920 (parent #917). Daily per-run retrospective: dispatch the
+        # /hydra-retro skill (#919) to turn the most-recent COMPLETED run into
+        # conservative, recurrence-gated improvement proposals.
+        #
+        # Gating is intentionally minimal — a signal class has no slot
+        # semantics and decide.py dispatches every pipeline slot BEFORE the
+        # signal loop, so a retro inherently never preempts a dev/QA/research
+        # dispatch (the issue's "spare-capacity" requirement). The daily
+        # cadence is enforced by the 24h SIGNAL_COOLDOWNS["retro_orch"], which
+        # the `signal_is_cooled` guard at the top of this function already
+        # honors (so a fired retro won't re-fire for 24h even while a
+        # completed run keeps surfacing).
+        #
+        # `retro_run_available` is the precomputed signal from collect-state.sh:
+        # true iff a COMPLETED run exists to analyse. decide.py reads it
+        # verbatim and never recomputes run state here — the same signal-seam
+        # discipline as scout_orch / architecture_orch.
+        #
+        # No run_id is threaded through prompt_args: the hydra-retro skill
+        # defaults to the latest completed run when invoked with no argument
+        # (see docs/operator-playbooks/hydra-retro.md "Resolve the run id").
+        # Mirroring architecture_orch's no-args dispatch keeps decide.py pure
+        # and avoids hard-coupling to the run-id resolution path.
+        if _signal_present(state, events, "retro_run_available"):
+            return make_dispatch(
+                sig,
+                "hydra-retro",
+                reason="completed run available — daily retrospective",
             )
         return None
     return None

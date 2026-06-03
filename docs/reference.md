@@ -96,15 +96,15 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 | `name` | yes | string | Unique identifier; lowercase + dashes |
 | `kind` | yes | `leading` \| `terminal` | `leading` = usable inside Tier-2 5-cycle holdback windows; `terminal` = ultimate goal, too slow for holdback |
 | `direction` | yes | `up` \| `down` | Favorable direction for the value |
-| `source` | yes | `prometheus` \| `api` \| `sql` \| `file` | Adapter dispatch in `getOutcomeValue` |
-| `query` | yes | string | Source-specific lookup (URL path, file path, SQL string, prom expression) |
+| `source` | yes | `file` | Adapter dispatch in `getOutcomeValue`. `file` is the only implemented source (#933); a non-`file` value fails schema validation |
+| `query` | yes | string | Source-specific lookup (for `file`: a path resolved against `HYDRA_ROOT` holding a single numeric value) |
 | `baseline` | yes | number | Starting reference |
 | `target` | yes | number | Goal value |
 | `noise_epsilon` | no (default 0) | number | Absolute change below this is treated as no-move |
 
 (The `stuckness_threshold_cycles` field was removed in ADR-0010 along with the detector it fed.)
 
-**Source adapters:** `file` is implemented (reads a number from a path resolved against `HYDRA_ROOT`). `api`, `prometheus`, and `sql` are stubbed — they return `null` and log a warning rather than throwing, so downstream consumers (#244 holdback) treat them as no-data instead of synthetic regressions.
+**Source adapters:** `file` is the only implemented source (reads a number from a path resolved against `HYDRA_ROOT`). The earlier `api`, `prometheus`, and `sql` arms were unimplemented stubs (logged + returned `null`); they were removed in #933 — a single real adapter is a hypothetical seam, not a real one (LANGUAGE.md), so the `OutcomeSource` union was narrowed to `file` and a non-`file` `source:` now fails schema validation. The dispatch switch re-opens for a genuine reason the day a second source lands (see the `FUTURE SOURCES` note in `src/outcomes.ts`). The YAML parse (comment stripping + scalar coercion + document walk) lives in its own Module `src/outcomes-yaml.ts` with its own test surface (`test/outcomes-yaml.test.mts`), separate from `validateOutcome`'s outcome-specific rules.
 
 **Error handling:** `loadOutcomes()` never throws. Returns `{ ok: false, errors: string[] }` on parse / schema violations. Missing file is `{ ok: true, outcomes: [] }` so projects start with no outcomes declared without crashing.
 

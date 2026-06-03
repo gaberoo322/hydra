@@ -13,9 +13,14 @@
 #                  terminal = the thing that ultimately matters;
 #                             too slow for holdback decisions
 #   direction      up | down  (favorable direction for `value`)
-#   source         prometheus | api | sql | file
-#   query          source-specific lookup (URL path, file path,
-#                  SQL string, prom expression). Required.
+#   source         file
+#                  (issue #933: `file` is the only implemented source. The
+#                  earlier `prometheus | api | sql` options were unimplemented
+#                  stubs and were removed; a non-file `source:` now fails schema
+#                  validation. A second source re-opens the seam when it
+#                  actually lands — see src/outcomes.ts FUTURE SOURCES.)
+#   query          source-specific lookup (for `file`: a path resolved against
+#                  HYDRA_ROOT holding a single numeric value). Required.
 #   baseline       starting reference value; numeric
 #   target         goal value; numeric
 #   noise_epsilon  (optional, default 0) absolute change below

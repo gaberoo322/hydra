@@ -12,8 +12,20 @@ OnFailure=hydra-notify-failure@%n.service
 # system without an autopilot for ~10h until the next timer fire. One retry
 # after 3 min absorbs transient errors; sustained failures still surface to
 # the operator via OnFailure= once the burst cap is hit.
-StartLimitBurst=2
-StartLimitIntervalSec=3600
+#
+# Relaxed for issue #925: with StartLimitBurst=2 / IntervalSec=3600, two bad
+# runs in an hour dead-zoned the unit for the rest of that hour — every
+# subsequent Pace Gate launch (~every 15 min) was refused with "Start request
+# repeated too quickly", starving the autopilot entirely. The dominant trigger
+# was a `claude` self-exit code 143 (a child SIGTERM propagated as the parent's
+# own exit STATUS) that SuccessExitStatus= did NOT cover (see below), so each
+# clean self-exit armed Restart=on-failure and burned a start slot. With 143
+# now declared a success, those exits no longer count against the burst; the
+# wider burst (5) / shorter window (900s = one Pace Gate cycle) is belt-and-
+# braces so a genuine transient burst cannot starve the Gate for more than a
+# single cycle.
+StartLimitBurst=5
+StartLimitIntervalSec=900
 
 [Service]
 # Type=exec (NOT oneshot). This is a long-running foreground process — the
@@ -40,7 +52,18 @@ TimeoutStopSec=600
 # EXIT_CODE=signal / EXIT_STATUS=TERM. The reap derivation maps that signal to
 # `interrupted` regardless; declaring it a success here also keeps Restart=
 # on-failure from spuriously retrying a deliberate restart.
-SuccessExitStatus=SIGTERM
+#
+# 143 / 130 added for issue #925. `SuccessExitStatus=SIGTERM` matches only a
+# systemd-delivered *signal* (EXIT_CODE=signal / EXIT_STATUS=TERM); it does
+# NOT match an exit *code* of 143. But the dominant termination here was the
+# `claude` CLI self-exiting with code 143 (= 128+SIGTERM, the conventional code
+# a Node/shell parent returns when a child it spawned dies on SIGTERM) — and
+# 130 (= 128+SIGINT) for the Ctrl-C analogue. systemd sees those as
+# EXIT_CODE=exited / EXIT_STATUS=143, marks the unit "Failed with result
+# 'exit-code'", and arms Restart=on-failure → the StartLimit lockout above.
+# Listing the numeric codes here declares those self-exits a success, so the
+# unit no longer spuriously retries them and no longer burns start slots.
+SuccessExitStatus=SIGTERM 143 130
 
 # Subscription-billed: the claude CLI uses the operator's logged-in
 # credentials in ~/.claude/. Do NOT set ANTHROPIC_API_KEY here.

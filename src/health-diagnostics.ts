@@ -90,7 +90,7 @@ export interface HealthAssessment {
   summary: string;
 }
 
-// ---- parseProbes — owns disk/mem regex + recent derivation ---------------
+// ---- parseProbes — owns the `recent` pipeline derivation ----------------
 //
 // Maps the raw `Promise.allSettled` results from the handler's probe fan-out
 // into a HealthSnapshot. Indices match the handler's settled array exactly:
@@ -98,6 +98,12 @@ export interface HealthAssessment {
 //   5 backlog counts, 6 metrics {trend,stats}, 7 df, 8 free,
 //   9 systemd orchestrator, 10 systemd watchdog, 11 systemd target web,
 //   12 patterns, 13 reflections, 14 ov search, 15 redis info, 16 brake.
+//
+// Issue #939: the df/free columnar PARSE moved to the **Host-Probe Adapter**
+// (`src/host-probe/probe.ts`) — indices 7/8 now arrive ALREADY-PARSED as a
+// `DiskUsage`/`MemUsage` (or null on probe failure), so parseProbes just reads
+// them, with the same zeroed defaults the old re-parse fell back to. The only
+// host-info shaping left here is the systemd-status "unknown" coalesce.
 
 type SettledLike = Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }>;
 
@@ -136,36 +142,12 @@ export function parseProbes(settled: SettledLike): HealthSnapshot {
   // rejected (val(16) === null) so a Redis blip never reports a phantom brake.
   const emergencyBrake = val(16) || { engaged: false };
 
-  // Parse disk
-  let disk = { availableGb: 0, totalGb: 0, usedPercent: 0 };
-  const diskRaw = val(7);
-  if (diskRaw?.stdout) {
-    const dl = diskRaw.stdout.trim().split("\n").pop()?.trim();
-    if (dl) {
-      const p = dl.split(/\s+/);
-      disk = {
-        availableGb: Math.round((parseInt(p[0] || "0") / 1073741824) * 10) / 10,
-        totalGb: Math.round((parseInt(p[1] || "0") / 1073741824) * 10) / 10,
-        usedPercent: parseInt((p[2] || "0").replace("%", "")) || 0,
-      };
-    }
-  }
-  // Parse memory
-  let mem = { totalGb: 0, availableGb: 0, usedPercent: 0 };
-  const memRaw = val(8);
-  if (memRaw?.stdout) {
-    const ml = memRaw.stdout.split("\n").find((l: string) => l.startsWith("Mem:"));
-    if (ml) {
-      const p = ml.split(/\s+/);
-      const t = parseInt(p[1]) || 0,
-        a = parseInt(p[6]) || 0;
-      mem = {
-        totalGb: Math.round((t / 1073741824) * 10) / 10,
-        availableGb: Math.round((a / 1073741824) * 10) / 10,
-        usedPercent: t > 0 ? Math.round((1 - a / t) * 100) : 0,
-      };
-    }
-  }
+  // Issue #939: disk/mem arrive already parsed from the Host-Probe Adapter
+  // (DiskUsage/MemUsage, or null on a probe failure). The zeroed default matches
+  // the old "unparseable → all-zero" fallback, so every downstream disk/mem rule
+  // sees the identical values.
+  const disk = val(7) || { availableGb: 0, totalGb: 0, usedPercent: 0 };
+  const mem = val(8) || { totalGb: 0, availableGb: 0, usedPercent: 0 };
   const sysdOrch = val(9) || "unknown",
     sysdWatch = val(10) || "unknown",
     sysdWeb = val(11) || "unknown";

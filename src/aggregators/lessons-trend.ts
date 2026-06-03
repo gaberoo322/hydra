@@ -31,6 +31,7 @@ import {
   readFrictionPatterns,
   readMetaFrictionIssues,
 } from "./friction-source.ts";
+import type { listIssuesBySearchOrEmpty } from "../github/issues.ts";
 import type { FrictionPattern } from "./lessons-overnight.ts";
 
 // ---------------------------------------------------------------------------
@@ -58,11 +59,11 @@ export interface LessonsTrendResponse {
 export interface LessonsTrendDeps {
   now?: Date;
   githubRepo?: string;
-  execFileAsync?: (
-    cmd: string,
-    args: readonly string[],
-    opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Override the GitHub Issue/PR Read seam reader (issue #908/#915) used by the
+   * meta-friction read. Passed straight through to `readMetaFrictionIssues`.
+   */
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
   /**
    * Override the friction-patterns reader. Defaults to the same Redis
    * scan as `lessons-overnight.ts`. Tests pass a stub.

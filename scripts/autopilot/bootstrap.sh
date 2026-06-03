@@ -99,7 +99,18 @@ set -euo pipefail
 __reap_derive_cause() {
   REAP_EXIT_STATUS="${EXIT_STATUS:-0}"
   REAP_EXIT_CODE_KIND="${EXIT_CODE:-exited}"
-  if [ "${REAP_EXIT_CODE_KIND}" = "exited" ] && { [ -z "${REAP_EXIT_STATUS}" ] || [ "${REAP_EXIT_STATUS}" = "0" ]; }; then
+  if [ "${REAP_EXIT_CODE_KIND}" = "exited" ] \
+    && { [ -z "${REAP_EXIT_STATUS}" ] || [ "${REAP_EXIT_STATUS}" = "0" ] \
+      || [ "${REAP_EXIT_STATUS}" = "143" ] || [ "${REAP_EXIT_STATUS}" = "130" ]; }; then
+    # A clean exit (status 0 / unset) OR a self-propagated 128+signal exit
+    # *code* of 143 (128+SIGTERM) / 130 (128+SIGINT) is an `interrupted` end,
+    # NOT a crash (issue #925). The latter happens when the `claude` CLI's own
+    # child (a dispatched subagent / tool) dies on SIGTERM/SIGINT and the
+    # parent propagates 143/130 as its OWN exit STATUS — systemd reports
+    # EXIT_CODE=exited (not signal), so without this branch a clean self-exit
+    # fell through to the catch-all `crash`. This mirrors the EXIT_CODE=signal
+    # TERM/INT mapping below; both record exit_code 0 so `crash` stays a
+    # meaningful health signal and the StartLimit lockout never arms.
     REAP_CAUSE="interrupted"
     REAP_EXIT_NUM=0
   elif [ "${REAP_EXIT_CODE_KIND}" = "signal" ]; then
@@ -165,17 +176,24 @@ if [ "${1:-}" = "--reap" ]; then
     exit 0
   fi
 
-  # Best-guess cause from the systemd-provided result (issue #898 / AC2).
-  # Two distinct kinds of non-crash exit must both map to `interrupted`,
-  # so `crash` stays a meaningful health signal:
+  # Best-guess cause from the systemd-provided result (issue #898 / AC2,
+  # extended by issue #925). Three distinct kinds of non-crash exit must all
+  # map to `interrupted`, so `crash` stays a meaningful health signal:
   #   1. Clean process exit  — EXIT_CODE=exited, status 0 or unset.
-  #   2. Signal-kill         — EXIT_CODE=signal, status in {TERM,INT,15,2}.
+  #   2. Self-propagated SIGTERM/SIGINT exit *code* — EXIT_CODE=exited,
+  #      status 143 (128+SIGTERM) or 130 (128+SIGINT). The `claude` CLI
+  #      returns these as its OWN exit status when a child it spawned (a
+  #      dispatched subagent / tool) dies on SIGTERM/SIGINT — systemd then
+  #      reports EXIT_CODE=exited (NOT signal). Before #925 this fell through
+  #      to `crash`, mislabeling clean self-exits and (via SuccessExitStatus
+  #      missing 143) arming Restart=on-failure → StartLimit lockout.
+  #   3. Signal-kill         — EXIT_CODE=signal, status in {TERM,INT,15,2}.
   #      This is `systemctl restart` / `RuntimeMaxSec` (SIGTERM) or a
   #      Ctrl-C (SIGINT) — an operator/scheduler interrupt, NOT a crash.
   #      The unit is Type=exec with SuccessExitStatus=SIGTERM, so systemd
   #      exports EXIT_CODE=signal / EXIT_STATUS=TERM on a clean stop;
   #      without this arm every restart was mis-recorded as a crash.
-  # Anything else — non-zero exit status, a non-TERM/INT signal
+  # Anything else — any other non-zero exit status, a non-TERM/INT signal
   # (e.g. SEGV/KILL/ABRT), or a missing/garbage code — stays `crash`
   # with the real exit status preserved. Shared with the --reap-derive-cause
   # dry-run so the test pins exactly this mapping.

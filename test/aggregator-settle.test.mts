@@ -1,0 +1,169 @@
+/**
+ * Regression tests for the shared settled-fold contract (issue #916).
+ *
+ * Before #916 the "fan sub-reads out under `Promise.allSettled`, and on a
+ * rejection log it + degrade to a fallback so the aggregator never throws"
+ * contract was copy-pasted as a private `settledOrEmpty` / `settledOr` /
+ * `settledOrNull` helper in ten aggregators. The contract was enforced by
+ * convention, not by a Module, and the copies had drifted. This is the one
+ * test surface that pins the contract now that all ten import it.
+ *
+ * Covers the three observed shapes:
+ *   - settledOrEmpty — degrade `T[]` to `[]` (with the Array.isArray guard)
+ *   - settledOr      — degrade `T` to an arbitrary fallback
+ *   - settledOrNull  — degrade `T` to `null`
+ * plus the core invariant: rejection logs to console.error AND returns the
+ * fallback (never throws).
+ */
+
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  settle,
+  settledOrEmpty,
+  settledOr,
+  settledOrNull,
+} from "../src/aggregators/settle.ts";
+
+/** Build a fulfilled PromiseSettledResult without an await. */
+function fulfilled<T>(value: T): PromiseSettledResult<T> {
+  return { status: "fulfilled", value };
+}
+
+/** Build a rejected PromiseSettledResult without an await. */
+function rejected<T>(reason: unknown): PromiseSettledResult<T> {
+  return { status: "rejected", reason };
+}
+
+/** Capture console.error calls for the duration of `fn`. */
+function withCapturedErrors<T>(fn: () => T): { result: T; calls: unknown[][] } {
+  const orig = console.error;
+  const calls: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    calls.push(args);
+  };
+  try {
+    const result = fn();
+    return { result, calls };
+  } finally {
+    console.error = orig;
+  }
+}
+
+describe("settle (core fold)", () => {
+  test("fulfilled returns the value and never logs", () => {
+    const { result, calls } = withCapturedErrors(() =>
+      settle(fulfilled(42), 0, "core/ok"),
+    );
+    assert.equal(result, 42);
+    assert.equal(calls.length, 0);
+  });
+
+  test("rejected logs once and returns the fallback (never throws)", () => {
+    const { result, calls } = withCapturedErrors(() =>
+      settle(rejected(new Error("boom")), 7, "core/fail"),
+    );
+    assert.equal(result, 7);
+    assert.equal(calls.length, 1);
+    const line = String(calls[0][0]);
+    // The label and the error message both reach the log line.
+    assert.match(line, /core\/fail/);
+    assert.match(line, /boom/);
+  });
+
+  test("rejected with a non-Error reason logs the raw reason", () => {
+    const { result, calls } = withCapturedErrors(() =>
+      settle(rejected("plain-string-reason"), "fb", "core/raw"),
+    );
+    assert.equal(result, "fb");
+    assert.match(String(calls[0][0]), /plain-string-reason/);
+  });
+});
+
+describe("settledOrEmpty", () => {
+  test("fulfilled array passes through", () => {
+    const { result, calls } = withCapturedErrors(() =>
+      settledOrEmpty(fulfilled([1, 2, 3]), "list/ok"),
+    );
+    assert.deepEqual(result, [1, 2, 3]);
+    assert.equal(calls.length, 0);
+  });
+
+  test("rejected degrades to [] and logs", () => {
+    const { result, calls } = withCapturedErrors(() =>
+      settledOrEmpty(rejected<number[]>(new Error("nope")), "list/fail"),
+    );
+    assert.deepEqual(result, []);
+    assert.equal(calls.length, 1);
+    assert.match(String(calls[0][0]), /list\/fail/);
+  });
+
+  test("fulfilled non-array degrades to [] (the Array.isArray guard)", () => {
+    // autopilot-health carried this guard; the other copies did not. The
+    // shared module folds it in so a malformed fulfilled value can't be
+    // iterated as an array downstream.
+    const bad = fulfilled("not-an-array" as unknown as number[]);
+    const { result } = withCapturedErrors(() => settledOrEmpty(bad, "list/bad"));
+    assert.deepEqual(result, []);
+  });
+});
+
+describe("settledOr", () => {
+  test("fulfilled returns the value", () => {
+    const { result, calls } = withCapturedErrors(() =>
+      settledOr(fulfilled("yes"), "fallback-val"),
+    );
+    assert.equal(result, "yes");
+    assert.equal(calls.length, 0);
+  });
+
+  test("rejected returns the arbitrary fallback and logs", () => {
+    const { result, calls } = withCapturedErrors(() =>
+      settledOr(rejected(new Error("x")), 0),
+    );
+    assert.equal(result, 0);
+    assert.equal(calls.length, 1);
+  });
+
+  test("optional label is included in the log line when provided", () => {
+    const { calls } = withCapturedErrors(() =>
+      settledOr(rejected(new Error("x")), 0, "cost/usage"),
+    );
+    assert.match(String(calls[0][0]), /cost\/usage/);
+  });
+
+  test("a falsy fulfilled value is NOT replaced by the fallback", () => {
+    // settledOr degrades only on rejection — a legitimately-0 fulfilled
+    // value must survive (the overnight-summary `mergeCount: 0` path).
+    const { result } = withCapturedErrors(() => settledOr(fulfilled(0), 99));
+    assert.equal(result, 0);
+  });
+});
+
+describe("settledOrNull", () => {
+  test("fulfilled returns the value", () => {
+    const obj = { autonomy: 0.5 };
+    const { result, calls } = withCapturedErrors(() =>
+      settledOrNull(fulfilled(obj), "null/ok"),
+    );
+    assert.equal(result, obj);
+    assert.equal(calls.length, 0);
+  });
+
+  test("rejected degrades to null and logs", () => {
+    const { result, calls } = withCapturedErrors(() =>
+      settledOrNull(rejected(new Error("y")), "null/fail"),
+    );
+    assert.equal(result, null);
+    assert.equal(calls.length, 1);
+    assert.match(String(calls[0][0]), /null\/fail/);
+  });
+
+  test("fulfilled nullish is coalesced to null", () => {
+    const { result } = withCapturedErrors(() =>
+      settledOrNull(fulfilled(undefined), "null/nullish"),
+    );
+    assert.equal(result, null);
+  });
+});

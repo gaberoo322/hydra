@@ -1,5 +1,12 @@
 /**
  * Regression tests for the backlog-flow aggregator (issue #620, PRD #615).
+ *
+ * After issue #915 the aggregator reads GitHub through the **GitHub Issue/PR
+ * Read seam** (`src/github/issues.ts`). Tests stub the seam readers
+ * (`listIssuesBySearchOrEmpty` for the created/closed windows,
+ * `listIssuesByLabelOrEmpty` for the blocked snapshot) with the seam's
+ * canonical `IssueRow` shape — only `labels` are read for class bucketing, so
+ * the raw-JSON parse now lives in the seam's own suite (`github-issues.test.mts`).
  */
 
 import { test, describe } from "node:test";
@@ -11,10 +18,22 @@ import {
   bucketByClass,
   clampWindowDays,
   iso8601DateOnly,
-  parseRawIssues,
 } from "../src/aggregators/backlog-flow.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");
+
+function row(number: number, labels: string[]): IssueRow {
+  return {
+    number,
+    title: `Issue #${number}`,
+    url: `https://github.com/gaberoo322/hydra/issues/${number}`,
+    createdAt: "",
+    labels,
+    body: "",
+    state: "OPEN",
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -37,13 +56,9 @@ describe("classFromLabels", () => {
 
 describe("bucketByClass", () => {
   test("tallies into one row per class", () => {
-    const added = [
-      { number: 1, labels: ["dev_orch"] },
-      { number: 2, labels: ["dev_orch"] },
-      { number: 3, labels: ["qa"] },
-    ];
-    const closed = [{ number: 4, labels: ["dev_orch"] }];
-    const blocked = [{ number: 5, labels: ["dev_target"] }];
+    const added = [row(1, ["dev_orch"]), row(2, ["dev_orch"]), row(3, ["qa"])];
+    const closed = [row(4, ["dev_orch"])];
+    const blocked = [row(5, ["dev_target"])];
     const rows = bucketByClass(added, closed, blocked);
     const dev_orch = rows.find((r) => r.class === "dev_orch");
     assert.deepEqual(dev_orch, { class: "dev_orch", added: 2, closed: 1, blocked: 0 });
@@ -54,22 +69,13 @@ describe("bucketByClass", () => {
   });
 
   test("unclassified bucket collects unlabelled issues", () => {
-    const rows = bucketByClass(
-      [{ number: 1, labels: [] }, { number: 2, labels: ["bug"] }],
-      [],
-      [],
-    );
+    const rows = bucketByClass([row(1, []), row(2, ["bug"])], [], []);
     const unc = rows.find((r) => r.class === "unclassified");
     assert.equal(unc?.added, 2);
   });
 
   test("rows sorted by total descending", () => {
-    const added = [
-      { number: 1, labels: ["qa"] },
-      { number: 2, labels: ["dev_orch"] },
-      { number: 3, labels: ["dev_orch"] },
-      { number: 4, labels: ["dev_orch"] },
-    ];
+    const added = [row(1, ["qa"]), row(2, ["dev_orch"]), row(3, ["dev_orch"]), row(4, ["dev_orch"])];
     const rows = bucketByClass(added, [], []);
     assert.equal(rows[0].class, "dev_orch");
   });
@@ -93,51 +99,26 @@ describe("iso8601DateOnly", () => {
   });
 });
 
-describe("parseRawIssues", () => {
-  test("returns [] on empty / non-array", () => {
-    assert.deepEqual(parseRawIssues(""), []);
-    assert.deepEqual(parseRawIssues("not-json"), []);
-  });
-  test("extracts label name strings", () => {
-    const out = parseRawIssues(
-      JSON.stringify([{ number: 1, labels: [{ name: "qa" }, { name: "ready-for-agent" }] }]),
-    );
-    assert.deepEqual(out[0].labels, ["qa", "ready-for-agent"]);
-  });
-});
-
 // ---------------------------------------------------------------------------
 // Integration shape
 // ---------------------------------------------------------------------------
 
 describe("getBacklogFlow — happy path", () => {
   test("invokes the three sub-sources and bundles per-class totals", async () => {
-    const addedStdout = JSON.stringify([
-      { number: 1, labels: [{ name: "dev_orch" }] },
-      { number: 2, labels: [{ name: "qa" }] },
-    ]);
-    const closedStdout = JSON.stringify([
-      { number: 3, labels: [{ name: "dev_orch" }] },
-    ]);
-    const blockedStdout = JSON.stringify([
-      { number: 4, labels: [{ name: "dev_target" }, { name: "blocked" }] },
-    ]);
-
-    const exec = async (cmd: string, args: readonly string[]) => {
-      const key = `${cmd} ${args.join(" ")}`;
-      if (key.includes("issue list") && key.includes("created:>=")) {
-        return { stdout: addedStdout, stderr: "" };
-      }
-      if (key.includes("issue list") && key.includes("closed:>=")) {
-        return { stdout: closedStdout, stderr: "" };
-      }
-      if (key.includes("issue list") && key.includes("--label blocked")) {
-        return { stdout: blockedStdout, stderr: "" };
-      }
-      throw new Error("unstubbed: " + key);
-    };
-
-    const result = await getBacklogFlow(7, { now: NOW, execFileAsync: exec });
+    const result = await getBacklogFlow(7, {
+      now: NOW,
+      listIssuesBySearchOrEmpty: async (search) => {
+        if (search.startsWith("created:>=")) {
+          return [row(1, ["dev_orch"]), row(2, ["qa"])];
+        }
+        if (search.startsWith("closed:>=")) {
+          return [row(3, ["dev_orch"])];
+        }
+        return [];
+      },
+      listIssuesByLabelOrEmpty: async (label) =>
+        label === "blocked" ? [row(4, ["dev_target", "blocked"])] : [],
+    });
     assert.equal(result.windowDays, 7);
     assert.equal(result.totals.added, 2);
     assert.equal(result.totals.closed, 1);
@@ -149,19 +130,18 @@ describe("getBacklogFlow — happy path", () => {
 });
 
 describe("getBacklogFlow — sub-source failure isolation", () => {
-  test("when one source fails, other columns still ship", async () => {
-    const exec = async (cmd: string, args: readonly string[]) => {
-      const key = `${cmd} ${args.join(" ")}`;
-      if (key.includes("created:>=")) throw new Error("added broken");
-      if (key.includes("closed:>=")) {
-        return {
-          stdout: JSON.stringify([{ number: 1, labels: [{ name: "qa" }] }]),
-          stderr: "",
-        };
-      }
-      return { stdout: JSON.stringify([]), stderr: "" };
-    };
-    const result = await getBacklogFlow(7, { now: NOW, execFileAsync: exec });
+  test("when one source rejects, other columns still ship", async () => {
+    const result = await getBacklogFlow(7, {
+      now: NOW,
+      // The *OrEmpty readers normally degrade to []; this models a harder
+      // failure (the reader rejecting) to prove allSettled isolation.
+      listIssuesBySearchOrEmpty: async (search) => {
+        if (search.startsWith("created:>=")) throw new Error("added broken");
+        if (search.startsWith("closed:>=")) return [row(1, ["qa"])];
+        return [];
+      },
+      listIssuesByLabelOrEmpty: async () => [],
+    });
     assert.equal(result.totals.added, 0);
     assert.equal(result.totals.closed, 1);
   });

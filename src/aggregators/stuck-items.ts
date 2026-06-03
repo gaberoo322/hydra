@@ -20,12 +20,13 @@
  *   aggregator. Production callers pass nothing.
  */
 
-import { execFileViaSeam } from "../github/exec-file-compat.ts";
-
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
-const execFile = execFileViaSeam;
+import {
+  listIssuesByLabelOrEmpty,
+  listOpenPrsOrEmpty,
+  type IssueRow,
+  type PrRow,
+} from "../github/issues.ts";
+import { settledOrEmpty } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -76,12 +77,14 @@ export interface StuckItemsDeps {
   githubRepo?: string;
   /** Override default age thresholds. */
   thresholds?: Partial<StuckThresholds>;
-  /** Async exec used for `gh` sub-shells. */
-  execFileAsync?: (
-    cmd: string,
-    args: readonly string[],
-    opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Override the GitHub Issue/PR Read seam readers (issue #908/#915). Tests
+   * inject these to avoid spawning `gh`; production uses the real seam readers.
+   * The aggregator consumes the seam's typed `IssueRow`/`PrRow` directly — no
+   * local argv or parser.
+   */
+  listIssuesByLabelOrEmpty?: typeof listIssuesByLabelOrEmpty;
+  listOpenPrsOrEmpty?: typeof listOpenPrsOrEmpty;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,10 +100,14 @@ export async function getStuckItems(
     ...(deps.thresholds ?? {}),
   };
 
+  const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
+  const listPrs = deps.listOpenPrsOrEmpty ?? listOpenPrsOrEmpty;
+  const opts = { repo: deps.githubRepo };
+
   const [blockedResult, infoResult, prsResult] = await Promise.allSettled([
-    fetchIssuesWithLabel("blocked", deps),
-    fetchIssuesWithLabel("needs-info", deps),
-    fetchPrsWithFailedCi(deps),
+    listByLabel("blocked", "stuck-items/blocked", opts),
+    listByLabel("needs-info", "stuck-items/needs-info", opts),
+    fetchPrsWithFailedCi(listPrs, opts),
   ]);
 
   const blocked = settledOrEmpty(blockedResult, "stuck-items/blocked");
@@ -116,33 +123,18 @@ export async function getStuckItems(
   };
 }
 
-function settledOrEmpty<T>(result: PromiseSettledResult<T[]>, label: string): T[] {
-  if (result.status === "fulfilled") return result.value;
-  console.error(
-    `[stuck-items] sub-source failed (${label}): ${result.reason?.message || result.reason}`,
-  );
-  return [];
-}
-
 // ---------------------------------------------------------------------------
 // Pure classifier — exported for tests
 // ---------------------------------------------------------------------------
 
-interface RawIssue {
-  number: number;
-  title: string;
-  url: string;
-  createdAt: string;
-  labels: string[];
-}
-
 /**
- * Pure helper — exported for tests. Filters a list of raw issues down to
- * those whose age (now - createdAt) is at least `minAgeDays`, attaching
+ * Pure helper — exported for tests. Filters a list of issues (the seam's
+ * {@link IssueRow}, of which only `number,title,url,createdAt,labels` are read)
+ * down to those whose age (now - createdAt) is at least `minAgeDays`, attaching
  * the computed `ageDays` to each surviving item. Sorts oldest-first.
  */
 export function classifyByAge(
-  issues: RawIssue[],
+  issues: readonly Pick<IssueRow, "number" | "title" | "url" | "createdAt" | "labels">[],
   now: Date,
   minAgeDays: number,
 ): StuckIssue[] {
@@ -168,161 +160,57 @@ export function classifyByAge(
 }
 
 // ---------------------------------------------------------------------------
-// Sub-source: labeled issues
-// ---------------------------------------------------------------------------
-
-async function fetchIssuesWithLabel(
-  label: string,
-  deps: StuckItemsDeps,
-): Promise<RawIssue[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
-  if (!repo) return [];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "open",
-      "--label",
-      label,
-      "--limit",
-      "100",
-      "--json",
-      "number,title,url,createdAt,labels",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return parseRawIssues(stdout);
-}
-
-/**
- * Pure helper — exported for tests. Parses `gh issue list --json` output
- * into the raw shape the classifier expects. Returns `[]` on structural
- * issues rather than throwing.
- */
-export function parseRawIssues(jsonStdout: string): RawIssue[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const out: RawIssue[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      title?: unknown;
-      url?: unknown;
-      createdAt?: unknown;
-      labels?: Array<{ name?: unknown }>;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    const createdAt = typeof c.createdAt === "string" ? c.createdAt : "";
-    if (!createdAt) continue;
-    out.push({
-      number,
-      title: typeof c.title === "string" ? c.title : `Issue #${number}`,
-      url: typeof c.url === "string" ? c.url : `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt,
-      labels: (c.labels ?? [])
-        .map((l) => l?.name)
-        .filter((n): n is string => typeof n === "string"),
-    });
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
 // Sub-source: open PRs with at least one failing check
 // ---------------------------------------------------------------------------
 
-async function fetchPrsWithFailedCi(deps: StuckItemsDeps): Promise<StuckPr[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
-  if (!repo) return [];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "pr",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "open",
-      "--limit",
-      "100",
-      "--json",
-      "number,title,url,updatedAt,statusCheckRollup",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return parsePrsWithFailedCi(stdout);
+async function fetchPrsWithFailedCi(
+  listPrs: typeof listOpenPrsOrEmpty,
+  opts: { repo?: string },
+): Promise<StuckPr[]> {
+  const rows = await listPrs("stuck-items/prs-failed-ci", opts);
+  return selectPrsWithFailedCi(rows);
 }
 
+const FAILING_CI_CONCLUSIONS = new Set([
+  "FAILURE",
+  "TIMED_OUT",
+  "CANCELLED",
+  "STARTUP_FAILURE",
+  "ACTION_REQUIRED",
+]);
+
 /**
- * Pure helper — exported for tests. Parses `gh pr list --json` output and
- * keeps only the PRs whose `statusCheckRollup` contains at least one
- * conclusion of FAILURE / TIMED_OUT / CANCELLED / STARTUP_FAILURE.
+ * Pure helper — exported for tests. Keeps only the PRs (the seam's
+ * {@link PrRow}) whose `statusCheckRollup` contains at least one conclusion of
+ * FAILURE / TIMED_OUT / CANCELLED / STARTUP_FAILURE / ACTION_REQUIRED, mapping
+ * each survivor to a {@link StuckPr} with the failing check names. Sorted
+ * most-recently-updated last so the dashboard's "oldest first" ordering matches
+ * the issue lists.
  */
-export function parsePrsWithFailedCi(jsonStdout: string): StuckPr[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-
-  const FAILING = new Set([
-    "FAILURE",
-    "TIMED_OUT",
-    "CANCELLED",
-    "STARTUP_FAILURE",
-    "ACTION_REQUIRED",
-  ]);
-
+export function selectPrsWithFailedCi(rows: readonly PrRow[]): StuckPr[] {
   const out: StuckPr[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      title?: unknown;
-      url?: unknown;
-      updatedAt?: unknown;
-      statusCheckRollup?: unknown;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    const checks = Array.isArray(c.statusCheckRollup) ? c.statusCheckRollup : [];
+  for (const pr of rows) {
     const failed: string[] = [];
-    for (const check of checks) {
-      if (!check || typeof check !== "object") continue;
-      const cc = check as { conclusion?: unknown; name?: unknown; context?: unknown };
-      const conclusion = typeof cc.conclusion === "string" ? cc.conclusion : "";
-      if (!FAILING.has(conclusion.toUpperCase())) continue;
-      const name = typeof cc.name === "string" ? cc.name : typeof cc.context === "string" ? cc.context : "check";
+    for (const check of pr.statusCheckRollup) {
+      const conclusion = typeof check.conclusion === "string" ? check.conclusion : "";
+      if (!FAILING_CI_CONCLUSIONS.has(conclusion.toUpperCase())) continue;
+      const name =
+        typeof check.name === "string"
+          ? check.name
+          : typeof check.context === "string"
+            ? check.context
+            : "check";
       failed.push(name);
     }
     if (failed.length === 0) continue;
     out.push({
-      number,
-      title: typeof c.title === "string" ? c.title : `PR #${number}`,
-      url: typeof c.url === "string" ? c.url : `https://github.com/gaberoo322/hydra/pull/${number}`,
+      number: pr.number,
+      title: pr.title,
+      url: pr.url,
       failedChecks: failed,
-      updatedAt: typeof c.updatedAt === "string" ? c.updatedAt : new Date(0).toISOString(),
+      updatedAt: pr.updatedAt || new Date(0).toISOString(),
     });
   }
-  // Most-recently-updated last so the dashboard's "oldest first" ordering
-  // matches the issue lists.
   out.sort((a, b) => Date.parse(a.updatedAt) - Date.parse(b.updatedAt));
   return out;
 }

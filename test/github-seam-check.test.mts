@@ -94,9 +94,31 @@ describe("github-seam-check: non-gh/git spawner carve-out", () => {
     );
   });
 
-  test("does NOT exempt src/api/health.ts — it stays a tolerated baseline entry", () => {
-    // health.ts spawns df/free/systemctl AND owns one migrated git call. It is
-    // intentionally a baseline violation (shrinkable later), not a carve-out.
+  test("exempts the Host-Probe Adapter family (src/host-probe/*) — sibling Seam, issue #939", () => {
+    // src/host-probe/exec.ts owns the host-info spawn (df/free/systemctl) as a
+    // separate Seam, NOT a gh/git caller. It is carved out of this scan and
+    // policed by host-probe-seam-check instead.
+    assert.equal(
+      fileViolatesGithubSeam(
+        "src/host-probe/exec.ts",
+        `import { spawn } from "node:child_process";`,
+      ),
+      false,
+    );
+    assert.equal(
+      fileViolatesGithubSeam(
+        "src/host-probe/probe.ts",
+        `import { runProbe } from "./exec.ts";`,
+      ),
+      false,
+    );
+  });
+
+  test("still flags src/api/health.ts IF it re-introduces a child_process import (post-#939)", () => {
+    // After #939 the real health.ts routes host probes through the Host-Probe
+    // Adapter and no longer imports child_process, so it dropped off the
+    // baseline (which closed to zero). It is NOT a carve-out, though: a future
+    // raw child_process import here would be caught on its own merits.
     assert.equal(
       fileViolatesGithubSeam(
         "src/api/health.ts",
