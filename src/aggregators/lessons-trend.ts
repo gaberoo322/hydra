@@ -31,6 +31,12 @@ import {
   readFrictionPatterns,
   readMetaFrictionIssues,
 } from "./friction-source.ts";
+import {
+  windowStart as trendWindowStart,
+  dayBucketKey,
+  sortByTimeAsc,
+  type TrendPoint,
+} from "./trend-series.ts";
 import type { listIssuesBySearchOrEmpty } from "../github/issues.ts";
 import type { FrictionPattern } from "./lessons-overnight.ts";
 
@@ -49,7 +55,7 @@ export interface LessonsTrendResponse {
   windowDays: number;
   generatedAt: string;
   /** Daily-bucketed promotion counts. */
-  promotionRate: { t: string; v: number }[];
+  promotionRate: TrendPoint[];
   topFriction: FrictionItem[];
   metaFrictionOpened: number;
   /** PROMOTION_THRESHOLD echo so the dashboard can render labels. */
@@ -82,7 +88,7 @@ export async function getLessonsTrend(
   deps: LessonsTrendDeps = {},
 ): Promise<LessonsTrendResponse> {
   const now = deps.now ?? new Date();
-  const windowStart = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
+  const windowStart = trendWindowStart(now, windowDays);
 
   const [patternsResult, metaResult] = await Promise.allSettled([
     (deps.readFrictionPatterns ??
@@ -176,20 +182,16 @@ export function collectPromoted(
 /**
  * Pure helper — exported for tests. Buckets promoted entries by UTC day.
  */
-export function promotionsByDay(
-  promoted: PromotedEntry[],
-): { t: string; v: number }[] {
+export function promotionsByDay(promoted: PromotedEntry[]): TrendPoint[] {
   if (!Array.isArray(promoted) || promoted.length === 0) return [];
   const byDay = new Map<string, number>();
   for (const p of promoted) {
-    const d = new Date(p.lastSeenMs);
-    const key = dayBucketKey(d);
+    const key = dayBucketKey(new Date(p.lastSeenMs));
     byDay.set(key, (byDay.get(key) ?? 0) + 1);
   }
-  const out: { t: string; v: number }[] = [];
+  const out: TrendPoint[] = [];
   for (const [t, v] of byDay.entries()) out.push({ t, v });
-  out.sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
-  return out;
+  return sortByTimeAsc(out);
 }
 
 /**
@@ -213,11 +215,4 @@ export function pickTopFriction(
     hitCount: p.hitCount,
     lastSeen: p.lastSeen,
   }));
-}
-
-function dayBucketKey(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}T00:00:00.000Z`;
 }

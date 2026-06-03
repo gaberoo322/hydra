@@ -36,17 +36,18 @@ import {
   type Outcome,
   type OutcomeReading,
 } from "../outcomes.ts";
+import {
+  windowStart as trendWindowStart,
+  mergeWindowedPoints,
+  type TrendPoint,
+} from "./trend-series.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface TrendPoint {
-  /** ISO timestamp of the reading. */
-  t: string;
-  /** Reading value at `t`. */
-  v: number;
-}
+/** Re-export of the shared trend-series point shape (issue #956). */
+export type { TrendPoint };
 
 export interface OutcomeTrend {
   name: string;
@@ -103,7 +104,7 @@ export async function getOutcomeTrends(
   deps: OutcomeTrendsDeps = {},
 ): Promise<OutcomeTrendsResponse> {
   const now = deps.now ?? new Date();
-  const windowStart = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
+  const windowStart = trendWindowStart(now, windowDays);
 
   const loader = deps.loadOutcomes ?? defaultLoadOutcomes;
   const reader = deps.readCurrentValue ?? getOutcomeValue;
@@ -202,30 +203,17 @@ export function bucketPoints(
   windowStart: Date,
   now: Date,
 ): TrendPoint[] {
-  const startMs = windowStart.getTime();
-  const endMs = now.getTime();
-  const out: TrendPoint[] = [];
-  if (Array.isArray(historical)) {
-    for (const p of historical) {
-      if (!p || typeof p.v !== "number" || typeof p.t !== "string") continue;
-      const ms = Date.parse(p.t);
-      if (!Number.isFinite(ms)) continue;
-      if (ms < startMs || ms > endMs) continue;
-      out.push({ t: p.t, v: p.v });
-    }
-  }
-  if (current && typeof current.value === "number") {
-    const ts = typeof current.ts === "string" ? current.ts : now.toISOString();
-    const ms = Date.parse(ts);
-    if (Number.isFinite(ms) && ms >= startMs && ms <= endMs) {
-      // Append unless an identical-ts entry already exists.
-      if (!out.some((p) => p.t === ts)) {
-        out.push({ t: ts, v: current.value });
-      }
-    }
-  }
-  out.sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
-  return out;
+  // Project the current reading into the canonical `{ t, v }` shape, then
+  // defer the window-clamp + at-now append + oldest→newest sort to the
+  // shared fold.
+  const currentPoint: TrendPoint | null =
+    current && typeof current.value === "number"
+      ? {
+          t: typeof current.ts === "string" ? current.ts : now.toISOString(),
+          v: current.value,
+        }
+      : null;
+  return mergeWindowedPoints(historical, currentPoint, windowStart, now);
 }
 
 /**

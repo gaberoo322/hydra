@@ -29,15 +29,18 @@ import {
   getUsage,
   type UsageSnapshot,
 } from "../cost/usage-tracker.ts";
+import {
+  windowStart as trendWindowStart,
+  mergeWindowedPoints,
+  type TrendPoint,
+} from "./trend-series.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface QuotaPoint {
-  t: string;
-  v: number;
-}
+/** Alias of the shared trend-series point shape (issue #956). */
+export type QuotaPoint = TrendPoint;
 
 export interface QuotaTrendResponse {
   windowDays: number;
@@ -80,7 +83,7 @@ export async function getQuotaTrend(
   deps: QuotaTrendDeps = {},
 ): Promise<QuotaTrendResponse> {
   const now = deps.now ?? new Date();
-  const windowStart = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
+  const windowStart = trendWindowStart(now, windowDays);
 
   const reader = deps.readCurrentSnapshot ?? (() => getUsage());
   const history = deps.readHistoricalSnapshots ?? (async () => []);
@@ -142,37 +145,32 @@ export function computeQuotaPoints(
   windowStart: Date,
   now: Date,
 ): QuotaPoint[] {
-  const startMs = windowStart.getTime();
-  const endMs = now.getTime();
-  const out: QuotaPoint[] = [];
+  // Project both sources into the canonical `{ t, v }` shape, then defer the
+  // window-clamp + at-now append + oldest→newest sort to the shared fold.
+  const historicalPoints: TrendPoint[] = Array.isArray(historical)
+    ? historical
+        .filter(
+          (h): h is HistoricalSnapshot =>
+            !!h &&
+            typeof h.t === "string" &&
+            typeof h.percentLast7d === "number" &&
+            Number.isFinite(h.percentLast7d),
+        )
+        .map((h) => ({ t: h.t, v: h.percentLast7d }))
+    : [];
 
-  if (Array.isArray(historical)) {
-    for (const h of historical) {
-      if (!h || typeof h.t !== "string") continue;
-      if (typeof h.percentLast7d !== "number" || !Number.isFinite(h.percentLast7d))
-        continue;
-      const ms = Date.parse(h.t);
-      if (!Number.isFinite(ms)) continue;
-      if (ms < startMs || ms > endMs) continue;
-      out.push({ t: h.t, v: h.percentLast7d });
-    }
-  }
+  const currentPoint: TrendPoint | null =
+    current && typeof current.percentLast7d === "number"
+      ? {
+          t:
+            typeof current.generatedAt === "string"
+              ? current.generatedAt
+              : now.toISOString(),
+          v: current.percentLast7d,
+        }
+      : null;
 
-  if (current && typeof current.percentLast7d === "number") {
-    const ts =
-      typeof current.generatedAt === "string"
-        ? current.generatedAt
-        : now.toISOString();
-    const ms = Date.parse(ts);
-    if (Number.isFinite(ms) && ms >= startMs && ms <= endMs) {
-      if (!out.some((p) => p.t === ts)) {
-        out.push({ t: ts, v: current.percentLast7d });
-      }
-    }
-  }
-
-  out.sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
-  return out;
+  return mergeWindowedPoints(historicalPoints, currentPoint, windowStart, now);
 }
 
 function clamp01(n: number): number {

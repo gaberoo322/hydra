@@ -31,6 +31,12 @@
  */
 
 import { isAutoMergeTier } from "../tier-policy.ts";
+import {
+  windowStart as trendWindowStart,
+  bucketByDay as foldByDay,
+  mean,
+  type TrendPoint,
+} from "./trend-series.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -38,7 +44,7 @@ import { isAutoMergeTier } from "../tier-policy.ts";
 
 export interface TimeSeries {
   /** Daily-bucketed accuracy points (0..1). */
-  points: { t: string; v: number }[];
+  points: TrendPoint[];
   /** Total records the average is computed from. */
   sampleSize: number;
 }
@@ -85,7 +91,7 @@ export async function getCalibrationTrend(
   deps: CalibrationTrendDeps = {},
 ): Promise<CalibrationTrendResponse> {
   const now = deps.now ?? new Date();
-  const windowStart = new Date(now.getTime() - windowDays * 24 * 60 * 60 * 1000);
+  const windowStart = trendWindowStart(now, windowDays);
 
   const reader = deps.readCalibrationRecords ?? defaultReadCalibrationRecords;
   let records: CalibrationRecord[] = [];
@@ -214,27 +220,12 @@ export function costAccuracyForRecord(rec: CalibrationRecord): number | null {
 export function bucketByDay(
   records: CalibrationRecord[],
   score: (rec: CalibrationRecord) => number | null,
-): { t: string; v: number }[] {
-  if (!Array.isArray(records) || records.length === 0) return [];
-  const byDay = new Map<string, { sum: number; n: number }>();
-  for (const rec of records) {
-    const s = score(rec);
-    if (s === null) continue;
-    const ts = typeof rec?.recordedAt === "string" ? rec.recordedAt : "";
-    const ms = Date.parse(ts);
-    if (!Number.isFinite(ms)) continue;
-    const day = dayBucketKey(new Date(ms));
-    const entry = byDay.get(day) ?? { sum: 0, n: 0 };
-    entry.sum += s;
-    entry.n += 1;
-    byDay.set(day, entry);
-  }
-  const out: { t: string; v: number }[] = [];
-  for (const [day, { sum, n }] of byDay.entries()) {
-    out.push({ t: day, v: n > 0 ? sum / n : 0 });
-  }
-  out.sort((a, b) => Date.parse(a.t) - Date.parse(b.t));
-  return out;
+): TrendPoint[] {
+  return foldByDay(records, {
+    tsOf: (rec) => (typeof rec?.recordedAt === "string" ? rec.recordedAt : ""),
+    score,
+    combine: mean,
+  });
 }
 
 function countSamples(
@@ -247,12 +238,4 @@ function countSamples(
     if (score(rec) !== null) n += 1;
   }
   return n;
-}
-
-function dayBucketKey(d: Date): string {
-  // YYYY-MM-DDT00:00:00.000Z — start-of-day UTC.
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}T00:00:00.000Z`;
 }
