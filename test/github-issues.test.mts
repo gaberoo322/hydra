@@ -31,6 +31,8 @@ import {
   listOpenPrs,
   viewPr,
   listIssuesByLabelOrEmpty,
+  normalizePrViewFromRest,
+  _clearViewPrCache,
 } from "../src/github/issues.ts";
 
 // ---------------------------------------------------------------------------
@@ -180,6 +182,74 @@ describe("parsePrRows", () => {
 });
 
 // ---------------------------------------------------------------------------
+// PURE — REST -> --json view normalization (issue #968)
+// ---------------------------------------------------------------------------
+
+describe("normalizePrViewFromRest", () => {
+  test("projects only the requested inline fields, snake_case -> camelCase", () => {
+    const out = normalizePrViewFromRest(
+      {
+        number: 99,
+        title: "Fix it",
+        html_url: "https://github.com/acme/widgets/pull/99",
+        merged_at: "2026-06-01T00:00:00Z",
+        body: "ignored — not requested",
+      },
+      "number,title,url,mergedAt",
+    );
+    assert.deepEqual(out, {
+      number: 99,
+      title: "Fix it",
+      url: "https://github.com/acme/widgets/pull/99",
+      mergedAt: "2026-06-01T00:00:00Z",
+    });
+  });
+
+  test("flattens REST labels to the [{name}] shape recent-merges expects", () => {
+    const out = normalizePrViewFromRest(
+      { labels: [{ name: "dev_orch", color: "abc" }, { name: "tier:3" }, "garbage"] },
+      "labels",
+    );
+    assert.deepEqual(out.labels, [{ name: "dev_orch" }, { name: "tier:3" }]);
+  });
+
+  test("maps merged_by + a Bot type into the {login,is_bot} actor shape", () => {
+    const out = normalizePrViewFromRest(
+      { merged_by: { login: "github-actions[bot]", type: "Bot" } },
+      "mergedBy",
+    );
+    assert.deepEqual(out.mergedBy, { login: "github-actions[bot]", is_bot: true });
+  });
+
+  test("a human merger has no is_bot flag (classifyAutonomy keys off login suffix)", () => {
+    const out = normalizePrViewFromRest(
+      { merged_by: { login: "alice", type: "User" } },
+      "mergedBy",
+    );
+    assert.deepEqual(out.mergedBy, { login: "alice" });
+  });
+
+  test("reviews/commits come from sub-results, normalized to author actors", () => {
+    const out = normalizePrViewFromRest(
+      {},
+      "reviews,commits",
+      {
+        reviews: [{ user: { login: "alice", type: "User" } }],
+        commits: [{ author: { login: "github-actions[bot]", type: "Bot" } }],
+      },
+    );
+    assert.deepEqual(out.reviews, [{ author: { login: "alice" } }]);
+    assert.deepEqual(out.commits, [{ author: { login: "github-actions[bot]", is_bot: true } }]);
+  });
+
+  test("missing sub-results degrade to empty arrays, never throw", () => {
+    const out = normalizePrViewFromRest({}, "reviews,commits");
+    assert.deepEqual(out.reviews, []);
+    assert.deepEqual(out.commits, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // WIRED — readers through a fake gh binary
 // ---------------------------------------------------------------------------
 
@@ -194,6 +264,17 @@ describe("GitHub Issue/PR Read seam — wired readers", () => {
 set -u
 SCENARIO=\${FAKE_SCENARIO:-issues}
 printf '%s\\n' "$(printf '%s ' "$@")" >> "${log}"
+# REST transport: 'gh api repos/<repo>/pulls/<n>[/reviews|/commits]'
+if [ "\${1:-}" = "api" ]; then
+  case "\${2:-}" in
+    */reviews) echo '[{"user":{"login":"alice","type":"User"}}]'; exit 0 ;;
+    */commits) echo '[{"author":{"login":"github-actions[bot]","type":"Bot"}}]'; exit 0 ;;
+    *)
+      if [ "\${FAKE_API_FAIL:-}" = "1" ]; then echo "boom" >&2; exit 1; fi
+      echo '{"number":33,"title":"R","html_url":"https://x/pull/33","merged_at":"2026-06-01T00:00:00Z","labels":[{"name":"qa"}],"merged_by":{"login":"github-actions[bot]","type":"Bot"}}'
+      exit 0 ;;
+  esac
+fi
 case "$SCENARIO" in
   issues) echo '[{"number":11,"title":"A","labels":[{"name":"dev_orch"}],"state":"open"}]'; exit 0 ;;
   prs)    echo '[{"number":22,"title":"P","statusCheckRollup":[{"conclusion":"FAILURE","name":"ci"}]}]'; exit 0 ;;
@@ -225,6 +306,8 @@ esac
   beforeEach(async () => {
     await writeFile(invocationsPath, "", "utf-8");
     delete process.env.FAKE_SCENARIO;
+    delete process.env.FAKE_API_FAIL;
+    _clearViewPrCache();
   });
 
   after(async () => {
@@ -275,14 +358,76 @@ esac
     }
   });
 
-  test("viewPr returns the raw parsed object", async () => {
-    process.env.FAKE_SCENARIO = "one";
-    const view = await viewPr<{ number: number; labels: Array<{ name: string }> }>(
-      33,
-      "number,labels",
-    );
+  test("viewPr defaults to the REST transport (gh api), not GraphQL pr view (issue #968)", async () => {
+    const view = await viewPr<{
+      number: number;
+      title: string;
+      url: string;
+      mergedAt: string;
+      labels: Array<{ name: string }>;
+    }>(33, "number,title,url,mergedAt,labels");
     assert.ok(view);
     assert.equal(view!.number, 33);
+    assert.equal(view!.url, "https://x/pull/33");
+    assert.deepEqual(view!.labels, [{ name: "qa" }]);
+    const inv = await readInvocations();
+    assert.ok(
+      inv.some((l) => l.startsWith("api repos/")),
+      "expected a REST `gh api` invocation",
+    );
+    assert.ok(
+      !inv.some((l) => l.startsWith("pr view")),
+      "must NOT use the GraphQL `gh pr view` transport by default",
+    );
+  });
+
+  test("viewPr fans out REST sub-calls only for reviews/commits", async () => {
+    const view = await viewPr<{
+      mergedBy: { login: string; is_bot?: boolean };
+      reviews: Array<{ author: { login: string } }>;
+      commits: Array<{ author: { login: string; is_bot?: boolean } }>;
+    }>(33, "mergedBy,reviews,commits");
+    assert.ok(view);
+    assert.deepEqual(view!.mergedBy, { login: "github-actions[bot]", is_bot: true });
+    assert.deepEqual(view!.reviews, [{ author: { login: "alice" } }]);
+    assert.deepEqual(view!.commits, [
+      { author: { login: "github-actions[bot]", is_bot: true } },
+    ]);
+    const inv = await readInvocations();
+    assert.ok(inv.some((l) => l.includes("/reviews")), "expected a reviews sub-call");
+    assert.ok(inv.some((l) => l.includes("/commits")), "expected a commits sub-call");
+  });
+
+  test("viewPr transport:'graphql' opts back into the legacy gh pr view path", async () => {
+    process.env.FAKE_SCENARIO = "one";
+    const view = await viewPr<{ number: number }>(33, "number,labels", {
+      transport: "graphql",
+    });
+    assert.ok(view);
+    assert.equal(view!.number, 33);
+    const inv = await readInvocations();
+    assert.ok(inv.some((l) => l.startsWith("pr view 33")), "expected `gh pr view`");
+    assert.ok(!inv.some((l) => l.startsWith("api ")), "must not hit REST");
+  });
+
+  test("viewPr caches a successful read — a second call does not re-spawn gh", async () => {
+    const first = await viewPr<{ number: number }>(33, "number,title");
+    assert.ok(first);
+    await writeFile(invocationsPath, "", "utf-8"); // reset the spawn log
+    const second = await viewPr<{ number: number }>(33, "number,title");
+    assert.ok(second);
+    assert.equal(second!.number, 33);
+    const inv = await readInvocations();
+    assert.equal(inv.length, 0, "second call should be served from cache");
+  });
+
+  test("viewPr does NOT cache a null (transient failure must not pin)", async () => {
+    process.env.FAKE_API_FAIL = "1";
+    const miss = await viewPr(33, "number");
+    assert.equal(miss, null);
+    delete process.env.FAKE_API_FAIL;
+    const hit = await viewPr<{ number: number }>(33, "number");
+    assert.ok(hit, "a later success must not be shadowed by a cached null");
   });
 
   test("a gh failure maps to the never-throw failure arm with a code", async () => {
@@ -293,7 +438,7 @@ esac
   });
 
   test("viewPr returns null on failure (no throw)", async () => {
-    process.env.FAKE_SCENARIO = "fail";
+    process.env.FAKE_API_FAIL = "1";
     const view = await viewPr(1, "number");
     assert.equal(view, null);
   });
