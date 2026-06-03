@@ -43,6 +43,7 @@
  */
 
 import type { UsageSnapshot } from "../cost/usage-tracker.ts";
+import { settledOr } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -95,12 +96,6 @@ export async function getCostBurn(deps: CostBurnDeps = {}): Promise<CostBurn> {
   });
 
   return { lastHourSpark };
-}
-
-function settledOr<T>(result: PromiseSettledResult<T>, fallback: T, label: string): T {
-  if (result.status === "fulfilled") return result.value;
-  console.error(`[cost-burn] ${label} failed: ${result.reason?.message || result.reason}`);
-  return fallback;
 }
 
 async function readUsage(

@@ -61,6 +61,7 @@ import { getMetricsTrend } from "../metrics/trend.ts";
 import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { listAutopilotPrLinksSince } from "../redis/autopilot-runs.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
+import { settledOrNull } from "./settle.ts";
 
 // The production default routes `gh`/`git` through the GitHub CLI Adapter seam
 // (issue #899). Tests still inject `deps.execFileAsync` directly — this only
@@ -222,14 +223,6 @@ export async function getBuilderHealthScorecard(
     scopeViolations: settledOrNull(scopeResult, "scope-violations"),
     learningThroughput: settledOrNull(learningResult, "learning-throughput"),
   };
-}
-
-function settledOrNull<T>(result: PromiseSettledResult<T>, label: string): T | null {
-  if (result.status === "fulfilled") return result.value;
-  console.error(
-    `[builder-health] sub-source failed (${label}): ${(result.reason as any)?.message || result.reason}`,
-  );
-  return null;
 }
 
 function clampWindow(v: unknown, fallback: number, min: number, max: number): number {
