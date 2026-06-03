@@ -117,7 +117,6 @@ You have full filesystem access. Key locations:
 | `~/hydra/config/feedback/to-skeptic.md` | Feedback for skeptic agent |
 | `~/hydra/config/research/` | Researcher methodology overrides |
 | Redis `hydra:reports:research:*` | Research cycle reports |
-| Redis `hydra:reports:reality:*` | Execution cycle reports |
 
 You can read and edit any of these files directly to steer Hydra's behavior.
 

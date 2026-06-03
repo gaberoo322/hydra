@@ -10,7 +10,7 @@
  * where individual sources come from.
  *
  * Depends on: agent-memory, metrics, grounding, backlog (dynamic),
- *             reflections, ioredis (for continuity), redis-keys
+ *             reflections
  */
 
 import { readFile } from "node:fs/promises";
@@ -23,12 +23,7 @@ import {
   type LearningContextBlock,
 } from "./learning.ts";
 import { getCumulativeAccomplishments } from "./metrics/aggregate.ts";
-import { summarizeForPrompt, getDiff } from "./grounding.ts";
-import {
-  getRecentReportIdsDesc,
-  getRealityReport,
-} from "./redis/reality-reports.ts";
-import { getTargetWorkspace } from "./target-config.ts";
+import { summarizeForPrompt } from "./grounding.ts";
 import { findRelatedFiles } from "./repo-file-matcher.ts";
 import { formatScopedFileTree } from "./repo-file-tree-format.ts";
 
@@ -394,7 +389,8 @@ export async function buildPlannerContext(
     return `## ALREADY ACCOMPLISHED (do NOT re-propose these)\n${acc.map((a) => `- "${a.title}"`).join("\n")}\n`;
   }, warnings);
 
-  // Load continuity context (last cycle report + repo diff)
+  // Load continuity context (no producer since the reality-report read path
+  // was removed in #965 — kept as a registry slot for a future source).
   const continuityContext = await loadContinuityContext(anchor, warnings);
 
   // Issue #366: build the scoped file-tree block from grounding.fileTree.
@@ -539,69 +535,25 @@ export function buildScopedFileTree(
 }
 
 // ---------------------------------------------------------------------------
-// Continuity context — last cycle report, repo diff, episodic reflections
+// Continuity context — formerly the last-cycle reality report + repo diff
 // ---------------------------------------------------------------------------
+//
+// The continuity block was sourced from the per-cycle reality report
+// (hydra:reports:reality:*). That subsystem was write-dead — saveRealityReport
+// had zero callers after the codex control loop was retired (ADR-0006 /
+// ADR-0012) — so this block had no producer and always rendered empty. The
+// reality-report read path was removed in #965; the per-run-reflection role it
+// once played is now covered by the retro subsystem (#917-#921).
+//
+// The `continuity` source slot is retained in PLANNER_SOURCE_REGISTRY (and the
+// continuityContext field) so the budget/registry shape is unchanged; it simply
+// has no producer now. If a future continuity source is wired, it plugs in here.
 
 async function loadContinuityContext(
-  anchor: { type: string; reference: string; [k: string]: any },
-  warnings: string[],
+  _anchor: { type: string; reference: string; [k: string]: any },
+  _warnings: string[],
 ): Promise<string> {
-  const PROJECT_WORKSPACE = getTargetWorkspace();
-  let continuityContext = "";
-
-  // Last cycle report (single fetch, format separately)
-  const lastCycleReport = await loadSource("continuity-report", () => loadLastCycleReportFull(), warnings);
-  const lastReport = lastCycleReport ? formatCycleReport(lastCycleReport) : null;
-  if (lastReport) {
-    if (lastCycleReport?.commitSha) {
-      try {
-        const { diff: diffSince, stat: diffStat } = await getDiff(PROJECT_WORKSPACE, lastCycleReport.commitSha);
-        const diffLines = diffSince.split("\n").length;
-        continuityContext = `## CONTINUITY (what happened since last cycle)\n${lastReport}\n\nRepo changes since last cycle commit (${lastCycleReport.commitSha.slice(0, 7)}): ${diffLines} diff lines\n`;
-        if (diffLines > 0 && diffLines < 200) {
-          continuityContext += `Diff stat:\n${diffStat}\n`;
-        }
-      } catch (err: any) {
-        console.error(`[ContextBuilder] Continuity diff failed, using simpler context: ${err.message}`);
-        continuityContext = `## CONTINUITY\n${lastReport}\n`;
-      }
-    } else {
-      continuityContext = `## CONTINUITY\n${lastReport}\n`;
-    }
-  }
-
-  // Episodic reflections and global reflections are now loaded via
-  // getContext() in buildPlannerContext() and included in plannerMemory.
-
-  return continuityContext;
-}
-
-// ---------------------------------------------------------------------------
-// loadLastCycleReport / loadLastCycleReportFull — moved from control-loop.ts
-// ---------------------------------------------------------------------------
-
-function formatCycleReport(report: any): string {
-  return [
-    `Last cycle: ${report.cycleId}`,
-    `Task: "${report.task?.title}" → ${report.task?.finalState}`,
-    `Tests: ${report.grounding?.before?.passed} → ${report.grounding?.after?.passed}`,
-    report.regressionIntroduced ? "WARNING: Regression introduced" : "No regression",
-    `Commit: ${report.commitSha || "none"}`,
-    report.rollbackRisk ? `Rollback risk: ${report.rollbackRisk}` : "",
-    report.filesChanged?.length > 0 ? `Files changed: ${report.filesChanged.join(", ")}` : "",
-  ].filter(Boolean).join("\n");
-}
-
-async function loadLastCycleReportFull(): Promise<any> {
-  try {
-    const recentIds = await getRecentReportIdsDesc(1);
-    if (recentIds.length === 0) return null;
-    const raw = await getRealityReport(recentIds[0]);
-    return raw ? JSON.parse(raw) : null;
-  } catch (err: any) {
-    console.error(`[ContextBuilder] loadLastCycleReportFull failed: ${err.message}`);
-    return null;
-  }
+  return "";
 }
 
 // ---------------------------------------------------------------------------

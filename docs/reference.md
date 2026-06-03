@@ -32,8 +32,6 @@ For module roles and file structure, explore `src/` directly — static inventor
 | `hydra:memory:{agent}:patterns` | String -- consolidated JSON patterns (15-slot rolling buffer) |
 | `hydra:memory:last-consolidation` | Timestamp of last memory consolidation |
 | `hydra:reflections:{ref}` | List -- episodic failure reflections (7-day TTL) |
-| `hydra:reports:reality:{id}` | String -- reality report JSON |
-| `hydra:reports:reality:index` | Sorted set -- reality report IDs |
 | `hydra:reports:summary:*` | String -- cycle summary (2-day TTL) |
 | `hydra:reports:research:*` | String -- research report JSON |
 | `hydra:reports:research:index` | Sorted set -- research report IDs |

@@ -8,9 +8,8 @@
  * Migrates:
  *   1. Backlog items (backlog.md → Redis)
  *   2. Agent memory rules (agent-memory/*.md → Redis)
- *   3. Reality reports (reports/reality-reports/*.json → Redis)
- *   4. Research reports (reports/research/*.json → Redis)
- *   5. All of the above → OpenViking for semantic search
+ *   3. Research reports (reports/research/*.json → Redis)
+ *   4. All of the above → OpenViking for semantic search
  */
 
 import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
@@ -210,48 +209,7 @@ async function backfillAgentMemory() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Reality Reports
-// ---------------------------------------------------------------------------
-
-async function backfillRealityReports() {
-  const existing = await redis.zcard("hydra:reports:reality:index");
-  if (existing > 0) {
-    console.log(`[Reality] Redis already has ${existing} reports, skipping`);
-    return;
-  }
-
-  const dir = join(VAULT_PATH, "reports", "reality-reports");
-  let files;
-  try { files = (await readdir(dir)).filter(f => f.endsWith(".json")).sort(); } catch { return; }
-
-  // Keep only the 50 most recent
-  const recentFiles = files.slice(-50);
-  let migrated = 0;
-
-  for (const file of recentFiles) {
-    try {
-      const raw = await readFile(join(dir, file), "utf-8");
-      const report = JSON.parse(raw);
-      const cycleId = report.cycleId || file.replace(".json", "");
-      const ts = new Date(report.timestamp || report.completedAt || Date.now()).getTime();
-
-      await redis.set(`hydra:reports:reality:${cycleId}`, raw);
-      await redis.zadd("hydra:reports:reality:index", ts, cycleId);
-      migrated++;
-
-      // Index summary to OpenViking
-      const summary = `Cycle ${cycleId}: ${report.task?.title} — ${report.task?.finalState}. Tests: ${report.grounding?.before?.passed}→${report.grounding?.after?.passed}. Files: ${(report.filesChanged || []).join(", ")}`;
-      await indexToOV(`reality-report:${cycleId}`, summary);
-    } catch (err) {
-      console.error(`  [Reality] Failed to process ${file}: ${err.message}`);
-    }
-  }
-
-  console.log(`[Reality] Migrated ${migrated} reports to Redis`);
-}
-
-// ---------------------------------------------------------------------------
-// 4. Research Reports
+// 3. Research Reports
 // ---------------------------------------------------------------------------
 
 async function backfillResearchReports() {
@@ -292,7 +250,7 @@ async function backfillResearchReports() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Index config files to OpenViking
+// 4. Index config files to OpenViking
 // ---------------------------------------------------------------------------
 
 async function indexConfigFiles() {
@@ -323,7 +281,6 @@ async function main() {
 
   await backfillBacklog();
   await backfillAgentMemory();
-  await backfillRealityReports();
   await backfillResearchReports();
   await indexConfigFiles();
 

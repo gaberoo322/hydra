@@ -295,7 +295,7 @@ async function main() {
     console.log(`[Hydra] WebSocket: ws://localhost:${PORT}`);
   });
 
-  // Report cleanup (cycle-summaries 2d, reality-reports keep 50)
+  // Report cleanup (cycle-summaries 2d TTL, stale Redis keys, done items)
   startCleanupSchedule();
 
   // Auto-start scheduler

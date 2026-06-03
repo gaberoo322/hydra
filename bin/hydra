@@ -26,14 +26,6 @@
 #     This CLI is the ONLY write path — the autopilot can never set/clear it.
 #   hydra cycle status
 #   hydra cycle start
-#   hydra cycle reality [<cycleId>]
-#     Fetches the reality report for <cycleId>. With no argument, resolves
-#     the most recent cycle from `/cycle/history?limit=1` and uses that ID.
-#     Issue #448: the legacy `/api/cycle/reality` route shape never existed
-#     after the router refactor — every invocation 404'd and the CLI printed
-#     the Express HTML to stdout. The current path is `/cycle/:cycleId/reality`
-#     and `_get` now detects HTML / non-2xx responses and exits non-zero so
-#     callers (skills, operators) don't silently consume error pages.
 #   hydra backlog ls | counts | move <id> <lane>
 #     move semantics (issue #537): PATCHes `/backlog/:id/move` with
 #     `{"lane": "<lane>"}`. Pre-fix, the CLI PATCHed `/backlog/:id` which
@@ -141,33 +133,6 @@ cmd_cycle() {
   case "${1:-}" in
     status ) _get "/cycle/status" ;;
     start  ) _post "/cycle/start" ;;
-    reality)
-      # Issue #448: the real route is /cycle/:cycleId/reality, never
-      # /cycle/reality. Accept an explicit cycleId or resolve the most
-      # recent one from /cycle/history when the operator omits it.
-      shift
-      local cid="${1:-}"
-      if [ -z "$cid" ]; then
-        local hist
-        hist="$(_get "/cycle/history?limit=1")" || {
-          echo "hydra cycle reality: could not resolve a recent cycleId (history fetch failed)" >&2
-          exit 1
-        }
-        cid="$(printf '%s' "$hist" | python3 -c 'import json,sys
-try:
-    rows = json.loads(sys.stdin.read())
-    if isinstance(rows, list) and rows:
-        cid = rows[0].get("cycleId") or rows[0].get("id") or ""
-        print(cid)
-except Exception:
-    pass
-')"
-        if [ -z "$cid" ]; then
-          echo "hydra cycle reality: no cycle history available — pass an explicit <cycleId>" >&2
-          exit 1
-        fi
-      fi
-      _get "/cycle/$cid/reality" ;;
     history)
       shift
       local q=""
@@ -178,7 +143,7 @@ except Exception:
         esac
       done
       _get "/cycle/history${q}" ;;
-    *      ) echo "hydra cycle: need status|start|reality|history" >&2; exit 2 ;;
+    *      ) echo "hydra cycle: need status|start|history" >&2; exit 2 ;;
   esac
 }
 

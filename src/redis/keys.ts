@@ -123,8 +123,12 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   // Reports
   // ---------------------------------------------------------------------------
-  realityReport: (id: string) => `hydra:reports:reality:${id}`,
-  realityReportIndex: () => "hydra:reports:reality:index",
+  // `realityReport` / `realityReportIndex` removed in #965 — the reality-report
+  // subsystem was write-dead (saveRealityReport had zero callers; the writer was
+  // a codex control-loop artifact, retired under ADR-0006/ADR-0012). The read
+  // path (API route, CLI, context-builder continuity, knowledge-indexer poll)
+  // was deleted with it. Residual `hydra:reports:reality:*` keys may remain in
+  // Redis but are no longer read or written.
   summaryReport: (suffix: string) => `hydra:reports:summary:${suffix}`,
   // `researchReport` / `researchReportIndex` removed in #863 — the in-process
   // research read surface (research-loop.ts + redis/research-reports.ts) was

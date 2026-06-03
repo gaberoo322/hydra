@@ -1,6 +1,5 @@
 import { Router } from "express";
 import { getCycleStatus, getCycleHistory } from "../cycle.ts";
-import { getRealityReport } from "../redis/reality-reports.ts";
 import {
   registerCycleSource,
   releaseCycleSource,
@@ -65,17 +64,6 @@ export function createCyclesRouter(_eventBus: any) {
           inProgress: Math.max(0, total - completed - failed - abandoned - timedOut),
         },
       });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /cycle/:cycleId/reality — Reality report for a specific cycle
-  router.get("/cycle/:cycleId/reality", async (req, res) => {
-    try {
-      const raw = await getRealityReport(req.params.cycleId);
-      if (!raw) return res.status(404).json({ error: "Reality report not found" });
-      res.json(JSON.parse(raw));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
