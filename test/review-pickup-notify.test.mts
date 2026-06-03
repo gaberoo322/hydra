@@ -1,6 +1,8 @@
 /**
  * Regression tests for the /hydra-review pickup-set phone-notify hook
- * (issue #745) — the edge-trigger logic in `checkReviewPickupNotify`.
+ * (issue #745) — the edge-trigger logic in `checkReviewPickupNotify`. Moved
+ * from `src/scheduler/heartbeat.ts` into the Housekeeping Module
+ * (`src/scheduler/housekeeping.ts`) in issue #938.
  *
  * Invariants under test (the issue's acceptance criteria):
  *   - empty -> non-empty fires EXACTLY ONE notification
@@ -16,7 +18,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { checkReviewPickupNotify } from "../src/scheduler/heartbeat.ts";
+import { checkReviewPickupNotify } from "../src/scheduler/housekeeping.ts";
 import { formatMessage } from "../src/notify.ts";
 
 interface PublishedEvent {

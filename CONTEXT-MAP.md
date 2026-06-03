@@ -17,7 +17,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/schemas/` | Schemas | _lazy_ | ADR-0011 |
 | `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | _lazy_ | — |
 | `src/autopilot/` | Autopilot Run, Autopilot Turn, Autopilot Focus | _lazy_ | ADR-0006, ADR-0007, ADR-0012 |
-| `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Research Floor | _lazy_ | ADR-0012 |
+| `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping, Research Floor | _lazy_ | ADR-0012 |
 | `src/pattern-memory/` | Pattern Memory | _lazy_ | — |
 | `src/reflections/` | Reflections | _lazy_ | — |
 | `src/knowledge-base/` | Knowledge Base | _lazy_ | — |
