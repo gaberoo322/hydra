@@ -78,7 +78,13 @@ Drop a candidate before it becomes an issue when ANY of:
 
 - It touches the **Untouchable Core** (`src/untouchable.ts` protected paths: merge gate, rollback, watchdog, cost guardrails) as its *primary* change. Those are operator-only (ADR-0001/0004) and an architecture-scan issue should not steer an agent at them. Note the friction in the report, but do not file it as a deepening issue.
 - It duplicates an already-open issue carrying the `architecture-scan` label (read the board in step 0/§"When NOT to run this"). Re-filing the same deepening candidate every idle tick is the exact failure `hydra-tool-scout`'s seen-list guards against; here the lightweight equivalent is a title/scope match against open `architecture-scan` issues.
-- It fails the **deletion test** (deleting the module would just move complexity, not concentrate it) — that means it was a genuine pass-through and there is nothing to deepen.
+- It fails the **deletion test as a pass-through** — deleting the module would just *move* complexity to its callers, not concentrate it. The module *has* live callers; it is genuinely earning its place in the call graph as a pass-through layer, so there is nothing to deepen. Drop it (note the friction in the report).
+
+> **Deletion-test failure is two different findings — split them before dropping.** A candidate that fails the deletion test is NOT always a pass-through. The old rule conflated two distinct outcomes and discarded both; only one of them is actually a drop:
+> - **Pass-through (drop)** — the module has live callers; deleting it would push its complexity onto them rather than concentrate it. There is nothing to deepen *and* nothing dead. **Drop**, per the rule above.
+> - **Genuinely unreferenced (re-route, do NOT drop)** — the module/export/file has **no live callers at all** (verify with `Grep`/`Glob`: no production import, re-export, or dynamic reference reaches it; test-only consumers do not count as live — mirror the cleanup test-only exclusion). It "fails" the deletion test only because there is no complexity left to concentrate — it is **dead code**, not a pass-through. Do **not** discard it: re-route it to a **dead-code deletion candidate** in step 4b, following the `hydra-cleanup` (slice beta, #960) convention. This is the genuinely-orphaned code the architecture pass used to throw away.
+>
+> When unsure whether a finding is a pass-through or genuinely unreferenced, treat it as a pass-through and drop it: architecture-scan stays conservative, and a missed dead-code finding is recovered by the deterministic `hydra-cleanup` (`knip`) pass on the next idle tick.
 
 ### 4. Emit issues (via hydra-prd or to-issues — labelled `needs-triage`)
 
@@ -130,6 +136,25 @@ will run.>
 
 **Labelling rule (HARD):** every emitted issue carries `enhancement`, `needs-triage`, and `architecture-scan`. **NEVER `ready-for-agent`.** The architecture-scan fallback produces *candidate* work; the operator (or `/hydra-sweep` triage) is the accept point. Auto-routing a self-generated deepening straight to `ready-for-agent` would let the autopilot dispatch a refactor it invented against itself with no human checkpoint — exactly the loop the `needs-triage` gate exists to break.
 
+### 4b. Re-route genuinely-dead findings to deletion (cleanup convention)
+
+The step-3 split routes here every finding that failed the deletion test **because it has no live callers at all** (the *genuinely unreferenced* branch, not the pass-through branch). These are NOT deepening candidates — there is no interface to deepen, only dead code to remove — so they do **not** use the architecture-scan issue body or label set above. Instead, emit each as a **dead-code deletion candidate following the `hydra-cleanup` (slice beta, #960) convention**, so it joins the same deterministic-confidence lane as the `knip` findings:
+
+- **Body** — the `hydra-cleanup` issue schema (`# cleanup: remove unused <export|file> ...`), not the architecture-scan schema. Acceptance criterion is the self-checking *"remove X **AND** `npm test` / `tsc` still pass"* — exactly as in `docs/operator-playbooks/hydra-cleanup.md` §3. The "Finding" is *manually surfaced by the architecture pass and verified unreferenced via `Grep`/`Glob`* rather than reported by `knip`; say so in the body so the provenance is honest.
+- **Labels (HARD)** — `cleanup-scan` + `ready-for-agent` (the same labels `hydra-cleanup` uses), **not** `architecture-scan` / `needs-triage`. The `cleanup-scan` label is the count seam `collect-state.sh` reads for `cleanup_board_saturated`, and routing to `ready-for-agent` is justified by the *same* confidence logic as cleanup: the acceptance check is deterministic (no references AND the suite/type-checker still pass), so no operator triage gate is needed.
+- **Emit path** — one `gh issue create` per finding (independent single-finding tickets, like cleanup), not the `hydra-prd` epic path.
+- **Filter parity** — apply the cleanup test-only / entrypoint / Verifier-Core exclusions before emitting: never re-route a test file, a test-only export, a public entrypoint, or a Verifier-Core path as a deletion candidate (mirror `hydra-cleanup` §2). When in doubt, drop rather than re-route.
+- **Dedup** — a finding that already has an open `cleanup-scan` issue (path/title match) is a duplicate; skip it. This keeps the architecture pass from re-filing what the deterministic `hydra-cleanup` pass already surfaced.
+
+```bash
+gh issue create --repo gaberoo322/hydra \
+  --title "cleanup: remove unused file \`src/foo/dead.ts\`" \
+  --label cleanup-scan --label ready-for-agent \
+  --body-file /tmp/arch-scan-deadcode-N.md
+```
+
+This is the recovery the gamma slice (#961) adds: dead code the architecture pass previously discarded with its pass-throughs is now routed to deletion instead of thrown away, joining the high-confidence mechanical lane rather than the judgment-call deepening lane.
+
 ### 5. Report (deterministic summary)
 
 Print a single-pass summary — this is the operator's accept/reject surface:
@@ -138,10 +163,11 @@ Print a single-pass summary — this is the operator's accept/reject surface:
 hydra-architecture-scan — Orchestrator (~/hydra) — 2026-05-31T19:32:00Z — apply
 
 Explored:  src/, dashboard/src/, scripts/
-Candidates surfaced:  5
-After filter (untouchable/dup/deletion-test):  3
-Emitted:  1 epic (#NNN) + 3 children (#NNN, #NNN, #NNN)  [needs-triage]
-Dropped:  2  (1 touches Untouchable Core; 1 failed deletion test)
+Candidates surfaced:  6
+After filter (untouchable/dup/pass-through):  3
+Emitted (deepening):    1 epic (#NNN) + 3 children (#NNN, #NNN, #NNN)  [needs-triage, architecture-scan]
+Re-routed (dead code):  1 deletion candidate (#NNN)  [ready-for-agent, cleanup-scan]
+Dropped:  2  (1 touches Untouchable Core; 1 failed deletion test as a pass-through)
 Board saturation:  ok (4 open architecture-scan issues, under the 10 cap)
 ```
 
@@ -151,7 +177,8 @@ In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the e
 
 - **Zero `AskUserQuestion`.** This is the decisive constraint the research (#776) found — the interactive skill cannot run unattended. This wrapper presents candidates into issue bodies and stops; it never asks the operator to pick one.
 - **Do NOT modify `improve-codebase-architecture`.** Re-use its Explore + Present-candidates process; never edit the upstream skill or its bundled docs.
-- **Issues land in `needs-triage`, never `ready-for-agent`.** The operator/triage is the accept point. No self-dispatch of self-invented refactors.
+- **Deepening candidates land in `needs-triage`, never `ready-for-agent`.** The operator/triage is the accept point. No self-dispatch of self-invented refactors. The single exception is a **dead-code deletion candidate** (a deletion-test failure that is *genuinely unreferenced*, not a pass-through): it re-routes to the `hydra-cleanup` convention (`cleanup-scan` + `ready-for-agent`) per step 4b, because its acceptance check is deterministic — that is mechanically-verifiable cleanup, not a judgment-call deepening.
+- **Deletion-test failure is a fork, not a discard.** A *pass-through* (live callers, complexity would move not concentrate) is dropped; a *genuinely-unreferenced* finding (no live callers at all, test-only consumers excluded) is re-routed to a deletion candidate, never thrown away (#961). When unsure, drop.
 - **Orchestrator-scoped.** Always `~/hydra`. Not parameterised to the Target.
 - **Steps 1–2 only.** Never run the upstream skill's step-3 grilling loop, and never propose concrete interfaces or write code. Solution descriptions stay plain-English.
 - **Don't steer at the Untouchable Core.** A candidate whose primary change is a protected path (ADR-0001/0004) is reported as friction but not filed as an actionable issue.
@@ -171,8 +198,9 @@ Phase A acceptance flow — the operator runs this before #790 wires the autopil
 Expected:
 
 - The Explore phase surfaces 3–6 deepening candidates in `CONTEXT.md` + `LANGUAGE.md` vocabulary.
-- The filter drops candidates that touch the Untouchable Core, duplicate an open `architecture-scan` issue, or fail the deletion test.
-- `--apply` files issues labelled `enhancement`, `needs-triage`, `architecture-scan` — and **never** `ready-for-agent`.
+- The filter drops candidates that touch the Untouchable Core, duplicate an open `architecture-scan` issue, or fail the deletion test **as a pass-through**.
+- A deletion-test failure that is **genuinely unreferenced** (no live callers at all) is re-routed to a dead-code deletion candidate following the `hydra-cleanup` convention — `cleanup-scan` + `ready-for-agent`, deterministic "remove X AND test/tsc green" acceptance — not dropped (#961).
+- `--apply` files deepening issues labelled `enhancement`, `needs-triage`, `architecture-scan` — and **never** `ready-for-agent`; re-routed dead-code deletion candidates instead carry `cleanup-scan`, `ready-for-agent`.
 - Re-running `--apply` against an already-saturated board emits nothing and prints the board-saturation skip.
 - The interactive `improve-codebase-architecture` skill is unchanged (`git status` shows no edits under `~/.claude/skills/improve-codebase-architecture/`).
 
@@ -194,6 +222,7 @@ See parent epic #787 for the full roadmap.
 - `~/.claude/skills/improve-codebase-architecture/` — the upstream interactive skill this wrapper re-uses (Explore + Present-candidates, steps 1–2). **Read-only — never edited by this skill.**
 - `docs/operator-playbooks/hydra-prd.md` — the `≥3`-candidate emission path (parent epic + children).
 - `~/.claude/skills/to-issues/` (upstream) — the `1–2`-candidate emission path.
+- `docs/operator-playbooks/hydra-cleanup.md` — the dead-code deletion convention (`cleanup-scan` + `ready-for-agent`, deterministic "remove X AND test/tsc green" acceptance) that step 4b re-uses for genuinely-unreferenced findings (#961).
 
 ## Tier
 
