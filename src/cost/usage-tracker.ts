@@ -89,11 +89,14 @@
  *     contract, ADR-0021).
  */
 
-import { readdir, readFile, stat } from "node:fs/promises";
-import type { Dirent, Stats } from "node:fs";
-import { basename, join } from "node:path";
-import { homedir } from "node:os";
+import { readFile, stat } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { getSubagentDispatch } from "../redis/dispatches.ts";
+import {
+  projectsRoot,
+  listTranscriptFiles,
+  sessionIdFromPath as transcriptSessionIdFromPath,
+} from "../transcript-store.ts";
 
 /**
  * Bucket key for sessions that have no `hydra:dispatches:subagent:{sessionId}`
@@ -577,10 +580,6 @@ function emptyByModel(): Record<ModelFamily, TokenBreakdown> {
   };
 }
 
-function getProjectsRoot(): string {
-  return process.env.HYDRA_CLAUDE_PROJECTS_ROOT || join(homedir(), ".claude", "projects");
-}
-
 export function clearUsageCache(): void {
   cache = null;
 }
@@ -617,7 +616,7 @@ export async function getUsage(opts: {
     }
   }
 
-  const root = opts.projectsRoot ?? getProjectsRoot();
+  const root = opts.projectsRoot ?? projectsRoot();
   const resolveSkill = opts.resolveSkill ?? defaultSkillResolver;
   const snapshot = await scanUsage(root, now, resolveSkill);
 
@@ -628,16 +627,17 @@ export async function getUsage(opts: {
 }
 
 /**
- * Derive a transcript's sessionId from its file path. The Claude Code layout
- * names each transcript `<sessionId>.jsonl`, and the SessionStart capture hook
- * (issue #692) registers the dispatch under exactly that `session_id`, so the
- * filename basename is the join key into the dispatch registry. Resolving once
- * per file (not per line) keeps attribution O(files), honouring the design
- * invariant. (issue #693)
+ * Derive a transcript's sessionId from its file path. The SessionStart capture
+ * hook (issue #692) registers the dispatch under exactly the `<sessionId>.jsonl`
+ * filename stem, so the basename is the join key into the dispatch registry.
+ * Resolving once per file (not per line) keeps attribution O(files), honouring
+ * the design invariant. (issue #693)
+ *
+ * Re-exported from the **Transcript Store** Seam (`src/transcript-store.ts`,
+ * issue #951) — the single owner of the `<sessionId>.jsonl` filename grammar —
+ * kept on this surface for existing callers (`src/cost/index.ts`, tests).
  */
-export function sessionIdFromPath(filePath: string): string {
-  return basename(filePath, ".jsonl");
-}
+export const sessionIdFromPath = transcriptSessionIdFromPath;
 
 async function scanUsage(
   root: string,
@@ -699,7 +699,7 @@ async function scanUsage(
   let linesWithUsage = 0;
   let parseErrors = 0;
 
-  const files = await listJsonlFiles(root);
+  const files = await listTranscriptFiles(root);
   for (const file of files) {
     let st: Stats;
     try {
@@ -1077,19 +1077,6 @@ function addBreakdown(target: TokenBreakdown, src: TokenBreakdown): void {
 }
 
 /**
- * Walk the projects tree and return every `.jsonl` file. Two levels
- * deep is enough for today's Claude Code layout
- * (`<root>/<projectDir>/*.jsonl` and
- * `<root>/<projectDir>/<sessionId>/subagents/*.jsonl`), but we walk
- * arbitrarily deep so the format can evolve without us caring.
- */
-async function listJsonlFiles(root: string): Promise<string[]> {
-  const out: string[] = [];
-  await walk(root, out);
-  return out;
-}
-
-/**
  * Autopilot classes the orchestrator sheds when the **Subscription Usage
  * Tracker** projects we'll exceed the weekly quota at the current rate.
  *
@@ -1248,25 +1235,4 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
     anchor: snapshot.weeklyResetAnchor,
     usage: snapshot,
   };
-}
-
-async function walk(dir: string, out: string[]): Promise<void> {
-  let entries: Dirent[];
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    // Missing or unreadable dir is silently skipped — the homedir
-    // layout is operator-controlled and we don't want a missing
-    // `~/.claude/projects` to take the orchestrator down on first
-    // boot.
-    return;
-  }
-  for (const entry of entries) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      await walk(full, out);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-      out.push(full);
-    }
-  }
 }

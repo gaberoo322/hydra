@@ -28,8 +28,6 @@
  */
 import { Router } from "express";
 import { promises as fs } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve, sep } from "node:path";
 import {
   registerSubagentDispatch,
   setSubagentDispatchStep,
@@ -41,130 +39,43 @@ import {
   SubagentDispatchStepPatchBodySchema,
   TranscriptQuerySchema,
 } from "../schemas/dispatches.ts";
+import {
+  projectsRoot,
+  encodeProjectDir,
+  isUuidShaped,
+  confineToRoot,
+  resolveTranscriptPath,
+} from "../transcript-store.ts";
 
 // ===========================================================================
-// Transcript reading (issue #695) — pure helpers, exported for tests.
+// Transcript reading (issue #695).
 //
-// The harness stores each session as a JSONL file at
-//   ~/.claude/projects/<encoded-projectDir>/<sessionId>.jsonl
-// where <encoded-projectDir> replaces every non-alphanumeric char in the
-// absolute cwd with "-". We resolve the path from the registry row's
-// `projectDir` when present (deterministic), and fall back to a recursive
-// scan of ~/.claude/projects/**/<sessionId>.jsonl otherwise.
+// Where transcripts live and how to locate one — the `~/.claude/projects`
+// root, the `<encoded-projectDir>/<sessionId>.jsonl` layout, the path-traversal
+// confinement guard, and the session-id → path resolution — is owned by the
+// **Transcript Store** Seam (`src/transcript-store.ts`, issue #951). This
+// router is a CALLER of that Interface; it owns only the conversation-record
+// projection of the raw JSONL lines (`parseTranscript` / `projectMessage`),
+// not the filesystem contract. The store-owned symbols are re-exported below
+// for existing test imports (`dispatches-transcript.test.mts`) — the single
+// implementation lives in the store.
 // ===========================================================================
 
-/** Root under which all transcript JSONL lives. Reads are confined here. */
+export {
+  encodeProjectDir,
+  isUuidShaped,
+  confineToRoot,
+  resolveTranscriptPath,
+} from "../transcript-store.ts";
+
+/**
+ * Root under which all transcript JSONL lives; reads are confined here.
+ * Delegates to the **Transcript Store** Seam so the `HYDRA_CLAUDE_PROJECTS_ROOT`
+ * override is honored identically to the usage tracker (the divergence this
+ * Seam removed — issue #951). Kept on this surface for existing callers/tests.
+ */
 export function transcriptRoot(): string {
-  return join(homedir(), ".claude", "projects");
-}
-
-/**
- * A `sessionId` is the JSONL filename stem — a harness-assigned UUID. We only
- * ever compose a filesystem path from a validated session id, never from raw
- * client input, so this guards against path traversal: anything that isn't a
- * UUID-shaped token is rejected before it touches the filesystem.
- */
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-export function isUuidShaped(value: string): boolean {
-  return typeof value === "string" && UUID_RE.test(value.trim());
-}
-
-/**
- * Encode an absolute project dir into the harness's directory name: every
- * char that isn't `[A-Za-z0-9]` becomes `-`. Mirrors the harness's own
- * encoding (e.g. `/home/gabe/hydra` -> `-home-gabe-hydra`).
- */
-export function encodeProjectDir(projectDir: string): string {
-  return projectDir.replace(/[^A-Za-z0-9]/g, "-");
-}
-
-/**
- * Assert a resolved path stays within `root`. Returns the resolved path on
- * success, or `null` if it escapes (defence in depth on top of the UUID
- * check). Exported for tests.
- */
-export function confineToRoot(root: string, candidate: string): string | null {
-  const resolvedRoot = resolve(root);
-  const resolvedCandidate = resolve(candidate);
-  if (
-    resolvedCandidate === resolvedRoot ||
-    resolvedCandidate.startsWith(resolvedRoot + sep)
-  ) {
-    return resolvedCandidate;
-  }
-  return null;
-}
-
-/**
- * Resolve the on-disk JSONL path for a session, or `null` if not found.
- *
- * Strategy:
- *   1. If `projectDir` is known, try `<root>/<encode(projectDir)>/<id>.jsonl`
- *      directly (one stat, no scan).
- *   2. Otherwise (or if step 1 misses), recursively scan one level of
- *      project directories for `<id>.jsonl`.
- *
- * All candidate paths are confined to `transcriptRoot()`. READ-ONLY — only
- * `stat`/`readdir`, never a write.
- */
-export async function resolveTranscriptPath(
-  sessionId: string,
-  projectDir: string | undefined,
-  deps: {
-    root?: string;
-    stat?: (p: string) => Promise<boolean>;
-    listProjectDirs?: (root: string) => Promise<string[]>;
-  } = {},
-): Promise<string | null> {
-  if (!isUuidShaped(sessionId)) return null;
-  const root = deps.root ?? transcriptRoot();
-  const id = sessionId.trim();
-
-  const statExists =
-    deps.stat ??
-    (async (p: string) => {
-      try {
-        await fs.stat(p);
-        return true;
-      } catch {
-        /* intentional: missing file is the normal not-available path */
-        return false;
-      }
-    });
-
-  // Step 1 — deterministic path from a known projectDir.
-  if (projectDir) {
-    const direct = confineToRoot(
-      root,
-      join(root, encodeProjectDir(projectDir), `${id}.jsonl`),
-    );
-    if (direct && (await statExists(direct))) return direct;
-  }
-
-  // Step 2 — scan the project dirs for the session file.
-  const listDirs =
-    deps.listProjectDirs ??
-    (async (r: string) => {
-      try {
-        const entries = await fs.readdir(r, { withFileTypes: true });
-        return entries.filter((e) => e.isDirectory()).map((e) => e.name);
-      } catch (err) {
-        console.error(
-          `[api/dispatches] failed to list transcript root ${r}:`,
-          err,
-        );
-        return [];
-      }
-    });
-
-  const dirs = await listDirs(root);
-  for (const dir of dirs) {
-    const candidate = confineToRoot(root, join(root, dir, `${id}.jsonl`));
-    if (candidate && (await statExists(candidate))) return candidate;
-  }
-  return null;
+  return projectsRoot();
 }
 
 /**
