@@ -75,15 +75,29 @@ const WRITE_BASELINE = process.argv.includes("--write-baseline");
  *     primitive (CONTEXT.md GitHub CLI Adapter entry exempts it explicitly).
  *   - src/autopilot/log.ts     — spawns `journalctl`, not `gh`/`git`.
  *   - src/index.ts             — dynamic execFile import for a non-gh/git use.
- * `src/api/health.ts` is deliberately NOT exempt — it spawns `df`/`free`/
- * `systemctl` AND owns one migrated `git` call, so it stays a tolerated
- * baseline entry (shrinkable if its host probes ever move behind a seam).
+ * Since issue #939, `src/api/health.ts`'s host-info probes (`df`/`free`/
+ * `systemctl`) moved behind the **Host-Probe Adapter** (`src/host-probe/*`), so
+ * `health.ts` no longer imports `node:child_process` and drops off the baseline
+ * (which closes to zero). The Host-Probe Adapter family is itself carved out
+ * here: it OWNS the host-info `node:child_process` spawn (its own sibling Seam,
+ * NOT the gh/git boundary), policed instead by the dedicated
+ * `host-probe-seam-check` ratchet. See {@link HOST_PROBE_DIR_PREFIX}.
  */
 const NON_GITHUB_SPAWNERS = new Set<string>([
   "src/exec-with-timeout.ts",
   "src/autopilot/log.ts",
   "src/index.ts",
 ]);
+
+/**
+ * The Host-Probe Adapter family prefix. Files under `src/host-probe/` own the
+ * host-info external-process boundary (`df`/`free`/`systemctl`) on their own
+ * private spawn primitive — a sibling Seam to the GitHub CLI Adapter, NOT a
+ * gh/git caller. They are exempt from THIS scan and policed by their own
+ * `host-probe-seam-check` ratchet (issue #939). Trailing slash so it matches
+ * the family directory, not an incidental `src/host-probe-foo.ts`.
+ */
+const HOST_PROBE_DIR_PREFIX = "src/host-probe/";
 
 interface BaselineFile {
   /** Sorted list of `src/...` paths whose `node:child_process` import is tolerated. */
@@ -100,6 +114,9 @@ interface BaselineFile {
  */
 export function fileViolatesGithubSeam(relPath: string, body: string): boolean {
   if (NON_GITHUB_SPAWNERS.has(relPath)) return false;
+  // Issue #939: the Host-Probe Adapter family owns its own host-info spawn —
+  // a sibling Seam, not a gh/git caller — so it is carved out of this scan.
+  if (relPath.startsWith(HOST_PROBE_DIR_PREFIX)) return false;
   for (const re of CHILD_PROCESS_PATTERNS) {
     if (re.test(body)) return true;
   }
