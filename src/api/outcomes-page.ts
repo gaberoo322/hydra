@@ -21,6 +21,7 @@
  */
 
 import { Router } from "express";
+import { aggregatorRoute } from "./route-helpers.ts";
 import {
   WindowedDaysQuerySchema,
   type OutcomeTrendsResponse,
@@ -79,94 +80,44 @@ export function createOutcomesPageRouter(deps: OutcomesPageRouterDeps = {}) {
   // -------------------------------------------------------------------------
   // GET /v2/outcomes/trends
   // -------------------------------------------------------------------------
-  router.get("/outcomes/trends", async (req, res) => {
-    const parsed = WindowedDaysQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const body = await aggregateTrends(parsed.data.window);
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/outcomes/trends] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get(
+    "/outcomes/trends",
+    aggregatorRoute(WindowedDaysQuerySchema, "v2/outcomes/trends", (data) =>
+      aggregateTrends(data.window),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/outcomes/calibration
   // -------------------------------------------------------------------------
-  router.get("/outcomes/calibration", async (req, res) => {
-    const parsed = WindowedDaysQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const body = await aggregateCalibration(parsed.data.window);
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/outcomes/calibration] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get(
+    "/outcomes/calibration",
+    aggregatorRoute(
+      WindowedDaysQuerySchema,
+      "v2/outcomes/calibration",
+      (data) => aggregateCalibration(data.window),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/outcomes/lessons
   // -------------------------------------------------------------------------
-  router.get("/outcomes/lessons", async (req, res) => {
-    const parsed = WindowedDaysQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const body = await aggregateLessons(parsed.data.window);
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/outcomes/lessons] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get(
+    "/outcomes/lessons",
+    aggregatorRoute(WindowedDaysQuerySchema, "v2/outcomes/lessons", (data) =>
+      aggregateLessons(data.window),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/outcomes/quota
   // -------------------------------------------------------------------------
-  router.get("/outcomes/quota", async (req, res) => {
-    const parsed = WindowedDaysQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const body = await aggregateQuota(parsed.data.window);
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/outcomes/quota] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get(
+    "/outcomes/quota",
+    aggregatorRoute(WindowedDaysQuerySchema, "v2/outcomes/quota", (data) =>
+      aggregateQuota(data.window),
+    ),
+  );
 
   return router;
 }
