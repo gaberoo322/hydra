@@ -17,12 +17,10 @@
  * dynamic `await import(...)` + getRedisConnection() call sites are a
  * documented follow-up, not flagged here.
  *
- * Implements a baseline ratchet: existing violations live in
- * `scripts/ci/redis-seam-baseline.json` and are tolerated. New
- * violations fail the gate. The baseline is allowed to *shrink* but
- * not grow — any caller that gets cleaned up must be removed from the
- * baseline, and a future caller that re-introduces the same import is
- * caught on its own merits.
+ * This is a thin Adapter over the shared baseline-ratchet engine in
+ * `seam-check-lib.ts` (issue #950): it declares its policy (the forbidden-import
+ * predicate, the baseline path, the wording) and the engine owns the git scan,
+ * the shrink-only baseline diff, the `--write-baseline` path, and the CLI guard.
  *
  * Usage:
  *   node --no-warnings --experimental-strip-types scripts/ci/redis-seam-check.ts
@@ -34,13 +32,8 @@
  *   3. Commit the smaller baseline alongside the migration.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { join } from "node:path";
+import { REPO_ROOT, isCliEntrypoint, runAsCli } from "./seam-check-lib.ts";
 
 const FORBIDDEN_PATTERNS = [
   /from\s+['"][^'"]*\/redis-keys(?:\.ts)?['"]/,
@@ -57,9 +50,8 @@ const FORBIDDEN_PATTERNS = [
  */
 const RAW_CONNECTION_PATTERN = /from\s+['"][^'"]*\/redis\/connection(?:\.ts)?['"]/;
 
-const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
-const SRC_DIR = join(REPO_ROOT, "src");
-const REDIS_DIR = join(SRC_DIR, "redis");
+/** The Redis Seam family prefix. Files inside `src/redis/` ARE the seam (exempt). */
+const REDIS_DIR_PREFIX = "src/redis/";
 
 /**
  * Files outside `src/redis/*` that may statically import `redis/connection`.
@@ -67,23 +59,21 @@ const REDIS_DIR = join(SRC_DIR, "redis");
  * accessor and so legitimately holds the raw connection (ADR-0017 Category B).
  */
 const SANCTIONED_RAW_CONNECTION_OWNERS = new Set<string>(["src/event-bus.ts"]);
-const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/redis-seam-baseline.json");
-const WRITE_BASELINE = process.argv.includes("--write-baseline");
 
-interface BaselineFile {
-  /** Sorted list of `src/...` paths whose legacy imports are tolerated. */
-  callers: string[];
-  /** Free-form note explaining when this baseline was last regenerated. */
-  note: string;
-}
+const BASELINE_PATH = join(REPO_ROOT, "scripts/ci/redis-seam-baseline.json");
 
 /**
  * Pure predicate: does `body` (the file contents at repo-relative `relPath`)
  * contain a forbidden seam import? Exported so the regression test can pin the
  * grammar without shelling out to git. `relPath` decides the sanctioned-owner
- * carve-out for the ADR-0017 raw-connection rule; pass a `src/...` path.
+ * carve-out for the ADR-0017 raw-connection rule, and (issue #950) the
+ * `src/redis/*` family carve-out folded in from the old loop-level dir-skip;
+ * pass a `src/...` path.
  */
 export function fileViolatesSeam(relPath: string, body: string): boolean {
+  // The Redis Seam family itself is the seam — never a violation (folds in the
+  // old loop-level isInsideRedisDir skip, issue #950).
+  if (relPath.startsWith(REDIS_DIR_PREFIX)) return false;
   for (const re of FORBIDDEN_PATTERNS) {
     if (re.test(body)) return true;
   }
@@ -96,104 +86,21 @@ export function fileViolatesSeam(relPath: string, body: string): boolean {
   return false;
 }
 
-async function listTrackedSrcFiles(): Promise<string[]> {
-  // git ls-files is faster and respects .gitignore.
-  const { stdout } = await execFileAsync(
-    "git",
-    ["ls-files", "src/*.ts", "src/**/*.ts"],
-    { cwd: REPO_ROOT },
-  );
-  return stdout
-    .split("\n")
-    .map(s => s.trim())
-    .filter(Boolean);
-}
-
-function isInsideRedisDir(absolutePath: string): boolean {
-  return absolutePath === REDIS_DIR || absolutePath.startsWith(REDIS_DIR + "/");
-}
-
-async function findViolations(): Promise<string[]> {
-  const tracked = await listTrackedSrcFiles();
-  const violations: string[] = [];
-  for (const relPath of tracked) {
-    const abs = join(REPO_ROOT, relPath);
-    if (isInsideRedisDir(abs)) continue;
-    let body: string;
-    try {
-      body = await readFile(abs, "utf8");
-    } catch {
-      continue;
-    }
-    if (fileViolatesSeam(relPath, body)) {
-      violations.push(relPath);
-    }
-  }
-  return violations.sort();
-}
-
-async function loadBaseline(): Promise<BaselineFile> {
-  try {
-    const raw = await readFile(BASELINE_PATH, "utf8");
-    return JSON.parse(raw) as BaselineFile;
-  } catch {
-    return { callers: [], note: "baseline not yet seeded" };
-  }
-}
-
-async function writeBaselineFile(callers: string[]): Promise<void> {
-  const payload: BaselineFile = {
-    callers,
-    note: `Auto-generated by scripts/ci/redis-seam-check.ts --write-baseline on ${new Date().toISOString()}. ADR-0009 closure ratchet: shrink only.`,
-  };
-  await writeFile(BASELINE_PATH, JSON.stringify(payload, null, 2) + "\n", "utf8");
-}
-
-async function main(): Promise<number> {
-  const violations = await findViolations();
-
-  if (WRITE_BASELINE) {
-    await writeBaselineFile(violations);
-    console.log(`[redis-seam-check] Wrote baseline with ${violations.length} entries to ${relative(REPO_ROOT, BASELINE_PATH)}`);
-    return 0;
-  }
-
-  const baseline = await loadBaseline();
-  const baselineSet = new Set(baseline.callers);
-  const violationSet = new Set(violations);
-
-  const newViolations = violations.filter(v => !baselineSet.has(v));
-  const fixedCallers = baseline.callers.filter(c => !violationSet.has(c));
-
-  if (newViolations.length > 0) {
-    console.error("[redis-seam-check] NEW Redis-seam violations (ADR-0009):");
-    for (const v of newViolations) console.error(`  - ${v}`);
-    console.error("");
-    console.error("These files import from redis-keys / redis-adapter / redis/keys / redis/kv.");
-    console.error("Move the access behind a typed accessor in src/redis/<domain>.ts.");
-    return 1;
-  }
-
-  if (fixedCallers.length > 0) {
-    console.error("[redis-seam-check] Baseline is stale — these files no longer violate:");
-    for (const c of fixedCallers) console.error(`  - ${c}`);
-    console.error("");
-    console.error("Re-run with --write-baseline and commit the shrunk baseline.");
-    return 1;
-  }
-
-  console.log(`[redis-seam-check] OK — ${violations.length} known violations, no new ones.`);
-  return 0;
-}
+const CONFIG = {
+  name: "redis-seam-check",
+  globs: ["src/*.ts", "src/**/*.ts"],
+  predicate: fileViolatesSeam,
+  baselinePath: BASELINE_PATH,
+  noteSuffix: "ADR-0009 closure ratchet: shrink only.",
+  newViolationsHeadline: "NEW Redis-seam violations (ADR-0009):",
+  newViolationsHelp: [
+    "These files import from redis-keys / redis-adapter / redis/keys / redis/kv.",
+    "Move the access behind a typed accessor in src/redis/<domain>.ts.",
+  ],
+};
 
 // Only run as a CLI — importing the module (e.g. from the regression test)
 // must not trigger the git scan or process.exit.
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  main().then(
-    code => process.exit(code),
-    err => {
-      console.error("[redis-seam-check] crash:", err);
-      process.exit(2);
-    },
-  );
+if (isCliEntrypoint(import.meta.url)) {
+  runAsCli(CONFIG);
 }
