@@ -36,6 +36,7 @@ import {
   type IssueRow,
 } from "../github/issues.ts";
 import { settledOrEmpty } from "./settle.ts";
+import { windowStart as trendWindowStart, dayKey } from "./trend-series.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -92,7 +93,7 @@ export async function getBacklogFlow(
 ): Promise<BacklogFlow> {
   const now = deps.now ?? new Date();
   const days = clampWindowDays(windowDays);
-  const windowStart = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  const windowStart = trendWindowStart(now, days);
   const sinceDate = iso8601DateOnly(windowStart);
 
   const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
@@ -180,7 +181,11 @@ export function bucketByClass(
   });
 }
 
-/** Pure helper — exported for tests. Strips an ISO timestamp down to YYYY-MM-DD. */
+/**
+ * Pure helper — exported for tests. Strips an ISO timestamp down to
+ * YYYY-MM-DD. Delegates to the shared trend-series day-key (issue #956) so
+ * the date-only form can't drift from the day-bucket form.
+ */
 export function iso8601DateOnly(d: Date): string {
-  return d.toISOString().split("T")[0];
+  return dayKey(d);
 }

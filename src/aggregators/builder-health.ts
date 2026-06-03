@@ -61,6 +61,7 @@ import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { listAutopilotPrLinksSince } from "../redis/autopilot-runs.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
 import { settledOrNull } from "./settle.ts";
+import { dayKey, type TrendPoint } from "./trend-series.ts";
 
 // Heartbeat merge-rate window (env-overridable, matches the rolling merge
 // rate's native window). Used for the rework metric's "of N cycles" framing.
@@ -110,18 +111,18 @@ export interface TimeToMergeMetric {
 }
 
 export interface MutationTrendMetric {
-  series: { t: string; v: number }[];
+  series: TrendPoint[];
   window: number;
 }
 
 export interface ScopeViolationMetric {
-  series: { t: string; v: number }[];
+  series: TrendPoint[];
   total: number;
   windowDays: number;
 }
 
 export interface LearningThroughputMetric {
-  promotionRate: { t: string; v: number }[];
+  promotionRate: TrendPoint[];
   metaFrictionOpened: number;
   designConceptsProducedToday: number;
   windowDays: number;
@@ -169,7 +170,7 @@ export interface BuilderHealthDeps {
   getMetricsTrend?: typeof getMetricsTrend;
   /** Override the lessons-trend reader. */
   getLessonsTrend?: (windowDays: number, deps?: LessonsTrendDeps) => Promise<{
-    promotionRate: { t: string; v: number }[];
+    promotionRate: TrendPoint[];
     metaFrictionOpened: number;
   }>;
   /** Override the scope-violations reader. */
@@ -264,7 +265,7 @@ async function computeReworkRate(deps: BuilderHealthDeps): Promise<ReworkRateMet
 async function computeMutationTrend(deps: BuilderHealthDeps): Promise<MutationTrendMetric> {
   const reader = deps.getMetricsTrend ?? getMetricsTrend;
   const trend = await reader(MERGE_RATE_WINDOW);
-  const series: { t: string; v: number }[] = [];
+  const series: TrendPoint[] = [];
   // Oldest-first so the sparkline reads left-to-right chronologically.
   for (const m of [...trend].reverse()) {
     const v = Number(m.mutationKillRate);
@@ -499,9 +500,5 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
-function utcDate(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
+// The UTC date-only key is the shared trend-series grammar (issue #956).
+const utcDate = dayKey;
