@@ -43,6 +43,32 @@ export const redisKeys = {
   autopilotRunTurns: (runId: string) => `hydra:autopilot:run:${runId}:turns`,
 
   // ---------------------------------------------------------------------------
+  // Retrospective seen-list + recurrence ledger (issue #919, epic #917).
+  //
+  // The /hydra-retro skill synthesises a per-run retrospective and, when a
+  // gotcha clears the bar, files a capped emit (GitHub issue / gated PR /
+  // artifact-only note). To keep the same gotcha from being re-proposed on the
+  // next run, every emit decision is recorded against a stable, kebab-case
+  // `cue` (the same cue grammar the friction store uses, so the two ledgers
+  // line up). Two key families, both global (not per-run): a retrospective
+  // gotcha recurs ACROSS runs, so a per-run scope would defeat the recurrence
+  // gate.
+  //
+  // `retroSeen`: hash, field=cue, value=JSON {decision, runId, ref, at}. The
+  //   dedup ledger — a cue present here was already emitted, so a later run
+  //   skips it (mirrors `scoutToolsConsidered`). NOT TTLed; a gotcha resolved
+  //   long ago should still be one lookup away so we never re-file it.
+  //
+  // `retroRecurrence`: hash, field=cue, value=INT-string. The recurrence
+  //   counter — incremented once per run a cue is OBSERVED (independent of
+  //   whether it was emitted). The prompt-shaped-fix gate fires only when a
+  //   cue's count is ≥3 (seen across ≥3 runs/friction observations), the
+  //   recurrence threshold the epic mandates. NOT TTLed for the same reason.
+  // ---------------------------------------------------------------------------
+  retroSeen: () => "hydra:retro:seen",
+  retroRecurrence: () => "hydra:retro:recurrence",
+
+  // ---------------------------------------------------------------------------
   // Dispatch registries (issue #618 operator namespace; issue #692 subagent
   // namespace). The key builders for both namespaces are inlined in
   // `src/redis/dispatches.ts` rather than here — the ADR-0009 seam-check is
