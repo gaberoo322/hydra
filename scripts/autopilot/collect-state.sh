@@ -39,16 +39,47 @@ echo -n "failed_services="; systemctl --user list-units --type=service --state=f
 # an issue means "diff has not yet been reviewed"; once reviewed, the PR
 # carries the pending-CI state and autopilot polls statusCheckRollup
 # directly without re-running QA.
-gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
-  needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
-  ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
-  needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
-  needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length,
-  in_progress: [.[] | select(.labels | map(.name) | index("in-progress"))] | length,
-  blocked: [.[] | select(.labels | map(.name) | index("blocked"))] | length,
-  stale_in_progress: [.[] | select((.labels | map(.name) | index("in-progress")) and ((now - (.updatedAt | fromdateiso8601)) > 5400))] | map(.number),
-  stale_blocked: [.[] | select((.labels | map(.name) | index("blocked")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)
-}'
+#
+# SEAM ROUTING (issue #934): the counts + stale lists below are now served by
+# `GET /api/autopilot/board-state` (src/api/autopilot-board.ts), which buckets
+# the open board on top of the GitHub-Read seam (src/github/issues.ts). The
+# repo handle, the `--json` field set, and the orchestrator label vocabulary
+# live in exactly one place (the TS seam) instead of being re-spelled in this
+# bash `--jq`. We read that single surface and emit the same JSON shape the
+# playbook stitches into state.json. FALLBACK: if the orchestrator is down OR
+# returns `degraded:true` (its `gh` read failed), we drop back to the inline
+# `gh` call so a transient outage never wedges the autopilot turn.
+BOARD_STATE_JSON=$(hydra raw GET /autopilot/board-state 2>/dev/null || true)
+BOARD_STATE_DEGRADED=$(printf '%s' "$BOARD_STATE_JSON" | python3 -c "
+import json,sys
+try:
+  d=json.load(sys.stdin)
+  # degraded, or missing required count fields → treat as unusable.
+  ok = isinstance(d,dict) and not d.get('degraded', False) and 'ready_for_agent' in d
+  print('0' if ok else '1')
+except Exception:
+  print('1')" 2>/dev/null || echo 1)
+if [ "$BOARD_STATE_DEGRADED" = "0" ]; then
+  # Strip the endpoint-only fields (degraded, generatedAt) so the emitted shape
+  # matches the historical inline `--jq` output exactly.
+  printf '%s' "$BOARD_STATE_JSON" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+keys=['needs_qa','ready_for_agent','needs_triage','needs_research','in_progress','blocked','stale_in_progress','stale_blocked']
+print(json.dumps({k:d[k] for k in keys}))"
+else
+  # Fallback: orchestrator down or its gh read degraded — read directly.
+  gh issue list --repo gaberoo322/hydra --state open --json number,labels,updatedAt --jq '{
+    needs_qa: [.[] | select(.labels | map(.name) | index("needs-qa"))] | length,
+    ready_for_agent: [.[] | select(.labels | map(.name) | index("ready-for-agent"))] | length,
+    needs_triage: [.[] | select(.labels | map(.name) | index("needs-triage"))] | length,
+    needs_research: [.[] | select(.labels | map(.name) | index("needs-research"))] | length,
+    in_progress: [.[] | select(.labels | map(.name) | index("in-progress"))] | length,
+    blocked: [.[] | select(.labels | map(.name) | index("blocked"))] | length,
+    stale_in_progress: [.[] | select((.labels | map(.name) | index("in-progress")) and ((now - (.updatedAt | fromdateiso8601)) > 5400))] | map(.number),
+    stale_blocked: [.[] | select((.labels | map(.name) | index("blocked")) and ((now - (.updatedAt | fromdateiso8601)) > 43200))] | map(.number)
+  }'
+fi
 
 # design-concept gate (issue #628): pick the first orch-board
 # `ready-for-agent` issue whose design-concept artifact is missing or

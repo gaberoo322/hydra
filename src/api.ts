@@ -33,6 +33,7 @@ import { createAgentsRouter } from "./api/agents.ts";
 import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
 import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
+import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
 import { createNowPageRouter } from "./api/now-page.ts";
 import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
@@ -93,6 +94,11 @@ function createApi(eventBus) {
   // Idle-diagnostics (issue #889, now-console-2) — *why* the Pace Gate isn't
   // launching a run right now: the data behind an IDLE verdict on the Console.
   api.use(createAutopilotIdleRouter());
+  // Board-state projection (issue #934) — the orchestrator issue-board counts
+  // + stale lists the autopilot Phase-1 collector consumes, served on top of
+  // the GitHub-Read seam so collect-state.sh stops re-spelling the repo handle,
+  // the --json field set, and the label vocabulary in bash.
+  api.use(createAutopilotBoardRouter());
   // Subagent-dispatch capture (issue #692) — SessionStart hook write surface.
   api.use(createDispatchesRouter());
   // Builder-Health Scorecard (issue #732) — orchestrator self-improvement
