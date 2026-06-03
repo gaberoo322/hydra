@@ -111,7 +111,7 @@ The per-anchor and per-file Reflexion-style episodic store (`hydra:reflections:{
 _Avoid_: memory (overloaded with Pattern Memory), retrospective (informal)
 
 **Knowledge Base**:
-The OpenViking-backed semantic store of indexed source code, reality reports, and subagent session transcripts (`src/knowledge-base/`). Subagents query it for relevant past experience; the indexer watches files and Redis report keys to keep embeddings current. Distinct from **Pattern Memory** (Redis hash store of structured patterns) and **Reflections** (Redis key/value store of episodic narrative) — the Knowledge Base is the semantic / embeddings tier and lives outside Redis (HTTP to the OV service).
+The OpenViking-backed semantic store of indexed source code, agent memory patterns, and subagent session transcripts (`src/knowledge-base/`). Subagents query it for relevant past experience; the indexer watches files and Redis memory-pattern keys to keep embeddings current. Distinct from **Pattern Memory** (Redis hash store of structured patterns) and **Reflections** (Redis key/value store of episodic narrative) — the Knowledge Base is the semantic / embeddings tier and lives outside Redis (HTTP to the OV service).
 _Avoid_: OV (insider shorthand), embeddings store (too narrow — it also holds raw transcripts)
 
 **Learning Context**:

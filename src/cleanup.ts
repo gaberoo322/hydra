@@ -1,7 +1,6 @@
 /**
  * Report Cleanup — Redis-backed
  *
- * Reality reports: trimmed to 50 most recent inline during writes.
  * Cycle summaries: auto-expire via Redis TTL (2 days).
  * Backlog done items: pruned by pruneOldDoneItems().
  * Stale Redis keys: cycle/task/metrics keys older than 7 days.

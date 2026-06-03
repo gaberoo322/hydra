@@ -27,7 +27,6 @@ describe("redisKeys naming convention", () => {
     ["anchorPriorFailures", redisKeys.anchorPriorFailures],
     ["anchorReframeQueue", redisKeys.anchorReframeQueue],
     ["metricsIndex", redisKeys.metricsIndex],
-    ["realityReportIndex", redisKeys.realityReportIndex],
     ["memoryLastConsolidation", redisKeys.memoryLastConsolidation],
     ["reflectionPrefix", redisKeys.reflectionPrefix],
     ["backlogItems", redisKeys.backlogItems],
@@ -71,7 +70,6 @@ describe("redisKeys naming convention", () => {
     ["anchorAbandonmentCount", redisKeys.anchorAbandonmentCount("ref-1")],
     ["anchorPermSkip", redisKeys.anchorPermSkip("ref-1")],
     ["metrics", redisKeys.metrics("cycle-1")],
-    ["realityReport", redisKeys.realityReport("cycle-1")],
     ["summaryReport", redisKeys.summaryReport("manual-planner-abc")],
     ["memoryPatterns", redisKeys.memoryPatterns("planner")],
     ["memoryRules", redisKeys.memoryRules("executor")],
@@ -105,7 +103,6 @@ describe("redisKeys uniqueness", () => {
       ["anchorPriorFailures", redisKeys.anchorPriorFailures()],
       ["anchorReframeQueue", redisKeys.anchorReframeQueue()],
       ["metricsIndex", redisKeys.metricsIndex()],
-      ["realityReportIndex", redisKeys.realityReportIndex()],
       ["memoryLastConsolidation", redisKeys.memoryLastConsolidation()],
       ["backlogItems", redisKeys.backlogItems()],
       ["backlogCounter", redisKeys.backlogCounter()],
@@ -156,7 +153,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.anchorPriorFailures(), "hydra:anchors:prior-failures");
     assert.equal(redisKeys.anchorReframeQueue(), "hydra:anchors:reframe-queue");
     assert.equal(redisKeys.metricsIndex(), "hydra:metrics:index");
-    assert.equal(redisKeys.realityReportIndex(), "hydra:reports:reality:index");
     assert.equal(redisKeys.backlogItems(), "hydra:backlog:items");
     assert.equal(redisKeys.backlogCounter(), "hydra:backlog:counter");
     assert.equal(redisKeys.schedulerState(), "hydra:scheduler:state");
@@ -175,7 +171,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.task("task-1"), "hydra:task:task-1");
     assert.equal(redisKeys.taskEvidence("t1", "merged"), "hydra:task:t1:evidence:merged");
     assert.equal(redisKeys.metrics("c1"), "hydra:metrics:c1");
-    assert.equal(redisKeys.realityReport("c1"), "hydra:reports:reality:c1");
     assert.equal(redisKeys.summaryReport("manual-planner-abc"), "hydra:reports:summary:manual-planner-abc");
     assert.equal(redisKeys.memoryPatterns("planner"), "hydra:memory:planner:patterns");
     assert.equal(redisKeys.memoryRules("executor"), "hydra:memory:executor:rules");

@@ -50,17 +50,6 @@ async function main() {
     console.log(`[Memory] ${agent}: ${rules.length} rules indexed`);
   }
 
-  // Reality reports (last 50)
-  const reportIds = await redis.zrevrange("hydra:reports:reality:index", 0, 49);
-  for (const id of reportIds) {
-    const raw = await redis.get(`hydra:reports:reality:${id}`);
-    if (!raw) continue;
-    const report = JSON.parse(raw);
-    const summary = `Cycle ${id}: ${report.task?.title} — ${report.task?.finalState}. Tests: ${report.grounding?.before?.passed}→${report.grounding?.after?.passed}. Files: ${(report.filesChanged || []).join(", ")}`;
-    await indexToOV(`reality-${id}`, summary);
-  }
-  console.log(`[Reality] ${reportIds.length} reports indexed`);
-
   // Research reports
   const researchIds = await redis.zrevrange("hydra:reports:research:index", 0, 19);
   for (const id of researchIds) {

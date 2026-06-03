@@ -55,16 +55,7 @@ Alerts:
 - Any anchor type 0% merge over 5+ cycles → architectural finding
 - Overall empty rate >25% → performance finding
 
-### 2b. Recent reality reports
-```bash
-docker exec hydra-redis-1 redis-cli ZREVRANGE hydra:reports:reality:index 0 4
-# For each ID:
-hydra cycle reality <id>
-```
-
-Look for: same files in scope creep repeatedly (architectural), repeated verification failures (specific bug), rollbackRisk consistently medium/high (quality), unresolvedUncertainty accumulating (operational debt), `recommendedNext` not followed (process gap).
-
-### 2c. Cost & efficiency
+### 2b. Cost & efficiency
 From metrics: cost/merged feature, cost of empty cycles, plan cache hit rate, grounding duration trend, thread reuse rate.
 
 Alerts:
@@ -72,7 +63,7 @@ Alerts:
 - Empty-cycle cost >30% of total → waste finding
 - Grounding duration up >20% over 20 cycles → performance finding
 
-### 2d. Backlog & queue health
+### 2c. Backlog & queue health
 ```bash
 docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:processing
 docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:prior-failures
@@ -191,7 +182,7 @@ Otherwise log in summary, don't create.
 ## Summary output (every iteration)
 
 ```
-[hydra-discover] Tier 1+2 (iteration N). Checked 50 cycles, 5 reality reports.
+[hydra-discover] Tier 1+2 (iteration N). Checked 50 cycles.
   Health: OK | Empty rate: 18% | Merge rate: 62% | Cost: $X.XX/merge
   Findings: 0 health, 1 perf, 0 arch
   Created: #42 (codebase-health anchor filtering). Skipped: 1 (#6).

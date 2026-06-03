@@ -2,8 +2,8 @@
  * learning/knowledge-indexer.ts — background indexer wiring
  *
  * Extracted from learning.ts (issue #219). Watches the operator config
- * directory for changes, polls Redis for new reality reports + memory
- * patterns, and uploads source code via the source-indexer module.
+ * directory for changes, polls Redis for new memory patterns, and uploads
+ * source code via the source-indexer module.
  *
  * Public API: startKnowledgeIndexer() — fire-and-forget setup.
  *
@@ -19,11 +19,6 @@ import {
   makeSourceWatcher,
   setWatchedPaths,
 } from "./source-indexer.ts";
-import {
-  getReportIdsByScore,
-  getRealityReport,
-  getReportScore,
-} from "../redis/reality-reports.ts";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
@@ -33,7 +28,6 @@ const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
 const REDIS_POLL_MS = parseInt(process.env.INDEXER_POLL_MS as any) || 30000;
 
 const indexerPending = new Map<string, ReturnType<typeof setTimeout>>();
-let lastReportIndex = 0;
 let lastRuleCounts: Record<string, number> = {};
 
 function shouldIndex(filePath: string): boolean {
@@ -61,20 +55,9 @@ function onFileChange(_eventType: string, filename: string | null) {
 
 async function pollRedisContent() {
   try {
-    const reportIds = await getReportIdsByScore(lastReportIndex);
-    for (const id of reportIds) {
-      const raw = await getRealityReport(id);
-      if (raw) {
-        const report = JSON.parse(raw);
-        const summary = `Cycle ${report.cycleId}: ${report.task?.title} — ${report.task?.finalState}. Tests: ${report.grounding?.before?.passed}→${report.grounding?.after?.passed}`;
-        await indexText(`reality-report:${id}`, summary);
-      }
-    }
-    if (reportIds.length > 0) {
-      const latest = await getReportScore(reportIds[reportIds.length - 1]);
-      lastReportIndex = parseInt(latest as string) || lastReportIndex;
-    }
-
+    // Reality-report indexing was removed in #965 — saveRealityReport had zero
+    // callers (a retired codex control-loop artifact, ADR-0006/ADR-0012), so
+    // this poll read a write-dead store. Memory-pattern polling stays.
     for (const agent of ["planner", "executor", "skeptic"]) {
       const raw = await getMemoryPatterns(agent);
       if (!raw) continue;
