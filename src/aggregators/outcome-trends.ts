@@ -9,7 +9,8 @@
  * 1. `loadOutcomes()` reads `config/direction/outcomes.yaml` — the canonical
  *    list of declared outcomes (baseline, target, direction).
  * 2. For each outcome, `getOutcomeValue()` produces a single current
- *    reading from its source adapter (file/api/prometheus/sql). The
+ *    reading from its source adapter (`file` — the only implemented source
+ *    since #933). The
  *    orchestrator does NOT yet persist a per-day history of outcome
  *    evaluations — when history-storage lands, the `readHistoricalPoints`
  *    dep on this aggregator is the seam to plug it into. Until then the

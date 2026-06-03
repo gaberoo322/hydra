@@ -18,7 +18,6 @@ import { join } from "node:path";
 import {
   loadOutcomes,
   getOutcomeValue,
-  parseOutcomesYaml,
   type Outcome,
 } from "../src/outcomes.ts";
 import { createOutcomesRouter } from "../src/api/outcomes.ts";
@@ -77,74 +76,9 @@ function mockRes(): any {
   return res;
 }
 
-// ---------------------------------------------------------------------------
-// Parser tests
-// ---------------------------------------------------------------------------
-
-describe("parseOutcomesYaml — subset YAML parser", () => {
-  test("parses a valid declaration with all fields", () => {
-    const raw = `
-outcomes:
-  - name: clv-promotion
-    kind: leading
-    direction: up
-    source: file
-    query: metrics/clv.txt
-    baseline: 0.0
-    target: 0.05
-    noise_epsilon: 0.001
-`;
-    const r = parseOutcomesYaml(raw);
-    assert.equal(r.ok, true, `expected ok, got errors: ${r.errors.join("; ")}`);
-    assert.equal(r.value.outcomes?.length, 1);
-    const o = r.value.outcomes![0];
-    assert.equal(o.name, "clv-promotion");
-    assert.equal(o.kind, "leading");
-    assert.equal(o.baseline, 0);
-    assert.equal(o.target, 0.05);
-    assert.equal(o.noise_epsilon, 0.001);
-  });
-
-  test("strips full-line and trailing comments", () => {
-    const raw = `
-# comment header
-outcomes:
-  - name: x  # trailing comment
-    kind: leading
-    direction: up
-    source: file
-    query: y
-    baseline: 0
-    target: 1
-`;
-    const r = parseOutcomesYaml(raw);
-    assert.equal(r.ok, true);
-    assert.equal(r.value.outcomes![0].name, "x");
-  });
-
-  test("supports quoted strings", () => {
-    const raw = `
-outcomes:
-  - name: "with spaces"
-    kind: leading
-    direction: up
-    source: api
-    query: "/api/foo?bar=baz"
-    baseline: 0
-    target: 1
-`;
-    const r = parseOutcomesYaml(raw);
-    assert.equal(r.ok, true);
-    assert.equal(r.value.outcomes![0].query, "/api/foo?bar=baz");
-  });
-
-  test("flags unknown top-level keys", () => {
-    const raw = `bogus:\n  - x: 1\n`;
-    const r = parseOutcomesYaml(raw);
-    assert.equal(r.ok, false);
-    assert.ok(r.errors.some(e => e.includes("unknown top-level key")), `errors: ${r.errors.join("; ")}`);
-  });
-});
+// Parser edge cases now live in test/outcomes-yaml.test.mts (the extracted
+// parser Module's own test surface, #933). This file covers the loader,
+// adapters, and API round-trip.
 
 // ---------------------------------------------------------------------------
 // Loader: missing / valid / invalid files
@@ -170,8 +104,8 @@ outcomes:
   - name: bankroll-pnl
     kind: terminal
     direction: up
-    source: api
-    query: /api/pnl
+    source: file
+    query: metrics/pnl.txt
     baseline: 0
     target: 1000
     noise_epsilon: 0.5
@@ -301,21 +235,28 @@ describe("getOutcomeValue — source adapters", () => {
     assert.equal(reading, null);
   });
 
-  test("api/prometheus/sql adapters return null (stubbed, never throw)", async () => {
-    const sources: Outcome["source"][] = ["api", "prometheus", "sql"];
-    for (const source of sources) {
-      const outcome: Outcome = {
-        name: `stub-${source}`,
-        kind: "leading",
-        direction: "up",
-        source,
-        query: "anything",
-        baseline: 0,
-        target: 1,
-        noise_epsilon: 0,
-      };
-      const reading = await getOutcomeValue(outcome);
-      assert.equal(reading, null, `${source} adapter should return null`);
+  test("non-file source is rejected by schema validation (#933)", async () => {
+    // The api/prometheus/sql stubs were removed (#933): `file` is the only
+    // real adapter, so a non-file `source:` is now a schema violation rather
+    // than a silently-stubbed no-data read.
+    for (const source of ["api", "prometheus", "sql"]) {
+      const path = await fixture(`bad-source-${source}.yaml`, `
+outcomes:
+  - name: x
+    kind: leading
+    direction: up
+    source: ${source}
+    query: y
+    baseline: 0
+    target: 1
+`);
+      const r = await loadOutcomes(path);
+      assert.equal(r.ok, false, `source '${source}' should fail schema validation`);
+      if (r.ok) throw new Error("unreachable");
+      assert.ok(
+        r.errors.some((e) => e.includes("source")),
+        `expected a 'source' error for '${source}', got: ${r.errors.join("; ")}`,
+      );
     }
   });
 });

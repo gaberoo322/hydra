@@ -3,8 +3,16 @@
  *
  * Declares the structured contract between the target vision (prose) and
  * the orchestrator's behavior (code). Reads `config/direction/outcomes.yaml`,
- * validates schema, and exposes a typed value-fetch dispatcher per source
- * adapter (`prometheus`, `api`, `sql`, `file`).
+ * validates schema, and exposes a typed value-fetch adapter for the `file`
+ * source.
+ *
+ * Source seam (issue #933): `OutcomeSource` is `file` only — the one adapter
+ * that is actually implemented. The earlier `prometheus | api | sql` arms were
+ * stubs that logged and returned `null`; per LANGUAGE.md ("one adapter means a
+ * hypothetical seam, two means a real one") a four-way union that only one arm
+ * honours is a false promise to callers. They re-open as real arms the day a
+ * SECOND source is implemented — see the FUTURE SOURCES note above
+ * `getOutcomeValue`.
  *
  * Foundational dependency for #243/#244 (Tier-2 outcome holdback) and
  * the capacity-floor dispatcher (#245). (#242 stuckness detector retired
@@ -12,12 +20,18 @@
  *   - Never throws. All error paths return structured `{ ok: false, errors }`.
  *   - All errors logged with `[outcomes]` prefix.
  *   - Zero new dependencies — uses node:fs + a hand-rolled YAML subset parser
- *     covering only the schema this file documents (per CLAUDE.md "Four
- *     dependencies" rule).
+ *     (extracted to `src/outcomes-yaml.ts`, #933) covering only the schema this
+ *     file documents (per CLAUDE.md operator-approved-deps rule).
  */
 
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";
+import { parseOutcomesYaml, type YamlScalar } from "./outcomes-yaml.ts";
+
+// Re-export the extracted YAML parser surface so existing importers of
+// `parseOutcomesYaml` from this Module keep working (back-compat, #933).
+export { parseOutcomesYaml, stripComment, parseScalar } from "./outcomes-yaml.ts";
+export type { ParsedYaml, ParseResult, YamlScalar } from "./outcomes-yaml.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
@@ -29,7 +43,13 @@ const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.yaml");
 
 export type OutcomeKind = "leading" | "terminal";
 export type OutcomeDirection = "up" | "down";
-export type OutcomeSource = "prometheus" | "api" | "sql" | "file";
+/**
+ * Where an outcome's current value is read from. Today this is `file` only —
+ * the single adapter that is actually implemented (#933). `prometheus | api |
+ * sql` were live-looking stubs; they re-enter this union the day a real second
+ * adapter lands (the "two adapters means a real seam" trigger, LANGUAGE.md).
+ */
+export type OutcomeSource = "file";
 
 export interface Outcome {
   name: string;
@@ -52,144 +72,21 @@ export type LoadOutcomesResult =
   | { ok: false; errors: string[] };
 
 // ---------------------------------------------------------------------------
-// YAML subset parser
-//
-// Intentionally small. Supports only what `outcomes.yaml` documents:
-//   - `#` comments (full-line and trailing)
-//   - blank lines
-//   - top-level `key:` introducing a list
-//   - `- key: value` list-item-as-mapping
-//   - subsequent `  key: value` lines belonging to the most recent list item
-//   - scalar values: number, boolean, quoted string, bare string
-//
-// Returns `{ ok, value }` so the loader can attribute errors to file paths.
-// Anything more elaborate is operator-edited and out of scope for this issue.
-// ---------------------------------------------------------------------------
-
-function stripComment(line: string): string {
-  // Strip trailing `# ...` but only when not inside quotes. Schema doesn't
-  // currently use `#` inside values, but be safe with a small state machine.
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === "'" && !inDouble) inSingle = !inSingle;
-    else if (ch === '"' && !inSingle) inDouble = !inDouble;
-    else if (ch === "#" && !inSingle && !inDouble) return line.slice(0, i);
-  }
-  return line;
-}
-
-function parseScalar(raw: string): string | number | boolean {
-  const v = raw.trim();
-  if (v === "") return "";
-  if (v === "true") return true;
-  if (v === "false") return false;
-  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-    return v.slice(1, -1);
-  }
-  // numeric (int or decimal, optional sign)
-  if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
-  return v;
-}
-
-interface ParsedYaml {
-  outcomes?: Array<Record<string, string | number | boolean>>;
-}
-
-interface ParseResult {
-  ok: boolean;
-  value: ParsedYaml;
-  errors: string[];
-}
-
-export function parseOutcomesYaml(raw: string): ParseResult {
-  const errors: string[] = [];
-  const result: ParsedYaml = {};
-  const lines = raw.split("\n");
-
-  let currentTopKey: string | null = null;
-  let currentList: Array<Record<string, string | number | boolean>> | null = null;
-  let currentItem: Record<string, string | number | boolean> | null = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const rawLine = lines[i];
-    const stripped = stripComment(rawLine);
-    if (stripped.trim() === "") continue;
-
-    // Count leading spaces to determine indentation level.
-    const indent = stripped.length - stripped.replace(/^ */, "").length;
-    const content = stripped.slice(indent);
-
-    if (indent === 0) {
-      // Top-level key: `outcomes:` (introduces list)
-      const m = content.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
-      if (!m) {
-        errors.push(`line ${i + 1}: unrecognized top-level syntax: "${rawLine}"`);
-        continue;
-      }
-      const key = m[1];
-      const inline = m[2];
-      currentTopKey = key;
-      if (key === "outcomes") {
-        currentList = [];
-        result.outcomes = currentList;
-        currentItem = null;
-      } else {
-        // Unknown top-level key — schema violation surfaces later when
-        // required fields aren't found, but record a hint here too.
-        errors.push(`line ${i + 1}: unknown top-level key '${key}' (expected 'outcomes')`);
-      }
-      if (inline.trim() !== "") {
-        errors.push(`line ${i + 1}: inline value not supported for top-level key '${key}'`);
-      }
-    } else {
-      // Indented line — must belong to a list item under `outcomes:`.
-      if (currentTopKey !== "outcomes" || !currentList) {
-        errors.push(`line ${i + 1}: indented content without enclosing 'outcomes:' list`);
-        continue;
-      }
-
-      const itemMatch = content.match(/^-\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
-      if (itemMatch) {
-        // New list item starting with `- key: value`
-        currentItem = {};
-        currentList.push(currentItem);
-        const key = itemMatch[1];
-        const value = itemMatch[2];
-        currentItem[key] = parseScalar(value);
-        continue;
-      }
-
-      const fieldMatch = content.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
-      if (fieldMatch) {
-        if (!currentItem) {
-          errors.push(`line ${i + 1}: field '${fieldMatch[1]}' has no enclosing list item`);
-          continue;
-        }
-        const key = fieldMatch[1];
-        const value = fieldMatch[2];
-        currentItem[key] = parseScalar(value);
-        continue;
-      }
-
-      errors.push(`line ${i + 1}: unrecognized indented syntax: "${rawLine}"`);
-    }
-  }
-
-  return { ok: errors.length === 0, value: result, errors };
-}
-
-// ---------------------------------------------------------------------------
 // Schema validation
+//
+// The raw text → records parse lives in `src/outcomes-yaml.ts` (#933). This
+// section owns the outcome-SPECIFIC rules (required fields, enums, ranges) and
+// runs over the parser's `value.outcomes` records.
 // ---------------------------------------------------------------------------
 
 const VALID_KINDS: OutcomeKind[] = ["leading", "terminal"];
 const VALID_DIRECTIONS: OutcomeDirection[] = ["up", "down"];
-const VALID_SOURCES: OutcomeSource[] = ["prometheus", "api", "sql", "file"];
+// Only `file` is a real source today (#933). A non-`file` `source:` is now a
+// schema violation rather than a stub that silently reads as no-data.
+const VALID_SOURCES: OutcomeSource[] = ["file"];
 
 function validateOutcome(
-  raw: Record<string, string | number | boolean>,
+  raw: Record<string, YamlScalar>,
   index: number,
 ): { ok: true; outcome: Outcome } | { ok: false; errors: string[] } {
   const errors: string[] = [];
@@ -328,6 +225,17 @@ export async function loadOutcomes(filePath: string = DEFAULT_OUTCOMES_FILE): Pr
 
 // ---------------------------------------------------------------------------
 // Source adapters
+//
+// FUTURE SOURCES (#933): only `file` is implemented. `prometheus`, `api`, and
+// `sql` were live-looking stubs that logged + returned null; they were removed
+// because a single real adapter is a HYPOTHETICAL seam, not a real one
+// (LANGUAGE.md). When a SECOND source genuinely lands:
+//   1. widen `OutcomeSource` to the new union member,
+//   2. add its `case` arm + a real adapter below,
+//   3. add it back to `VALID_SOURCES`,
+//   4. update the `source` field doc in `config/direction/outcomes.yaml`.
+// That second adapter is the "two adapters means a real seam" trigger that
+// re-opens the dispatch switch for a genuine reason.
 // ---------------------------------------------------------------------------
 
 /**
@@ -364,23 +272,6 @@ async function readFileAdapter(query: string): Promise<OutcomeReading | null> {
   }
 }
 
-async function apiAdapter(query: string): Promise<OutcomeReading | null> {
-  // Stub: real wiring is operator-defined. We log + return null so callers
-  // treat unreachable as no-data, never crash.
-  console.error(`[outcomes] api adapter: not yet implemented (query='${query}'); returning null`);
-  return null;
-}
-
-async function prometheusAdapter(query: string): Promise<OutcomeReading | null> {
-  console.error(`[outcomes] prometheus adapter: not yet implemented (query='${query}'); returning null`);
-  return null;
-}
-
-async function sqlAdapter(query: string): Promise<OutcomeReading | null> {
-  console.error(`[outcomes] sql adapter: not yet implemented (query='${query}'); returning null`);
-  return null;
-}
-
 /**
  * Read the current value of an outcome from its declared source.
  *
@@ -393,14 +284,9 @@ export async function getOutcomeValue(outcome: Outcome): Promise<OutcomeReading 
     switch (outcome.source) {
       case "file":
         return await readFileAdapter(outcome.query);
-      case "api":
-        return await apiAdapter(outcome.query);
-      case "prometheus":
-        return await prometheusAdapter(outcome.query);
-      case "sql":
-        return await sqlAdapter(outcome.query);
       default:
-        // Should be unreachable thanks to schema validation.
+        // Unreachable: schema validation rejects any non-`file` source today
+        // (#933). Kept as a fail-loud guard for the day a second source lands.
         console.error(`[outcomes] unknown source '${(outcome as Outcome).source}' for outcome '${outcome.name}'`);
         return null;
     }
