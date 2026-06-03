@@ -20,6 +20,7 @@
  */
 
 import { Router } from "express";
+import { aggregatorRoute, aggregatorRouteNoQuery } from "./route-helpers.ts";
 import {
   OvernightSummaryQuerySchema,
   RecentMergesQuerySchema,
@@ -99,140 +100,85 @@ export function createTodayPageRouter(deps: TodayPageRouterDeps = {}) {
   // -------------------------------------------------------------------------
   // GET /v2/today/summary — slice 1
   // -------------------------------------------------------------------------
-  router.get("/today/summary", async (req, res) => {
-    const parsed = OvernightSummaryQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const summary = await aggregateOvernight(parsed.data.windowHours);
-      return res.json(summary);
-    } catch (err: any) {
-      console.error(
-        `[v2/today/summary] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get(
+    "/today/summary",
+    aggregatorRoute(
+      OvernightSummaryQuerySchema,
+      "v2/today/summary",
+      (data): Promise<OvernightSummaryResponse> =>
+        aggregateOvernight(data.windowHours),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/today/decision-queue — slice 2
   // -------------------------------------------------------------------------
-  router.get("/today/decision-queue", async (_req, res) => {
-    try {
-      const items = await aggregateDecisionQueue();
-      const body: DecisionQueueResponse = {
-        items,
+  router.get(
+    "/today/decision-queue",
+    aggregatorRouteNoQuery(
+      "v2/today/decision-queue",
+      async (): Promise<DecisionQueueResponse> => ({
+        items: await aggregateDecisionQueue(),
         generatedAt: new Date().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/today/decision-queue] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      }),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/today/stuck — slice 2
   // -------------------------------------------------------------------------
-  router.get("/today/stuck", async (_req, res) => {
-    try {
-      const items = await aggregateStuck();
-      const body: StuckItemsResponse = items;
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/today/stuck] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get(
+    "/today/stuck",
+    aggregatorRouteNoQuery(
+      "v2/today/stuck",
+      (): Promise<StuckItemsResponse> => aggregateStuck(),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/today/merges — slice 2
   // -------------------------------------------------------------------------
-  router.get("/today/merges", async (req, res) => {
-    const parsed = RecentMergesQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const items = await aggregateMerges(parsed.data.limit);
-      const body: RecentMergesResponse = {
-        items,
-        limit: parsed.data.limit,
+  router.get(
+    "/today/merges",
+    aggregatorRoute(
+      RecentMergesQuerySchema,
+      "v2/today/merges",
+      async (data): Promise<RecentMergesResponse> => ({
+        items: await aggregateMerges(data.limit),
+        limit: data.limit,
         generatedAt: new Date().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/today/merges] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      }),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/today/findings — slice 2
   // -------------------------------------------------------------------------
-  router.get("/today/findings", async (req, res) => {
-    const parsed = WindowedQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const items = await aggregateFindings(parsed.data.windowHours);
-      const body: FindingsResponse = {
-        items,
-        windowHours: parsed.data.windowHours,
+  router.get(
+    "/today/findings",
+    aggregatorRoute(
+      WindowedQuerySchema,
+      "v2/today/findings",
+      async (data): Promise<FindingsResponse> => ({
+        items: await aggregateFindings(data.windowHours),
+        windowHours: data.windowHours,
         generatedAt: new Date().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/today/findings] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      }),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/today/lessons-overnight — slice 2
   // -------------------------------------------------------------------------
-  router.get("/today/lessons-overnight", async (req, res) => {
-    const parsed = WindowedQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const lessons = await aggregateLessons(parsed.data.windowHours);
-      const body: LessonsOvernightResponse = lessons;
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/today/lessons-overnight] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get(
+    "/today/lessons-overnight",
+    aggregatorRoute(
+      WindowedQuerySchema,
+      "v2/today/lessons-overnight",
+      (data): Promise<LessonsOvernightResponse> =>
+        aggregateLessons(data.windowHours),
+    ),
+  );
 
   return router;
 }

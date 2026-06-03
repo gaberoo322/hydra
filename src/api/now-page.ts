@@ -18,6 +18,7 @@
  */
 
 import { Router } from "express";
+import { aggregatorRoute, aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 import {
   AlertsNowQuerySchema,
@@ -123,8 +124,16 @@ export interface RecommendationsReaderDeps {
   getAllRecommendations(runId: string): Promise<Record<string, string>>;
   getDismissedSet(runId: string): Promise<string[]>;
   getMutedClassesSet(runId: string): Promise<string[]>;
-  dismissRecommendation(runId: string, recId: string, ttlSeconds: number): Promise<void>;
-  muteSeverityClass(runId: string, severity: string, ttlSeconds: number): Promise<void>;
+  dismissRecommendation(
+    runId: string,
+    recId: string,
+    ttlSeconds: number,
+  ): Promise<void>;
+  muteSeverityClass(
+    runId: string,
+    severity: string,
+    ttlSeconds: number,
+  ): Promise<void>;
 }
 
 export interface CurrentRunIdReader {
@@ -181,44 +190,44 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   const aggregateServiceStrip = deps.getServiceStrip ?? getServiceStrip;
   const aggregateDispatches = deps.getActiveDispatches ?? getActiveDispatches;
   const aggregateCostBurn = deps.getCostBurn ?? getCostBurn;
-  const aggregateAutopilotHealth = deps.getAutopilotHealth ?? getAutopilotHealth;
-  const readSchedStatus = deps.readSchedulerStatus ?? defaultReadSchedulerStatus;
+  const aggregateAutopilotHealth =
+    deps.getAutopilotHealth ?? getAutopilotHealth;
+  const readSchedStatus =
+    deps.readSchedulerStatus ?? defaultReadSchedulerStatus;
   const readCurrentRun = deps.readCurrentAutopilotRun ?? defaultReadCurrentRun;
-  const readLifecycle = deps.readAutopilotLifecycle ?? defaultReadAutopilotLifecycle;
+  const readLifecycle =
+    deps.readAutopilotLifecycle ?? defaultReadAutopilotLifecycle;
   const readAlertsJson = deps.readRecentAlertsJson ?? defaultReadAlertsJson;
   const readCurrentRunId = deps.readCurrentRunId ?? defaultReadCurrentRunId;
-  const recsRedis: RecommendationsReaderDeps = deps.recsRedis ?? defaultRecsRedis;
+  const recsRedis: RecommendationsReaderDeps =
+    deps.recsRedis ?? defaultRecsRedis;
   const clock = deps.now ?? (() => new Date());
 
   // -------------------------------------------------------------------------
   // GET /v2/now/service-strip
   // -------------------------------------------------------------------------
-  router.get("/now/service-strip", async (_req, res) => {
-    try {
-      const rows = await aggregateServiceStrip();
-      const body: ServiceStripResponse = {
-        rows,
+  router.get(
+    "/now/service-strip",
+    aggregatorRouteNoQuery(
+      "v2/now/service-strip",
+      async (): Promise<ServiceStripResponse> => ({
+        rows: await aggregateServiceStrip(),
         generatedAt: clock().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/now/service-strip] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      }),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/now/autopilot-tick — thin wrapper over scheduler/autopilot data
   // -------------------------------------------------------------------------
   router.get("/now/autopilot-tick", async (_req, res) => {
     try {
-      const [schedSettled, runSettled, lifecycleSettled] = await Promise.allSettled([
-        readSchedStatus(),
-        readCurrentRun(),
-        readLifecycle(),
-      ]);
+      const [schedSettled, runSettled, lifecycleSettled] =
+        await Promise.allSettled([
+          readSchedStatus(),
+          readCurrentRun(),
+          readLifecycle(),
+        ]);
       const sched =
         schedSettled.status === "fulfilled"
           ? schedSettled.value
@@ -268,108 +277,77 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
   // -------------------------------------------------------------------------
   // GET /v2/now/active-dispatches
   // -------------------------------------------------------------------------
-  router.get("/now/active-dispatches", async (_req, res) => {
-    try {
-      const items = await aggregateDispatches();
-      const body: ActiveDispatchesResponse = {
-        items,
+  router.get(
+    "/now/active-dispatches",
+    aggregatorRouteNoQuery(
+      "v2/now/active-dispatches",
+      async (): Promise<ActiveDispatchesResponse> => ({
+        items: await aggregateDispatches(),
         generatedAt: clock().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/now/active-dispatches] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      }),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/now/cost-burn
   // -------------------------------------------------------------------------
-  router.get("/now/cost-burn", async (_req, res) => {
-    try {
-      const burn = await aggregateCostBurn();
-      const body: CostBurnResponse = {
-        ...burn,
+  router.get(
+    "/now/cost-burn",
+    aggregatorRouteNoQuery(
+      "v2/now/cost-burn",
+      async (): Promise<CostBurnResponse> => ({
+        ...(await aggregateCostBurn()),
         generatedAt: clock().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/now/cost-burn] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      }),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /now/autopilot-health — ranked stuck signals (issue #890)
   // -------------------------------------------------------------------------
-  router.get("/now/autopilot-health", async (req, res) => {
-    const parsed = AutopilotHealthQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const signals = await aggregateAutopilotHealth({
-        historyWindow: parsed.data.historyWindow,
-        now: clock(),
-      });
-      const body: AutopilotHealthResponse = {
-        signals,
-        historyWindow: parsed.data.historyWindow,
+  router.get(
+    "/now/autopilot-health",
+    aggregatorRoute(
+      AutopilotHealthQuerySchema,
+      "now/autopilot-health",
+      async (data): Promise<AutopilotHealthResponse> => ({
+        signals: await aggregateAutopilotHealth({
+          historyWindow: data.historyWindow,
+          now: clock(),
+        }),
+        historyWindow: data.historyWindow,
         generatedAt: clock().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[now/autopilot-health] aggregator threw despite never-throw contract: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+      }),
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /v2/now/alerts — thin wrapper over /api/alerts
   // -------------------------------------------------------------------------
-  router.get("/now/alerts", async (req, res) => {
-    const parsed = AlertsNowQuerySchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      return res.status(400).json({
-        code: "schema-validation-failed",
-        issues: parsed.error.issues,
-      });
-    }
-
-    try {
-      const raw = await readAlertsJson(parsed.data.limit);
-      const items = parseAlertsWindow({
-        raw,
-        sinceMinutes: parsed.data.sinceMinutes,
-        now: clock(),
-      });
-      // `items` is the projected `Record<string, unknown>[]` shape — the
-      // schema's `passthrough()` row type accepts the same data at runtime
-      // but TS doesn't see the required-field intersection until parse-time.
-      // The shape is enforced via the schema; the cast here is local.
-      const body: AlertsNowResponse = {
-        items: items as AlertsNowResponse["items"],
-        windowMinutes: parsed.data.sinceMinutes,
-        generatedAt: clock().toISOString(),
-      };
-      return res.json(body);
-    } catch (err: any) {
-      console.error(
-        `[v2/now/alerts] reader threw: ${err?.message || err}`,
-      );
-      return res.status(500).json({ error: err?.message || String(err) });
-    }
-  });
+  router.get(
+    "/now/alerts",
+    aggregatorRoute(
+      AlertsNowQuerySchema,
+      "v2/now/alerts",
+      async (data): Promise<AlertsNowResponse> => {
+        const raw = await readAlertsJson(data.limit);
+        const items = parseAlertsWindow({
+          raw,
+          sinceMinutes: data.sinceMinutes,
+          now: clock(),
+        });
+        // `items` is the projected `Record<string, unknown>[]` shape — the
+        // schema's `passthrough()` row type accepts the same data at runtime
+        // but TS doesn't see the required-field intersection until parse-time.
+        // The shape is enforced via the schema; the cast here is local.
+        return {
+          items: items as AlertsNowResponse["items"],
+          windowMinutes: data.sinceMinutes,
+          generatedAt: clock().toISOString(),
+        };
+      },
+    ),
+  );
 
   // -------------------------------------------------------------------------
   // GET /now/recommendations — active (non-dismissed, non-muted-class) recs
@@ -467,7 +445,11 @@ export function createNowPageRouter(deps: NowPageRouterDeps = {}) {
       if (!runId) {
         return res.status(404).json({ error: "no current run" });
       }
-      await recsRedis.muteSeverityClass(runId, parsed.data.severity, RUN_TTL_SECONDS);
+      await recsRedis.muteSeverityClass(
+        runId,
+        parsed.data.severity,
+        RUN_TTL_SECONDS,
+      );
       return res.json({
         run_id: runId,
         severity: parsed.data.severity,
@@ -570,7 +552,8 @@ export function parseAlertsWindow(input: {
     }
     if (!parsed || typeof parsed !== "object") continue;
     const obj = parsed as Record<string, unknown>;
-    const ts = typeof obj.timestamp === "string" ? Date.parse(obj.timestamp) : NaN;
+    const ts =
+      typeof obj.timestamp === "string" ? Date.parse(obj.timestamp) : NaN;
     if (!Number.isFinite(ts)) continue;
     if (ts < cutoffMs) continue;
     if (typeof obj.id !== "string") continue;
@@ -585,12 +568,16 @@ export function parseAlertsWindow(input: {
 // Default wiring
 // ---------------------------------------------------------------------------
 
-async function defaultReadSchedulerStatus(): Promise<{ running: boolean; lastTickAt: string | null }> {
+async function defaultReadSchedulerStatus(): Promise<{
+  running: boolean;
+  lastTickAt: string | null;
+}> {
   const { getStatus } = await import("../scheduler/heartbeat.ts");
   const status = await getStatus();
   return {
     running: !!status.running,
-    lastTickAt: typeof status.lastTickAt === "string" ? status.lastTickAt : null,
+    lastTickAt:
+      typeof status.lastTickAt === "string" ? status.lastTickAt : null,
   };
 }
 
