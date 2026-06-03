@@ -4,6 +4,7 @@ import StatusVerdict from "./StatusVerdict.jsx";
 import UsagePanel from "./UsagePanel.jsx";
 import StuckSignals from "./StuckSignals.jsx";
 import RunHistoryStrip from "./RunHistoryStrip.jsx";
+import RetroPanel from "./RetroPanel.jsx";
 import { summariseTurns, formatRelativeTime } from "../now-pixel/oak-tab-state.ts";
 
 /**
@@ -110,6 +111,7 @@ export default function NowConsole() {
         <StuckSignals />
       </div>
       <RunHistoryStrip />
+      <RetroPanel />
     </div>
   );
 }

@@ -35,3 +35,74 @@ export const RetroBundleParamsSchema = z
 
 /** Inferred TS type — canonical shape of the retro-bundle path params. */
 export type RetroBundleParams = z.infer<typeof RetroBundleParamsSchema>;
+
+// ---------------------------------------------------------------------------
+// Persisted retro artifacts (issue #921, retro-4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Query parameter accepted by `GET /api/autopilot/retros?limit=N`, which
+ * returns the recent persisted retro artifacts newest-first for the dashboard
+ * Retro panel.
+ *
+ * `limit` arrives on the wire as a string (Express `req.query`), so we coerce
+ * through `z.coerce.number()` then constrain to a positive integer capped at
+ * 100 — the panel only ever renders a handful of recent retrospectives, so the
+ * cap stops a caller asking the server to slurp an unbounded slice. OPTIONAL
+ * with a default of 20, matching the other paged read surfaces.
+ */
+export const RecentRetrosQuerySchema = z
+  .object({
+    limit: z.coerce
+      .number({ message: "limit must be a number" })
+      .int({ message: "limit must be an integer" })
+      .min(1, { message: "limit must be >= 1" })
+      .max(100, { message: "limit must be <= 100" })
+      .default(20),
+  })
+  .strict();
+
+/** Inferred TS type — canonical shape of the recent-retros query params. */
+export type RecentRetrosQuery = z.infer<typeof RecentRetrosQuerySchema>;
+
+/**
+ * One synthesised finding inside a persisted artifact. `recurrence` is the
+ * cross-run gotcha count that gates whether a prompt/doc fix is emitted.
+ */
+export const RetroFindingSchema = z
+  .object({
+    cue: z.string().min(1, { message: "cue must be a non-empty string" }),
+    summary: z.string(),
+    recurrence: z.number().int().min(0),
+    disposition: z.string(),
+  })
+  .strict();
+
+/** A GitHub ref (issue or PR) the retrospective produced from the run. */
+export const RetroEmittedRefSchema = z
+  .object({
+    kind: z.enum(["issue", "pr"]),
+    number: z.number().int().positive(),
+    title: z.string().optional(),
+  })
+  .strict();
+
+/**
+ * The durable retrospective artifact persisted per autopilot run. This is the
+ * canonical shape of both the Redis-stored record and the read-endpoint
+ * response items, so the `/hydra-retro` skill and the dashboard agree on it.
+ */
+export const RetroArtifactSchema = z
+  .object({
+    run_id: z.string().min(1, { message: "run_id must be a non-empty string" }),
+    generatedAt: z.string().min(1, { message: "generatedAt must be a non-empty string" }),
+    findings: z.array(RetroFindingSchema),
+    emitted: z.array(RetroEmittedRefSchema),
+    summary: z.string().optional(),
+  })
+  .strict();
+
+/** Inferred TS types — canonical shapes of the persisted artifact + parts. */
+export type RetroFindingShape = z.infer<typeof RetroFindingSchema>;
+export type RetroEmittedRefShape = z.infer<typeof RetroEmittedRefSchema>;
+export type RetroArtifactShape = z.infer<typeof RetroArtifactSchema>;
