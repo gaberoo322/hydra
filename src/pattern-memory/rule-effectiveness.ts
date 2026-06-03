@@ -33,12 +33,26 @@
  * stays byte-compatible.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
 import { appendRuleAction, readRecentRuleActions } from "../redis/agent-memory.ts";
 import { loadPatterns, savePatterns, type MemoryPattern } from "./agent-memory.ts";
+import {
+  demotePromotedRuleFromFeedbackFile,
+  removePromotedRuleBlock,
+} from "./feedback-file.ts";
 
-const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
+// Issue #940 — the demote-side feedback-file grammar (`removePromotedRuleBlock`
+// + the side-effecting `demotePromotedRuleFromFeedbackFile`) is now owned by the
+// `feedback-file.ts` Module, co-located with the matching append/render grammar
+// it parses against (the writer/reader coupling is now structural, not a doc
+// comment). `demotePromotedRuleFromFeedbackFile` is re-exported so the demotion
+// caller below keeps a stable local name; `removePromotedRuleBlock` is
+// re-exported under its historical name `removePromotedRuleFromFeedback` so the
+// existing test import (test/promoted-rule-effectiveness.test.mts) keeps
+// resolving against `rule-effectiveness.ts`.
+export {
+  demotePromotedRuleFromFeedbackFile,
+  removePromotedRuleBlock as removePromotedRuleFromFeedback,
+};
 
 // ===========================================================================
 // Types
@@ -251,77 +265,12 @@ export async function getIneffectivePromotedPatterns(
 // Issue #365 — Auto-demote / alert action on ineffective promoted rules
 // ===========================================================================
 
-/**
- * Pure helper — remove a promoted-rule block from a feedback file by category
- * heading. Returns `{ newContent, removed }` so the caller can decide whether
- * to write the file. The match is anchored to `### <category> (...)` — exactly
- * the heading format produced by `promoteToFeedback()`.
- *
- * Exported for unit tests (no I/O dependency).
- */
-export function removePromotedRuleFromFeedback(
-  feedbackContent: string,
-  category: string,
-): { newContent: string; removed: boolean } {
-  const autoPromotedIdx = feedbackContent.indexOf("## Auto-Promoted Rules");
-  if (autoPromotedIdx === -1) return { newContent: feedbackContent, removed: false };
-
-  const staleIdx = feedbackContent.indexOf("## Stale Rules (review needed)", autoPromotedIdx);
-  const sectionEnd = staleIdx !== -1 ? staleIdx : feedbackContent.length;
-  const sectionContent = feedbackContent.slice(autoPromotedIdx, sectionEnd);
-
-  // Find headings inside the Auto-Promoted section. The block goes from this
-  // heading up to the next ### (or end of section).
-  const headingRegex = /^### .+$/gm;
-  const headings: { index: number; match: string }[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = headingRegex.exec(sectionContent)) !== null) {
-    headings.push({ index: m.index, match: m[0] });
-  }
-
-  // Match heading that starts with `### <category> (` — the format produced
-  // by promoteToFeedback().
-  const headingPrefix = `### ${category} (`;
-  const targetIdx = headings.findIndex(h => h.match.startsWith(headingPrefix));
-  if (targetIdx === -1) return { newContent: feedbackContent, removed: false };
-
-  const target = headings[targetIdx];
-  const blockStartInSection = target.index;
-  const blockEndInSection =
-    targetIdx + 1 < headings.length ? headings[targetIdx + 1].index : sectionContent.length;
-
-  const absStart = autoPromotedIdx + blockStartInSection;
-  const absEnd = autoPromotedIdx + blockEndInSection;
-
-  let newContent = feedbackContent.slice(0, absStart) + feedbackContent.slice(absEnd);
-  // Collapse triple+ newlines produced by the removal.
-  newContent = newContent.replace(/\n{3,}/g, "\n\n");
-  return { newContent, removed: true };
-}
-
-/**
- * Remove a promoted rule block from `config/feedback/to-{agent}.md`.
- * Side-effecting wrapper around `removePromotedRuleFromFeedback()`.
- * Returns true when the file was rewritten.
- */
-export async function demotePromotedRuleFromFeedbackFile(
-  agentName: string,
-  category: string,
-): Promise<boolean> {
-  const feedbackPath = join(CONFIG_PATH, "feedback", `to-${agentName}.md`);
-  try {
-    const content = await readFile(feedbackPath, "utf-8");
-    const { newContent, removed } = removePromotedRuleFromFeedback(content, category);
-    if (!removed || newContent === content) return false;
-    await writeFile(feedbackPath, newContent);
-    return true;
-  } catch (err: any) {
-    console.error(
-      `[Learning] demotePromotedRuleFromFeedbackFile(${agentName}, ${category}) failed: ${err.message}`,
-    );
-    return false;
-  }
-}
+// Issue #940 — the demote-side feedback-file grammar (the pure
+// `removePromotedRuleBlock` transform, re-exported here under its historical
+// name `removePromotedRuleFromFeedback`, and the side-effecting
+// `demotePromotedRuleFromFeedbackFile` wrapper) moved verbatim into the
+// `feedback-file.ts` Module and is re-exported at the top of this file. The
+// auto-demote orchestration below calls the re-exported wrapper.
 
 /**
  * Append a rule-action audit entry to the bounded Redis list. Tail entries
