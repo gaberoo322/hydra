@@ -112,10 +112,11 @@ export default function NowPixel({ ws }) {
   return (
     <div className="space-y-4">
       <header>
-        <h1 className="text-2xl font-bold">Now (Pixel View)</h1>
+        <h2 className="text-lg font-semibold text-zinc-200">Habitat view</h2>
         <p className="text-sm text-zinc-400">
-          Pokemon-habitat rendering of the live orchestrator. Preview build —
-          coexists with classic /now until the atomic swap.
+          Pokemon-habitat rendering of the live orchestrator — the alternate
+          surface to the /now Console (toggle above, or deep-link
+          <code className="text-zinc-300"> /now-pixel</code>).
         </p>
       </header>
       <AutopilotPavilion spriteRef={pavilionSpriteRef} />
