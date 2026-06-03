@@ -74,10 +74,6 @@ export async function getMetricsTrend(count = 20) {
     if (parsed.regressionIntroduced !== undefined) {
       parsed.regressionIntroduced = parsed.regressionIntroduced === "true";
     }
-    // Issue #272: gate-coverage observability — string "true"/"false" in Redis.
-    if (parsed.qualityGateCoverage !== undefined) {
-      parsed.qualityGateCoverage = parsed.qualityGateCoverage === "true";
-    }
 
     // Issue #326: derive `reflectionMatchSource` at read time when callers
     // (verification, post-merge) did not emit it directly.

@@ -1,79 +1,16 @@
 /**
- * Quality-gate signals — derivation, percentiles, trend aggregation.
+ * Quality-gate signals — percentiles + mutation/JIT trend aggregation.
  *
- * `deriveQualityGateCoverage` is the bridge between recordCycleMetrics()
- * and the gate-coverage observability surface (issue #287). `percentile`
- * + `getQualityGateTrend` feed the /metrics/quality-gates endpoint
- * (issue #212).
+ * `percentile` + `getQualityGateTrend` feed the /metrics/quality-gates
+ * endpoint (issue #212), reading the same `mutationKillRate` / `jitTestsKept`
+ * cycle fields that `src/aggregators/builder-health.ts` renders.
+ *
+ * The `deriveQualityGateCoverage` derivation (issue #287) was retired in #971:
+ * its mutation/JIT inputs lost their in-process writer when the codex control
+ * loop was removed (ADR-0006 / ADR-0012 — the mutation gate moved to CI), so
+ * the derived `qualityGateCoverage` metric was structurally pinned at 0% and
+ * fed nothing live.
  */
-
-/**
- * Derive `qualityGateCoverage` from other metric signals when callers haven't
- * set it explicitly (issue #287).
- *
- * Pre-#287 only the post-merge path recorded the field — every other early-exit
- * (verification failure, mutation-gate block, JIT bug catch, drift, planner
- * no-work, preflight rejection, cost-cap) silently dropped out of the
- * denominator, biasing the rate upward (3/20 samples → reported 33% even
- * though the true denominator was 20).
- *
- * Rules:
- *   - explicit value wins (post-merge keeps its precise truth)
- *   - mutation OR JIT actually produced output → "true" (gate did useful work)
- *   - verification ran but neither gate did → "false" (explicit miss)
- *   - verification did not run at all → absent (null / not-applicable)
- *
- * Pure function — exported for unit tests.
- */
-export function deriveQualityGateCoverage(metrics: Record<string, any>): "true" | "false" | undefined {
-  // Caller already set it — preserve their value (boolean OR string form).
-  if (metrics.qualityGateCoverage !== undefined && metrics.qualityGateCoverage !== null) {
-    if (typeof metrics.qualityGateCoverage === "boolean") {
-      return metrics.qualityGateCoverage ? "true" : "false";
-    }
-    const s = String(metrics.qualityGateCoverage).toLowerCase();
-    if (s === "true" || s === "false") return s as "true" | "false";
-    // Unknown explicit value — fall through to derive.
-  }
-
-  // Did mutation OR JIT actually run? Any of these signals means a gate
-  // produced real output for this cycle.
-  const mutationsTested = typeof metrics.mutationsTested === "number" ? metrics.mutationsTested : 0;
-  const mutationKillRate = typeof metrics.mutationKillRate === "number" ? metrics.mutationKillRate : -1;
-  const mutationDecision = typeof metrics.mutationDecision === "string" ? metrics.mutationDecision : "";
-  const jitTestsGenerated = typeof metrics.jitTestsGenerated === "number" ? metrics.jitTestsGenerated : 0;
-  const jitTestsKept = typeof metrics.jitTestsKept === "number" ? metrics.jitTestsKept : 0;
-  const jitTestsCaughtBug = typeof metrics.jitTestsCaughtBug === "number" ? metrics.jitTestsCaughtBug : 0;
-  const jitDecision = typeof metrics.jitDecision === "string" ? metrics.jitDecision : "";
-
-  const mutationRan = mutationDecision === "ran" || mutationsTested > 0 || mutationKillRate >= 0;
-  const jitRan = jitDecision.startsWith("ran")
-    || jitTestsGenerated > 0
-    || jitTestsKept > 0
-    || jitTestsCaughtBug > 0;
-  if (mutationRan || jitRan) return "true";
-
-  // Did verification run at all? Any of these signals means we got past
-  // the executor and into the verification step (test/typecheck/build).
-  // tasksAttempted alone is not enough — drift-rejected and preflight-rejected
-  // cycles also set tasksAttempted=1 without running verification.
-  const verificationDurationMs = typeof metrics.verificationDurationMs === "number"
-    ? metrics.verificationDurationMs : 0;
-  const tasksVerified = typeof metrics.tasksVerified === "number" ? metrics.tasksVerified : 0;
-  const tasksMerged = typeof metrics.tasksMerged === "number" ? metrics.tasksMerged : 0;
-  // tasksFailed only counts as "verification ran" when not paired with an
-  // abandonReason indicating pre-verification exit (drift, preflight, cost-cap).
-  const tasksFailed = typeof metrics.tasksFailed === "number" ? metrics.tasksFailed : 0;
-  const abandonReason = typeof metrics.abandonReason === "string" ? metrics.abandonReason : "";
-  const preVerificationAbandon = abandonReason.length > 0; // any abandonReason means we exited early
-
-  const verificationRan = verificationDurationMs > 0
-    || tasksVerified > 0
-    || tasksMerged > 0
-    || (tasksFailed > 0 && !preVerificationAbandon);
-
-  return verificationRan ? "false" : undefined;
-}
 
 /**
  * Compute the p-th percentile of a numeric array using nearest-rank.

@@ -3,17 +3,17 @@
  *
  * `recordCycleMetrics(cycleId, metrics)` is the single write entry for the
  * cycle metrics hash. Auto-computes cycle cost from agent runs (back-compat
- * for callers that didn't supply it) and auto-derives `qualityGateCoverage`
- * via `deriveQualityGateCoverage` so cycles that exited before verification
- * land as "not-applicable" rather than dropping out of the rate denominator
- * (issue #287).
+ * for callers that didn't supply it).
+ *
+ * The `deriveQualityGateCoverage` auto-derivation (issue #287) was removed in
+ * #971: its mutation/JIT inputs lost their in-process writer when the codex
+ * control loop was retired, leaving the metric write-dead (pinned at 0%).
  */
 
 import {
   getCycleAgentRuns,
   setCycleMetrics,
 } from "../redis/cycle-metrics.ts";
-import { deriveQualityGateCoverage } from "./quality-gates.ts";
 
 /** TTL for cycle metrics Redis keys: 7 days in seconds (matches redis/cycle-tracking.ts). */
 const CYCLE_KEY_TTL = 7 * 24 * 60 * 60; // 604800
@@ -41,22 +41,10 @@ export async function recordCycleMetrics(cycleId, metrics) {
     } catch { /* intentional: cost tracking is best-effort */ }
   }
 
-  // Issue #287: derive qualityGateCoverage so cycles that ran verification but
-  // skipped the gate (or that didn't reach verification) get an explicit
-  // false / not-applicable instead of dropping out of the rate denominator.
-  const derivedCoverage = deriveQualityGateCoverage(metrics);
-  if (derivedCoverage !== undefined) {
-    metrics.qualityGateCoverage = derivedCoverage;
-  } else {
-    // Verification did not run — strip the field so it is genuinely absent
-    // in Redis (parses back as undefined → "not applicable").
-    delete metrics.qualityGateCoverage;
-  }
-
   const flat: Record<string, string> = {};
   for (const [k, v] of Object.entries(metrics)) {
-    // Issue #287: skip undefined so "not-applicable" stays absent rather than
-    // being persisted as the string "undefined".
+    // Skip undefined so absent fields stay absent rather than being persisted
+    // as the string "undefined".
     if (v === undefined) continue;
     flat[k] = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
   }
