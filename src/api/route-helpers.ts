@@ -24,10 +24,10 @@
  *     near-identical per-route assertions.
  *
  * Scope (see CONTEXT.md): this is the **query/aggregator-route** shape only. It
- * EXTENDS the Schemas Seam convention — it does NOT move HTTP *body* validation
- * out of `src/schemas/`. The body-validation seam-check (which targets
- * `req.body`, not `req.query`) is unchanged; POST body routes keep their inline
- * `req.body` safeParse.
+ * EXTENDS the Schemas Seam convention — it does NOT move HTTP request-body
+ * validation out of `src/schemas/`. The body-validation seam-check (which
+ * targets the request body, not the query string) is unchanged; POST body
+ * routes keep their inline body safeParse.
  */
 
 import type { Request, Response } from "express";
