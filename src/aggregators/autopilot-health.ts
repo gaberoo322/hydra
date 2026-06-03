@@ -34,7 +34,7 @@
  */
 
 import type { StuckSignal, StuckSignalSeverity } from "../schemas/now-page.ts";
-import { settledOrEmpty, settledOrNull } from "./settle.ts";
+import { settledOr, settledOrEmpty, settledOrNull } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
 // Tunable thresholds
@@ -88,6 +88,12 @@ export interface RunDigest {
   dispatches?: unknown;
   merged_count?: unknown;
   failed_count?: unknown;
+  /**
+   * Epoch *seconds* the run started (from `projectRunDigest`). Used to derive
+   * the wall-clock span the window covers so the real-merge cross-check
+   * (`readWindowMergeCount`) can count master merges over the same interval.
+   */
+  started_epoch?: unknown;
 }
 
 /** Live-run view subset (from `getCurrentRun().view`). */
@@ -114,6 +120,17 @@ export interface AutopilotHealthDeps {
    * thin call into `autopilot/runs.listRuns(limit)`.
    */
   readRecentRuns?: (limit: number) => Promise<RunDigest[]>;
+  /**
+   * Reader for the count of **real** master merges that landed at or after
+   * `sinceEpochS` (epoch seconds). This is the out-of-band delivery proxy the
+   * `unproductive-loop` heuristic cross-checks against, because per-run
+   * `merged_count` is structurally near-zero when CI (the async merge gate)
+   * lands PRs after their dispatching run has ended (issue #924). Defaults to a
+   * thin `git log master --since` count via the recent-merges aggregator.
+   * Returns 0 when no merges landed or the read fails (the latter logs and
+   * fails open to the legacy per-run behaviour).
+   */
+  readWindowMergeCount?: (sinceEpochS: number) => Promise<number>;
   /** How many recent runs the cross-run heuristics scan. Defaults to 14. */
   historyWindow?: number;
 }
@@ -132,6 +149,8 @@ export async function getAutopilotHealth(
   const historyWindow = deps.historyWindow ?? 14;
   const readLiveRun = deps.readLiveRun ?? defaultReadLiveRun;
   const readRecentRuns = deps.readRecentRuns ?? defaultReadRecentRuns;
+  const readWindowMergeCount =
+    deps.readWindowMergeCount ?? defaultReadWindowMergeCount;
 
   const [liveResult, historyResult] = await Promise.allSettled([
     readLiveRun(),
@@ -141,9 +160,27 @@ export async function getAutopilotHealth(
   const live = settledOrNull(liveResult, "autopilot-health/live-run");
   const history = settledOrEmpty(historyResult, "autopilot-health/run-history");
 
+  // Cross-check real out-of-band delivery (issue #924). Per-run `merged_count`
+  // can't see CI merges that land after a run ends, so before flagging an
+  // unproductive loop we count master merges over the same wall-clock span the
+  // run window covers. The window start is the oldest run's `started_epoch`.
+  // Read failures fail open to 0 (legacy per-run behaviour) — never throw.
+  const windowStartEpochS = oldestRunStartEpochS(history);
+  let realMergesInWindow = 0;
+  if (windowStartEpochS !== null) {
+    const [mergeResult] = await Promise.allSettled([
+      readWindowMergeCount(windowStartEpochS),
+    ]);
+    realMergesInWindow = settledOr(
+      mergeResult,
+      0,
+      "autopilot-health/window-merge-count",
+    );
+  }
+
   const signals: StuckSignal[] = [
     ...detectStalledDispatch(live, thresholds),
-    ...detectUnproductiveLoops(history, thresholds),
+    ...detectUnproductiveLoops(history, thresholds, realMergesInWindow),
     ...detectIdleStreak(history, thresholds),
     ...detectIssuePrChurn(history, thresholds),
   ];
@@ -189,6 +226,24 @@ function toNum(v: unknown): number {
 
 function toStr(v: unknown): string {
   return typeof v === "string" ? v : "";
+}
+
+/**
+ * Pure helper — exported for tests. Returns the smallest positive
+ * `started_epoch` (epoch seconds) across the run-history window, i.e. when the
+ * oldest run began — the wall-clock start of the span the window covers. The
+ * real-merge cross-check counts master merges since this point. Returns null
+ * when no run carries a usable timestamp (the cross-check is then skipped and
+ * the heuristic falls back to the per-run `merged_count` boundary alone).
+ */
+export function oldestRunStartEpochS(history: RunDigest[]): number | null {
+  let oldest: number | null = null;
+  for (const run of history) {
+    const s = toNum(run.started_epoch);
+    if (s <= 0) continue;
+    if (oldest === null || s < oldest) oldest = s;
+  }
+  return oldest;
 }
 
 // ---------------------------------------------------------------------------
@@ -270,13 +325,25 @@ function countOpenDispatchActions(turn: unknown): number {
 // The run digest doesn't carry a per-run class label, but it does carry the
 // aggregate dispatch/merged/failed counts per run. We treat the run-history
 // window itself as the "loop": across the window, if total dispatches are
-// non-trivial yet zero merged AND a meaningful share failed, the autopilot is
-// burning capacity without landing work.
+// non-trivial yet NOTHING landed, the autopilot may be burning capacity
+// without delivering.
+//
+// CRITICAL (issue #924): per-run `merged_count` is NOT a delivery proxy. CI is
+// the async merge gate, so a dispatch opens a PR that merges minutes-to-hours
+// later — almost always after the dispatching run has ended (and short-lived
+// runs terminate before CI even resolves, leaving every outcome `pending`).
+// So per-run `merged_count` is structurally ~0 regardless of real delivery,
+// which made this heuristic cry wolf whenever runs are short-lived. We now
+// cross-check `realMergesInWindow` — actual master merges over the same span —
+// and suppress the signal entirely when real merges landed. The heuristic only
+// fires for the genuine case: dispatches accumulating with zero real merges
+// ANYWHERE (per-run AND out-of-band).
 // ---------------------------------------------------------------------------
 
 export function detectUnproductiveLoops(
   history: RunDigest[],
   thresholds: AutopilotHealthThresholds,
+  realMergesInWindow = 0,
 ): StuckSignal[] {
   let dispatches = 0;
   let merged = 0;
@@ -291,8 +358,10 @@ export function detectUnproductiveLoops(
   }
 
   if (dispatches < thresholds.unproductiveMinDispatches) return [];
-  // Productive if anything merged — only flag a fully-unproductive window.
-  if (merged > 0) return [];
+  // Productive if anything landed per-run OR out-of-band (real master merges in
+  // the window). Only flag a window with zero delivery on EITHER axis.
+  const realMerges = Math.max(0, Math.floor(realMergesInWindow));
+  if (merged > 0 || realMerges > 0) return [];
 
   const failRatio = dispatches > 0 ? failed / dispatches : 0;
   const severity: StuckSignalSeverity =
@@ -302,12 +371,13 @@ export function detectUnproductiveLoops(
     {
       type: "unproductive-loop",
       severity,
-      summary: `Across the last ${history.length} runs, ${dispatches} dispatch(es) landed 0 merges (${failed} failed) — autopilot is looping without progress.`,
+      summary: `Across the last ${history.length} runs, ${dispatches} dispatch(es) landed 0 merges (${failed} failed, 0 real master merges in the window) — autopilot is looping without progress.`,
       evidence: {
         windowRuns: history.length,
         runsWithDispatch,
         dispatches,
         merged,
+        realMergesInWindow: realMerges,
         failed,
         failRatio: Number(failRatio.toFixed(3)),
       },
@@ -445,4 +515,34 @@ async function defaultReadRecentRuns(limit: number): Promise<RunDigest[]> {
   const result = await listRuns(limit);
   if (!result.ok) return [];
   return result.runs as RunDigest[];
+}
+
+/**
+ * Default `readWindowMergeCount` — counts master merges that landed at or after
+ * `sinceEpochS` via the recent-merges aggregator (`git log master` through the
+ * GitHub CLI Adapter seam, issue #924). This is the out-of-band delivery proxy
+ * the per-run `merged_count` can't see because CI merges PRs after their
+ * dispatching run ends. Never throws: any failure logs and returns 0, failing
+ * open to the legacy per-run boundary.
+ */
+async function defaultReadWindowMergeCount(sinceEpochS: number): Promise<number> {
+  try {
+    const { getRecentMerges } = await import("./recent-merges.ts");
+    // The aggregator caps at 50; that comfortably covers a healthy ~14-run
+    // window (the issue's incident saw 10 merges in 14 runs) and is the most
+    // recent slice of master — exactly where window merges live.
+    const merges = await getRecentMerges(50);
+    const sinceMs = sinceEpochS * 1000;
+    let count = 0;
+    for (const m of merges) {
+      const mergedMs = Date.parse(m.mergedAt);
+      if (Number.isFinite(mergedMs) && mergedMs >= sinceMs) count += 1;
+    }
+    return count;
+  } catch (err: any) {
+    console.error(
+      `[autopilot-health] window-merge-count read failed: ${err?.message || err}`,
+    );
+    return 0;
+  }
 }

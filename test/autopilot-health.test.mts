@@ -24,6 +24,7 @@ import {
   detectUnproductiveLoops,
   detectIdleStreak,
   detectIssuePrChurn,
+  oldestRunStartEpochS,
   rankSignals,
   DEFAULT_HEALTH_THRESHOLDS,
   type LiveRunView,
@@ -155,6 +156,83 @@ describe("detectUnproductiveLoops (issue #890)", () => {
     const sig = detectUnproductiveLoops(history, T);
     assert.equal(sig.length, 1);
     assert.equal(sig[0].evidence.dispatches, 3);
+  });
+
+  // ---- issue #924: real-merge cross-check ----------------------------------
+  // Per-run merged_count is structurally ~0 (CI merges PRs after the run ends),
+  // so an unproductive verdict must NOT rely on it alone. The third arg carries
+  // the count of real master merges over the window.
+
+  test("zero per-run merges but real merges in window → no signal (#924)", () => {
+    // The exact incident shape: enough dispatches, zero per-run merged_count,
+    // but PRs DID land on master out-of-band.
+    const history: RunDigest[] = [
+      { dispatches: 4, merged_count: 0, failed_count: 0 },
+      { dispatches: 2, merged_count: 0, failed_count: 0 },
+    ];
+    assert.deepEqual(detectUnproductiveLoops(history, T, 10), []);
+  });
+
+  test("zero per-run AND zero real merges → still flags (#924)", () => {
+    const history: RunDigest[] = [
+      { dispatches: 2, merged_count: 0, failed_count: 1 },
+      { dispatches: 2, merged_count: 0, failed_count: 0 },
+    ];
+    const sig = detectUnproductiveLoops(history, T, 0);
+    assert.equal(sig.length, 1);
+    assert.equal(sig[0].type, "unproductive-loop");
+    assert.equal(sig[0].evidence.realMergesInWindow, 0);
+  });
+
+  test("realMergesInWindow defaults to 0 (back-compat call shape) (#924)", () => {
+    const history: RunDigest[] = [
+      { dispatches: 4, merged_count: 0, failed_count: 4 },
+    ];
+    // No third arg — same as the pre-#924 signature; still flags on a genuinely
+    // dead window.
+    const sig = detectUnproductiveLoops(history, T);
+    assert.equal(sig.length, 1);
+    assert.equal(sig[0].severity, "critical");
+  });
+
+  test("fractional / negative realMergesInWindow is floored & clamped (#924)", () => {
+    const history: RunDigest[] = [
+      { dispatches: 4, merged_count: 0, failed_count: 0 },
+    ];
+    // 0.9 floors to 0 → still flags; -3 clamps to 0 → still flags.
+    assert.equal(detectUnproductiveLoops(history, T, 0.9).length, 1);
+    assert.equal(detectUnproductiveLoops(history, T, -3).length, 1);
+    // 1.9 floors to 1 → suppressed.
+    assert.deepEqual(detectUnproductiveLoops(history, T, 1.9), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// oldestRunStartEpochS (issue #924)
+// ---------------------------------------------------------------------------
+
+describe("oldestRunStartEpochS (issue #924)", () => {
+  test("returns the smallest positive started_epoch", () => {
+    const history: RunDigest[] = [
+      { started_epoch: 1_700_000_300 } as unknown as RunDigest,
+      { started_epoch: 1_700_000_100 } as unknown as RunDigest,
+      { started_epoch: 1_700_000_200 } as unknown as RunDigest,
+    ];
+    assert.equal(oldestRunStartEpochS(history), 1_700_000_100);
+  });
+
+  test("coerces string epochs and ignores non-positive / missing", () => {
+    const history: RunDigest[] = [
+      { started_epoch: "1700000500" } as unknown as RunDigest,
+      { started_epoch: 0 } as unknown as RunDigest,
+      {} as unknown as RunDigest,
+    ];
+    assert.equal(oldestRunStartEpochS(history), 1_700_000_500);
+  });
+
+  test("no usable timestamp → null", () => {
+    const history: RunDigest[] = [{}, { started_epoch: 0 }] as RunDigest[];
+    assert.equal(oldestRunStartEpochS(history), null);
   });
 });
 
@@ -307,6 +385,77 @@ describe("getAutopilotHealth — never-throw + composition (issue #890)", () => 
       readRecentRuns: async () => [],
     });
     assert.deepEqual(signals, []);
+  });
+
+  // ---- issue #924: end-to-end false-positive suppression -------------------
+
+  test("real merges in window suppress the unproductive-loop signal (#924)", async () => {
+    // The exact incident: 14 short-lived runs, ~28 dispatches, every per-run
+    // merged_count 0 (CI merged out-of-band), but 10 PRs DID land on master.
+    let sawSince = -1;
+    const signals = await getAutopilotHealth({
+      readLiveRun: async () => null,
+      readRecentRuns: async () =>
+        Array.from({ length: 14 }, (_, i) => ({
+          dispatches: 2,
+          merged_count: 0,
+          failed_count: 0,
+          term_reason: "interrupted",
+          started_epoch: 1_700_000_000 + i * 60,
+        })) as unknown as RunDigest[],
+      readWindowMergeCount: async (since) => {
+        sawSince = since;
+        return 10; // real master merges landed in the window
+      },
+    });
+    assert.equal(signals.some((s) => s.type === "unproductive-loop"), false);
+    // Cross-check was queried with the OLDEST run's start (window span start).
+    assert.equal(sawSince, 1_700_000_000);
+  });
+
+  test("a genuinely dead window (zero real merges anywhere) still flags (#924)", async () => {
+    const signals = await getAutopilotHealth({
+      readLiveRun: async () => null,
+      readRecentRuns: async () => [
+        { dispatches: 4, merged_count: 0, failed_count: 4, started_epoch: 1_700_000_000 },
+      ],
+      readWindowMergeCount: async () => 0,
+    });
+    const sig = signals.find((s) => s.type === "unproductive-loop");
+    assert.ok(sig, "expected an unproductive-loop signal");
+    assert.equal(sig!.severity, "critical");
+  });
+
+  test("merge-count reader rejecting fails open to per-run boundary (#924)", async () => {
+    // Reader throws → realMergesInWindow degrades to 0 → legacy behaviour:
+    // a zero-per-run window still flags (never throws).
+    const signals = await getAutopilotHealth({
+      readLiveRun: async () => null,
+      readRecentRuns: async () => [
+        { dispatches: 4, merged_count: 0, failed_count: 0, started_epoch: 1_700_000_000 },
+      ],
+      readWindowMergeCount: async () => {
+        throw new Error("git log blew up");
+      },
+    });
+    assert.equal(signals.some((s) => s.type === "unproductive-loop"), true);
+  });
+
+  test("no usable run timestamps → cross-check skipped, never queries reader (#924)", async () => {
+    let queried = false;
+    const signals = await getAutopilotHealth({
+      readLiveRun: async () => null,
+      readRecentRuns: async () => [
+        { dispatches: 4, merged_count: 0, failed_count: 0 }, // no started_epoch
+      ],
+      readWindowMergeCount: async () => {
+        queried = true;
+        return 5;
+      },
+    });
+    assert.equal(queried, false);
+    // Falls back to per-run boundary: zero per-run merges → flags.
+    assert.equal(signals.some((s) => s.type === "unproductive-loop"), true);
   });
 
   test("composes + ranks signals across both sources", async () => {
