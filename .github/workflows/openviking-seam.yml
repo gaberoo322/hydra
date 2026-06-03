@@ -1,0 +1,41 @@
+name: openviking-seam
+
+# OpenViking-Seam gate (issue #954). The OpenViking Request Adapter Seam
+# (src/knowledge-base/ov-request.ts) owns the OpenViking HTTP request boundary —
+# base-URL resolution, auth headers, timeout discipline, the four
+# external-request error modes, and the JSON/text unwrap — behind one private
+# fetch primitive returning a discriminated never-throw OvResult. It is the
+# fourth boundary Seam, a sibling to the GitHub CLI Adapter (src/github/*,
+# gh/git) and the Host-Probe Adapter (src/host-probe/*, df/free/systemctl), but
+# over fetch() not node:child_process. This gate freezes the drift: a shrink-only
+# baseline tolerates today's known violations (seeded at zero — every OV fetch
+# lives behind the adapter) and fails any NEW raw OpenViking fetch() landing
+# outside src/knowledge-base/ov-request.ts.
+#
+# This lives in its OWN workflow file — deliberately NOT inside ci.yml — because
+# ci.yml is exact-match Verifier Core (ADR-0001/ADR-0015, Tier-4/operator-only).
+# A new verification belongs in a sibling workflow that lands as a normal Tier-3
+# change. Only ci.yml / deploy.yml are exact-match untouchable. This mirrors the
+# host-probe-seam.yml / github-seam.yml / schema-seam.yml precedent.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: openviking-seam-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  openviking-seam:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: OpenViking-seam check (OpenViking Request Adapter closure ratchet)
+        run: npx tsx scripts/ci/openviking-seam-check.ts

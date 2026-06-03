@@ -6,7 +6,8 @@
  * them. Non-blocking — failures are logged and ignored.
  */
 
-import { OV_URL, OV_KEY } from "./ov-search.ts";
+// Issue #954: OV HTTP requests route through the OpenViking Request Adapter.
+import { ovPostJson, isOvFailure } from "./ov-request.ts";
 
 const OV_SKILLS = [
   {
@@ -34,21 +35,14 @@ const OV_SKILLS = [
 export async function registerSkills() {
   let registered = 0;
   for (const skill of OV_SKILLS) {
-    try {
-      const res = await fetch(`${OV_URL}/api/v1/skills`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Api-Key": OV_KEY },
-        body: JSON.stringify({ data: skill }),
-        signal: AbortSignal.timeout(60000),
-      });
-      if (res.ok) {
-        registered++;
-      } else {
-        const text = await res.text().catch(() => "");
-        console.error(`[Learning] Failed to register skill ${skill.name}: ${res.status} ${text.slice(0, 150)}`);
-      }
-    } catch (err: any) {
-      console.error(`[Learning] Failed to register skill ${skill.name}: ${err.message}`);
+    // The adapter owns the URL join + auth headers + 60000ms timeout +
+    // non-2xx/transport classification (and logs the failing code/body). This
+    // loop keeps its fire-and-forget "log and continue" semantics.
+    const result = await ovPostJson("/api/v1/skills", { data: skill }, { timeout: 60000 });
+    if (!isOvFailure(result)) {
+      registered++;
+    } else {
+      console.error(`[Learning] Failed to register skill ${skill.name}: ${result.code}`);
     }
   }
   if (registered > 0) {

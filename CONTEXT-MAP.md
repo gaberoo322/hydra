@@ -20,7 +20,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 | `src/scheduler/` | Orchestrator Scheduler (Observability Heartbeat), Housekeeping, Research Floor | _lazy_ | ADR-0012 |
 | `src/pattern-memory/` | Pattern Memory | _lazy_ | — |
 | `src/reflections/` | Reflections | _lazy_ | — |
-| `src/knowledge-base/` | Knowledge Base | _lazy_ | — |
+| `src/knowledge-base/` | Knowledge Base, OpenViking Request Adapter | _lazy_ | — |
 | `src/anchor-selection/` | Reframe Queue | _lazy_ | ADR-0010 |
 | `src/design-concept.ts` | Design Concept | n/a | ADR-0008 |
 | backlog / GitHub issues | Epic, Roadmap Milestone, Focus Label | n/a | ADR-0003 |

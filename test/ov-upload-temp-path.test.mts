@@ -179,10 +179,15 @@ describe("indexText temp_path parsing (issue #318)", () => {
       cap.restore();
     }
     assert.equal(stub.calls.length, 1, "should not call add-resource on upload failure");
-    assert.equal(cap.errors.length, 1);
-    const msg = cap.errors[0];
-    assert.ok(msg.includes("503"), `expected status in error: ${msg}`);
-    assert.ok(msg.includes("service overloaded"), `expected body in error: ${msg}`);
+    // Issue #954: the OpenViking Request Adapter now owns the transport boundary
+    // and logs the non-2xx (status + body) itself; the caller logs the
+    // discriminated code + body. The failure is still loud and debuggable — the
+    // status, the body, and the ov-non-2xx code all reach the logs — but it's
+    // spread across the adapter log and the caller log rather than one line.
+    const all = cap.errors.join(" | ");
+    assert.ok(all.includes("503"), `expected status in adapter error: ${all}`);
+    assert.ok(all.includes("service overloaded"), `expected body in error: ${all}`);
+    assert.ok(all.includes("ov-non-2xx"), `expected ov code in error: ${all}`);
   });
 
   test("add-resource failure → logs status + body", async () => {
@@ -203,10 +208,12 @@ describe("indexText temp_path parsing (issue #318)", () => {
       cap.restore();
     }
     assert.equal(stub.calls.length, 2);
-    assert.equal(cap.errors.length, 1);
-    const msg = cap.errors[0];
-    assert.ok(msg.includes("Failed to add text"), `expected add-failure prefix: ${msg}`);
-    assert.ok(msg.includes("409"), `expected status in error: ${msg}`);
-    assert.ok(msg.includes("conflict"), `expected body in error: ${msg}`);
+    // Issue #954: as above — the adapter logs the non-2xx (status + body) and
+    // the caller logs the "Failed to add text" prefix with the code + body. The
+    // status, body, and caller prefix all still reach the logs.
+    const all = cap.errors.join(" | ");
+    assert.ok(all.includes("Failed to add text"), `expected add-failure prefix: ${all}`);
+    assert.ok(all.includes("409"), `expected status in adapter error: ${all}`);
+    assert.ok(all.includes("conflict"), `expected body in error: ${all}`);
   });
 });

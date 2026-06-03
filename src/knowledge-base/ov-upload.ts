@@ -16,12 +16,12 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve, sep as pathSep } from "node:path";
 import { createHash } from "node:crypto";
 
-// Issue #231: import the canonical OV connection config instead of duplicating
-// the literal API key default that diverged across src/ files.
-import { OPENVIKING_URL, OPENVIKING_API_KEY } from "./ov-config.ts";
+// Issue #954: OV HTTP requests route through the OpenViking Request Adapter,
+// which owns the URL join + auth headers + timeout + error classification +
+// JSON/text unwrap. This module keeps its #313 temp_path unwrap and the
+// multipart upload shape — pure domain behaviour layered on the transport.
+import { ovPostJson, ovPostForm, isOvFailure } from "./ov-request.ts";
 
-const OV_URL = OPENVIKING_URL;
-const OV_KEY = OPENVIKING_API_KEY;
 const OV_CONFIG_MOUNT = process.env.OV_CONFIG_MOUNT || "/config";
 const CONFIG_PATH =
   process.env.HYDRA_CONFIG_PATH ||
@@ -62,33 +62,33 @@ export async function indexFile(filePath: string): Promise<void> {
     /* intentional: hash failure is non-fatal — fall through and try to index */
   }
 
-  try {
-    const res = await fetch(`${OV_URL}/api/v1/resources`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Api-Key": OV_KEY },
-      body: JSON.stringify({ path: containerPath, to: targetUri }),
-      signal: AbortSignal.timeout(60000),
-    });
-    if (res.ok) {
-      if (hash) indexedConfigHashes.set(filePath, hash);
-      console.log(`[Learning:Indexer] Indexed file: ${rel} -> ${targetUri}`);
+  // The adapter owns transport (URL join + auth headers + 60000ms timeout +
+  // non-2xx/transport classification). The OV error-prose classification below
+  // — distinguishing a removed file from a transient conflict from a real
+  // failure — is domain behaviour and stays here, reading the failure arm's
+  // `body` (the raw non-2xx response text) instead of re-spelling a fetch.
+  const result = await ovPostJson(
+    "/api/v1/resources",
+    { path: containerPath, to: targetUri },
+    { timeout: 60000 },
+  );
+  if (!isOvFailure(result)) {
+    if (hash) indexedConfigHashes.set(filePath, hash);
+    console.log(`[Learning:Indexer] Indexed file: ${rel} -> ${targetUri}`);
+  } else {
+    const err = result.body ?? "";
+    if (err.includes("not exist") || err.includes("ENOENT")) {
+      console.log(`[Learning:Indexer] Skipped (removed): ${rel}`);
+      indexedConfigHashes.delete(filePath);
+    } else if (err.includes("file exists") || err.includes("point lock")) {
+      console.warn(
+        `[Learning:Indexer] Transient OV conflict on ${rel} — will retry on next change: ${err.slice(0, 160)}`
+      );
     } else {
-      const err = await res.text();
-      if (err.includes("not exist") || err.includes("ENOENT")) {
-        console.log(`[Learning:Indexer] Skipped (removed): ${rel}`);
-        indexedConfigHashes.delete(filePath);
-      } else if (err.includes("file exists") || err.includes("point lock")) {
-        console.warn(
-          `[Learning:Indexer] Transient OV conflict on ${rel} — will retry on next change: ${err.slice(0, 160)}`
-        );
-      } else {
-        console.error(
-          `[Learning:Indexer] Failed to index ${rel}: ${err.slice(0, 200)}`
-        );
-      }
+      console.error(
+        `[Learning:Indexer] Failed to index ${rel}: ${result.code} ${err.slice(0, 200)}`
+      );
     }
-  } catch (err: any) {
-    console.error(`[Learning:Indexer] Failed to index ${rel}: ${err.message}`);
   }
 }
 
@@ -112,43 +112,39 @@ export async function indexText(title: string, content: string): Promise<void> {
       `${safeName}.md`
     );
 
-    const uploadRes = await fetch(`${OV_URL}/api/v1/resources/temp_upload`, {
-      method: "POST",
-      headers: { "X-Api-Key": OV_KEY },
-      body: formData,
-      signal: AbortSignal.timeout(30000),
-    });
+    // Multipart upload through the adapter (drops the JSON Content-Type so
+    // FormData sets its own boundary; keeps X-Api-Key; 30000ms timeout).
+    const uploadResult = await ovPostForm<any>(
+      "/api/v1/resources/temp_upload",
+      formData,
+      { timeout: 30000 },
+    );
 
-    if (uploadRes.ok) {
+    if (!isOvFailure(uploadResult)) {
       // OpenViking wraps responses as {status, result, error, telemetry}.
       // The temp_upload endpoint returns the path under `result.temp_path` —
       // older code read `uploadData.temp_path` directly and silently no-op'd
       // on every call (issue #313 in src/redis/work-queue.ts; same bug here
       // per #318). Read both wrapped and legacy unwrapped shapes for safety.
-      const uploadData = (await uploadRes.json()) as any;
+      const uploadData = uploadResult.data;
       const result = uploadData?.result ?? {};
       const tempPath =
         result.temp_path ?? result.path ?? uploadData.temp_path ?? uploadData.path;
 
       if (tempPath) {
-        const addRes = await fetch(`${OV_URL}/api/v1/resources`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Api-Key": OV_KEY,
-          },
-          body: JSON.stringify({
+        const addResult = await ovPostJson(
+          "/api/v1/resources",
+          {
             temp_path: tempPath,
             to: `viking://resources/hydra-memory/${safeName}`,
-          }),
-          signal: AbortSignal.timeout(60000),
-        });
-        if (addRes.ok) {
+          },
+          { timeout: 60000 },
+        );
+        if (!isOvFailure(addResult)) {
           console.log(`[Learning:Indexer] Indexed text: ${title}`);
         } else {
-          const body = await addRes.text().catch(() => "");
           console.error(
-            `[Learning:Indexer] Failed to add text "${title}": ${addRes.status} body=${body.slice(
+            `[Learning:Indexer] Failed to add text "${title}": ${addResult.code} body=${(addResult.body ?? "").slice(
               0,
               200
             )}`
@@ -164,9 +160,8 @@ export async function indexText(title: string, content: string): Promise<void> {
         );
       }
     } else {
-      const body = await uploadRes.text().catch(() => "");
       console.error(
-        `[Learning:Indexer] Failed to upload text "${title}": ${uploadRes.status} body=${body.slice(
+        `[Learning:Indexer] Failed to upload text "${title}": ${uploadResult.code} body=${(uploadResult.body ?? "").slice(
           0,
           200
         )}`
