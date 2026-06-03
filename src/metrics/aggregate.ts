@@ -39,15 +39,6 @@ export async function getAggregateStats(count = 20) {
     anchorDist[at] = (anchorDist[at] || 0) + 1;
   }
 
-  // Issue #272/#287: gate-coverage breakdown.
-  const coverageSamples = trend.filter((m) => typeof m.qualityGateCoverage === "boolean");
-  const coverageCovered = coverageSamples.filter((m) => m.qualityGateCoverage === true).length;
-  const coverageNotCovered = coverageSamples.filter((m) => m.qualityGateCoverage === false).length;
-  const coverageNotApplicable = total - coverageSamples.length;
-  const qualityGateCoverageRate = coverageSamples.length > 0
-    ? Math.round((coverageCovered / coverageSamples.length) * 100)
-    : null;
-
   return {
     cycles: total,
     mergedRate: Math.round((merged / total) * 100),
@@ -68,11 +59,6 @@ export async function getAggregateStats(count = 20) {
     falseCompletionRate: 0,
     anchoredRate: 100,
     verifiedCompletionRate: merged > 0 ? 100 : 0,
-    qualityGateCoverageRate,
-    qualityGateCoverageSamples: coverageSamples.length,
-    qualityGateCoverageCovered: coverageCovered,
-    qualityGateCoverageNotCovered: coverageNotCovered,
-    qualityGateCoverageNotApplicable: coverageNotApplicable,
   };
 }
 
