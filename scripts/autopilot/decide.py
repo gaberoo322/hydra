@@ -212,6 +212,19 @@ SIGNAL_CLASSES = (
     # The 24h class cooldown is the daily cadence back-stop; decide.py reads
     # the precomputed signal verbatim and never recomputes run state here.
     "retro_orch",
+    # cleanup_orch (issue #960, parent #958): board-idle backfill that dispatches
+    # the headless /hydra-cleanup skill — a DETERMINISTIC dead-code + simplification
+    # detector (knip/ts-prune devDependency) that files high-confidence,
+    # mechanically-verifiable findings ("remove X AND npm test/tsc still pass") as
+    # ready-for-agent issues. Keyed off the same unified `orch_backfill_idle`
+    # signal as architecture_orch / discover_orch (#959), but with a 1h cooldown
+    # and DELIBERATELY NOT in BACKFILL_SIGNAL_CLASSES so it is NOT subject to the
+    # one-per-turn stagger — cleanup is the high-confidence mechanical workhorse
+    # and is meant to "run hot" alongside the staggered backfill set. Its own
+    # anti-flood cap is `cleanup_board_saturated` (collect-state.sh, mirroring
+    # arch_board_saturated), checked FIRST in the selector. collect-state.sh owns
+    # signal emission; decide.py only reads the precomputed signals.
+    "cleanup_orch",
 )
 
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
@@ -248,6 +261,16 @@ SIGNAL_COOLDOWNS = {
     # every idle turn. Mirrors architecture_orch's daily idle-reclamation
     # cadence rather than scout's weekly walk.
     "retro_orch": 24 * 60 * 60,
+    # cleanup_orch (issue #960, epic #958): 1h backfill cadence. Mirrors
+    # discover_orch / architecture_orch's hourly cadence so the high-confidence
+    # mechanical workhorse can run hot on an idle board. The 1h class cooldown is
+    # the back-stop; `cleanup_board_saturated` (collect-state.sh) is the PRIMARY
+    # suppressor, checked FIRST in the selector exactly like arch_board_saturated.
+    # Unlike the staggered backfill set, cleanup_orch is NOT in
+    # BACKFILL_SIGNAL_CLASSES, so it may dispatch on the same idle turn as a
+    # staggered backfill class — by design, since dead-code removal is the
+    # highest-confidence (mechanically-verifiable) continuous-backfill work.
+    "cleanup_orch": 3600,
 }
 
 # Board-idle backfill set (issue #959, epic #958). Both classes key off the
@@ -401,6 +424,13 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # `target-only` the autopilot stays out of orch work, so retro_orch is
     # excluded, mirroring scout_orch / architecture_orch.
     "retro_orch",
+    # cleanup_orch (issue #960) runs a deterministic dead-code / simplification
+    # scan over the ORCHESTRATOR's own codebase and files orch-scope issues —
+    # orch-scope by definition. Under `target-only` the autopilot stays out of
+    # orch work, so cleanup_orch is excluded, mirroring scout_orch /
+    # architecture_orch / retro_orch (no cleanup_target mirror — the Target has a
+    # PR merge backlog, #718).
+    "cleanup_orch",
 )
 
 # 5-retry escalation per pattern (issue #426 AC; failure modes section).
@@ -1367,6 +1397,13 @@ def _rule_signal_classes(
         # The 24h class cooldown (SIGNAL_COOLDOWNS) is honored by the shared
         # signal_is_cooled guard inside _select_for_signal.
         "retro_orch",
+        # cleanup_orch (issue #960, parent #958) — board-idle backfill that runs
+        # the deterministic dead-code / simplification detector. Keyed off the
+        # same `orch_backfill_idle` signal as the backfill set but deliberately
+        # NOT in BACKFILL_SIGNAL_CLASSES (no one-per-turn stagger): the
+        # high-confidence mechanical workhorse runs hot, gated only by its own
+        # `cleanup_board_saturated` cap + the 1h class cooldown.
+        "cleanup_orch",
     ):
         if dispatch_blocked:
             out.events.append(
@@ -2098,6 +2135,41 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                 sig,
                 "hydra-retro",
                 reason="completed run available — daily retrospective",
+            )
+        return None
+    if sig == "cleanup_orch":
+        # Issue #960 (parent #958). Board-idle backfill: when the orchestrator
+        # board has gone idle (collect-state.sh emits the unified
+        # `orch_backfill_idle` signal), reclaim spare capacity by dispatching the
+        # headless /hydra-cleanup skill — a DETERMINISTIC dead-code +
+        # simplification detector (knip/ts-prune devDependency) that files
+        # high-confidence, mechanically-verifiable findings as ready-for-agent
+        # issues whose acceptance criterion is "remove X AND npm test/tsc still
+        # pass".
+        #
+        # `cleanup_board_saturated` is the anti-feedback-loop guard, mirroring
+        # arch_board_saturated: once the board already holds enough open
+        # `cleanup-scan`-labelled findings (cap owned by collect-state.sh), the
+        # scan suppresses itself. It is checked FIRST — before the cooldown (via
+        # signal_is_cooled above) — exactly like architecture_orch's
+        # arch_board_saturated / scout_orch's scout_board_saturated early-return.
+        #
+        # Unlike architecture_orch / discover_orch, cleanup_orch is NOT in
+        # BACKFILL_SIGNAL_CLASSES, so it is exempt from the one-per-turn stagger
+        # guard in _rule_signal_classes and may dispatch on the same idle turn as
+        # a staggered backfill class. This is deliberate (epic #958): dead-code
+        # removal is the highest-confidence continuous-backfill work and is meant
+        # to run hot. The 1h class cooldown is the only cadence back-stop.
+        #
+        # decide.py reads the precomputed signals only — it never recomputes
+        # board-empty / saturation / cooldown here (the signal-seam discipline).
+        if _signal_present(state, events, "cleanup_board_saturated"):
+            return None
+        if _signal_present(state, events, "orch_backfill_idle"):
+            return make_dispatch(
+                sig,
+                "hydra-cleanup",
+                reason="orch board idle — dead-code / simplification backfill",
             )
         return None
     return None

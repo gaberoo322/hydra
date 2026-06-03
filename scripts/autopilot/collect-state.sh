@@ -221,10 +221,12 @@ echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
 #
 # These mirror the scout_board_open_enhancements / scout_board_saturated
 # precedent above. The autopilot promotes them into state.signals so the
-# backfill-set selectors in decide.py (`architecture_orch` #790 and the
-# revived `discover_orch` #959) can fire a deepening / discovery pass ONLY
-# when the orchestrator board is genuinely idle AND the pass hasn't already
-# flooded the board with its own proposals.
+# backfill-set selectors in decide.py (`architecture_orch` #790, the
+# revived `discover_orch` #959, and `cleanup_orch` #960) can fire a deepening /
+# discovery / dead-code pass ONLY when the orchestrator board is genuinely idle
+# AND the pass hasn't already flooded the board with its own proposals.
+# `cleanup_board_saturated` (below) is cleanup_orch's own anti-flood cap,
+# mirroring `arch_board_saturated`.
 #
 # `orch_backfill_idle` — the SINGLE canonical board-empty signal: true when
 # the orchestrator board is empty of actionable work, i.e. ready_for_agent
@@ -251,20 +253,33 @@ echo "scout_spend_usd_today=${SCOUT_SPEND_USD}"
 # agree on the `architecture-scan` label as the emit/count seam.
 ARCH_SCAN_LABEL="architecture-scan"
 ARCH_BOARD_SATURATION_CAP=6
+# `cleanup_board_saturated` (issue #960, epic #958) is the anti-flood cap for
+# the cleanup_orch backfill class, mirroring arch_board_saturated exactly: true
+# when the count of OPEN issues carrying the stable `cleanup-scan` label exceeds
+# the cap. The /hydra-cleanup skill stamps every emitted issue with this label
+# (the emit/count seam), and decide.py's cleanup_orch selector checks
+# `cleanup_board_saturated` FIRST (before the 1h cooldown) so a board already
+# full of open cleanup findings suppresses further scans rather than
+# manufacturing duplicate deletion tickets. The cap lives here (not in the
+# playbook) so the playbook never greps state JSON — the scout/arch precedent.
+CLEANUP_SCAN_LABEL="cleanup-scan"
+CLEANUP_BOARD_SATURATION_CAP=10
 # Single board read: the three actionable-label counts plus the
-# architecture-sourced count, in one gh call to keep this collector cheap.
+# architecture-sourced and cleanup-sourced counts, in one gh call to keep this
+# collector cheap.
 ARCH_BOARD_JSON=$(gh issue list --repo gaberoo322/hydra --state open --json number,labels --jq "{
   ready_for_agent: [.[] | select(.labels | map(.name) | index(\"ready-for-agent\"))] | length,
   needs_research: [.[] | select(.labels | map(.name) | index(\"needs-research\"))] | length,
   needs_triage: [.[] | select(.labels | map(.name) | index(\"needs-triage\"))] | length,
-  arch_sourced: [.[] | select(.labels | map(.name) | index(\"${ARCH_SCAN_LABEL}\"))] | length
-}" 2>/dev/null || echo '{"ready_for_agent":0,"needs_research":0,"needs_triage":0,"arch_sourced":0}')
+  arch_sourced: [.[] | select(.labels | map(.name) | index(\"${ARCH_SCAN_LABEL}\"))] | length,
+  cleanup_sourced: [.[] | select(.labels | map(.name) | index(\"${CLEANUP_SCAN_LABEL}\"))] | length
+}" 2>/dev/null || echo '{"ready_for_agent":0,"needs_research":0,"needs_triage":0,"arch_sourced":0,"cleanup_sourced":0}')
 ARCH_WORK_QUEUE=$(docker exec hydra-redis-1 redis-cli LLEN hydra:anchors:work-queue 2>/dev/null || echo 0)
 if ! [[ "$ARCH_WORK_QUEUE" =~ ^[0-9]+$ ]]; then
   ARCH_WORK_QUEUE=0
 fi
 echo -n "arch_last_run_iso="; docker exec hydra-redis-1 redis-cli GET hydra:architecture:last-run 2>/dev/null | tr -d '"' || echo ""
-printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" python3 -c "
+printf '%s' "$ARCH_BOARD_JSON" | ARCH_WORK_QUEUE="$ARCH_WORK_QUEUE" ARCH_BOARD_SATURATION_CAP="$ARCH_BOARD_SATURATION_CAP" CLEANUP_BOARD_SATURATION_CAP="$CLEANUP_BOARD_SATURATION_CAP" python3 -c "
 import json, os, sys
 try:
   d = json.load(sys.stdin)
@@ -272,16 +287,21 @@ try:
   nr = int(d.get('needs_research', 0) or 0)
   nt = int(d.get('needs_triage', 0) or 0)
   arch = int(d.get('arch_sourced', 0) or 0)
+  cleanup = int(d.get('cleanup_sourced', 0) or 0)
 except Exception:
-  rfa = nr = nt = arch = 0
+  rfa = nr = nt = arch = cleanup = 0
 wq = int(os.environ.get('ARCH_WORK_QUEUE', '0') or 0)
 cap = int(os.environ.get('ARCH_BOARD_SATURATION_CAP', '6') or 6)
+cleanup_cap = int(os.environ.get('CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
 fallback_due = (rfa == 0 and nr == 0 and nt == 0 and wq == 0)
 saturated = (arch > cap)
+cleanup_saturated = (cleanup > cleanup_cap)
 print('orch_backfill_idle=' + ('true' if fallback_due else 'false'))
 print('arch_board_open_scan=' + str(arch))
 print('arch_board_saturated=' + ('true' if saturated else 'false'))
-" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; }
+print('cleanup_board_open_scan=' + str(cleanup))
+print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
+" 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; }
 
 # Per-run retrospective — daily trigger (issue #920, epic #917).
 #

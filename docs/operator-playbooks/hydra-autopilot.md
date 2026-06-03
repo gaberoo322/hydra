@@ -62,6 +62,7 @@ Each tick:
 | signal | `scout_orch` | hydra-tool-scout (Phase B, weekly calendar walk) |
 | signal | `architecture_orch` | hydra-architecture-scan (#788; idle-time fallback, issue-producing) |
 | signal | `retro_orch` | hydra-retro (#919; daily per-run retrospective, issue-producing + ≤1 gated PR) |
+| signal | `cleanup_orch` | hydra-cleanup (#960; board-idle deterministic dead-code/simplification scan, issue-producing → `ready-for-agent`) |
 
 > **Phase B wiring (issue #485, sub of #483):** `scout_orch` is a
 > calendar-driven signal class — `SIGNAL_COOLDOWNS["scout_orch"] = 7d`.
@@ -184,6 +185,42 @@ Each tick:
 >   completed run when invoked with no argument (see
 >   `docs/operator-playbooks/hydra-retro.md` — "Resolve the run id"), so the
 >   dispatch is argument-free exactly like `architecture_orch`.
+
+> **Cleanup wiring (issue #960, parent #958):** `cleanup_orch` is the
+> high-confidence mechanical backfill class. It dispatches the headless
+> `/hydra-cleanup` skill — a **deterministic** dead-code + simplification
+> detector (a `knip`/`ts-prune` **devDependency**, NOT a runtime dep — ADR-0005
+> only constrains runtime deps) that finds provably-unused exports/files and
+> files them as GitHub issues. Like `architecture_orch` / `retro_orch` it is
+> **issue-producing, not direct-dispatch** — the issues it files re-enter the
+> board as ordinary work on a later turn.
+>
+> - **Cadence / cooldown:** `SIGNAL_COOLDOWNS["cleanup_orch"] = 3600` (1h) —
+>   the same hourly backfill cadence as `discover_orch` / `architecture_orch`
+>   (#959), so the workhorse runs hot on an idle board.
+> - **Trigger / gate:** keyed off the **same** unified `orch_backfill_idle`
+>   signal as the backfill set. `cleanup_board_saturated` is the PRIMARY
+>   suppressor (checked FIRST in `decide.py:_select_for_signal`, before the 1h
+>   cooldown) — true when the count of OPEN issues carrying the stable
+>   `cleanup-scan` label exceeds `CLEANUP_BOARD_SATURATION_CAP = 10` (the cap
+>   lives in `collect-state.sh`, not this playbook, mirroring
+>   `arch_board_saturated`). This is the anti-feedback-loop guard.
+> - **NOT staggered:** unlike `discover_orch` / `architecture_orch`,
+>   `cleanup_orch` is deliberately **NOT** in `decide.py`'s
+>   `BACKFILL_SIGNAL_CLASSES`, so it is exempt from the one-per-turn stagger and
+>   MAY dispatch on the same idle turn as a staggered backfill class. Dead-code
+>   removal is the highest-confidence (mechanically-verifiable) continuous-
+>   backfill work (epic #958), so it is meant to run every cooled idle turn.
+> - **Findings are `ready-for-agent`, NOT `needs-triage`:** in contrast to
+>   `architecture_orch` (whose softer deepening candidates land at
+>   `needs-triage`), `cleanup_orch`'s findings are mechanically verifiable —
+>   each emitted issue's acceptance criterion is "remove X **AND** `npm test` /
+>   `tsc` still pass", so the deletion is self-checking and routes straight to
+>   `ready-for-agent`.
+> - **Scope / target:** orch-scope by definition (it scans the orchestrator's
+>   own `src/`), excluded under `target-only` via `SCOPE_TARGET_ONLY_EXCLUDE`,
+>   mirroring `scout_orch` / `architecture_orch` / `retro_orch`. There is no
+>   `cleanup_target` mirror (the Target PR merge backlog, #718, must drain first).
 
 > **Phase B wiring (issue #466, sub of #437):** `design_concept_orch`
 > fires before `dev_orch` for an orch anchor when the artifact is
@@ -619,6 +656,8 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
 | `arch_fallback_due` (`ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`) | `arch_fallback_due` | `architecture_orch` (issues #789/#790) |
 | `arch_board_open_scan > ARCH_BOARD_SATURATION_CAP (6)` → `arch_board_saturated` | `arch_board_saturated` | suppresses `architecture_orch` (checked FIRST) |
+| `orch_backfill_idle` (same signal as above) | `orch_backfill_idle` | also drives `cleanup_orch` (issue #960) — NOT staggered, so it may co-fire with the backfill set |
+| `cleanup_board_open_scan > CLEANUP_BOARD_SATURATION_CAP (10)` → `cleanup_board_saturated` | `cleanup_board_saturated` | suppresses `cleanup_orch` (checked FIRST, mirrors `arch_board_saturated`) (issue #960) |
 | `/api/autopilot/runs` index has ≥1 non-`running` run | `retro_run_available` | `retro_orch` (issue #920) — daily per-run retrospective; 24h class cooldown enforces the once-per-day cadence |
 | `usage_eligibility_json` | `state.usage_eligibility` (object, merged verbatim) | hard-stop all dispatches when `allow=false`; skip listed classes when `shed` non-empty (PR B1) |
 | `emergency_brake_json` | `state.emergency_brake` (object, merged verbatim) | operator-only emergency brake (issue #744): when `engaged=true`, `decide()` emits ZERO `auto-merge` actions and a single `route-prs-to-review` action that arms the /hydra-review pickup set. Default `{engaged:false}`. READ-ONLY — the autopilot can never set/clear it (no engage/disengage action type); the sole write path is `hydra brake on\|off`. |
