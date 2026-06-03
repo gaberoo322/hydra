@@ -2,14 +2,13 @@ import { Router } from "express";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
-// `df`/`free`/`systemctl` probes below stay on the raw execFile — they are
-// host-info binaries outside the GitHub CLI Adapter seam's `gh`/`git` boundary
-// (issue #899), so this file remains a known `github-seam-check` baseline
-// entry. The one `git` call (getDeployedSha) is migrated onto the seam.
-const execFileAsync = promisify(execFile);
+// Issue #939: the `df`/`free`/`systemctl` host-info probes are now routed
+// through the **Host-Probe Adapter** (`src/host-probe/*`) — a sibling Seam to
+// the GitHub CLI Adapter, on its own private spawn primitive. With the raw
+// child-process import gone, this file drops off the `github-seam-check`
+// baseline (which closes to zero). The one `git` call (getDeployedSha) stays on
+// the GitHub CLI Adapter seam below.
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
@@ -28,6 +27,10 @@ import { OPENVIKING_API_KEY } from "../knowledge-base/ov-config.ts";
 import { parseProbes, assessHealth } from "../health-diagnostics.ts";
 import { gitExec } from "../github/git.ts";
 import { isGhFailure } from "../github/exec.ts";
+// Issue #939: Host-Probe Adapter — typed, never-throw disk/mem/service-status
+// readers. Replaces the inline `execFileAsync(...).catch(() => null|"unknown")`
+// host-info probes that kept this file on the github-seam-check baseline.
+import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -164,11 +167,18 @@ export function createHealthRouter(eventBus: any) {
       /* 4 */ getWorkQueueLen(),
       /* 5 */ getBacklogCounts(),
       /* 6 */ (async () => ({ trend: await getMetricsTrend(20), stats: await getAggregateStats(20) }))(),
-      /* 7 */ execFileAsync("df", ["-B1", "--output=avail,size,pcent", "/"], { timeout: 3000 }).catch(() => null),
-      /* 8 */ execFileAsync("free", ["-b"], { timeout: 3000 }).catch(() => null),
-      /* 9 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-orchestrator.service"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
-      /* 10 */ execFileAsync("systemctl", ["--user", "is-active", "hydra-watchdog.timer"], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
-      /* 11 */ execFileAsync("systemctl", ["--user", "is-active", getTargetServiceName()], { timeout: 3000 }).then(r => r.stdout.trim()).catch(() => "unknown"),
+      // Issue #939: host-info probes now go through the Host-Probe Adapter,
+      // which owns the argv + timeout + df/free parse and returns a typed
+      // never-throw result. The fan-out coalesces a probe failure back to the
+      // same shape the old `.catch()` sentinels produced (null disk/mem,
+      // "unknown" service-status) so parseProbes' downstream contract is
+      // unchanged — the difference is the failure mode is now a discriminated
+      // `code` we log, not an indistinguishable swallow.
+      /* 7  df    */ readDisk().then(r => (isProbeFailure(r) ? null : r.data)),
+      /* 8  free  */ readMem().then(r => (isProbeFailure(r) ? null : r.data)),
+      /* 9  sysd  */ readServiceStatus("hydra-orchestrator.service").then(r => (isProbeFailure(r) ? "unknown" : r.data)),
+      /* 10 sysd  */ readServiceStatus("hydra-watchdog.timer").then(r => (isProbeFailure(r) ? "unknown" : r.data)),
+      /* 11 sysd  */ readServiceStatus(getTargetServiceName()).then(r => (isProbeFailure(r) ? "unknown" : r.data)),
       /* 12 */ (async () => {
         const [p, e, s] = await Promise.all([getMemoryPatterns("planner"), getMemoryPatterns("executor"), getMemoryPatterns("skeptic")]);
         const cnt = (raw) => { try { return JSON.parse(raw).length; } catch { return 0; } };

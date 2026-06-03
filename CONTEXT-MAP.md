@@ -12,6 +12,7 @@ Where the domain language lives. Read this to find the glossary entries and ADRs
 
 | Code area | Glossary terms (in `CONTEXT.md`) | Co-located `CONTEXT.md` | Relevant ADRs |
 |---|---|---|---|
+| `src/host-probe/` | Host-Probe Adapter | _lazy_ | — |
 | `src/redis/` | Redis Adapters | _lazy_ | ADR-0009 |
 | `src/schemas/` | Schemas | _lazy_ | ADR-0011 |
 | `src/cost/` | Cost, Subscription Usage Tracker, Quota Weight | _lazy_ | — |

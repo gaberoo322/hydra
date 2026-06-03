@@ -52,7 +52,18 @@ export type HydraErrorCode =
   | "gh-empty" // the command produced no stdout where output was required
   | "gh-malformed-json" // --json output failed to JSON.parse
   | "gh-timeout" // the command exceeded its timeout and was killed
-  | "gh-failed"; // gh/git exited non-zero for any other reason
+  | "gh-failed" // gh/git exited non-zero for any other reason
+  // Host-Probe Adapter (src/host-probe/) result-object codes (issue #939).
+  // The sibling Seam to the GitHub CLI Adapter for the host-info binaries
+  // (df/free/systemctl). Same never-throw discipline: these literals appear
+  // only on the failure arm of the host-probe `{ ok:false; code }` result, so
+  // /api/health/deep discriminates on a code instead of the old
+  // `.catch(() => null)` / `.catch(() => "unknown")` sentinel. No thrown
+  // subclass — the adapter returns, never raises.
+  | "host-probe-not-installed" // the host binary is not on PATH (spawn ENOENT)
+  | "host-probe-timeout" // the probe exceeded its timeout and was killed
+  | "host-probe-empty" // the probe exited 0 but produced no parseable output
+  | "host-probe-failed"; // the host binary exited non-zero for any other reason
 
 /**
  * Base class for all Hydra typed errors. Carries a stable `code` and sets

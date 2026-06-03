@@ -457,31 +457,25 @@ describe("parseProbes", () => {
     return arr;
   }
 
-  test("parses df output into disk GB + percent", () => {
-    // df -B1 --output=avail,size,pcent / → header + one data line.
-    const df = { stdout: "Avail        Size Use%\n  53687091200 536870912000  90%\n" };
-    const snap = parseProbes(settled({ 7: df }));
-    assert.equal(snap.disk.availableGb, 50); // 53687091200 / 1073741824 = 50
-    assert.equal(snap.disk.totalGb, 500);
-    assert.equal(snap.disk.usedPercent, 90);
+  // Issue #939: the df/free COLUMNAR PARSE moved to the Host-Probe Adapter
+  // (src/host-probe/probe.ts — tested in test/host-probe.test.mts via
+  // parseDfOutput/parseFreeOutput). parseProbes now receives already-parsed
+  // DiskUsage/MemUsage at indices 7/8 and simply passes them through, with the
+  // same zeroed default on a probe failure.
+  test("passes the already-parsed DiskUsage through (index 7)", () => {
+    const disk = { availableGb: 50, totalGb: 500, usedPercent: 90 };
+    const snap = parseProbes(settled({ 7: disk }));
+    assert.deepEqual(snap.disk, disk);
   });
 
-  test("parses free -b output into mem GB + usedPercent", () => {
-    // free -b: Mem: total used free shared buff/cache available
-    const free = {
-      stdout:
-        "               total        used        free      shared  buff/cache   available\n" +
-        "Mem:     34359738368 10000000000  5000000000           0 19359738368 21474836480\n" +
-        "Swap:             0           0           0\n",
-    };
-    const snap = parseProbes(settled({ 8: free }));
-    assert.equal(snap.mem.totalGb, 32); // 34359738368 / 1073741824 = 32
-    assert.equal(snap.mem.availableGb, 20); // 21474836480 / 1073741824 = 20
-    assert.equal(snap.mem.usedPercent, Math.round((1 - 21474836480 / 34359738368) * 100)); // 38
+  test("passes the already-parsed MemUsage through (index 8)", () => {
+    const mem = { totalGb: 32, availableGb: 20, usedPercent: 38 };
+    const snap = parseProbes(settled({ 8: mem }));
+    assert.deepEqual(snap.mem, mem);
   });
 
-  test("df failure → zeros (degraded fallback, no throw)", () => {
-    const snap = parseProbes(settled({})); // index 7 rejected
+  test("disk/mem probe failure (null) → zeros (degraded fallback, no throw)", () => {
+    const snap = parseProbes(settled({})); // indices 7/8 rejected → val() null
     assert.deepEqual(snap.disk, { availableGb: 0, totalGb: 0, usedPercent: 0 });
     assert.deepEqual(snap.mem, { totalGb: 0, availableGb: 0, usedPercent: 0 });
   });
@@ -540,7 +534,7 @@ describe("parseProbes", () => {
         4: 2,
         5: { triage: 0, backlog: 1, inProgress: 0, blocked: 0, done: 0, total: 1 },
         6: { trend: [], stats: {} },
-        7: { stdout: "Avail Size Use%\n12884901888 536870912000 90%\n" }, // ~12GB → low
+        7: { availableGb: 12, totalGb: 500, usedPercent: 90 }, // already-parsed (issue #939) → low
         9: "active",
         10: "inactive", // watchdog
         11: "active",
