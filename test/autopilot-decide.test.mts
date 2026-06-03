@@ -494,7 +494,7 @@ describe("decide.py — scope filter exclusion mask (INV-008)", () => {
         needs_qa_orch: true,
         needs_research: true,
         needs_triage_orch: true,
-        orch_idle: true,
+        orch_backfill_idle: true,
       },
     });
     const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.95 }] };
@@ -696,7 +696,7 @@ describe("decide.py — completion reap ordering (INV-006)", () => {
     // happily re-dispatch the runaway. This test pins the suppression.
     const state = baseState({
       burned_classes: ["discover_orch"],
-      signals: { orch_idle: true },     // would trigger discover_orch
+      signals: { orch_backfill_idle: true },  // would trigger discover_orch (issue #959)
     });
     const plan = runDecide(state, null);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_orch");
@@ -1132,52 +1132,74 @@ describe("decide.py — signal classes with cooldowns", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 7b. architecture_orch signal class (issue #790, parent #787)
+// 7b. architecture_orch signal class (issue #790, parent #787;
+//     unified board-idle signal + 1h cadence by issue #959, epic #958)
 // ---------------------------------------------------------------------------
 //
-// architecture_orch is an idle-time fallback that dispatches the headless
-// /hydra-architecture-scan wrapper (#788). It fires when `arch_fallback_due`
-// is present AND `arch_board_saturated` is absent; the 24h class cooldown is
-// the back-stop and arch_board_saturated is the primary suppressor. It is
-// orch-scope only (SCOPE_TARGET_ONLY_EXCLUDE; no architecture_target mirror).
-// collect-state.sh (#789) owns signal emission; decide.py only reads them.
+// architecture_orch is a board-idle backfill that dispatches the headless
+// /hydra-architecture-scan wrapper (#788). Issue #959 repointed it from the
+// old `arch_fallback_due` signal to the unified `orch_backfill_idle` signal
+// and dropped its class cooldown from 24h to 1h. It fires when
+// `orch_backfill_idle` is present AND `arch_board_saturated` is absent;
+// arch_board_saturated stays the FIRST gate (primary suppressor) and the 1h
+// class cooldown is the back-stop. It is orch-scope only
+// (SCOPE_TARGET_ONLY_EXCLUDE; no architecture_target mirror).
+//
+// NOTE on test isolation: discover_orch (issue #959) is now ALSO a backfill
+// class keyed off the SAME orch_backfill_idle signal and iterates BEFORE
+// architecture_orch. The one-per-turn stagger guard therefore lets discover_orch
+// win a fully-idle turn, staggering architecture_orch out. Tests that want to
+// observe architecture_orch dispatching put discover_orch inside its 1h cooldown
+// (signal_last_fired.discover_orch = now) so architecture_orch is the only
+// eligible backfill class — exactly the round-robin state of the SECOND idle turn.
+// collect-state.sh (#789/#959) owns signal emission; decide.py only reads them.
 // ---------------------------------------------------------------------------
 
-describe("decide.py — architecture_orch signal class (issue #790)", () => {
-  test("architecture_orch fires on arch_fallback_due signal", () => {
-    const state = baseState({ signals: { arch_fallback_due: true } });
+describe("decide.py — architecture_orch signal class (issue #790, #959)", () => {
+  const now = Math.floor(Date.now() / 1000);
+  // discover_orch just fired → inside its 1h cooldown, so architecture_orch is
+  // the only eligible backfill class (the "turn N+1" round-robin state).
+  const discoverCooling = { discover_orch: now } as any;
+
+  test("architecture_orch fires on orch_backfill_idle (discover_orch cooling)", () => {
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: discoverCooling,
+    });
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "architecture_orch");
-    assert.ok(a, "architecture_orch must dispatch on arch_fallback_due");
+    assert.ok(a, "architecture_orch must dispatch on orch_backfill_idle");
     assert.equal(a.skill, "hydra-architecture-scan");
   });
 
-  test("architecture_orch DOES NOT fire without arch_fallback_due signal", () => {
+  test("architecture_orch DOES NOT fire without orch_backfill_idle signal", () => {
     const state = baseState();  // no signals
     const plan = runDecide(state, null);
     assert.equal(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
       undefined,
-      "architecture_orch must not dispatch when no fallback is due",
+      "architecture_orch must not dispatch when the board is not idle",
     );
   });
 
-  test("architecture_orch suppressed when arch_board_saturated is set", () => {
+  test("architecture_orch suppressed when arch_board_saturated is set (cap is FIRST gate)", () => {
     const state = baseState({
-      signals: { arch_fallback_due: true, arch_board_saturated: true },
+      signals: { orch_backfill_idle: true, arch_board_saturated: true },
+      signal_last_fired: discoverCooling,
     });
     const plan = runDecide(state, null);
     assert.equal(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
       undefined,
-      "saturated arch board → suppress the fallback (anti-feedback-loop guard)",
+      "saturated arch board → suppress backfill (anti-feedback-loop guard, checked before cooldown + stagger)",
     );
   });
 
   test("architecture_orch is excluded by target-only scope (orch-scope by definition)", () => {
     const state = baseState({
       scope: "target-only",
-      signals: { arch_fallback_due: true },
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: discoverCooling,
     });
     const plan = runDecide(state, null);
     assert.equal(
@@ -1190,7 +1212,8 @@ describe("decide.py — architecture_orch signal class (issue #790)", () => {
   test("architecture_orch is allowed under orch-only scope", () => {
     const state = baseState({
       scope: "orch-only",
-      signals: { arch_fallback_due: true },
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: discoverCooling,
     });
     const plan = runDecide(state, null);
     assert.ok(
@@ -1199,36 +1222,30 @@ describe("decide.py — architecture_orch signal class (issue #790)", () => {
     );
   });
 
-  test("architecture_orch suppressed when recently fired (within 24h cooldown)", () => {
-    const now = Math.floor(Date.now() / 1000);
+  test("architecture_orch suppressed when recently fired (within 1h cooldown)", () => {
     const state = baseState({
-      signals: { arch_fallback_due: true },
-      // Fired 1h ago → inside the 24h cooldown.
-      signal_last_fired: {
-        architecture_orch: now - 60 * 60,
-      } as any,
+      signals: { orch_backfill_idle: true },
+      // Fired 30m ago → inside the new 1h cooldown.
+      signal_last_fired: { architecture_orch: now - 30 * 60, discover_orch: now } as any,
     });
     const plan = runDecide(state, null);
     assert.equal(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
       undefined,
-      "1h ago is inside the 24h architecture_orch cooldown",
+      "30m ago is inside the 1h architecture_orch cooldown (issue #959)",
     );
   });
 
-  test("architecture_orch fires after 24h cooldown elapses", () => {
-    const now = Math.floor(Date.now() / 1000);
+  test("architecture_orch fires after the 1h cooldown elapses", () => {
     const state = baseState({
-      signals: { arch_fallback_due: true },
-      // 25h ago → past the 24h cooldown.
-      signal_last_fired: {
-        architecture_orch: now - 25 * 60 * 60,
-      } as any,
+      signals: { orch_backfill_idle: true },
+      // 61m ago → past the 1h cooldown. discover_orch still cooling.
+      signal_last_fired: { architecture_orch: now - 61 * 60, discover_orch: now } as any,
     });
     const plan = runDecide(state, null);
     assert.ok(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
-      "architecture_orch must fire once the 24h cooldown has elapsed",
+      "architecture_orch must fire once the 1h cooldown has elapsed (issue #959)",
     );
   });
 
@@ -1237,7 +1254,10 @@ describe("decide.py — architecture_orch signal class (issue #790)", () => {
     // heartbeat `wait` action so idle_turns does not accumulate while a
     // fallback is eligible. The observable proof is the ABSENCE of a
     // heartbeat wait alongside the PRESENCE of the dispatch.
-    const state = baseState({ signals: { arch_fallback_due: true } });
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: discoverCooling,
+    });
     const plan = runDecide(state, null);
     const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "architecture_orch");
     assert.ok(a, "architecture_orch dispatch must be present");
@@ -1251,13 +1271,110 @@ describe("decide.py — architecture_orch signal class (issue #790)", () => {
   test("architecture_orch in burned_classes is NOT re-dispatched (mirrors #432)", () => {
     const state = baseState({
       burned_classes: ["architecture_orch"],
-      signals: { arch_fallback_due: true },
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: discoverCooling,
     });
     const plan = runDecide(state, null);
     assert.equal(
       findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
       undefined,
       "burned signal class architecture_orch must not be re-dispatched",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7c. Board-idle backfill set: discover_orch revival + one-per-turn stagger
+//     (issue #959, epic #958)
+// ---------------------------------------------------------------------------
+//
+// Issue #959 unifies the board-empty predicate behind a single canonical
+// `orch_backfill_idle` signal and points BOTH backfill-set classes
+// (discover_orch + architecture_orch) at it on a 1h cadence:
+//   - discover_orch was DEAD: it keyed off `orch_idle`, a signal collect-state
+//     never emitted. It now reads orch_backfill_idle.
+//   - A one-per-turn stagger guard in _rule_signals ensures the two never both
+//     dispatch on the same idle turn; round-robin across turns emerges from the
+//     per-class 1h cooldowns with NO new persistent state.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — board-idle backfill set (issue #959)", () => {
+  const now = Math.floor(Date.now() / 1000);
+
+  test("discover_orch is REVIVED: dispatches on orch_backfill_idle", () => {
+    const state = baseState({ signals: { orch_backfill_idle: true } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "discover_orch");
+    assert.ok(a, "discover_orch must dispatch on orch_backfill_idle (was dead on orch_idle)");
+    assert.equal(a.skill, "hydra-discover");
+  });
+
+  test("discover_orch does NOT fire on the dead orch_idle signal anymore", () => {
+    // The old (never-emitted) signal must no longer trigger discover_orch —
+    // the seam is orch_backfill_idle now.
+    const state = baseState({ signals: { orch_idle: true } });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "discover_orch"),
+      undefined,
+      "orch_idle is a dead signal; discover_orch must key off orch_backfill_idle",
+    );
+  });
+
+  test("stagger: on a fully-idle turn with BOTH cooled, exactly ONE backfill class dispatches", () => {
+    // Both discover_orch and architecture_orch are eligible (idle board, both
+    // cooled). The one-per-turn guard must let only one through — discover_orch
+    // iterates first, so it wins this turn and architecture_orch is staggered.
+    const state = baseState({ signals: { orch_backfill_idle: true } });
+    const plan = runDecide(state, null);
+    const backfillDispatches = (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && (a.slot === "discover_orch" || a.slot === "architecture_orch"),
+    );
+    assert.equal(backfillDispatches.length, 1, "exactly one backfill class may dispatch per turn");
+    assert.equal(backfillDispatches[0].slot, "discover_orch", "discover_orch iterates first → wins turn 1");
+  });
+
+  test("stagger round-robin: turn N+1 (discover_orch cooling) dispatches architecture_orch", () => {
+    // Simulate the second consecutive idle turn: discover_orch fired last turn
+    // so it is inside its 1h cooldown; architecture_orch is the only eligible
+    // backfill class. No persistent rotation cursor — the cooldown IS the cursor.
+    const state = baseState({
+      signals: { orch_backfill_idle: true },
+      signal_last_fired: { discover_orch: now } as any,
+    });
+    const plan = runDecide(state, null);
+    const backfillDispatches = (plan.actions ?? []).filter(
+      (a: any) => a.type === "dispatch" && (a.slot === "discover_orch" || a.slot === "architecture_orch"),
+    );
+    assert.equal(backfillDispatches.length, 1, "still exactly one backfill class on turn N+1");
+    assert.equal(
+      backfillDispatches[0].slot,
+      "architecture_orch",
+      "discover_orch cooling → architecture_orch is the only eligible backfill class",
+    );
+  });
+
+  test("staggered class records a `stagger` dispatch_decision (not a real dispatch)", () => {
+    const state = baseState({ signals: { orch_backfill_idle: true } });
+    const plan = runDecide(state, null);
+    const staggerEvents = (plan.events ?? []).filter(
+      (e: any) => e.event === "dispatch_decision" && e.outcome === "stagger" && e.class === "architecture_orch",
+    );
+    assert.equal(staggerEvents.length, 1, "the held-back architecture_orch must record a stagger decision");
+  });
+
+  test("stagger NEVER bypasses the saturation cap: saturated arch board still suppresses", () => {
+    // discover_orch cooling so architecture_orch would be the winner, BUT the
+    // board is saturated → suppressed at the FIRST gate, before the stagger.
+    const state = baseState({
+      signals: { orch_backfill_idle: true, arch_board_saturated: true },
+      signal_last_fired: { discover_orch: now } as any,
+    });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "architecture_orch"),
+      undefined,
+      "saturation cap is the first gate — a saturated class never consumes the stagger slot",
     );
   });
 });
