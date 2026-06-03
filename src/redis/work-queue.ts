@@ -4,8 +4,13 @@
  */
 
 import { redisKeys } from "./keys.ts";
-// Issue #231: shared OV connection config — no local literal default.
-import { OPENVIKING_URL as OV_DEDUP_URL, OPENVIKING_API_KEY as OV_DEDUP_KEY } from "../knowledge-base/ov-config.ts";
+// Issue #954: the OV dedup search + work-item indexing route through the
+// OpenViking Request Adapter — the same boundary and config (OPENVIKING_URL via
+// ov-config.ts) every other OV caller uses, so these dedup fetches are no longer
+// un-owned raw fetches the seam-check can't see. redis-seam-check forbids only
+// redis/keys|kv|connection imports outside src/redis/; importing the OV adapter
+// cross-family is seam-legal (this module already imported ov-config.ts).
+import { ovPostJson, ovPostForm, isOvFailure } from "../knowledge-base/ov-request.ts";
 import { getRedisConnection } from "./connection.ts";
 
 /** Get the length of the work queue. */
@@ -159,34 +164,33 @@ export async function searchOVForDedup(
   reference: string,
   threshold: number = SEMANTIC_DEDUP_THRESHOLD,
 ): Promise<string | null> {
-  try {
-    const res = await fetch(`${OV_DEDUP_URL}/api/v1/search/find`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Api-Key": OV_DEDUP_KEY },
-      body: JSON.stringify({
-        query: reference,
-        limit: 5,
-        filter: { tags: ["hydra-work-item"] },
-      }),
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    const data = await res.json() as any;
-    const resources = data?.result?.resources || [];
-    for (const r of resources) {
-      const score = r.score ?? r.similarity ?? 0;
-      if (score >= threshold) {
-        const matchedRef = r.title || r.uri || "";
-        console.log(`[WorkQueue] Semantic dedup: "${reference.slice(0, 80)}" matches "${matchedRef.slice(0, 80)}" (score=${score.toFixed(3)}, threshold=${threshold})`);
-        return matchedRef;
-      }
-    }
-    return null;
-  } catch (err: any) {
+  // The adapter owns transport (URL join + auth + 5000ms timeout + error
+  // classification) and never throws; this reader keeps the tag filter, the
+  // score threshold, and the fall-through-to-fuzzy-only-on-failure semantics.
+  const result = await ovPostJson<any>(
+    "/api/v1/search/find",
+    {
+      query: reference,
+      limit: 5,
+      filter: { tags: ["hydra-work-item"] },
+    },
+    { timeout: 5000 },
+  );
+  if (isOvFailure(result)) {
     // OV unavailable -- fall through to fuzzy-only dedup (don't block queue operations)
-    console.error(`[WorkQueue] Semantic dedup: OV unavailable, falling back to fuzzy-only -- ${err.message}`);
+    console.error(`[WorkQueue] Semantic dedup: OV unavailable, falling back to fuzzy-only -- ${result.code}`);
     return null;
   }
+  const resources = result.data?.result?.resources || [];
+  for (const r of resources) {
+    const score = r.score ?? r.similarity ?? 0;
+    if (score >= threshold) {
+      const matchedRef = r.title || r.uri || "";
+      console.log(`[WorkQueue] Semantic dedup: "${reference.slice(0, 80)}" matches "${matchedRef.slice(0, 80)}" (score=${score.toFixed(3)}, threshold=${threshold})`);
+      return matchedRef;
+    }
+  }
+  return null;
 }
 
 /**
@@ -236,17 +240,15 @@ export async function indexWorkItem(reference: string, source: string = "queue")
       `work-item-${safeName}.md`,
     );
 
-    const uploadRes = await fetch(`${OV_DEDUP_URL}/api/v1/resources/temp_upload`, {
-      method: "POST",
-      headers: { "X-Api-Key": OV_DEDUP_KEY },
-      body: formData,
-      signal: AbortSignal.timeout(10000),
-    });
+    const uploadResult = await ovPostForm<any>(
+      "/api/v1/resources/temp_upload",
+      formData,
+      { timeout: 10000 },
+    );
 
-    if (!uploadRes.ok) {
-      const body = await uploadRes.text().catch(() => "");
+    if (isOvFailure(uploadResult)) {
       console.error(
-        `[WorkQueue] indexWorkItem upload failed: ${uploadRes.status} body=${body.slice(0, 200)}`,
+        `[WorkQueue] indexWorkItem upload failed: ${uploadResult.code} body=${(uploadResult.body ?? "").slice(0, 200)}`,
       );
       return;
     }
@@ -256,7 +258,7 @@ export async function indexWorkItem(reference: string, source: string = "queue")
     // older code read `uploadData.temp_path` directly and silently no-op'd
     // on every call (issue #313: 354 silent failures over 2 days). Read
     // both wrapped and legacy unwrapped shapes for safety.
-    const uploadData = (await uploadRes.json()) as any;
+    const uploadData = uploadResult.data;
     const result = uploadData?.result ?? {};
     const tempPath =
       result.temp_path ?? result.path ?? uploadData.temp_path ?? uploadData.path;
@@ -271,23 +273,21 @@ export async function indexWorkItem(reference: string, source: string = "queue")
       return;
     }
 
-    const addRes = await fetch(`${OV_DEDUP_URL}/api/v1/resources`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Api-Key": OV_DEDUP_KEY },
-      body: JSON.stringify({
+    const addResult = await ovPostJson(
+      "/api/v1/resources",
+      {
         temp_path: tempPath,
         to: `viking://resources/hydra-work-items/${safeName}`,
         tags: ["hydra-work-item"],
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
+      },
+      { timeout: 15000 },
+    );
 
-    if (addRes.ok) {
+    if (!isOvFailure(addResult)) {
       console.log(`[WorkQueue] Indexed work item into OV: "${reference.slice(0, 80)}" (source=${source})`);
     } else {
-      const body = await addRes.text().catch(() => "");
       console.error(
-        `[WorkQueue] indexWorkItem add-resource failed: ${addRes.status} body=${body.slice(0, 200)}`,
+        `[WorkQueue] indexWorkItem add-resource failed: ${addResult.code} body=${(addResult.body ?? "").slice(0, 200)}`,
       );
     }
   } catch (err: any) {

@@ -23,6 +23,14 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
+// Issue #954: resolve the OpenViking base URL from OPENVIKING_URL (via the
+// OpenViking Request Adapter's `ovBaseUrl`) instead of hardcoding
+// `http://localhost:1933` — a non-default OPENVIKING_URL must reach this probe
+// too, or the strip lies exactly as the #231-class health-probe bug did. This
+// aggregator keeps its injectable generic `probe(url, timeout)` dep; only the
+// OV URL it passes is no longer a hardcoded literal.
+import { ovBaseUrl } from "../knowledge-base/ov-request.ts";
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -76,7 +84,7 @@ export async function getServiceStrip(deps: ServiceStripDeps = {}): Promise<Serv
       checkOrch(),
       pingRedis(),
       probe("http://localhost:5000/health", 3000),
-      probe("http://localhost:1933/health", 3000),
+      probe(`${ovBaseUrl()}/health`, 3000),
     ]);
 
   return [

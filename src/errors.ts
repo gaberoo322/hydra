@@ -63,7 +63,19 @@ export type HydraErrorCode =
   | "host-probe-not-installed" // the host binary is not on PATH (spawn ENOENT)
   | "host-probe-timeout" // the probe exceeded its timeout and was killed
   | "host-probe-empty" // the probe exited 0 but produced no parseable output
-  | "host-probe-failed"; // the host binary exited non-zero for any other reason
+  | "host-probe-failed" // the host binary exited non-zero for any other reason
+  // OpenViking Request Adapter (src/knowledge-base/ov-request.ts) result-object
+  // codes (issue #954). The fourth boundary Seam — sibling to the GitHub CLI
+  // Adapter and Host-Probe Adapter, but over fetch() not child_process. Same
+  // never-throw discipline: these literals appear only on the failure arm of the
+  // OvResult `{ ok:false; code }`, so callers (trackedOvSearch, the upload/skill
+  // helpers, the work-queue dedup, the /health probes) discriminate on a code
+  // instead of regexing fetch error prose. No thrown subclass — the adapter
+  // returns, never raises.
+  | "ov-service-down" // the request never reached OV (DNS/ECONNREFUSED/network)
+  | "ov-non-2xx" // OV answered but with a non-2xx status (!res.ok)
+  | "ov-malformed-json" // a 2xx body failed to JSON.parse
+  | "ov-timeout"; // the request exceeded its AbortSignal timeout and was aborted
 
 /**
  * Base class for all Hydra typed errors. Carries a stable `code` and sets

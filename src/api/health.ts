@@ -19,8 +19,15 @@ import { getWorkQueueLen } from "../redis/work-queue.ts";
 import { countReflectionKeys } from "../redis/reflections.ts";
 import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getTargetServiceName } from "../target-config.ts";
-// Issue #231: shared OV credential — health probe must use the same key as agent searches.
-import { OPENVIKING_API_KEY } from "../knowledge-base/ov-config.ts";
+// Issue #954: the OpenViking health/search probes route through the OpenViking
+// Request Adapter, which resolves the base URL from OPENVIKING_URL (via
+// ov-config.ts). This kills the hardcoded `http://localhost:1933/...` literals
+// that made the probe lie under a non-default OPENVIKING_URL (the #231-class
+// bug) — the same structural fix #939 did for this file's df/free/systemctl
+// probes via the Host-Probe Adapter. The OV liveness GET and the OV /search/find
+// probe are both adapter request shapes; vikingdb stays a plain inline probe
+// (it is not an OpenViking boundary).
+import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-request.ts";
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
@@ -130,9 +137,20 @@ export function createHealthRouter(eventBus: any) {
       }
     }
 
+    // OpenViking liveness via the adapter (resolves OPENVIKING_URL, 3000ms);
+    // vikingdb stays a plain inline probe (not an OpenViking boundary).
+    async function probeOv() {
+      const start = Date.now();
+      const result = await ovHealthGet("/health", { timeout: 3000 });
+      return {
+        status: isOvFailure(result) ? "failed" : "running",
+        latencyMs: isOvFailure(result) ? null : Date.now() - start,
+      };
+    }
+
     const [vikingdb, openviking] = await Promise.all([
       probe("http://localhost:5000/health"),
-      probe("http://localhost:1933/health"),
+      probeOv(),
     ]);
 
     res.json({ vikingdb, openviking });
@@ -157,9 +175,16 @@ export function createHealthRouter(eventBus: any) {
             return { status: (r.ok || acceptAny) ? "running" : "failed", latencyMs: Date.now() - start };
           } catch { return { status: "failed", latencyMs: null }; }
         };
+        // Issue #954: OpenViking liveness via the adapter (resolves OPENVIKING_URL,
+        // 3000ms) — no hardcoded localhost:1933. vikingdb stays an inline probe.
         // openai-proxy diagnostic removed in PR-3 (issue #383) — port 4001 only
         // existed to feed the codex CLI agents.
-        const [vikingdb, ov] = await Promise.all([probe("http://localhost:5000/health"), probe("http://localhost:1933/health")]);
+        const probeOv = async () => {
+          const start = Date.now();
+          const r = await ovHealthGet("/health", { timeout: 3000 });
+          return { status: isOvFailure(r) ? "failed" : "running", latencyMs: isOvFailure(r) ? null : Date.now() - start };
+        };
+        const [vikingdb, ov] = await Promise.all([probe("http://localhost:5000/health"), probeOv()]);
         return { vikingdb, openviking: ov };
       })(),
       /* 2 */ getSchedulerStatus(),
@@ -186,15 +211,15 @@ export function createHealthRouter(eventBus: any) {
       })(),
       /* 13 */ countReflectionKeys(),
       /* 14 */ (async () => {
-        try {
-          const ovKey = OPENVIKING_API_KEY;
-          const start = Date.now();
-          const r = await fetch("http://localhost:1933/api/v1/search/find", { method: "POST", headers: { "Content-Type": "application/json", "X-Api-Key": ovKey }, body: JSON.stringify({ query: "system health", limit: 3 }), signal: AbortSignal.timeout(3000) });
-          const lat = Date.now() - start;
-          if (!r.ok) return { status: "failed", latencyMs: lat, resultCount: 0 };
-          const d = await r.json() as any; const rs = d?.result || {};
-          return { status: "running", latencyMs: lat, resultCount: (rs.memories?.length || 0) + (rs.resources?.length || 0) + (rs.skills?.length || 0) };
-        } catch { return { status: "failed", latencyMs: null, resultCount: 0 }; }
+        // Issue #954: OV search probe via the adapter (resolves OPENVIKING_URL +
+        // auth headers + 3000ms timeout + JSON unwrap) — no hardcoded
+        // localhost:1933, no inline X-Api-Key. Never throws.
+        const start = Date.now();
+        const result = await ovPostJson<any>("/api/v1/search/find", { query: "system health", limit: 3 }, { timeout: 3000 });
+        const lat = Date.now() - start;
+        if (isOvFailure(result)) return { status: "failed", latencyMs: result.code === "ov-non-2xx" ? lat : null, resultCount: 0 };
+        const rs = result.data?.result || {};
+        return { status: "running", latencyMs: lat, resultCount: (rs.memories?.length || 0) + (rs.resources?.length || 0) + (rs.skills?.length || 0) };
       })(),
       /* 15 */ (async () => {
         try {

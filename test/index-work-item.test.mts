@@ -169,10 +169,14 @@ describe("indexWorkItem temp_path parsing (issue #313)", () => {
       cap.restore();
     }
     assert.equal(stub.calls.length, 1, "should not call add-resource on upload failure");
-    assert.equal(cap.errors.length, 1);
-    const msg = cap.errors[0];
-    assert.ok(msg.includes("503"), `expected status in error: ${msg}`);
-    assert.ok(msg.includes("service overloaded"), `expected body in error: ${msg}`);
+    // Issue #954: the OpenViking Request Adapter owns the transport boundary and
+    // logs the non-2xx (status + body); the caller logs the discriminated code +
+    // body. The failure stays loud — status, body, and ov-non-2xx code all reach
+    // the logs — but across the adapter line and the caller line.
+    const all = cap.errors.join(" | ");
+    assert.ok(all.includes("503"), `expected status in adapter error: ${all}`);
+    assert.ok(all.includes("service overloaded"), `expected body in error: ${all}`);
+    assert.ok(all.includes("ov-non-2xx"), `expected ov code in error: ${all}`);
   });
 
   test("add-resource failure → logs status + body", async () => {
@@ -193,10 +197,11 @@ describe("indexWorkItem temp_path parsing (issue #313)", () => {
       cap.restore();
     }
     assert.equal(stub.calls.length, 2);
-    assert.equal(cap.errors.length, 1);
-    const msg = cap.errors[0];
-    assert.ok(msg.includes("add-resource failed"));
-    assert.ok(msg.includes("409"));
-    assert.ok(msg.includes("conflict"));
+    // Issue #954: as above — adapter logs the non-2xx (status + body), caller
+    // logs the "add-resource failed" prefix with the code + body.
+    const all = cap.errors.join(" | ");
+    assert.ok(all.includes("add-resource failed"), `expected caller prefix: ${all}`);
+    assert.ok(all.includes("409"), `expected status in adapter error: ${all}`);
+    assert.ok(all.includes("conflict"), `expected body in error: ${all}`);
   });
 });

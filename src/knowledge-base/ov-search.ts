@@ -21,6 +21,11 @@
 // Re-exported under the historical OV_URL / OV_KEY / OV_HEADERS names so existing
 // importers keep compiling without churn.
 import { OPENVIKING_URL, OPENVIKING_API_KEY, OPENVIKING_HEADERS } from "./ov-config.ts";
+// Issue #954: the OpenViking Request Adapter — all OV HTTP request mechanics
+// (URL join, auth headers, timeout, error classification, JSON unwrap) live
+// behind this seam now. This module keeps its domain behaviour (metrics +
+// fallback) and routes the raw fetch through `ovPostJson`.
+import { ovPostJson, isOvFailure } from "./ov-request.ts";
 
 export const OV_URL = OPENVIKING_URL;
 export const OV_KEY = OPENVIKING_API_KEY;
@@ -134,24 +139,19 @@ export async function trackedOvSearch(
     const body: Record<string, any> = { query, limit };
     if (sessionId) body.session_id = sessionId;
 
-    const res = await fetch(`${OV_URL}/api/v1/search/find`, {
-      method: "POST",
-      headers: OV_HEADERS,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
-    });
+    const result = await ovPostJson<any>("/api/v1/search/find", body, { timeout: 5000 });
 
     const latencyMs = Date.now() - startMs;
 
-    if (!res.ok) {
+    if (isOvFailure(result)) {
       ovSearchMetrics.totalSearches++;
       ovSearchMetrics.errors++;
       ovSearchMetrics.totalLatencyMs += latencyMs;
-      console.log(`[OV Search] query="${query.slice(0, 80)}" status=${res.status} latency=${latencyMs}ms ERROR`);
+      console.log(`[OV Search] query="${query.slice(0, 80)}" status=${result.code} latency=${latencyMs}ms ERROR`);
       return { resources: [], memories: [] };
     }
 
-    const data = await res.json() as any;
+    const data = result.data;
     resources = data?.result?.resources || [];
     memories = data?.result?.memories || [];
     const resultCount = resources.length + memories.length;
@@ -173,17 +173,12 @@ export async function trackedOvSearch(
         const fbBody: Record<string, any> = { query: fallbackQuery, limit };
         if (sessionId) fbBody.session_id = sessionId;
 
-        const fbRes = await fetch(`${OV_URL}/api/v1/search/find`, {
-          method: "POST",
-          headers: OV_HEADERS,
-          body: JSON.stringify(fbBody),
-          signal: AbortSignal.timeout(5000),
-        });
+        const fbResult = await ovPostJson<any>("/api/v1/search/find", fbBody, { timeout: 5000 });
 
         const fbLatencyMs = Date.now() - fbStartMs;
 
-        if (fbRes.ok) {
-          const fbData = await fbRes.json() as any;
+        if (!isOvFailure(fbResult)) {
+          const fbData = fbResult.data;
           const fbResources = fbData?.result?.resources || [];
           const fbMemories = fbData?.result?.memories || [];
           const fbCount = fbResources.length + fbMemories.length;
@@ -219,23 +214,17 @@ export async function trackedOvSearch(
 // ===========================================================================
 
 export async function ovFetch(path: string, body: any) {
-  try {
-    const res = await fetch(`${OV_URL}${path}`, {
-      method: "POST",
-      headers: OV_HEADERS,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      console.error(`[Learning] OV ${path} failed: ${res.status} ${text.slice(0, 200)}`);
-      return null;
-    }
-    return await res.json();
-  } catch (err: any) {
-    console.error(`[Learning] OV ${path} error: ${err.message}`);
+  // Issue #954: routed through the OpenViking Request Adapter. The adapter owns
+  // the URL join + headers + 10000ms timeout + non-2xx/malformed-JSON
+  // classification and logs the failure mode; this helper keeps its historical
+  // contract of returning the parsed JSON on success or `null` on any failure
+  // (callers fall back to a no-op session on null).
+  const result = await ovPostJson<any>(path, body, { timeout: 10000 });
+  if (isOvFailure(result)) {
+    console.error(`[Learning] OV ${path} failed: ${result.code}`);
     return null;
   }
+  return result.data;
 }
 
 // ===========================================================================
@@ -368,23 +357,21 @@ export async function createCycleSession(cycleId: string) {
     },
 
     async commit() {
-      try {
-        const res = await fetch(`${OV_URL}/api/v1/sessions/${sessionId}/commit?wait=false`, {
-          method: "POST",
-          headers: OV_HEADERS,
-          body: "{}",
-          signal: AbortSignal.timeout(15000),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          console.log(`[Learning] Committed OV session ${sessionId} (async) — memory extraction queued`);
-          this.active = false;
-          return data;
-        }
-        console.error(`[Learning] OV commit failed: ${res.status}`);
-      } catch (err: any) {
-        console.error(`[Learning] OV commit error: ${err.message}`);
+      // Issue #954: routed through the OpenViking Request Adapter (15000ms
+      // timeout). Body `{}` serializes to the historical `"{}"`. Behaviour
+      // preserved: on success return the parsed body and mark inactive; on any
+      // failure log the code and return null.
+      const result = await ovPostJson<any>(
+        `/api/v1/sessions/${sessionId}/commit?wait=false`,
+        {},
+        { timeout: 15000 },
+      );
+      if (!isOvFailure(result)) {
+        console.log(`[Learning] Committed OV session ${sessionId} (async) — memory extraction queued`);
+        this.active = false;
+        return result.data;
       }
+      console.error(`[Learning] OV commit failed: ${result.code}`);
       this.active = false;
       return null;
     },

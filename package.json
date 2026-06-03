@@ -15,6 +15,7 @@
     "schema-seam-check": "npx tsx scripts/ci/schema-seam-check.ts",
     "github-seam-check": "npx tsx scripts/ci/github-seam-check.ts",
     "host-probe-seam-check": "npx tsx scripts/ci/host-probe-seam-check.ts",
+    "openviking-seam-check": "npx tsx scripts/ci/openviking-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts"
   },
   "author": "Gabe",

@@ -1,41 +1,38 @@
 import { Router } from "express";
-import { getOvSearchMetrics } from "../knowledge-base/ov-search.ts";
+// Issue #954: the dashboard search proxy no longer hand-rolls its own
+// `/search/find` fetch (a second, divergent search path that dropped the
+// timeout, metrics, and fallback). It calls `trackedOvSearch` — the canonical
+// reader — so there is exactly ONE search implementation in src/, carrying the
+// OpenViking Request Adapter's transport discipline plus this reader's metrics
+// and zero-result fallback.
+import { getOvSearchMetrics, trackedOvSearch } from "../knowledge-base/ov-search.ts";
 import { getCoverageStats } from "../knowledge-base/source-indexer.ts";
-// Issue #231: shared OV connection config — the previous local default literal
-// for OPENVIKING_API_KEY in misc.ts was the WRONG key (returned 401), so the
-// dashboard search proxy silently broke whenever the env var was absent.
-import { OPENVIKING_URL, OPENVIKING_API_KEY } from "../knowledge-base/ov-config.ts";
 
 /**
  * OpenViking proxy + knowledge metrics routes.
  *
  * Extracted from api/misc.ts as part of issue #268 (mirrors the learning.ts
- * split from #219). Pure move — no behavior changes.
+ * split from #219). Issue #954 collapsed the divergent inline search fetch into
+ * the canonical `trackedOvSearch` reader.
  */
 export function createOpenVikingRouter() {
   const router = Router();
 
-  // GET /openviking/search — Proxy search to OpenViking
+  // GET /openviking/search — Proxy search to OpenViking via the canonical reader.
   router.get("/openviking/search", async (req, res) => {
     const query = req.query.q;
     if (!query) {
       return res.status(400).json({ error: "Missing query parameter 'q'" });
     }
 
-    try {
-      const ovUrl = OPENVIKING_URL;
-      const ovKey = OPENVIKING_API_KEY;
-      const response = await fetch(`${ovUrl}/api/v1/search/find`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Api-Key": ovKey },
-    // @ts-expect-error — migrate to proper types
-        body: JSON.stringify({ query, limit: parseInt(req.query.limit) || 10 }),
-      });
-      const data = await response.json();
-      res.json(data);
-    } catch (err: any) {
-      res.status(502).json({ error: `OpenViking unavailable: ${err.message}` });
-    }
+    // trackedOvSearch never throws — it routes through the OpenViking Request
+    // Adapter (timeout + error classification) and folds every failure to an
+    // empty `{ resources, memories }`. The proxy surfaces that shape; an OV
+    // outage now degrades to an empty result with logged metrics rather than a
+    // 502, matching how every other caller of the reader behaves.
+    const limit = parseInt(String(req.query.limit ?? ""), 10) || 10;
+    const { resources, memories } = await trackedOvSearch(String(query), limit);
+    res.json({ result: { resources, memories } });
   });
 
   // GET /openviking-stats — OV search quality metrics (in-memory, resets on restart)
