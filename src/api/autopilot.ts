@@ -43,7 +43,8 @@ import {
   fetchTurnsWithJoins,
 } from "../autopilot/runs.ts";
 import { assembleRetroBundle } from "../autopilot/retro-bundle.ts";
-import { RetroBundleParamsSchema } from "../schemas/retro.ts";
+import { RetroBundleParamsSchema, RecentRetrosQuerySchema } from "../schemas/retro.ts";
+import { listRecentRetroArtifacts } from "../redis/retro.ts";
 import {
   readLogTail,
   readJournalSlice,
@@ -274,6 +275,27 @@ export function createAutopilotRouter() {
     }
     const bundle = await assembleRetroBundle(parsed.data.run_id);
     return res.json(bundle);
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /autopilot/retros — recent PERSISTED retro artifacts (issue #921).
+  //
+  // The durable, auditable record of what each retrospective concluded and
+  // acted on, newest-first. Feeds the dashboard Retro panel. The accessor
+  // (`redis/retro.listRecentRetroArtifacts`) honours the never-throw contract
+  // — a Redis failure yields `[]`, never a throw — so this route always
+  // answers 200 with the (possibly empty) list once the query validates. A bad
+  // `limit` is a 400 via the schema seam.
+  // -------------------------------------------------------------------------
+  router.get("/autopilot/retros", async (req, res) => {
+    const parsed = RecentRetrosQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ code: "schema-validation-failed", issues: parsed.error.issues });
+    }
+    const artifacts = await listRecentRetroArtifacts(parsed.data.limit);
+    return res.json({ artifacts });
   });
 
   // -------------------------------------------------------------------------
