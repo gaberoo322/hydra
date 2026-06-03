@@ -127,9 +127,15 @@ prune_repo() {
     BRANCHES_RAW=$(git branch -vv 2>/dev/null || true)
     WORKTREES_RAW=$(git worktree list --porcelain 2>/dev/null || true)
 
-    # Build a JSON map of {worktreePath: lockBody}.
+    # Build a JSON map of {worktreePath: lockBody} AND {worktreePath: ageSeconds}.
+    # The age map feeds the worktree-orphan GC (issue #911): a worktree's dir
+    # mtime is the cheapest available "last touched" signal, and the GC defers
+    # any worktree younger than its age floor so an in-flight dispatch that
+    # hasn't taken its lock yet is never reaped.
     local -a LOCK_ENTRIES=()
-    local line wt_path wt_name lockfile body
+    local -a AGE_ENTRIES=()
+    local line wt_path wt_name lockfile body now mtime age
+    now=$(date +%s)
     while IFS= read -r line; do
       case "$line" in
         "worktree "*)
@@ -140,31 +146,75 @@ prune_repo() {
             body=$(cat "$lockfile" 2>/dev/null || true)
             LOCK_ENTRIES+=("$(jq -nc --arg p "$wt_path" --arg b "$body" '{($p): $b}')")
           fi
+          # Age = now - dir mtime. `stat` may fail for the main worktree's own
+          # path on some platforms; tolerate by simply omitting the entry (the
+          # classifier treats a missing age as "unknown" → skip, never delete).
+          mtime=$(stat -c %Y "$wt_path" 2>/dev/null || stat -f %m "$wt_path" 2>/dev/null || echo "")
+          if [ -n "$mtime" ]; then
+            age=$((now - mtime))
+            [ "$age" -lt 0 ] && age=0
+            AGE_ENTRIES+=("$(jq -nc --arg p "$wt_path" --argjson s "$age" '{($p): $s}')")
+          fi
           ;;
       esac
     done <<<"$WORKTREES_RAW"
 
-    local LOCKS_JSON
+    local LOCKS_JSON AGES_JSON
     if [ ${#LOCK_ENTRIES[@]} -eq 0 ]; then
       LOCKS_JSON='{}'
     else
       LOCKS_JSON=$(printf '%s\n' "${LOCK_ENTRIES[@]}" | jq -s 'add // {}')
     fi
+    if [ ${#AGE_ENTRIES[@]} -eq 0 ]; then
+      AGES_JSON='{}'
+    else
+      AGES_JSON=$(printf '%s\n' "${AGE_ENTRIES[@]}" | jq -s 'add // {}')
+    fi
 
-    local CURRENT_BRANCH
+    # Open-PR head branches — a worktree whose branch heads an open PR is
+    # preserved even when its lock PID is dead (the PR may still merge). A
+    # missing/unauthenticated `gh` degrades to an empty set: the GC then
+    # protects nothing on this signal, so it relies on age + dead-PID alone.
+    # That is the safe direction — it only ever makes the GC MORE conservative
+    # for branches it would otherwise have reclaimed.
+    # We resolve the repo from this clone's `origin` remote (via `gh`'s own
+    # inference) rather than hard-coding a slug, so the same code path works for
+    # both the orchestrator and target passes.
+    local OPEN_PR_HEADS_JSON
+    if command -v gh >/dev/null 2>&1; then
+      OPEN_PR_HEADS_JSON=$(gh pr list --state open --limit 1000 \
+        --json headRefName --jq '[.[].headRefName]' 2>/dev/null || echo '[]')
+    else
+      OPEN_PR_HEADS_JSON='[]'
+    fi
+    [ -z "$OPEN_PR_HEADS_JSON" ] && OPEN_PR_HEADS_JSON='[]'
+
+    local CURRENT_BRANCH MAIN_WT
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")
+    # The main working tree is the first stanza of `git worktree list` — it is
+    # the top-level repo dir, never under `.git/worktrees/`.
+    MAIN_WT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$REPO")
 
     local AUDIT_JSON
     if [ "$APPLY" -eq 1 ]; then AUDIT_JSON=false; else AUDIT_JSON=true; fi
+
+    # Age floor override (seconds). Default lives in the classifier (6h).
+    local MIN_AGE_JSON
+    MIN_AGE_JSON="${HYDRA_WORKTREE_MIN_AGE_SECONDS:-null}"
 
     local INPUT_JSON PLAN REPORT
     INPUT_JSON=$(jq -nc \
       --arg b "$BRANCHES_RAW" \
       --arg w "$WORKTREES_RAW" \
       --arg c "$CURRENT_BRANCH" \
+      --arg m "$MAIN_WT" \
       --argjson l "$LOCKS_JSON" \
+      --argjson ag "$AGES_JSON" \
+      --argjson ph "$OPEN_PR_HEADS_JSON" \
+      --argjson mn "$MIN_AGE_JSON" \
       --argjson a "$AUDIT_JSON" \
-      '{branchesRaw: $b, worktreesRaw: $w, currentBranch: $c, locks: $l, audit: $a}')
+      '{branchesRaw: $b, worktreesRaw: $w, currentBranch: $c, mainWorktreePath: $m,
+        locks: $l, worktreeAges: $ag, openPrHeads: $ph, minAgeSeconds: $mn, audit: $a}')
 
     PLAN=$(printf '%s' "$INPUT_JSON" | npx -y tsx "$REPO_ROOT/scripts/ci/branch-prune-runner.ts")
     if [ -z "$PLAN" ]; then
@@ -221,6 +271,30 @@ prune_repo() {
         ERRORS=$((ERRORS+1))
       fi
     done < <(printf '%s' "$PLAN" | jq -r '.plan.deleteBranchOnly[]')
+
+    # Worktree-orphan GC (issue #911): reclaim local-only orphan worktrees the
+    # [gone]-branch passes above never see. Same order as delete-worktree-and-
+    # branch — remove the worktree first, then delete its branch (if any; a
+    # detached worktree has none). A failure to remove the worktree leaves the
+    # branch alone, exactly like the [gone] path.
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      wt=$(printf '%s' "$entry" | jq -r '.worktreePath')
+      br=$(printf '%s' "$entry" | jq -r '.branch // ""')
+      echo "branch-prune: [$LABEL] reclaiming orphan worktree $wt${br:+ and branch $br}"
+      git worktree unlock "$wt" 2>/dev/null || true
+      if ! git worktree remove --force "$wt" 2>&1 | sed "s/^/  [$LABEL] /"; then
+        echo "  branch-prune: [$LABEL] orphan worktree remove failed for $wt — leaving branch ${br:-<detached>} alone" >&2
+        ERRORS=$((ERRORS+1))
+        continue
+      fi
+      if [ -n "$br" ]; then
+        if ! git branch -D "$br" 2>&1 | sed "s/^/  [$LABEL] /"; then
+          echo "  branch-prune: [$LABEL] branch -D failed for orphan $br" >&2
+          ERRORS=$((ERRORS+1))
+        fi
+      fi
+    done < <(printf '%s' "$PLAN" | jq -c '.plan.deleteOrphanWorktree[]')
 
     # Final pass: prune metadata for manually-deleted worktree dirs.
     echo "branch-prune: [$LABEL] git worktree prune"
