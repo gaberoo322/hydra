@@ -28,6 +28,7 @@
  */
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
+import { resolveGithubRepo } from "../github/issues.ts";
 
 import type { DecisionItemSource } from "./types.ts";
 
@@ -179,7 +180,7 @@ async function fetchOperatorDigestItems(
   deps: DecisionQueueDeps,
 ): Promise<RawDecisionInput[]> {
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return [];
   const now = deps.now ?? new Date();
   // Look for digest titles for "today" and "yesterday" — the morning hand-off
@@ -302,7 +303,7 @@ async function fetchLabeledItems(
   deps: DecisionQueueDeps,
 ): Promise<RawDecisionInput[]> {
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return [];
   const { stdout } = await exec(
     "gh",

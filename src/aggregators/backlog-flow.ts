@@ -30,6 +30,10 @@
  */
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
+import {
+  classFromLabels as seamClassFromLabels,
+  resolveGithubRepo,
+} from "../github/issues.ts";
 
 // The production default routes `gh`/`git` through the GitHub CLI Adapter seam
 // (issue #899). Tests still inject `deps.execFileAsync` directly — this only
@@ -70,20 +74,10 @@ export interface BacklogFlowDeps {
 const MAX_WINDOW_DAYS = 30;
 const DEFAULT_WINDOW_DAYS = 7;
 
-const KNOWN_CLASS_LABELS = [
-  "dev_orch",
-  "dev_target",
-  "qa",
-  "health",
-  "research_orch",
-  "research_target",
-  "sweep_orch",
-  "sweep_target",
-  "discover_orch",
-  "discover_target",
-] as const;
-
-const UNCLASSIFIED = "unclassified";
+// The autopilot dispatch-class taxonomy + the "unclassified" sentinel live in
+// the GitHub Issue/PR Read seam (issue #908) — one authoritative copy, no more
+// array-vs-Set drift with recent-merges.ts. `classFromLabels` below re-exports
+// the seam's classifier so existing importers/tests are unaffected.
 
 // ---------------------------------------------------------------------------
 // Public entrypoint
@@ -148,20 +142,13 @@ export function clampWindowDays(d: number): number {
 }
 
 /**
- * Pure helper — exported for tests. Returns the first known autopilot-class
- * label on the issue, or "unclassified" if none of the known labels match.
- * Case-sensitive — the `gh issue list` payload preserves the label as
- * stored.
+ * Pure helper — exported for tests and the dashboard. Returns the first known
+ * autopilot-class label on the issue, or "unclassified" if none match.
+ * Case-sensitive. Delegates to the GitHub Issue/PR Read seam (issue #908) so
+ * the taxonomy has exactly one home; re-exported here for backward
+ * compatibility with existing importers.
  */
-export function classFromLabels(labels: readonly string[]): string {
-  for (const label of labels) {
-    if (typeof label !== "string") continue;
-    if (KNOWN_CLASS_LABELS.includes(label as (typeof KNOWN_CLASS_LABELS)[number])) {
-      return label;
-    }
-  }
-  return UNCLASSIFIED;
-}
+export const classFromLabels = seamClassFromLabels;
 
 /**
  * Pure helper — exported for tests. Produces one row per class that appears
@@ -243,7 +230,7 @@ async function fetchIssuesByDateFilter(
   deps: BacklogFlowDeps,
 ): Promise<RawIssue[]> {
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return [];
   const { stdout } = await exec(
     "gh",
@@ -271,7 +258,7 @@ async function fetchIssuesWithLabel(
   deps: BacklogFlowDeps,
 ): Promise<RawIssue[]> {
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return [];
   const { stdout } = await exec(
     "gh",

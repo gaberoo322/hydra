@@ -43,6 +43,7 @@
  */
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
+import { resolveGithubRepo } from "../github/issues.ts";
 
 // The production default routes `gh`/`git` through the GitHub CLI Adapter seam
 // (issue #899). Tests still inject `deps.execFileAsync` directly — this only
@@ -101,7 +102,7 @@ export async function readMetaFrictionIssues(
   deps: MetaFrictionReadDeps = {},
 ): Promise<MetaFrictionIssue[]> {
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return [];
   const sinceDate = windowStart.toISOString().split("T")[0];
   let stdout = "";

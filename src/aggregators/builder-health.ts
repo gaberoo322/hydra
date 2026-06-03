@@ -53,6 +53,7 @@
  */
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
+import { resolveGithubRepo } from "../github/issues.ts";
 
 import { getCapacitySnapshot, ORCHESTRATOR_FLOOR, DEFAULT_WINDOW_CYCLES } from "../capacity-floor.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
@@ -416,7 +417,7 @@ function makeDefaultFetchPrView(
   deps: BuilderHealthDeps,
 ): (prNumber: number) => Promise<GhPrView | null> {
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   return async (prNumber: number) => {
     try {
       const { stdout } = await exec(

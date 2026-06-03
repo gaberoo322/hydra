@@ -17,6 +17,7 @@
  */
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
+import { resolveGithubRepo } from "../github/issues.ts";
 
 // The production default routes `gh`/`git` through the GitHub CLI Adapter seam
 // (issue #899). Tests still inject `deps.execFileAsync` directly — this only
@@ -58,7 +59,7 @@ export async function getNewTargetFindings(
   const now = deps.now ?? new Date();
   const windowStart = new Date(now.getTime() - windowHours * 60 * 60 * 1000);
   const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? "gaberoo322/hydra";
+  const repo = resolveGithubRepo(deps.githubRepo);
   if (!repo) return [];
 
   try {
