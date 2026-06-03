@@ -21,9 +21,29 @@ import {
 } from "../src/aggregators/lessons-trend.ts";
 import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
 import type { FrictionPattern } from "../src/aggregators/lessons-overnight.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");
 const WINDOW_START = new Date(NOW.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+/**
+ * Build a `listIssuesBySearchOrEmpty` stub that returns the given meta-friction
+ * rows (after issue #915 the meta-friction read goes through the seam, not a
+ * raw `gh` exec). The seam's `parseIssueRows` already synthesized title/url;
+ * tests supply only the fields the window-filter reads.
+ */
+function metaReader(rows: Array<Partial<IssueRow> & { number: number }>) {
+  const full: IssueRow[] = rows.map((r) => ({
+    number: r.number,
+    title: r.title ?? `Issue #${r.number}`,
+    url: r.url ?? `https://github.com/gaberoo322/hydra/issues/${r.number}`,
+    createdAt: r.createdAt ?? "",
+    labels: r.labels ?? [],
+    body: r.body ?? "",
+    state: r.state ?? "OPEN",
+  }));
+  return async () => full;
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers — collectPromoted
@@ -230,26 +250,22 @@ describe("pickTopFriction — pure helper", () => {
 describe("metaFrictionOpened — derived from seam reader length", () => {
   test("counts only items inside the window via getLessonsTrend", async () => {
     // windowStart = NOW - 7d = 2026-05-19T12:00:00Z.
-    const exec = async () => ({
-      stdout: JSON.stringify([
+    const response = await getLessonsTrend(7, {
+      now: NOW,
+      listIssuesBySearchOrEmpty: metaReader([
         { number: 1, title: "in", url: "u1", createdAt: "2026-05-26T01:00:00Z" }, // inside
         { number: 2, title: "before", url: "u2", createdAt: "2026-05-19T11:00:00Z" }, // just BEFORE start → outside
         { number: 3, title: "in", url: "u3", createdAt: "2026-05-20T00:00:00Z" }, // inside
       ]),
-      stderr: "",
-    });
-    const response = await getLessonsTrend(7, {
-      now: NOW,
-      execFileAsync: exec,
       readFrictionPatterns: async () => [],
     });
     assert.equal(response.metaFrictionOpened, 2);
   });
 
-  test("non-array gh payload → count 0 (never throws)", async () => {
+  test("seam reader degrades to [] → count 0 (never throws)", async () => {
     const response = await getLessonsTrend(7, {
       now: NOW,
-      execFileAsync: async () => ({ stdout: "{}", stderr: "" }),
+      listIssuesBySearchOrEmpty: async () => [],
       readFrictionPatterns: async () => [],
     });
     assert.equal(response.metaFrictionOpened, 0);
@@ -262,12 +278,6 @@ describe("metaFrictionOpened — derived from seam reader length", () => {
 
 describe("getLessonsTrend — happy path", () => {
   test("merges promotion + top friction + meta-friction count", async () => {
-    const exec = async () => ({
-      stdout: JSON.stringify([
-        { number: 7, createdAt: "2026-05-26T01:00:00Z" },
-      ]),
-      stderr: "",
-    });
     const readFrictionPatterns = async () => [
       {
         skill: "hydra-dev",
@@ -283,7 +293,7 @@ describe("getLessonsTrend — happy path", () => {
     ];
     const response = await getLessonsTrend(7, {
       now: NOW,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: metaReader([{ number: 7, createdAt: "2026-05-26T01:00:00Z" }]),
       readFrictionPatterns,
     });
     assert.equal(response.windowDays, 7);
@@ -298,7 +308,7 @@ describe("getLessonsTrend — empty state", () => {
   test("no patterns and no meta-friction → zero counts", async () => {
     const response = await getLessonsTrend(7, {
       now: NOW,
-      execFileAsync: async () => ({ stdout: JSON.stringify([]), stderr: "" }),
+      listIssuesBySearchOrEmpty: async () => [],
       readFrictionPatterns: async () => [],
     });
     assert.deepEqual(response.promotionRate, []);
@@ -311,10 +321,7 @@ describe("getLessonsTrend — failure isolation", () => {
   test("friction reader throws → meta count still ships", async () => {
     const response = await getLessonsTrend(7, {
       now: NOW,
-      execFileAsync: async () => ({
-        stdout: JSON.stringify([{ number: 1, createdAt: "2026-05-26T01:00:00Z" }]),
-        stderr: "",
-      }),
+      listIssuesBySearchOrEmpty: metaReader([{ number: 1, createdAt: "2026-05-26T01:00:00Z" }]),
       readFrictionPatterns: async () => {
         throw new Error("redis down");
       },
@@ -323,12 +330,10 @@ describe("getLessonsTrend — failure isolation", () => {
     assert.equal(response.metaFrictionOpened, 1);
   });
 
-  test("gh exec throws → friction signals still ship", async () => {
+  test("meta-friction reader degrades to [] → friction signals still ship", async () => {
     const response = await getLessonsTrend(7, {
       now: NOW,
-      execFileAsync: async () => {
-        throw new Error("gh broken");
-      },
+      listIssuesBySearchOrEmpty: async () => [],
       readFrictionPatterns: async () => [
         {
           skill: "hydra-dev",

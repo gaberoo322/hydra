@@ -16,8 +16,27 @@ import {
   filterNearPromotion,
 } from "../src/aggregators/lessons-overnight.ts";
 import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");
+
+/**
+ * Build a `listIssuesBySearchOrEmpty` stub returning the given meta-friction
+ * rows (after issue #915 the meta-friction read goes through the seam, not a
+ * raw `gh` exec).
+ */
+function metaReader(rows: Array<Partial<IssueRow> & { number: number }>) {
+  const full: IssueRow[] = rows.map((r) => ({
+    number: r.number,
+    title: r.title ?? `Issue #${r.number}`,
+    url: r.url ?? `https://github.com/gaberoo322/hydra/issues/${r.number}`,
+    createdAt: r.createdAt ?? "",
+    labels: r.labels ?? [],
+    body: r.body ?? "",
+    state: r.state ?? "OPEN",
+  }));
+  return async () => full;
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -58,28 +77,23 @@ describe("filterNearPromotion — pure helper", () => {
 
 describe("meta-friction read (via seam) — windowing through getOvernightLessons", () => {
   test("keeps issues created inside the window, drops pre-window, sorts newest-first", async () => {
-    const exec = async () => ({
-      stdout: JSON.stringify([
+    const lessons = await getOvernightLessons(24, {
+      now: NOW,
+      listIssuesBySearchOrEmpty: metaReader([
         { number: 1, title: "older meta", url: "u1", createdAt: "2026-05-25T13:00:00Z" },
         { number: 2, title: "newer meta", url: "u2", createdAt: "2026-05-26T11:00:00Z" },
         { number: 3, title: "before window", url: "u3", createdAt: "2026-05-24T00:00:00Z" },
       ]),
-      stderr: "",
-    });
-    const lessons = await getOvernightLessons(24, {
-      now: NOW,
-      execFileAsync: exec,
       readFrictionPatterns: async () => [],
     });
     // WINDOW_START = NOW - 24h = 2026-05-25T12:00:00Z; #3 is before it.
     assert.deepEqual(lessons.metaFrictionOpened.map((i) => i.number), [2, 1]);
   });
 
-  test("non-array gh payload degrades to empty bucket (never throws)", async () => {
-    const exec = async () => ({ stdout: "{}", stderr: "" });
+  test("seam reader degrades to [] → empty bucket (never throws)", async () => {
     const lessons = await getOvernightLessons(24, {
       now: NOW,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: async () => [],
       readFrictionPatterns: async () => [],
     });
     assert.deepEqual(lessons.metaFrictionOpened, []);
@@ -92,12 +106,6 @@ describe("meta-friction read (via seam) — windowing through getOvernightLesson
 
 describe("getOvernightLessons — happy path", () => {
   test("merges friction-pattern candidates with meta-friction issues", async () => {
-    const exec = async () => ({
-      stdout: JSON.stringify([
-        { number: 99, title: "meta-friction: x", url: "u99", createdAt: "2026-05-26T10:00:00Z" },
-      ]),
-      stderr: "",
-    });
     const readFrictionPatterns = async () => [
       {
         skill: "hydra-dev",
@@ -108,7 +116,9 @@ describe("getOvernightLessons — happy path", () => {
     ];
     const lessons = await getOvernightLessons(24, {
       now: NOW,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: metaReader([
+        { number: 99, title: "meta-friction: x", url: "u99", createdAt: "2026-05-26T10:00:00Z" },
+      ]),
       readFrictionPatterns,
     });
     assert.equal(lessons.promotionCandidates.length, 1);
@@ -127,10 +137,9 @@ describe("getOvernightLessons — happy path", () => {
 
 describe("getOvernightLessons — empty state", () => {
   test("no patterns, no meta-issues → empty buckets but threshold echoed", async () => {
-    const exec = async () => ({ stdout: JSON.stringify([]), stderr: "" });
     const lessons = await getOvernightLessons(24, {
       now: NOW,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: async () => [],
       readFrictionPatterns: async () => [],
     });
     assert.deepEqual(lessons.promotionCandidates, []);
@@ -145,15 +154,11 @@ describe("getOvernightLessons — empty state", () => {
 
 describe("getOvernightLessons — sub-source failure isolation", () => {
   test("friction-pattern reader throws → meta-issues still ship", async () => {
-    const exec = async () => ({
-      stdout: JSON.stringify([
-        { number: 1, title: "meta", url: "u1", createdAt: "2026-05-26T10:00:00Z" },
-      ]),
-      stderr: "",
-    });
     const lessons = await getOvernightLessons(24, {
       now: NOW,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: metaReader([
+        { number: 1, title: "meta", url: "u1", createdAt: "2026-05-26T10:00:00Z" },
+      ]),
       readFrictionPatterns: async () => {
         throw new Error("redis down");
       },
@@ -162,13 +167,10 @@ describe("getOvernightLessons — sub-source failure isolation", () => {
     assert.equal(lessons.metaFrictionOpened.length, 1);
   });
 
-  test("gh throws → friction candidates still ship", async () => {
-    const exec = async () => {
-      throw new Error("gh broken");
-    };
+  test("meta-friction reader degrades to [] → friction candidates still ship", async () => {
     const lessons = await getOvernightLessons(24, {
       now: NOW,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: async () => [],
       readFrictionPatterns: async () => [
         {
           skill: "hydra-dev",

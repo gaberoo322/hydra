@@ -7,9 +7,12 @@
  * phone-notify hook reads THIS aggregator so it mirrors what the operator sees
  * in `/hydra-review`.
  *
- * Pure helpers are tested directly; the integration shape is tested with an
- * exec stub that routes by command-string substring — no subprocesses, no
- * GitHub round-trips.
+ * After issue #915 the aggregator reads GitHub through the **GitHub Issue/PR
+ * Read seam** (`src/github/issues.ts`). Tests stub the seam readers
+ * (`listIssuesBySearchOrEmpty` / `listIssuesByLabelOrEmpty`, and the
+ * discriminated `listIssuesBySearch` for the open-blocker lookup) and feed the
+ * pure helpers the canonical `IssueRow` shape — the raw-JSON parse now lives in
+ * the seam's own suite (`github-issues.test.mts`).
  */
 
 import { test, describe } from "node:test";
@@ -18,20 +21,23 @@ import assert from "node:assert/strict";
 import {
   getReviewPickupSet,
   mergePickupItems,
-  parseBlockedIssuesOutput,
+  blockedIssuesFromRows,
   classifyStaleBlocked,
-  parseOpenNumbers,
+  openNumbersFromRows,
 } from "../src/review-pickup.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 
 const NOW = new Date("2026-05-29T12:00:00.000Z");
 
-function makeExecStub(routes: Array<{ match: string; stdout: string }>) {
-  return async (cmd: string, args: readonly string[]) => {
-    const key = `${cmd} ${args.join(" ")}`;
-    for (const { match, stdout } of routes) {
-      if (key.includes(match)) return { stdout, stderr: "" };
-    }
-    throw new Error(`exec-stub: no route for "${key}"`);
+function issueRow(over: Partial<IssueRow> & { number: number }): IssueRow {
+  return {
+    number: over.number,
+    title: over.title ?? `Issue #${over.number}`,
+    url: over.url ?? `https://github.com/gaberoo322/hydra/issues/${over.number}`,
+    createdAt: over.createdAt ?? "",
+    labels: over.labels ?? [],
+    body: over.body ?? "",
+    state: over.state ?? "OPEN",
   };
 }
 
@@ -72,31 +78,28 @@ describe("mergePickupItems — pure helper", () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseBlockedIssuesOutput — pure helper
+// blockedIssuesFromRows — pure helper
 // ---------------------------------------------------------------------------
 
-describe("parseBlockedIssuesOutput — pure helper", () => {
-  test("returns [] on empty / non-JSON / non-array", () => {
-    assert.deepEqual(parseBlockedIssuesOutput(""), []);
-    assert.deepEqual(parseBlockedIssuesOutput("not json"), []);
-    assert.deepEqual(parseBlockedIssuesOutput("{}"), []);
+describe("blockedIssuesFromRows — pure helper", () => {
+  test("returns [] on empty input", () => {
+    assert.deepEqual(blockedIssuesFromRows([]), []);
   });
 
   test("extracts blocker refs from body, dropping self-references", () => {
-    const stdout = JSON.stringify([
-      { number: 5, title: "T", url: "u5", body: "blocked by #5 and #9" },
+    const parsed = blockedIssuesFromRows([
+      issueRow({ number: 5, title: "T", url: "u5", body: "blocked by #5 and #9" }),
     ]);
-    const parsed = parseBlockedIssuesOutput(stdout);
     assert.equal(parsed.length, 1);
     // #5 is a self-reference and is filtered out; #9 remains.
     assert.deepEqual(parsed[0].blockerRefs, [9]);
   });
 
   test("no refs in body yields empty blockerRefs", () => {
-    const stdout = JSON.stringify([
-      { number: 7, title: "Standalone", url: "u7", body: "Waiting on operator decision." },
+    const parsed = blockedIssuesFromRows([
+      issueRow({ number: 7, title: "Standalone", url: "u7", body: "Waiting on operator decision." }),
     ]);
-    assert.deepEqual(parseBlockedIssuesOutput(stdout)[0].blockerRefs, []);
+    assert.deepEqual(parsed[0].blockerRefs, []);
   });
 });
 
@@ -132,69 +135,65 @@ describe("classifyStaleBlocked — pure helper", () => {
 });
 
 // ---------------------------------------------------------------------------
-// parseOpenNumbers — pure helper
+// openNumbersFromRows — pure helper
 // ---------------------------------------------------------------------------
 
-describe("parseOpenNumbers — pure helper", () => {
+describe("openNumbersFromRows — pure helper", () => {
   test("intersects reported open numbers with requested", () => {
-    const stdout = JSON.stringify([{ number: 100 }, { number: 999 }]);
-    const open = parseOpenNumbers(stdout, [100, 200]);
+    const open = openNumbersFromRows(
+      [issueRow({ number: 100 }), issueRow({ number: 999 })],
+      [100, 200],
+    );
     // 100 is open and requested; 999 is open but not requested (ignored).
     assert.deepEqual([...open], [100]);
   });
 
-  test("empty / non-JSON yields empty set", () => {
-    assert.equal(parseOpenNumbers("", [1]).size, 0);
-    assert.equal(parseOpenNumbers("nope", [1]).size, 0);
+  test("empty rows yields empty set", () => {
+    assert.equal(openNumbersFromRows([], [1]).size, 0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// getReviewPickupSet — integration shape (exec stub)
+// getReviewPickupSet — integration shape (seam-reader stubs)
 // ---------------------------------------------------------------------------
 
 describe("getReviewPickupSet — integration", () => {
   test("merges all three buckets; only stale-blocked issues survive", async () => {
-    const exec = makeExecStub([
-      // Digest issue for today carries one ref (#100).
-      {
-        match: 'in:title "Operator decision queue 2026-05-29"',
-        stdout: JSON.stringify([
-          {
-            number: 900,
-            title: "Operator decision queue 2026-05-29",
-            body: "Decide: #100",
-            url: "https://x/900",
-            createdAt: "2026-05-29T06:00:00Z",
-            labels: [],
-          },
-        ]),
+    const items = await getReviewPickupSet({
+      now: NOW,
+      listIssuesBySearchOrEmpty: async (search) => {
+        // Digest issue for today carries one ref (#100); yesterday — none.
+        if (search.includes("Operator decision queue 2026-05-29")) {
+          return [
+            issueRow({
+              number: 900,
+              title: "Operator decision queue 2026-05-29",
+              body: "Decide: #100",
+              url: "https://x/900",
+              createdAt: "2026-05-29T06:00:00Z",
+            }),
+          ];
+        }
+        return [];
       },
-      // Yesterday's digest — none.
-      { match: 'in:title "Operator decision queue 2026-05-28"', stdout: "[]" },
-      // ready-for-human
-      {
-        match: "--label ready-for-human",
-        stdout: JSON.stringify([
-          { number: 200, title: "Decide tier", url: "https://x/200", createdAt: "2026-05-29T08:00:00Z", labels: [] },
-        ]),
-      },
-      // blocked: #300 has an open blocker (#100), #400 has only a closed one.
-      {
-        match: "--label blocked",
-        stdout: JSON.stringify([
-          { number: 300, title: "still blocked", url: "https://x/300", body: "blocked by #100" },
-          { number: 400, title: "stale blocked", url: "https://x/400", body: "depends on #500" },
-        ]),
+      listIssuesByLabelOrEmpty: async (label) => {
+        if (label === "ready-for-human") {
+          return [
+            issueRow({ number: 200, title: "Decide tier", url: "https://x/200", createdAt: "2026-05-29T08:00:00Z" }),
+          ];
+        }
+        if (label === "blocked") {
+          // #300 has an open blocker (#100); #400 only a closed one (#500).
+          return [
+            issueRow({ number: 300, title: "still blocked", url: "https://x/300", body: "blocked by #100" }),
+            issueRow({ number: 400, title: "stale blocked", url: "https://x/400", body: "depends on #500" }),
+          ];
+        }
+        return [];
       },
       // open-blocker lookup over {100, 500}: only #100 is open.
-      {
-        match: "--state open --search 100 500",
-        stdout: JSON.stringify([{ number: 100 }]),
-      },
-    ]);
-
-    const items = await getReviewPickupSet({ now: NOW, execFileAsync: exec });
+      listIssuesBySearch: async () => ({ ok: true, rows: [issueRow({ number: 100 })] }),
+    });
     const numbers = items.map((i) => i.number);
     // #100 (digest ref), #200 (ready-for-human), #400 (stale-blocked).
     // #300 is NOT here — its blocker #100 is still open.
@@ -202,27 +201,44 @@ describe("getReviewPickupSet — integration", () => {
     assert.equal(items.find((i) => i.number === 400)?.source, "stale-blocked");
   });
 
+  test("a failed open-blocker lookup conservatively treats all blockers as open", async () => {
+    const items = await getReviewPickupSet({
+      now: NOW,
+      listIssuesBySearchOrEmpty: async () => [],
+      listIssuesByLabelOrEmpty: async (label) =>
+        label === "blocked"
+          ? [issueRow({ number: 400, title: "blocked", url: "https://x/400", body: "depends on #500" })]
+          : [],
+      // Discriminated reader reports a failure → #500 treated as still-open →
+      // #400 is NOT surfaced as stale (no false notification).
+      listIssuesBySearch: async () => ({ ok: false, code: "gh-failed" }),
+    });
+    assert.deepEqual(items, []);
+  });
+
   test("never throws — a failed sub-source contributes []", async () => {
-    const exec = makeExecStub([
-      // ready-for-human succeeds...
-      {
-        match: "--label ready-for-human",
-        stdout: JSON.stringify([
-          { number: 200, title: "rfh", url: "https://x/200", createdAt: "2026-05-29T08:00:00Z", labels: [] },
-        ]),
+    const items = await getReviewPickupSet({
+      now: NOW,
+      listIssuesBySearchOrEmpty: async () => {
+        throw new Error("digest reader exploded");
       },
-      // ...everything else throws (no route) — digest + blocked sub-sources fail.
-    ]);
-    const items = await getReviewPickupSet({ now: NOW, execFileAsync: exec });
+      listIssuesByLabelOrEmpty: async (label) =>
+        label === "ready-for-human"
+          ? [issueRow({ number: 200, title: "rfh", url: "https://x/200", createdAt: "2026-05-29T08:00:00Z" })]
+          : [],
+      listIssuesBySearch: async () => ({ ok: true, rows: [] }),
+    });
     // The surviving ready-for-human source still ships.
     assert.deepEqual(items.map((i) => i.number), [200]);
   });
 
   test("empty board yields empty pickup set", async () => {
-    const exec = makeExecStub([
-      { match: "issue list", stdout: "[]" },
-    ]);
-    const items = await getReviewPickupSet({ now: NOW, execFileAsync: exec });
+    const items = await getReviewPickupSet({
+      now: NOW,
+      listIssuesBySearchOrEmpty: async () => [],
+      listIssuesByLabelOrEmpty: async () => [],
+      listIssuesBySearch: async () => ({ ok: true, rows: [] }),
+    });
     assert.deepEqual(items, []);
   });
 });
