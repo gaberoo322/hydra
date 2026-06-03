@@ -39,6 +39,7 @@ import {
   readMetaFrictionIssues,
   type MetaFrictionIssue,
 } from "./friction-source.ts";
+import type { listIssuesBySearchOrEmpty } from "../github/issues.ts";
 import { settledOrEmpty } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
@@ -70,11 +71,11 @@ export interface LessonsOvernightDeps {
   githubRepo?: string;
   /** How many hits short of the threshold still counts as a candidate. Default 1. */
   candidateWindow?: number;
-  execFileAsync?: (
-    cmd: string,
-    args: readonly string[],
-    opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Override the GitHub Issue/PR Read seam reader (issue #908/#915) used by the
+   * meta-friction read. Passed straight through to `readMetaFrictionIssues`.
+   */
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
   /**
    * Override the friction-patterns reader. Returns a list of
    * `{skill, patterns}` tuples. Defaults to scanning Redis. Tests pass a

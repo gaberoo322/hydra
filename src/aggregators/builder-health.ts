@@ -52,8 +52,7 @@
  *   and Redis readers are overridable via `deps`.
  */
 
-import { execFileViaSeam } from "../github/exec-file-compat.ts";
-import { resolveGithubRepo } from "../github/issues.ts";
+import { viewPr } from "../github/issues.ts";
 
 import { getCapacitySnapshot, ORCHESTRATOR_FLOOR, DEFAULT_WINDOW_CYCLES } from "../capacity-floor.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
@@ -62,11 +61,6 @@ import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { listAutopilotPrLinksSince } from "../redis/autopilot-runs.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
 import { settledOrNull } from "./settle.ts";
-
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
-const execFile = execFileViaSeam;
 
 // Heartbeat merge-rate window (env-overridable, matches the rolling merge
 // rate's native window). Used for the rework metric's "of N cycles" framing.
@@ -182,8 +176,8 @@ export interface BuilderHealthDeps {
   getScopeViolationsByDay?: (days: number, now?: Date) => Promise<Array<{ date: string; count: number }>>;
   /** Override the design-concept production-count reader. */
   getDesignConceptProductionCountForDate?: (date: string) => Promise<number>;
+  /** GitHub repo handle (`owner/name`) for the per-PR view. Defaults to `gaberoo322/hydra`. */
   githubRepo?: string;
-  execFileAsync?: typeof execFile;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,30 +403,14 @@ async function computeAutonomyAndLatency(
 function makeDefaultFetchPrView(
   deps: BuilderHealthDeps,
 ): (prNumber: number) => Promise<GhPrView | null> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = resolveGithubRepo(deps.githubRepo);
-  return async (prNumber: number) => {
-    try {
-      const { stdout } = await exec(
-        "gh",
-        [
-          "pr",
-          "view",
-          String(prNumber),
-          "--repo",
-          repo,
-          "--json",
-          "number,mergedAt,mergedBy,labels,reviews,commits",
-        ],
-        { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-      );
-      if (!stdout.trim()) return null;
-      return JSON.parse(stdout) as GhPrView;
-    } catch (err: any) {
-      console.error(`[builder-health] gh pr view ${prNumber} failed: ${err?.message || err}`);
-      return null;
-    }
-  };
+  return (prNumber: number) =>
+    // viewPr reads through the Issue/PR Read seam (issue #908/#915): it owns
+    // the `gh pr view` argv + repo handle and returns the raw parsed object
+    // (typed `GhPrView` here, the caller's responsibility) or null on any
+    // failure (never throws).
+    viewPr<GhPrView>(prNumber, "number,mergedAt,mergedBy,labels,reviews,commits", {
+      repo: deps.githubRepo,
+    });
 }
 
 // ---------------------------------------------------------------------------

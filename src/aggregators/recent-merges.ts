@@ -35,12 +35,14 @@ import { resolve } from "node:path";
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
 import {
   classLabelFromLabels as seamClassLabelFromLabels,
-  resolveGithubRepo,
+  viewPr,
 } from "../github/issues.ts";
 
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
+// The production default routes the `git log` read through the GitHub CLI
+// Adapter seam (issue #899). Tests still inject `deps.execFileAsync` for the
+// `git` call — this only changes the default, not the injection seam. The
+// per-PR GitHub read now goes through the Issue/PR Read seam's `viewPr`
+// (issue #908/#915), not a hand-built `gh pr view` argv.
 const execFile = execFileViaSeam;
 
 // ---------------------------------------------------------------------------
@@ -212,59 +214,39 @@ export function extractPrNumbersFromGitLog(stdout: string, limit: number): numbe
 // ---------------------------------------------------------------------------
 
 function defaultFetchPrMeta(deps: RecentMergesDeps): (n: number) => Promise<PrMeta | null> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = resolveGithubRepo(deps.githubRepo);
   return async (n: number) => {
-    if (!repo) return null;
-    try {
-      const { stdout } = await exec(
-        "gh",
-        [
-          "pr",
-          "view",
-          String(n),
-          "--repo",
-          repo,
-          "--json",
-          "title,labels,mergedAt,url",
-        ],
-        { timeout: 10_000, maxBuffer: 1024 * 1024 },
-      );
-      return parsePrMeta(stdout);
-    } catch (err: any) {
-      console.error(`[recent-merges] gh pr view #${n} failed: ${err?.message || err}`);
-      return null;
-    }
+    // viewPr reads through the Issue/PR Read seam (issue #908/#915): it owns
+    // the `gh pr view` argv + repo handle and returns the raw parsed object or
+    // null on any failure (never throws). We map the raw shape to PrMeta here.
+    const view = await viewPr<{
+      title?: unknown;
+      labels?: Array<{ name?: unknown }>;
+      mergedAt?: unknown;
+      url?: unknown;
+    }>(n, "title,labels,mergedAt,url", { repo: deps.githubRepo });
+    return view ? prMetaFromView(view) : null;
   };
 }
 
 /**
- * Pure helper — exported for tests. Parses one `gh pr view --json` payload
- * into the `PrMeta` shape. Returns `null` on structural problems so the
- * caller can substitute a stub item.
+ * Pure helper — exported for tests. Maps one raw `gh pr view --json` object
+ * (as `viewPr` returns it) into the `PrMeta` shape, flattening `labels` to a
+ * `string[]` and defaulting missing string fields to `""`. Never throws.
  */
-export function parsePrMeta(jsonStdout: string): PrMeta | null {
-  if (!jsonStdout.trim()) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const c = parsed as {
-    title?: unknown;
-    labels?: Array<{ name?: unknown }>;
-    mergedAt?: unknown;
-    url?: unknown;
+export function prMetaFromView(view: {
+  title?: unknown;
+  labels?: Array<{ name?: unknown }>;
+  mergedAt?: unknown;
+  url?: unknown;
+}): PrMeta {
+  return {
+    title: typeof view.title === "string" ? view.title : "",
+    url: typeof view.url === "string" ? view.url : "",
+    mergedAt: typeof view.mergedAt === "string" ? view.mergedAt : "",
+    labels: (view.labels ?? [])
+      .map((l) => l?.name)
+      .filter((n): n is string => typeof n === "string"),
   };
-  const title = typeof c.title === "string" ? c.title : "";
-  const url = typeof c.url === "string" ? c.url : "";
-  const mergedAt = typeof c.mergedAt === "string" ? c.mergedAt : "";
-  const labels = (c.labels ?? [])
-    .map((l) => l?.name)
-    .filter((n): n is string => typeof n === "string");
-  return { title, labels, mergedAt, url };
 }
 
 // ---------------------------------------------------------------------------

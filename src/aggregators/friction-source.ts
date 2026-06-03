@@ -42,13 +42,7 @@
  * It touches no Redis adapter, so `scripts/ci/redis-seam-check.ts` stays green.
  */
 
-import { execFileViaSeam } from "../github/exec-file-compat.ts";
-import { resolveGithubRepo } from "../github/issues.ts";
-
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
-const execFile = execFileViaSeam;
+import { listIssuesBySearchOrEmpty, type IssueRow } from "../github/issues.ts";
 
 /**
  * One `meta-friction` GitHub issue, as the dashboard aggregators render it.
@@ -65,17 +59,15 @@ export interface MetaFrictionIssue {
 }
 
 /**
- * Minimal exec/repo overrides the meta-friction reader needs. Each consumer's
+ * Minimal seam/repo overrides the meta-friction reader needs. Each consumer's
  * own deps interface is a structural superset of this, so callers pass their
- * `deps` object straight through.
+ * `deps` object straight through. The GitHub read now goes through the
+ * Issue/PR Read seam (issue #908/#915), so tests inject the seam reader rather
+ * than a raw `gh` exec.
  */
 export interface MetaFrictionReadDeps {
   githubRepo?: string;
-  execFileAsync?: (
-    cmd: string,
-    args: readonly string[],
-    opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => Promise<{ stdout: string; stderr: string }>;
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
 }
 
 /**
@@ -101,88 +93,38 @@ export async function readMetaFrictionIssues(
   windowStart: Date,
   deps: MetaFrictionReadDeps = {},
 ): Promise<MetaFrictionIssue[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = resolveGithubRepo(deps.githubRepo);
-  if (!repo) return [];
+  const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
   const sinceDate = windowStart.toISOString().split("T")[0];
-  let stdout = "";
-  try {
-    ({ stdout } = await exec(
-      "gh",
-      [
-        "issue",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "all",
-        "--label",
-        "meta-friction",
-        "--search",
-        `created:>=${sinceDate}`,
-        "--limit",
-        "200",
-        "--json",
-        "number,title,url,createdAt",
-      ],
-      { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-    ));
-  } catch (err: any) {
-    console.error(
-      `[${label}] meta-friction gh fetch failed: ${err?.message || err}`,
-    );
-    return [];
-  }
-  return parseMetaFrictionIssues(label, stdout, windowStart);
+  const rows = await listBySearch(`created:>=${sinceDate}`, label, {
+    label: "meta-friction",
+    state: "all",
+    limit: 200,
+    repo: deps.githubRepo,
+  });
+  return windowFilterMetaFriction(rows, windowStart);
 }
 
 /**
- * Parse `gh issue list --json number,title,url,createdAt` output for the
- * meta-friction query. Re-filters by exact `createdAt` so sub-day windows don't
- * over-count from the search's coarser date-prefix resolution, and sorts
- * newest-first. A malformed/non-array payload is `console.error`-logged with
- * `[label]` and yields `[]` (never throws). Not exported — the seam owns parse;
- * tests exercise it through `readMetaFrictionIssues` with an exec stub.
+ * From the seam's {@link IssueRow} rows of the meta-friction query, re-filter by
+ * exact `createdAt` (so sub-day windows don't over-count from the search's
+ * coarser date-prefix resolution) and sort newest-first. The canonical-field
+ * parse + title/url fallbacks are done by the seam's `parseIssueRows` upstream;
+ * this keeps only the four meta-friction fields. Never throws.
  */
-function parseMetaFrictionIssues(
-  label: string,
-  jsonStdout: string,
+function windowFilterMetaFriction(
+  rows: readonly IssueRow[],
   windowStart: Date,
 ): MetaFrictionIssue[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch (err: any) {
-    console.error(
-      `[${label}] failed to parse meta-friction gh output: ${err?.message || err}`,
-    );
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
   const startMs = windowStart.getTime();
   const out: MetaFrictionIssue[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      title?: unknown;
-      url?: unknown;
-      createdAt?: unknown;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    const createdAt = typeof c.createdAt === "string" ? c.createdAt : "";
-    const createdMs = Date.parse(createdAt);
+  for (const row of rows) {
+    const createdMs = Date.parse(row.createdAt);
     if (!Number.isFinite(createdMs) || createdMs < startMs) continue;
     out.push({
-      number,
-      title: typeof c.title === "string" ? c.title : `Issue #${number}`,
-      url:
-        typeof c.url === "string"
-          ? c.url
-          : `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt,
+      number: row.number,
+      title: row.title,
+      url: row.url,
+      createdAt: row.createdAt,
     });
   }
   out.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));

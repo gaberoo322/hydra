@@ -32,18 +32,17 @@
 
 import {
   extractIssueRefs,
-  parseDigestSearchOutput,
-  parseLabeledIssuesOutput,
+  digestRefsFromRows,
+  labeledItemsFromRows,
   datedTitle,
 } from "./aggregators/decision-queue.ts";
-import { execFileViaSeam } from "./github/exec-file-compat.ts";
-
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
-const execFile = execFileViaSeam;
-
-const DEFAULT_REPO = "gaberoo322/hydra";
+import {
+  listIssuesByLabelOrEmpty,
+  listIssuesBySearch,
+  listIssuesBySearchOrEmpty,
+  isIssueReadFailure,
+  type IssueRow,
+} from "./github/issues.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -65,19 +64,26 @@ export interface PickupItem {
   sources: PickupSource[];
 }
 
-type ExecFileAsync = (
-  cmd: string,
-  args: readonly string[],
-  opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-) => Promise<{ stdout: string; stderr: string }>;
-
 export interface PickupSetDeps {
   /** Wall-clock anchor — defaults to `new Date()`. Drives the YYYY-MM-DD digest title. */
   now?: Date;
-  /** Async exec used for `gh` sub-shells. Defaults to `promisify(execFile)`. */
-  execFileAsync?: ExecFileAsync;
   /** GitHub repo handle (`owner/name`). Defaults to `gaberoo322/hydra`. */
   githubRepo?: string;
+  /**
+   * Override the GitHub Issue/PR Read seam readers (issue #908/#915). Tests
+   * inject these to avoid spawning `gh`; production uses the real seam readers,
+   * which return the canonical {@link IssueRow} shape (no local argv/parser).
+   */
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
+  listIssuesByLabelOrEmpty?: typeof listIssuesByLabelOrEmpty;
+  /**
+   * The open-blocker lookup uses the *discriminated* (failure-aware) reader, not
+   * the *OrEmpty variant: on a lookup FAILURE we must conservatively treat every
+   * referenced blocker as still-open (so a transient gh outage yields FEWER
+   * stale-blocked items, never a false notification). The OrEmpty wrapper would
+   * collapse failure into `[]`, which flips that safety direction.
+   */
+  listIssuesBySearch?: typeof listIssuesBySearch;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,10 +102,13 @@ export interface PickupSetDeps {
 export async function getReviewPickupSet(
   deps: PickupSetDeps = {},
 ): Promise<PickupItem[]> {
+  const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
+  const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
+
   const [digestResult, readyResult, blockedResult] = await Promise.allSettled([
-    fetchOperatorDigestItems(deps),
-    fetchReadyForHumanItems(deps),
-    fetchStaleBlockedItems(deps),
+    fetchOperatorDigestItems(listBySearch, deps),
+    fetchReadyForHumanItems(listByLabel, deps),
+    fetchStaleBlockedItems(listBySearch, listByLabel, deps),
   ]);
 
   const digest = settledOrEmpty(digestResult, "review-pickup/digest");
@@ -173,11 +182,9 @@ export function mergePickupItems(
 // ---------------------------------------------------------------------------
 
 async function fetchOperatorDigestItems(
+  listBySearch: typeof listIssuesBySearchOrEmpty,
   deps: PickupSetDeps,
 ): Promise<RawPickupInput[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? DEFAULT_REPO;
-  if (!repo) return [];
   const now = deps.now ?? new Date();
   // The morning hand-off writes a YYYY-MM-DD-suffixed issue; the operator may
   // still be working yesterday's queue when this runs, so check both.
@@ -185,34 +192,17 @@ async function fetchOperatorDigestItems(
 
   const items: RawPickupInput[] = [];
   for (const title of candidates) {
-    try {
-      const { stdout } = await exec(
-        "gh",
-        [
-          "issue",
-          "list",
-          "--repo",
-          repo,
-          "--state",
-          "open",
-          "--search",
-          `in:title "${title}"`,
-          "--limit",
-          "5",
-          "--json",
-          "number,title,body,url,createdAt,labels",
-        ],
-        { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-      );
-      // parseDigestSearchOutput returns the digest-issue-derived rows; we map
-      // them down to the lean pickup shape (number/title/url).
-      for (const row of parseDigestSearchOutput(stdout, title)) {
-        items.push({ number: row.number, title: row.title, url: row.url });
-      }
-    } catch (err: any) {
-      console.error(
-        `[review-pickup] digest search failed for "${title}": ${err?.message || err}`,
-      );
+    // The seam reader degrades to [] on failure (logged) — a sub-failure
+    // doesn't abort the other digest candidate or the other buckets.
+    const rows = await listBySearch(`in:title "${title}"`, "review-pickup/digest", {
+      state: "open",
+      limit: 5,
+      repo: deps.githubRepo,
+    });
+    // digestRefsFromRows returns the digest-issue-derived rows; we map them
+    // down to the lean pickup shape (number/title/url).
+    for (const row of digestRefsFromRows(rows, title)) {
+      items.push({ number: row.number, title: row.title, url: row.url });
     }
   }
   return items;
@@ -223,30 +213,14 @@ async function fetchOperatorDigestItems(
 // ---------------------------------------------------------------------------
 
 async function fetchReadyForHumanItems(
+  listByLabel: typeof listIssuesByLabelOrEmpty,
   deps: PickupSetDeps,
 ): Promise<RawPickupInput[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? DEFAULT_REPO;
-  if (!repo) return [];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "open",
-      "--label",
-      "ready-for-human",
-      "--limit",
-      "100",
-      "--json",
-      "number,title,url,createdAt,labels",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return parseLabeledIssuesOutput(stdout).map((r) => ({
+  const rows = await listByLabel("ready-for-human", "review-pickup/ready-for-human", {
+    state: "open",
+    repo: deps.githubRepo,
+  });
+  return labeledItemsFromRows(rows).map((r) => ({
     number: r.number,
     title: r.title,
     url: r.url,
@@ -271,32 +245,16 @@ async function fetchReadyForHumanItems(
  * (never a false notification).
  */
 async function fetchStaleBlockedItems(
+  listBySearch: typeof listIssuesBySearchOrEmpty,
+  listByLabel: typeof listIssuesByLabelOrEmpty,
   deps: PickupSetDeps,
 ): Promise<RawPickupInput[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = deps.githubRepo ?? DEFAULT_REPO;
-  if (!repo) return [];
+  const rows = await listByLabel("blocked", "review-pickup/stale-blocked", {
+    state: "open",
+    repo: deps.githubRepo,
+  });
 
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "open",
-      "--label",
-      "blocked",
-      "--limit",
-      "100",
-      "--json",
-      "number,title,url,body",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-
-  const blocked = parseBlockedIssuesOutput(stdout);
+  const blocked = blockedIssuesFromRows(rows);
   if (blocked.length === 0) return [];
 
   // Collect the union of referenced blocker numbers across all blocked issues.
@@ -307,16 +265,7 @@ async function fetchStaleBlockedItems(
 
   let openBlockers = new Set<number>();
   if (referenced.size > 0) {
-    try {
-      openBlockers = await fetchOpenIssueNumbers(exec, repo, [...referenced]);
-    } catch (err: any) {
-      console.error(
-        `[review-pickup] open-blocker lookup failed: ${err?.message || err}`,
-      );
-      // Conservative: treat all referenced blockers as open so none of these
-      // count as stale (no false notification on a lookup failure).
-      openBlockers = referenced;
-    }
+    openBlockers = await fetchOpenIssueNumbers(deps, [...referenced]);
   }
 
   return classifyStaleBlocked(blocked, openBlockers);
@@ -331,43 +280,19 @@ interface BlockedIssue {
 }
 
 /**
- * Pure helper — parse `gh issue list --json number,title,url,body` for the
- * `blocked` label and extract each issue's claimed blocker references.
+ * Pure helper — exported for tests. Map the seam's {@link IssueRow} rows for the
+ * `blocked` label to each issue's claimed blocker references. The seam already
+ * synthesizes title/url fallbacks and drops invalid rows; here we only extract
+ * the `#N` blocker refs from each body.
  */
-export function parseBlockedIssuesOutput(jsonStdout: string): BlockedIssue[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-
-  const out: BlockedIssue[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      title?: unknown;
-      url?: unknown;
-      body?: unknown;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    const body = typeof c.body === "string" ? c.body : "";
-    out.push({
-      number,
-      title: typeof c.title === "string" ? c.title : `Issue #${number}`,
-      url:
-        typeof c.url === "string"
-          ? c.url
-          : `https://github.com/${DEFAULT_REPO}/issues/${number}`,
-      // Reuse the digest ref extractor — same `#N` semantics, code-span-safe.
-      blockerRefs: extractIssueRefs(body).filter((n) => n !== number),
-    });
-  }
-  return out;
+export function blockedIssuesFromRows(rows: readonly IssueRow[]): BlockedIssue[] {
+  return rows.map((row) => ({
+    number: row.number,
+    title: row.title,
+    url: row.url,
+    // Reuse the digest ref extractor — same `#N` semantics, code-span-safe.
+    blockerRefs: extractIssueRefs(row.body).filter((n) => n !== row.number),
+  }));
 }
 
 /**
@@ -390,61 +315,43 @@ export function classifyStaleBlocked(
 
 /**
  * Resolve which of the given issue numbers are currently OPEN. Batches into a
- * single `gh issue list --search "<n1> <n2> ..." --state open` query.
+ * single `--state open --search "<n1> <n2> ..."` query through the seam's
+ * *discriminated* reader.
+ *
+ * On a lookup FAILURE we conservatively return the full requested set (treat
+ * every referenced blocker as still-open) so a transient gh outage yields FEWER
+ * stale-blocked items, never a false notification.
  */
 async function fetchOpenIssueNumbers(
-  exec: ExecFileAsync,
-  repo: string,
+  deps: PickupSetDeps,
   numbers: number[],
 ): Promise<Set<number>> {
   if (numbers.length === 0) return new Set();
-  // `in:title`-free search: bare numbers match the issue-number index.
   const search = numbers.map((n) => `${n}`).join(" ");
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "open",
-      "--search",
-      search,
-      "--limit",
-      "100",
-      "--json",
-      "number",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return parseOpenNumbers(stdout, numbers);
+  const read = deps.listIssuesBySearch ?? listIssuesBySearch;
+  const res = await read(search, { state: "open", repo: deps.githubRepo });
+  if (isIssueReadFailure(res)) {
+    console.error(`[review-pickup] open-blocker lookup failed (${res.code})`);
+    // Conservative: treat all referenced blockers as open (no false alert).
+    return new Set(numbers);
+  }
+  return openNumbersFromRows(res.rows, numbers);
 }
 
 /**
- * Pure helper — exported for tests. Parse `gh issue list --json number` output
- * and return the subset of `requested` numbers that the query reports as open.
- * Intersecting with `requested` guards against the search matching unrelated
- * issues that merely mention the number.
+ * Pure helper — exported for tests. From the seam's {@link IssueRow} rows of an
+ * open-state number search, return the subset of `requested` numbers reported
+ * open. Intersecting with `requested` guards against the search matching
+ * unrelated issues that merely mention the number.
  */
-export function parseOpenNumbers(
-  jsonStdout: string,
+export function openNumbersFromRows(
+  rows: readonly IssueRow[],
   requested: number[],
 ): Set<number> {
   const requestedSet = new Set(requested);
   const open = new Set<number>();
-  if (!jsonStdout.trim()) return open;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return open;
-  }
-  if (!Array.isArray(parsed)) return open;
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const n = (candidate as { number?: unknown }).number;
-    if (typeof n === "number" && requestedSet.has(n)) open.add(n);
+  for (const row of rows) {
+    if (requestedSet.has(row.number)) open.add(row.number);
   }
   return open;
 }

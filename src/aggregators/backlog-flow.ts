@@ -29,17 +29,13 @@
  *   table small enough to render without pagination.
  */
 
-import { execFileViaSeam } from "../github/exec-file-compat.ts";
 import {
   classFromLabels as seamClassFromLabels,
-  resolveGithubRepo,
+  listIssuesByLabelOrEmpty,
+  listIssuesBySearchOrEmpty,
+  type IssueRow,
 } from "../github/issues.ts";
 import { settledOrEmpty } from "./settle.ts";
-
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
-const execFile = execFileViaSeam;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -65,12 +61,18 @@ export interface BacklogFlow {
 export interface BacklogFlowDeps {
   now?: Date;
   githubRepo?: string;
-  execFileAsync?: (
-    cmd: string,
-    args: readonly string[],
-    opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => Promise<{ stdout: string; stderr: string }>;
+  /**
+   * Override the GitHub Issue/PR Read seam readers (issue #908/#915). Tests
+   * inject these to avoid spawning `gh`; production uses the real seam readers.
+   * Only `labels` are read off each {@link IssueRow}; the seam over-fetches the
+   * canonical field set (cheaper than N divergent `--json` lists).
+   */
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
+  listIssuesByLabelOrEmpty?: typeof listIssuesByLabelOrEmpty;
 }
+
+// The aggregator only reads each issue's `labels` for class bucketing.
+type FlowIssue = Pick<IssueRow, "labels">;
 
 const MAX_WINDOW_DAYS = 30;
 const DEFAULT_WINDOW_DAYS = 7;
@@ -93,10 +95,15 @@ export async function getBacklogFlow(
   const windowStart = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
   const sinceDate = iso8601DateOnly(windowStart);
 
+  const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
+  const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
+  // Behaviour-preserving query knobs: the wide window can return many rows.
+  const wide = { repo: deps.githubRepo, limit: 1000, maxBuffer: 8 * 1024 * 1024, timeout: 15_000 };
+
   const [addedResult, closedResult, blockedResult] = await Promise.allSettled([
-    fetchIssuesByDateFilter(`created:>=${sinceDate}`, "all", deps),
-    fetchIssuesByDateFilter(`closed:>=${sinceDate}`, "closed", deps),
-    fetchIssuesWithLabel("blocked", deps),
+    listBySearch(`created:>=${sinceDate}`, "backlog-flow/added", { ...wide, state: "all" }),
+    listBySearch(`closed:>=${sinceDate}`, "backlog-flow/closed", { ...wide, state: "closed" }),
+    listByLabel("blocked", "backlog-flow/blocked", { ...wide, state: "open" }),
   ]);
 
   const added = settledOrEmpty(addedResult, "backlog-flow/added");
@@ -149,9 +156,9 @@ export const classFromLabels = seamClassFromLabels;
  * descending so the busiest class lands at the top.
  */
 export function bucketByClass(
-  added: readonly RawIssue[],
-  closed: readonly RawIssue[],
-  blocked: readonly RawIssue[],
+  added: readonly FlowIssue[],
+  closed: readonly FlowIssue[],
+  blocked: readonly FlowIssue[],
 ): ClassFlowRow[] {
   const tally = new Map<string, ClassFlowRow>();
   const ensure = (cls: string): ClassFlowRow => {
@@ -176,100 +183,4 @@ export function bucketByClass(
 /** Pure helper — exported for tests. Strips an ISO timestamp down to YYYY-MM-DD. */
 export function iso8601DateOnly(d: Date): string {
   return d.toISOString().split("T")[0];
-}
-
-/**
- * Pure helper — exported for tests. Parses `gh issue list --json` output
- * into the minimal shape the classifier needs. Returns `[]` on structural
- * problems.
- */
-export function parseRawIssues(jsonStdout: string): RawIssue[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-  const out: RawIssue[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as { number?: unknown; labels?: Array<{ name?: unknown }> };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    out.push({
-      number,
-      labels: (c.labels ?? [])
-        .map((l) => l?.name)
-        .filter((n): n is string => typeof n === "string"),
-    });
-  }
-  return out;
-}
-
-interface RawIssue {
-  number: number;
-  labels: string[];
-}
-
-// ---------------------------------------------------------------------------
-// Sub-sources
-// ---------------------------------------------------------------------------
-
-async function fetchIssuesByDateFilter(
-  searchClause: string,
-  state: "all" | "closed",
-  deps: BacklogFlowDeps,
-): Promise<RawIssue[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = resolveGithubRepo(deps.githubRepo);
-  if (!repo) return [];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      state,
-      "--search",
-      searchClause,
-      "--limit",
-      "1000",
-      "--json",
-      "number,labels",
-    ],
-    { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 },
-  );
-  return parseRawIssues(stdout);
-}
-
-async function fetchIssuesWithLabel(
-  label: string,
-  deps: BacklogFlowDeps,
-): Promise<RawIssue[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = resolveGithubRepo(deps.githubRepo);
-  if (!repo) return [];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "open",
-      "--label",
-      label,
-      "--limit",
-      "1000",
-      "--json",
-      "number,labels",
-    ],
-    { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 },
-  );
-  return parseRawIssues(stdout);
 }

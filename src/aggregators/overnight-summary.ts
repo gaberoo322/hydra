@@ -33,14 +33,16 @@
 import { resolve } from "node:path";
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
-import { resolveGithubRepo } from "../github/issues.ts";
+import { listIssuesBySearchOrEmpty, type IssueRow } from "../github/issues.ts";
 
 import type { HeadroomLevel } from "./types.ts";
 import { settledOr } from "./settle.ts";
 
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
+// The production default routes the `git log` merge count through the GitHub
+// CLI Adapter seam (issue #899). Tests still inject `deps.execFileAsync` for the
+// `git` call — this only changes the default, not the injection seam. The
+// issues-opened GitHub read now goes through the Issue/PR Read seam
+// (issue #908/#915), not a hand-built `gh issue list` argv.
 const execFile = execFileViaSeam;
 
 // ---------------------------------------------------------------------------
@@ -78,11 +80,16 @@ export interface OvernightSummaryDeps {
     opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
   ) => Promise<{ stdout: string; stderr: string }>;
   /**
-   * GitHub repo handle for `gh issue list` (`owner/name`). Defaults to
-   * `gaberoo322/hydra`. Tests can pass an empty string to skip the
-   * subprocess.
+   * GitHub repo handle for the issues-opened read (`owner/name`). Defaults to
+   * `gaberoo322/hydra`. Tests can pass an empty string to skip the subprocess.
    */
   githubRepo?: string;
+  /**
+   * Override the GitHub Issue/PR Read seam reader (issue #908/#915) for the
+   * issues-opened count. Tests inject this to avoid spawning `gh`; production
+   * uses the real seam reader, which returns the canonical {@link IssueRow}.
+   */
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
   /**
    * Autopilot runs reader — returns IDs of runs started at or after
    * `windowStartEpoch` (seconds). Defaults to a ZRANGEBYSCORE on
@@ -202,60 +209,33 @@ async function readCostUsd(deps: OvernightSummaryDeps): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function countIssuesOpened(windowStart: Date, deps: OvernightSummaryDeps): Promise<number> {
-  const repo = resolveGithubRepo(deps.githubRepo);
-  if (!repo) return 0;
-  const exec = deps.execFileAsync ?? execFile;
-  // `gh issue list --search "created:>=YYYY-MM-DD"` is the simplest way to
-  // page back exactly the items we want without pulling the entire issue
-  // history. We use the ISO date prefix (UTC) — GitHub's search interprets
-  // bare date as an inclusive lower bound at 00:00 UTC, which is slightly
-  // generous for sub-day windows but harmless for the overnight use case.
+  const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
+  // `created:>=YYYY-MM-DD` is the simplest way to page back exactly the items
+  // we want without pulling the entire issue history. The ISO date prefix (UTC)
+  // is an inclusive lower bound at 00:00 UTC — slightly generous for sub-day
+  // windows, which `countIssuesInWindow` then re-filters on exact `createdAt`.
   const sinceDate = windowStart.toISOString().split("T")[0];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "all",
-      "--search",
-      `created:>=${sinceDate}`,
-      "--limit",
-      "200",
-      "--json",
-      "number,createdAt",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return countIssuesInWindow(stdout, windowStart);
+  const rows = await listBySearch(`created:>=${sinceDate}`, "overnight-summary/issues", {
+    state: "all",
+    limit: 200,
+    repo: deps.githubRepo,
+  });
+  return countIssuesInWindow(rows, windowStart);
 }
 
 /**
- * Pure helper — exported for tests. Parses `gh issue list --json` output
- * and counts issues whose `createdAt` is strictly within the window.
+ * Pure helper — exported for tests. Counts the seam's {@link IssueRow} rows
+ * whose `createdAt` is at or after the window start.
  *
  * Refines the date-prefix search above: GitHub's search returns anything
  * created on the boundary day, but a 12h overnight window may sit entirely
  * inside that day. We re-filter on the actual `createdAt` timestamp here.
  */
-export function countIssuesInWindow(jsonStdout: string, windowStart: Date): number {
-  if (!jsonStdout.trim()) return 0;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return 0;
-  }
-  if (!Array.isArray(parsed)) return 0;
+export function countIssuesInWindow(rows: readonly IssueRow[], windowStart: Date): number {
   const startMs = windowStart.getTime();
   let n = 0;
-  for (const item of parsed) {
-    if (!item || typeof item !== "object") continue;
-    const createdAt = (item as { createdAt?: unknown }).createdAt;
-    if (typeof createdAt !== "string") continue;
-    const ms = Date.parse(createdAt);
+  for (const row of rows) {
+    const ms = Date.parse(row.createdAt);
     if (!Number.isFinite(ms)) continue;
     if (ms >= startMs) n += 1;
   }

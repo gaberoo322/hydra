@@ -18,8 +18,27 @@ import {
   type RawFrictionPattern,
 } from "../src/aggregators/friction-patterns.ts";
 import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
+import type { IssueRow } from "../src/github/issues.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");
+
+/**
+ * Build a `listIssuesBySearchOrEmpty` stub returning the given meta-friction
+ * rows (after issue #915 the meta-friction read goes through the seam, not a
+ * raw `gh` exec).
+ */
+function metaReader(rows: Array<Partial<IssueRow> & { number: number }>) {
+  const full: IssueRow[] = rows.map((r) => ({
+    number: r.number,
+    title: r.title ?? `Issue #${r.number}`,
+    url: r.url ?? `https://github.com/gaberoo322/hydra/issues/${r.number}`,
+    createdAt: r.createdAt ?? "",
+    labels: r.labels ?? [],
+    body: r.body ?? "",
+    state: r.state ?? "OPEN",
+  }));
+  return async () => full;
+}
 
 function rawPattern(overrides: Partial<RawFrictionPattern> = {}): RawFrictionPattern {
   return {
@@ -167,18 +186,14 @@ describe("normalizeLastEscalation — pure helper (issue #843)", () => {
 describe("meta-friction read (via seam) — windowing through getFrictionPatterns", () => {
   test("filters by createdAt against the 7d window and sorts newest-first", async () => {
     // Default windowHours = 168 (7d); windowStart = NOW - 7d = 2026-05-19T12:00Z.
-    const exec = async () => ({
-      stdout: JSON.stringify([
+    const snapshot = await getFrictionPatterns({
+      now: NOW,
+      readFrictionPatterns: async () => [],
+      listIssuesBySearchOrEmpty: metaReader([
         { number: 1, title: "older", url: "u1", createdAt: "2026-05-20T01:00:00Z" },
         { number: 2, title: "newer", url: "u2", createdAt: "2026-05-25T20:00:00Z" },
         { number: 3, title: "before window", url: "u3", createdAt: "2026-05-18T00:00:00Z" },
       ]),
-      stderr: "",
-    });
-    const snapshot = await getFrictionPatterns({
-      now: NOW,
-      readFrictionPatterns: async () => [],
-      execFileAsync: exec,
     });
     assert.deepEqual(
       snapshot.recentMetaFrictionIssues.map((i) => i.number),
@@ -186,11 +201,11 @@ describe("meta-friction read (via seam) — windowing through getFrictionPattern
     );
   });
 
-  test("non-array gh payload degrades to empty (never throws)", async () => {
+  test("seam reader degrades to [] → empty (never throws)", async () => {
     const snapshot = await getFrictionPatterns({
       now: NOW,
       readFrictionPatterns: async () => [],
-      execFileAsync: async () => ({ stdout: "{}", stderr: "" }),
+      listIssuesBySearchOrEmpty: async () => [],
     });
     assert.deepEqual(snapshot.recentMetaFrictionIssues, []);
   });
@@ -217,16 +232,12 @@ describe("getFrictionPatterns — happy path", () => {
         ],
       },
     ];
-    const exec = async () => ({
-      stdout: JSON.stringify([
-        { number: 555, title: "meta", url: "u", createdAt: "2026-05-25T00:00:00Z" },
-      ]),
-      stderr: "",
-    });
     const snapshot = await getFrictionPatterns({
       now: NOW,
       readFrictionPatterns: reader,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: metaReader([
+        { number: 555, title: "meta", url: "u", createdAt: "2026-05-25T00:00:00Z" },
+      ]),
     });
 
     assert.equal(snapshot.bySkill.length, 2);
@@ -243,17 +254,14 @@ describe("getFrictionPatterns — happy path", () => {
 // ---------------------------------------------------------------------------
 
 describe("getFrictionPatterns — sub-source failure isolation", () => {
-  test("gh failure → groups still ship; meta-friction empty", async () => {
+  test("meta-friction reader degrades to [] → groups still ship; meta-friction empty", async () => {
     const reader = async () => [
       { skill: "hydra-dev", patterns: [rawPattern({ hitCount: 1 })] },
     ];
-    const exec = async () => {
-      throw new Error("gh broken");
-    };
     const snapshot = await getFrictionPatterns({
       now: NOW,
       readFrictionPatterns: reader,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: async () => [],
     });
     assert.equal(snapshot.bySkill.length, 1);
     assert.deepEqual(snapshot.recentMetaFrictionIssues, []);
@@ -263,16 +271,12 @@ describe("getFrictionPatterns — sub-source failure isolation", () => {
     const reader = async () => {
       throw new Error("redis broken");
     };
-    const exec = async () => ({
-      stdout: JSON.stringify([
-        { number: 1, title: "ok", url: "u", createdAt: "2026-05-25T00:00:00Z" },
-      ]),
-      stderr: "",
-    });
     const snapshot = await getFrictionPatterns({
       now: NOW,
       readFrictionPatterns: reader,
-      execFileAsync: exec,
+      listIssuesBySearchOrEmpty: metaReader([
+        { number: 1, title: "ok", url: "u", createdAt: "2026-05-25T00:00:00Z" },
+      ]),
     });
     assert.deepEqual(snapshot.bySkill, []);
     assert.equal(snapshot.recentMetaFrictionIssues.length, 1);

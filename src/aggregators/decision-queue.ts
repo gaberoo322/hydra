@@ -27,16 +27,14 @@
  *   issues queried via `gh issue list`.
  */
 
-import { execFileViaSeam } from "../github/exec-file-compat.ts";
-import { resolveGithubRepo } from "../github/issues.ts";
+import {
+  listIssuesByLabelOrEmpty,
+  listIssuesBySearchOrEmpty,
+  type IssueRow,
+} from "../github/issues.ts";
 
 import type { DecisionItemSource } from "./types.ts";
 import { settledOrEmpty } from "./settle.ts";
-
-// The production default routes `gh`/`git` through the GitHub CLI Adapter seam
-// (issue #899). Tests still inject `deps.execFileAsync` directly — this only
-// changes the default, not the injection seam.
-const execFile = execFileViaSeam;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -57,14 +55,16 @@ export interface DecisionItem {
 export interface DecisionQueueDeps {
   /** Wall-clock anchor — defaults to `new Date()`. Used to compute the YYYY-MM-DD digest title. */
   now?: Date;
-  /** Async exec used for `gh` sub-shells. Defaults to `promisify(execFile)`. */
-  execFileAsync?: (
-    cmd: string,
-    args: readonly string[],
-    opts?: { cwd?: string; timeout?: number; maxBuffer?: number },
-  ) => Promise<{ stdout: string; stderr: string }>;
   /** GitHub repo handle (`owner/name`). Defaults to `gaberoo322/hydra`. */
   githubRepo?: string;
+  /**
+   * Override the GitHub Issue/PR Read seam readers (issue #908/#915). Tests
+   * inject these to avoid spawning `gh`; production uses the real seam readers.
+   * The aggregator consumes the seam's typed {@link IssueRow} — no local argv
+   * or parser.
+   */
+  listIssuesBySearchOrEmpty?: typeof listIssuesBySearchOrEmpty;
+  listIssuesByLabelOrEmpty?: typeof listIssuesByLabelOrEmpty;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,10 +81,13 @@ export interface DecisionQueueDeps {
 export async function getDecisionQueue(
   deps: DecisionQueueDeps = {},
 ): Promise<DecisionItem[]> {
+  const listBySearch = deps.listIssuesBySearchOrEmpty ?? listIssuesBySearchOrEmpty;
+  const listByLabel = deps.listIssuesByLabelOrEmpty ?? listIssuesByLabelOrEmpty;
+
   const [digestResult, readyResult, infoResult] = await Promise.allSettled([
-    fetchOperatorDigestItems(deps),
-    fetchLabeledItems("ready-for-human", deps),
-    fetchLabeledItems("needs-info", deps),
+    fetchOperatorDigestItems(listBySearch, deps),
+    fetchLabeledItems("ready-for-human", listByLabel, deps),
+    fetchLabeledItems("needs-info", listByLabel, deps),
   ]);
 
   const digest = settledOrEmpty(digestResult, "decision-queue/digest");
@@ -170,11 +173,9 @@ export function mergeDecisionItems(
 // ---------------------------------------------------------------------------
 
 async function fetchOperatorDigestItems(
+  listBySearch: typeof listIssuesBySearchOrEmpty,
   deps: DecisionQueueDeps,
 ): Promise<RawDecisionInput[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = resolveGithubRepo(deps.githubRepo);
-  if (!repo) return [];
   const now = deps.now ?? new Date();
   // Look for digest titles for "today" and "yesterday" — the morning hand-off
   // skill writes a YYYY-MM-DD-suffixed issue, and the operator may still be
@@ -183,81 +184,39 @@ async function fetchOperatorDigestItems(
 
   const items: RawDecisionInput[] = [];
   for (const title of candidates) {
-    try {
-      const { stdout } = await exec(
-        "gh",
-        [
-          "issue",
-          "list",
-          "--repo",
-          repo,
-          "--state",
-          "open",
-          "--search",
-          `in:title "${title}"`,
-          "--limit",
-          "5",
-          "--json",
-          "number,title,body,url,createdAt,labels",
-        ],
-        { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-      );
-      const parsed = parseDigestSearchOutput(stdout, title);
-      items.push(...parsed);
-    } catch (err: any) {
-      // Sub-failure is logged but doesn't abort — the labeled-issue sources
-      // can still produce a useful queue.
-      console.error(
-        `[decision-queue] digest search failed for "${title}": ${err?.message || err}`,
-      );
-    }
+    // The seam reader degrades to [] on failure (logged) — a sub-failure
+    // doesn't abort; the labeled-issue sources can still produce a queue.
+    const rows = await listBySearch(`in:title "${title}"`, "decision-queue/digest", {
+      state: "open",
+      limit: 5,
+      repo: deps.githubRepo,
+    });
+    items.push(...digestRefsFromRows(rows, title));
   }
   return items;
 }
 
 /**
- * Pure helper — exported for tests. Parses the `gh issue list --json` output
- * of a digest-title search, finds the exact-title match, then extracts every
- * `#N` reference from the body. For each referenced number, returns a raw
- * decision input. The title/url/createdAt/labels fields are inherited from
- * the digest issue itself so the dashboard has something to render even if
- * the referenced sub-issue lookup later fails (sub-issues are fetched
- * separately by the labeled-issue sub-sources).
+ * Pure helper — exported for tests. From the seam's {@link IssueRow} rows of a
+ * digest-title search, finds the exact-title match, then extracts every `#N`
+ * reference from its body. For each referenced number, returns a raw decision
+ * input. The url/createdAt/labels are inherited from the digest issue itself so
+ * the dashboard has something to render even if the referenced sub-issue lookup
+ * later fails (sub-issues are fetched separately by the labeled-issue sources).
  */
-export function parseDigestSearchOutput(
-  jsonStdout: string,
+export function digestRefsFromRows(
+  rows: readonly IssueRow[],
   expectedTitle: string,
 ): RawDecisionInput[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: number;
-      title?: string;
-      body?: string;
-      url?: string;
-      createdAt?: string;
-      labels?: Array<{ name?: string }>;
-    };
-    if (c.title !== expectedTitle) continue;
-    if (typeof c.body !== "string") return [];
-    const refs = extractIssueRefs(c.body);
+  for (const row of rows) {
+    if (row.title !== expectedTitle) continue;
+    const refs = extractIssueRefs(row.body);
     return refs.map((number) => ({
       number,
       title: `Referenced from ${expectedTitle} (#${number})`,
       url: `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt: typeof c.createdAt === "string" ? c.createdAt : new Date(0).toISOString(),
-      labels: (c.labels ?? [])
-        .map((l) => l?.name)
-        .filter((n): n is string => typeof n === "string"),
+      createdAt: row.createdAt || new Date(0).toISOString(),
+      labels: [...row.labels],
     }));
   }
   return [];
@@ -293,70 +252,30 @@ export function extractIssueRefs(body: string): number[] {
 
 async function fetchLabeledItems(
   label: string,
+  listByLabel: typeof listIssuesByLabelOrEmpty,
   deps: DecisionQueueDeps,
 ): Promise<RawDecisionInput[]> {
-  const exec = deps.execFileAsync ?? execFile;
-  const repo = resolveGithubRepo(deps.githubRepo);
-  if (!repo) return [];
-  const { stdout } = await exec(
-    "gh",
-    [
-      "issue",
-      "list",
-      "--repo",
-      repo,
-      "--state",
-      "open",
-      "--label",
-      label,
-      "--limit",
-      "100",
-      "--json",
-      "number,title,url,createdAt,labels",
-    ],
-    { timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  return parseLabeledIssuesOutput(stdout);
+  const rows = await listByLabel(label, `decision-queue/${label}`, {
+    state: "open",
+    repo: deps.githubRepo,
+  });
+  return labeledItemsFromRows(rows);
 }
 
 /**
- * Pure helper — exported for tests. Parses `gh issue list --json` output
- * for a labeled query and produces the raw decision-input shape. Returns
- * `[]` on any structural issue rather than throwing.
+ * Pure helper — exported for tests. Maps the seam's {@link IssueRow} rows of a
+ * labeled query to the raw decision-input shape. The seam already synthesizes
+ * title/url fallbacks and drops invalid rows; here we only re-home `createdAt`
+ * to the epoch sentinel when the seam returned `""`.
  */
-export function parseLabeledIssuesOutput(jsonStdout: string): RawDecisionInput[] {
-  if (!jsonStdout.trim()) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonStdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-
-  const out: RawDecisionInput[] = [];
-  for (const candidate of parsed) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const c = candidate as {
-      number?: unknown;
-      title?: unknown;
-      url?: unknown;
-      createdAt?: unknown;
-      labels?: Array<{ name?: unknown }>;
-    };
-    const number = typeof c.number === "number" ? c.number : NaN;
-    if (!Number.isFinite(number) || number <= 0) continue;
-    out.push({
-      number,
-      title: typeof c.title === "string" ? c.title : `Issue #${number}`,
-      url: typeof c.url === "string" ? c.url : `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt: typeof c.createdAt === "string" ? c.createdAt : new Date(0).toISOString(),
-      labels: (c.labels ?? [])
-        .map((l) => l?.name)
-        .filter((n): n is string => typeof n === "string"),
-    });
-  }
-  return out;
+export function labeledItemsFromRows(rows: readonly IssueRow[]): RawDecisionInput[] {
+  return rows.map((row) => ({
+    number: row.number,
+    title: row.title,
+    url: row.url,
+    createdAt: row.createdAt || new Date(0).toISOString(),
+    labels: [...row.labels],
+  }));
 }
 
 // ---------------------------------------------------------------------------
