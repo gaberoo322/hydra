@@ -166,6 +166,132 @@ describe("projectDispatches", () => {
     assert.equal(out[0].status, null);
     assert.equal(out[0].bucket, null);
   });
+
+  // -------------------------------------------------------------------------
+  // issue #975 — slots_snapshot reconciliation
+  // -------------------------------------------------------------------------
+
+  test("reads anchor from the action's nested prompt_args.anchor", () => {
+    // The real dispatch action carries the anchor under prompt_args.anchor,
+    // not the top-level anchorReference the legacy join read.
+    const turns = [
+      {
+        turn_n: 1,
+        actions: [
+          {
+            type: "dispatch",
+            slot: "dev_orch",
+            skill: "hydra-dev",
+            prompt_args: { anchor: "#961", score: 0.8 },
+            outcome: null,
+          },
+        ],
+      },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].anchorReference, "#961");
+    assert.equal(out[0].skill, "hydra-dev");
+  });
+
+  test("crashed-run slots_snapshot reconciles anchor/skill/prNumber when actions are missing", () => {
+    // A crash truncated the turn: no dispatch action was recorded, but the
+    // slots_snapshot still carries the resolvable identity. Each occupied slot
+    // must yield exactly one attributable RetroDispatch.
+    const turns = [
+      {
+        turn_n: 4,
+        actions: [],
+        slots_snapshot: {
+          qa_orch: { skill: "hydra-qa", anchor: "PR#970", task_id: "a6f929932fd15784b" },
+          dev_orch: { skill: "hydra-dev", anchor: "#961", task_id: "a089f8680966d32ec" },
+          research_orch: null, // empty slot — must NOT become a dispatch
+        },
+      },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 2, "two occupied slots → two dispatches (null slot skipped)");
+
+    const qa = out.find((d) => d.skill === "hydra-qa");
+    assert.ok(qa, "qa_orch dispatch reconciled");
+    assert.equal(qa!.anchorReference, "PR#970");
+    assert.equal(qa!.prNumber, "970", "PR#NNN anchor parses to a prNumber");
+    assert.equal(qa!.turn_n, 4);
+
+    const dev = out.find((d) => d.skill === "hydra-dev");
+    assert.ok(dev, "dev_orch dispatch reconciled");
+    assert.equal(dev!.anchorReference, "#961");
+    assert.equal(dev!.prNumber, null, "issue-shaped #NNN anchor is not a PR number");
+  });
+
+  test("action-derived dispatch wins; slots_snapshot only fills null fields (no double-count)", () => {
+    // A slot present in BOTH actions[] and slots_snapshot must merge by slot
+    // key, not concatenate. Action-carried values win; the snapshot only fills
+    // what the action left null.
+    const turns = [
+      {
+        turn_n: 2,
+        actions: [
+          {
+            type: "dispatch",
+            slot: "dev_orch",
+            skill: "hydra-dev",
+            anchorReference: "issue-918",
+            outcome: { cycleId: "c1", status: "merged", prNumber: 920 },
+          },
+        ],
+        slots_snapshot: {
+          // Same slot, divergent anchor/skill — must NOT override the action.
+          dev_orch: { skill: "hydra-other", anchor: "PR#999" },
+        },
+      },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 1, "merged by slot — exactly one dispatch, no double-count");
+    assert.equal(out[0].skill, "hydra-dev", "action skill wins");
+    assert.equal(out[0].anchorReference, "issue-918", "action anchor wins");
+    assert.equal(out[0].prNumber, "920", "action/outcome prNumber wins over snapshot anchor");
+    assert.equal(out[0].status, "merged");
+  });
+
+  test("slots_snapshot enriches an action that left skill/anchor null", () => {
+    const turns = [
+      {
+        turn_n: 3,
+        actions: [
+          // Action carries the slot but no skill/anchor (an under-specified
+          // plan); the snapshot fills both.
+          { type: "dispatch", slot: "qa_orch", outcome: null },
+        ],
+        slots_snapshot: {
+          qa_orch: { skill: "hydra-qa", anchor: "PR#970" },
+        },
+      },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].skill, "hydra-qa");
+    assert.equal(out[0].anchorReference, "PR#970");
+    assert.equal(out[0].prNumber, "970");
+  });
+
+  test("a malformed slot map never throws — yields the prior action-derived dispatch", () => {
+    const turns = [
+      {
+        turn_n: 1,
+        actions: [
+          { type: "dispatch", slot: "dev_orch", skill: "hydra-dev", anchorReference: "issue-1", outcome: null },
+        ],
+        // garbage shapes: a string, a number, an array — none should throw.
+        slots_snapshot: { dev_orch: "not-an-object", qa_orch: 42, research_orch: ["x"] },
+      },
+    ];
+    const out = projectDispatches(turns);
+    // The action dispatch survives; non-object slot members are skipped.
+    assert.equal(out.length, 1);
+    assert.equal(out[0].skill, "hydra-dev");
+    assert.equal(out[0].anchorReference, "issue-1");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -293,6 +419,85 @@ describe("assembleRetroBundle — composition", () => {
     // A merged-but-regressed dispatch is drill-worthy → got a reflection read.
     assert.equal(bundle.reflections.length, 1);
     assert.equal(bundle.reflections[0].anchorReference, "issue-x");
+  });
+
+  // -------------------------------------------------------------------------
+  // issue #975 — a crashed run reconciles + flags its dispatches end-to-end
+  // -------------------------------------------------------------------------
+
+  test("crashed run: slots_snapshot dispatches reconcile and get flagged for drill", async () => {
+    // The run #975 scenario: term_reason=crash, no dispatch actions / no cycle
+    // status, but slots_snapshot carries the identity. The bundle must surface
+    // non-null anchorReference/skill/prNumber AND flag the dispatches so their
+    // transcripts get drilled (reflection reads happen).
+    const reflectionAnchors: string[] = [];
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-crash", status: "killed", term_reason: "crash" },
+          turns: [
+            {
+              turn_n: 7,
+              actions: [], // crash truncated the turn — no dispatch action recorded
+              slots_snapshot: {
+                qa_orch: { skill: "hydra-qa", anchor: "PR#970", task_id: "a6f929932fd15784b" },
+                dev_orch: { skill: "hydra-dev", anchor: "#961", task_id: "a089f8680966d32ec" },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}), // no cycle ⇒ no status from the sidecar
+      readAnchorReflections: async (anchor: string) => {
+        reflectionAnchors.push(anchor);
+        return { content: `## PRIOR ATTEMPTS for ${anchor}`, count: 1 };
+      },
+    });
+
+    const bundle = await assembleRetroBundle("run-crash", deps);
+
+    assert.equal(bundle.dispatches.length, 2, "both occupied slots projected");
+    const qa = bundle.dispatches.find((d) => d.skill === "hydra-qa")!;
+    assert.equal(qa.anchorReference, "PR#970");
+    assert.equal(qa.prNumber, "970");
+    // Crash term_reason ⇒ best-effort failure-leaning abandonReason ⇒ flaggable.
+    assert.equal(qa.abandonReason, "run-crash");
+
+    const flagged = flagDispatchesForDrill(bundle.dispatches);
+    assert.equal(flagged.length, 2, "both crashed-run dispatches are flagged for drill");
+
+    // The flagged dispatches' anchors got reflection reads — the retro is no
+    // longer structurally blind on a non-clean run.
+    assert.deepEqual(reflectionAnchors.sort(), ["#961", "PR#970"]);
+    assert.equal(bundle.reflections.length, 2);
+  });
+
+  test("clean stop does NOT fabricate a failure status for a pending dispatch", async () => {
+    // A status-less dispatch on a clean (budget) stop is genuinely pending —
+    // it must stay unflagged (no run-<reason> abandonReason fabricated).
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-clean", status: "ended", term_reason: "budget" },
+          turns: [
+            {
+              turn_n: 1,
+              actions: [],
+              slots_snapshot: {
+                dev_orch: { skill: "hydra-dev", anchor: "#500" },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}),
+    });
+
+    const bundle = await assembleRetroBundle("run-clean", deps);
+    assert.equal(bundle.dispatches.length, 1);
+    assert.equal(bundle.dispatches[0].anchorReference, "#500", "still reconciled from snapshot");
+    assert.equal(bundle.dispatches[0].abandonReason, null, "no fabricated failure on a clean stop");
+    assert.equal(flagDispatchesForDrill(bundle.dispatches).length, 0, "pending dispatch stays unflagged");
   });
 });
 
