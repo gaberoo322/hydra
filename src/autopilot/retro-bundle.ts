@@ -154,6 +154,23 @@ const DEFAULT_FRICTION_SKILLS = [
   "hydra-target-build",
 ];
 
+/**
+ * `term_reason` values that mark a non-clean run termination — the run died
+ * before its dispatches' terminal cycle status could be written. For a
+ * dispatch left status-less on such a run, the assembler derives a
+ * failure-leaning `abandonReason` (`run-<reason>`) so a stalled dispatch is
+ * still flagged for drill (issue #975). `crash` / `killed` are the abnormal
+ * exits; `failure_backstop` is the reap-on-exit cause for a run that stopped
+ * on a failure. Clean stops (`budget` / `wall_clock` / `idle` /
+ * `interrupted`) are NOT here — a status-less dispatch on a clean stop is
+ * genuinely still pending and must stay unflagged.
+ */
+const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
+  "crash",
+  "killed",
+  "failure_backstop",
+]);
+
 // ---------------------------------------------------------------------------
 // Drill-flag selector (pure)
 // ---------------------------------------------------------------------------
@@ -223,10 +240,60 @@ function bucketOf(status: string | null): "merged" | "failed" | null {
 }
 
 /**
+ * Extract a bare PR number from an anchor string. The slot snapshot's `anchor`
+ * carries the dispatched reference verbatim (e.g. a `qa_orch` slot reads
+ * `PR#970`, a `dev_orch` slot reads `#961`); a PR-shaped anchor yields the
+ * digits for `prNumber`, an issue-shaped one yields `null` (its number is the
+ * issue ref, not a PR). Returns `null` when no PR-shaped token is present.
+ * Used only as a slots_snapshot fallback — an action/outcome `prNumber`
+ * always wins.
+ */
+function prNumberFromAnchor(anchor: string | null): string | null {
+  if (!anchor) return null;
+  // Only PR-shaped anchors carry a PR number: `PR#970` / `pr#970` / `PR970`.
+  const m = /\bpr\s*#?\s*(\d+)\b/i.exec(anchor);
+  return m ? m[1] : null;
+}
+
+/** Read the dispatched slot key off a dispatch action, when it carries one. */
+function slotOfAction(a: any): string | null {
+  return typeof a?.slot === "string" && a.slot.length > 0 ? a.slot : null;
+}
+
+/**
+ * Read a string field off a slot-snapshot entry, tolerating non-object /
+ * non-string members (a malformed slot map must never throw — it yields the
+ * prior action-derived dispatch, per the never-throw / read-only invariant).
+ */
+function slotStr(slotObj: unknown, key: string): string | null {
+  if (!slotObj || typeof slotObj !== "object") return null;
+  const v = (slotObj as Record<string, unknown>)[key];
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/**
  * Project the run's turn timeline into the flat per-dispatch list. Pulls the
  * dispatch identity (cycleId / skill / anchor) off each `type === "dispatch"`
- * action and the joined `outcome` (attached by `fetchTurnsWithJoins`). Pure
- * over the already-fetched turns — no Redis here.
+ * action and the joined `outcome` (attached by `fetchTurnsWithJoins`), then
+ * reconciles each turn's `slots_snapshot` (slot key → `{skill, anchor,
+ * task_id, ...}`) as a FALLBACK that only fills fields the action left null.
+ *
+ * The real dispatch action carries the anchor nested under
+ * `prompt_args.anchor` (not the top-level `anchorReference` the legacy join
+ * read) and carries no `cycleId`, while the resolvable identity lives in
+ * `slots_snapshot`; without this reconciliation `anchorReference` / `skill` /
+ * `prNumber` came back null and `flagDispatchesForDrill` flagged nothing
+ * (issue #975).
+ *
+ * Merge is keyed by `(turn, slot)`, NOT concatenated: a slot already
+ * represented by an action enriches that RetroDispatch's null fields; a slot
+ * present ONLY in `slots_snapshot` (the crashed-run case, where the dispatch
+ * action was never recorded) becomes a NEW RetroDispatch. One real dispatch →
+ * exactly one RetroDispatch, so a clean run with action-carried identity is
+ * byte-identical (action values win, no double-count).
+ *
+ * Pure over the already-fetched turns — `slots_snapshot` is already on each
+ * turn member, so there is no Redis round-trip here.
  */
 export function projectDispatches(
   turns: Array<Record<string, unknown>>,
@@ -238,6 +305,15 @@ export function projectDispatches(
         ? (turn.turn_n as number)
         : null;
     const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
+    const slotsSnapshot =
+      turn.slots_snapshot && typeof turn.slots_snapshot === "object"
+        ? (turn.slots_snapshot as Record<string, unknown>)
+        : {};
+
+    // Track which slot keys an action already projected, so the slots_snapshot
+    // fold enriches those in place rather than emitting a duplicate.
+    const bySlot = new Map<string, RetroDispatch>();
+
     for (const a of actions) {
       if (!a || a.type !== "dispatch") continue;
       const outcome = a.outcome && typeof a.outcome === "object" ? a.outcome : null;
@@ -250,23 +326,75 @@ export function projectDispatches(
         outcome && typeof outcome.status === "string" ? (outcome.status as string) : null;
       const prNumber =
         outcome && outcome.prNumber != null ? String(outcome.prNumber) : null;
-      out.push({
+      // Anchor priority: top-level anchorReference/anchor/issueRef (legacy join
+      // shape) then the real action's nested prompt_args.anchor.
+      const anchorReference =
+        (typeof a.anchorReference === "string" && a.anchorReference) ||
+        (typeof a.anchor === "string" && a.anchor) ||
+        (typeof a.issueRef === "string" && a.issueRef) ||
+        (a.prompt_args &&
+          typeof a.prompt_args === "object" &&
+          typeof (a.prompt_args as any).anchor === "string" &&
+          (a.prompt_args as any).anchor) ||
+        null;
+      const dispatch: RetroDispatch = {
         cycleId,
         turn_n: turnN,
         skill: typeof a.skill === "string" ? a.skill : null,
-        anchorReference:
-          (typeof a.anchorReference === "string" && a.anchorReference) ||
-          (typeof a.anchor === "string" && a.anchor) ||
-          (typeof a.issueRef === "string" && a.issueRef) ||
-          null,
+        anchorReference,
         prNumber,
         status,
         bucket: bucketOf(status),
         // abandonReason / regression are enriched from the metrics sidecar
-        // join below; default to the no-signal values here.
+        // join in the assemble loop; default to the no-signal values here.
         abandonReason: null,
         regressionIntroduced: false,
-      });
+      };
+      out.push(dispatch);
+      const slot = slotOfAction(a);
+      if (slot && !bySlot.has(slot)) bySlot.set(slot, dispatch);
+    }
+
+    // Fold the slots_snapshot in: enrich an action-derived dispatch's null
+    // fields, or emit a new dispatch for a slot the actions never recorded
+    // (the crashed-run case). Action-join wins when present, so this only fills
+    // nulls — clean-run behaviour is byte-identical.
+    for (const [slot, slotObj] of Object.entries(slotsSnapshot)) {
+      if (slotObj == null) continue; // empty slot — nothing dispatched here.
+      const slotSkill = slotStr(slotObj, "skill");
+      const slotAnchor = slotStr(slotObj, "anchor");
+      const existing = bySlot.get(slot);
+      if (existing) {
+        if (!existing.skill && slotSkill) existing.skill = slotSkill;
+        if (!existing.anchorReference && slotAnchor) existing.anchorReference = slotAnchor;
+        if (!existing.prNumber) {
+          const pr = prNumberFromAnchor(slotAnchor);
+          if (pr) existing.prNumber = pr;
+        }
+        continue;
+      }
+      // A slot member with no matching action that carries NO usable identity
+      // (a malformed string/number/array, or an object with neither skill nor
+      // anchor) is skipped rather than synthesised as an all-null phantom
+      // dispatch (never-throw / read-only invariant: a garbage slot map yields
+      // the prior action-derived dispatches, not a junk row).
+      if (!slotSkill && !slotAnchor) continue;
+      // Slot present only in the snapshot — the dispatch action was never
+      // recorded (a crash truncated the turn). Synthesise a RetroDispatch so
+      // the crashed-run dispatch is still attributable and flaggable.
+      const dispatch: RetroDispatch = {
+        cycleId: "",
+        turn_n: turnN,
+        skill: slotSkill,
+        anchorReference: slotAnchor,
+        prNumber: prNumberFromAnchor(slotAnchor),
+        status: null,
+        bucket: null,
+        abandonReason: null,
+        regressionIntroduced: false,
+      };
+      out.push(dispatch);
+      bySlot.set(slot, dispatch);
     }
   }
   return out;
@@ -358,6 +486,32 @@ export async function assembleRetroBundle(
       }
       if (!d.prNumber && typeof metrics.prNumber === "string" && metrics.prNumber.length > 0) {
         d.prNumber = metrics.prNumber;
+      }
+    }
+  }
+
+  // 3b. Best-effort status derivation for a non-clean termination. When a run
+  //     crashed (term_reason=crash) or was killed, its dispatches' terminal
+  //     cycle status was never written, so they'd stay status=null and
+  //     flagDispatchesForDrill would skip them — exactly the run #975 hit. For
+  //     a still-occupied slot on a crashed run we derive a failure-leaning
+  //     status from the run term_reason so the stalled dispatch becomes
+  //     flaggable. We do NOT claim `merged` (that would be a false success on a
+  //     run whose terminal status was never recorded); we tag the safe
+  //     `errored` abandonReason instead, leaving the status itself null so we
+  //     never misreport a positive outcome. Genuinely-idle slots are absent
+  //     from slots_snapshot (null), so they were never projected and stay
+  //     unflagged.
+  const termReason =
+    runView && typeof (runView as any).term_reason === "string"
+      ? ((runView as any).term_reason as string)
+      : "";
+  if (CRASH_TERM_REASONS.has(termReason)) {
+    for (const d of dispatches) {
+      // Only fill dispatches whose terminal outcome was never resolved — an
+      // action/cycle that DID record a status keeps it (action-join wins).
+      if (d.status === null && d.bucket === null && !d.abandonReason) {
+        d.abandonReason = `run-${termReason}`;
       }
     }
   }
