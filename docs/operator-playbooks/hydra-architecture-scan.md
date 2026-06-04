@@ -15,6 +15,19 @@ This is the gating build artifact (issue #788) for the `architecture_orch` epic 
 
 The design deliberately **mirrors `hydra-tool-scout`** (the `scout_orch` precedent this epic copies): a depth-first pass over one surface, a filter to keep the issue count sane, structured GitHub issues labelled `needs-triage`, and **no auto-route to `ready-for-agent`**. The operator (or `/hydra-sweep` triage) is the accept point. Because the fallback only produces issues, no merge happens at fallback time, and the existing tier classifier + Untouchable Core (ADR-0001/0004) apply unchanged when the produced issues are later picked up — no new **Modification Tier** carve-out is required.
 
+## The confidence gate (shared with `hydra-cleanup`)
+
+Both idle-backfill scan skills route every emitted candidate through one **confidence gate** — a single, symmetric rule that decides the triage label:
+
+| Confidence | What it means | Triage label | Routing rationale |
+|---|---|---|---|
+| **Mechanical** (high-confidence) | The acceptance check is **deterministic** — a self-checking "remove X **AND** `npm test` / `tsc` still pass". Provably-unused dead code, deletions/simplifications gated on a green suite. | **`ready-for-agent`** | No human judgment is needed: CI is the merge gate, so a wrong deletion simply fails the suite and the PR is abandoned. The autopilot picks these up hands-off. |
+| **Judgment** (softer) | Correctness is an **opinion**, not a green-test check — "this seam feels shallow", a deep-module reorganisation, any deepening whose value is debatable. | **`needs-triage`** | A sweep/operator pass must approve before `dev_orch` grabs it. This keeps the operator in the loop on debatable refactors, honouring *maintainability over throughput*. |
+
+**Deep-module reorganisation is the canonical judgment call → `needs-triage` by default.** It is the deepest, softest category: it carries policy and invariants, and its correctness is a judgment call, not a green-test check. The depth of a candidate inversely correlates with its mechanical verifiability — deeper means softer means judgment means `needs-triage`. A deep-module reorg is **never** auto-routed to `ready-for-agent`, even if a heuristic deems it "clean".
+
+This skill is the **judgment** half of that gate: every deepening candidate it surfaces is a softer judgment call, so it routes to **`needs-triage`** (steps 4 + 4b below). The single mechanical exception is a **genuinely-unreferenced dead-code re-route** (#961): a deletion-test failure with no live callers at all is not a deepening — it is provably-dead code, so it crosses into the mechanical lane (`cleanup-scan` + `ready-for-agent`, the `hydra-cleanup` convention). The mechanical half of the gate lives in `hydra-cleanup`. The two playbooks state the same gate symmetrically.
+
 ## What this skill is NOT
 
 - **NOT a modification of `improve-codebase-architecture`.** That skill stays interactive and operator-facing. This wrapper re-uses its **Explore** and **Present candidates** phases (steps 1–2) by following the same process, then diverts to issue emission instead of running its step-3 grilling loop. Do not edit the upstream skill, its `LANGUAGE.md`, `INTERFACE-DESIGN.md`, or `DEEPENING.md`.
