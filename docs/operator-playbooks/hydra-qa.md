@@ -329,7 +329,24 @@ CHECKS_BLOCK=$(jq -r '.checks' /tmp/qa-verdict.json)
 
 **Verdict `PASS`** (both axes pass + all required checks green):
 ```bash
-gh pr review $pr_number --repo gaberoo322/hydra --approve --body "> *Automated QA — two-axis review*
+# Strip needs-qa from the source issue FIRST (issue #974), before any command
+# that can abort this branch on a self-authored PR. The PASS verdict is final
+# the moment it is computed; the label routing must not be hostage to the
+# comment/merge calls below. The old first command here was
+# `gh pr review --approve`, which ALWAYS errors on a self-authored PR (shared
+# gaberoo322 identity — reference_qa_cannot_self_approve / #848); that abort
+# left needs-qa lingering ~1h23m until a LATER autopilot run cleared it — the
+# #974 busy-loop (QA-side twin of #846). Use the PR-event-safe `gh issue edit`
+# path (NOT the broken `gh pr edit` — feedback_gh_rerun_label_quirk), tolerant
+# of an already-cleared label via `|| true`.
+gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" 2>/dev/null \
+  || true  # already cleared (e.g. by a prior auto-close) — expected and non-fatal
+
+# Record the PASS as a COMMENT, not an approval: the shared gaberoo322 identity
+# cannot self-approve its own PR (reference_qa_cannot_self_approve / #848), and
+# the merge gate is CI required-status-checks, not approvals. This matches the
+# T4 Deep-QA PASS-marker path below, which already uses `gh pr comment`.
+gh pr comment $pr_number --repo gaberoo322/hydra --body "> *Automated QA — two-axis review*
 
 $REVIEW_REPORT
 
@@ -363,18 +380,17 @@ ${DEEP_QA_PASS_LINE}
 The Verifier-Core deep-QA branch passed against this exact head SHA. The \`deep-qa-gate\` required check verifies this marker before merge; new commits invalidate it and force re-QA."
 fi
 
-gh pr merge $pr_number --repo gaberoo322/hydra --squash --delete-branch
-
-# Belt-and-braces (issue #638): the merge above auto-closes the issue via
-# `Closes #N` in the PR body, which also removes labels on close — but if
-# the merge call fails (branch protection edge case, network blip) the
-# issue keeps `needs-qa` and causes the same busy-loop the PASS-pending-CI
-# branch fixes. Clearing the label explicitly here makes the post-state
-# the same regardless of whether auto-merge succeeded.
-gh issue edit $issue_number --repo gaberoo322/hydra --remove-label "needs-qa" 2>/dev/null \
-  || true  # already cleared by auto-close — expected and non-fatal
+# Enable auto-merge (squash) rather than a blocking immediate merge: the merge
+# gate is CI required-status-checks (feedback_hydra_repo_no_auto_merge), so
+# `--auto` lets GitHub squash-merge the instant the checks settle without this
+# dispatch blocking on them. needs-qa was already stripped above, so even if
+# this call errors the source issue is not left in the #974 busy-loop.
+gh pr merge $pr_number --repo gaberoo322/hydra --auto --squash --delete-branch \
+  || echo "WARN: failed to enable auto-merge on PR #${pr_number} (non-fatal — needs-qa already cleared; CI is the merge gate)"
 ```
-Issue auto-closes via `closes #N` in PR body.
+The needs-qa strip runs first (issue #974), so the label is cleared regardless
+of whether the comment or auto-merge calls below it succeed. The issue
+auto-closes via `closes #N` in the PR body when the squash-merge lands.
 
 **Verdict `PASS-pending-CI`** (review PASS + at least one check still queued/in_progress):
 ```bash

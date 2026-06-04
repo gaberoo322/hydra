@@ -62,6 +62,51 @@ describe("hydra-qa playbook clears needs-qa on every verdict (issue #638)", () =
     );
   });
 
+  // Issue #974 — the QA-side twin of the dev-side #846 gap.
+  // ROOT CAUSE: the PASS branch's FIRST command used to be
+  // `gh pr review --approve`, which ALWAYS errors on a self-authored PR
+  // (shared gaberoo322 identity; reference_qa_cannot_self_approve / #848).
+  // That abort meant the trailing `gh issue edit --remove-label needs-qa`
+  // never ran, so the label lingered until a LATER autopilot run stripped it
+  // (~1h23m busy-loop, PR#970/#961). The fix makes the strip REACHABLE
+  // irrespective of the approve/merge outcome: remove the self-approve and
+  // ensure the strip runs before any command that aborts on self-author.
+  describe("PASS branch strips needs-qa reachably (issue #974)", () => {
+    const block = extractVerdictBlock(playbook, "PASS");
+
+    test("PASS branch does not use the self-aborting `gh pr review --approve`", () => {
+      // `--approve` on a self-authored PR (shared identity) errors and would
+      // abort the sequence before the needs-qa strip. The documented pattern
+      // is to record the verdict as a comment instead.
+      assert.doesNotMatch(
+        block,
+        /gh pr review\s+\$pr_number[^\n]*--approve/,
+        "PASS branch must NOT `gh pr review --approve` — it always errors on a self-authored PR and aborts before the needs-qa strip (issue #974 / reference_qa_cannot_self_approve). Post the verdict as `gh pr comment` instead.",
+      );
+    });
+
+    test("PASS verdict is recorded via `gh pr comment`, not an approval", () => {
+      assert.match(
+        block,
+        /gh pr comment\s+\$pr_number/,
+        "PASS branch must record its verdict as a PR comment (self-author cannot self-approve — #848).",
+      );
+    });
+
+    test("needs-qa strip precedes the merge call (reachable before any abort)", () => {
+      const stripIdx = block.search(
+        /gh issue edit\s+\$issue_number[^\n]*--remove-label\s+["']needs-qa["']/,
+      );
+      const mergeIdx = block.search(/gh pr merge\s+\$pr_number/);
+      assert.ok(stripIdx >= 0, "PASS branch must contain a needs-qa strip");
+      assert.ok(mergeIdx >= 0, "PASS branch must contain a merge call");
+      assert.ok(
+        stripIdx < mergeIdx,
+        "needs-qa strip must run BEFORE the merge call so it is reachable even if the merge (or any self-author-hostile command) aborts the sequence — the #974 fix.",
+      );
+    });
+  });
+
   test("PASS-pending-CI verdict block removes needs-qa from the source issue", () => {
     const block = extractVerdictBlock(playbook, "PASS-pending-CI");
     assert.match(
