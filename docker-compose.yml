@@ -72,6 +72,10 @@ services:
       - /home/gabe/hydra/config:/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      # Local Ollama (gaming PC) over Tailnet — serves OV's embedding + vlm
+      # backends. Container has no MagicDNS, so map the Tailscale IP here and
+      # reference the hostname in docker/ov.conf. See ADR / hydra-doctor 2026-06-05.
+      - "gabes-desktop-1:100.69.55.127"
     environment:
       - OPENVIKING_CONFIG_FILE=/app/ov.conf
     depends_on:
