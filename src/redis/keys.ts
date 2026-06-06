@@ -110,8 +110,6 @@ export const redisKeys = {
   anchorReframeLastServedAt: () => "hydra:anchors:reframe-last-served-at",
   anchorAbandonmentCount: (ref: string) => `hydra:anchors:abandonment-count:${ref}`,
   anchorPermSkip: (ref: string) => `hydra:anchors:perm-skip:${ref}`,
-  anchorCalibration: (cycleId: string) => `hydra:anchors:calibration:${cycleId}`,
-  anchorCalibrationIndex: () => "hydra:anchors:calibration:index",
 
   // ---------------------------------------------------------------------------
   // Metrics
