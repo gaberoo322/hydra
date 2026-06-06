@@ -72,6 +72,7 @@ export type {
 export {
   getUsage,
   projectEligibility,
+  overlayPauseEligibility,
   clearUsageCache,
   getWeeklyQuotaTokens,
   getFiveHourQuotaTokens,

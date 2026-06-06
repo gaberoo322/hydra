@@ -19,13 +19,16 @@
 #      bootstrap.sh's concurrent-run guard is the second layer of protection.
 #
 #   2. Consult the Pacing Curve via GET /api/usage/eligibility (#857):
+#        - .reasons.paused == true          → operator-only Autopilot pause
+#          (#988) is set. Skip launch entirely — no throwaway run spawned.
+#          Most authoritative skip; checked first.
 #        - .reasons.emergencyStop == true  → the 5-hour cap (>=90%) tripped.
 #          Pause fully; skip.
 #        - .paceState == "ahead"           → total burn is above the Pacing
 #          Curve for this instant in the week. Pause; skip. The sawtooth
 #          relaunches the moment burn falls back to/below the curve.
-#        - otherwise ("on" / "behind", not emergency) → eligible. Launch:
-#          `systemctl --user start hydra-autopilot.service`.
+#        - otherwise ("on" / "behind", not emergency, not paused) → eligible.
+#          Launch: `systemctl --user start hydra-autopilot.service`.
 #
 #   3. Eligibility endpoint unreachable → FAIL SAFE: do NOT launch. Pacing is
 #      the governor; when we're blind to usage we must not burn quota. Log a
@@ -112,13 +115,23 @@ fi
 
 EMERGENCY_STOP=$(jq -r '.reasons.emergencyStop // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 PACE_STATE=$(jq -r '.paceState // "unknown"' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #988: operator-only autopilot pause. The /api/usage/eligibility route
+# overlays `.reasons.paused` from the Redis pause flag. When set, skip the
+# launch entirely (no throwaway run spawned) — the operator paused autopilot.
+PAUSED=$(jq -r '.reasons.paused // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
   exit 0
 fi
 
 # --- Step 3: pause conditions ---
+# Issue #988: operator pause is the most authoritative skip — check it first.
+if [[ "$PAUSED" == "true" ]]; then
+  log "autopilot paused (operator) — skip"
+  exit 0
+fi
+
 if [[ "$EMERGENCY_STOP" == "true" ]]; then
   log "5h emergencyStop — pausing (skip)"
   exit 0

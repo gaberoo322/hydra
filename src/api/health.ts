@@ -18,6 +18,7 @@ import { redisInfo as getRedisInfo } from "../redis/utility.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
 import { countReflectionKeys } from "../redis/reflections.ts";
 import { getEmergencyBrake } from "../redis/emergency-brake.ts";
+import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 import { getTargetServiceName } from "../target-config.ts";
 // Issue #954: the OpenViking health/search probes route through the OpenViking
 // Request Adapter, which resolves the base URL from OPENVIKING_URL (via
@@ -102,6 +103,18 @@ export function createHealthRouter(eventBus: any) {
       console.error(`[API] /health emergency-brake read failed: ${err?.message ?? err}`);
     }
 
+    // Issue #988: operator-only autopilot-pause state. A deliberate pause is a
+    // HEALTHY/expected state — surfaced so hydra-doctor / the watchdog can
+    // distinguish "operator paused autopilot on purpose" from "autopilot
+    // wedged", and never report a pause as degraded. Fail-safe to not-paused
+    // if Redis is unreachable; the read is purely advisory observability.
+    let autopilotPause: { paused: boolean; since?: number } = { paused: false };
+    try {
+      autopilotPause = await getAutopilotPaused();
+    } catch (err: any) {
+      console.error(`[API] /health autopilot-pause read failed: ${err?.message ?? err}`);
+    }
+
     res.json({
       status: killFileExists ? "killed" : "ok",
       redis: redisOk,
@@ -117,6 +130,10 @@ export function createHealthRouter(eventBus: any) {
       // Issue #744: emergency-brake state. `{engaged:false}` by default;
       // `{engaged:true, since, engagedBy}` while the operator holds the brake.
       emergencyBrake,
+      // Issue #988: autopilot-pause state. `{paused:false}` by default;
+      // `{paused:true, since}` while the operator has paused autopilot. A
+      // HEALTHY/expected state — NOT degraded.
+      autopilotPause,
     });
   });
 
