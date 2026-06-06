@@ -74,13 +74,6 @@ export const redisKeys = {
   anchorProcessing: () => "hydra:anchors:processing",
   anchorPriorFailures: () => "hydra:anchors:prior-failures",
   anchorReframeQueue: () => "hydra:anchors:reframe-queue",
-  // Reframe-starvation instrumentation (issue #377) — mirrors the spec-tier
-  // starvation gauge. Tracks how often the reframe lane is passed over, the
-  // reason it lost, and the running "cycles since reframe last served" gauge
-  // consumed by the capacity-floor.
-  anchorReframePassedReasons: () => "hydra:anchors:reframe-passed-reasons",
-  anchorReframeCyclesSinceServed: () => "hydra:anchors:reframe-cycles-since-served",
-  anchorReframeLastServedAt: () => "hydra:anchors:reframe-last-served-at",
   anchorAbandonmentCount: (ref: string) => `hydra:anchors:abandonment-count:${ref}`,
   anchorPermSkip: (ref: string) => `hydra:anchors:perm-skip:${ref}`,
 
