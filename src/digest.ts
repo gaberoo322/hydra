@@ -22,10 +22,18 @@ const QUIET_START_HOUR = 22; // 10pm
 const QUIET_END_HOUR = 7; // 7am
 const MAX_DIGEST_LENGTH = 4000; // Telegram's ~4096 char limit with margin
 
+// Daily heartbeat: a guaranteed once-per-day proof-of-life push. Unlike the
+// event-gated 4h alert digest above (which stays SILENT when nothing has gone
+// wrong), the heartbeat ALWAYS sends — so a dark/AFK operator can distinguish
+// "healthy and quiet" from "crashed and not reporting", and gets a daily
+// rollup of liveness, subscription-usage %, throughput, and queue depth.
+const HEARTBEAT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 // Accumulated events since last digest
 let pendingEvents = [];
 let lastDigestAt = null;
 let digestTimer = null;
+let heartbeatTimer = null;
 
 function isQuietHours() {
   const hour = new Date().getHours();
@@ -348,13 +356,27 @@ async function sendImmediate(message) {
  */
 export function startDigest() {
   digestTimer = setInterval(() => sendDigest(), DIGEST_INTERVAL_MS);
-  console.log(`[Digest] Started — summaries every ${DIGEST_INTERVAL_MS / 3600_000}h, quiet ${QUIET_START_HOUR}:00-${QUIET_END_HOUR}:00`);
+  // Guaranteed daily proof-of-life. Fires unconditionally (no quiet-hours /
+  // no empty-skip gate) so the operator always gets one push per day.
+  heartbeatTimer = setInterval(() => {
+    sendDailyHeartbeat().catch((err) =>
+      console.error(`[Digest] daily heartbeat failed (non-fatal): ${err?.message || err}`),
+    );
+  }, HEARTBEAT_INTERVAL_MS);
+  console.log(
+    `[Digest] Started — summaries every ${DIGEST_INTERVAL_MS / 3600_000}h, quiet ${QUIET_START_HOUR}:00-${QUIET_END_HOUR}:00; ` +
+      `daily heartbeat every ${HEARTBEAT_INTERVAL_MS / 3600_000}h`,
+  );
 }
 
 export function stopDigest() {
   if (digestTimer) {
     clearInterval(digestTimer);
     digestTimer = null;
+  }
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
   }
 }
 
@@ -363,6 +385,124 @@ export function stopDigest() {
  */
 export async function sendDigestNow() {
   await sendDigest();
+}
+
+/**
+ * Build the daily heartbeat message (always returns a string — never null).
+ *
+ * Each section is best-effort: a failing reader degrades that one line to a
+ * "n/a" marker rather than throwing, so the heartbeat ALWAYS ships even when
+ * Redis / the usage tracker hiccups. Sections, in operator-priority order:
+ *   - Liveness   — most recent autopilot run + its age (a wedged loop shows up)
+ *   - Usage      — 5h % and weekly since-reset %, against the 90% hard-stops
+ *   - Throughput — autonomous merge rate over the builder-health window
+ *   - Queue      — target backlog lanes (queued / blocked / triage)
+ *   - Alerts     — count of alert events recorded in the last 24h
+ */
+export async function buildDailyHeartbeat(): Promise<string> {
+  const lines = ["💓 *Hydra Daily Heartbeat*", ""];
+
+  // --- Liveness: latest autopilot run + age ---
+  try {
+    const { listRecentAutopilotRunIds, getAutopilotRun } = await import(
+      "./redis/autopilot-runs.ts"
+    );
+    const [latestId] = await listRecentAutopilotRunIds(1);
+    if (latestId) {
+      const run = await getAutopilotRun(latestId);
+      const startedEpoch = Number(run.started_epoch || 0);
+      const ageMin = startedEpoch > 0 ? Math.round((Date.now() / 1000 - startedEpoch) / 60) : null;
+      const status = run.status || run.ended ? run.status || "ended" : "running";
+      const ageStr = ageMin === null ? "?" : ageMin < 60 ? `${ageMin}m ago` : `${Math.round(ageMin / 60)}h ago`;
+      lines.push(`*Autopilot:* last run ${status} — started ${ageStr}`);
+    } else {
+      lines.push(`*Autopilot:* ⚠️ no recent run indexed`);
+    }
+  } catch (err: any) {
+    lines.push(`*Autopilot:* n/a (${err?.message || err})`);
+  }
+
+  // --- Usage: 5h + weekly since-reset, with the 90% hard-stops in view ---
+  try {
+    const { getUsage } = await import("./cost/usage-tracker.ts");
+    const u = await getUsage();
+    if (!u.calibrated) {
+      lines.push(`*Usage:* uncalibrated (quota env vars unset)`);
+    } else {
+      const stop5h = u.emergencyStop ? " 🛑" : "";
+      const stopWk = u.weeklyEmergencyStop ? " 🛑" : "";
+      lines.push(
+        `*Usage:* 5h ${u.percentLast5h.toFixed(0)}%${stop5h} · weekly ${u.percentSinceReset.toFixed(0)}%${stopWk} (caps at 90%)`,
+      );
+    }
+  } catch (err: any) {
+    lines.push(`*Usage:* n/a (${err?.message || err})`);
+  }
+
+  // --- Throughput: autonomous merge rate over the builder-health window ---
+  try {
+    const health = await getBuilderHealthScorecard();
+    const autonomy = health?.autonomyRate;
+    if (autonomy && autonomy.total > 0) {
+      lines.push(
+        `*Throughput:* ${autonomy.autonomous}/${autonomy.total} PRs auto-merged (last ${autonomy.window})`,
+      );
+    } else {
+      lines.push(`*Throughput:* no merges in window`);
+    }
+  } catch (err: any) {
+    lines.push(`*Throughput:* n/a (${err?.message || err})`);
+  }
+
+  // --- Queue: target backlog lanes ---
+  try {
+    const { getBacklogCounts } = await import("./backlog/reads.ts");
+    const counts = await getBacklogCounts();
+    lines.push(
+      `*Target backlog:* ${counts.queued || 0} queued, ${counts.blocked || 0} blocked, ${counts.triage || 0} triage`,
+    );
+  } catch (err: any) {
+    lines.push(`*Target backlog:* n/a (${err?.message || err})`);
+  }
+
+  // --- Alerts: count recorded in the last 24h ---
+  try {
+    const { readRecentAlerts } = await import("./redis/alerts.ts");
+    const raw = await readRecentAlerts(100);
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    let count = 0;
+    for (const a of raw) {
+      try {
+        const ts = JSON.parse(a)?.timestamp;
+        if (!ts || new Date(ts).getTime() >= since) count++;
+      } catch {
+        count++; // unparseable → count it rather than hide it
+      }
+    }
+    lines.push(`*Alerts (24h):* ${count}${count > 0 ? " — see the 4h alert digest" : ""}`);
+  } catch (err: any) {
+    lines.push(`*Alerts (24h):* n/a (${err?.message || err})`);
+  }
+
+  return lines.filter(Boolean).join("\n");
+}
+
+/**
+ * Build and send the daily heartbeat. ALWAYS sends — no quiet-hours gate and
+ * no empty-skip — because the whole point is a guaranteed daily proof-of-life.
+ */
+async function sendDailyHeartbeat() {
+  const message = await buildDailyHeartbeat();
+  await sendToTelegram(message);
+  console.log("[Digest] Sent daily heartbeat");
+}
+
+/**
+ * Force-send the daily heartbeat now (manual trigger via API). Lets the
+ * operator verify Telegram delivery on demand without waiting 24h.
+ */
+export async function sendDailyHeartbeatNow() {
+  await sendDailyHeartbeat();
 }
 
 /**
