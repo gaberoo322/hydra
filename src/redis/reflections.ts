@@ -90,36 +90,11 @@ export async function getAnchorReflections(key: string): Promise<string[]> {
 }
 
 /**
- * Delete a reflection key.
- */
-export async function deleteReflectionKey(key: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(key);
-}
-
-/**
- * Record a reflection outcome (whether a retry with reflections succeeded or failed).
- * Stored as a sorted set (by timestamp) for time-ordered retrieval.
- */
-export async function pushReflectionOutcome(json: string, score: number): Promise<void> {
-  const r = getRedisConnection();
-  await r.zadd(redisKeys.reflectionOutcomes(), score, json);
-}
-
-/**
  * Get all reflection outcomes (oldest first).
  */
 export async function getReflectionOutcomes(): Promise<string[]> {
   const r = getRedisConnection();
   return r.zrange(redisKeys.reflectionOutcomes(), 0, -1);
-}
-
-/**
- * Set TTL on a reflection key (for extending effective reflections).
- */
-export async function setReflectionKeyTTL(key: string, ttlSeconds: number): Promise<void> {
-  const r = getRedisConnection();
-  await r.expire(key, ttlSeconds);
 }
 
 // ===========================================================================
@@ -138,7 +113,7 @@ export async function setReflectionKeyTTL(key: string, ttlSeconds: number): Prom
 const BY_FILE_PREFIX = "hydra:reflections:by-file:";
 
 /** Returns the Redis key holding the anchor-key set for `file`. */
-export function reflectionByFileKey(file: string): string {
+function reflectionByFileKey(file: string): string {
   return BY_FILE_PREFIX + file;
 }
 
@@ -165,17 +140,4 @@ export async function getReflectionKeysByFile(file: string): Promise<string[]> {
   if (!file) return [];
   const r = getRedisConnection();
   return r.smembers(reflectionByFileKey(file));
-}
-
-/**
- * Remove `anchorKey` from the by-file index entry for `file`.
- * Used by post-merge cleanup.
- */
-export async function removeReflectionFromFileIndex(
-  file: string,
-  anchorKey: string,
-): Promise<void> {
-  if (!file || !anchorKey) return;
-  const r = getRedisConnection();
-  await r.srem(reflectionByFileKey(file), anchorKey);
 }
