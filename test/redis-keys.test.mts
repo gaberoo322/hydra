@@ -33,7 +33,6 @@ describe("redisKeys naming convention", () => {
     ["backlogCounter", redisKeys.backlogCounter],
     ["schedulerState", redisKeys.schedulerState],
     ["mergeLock", redisKeys.mergeLock],
-    ["workspaceLock", redisKeys.workspaceLock],
     ["planCachePrefix", redisKeys.planCachePrefix],
     ["alerts", redisKeys.alerts],
     ["patternDetectorCooldowns", redisKeys.patternDetectorCooldowns],
@@ -106,7 +105,6 @@ describe("redisKeys uniqueness", () => {
       ["backlogCounter", redisKeys.backlogCounter()],
       ["schedulerState", redisKeys.schedulerState()],
       ["mergeLock", redisKeys.mergeLock()],
-      ["workspaceLock", redisKeys.workspaceLock()],
       ["alerts", redisKeys.alerts()],
       ["patternDetectorCooldowns", redisKeys.patternDetectorCooldowns()],
       ["blockedLastEscalation", redisKeys.blockedLastEscalation()],
@@ -153,7 +151,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.backlogCounter(), "hydra:backlog:counter");
     assert.equal(redisKeys.schedulerState(), "hydra:scheduler:state");
     assert.equal(redisKeys.mergeLock(), "hydra:merge:lock");
-    assert.equal(redisKeys.workspaceLock(), "hydra:workspace:lock");
     assert.equal(redisKeys.alerts(), "hydra:alerts");
     assert.equal(redisKeys.streamNotifications(), "hydra:notifications");
   });
