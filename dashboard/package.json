@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "allow-scripts": "allow-scripts"
+  },
+  "lavamoat": {
+    "allowScripts": {}
   },
   "dependencies": {
     "react": "^19.2.4",
