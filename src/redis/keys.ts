@@ -269,7 +269,6 @@ export const redisKeys = {
   // Locks
   // ---------------------------------------------------------------------------
   mergeLock: () => "hydra:merge:lock",
-  workspaceLock: () => "hydra:workspace:lock",
 
   // ---------------------------------------------------------------------------
   // Plan Cache

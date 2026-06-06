@@ -6,7 +6,6 @@
  */
 
 import Redis from "ioredis";
-import { redisKeys } from "./keys.ts";
 
 let _instance: any = null;
 let _subscriber: any = null;
@@ -46,25 +45,4 @@ export function closeRedisConnections(): void {
     _subscriber.disconnect();
     _subscriber = null;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Workspace lock (lives here because it predates the lock-domain split and is
-// tightly coupled to connection lifecycle)
-// ---------------------------------------------------------------------------
-
-/**
- * Acquire the workspace lock (NX + 60s TTL).
- * Returns true if lock was acquired, false if already held.
- */
-export async function acquireWorkspaceLock(pid: number): Promise<boolean> {
-  const r = getRedisConnection();
-  const result = await r.set(redisKeys.workspaceLock(), `${pid}`, "NX", "EX", 60);
-  return result === "OK";
-}
-
-/** Release the workspace lock. */
-export async function releaseWorkspaceLock(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.workspaceLock());
 }
