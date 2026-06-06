@@ -37,3 +37,7 @@ secrets.json
 # the deploy.sh dirty-tree guard stops tripping. Exact path, not a .claude glob,
 # to avoid shadowing the .claude/worktrees/ rule or ignoring other tracked .claude/ paths.
 .claude/scheduled_tasks.lock
+
+# Per-test TAP artifact from `npm run test:debug` (issue #1076) — regenerated
+# on every debug run, never committed.
+test-debug.tap
