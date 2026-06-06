@@ -12,6 +12,108 @@
 // Distinct from **Builder Health** (capability trend) and the `/api/health`
 // liveness boolean (process up).
 
+// ---- OV-search deep-health probe — timeout + failure classification ------
+//
+// Issue #1032: the index-14 `/api/v1/search/find` probe in `src/api/health.ts`
+// was false-negativing `status:"failed"` (`latencyMs:null`) while OpenViking
+// was fully healthy. Root cause: after #980 repointed OV's dense embedding to
+// the gaming-PC Ollama (`nomic-embed-text`, 768-dim) over Tailscale, the
+// query-embedding step incurs Tailnet RTT + local model inference and
+// routinely exceeds the probe's old 3000ms `AbortSignal` ceiling. A timeout is
+// classified by the OV Request Adapter as `ov-timeout` (distinct from the
+// `ov-non-2xx` a real 5xx produces), so a slow-but-working plane was being
+// reported as a hard failure — the inverse of the now-closed #985.
+//
+// Two changes close it:
+//   1) raise the probe ceiling to OV_SEARCH_PROBE_TIMEOUT_MS so a healthy
+//      Ollama-backed search completes inside the window and reports `running`
+//      with its true latency, and
+//   2) when the probe DOES still exhaust the (now generous) window, classify
+//      it as a distinct `"timeout"` status — NOT `"failed"` — so a slow plane
+//      is surfaced honestly instead of masquerading as a 5xx. Only a real
+//      `ov-non-2xx` (OV reachable but search 500ing) or transport failure
+//      (`ov-service-down`) folds to `"failed"`.
+
+/**
+ * The wire/snapshot status the OV-search deep-health probe can report.
+ *  - `running` — `search/find` returned 200 (the true plane state).
+ *  - `failed`  — OV reachable but search 5xx'd (`ov-non-2xx`), or the transport
+ *                failed (`ov-service-down` / malformed JSON). A genuine fault.
+ *  - `timeout` — the probe exhausted its window (`ov-timeout`); the plane is
+ *                likely working-but-slow (real agent searches have no 3s cap),
+ *                so this is reported distinctly and treated as informational.
+ */
+export type OvSearchProbeStatus = "running" | "failed" | "timeout";
+
+/**
+ * OV-search deep-health probe `AbortSignal` ceiling (ms).
+ *
+ * Sized for the post-#980 Ollama-backed dense-embedding path
+ * (`nomic-embed-text`, 768-dim, reached over Tailscale): query-embedding +
+ * Tailnet RTT routinely pushes a warm `search/find` past the old 3000ms cap.
+ * 15s matches the most generous existing OV timeout in the codebase
+ * (`ov-search.ts`'s session-message POST) and gives the cold-embedding case
+ * ample headroom while still bounding the deep-health fan-out. The real agent
+ * search path uses 5000ms and has no probe; this ceiling exists only so a slow
+ * plane reports `running`/`timeout` rather than a false `failed`.
+ */
+export const OV_SEARCH_PROBE_TIMEOUT_MS = 15_000;
+
+/**
+ * The shape of an OV `search/find` result body the probe counts hits from.
+ * Optional everywhere — the probe coalesces missing arrays to 0.
+ */
+interface OvSearchResultBody {
+  result?: {
+    memories?: unknown[];
+    resources?: unknown[];
+    skills?: unknown[];
+  };
+}
+
+/**
+ * Pure classifier for the index-14 OV-search probe. Maps the OV Request Adapter
+ * result (already discriminated by `code`) onto the `ovSearch` snapshot shape.
+ *
+ * Kept pure + exported so the timeout-vs-real-failure logic (#1032) is unit
+ * testable without standing up `fetch`/OpenViking: a slow probe that times out
+ * must report `"timeout"` (carrying its measured latency, not `null`) and a
+ * genuine 5xx/transport fault must still report `"failed"`.
+ *
+ * @param result discriminated OV result for `POST /api/v1/search/find`.
+ * @param latencyMs wall-clock ms the probe took (measured by the caller).
+ */
+export function classifyOvSearchProbe(
+  result:
+    | { ok: true; data: OvSearchResultBody | null | undefined }
+    | { ok: false; code: string },
+  latencyMs: number,
+): { status: OvSearchProbeStatus; latencyMs: number | null; resultCount: number } {
+  if (result.ok === false) {
+    // `ov-timeout` is a slow-but-likely-working plane, not a fault: surface it
+    // distinctly and KEEP the measured latency so the deep-health view shows how
+    // long the (uncapped, in real use) embedding path is actually taking.
+    if (result.code === "ov-timeout") {
+      return { status: "timeout", latencyMs, resultCount: 0 };
+    }
+    // `ov-non-2xx` reached OV but search 5xx'd — a real fault; keep its latency.
+    // `ov-service-down` / `ov-malformed-json` never completed a round-trip, so
+    // `latencyMs` would be meaningless → null.
+    return {
+      status: "failed",
+      latencyMs: result.code === "ov-non-2xx" ? latencyMs : null,
+      resultCount: 0,
+    };
+  }
+  const rs = result.data?.result || {};
+  return {
+    status: "running",
+    latencyMs,
+    resultCount:
+      (rs.memories?.length || 0) + (rs.resources?.length || 0) + (rs.skills?.length || 0),
+  };
+}
+
 // ---- Health Snapshot — the normalized internal model ---------------------
 
 export interface HealthSnapshot {
@@ -43,7 +145,7 @@ export interface HealthSnapshot {
   };
   patterns: { planner: number; executor: number; skeptic: number };
   reflCount: number;
-  ovSearch: { status: string; latencyMs: number | null; resultCount: number };
+  ovSearch: { status: OvSearchProbeStatus; latencyMs: number | null; resultCount: number };
   redisInfo: {
     memoryHuman: string;
     connectedClients: number;
@@ -479,6 +581,22 @@ const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           impact: "Agents run cycles with empty knowledge context.",
           action: "Check OpenViking + its LLM/embedding backend (#980).",
           autoRecovery: false,
+        }
+      : null,
+  // Issue #1032: a probe TIMEOUT is NOT a fault — the Ollama-backed embedding
+  // path is just slow, and real agent searches (no 3s cap) succeed. Surface it
+  // as info so a slow-but-working plane is visible without folding the top-level
+  // status to `degraded` the way the `failed` warning above does.
+  (s) =>
+    s.ovSearch.status === "timeout"
+      ? {
+          severity: "info",
+          component: "intelligence",
+          what: "OV search slow",
+          why: "Search probe exceeded its deep-health timeout but did not error — the Ollama-backed embedding path (nomic-embed over Tailscale, #980) is slow, not down. Real agent searches have no such cap and succeed.",
+          impact: "None on agents; the deep-health probe latency is just high.",
+          action: "Monitor; raise OV_SEARCH_PROBE_TIMEOUT_MS if it persists.",
+          autoRecovery: true,
         }
       : null,
 ];

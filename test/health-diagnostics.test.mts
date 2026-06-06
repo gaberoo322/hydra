@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 import {
   parseProbes,
   assessHealth,
+  classifyOvSearchProbe,
+  OV_SEARCH_PROBE_TIMEOUT_MS,
   type HealthSnapshot,
 } from "../src/health-diagnostics.ts";
 
@@ -377,6 +379,97 @@ describe("assessHealth — per-rule firing", () => {
     );
     // A warning with no higher-severity diagnostic folds top-level status to degraded.
     assert.equal(a.status, "degraded");
+  });
+
+  // Issue #1032: a probe TIMEOUT is the Ollama-backed embedding path being slow,
+  // NOT a fault. It must surface as info ("OV search slow"), must NOT fire the
+  // hard-failure warning, and (being info, not warning) must not drive the
+  // top-level status to a WARNING-grade degradation the way `failed` does.
+  test("OV search timeout → info intelligence, NOT the failing warning", () => {
+    const a = assessHealth(
+      clone((s) => (s.ovSearch = { status: "timeout", latencyMs: 14200, resultCount: 0 })),
+    );
+    const slow = a.diagnostics.filter((x) => x.what === "OV search slow");
+    assert.equal(slow.length, 1, "exactly one OV-search-slow diagnostic");
+    assert.equal(slow[0]!.severity, "info");
+    assert.equal(slow[0]!.component, "intelligence");
+    assert.equal(slow[0]!.autoRecovery, true);
+    // A timeout must NOT fire the hard-failure warning rule…
+    assert.ok(
+      !a.diagnostics.some((x) => x.what === "OV search failing"),
+      "timeout must not fire the OV-search-failing warning",
+    );
+    // …nor the empty-index info rule (that one keys off status === 'running').
+    assert.ok(
+      !a.diagnostics.some((x) => x.what === "OV search empty"),
+      "timeout must not fire the empty-index info rule",
+    );
+    // The timeout firing is info-only — there is no WARNING-or-worse diagnostic
+    // attributable to the slow probe (the `failed` path produces a warning).
+    assert.ok(
+      !a.diagnostics.some(
+        (x) => x.component === "intelligence" && x.severity !== "info",
+      ),
+      "a slow probe must not contribute any warning/error intelligence diagnostic",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifyOvSearchProbe — pure timeout-vs-failure mapping (issue #1032)
+// ---------------------------------------------------------------------------
+
+describe("classifyOvSearchProbe", () => {
+  test("a slow-but-successful probe within the window reports running with latency", () => {
+    // Simulate the Ollama-backed path returning 200 after a long-but-bounded
+    // latency (> the old 3000ms cap, < the new ceiling).
+    const lat = OV_SEARCH_PROBE_TIMEOUT_MS - 800;
+    const out = classifyOvSearchProbe(
+      { ok: true, data: { result: { memories: [1, 2], resources: [3], skills: [] } } },
+      lat,
+    );
+    assert.equal(out.status, "running");
+    assert.equal(out.latencyMs, lat);
+    assert.equal(out.resultCount, 3);
+  });
+
+  test("a probe timeout reports 'timeout' (NOT 'failed') and KEEPS its latency", () => {
+    // ov-timeout is the regression #1032 fixes: previously this collapsed to
+    // { status:"failed", latencyMs:null }.
+    const out = classifyOvSearchProbe({ ok: false, code: "ov-timeout" }, 15000);
+    assert.equal(out.status, "timeout");
+    assert.equal(out.latencyMs, 15000, "timeout must carry the measured latency, not null");
+    assert.equal(out.resultCount, 0);
+  });
+
+  test("a real 5xx (ov-non-2xx) still reports failed, with latency", () => {
+    const out = classifyOvSearchProbe({ ok: false, code: "ov-non-2xx" }, 1471);
+    assert.equal(out.status, "failed");
+    assert.equal(out.latencyMs, 1471);
+    assert.equal(out.resultCount, 0);
+  });
+
+  test("a transport failure (ov-service-down) reports failed with null latency", () => {
+    const out = classifyOvSearchProbe({ ok: false, code: "ov-service-down" }, 25);
+    assert.equal(out.status, "failed");
+    assert.equal(out.latencyMs, null, "no round-trip → meaningless latency → null");
+    assert.equal(out.resultCount, 0);
+  });
+
+  test("a 200 with a missing result body counts zero hits but stays running", () => {
+    const out = classifyOvSearchProbe({ ok: true, data: {} }, 4200);
+    assert.equal(out.status, "running");
+    assert.equal(out.resultCount, 0);
+    assert.equal(out.latencyMs, 4200);
+  });
+
+  test("the probe ceiling is generous enough for the Ollama embedding path", () => {
+    // Guard the constant against an accidental tightening back toward the old
+    // 3000ms that caused #1032. The real agent search path uses 5000ms.
+    assert.ok(
+      OV_SEARCH_PROBE_TIMEOUT_MS >= 10_000,
+      "OV search probe timeout must accommodate the Tailnet+Ollama embedding latency",
+    );
   });
 });
 
