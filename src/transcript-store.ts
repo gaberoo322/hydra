@@ -28,8 +28,9 @@
  * they live and how to read the files. It does NOT interpret line contents: the
  * cost-domain `parseUsageLine` / token-breakdown semantics stay in
  * `src/cost/usage-tracker.ts`, and the conversation-record projection
- * (`parseTranscript` / `projectMessage`) stays in `src/api/dispatches.ts`. The
- * Store hands back file paths and raw lines; callers interpret them.
+ * (`parseTranscript` / `projectMessage`) lives in its sibling **Transcript
+ * Projection** Seam (`src/transcript-projection.ts`, issue #987). The Store
+ * hands back file paths and raw lines; callers interpret them.
  *
  * READ-ONLY — every function here only resolves paths or reads/lists files;
  * none mutates the transcript tree (grounding.ts discipline).
