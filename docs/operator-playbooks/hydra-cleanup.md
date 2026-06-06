@@ -89,6 +89,10 @@ Drop a finding before it becomes an issue when ANY of:
 
 Each surviving finding becomes one GitHub issue. Use `gh issue create` directly (these are independent single-finding tickets, so the `hydra-prd` epic path is unnecessary).
 
+**Emit as a SINGLE loop over the filtered findings — one finding at a time, render-then-create atomically (HARD).** For each finding: derive its title AND its body H1 from the **same finding object** inside the same iteration, then immediately call `gh issue create` with both `--title` and `--body-file` built from that one finding, *before advancing to the next finding*. Never build a list of all titles in one pass and a list of all body files in a second pass and then zip the two by index — that index-aligned parallel-array pattern is exactly what produced the off-by-one title/body rotation across the #997–#1004 batch (issue #1005), where `title[i]` was paired with `body[i+1]`. There is no second pass and no shared running counter linking two separate lists: the title and body for a given issue are produced and consumed together within one iteration, so they cannot drift.
+
+If you stage the body to a temp file, name it by the finding's **stable identity** (a slug of its `<name / path>`), e.g. `/tmp/cleanup-issue-$slug.md`, NOT by a running counter shared with a separate title loop. The slug binds the body file to the same finding the title is derived from.
+
 Issue body schema (one per finding):
 
 ```markdown
@@ -123,10 +127,19 @@ This is a mechanically-verifiable cleanup: the deletion is correct **iff** the t
 **Labelling rule (HARD):** every emitted issue carries `cleanup-scan` and `ready-for-agent`. The `cleanup-scan` label is the emit/count seam that `collect-state.sh` reads for `cleanup_board_saturated`, so it MUST be present on every issue. Routing to `ready-for-agent` (NOT `needs-triage`) is the deliberate confidence-routing decision (epic #958): the acceptance criterion is self-checking, so no operator triage gate is needed — a `hydra-dev` pickup will only merge if the deletion keeps `npm test` and `tsc` green, and CI is the merge gate.
 
 ```bash
-gh issue create --repo gaberoo322/hydra \
-  --title "cleanup: remove unused export \`foo\` (src/bar.ts)" \
-  --label cleanup-scan --label ready-for-agent \
-  --body-file /tmp/cleanup-issue-N.md
+# Single loop over the filtered findings — render THIS finding's body and create
+# THIS finding's issue together, before moving on. Title and body are both derived
+# from the one $finding object, so they cannot drift (no parallel title/body lists).
+for finding in "${findings[@]}"; do
+  title=$(render_title "$finding")          # e.g. "cleanup: remove unused export `foo` (src/bar.ts)"
+  slug=$(slugify "$finding")                # stable identity, NOT a running counter
+  body_file="/tmp/cleanup-issue-$slug.md"
+  render_body "$finding" > "$body_file"     # body H1 derived from the SAME $finding
+  gh issue create --repo gaberoo322/hydra \
+    --title "$title" \
+    --label cleanup-scan --label ready-for-agent \
+    --body-file "$body_file"
+done
 ```
 
 ### 4. Report (deterministic summary)
@@ -171,6 +184,7 @@ Expected:
 - `knip` runs and the report parses; findings are categorised into files vs exports.
 - The filter drops verifier-core, test-only, entrypoint, and duplicate findings.
 - `--apply` files issues labelled `cleanup-scan` + `ready-for-agent` — each with the deterministic "remove X AND test/tsc green" acceptance criterion.
+- **Title/body pairing (multi-finding regression, issue #1005).** Run the dry-run (or `--apply`) over a scenario with **≥2 findings** and assert that, for **every** emitted issue, the body's H1 (`# cleanup: remove unused <export|file> \`<name / path>\``) names the **same** target as that issue's title — no off-by-one, no rotation across the batch. The dry-run already prints both the title and the rendered body for each finding, so the check is: in a multi-finding run, every printed `(title, body-H1)` pair matches. A failure here means the emit step has regressed back to two index-aligned passes (the #997–#1004 drift); the single render-then-create loop in Step 3 is what guarantees the match.
 - Re-running `--apply` against an already-saturated board (> 10 open `cleanup-scan`) emits nothing and prints the saturation skip.
 - Re-running `--apply` does not double-file a finding that already has an open `cleanup-scan` issue.
 
