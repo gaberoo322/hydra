@@ -29,7 +29,6 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "hydra", "config");
-const HYDRA_ROOT = resolve(process.env.HOME, "hydra");
 const GOALS_FILE = join(CONFIG_PATH, "direction", "goals.md");
 
 /**
@@ -185,32 +184,6 @@ export function summarizeGoalsForPrompt(goals) {
   }
 
   return parts.join("\n");
-}
-
-/**
- * Load app metrics from a JSON file or API endpoint.
- * Checks: {HYDRA_PATH}/metrics/app-metrics.json first,
- * then tries HYDRA_APP_METRICS_URL if set.
- */
-export async function loadAppMetrics() {
-  // Try file-based metrics first
-  const metricsFile = join(HYDRA_ROOT, "metrics", "app-metrics.json");
-  try {
-    const raw = await readFile(metricsFile, "utf-8");
-    return { source: "file", data: JSON.parse(raw), loadedAt: new Date().toISOString() };
-  } catch { /* intentional: file-based metrics may not exist, fall through to API endpoint */ }
-
-  // Try API endpoint
-  const metricsUrl = process.env.HYDRA_APP_METRICS_URL;
-  if (metricsUrl) {
-    try {
-      const response = await fetch(metricsUrl, { signal: AbortSignal.timeout(10000) });
-      const data = await response.json();
-      return { source: "api", url: metricsUrl, data, loadedAt: new Date().toISOString() };
-    } catch (err: any) { console.error(`[ProjectGoals] Failed to fetch app metrics from ${metricsUrl}: ${err.message}`); }
-  }
-
-  return null;
 }
 
 export { GOALS_FILE };
