@@ -281,18 +281,6 @@ export async function incrRevertCount(date: string = utcDateKey()): Promise<numb
   }
 }
 
-/**
- * True when the per-day revert cap has been reached (no more reverts allowed
- * today). Reads the counter without mutating it.
- */
-export async function isRevertCapReached(
-  date: string = utcDateKey(),
-  cap: number = HOLDBACK_MAX_REVERTS_PER_DAY,
-): Promise<boolean> {
-  const count = await getRevertCount(date);
-  return count >= cap;
-}
-
 /** Test-only: clear a day's revert counter. */
 export async function _resetRevertCount(date: string): Promise<void> {
   const r = getRedisConnection();
