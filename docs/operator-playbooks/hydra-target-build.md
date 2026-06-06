@@ -232,6 +232,72 @@ Read `~/hydra/config/agents/skeptic.md`. Challenge:
 
 If rejected, replan narrower.
 
+### 4.5. Design-concept artifact (money-critical only — issue #1056)
+
+Before execute, money-critical Target builds capture a **lightweight
+design-concept artifact** and persist it per-anchor, so a retry on the same
+anchor reuses it instead of rediscovering scope every cycle. This is the
+Target analogue of the Orchestrator's `hydra-grill` design-concept — but
+**deliberately lighter**: a flat 4-field record (scope / modules-touched /
+invariants / rejected-alternatives), NOT the full Q&A loop, NOT a
+draft/approved/stale gate, NOT a tier ladder (epic #1052: selectively
+converge, do not mirror). The pure builder/serializer lives in
+`scripts/target/target-design-concept.ts`; this step is the I/O wrapper.
+
+**Gate on money-critical first — safe-path builds skip this step entirely.**
+`shouldCaptureDesignConcept()` routes on the keystone classifier
+(`classifyTargetRisk`, #1053): if no expected path is money-critical
+(providers / execution / staking / bet-math), there is no artifact to create,
+persist, or diff against — proceed straight to Step 5.
+
+```bash
+# EXPECTED_PATHS is the planner's `scopeBoundary.in` money-critical surface,
+# space- or newline-separated; ANCHOR_REF is anchor.reference (e.g. "issue-1056").
+DC_KEY="hydra:target:design-concept:${ANCHOR_REF}"
+
+CAPTURE=$(node --input-type=module -e '
+  import { shouldCaptureDesignConcept } from "./scripts/target/target-design-concept.ts";
+  const paths = process.argv.slice(1);
+  process.stdout.write(shouldCaptureDesignConcept(paths) ? "yes" : "no");
+' -- $EXPECTED_PATHS)
+
+if [ "$CAPTURE" = "no" ]; then
+  echo "safe-path build — skipping design-concept artifact"
+else
+  # Reuse-on-retry: if a prior attempt persisted one, read it back and reuse.
+  EXISTING=$(docker exec hydra-redis-1 redis-cli GET "$DC_KEY" 2>/dev/null)
+  REUSED=$(node --input-type=module -e '
+    import { parseDesignConcept } from "./scripts/target/target-design-concept.ts";
+    const dc = parseDesignConcept(process.argv[1] || "");
+    process.stdout.write(dc ? JSON.stringify(dc) : "");
+  ' -- "$EXISTING")
+
+  if [ -n "$REUSED" ]; then
+    echo "reusing persisted design-concept for $ANCHOR_REF (retry):"
+    printf '%s\n' "$REUSED" | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); console.log("  scope:", d.scope); console.log("  invariants:", d.invariants.join("; "));'
+    # Fold the reused artifact into the plan you hand the executor role.
+  else
+    # First attempt (or corrupt prior value): the planner authors the four
+    # fields now and persists. Build the input JSON from the plan, then:
+    DC_JSON=$(node --input-type=module -e '
+      import { buildDesignConcept, serializeDesignConcept } from "./scripts/target/target-design-concept.ts";
+      const input = JSON.parse(process.argv[1]);
+      process.stdout.write(serializeDesignConcept(buildDesignConcept(input)));
+    ' -- "$DC_INPUT_JSON")
+    # Persist per-anchor with a 14-day TTL so a stale anchor self-cleans.
+    docker exec hydra-redis-1 redis-cli SET "$DC_KEY" "$DC_JSON" EX 1209600 >/dev/null
+    echo "persisted design-concept for $ANCHOR_REF"
+  fi
+fi
+```
+
+`DC_INPUT_JSON` is the planner-authored
+`{anchorRef, scope, modulesTouched, invariants, rejectedAlternatives}` object
+(`rejectedAlternatives` is `[{alt, why}, ...]`). The Target QA Spec axis
+(#1055) reads the same `hydra:target:design-concept:$ANCHOR_REF` key to diff
+the merged change against the captured intent — that is the artifact's only
+consumer; it never blocks a merge by itself.
+
 ### 5. Execute
 
 Read `~/hydra/config/agents/executor.md` and `~/hydra/config/feedback/to-executor.md`.
@@ -255,7 +321,7 @@ Rules:
 - `vi.mock("server-only", () => ({}))` in tests importing server modules.
 - Read `web/AGENTS.md` — Next.js 16 APIs may differ from training.
 - **Stay in scope.** If you must touch a file outside the Step 3.5 in-scope list, append it to `SCOPE_JUSTIFICATIONS` with a one-line reason before continuing.
-- **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The design-concept artifact (if present at `hydra:design-concept:$ANCHOR`) already carries the issue-relevant terms forward — the co-located read is the residual case for files the artifact didn't anticipate.
+- **Co-located glossary rule.** Treat any `CONTEXT.md` sibling of a file you're editing as required reading before the edit. Use that file's canonical vocabulary in identifiers, variable names, test names, and comments. The money-critical design-concept artifact (if present at `hydra:target:design-concept:$ANCHOR_REF` from Step 4.5) already carries the scope and invariants forward — the co-located read is the residual case for files the artifact didn't anticipate.
 
 ### 6. Verify (NOT an agent)
 ```bash
