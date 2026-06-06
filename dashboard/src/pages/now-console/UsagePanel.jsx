@@ -18,6 +18,13 @@ import {
  *   - cache-hit efficiency (cacheHitRatioLast5h)
  *
  * No dollar metric anywhere — acceptance criterion #3.
+ *
+ * Source badge (issue #1083): `percentLast5h`/`percentLast7d` are now backed by
+ * the authoritative OAuth `/api/oauth/usage` meter when it reads successfully.
+ * `usage.usageSource` reports `"oauth"` (ground truth) vs `"estimate"` (the
+ * transcript+calibration fallback used when the meter read fails / the token
+ * expired). The badge surfaces which one is live so the operator can tell a
+ * ground-truth number from the ~2x-wrong fallback guess during an outage.
  */
 
 const PACE_STYLE = {
@@ -57,6 +64,12 @@ export default function UsagePanel() {
   const pace = PACE_STYLE[paceVerdict] ?? PACE_STYLE.on;
   const cacheHit = Number(usage.cacheHitRatioLast5h ?? 0);
   const emergencyStop = Boolean(usage.emergencyStop);
+  // Source of the headline percents (issue #1083): "oauth" = authoritative
+  // meter, "estimate" = transcript+calibration fallback (meter read failed /
+  // token expired). Default to "estimate" defensively for an older snapshot
+  // shape that predates the field.
+  const usageSource = usage.usageSource === "oauth" ? "oauth" : "estimate";
+  const oauthError = usage.oauthError ?? null;
 
   const attribution = flattenAttribution(usage.bySkillByModel).slice(0, 6);
 
@@ -66,7 +79,28 @@ export default function UsagePanel() {
       className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-4"
     >
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-200">Quota &amp; pacing</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-zinc-200">Quota &amp; pacing</h2>
+          {usageSource === "oauth" ? (
+            <span
+              data-testid="usage-source"
+              data-source="oauth"
+              title="Headline backed by the authoritative OAuth /usage meter"
+              className="text-[10px] rounded px-1.5 py-0.5 bg-emerald-500/10 text-emerald-300 border border-emerald-500/30"
+            >
+              live meter
+            </span>
+          ) : (
+            <span
+              data-testid="usage-source"
+              data-source="estimate"
+              title={`OAuth meter unavailable${oauthError ? ` (${oauthError})` : ""}; showing transcript estimate (may read ~2x off)`}
+              className="text-[10px] rounded px-1.5 py-0.5 bg-amber-500/10 text-amber-300 border border-amber-500/30"
+            >
+              estimate (fallback)
+            </span>
+          )}
+        </div>
         {emergencyStop && (
           <span
             data-testid="emergency-stop-flag"

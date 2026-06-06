@@ -75,7 +75,22 @@ export type HydraErrorCode =
   | "ov-service-down" // the request never reached OV (DNS/ECONNREFUSED/network)
   | "ov-non-2xx" // OV answered but with a non-2xx status (!res.ok)
   | "ov-malformed-json" // a 2xx body failed to JSON.parse
-  | "ov-timeout"; // the request exceeded its AbortSignal timeout and was aborted
+  | "ov-timeout" // the request exceeded its AbortSignal timeout and was aborted
+  // OAuth Usage Adapter (src/cost/oauth-usage.ts) result-object codes (issue
+  // #1083). The fifth boundary Seam — sibling to the OpenViking Request Adapter,
+  // also over fetch(), reading the authoritative server-side subscription-usage
+  // meter that rebases the Subscription Usage Tracker's headline + 5h
+  // emergencyStop. Same never-throw discipline: these literals appear only on
+  // the failure arm of the OAuthUsageResult `{ ok:false; code }`. CRITICAL: a
+  // failure code makes the tracker FALL BACK to its transcript estimate — it is
+  // NEVER read as 0% utilization (which would wrongly unblock dispatch during an
+  // outage). No thrown subclass — the adapter returns, never raises.
+  | "oauth-usage-no-credentials" // no credentials file / no claudeAiOauth.accessToken
+  | "oauth-usage-token-expired" // the endpoint reported 401/403 (token expired/revoked)
+  | "oauth-usage-non-2xx" // the endpoint answered with a non-2xx status other than 401/403
+  | "oauth-usage-parse" // a 2xx body failed JSON.parse OR was missing a usable window
+  | "oauth-usage-timeout" // the request exceeded its AbortSignal timeout and was aborted
+  | "oauth-usage-network"; // transport failed (DNS/ECONNREFUSED/offline)
 
 /**
  * Base class for all Hydra typed errors. Carries a stable `code` and sets
