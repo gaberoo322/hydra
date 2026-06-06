@@ -12,7 +12,6 @@ export const redisKeys = {
   // Cycles
   // ---------------------------------------------------------------------------
   cycleActive: () => "hydra:cycle:active",
-  cycleLast: () => "hydra:cycle:last",
   cycle: (id: string) => `hydra:cycle:${id}`,
   // Index of cycle IDs scored by Date.now() — written by the autopilot
   // cycle-record endpoint (issue #430). /api/cycle/history continues to

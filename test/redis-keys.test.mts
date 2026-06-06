@@ -19,7 +19,6 @@ describe("redisKeys naming convention", () => {
   // Generators with no arguments (static keys)
   const staticGenerators: [string, () => string][] = [
     ["cycleActive", redisKeys.cycleActive],
-    ["cycleLast", redisKeys.cycleLast],
     ["depsCompleted", redisKeys.depsCompleted],
     ["depsIndex", redisKeys.depsIndex],
     ["anchorWorkQueue", redisKeys.anchorWorkQueue],
@@ -93,7 +92,6 @@ describe("redisKeys uniqueness", () => {
     const seen = new Map<string, string>();
     const staticKeys: [string, string][] = [
       ["cycleActive", redisKeys.cycleActive()],
-      ["cycleLast", redisKeys.cycleLast()],
       ["depsCompleted", redisKeys.depsCompleted()],
       ["depsIndex", redisKeys.depsIndex()],
       ["anchorWorkQueue", redisKeys.anchorWorkQueue()],
@@ -143,7 +141,6 @@ describe("redisKeys uniqueness", () => {
 describe("redisKeys snapshot", () => {
   test("static keys match expected values", () => {
     assert.equal(redisKeys.cycleActive(), "hydra:cycle:active");
-    assert.equal(redisKeys.cycleLast(), "hydra:cycle:last");
     assert.equal(redisKeys.anchorWorkQueue(), "hydra:anchors:work-queue");
     assert.equal(redisKeys.anchorProcessing(), "hydra:anchors:processing");
     assert.equal(redisKeys.anchorPriorFailures(), "hydra:anchors:prior-failures");

@@ -6,12 +6,6 @@
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
 
-/** Set the active cycle ID. */
-export async function setCycleActive(cycleId: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.cycleActive(), cycleId);
-}
-
 /** Read the active cycle ID, or null if none. */
 export async function getActiveCycleId(): Promise<string | null> {
   const r = getRedisConnection();
@@ -55,18 +49,6 @@ export async function listCycleIds(): Promise<string[]> {
   return ids;
 }
 
-/** Clear the active cycle. */
-export async function clearCycleActive(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.cycleActive());
-}
-
-/** Set the last completed cycle ID. */
-export async function setCycleLast(cycleId: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.cycleLast(), cycleId);
-}
-
 /** Init cycle hash fields and set TTL. */
 export async function initCycleHash(
   cycleId: string,
@@ -85,12 +67,6 @@ export async function updateCycleHash(
 ): Promise<void> {
   const r = getRedisConnection();
   await r.hset(redisKeys.cycle(cycleId), ...Object.entries(fields).flat());
-}
-
-/** Refresh cycle hash TTL. */
-export async function refreshCycleTTL(cycleId: string, ttlSeconds: number): Promise<void> {
-  const r = getRedisConnection();
-  await r.expire(redisKeys.cycle(cycleId), ttlSeconds);
 }
 
 /** Register a cycle source (codex/claude) with TTL. */
