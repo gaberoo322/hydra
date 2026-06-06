@@ -93,16 +93,6 @@ export async function removeFromBacklogLane(lane: string, id: string): Promise<v
   await r.zrem(redisKeys.backlogLane(lane), id);
 }
 
-/** Execute a Lua script (for atomic backlog operations). */
-export async function evalScript(
-  script: string,
-  numKeys: number,
-  ...args: (string | number)[]
-): Promise<any> {
-  const r = getRedisConnection();
-  return r.eval(script, numKeys, ...args);
-}
-
 // ---------------------------------------------------------------------------
 // Claim-next-queued Lua claim — script body owned by caller (domain logic),
 // the three backlog keys it needs are owned here.
