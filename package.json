@@ -16,7 +16,8 @@
     "github-seam-check": "npx tsx scripts/ci/github-seam-check.ts",
     "host-probe-seam-check": "npx tsx scripts/ci/host-probe-seam-check.ts",
     "openviking-seam-check": "npx tsx scripts/ci/openviking-seam-check.ts",
-    "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts"
+    "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts",
+    "lockfile-lint": "lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity"
   },
   "author": "Gabe",
   "license": "AGPL-3.0-only",
@@ -30,6 +31,7 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "knip": "^6.15.0",
+    "lockfile-lint": "5.0.0",
     "pngjs": "^7.0.0",
     "typescript": "^6.0.2"
   }
