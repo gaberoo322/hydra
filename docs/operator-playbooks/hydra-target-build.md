@@ -277,6 +277,44 @@ Fail → fix → re-verify. After 2 failed fixes, abandon branch.
 
 For orchestrator changes (~/hydra/): `node --check src/<file>.ts` + `npm test` + restart service.
 
+### 6.6. Money-critical mutation gate (issue #1057 — diff-scoped)
+
+After the test/typecheck gate passes (Step 6), the changed-file set runs through
+the **money-critical mutation gate**. This is the Target analogue of the
+Orchestrator's diff-scoped mutation gate, with two deliberate differences from
+epic #1052:
+
+- **Diff-scoped to money-critical paths only.** The gate mutates ONLY the
+  changed files that `classifyTargetRisk()` (the keystone classifier from
+  #1053) flags as money-critical — provider integrations, execution, staking,
+  bet-math. A green-but-empty suite over those paths costs real money; a
+  green-but-empty suite over UI/docs/config does not.
+- **Safe-path PRs skip mutation entirely.** When no changed file is
+  money-critical, the gate exits 0 with a `skipped` status and never spins up
+  the runner — keeping the single hydra-server-betting runner fast for the
+  common UI/docs change.
+- **A single kill-floor — NOT a tier ladder.** Either the changed
+  money-critical files clear the one floor or the build fails. Mirrors the
+  classifier's own two-level boolean (money-critical vs. safe).
+
+Invoke it from the target worktree, feeding it the PR diff against the merge
+base:
+
+```bash
+# CHANGED_FILES is the newline-separated diff against origin/main's merge base.
+CHANGED_FILES=$(cd "$TARGET_WT" && git diff --name-only "$(git merge-base origin/main HEAD)"...HEAD)
+CHANGED_FILES="$CHANGED_FILES" \
+TARGET_PROJECT_DIR="$TARGET_WT/web" \
+  npx tsx scripts/target/mutation-check.ts
+```
+
+Exit codes: 0 = pass (or skipped/neutral), 2 = kill-rate below the floor (block
+merge), 1 = usage/unexpected error. Tune the floor with
+`TARGET_MUTATION_KILL_FLOOR` (default 60 — higher than the Orchestrator base
+because every file the gate reaches handles real money) and the time budget
+with `MUTATION_TIME_BUDGET_MS`. A `[quick-fix]` tag in `PR_BODY` writes a
+neutral status and exits 0, mirroring the Orchestrator gate's exemption.
+
 ### 6.5. Glossary / ADR gate (per target `docs/agents/domain.md`)
 
 Before opening the code PR (or pushing the feature branch), answer the WRITE protocol's two yes/no questions documented in `~/hydra-betting/docs/agents/domain.md`. Both answers go in the code PR body (or merge commit body, for direct-to-main merges) **even when both are "none"** — the declaration is the audit trail.
