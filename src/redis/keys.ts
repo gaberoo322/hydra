@@ -319,12 +319,6 @@ export const redisKeys = {
     `hydra:plans:cache:miss-reasons:${isoDate}`,
 
   // ---------------------------------------------------------------------------
-  // Adversarial Validation
-  // ---------------------------------------------------------------------------
-  adversarialTracking: () => "hydra:adversarial:tracking",
-  adversarialStats: () => "hydra:adversarial:stats",
-
-  // ---------------------------------------------------------------------------
   // Pattern Detector
   // ---------------------------------------------------------------------------
   alerts: () => "hydra:alerts",
