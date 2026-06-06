@@ -359,6 +359,25 @@ describe("assessHealth — per-rule firing", () => {
     assert.ok(d);
     assert.equal(d!.severity, "info");
   });
+
+  test("OV search failed → warning intelligence (and not the empty info rule)", () => {
+    const a = assessHealth(
+      clone((s) => (s.ovSearch = { status: "failed", latencyMs: 1471, resultCount: 0 })),
+    );
+    const failing = a.diagnostics.filter((x) => x.what === "OV search failing");
+    assert.equal(failing.length, 1, "exactly one OV-search-failing diagnostic");
+    const d = failing[0]!;
+    assert.equal(d.severity, "warning");
+    assert.equal(d.component, "intelligence");
+    assert.equal(d.autoRecovery, false);
+    // The failed probe must NOT also fire the empty-index info rule (mutually exclusive).
+    assert.ok(
+      !a.diagnostics.some((x) => x.what === "OV search empty"),
+      "must not fire the empty-index info rule on a failed probe",
+    );
+    // A warning with no higher-severity diagnostic folds top-level status to degraded.
+    assert.equal(a.status, "degraded");
+  });
 });
 
 // ---------------------------------------------------------------------------
