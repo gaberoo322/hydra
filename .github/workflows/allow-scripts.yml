@@ -26,6 +26,12 @@ name: allow-scripts
 # workflow that can land as a normal (Tier 2/below) change. It pairs with the
 # sibling lockfile-lint workflow: lockfile-lint guarantees *what* gets installed;
 # allow-scripts guarantees *what code runs* during that install.
+#
+# The gate covers BOTH npm manifests in the repo — the root orchestrator
+# manifest (`package.json`) and the dashboard manifest (`dashboard/package.json`),
+# each with its own lockfile and its own committed `lavamoat.allowScripts` block.
+# They run as independent jobs so a dirty allowlist in either tree is reported
+# (and fails) on its own. Adding a manifest? Add a matching job here.
 
 on:
   pull_request:
@@ -64,3 +70,28 @@ jobs:
             exit 1
           fi
           echo "Install-script allowlist is up to date — no dependency runs unapproved lifecycle scripts."
+
+  allow-scripts-dashboard:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconcile install-script allowlist (dashboard)
+        working-directory: dashboard
+        run: |
+          # Same gate as the root job, scoped to the dashboard manifest. The
+          # dashboard has its own package.json + package-lock.json + committed
+          # `lavamoat.allowScripts` block; `auto` reconciles against that lockfile.
+          npx --yes @lavamoat/allow-scripts@5.0.2 auto
+
+      - name: Fail if the dashboard allowlist is out of date
+        working-directory: dashboard
+        run: |
+          if ! git diff --quiet -- package.json; then
+            echo "::error::A dependency with an install/postinstall lifecycle script is not reflected in dashboard/package.json 'lavamoat.allowScripts'."
+            echo "A new (possibly transitive) dashboard dependency wants to run code at install time. Review it, then run 'npm run allow-scripts -- auto' inside dashboard/ and commit the package.json change to consciously allow (or, by removing the dep, disallow) it."
+            echo "----- dashboard/package.json diff -----"
+            git --no-pager diff -- package.json
+            exit 1
+          fi
+          echo "Dashboard install-script allowlist is up to date — no dependency runs unapproved lifecycle scripts."
