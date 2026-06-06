@@ -1,0 +1,66 @@
+name: allow-scripts
+
+# Supply-chain install-script gate (issue #1043 / tool-scout: deterministic-builds).
+#
+# @lavamoat/allow-scripts replaces npm's implicit "run every dependency's
+# install/postinstall lifecycle script" behaviour with an explicit allowlist
+# committed to package.json (`lavamoat.allowScripts`). With an empty allowlist,
+# no dependency may execute arbitrary code at install time — so `npm ci`
+# produces the same result on every runner and on the deploy host, regardless
+# of what a transitive dep decided to do during install.
+#
+# This workflow runs `allow-scripts auto`, which re-derives the set of
+# dependencies that *have* lifecycle scripts and reconciles it against the
+# committed allowlist. If a newly-introduced (transitive) dependency carries a
+# lifecycle script that is not reflected in the committed `lavamoat.allowScripts`
+# block, `auto` rewrites package.json — and this job fails on the resulting dirty
+# tree. That turns "a dep bump silently pulled in a new install-time script" into
+# a hard, reviewable CI failure before merge: the operator/agent must consciously
+# add the dependency to the allowlist (and approve that it should run code at
+# install time) for the gate to go green again.
+#
+# This lives in its own workflow file — deliberately NOT inside ci.yml — because
+# ci.yml is part of the Verifier Core (ADR-0001/ADR-0015: "the gate that gates
+# the gate", operator-only / Tier-0 exact-match). An install-script auditor is a
+# *new verification*, not a change to the merge gate, so it belongs in a sibling
+# workflow that can land as a normal (Tier 2/below) change. It pairs with the
+# sibling lockfile-lint workflow: lockfile-lint guarantees *what* gets installed;
+# allow-scripts guarantees *what code runs* during that install.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: allow-scripts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  allow-scripts:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconcile install-script allowlist
+        run: |
+          # `auto` re-derives the lifecycle-script policy from the lockfile and
+          # rewrites package.json only if it disagrees with the committed
+          # allowlist. No install, no network beyond resolving the CLI — the same
+          # committed inputs always produce the same answer.
+          npx --yes @lavamoat/allow-scripts@5.0.2 auto
+
+      - name: Fail if the allowlist is out of date
+        run: |
+          if ! git diff --quiet -- package.json; then
+            echo "::error::A dependency with an install/postinstall lifecycle script is not reflected in package.json 'lavamoat.allowScripts'."
+            echo "A new (possibly transitive) dependency wants to run code at install time. Review it, then run 'npm run allow-scripts -- auto' locally and commit the package.json change to consciously allow (or, by removing the dep, disallow) it."
+            echo "----- package.json diff -----"
+            git --no-pager diff -- package.json
+            exit 1
+          fi
+          echo "Install-script allowlist is up to date — no dependency runs unapproved lifecycle scripts."

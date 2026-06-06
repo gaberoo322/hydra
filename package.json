@@ -17,10 +17,14 @@
     "host-probe-seam-check": "npx tsx scripts/ci/host-probe-seam-check.ts",
     "openviking-seam-check": "npx tsx scripts/ci/openviking-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts",
-    "lockfile-lint": "lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity"
+    "lockfile-lint": "lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity",
+    "allow-scripts": "allow-scripts"
   },
   "author": "Gabe",
   "license": "AGPL-3.0-only",
+  "lavamoat": {
+    "allowScripts": {}
+  },
   "dependencies": {
     "@sentry/node": "^10.48.0",
     "express": "^5.2.1",
@@ -29,6 +33,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@lavamoat/allow-scripts": "5.0.2",
     "@types/express": "^5.0.6",
     "knip": "^6.15.0",
     "lockfile-lint": "5.0.0",
