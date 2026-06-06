@@ -1116,6 +1116,16 @@ export interface UsageEligibility {
     emergencyStop: boolean;
     pacingShed: boolean;
     calibrated: boolean;
+    /**
+     * Operator-only **Autopilot pause** flag (issue #988). When true, the
+     * autopilot is paused: the launcher (pace-gate.sh) skips spawning a run
+     * and the brain (decide.py) drains (no new dispatches). It forces
+     * `allow=false` like `emergencyStop`, but is an INDEPENDENT, durable,
+     * operator-held flag — not a quota signal. Defaults to `false`; the value
+     * is overlaid at the route/collector seam (NOT inside the pure
+     * `projectEligibility`) by {@link overlayPauseEligibility}.
+     */
+    paused: boolean;
   };
   /**
    * Position of total burn relative to the **Pacing Curve** for this instant
@@ -1228,11 +1238,46 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
       emergencyStop: snapshot.emergencyStop,
       pacingShed,
       calibrated: snapshot.calibrated,
+      // Default not-paused. The pause flag is a Redis read that does NOT
+      // belong inside this pure projection — it is overlaid at the
+      // route/collector seam via overlayPauseEligibility().
+      paused: false,
     },
     paceState,
     targetPercent,
     sinceResetPercent,
     anchor: snapshot.weeklyResetAnchor,
     usage: snapshot,
+  };
+}
+
+/**
+ * Overlay the operator-only **Autopilot pause** flag (issue #988) onto an
+ * eligibility projection, at the caller/route seam.
+ *
+ * `projectEligibility` is a PURE function of its snapshot (no IO, no
+ * `Date.now()`) — exactly as the emergency-brake is read at the
+ * collector/health seam and never folded into the projection. The pause flag
+ * is a Redis read, so the read happens in the caller (the
+ * `/api/usage/eligibility` route, `autopilot-idle`, `collect-state.sh` via the
+ * route) and the boolean is overlaid here, preserving the documented purity
+ * contract while satisfying AC#3/AC#7 ("eligibility surfaces paused").
+ *
+ * When `paused` is true this returns a new eligibility object with
+ * `allow=false` and `reasons.paused=true`, so EVERY dispatch class is blocked
+ * for the turn (the same hard-stop path `emergencyStop` rides) — the autopilot
+ * drains. When `paused` is false the input is returned UNCHANGED (no spurious
+ * mutation): pause never *enables* anything a quota stop disabled. Pure: no IO,
+ * no mutation of the input object.
+ */
+export function overlayPauseEligibility(
+  eligibility: UsageEligibility,
+  paused: boolean,
+): UsageEligibility {
+  if (!paused) return eligibility;
+  return {
+    ...eligibility,
+    allow: false,
+    reasons: { ...eligibility.reasons, paused: true },
   };
 }

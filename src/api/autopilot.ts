@@ -18,18 +18,25 @@
  */
 
 import { Router } from "express";
+import { STREAMS } from "../event-bus.ts";
 import {
   CycleRecordBodySchema,
   RunStartBodySchema,
   RunEndBodySchema,
   TurnBodySchema,
   EmergencyBrakeBodySchema,
+  AutopilotPauseBodySchema,
 } from "../autopilot/schemas.ts";
 import {
   getEmergencyBrake,
   setEmergencyBrake,
   clearEmergencyBrake,
 } from "../redis/emergency-brake.ts";
+import {
+  getAutopilotPaused,
+  setAutopilotPaused,
+  clearAutopilotPaused,
+} from "../redis/autopilot-pause.ts";
 import {
   recordCycle,
   startRun,
@@ -63,8 +70,30 @@ import {
  */
 export { runJournalctl, fetchTurnsWithJoins, sanitizeIso };
 
-export function createAutopilotRouter() {
+/**
+ * @param eventBus - optional; when provided, pause/resume emit a
+ *   `hydra:notifications` event (issue #988 AC#5). The router stays usable
+ *   without it (tests construct it bare) — a missing bus degrades to a no-op
+ *   publish, never a throw.
+ */
+export function createAutopilotRouter(eventBus?: any) {
   const router = Router();
+
+  // Best-effort bus publish — never throws into a route handler. AC#5 wants a
+  // pause/resume event, but the flag write is the source of truth; a publish
+  // failure (or absent bus in a test) must not fail the operator's POST.
+  async function publishPauseEvent(type: string, payload: unknown): Promise<void> {
+    if (!eventBus || typeof eventBus.publish !== "function") return;
+    try {
+      await eventBus.publish(STREAMS.NOTIFICATIONS, {
+        type,
+        source: "autopilot-pause",
+        payload,
+      });
+    } catch (err: any) {
+      console.error(`[autopilot] pause event publish failed: ${err?.message || err}`);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // POST /autopilot/cycle-record — one per code-writing subagent dispatch.
@@ -357,6 +386,50 @@ export function createAutopilotRouter() {
       return res.json({ engaged: false });
     } catch (err: any) {
       console.error(`[autopilot] emergency-brake write failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Autopilot pause (issue #988) — the operator-only durable autopilot pause.
+  //
+  // This router IS the sole write path for the pause flag. The autopilot
+  // (decide.py / collect-state.sh / pace-gate.sh) only READS it (folded into
+  // /api/usage/eligibility); there is no engage/disengage *action type*, so
+  // the autopilot has no structural way to set or clear it. Setting it pauses
+  // launch+dispatch with a DRAIN (in-flight subagents finish their atomic
+  // unit); clearing it resumes. INDEPENDENT of the emergency-brake (merge-
+  // only) — the two flags compose.
+  // -------------------------------------------------------------------------
+
+  // GET /autopilot/paused — read current pause state.
+  router.get("/autopilot/paused", async (_req, res) => {
+    try {
+      const state = await getAutopilotPaused();
+      return res.json(state);
+    } catch (err: any) {
+      console.error(`[autopilot] paused read failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  // POST /autopilot/paused — pause/resume. Operator-only.
+  router.post("/autopilot/paused", async (req, res) => {
+    const parsed = AutopilotPauseBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
+    }
+    try {
+      if (parsed.data.paused) {
+        const state = await setAutopilotPaused();
+        await publishPauseEvent("autopilot-paused", { paused: true, since: state.since });
+        return res.json(state);
+      }
+      await clearAutopilotPaused();
+      await publishPauseEvent("autopilot-resumed", { paused: false });
+      return res.json({ paused: false });
+    } catch (err: any) {
+      console.error(`[autopilot] paused write failed: ${err?.message || err}`);
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });

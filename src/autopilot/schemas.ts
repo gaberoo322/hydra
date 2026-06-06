@@ -131,3 +131,26 @@ export const EmergencyBrakeBodySchema = z
   });
 
 export type EmergencyBrakeBody = z.infer<typeof EmergencyBrakeBodySchema>;
+
+// ---------------------------------------------------------------------------
+// Autopilot pause — POST /api/autopilot/paused (issue #988)
+// ---------------------------------------------------------------------------
+
+/**
+ * Operator-only autopilot-pause toggle body. NEW endpoint, so strict (per the
+ * "For NEW endpoints, follow queue.ts's strict pattern" note above): an
+ * unknown field is a caller bug we want surfaced, not silently ignored.
+ *
+ *   paused: true  => pause autopilot (launcher skips, brain drains — no new
+ *                    dispatches; in-flight subagents are untouched).
+ *   paused: false => resume autopilot.
+ *
+ * No attribution field (unlike the emergency-brake's `engagedBy`): the pause
+ * blob is `{paused, since}` only, by design (issue #988).
+ */
+export const AutopilotPauseBodySchema = z
+  .strictObject({
+    paused: z.boolean({ message: "paused must be a boolean" }),
+  });
+
+export type AutopilotPauseBody = z.infer<typeof AutopilotPauseBodySchema>;

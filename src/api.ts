@@ -87,7 +87,7 @@ function createApi(eventBus) {
   api.use(createObservabilityRouter());
   api.use(createLearningRouter());
   api.use(createAnchorRouter());
-  api.use(createAutopilotRouter());
+  api.use(createAutopilotRouter(eventBus));
   api.use(createAgentsRouter());
   api.use(createScoutRouter());
   api.use(createUsageRouter());

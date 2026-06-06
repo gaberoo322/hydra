@@ -208,6 +208,18 @@ export const redisKeys = {
   // (default-off).
   emergencyBrake: () => "hydra:autopilot:emergency-brake",
 
+  // Issue #988: operator-only autopilot pause. A persistent flag (no TTL — it
+  // must be held until the operator explicitly clears it) that, while set,
+  // pauses hydra-autopilot with a DRAIN: the launcher (pace-gate.sh) skips
+  // spawning a new run and the brain (decide.py) emits no new dispatches,
+  // while in-flight subagents finish their atomic unit. INDEPENDENT of and
+  // composes with the emergency-brake (which is merge-only). The SOLE write
+  // path is the operator-facing API route (src/api/autopilot.ts); decide.py
+  // and collect-state.sh only READ it (folded into /api/usage/eligibility).
+  // Stored as a JSON blob `{paused, since}` (no attribution). Absent =>
+  // not paused (default-off, fail-safe to running).
+  autopilotPaused: () => "hydra:autopilot:paused",
+
   // Issue #673 budget-threshold idempotency sentinel removed in #703 along
   // with the dead budget-threshold bridge that wrote it. The bridge polled
   // `hydra:scheduler:daily-spend` (no live writer) and never emitted.

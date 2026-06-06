@@ -41,6 +41,7 @@ import {
   getSchedulerStateRaw,
   getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
 } from "../redis/scheduler.ts";
+import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (issue #725: slowed from 2min; watchdog staleness threshold is 15min = 3x margin)
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
@@ -422,8 +423,23 @@ async function getStatus() {
   // so existing consumers that read `mergeRate` keep getting a number.
   const mergeRate = rolling.mergeRate ?? lifetimeMergeRate;
 
+  // Issue #988: operator-only autopilot-pause state. A deliberate pause is a
+  // HEALTHY/expected state — surfaced so hydra-doctor / the watchdog can
+  // distinguish "operator paused autopilot on purpose" from "scheduler
+  // wedged". Fail-safe to not-paused if Redis is unreachable; advisory only.
+  let autopilotPause: { paused: boolean; since?: number } = { paused: false };
+  try {
+    autopilotPause = await getAutopilotPaused();
+  } catch (err: any) {
+    console.error(`[Heartbeat] getStatus autopilot-pause read failed: ${err?.message ?? err}`);
+  }
+
   return {
     running: state.running,
+    // Issue #988: autopilot-pause state. `{paused:false}` by default;
+    // `{paused:true, since}` while the operator has paused autopilot. A
+    // HEALTHY/expected state — NOT degraded.
+    autopilotPause,
     // Issue #388: surface why the scheduler is stopped so consumers
     // (especially the watchdog) can distinguish operator-deliberate stops
     // from self-stops. `null` when running, or when start() was the last
