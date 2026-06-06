@@ -269,15 +269,16 @@ async function fetchSubagentDispatches(
 }
 
 /**
- * Pure helper — exported for tests. Projects a subagent-dispatch row into the
- * unified `Dispatch` shape.
+ * Pure helper. Projects a subagent-dispatch row into the unified `Dispatch`
+ * shape. Called internally by `fetchSubagentDispatches`; no external importers
+ * (the `export` was removed in #1073 as a dead-export cleanup).
  *
  * The unified row is keyed on `id`; we use the harness `sessionId` as that id
  * so the dedupe-by-id contract in `mergeDispatches` works across sources. The
  * `classLabel` is the dispatched `skill` (e.g. "hydra-dev") so the dashboard
  * renders the same label it shows for an autopilot dispatch of that skill.
  */
-export function projectSubagentDispatchRow(row: SubagentDispatch): Dispatch {
+function projectSubagentDispatchRow(row: SubagentDispatch): Dispatch {
   const dispatch: Dispatch = {
     id: row.sessionId,
     classLabel: row.skill,
