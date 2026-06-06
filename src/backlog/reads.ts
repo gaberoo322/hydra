@@ -89,12 +89,3 @@ export async function getCurrentMilestoneProgress() {
     return null;
   }
 }
-
-/**
- * Close the Redis connection (for tests/cleanup). No-op: Redis connection
- * is managed by the shared src/redis/connection.ts singleton.
- */
-export async function closeBacklogRedis() {
-  // intentional: kept as a no-op so call sites that previously expected a
-  // teardown hook don't break — the singleton manages connection lifetime.
-}
