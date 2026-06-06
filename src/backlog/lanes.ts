@@ -149,31 +149,6 @@ export async function blockByTitle(title: string, reason: string) {
 }
 
 /**
- * Block an item by ID. Idempotent (returns false if already blocked) and
- * scans every lane (covers triage / done that blockByTitle skips).
- */
-export async function blockById(itemId: any, reason: string) {
-  const item = await getItem(itemId);
-  if (!item) return false;
-  if (item.lane === "blocked") return false;
-
-  for (const lane of LANES) {
-    await removeFromBacklogLane(lane, itemId);
-  }
-
-  item.meta = {
-    ...item.meta,
-    blockedAt: new Date().toISOString().split("T")[0],
-    blockedReason: reason,
-  };
-  applyLaneTransition(item, "blocked");
-  await saveItem(item);
-  await addToBacklogLane("blocked", Date.now(), itemId);
-  console.log(`[Backlog] Blocked item "${item.title}" (${itemId}): ${reason}`);
-  return true;
-}
-
-/**
  * Remove a failed/abandoned item from In Progress back to Backlog.
  */
 export async function returnToBacklog(title: string, reason: string) {
