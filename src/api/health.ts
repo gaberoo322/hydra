@@ -32,7 +32,7 @@ import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-reque
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
-import { parseProbes, assessHealth } from "../health-diagnostics.ts";
+import { parseProbes, assessHealth, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "../health-diagnostics.ts";
 import { gitExec } from "../github/git.ts";
 import { isGhFailure } from "../github/exec.ts";
 // Issue #939: Host-Probe Adapter — typed, never-throw disk/mem/service-status
@@ -229,14 +229,16 @@ export function createHealthRouter(eventBus: any) {
       /* 13 */ countReflectionKeys(),
       /* 14 */ (async () => {
         // Issue #954: OV search probe via the adapter (resolves OPENVIKING_URL +
-        // auth headers + 3000ms timeout + JSON unwrap) — no hardcoded
-        // localhost:1933, no inline X-Api-Key. Never throws.
+        // auth headers + timeout + JSON unwrap) — no hardcoded localhost:1933,
+        // no inline X-Api-Key. Never throws.
+        // Issue #1032: timeout raised to OV_SEARCH_PROBE_TIMEOUT_MS (the old
+        // 3000ms was tighter than even the real search path and false-negatived
+        // `failed` against the Ollama-backed embedding latency), and the
+        // result→snapshot mapping moved to the pure, unit-tested
+        // `classifyOvSearchProbe` so timeout vs real-failure is testable.
         const start = Date.now();
-        const result = await ovPostJson<any>("/api/v1/search/find", { query: "system health", limit: 3 }, { timeout: 3000 });
-        const lat = Date.now() - start;
-        if (isOvFailure(result)) return { status: "failed", latencyMs: result.code === "ov-non-2xx" ? lat : null, resultCount: 0 };
-        const rs = result.data?.result || {};
-        return { status: "running", latencyMs: lat, resultCount: (rs.memories?.length || 0) + (rs.resources?.length || 0) + (rs.skills?.length || 0) };
+        const result = await ovPostJson<any>("/api/v1/search/find", { query: "system health", limit: 3 }, { timeout: OV_SEARCH_PROBE_TIMEOUT_MS });
+        return classifyOvSearchProbe(result, Date.now() - start);
       })(),
       /* 15 */ (async () => {
         try {
