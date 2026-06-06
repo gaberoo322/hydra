@@ -182,10 +182,24 @@ export interface UsageSnapshot {
    */
   pacingState: "under" | "on" | "over";
   /**
-   * True only when calibrated AND percentLast5h >= 90. Future PR wires
-   * this to skip the autopilot tick entirely.
+   * True only when calibrated AND percentLast5h >= 90. Wired to
+   * `projectEligibility` (allow=false), so it skips the autopilot tick
+   * entirely — every dispatch class is blocked while it holds.
    */
   emergencyStop: boolean;
+  /**
+   * Weekly analogue of {@link emergencyStop}: true only when calibrated AND
+   * `percentSinceReset >= 90` — i.e. ≥90% of the weekly quota has been burned
+   * since the current **Weekly Reset Anchor** boundary. Gates `allow=false`
+   * in `projectEligibility` exactly like `emergencyStop`, blocking ALL
+   * dispatch classes (not just the sheddable ones) until the weekly window
+   * resets. Uses the reset-aligned `percentSinceReset` (NOT the rolling
+   * `percentLast7d`) because that is what "90% of the weekly limit" means
+   * against the interactive `/usage` view. Stays false whenever the Weekly
+   * Reset Anchor is unset (percentSinceReset is then 0) or the quota is
+   * uncalibrated — mirroring the all-or-nothing calibration discipline.
+   */
+  weeklyEmergencyStop: boolean;
   /** True only when both quota env vars are set to positive values. */
   calibrated: boolean;
   /**
@@ -326,6 +340,16 @@ export function getWeeklyResetAnchorMs(): number | null {
  * Anchor**. The ~8% gap below 1.0 is the **Operator Reserve** (CONTEXT.md).
  */
 export const DEFAULT_WEEKLY_PACE_CEILING = 0.92;
+
+/**
+ * Hard-stop threshold (in % of quota) shared by the 5-hour `emergencyStop` and
+ * the weekly `weeklyEmergencyStop`. At or above this percentage the
+ * corresponding window is considered exhausted enough to block ALL autopilot
+ * dispatch (via `projectEligibility` → allow=false), leaving the ~10% headroom
+ * as **Operator Reserve** for whatever the operator dispatches by hand. Both
+ * windows share the one constant so the two caps stay symmetric.
+ */
+export const EMERGENCY_STOP_PERCENT = 90;
 
 /**
  * Tolerance band (in percentage points of weekly quota) around the **Pacing
@@ -833,7 +857,7 @@ async function scanUsage(
     if (projectedWeeklyPercent > 100) pacingState = "over";
     else if (projectedWeeklyPercent >= 80) pacingState = "on";
   }
-  const emergencyStop = calibrated && percentLast5h >= 90;
+  const emergencyStop = calibrated && percentLast5h >= EMERGENCY_STOP_PERCENT;
 
   const weightedTotal = (acc: Record<ModelFamily, TokenBreakdown>): number =>
     MODEL_FAMILIES.reduce((sum, f) => sum + acc[f].total * familyWeight(f, weights), 0);
@@ -905,6 +929,12 @@ async function scanUsage(
     }
   }
 
+  // Weekly hard-stop (the reset-aligned analogue of the 5h `emergencyStop`).
+  // Computed here, AFTER `percentSinceReset` is finalised against the
+  // effective Weekly Reset Anchor boundary. Stays false when the Anchor is
+  // unset (percentSinceReset === 0) or the quota is uncalibrated.
+  const weeklyEmergencyStop = calibrated && percentSinceReset >= EMERGENCY_STOP_PERCENT;
+
   return {
     tokensLast5h: acc5h,
     tokensLast7d: acc7d,
@@ -914,6 +944,7 @@ async function scanUsage(
     projectedWeeklyPercent,
     pacingState,
     emergencyStop,
+    weeklyEmergencyStop,
     calibrated,
     byModel: byModel7d,
     bySkillByModel,
@@ -1114,6 +1145,13 @@ export interface UsageEligibility {
   shed: readonly string[];
   reasons: {
     emergencyStop: boolean;
+    /**
+     * True when the weekly hard-stop is the reason `allow` is false: ≥90% of
+     * the weekly quota burned since the current Weekly Reset Anchor boundary
+     * (`UsageSnapshot.weeklyEmergencyStop`). Independent of `emergencyStop`;
+     * either one forces `allow=false` and blocks every dispatch class.
+     */
+    weeklyEmergencyStop: boolean;
     pacingShed: boolean;
     calibrated: boolean;
     /**
@@ -1221,7 +1259,9 @@ function projectPacingCurve(
  * calibration confirms it's reading real ground truth.
  */
 export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
-  const allow = !snapshot.emergencyStop;
+  // EITHER hard-stop (5h OR weekly) blocks every dispatch class. Both ride the
+  // same allow=false drain path the operator pause uses.
+  const allow = !snapshot.emergencyStop && !snapshot.weeklyEmergencyStop;
   const pacingShed = snapshot.pacingState === "over";
   const shed = pacingShed ? PACING_SHEDDABLE_CLASSES : [];
   // Pacing Curve verdict (issue #857). ADDITIVE — does NOT touch allow/shed;
@@ -1236,6 +1276,7 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
     shed,
     reasons: {
       emergencyStop: snapshot.emergencyStop,
+      weeklyEmergencyStop: snapshot.weeklyEmergencyStop,
       pacingShed,
       calibrated: snapshot.calibrated,
       // Default not-paused. The pause flag is a Redis read that does NOT

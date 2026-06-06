@@ -945,6 +945,7 @@ describe("usage-tracker", () => {
         projectedWeeklyPercent: 0,
         pacingState: "under",
         emergencyStop: false,
+        weeklyEmergencyStop: false,
         calibrated: false,
         byModel: {
           opus: { ...empty },
@@ -1031,6 +1032,44 @@ describe("usage-tracker", () => {
       // shed is still populated — callers MUST honor `allow` first; if
       // they did go ahead, the shed list remains the right second filter.
       assert.deepEqual([...v.shed], [...PACING_SHEDDABLE_CLASSES]);
+    });
+
+    test("calibrated + weeklyEmergencyStop: allow=false (weekly hard-stop blocks every class)", () => {
+      const v = projectEligibility(
+        snapshotWith({
+          calibrated: true,
+          pacingState: "under",
+          emergencyStop: false,
+          weeklyEmergencyStop: true,
+        })
+      );
+      assert.equal(v.allow, false);
+      assert.equal(v.reasons.weeklyEmergencyStop, true);
+      assert.equal(v.reasons.emergencyStop, false);
+    });
+
+    test("weeklyEmergencyStop is independent of the 5h emergencyStop", () => {
+      // 5h fine, weekly exhausted → still blocked.
+      assert.equal(
+        projectEligibility(
+          snapshotWith({ calibrated: true, emergencyStop: false, weeklyEmergencyStop: true })
+        ).allow,
+        false
+      );
+      // weekly fine, 5h exhausted → still blocked.
+      assert.equal(
+        projectEligibility(
+          snapshotWith({ calibrated: true, emergencyStop: true, weeklyEmergencyStop: false })
+        ).allow,
+        false
+      );
+      // both fine → allowed.
+      assert.equal(
+        projectEligibility(
+          snapshotWith({ calibrated: true, emergencyStop: false, weeklyEmergencyStop: false })
+        ).allow,
+        true
+      );
     });
 
     // -----------------------------------------------------------------------

@@ -33,6 +33,7 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     projectedWeeklyPercent: 50,
     pacingState: "under",
     emergencyStop: false,
+    weeklyEmergencyStop: false,
     calibrated: true,
     byModel: {
       opus: { ...zero },

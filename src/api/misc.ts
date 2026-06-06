@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { sendDigestNow } from "../digest.ts";
+import { sendDigestNow, sendDailyHeartbeatNow } from "../digest.ts";
 import { classifyChange } from "../tier-classifier.ts";
 
 /**
@@ -48,6 +48,18 @@ export function createMiscRouter(_eventBus: any) {
   router.post("/digest/send", async (req, res) => {
     try {
       await sendDigestNow();
+      res.json({ sent: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /digest/heartbeat — Manually trigger the daily heartbeat now. Lets the
+  // operator verify Telegram delivery on demand (and is the endpoint a daily
+  // systemd timer can hit if wall-clock-aligned delivery is wanted).
+  router.post("/digest/heartbeat", async (req, res) => {
+    try {
+      await sendDailyHeartbeatNow();
       res.json({ sent: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
