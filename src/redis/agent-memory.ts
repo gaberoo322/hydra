@@ -1,5 +1,5 @@
 /**
- * Agent-memory Redis ops (pattern persistence + cooldowns).
+ * Agent-memory Redis ops (pattern persistence).
  * Extracted from redis-adapter.ts (issue #269).
  *
  * Note: this is the low-level Redis adapter for agent-memory. The higher-level
@@ -15,23 +15,6 @@ import { getRedisConnection } from "./connection.ts";
 export async function getMemoryPatterns(agent: string): Promise<string | null> {
   const r = getRedisConnection();
   return r.get(redisKeys.memoryPatterns(agent));
-}
-
-/**
- * Get the last alert timestamp for a given pattern name.
- * Returns null if never alerted.
- */
-export async function getPatternCooldown(pattern: string): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.hget(redisKeys.patternDetectorCooldowns(), pattern);
-}
-
-/**
- * Set the cooldown timestamp for a pattern name.
- */
-export async function setPatternCooldown(pattern: string, timestamp: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.hset(redisKeys.patternDetectorCooldowns(), pattern, timestamp);
 }
 
 /**
