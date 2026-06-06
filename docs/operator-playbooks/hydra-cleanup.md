@@ -89,7 +89,7 @@ Drop a finding before it becomes an issue when ANY of:
 
 Each surviving finding becomes one GitHub issue. Use `gh issue create` directly (these are independent single-finding tickets, so the `hydra-prd` epic path is unnecessary).
 
-**Emit as a SINGLE loop over the filtered findings — one finding at a time, render-then-create atomically (HARD).** For each finding: derive its title AND its body H1 from the **same finding object** inside the same iteration, then immediately call `gh issue create` with both `--title` and `--body-file` built from that one finding, *before advancing to the next finding*. Never build a list of all titles in one pass and a list of all body files in a second pass and then zip the two by index — that index-aligned parallel-array pattern is exactly what produced the off-by-one title/body rotation across the #997–#1004 batch (issue #1005), where `title[i]` was paired with `body[i+1]`. There is no second pass and no shared running counter linking two separate lists: the title and body for a given issue are produced and consumed together within one iteration, so they cannot drift.
+**Emit as a SINGLE loop over the filtered findings — one finding at a time, render-then-create atomically (HARD).** For each finding: derive its title, its body H1, AND its `## Files in scope` path from the **same finding object** inside the same iteration, then immediately call `gh issue create` with both `--title` and `--body-file` built from that one finding, *before advancing to the next finding*. The `## Files in scope` path is the same target path the title names, rendered from the one `$finding` — so the scoped file can never drift from the issue title or the body H1. Never build a list of all titles in one pass and a list of all body files in a second pass and then zip the two by index — that index-aligned parallel-array pattern is exactly what produced the off-by-one title/body rotation across the #997–#1004 batch (issue #1005), where `title[i]` was paired with `body[i+1]`. There is no second pass and no shared running counter linking two separate lists: the title and body for a given issue are produced and consumed together within one iteration, so they cannot drift.
 
 If you stage the body to a temp file, name it by the finding's **stable identity** (a slug of its `<name / path>`), e.g. `/tmp/cleanup-issue-$slug.md`, NOT by a running counter shared with a separate title loop. The slug binds the body file to the same finding the title is derived from.
 
@@ -108,6 +108,10 @@ Issue body schema (one per finding):
 ## What to do
 
 Remove the unused <file / export> and any now-orphaned imports it leaves behind.
+
+## Files in scope
+
+- `<path>`
 
 ## Acceptance criteria
 
@@ -128,13 +132,14 @@ This is a mechanically-verifiable cleanup: the deletion is correct **iff** the t
 
 ```bash
 # Single loop over the filtered findings — render THIS finding's body and create
-# THIS finding's issue together, before moving on. Title and body are both derived
-# from the one $finding object, so they cannot drift (no parallel title/body lists).
+# THIS finding's issue together, before moving on. Title, body H1, and the
+# `## Files in scope` path are all derived from the one $finding object, so they
+# cannot drift (no parallel title/body lists).
 for finding in "${findings[@]}"; do
   title=$(render_title "$finding")          # e.g. "cleanup: remove unused export `foo` (src/bar.ts)"
   slug=$(slugify "$finding")                # stable identity, NOT a running counter
   body_file="/tmp/cleanup-issue-$slug.md"
-  render_body "$finding" > "$body_file"     # body H1 derived from the SAME $finding
+  render_body "$finding" > "$body_file"     # body H1 + `## Files in scope` from the SAME $finding
   gh issue create --repo gaberoo322/hydra \
     --title "$title" \
     --label cleanup-scan --label ready-for-agent \
@@ -184,7 +189,8 @@ Expected:
 - `knip` runs and the report parses; findings are categorised into files vs exports.
 - The filter drops verifier-core, test-only, entrypoint, and duplicate findings.
 - `--apply` files issues labelled `cleanup-scan` + `ready-for-agent` — each with the deterministic "remove X AND test/tsc green" acceptance criterion.
-- **Title/body pairing (multi-finding regression, issue #1005).** Run the dry-run (or `--apply`) over a scenario with **≥2 findings** and assert that, for **every** emitted issue, the body's H1 (`# cleanup: remove unused <export|file> \`<name / path>\``) names the **same** target as that issue's title — no off-by-one, no rotation across the batch. The dry-run already prints both the title and the rendered body for each finding, so the check is: in a multi-finding run, every printed `(title, body-H1)` pair matches. A failure here means the emit step has regressed back to two index-aligned passes (the #997–#1004 drift); the single render-then-create loop in Step 3 is what guarantees the match.
+- **Title/body pairing (multi-finding regression, issue #1005).** Run the dry-run (or `--apply`) over a scenario with **≥2 findings** and assert that, for **every** emitted issue, the body's H1 (`# cleanup: remove unused <export|file> \`<name / path>\``) AND its `## Files in scope` path name the **same** target as that issue's title — no off-by-one, no rotation across the batch. The dry-run already prints both the title and the rendered body for each finding, so the check is: in a multi-finding run, every printed `(title, body-H1, files-in-scope)` triple matches. A failure here means the emit step has regressed back to two index-aligned passes (the #997–#1004 drift); the single render-then-create loop in Step 3 is what guarantees the match.
+- **Scope section present (issue #1077).** Every emitted issue body carries a section headed exactly `## Files in scope` listing the single target path. This is the heading `scope-check` matches (`/Files in scope/i`, read live from the linked issue body) and the canonical heading `hydra-prd-render.ts` emits — so a `hydra-dev` pickup can copy it straight into the PR body instead of hand-authoring it from the design-concept artifact.
 - Re-running `--apply` against an already-saturated board (> 10 open `cleanup-scan`) emits nothing and prints the saturation skip.
 - Re-running `--apply` does not double-file a finding that already has an open `cleanup-scan` issue.
 
