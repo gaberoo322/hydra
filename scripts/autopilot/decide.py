@@ -398,6 +398,24 @@ RESEARCH_FORCE_DAILY_CAP = 4
 SCOUT_DAILY_COST_SHARE_DEFAULT = 0.04
 DAILY_SPEND_CAP_USD_DEFAULT = 50.0
 
+# Per-cycle dev_target cost cap (issue #1059, leaf of epic #1052). Mirrors the
+# Orchestrator's retired per-cycle dollar circuit-breaker pattern (the
+# HYDRA_PER_CYCLE_COST_CAP_USD knob; src/cost/cap.ts was removed in #704 once
+# HYDRA_TOKEN_USD_RATE went structurally $0) and the live scout cost-share gate
+# above. This is a HIGH backstop, NOT a throttle: it only fires on a runaway
+# cycle that has already burned through a large dollar budget on Target builds.
+# Slices 3/5/6 (QA, mutation, retro) raise per-cycle Target spend on the single
+# self-hosted runner, so a backstop guards against an unbounded dispatch loop.
+#
+# The default is deliberately high ($25/cycle) so day-to-day cycles never touch
+# it. Operators tune it via `state.limits.per_cycle_cost_cap_usd` (or the
+# bootstrap env var of the same shape). A value of 0 disables the gate entirely
+# (no-op) — matching the scout gate's "rate not configured" degrade path, since
+# no live USD rate exists on this deployment yet (#704). Spend is read from
+# `state.dev_target_spend_usd_cycle` (default 0.0); absent that key the gate is
+# a clean no-op, so legacy state shapes keep today's behaviour.
+PER_CYCLE_COST_CAP_USD_DEFAULT = 25.0
+
 # Slots that are scope-disallowed exclusion mask. Scope filter is an
 # exclusion mask (grilled decision 3); `health` and `qa_*` are always
 # allowed regardless of scope (qa reviews any PR, health is whole-system).
@@ -1315,6 +1333,26 @@ def _rule_pipeline_dispatch(
                 make_dispatch_decision_event(
                     state, now, cls=cls, outcome="idle",
                     reason=f"scope excluded ({scope})",
+                )
+            )
+            out.skipped += 1
+            continue
+        # Per-cycle cost-cap backstop (issue #1059) — checked BEFORE the
+        # selector so a runaway cycle halts further dev_target sub-dispatch
+        # regardless of available work. HIGH cap: this is a runaway backstop,
+        # not a throttle. Only `dev_target` carries this cap today; other
+        # pipeline classes fall through. Mirrors the scout cost-cap gate's
+        # "cap is the harder limit, checked first" placement (issue #532).
+        if cls == "dev_target" and dev_target_cost_cap_exceeded(state):
+            cap = dev_target_cost_cap_state(state)
+            out.debug.setdefault("dev_target_cost_cap_skipped", {
+                "cap_usd": cap["cap_usd"],
+                "spend_usd": cap["spend_usd"],
+            })
+            out.events.append(
+                make_dispatch_decision_event(
+                    state, now, cls=cls, outcome="budget",
+                    reason="dev_target per-cycle cost-cap exceeded",
                 )
             )
             out.skipped += 1
@@ -2260,6 +2298,58 @@ def scout_cost_cap_exceeded(state: dict) -> bool:
     log either the bool decision or the full breakdown.
     """
     s = scout_cost_cap_state(state)
+    if not s["enforced"]:
+        return False
+    return s["spend_usd"] >= s["cap_usd"]
+
+
+def dev_target_cost_cap_state(state: dict) -> dict:
+    """Resolve the per-cycle dev_target cost-cap inputs from state (issue #1059).
+
+    Reads (with sane fallbacks for legacy state shapes):
+      - state.limits.per_cycle_cost_cap_usd   (default PER_CYCLE_COST_CAP_USD_DEFAULT)
+      - state.dev_target_spend_usd_cycle       (default 0.0)
+
+    Returns a dict with the resolved floats AND a boolean `enforced` flag.
+    `enforced` is False when the resolved cap is <= 0 — the documented
+    kill-for-the-gate value that disables the backstop entirely (a no-op,
+    matching the scout gate's "rate not configured" degrade). When the cap is
+    positive the gate compares cycle spend against it. Unlike the scout gate
+    there is no kill-SWITCH semantics for 0 here: this is a HIGH backstop, not a
+    throttle, so a 0 cap means "no backstop", never "suppress everything".
+
+    Pure: no side effects.
+    """
+    limits = state.get("limits") or {}
+
+    try:
+        cap_usd = float(limits.get("per_cycle_cost_cap_usd", PER_CYCLE_COST_CAP_USD_DEFAULT))
+    except (TypeError, ValueError):
+        cap_usd = PER_CYCLE_COST_CAP_USD_DEFAULT
+    if not (cap_usd >= 0.0):  # NaN-safe
+        cap_usd = PER_CYCLE_COST_CAP_USD_DEFAULT
+
+    try:
+        spend = float(state.get("dev_target_spend_usd_cycle", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        spend = 0.0
+    if not (spend >= 0.0):
+        spend = 0.0
+
+    return {
+        "cap_usd": cap_usd,
+        "spend_usd": spend,
+        "enforced": cap_usd > 0.0,
+    }
+
+
+def dev_target_cost_cap_exceeded(state: dict) -> bool:
+    """True when the per-cycle dev_target cost-cap backstop should halt dispatch.
+
+    Pure wrapper over `dev_target_cost_cap_state` — separated so callers can
+    log either the bool decision or the full breakdown.
+    """
+    s = dev_target_cost_cap_state(state)
     if not s["enforced"]:
         return False
     return s["spend_usd"] >= s["cap_usd"]

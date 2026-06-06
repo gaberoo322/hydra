@@ -105,6 +105,34 @@ Each tick:
 > `/api/metrics/tokens` accumulator (`hydra-tool-scout` skill) — no
 > separate writer is needed and the gate sees real usage.
 
+> **Per-cycle dev_target cost-cap backstop (issue #1059, leaf of epic
+> #1052).** `dev_target` dispatches respect a per-cycle USD backstop that
+> mirrors the Orchestrator's per-cycle cost-cap pattern (the
+> `HYDRA_PER_CYCLE_COST_CAP_USD` knob) and the scout cost-share gate above.
+> It is a HIGH backstop, NOT a throttle: it only fires on a runaway cycle
+> that has already burned a large dollar budget on Target builds. Slices
+> 3/5/6 of epic #1052 (Target QA, mutation, retro) raise per-cycle Target
+> spend on the single self-hosted runner, so the backstop guards against an
+> unbounded sub-dispatch loop.
+>
+> `decide.py:_rule_pipeline_classes` reads
+> `state.limits.per_cycle_cost_cap_usd` (default
+> `PER_CYCLE_COST_CAP_USD_DEFAULT = $25.0`) and
+> `state.dev_target_spend_usd_cycle` (default `0.0`), then halts further
+> `dev_target` sub-dispatch this cycle when `spend_usd >= cap_usd`. The
+> check fires BEFORE the selector (cap is the harder limit), mirroring the
+> scout gate, and records a `dispatch_decision` `budget` skip plus a
+> `plan.debug.dev_target_cost_cap_skipped` breakdown for operator audit.
+>
+> Two operator knobs:
+> - **Tune:** raise/lower `state.limits.per_cycle_cost_cap_usd` (or the
+>   `HYDRA_PER_CYCLE_COST_CAP_USD` bootstrap env var) to move the backstop.
+> - **Disable:** a cap of `0` turns the backstop off entirely (no-op) —
+>   this is NOT a kill-switch (the cap is a backstop, never a throttle), so
+>   `0` means "no backstop", never "suppress everything". An absent
+>   `dev_target_spend_usd_cycle` key likewise degrades to a clean no-op, so
+>   legacy state shapes keep today's behaviour.
+
 > **Architecture-scan wiring (issues #789/#790, parent #787):**
 > `architecture_orch` is the idle-time fallback signal class. When the
 > orchestrator board has gone fully idle, it reclaims spare capacity by
@@ -637,6 +665,7 @@ regression test `test/autopilot-hooks.test.mts` enforces this.
 | `HYDRA_AUTOPILOT_SUBAGENT_MAX_WALL_SECONDS` | `3600` | Silent-wedge fallback cap (`decide.py` only) |
 | `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD` | `50.0` | Total daily spend cap (issue #532; bootstrap writes into `state.limits.daily_spend_cap_usd`) |
 | `HYDRA_AUTOPILOT_SCOUT_COST_SHARE` | `0.04` | Scout slice of the daily cap (issue #532; `0` = kill-switch). Writes `state.limits.scout_cost_share` |
+| `HYDRA_PER_CYCLE_COST_CAP_USD` | `25.0` | Per-cycle `dev_target` cost-cap backstop (issue #1059; HIGH backstop not a throttle; `0` = disabled). Read by `decide.py` from `state.limits.per_cycle_cost_cap_usd` |
 
 ## Signal wiring (state.signals)
 
@@ -654,6 +683,7 @@ boolean signals decide.py reads from `state.signals`. The key mappings:
 | `scout_last_walk_iso` >7d old or empty | `scout_walk_due` | `scout_orch` (issue #485) |
 | `scout_board_open_enhancements > 20` | `scout_board_saturated` | suppresses `scout_orch` |
 | `scout_spend_usd_today` | (read directly from state) | suppresses `scout_orch` via cost-cap (issue #532) |
+| `dev_target_spend_usd_cycle` | (read directly from state) | halts `dev_target` via per-cycle cost-cap backstop (issue #1059) |
 | `arch_fallback_due` (`ready_for_agent==0 && needs_research==0 && needs_triage==0 && work_queue==0`) | `arch_fallback_due` | `architecture_orch` (issues #789/#790) |
 | `arch_board_open_scan > ARCH_BOARD_SATURATION_CAP (6)` → `arch_board_saturated` | `arch_board_saturated` | suppresses `architecture_orch` (checked FIRST) |
 | `orch_backfill_idle` (same signal as above) | `orch_backfill_idle` | also drives `cleanup_orch` (issue #960) — NOT staggered, so it may co-fire with the backfill set |
