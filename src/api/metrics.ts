@@ -12,6 +12,17 @@ import {
   recordSubagentTokens,
   todayDateString,
 } from "../cost/index.ts";
+import { countQuerySchema } from "../schemas/common.ts";
+import { z } from "zod";
+
+/**
+ * Query schema for `GET /metrics/cost?date=YYYY-MM-DD` (ADR-0022 slice 1).
+ * `date` is optional; an absent or non-string value defers to the caller's
+ * `todayDateString()` fallback. Non-strict so it ignores any unknown params.
+ */
+const CostQuerySchema = z.object({
+  date: z.string().trim().min(1).optional(),
+});
 
 export function createMetricsRouter() {
   const router = Router();
@@ -42,8 +53,10 @@ export function createMetricsRouter() {
   // GET /metrics — Recent cycle metrics
   router.get("/metrics", async (req, res) => {
     try {
-    // @ts-expect-error — migrate to proper types
-      const count = parseInt(req.query.count) || 20;
+      // ADR-0022: read `count` through the Schemas seam (safeParse on req.query).
+      // countQuerySchema collapses bad/absent input to the default, so this
+      // safeParse never fails — but it keeps the read on the one query pattern.
+      const count = countQuerySchema(20).safeParse(req.query).data?.count ?? 20;
       const trend = await getMetricsTrend(count);
       const stats = await getAggregateStats(count);
       res.json({ stats, trend });
@@ -55,8 +68,7 @@ export function createMetricsRouter() {
   // GET /spending — Token consumption and dollar costs from Redis
   router.get("/spending", async (req, res) => {
     try {
-    // @ts-expect-error — migrate to proper types
-      const count = parseInt(req.query.count) || 20;
+      const count = countQuerySchema(20).safeParse(req.query).data?.count ?? 20;
       const report = await loadCycleSpending(count);
       res.json(report);
     } catch (err: any) {
@@ -67,8 +79,7 @@ export function createMetricsRouter() {
   // GET /metrics/abandonment — Aggregated abandonment causes from recent cycles (issue #195)
   router.get("/metrics/abandonment", async (req, res) => {
     try {
-      // @ts-expect-error — req.query.count is a string at runtime
-      const count = parseInt(req.query.count) || 50;
+      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const breakdown = await getAbandonmentBreakdown(count);
       res.json(breakdown);
     } catch (err: any) {
@@ -79,8 +90,10 @@ export function createMetricsRouter() {
   // GET /metrics/quality-gates — Mutation kill-rate + JIT trend (issue #212)
   router.get("/metrics/quality-gates", async (req, res) => {
     try {
-      // @ts-expect-error — req.query.count is a string at runtime
-      const count = parseInt(req.query.count) || 50;
+      // ADR-0022 slice 1: this route keeps its bespoke "never 500" 200-empty
+      // fallback (below), so it reads `count` via an inline safeParse rather
+      // than aggregatorRoute (whose hard 500 would regress the documented AC).
+      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const result = await getQualityGateTrend(count);
       res.json(result);
     } catch (err: any) {
@@ -105,8 +118,7 @@ export function createMetricsRouter() {
   // GET /metrics/cost-attribution — Per-role / tier / anchor / complexity cost breakdown (issue #271)
   router.get("/metrics/cost-attribution", async (req, res) => {
     try {
-      // @ts-expect-error — req.query.count is a string at runtime
-      const count = parseInt(req.query.count) || 50;
+      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const cycles = await loadCycleSummaries(count);
       const result = aggregateCostAttribution(cycles);
       res.json(result);
@@ -123,8 +135,7 @@ export function createMetricsRouter() {
   // covers only the live priority lanes. Read-only and best-effort.
   router.get("/metrics/anchor-distribution", async (req, res) => {
     try {
-      // @ts-expect-error — req.query.count is a string at runtime
-      const count = parseInt(req.query.count) || 50;
+      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
 
       const trend = await getMetricsTrend(count).catch((err: any) => {
         console.error(`[api/metrics] anchor-distribution: trend read failed: ${err.message}`);
@@ -200,8 +211,7 @@ export function createMetricsRouter() {
   // an empty mode field — bucket distribution makes that visible.
   router.get("/metrics/grounding-duration", async (req, res) => {
     try {
-      // @ts-expect-error — req.query.count is a string at runtime
-      const count = parseInt(req.query.count) || 50;
+      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const trend = await getMetricsTrend(count);
 
       const samples = trend.map((m: any) => ({
@@ -269,10 +279,10 @@ export function createMetricsRouter() {
   // populated by autopilot subagents (writers post to /metrics/tokens).
   router.get("/metrics/cost", async (req, res) => {
     try {
-      const dateRaw = req.query.date;
-      const date = (typeof dateRaw === "string" && dateRaw)
-        ? dateRaw
-        : todayDateString();
+      // ADR-0022 slice 1: read `date` through the Schemas seam. An absent or
+      // empty value defers to today's date string.
+      const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
+      const date = parsedDate || todayDateString();
       const snapshot = await getDailyTokenCounter(date);
       res.json(snapshot);
     } catch (err: any) {
