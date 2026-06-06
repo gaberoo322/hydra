@@ -291,7 +291,6 @@ export const redisKeys = {
   // Pattern Detector
   // ---------------------------------------------------------------------------
   alerts: () => "hydra:alerts",
-  patternDetectorCooldowns: () => "hydra:pattern-detector:cooldowns",
 
   // ---------------------------------------------------------------------------
   // Stale-claim reaper (issue #374)
