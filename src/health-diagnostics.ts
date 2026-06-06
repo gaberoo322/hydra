@@ -469,6 +469,18 @@ const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: false,
         }
       : null,
+  (s) =>
+    s.ovSearch.status === "failed"
+      ? {
+          severity: "warning",
+          component: "intelligence",
+          what: "OV search failing",
+          why: "Knowledge-plane search probe returned an error (OpenViking up but search 500ing — usually its LLM/embedding backend is down).",
+          impact: "Agents run cycles with empty knowledge context.",
+          action: "Check OpenViking + its LLM/embedding backend (#980).",
+          autoRecovery: false,
+        }
+      : null,
 ];
 
 // ---- assessHealth — the single entry point -------------------------------
