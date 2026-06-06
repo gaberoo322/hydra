@@ -28,8 +28,6 @@ export const VIEW_HABITAT = "habitat" as const;
 
 export type NowViewMode = typeof VIEW_CONSOLE | typeof VIEW_HABITAT;
 
-export const NOW_VIEW_IDS: readonly NowViewMode[] = [VIEW_CONSOLE, VIEW_HABITAT];
-
 /** The Console is the default surface (acceptance criterion #1). */
 export const DEFAULT_NOW_VIEW: NowViewMode = VIEW_CONSOLE;
 
