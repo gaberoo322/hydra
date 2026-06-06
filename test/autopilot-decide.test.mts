@@ -1132,6 +1132,126 @@ describe("decide.py — signal classes with cooldowns", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 6c. Per-cycle dev_target cost-cap backstop (issue #1059, leaf of epic #1052)
+// ---------------------------------------------------------------------------
+//
+// dev_target dispatch respects a per-cycle USD cap that mirrors the
+// Orchestrator's per-cycle cost-cap pattern and the scout cost-share gate.
+// The cap is a HIGH backstop (not a throttle): exceeding it halts further
+// dev_target sub-dispatch this cycle and records a budget skip. The gate is
+// configurable via `state.limits.per_cycle_cost_cap_usd`, defaults HIGH, reads
+// cycle spend from `state.dev_target_spend_usd_cycle`, and degrades to a no-op
+// when the cap is 0 (backstop disabled) or the spend key is absent.
+describe("decide.py — dev_target per-cycle cost-cap (issue #1059)", () => {
+  function devTargetCapState(o: {
+    scope?: string;
+    perCycleCapUsd?: number;
+    devTargetSpendUsdCycle?: number;
+  }): any {
+    const s = baseState({
+      scope: o.scope,
+      signals: { target_work_available: true },
+    });
+    if (o.perCycleCapUsd !== undefined) s.limits.per_cycle_cost_cap_usd = o.perCycleCapUsd;
+    if (o.devTargetSpendUsdCycle !== undefined) s.dev_target_spend_usd_cycle = o.devTargetSpendUsdCycle;
+    return s;
+  }
+
+  test("cost-cap halts dev_target when cycle spend >= per_cycle cap (issue #1059 AC)", () => {
+    const state = devTargetCapState({ perCycleCapUsd: 25.0, devTargetSpendUsdCycle: 30.0 });
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      undefined,
+      "cycle spend $30 above $25 cap must halt dev_target sub-dispatch",
+    );
+    assert.ok(plan.debug?.dev_target_cost_cap_skipped,
+      "plan.debug should record the cost-cap skip reason for operator audit");
+  });
+
+  test("cost-cap allows dev_target when cycle spend below the cap", () => {
+    const state = devTargetCapState({ perCycleCapUsd: 25.0, devTargetSpendUsdCycle: 5.0 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "cycle spend $5 below $25 cap must allow dev_target dispatch",
+    );
+  });
+
+  test("cost-cap defaults HIGH — a normal cycle is never throttled (issue #1059 AC)", () => {
+    // No explicit cap → PER_CYCLE_COST_CAP_USD_DEFAULT ($25). A modest $5 of
+    // cycle spend stays well under the backstop, so dispatch proceeds.
+    const state = baseState({ signals: { target_work_available: true } });
+    state.dev_target_spend_usd_cycle = 5.0;
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "default cap is HIGH ($25); $5 cycle spend must not throttle dev_target",
+    );
+  });
+
+  test("cost-cap default backstop still fires on a runaway cycle (issue #1059 AC)", () => {
+    // No explicit cap → $25 default. A runaway $40 of cycle spend trips it.
+    const state = baseState({ signals: { target_work_available: true } });
+    state.dev_target_spend_usd_cycle = 40.0;
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      undefined,
+      "default $25 backstop must halt a runaway $40 cycle",
+    );
+  });
+
+  test("cost-cap is a no-op (backstop disabled) when per_cycle cap is 0", () => {
+    // cap=0 disables the backstop entirely — NOT a kill-switch. Even high
+    // spend dispatches, because a 0 cap means "no backstop configured".
+    const state = devTargetCapState({ perCycleCapUsd: 0, devTargetSpendUsdCycle: 99.0 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "cap of 0 disables the backstop — dev_target must still dispatch",
+    );
+  });
+
+  test("cost-cap is a no-op when the cycle-spend key is absent (legacy state)", () => {
+    // No dev_target_spend_usd_cycle key → spend defaults to 0.0, under any
+    // positive cap, so legacy state shapes keep today's behaviour.
+    const state = devTargetCapState({ perCycleCapUsd: 25.0 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "absent cycle-spend key → 0 spend → under cap → dispatch proceeds",
+    );
+  });
+
+  test("cost-cap reads limits.per_cycle_cost_cap_usd override (issue #1059 AC)", () => {
+    // Operator raises the backstop to $100 → $50 cycle spend now allowed.
+    const state = devTargetCapState({ perCycleCapUsd: 100.0, devTargetSpendUsdCycle: 50.0 });
+    const plan = runDecide(state, null);
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      "raised $100 cap → $50 cycle spend allowed",
+    );
+  });
+
+  test("cost-cap halts ONLY dev_target — other pipeline classes unaffected", () => {
+    // A tripped dev_target backstop must not suppress dev_orch / qa_orch etc.
+    const state = devTargetCapState({ perCycleCapUsd: 25.0, devTargetSpendUsdCycle: 30.0 });
+    state.signals = { target_work_available: true, orch_work_available: true };
+    const plan = runDecide(state, null);
+    assert.equal(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target"),
+      undefined,
+      "dev_target halted by its own per-cycle cap",
+    );
+    assert.ok(
+      findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_orch"),
+      "dev_orch must still dispatch — the cap is dev_target-only",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7b. architecture_orch signal class (issue #790, parent #787;
 //     unified board-idle signal + 1h cadence by issue #959, epic #958)
 // ---------------------------------------------------------------------------
