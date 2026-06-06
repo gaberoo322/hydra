@@ -78,7 +78,6 @@ const META_LESSON_LABEL = "meta-friction"; // share the label; titles distinguis
 //                                    Surface only at much higher thresholds.
 //
 // Any other cue uses the default threshold (`PROMOTION_THRESHOLD` = 3).
-export const ACCEPTANCE_CRITERION_UNMET_CUE = "acceptance-criterion-unmet";
 export const ACCEPTANCE_CRITERION_DEFERRED_CUE = "acceptance-criterion-deferred";
 
 /**
