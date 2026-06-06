@@ -1,0 +1,13 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": ["src/index.ts", "scripts/**/*.{ts,mts}", "test/**/*.{test,spec}.{ts,mts}"],
+      "project": ["src/**/*.ts", "scripts/**/*.{ts,mts}"]
+    },
+    "dashboard": {
+      "entry": ["src/main.jsx", "vite.config.js", "index.html"],
+      "project": ["src/**/*.{js,jsx,ts,tsx}"]
+    }
+  }
+}
