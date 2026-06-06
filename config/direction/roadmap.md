@@ -92,4 +92,11 @@ Deliver real-money cross-venue proof, hardened execution controls, and operator-
 - [ ] Add venue-native sports identity matching before title fallback
 - [ ] Add OpticOdds supported-market capability gating to scanner scope
 - [x] Wire Polymarket CLOB V2 client (sdk-v2-compat, pUSD collateral) — went live upstream 2026-04-28
-- [ ] Verify Polymarket CLOB V2 live submit path end-to-end (pUSD signing, keyset≤100 pagination clamp, 2026-06-01 rate-limit ceiling) — item-402 corrected from the false "V3 / June-15" premise
+- [x] Verify Polymarket CLOB V2 live submit path end-to-end (pUSD signing, keyset≤100 pagination clamp, 200 req/s rate-limit ceiling) — item-402 closed; corrected from the false "V3 / June-15" premise
+- [x] Adopt Kalshi order_group_updates WS account channel for live execution-state lead (item-483)
+- [x] Migrate Kalshi off deprecated /portfolio/orders to V2 /trade-api/v2/orders (guard test in place)
+- [x] Extend SportsDataIO injury feed to MLB + MLS
+- [x] Add sharp-book lead-lag evidence to sports route ranking (item-429)
+- [ ] Wire live Kalshi GET /margin/fee_tiers per-market maker/taker map into resolveKalshiFeeRate so fee-adjusted sports edge uses the venue's actual per-ticker fee (2026-05-11 restructure, 2026-06-11 zeroed-rate fix) — priorities #2
+- [ ] Surface Kalshi earned rate-limit tier (grants array, Premier/Paragon/Prime) + token-budget headroom on the dual-leg submit preflight — guards against silent throttle now that legacy mutation costs are 10x V2 (2026-06-04/06-05) — priorities #3
+- [ ] Fix web/src/lib/arbitrage/scanner.test.ts standalone @/-alias resolution so the scanner's 162 tests run in isolation, not only in the full suite — priorities #1
