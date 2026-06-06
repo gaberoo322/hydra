@@ -377,6 +377,39 @@ npm test    # compare to pre-merge
 
 Regression → revert + restart + report.
 
+### 8.6. Post-merge operational-health smoke check (alarm-only — issue #1054)
+
+After the merge has landed and the service is back up (Step 7.5), run the
+**alarm-only** operational-health smoke check. This is the Target's replacement
+for per-merge **Outcome Holdback** (epic #1052): betting outcomes are
+settlement-lagged and the outcome-ingestion seam was removed (#933), so instead
+of holding a merge back on an outcome signal, we let the merge land and then
+sample fast, merge-attributable operational signals the Target already exposes
+(`/api/health/full` — overall status + per-service execution-success and
+provider/API error proxies). On a regression past a configurable noise floor it
+raises a `hydra-incident` alarm.
+
+ALARM-ONLY: this step NEVER reverts and NEVER blocks a merge. It observes
+post-merge and routes to `hydra-incident`, which decides whether to
+investigate/fix/revert. The auto-revert path is Step 7.5 (deploy failure) /
+Step 8 (test regression) only — do NOT add a revert here.
+
+```bash
+# Pass --dispatch so a real regression actually fires hydra-incident.
+# Without --dispatch it is a dry-run (prints the alarm context, spawns nothing),
+# which is what you want when smoke-testing the watcher itself.
+npx tsx scripts/target/post-merge-health.ts --merge-sha "$COMMIT_SHA" --dispatch
+```
+
+Fail-soft: if the Target API is unreachable (service still restarting, port not
+yet up), the script logs and exits 0 — an unreachable Target is not a merge
+regression and must never look like a build failure. Tune the noise floor via
+the `HYDRA_PMH_*` env vars documented at the top of
+`scripts/target/post-merge-health.ts` (overall-status alarm set, and the
+tolerated counts of degraded / execution-class / provider-class services). The
+exit code is informational only (75 on alarm, 0 otherwise); do NOT branch the
+cycle on it.
+
 ### 8.5. Worktree cleanup (issue #542)
 
 On success, remove the hydra-betting worktree we created in Step 0.6. On failure, `scripts/branch-prune.sh` will GC it on the next daily sweep — leaking is acceptable on crash but not on the happy path.
