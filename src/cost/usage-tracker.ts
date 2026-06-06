@@ -97,6 +97,8 @@ import {
   listTranscriptFiles,
   sessionIdFromPath as transcriptSessionIdFromPath,
 } from "../transcript-store.ts";
+import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
+import type { OAuthUsageResult } from "./oauth-usage.ts";
 
 /**
  * Bucket key for sessions that have no `hydra:dispatches:subagent:{sessionId}`
@@ -165,10 +167,56 @@ export interface UsageSnapshot {
   tokensLast7d: TokenBreakdown;
   /** Raw token total over the last 24h. Drives `projectedWeeklyPercent`. */
   tokensLast24h: number;
-  /** % of 5h quota consumed; 0 when uncalibrated. */
+  /**
+   * % of 5h quota consumed. SOURCE PRECEDENCE (issue #1083): the authoritative
+   * OAuth `/api/oauth/usage` five_hour utilization when the meter read
+   * succeeds; otherwise the transcript+calibration estimate (0 when
+   * uncalibrated). NEVER silently 0 on a failed meter read — a failed read
+   * degrades to the estimate so `emergencyStop` (>=90%) stays conservative
+   * rather than unblocking dispatch during an OAuth outage. Which source backs
+   * the value is reported in {@link usageSource}.
+   */
   percentLast5h: number;
-  /** % of weekly quota consumed; 0 when uncalibrated. */
+  /**
+   * % of weekly quota consumed. SOURCE PRECEDENCE (issue #1083): the
+   * authoritative OAuth `/api/oauth/usage` seven_day utilization when the meter
+   * read succeeds; otherwise the transcript+calibration estimate (0 when
+   * uncalibrated). See {@link percentLast5h} for the never-silently-0 invariant
+   * and {@link usageSource}. Distinct from `percentSinceReset`, which is Hydra's
+   * env-anchored fixed-window projection and is left UNCHANGED by this seam.
+   */
   percentLast7d: number;
+  /**
+   * Which source backs the headline `percentLast5h`/`percentLast7d` (issue
+   * #1083): `"oauth"` when the authoritative OAuth meter read succeeded,
+   * `"estimate"` when it fell back to the transcript+calibration estimate (the
+   * meter read failed, the token expired, or no credentials were found).
+   * Additive observability field — no gating reads it; it lets the dashboard /
+   * operator see whether the number is ground truth or a fallback guess.
+   */
+  usageSource: "oauth" | "estimate";
+  /**
+   * The `oauth-usage-*` failure code when {@link usageSource} is `"estimate"`
+   * because the OAuth read failed, or `null` when the meter read succeeded
+   * (`usageSource === "oauth"`). Additive observability — surfaces WHY the
+   * fallback happened (e.g. `oauth-usage-token-expired` => operator should
+   * re-login). (issue #1083)
+   */
+  oauthError: string | null;
+  /**
+   * ISO-8601 of the real 5-hour window reset boundary from the OAuth meter, or
+   * `null` when the meter read failed OR the meter reported no boundary.
+   * Additive — distinct from the env-anchored `weeklyResetAnchor`; this is the
+   * server's authoritative boundary. NOT yet wired into the ADR-0021 Pace Gate
+   * (deliberately deferred — see issue #1083). (issue #1083)
+   */
+  oauthFiveHourResetsAt: string | null;
+  /**
+   * ISO-8601 of the real 7-day window reset boundary from the OAuth meter, or
+   * `null` when the meter read failed OR reported no boundary. Additive; see
+   * {@link oauthFiveHourResetsAt}. (issue #1083)
+   */
+  oauthSevenDayResetsAt: string | null;
   /**
    * If we continued at the last-24h rate for a full 7 days, what % of
    * weekly quota would that be? 0 when uncalibrated.
@@ -628,13 +676,22 @@ export async function getUsage(opts: {
    * read. Injected by tests to pin attribution without Redis. (issue #693)
    */
   resolveSkill?: SkillResolver;
+  /**
+   * Reads the authoritative OAuth subscription-usage meter (issue #1083).
+   * Defaults to {@link readOAuthUsage}, which reads the credentials file fresh
+   * and GETs the OAuth endpoint. Injected by tests to pin the meter result
+   * without a live endpoint or a real credentials file. Piggybacks on the 60s
+   * snapshot cache — ONE meter read per cache refresh, not per caller.
+   */
+  readUsage?: () => Promise<OAuthUsageResult>;
 } = {}): Promise<UsageSnapshot> {
   const now = opts.now ?? new Date();
   const nowMs = now.getTime();
 
   const overrideRoot = opts.projectsRoot !== undefined;
   const overrideResolver = opts.resolveSkill !== undefined;
-  if (!opts.force && !overrideRoot && !overrideResolver && cache) {
+  const overrideMeter = opts.readUsage !== undefined;
+  if (!opts.force && !overrideRoot && !overrideResolver && !overrideMeter && cache) {
     if (nowMs - cache.storedAt < CACHE_TTL_MS) {
       return cache.snapshot;
     }
@@ -642,9 +699,19 @@ export async function getUsage(opts: {
 
   const root = opts.projectsRoot ?? projectsRoot();
   const resolveSkill = opts.resolveSkill ?? defaultSkillResolver;
-  const snapshot = await scanUsage(root, now, resolveSkill);
+  // Meter-read default (issue #1083): production uses the live OAuth meter.
+  // When a fixture `projectsRoot` is supplied (test mode) WITHOUT an explicit
+  // `readUsage`, default to an estimate-forcing stub so transcript-fixture tests
+  // exercise the estimate path deterministically and never touch the network or
+  // a real credentials file. An explicit `readUsage` always wins.
+  const readUsage =
+    opts.readUsage ??
+    (overrideRoot
+      ? async (): Promise<OAuthUsageResult> => ({ ok: false, code: "oauth-usage-no-credentials" })
+      : readOAuthUsage);
+  const snapshot = await scanUsage(root, now, resolveSkill, readUsage);
 
-  if (!overrideRoot && !overrideResolver) {
+  if (!overrideRoot && !overrideResolver && !overrideMeter) {
     cache = { snapshot, storedAt: nowMs };
   }
   return snapshot;
@@ -667,11 +734,20 @@ async function scanUsage(
   root: string,
   now: Date,
   resolveSkill: SkillResolver,
+  readUsage: () => Promise<OAuthUsageResult>,
 ): Promise<UsageSnapshot> {
   const nowMs = now.getTime();
   const cutoff7d = nowMs - WINDOW_7D_MS;
   const cutoff24h = nowMs - WINDOW_24H_MS;
   const cutoff5h = nowMs - WINDOW_5H_MS;
+
+  // Authoritative OAuth meter read (issue #1083). Fired CONCURRENTLY with the
+  // transcript file scan below so the ~one-per-cache-window external GET adds no
+  // serial latency to the scan. Resolved after the estimate is computed; on
+  // success it REBASES the headline percents + 5h emergencyStop onto ground
+  // truth, on failure the estimate stands (never silently 0). Never throws —
+  // readOAuthUsage returns a discriminated result.
+  const oauthPromise = readUsage();
 
   const weeklyQuota = getWeeklyQuotaTokens();
   const fiveHourQuota = getFiveHourQuotaTokens();
@@ -848,16 +924,68 @@ async function scanUsage(
   const weightedBurn7d = weightedQuotaBurn(byModel7d, cacheReadWeight, burnWeights);
   const weightedBurn24h = weightedQuotaBurn(byModel24h, cacheReadWeight, burnWeights);
 
-  const percentLast5h = calibrated ? (weightedBurn5h / fiveHourQuota) * 100 : 0;
-  const percentLast7d = calibrated ? (weightedBurn7d / weeklyQuota) * 100 : 0;
+  // Transcript+calibration ESTIMATE (the historical headline + fallback path).
+  const estimatePercentLast5h = calibrated ? (weightedBurn5h / fiveHourQuota) * 100 : 0;
+  const estimatePercentLast7d = calibrated ? (weightedBurn7d / weeklyQuota) * 100 : 0;
   const projectedWeeklyPercent = calibrated ? ((weightedBurn24h * 7) / weeklyQuota) * 100 : 0;
 
+  // `pacingState` keys off the transcript-derived 24h projection (NOT the OAuth
+  // headline) — it is part of the ADR-0021 projection family this seam leaves
+  // intact. Unchanged.
   let pacingState: "under" | "on" | "over" = "under";
   if (calibrated) {
     if (projectedWeeklyPercent > 100) pacingState = "over";
     else if (projectedWeeklyPercent >= 80) pacingState = "on";
   }
-  const emergencyStop = calibrated && percentLast5h >= EMERGENCY_STOP_PERCENT;
+
+  // OAuth rebase (issue #1083). When the authoritative meter read succeeds, the
+  // headline `percentLast5h`/`percentLast7d` and the 5h `emergencyStop` are
+  // rebased onto the real utilization — the meter IS the ground-truth 5h/7d
+  // utilization, strictly better than a calibration guess. HARD INVARIANT: on
+  // ANY failed/expired/garbage read the estimate stands; the headline NEVER
+  // silently reads 0 (which would unblock dispatch during an outage), so
+  // emergencyStop stays conservative. The ADR-0021 since-reset / Pace-Gate
+  // machinery (percentSinceReset, weeklyEmergencyStop, projectPacingCurve) is
+  // byte-for-byte untouched — only the rolling headline + 5h emergencyStop move.
+  const oauth = await oauthPromise;
+  let percentLast5h: number;
+  let percentLast7d: number;
+  let usageSource: "oauth" | "estimate";
+  let oauthError: string | null;
+  let oauthFiveHourResetsAt: string | null = null;
+  let oauthSevenDayResetsAt: string | null = null;
+  // `isOAuthUsageOk` is the type guard the seam exports for narrowing under the
+  // orchestrator's `strict:false` tsconfig (a bare `if (oauth.ok)` does not
+  // narrow a discriminated union without strictNullChecks — same reason
+  // ov-request ships isOvOk/isOvFailure).
+  if (isOAuthUsageOk(oauth)) {
+    percentLast5h = oauth.data.fiveHour.utilization;
+    percentLast7d = oauth.data.sevenDay.utilization;
+    usageSource = "oauth";
+    oauthError = null;
+    oauthFiveHourResetsAt = oauth.data.fiveHour.resetsAt;
+    oauthSevenDayResetsAt = oauth.data.sevenDay.resetsAt;
+  } else {
+    // Graceful degradation: fall back to the transcript+calibration estimate.
+    // Logged (fail-loud) so a persistent OAuth outage is visible, but the gate
+    // stays conservative on the estimate rather than reading 0.
+    console.error(
+      `[usage-tracker] OAuth usage meter unavailable (${oauth.code}); falling back to transcript estimate for percentLast5h/percentLast7d`,
+    );
+    percentLast5h = estimatePercentLast5h;
+    percentLast7d = estimatePercentLast7d;
+    usageSource = "estimate";
+    oauthError = oauth.code;
+  }
+
+  // emergencyStop rides whichever headline is authoritative. On the OAuth path
+  // the meter is a real 0–100 utilization so the calibration gate does not
+  // apply; on the estimate path the historical `calibrated && >=90` gate holds
+  // (an uncalibrated estimate is 0, so it stays false — unchanged behaviour).
+  const emergencyStop =
+    usageSource === "oauth"
+      ? percentLast5h >= EMERGENCY_STOP_PERCENT
+      : calibrated && percentLast5h >= EMERGENCY_STOP_PERCENT;
 
   const weightedTotal = (acc: Record<ModelFamily, TokenBreakdown>): number =>
     MODEL_FAMILIES.reduce((sum, f) => sum + acc[f].total * familyWeight(f, weights), 0);
@@ -941,6 +1069,10 @@ async function scanUsage(
     tokensLast24h: tokens24h,
     percentLast5h,
     percentLast7d,
+    usageSource,
+    oauthError,
+    oauthFiveHourResetsAt,
+    oauthSevenDayResetsAt,
     projectedWeeklyPercent,
     pacingState,
     emergencyStop,

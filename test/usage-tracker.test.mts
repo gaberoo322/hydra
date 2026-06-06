@@ -942,6 +942,10 @@ describe("usage-tracker", () => {
         tokensLast24h: 0,
         percentLast5h: 0,
         percentLast7d: 0,
+        usageSource: "estimate",
+        oauthError: null,
+        oauthFiveHourResetsAt: null,
+        oauthSevenDayResetsAt: null,
         projectedWeeklyPercent: 0,
         pacingState: "under",
         emergencyStop: false,
@@ -1871,6 +1875,160 @@ describe("usage-tracker", () => {
       try {
         await getUsage({ now: new Date("2026-05-25T12:00:00Z"), projectsRoot: root, force: true });
         assert.equal(driftWarnings().length, 0);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // OAuth meter rebase + gate-safe fallback (issue #1083). The injected
+  // `readUsage` lets these pin the meter result without a live endpoint.
+  describe("OAuth meter rebase (issue #1083)", () => {
+    const meterOk = (fiveHour: number, sevenDay: number) => async () => ({
+      ok: true as const,
+      data: {
+        fiveHour: { utilization: fiveHour, resetsAt: "2026-06-07T02:50:00.000Z" },
+        sevenDay: { utilization: sevenDay, resetsAt: "2026-06-10T17:00:00.000Z" },
+      },
+    });
+    const meterFail = (code: any) => async () => ({ ok: false as const, code });
+
+    test("successful meter read REBASES percentLast5h/percentLast7d onto OAuth utilization", async () => {
+      // Transcript estimate would compute very different numbers; the OAuth
+      // headline must win and usageSource must be 'oauth'.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 100, out: 100 }),
+        ]);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: meterOk(50, 34),
+        });
+        assert.equal(snap.usageSource, "oauth");
+        assert.equal(snap.percentLast5h, 50);
+        assert.equal(snap.percentLast7d, 34);
+        assert.equal(snap.oauthError, null);
+        assert.equal(snap.oauthFiveHourResetsAt, "2026-06-07T02:50:00.000Z");
+        assert.equal(snap.oauthSevenDayResetsAt, "2026-06-10T17:00:00.000Z");
+        // Raw transcript token accounting is untouched (attribution stays).
+        assert.equal(snap.tokensLast5h.total, 200);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("OAuth >=90 fires emergencyStop on the meter path (real utilization gate)", async () => {
+      // No quota env set => uncalibrated estimate, yet the OAuth meter alone
+      // must be able to trip the 5h emergency stop.
+      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
+      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 10 }),
+        ]);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: meterOk(92, 40),
+        });
+        assert.equal(snap.usageSource, "oauth");
+        assert.equal(snap.percentLast5h, 92);
+        assert.equal(snap.emergencyStop, true);
+        assert.equal(projectEligibility(snap).allow, false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("HARD INVARIANT: a FAILED meter read falls back to the estimate, NEVER 0", async () => {
+      // Estimate computes 95% (>=90 => emergencyStop). A failed OAuth read must
+      // keep that conservative number, NOT silently degrade to 0 (which would
+      // unblock dispatch during an outage).
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 900, out: 50 }),
+        ]);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: meterFail("oauth-usage-token-expired"),
+        });
+        assert.equal(snap.usageSource, "estimate");
+        assert.equal(snap.oauthError, "oauth-usage-token-expired");
+        assert.equal(snap.percentLast5h, 95); // estimate stands — NOT 0
+        assert.equal(snap.emergencyStop, true);
+        assert.equal(projectEligibility(snap).allow, false);
+        // OAuth reset boundaries are null on the fallback path.
+        assert.equal(snap.oauthFiveHourResetsAt, null);
+        assert.equal(snap.oauthSevenDayResetsAt, null);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("Pace-Gate isolation: percentSinceReset / weeklyResetAnchor unchanged by the OAuth rebase", async () => {
+      // The ADR-0021 since-reset machinery keys off the env anchor, NOT the
+      // OAuth meter. A successful OAuth read must not move it.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T06:00:00Z", { in: 250 }),
+        ]);
+        const withMeter = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: meterOk(50, 34),
+        });
+        const withoutMeter = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: meterFail("oauth-usage-network"),
+        });
+        // since-reset projection identical regardless of the OAuth headline.
+        assert.equal(withMeter.percentSinceReset, withoutMeter.percentSinceReset);
+        assert.equal(withMeter.weeklyResetAnchor, withoutMeter.weeklyResetAnchor);
+        assert.equal(withMeter.weeklyEmergencyStop, withoutMeter.weeklyEmergencyStop);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a real OAuth 0% is honored on the meter path (distinct from a failed read)", async () => {
+      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
+      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
+      const root = await mkdtemp(join(tmpdir(), "usage-test-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: meterOk(0, 0),
+        });
+        assert.equal(snap.usageSource, "oauth");
+        assert.equal(snap.percentLast5h, 0);
+        assert.equal(snap.emergencyStop, false);
       } finally {
         await rm(root, { recursive: true, force: true });
       }

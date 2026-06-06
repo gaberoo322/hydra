@@ -109,3 +109,25 @@ export type {
   ResetWindow,
   PaceState,
 } from "./usage-tracker.ts";
+
+// ---------------------------------------------------------------------------
+// OAuth Usage Adapter — authoritative server-side meter (issue #1083)
+// ---------------------------------------------------------------------------
+export {
+  readOAuthUsage,
+  readAccessToken,
+  credentialsPath,
+  parseOAuthUsageBody,
+  isOAuthUsageFailure,
+  isOAuthUsageOk,
+  OAUTH_USAGE_URL,
+  OAUTH_USAGE_BETA,
+  OAUTH_USAGE_TIMEOUT_MS,
+} from "./oauth-usage.ts";
+
+export type {
+  OAuthUsageResult,
+  OAuthUsageData,
+  OAuthUsageWindow,
+  OAuthUsageErrorCode,
+} from "./oauth-usage.ts";
