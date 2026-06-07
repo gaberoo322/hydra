@@ -267,7 +267,51 @@ def append_failure(
             fh.write(json.dumps(asdict(record)) + "\n")
     except OSError as exc:
         print(f"[autopilot] self_heal: append_failure to {p} failed: {exc}", file=sys.stderr)
+
+    # Issue #1119: re-wire a reflection PRODUCER onto the live path. This is the
+    # single chokepoint where a NON-MERGED terminal outcome is decided WITH the
+    # anchor (`issue`) + classified pattern (`outcome`) + cue/note (`reason`)
+    # all known — exactly the shape `recordAnchorReflection` needs. Fire a
+    # best-effort reflection-record POST so the next attempt on this anchor
+    # reads its own prior-failure narrative (the #193 retry-correctness
+    # invariant the #841 consumers were silently starved of). Fully non-fatal:
+    # a missing/uninstalled reap module, an unreachable orchestrator, or any
+    # error is swallowed and never propagates back into the self-heal path.
+    _fire_reflection_for_failure(record)
+
     return record
+
+
+def _fire_reflection_for_failure(record: FailureRecord) -> None:
+    """Best-effort reflection-record fire for a non-merged failure (issue #1119).
+
+    Delegates the actual HTTP POST to `reap._fire_reflection_record`, which owns
+    the orchestrator-endpoint convention (mirroring `_fire_cycle_record`). The
+    import is LAZY + guarded so self_heal stays importable/usable even if reap
+    is unavailable (a test harness, a partial checkout), and so a circular-
+    import or any runtime error degrades to a no-op rather than breaking the
+    failure-log append. Skips when there is no anchor (`issue`) to key on; the
+    reap helper additionally skips non-learning-worthy patterns (e.g.
+    worktree-isolation-broken).
+    """
+    if not record.issue:
+        return
+    try:
+        from reap import _fire_reflection_record  # lazy: avoid import coupling
+        _fire_reflection_record(
+            record.issue,
+            record.pattern,
+            record.cue or record.note,
+            task_title=record.note or None,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort; never break the append
+        # Reflection writes are learning, not correctness. A failure here must
+        # not propagate into the autopilot self-heal path.
+        print(
+            f"[autopilot] self_heal: reflection fire skipped issue={record.issue} "
+            f"pattern={record.pattern} err={exc}",
+            file=sys.stderr,
+        )
 
 
 def read_failure_log(path: Path | str | None = None, *, limit: int = 200) -> list[dict]:

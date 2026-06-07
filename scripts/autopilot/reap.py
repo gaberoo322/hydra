@@ -237,6 +237,77 @@ def _fire_worktree_gc(skill: str | None) -> None:
         _append_log(f"worktree_gc_skipped err={exc}")
 
 
+# Self-heal pattern IDs that are NOT learning-worthy reflection writes
+# (issue #1119). `worktree-isolation-broken` is an INFRA abort, not a
+# model-fixable failure (self_heal.py tags it "never auto-retry; surface to
+# operator"), so recording a prior-attempt narrative for it would pollute the
+# retry-correctness signal with noise. Every other pattern (verification-
+# failure / no-diff / rollback / scope-violation / test-timeout / ci-flake /
+# ratelimit / unknown) IS a non-merged terminal outcome whose narrative the
+# next attempt should read.
+REFLECTION_RECORD_SKIP_PATTERNS = {"worktree-isolation-broken"}
+
+
+def _fire_reflection_record(
+    anchor_ref: str | None,
+    outcome: str,
+    reason: str,
+    *,
+    task_id: str | None = None,
+    task_title: str | None = None,
+) -> None:
+    """Best-effort POST to /api/autopilot/reflection-record (issue #1119).
+
+    The WRITE-gap fix for the severed episodic-reflection learning loop. Fires
+    when a dispatch terminalises on a NON-MERGED outcome so the per-anchor
+    reflection store becomes non-empty — restoring the #841 live injection path
+    that hydra-dev/target read at planning time (the #193 retry-correctness
+    invariant). Mirrors `_fire_cycle_record` exactly:
+
+      - Skipped when there is no anchor to key on (`anchor_ref` empty), or for a
+        non-learning-worthy pattern (`worktree-isolation-broken` — an infra
+        abort, not a model bug).
+      - A non-2xx, an unreachable orchestrator, a malformed response, or any
+        network error is logged to the run-log and SWALLOWED. Reflection writes
+        are learning, NOT correctness — they must never block or fail the reap
+        path.
+      - The endpoint (and its `recordAnchorReflection` producer) is idempotent
+        on `cycleId`/the capped per-anchor ring, so retries and overlapping
+        reaps converge harmlessly.
+
+    `outcome` is the classified self-heal pattern ID; `reason` is the cue/note
+    digest. A merged PR must NEVER reach here — reflections are prior-FAILURE
+    narratives, not success logs.
+    """
+    if not anchor_ref:
+        return
+    if outcome in REFLECTION_RECORD_SKIP_PATTERNS:
+        return
+    payload: dict = {
+        "anchorRef": anchor_ref,
+        "outcome": outcome,
+        "reason": reason or outcome,
+    }
+    if task_title:
+        payload["taskTitle"] = task_title
+    if task_id:
+        payload["cycleId"] = task_id
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{HYDRA_API_BASE}/api/autopilot/reflection-record",
+        data=data,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
+        msg = f"reflection_record_skipped anchor={anchor_ref} outcome={outcome} err={exc}"
+        print(f"[autopilot] reap: {msg}", file=sys.stderr)
+        _append_log(msg)
+
+
 def _reap_stale_claims() -> None:
     """Best-effort POST to /api/backlog/stale-claims/reap (issue #721).
 

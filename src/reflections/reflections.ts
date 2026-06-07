@@ -176,6 +176,35 @@ export async function recordAnchorReflection(opts: {
 }) {
   const key = reflectionKey(opts.anchorRef);
 
+  // Idempotency on cycleId (issue #1119): the reap-side producer keys each
+  // record on the autopilot task_id, and re-invocation for the SAME reaped
+  // dispatch (a retried POST, overlapping reaps) must be a no-op rather than
+  // pushing a duplicate prior-attempt narrative. The store's push is otherwise
+  // an unconditional rpush, so we dedup here — if a record with this cycleId
+  // already exists for the anchor, skip the write. A non-empty cycleId is
+  // required for the dedup to bite; callers always supply one (the wrapper
+  // synthesises a stable id when the body omits it).
+  if (opts.cycleId) {
+    try {
+      const existing = await getAnchorReflections(key);
+      for (const raw of existing) {
+        try {
+          const parsed = JSON.parse(raw) as { cycleId?: string };
+          if (parsed?.cycleId === opts.cycleId) {
+            // Already recorded for this dispatch — converge harmlessly.
+            return;
+          }
+        } catch {
+          /* intentional: skip malformed entry during dedup scan */
+        }
+      }
+    } catch (err: any) {
+      // A dedup-scan failure must not block the write — fall through and push.
+      // Worst case is a duplicate narrative, never a lost one.
+      console.error(`[Learning] cycleId dedup scan failed for "${opts.anchorRef.slice(0, 60)}": ${err.message}`);
+    }
+  }
+
   const reflection: AnchorReflection = {
     cycleId: opts.cycleId,
     anchorRef: opts.anchorRef,
