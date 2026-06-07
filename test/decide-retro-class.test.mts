@@ -142,6 +142,26 @@ describe("decide.py — retro_orch signal class (issue #920)", () => {
     assert.equal(args.runId, undefined, "no runId should be threaded through prompt_args");
   });
 
+  test("retro_orch dispatch stamps apply:true so a headless retro EMITS (issue #1078)", () => {
+    // hydra-retro defaults to --audit/dry-run: an argument-free headless
+    // dispatch persists the artifact but files ZERO issues and opens ZERO
+    // PRs, making every scheduled retro_orch a silent no-op on GitHub. The
+    // fix (option 2 of #1078) is decide.py-side: stamp `apply:true` so the
+    // autopilot forwards `--apply` (the playbook maps `apply=true` →
+    // `--apply`). This pins the emit-mode contract — without it the retro
+    // signal class's entire purpose (≤2 issues + ≤1 gated PR/run) never fires.
+    const state = baseState({ signals: { retro_run_available: true } });
+    const plan = runDecide(state, null);
+    const a = findAction(plan, (x) => x.type === "dispatch" && x.slot === "retro_orch");
+    assert.ok(a, "retro_orch dispatch must be present");
+    const args = a.prompt_args ?? {};
+    assert.equal(
+      args.apply,
+      true,
+      "headless retro_orch must dispatch with apply:true (emit mode), not silent dry-run",
+    );
+  });
+
   test("retro_orch DOES NOT fire without retro_run_available signal", () => {
     const state = baseState(); // no signals
     const plan = runDecide(state, null);

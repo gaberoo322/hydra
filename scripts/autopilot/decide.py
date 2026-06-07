@@ -2168,10 +2168,20 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
         # (see docs/operator-playbooks/hydra-retro.md "Resolve the run id").
         # Mirroring architecture_orch's no-args dispatch keeps decide.py pure
         # and avoids hard-coupling to the run-id resolution path.
+        #
+        # `apply:true` IS threaded, however (issue #1078): hydra-retro defaults
+        # to --audit/dry-run, so an argument-free headless dispatch files ZERO
+        # issues and opens ZERO PRs — every scheduled retro is then a silent
+        # no-op on GitHub, defeating the signal class's entire purpose
+        # (≤2 issues + ≤1 gated PR per run). Stamping `apply:true` makes the
+        # autopilot forward `--apply` (the playbook maps `apply=true` →
+        # `--apply`), so the headless retro emits. `--audit` remains the
+        # explicit opt-in for a manual operator inspection run.
         if _signal_present(state, events, "retro_run_available"):
             return make_dispatch(
                 sig,
                 "hydra-retro",
+                prompt_args={"apply": True},
                 reason="completed run available — daily retrospective",
             )
         return None
