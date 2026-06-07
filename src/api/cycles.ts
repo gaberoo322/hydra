@@ -7,6 +7,7 @@ import {
   updateCycleHash,
   getCycleHash,
 } from "../redis/cycle-tracking.ts";
+import { countQuerySchema } from "../schemas/common.ts";
 
 export function createCyclesRouter(_eventBus: any) {
   const router = Router();
@@ -23,8 +24,9 @@ export function createCyclesRouter(_eventBus: any) {
   // GET /cycle/history — Recent cycle results
   router.get("/cycle/history", async (req, res) => {
     try {
-    // @ts-expect-error — migrate to proper types
-      const limit = parseInt(req.query.limit) || 10;
+      // ADR-0022: read `limit` through the Schemas seam; bad/absent input
+      // collapses to the default, preserving the legacy `|| 10` semantics.
+      const limit = countQuerySchema(10).safeParse(req.query).data?.count ?? 10;
       res.json(await getCycleHistory(limit));
     } catch (err: any) {
       res.status(500).json({ error: err.message });

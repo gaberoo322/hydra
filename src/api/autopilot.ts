@@ -18,6 +18,7 @@
  */
 
 import { Router } from "express";
+import { z } from "zod";
 import { STREAMS } from "../event-bus.ts";
 import {
   CycleRecordBodySchema,
@@ -46,7 +47,6 @@ import {
   getRun,
   getRunRow,
   listRuns,
-  clampInt,
   fetchTurnsWithJoins,
 } from "../autopilot/runs.ts";
 import { assembleRetroBundle } from "../autopilot/retro-bundle.ts";
@@ -69,6 +69,30 @@ import {
  * `src/autopilot/runs.ts` directly.
  */
 export { runJournalctl, fetchTurnsWithJoins, sanitizeIso };
+
+/**
+ * Query schema for `GET /autopilot/runs?limit=N` (ADR-0022). Coerces the wire
+ * string to an integer, clamps to [1, 50], and collapses bad/absent/out-of-range
+ * input to the default 14 — preserving the prior `clampInt(.., 1, 50, 14)`
+ * leniency without a behaviour-changing 400. Non-strict so it ignores any other
+ * query params.
+ */
+const RunsLimitQuerySchema = z.object({
+  // Mirror clampInt(n, 1, 50, 14) exactly: a non-finite / non-integer value
+  // (absent param, "abc", "1.5") falls back to 14; an in-range or out-of-range
+  // INTEGER clamps into [1, 50] (so limit=0 → 1, limit=999 → 50) rather than
+  // collapsing to the default.
+  limit: z
+    .unknown()
+    .transform((raw) => {
+      const n = typeof raw === "number" ? raw : Number(raw);
+      if (raw === undefined || raw === null || raw === "") return 14;
+      if (!Number.isFinite(n) || !Number.isInteger(n)) return 14;
+      if (n < 1) return 1;
+      if (n > 50) return 50;
+      return n;
+    }),
+});
 
 /**
  * @param eventBus - optional; when provided, pause/resume emit a
@@ -199,8 +223,10 @@ export function createAutopilotRouter(eventBus?: any) {
   // GET /autopilot/runs — history table.
   // -------------------------------------------------------------------------
   router.get("/autopilot/runs", async (req, res) => {
-    const limitRaw = req.query.limit;
-    const limit = clampInt(limitRaw === undefined ? 14 : Number(limitRaw), 1, 50, 14);
+    // ADR-0022: read `limit` through the Schemas seam. This mirrors the prior
+    // clampInt(.., 1, 50, 14) — bad/absent/out-of-range input collapses to the
+    // default 14, valid input clamps into [1, 50].
+    const limit = RunsLimitQuerySchema.safeParse(req.query).data?.limit ?? 14;
     const result = await listRuns(limit);
     if (!result.ok) {
       return res.status(500).json({ error: result.detail || result.code });
@@ -234,13 +260,27 @@ export function createAutopilotRouter(eventBus?: any) {
       return res.status(status).json({ error: runRowResult.detail || runRowResult.code });
     }
 
-    const tailRaw = req.query.tail;
-    const tailParsed = tailRaw === undefined ? LOG_TAIL_DEFAULT : Number(tailRaw);
-    if (!Number.isInteger(tailParsed) || tailParsed < 1 || tailParsed > LOG_TAIL_MAX) {
+    // ADR-0022: read `tail` through the Schemas seam. This route keeps its
+    // bespoke hard-400 on out-of-range input, so it safeParses inline (strict
+    // integer in [1, LOG_TAIL_MAX], default LOG_TAIL_DEFAULT) and owns the
+    // response — matching the common.ts guidance for routes with bespoke
+    // error handling.
+    const tailResult = z
+      .object({
+        tail: z.coerce
+          .number()
+          .int()
+          .min(1)
+          .max(LOG_TAIL_MAX)
+          .default(LOG_TAIL_DEFAULT),
+      })
+      .safeParse(req.query);
+    if (!tailResult.success) {
       return res.status(400).json({
         error: `invalid tail: must be integer in [1, ${LOG_TAIL_MAX}]`,
       });
     }
+    const tailParsed = tailResult.data.tail;
 
     try {
       const logResult = await readLogTail({ runId, row: runRowResult.row, tail: tailParsed });

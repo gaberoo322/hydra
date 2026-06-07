@@ -14,14 +14,24 @@
  */
 
 import { Router } from "express";
+import { z } from "zod";
 import { getUsage, projectEligibility, overlayPauseEligibility } from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
+import { booleanFlag } from "../schemas/common.ts";
+
+/**
+ * Query schema for the `?force=1` cache-bust knob shared by both usage read
+ * routes (ADR-0022). The common booleanFlag helper preserves the legacy
+ * `force === "1" || force === "true"` semantics (and additionally accepts the
+ * canonical `yes`/`on` truthy forms); absent => false.
+ */
+const ForceQuerySchema = z.object({ force: booleanFlag() });
 
 export function createUsageRouter() {
   const router = Router();
 
   router.get("/usage", async (req, res) => {
-    const force = req.query.force === "1" || req.query.force === "true";
+    const force = ForceQuerySchema.parse(req.query).force;
     try {
       const snapshot = await getUsage({ force });
       return res.json(snapshot);
@@ -49,7 +59,7 @@ export function createUsageRouter() {
    * error degrades to not-paused so it can never wedge the loop off.
    */
   router.get("/usage/eligibility", async (req, res) => {
-    const force = req.query.force === "1" || req.query.force === "true";
+    const force = ForceQuerySchema.parse(req.query).force;
     try {
       const snapshot = await getUsage({ force });
       let paused = false;
