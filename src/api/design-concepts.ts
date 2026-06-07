@@ -82,7 +82,7 @@ type GreenLightMetrics = {
  * — no Redis IO — so it is unit-testable. A "green" day is one whose
  * production count is > 0.
  */
-export function computeGreenLight(
+function computeGreenLight(
   snapshots: Array<{ date: string; count: number }>,
   windowDays: number = GREEN_LIGHT_WINDOW_DAYS,
   requiredGreenDays: number = GREEN_LIGHT_REQUIRED_DAYS,
