@@ -1612,6 +1612,116 @@ export const PACING_SHEDDABLE_CLASSES: readonly string[] = Object.freeze([
   "scout_orch",
 ]);
 
+/**
+ * Graduated 5-hour-utilization throttle (issue #1087, builds on #1085).
+ *
+ * Between 0% and the 90% `emergencyStop` the pipeline fan-out used to run at
+ * full throttle, sprinting to the 5h session wall and then slamming to a hard
+ * stop. These two ordered tiers shed pipeline classes EARLIER — lowest pipeline
+ * priority first — so the 5h window burns down gracefully. Keyed off the
+ * AUTHORITATIVE OAuth `percentLast5h` (`usageSource:"oauth"`); inert on the
+ * transcript `estimate` (the rough number must not throttle real work).
+ *
+ * Tier 1 (≥ T1, default 60%): the lowest-value pipeline classes — both research
+ * classes plus the orch-self backfill / retro / cleanup signal classes. These
+ * are spare-capacity self-improvement dispatches that don't move Target
+ * Outcomes; shedding them first costs nothing in-flight.
+ *
+ * Tier 2 (≥ T2, default 75%): ADDITIONALLY the design-concept grill and the
+ * single largest dev consumer (`dev_orch`, ~37% of measured 5h burn). `qa_*`
+ * are NEVER shed — finishing work that's already burned tokens is cheaper than
+ * abandoning it. `dev_target` is also kept so Target work can still land.
+ *
+ * Each tier UNIONS its predecessor (a T2-or-higher snapshot sheds the T1 set
+ * too). Above 90% the existing `emergencyStop` blocks everything (allow=false),
+ * which supersedes any shed list. This is policy, not measurement; if you change
+ * a list, also update the autopilot playbook class-eligibility table.
+ */
+export const FIVE_HOUR_THROTTLE_T1_CLASSES: readonly string[] = Object.freeze([
+  "research_orch",
+  "research_target",
+  "architecture_orch",
+  "retro_orch",
+  "cleanup_orch",
+  "discover_orch",
+]);
+
+/**
+ * Tier-2 classes shed IN ADDITION to {@link FIVE_HOUR_THROTTLE_T1_CLASSES} once
+ * `percentLast5h` reaches T2. The grill + the single largest dev class; `qa_*`
+ * and `dev_target` are deliberately excluded. See
+ * {@link FIVE_HOUR_THROTTLE_T1_CLASSES} for the full rationale. (issue #1087)
+ */
+export const FIVE_HOUR_THROTTLE_T2_CLASSES: readonly string[] = Object.freeze([
+  "design_concept_orch",
+  "dev_orch",
+]);
+
+/** Default Tier-1 5h-utilization throttle threshold (fraction of quota). */
+export const DEFAULT_FIVE_HOUR_THROTTLE_T1 = 0.6;
+/** Default Tier-2 5h-utilization throttle threshold (fraction of quota). */
+export const DEFAULT_FIVE_HOUR_THROTTLE_T2 = 0.75;
+
+/**
+ * Read a 5h-throttle threshold env var as a fraction in (0, 1). Unset/empty →
+ * `fallback`. Set-but-invalid (non-finite, ≤0, or ≥1) → `fallback` with a
+ * fail-loud `console.error`, mirroring {@link getWeeklyPaceCeiling}'s discipline
+ * (a mis-configured env var is visible, never silently honoured). (issue #1087)
+ */
+function getFiveHourThrottleThreshold(envVar: string, fallback: number): number {
+  const raw = process.env[envVar];
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) {
+    console.error(
+      `[usage-tracker] ${envVar} is set but not a finite fraction in (0, 1) (${JSON.stringify(
+        raw,
+      )}); falling back to default ${fallback}`,
+    );
+    return fallback;
+  }
+  return parsed;
+}
+
+/**
+ * The graduated 5h-utilization shed set for a snapshot (issue #1087), as a
+ * PURE function (env-only + snapshot; no `Date.now()`, no IO). Returns the
+ * classes to shed given the authoritative OAuth `percentLast5h`:
+ *   - `usageSource !== "oauth"` (estimate/uncalibrated) → `[]` (inert).
+ *   - `percentLast5h >= T2*100` → T1 ∪ T2.
+ *   - `percentLast5h >= T1*100` → T1.
+ *   - below T1 → `[]`.
+ * T1/T2 read from `HYDRA_USAGE_5H_THROTTLE_T1` / `_T2` (fractions). When a
+ * mis-set T2 < T1, the higher of the two governs the T2 cut so the ordering
+ * invariant (T2 ⊇ T1 only above T1) never inverts.
+ */
+export function fiveHourThrottleShed(snapshot: UsageSnapshot): readonly string[] {
+  // Only the AUTHORITATIVE OAuth meter throttles real work; the transcript
+  // estimate is too rough to gate on (and is 0 when uncalibrated).
+  if (snapshot.usageSource !== "oauth") return [];
+  const t1 = getFiveHourThrottleThreshold(
+    "HYDRA_USAGE_5H_THROTTLE_T1",
+    DEFAULT_FIVE_HOUR_THROTTLE_T1,
+  );
+  const t2 = getFiveHourThrottleThreshold(
+    "HYDRA_USAGE_5H_THROTTLE_T2",
+    DEFAULT_FIVE_HOUR_THROTTLE_T2,
+  );
+  const pct = snapshot.percentLast5h;
+  // Defensive ordering: T2 must not cut below T1. If an operator mis-sets
+  // T2 < T1, treat the larger as the T2 boundary (the T1 set still sheds at T1).
+  const t2Pct = Math.max(t1, t2) * 100;
+  const t1Pct = t1 * 100;
+  if (pct >= t2Pct) {
+    return Object.freeze([
+      ...FIVE_HOUR_THROTTLE_T1_CLASSES,
+      ...FIVE_HOUR_THROTTLE_T2_CLASSES,
+    ]);
+  }
+  if (pct >= t1Pct) return FIVE_HOUR_THROTTLE_T1_CLASSES;
+  return [];
+}
+
 export interface UsageEligibility {
   /**
    * False when the tracker reports `emergencyStop` (5h consumption at
@@ -1638,6 +1748,15 @@ export interface UsageEligibility {
      */
     weeklyEmergencyStop: boolean;
     pacingShed: boolean;
+    /**
+     * True when the graduated 5h-utilization throttle (issue #1087) contributed
+     * classes to {@link UsageEligibility.shed} — i.e. the authoritative OAuth
+     * `percentLast5h` reached at least the Tier-1 threshold. Independent of
+     * {@link pacingShed} (the weekly-projection shed); either or both can be
+     * true, and `shed` is their union. False on the transcript estimate / below
+     * Tier 1.
+     */
+    fiveHourThrottleShed: boolean;
     calibrated: boolean;
     /**
      * Operator-only **Autopilot pause** flag (issue #988). When true, the
@@ -1761,7 +1880,21 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
   // same allow=false drain path the operator pause uses.
   const allow = !snapshot.emergencyStop && !snapshot.weeklyEmergencyStop;
   const pacingShed = snapshot.pacingState === "over";
-  const shed = pacingShed ? PACING_SHEDDABLE_CLASSES : [];
+  // Two independent soft-throttles COMPOSE into the shed list (issue #1087):
+  //   - the weekly-projection pacing shed (existing, `pacingState === "over"`)
+  //   - the graduated 5h-utilization throttle (keyed off OAuth `percentLast5h`)
+  // Union + de-dupe so a class shed by either path appears exactly once.
+  const throttleShed = fiveHourThrottleShed(snapshot);
+  const fiveHourThrottleShed_ = throttleShed.length > 0;
+  const shed =
+    pacingShed || fiveHourThrottleShed_
+      ? Object.freeze([
+          ...new Set([
+            ...(pacingShed ? PACING_SHEDDABLE_CLASSES : []),
+            ...throttleShed,
+          ]),
+        ])
+      : [];
   // Pacing Curve verdict (issue #857). ADDITIVE — does NOT touch allow/shed;
   // the Pace Gate that acts on paceState lands in #858. Reads the ceiling from
   // env here so callers (incl. the HTTP route) get the live verdict.
@@ -1776,6 +1909,7 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
       emergencyStop: snapshot.emergencyStop,
       weeklyEmergencyStop: snapshot.weeklyEmergencyStop,
       pacingShed,
+      fiveHourThrottleShed: fiveHourThrottleShed_,
       calibrated: snapshot.calibrated,
       // Default not-paused. The pause flag is a Redis read that does NOT
       // belong inside this pure projection — it is overlaid at the

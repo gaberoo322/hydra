@@ -29,6 +29,11 @@ import {
   DEFAULT_DRIFT_FACTOR,
   sessionIdFromPath,
   PACING_SHEDDABLE_CLASSES,
+  fiveHourThrottleShed,
+  FIVE_HOUR_THROTTLE_T1_CLASSES,
+  FIVE_HOUR_THROTTLE_T2_CLASSES,
+  DEFAULT_FIVE_HOUR_THROTTLE_T1,
+  DEFAULT_FIVE_HOUR_THROTTLE_T2,
   UNATTRIBUTED_SKILL,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
@@ -99,6 +104,8 @@ function withEnvSnapshot() {
     "HYDRA_USAGE_DRIFT_FACTOR",
     "HYDRA_OAUTH_USAGE_TTL_MS",
     "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
+    "HYDRA_USAGE_5H_THROTTLE_T1",
+    "HYDRA_USAGE_5H_THROTTLE_T2",
   ];
   const prev: Record<string, string | undefined> = {};
   for (const k of keys) prev[k] = process.env[k];
@@ -1085,6 +1092,157 @@ describe("usage-tracker", () => {
         ).allow,
         true
       );
+    });
+
+    // -----------------------------------------------------------------------
+    // Graduated 5h-utilization throttle (issue #1087, builds on #1085).
+    // Pure function of the OAuth `percentLast5h` + the T1/T2 env thresholds.
+    // Defaults: T1=0.60, T2=0.75. Inert on the transcript `estimate`.
+    // -----------------------------------------------------------------------
+    describe("graduated 5h throttle", () => {
+      const restore = withEnvSnapshot();
+      beforeEach(() => {
+        delete process.env.HYDRA_USAGE_5H_THROTTLE_T1;
+        delete process.env.HYDRA_USAGE_5H_THROTTLE_T2;
+      });
+      afterEach(() => restore());
+
+      function oauthSnap(percentLast5h: number): UsageSnapshot {
+        return snapshotWith({
+          calibrated: true,
+          usageSource: "oauth",
+          percentLast5h,
+          // keep pacing/emergency inert so we isolate the 5h throttle
+          pacingState: "under",
+          emergencyStop: false,
+          weeklyEmergencyStop: false,
+        });
+      }
+
+      const T1 = new Set(FIVE_HOUR_THROTTLE_T1_CLASSES);
+      const T1T2 = new Set([
+        ...FIVE_HOUR_THROTTLE_T1_CLASSES,
+        ...FIVE_HOUR_THROTTLE_T2_CLASSES,
+      ]);
+
+      test("defaults are 0.60 / 0.75", () => {
+        assert.equal(DEFAULT_FIVE_HOUR_THROTTLE_T1, 0.6);
+        assert.equal(DEFAULT_FIVE_HOUR_THROTTLE_T2, 0.75);
+      });
+
+      test("below T1 (59%): no shed", () => {
+        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(59))], []);
+        const v = projectEligibility(oauthSnap(59));
+        assert.deepEqual([...v.shed], []);
+        assert.equal(v.reasons.fiveHourThrottleShed, false);
+        assert.equal(v.allow, true);
+      });
+
+      test("exactly at T1 (60%): T1 set sheds (boundary is inclusive)", () => {
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(60))), T1);
+        const v = projectEligibility(oauthSnap(60));
+        assert.deepEqual(new Set(v.shed), T1);
+        assert.equal(v.reasons.fiveHourThrottleShed, true);
+        // dev_orch / qa_* / dev_target NOT shed at T1.
+        assert.equal(v.shed.includes("dev_orch"), false);
+        assert.equal(v.shed.includes("dev_target"), false);
+        assert.equal(v.shed.includes("qa_orch"), false);
+        assert.equal(v.shed.includes("qa_target"), false);
+      });
+
+      test("between T1 and T2 (70%): only the T1 set", () => {
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(70))), T1);
+      });
+
+      test("exactly at T2 (75%): T1 ∪ T2; dev_orch shed but qa_* + dev_target kept", () => {
+        const shed = new Set(fiveHourThrottleShed(oauthSnap(75)));
+        assert.deepEqual(shed, T1T2);
+        assert.equal(shed.has("dev_orch"), true);
+        assert.equal(shed.has("design_concept_orch"), true);
+        assert.equal(shed.has("qa_orch"), false);
+        assert.equal(shed.has("qa_target"), false);
+        assert.equal(shed.has("dev_target"), false);
+      });
+
+      test("above T2 (89%, below 90% emergency): T1 ∪ T2, still allow=true", () => {
+        const v = projectEligibility(oauthSnap(89));
+        assert.deepEqual(new Set(v.shed), T1T2);
+        assert.equal(v.reasons.fiveHourThrottleShed, true);
+        assert.equal(v.allow, true);
+      });
+
+      test("usageSource=estimate: inert even above T2", () => {
+        const snap = snapshotWith({
+          calibrated: true,
+          usageSource: "estimate",
+          percentLast5h: 88,
+          pacingState: "under",
+        });
+        assert.deepEqual([...fiveHourThrottleShed(snap)], []);
+        const v = projectEligibility(snap);
+        assert.deepEqual([...v.shed], []);
+        assert.equal(v.reasons.fiveHourThrottleShed, false);
+      });
+
+      test("env override: custom T1/T2 thresholds honoured", () => {
+        process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0.40";
+        process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "0.50";
+        // 45% now crosses the custom T1 but not the custom T2.
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(45))), T1);
+        // 55% crosses both.
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(55))), T1T2);
+        // 35% below custom T1 → no shed.
+        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(35))], []);
+      });
+
+      test("set-but-invalid env falls back to default (fail-loud, no throw)", () => {
+        process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "not-a-number";
+        process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "1.5"; // >=1 invalid
+        // Falls back to 0.60 / 0.75: 70% → T1 only.
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(70))), T1);
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(80))), T1T2);
+      });
+
+      test("mis-set T2 < T1: T2 cut never inverts below T1", () => {
+        process.env.HYDRA_USAGE_5H_THROTTLE_T1 = "0.70";
+        process.env.HYDRA_USAGE_5H_THROTTLE_T2 = "0.50";
+        // T1=70, T2 clamped up to max(70,50)=70. At 65% → no shed.
+        assert.deepEqual([...fiveHourThrottleShed(oauthSnap(65))], []);
+        // At 72% → both tiers fire together (T2 boundary == T1 boundary).
+        assert.deepEqual(new Set(fiveHourThrottleShed(oauthSnap(72))), T1T2);
+      });
+
+      test("composes with pacing shed (union, de-duped)", () => {
+        // pacingState 'over' + 5h above T1 → union of both lists, no dupes.
+        const snap = snapshotWith({
+          calibrated: true,
+          usageSource: "oauth",
+          percentLast5h: 65,
+          pacingState: "over",
+          emergencyStop: false,
+        });
+        const v = projectEligibility(snap);
+        const expected = new Set([
+          ...PACING_SHEDDABLE_CLASSES,
+          ...FIVE_HOUR_THROTTLE_T1_CLASSES,
+        ]);
+        assert.deepEqual(new Set(v.shed), expected);
+        // No duplicate entries (discover_orch is in BOTH lists).
+        assert.equal(v.shed.length, new Set(v.shed).size);
+        assert.equal(v.reasons.pacingShed, true);
+        assert.equal(v.reasons.fiveHourThrottleShed, true);
+      });
+
+      test("emergencyStop (>=90%) supersedes: allow=false", () => {
+        const snap = snapshotWith({
+          calibrated: true,
+          usageSource: "oauth",
+          percentLast5h: 95,
+          emergencyStop: true,
+        });
+        const v = projectEligibility(snap);
+        assert.equal(v.allow, false);
+      });
     });
 
     // -----------------------------------------------------------------------
@@ -2354,6 +2512,7 @@ describe("usage-tracker", () => {
         emergencyStop: false,
         weeklyEmergencyStop: false,
         pacingShed: false,
+        fiveHourThrottleShed: false,
         calibrated: true,
         paused: false,
         sessionBlockedUntil: null,
