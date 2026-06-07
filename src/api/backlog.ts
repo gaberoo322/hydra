@@ -10,6 +10,27 @@ import {
   getClaimsReapedDay,
   getClaimsReapedLast,
 } from "../redis/backlog.ts";
+import { z } from "zod";
+
+/**
+ * Query schema for `GET /backlog/stale-claims?maxAgeMs=N` (ADR-0022).
+ *
+ * `maxAgeMs` is an OPTIONAL positive-integer override; an absent, non-numeric,
+ * zero, or negative value collapses to `undefined` so the caller falls back to
+ * the env/default threshold — preserving the legacy
+ * `Number.isFinite(rawMax) && rawMax > 0 ? rawMax : envMax` semantics without a
+ * behaviour-changing 400. Non-strict so it ignores any other query params.
+ */
+const StaleClaimsQuerySchema = z.object({
+  maxAgeMs: z
+    .coerce.number()
+    .int()
+    .positive()
+    .optional()
+    // Any failure (absent, NaN from a non-numeric string, zero/negative)
+    // collapses to undefined so the caller applies its env/default fallback.
+    .catch(undefined),
+});
 
 export function createBacklogRouter() {
   const router = Router();
@@ -118,9 +139,11 @@ export function createBacklogRouter() {
   // #374). Optional `?maxAgeMs=N` overrides the default for diagnostic queries.
   router.get("/backlog/stale-claims", async (req, res) => {
     try {
-      const rawMax = typeof req.query.maxAgeMs === "string" ? parseInt(req.query.maxAgeMs, 10) : NaN;
+      // ADR-0022: read `maxAgeMs` through the Schemas seam. The schema yields a
+      // positive integer or undefined; undefined falls back to env/default.
+      const rawMax = StaleClaimsQuerySchema.safeParse(req.query).data?.maxAgeMs;
       const envMax = parseInt(process.env.HYDRA_CLAIM_MAX_AGE_MS ?? "") || 2 * 60 * 60 * 1000;
-      const maxAgeMs = Number.isFinite(rawMax) && rawMax > 0 ? rawMax : envMax;
+      const maxAgeMs = rawMax ?? envMax;
       const { all, stale, maxAgeMs: usedMax } = await getStaleClaims({ maxAgeMs });
       const lifetime = await getClaimsReapedLifetime();
       const isoDate = new Date().toISOString().split("T")[0];

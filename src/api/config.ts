@@ -2,6 +2,8 @@ import { Router } from "express";
 import { readFile, writeFile, readdir } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { getTargetName, getTargetWorkspace } from "../target-config.ts";
+import { booleanFlag } from "../schemas/common.ts";
+import { z } from "zod";
 
 /**
  * Config + env-var routes.
@@ -115,7 +117,9 @@ export function createConfigRouter() {
     try {
       const raw = await readFile(envPath, "utf-8");
       const vars = parseEnvFile(raw);
-      const reveal = req.query.reveal === "true";
+      // ADR-0022: read the `reveal` flag through the Schemas seam via the
+      // common booleanFlag helper. Absent/unset => false (mask values).
+      const reveal = z.object({ reveal: booleanFlag() }).parse(req.query).reveal;
       res.json(vars.map(v => ({
         key: v.key,
         value: reveal ? v.value : maskValue(v.value),

@@ -7,6 +7,7 @@ import {
   setAlertAt,
 } from "../redis/alerts.ts";
 import { pushToWorkQueue } from "../redis/work-queue.ts";
+import { countQuerySchema } from "../schemas/common.ts";
 
 /**
  * Alerts + Sentry webhook routes.
@@ -23,7 +24,10 @@ export function createAlertsRouter(_eventBus: any) {
   // GET /alerts — List recent alerts
   router.get("/alerts", async (req, res) => {
     try {
-      const limit = parseInt(String(req.query.limit ?? ""), 10) || 50;
+      // ADR-0022: read `limit` through the Schemas seam (safeParse on req.query).
+      // countQuerySchema collapses bad/absent input to the default, preserving
+      // the legacy `|| 50` semantics without a behaviour change.
+      const limit = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const raw = await readRecentAlerts(limit + 1);
       res.json(raw.map(s => JSON.parse(s)));
     } catch (err: any) {

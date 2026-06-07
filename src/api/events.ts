@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { STREAMS, streamKey } from "../event-bus.ts";
+import { countQuerySchema } from "../schemas/common.ts";
 
 /**
  * Event bus stream routes.
@@ -12,7 +13,9 @@ export function createEventsRouter(eventBus: any) {
   // GET /events/:stream — Read recent events from a stream
   router.get("/events/:stream", async (req, res) => {
     const stream = streamKey(req.params.stream);
-    const count = parseInt(String(req.query.count ?? ""), 10) || 10;
+    // ADR-0022: read `count` through the Schemas seam; bad/absent input
+    // collapses to the default, preserving the legacy `|| 10` semantics.
+    const count = countQuerySchema(10).safeParse(req.query).data?.count ?? 10;
     try {
       const events = await eventBus.readRecent(stream, count);
       res.json(events);
