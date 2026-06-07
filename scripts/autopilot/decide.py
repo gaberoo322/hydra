@@ -933,7 +933,29 @@ def best_candidate(candidates_payload: dict | None) -> dict | None:
 
 
 def research_recommended(candidates_payload: dict | None) -> bool:
+    """Read the candidate feed's precomputed `research_recommended` flag.
+
+    `src/anchor-candidates.ts` is the single source of truth for "the
+    target board is empty / top score is too weak → recommend research"
+    (it applies RESEARCH_THRESHOLD). The research_target selector consumes
+    this flag instead of re-deriving `best_score < DEV_CONFIDENCE_THRESHOLD`
+    inline, so the two thresholds can't silently diverge (issue #1129).
+
+    A missing/unusable payload (feed unreachable, or no `candidates` array)
+    defaults to True — degrade toward research direction rather than
+    starving the target backlog. This mirrors the pre-#1129 inline check,
+    whose `best is None` arm fired research whenever the feed produced no
+    top candidate.
+    """
     if not candidates_payload:
+        return True
+    # A payload that doesn't carry a `candidates` list isn't a real
+    # /api/anchor/candidates response (feed degraded / wrong shape). The
+    # feed only stamps `research_recommended` alongside that array, so its
+    # absence means "no usable candidate signal" → default to research,
+    # matching the old `best is None` arm rather than reading the absent
+    # flag as a falsy "do not research".
+    if not isinstance(candidates_payload.get("candidates"), list):
         return True
     return bool(candidates_payload.get("research_recommended"))
 
@@ -1953,13 +1975,18 @@ def _select_for_slot(
         return None
     if cls == "research_target":
         # Two triggers: (a) explicit target_research_due signal, or
-        # (b) best /api/anchor/candidates score below the dev threshold —
-        # the candidates feed IS the target backlog, so a weak top score
-        # means the target product needs more research direction (post-#458,
-        # this trigger moved here from research_orch).
+        # (b) the candidate feed's precomputed `research_recommended` flag —
+        # the candidates feed IS the target backlog, so a feed that flags
+        # "board empty / top score too weak" means the target product needs
+        # more research direction (post-#458, this trigger moved here from
+        # research_orch). We consume the flag the feed already computed
+        # (anchor-candidates.ts applies RESEARCH_THRESHOLD) rather than
+        # re-deriving `best_score < DEV_CONFIDENCE_THRESHOLD` inline — two
+        # thresholds that coincide today (both 0.5) but could silently
+        # diverge if either is tuned (issue #1129).
         if _signal_present(state, events, "target_research_due"):
             return make_dispatch(cls, "hydra-target-research", reason="target research due")
-        if candidates is not None and (best is None or best_score < DEV_CONFIDENCE_THRESHOLD):
+        if candidates is not None and research_recommended(candidates):
             if _research_force_allowed(state, "research_target", now):
                 return make_dispatch(
                     cls,

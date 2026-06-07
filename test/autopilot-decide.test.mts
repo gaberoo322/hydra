@@ -236,6 +236,46 @@ describe("decide.py — research force-dispatch when no candidate >= 0.5", () =>
     assert.ok(dispatch);
   });
 
+  // ISSUE #1129: the research_target trigger consumes the candidate feed's
+  // precomputed `research_recommended` flag — NOT a re-derivation of
+  // `best_score < DEV_CONFIDENCE_THRESHOLD`. These two tests pin that the
+  // flag is authoritative independent of best_score, so the feed's
+  // RESEARCH_THRESHOLD and decide.py's DEV_CONFIDENCE_THRESHOLD can diverge
+  // without the forced-research decision silently going stale.
+  test("research_recommended=true forces research_target even when best_score >= threshold (#1129)", () => {
+    const state = baseState();
+    // Strong top score (0.9 >= 0.5) but the feed still recommends research.
+    const cands = { candidates: [{ issue: 7, anchorRef: "x", score: 0.9 }], research_recommended: true };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+    assert.ok(dispatch, "flag=true must force research regardless of best_score");
+    assert.equal(dispatch.prompt_args.forced, true);
+    assert.equal(dispatch.skill, "hydra-target-research");
+  });
+
+  test("research_recommended=false suppresses research_target even when best_score < threshold (#1129)", () => {
+    const state = baseState();
+    // Weak top score (0.4 < 0.5) but the feed does NOT recommend research.
+    const cands = { candidates: [{ issue: 8, anchorRef: "x", score: 0.4 }], research_recommended: false };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+    assert.equal(dispatch, undefined,
+      "flag=false must suppress forced research regardless of best_score");
+  });
+
+  test("daily cap still gates a flag-driven forced research_target (#1129)", () => {
+    // AC: RESEARCH_FORCE_DAILY_CAP / _research_force_allowed gating unchanged
+    // even though the trigger now reads the flag instead of best_score.
+    const today = new Date().toISOString().slice(0, 10);
+    const state = baseState({
+      research_force_counter: { [today]: { research_target: 4 } },
+    });
+    const cands = { candidates: [{ issue: 9, anchorRef: "x", score: 0.9 }], research_recommended: true };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+    assert.equal(dispatch, undefined, "force cap must suppress even a flag-driven forced dispatch");
+  });
+
   test("daily research-force cap (4/day) — 4th forced research_target dispatch suppressed (#458)", () => {
     const today = new Date().toISOString().slice(0, 10);
     const state = baseState({
