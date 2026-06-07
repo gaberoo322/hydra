@@ -572,4 +572,45 @@ describe("backlog state machine", () => {
     assert.ok(ts >= before - 1 && ts <= after + 1, `movedAt ${ts} must fall within [${before},${after}]`);
     assert.equal(result.item.claimedAt, result.item.movedAt);
   });
+
+  // -------------------------------------------------------------------------
+  // Issue #1122 — a corrupt `hydra:backlog:items` entry must surface a logged
+  // error rather than silently stalling the queue with `parse-error`.
+  // -------------------------------------------------------------------------
+  test("issue #1122: corrupt queue item logs an error rather than silently returning parse-error", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "Corrupt claim 1122", category: "test" });
+    await admin.promoteToQueued(1);
+
+    // Find the queued item's id, then poison its `hydra:backlog:items` hash
+    // entry with non-JSON so the Lua claim returns a value JSON.parse chokes on.
+    const queued = await admin.peekNextQueuedItem();
+    assert.ok(queued && queued.id, "test setup: a queued item must exist");
+    await redis.hset("hydra:backlog:items", queued.id, "{not valid json");
+
+    // Capture console.error for the duration of the claim.
+    const original = console.error;
+    const calls: any[][] = [];
+    console.error = (...args: any[]) => {
+      calls.push(args);
+    };
+    let result: any;
+    try {
+      result = await admin.claimNextQueuedItem("claude");
+    } finally {
+      console.error = original;
+    }
+
+    assert.equal(result.claimed, false);
+    assert.equal(result.reason, "parse-error");
+    assert.ok(
+      calls.length >= 1,
+      "a corrupt queue item must trigger at least one console.error, not a silent parse-error",
+    );
+    const logged = calls.flat().map(String).join(" ");
+    assert.ok(
+      /backlog\/claim/.test(logged) && /parse/i.test(logged),
+      `the logged error must identify the claim-path parse failure (got: ${logged})`,
+    );
+  });
 });

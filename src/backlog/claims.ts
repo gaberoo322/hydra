@@ -56,13 +56,33 @@ export async function claimNextQueuedItem(claimedBy: string): Promise<{
 
   if (!result) return { claimed: false, reason: "no-result" };
 
+  // Parse the Lua return value first. A failure here is a corrupt Redis write
+  // (poisoned `hydra:backlog:items` entry) — distinct from the legitimate
+  // `blocked` paths below — and MUST surface loudly rather than stall the queue
+  // invisibly (CLAUDE.md fail-loud; issue #1122). The result-object contract is
+  // preserved (we never throw from the claim path).
+  let parsed: any;
   try {
-    const parsed = JSON.parse(result);
-    if (parsed.blocked) {
-      return { claimed: false, reason: parsed.blocked, count: parsed.count };
-    }
+    parsed = JSON.parse(result);
+  } catch (err) {
+    console.error(
+      `[backlog/claim] corrupt queue item — JSON.parse failed (claimedBy=${claimedBy}). ` +
+        `The item was already removed from the queued lane by the Lua claim and is now orphaned. ` +
+        `Raw value: ${truncate(result)}`,
+      err,
+    );
+    return { claimed: false, reason: "parse-error" };
+  }
 
-    // Raw item JSON — stamp lane metadata and persist.
+  if (parsed.blocked) {
+    return { claimed: false, reason: parsed.blocked, count: parsed.count };
+  }
+
+  // Raw item JSON — stamp lane metadata and persist. A failure persisting the
+  // claimed item is distinct from a parse failure: the item parsed fine but the
+  // write-back (e.g. a Redis seam error) failed. Log it and return a result
+  // object — the claim path never throws (issue #1122 implementation note).
+  try {
     parsed.meta = {
       ...parsed.meta,
       startedAt: new Date().toISOString().split("T")[0],
@@ -71,7 +91,18 @@ export async function claimNextQueuedItem(claimedBy: string): Promise<{
     applyLaneTransition(parsed, "inProgress", { claimedBy });
     await saveItem(parsed);
     return { claimed: true, item: parsed };
-  } catch {
-    return { claimed: false, reason: "parse-error" };
+  } catch (err) {
+    console.error(
+      `[backlog/claim] failed to persist claimed item (claimedBy=${claimedBy}, id=${parsed?.id}). ` +
+        `The Lua claim already moved it into the inProgress lane, so it is now in inProgress without ` +
+        `refreshed claim metadata.`,
+      err,
+    );
+    return { claimed: false, reason: "save-error" };
   }
+}
+
+/** Bound the raw-value context so an oversized corrupt blob can't flood the log. */
+function truncate(s: string, max = 500): string {
+  return s.length > max ? `${s.slice(0, max)}… (${s.length} chars total)` : s;
 }
