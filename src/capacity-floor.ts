@@ -14,8 +14,6 @@
  *     `recordOrchestratorSideMerge`) so we have a single source of truth.
  *   - A consumer (`getSelfImprovementShare`) that returns the share of
  *     orchestrator-side merges in the last N non-idle cycles.
- *   - A soft preference signal (`shouldPreferOrchestratorSide`) the
- *     autopilot consults before picking its next skill.
  *   - A snapshot (`getCapacitySnapshot`) used by the API route and digest.
  *
  * Soft preference, NOT hard block: `/hydra-doctor` / critical incidents
@@ -238,8 +236,7 @@ export function computeShare(history: CycleSideEntry[], floor = ORCHESTRATOR_FLO
     windowCount,
     floor,
     // If there's no signal yet (empty window) we DO NOT report a floor breach
-    // — we have no opinion. shouldPreferOrchestratorSide() handles that case
-    // as "don't fire" by checking windowCount > 0.
+    // — we have no opinion, so floorMet reports true for an empty window.
     floorMet: windowCount > 0 ? share >= floor : true,
   };
 }
@@ -252,18 +249,6 @@ export async function getSelfImprovementShare(
 ): Promise<ShareResult> {
   const history = await getCycleHistory(windowCycles);
   return computeShare(history);
-}
-
-/**
- * Soft preference signal. Returns true iff there's enough history to make a
- * call AND the share is below the floor. Empty / sparse history → false
- * (no preference change).
- */
-export async function shouldPreferOrchestratorSide(
-  windowCycles: number = DEFAULT_WINDOW_CYCLES,
-): Promise<boolean> {
-  const result = await getSelfImprovementShare(windowCycles);
-  return result.windowCount > 0 && result.share < result.floor;
 }
 
 /**
