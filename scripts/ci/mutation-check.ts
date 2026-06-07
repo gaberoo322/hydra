@@ -35,13 +35,24 @@
  * the gate writes a "neutral" status and exits 0. Mirrors the in-cycle
  * quick-fix exemption.
  *
+ * No-signal status (issue #1120): when the diff yields zero TESTABLE mutants
+ * (all generated mutants skipped, or none generated) the gate no longer
+ * fabricates `killRate=100`/`pass`. For tier>=3 it emits `status:"warn"` with a
+ * null `killRate` and a reason distinguishing "no mutants generated" from "all
+ * generated mutants skipped"; T1/T2 stays `neutral`. Both are non-blocking
+ * (exit 0) — `warn` only surfaces the no-signal gap in the step-summary JSON.
+ *
  * Exit codes:
- *   0 — pass (or neutral skip)
- *   2 — mutation gate failed (block merge)
+ *   0 — pass, neutral/warn skip, or no-signal (non-blocking)
+ *   2 — mutation gate failed: kill rate below floor (block merge)
  *   1 — usage / unexpected error
  */
 
-import { runMutationTests, shouldSkipMutation } from "../../src/mutation.ts";
+import {
+  runMutationTests,
+  shouldSkipMutation,
+  type MutationTestReport,
+} from "../../src/mutation.ts";
 
 /**
  * Filter a list of changed paths down to the files the mutation gate
@@ -90,6 +101,71 @@ export function selectKillFloor(
 ): number {
   if (!Number.isFinite(tier)) return t3Floor;
   return tier >= 3 ? t3Floor : baseFloor;
+}
+
+/**
+ * Result of the no-signal classification (issue #1120).
+ *
+ * `status` is the gate status to emit for the no-signal case:
+ *   - `"warn"`    — tier>=3: the gate produced NO fault-detection signal on a
+ *                   deep diff. Non-blocking (exit 0) but distinctly NOT a pass:
+ *                   it never fabricates `killRate=100`, and `killRate` is null.
+ *   - `"neutral"` — T1/T2: same no-signal case, preserved as the historical
+ *                   non-blocking neutral skip.
+ * `reason` distinguishes the two no-signal sub-cases.
+ * `killRate` is always `null` here — the no-signal branch must NOT synthesise a
+ * 100% kill rate (the root cause of the silent merge-gate bypass).
+ */
+export type NoSignalClassification = {
+  status: "warn" | "neutral";
+  reason: string;
+  killRate: null;
+};
+
+/**
+ * Classify a mutation report that produced no testable signal (issue #1120).
+ *
+ * "No testable signal" means `testable === totalMutants - skipped === 0`: every
+ * generated mutant was skipped (uncompilable), or no mutants were generated at
+ * all. The pre-#1120 gate collapsed this into a synthetic `killRate = 100` →
+ * `status:pass`, silently rubber-stamping a T3/T4 diff with zero
+ * fault-detection. This helper is the pure, unit-testable seam that derives the
+ * correct no-signal status instead.
+ *
+ * Returns `null` when there IS testable signal (`testable > 0`) — the caller
+ * then runs the normal kill-rate comparison. Only the `testable === 0` case
+ * yields a classification.
+ *
+ * Tier policy:
+ *   - tier>=3 → `status:"warn"` (deep diff, no signal is a real gap to surface).
+ *   - T1/T2   → `status:"neutral"` (historical non-blocking behaviour preserved).
+ * Both are non-blocking (the caller keeps exit 0); the distinction is purely
+ * what surfaces in the CI step-summary JSON.
+ *
+ * Sub-case reasons:
+ *   - `candidatesGenerated === 0` → "no mutants generated" (comment-only /
+ *     trivial diff — the generator emitted nothing).
+ *   - otherwise (`totalMutants > 0 && skipped === totalMutants`) → "all
+ *     generated mutants were skipped" (every candidate was uncompilable).
+ *
+ * Pure — no env, no IO. Test it by passing in arbitrary reports + tiers.
+ */
+export function classifyNoSignal(
+  report: MutationTestReport,
+  tier: number,
+): NoSignalClassification | null {
+  const testable = report.totalMutants - report.skipped;
+  if (testable > 0) return null;
+
+  const status: "warn" | "neutral" =
+    !Number.isFinite(tier) || tier >= 3 ? "warn" : "neutral";
+
+  const reason =
+    report.candidatesGenerated === 0
+      ? "no mutants generated (diff is comment-only or trivial) — no fault-detection signal"
+      : "all generated mutants were skipped (uncompilable) — no fault-detection signal";
+
+  return { status, reason, killRate: null };
 }
 
 function readChangedFiles(): string[] {
@@ -182,28 +258,36 @@ async function main(): Promise<number> {
   });
 
   const testable = report.totalMutants - report.skipped;
-  const killRate = testable > 0
-    ? Math.round((report.killed / testable) * 100)
-    : 100;
 
-  // No-signal case: gate cannot conclude — treat as pass with note. Matches
-  // the in-cycle gate's behaviour (classifyNoSignalDecision returns a decision
-  // that does NOT block merge — only kill-rate below floor blocks).
-  if (testable === 0) {
-    const reason = report.candidatesGenerated === 0
-      ? "no mutants generated (diff is comment-only or trivial)"
-      : "all generated mutants were uncompilable";
+  // No-signal case (issue #1120): the diff produced ZERO testable mutants — the
+  // gate cannot conclude. The pre-#1120 code fabricated `killRate = 100` here,
+  // which let a T3/T4 diff clear the raised kill-floor with no fault-detection
+  // signal at all (a silent merge-gate bypass). Instead, classify via the pure
+  // `classifyNoSignal` seam: tier>=3 emits `warn` (distinctly NOT a pass, and
+  // NO synthetic killRate), T1/T2 stays `neutral`. Both are non-blocking
+  // (exit 0) — the `warn` surfaces the gap in the CI step-summary JSON without
+  // hard-blocking. Only a below-floor kill rate (below) blocks merge.
+  const noSignal = classifyNoSignal(report, tier);
+  if (noSignal) {
     process.stdout.write(
       JSON.stringify({
-        status: "neutral",
-        reason,
+        status: noSignal.status,
+        reason: noSignal.reason,
+        killRate: noSignal.killRate,
+        tier,
         candidatesGenerated: report.candidatesGenerated,
+        totalMutants: report.totalMutants,
+        skipped: report.skipped,
         inspectable: inspectable.length,
       }) + "\n",
     );
-    process.stderr.write(`Mutation gate: ${reason} — gate passes by default.\n`);
+    process.stderr.write(
+      `Mutation gate: ${noSignal.reason} — status=${noSignal.status} (tier=${tier}, non-blocking).\n`,
+    );
     return 0;
   }
+
+  const killRate = Math.round((report.killed / testable) * 100);
 
   const summary = {
     status: killRate < killFloor ? "fail" : "pass",

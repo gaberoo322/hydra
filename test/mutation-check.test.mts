@@ -15,7 +15,33 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { filterMutationCandidates, selectKillFloor } from "../scripts/ci/mutation-check.ts";
+import {
+  filterMutationCandidates,
+  selectKillFloor,
+  classifyNoSignal,
+} from "../scripts/ci/mutation-check.ts";
+import type { MutationTestReport } from "../src/mutation.ts";
+
+/**
+ * Build a MutationTestReport for the classifyNoSignal tests. Only the four
+ * fields the helper reads (totalMutants, skipped, killed, candidatesGenerated)
+ * are meaningful; the rest are inert placeholders.
+ */
+function makeReport(
+  partial: Partial<MutationTestReport>,
+): MutationTestReport {
+  return {
+    totalMutants: 0,
+    killed: 0,
+    survived: 0,
+    skipped: 0,
+    timedOut: false,
+    durationMs: 0,
+    survivors: [],
+    candidatesGenerated: 0,
+    ...partial,
+  };
+}
 
 describe("filterMutationCandidates — diff scoping (issue #653)", () => {
   test("keeps src/**/*.ts files", () => {
@@ -230,5 +256,111 @@ describe("selectKillFloor — per-tier mutation floor (issue #778)", () => {
   test("tiers above 4 still resolve to the T3 band (defensive >= )", () => {
     // Should never happen (Tier is 1|2|3|4) but the predicate stays safe.
     assert.equal(selectKillFloor(5, BASE, T3), 55);
+  });
+});
+
+describe("classifyNoSignal — no-testable-mutants gate (issue #1120)", () => {
+  // The pre-#1120 bug: a diff where every generated mutant is skipped (or none
+  // are generated) yielded testable===0 → synthetic killRate=100 → status:pass,
+  // silently clearing the raised T3/T4 kill-floor with zero fault-detection.
+
+  test("returns null when there IS testable signal (caller runs kill-rate)", () => {
+    // 10 mutants, 2 skipped → testable=8 > 0 → not a no-signal case.
+    const report = makeReport({ totalMutants: 10, skipped: 2, killed: 6 });
+    assert.equal(classifyNoSignal(report, 3), null);
+    assert.equal(classifyNoSignal(report, 1), null);
+  });
+
+  test("tier>=3 all-skipped → warn (NOT pass), null killRate, distinct reason (AC#1, AC#2)", () => {
+    // totalMutants > 0 with skipped === totalMutants: every candidate
+    // uncompilable. On a deep diff this is a real no-signal gap.
+    const report = makeReport({
+      totalMutants: 7,
+      skipped: 7,
+      candidatesGenerated: 7,
+    });
+    const result = classifyNoSignal(report, 3);
+    assert.ok(result, "expected a classification for the all-skipped case");
+    assert.equal(result.status, "warn");
+    assert.notEqual(result.status, "pass" as unknown as string);
+    assert.equal(result.killRate, null, "must NOT fabricate killRate=100");
+    assert.match(result.reason, /all generated mutants were skipped/);
+  });
+
+  test("tier>=3 no-mutants-generated → warn with the candidatesGenerated===0 reason", () => {
+    const report = makeReport({
+      totalMutants: 0,
+      skipped: 0,
+      candidatesGenerated: 0,
+    });
+    const result = classifyNoSignal(report, 3);
+    assert.ok(result);
+    assert.equal(result.status, "warn");
+    assert.equal(result.killRate, null);
+    assert.match(result.reason, /no mutants generated/);
+  });
+
+  test("T4 (tier>=3) all-skipped → warn — never relaxes for Verifier-Core", () => {
+    const report = makeReport({
+      totalMutants: 4,
+      skipped: 4,
+      candidatesGenerated: 4,
+    });
+    const result = classifyNoSignal(report, 4);
+    assert.ok(result);
+    assert.equal(result.status, "warn");
+    assert.equal(result.killRate, null);
+  });
+
+  test("T1 all-skipped → neutral (historical non-blocking behaviour preserved, AC#3)", () => {
+    const report = makeReport({
+      totalMutants: 5,
+      skipped: 5,
+      candidatesGenerated: 5,
+    });
+    const result = classifyNoSignal(report, 1);
+    assert.ok(result);
+    assert.equal(result.status, "neutral");
+    assert.equal(result.killRate, null);
+    assert.match(result.reason, /all generated mutants were skipped/);
+  });
+
+  test("T2 no-mutants-generated → neutral with the no-mutants reason", () => {
+    const report = makeReport({
+      totalMutants: 0,
+      skipped: 0,
+      candidatesGenerated: 0,
+    });
+    const result = classifyNoSignal(report, 2);
+    assert.ok(result);
+    assert.equal(result.status, "neutral");
+    assert.equal(result.killRate, null);
+    assert.match(result.reason, /no mutants generated/);
+  });
+
+  test("missing / non-finite tier classifies conservatively as warn (matches floor fallback)", () => {
+    const report = makeReport({
+      totalMutants: 3,
+      skipped: 3,
+      candidatesGenerated: 3,
+    });
+    assert.equal(classifyNoSignal(report, NaN)?.status, "warn");
+    assert.equal(
+      classifyNoSignal(report, Number.POSITIVE_INFINITY)?.status,
+      "warn",
+    );
+  });
+
+  test("all-killed (testable>0, killed===testable) is NOT a no-signal case → null", () => {
+    // The existing all-killed path must still flow to the normal pass branch
+    // (killRate=100) — classifyNoSignal must not intercept it (AC#4).
+    const report = makeReport({
+      totalMutants: 6,
+      skipped: 0,
+      killed: 6,
+      candidatesGenerated: 6,
+    });
+    assert.equal(classifyNoSignal(report, 3), null);
+    assert.equal(classifyNoSignal(report, 1), null);
   });
 });

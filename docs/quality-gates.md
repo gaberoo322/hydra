@@ -111,14 +111,36 @@ relaxing. Issue #653 (diff scoping) changed only WHAT is mutated; issue
 **Budget.** `MUTATION_TIME_BUDGET_MS` env var (default `540_000` = 9 minutes).
 The CI step itself has a hard 10-minute `timeout-minutes: 10` ceiling.
 
-**No-signal behaviour.** When the diff yields zero compilable mutants
-(comment-only / formatting changes, or every generated mutant fails to compile)
-the gate exits `0` with a `neutral` status. This is distinct from `skipped`:
-`skipped` means "no src/**/*.ts files in diff, runner never invoked";
-`neutral` means "runner ran, couldn't produce a signal." Implemented in
-`scripts/ci/mutation-check.ts` (the historical in-cycle helper
-`classifyNoSignalDecision` in `src/mutation.ts` was removed by issue #476
-along with the rest of the orphaned gate orchestration).
+**No-signal behaviour (tier-aware — issue #1120).** When the diff yields zero
+**testable** mutants (`testable = totalMutants - skipped === 0` — comment-only /
+formatting changes that generate nothing, or every generated mutant fails to
+compile and is skipped) the gate exits `0` (non-blocking) but does **not**
+report a clean `pass`. The pre-#1120 gate fabricated `killRate = 100` here,
+which let a T3/T4 diff clear the raised kill-floor with **no fault-detection
+signal at all** — a silent merge-gate bypass. The status is now tier-aware:
+
+| Tier | No-signal status | `killRate` | Blocks merge? |
+|------|------------------|-----------|---------------|
+| T1 / T2 | `neutral` | `null` | no (preserved historical behaviour) |
+| T3 / T4 | `warn` | `null` | no — surfaces the gap in the step-summary JSON |
+
+The `reason` field distinguishes the two sub-cases: **no mutants generated**
+(`candidatesGenerated === 0` — comment-only / trivial diff) vs **all generated
+mutants skipped** (`totalMutants > 0 && skipped === totalMutants` — every
+candidate uncompilable). `killRate` is `null` on both no-signal branches — the
+gate never synthesises a 100% kill rate where there was no signal. A
+non-finite/missing `PR_TIER` classifies conservatively as `warn` (mirrors the
+floor fallback). The all-killed path (`testable > 0`, `killed === testable`)
+still reports `pass` with `killRate: 100`, and a below-floor kill rate still
+exits `2` and blocks.
+
+This is distinct from `skipped`: `skipped` means "no src/**/*.ts files in diff,
+runner never invoked"; `neutral`/`warn` mean "runner ran, couldn't produce a
+signal." The status derivation lives in the pure exported `classifyNoSignal`
+helper in `scripts/ci/mutation-check.ts` (unit-tested via the same seam as
+`selectKillFloor` / `filterMutationCandidates`; the historical in-cycle helper
+`classifyNoSignalDecision` in `src/mutation.ts` was removed by issue #476 along
+with the rest of the orphaned gate orchestration).
 
 **Quick-fix bypass.** PR bodies containing the literal token `[quick-fix]` skip
 the gate with a `neutral` status. Matches the existing in-cycle exemption for
