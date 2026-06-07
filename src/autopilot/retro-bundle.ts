@@ -84,6 +84,15 @@ export interface RetroDispatch {
   abandonReason: string | null;
   /** Whether the cycle introduced a regression (from the metrics sidecar). */
   regressionIntroduced: boolean;
+  /**
+   * Whether {@link flagDispatchesForDrill} selected this dispatch for a
+   * transcript drill (failed / churned / errored / crashed-stall). Materialised
+   * onto the served bundle by {@link assembleRetroBundle} AFTER the crash
+   * abandonReason backfill, so a consumer reading the JSON (which cannot call
+   * the pure TS selector) sees the flag directly. `projectDispatches` leaves it
+   * `false`; the assemble loop is the sole writer (issue #1094).
+   */
+  flagged: boolean;
 }
 
 /** A per-anchor reflection narrative attached to a flagged dispatch. */
@@ -349,6 +358,9 @@ export function projectDispatches(
         // join in the assemble loop; default to the no-signal values here.
         abandonReason: null,
         regressionIntroduced: false,
+        // flagged is materialised in the assemble loop after the crash
+        // abandonReason backfill — projection cannot know the final signal yet.
+        flagged: false,
       };
       out.push(dispatch);
       const slot = slotOfAction(a);
@@ -392,6 +404,7 @@ export function projectDispatches(
         bucket: null,
         abandonReason: null,
         regressionIntroduced: false,
+        flagged: false,
       };
       out.push(dispatch);
       bySlot.set(slot, dispatch);
@@ -521,6 +534,16 @@ export async function assembleRetroBundle(
   //    drill-on-flag bound keeps the read fan-out to the dispatches that went
   //    wrong.
   const flagged = flagDispatchesForDrill(dispatches);
+  // Materialise the drill-flag onto the served dispatches. The bundle's JSON
+  // consumers (the hydra-retro skill curls the endpoint and cannot call the
+  // pure TS selector) read `dispatches[].flagged` directly, and the
+  // SKILL.md contract is that `dispatches[]` already carries the flagged
+  // signal. Without this write-back every served dispatch reported
+  // `flagged: undefined` and the rollup was `flagged: 0` even on a crashed run
+  // where every dispatch carried `abandonReason: run-crash` (issue #1094).
+  // flagDispatchesForDrill returns members of `dispatches` (filter, not map),
+  // so mutating them here is mutating the served objects in place.
+  for (const d of flagged) d.flagged = true;
   const reflections: RetroReflection[] = [];
   const seenAnchors = new Set<string>();
   for (const d of flagged) {
