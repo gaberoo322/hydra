@@ -1,8 +1,24 @@
 import { Router } from "express";
+import { z } from "zod";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { sendDigestNow, sendDailyHeartbeatNow } from "../digest.ts";
 import { classifyChange } from "../tier-classifier.ts";
+
+/**
+ * Query schema for `GET /tier?files=a,b,c` (ADR-0022).
+ *
+ * `files` must be PRESENT (string or repeated-param array) but may be empty —
+ * the legacy read only 400s when the param is absent (undefined/null), and an
+ * empty value classifies the empty change set. The schema requires presence
+ * (any string or string[]) and the handler splits/trims the CSV into the file
+ * list, exactly mirroring the legacy `Array.isArray(raw) ? raw.flatMap(...) :
+ * String(raw).split(",")` normalisation. The route owns its bespoke 400 via an
+ * inline safeParse. Non-strict — ignores unknown params.
+ */
+const TierQuerySchema = z.object({
+  files: z.union([z.string(), z.array(z.string())]),
+});
 
 /**
  * Residual "misc" routes that don't fit elsewhere.
@@ -34,10 +50,13 @@ export function createMiscRouter(_eventBus: any) {
   // ADR-0004 work-order step 3). Used by autopilot/dashboard to know
   // which merge policy applies to a proposed change.
   router.get("/tier", (req, res) => {
-    const raw = req.query.files;
-    if (raw === undefined || raw === null) {
+    // ADR-0022: read `files` through the Schemas seam. Required-present (string
+    // or array) but may be empty; the route owns its bespoke 400 on absence.
+    const parsed = TierQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
       return res.status(400).json({ error: "Missing query parameter 'files' (comma-separated)" });
     }
+    const raw = parsed.data.files;
     const list = Array.isArray(raw) ? raw.flatMap(s => String(s).split(",")) : String(raw).split(",");
     const files = list.map(s => s.trim()).filter(s => s.length > 0);
     const result = classifyChange(files);

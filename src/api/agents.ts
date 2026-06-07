@@ -35,11 +35,23 @@
 // `src/api/autopilot.ts` for the dispatch→cycle join.
 
 import { Router } from "express";
+import { z } from "zod";
 import {
   getAutopilotRun,
   listRecentAutopilotRunIds,
 } from "../redis/autopilot-runs.ts";
 import { fetchTurnsWithJoins } from "./autopilot.ts";
+
+/**
+ * Query schema for `GET /agents/stream?agent=<worktreeBranch>` (ADR-0022).
+ * `agent` is a REQUIRED non-empty string (the stamped correlation token); an
+ * absent or whitespace-only value can't address a dispatch, so the route owns
+ * its bespoke 400 below via an inline safeParse. Non-strict — ignores unknown
+ * params.
+ */
+const AgentStreamQuerySchema = z.object({
+  agent: z.string().trim().min(1),
+});
 
 // How many recent runs to scan when resolving a stamped branch. The branch
 // format is `worktree-agent-<runtoken>-t<turn>-<slot>` (PR #528) — once a
@@ -85,14 +97,15 @@ export function createAgentsRouter() {
   // -------------------------------------------------------------------------
   router.get("/agents/stream", async (req, res) => {
     try {
-      const agent = typeof req.query.agent === "string"
-        ? req.query.agent.trim()
-        : "";
-      if (!agent) {
+      // ADR-0022: read `agent` through the Schemas seam. Required non-empty
+      // string; the route owns its bespoke 400 via this inline safeParse.
+      const parsedQuery = AgentStreamQuerySchema.safeParse(req.query);
+      if (!parsedQuery.success) {
         return res.status(400).json({
           error: "Missing query parameter 'agent' (the stamped worktreeBranch correlation token)",
         });
       }
+      const agent = parsedQuery.data.agent;
 
       // Walk the most-recent N runs in reverse-chronological order. ZREVRANGE
       // returns newest-first by score (started_epoch). The branch token's

@@ -7,6 +7,7 @@ import { Router } from "express";
 // and zero-result fallback.
 import { getOvSearchMetrics, trackedOvSearch } from "../knowledge-base/ov-search.ts";
 import { getCoverageStats } from "../knowledge-base/source-indexer.ts";
+import { OpenVikingSearchQuerySchema } from "../schemas/openviking.ts";
 
 /**
  * OpenViking proxy + knowledge metrics routes.
@@ -20,18 +21,22 @@ export function createOpenVikingRouter() {
 
   // GET /openviking/search — Proxy search to OpenViking via the canonical reader.
   router.get("/openviking/search", async (req, res) => {
-    const query = req.query.q;
-    if (!query) {
+    // ADR-0022 slice 3: read `q` + `limit` through the Schemas seam. `q` is a
+    // REQUIRED non-empty string, so this route owns its bespoke 400 (inline
+    // safeParse) rather than a default-on-garbage read. `limit` collapses bad
+    // input to 10 (the legacy `parseInt(...) || 10`).
+    const parsed = OpenVikingSearchQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
       return res.status(400).json({ error: "Missing query parameter 'q'" });
     }
+    const { q, limit } = parsed.data;
 
     // trackedOvSearch never throws — it routes through the OpenViking Request
     // Adapter (timeout + error classification) and folds every failure to an
     // empty `{ resources, memories }`. The proxy surfaces that shape; an OV
     // outage now degrades to an empty result with logged metrics rather than a
     // 502, matching how every other caller of the reader behaves.
-    const limit = parseInt(String(req.query.limit ?? ""), 10) || 10;
-    const { resources, memories } = await trackedOvSearch(String(query), limit);
+    const { resources, memories } = await trackedOvSearch(q, limit);
     res.json({ result: { resources, memories } });
   });
 

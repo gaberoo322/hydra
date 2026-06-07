@@ -1,4 +1,22 @@
 import { Router } from "express";
+import { z } from "zod";
+
+/**
+ * Query schema for `GET /observability/trace-url?cycleId=<id>` (ADR-0022).
+ *
+ * `cycleId` is REQUIRED. Express surfaces a repeated param
+ * (`?cycleId=a&cycleId=b`) as an array, so the legacy read took the first
+ * element and stringified it; the schema mirrors that — it flattens an array to
+ * its first element, coerces to a string, then requires a non-empty trimmed
+ * value. The route owns its bespoke 400 via an inline safeParse. Non-strict —
+ * ignores unknown params.
+ */
+const TraceUrlQuerySchema = z.object({
+  cycleId: z.preprocess((v) => {
+    const first = Array.isArray(v) ? v[0] : v;
+    return first === undefined || first === null ? first : String(first);
+  }, z.string().trim().min(1)),
+});
 
 /**
  * Observability surface (issue #207, Tier-3).
@@ -50,11 +68,13 @@ export function createObservabilityRouter() {
 
   // GET /observability/trace-url?cycleId=<id> — resolved deep-link
   router.get("/observability/trace-url", (req, res) => {
-    const raw = req.query.cycleId;
-    const cycleId = Array.isArray(raw) ? String(raw[0] ?? "") : (raw ? String(raw) : "");
-    if (!cycleId) {
+    // ADR-0022: read `cycleId` through the Schemas seam. Required non-empty
+    // string (array-flattened); the route owns its bespoke 400.
+    const parsed = TraceUrlQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
       return res.status(400).json({ error: "Missing query parameter 'cycleId'" });
     }
+    const cycleId = parsed.data.cycleId;
     const url = buildTraceUrl(cycleId);
     res.json({ cycleId, url });
   });

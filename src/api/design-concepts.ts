@@ -20,7 +20,9 @@
  */
 
 import { Router } from "express";
+import { z } from "zod";
 
+import { countQuerySchema } from "../schemas/common.ts";
 import {
   saveDesignConcept,
   getDesignConcept,
@@ -44,6 +46,33 @@ import {
 /** Maximum number of audit entries the read endpoint will return. */
 const EXEMPT_LOG_DEFAULT_LIMIT = 50;
 const EXEMPT_LOG_MAX_LIMIT = 500;
+
+/**
+ * Query schemas for the design-concept read routes (ADR-0022).
+ *
+ * Both reuse the shared `countQuerySchema` factory (the `parseInt(...) || N`
+ * default-on-garbage + clamp idiom) under the wire-name `limit`:
+ *
+ *   - `GET /design-concepts/exempt-log?limit=N` — historic default 50, cap 500.
+ *   - `GET /design-concepts?scope=&limit=N` — historic default 50 (no explicit
+ *     cap previously; the factory's 1000 cap bounds an otherwise-unbounded
+ *     slice). `scope` is an optional `"orch" | "target"` enum; any other value
+ *     (or absence) collapses to `undefined`, exactly the legacy ternary.
+ *
+ * Non-strict (plain object schemas ignore unknown keys); the routes pass the
+ * whole `req.query` to `safeParse` and read typed, always-present fields.
+ */
+const ExemptLogQuerySchema = z.object({
+  limit: countQuerySchema(EXEMPT_LOG_DEFAULT_LIMIT, EXEMPT_LOG_MAX_LIMIT).shape.count,
+});
+
+const DesignConceptListQuerySchema = z.object({
+  scope: z
+    .enum(["orch", "target"])
+    .optional()
+    .catch(undefined),
+  limit: countQuerySchema(50).shape.count,
+});
 
 // ---------------------------------------------------------------------------
 // Green-light criterion (issue #736)
@@ -171,11 +200,9 @@ export function createDesignConceptsRouter() {
 
   router.get("/design-concepts/exempt-log", async (req, res) => {
     try {
-      const limitParam = parseInt(req.query.limit as string, 10);
-      const limit =
-        Number.isFinite(limitParam) && limitParam > 0
-          ? Math.min(limitParam, EXEMPT_LOG_MAX_LIMIT)
-          : EXEMPT_LOG_DEFAULT_LIMIT;
+      // ADR-0022: read `limit` through the Schemas seam. Default-on-garbage to
+      // EXEMPT_LOG_DEFAULT_LIMIT, clamped to EXEMPT_LOG_MAX_LIMIT.
+      const limit = ExemptLogQuerySchema.safeParse(req.query).data?.limit ?? EXEMPT_LOG_DEFAULT_LIMIT;
 
       const rawEntries = await readRecentExemptLogEntries(limit);
       const items: ExemptLogEntry[] = [];
@@ -250,12 +277,11 @@ export function createDesignConceptsRouter() {
 
   router.get("/design-concepts", async (req, res) => {
     try {
-      const scopeRaw = (req.query.scope as string | undefined) ?? "";
-      const scope: DesignConceptScope | undefined =
-        scopeRaw === "orch" || scopeRaw === "target" ? scopeRaw : undefined;
-      const limitParam = parseInt(req.query.limit as string, 10);
-      const limit =
-        Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 50;
+      // ADR-0022: read `scope` + `limit` through the Schemas seam. `scope`
+      // collapses any non-enum value to undefined; `limit` defaults to 50.
+      const parsedQuery = DesignConceptListQuerySchema.safeParse(req.query);
+      const scope: DesignConceptScope | undefined = parsedQuery.data?.scope;
+      const limit = parsedQuery.data?.limit ?? 50;
 
       const items = await listDesignConcepts({ scope, limit });
       res.json({ items, count: items.length });
