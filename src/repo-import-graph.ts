@@ -10,12 +10,15 @@
  * project) for free.
  *
  * This module is the home of the shared `isTestFile` predicate and the four
- * shared types (SymbolDetail / ExportedSymbol / ImportEdge / ImportGraph). The
- * caller (grounding) composes the lower-level pieces directly. The
- * sibling concerns — `repo-file-matcher.ts` (anchor→file matching) and
- * `repo-file-tree-format.ts` (scoped-tree formatting) — import `isTestFile`
- * from here and never duplicate it. Split out of the former monolithic
- * `repo-map.ts` (issue #805) so each concern presents a small interface.
+ * shared types (SymbolDetail / ExportedSymbol / ImportEdge / ImportGraph).
+ * Split out of the former monolithic `repo-map.ts` (issue #805) so each concern
+ * presents a small interface.
+ *
+ * NOTE (issue #1128): the former sibling consumers `repo-file-matcher.ts` and
+ * `repo-file-tree-format.ts` were retired alongside the dead in-process
+ * planner-assembly path. After that retirement this module has no remaining
+ * production importer (only its own test exercises it); a follow-up should
+ * decide whether to retire it too.
  */
 
 import { createHash } from "node:crypto";

@@ -1,15 +1,16 @@
 /**
- * Regression tests for episodic reflection injection on retries (issue #193).
+ * Regression tests for episodic reflection telemetry on retries (issue #193).
  *
- * The bug: prior-failure anchors are quick-fix anchors, and buildPlannerContext
- * deliberately returned an empty plannerMemory for quick-fix anchors. As a
- * result, retries had a 0% merge rate (0/8 across 50 cycles, measured 2026-05-09)
- * because the planner never saw the failure context and re-proposed the same
- * plan that already failed.
+ * Original context: prior-failure anchors are quick-fix anchors. The fix loaded
+ * reflections for them so a retry saw the prior-failure context instead of
+ * re-proposing a plan that already failed. The in-process assembly path
+ * (`buildPlannerContext`) that those reflections fed was retired (issue #1128)
+ * along with the codex control loop; the LIVE injection path is now
+ * `GET /api/reflections`, which the dispatch skills fetch at planning time.
  *
- * The fix: load reflections (planner-context) for quick-fix anchors too, and
- * inject them into the quick-fix prompt with explicit "do something different"
- * guidance.
+ * What remains here is the still-live telemetry contract: `reflectionTelemetry`
+ * (the per-anchor/global itemCount summation behind `task.__reflectionsInjected`)
+ * and `getReflectionEffectiveness` (the injection-stats shape, issue #193).
  *
  * Requires Redis running on localhost:6379 (uses DB 1).
  */
@@ -50,23 +51,6 @@ async function cleanReflections() {
   await redis.del(outcomes);
 }
 
-function makeGrounding(overrides: Record<string, any> = {}) {
-  return {
-    timestamp: Date.now(),
-    branch: "main",
-    headCommit: "abc1234",
-    fileCount: 42,
-    failingTests: [],
-    testReport: { passed: 10, failed: 0, total: 10, ran: true, stdout: "", stderr: "", durationMs: 50 },
-    typecheckReport: { exitCode: 0, output: "", ran: false },
-    dirtyFiles: [],
-    recentCommits: ["abc1234 test commit"],
-    fileTree: "src/index.ts",
-    groundingDurationMs: 100,
-    ...overrides,
-  };
-}
-
 describe("reflection injection on retry (issue #193)", () => {
   beforeEach(async () => {
     if (!redis) {
@@ -90,61 +74,6 @@ describe("reflection injection on retry (issue #193)", () => {
     }
     const { closeRedisConnections } = await import("../src/redis/connection.ts");
     closeRedisConnections();
-  });
-
-  test("buildPlannerContext loads reflections for prior-failure anchor", async (t) => {
-    requireRedis(t);
-    const cb = await import("../src/context-builder.ts");
-
-    const anchorRef = "task-flake-fix-001";
-
-    // Seed a per-anchor reflection directly in Redis (matches the format
-    // produced by recordAnchorReflection in learning.ts).
-    const reflectionKey = "hydra:reflections:" + anchorRef.replace(/\s+/g, "-").toLowerCase().slice(0, 120);
-    const reflection = {
-      cycleId: "cycle-prior-001",
-      anchorRef,
-      taskTitle: "Update auth token validation",
-      outcome: "verification-failed",
-      reason: "Test fixture used hardcoded token",
-      whatWasAttempted: "Update auth token validation",
-      whyItFailed: "Test fixture used hardcoded token; refactor missed it",
-      whatShouldChange: "Update the fixture in test/fixtures/auth.json before changing validator",
-      timestamp: new Date().toISOString(),
-    };
-    await redis.rpush(reflectionKey, JSON.stringify(reflection));
-    await redis.expire(reflectionKey, 7 * 24 * 60 * 60);
-
-    const anchor = { type: "prior-failure", reference: anchorRef, whyNow: "retry" };
-    const ctx = await cb.buildPlannerContext(anchor, makeGrounding(), null);
-
-    // The reflection MUST appear in plannerMemory — this is the core fix.
-    assert.ok(
-      ctx.plannerMemory.includes("PRIOR ATTEMPTS"),
-      `plannerMemory should include "PRIOR ATTEMPTS" header for prior-failure anchor. Got: ${ctx.plannerMemory.slice(0, 300)}`,
-    );
-    assert.ok(
-      ctx.plannerMemory.includes("Update the fixture in test/fixtures/auth.json"),
-      `plannerMemory should include the specific advice from the reflection. Got: ${ctx.plannerMemory.slice(0, 300)}`,
-    );
-  });
-
-  test("buildPlannerContext: prior-failure anchor with no reflection has no PRIOR ATTEMPTS section", async (t) => {
-    requireRedis(t);
-    const cb = await import("../src/context-builder.ts");
-
-    const anchor = { type: "prior-failure", reference: "never-failed-before-xyz", whyNow: "retry" };
-    const ctx = await cb.buildPlannerContext(anchor, makeGrounding(), null);
-
-    // Note: plannerMemory may still include generic "PAST OUTCOMES" agent
-    // memory patterns — that's fine. The contract for this test is that
-    // there's no per-anchor PRIOR ATTEMPTS section when no reflection exists
-    // for THIS specific anchor.
-    assert.equal(typeof ctx.plannerMemory, "string");
-    assert.ok(
-      !ctx.plannerMemory.includes("PRIOR ATTEMPTS"),
-      "no per-anchor reflection seeded → no PRIOR ATTEMPTS section",
-    );
   });
 
   test("reflectionTelemetry sums per-anchor and global block itemCounts (issue #804)", async () => {

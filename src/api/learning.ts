@@ -109,11 +109,13 @@ export function createLearningRouter() {
    *
    * IMPORTANT — composition, NOT a dispatched prompt (issue #841 honesty
    * re-scope): on today's architecture there is no in-process planner that
-   * dispatches `getContext()`'s output. `getContext()` (and its sole live
-   * caller, the dead-in-production `buildPlannerContext`) compose a prompt
-   * string that no subagent receives. A block reporting `status: "hit"` here
-   * therefore means "this source *would* contribute content if this prompt
-   * were dispatched" — it does NOT prove a subagent actually received it.
+   * dispatches `getContext()`'s output. The dead in-process assembly path that
+   * used to consume it (`buildPlannerContext`) was retired with the codex
+   * control loop (issue #1128); `getContext()` now serves only this diagnostic
+   * trace, composing a prompt string that no subagent receives. A block
+   * reporting `status: "hit"` here therefore means "this source *would*
+   * contribute content if this prompt were dispatched" — it does NOT prove a
+   * subagent actually received it.
    *
    * The LIVE reflection-injection path is `GET /api/reflections?anchor=&files=`,
    * which the dispatch skills (`hydra-dev`, `hydra-target-build`) fetch at

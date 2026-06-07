@@ -28,7 +28,6 @@ process.env.REDIS_URL = "redis://localhost:6379/1";
 
 let reflections: any;
 let learning: any;
-let cb: any;
 let metrics: any;
 let redis: any;
 let redisAvailable = false;
@@ -55,7 +54,6 @@ describe("issue #326: reflection by-file index", () => {
       }
       reflections = await import("../src/reflections/reflections.ts");
       learning = await import("../src/learning.ts");
-      cb = await import("../src/context-builder.ts");
       metrics = await import("../src/metrics/trend.ts");
     }
     if (!redisAvailable) return;
