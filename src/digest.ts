@@ -399,7 +399,7 @@ export async function sendDigestNow() {
  *   - Queue      — target backlog lanes (queued / blocked / triage)
  *   - Alerts     — count of alert events recorded in the last 24h
  */
-export async function buildDailyHeartbeat(): Promise<string> {
+async function buildDailyHeartbeat(): Promise<string> {
   const lines = ["💓 *Hydra Daily Heartbeat*", ""];
 
   // --- Liveness: latest autopilot run + age ---
