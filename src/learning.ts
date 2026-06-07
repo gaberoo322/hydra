@@ -111,10 +111,11 @@ export interface LearningContextBlock {
 /**
  * Issue #804 (PR-B): the canonical within-bundle drop order. Lower number is
  * dropped first when the assembled context is over budget. Frozen contract —
- * the budget logic in context-builder.ts depends on these exact values, and
  * per-anchor MUST stay the highest (last-dropped) entry (#193 retry
- * correctness). Exported so the budgeter and its tests share one source of
- * truth rather than re-declaring the order.
+ * correctness). `buildLearningContext` stamps each block's `dropPriority` from
+ * this table; it is the single source of truth for the order rather than having
+ * callers re-declare it. (The in-process context-builder budgeter that also
+ * read this table was retired in issue #1128.)
  */
 export const LEARNING_DROP_PRIORITY: Record<LearningContextSource, number> = {
   "global-reflections": 0,

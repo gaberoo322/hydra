@@ -38,7 +38,8 @@ export function createReflectionsRouter() {
   //      into the implementation prompt, so a RETRY of a prior-failure
   //      anchor demonstrably receives its own reflection narrative (the
   //      #193 retry-correctness invariant, now on a live path instead of
-  //      the dead in-process `buildPlannerContext`).
+  //      the in-process assembly path that used to carry it — retired with
+  //      the codex control loop, issue #1128).
   //
   //      The narrative travels skill -> API at planning time and never
   //      through `decide.py` (whose dispatch JSON stays `{anchor, score}`),

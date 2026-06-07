@@ -1,21 +1,16 @@
 /**
- * Regression tests for issue #221 — reflection injection metric was stuck at 0%
- * because task.__hadReflections was set in planner-prompt.ts using the raw
- * plannerMemory but the metric was never propagated through the auto-decompose
- * path. Also __reflectionSources was missing from the task entirely.
+ * Regression tests for issue #221 — the reflection-injection metric was stuck
+ * at 0% because the count/sources flags weren't propagated correctly through the
+ * task-tagging / auto-decompose path.
  *
- * The fix: context-builder.ts now exposes `reflectionInjected` and
- * `reflectionSources` directly on PlannerContext (single source of truth), and
- * planner-prompt.ts copies those onto the task. control-loop.ts carries the
- * flags across the auto-decompose boundary.
- *
- * Issue #804: the count/sources are now read off the structured LearningContext
- * blocks via `learning.reflectionTelemetry`, NOT regex-scanned out of the
- * flattened markdown (the deleted `inspectReflections`/`countReflections`). The
- * helper unit tests below assert against the structured blocks directly.
- *
- * These tests are pure (no Redis required) — they verify the contract of the
- * exported helpers and the PlannerContext shape.
+ * The in-process assembly path those flags travelled through (`context-builder`,
+ * `planner-prompt`, `control-loop`) was retired (issue #1128) with the codex
+ * control loop. What survives — and what these pure (no-Redis) tests pin — is
+ * the still-live telemetry contract: `learning.reflectionTelemetry` reads count
+ * + sources off the structured LearningContext blocks (issue #804, NOT a regex
+ * scan of flattened markdown), and downstream metric/auto-decompose writers
+ * derive the `__hadReflections` / `__reflectionsInjected` / `__reflectionSources`
+ * flags from that count.
  */
 
 import { test, describe } from "node:test";
@@ -34,23 +29,6 @@ function ctxOf(blocks: Partial<LearningContextBlock>[]): LearningContext {
   return {
     blocks: full,
     toPrompt: () => full.filter((b) => b.status === "hit" && b.content.length > 0).map((b) => b.content).join("\n\n"),
-  };
-}
-
-function makeGrounding(overrides: Record<string, any> = {}) {
-  return {
-    timestamp: Date.now(),
-    branch: "main",
-    headCommit: "abc1234",
-    fileCount: 42,
-    failingTests: [],
-    testReport: { passed: 10, failed: 0, total: 10, ran: true, stdout: "", stderr: "", durationMs: 50 },
-    typecheckReport: { exitCode: 0, output: "", ran: false },
-    dirtyFiles: [],
-    recentCommits: ["abc1234 test commit"],
-    fileTree: "src/index.ts",
-    groundingDurationMs: 100,
-    ...overrides,
   };
 }
 
@@ -106,39 +84,6 @@ describe("issue #804: reflectionTelemetry reads count + sources off structured b
       { source: "knowledge-base", status: "hit", content: "ov memories", itemCount: 4 },
     ]));
     assert.deepEqual(result, { count: 0, sources: [] });
-  });
-
-  test("PlannerContext exposes reflectionInjected and reflectionSources fields", async () => {
-    const cb = await import("../src/context-builder.ts");
-
-    // failing-test anchor takes the quick-fix branch — easiest to exercise
-    // without needing config files / OV
-    const anchor = { type: "failing-test", reference: "test:nonexistent" };
-    const ctx = await cb.buildPlannerContext(anchor, makeGrounding({ failed: 1 }), null);
-
-    // Both new fields must be present on every code path (issue #221)
-    assert.equal(typeof ctx.reflectionInjected, "number",
-      "reflectionInjected must be exposed by buildPlannerContext");
-    assert.ok(Array.isArray(ctx.reflectionSources),
-      "reflectionSources must be an array");
-    // No reflections seeded in this test → must be 0 / []
-    assert.equal(ctx.reflectionInjected, 0);
-    assert.deepEqual(ctx.reflectionSources, []);
-  });
-
-  test("PlannerContext exposes reflectionInjected on standard (non-quick-fix) anchor", async () => {
-    const cb = await import("../src/context-builder.ts");
-
-    // Non-quick-fix path goes through the budgeted branch with applyContextBudget
-    const anchor = { type: "backlog", reference: "implement-feature-x" };
-    const ctx = await cb.buildPlannerContext(anchor, makeGrounding(), null);
-
-    // Must populate the same fields on the standard branch — this is the
-    // bug regression check: previously only the quick-fix branch logged
-    // reflection counts, the standard branch did too but the metric was
-    // recomputed from raw bytes in planner-prompt.ts (off by truncation).
-    assert.equal(typeof ctx.reflectionInjected, "number");
-    assert.ok(Array.isArray(ctx.reflectionSources));
   });
 });
 
