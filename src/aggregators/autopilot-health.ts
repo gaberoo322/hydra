@@ -35,6 +35,7 @@
 
 import type { StuckSignal, StuckSignalSeverity } from "../schemas/now-page.ts";
 import { settledOr, settledOrEmpty, settledOrNull } from "./settle.ts";
+import { osHeartbeatAgeS, isOsHeartbeatStale } from "../autopilot/os-heartbeat.ts";
 
 // ---------------------------------------------------------------------------
 // Tunable thresholds
@@ -131,6 +132,17 @@ export interface AutopilotHealthDeps {
    * fails open to the legacy per-run behaviour).
    */
   readWindowMergeCount?: (sinceEpochS: number) => Promise<number>;
+  /**
+   * Reader for the OS-heartbeat age in seconds (#1091), or `null` when the
+   * heartbeat file can't be read. The `stalled-dispatch` heuristic
+   * cross-checks this against the live run's per-turn `age_s`: a run is only
+   * stalled when BOTH the per-turn heartbeat AND the continuously-written OS
+   * heartbeat are stale, so a healthy run mid-long-turn (per-turn heartbeat
+   * frozen at the previous turn boundary) is no longer a false positive.
+   * Defaults to the real heartbeat-file reader and fails open (unreadable →
+   * treated as stale). `nowS` is epoch seconds.
+   */
+  readOsHeartbeatAgeS?: (nowS: number) => number | null;
   /** How many recent runs the cross-run heuristics scan. Defaults to 14. */
   historyWindow?: number;
 }
@@ -151,6 +163,7 @@ export async function getAutopilotHealth(
   const readRecentRuns = deps.readRecentRuns ?? defaultReadRecentRuns;
   const readWindowMergeCount =
     deps.readWindowMergeCount ?? defaultReadWindowMergeCount;
+  const readOsHeartbeatAgeS = deps.readOsHeartbeatAgeS ?? osHeartbeatAgeS;
 
   const [liveResult, historyResult] = await Promise.allSettled([
     readLiveRun(),
@@ -178,8 +191,22 @@ export async function getAutopilotHealth(
     );
   }
 
+  // OS-heartbeat cross-check (#1091). Read once, fail open: any error in the
+  // reader is treated as "stale" inside detectStalledDispatch so a genuinely
+  // hung run isn't silently un-flagged. nowS anchored to deps.now for tests.
+  const nowS = Math.floor((deps.now ?? new Date()).getTime() / 1000);
+  let osHbAgeS: number | null = null;
+  try {
+    osHbAgeS = readOsHeartbeatAgeS(nowS);
+  } catch (err: any) {
+    console.error(
+      `[autopilot-health] os-heartbeat read failed: ${err?.message || err}`,
+    );
+    osHbAgeS = null; // fail open → treated as stale
+  }
+
   const signals: StuckSignal[] = [
-    ...detectStalledDispatch(live, thresholds),
+    ...detectStalledDispatch(live, thresholds, osHbAgeS),
     ...detectUnproductiveLoops(history, thresholds, realMergesInWindow),
     ...detectIdleStreak(history, thresholds),
     ...detectIssuePrChurn(history, thresholds),
@@ -252,20 +279,33 @@ export function oldestRunStartEpochS(history: RunDigest[]): number | null {
 
 /**
  * A live run is stalled when it is still `running`, its most-recent turn
- * carries at least one open dispatch action, and the run's heartbeat age has
- * crossed the threshold (no fresh turn / tool-call activity). `warn` at the
+ * carries at least one open dispatch action, the run's per-turn heartbeat age
+ * has crossed the threshold (no fresh turn / tool-call activity), AND the
+ * continuously-written OS heartbeat is ALSO stale (#1091). `warn` at the
  * threshold, `critical` at 2x. Returns `[]` for any run that is not live,
- * has no open dispatch in its latest turn, or is within the cadence window.
+ * has no open dispatch in its latest turn, is within the cadence window, or
+ * whose OS heartbeat is fresh (loop alive mid-long-turn).
+ *
+ * `osHbAgeS` is the OS-heartbeat age in seconds, or `null` when unreadable;
+ * `null` fails open (treated as stale) so a genuinely hung run whose
+ * heartbeat file vanished is still flagged. Omitting it (legacy 2-arg call)
+ * also fails open — the cross-check then degrades to the per-turn-only
+ * behaviour rather than silently suppressing the signal.
  */
 export function detectStalledDispatch(
   live: LiveRunView | null,
   thresholds: AutopilotHealthThresholds,
+  osHbAgeS: number | null = null,
 ): StuckSignal[] {
   if (!live) return [];
   if (toStr(live.status) !== "running") return [];
 
   const ageS = toNum(live.age_s);
   if (ageS < thresholds.stalledDispatchAgeS) return [];
+
+  // #1091: a fresh OS heartbeat means the control loop is alive even though
+  // the per-turn heartbeat lags during a long turn — not a stall.
+  if (!isOsHeartbeatStale(osHbAgeS, thresholds.stalledDispatchAgeS)) return [];
 
   const turns = Array.isArray(live.turns) ? (live.turns as unknown[]) : [];
   if (turns.length === 0) return [];
@@ -291,6 +331,7 @@ export function detectStalledDispatch(
       evidence: {
         runId,
         ageSeconds: ageS,
+        osHeartbeatAgeSeconds: osHbAgeS, // null = OS heartbeat unreadable (failed open to stale)
         openDispatches: dispatchCount,
         thresholdSeconds: thresholds.stalledDispatchAgeS,
       },

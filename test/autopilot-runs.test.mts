@@ -532,3 +532,58 @@ describe("autopilot runs API (issue #497)", () => {
     assert.equal(res._body.term_reason, "crash");
   });
 });
+
+// ---------------------------------------------------------------------------
+// projectRunView wedge cross-check (issue #1091) — Redis-free, pure projection.
+//
+// `wedge_likely` must only fire when BOTH the per-turn heartbeat (age_s) AND
+// the continuously-written OS heartbeat are stale. A run mid-long-turn has a
+// stale per-turn heartbeat but a fresh OS heartbeat → NOT a wedge.
+// ---------------------------------------------------------------------------
+describe("projectRunView wedge cross-check (issue #1091)", () => {
+  let projectRunView: any;
+  let WEDGE_AGE_THRESHOLD_S: number;
+
+  beforeEach(async () => {
+    if (!projectRunView) {
+      const mod = await import("../src/autopilot/runs.ts");
+      projectRunView = mod.projectRunView;
+      WEDGE_AGE_THRESHOLD_S = mod.WEDGE_AGE_THRESHOLD_S;
+    }
+  });
+
+  function runningRow(staleSeconds: number): Record<string, string> {
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      run_id: "wedge-test",
+      status: "running",
+      started_epoch: String(now - staleSeconds),
+      last_heartbeat_epoch: String(now - staleSeconds),
+      pid: String(process.pid),
+    };
+  }
+
+  test("per-turn heartbeat stale but OS heartbeat FRESH → not a wedge (#1091)", () => {
+    const row = runningRow(WEDGE_AGE_THRESHOLD_S + 300);
+    const v = projectRunView(row, () => 30); // OS heartbeat fresh (30s old)
+    assert.equal(v.wedge_likely, false);
+  });
+
+  test("both heartbeats stale → wedge_likely true (#1091)", () => {
+    const row = runningRow(WEDGE_AGE_THRESHOLD_S + 300);
+    const v = projectRunView(row, () => WEDGE_AGE_THRESHOLD_S + 300);
+    assert.equal(v.wedge_likely, true);
+  });
+
+  test("OS heartbeat unreadable (null) fails open → wedge when per-turn stale (#1091)", () => {
+    const row = runningRow(WEDGE_AGE_THRESHOLD_S + 300);
+    const v = projectRunView(row, () => null);
+    assert.equal(v.wedge_likely, true);
+  });
+
+  test("per-turn heartbeat fresh → never a wedge regardless of OS heartbeat (#1091)", () => {
+    const row = runningRow(60); // per-turn fresh
+    const v = projectRunView(row, () => WEDGE_AGE_THRESHOLD_S + 9999); // OS stale
+    assert.equal(v.wedge_likely, false);
+  });
+});
