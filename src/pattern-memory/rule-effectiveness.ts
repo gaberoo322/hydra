@@ -277,7 +277,7 @@ export async function getIneffectivePromotedPatterns(
  * past `RULE_ACTION_LOG_CAP` are trimmed away. Best-effort: log + swallow
  * errors so a Redis blip can't break the daily consolidation pass.
  */
-export async function recordRuleAction(entry: RuleActionLogEntry): Promise<void> {
+async function recordRuleAction(entry: RuleActionLogEntry): Promise<void> {
   try {
     await appendRuleAction(JSON.stringify(entry), RULE_ACTION_LOG_CAP);
   } catch (err: any) {
