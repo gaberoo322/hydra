@@ -108,6 +108,46 @@ describe("detectStalledDispatch (issue #890)", () => {
     const sig = detectStalledDispatch(liveRun({ turns: [] }), T);
     assert.deepEqual(sig, []);
   });
+
+  // -------------------------------------------------------------------------
+  // #1091: OS-heartbeat cross-check. The per-turn `age_s` can be stale during
+  // a long turn even though the control loop is alive — only flag a stall
+  // when BOTH heartbeats are stale.
+  // -------------------------------------------------------------------------
+
+  test("#1091 fresh OS heartbeat suppresses the signal (loop alive mid-long-turn)", () => {
+    // Per-turn age is past threshold (would have flagged pre-#1091), but the
+    // OS heartbeat is fresh → the loop is alive, NOT a stall.
+    const sig = detectStalledDispatch(liveRun({}), T, /* osHbAgeS */ 30);
+    assert.deepEqual(sig, []);
+  });
+
+  test("#1091 both heartbeats stale → warn signal still fires", () => {
+    const sig = detectStalledDispatch(
+      liveRun({}),
+      T,
+      /* osHbAgeS */ T.stalledDispatchAgeS + 60,
+    );
+    assert.equal(sig.length, 1);
+    assert.equal(sig[0].type, "stalled-dispatch");
+    assert.equal(sig[0].severity, "warn");
+    assert.equal(sig[0].evidence.osHeartbeatAgeSeconds, T.stalledDispatchAgeS + 60);
+    assert.equal(StuckSignalSchema.safeParse(sig[0]).success, true);
+  });
+
+  test("#1091 null OS-heartbeat age fails OPEN — genuinely hung run still flagged", () => {
+    // Heartbeat file unreadable → null → treated as stale, so a hung run
+    // whose heartbeat vanished is NOT silently un-flagged.
+    const sig = detectStalledDispatch(liveRun({}), T, /* osHbAgeS */ null);
+    assert.equal(sig.length, 1);
+    assert.equal(sig[0].type, "stalled-dispatch");
+    assert.equal(sig[0].evidence.osHeartbeatAgeSeconds, null);
+  });
+
+  test("#1091 OS heartbeat exactly at threshold is fresh → no signal", () => {
+    const sig = detectStalledDispatch(liveRun({}), T, /* osHbAgeS */ T.stalledDispatchAgeS);
+    assert.deepEqual(sig, []);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -469,6 +509,9 @@ describe("getAutopilotHealth — never-throw + composition (issue #890)", () => 
       readRecentRuns: async () => [
         { dispatches: 4, merged_count: 0, failed_count: 4 }, // unproductive critical
       ],
+      // #1091: pin the OS heartbeat stale so the stalled signal is deterministic
+      // regardless of any heartbeat file on the host running the test.
+      readOsHeartbeatAgeS: () => T.stalledDispatchAgeS * 2 + 10,
     });
     // The critical signals come first.
     assert.ok(signals.length >= 2);
@@ -478,6 +521,39 @@ describe("getAutopilotHealth — never-throw + composition (issue #890)", () => 
       historyWindow: 14,
       generatedAt: new Date().toISOString(),
     }).success, true);
+  });
+
+  // ---- issue #1091: end-to-end OS-heartbeat cross-check --------------------
+
+  test("#1091 fresh OS heartbeat suppresses the stalled-dispatch signal end-to-end", async () => {
+    const signals = await getAutopilotHealth({
+      readLiveRun: async () => ({
+        run_id: "ap-live",
+        status: "running",
+        age_s: T.stalledDispatchAgeS + 120, // per-turn heartbeat stale
+        turns: [{ turn_n: 1, actions: [{ type: "dispatch", outcome: null }] }],
+      }),
+      readRecentRuns: async () => [],
+      readOsHeartbeatAgeS: () => 30, // ...but the loop is alive
+    });
+    assert.equal(signals.some((s) => s.type === "stalled-dispatch"), false);
+  });
+
+  test("#1091 OS-heartbeat reader throwing fails open → signal still fires", async () => {
+    const signals = await getAutopilotHealth({
+      readLiveRun: async () => ({
+        run_id: "ap-live",
+        status: "running",
+        age_s: T.stalledDispatchAgeS + 120,
+        turns: [{ turn_n: 1, actions: [{ type: "dispatch", outcome: null }] }],
+      }),
+      readRecentRuns: async () => [],
+      readOsHeartbeatAgeS: () => {
+        throw new Error("heartbeat read blew up");
+      },
+    });
+    // Failing open means the stall is NOT silently suppressed.
+    assert.equal(signals.some((s) => s.type === "stalled-dispatch"), true);
   });
 });
 

@@ -65,6 +65,7 @@ import type {
   RunEndBody,
   TurnBody,
 } from "./schemas.ts";
+import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -676,8 +677,20 @@ export function computeCostBreakdown(
  * Project a raw Redis hash into the public response shape: parse JSON
  * limits, coerce numeric fields, compute elapsed_s / age_s, and on
  * `running` rows compute pid_alive + wedge_likely.
+ *
+ * `wedge_likely` cross-checks the OS heartbeat (#1091): the per-turn
+ * `last_heartbeat_epoch` only refreshes at `recordTurn` close, so a run
+ * mid-turn on slow background subagents has a stale `age_s` even while the
+ * control loop is alive. We only flag a wedge when BOTH the per-turn
+ * heartbeat AND the continuously-written OS heartbeat
+ * (`/tmp/hydra-autopilot-heartbeat.txt`) are stale. `readOsHbAgeS` is
+ * injectable for tests; the default reads the real heartbeat file and
+ * fails open (unreadable → treated as stale).
  */
-export function projectRunView(row: Record<string, string>): Record<string, unknown> {
+export function projectRunView(
+  row: Record<string, string>,
+  readOsHbAgeS: (nowS: number) => number | null = osHeartbeatAgeS,
+): Record<string, unknown> {
   const now = Math.floor(Date.now() / 1000);
   const startedEpoch = Number(row.started_epoch || "0");
   const lastHb = Number(row.last_heartbeat_epoch || row.started_epoch || "0");
@@ -721,7 +734,12 @@ export function projectRunView(row: Record<string, string>): Record<string, unkn
   if (status === "running") {
     const pid = Number(row.pid || "0");
     view.pid_alive = isPidAlive(pid);
-    view.wedge_likely = ageS > WEDGE_AGE_THRESHOLD_S;
+    // #1091: only a wedge when BOTH heartbeats are stale. A fresh OS
+    // heartbeat means the loop is alive even though the per-turn heartbeat
+    // (refreshed only at recordTurn close) lags during a long turn.
+    const perTurnStale = ageS > WEDGE_AGE_THRESHOLD_S;
+    const osStale = isOsHeartbeatStale(readOsHbAgeS(now), WEDGE_AGE_THRESHOLD_S);
+    view.wedge_likely = perTurnStale && osStale;
   }
 
   return view;
