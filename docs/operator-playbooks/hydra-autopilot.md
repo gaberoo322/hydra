@@ -212,7 +212,15 @@ Each tick:
 >   through `prompt_args`: the `hydra-retro` skill defaults to the latest
 >   completed run when invoked with no argument (see
 >   `docs/operator-playbooks/hydra-retro.md` — "Resolve the run id"), so the
->   dispatch is argument-free exactly like `architecture_orch`.
+>   run-id resolution stays inside the skill exactly like `architecture_orch`.
+> - **Emit, don't audit (issue #1078):** `decide.py` DOES stamp
+>   `prompt_args:{apply:true}` on the dispatch. `hydra-retro` defaults to
+>   `--audit`/dry-run, so an argument-free headless dispatch would file ZERO
+>   issues and open ZERO PRs — a silent no-op that defeats the class's entire
+>   purpose (≤2 issues + ≤1 gated PR/run). With `apply:true` the autopilot
+>   forwards `--apply` (the action-to-tool table maps `apply=true` →
+>   `--apply`), so the scheduled retro emits. `--audit` remains the explicit
+>   opt-in for a manual operator inspection run.
 
 > **Cleanup wiring (issue #960, parent #958):** `cleanup_orch` is the
 > high-confidence mechanical backfill class. It dispatches the headless
