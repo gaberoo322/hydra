@@ -230,13 +230,6 @@ export function parseCrashDetail(raw: string | undefined): Record<string, unknow
   }
 }
 
-export function clampInt(n: number, min: number, max: number, fallback: number): number {
-  if (!Number.isFinite(n) || !Number.isInteger(n)) return fallback;
-  if (n < min) return min;
-  if (n > max) return max;
-  return n;
-}
-
 /**
  * `kill -0 pid` liveness probe. Returns true iff the pid is alive AND
  * we have permission to signal it (EPERM = alive-from-our-perspective).
