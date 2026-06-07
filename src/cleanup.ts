@@ -189,4 +189,4 @@ function stopCleanupSchedule() {
   }
 }
 
-export { startCleanupSchedule, stopCleanupSchedule, runCleanup };
+export { startCleanupSchedule, stopCleanupSchedule };
