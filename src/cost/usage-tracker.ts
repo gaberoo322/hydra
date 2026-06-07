@@ -87,6 +87,20 @@
  *     discipline. Read-time detection only — nothing is persisted, no self-
  *     recalibration (that would violate the pure read-side projection
  *     contract, ADR-0021).
+ *
+ * OAuth-read cadence env (issue #1090):
+ *   - HYDRA_OAUTH_USAGE_TTL_MS — how long a SUCCESSFUL OAuth meter read is
+ *     reused before the next external GET (default 300_000 = 5min). DECOUPLED
+ *     from the 60s transcript-scan cache so the OAuth read cadence is ≤12 GETs/hr
+ *     (under the endpoint's rolling rate limit) instead of pinned to the ~60/hr
+ *     scan cadence. `?force=1` busts the snapshot scan but NOT this cache.
+ *   - HYDRA_OAUTH_USAGE_MAX_STALE_MS — how long PAST the TTL a last-good value
+ *     may still be served (as STALE oauth) on a failed read before the headline
+ *     falls through to the transcript estimate (default = the effective TTL). A
+ *     transient 429 keeps `usageSource:"oauth"` on the last-good value (with
+ *     `oauthStale=true` + `oauthAgeMs`) rather than flipping to the estimate;
+ *     only when no recent-enough OAuth value exists at all does it fall to the
+ *     estimate (never silently 0). Only a SUCCESSFUL read overwrites the cache.
  */
 
 import { readFile, stat } from "node:fs/promises";
@@ -98,7 +112,7 @@ import {
   sessionIdFromPath as transcriptSessionIdFromPath,
 } from "../transcript-store.ts";
 import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
-import type { OAuthUsageResult } from "./oauth-usage.ts";
+import type { OAuthUsageResult, OAuthUsageData } from "./oauth-usage.ts";
 
 /**
  * Bucket key for sessions that have no `hydra:dispatches:subagent:{sessionId}`
@@ -139,6 +153,17 @@ const WINDOW_5H_MS = 5 * MS_PER_HOUR;
 const WINDOW_24H_MS = MS_PER_DAY;
 const WINDOW_7D_MS = 7 * MS_PER_DAY;
 const CACHE_TTL_MS = 60_000;
+
+/**
+ * Default OAuth-meter cache TTL (issue #1090): how long a successful
+ * {@link OAuthUsageResult} is reused before the next external GET is attempted.
+ * DECOUPLED from {@link CACHE_TTL_MS} (the 60s transcript-scan cache) so the
+ * OAuth read cadence is NOT pinned to the scan cadence. At 5 minutes the
+ * service makes ≤12 OAuth GETs/hour, comfortably under the endpoint's
+ * rolling-window rate limit (it 429s at ~tens/hour), instead of the ~60/hr the
+ * snapshot-coupled read produced. Overridable via `HYDRA_OAUTH_USAGE_TTL_MS`.
+ */
+export const DEFAULT_OAUTH_USAGE_TTL_MS = 300_000;
 
 export interface TokenBreakdown {
   input: number;
@@ -197,12 +222,29 @@ export interface UsageSnapshot {
   usageSource: "oauth" | "estimate";
   /**
    * The `oauth-usage-*` failure code when {@link usageSource} is `"estimate"`
-   * because the OAuth read failed, or `null` when the meter read succeeded
-   * (`usageSource === "oauth"`). Additive observability — surfaces WHY the
-   * fallback happened (e.g. `oauth-usage-token-expired` => operator should
-   * re-login). (issue #1083)
+   * because the OAuth read failed, or `null` when a FRESH meter read succeeded.
+   * When a STALE last-good value backs the headline (issue #1090), this is the
+   * sentinel `"oauth-usage-stale"` (and {@link oauthStale} is true). Additive
+   * observability — surfaces WHY the fallback / staleness happened (e.g.
+   * `oauth-usage-token-expired` => operator should re-login). (issue #1083, #1090)
    */
   oauthError: string | null;
+  /**
+   * True when the OAuth-backed headline is a STALE last-good value served
+   * because a fresh meter read failed (e.g. a transient 429) but a recent-enough
+   * cached value existed (issue #1090). `usageSource` is still `"oauth"` in this
+   * case — the headline stays on ground truth rather than flipping to the
+   * estimate. False on a fresh read AND on the estimate fallback. Additive.
+   */
+  oauthStale: boolean;
+  /**
+   * Age in ms of the OAuth value backing the headline (issue #1090): `0` for a
+   * fresh read, the cached value's age when served fresh-from-cache OR served
+   * stale, and `null` on the estimate fallback (no OAuth value backs the
+   * headline). Additive observability — lets the dashboard show "OAuth meter:
+   * Ns old" / "stale". (issue #1090)
+   */
+  oauthAgeMs: number | null;
   /**
    * ISO-8601 of the real 5-hour window reset boundary from the OAuth meter, or
    * `null` when the meter read failed OR the meter reported no boundary.
@@ -344,6 +386,21 @@ interface CacheEntry {
 
 let cache: CacheEntry | null = null;
 
+/**
+ * Last SUCCESSFUL OAuth meter read, cached independently of the snapshot cache
+ * (issue #1090). `storedAt` is the epoch-ms of the successful GET. This is the
+ * "last-good" value served while the meter is rate-limited (429) or otherwise
+ * transiently failing, so the headline stays on ground truth rather than
+ * flipping to the transcript estimate the moment the endpoint hiccups. Only a
+ * SUCCESSFUL read is cached here — a failure never overwrites the last-good.
+ */
+interface OAuthCacheEntry {
+  data: OAuthUsageData;
+  storedAt: number;
+}
+
+let oauthCache: OAuthCacheEntry | null = null;
+
 export function getWeeklyQuotaTokens(): number {
   return parseQuotaEnv(process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS);
 }
@@ -356,6 +413,55 @@ function parseQuotaEnv(raw: string | undefined): number {
   if (raw === undefined || raw === "") return 0;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return parsed;
+}
+
+/**
+ * The OAuth-meter cache TTL in ms (issue #1090), from `HYDRA_OAUTH_USAGE_TTL_MS`,
+ * falling back to {@link DEFAULT_OAUTH_USAGE_TTL_MS}. While a cached successful
+ * read is younger than this, no external GET is made (the value is served as
+ * fresh `usageSource:"oauth"`). A non-empty-but-invalid value (non-finite or
+ * <= 0) is logged (fail-loud) and falls back to the default, mirroring the
+ * other env readers. Pure + env-only so the cache math stays unit-testable.
+ */
+export function getOAuthUsageTtlMs(): number {
+  const raw = process.env.HYDRA_OAUTH_USAGE_TTL_MS;
+  if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_TTL_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_OAUTH_USAGE_TTL_MS is set but not a positive finite ` +
+        `number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_TTL_MS}`,
+    );
+    return DEFAULT_OAUTH_USAGE_TTL_MS;
+  }
+  return parsed;
+}
+
+/**
+ * How long PAST the TTL a stale last-good OAuth value may still be served on a
+ * failed read before the headline falls through to the transcript estimate
+ * (issue #1090), from `HYDRA_OAUTH_USAGE_MAX_STALE_MS`, defaulting to the
+ * effective TTL. So the lifecycle of one successful read is:
+ *   - age < TTL                  → served fresh, no GET attempted (oauth)
+ *   - TTL ≤ age < TTL+maxStale    → GET attempted; on failure served STALE (oauth+stale)
+ *   - age ≥ TTL + maxStale        → too stale; falls through to the estimate
+ * This realises AC2 ("a 429 keeps usageSource:oauth using last-good while a
+ * recent value exists") AND AC3 ("after the OAuth TTL with no successful read,
+ * falls to estimate"). A non-empty-but-invalid value is logged and falls back
+ * to the effective TTL. Pure + env-only.
+ */
+export function getOAuthUsageMaxStaleMs(): number {
+  const raw = process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS;
+  if (raw === undefined || raw === "") return getOAuthUsageTtlMs();
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_OAUTH_USAGE_MAX_STALE_MS is set but not a positive ` +
+        `finite number (${JSON.stringify(raw)}); falling back to the OAuth TTL`,
+    );
+    return getOAuthUsageTtlMs();
+  }
   return parsed;
 }
 
@@ -654,6 +760,82 @@ function emptyByModel(): Record<ModelFamily, TokenBreakdown> {
 
 export function clearUsageCache(): void {
   cache = null;
+  oauthCache = null;
+}
+
+/**
+ * The OAuth read fed into one `scanUsage`, after the independent-TTL + last-good
+ * cache layer (issue #1090). Distinct from the raw {@link OAuthUsageResult}: it
+ * also tells the scan whether the value it carries is a STALE last-good (`stale`)
+ * and how old it is (`ageMs`), so the snapshot can surface those observability
+ * fields. `result.ok === true` covers BOTH a fresh read AND a served-stale
+ * last-good — in either case the headline rebases onto OAuth ground truth; only
+ * `result.ok === false` falls through to the transcript estimate.
+ */
+interface CachedOAuthRead {
+  result: OAuthUsageResult;
+  /** True when `result` is a last-good value served because a fresh read failed. */
+  stale: boolean;
+  /** Age in ms of the served OAuth value, or `null` when none was served (failure). */
+  ageMs: number | null;
+}
+
+/**
+ * Decouple the OAuth-read cadence from the 60s transcript-scan cadence and
+ * serve a last-good value through transient meter failures (issue #1090).
+ *
+ * Lifecycle of the module-level `oauthCache` (a SUCCESSFUL read only):
+ *   - cache fresh (age < TTL)        → serve cached, NO external GET (fresh oauth)
+ *   - cache stale-but-servable       → attempt GET; on success refresh + serve fresh;
+ *       (TTL ≤ age < TTL + maxStale)    on FAILURE serve the cached value as STALE oauth
+ *   - cache absent OR too stale       → attempt GET; on failure pass the failure
+ *       (age ≥ TTL + maxStale)          through (caller falls to the estimate)
+ *
+ * Only a SUCCESSFUL read overwrites the cache — a 429/timeout never evicts the
+ * last-good. Pure of `Date.now()` (caller passes `nowMs`); the module cache is
+ * the only side effect, mirroring the snapshot `cache`.
+ */
+async function readOAuthCached(
+  readUsage: () => Promise<OAuthUsageResult>,
+  nowMs: number,
+): Promise<CachedOAuthRead> {
+  const ttlMs = getOAuthUsageTtlMs();
+
+  // Fresh cache hit: serve without an external GET. This is the cadence
+  // decoupling — within the TTL the snapshot scan reuses the cached OAuth value
+  // instead of GETting on every 60s refresh.
+  if (oauthCache !== null && nowMs - oauthCache.storedAt < ttlMs) {
+    return {
+      result: { ok: true, data: oauthCache.data },
+      stale: false,
+      ageMs: nowMs - oauthCache.storedAt,
+    };
+  }
+
+  // TTL expired (or no cache): attempt a fresh read.
+  const result = await readUsage();
+  if (isOAuthUsageOk(result)) {
+    oauthCache = { data: result.data, storedAt: nowMs };
+    return { result, stale: false, ageMs: 0 };
+  }
+
+  // Read failed. Serve the last-good value (now stale) instead of flipping to
+  // the estimate — UNLESS it is older than TTL + maxStale, in which case it is
+  // too stale to trust and we let the failure fall through to the estimate.
+  if (oauthCache !== null) {
+    const ageMs = nowMs - oauthCache.storedAt;
+    if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
+      return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs };
+    }
+    // Too stale: evict so a future success starts a clean age clock, and fall
+    // through to the failure (estimate). Logged so a sustained outage is visible.
+    console.error(
+      `[usage-tracker] OAuth last-good value is too stale (age ${ageMs}ms ≥ ` +
+        `TTL+maxStale); falling through to the transcript estimate (last read: ${result.code})`,
+    );
+    oauthCache = null;
+  }
+  return { result, stale: false, ageMs: null };
 }
 
 /**
@@ -680,10 +862,25 @@ export async function getUsage(opts: {
    * Reads the authoritative OAuth subscription-usage meter (issue #1083).
    * Defaults to {@link readOAuthUsage}, which reads the credentials file fresh
    * and GETs the OAuth endpoint. Injected by tests to pin the meter result
-   * without a live endpoint or a real credentials file. Piggybacks on the 60s
-   * snapshot cache — ONE meter read per cache refresh, not per caller.
+   * without a live endpoint or a real credentials file.
+   *
+   * Cadence (issue #1090): on the PRODUCTION path the meter read goes through
+   * the independent-TTL `oauthCache` (default 5min, `HYDRA_OAUTH_USAGE_TTL_MS`)
+   * — DECOUPLED from the 60s snapshot cache, so `?force=1` busts the snapshot
+   * scan but NOT the OAuth read, and the read cadence is ≤12/hr not ~60/hr.
+   * When `readUsage` is injected (tests) OR a fixture `projectsRoot` is supplied,
+   * the OAuth cache is BYPASSED so each call exercises the injected reader
+   * deterministically — UNLESS {@link useOAuthCache} is set true.
    */
   readUsage?: () => Promise<OAuthUsageResult>;
+  /**
+   * Opt the injected/fixture path INTO the module-level OAuth cache (issue
+   * #1090) so a test can drive the independent-TTL + last-good behaviour with a
+   * pinned `readUsage` + fixture `projectsRoot`. Defaults to undefined =>
+   * bypass (the #1083 fresh-each-call contract). Production never sets this; it
+   * uses the cache because no reader/root is injected.
+   */
+  useOAuthCache?: boolean;
 } = {}): Promise<UsageSnapshot> {
   const now = opts.now ?? new Date();
   const nowMs = now.getTime();
@@ -709,7 +906,24 @@ export async function getUsage(opts: {
     (overrideRoot
       ? async (): Promise<OAuthUsageResult> => ({ ok: false, code: "oauth-usage-no-credentials" })
       : readOAuthUsage);
-  const snapshot = await scanUsage(root, now, resolveSkill, readUsage);
+
+  // OAuth-read cadence layer (issue #1090). On the pure production path
+  // (no injected reader, no fixture root) the read goes through the
+  // independent-TTL `oauthCache` so it is decoupled from the snapshot scan and
+  // serves a last-good value through transient 429s. When tests inject a reader
+  // or point at a fixture root, bypass the module cache so each call exercises
+  // the injected reader deterministically (preserving the #1083 test contract)
+  // — unless `useOAuthCache` is explicitly set, which the #1090 tests use to
+  // drive the cache with a pinned reader.
+  const bypassOAuthCache = (overrideMeter || overrideRoot) && opts.useOAuthCache !== true;
+  const readOAuth: () => Promise<CachedOAuthRead> = bypassOAuthCache
+    ? async () => {
+        const result = await readUsage();
+        return { result, stale: false, ageMs: isOAuthUsageOk(result) ? 0 : null };
+      }
+    : () => readOAuthCached(readUsage, nowMs);
+
+  const snapshot = await scanUsage(root, now, resolveSkill, readOAuth);
 
   if (!overrideRoot && !overrideResolver && !overrideMeter) {
     cache = { snapshot, storedAt: nowMs };
@@ -734,20 +948,21 @@ async function scanUsage(
   root: string,
   now: Date,
   resolveSkill: SkillResolver,
-  readUsage: () => Promise<OAuthUsageResult>,
+  readOAuth: () => Promise<CachedOAuthRead>,
 ): Promise<UsageSnapshot> {
   const nowMs = now.getTime();
   const cutoff7d = nowMs - WINDOW_7D_MS;
   const cutoff24h = nowMs - WINDOW_24H_MS;
   const cutoff5h = nowMs - WINDOW_5H_MS;
 
-  // Authoritative OAuth meter read (issue #1083). Fired CONCURRENTLY with the
-  // transcript file scan below so the ~one-per-cache-window external GET adds no
-  // serial latency to the scan. Resolved after the estimate is computed; on
-  // success it REBASES the headline percents + 5h emergencyStop onto ground
-  // truth, on failure the estimate stands (never silently 0). Never throws —
-  // readOAuthUsage returns a discriminated result.
-  const oauthPromise = readUsage();
+  // Authoritative OAuth meter read (issue #1083), through the independent-TTL +
+  // last-good cache layer (issue #1090). Fired CONCURRENTLY with the transcript
+  // file scan below so the external GET (when one is even made — see
+  // `readOAuthCached`) adds no serial latency to the scan. Resolved after the
+  // estimate is computed; on success (fresh OR served-stale last-good) it
+  // REBASES the headline percents + 5h emergencyStop onto ground truth, on
+  // failure the estimate stands (never silently 0). Never throws.
+  const oauthPromise = readOAuth();
 
   const weeklyQuota = getWeeklyQuotaTokens();
   const fiveHourQuota = getFiveHourQuotaTokens();
@@ -947,13 +1162,21 @@ async function scanUsage(
   // emergencyStop stays conservative. The ADR-0021 since-reset / Pace-Gate
   // machinery (percentSinceReset, weeklyEmergencyStop, projectPacingCurve) is
   // byte-for-byte untouched — only the rolling headline + 5h emergencyStop move.
-  const oauth = await oauthPromise;
+  const cachedOAuth = await oauthPromise;
+  const oauth = cachedOAuth.result;
   let percentLast5h: number;
   let percentLast7d: number;
   let usageSource: "oauth" | "estimate";
   let oauthError: string | null;
   let oauthFiveHourResetsAt: string | null = null;
   let oauthSevenDayResetsAt: string | null = null;
+  // Staleness markers (issue #1090). When a served-stale last-good value backs
+  // the headline (a transient 429/timeout kept us on OAuth ground truth rather
+  // than flipping to the estimate), `oauthStale` is true and `oauthAgeMs` is its
+  // age. On a fresh read both are observability-neutral (false / 0); on the
+  // estimate fallback `oauthAgeMs` is null (no OAuth value backs the headline).
+  let oauthStale = false;
+  let oauthAgeMs: number | null = null;
   // `isOAuthUsageOk` is the type guard the seam exports for narrowing under the
   // orchestrator's `strict:false` tsconfig (a bare `if (oauth.ok)` does not
   // narrow a discriminated union without strictNullChecks — same reason
@@ -962,13 +1185,20 @@ async function scanUsage(
     percentLast5h = oauth.data.fiveHour.utilization;
     percentLast7d = oauth.data.sevenDay.utilization;
     usageSource = "oauth";
-    oauthError = null;
+    // A served-stale last-good still backs the headline with the prior error
+    // code (so the operator sees WHY it's stale, e.g. oauth-usage-non-2xx for a
+    // 429); a fresh read clears it to null. Distinguished by `oauthStale`.
+    oauthError = cachedOAuth.stale ? "oauth-usage-stale" : null;
+    oauthStale = cachedOAuth.stale;
+    oauthAgeMs = cachedOAuth.ageMs;
     oauthFiveHourResetsAt = oauth.data.fiveHour.resetsAt;
     oauthSevenDayResetsAt = oauth.data.sevenDay.resetsAt;
   } else {
     // Graceful degradation: fall back to the transcript+calibration estimate.
-    // Logged (fail-loud) so a persistent OAuth outage is visible, but the gate
-    // stays conservative on the estimate rather than reading 0.
+    // Reached only when there is NO recent-enough OAuth value to serve (a fresh
+    // failure with no last-good, or a last-good aged past TTL+maxStale). Logged
+    // (fail-loud) so a persistent OAuth outage is visible, but the gate stays
+    // conservative on the estimate rather than reading 0.
     console.error(
       `[usage-tracker] OAuth usage meter unavailable (${oauth.code}); falling back to transcript estimate for percentLast5h/percentLast7d`,
     );
@@ -976,6 +1206,7 @@ async function scanUsage(
     percentLast7d = estimatePercentLast7d;
     usageSource = "estimate";
     oauthError = oauth.code;
+    oauthAgeMs = null;
   }
 
   // emergencyStop rides whichever headline is authoritative. On the OAuth path
@@ -1071,6 +1302,8 @@ async function scanUsage(
     percentLast7d,
     usageSource,
     oauthError,
+    oauthStale,
+    oauthAgeMs,
     oauthFiveHourResetsAt,
     oauthSevenDayResetsAt,
     projectedWeeklyPercent,
