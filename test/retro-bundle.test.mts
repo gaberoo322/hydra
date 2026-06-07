@@ -46,6 +46,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     bucket: "merged",
     abandonReason: null,
     regressionIntroduced: false,
+    flagged: false,
     ...over,
   };
 }
@@ -466,10 +467,62 @@ describe("assembleRetroBundle — composition", () => {
     const flagged = flagDispatchesForDrill(bundle.dispatches);
     assert.equal(flagged.length, 2, "both crashed-run dispatches are flagged for drill");
 
+    // issue #1094 — the SERVED bundle must materialise the drill-flag onto each
+    // dispatch (a JSON consumer cannot call the pure selector). Before this fix
+    // every served dispatch reported flagged=false even on a crashed run where
+    // all carried abandonReason=run-crash, so the rollup was flagged:0.
+    assert.equal(qa.flagged, true, "served dispatch carries flagged=true");
+    assert.ok(
+      bundle.dispatches.every((d) => d.flagged === true),
+      "every crashed-run dispatch is flagged on the served bundle",
+    );
+
     // The flagged dispatches' anchors got reflection reads — the retro is no
     // longer structurally blind on a non-clean run.
     assert.deepEqual(reflectionAnchors.sort(), ["#961", "PR#970"]);
     assert.equal(bundle.reflections.length, 2);
+  });
+
+  // -------------------------------------------------------------------------
+  // issue #1094 — the served bundle's per-dispatch `flagged` field is the
+  // signal the hydra-retro skill (which curls the endpoint and cannot call the
+  // pure TS selector) reads. Pin the exact reported shape: a crashed run where
+  // every dispatch carries abandonReason=run-crash must report flagged:true on
+  // each served dispatch, with a non-empty flagged subset.
+  // -------------------------------------------------------------------------
+  test("crashed run: served dispatches[].flagged is true for every run-crash dispatch (#1094)", async () => {
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-1094", status: "crashed", term_reason: "crash" },
+          turns: [
+            {
+              turn_n: 12,
+              actions: [],
+              slots_snapshot: {
+                dev_orch: { skill: "hydra-dev", anchor: "issue-1073" },
+                qa_orch: { skill: "hydra-qa", anchor: "PR#1011" },
+                grill_orch: { skill: "hydra-grill", anchor: "issue-1087" },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}),
+      readAnchorReflections: async () => ({ content: "", count: 0 }),
+    });
+
+    const bundle = await assembleRetroBundle("run-1094", deps);
+
+    assert.equal(bundle.dispatches.length, 3, "all three occupied slots projected");
+    // Reproduces the issue evidence: every dispatch carries run-crash and so
+    // every served dispatch must report flagged:true (was false → rollup 0).
+    for (const d of bundle.dispatches) {
+      assert.equal(d.abandonReason, "run-crash", `${d.skill} carries run-crash`);
+      assert.equal(d.flagged, true, `${d.skill} served dispatch is flagged`);
+    }
+    const flaggedCount = bundle.dispatches.filter((d) => d.flagged).length;
+    assert.equal(flaggedCount, 3, "the served flagged subset is non-empty (was 0)");
   });
 
   test("clean stop does NOT fabricate a failure status for a pending dispatch", async () => {
@@ -498,6 +551,9 @@ describe("assembleRetroBundle — composition", () => {
     assert.equal(bundle.dispatches[0].anchorReference, "#500", "still reconciled from snapshot");
     assert.equal(bundle.dispatches[0].abandonReason, null, "no fabricated failure on a clean stop");
     assert.equal(flagDispatchesForDrill(bundle.dispatches).length, 0, "pending dispatch stays unflagged");
+    // issue #1094 — the served flag must mirror the selector: a genuinely
+    // pending dispatch stays flagged=false (no false-positive drill).
+    assert.equal(bundle.dispatches[0].flagged, false, "served pending dispatch is not flagged");
   });
 });
 
