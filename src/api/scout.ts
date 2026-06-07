@@ -9,6 +9,10 @@ import {
   listDispatchAudits,
   planAlertDispatches,
 } from "../scout/alert-listener.ts";
+import {
+  ScoutDispatchesQuerySchema,
+  ScoutStatsQuerySchema,
+} from "../schemas/scout.ts";
 
 /**
  * Tool-scout API surface (issue #485, Phase B).
@@ -37,10 +41,14 @@ export function createScoutRouter() {
   //   }
   router.get("/scout/stats", async (req, res) => {
     try {
-      const rawWindow = parseInt(String(req.query.window ?? ""), 10);
-      const window = Number.isFinite(rawWindow) && rawWindow > 0
-        ? Math.min(MAX_ROLLUP_WINDOW_DAYS, rawWindow)
-        : 7;
+      // ADR-0022: read `window` through the Schemas seam (absent/garbage → 7),
+      // then clamp to the rollup ceiling. The clamp stays in the route because
+      // the legacy behaviour clamps an over-range value (Math.min) rather than
+      // rejecting it to the default — see ScoutStatsQuerySchema.
+      const window = Math.min(
+        MAX_ROLLUP_WINDOW_DAYS,
+        ScoutStatsQuerySchema.parse(req.query).window,
+      );
       const now = new Date();
       const categories = await getStatsRollup(window, now);
 
@@ -85,8 +93,8 @@ export function createScoutRouter() {
   // dredging the Redis stream by hand.
   router.get("/scout/dispatches", async (req, res) => {
     try {
-      const rawLimit = parseInt(String(req.query.limit ?? ""), 10);
-      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 50;
+      // ADR-0022: read `limit` through the Schemas seam (default 50 on garbage).
+      const { limit } = ScoutDispatchesQuerySchema.parse(req.query);
       const entries = await listDispatchAudits(limit);
       res.json({ limit, entries });
     } catch (err) {

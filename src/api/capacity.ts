@@ -4,6 +4,7 @@ import {
   recordOrchestratorSideMerge,
   DEFAULT_WINDOW_CYCLES,
 } from "../capacity-floor.ts";
+import { countQuerySchema } from "../schemas/common.ts";
 
 /**
  * Capacity-floor routes (issue #245).
@@ -23,10 +24,13 @@ export function createCapacityRouter() {
   // GET /capacity — Orchestrator self-improvement share + recent history
   router.get("/capacity", async (req, res) => {
     try {
-      const rawWindow = parseInt(String(req.query.window || ""), 10);
-      const window = Number.isFinite(rawWindow) && rawWindow > 0 && rawWindow <= 200
-        ? rawWindow
-        : DEFAULT_WINDOW_CYCLES;
+      // ADR-0022: read `window` through the Schemas seam via the shared
+      // count factory. Absent/non-numeric collapses to DEFAULT_WINDOW_CYCLES;
+      // any value is clamped to 1..200, the legacy upper bound. `count` is the
+      // factory's field name (renamed to `window` here).
+      const { count: window } = countQuerySchema(DEFAULT_WINDOW_CYCLES, 200).parse(
+        req.query,
+      );
       const snapshot = await getCapacitySnapshot(window);
       // Shape requested by issue #245.
       res.json({
