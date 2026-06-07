@@ -85,7 +85,13 @@ export async function getCurrentMilestoneProgress() {
       };
     }
     return null;
-  } catch {
+  } catch (err: any) {
+    // A missing roadmap.md is the legitimate "no active milestone yet" path —
+    // stay quiet. Anything else (parse/permission/etc.) is a real fault that
+    // must not be swallowed silently (CLAUDE.md fail-loud; issue #1122).
+    if (err?.code !== "ENOENT") {
+      console.error("[backlog/reads] getCurrentMilestoneProgress failed reading roadmap.md", err);
+    }
     return null;
   }
 }
