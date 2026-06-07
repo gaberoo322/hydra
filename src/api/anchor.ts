@@ -13,6 +13,7 @@
 
 import { Router } from "express";
 import { getCandidateFeed } from "../anchor-candidates.ts";
+import { AnchorCandidatesQuerySchema } from "../schemas/anchor.ts";
 
 export function createAnchorRouter() {
   const router = Router();
@@ -20,20 +21,13 @@ export function createAnchorRouter() {
   // GET /api/anchor/candidates?limit=N&excludeInFlight=true|false&excludeMerged=true|false
   router.get("/anchor/candidates", async (req, res) => {
     try {
-      const requestedLimit = parseInt(String(req.query.limit ?? ""), 10);
-      const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
-        ? requestedLimit
-        : undefined;
-      // Issue #640 — exclude inProgress items with a fresh `pr-<n>` claim by
-      // default (the safer behaviour for decide.py / dev_target dispatch);
-      // callers that need the raw view pass excludeInFlight=false.
-      const excludeInFlight =
-        String(req.query.excludeInFlight ?? "true").toLowerCase() !== "false";
-      // Issue #882 — also exclude candidates whose work already MERGED with no
-      // open PR (the in-flight window only hides fresh open-PR claims). On by
-      // default; callers that need the raw view pass excludeMerged=false.
-      const excludeMerged =
-        String(req.query.excludeMerged ?? "true").toLowerCase() !== "false";
+      // ADR-0022: read query params through the Schemas seam. `limit` collapses
+      // to DEFAULT_LIMIT (10, clamped 1..50) on absent/garbage input — the same
+      // window getCandidateFeed applies. The two exclusion flags default true
+      // (issues #640 / #882: exclude in-flight + already-merged candidates;
+      // callers pass `=false` for the raw view).
+      const { count: limit, excludeInFlight, excludeMerged } =
+        AnchorCandidatesQuerySchema.parse(req.query);
 
       const feed = await getCandidateFeed({ limit, excludeInFlight, excludeMerged });
 
