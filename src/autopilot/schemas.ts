@@ -47,6 +47,19 @@ export const CycleRecordBodySchema = z
     autopilotTurnId: z.string().optional(),
     worktreeBranch: z.string().optional(),
     costUsd: z.number().optional(),
+    // Issue #1136 (Slice 2 of #1119): the comma-separated reflection bucket
+    // tokens (`per-anchor` / `by-file` / ...) the code-writing dispatch was
+    // SERVED at planning time by `GET /api/reflections`, reported back so
+    // `deriveReflectionMatchSource` (src/metrics/trend.ts) stops reading
+    // 'none' on every cycle. OPTIONAL on purpose: the dispatch deposits the
+    // string only when it served reflections, reap reads an absent deposit
+    // file as empty, and every existing reap call / non-code-writing class
+    // omits it entirely — so this is byte-for-byte backward compatible.
+    // recordCycle is a pure PASS-THROUGH of this field (it never derives it);
+    // the Slice-1 wrong-altitude guard (reap time has no planning-time
+    // knowledge) stays intact because the string crosses the gap via the
+    // dispatch's deposit file, not reap's own knowledge.
+    reflectionSources: z.string().optional(),
   });
 
 export type CycleRecordBody = z.infer<typeof CycleRecordBodySchema>;

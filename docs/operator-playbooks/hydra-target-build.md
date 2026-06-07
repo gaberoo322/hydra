@@ -215,6 +215,45 @@ fi
 # a miss). Never fail the build over a reflections miss.
 ```
 
+**Reflection-source telemetry deposit (issue #1136 — at the SAME planning-time
+step):** so the `reflectionMatchSource` cycle metric reflects what was actually
+served (instead of reading `'none'` on every cycle), MAP the served block
+sources to the bucket tokens `deriveReflectionMatchSource` matches and DEPOSIT
+the comma-separated string to a task-scoped file. reap.py reads that file on its
+single authoritative `cycle-record` write — do **NOT** POST `cycle-record`
+yourself (reap is the sole writer; a competing POST loses the idempotency race
+and silently dedups to a no-op).
+
+CRITICAL mapping: the API emits `blocks[].source` = `per-anchor-reflections` /
+`by-file-reflections`, but `deriveReflectionMatchSource` matches the BARE tokens
+`per-anchor` / `by-file`. Emit the mapped tokens, never the raw API strings
+(raw strings mis-bucket to `mixed`/`none`).
+
+```bash
+# Map each served block (count>0) to its bucket token, comma-join.
+REFL_SOURCES=$(printf '%s' "$REFL_JSON" | jq -r '
+  [ (.blocks // [])[]
+    | select((.count // 0) > 0)
+    | (.source // "")
+    | if test("per-anchor") then "per-anchor"
+      elif test("by-file") then "by-file"
+      elif test("global") then "global"
+      else empty end ]
+  | unique | join(",")')
+# Deposit keyed on THIS dispatch's task_id so reap (which holds the same id)
+# can read it. The autopilot envelope surfaces it as HYDRA_AUTOPILOT_TASK_ID;
+# fall back to CLAUDE_CODE_SESSION_ID (reap's `.session_id` fallback id).
+REFL_TASK_ID="${HYDRA_AUTOPILOT_TASK_ID:-$CLAUDE_CODE_SESSION_ID}"
+if [ -n "$REFL_SOURCES" ] && [ -n "$REFL_TASK_ID" ]; then
+  printf '%s' "$REFL_SOURCES" \
+    > "${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-${REFL_TASK_ID}" 2>/dev/null \
+    || true   # best-effort: a deposit miss only loses telemetry, never blocks work
+fi
+# Empty REFL_SOURCES (served nothing) → no deposit → reap omits the field →
+# the cycle truthfully buckets to 'none'. This distinguishes "served nothing"
+# from the pre-#1136 "served but unstamped" false 'none'.
+```
+
 To verify reflections actually reach a retry, query this `/api/reflections`
 endpoint — NOT `/api/learning/context-trace`, which reports only
 `getContext()`'s composition (a prompt no subagent receives on today's

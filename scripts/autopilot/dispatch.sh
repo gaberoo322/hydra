@@ -62,7 +62,15 @@ print(json.dumps({
     # data. Idempotent on cycleId — re-running with the same cycleId is a
     # no-op on the server, so retries don't double-count.
     #
-    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms]
+    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources]
+    #
+    # Issue #1136 (Slice 2 of #1119): the optional 8th positional arg
+    # `reflection_sources` is the comma-separated reflection bucket tokens
+    # (`per-anchor` / `by-file` / ...) the code-writing dispatch was SERVED at
+    # planning time. reap.py reads it from a task-scoped deposit file and passes
+    # it here so the cycle metric records what was actually injected, instead of
+    # `deriveReflectionMatchSource` reading 'none' on every cycle. Empty/absent
+    # → the field is omitted from the POST body (truthful 'none').
     cycle_id="${1:-}"
     status="${2:-}"
     skill="${3:-}"
@@ -70,8 +78,9 @@ print(json.dumps({
     task_title="${5:-}"
     anchor_ref="${6:-}"
     duration_ms="${7:-0}"
+    reflection_sources="${8:-}"
     if [ -z "$cycle_id" ] || [ -z "$status" ] || [ -z "$skill" ]; then
-      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms]" >&2
+      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources]" >&2
       exit 2
     fi
     # Anchor type is derived from the skill: dev_orch / dev_target subagents
@@ -94,7 +103,7 @@ print(json.dumps({
     esac
     payload=$(python3 -c "
 import json, sys
-cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta = sys.argv[1:12]
+cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources = sys.argv[1:13]
 body = {
     'cycleId': cycle_id,
     'status': status,
@@ -112,8 +121,12 @@ if task_title:
     body['taskTitle'] = task_title
 if anchor_ref:
     body['anchorReference'] = anchor_ref
+# Issue #1136: only emit reflectionSources when the dispatch reported a
+# non-empty served-bucket string; absent → field omitted → truthful 'none'.
+if reflection_sources:
+    body['reflectionSources'] = reflection_sources
 print(json.dumps(body))
-" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned")
+" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources")
     if command -v hydra >/dev/null 2>&1; then
       hydra raw POST /autopilot/cycle-record --json "$payload" >/dev/null 2>&1 || {
         echo "[autopilot] dispatch: cycle-record post failed for cycle=$cycle_id (non-fatal)" >&2
@@ -132,7 +145,7 @@ print(json.dumps(body))
 Usage:
   dispatch.sh log <class> <skill> [ts]
   dispatch.sh capacity-writeback <pr_number> <commit_sha> <skill> <files_json>
-  dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms]
+  dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources]
 
 Environment:
   HYDRA_AUTOPILOT_LOG   Path to the nightly run log

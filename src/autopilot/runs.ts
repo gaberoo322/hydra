@@ -394,6 +394,18 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
       autopilotTurnId: body.autopilotTurnId,
       worktreeBranch: body.worktreeBranch,
       costUsd: typeof body.costUsd === "number" ? body.costUsd : undefined,
+      // Issue #1136 (Slice 2 of #1119): PURE PASS-THROUGH of the planning-time
+      // reflection bucket tokens the dispatch served itself. recordCycle MUST
+      // NOT derive this — reap time (the only caller) has no knowledge of what
+      // `GET /api/reflections` served the subagent; the string is reported back
+      // by the dispatch via reap's deposit-file read. Persisting it here is
+      // what makes `deriveReflectionMatchSource` (src/metrics/trend.ts) read a
+      // real bucket instead of 'none' on every cycle. Absent body field →
+      // undefined → stripped below → field stays absent (truthful 'none').
+      reflectionSources:
+        typeof body.reflectionSources === "string" && body.reflectionSources.length > 0
+          ? body.reflectionSources
+          : undefined,
     };
     for (const k of Object.keys(metrics)) {
       if (metrics[k] === undefined) delete metrics[k];
