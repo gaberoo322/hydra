@@ -139,12 +139,39 @@ __reap_derive_cause() {
   fi
 }
 
+# Issue #1130: decide whether the just-exited run may arm a session-limit
+# block. ONLY a genuine session-limit exit qualifies: the Claude CLI prints
+# `You've hit your session limit · resets <t>` and exits code=1, which
+# __reap_derive_cause maps to `crash`. A clean exit (cause=interrupted) NEVER
+# arms a block — so a stale `hit your session limit` line left in the journal
+# by a PRIOR run can no longer re-arm a phantom block on a clean exit. Reads
+# REAP_CAUSE + REAP_SESSION_LINE; sets REAP_SESSION_SHOULD_POST=yes|no.
+__reap_session_should_post() {
+  if [ "${REAP_CAUSE}" = "crash" ] && [ -n "${REAP_SESSION_LINE}" ]; then
+    REAP_SESSION_SHOULD_POST="yes"
+  else
+    REAP_SESSION_SHOULD_POST="no"
+  fi
+}
+
 # Dry-run: echo the derived (cause, exit_code) for the current
 # $EXIT_CODE/$EXIT_STATUS and exit. No state read, no POST — purely the
 # mapping under test. Output shape: `cause=<c> exit_code=<n>`.
 if [ "${1:-}" = "--reap-derive-cause" ]; then
   __reap_derive_cause
   echo "cause=${REAP_CAUSE} exit_code=${REAP_EXIT_NUM}"
+  exit 0
+fi
+
+# Dry-run (issue #1130): echo the session-block arming decision for the current
+# $EXIT_CODE/$EXIT_STATUS + injected $HYDRA_AUTOPILOT_REAP_SESSION_LINE. No
+# journal scan, no POST — purely the cause-gate under test. Output shape:
+# `cause=<c> post=<yes|no>`.
+if [ "${1:-}" = "--reap-session-decision" ]; then
+  __reap_derive_cause
+  REAP_SESSION_LINE="${HYDRA_AUTOPILOT_REAP_SESSION_LINE:-}"
+  __reap_session_should_post
+  echo "cause=${REAP_CAUSE} post=${REAP_SESSION_SHOULD_POST}"
   exit 0
 fi
 
@@ -213,17 +240,43 @@ if [ "${1:-}" = "--reap" ]; then
   # non-session-limit line as a no-op (recorded:false), so scanning a normal
   # crash's journal is harmless.
   #
+  # Issue #1130: TWO guards stop a PHANTOM block from a stale line:
+  #   1. Cause gate — only a `crash` (the code=1 session-limit exit signature)
+  #      may arm a block. A clean exit (cause=interrupted: code 0/143/130) skips
+  #      detection entirely, so an hours-old `hit your session limit` line from
+  #      a PRIOR run can no longer re-arm a block when this run exits cleanly.
+  #   2. Run-scoped scan — the journal grep is bounded to THIS run (since the
+  #      state file's started_epoch) instead of a 200-line window that spans
+  #      prior runs, so even a crash only matches its OWN session-limit line.
+  # Before this, a clean code=0 exit re-grepped a stale line and parked the
+  # autopilot for hours with the usage meter empty.
+  #
   # Testability: HYDRA_AUTOPILOT_REAP_SESSION_LINE injects the candidate line
-  # directly (the test harness can't poke the journal); when unset we read the
-  # tail of this unit's journal for the just-exited run.
+  # directly (the test harness can't poke the journal); when unset and the run
+  # crashed we read THIS run's journal for the just-exited run. The cause-gate
+  # decision is pinned by the `--reap-session-decision` dry-run above.
   REAP_SESSION_LINE="${HYDRA_AUTOPILOT_REAP_SESSION_LINE:-}"
-  if [ -z "${REAP_SESSION_LINE}" ] && command -v journalctl >/dev/null 2>&1; then
-    # Last 200 journal lines for this unit, newest match wins. grep -i is
-    # tolerant of the journal prefix; the server-side regex is the real filter.
-    REAP_SESSION_LINE="$(journalctl --user -u hydra-autopilot.service -n 200 --no-pager 2>/dev/null \
-      | grep -i 'hit your session limit' | tail -n 1 || echo "")"
+  if [ "${REAP_CAUSE}" = "crash" ]; then
+    if [ -z "${REAP_SESSION_LINE}" ] && command -v journalctl >/dev/null 2>&1; then
+      # Scope the scan to THIS run (since started_epoch) so a stale line from a
+      # prior run cannot match. Fall back to the bounded tail only when the
+      # start epoch is unavailable — still safe because the cause=crash gate
+      # already holds. Newest match wins; the server-side regex is the real filter.
+      REAP_STARTED_EPOCH="$(jq -r '.started_epoch // 0' "${REAP_STATE_PATH}" 2>/dev/null || echo 0)"
+      if [ -n "${REAP_STARTED_EPOCH}" ] && [ "${REAP_STARTED_EPOCH}" != "0" ]; then
+        REAP_SESSION_LINE="$(journalctl --user -u hydra-autopilot.service --since "@${REAP_STARTED_EPOCH}" --no-pager 2>/dev/null \
+          | grep -i 'hit your session limit' | tail -n 1 || echo "")"
+      else
+        REAP_SESSION_LINE="$(journalctl --user -u hydra-autopilot.service -n 200 --no-pager 2>/dev/null \
+          | grep -i 'hit your session limit' | tail -n 1 || echo "")"
+      fi
+    fi
+  else
+    # Clean / interrupted exit — never arm a session block (issue #1130).
+    REAP_SESSION_LINE=""
   fi
-  if [ -n "${REAP_SESSION_LINE}" ]; then
+  __reap_session_should_post
+  if [ "${REAP_SESSION_SHOULD_POST}" = "yes" ]; then
     REAP_SESSION_PAYLOAD="$(jq -n --arg line "${REAP_SESSION_LINE}" '{line: $line}')"
     if curl -sf --max-time 5 -X POST \
         -H "content-type: application/json" \
@@ -233,6 +286,8 @@ if [ "${1:-}" = "--reap" ]; then
     else
       echo "[autopilot] reap: session-block POST failed (orchestrator down?) — pace-gate may relaunch into the quota"
     fi
+  elif [ "${REAP_CAUSE}" != "crash" ]; then
+    echo "[autopilot] reap: clean exit (cause=${REAP_CAUSE}) — no session-limit block (issue #1130)"
   fi
 
   # Issue #1079: for an abnormal exit (cause=crash / failure_backstop) capture
