@@ -59,12 +59,14 @@ import {
   incrSchedulerCyclesFailed,
 } from "../redis/scheduler.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
+import { recordAnchorReflection } from "../reflections/reflections.ts";
 import type {
   CrashDetail,
   CycleRecordBody,
   RunStartBody,
   RunEndBody,
   TurnBody,
+  ReflectionRecordBody,
 } from "./schemas.ts";
 import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
 
@@ -411,6 +413,73 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
 
     return { ok: true, cycleId, status, bucketed, deduped: false };
   } catch (err: any) {
+    return errRedis(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle: reflection-record (issue #1119)
+// ---------------------------------------------------------------------------
+
+export type RecordReflectionOutcomeResult = Ok<{
+  anchorRef: string;
+  outcome: string;
+}> | Err;
+
+/**
+ * Re-wire a reflection PRODUCER onto the live path (issue #1119, Slice 1).
+ *
+ * `recordAnchorReflection`/`recordReflection` lost their only live caller when
+ * #710 deleted the in-process planner, so the per-anchor reflection store has
+ * been structurally empty — every `GET /api/reflections?anchor=` returns
+ * `count:0`, and a retry of a prior-failure anchor silently loses its own
+ * failure context (the #193 retry-correctness invariant). This wrapper is the
+ * orchestrator-side entry point the autopilot reap path calls (via
+ * `POST /api/autopilot/reflection-record`) when a dispatch terminalises on a
+ * NON-MERGED outcome, so the next attempt's pull is non-empty.
+ *
+ * Never throws — returns an Ok/Err result object, matching the
+ * merge/grounding/verification convention (CLAUDE.md) and the rest of this
+ * module. A reflection-write failure is observability/learning, not
+ * correctness: the reap path swallows a non-2xx and never blocks on it.
+ *
+ * The producer (`recordAnchorReflection`) keeps its current signature; this is
+ * a thin pass-through that maps the validated body onto its opts. Idempotency
+ * is the producer's existing push semantics (capped per-anchor ring) plus the
+ * reap path's `reaped_task_ids` ledger keyed on `cycleId` — re-invocation for
+ * the same reaped dispatch converges harmlessly.
+ */
+export async function recordReflectionOutcome(
+  body: ReflectionRecordBody,
+): Promise<RecordReflectionOutcomeResult> {
+  try {
+    const anchorRef = body.anchorRef.trim();
+    const outcome = body.outcome.trim();
+    if (!anchorRef) {
+      return { ok: false, code: "invalid", detail: "anchorRef must be a non-empty string" };
+    }
+    if (!outcome) {
+      return { ok: false, code: "invalid", detail: "outcome must be a non-empty string" };
+    }
+    const cycleId =
+      typeof body.cycleId === "string" && body.cycleId.trim().length > 0
+        ? body.cycleId.trim()
+        : `reflection-${anchorRef}-${Date.now()}`;
+
+    await recordAnchorReflection({
+      cycleId,
+      anchorRef,
+      taskTitle: body.taskTitle ?? anchorRef,
+      outcome,
+      reason: body.reason,
+      scopeFiles: body.scopeFiles,
+    });
+
+    return { ok: true, anchorRef, outcome };
+  } catch (err: any) {
+    // Never throw out of this path — reflection writes are best-effort
+    // learning, not correctness. Surface the failure as an Err so the route
+    // can answer 500 without crashing the reap-side POST.
     return errRedis(err);
   }
 }

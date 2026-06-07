@@ -27,6 +27,7 @@ import {
   TurnBodySchema,
   EmergencyBrakeBodySchema,
   AutopilotPauseBodySchema,
+  ReflectionRecordBodySchema,
 } from "../autopilot/schemas.ts";
 import {
   getEmergencyBrake,
@@ -40,6 +41,7 @@ import {
 } from "../redis/autopilot-pause.ts";
 import {
   recordCycle,
+  recordReflectionOutcome,
   startRun,
   endRun,
   recordTurn,
@@ -141,6 +143,38 @@ export function createAutopilotRouter(eventBus?: any) {
       status: result.status,
       bucketed: result.bucketed,
       deduped: result.deduped,
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /autopilot/reflection-record — reap-side reflection writer (#1119).
+  //
+  // The WRITE-gap fix for the severed episodic-reflection learning loop. The
+  // reap path (`scripts/autopilot/reap.py::_fire_reflection_record`) POSTs a
+  // classified NON-MERGED failure here so the per-anchor reflection store
+  // becomes non-empty, restoring the #841 live injection path that
+  // hydra-dev/target read at planning time (the #193 retry-correctness
+  // invariant). A merged PR records NO reflection — reflections are
+  // prior-FAILURE narratives. The wrapper never throws; a Redis error answers
+  // 500, which the best-effort reap POST swallows.
+  // -------------------------------------------------------------------------
+  router.post("/autopilot/reflection-record", async (req, res) => {
+    const parsed = ReflectionRecordBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        code: "schema-validation-failed",
+        issues: parsed.error.issues,
+      });
+    }
+    const result = await recordReflectionOutcome(parsed.data);
+    if (!result.ok) {
+      const status = result.code === "redis" ? 500 : 400;
+      return res.status(status).json({ error: result.detail || result.code });
+    }
+    return res.json({
+      ok: true,
+      anchorRef: result.anchorRef,
+      outcome: result.outcome,
     });
   });
 

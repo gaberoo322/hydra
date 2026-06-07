@@ -180,3 +180,53 @@ export const AutopilotPauseBodySchema = z
   });
 
 export type AutopilotPauseBody = z.infer<typeof AutopilotPauseBodySchema>;
+
+// ---------------------------------------------------------------------------
+// Reflection record — POST /api/autopilot/reflection-record (issue #1119)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reap-side reflection-record body — the WRITE-gap fix for the severed
+ * episodic-reflection learning loop (issue #1119, Slice 1).
+ *
+ * The reflection PRODUCERS (`recordAnchorReflection`/`recordReflection`) lost
+ * their only live caller when #710 deleted the in-process planner; the
+ * CONSUMERS stayed live but read an always-empty store (the #841
+ * `GET /api/reflections?anchor=` injection path, `loadAnchorReflectionsRaw` in
+ * anchor scoring, retro-bundle's `readAnchorReflections`). This endpoint
+ * re-wires a producer onto the autopilot reap path: when a dispatch
+ * terminalises on a NON-MERGED outcome, `scripts/autopilot/reap.py` POSTs the
+ * classified failure here so the next attempt's pull is non-empty — restoring
+ * the #193 retry-correctness invariant.
+ *
+ * STRICT (per the "For NEW endpoints, follow queue.ts's strict pattern" note
+ * at the top of this file): an unknown field is a caller bug we want surfaced.
+ * The shape mirrors `recordAnchorReflection`'s opts:
+ *
+ *   anchorRef  — the anchor reference (issue ref, e.g. "issue-1119"); the
+ *                reflection store keys on this. REQUIRED, non-empty.
+ *   taskTitle  — the human task title carried in the dispatch envelope.
+ *   outcome    — the classified self-heal pattern ID (no-diff /
+ *                verification-failure / scope-violation / ...). REQUIRED,
+ *                non-empty: a reflection is a prior-FAILURE narrative, so the
+ *                failure category must be present.
+ *   reason     — the cue/note digest (the stderr-line / stage tag the wrapper
+ *                captured). REQUIRED, non-empty.
+ *   cycleId    — the autopilot task_id; OPTIONAL. Drives the producer's
+ *                per-record dedup (re-invocation for the same reaped dispatch
+ *                converges harmlessly). Defaults server-side when absent.
+ *   scopeFiles — OPTIONAL `## Files in scope` paths, for the #326 by-file
+ *                secondary index so retries on a DIFFERENT anchor that touched
+ *                the same files also surface this narrative.
+ */
+export const ReflectionRecordBodySchema = z
+  .strictObject({
+    anchorRef: z.string().trim().min(1, { message: "anchorRef must be a non-empty string" }),
+    taskTitle: z.string().optional(),
+    outcome: z.string().trim().min(1, { message: "outcome must be a non-empty string" }),
+    reason: z.string().trim().min(1, { message: "reason must be a non-empty string" }),
+    cycleId: z.string().trim().min(1).optional(),
+    scopeFiles: z.array(z.string()).optional(),
+  });
+
+export type ReflectionRecordBody = z.infer<typeof ReflectionRecordBodySchema>;
