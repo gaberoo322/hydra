@@ -2512,6 +2512,7 @@ describe("usage-tracker", () => {
         emergencyStop: false,
         weeklyEmergencyStop: false,
         pacingShed: false,
+        fiveHourThrottleShed: false,
         calibrated: true,
         paused: false,
         sessionBlockedUntil: null,
