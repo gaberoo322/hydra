@@ -5,6 +5,7 @@ import {
   getRuleActionLog,
 } from "../pattern-memory/rule-effectiveness.ts";
 import { getContext } from "../learning.ts";
+import { RuleActionLogQuerySchema, ContextTraceQuerySchema } from "../schemas/learning.ts";
 
 const FRICTION_SKILLS = ["hydra-dev", "hydra-target-build", "hydra-qa"] as const;
 
@@ -62,8 +63,11 @@ export function createLearningRouter() {
    */
   router.get("/learning/rule-action-log", async (req, res) => {
     try {
-      const limitRaw = parseInt(String(req.query.limit ?? "50"), 10);
-      const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw)) : 50;
+      // ADR-0022: read `limit` through the Schemas seam (safeParse on the whole
+      // req.query). The schema reuses countQuerySchema's coercion, which
+      // collapses bad/absent/out-of-range input to the default (50) and clamps
+      // to [1, 200] — exactly the legacy `parseInt(...) || 50` + clamp.
+      const limit = RuleActionLogQuerySchema.safeParse(req.query).data?.limit ?? 50;
       const entries = await getRuleActionLog(limit);
       res.json({ entries, count: entries.length });
     } catch (err: any) {
@@ -147,14 +151,16 @@ export function createLearningRouter() {
    * cycle inspection endpoints.
    */
   router.get("/learning/context-trace", async (req, res) => {
-    const agent = typeof req.query.agent === "string" ? req.query.agent : "";
-    const reference = typeof req.query.reference === "string" ? req.query.reference : "";
-    const type = typeof req.query.type === "string" ? req.query.type : "";
-    if (!agent || !reference || !type) {
+    // ADR-0022: read query through the Schemas seam. This route owns a bespoke
+    // 400 ("agent, reference, and type are required"), so it safeParses inline
+    // and keeps its own response rather than going through aggregatorRoute.
+    const parsed = ContextTraceQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
       res.status(400).json({ error: "agent, reference, and type query params are required" });
       return;
     }
-    const filesParam = typeof req.query.files === "string" ? req.query.files : "";
+    const { agent, reference, type } = parsed.data;
+    const filesParam = parsed.data.files ?? "";
     const files = filesParam
       ? filesParam.split(",").map(s => s.trim()).filter(Boolean)
       : undefined;
