@@ -319,18 +319,6 @@ export async function groundProject(projectDir,  opts: Record<string, any> = {})
 }
 
 /**
- * Get the diff and diff stat between current state and a reference.
- * Returns { diff, stat } where diff is the full patch and stat is the summary.
- */
-export async function getDiff(projectDir, ref = "HEAD~1") {
-  const [diffResult, statResult] = await Promise.all([
-    runCmd("git", ["diff", ref], { cwd: projectDir, timeout: 15000 }),
-    runCmd("git", ["diff", "--stat", ref], { cwd: projectDir, timeout: 10000 }),
-  ]);
-  return { diff: diffResult.stdout, stat: statResult.stdout };
-}
-
-/**
  * Summarize a grounding report into a concise string for agent prompts.
  * This replaces the old getProjectState() output.
  */
@@ -422,7 +410,7 @@ export function summarizeForPrompt(report,  opts: Record<string, any> = {}) {
 
 /**
  * Internal helpers exposed for regression tests only. Not part of the public
- * API — external modules should use groundProject() / summarizeForPrompt() /
- * getDiff() instead.
+ * API — external modules should use groundProject() / summarizeForPrompt()
+ * instead.
  */
 export const _testing = { truncate, stripAnsi, parseTestCounts, parseFailingTests, runCmd };
