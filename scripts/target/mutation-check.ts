@@ -49,13 +49,34 @@
  * Quick-fix bypass: if PR_BODY contains "[quick-fix]" the gate writes a
  * "neutral" status and exits 0.
  *
+ * No-signal status (issue #1132, mirroring the Orchestrator #1120 fix): when
+ * the changed money-critical files yield zero TESTABLE mutants (all generated
+ * mutants skipped/uncompilable, or none generated) the gate no longer
+ * fabricates `killRate=100`/`pass`. It emits `status:"warn"` with a null
+ * `killRate` and a reason distinguishing "no mutants generated" from "all
+ * generated mutants skipped". The warn is non-blocking (exit 0) — it only
+ * surfaces the no-signal gap in the step-summary JSON without hard-blocking.
+ *
+ * The divergence from the Orchestrator gate (#1120's `classifyNoSignal(report,
+ * tier)`): the Target risk model is a two-level boolean (money-critical vs.
+ * safe), explicitly NOT a tier ladder. There is no T1/T2 `neutral` analogue
+ * here, so `classifyNoSignal(report)` takes NO tier and ALWAYS warns — every
+ * file that reaches the no-signal branch is already money-critical (safe-path
+ * PRs short-circuit to `status:"skipped"` at the `inspectable.length === 0`
+ * guard BEFORE the runner ever runs). Money-handling code with zero
+ * fault-detection signal is exactly the gap a warn must surface.
+ *
  * Exit codes:
- *   0 — pass (or skipped / neutral)
+ *   0 — pass (or skipped / neutral / warn no-signal — non-blocking)
  *   2 — mutation gate failed (block merge)
  *   1 — usage / unexpected error
  */
 
-import { runMutationTests, shouldSkipMutation } from "../../src/mutation.ts";
+import {
+  runMutationTests,
+  shouldSkipMutation,
+  type MutationTestReport,
+} from "../../src/mutation.ts";
 import { classifyTargetRisk } from "../../src/target/money-critical.ts";
 
 const DEFAULT_TARGET_KILL_FLOOR = 60;
@@ -81,6 +102,70 @@ export function filterMoneyCriticalCandidates(changedFiles: string[]): string[] 
     .filter((f) => f.length > 0);
   const { matchedPaths } = classifyTargetRisk(trimmed);
   return matchedPaths.filter((f) => !shouldSkipMutation(f));
+}
+
+/**
+ * Result of the no-signal classification (issue #1132, mirroring #1120).
+ *
+ * `status` is always `"warn"` on the Target gate — unlike the Orchestrator's
+ * tier-aware helper (which emits `neutral` on T1/T2), every file reaching the
+ * Target no-signal branch is already money-critical (safe paths short-circuit
+ * to `status:"skipped"` before the runner). Money-handling code that produced
+ * ZERO fault-detection signal is exactly the gap a `warn` must surface, so
+ * there is no `neutral` sub-case here.
+ *
+ * `killRate` is always `null` — the no-signal branch must NOT synthesise a 100%
+ * kill rate (the root cause of the silent merge-gate bypass #1120 fixed).
+ * `warn` is non-blocking (the caller keeps exit 0); it only flags the gap in
+ * the step-summary JSON.
+ */
+export type NoSignalClassification = {
+  status: "warn";
+  reason: string;
+  killRate: null;
+};
+
+/**
+ * Classify a mutation report that produced no testable signal (issue #1132).
+ *
+ * "No testable signal" means `testable === totalMutants - skipped === 0`: every
+ * generated mutant was skipped (uncompilable), or no mutants were generated at
+ * all. The pre-#1132 Target gate collapsed this into a synthetic
+ * `killRate = 100` → `status:"neutral"` (gate passes by default), silently
+ * rubber-stamping a money-critical diff with zero fault-detection. This helper
+ * is the pure, unit-testable seam that derives the correct no-signal status
+ * instead.
+ *
+ * Returns `null` when there IS testable signal (`testable > 0`) — the caller
+ * then runs the normal kill-rate comparison. Only the `testable === 0` case
+ * yields a classification.
+ *
+ * Tier-less policy — THE deliberate divergence from the Orchestrator helper:
+ * the Target risk model is a two-level boolean (money-critical vs. safe),
+ * explicitly NOT a tier ladder, so there is no `tier` parameter and no
+ * `neutral`/T1-T2 branch. Every file reaching this branch is money-critical, so
+ * the result is ALWAYS `status:"warn"` (non-blocking; the caller keeps exit 0).
+ *
+ * Sub-case reasons:
+ *   - `candidatesGenerated === 0` → "no mutants generated" (comment-only /
+ *     trivial diff — the generator emitted nothing).
+ *   - otherwise (`totalMutants > 0 && skipped === totalMutants`) → "all
+ *     generated mutants were skipped" (every candidate was uncompilable).
+ *
+ * Pure — no env, no IO, no git. Test it by passing arbitrary reports.
+ */
+export function classifyNoSignal(
+  report: MutationTestReport,
+): NoSignalClassification | null {
+  const testable = report.totalMutants - report.skipped;
+  if (testable > 0) return null;
+
+  const reason =
+    report.candidatesGenerated === 0
+      ? "no mutants generated (diff is comment-only or trivial) — no fault-detection signal"
+      : "all generated mutants were skipped (uncompilable) — no fault-detection signal";
+
+  return { status: "warn", reason, killRate: null };
 }
 
 function readChangedFiles(): string[] {
@@ -170,28 +255,39 @@ async function main(): Promise<number> {
   });
 
   const testable = report.totalMutants - report.skipped;
-  const killRate = testable > 0
-    ? Math.round((report.killed / testable) * 100)
-    : 100;
 
-  // No-signal case: gate cannot conclude — treat as pass with note. Matches the
-  // Orchestrator gate: only a kill-rate BELOW the floor blocks merge; an
-  // inability to generate testable mutants does not.
-  if (testable === 0) {
-    const reason = report.candidatesGenerated === 0
-      ? "no mutants generated (diff is comment-only or trivial)"
-      : "all generated mutants were uncompilable";
+  // No-signal case (issue #1132, mirroring #1120): the changed money-critical
+  // files produced ZERO testable mutants — the gate cannot conclude. The
+  // pre-#1132 code fabricated `killRate = 100` here and emitted `neutral`
+  // (passes by default), which let a money-critical diff clear the floor with
+  // no fault-detection signal at all (the same silent merge-gate bypass #1120
+  // fixed on the Orchestrator). Instead, classify via the pure
+  // `classifyNoSignal` seam: it ALWAYS emits `warn` (distinctly NOT a pass, and
+  // NO synthetic killRate — `killRate` is null), because every file reaching
+  // this branch is money-critical. There is no `neutral`/T1-T2 analogue on the
+  // Target — the risk model is a two-level boolean, not a tier ladder. The warn
+  // is non-blocking (exit 0); it only surfaces the gap in the step-summary
+  // JSON. Only a below-floor kill rate (below) blocks merge.
+  const noSignal = classifyNoSignal(report);
+  if (noSignal) {
     process.stdout.write(
       JSON.stringify({
-        status: "neutral",
-        reason,
+        status: noSignal.status,
+        reason: noSignal.reason,
+        killRate: noSignal.killRate,
         candidatesGenerated: report.candidatesGenerated,
+        totalMutants: report.totalMutants,
+        skipped: report.skipped,
         inspectable: inspectable.length,
       }) + "\n",
     );
-    process.stderr.write(`target-mutation-gate: ${reason} — gate passes by default.\n`);
+    process.stderr.write(
+      `target-mutation-gate: ${noSignal.reason} — status=${noSignal.status} (non-blocking).\n`,
+    );
     return 0;
   }
+
+  const killRate = Math.round((report.killed / testable) * 100);
 
   const summary = {
     status: killRate < killFloor ? "fail" : "pass",

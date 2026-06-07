@@ -16,7 +16,31 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { filterMoneyCriticalCandidates } from "../scripts/target/mutation-check.ts";
+import {
+  filterMoneyCriticalCandidates,
+  classifyNoSignal,
+} from "../scripts/target/mutation-check.ts";
+import type { MutationTestReport } from "../src/mutation.ts";
+
+/**
+ * Build a MutationTestReport for the no-signal tests. Only the fields
+ * `classifyNoSignal` reads (totalMutants / skipped / killed / candidatesGenerated)
+ * are meaningful; the rest are inert defaults so the seam stays pure and the
+ * test never touches the runner.
+ */
+function makeReport(overrides: Partial<MutationTestReport>): MutationTestReport {
+  return {
+    totalMutants: 0,
+    killed: 0,
+    survived: 0,
+    skipped: 0,
+    timedOut: false,
+    durationMs: 0,
+    survivors: [],
+    candidatesGenerated: 0,
+    ...overrides,
+  };
+}
 
 describe("filterMoneyCriticalCandidates — money-critical diff scoping (issue #1057)", () => {
   test("keeps money-critical files (providers / execution / staking / bet-math)", () => {
@@ -143,5 +167,103 @@ describe("filterMoneyCriticalCandidates — money-critical diff scoping (issue #
       "./src/components/Footer.tsx",
     ]);
     assert.deepEqual(result, ["./src/lib/execution/place-bet.ts"]);
+  });
+});
+
+describe("classifyNoSignal — tier-less no-signal gate (issue #1132)", () => {
+  test("no mutants generated → warn, null killRate, generator-empty reason", () => {
+    // candidatesGenerated === 0: the generator emitted nothing (comment-only /
+    // trivial money-critical diff). Must NOT fabricate killRate=100.
+    const result = classifyNoSignal(
+      makeReport({ totalMutants: 0, skipped: 0, candidatesGenerated: 0 }),
+    );
+    assert.ok(result, "testable === 0 must yield a classification, not null");
+    assert.equal(result!.status, "warn");
+    assert.equal(result!.killRate, null);
+    assert.match(result!.reason, /no mutants generated/);
+    assert.match(result!.reason, /no fault-detection signal/);
+  });
+
+  test("all generated mutants skipped → warn, null killRate, all-skipped reason", () => {
+    // totalMutants > 0 && skipped === totalMutants: every candidate was
+    // uncompilable, so testable === 0 with a non-empty generator.
+    const result = classifyNoSignal(
+      makeReport({ totalMutants: 5, skipped: 5, candidatesGenerated: 5 }),
+    );
+    assert.ok(result);
+    assert.equal(result!.status, "warn");
+    assert.equal(result!.killRate, null);
+    assert.match(result!.reason, /all generated mutants were skipped/);
+    assert.match(result!.reason, /no fault-detection signal/);
+  });
+
+  test("the two no-signal sub-cases produce DISTINCT reasons", () => {
+    const noneGenerated = classifyNoSignal(
+      makeReport({ totalMutants: 0, skipped: 0, candidatesGenerated: 0 }),
+    );
+    const allSkipped = classifyNoSignal(
+      makeReport({ totalMutants: 3, skipped: 3, candidatesGenerated: 3 }),
+    );
+    assert.ok(noneGenerated && allSkipped);
+    assert.notEqual(
+      noneGenerated!.reason,
+      allSkipped!.reason,
+      "no-mutants-generated and all-skipped must be distinguishable in the JSON",
+    );
+  });
+
+  test("testable > 0 → returns null (caller runs the normal kill-rate path)", () => {
+    // 4 testable mutants (10 total - 6 skipped). The seam must hand control back
+    // to main()'s kill-rate comparison rather than short-circuiting.
+    const result = classifyNoSignal(
+      makeReport({
+        totalMutants: 10,
+        skipped: 6,
+        killed: 4,
+        candidatesGenerated: 10,
+      }),
+    );
+    assert.equal(result, null);
+  });
+
+  test("a single testable mutant is enough to leave the no-signal branch", () => {
+    // Boundary: testable === 1 is signal, so no classification.
+    const result = classifyNoSignal(
+      makeReport({
+        totalMutants: 1,
+        skipped: 0,
+        killed: 1,
+        candidatesGenerated: 1,
+      }),
+    );
+    assert.equal(result, null);
+  });
+
+  test("ALWAYS warns on no-signal — never neutral (no Target tier analogue)", () => {
+    // The deliberate divergence from the Orchestrator helper: every file
+    // reaching this branch is money-critical, so there is no neutral/T1-T2
+    // sub-case. Both no-signal shapes must be warn.
+    for (const report of [
+      makeReport({ totalMutants: 0, skipped: 0, candidatesGenerated: 0 }),
+      makeReport({ totalMutants: 7, skipped: 7, candidatesGenerated: 7 }),
+    ]) {
+      const result = classifyNoSignal(report);
+      assert.ok(result);
+      assert.equal(
+        result!.status,
+        "warn",
+        "Target no-signal is always money-critical → warn, never neutral",
+      );
+    }
+  });
+
+  test("no-signal classification never synthesises a killRate (null only)", () => {
+    // The root-cause invariant of #1120/#1132: the no-signal branch must not
+    // fabricate killRate=100. killRate is typed `null` and must stay null.
+    const result = classifyNoSignal(
+      makeReport({ totalMutants: 2, skipped: 2, candidatesGenerated: 2 }),
+    );
+    assert.ok(result);
+    assert.strictEqual(result!.killRate, null);
   });
 });
