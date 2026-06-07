@@ -91,34 +91,62 @@ fi
 # never fired on orch work even after Phase B shipped. This loop sources
 # an orch-scope anchor directly.
 #
+# Trivial-anchor gate (issue #1088): grilling EVERY ready-for-agent anchor
+# made design_concept_orch the highest-frequency subagent class (~14% of
+# burn) — most orch issues (T1 prompt tweaks, doc edits, dead-code removal)
+# are fully specified by their body and waste a full grill. We now suppress
+# the grill for *provably trivial* anchors. Rule (fail-toward-grill):
+#
+#   - Per-issue tier CANNOT be derived from /api/tier here — classifyChange()
+#     is purely file-PATH based and a ready-for-agent issue has no file list
+#     until a PR exists. The only pre-PR signal is the `Expected tier:` body
+#     stamp (emitted by hydra-prd / hydra-cleanup).
+#   - Suppress the grill ONLY on a POSITIVE trivial signal: an explicit
+#     `Expected tier: T1` (or `Expected tier: 1`) stamp in the body AND no
+#     `needs-design-concept` label.
+#   - ALWAYS grill (do NOT suppress) when: the `needs-design-concept` label
+#     is present, OR a T2/T3/T4 stamp is present, OR there is NO stamp at all
+#     (unknown complexity). Skip is the unsafe direction — a silently-skipped
+#     complex unstamped issue goes straight to dev_orch without a design
+#     concept — so absence of a signal NEVER suppresses.
+#
 # Implementation notes:
 #
 #   - Top 10 ready-for-agent issue numbers (newest-first by updatedAt).
 #     The hot path is "the first one without a fresh artifact"; capping
 #     at 10 keeps this loop O(10) regardless of board size.
+#   - One `gh issue list` fetches number+updatedAt+body+labels for all 10,
+#     so the trivial gate needs no extra per-issue gh round-trip.
 #   - For each issue we curl `/api/design-concepts/issue-<N>`. A 200 with
 #     `gate.ok` true OR `status=approved` AND fresh means we skip. A 404
-#     or stale/draft-without-gate-ok means this is a grill candidate.
+#     or stale/draft-without-gate-ok means this is a grill candidate — but
+#     a provably-trivial candidate is suppressed (continue) rather than
+#     promoted, so the loop falls through to the next non-trivial anchor.
 #   - Emit the first matching `issue-<N>` ref, or `none`.
 #   - Best-effort: any failure prints `none` so dispatch is never blocked
 #     by a transient orchestrator outage.
 echo -n "orch_pending_grill_anchor="
-ORCH_GRILL_CANDIDATES=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --json number,updatedAt --jq '
-  sort_by(.updatedAt) | reverse | .[0:10] | map(.number) | .[]
+ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --json number,updatedAt,body,labels --jq '
+  sort_by(.updatedAt) | reverse | .[0:10]
 ' 2>/dev/null || true)
+ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
+import json, sys
+try:
+  for it in json.load(sys.stdin):
+    print(it['number'])
+except Exception:
+  pass
+" 2>/dev/null || true)
 ORCH_GRILL_PICK="none"
 if [ -n "$ORCH_GRILL_CANDIDATES" ]; then
   for n in $ORCH_GRILL_CANDIDATES; do
     DC_JSON=$(curl -sf --max-time 3 "http://localhost:4000/api/design-concepts/issue-${n}" 2>/dev/null || true)
-    if [ -z "$DC_JSON" ]; then
-      # 404 — no artifact at all. This is the canonical "needs grilling" case.
-      ORCH_GRILL_PICK="issue-${n}"
-      break
-    fi
-    # Artifact exists. Skip ONLY if it's both fresh AND gate.ok (Phase B
-    # warn-only: a draft/!gateOk-but-fresh artifact is still "fresh present"
-    # per the selector's contract, so we don't re-grill it here either).
-    FRESH_OK=$(printf '%s' "$DC_JSON" | python3 -c "
+    if [ -n "$DC_JSON" ]; then
+      # Artifact exists. Skip ONLY if it's fresh (Phase B warn-only: a
+      # draft/!gateOk-but-fresh artifact is still "fresh present" per the
+      # selector's contract, so we don't re-grill it here either). A stale
+      # or unparseable artifact falls through to the trivial gate below.
+      FRESH_OK=$(printf '%s' "$DC_JSON" | python3 -c "
 import json, sys, time
 try:
   d = json.load(sys.stdin)
@@ -128,10 +156,42 @@ try:
   print('1' if fresh else '0')
 except Exception:
   print('0')" 2>/dev/null || echo "0")
-    if [ "$FRESH_OK" != "1" ]; then
-      ORCH_GRILL_PICK="issue-${n}"
-      break
+      if [ "$FRESH_OK" = "1" ]; then
+        # Fresh artifact already present — nothing to grill for this anchor.
+        continue
+      fi
     fi
+    # No fresh artifact for issue-<N>: it would be a grill candidate. Apply
+    # the trivial gate (issue #1088) — suppress ONLY on a positive trivial
+    # signal. TRIVIAL=1 means "explicit Expected tier: T1/1 stamp AND no
+    # needs-design-concept label". Any ambiguity (parse error, missing
+    # field) prints 0 → fail-toward-grill.
+    TRIVIAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
+import json, re, sys
+target = int('${n}')
+try:
+  items = json.load(sys.stdin)
+  it = next((x for x in items if int(x.get('number', -1)) == target), None)
+  if it is None:
+    print('0'); sys.exit(0)
+  labels = {l.get('name', '') for l in (it.get('labels') or [])}
+  if 'needs-design-concept' in labels:
+    # Explicit opt-in always grills, regardless of any stamp.
+    print('0'); sys.exit(0)
+  body = it.get('body') or ''
+  # Match an explicit T1 stamp: 'Expected tier: T1' or 'Expected tier: 1'.
+  # A T2/T3/T4 stamp (or no stamp) is NOT trivial → grill.
+  trivial = re.search(r'Expected\s+tier:\s*T?1\b', body, re.IGNORECASE) is not None
+  print('1' if trivial else '0')
+except Exception:
+  print('0')" 2>/dev/null || echo "0")
+    if [ "$TRIVIAL" = "1" ]; then
+      # Provably trivial (T1-stamped, no opt-in label) — suppress the grill
+      # and let this anchor fall straight through to dev_orch.
+      continue
+    fi
+    ORCH_GRILL_PICK="issue-${n}"
+    break
   done
 fi
 echo "$ORCH_GRILL_PICK"
