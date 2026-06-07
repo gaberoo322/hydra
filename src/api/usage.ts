@@ -15,8 +15,18 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { getUsage, projectEligibility, overlayPauseEligibility } from "../cost/index.ts";
+import {
+  getUsage,
+  projectEligibility,
+  overlayPauseEligibility,
+  overlaySessionBlockEligibility,
+  parseSessionLimitReset,
+} from "../cost/index.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
+import {
+  getSessionBlockedUntil,
+  setSessionBlockedUntil,
+} from "../redis/session-block.ts";
 import { booleanFlag } from "../schemas/common.ts";
 
 /**
@@ -26,6 +36,25 @@ import { booleanFlag } from "../schemas/common.ts";
  * canonical `yes`/`on` truthy forms); absent => false.
  */
 const ForceQuerySchema = z.object({ force: booleanFlag() });
+
+/**
+ * Body schema for `POST /api/usage/session-block` (issue #1089). The reap-on-
+ * exit backstop records a session-limit hard block one of two ways:
+ *   - `{ line: "...You've hit your session limit · resets 4:40pm (...)" }`
+ *     — the server parses the reset (keeps the brittle wall-clock→instant
+ *     resolution in TypeScript where it is unit-tested, not in bash); OR
+ *   - `{ blockedUntilMs: <epoch-ms> }` — a pre-parsed instant.
+ * At least one must be present. The route ignores a `line` that is not a
+ * session-limit notice (returns recorded:false) rather than erroring.
+ */
+const SessionBlockBodySchema = z
+  .object({
+    line: z.string().optional(),
+    blockedUntilMs: z.number().finite().positive().optional(),
+  })
+  .refine((b) => b.line !== undefined || b.blockedUntilMs !== undefined, {
+    message: "one of `line` or `blockedUntilMs` is required",
+  });
 
 export function createUsageRouter() {
   const router = Router();
@@ -57,6 +86,16 @@ export function createUsageRouter() {
    * launcher (`pace-gate.sh` reads `.reasons.paused`) and the brain (decide.py
    * rides the `allow=false` drain path). The pause read fails SAFE — a Redis
    * error degrades to not-paused so it can never wedge the loop off.
+   *
+   * Issue #1089: the session-limit hard block is overlaid the same way. The
+   * recorded block-until instant (`hydra:autopilot:session-blocked-until`) is
+   * read here and folded onto the verdict via `overlaySessionBlockEligibility`
+   * — while it is a FUTURE instant, `allow=false` and
+   * `reasons.sessionBlockedUntil` carries the ISO reset time, so the launcher
+   * skips relaunch into the exhausted quota (the OAuth 5h `emergencyStop`
+   * undershoots the true session limit). Fails SAFE to no-block on a read
+   * error, and the block self-clears (TTL + past-instant read guard) once the
+   * reset passes, so admission resumes automatically.
    */
   router.get("/usage/eligibility", async (req, res) => {
     const force = ForceQuerySchema.parse(req.query).force;
@@ -72,9 +111,68 @@ export function createUsageRouter() {
           `[usage] /api/usage/eligibility pause read failed (treating as not paused): ${err?.message || err}`,
         );
       }
-      return res.json(overlayPauseEligibility(projectEligibility(snapshot), paused));
+      let sessionBlockedUntilMs: number | null = null;
+      try {
+        sessionBlockedUntilMs = await getSessionBlockedUntil();
+      } catch (err: any) {
+        // Fail-safe to no-block: a session-block read error must not block the
+        // eligibility projection. Logged so the bad read is visible.
+        console.error(
+          `[usage] /api/usage/eligibility session-block read failed (treating as no block): ${err?.message || err}`,
+        );
+      }
+      const eligibility = overlaySessionBlockEligibility(
+        overlayPauseEligibility(projectEligibility(snapshot), paused),
+        sessionBlockedUntilMs,
+        Date.now(),
+      );
+      return res.json(eligibility);
     } catch (err: any) {
       console.error(`[usage] /api/usage/eligibility failed: ${err?.message || err}`);
+      return res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
+  /**
+   * POST /api/usage/session-block — record a session-limit hard block (#1089).
+   *
+   * Called by the reap-on-exit backstop (`bootstrap.sh --reap`) when the
+   * autopilot exited with `You've hit your session limit · resets <t>`. Accepts
+   * either the raw exit `line` (parsed server-side) or a pre-parsed
+   * `blockedUntilMs`. Records the instant in Redis with a self-expiring TTL so
+   * the launcher skips relaunch until the quota resets. Idempotent-ish: a
+   * later/duplicate record simply refreshes the value. Never throws — a parse
+   * miss or non-future instant returns `{ recorded: false }` (200), so a bad
+   * reap input can never abort the unit stop.
+   */
+  router.post("/usage/session-block", async (req, res) => {
+    const parsed = SessionBlockBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ code: "schema-validation-failed", issues: parsed.error.issues });
+    }
+    const nowMs = Date.now();
+    let blockedUntilMs = parsed.data.blockedUntilMs ?? null;
+    if (blockedUntilMs === null && parsed.data.line !== undefined) {
+      blockedUntilMs = parseSessionLimitReset(parsed.data.line, nowMs);
+    }
+    if (blockedUntilMs === null) {
+      // Not a session-limit notice / unparseable time → nothing to record.
+      return res.json({ recorded: false, blockedUntil: null });
+    }
+    try {
+      const stored = await setSessionBlockedUntil(blockedUntilMs, nowMs);
+      if (stored === null) {
+        return res.json({ recorded: false, blockedUntil: null });
+      }
+      return res.json({
+        recorded: true,
+        blockedUntil: new Date(stored).toISOString(),
+        blockedUntilMs: stored,
+      });
+    } catch (err: any) {
+      console.error(`[usage] /api/usage/session-block record failed: ${err?.message || err}`);
       return res.status(500).json({ error: err?.message || String(err) });
     }
   });

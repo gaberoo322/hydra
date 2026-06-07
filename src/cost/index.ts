@@ -73,6 +73,8 @@ export {
   getUsage,
   projectEligibility,
   overlayPauseEligibility,
+  overlaySessionBlockEligibility,
+  parseSessionLimitReset,
   clearUsageCache,
   getWeeklyQuotaTokens,
   getFiveHourQuotaTokens,

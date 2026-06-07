@@ -200,6 +200,41 @@ if [ "${1:-}" = "--reap" ]; then
   __reap_derive_cause
   REAP_ENDED_EPOCH="$(date -u +%s)"
 
+  # Issue #1089: session-limit hard-block detection. When the Claude Code
+  # rolling SESSION window is exhausted the CLI prints (to the journal)
+  #   You've hit your session limit · resets 4:40pm (America/Los_Angeles)
+  # and exits code=1 — which __reap_derive_cause maps to `crash`. If the
+  # pace-gate then relaunches the service it dies instantly again, repeatedly,
+  # until the quota resets, abandoning all in-flight dispatches. To break that
+  # storm we POST the exit line to /api/usage/session-block, which parses the
+  # reset and records a self-expiring block so the pace-gate skips relaunch
+  # until the reset passes. Best-effort: any failure here is logged and never
+  # aborts the unit stop (the reap NEVER throws). The server treats a
+  # non-session-limit line as a no-op (recorded:false), so scanning a normal
+  # crash's journal is harmless.
+  #
+  # Testability: HYDRA_AUTOPILOT_REAP_SESSION_LINE injects the candidate line
+  # directly (the test harness can't poke the journal); when unset we read the
+  # tail of this unit's journal for the just-exited run.
+  REAP_SESSION_LINE="${HYDRA_AUTOPILOT_REAP_SESSION_LINE:-}"
+  if [ -z "${REAP_SESSION_LINE}" ] && command -v journalctl >/dev/null 2>&1; then
+    # Last 200 journal lines for this unit, newest match wins. grep -i is
+    # tolerant of the journal prefix; the server-side regex is the real filter.
+    REAP_SESSION_LINE="$(journalctl --user -u hydra-autopilot.service -n 200 --no-pager 2>/dev/null \
+      | grep -i 'hit your session limit' | tail -n 1 || echo "")"
+  fi
+  if [ -n "${REAP_SESSION_LINE}" ]; then
+    REAP_SESSION_PAYLOAD="$(jq -n --arg line "${REAP_SESSION_LINE}" '{line: $line}')"
+    if curl -sf --max-time 5 -X POST \
+        -H "content-type: application/json" \
+        -d "${REAP_SESSION_PAYLOAD}" \
+        "${REAP_API_BASE}/api/usage/session-block" >/dev/null 2>&1; then
+      echo "[autopilot] reap: posted session-limit block from exit line"
+    else
+      echo "[autopilot] reap: session-block POST failed (orchestrator down?) — pace-gate may relaunch into the quota"
+    fi
+  fi
+
   # Issue #1079: for an abnormal exit (cause=crash / failure_backstop) capture
   # a durable structured crash_detail so the run is drillable AFTER the
   # ephemeral /log (.log.prev-bounded) + journal rotate. We can derive the

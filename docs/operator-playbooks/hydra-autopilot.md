@@ -550,11 +550,27 @@ On each tick `scripts/autopilot/pace-gate.sh`:
 1. **Skip if a run is already live** — the service is active OR
    `/tmp/hydra-autopilot-state.json` carries a live owning PID (`kill -0`).
 2. **Consult `/api/usage/eligibility`** (the Pacing Curve, #857): skip when
+   `.reasons.paused == true` (operator pause, #988), `.reasons.sessionBlockedUntil`
+   is a future instant (session-limit hard block, #1089),
    `.reasons.emergencyStop == true` (5h cap ≥ 90%) or `.paceState == "ahead"`
    (above the curve); otherwise (`on`/`behind`, not emergency) launch via
    `systemctl --user start hydra-autopilot.service`.
 3. **Fail safe** — if the eligibility endpoint is unreachable, do NOT launch
    (pacing is the governor; don't burn quota while blind to usage).
+
+**Session-limit hard block (#1089).** When the Claude Code rolling *session*
+window is exhausted the CLI prints `You've hit your session limit · resets <t>`
+and the autopilot exits `code=1`. The reap-on-exit backstop (`bootstrap.sh
+--reap`) scans the journal for that line and POSTs it to
+`POST /api/usage/session-block`, which parses the reset and records a
+self-expiring block (`hydra:autopilot:session-blocked-until`, TTL to the reset
+instant). While the block is in the future the eligibility route forces
+`allow=false` and surfaces `reasons.sessionBlockedUntil`, so the Gate skips
+relaunch into the exhausted quota instead of dying instantly on repeat. The
+OAuth 5h `emergencyStop` undershoots the true session limit, so this is the
+authoritative "the next run cannot make a single turn" signal. Admission
+resumes automatically once the reset passes (TTL expiry + a past-instant read
+guard) — no operator action needed.
 
 The Gate governs *admission* only (should a run start now?), never *what work*
 to do — that stays with `decide.py` (ADR-0012). It reuses the existing

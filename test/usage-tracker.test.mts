@@ -30,7 +30,11 @@ import {
   sessionIdFromPath,
   PACING_SHEDDABLE_CLASSES,
   UNATTRIBUTED_SKILL,
+  overlayPauseEligibility,
+  overlaySessionBlockEligibility,
+  parseSessionLimitReset,
   type UsageSnapshot,
+  type UsageEligibility,
   type TokenBreakdown,
   type SkillResolver,
 } from "../src/cost/index.ts";
@@ -2260,6 +2264,138 @@ describe("usage-tracker", () => {
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    });
+  });
+
+  describe("parseSessionLimitReset (issue #1089)", () => {
+    // 2026-06-06 12:00:00 PDT == 19:00:00Z (PDT is UTC-7 in June).
+    const nowMs = Date.parse("2026-06-06T19:00:00.000Z");
+
+    test("parses the real CLI/journal line and resolves to a future instant", () => {
+      const line =
+        "Jun 06 14:41:18 gabenuc env[1522365]: You've hit your session limit · resets 4:40pm (America/Los_Angeles)";
+      const ms = parseSessionLimitReset(line, nowMs);
+      assert.ok(ms !== null);
+      // 4:40pm PDT on 2026-06-06 == 23:40:00Z, which is after nowMs (19:00Z).
+      assert.equal(new Date(ms!).toISOString(), "2026-06-06T23:40:00.000Z");
+      assert.ok(ms! > nowMs);
+    });
+
+    test("a wall-clock time already passed today resolves to tomorrow", () => {
+      // 9:00am PDT on 2026-06-06 == 16:00Z, BEFORE nowMs (19:00Z) → next day.
+      const line = "You've hit your session limit · resets 9:00am (America/Los_Angeles)";
+      const ms = parseSessionLimitReset(line, nowMs);
+      assert.ok(ms !== null);
+      assert.equal(new Date(ms!).toISOString(), "2026-06-07T16:00:00.000Z");
+    });
+
+    test("tolerates AM/PM casing and a missing-minutes form", () => {
+      const ms = parseSessionLimitReset(
+        "hit your session limit · resets 5PM (America/Los_Angeles)",
+        nowMs,
+      );
+      assert.ok(ms !== null);
+      assert.equal(new Date(ms!).toISOString(), "2026-06-07T00:00:00.000Z"); // 5pm PDT
+    });
+
+    test("12am/12pm boundary handling", () => {
+      const noon = parseSessionLimitReset(
+        "hit your session limit · resets 12:00pm (America/Los_Angeles)",
+        nowMs,
+      );
+      assert.equal(new Date(noon!).toISOString(), "2026-06-07T19:00:00.000Z"); // next-day noon PDT
+      const midnight = parseSessionLimitReset(
+        "hit your session limit · resets 12:00am (America/Los_Angeles)",
+        nowMs,
+      );
+      assert.equal(new Date(midnight!).toISOString(), "2026-06-07T07:00:00.000Z"); // midnight PDT
+    });
+
+    test("a UTC timezone resolves with no offset", () => {
+      const ms = parseSessionLimitReset(
+        "hit your session limit · resets 11:30pm (UTC)",
+        nowMs,
+      );
+      assert.equal(new Date(ms!).toISOString(), "2026-06-06T23:30:00.000Z");
+    });
+
+    test("non-session-limit / generic lines return null", () => {
+      assert.equal(parseSessionLimitReset("ordinary log line", nowMs), null);
+      assert.equal(parseSessionLimitReset("rate_limit resets soon", nowMs), null);
+      assert.equal(parseSessionLimitReset("", nowMs), null);
+    });
+
+    test("an unknown timezone returns null (no throw)", () => {
+      assert.equal(
+        parseSessionLimitReset(
+          "hit your session limit · resets 4:40pm (Not/AZone)",
+          nowMs,
+        ),
+        null,
+      );
+    });
+
+    test("an out-of-range hour returns null", () => {
+      assert.equal(
+        parseSessionLimitReset(
+          "hit your session limit · resets 13:40pm (America/Los_Angeles)",
+          nowMs,
+        ),
+        null,
+      );
+    });
+  });
+
+  describe("overlaySessionBlockEligibility (issue #1089)", () => {
+    const base: UsageEligibility = {
+      allow: true,
+      shed: [],
+      reasons: {
+        emergencyStop: false,
+        weeklyEmergencyStop: false,
+        pacingShed: false,
+        calibrated: true,
+        paused: false,
+        sessionBlockedUntil: null,
+      },
+      paceState: "on",
+      targetPercent: 0,
+      sinceResetPercent: 0,
+      anchor: null,
+      usage: {} as UsageSnapshot,
+    };
+    const nowMs = Date.parse("2026-06-06T19:00:00.000Z");
+
+    test("a future block forces allow=false and surfaces the ISO instant", () => {
+      const blockedUntilMs = nowMs + 60 * 60 * 1000; // +1h
+      const v = overlaySessionBlockEligibility(base, blockedUntilMs, nowMs);
+      assert.equal(v.allow, false);
+      assert.equal(v.reasons.sessionBlockedUntil, new Date(blockedUntilMs).toISOString());
+    });
+
+    test("a null block returns the input unchanged", () => {
+      const v = overlaySessionBlockEligibility(base, null, nowMs);
+      assert.equal(v, base);
+    });
+
+    test("a past block returns the input unchanged (self-clear)", () => {
+      const v = overlaySessionBlockEligibility(base, nowMs - 1000, nowMs);
+      assert.equal(v, base);
+      assert.equal(v.allow, true);
+    });
+
+    test("composes after pause without dropping reasons.paused", () => {
+      const paused = overlayPauseEligibility(base, true);
+      const v = overlaySessionBlockEligibility(paused, nowMs + 1000, nowMs);
+      assert.equal(v.allow, false);
+      assert.equal(v.reasons.paused, true);
+      assert.ok(v.reasons.sessionBlockedUntil !== null);
+    });
+
+    test("does not mutate the input object", () => {
+      const snapshot = JSON.stringify(base);
+      overlaySessionBlockEligibility(base, nowMs + 1000, nowMs);
+      assert.equal(JSON.stringify(base), snapshot);
     });
   });
 });

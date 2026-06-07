@@ -214,6 +214,17 @@ export const redisKeys = {
   // not paused (default-off, fail-safe to running).
   autopilotPaused: () => "hydra:autopilot:paused",
 
+  // Issue #1089: session-limit hard-block reset instant. Recorded (by the
+  // reap-on-exit path via the API) when the autopilot exits with
+  // `You've hit your session limit · resets <t>`; the value is the epoch-ms the
+  // rolling SESSION window resets. UNLIKE the operator pause, this carries a
+  // TTL set to the reset instant (+ a small buffer) so it SELF-CLEARS once the
+  // quota resets — a stale block can never wedge autopilot off. Folded into
+  // /api/usage/eligibility as `reasons.sessionBlockedUntil`; while it is a
+  // future instant the launcher (pace-gate.sh) skips relaunch into the
+  // exhausted quota. Absent => no block (default-off, fail-safe to running).
+  autopilotSessionBlock: () => "hydra:autopilot:session-blocked-until",
+
   // Issue #673 budget-threshold idempotency sentinel removed in #703 along
   // with the dead budget-threshold bridge that wrote it. The bridge polled
   // `hydra:scheduler:daily-spend` (no live writer) and never emitted.
