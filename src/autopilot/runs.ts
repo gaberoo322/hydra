@@ -60,6 +60,7 @@ import {
 } from "../redis/scheduler.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
 import type {
+  CrashDetail,
   CycleRecordBody,
   RunStartBody,
   RunEndBody,
@@ -112,6 +113,26 @@ export const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * `term_reason` values that mark an abnormal (non-clean) termination — the
+ * only ones a `crash_detail` snapshot is recorded for (issue #1079). A clean
+ * stop (`budget` / `wall_clock` / `idle` / `interrupted`) carries no crash
+ * detail even if a caller mistakenly sends one, so the field stays a reliable
+ * "this run died badly, here's why" signal rather than ambient noise.
+ */
+export const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
+  "crash",
+  "failure_backstop",
+]);
+
+/**
+ * Server-side defensive cap on the persisted `crash_detail.log_tail`. The
+ * reap writer (`bootstrap.sh`) already ships a bounded slice; this is the
+ * belt-and-braces truncation so a misbehaving / future writer can't bloat
+ * the run hash. ~8 KB comfortably holds the last ~50-100 log lines.
+ */
+export const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
+
+/**
  * Status values that count toward `cycles-merged` (vs `cycles-failed`).
  * Aligned with the autopilot taxonomy: a "cycle" merged when the
  * dispatched subagent landed a PR; failed when it abandoned, timed
@@ -156,6 +177,57 @@ function numberOrDefault(v: unknown, fallback: number): number {
     if (Number.isFinite(n)) return n;
   }
   return fallback;
+}
+
+/**
+ * Normalise a `crash_detail` snapshot into the bounded, persistable shape
+ * (issue #1079). Drops empty fields, coerces `exit_code` to a finite number,
+ * and re-truncates `log_tail` server-side as a defensive cap (the writer is
+ * already expected to bound it). Returns `null` when nothing survives — the
+ * caller then writes no `crash_detail` field at all rather than an empty
+ * object, so a read can treat presence as "we captured something".
+ */
+export function sanitizeCrashDetail(detail: CrashDetail | undefined): Record<string, unknown> | null {
+  if (!detail || typeof detail !== "object") return null;
+  const out: Record<string, unknown> = {};
+  if (typeof detail.signal === "string" && detail.signal.trim().length > 0) {
+    out.signal = detail.signal.trim();
+  }
+  if (typeof detail.exit_code === "number" && Number.isFinite(detail.exit_code)) {
+    out.exit_code = detail.exit_code;
+  }
+  if (typeof detail.last_action === "string" && detail.last_action.trim().length > 0) {
+    out.last_action = detail.last_action.trim();
+  }
+  if (typeof detail.log_tail === "string" && detail.log_tail.length > 0) {
+    const tail = detail.log_tail;
+    // Keep the TAIL of the tail — the most-recent lines carry the failure.
+    out.log_tail =
+      tail.length > CRASH_DETAIL_LOG_TAIL_MAX_CHARS
+        ? tail.slice(-CRASH_DETAIL_LOG_TAIL_MAX_CHARS)
+        : tail;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Parse a persisted `crash_detail` JSON string back into an object for the
+ * read projection. A missing / unparseable value yields `null` (treated as
+ * "no crash detail captured") rather than throwing — the read surface must
+ * stay loud-but-non-fatal.
+ */
+export function parseCrashDetail(raw: string | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return null;
+  } catch (err) {
+    console.error(`[autopilot] failed to parse crash_detail: ${err}`);
+    return null;
+  }
 }
 
 export function clampInt(n: number, min: number, max: number, fallback: number): number {
@@ -227,17 +299,29 @@ export async function sweepRunIfDead(
   const status = cleanExit ? "ended" : "killed";
   const termReason = cleanExit ? "interrupted" : "crash";
 
-  await updateAutopilotRunFields(runId, {
+  const fields: Record<string, string> = {
     status,
     term_reason: termReason,
     ended_epoch: String(endedEpoch),
-  }, RUN_TTL_SECONDS);
+  };
+
+  // Issue #1079: a dead-pid running row swept to `killed`/`crash` means NO
+  // run-end POST ever landed — the reap backstop missed too. We can't recover
+  // the signal/log_tail here, but stamp a minimal crash_detail (unless one was
+  // already persisted) so this fallback path is still distinguishable from a
+  // run that genuinely has no detail, and `last_action` records that the sweep
+  // (not a clean term) produced the verdict.
+  if (termReason === "crash" && row.crash_detail === undefined) {
+    fields.crash_detail = JSON.stringify({
+      last_action: "swept-dead-pid: no run-end POST received before pid death",
+    });
+  }
+
+  await updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
 
   const mutated = {
     ...row,
-    status,
-    term_reason: termReason,
-    ended_epoch: String(endedEpoch),
+    ...fields,
   };
   return { row: mutated, swept: true };
 }
@@ -459,12 +543,24 @@ export async function endRun(body: RunEndBody): Promise<RunEndResult> {
     const endedEpoch = numberOrDefault(body.ended_epoch, Math.floor(Date.now() / 1000));
     const exitCode = body.exit_code !== undefined ? numberOrDefault(body.exit_code, 0) : 0;
 
-    await updateAutopilotRunFields(runId, {
+    const fields: Record<string, string> = {
       status: "ended",
       term_reason: termReason,
       ended_epoch: String(endedEpoch),
       exit_code: String(exitCode),
-    }, RUN_TTL_SECONDS);
+    };
+
+    // Issue #1079: capture a durable, structured crash snapshot ONLY for an
+    // abnormal termination. Stored as a JSON string on the run hash so it
+    // survives log/journal rotation — the gap the ephemeral #499 endpoints
+    // left. A clean stop never persists crash_detail even if a caller sends
+    // one, so the field stays a reliable "died badly, here's why" signal.
+    if (CRASH_TERM_REASONS.has(termReason)) {
+      const detail = sanitizeCrashDetail(body.crash_detail);
+      if (detail) fields.crash_detail = JSON.stringify(detail);
+    }
+
+    await updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
 
     return {
       ok: true,
@@ -730,6 +826,11 @@ export function projectRunView(
   if (row.term_reason) view.term_reason = row.term_reason;
   if (endedEpoch !== undefined) view.ended_epoch = endedEpoch;
   if (row.exit_code !== undefined) view.exit_code = Number(row.exit_code);
+  // Issue #1079: surface the durable crash snapshot on the run-detail view +
+  // retro bundle (both read through this projection). Parsed back from the
+  // persisted JSON string; absent / unparseable → field omitted.
+  const crashDetail = parseCrashDetail(row.crash_detail);
+  if (crashDetail) view.crash_detail = crashDetail;
 
   if (status === "running") {
     const pid = Number(row.pid || "0");
