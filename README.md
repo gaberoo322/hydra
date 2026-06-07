@@ -256,17 +256,18 @@ All endpoints are under `/api/`. Full list:
 
 ## Subagent Routing
 
-The orchestrator no longer routes per-call models. Claude Code's harness picks the model when it dispatches a subagent; the operator's subscription determines the model pool. Indicative routing:
+The autopilot routes a model **per dispatch class** at the Phase 5 `dispatch` step (issue #1093). `decide.py` stays pure (it emits no model field — keeping model selection a playbook concern, not a decision-brain one); the static class→model map lives in the autopilot playbook's "Per-class model routing" section, keyed off the `slot`/class the dispatch action already carries, and the model is passed to the `Agent` call. Background-dispatched subagents inherit the parent session's model unless the dispatch passes an explicit `model`, so skill frontmatter alone is **not** a sufficient lever for them. The operator's subscription determines the concrete versions the harness's model aliases resolve to.
 
-| Subagent | Typical model | Purpose |
+Right-sized by stakes × frequency — high-frequency non-authoring classes drop off Opus; authorship and behaviour-reshaping classes stay on Opus:
+
+| Class | Model | Purpose |
 |----------|--------------|---------|
-| hydra-dev / hydra-target-build | claude-opus-4-7 (1M context) | Deep multi-file edits, plan + implement + verify, isolated-worktree PRs |
-| hydra-research / hydra-target-research / hydra-architect | claude-opus-4-7 | Multi-source research and strategic design |
-| hydra-sweep / hydra-target-sweep / hydra-qa / hydra-doctor | claude-sonnet-4-6 | Board/PR/health work with structured outputs |
-| hydra-discover / hydra-target-discover | claude-haiku-4-5 | Patrol and runtime diagnostics; small/fast/cheap |
-| lesson-capture hook | claude-haiku-4-5 | Per-dispatch lesson extraction for the feedback loop |
+| dev_orch / dev_target / retro_orch / design_concept_orch | Opus (1M context) | Multi-file self-modification, money-critical betting code, behaviour-reshaping retros, design concepts |
+| qa_orch / qa_target / sweep_orch / sweep_target / health / research_orch / research_target / architecture_orch / scout_orch | Sonnet | Structured review, board routing, diagnosis, bounded research — not authorship (qa_target is the money-critical floor, never below Sonnet) |
+| cleanup_orch / discover_orch / discover_target | Haiku | Deterministic knip findings + patrol/diagnostics; small/fast/cheap |
+| lesson-capture hook | Haiku | Per-dispatch lesson extraction for the feedback loop |
 
-Daily token spend (when the harness exposes it) flows into `hydra:scheduler:daily-spend` for the same dashboard widget that previously tracked Codex usage. Pricing is determined by the operator's Claude Code plan, not by this repo.
+A class absent from the map → no explicit `model`, inheriting the parent session (the conservative default). Daily token spend (when the harness exposes it) flows into `hydra:scheduler:daily-spend` for the same dashboard widget that previously tracked Codex usage. Pricing is determined by the operator's Claude Code plan, not by this repo.
 
 ## Systemd Services
 
