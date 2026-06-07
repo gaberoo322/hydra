@@ -119,8 +119,15 @@ PACE_STATE=$(jq -r '.paceState // "unknown"' <<<"$ELIGIBILITY_JSON" 2>/dev/null 
 # overlays `.reasons.paused` from the Redis pause flag. When set, skip the
 # launch entirely (no throwaway run spawned) — the operator paused autopilot.
 PAUSED=$(jq -r '.reasons.paused // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #1089: session-limit hard block. The route overlays
+# `.reasons.sessionBlockedUntil` (ISO-8601) when the autopilot last exited with
+# `You've hit your session limit · resets <t>` and that reset is still in the
+# future. The OAuth 5h emergencyStop undershoots the true session limit, so
+# without this the gate relaunches into an exhausted quota → repeat exit-1
+# deaths. `null`/absent => no block.
+SESSION_BLOCKED_UNTIL=$(jq -r '.reasons.sessionBlockedUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
   exit 0
 fi
@@ -130,6 +137,19 @@ fi
 if [[ "$PAUSED" == "true" ]]; then
   log "autopilot paused (operator) — skip"
   exit 0
+fi
+
+# Issue #1089: session-limit hard block. The route only surfaces a FUTURE
+# instant (the overlay drops past ones), but we re-check against now defensively
+# so a clock-skewed/stale value can never wedge the gate off. A non-future or
+# unparseable value falls through to normal admission.
+if [[ -n "$SESSION_BLOCKED_UNTIL" ]]; then
+  BLOCK_EPOCH=$(date -d "$SESSION_BLOCKED_UNTIL" +%s 2>/dev/null || echo "")
+  NOW_EPOCH=$(date -u +%s)
+  if [[ -n "$BLOCK_EPOCH" && "$BLOCK_EPOCH" -gt "$NOW_EPOCH" ]]; then
+    log "session-limit block until $SESSION_BLOCKED_UNTIL — skip (exhausted session quota)"
+    exit 0
+  fi
 fi
 
 if [[ "$EMERGENCY_STOP" == "true" ]]; then

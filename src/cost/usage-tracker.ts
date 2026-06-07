@@ -1447,6 +1447,126 @@ function coerceInstantMs(value: unknown): number | null {
 }
 
 /**
+ * The Claude Code CLI's session-limit hard-block notice (issue #1089). When the
+ * subscription's rolling session window is exhausted, the CLI prints — to the
+ * journal, NOT the JSONL transcript — a line of the literal form:
+ *
+ *   You've hit your session limit · resets 4:40pm (America/Los_Angeles)
+ *
+ * This regex is deliberately tolerant of the surrounding journal prefix
+ * (`Jun 06 14:41:18 host env[123]: …`) and of `am`/`pm` casing, and captures
+ * the wall-clock time + IANA timezone so {@link parseSessionLimitReset} can
+ * resolve them to a concrete future instant. The phrase "hit your session
+ * limit" plus a `resets <time>` clause is the structural fingerprint — a
+ * generic rate-limit notice (which carries a JSON `resets_at`, handled by
+ * {@link parseObservedResetMs}) does not match.
+ */
+const SESSION_LIMIT_RE =
+  /hit your session limit\s*[·•]?\s*resets\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(([^)]+)\)/i;
+
+/**
+ * Resolve a wall-clock `HH:MM am|pm` in a named IANA timezone to the next
+ * future epoch-ms relative to `nowMs`. Uses `Intl.DateTimeFormat` (Node stdlib,
+ * no deps) to read the timezone's UTC offset at `nowMs`, then walks forward at
+ * most one day so a time that already passed today maps to tomorrow. Returns
+ * `null` on an unknown timezone or an out-of-range time. Pure helper for
+ * {@link parseSessionLimitReset}; `nowMs` is injected so it stays testable.
+ */
+function resolveWallClockInZone(
+  hour12: number,
+  minute: number,
+  meridiem: "am" | "pm",
+  timeZone: string,
+  nowMs: number,
+): number | null {
+  if (hour12 < 1 || hour12 > 12 || minute < 0 || minute > 59) return null;
+  // 12am → 0, 12pm → 12, else add 12 for pm.
+  let hour24 = hour12 % 12;
+  if (meridiem === "pm") hour24 += 12;
+
+  // The offset (minutes) between this timezone and UTC at `nowMs`. We compute
+  // it by formatting `nowMs` in the zone and diffing against UTC — robust
+  // across DST because the offset is sampled at the relevant instant.
+  let offsetMin: number;
+  try {
+    const dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const parts = dtf.formatToParts(new Date(nowMs));
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+    const asUtc = Date.UTC(
+      get("year"),
+      get("month") - 1,
+      get("day"),
+      get("hour") === 24 ? 0 : get("hour"),
+      get("minute"),
+      get("second"),
+    );
+    if (!Number.isFinite(asUtc)) return null;
+    offsetMin = Math.round((asUtc - nowMs) / 60_000);
+  } catch {
+    // Unknown/invalid IANA timezone → Intl throws a RangeError. Bail to null.
+    return null;
+  }
+
+  // Build "today" in the target zone from the same formatted parts, then set
+  // the target wall-clock h:m and convert back to UTC via the sampled offset.
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour12: false,
+  });
+  const parts = dtf.formatToParts(new Date(nowMs));
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+  const y = get("year");
+  const mo = get("month");
+  const d = get("day");
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return null;
+
+  // candidate(UTC) = local-wall-clock(UTC-naive) - offset.
+  let candidate = Date.UTC(y, mo - 1, d, hour24, minute, 0) - offsetMin * 60_000;
+  // If the wall-clock time has already passed today, the reset is tomorrow.
+  if (candidate <= nowMs) candidate += 24 * 60 * 60 * 1000;
+  return Number.isFinite(candidate) ? candidate : null;
+}
+
+/**
+ * Extract the session-limit reset instant (epoch-ms) from a CLI/journal line,
+ * or `null` when the line is not a session-limit notice (issue #1089).
+ *
+ * Distinct from {@link parseObservedResetMs}: that parses a JSON rate-limit
+ * payload from the JSONL transcript; THIS parses the human-readable
+ * `You've hit your session limit · resets <time>` line the CLI prints to the
+ * journal when the rolling SESSION window is hard-blocked — the exact signal
+ * the OAuth 5h meter undershoots (the skew #1089 fixes). `nowMs` is injected so
+ * the wall-clock→instant resolution is deterministic and unit-testable.
+ *
+ * Pure: no IO, no `Date.now()`. Returns `null` (never throws) on a non-matching
+ * line or an unresolvable time/timezone, so a journal-format drift degrades to
+ * "no block recorded" rather than wedging the reap.
+ */
+export function parseSessionLimitReset(line: string, nowMs: number): number | null {
+  if (typeof line !== "string" || line.length === 0) return null;
+  const m = SESSION_LIMIT_RE.exec(line);
+  if (!m) return null;
+  const hour12 = Number(m[1]);
+  const minute = m[2] !== undefined ? Number(m[2]) : 0;
+  const meridiem = m[3].toLowerCase() as "am" | "pm";
+  const timeZone = m[4].trim();
+  if (!Number.isFinite(hour12) || !Number.isFinite(minute) || timeZone === "") return null;
+  return resolveWallClockInZone(hour12, minute, meridiem, timeZone, nowMs);
+}
+
+/**
  * Cache-hit ratio for one accumulated window.
  *
  * `cacheRead / (cacheRead + cacheCreation + input)` — output tokens are
@@ -1529,6 +1649,19 @@ export interface UsageEligibility {
      * `projectEligibility`) by {@link overlayPauseEligibility}.
      */
     paused: boolean;
+    /**
+     * Session-limit hard-block reset instant (issue #1089). ISO-8601 of the
+     * moment the Claude Code rolling SESSION window resets, recorded when the
+     * autopilot last exited with `You've hit your session limit · resets <t>`.
+     * `null` when no future block is recorded. The OAuth 5h meter
+     * (`emergencyStop`) can read below 90% while the session is hard-blocked,
+     * so this is the authoritative "the next run cannot make a single turn"
+     * signal: while it is a FUTURE instant, `allow` is forced `false` so the
+     * launcher (pace-gate.sh) skips relaunch into an exhausted quota. Overlaid
+     * at the route/collector seam by {@link overlaySessionBlockEligibility}
+     * (NOT inside the pure `projectEligibility`), mirroring the pause flag.
+     */
+    sessionBlockedUntil: string | null;
   };
   /**
    * Position of total burn relative to the **Pacing Curve** for this instant
@@ -1648,6 +1781,10 @@ export function projectEligibility(snapshot: UsageSnapshot): UsageEligibility {
       // belong inside this pure projection — it is overlaid at the
       // route/collector seam via overlayPauseEligibility().
       paused: false,
+      // Default no session block. Like `paused`, the recorded block-until is a
+      // Redis read overlaid at the route/collector seam via
+      // overlaySessionBlockEligibility() — not inside this pure projection.
+      sessionBlockedUntil: null,
     },
     paceState,
     targetPercent,
@@ -1685,5 +1822,44 @@ export function overlayPauseEligibility(
     ...eligibility,
     allow: false,
     reasons: { ...eligibility.reasons, paused: true },
+  };
+}
+
+/**
+ * Overlay the session-limit hard-block (issue #1089) onto an eligibility
+ * projection, at the caller/route seam.
+ *
+ * The autopilot exits `code=1` the instant the Claude Code rolling SESSION
+ * window is exhausted (`You've hit your session limit · resets <t>`). The
+ * pace-gate then relaunches into the still-exhausted quota — dying instantly,
+ * repeatedly — because the OAuth 5h meter (`emergencyStop`) reads below 90%
+ * even while the session is hard-blocked. This overlay closes that skew: while
+ * `blockedUntilMs` is a FUTURE instant relative to `nowMs`, it forces
+ * `allow=false` (the same drain path `emergencyStop`/pause ride) so the
+ * launcher skips relaunch, AND surfaces the ISO instant under
+ * `reasons.sessionBlockedUntil` so the gate is a pure read of the snapshot.
+ *
+ * `blockedUntilMs` is a Redis read (durable across the process exit), kept OUT
+ * of the pure `projectEligibility` exactly like the pause flag. `nowMs` is
+ * injected so the future-vs-past comparison stays deterministic/testable. A
+ * `null` block, or a block whose instant is already in the past, returns the
+ * input UNCHANGED — the block self-clears the moment the reset passes, so a
+ * stale block can never wedge autopilot off. Pure: no IO, no mutation.
+ */
+export function overlaySessionBlockEligibility(
+  eligibility: UsageEligibility,
+  blockedUntilMs: number | null,
+  nowMs: number,
+): UsageEligibility {
+  if (blockedUntilMs === null || !Number.isFinite(blockedUntilMs) || blockedUntilMs <= nowMs) {
+    return eligibility;
+  }
+  return {
+    ...eligibility,
+    allow: false,
+    reasons: {
+      ...eligibility.reasons,
+      sessionBlockedUntil: new Date(blockedUntilMs).toISOString(),
+    },
   };
 }
