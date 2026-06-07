@@ -8,6 +8,9 @@ import {
   getUsage,
   getWeeklyQuotaTokens,
   getFiveHourQuotaTokens,
+  getOAuthUsageTtlMs,
+  getOAuthUsageMaxStaleMs,
+  DEFAULT_OAUTH_USAGE_TTL_MS,
   modelToFamily,
   parseUsageLine,
   parseObservedResetMs,
@@ -90,6 +93,8 @@ function withEnvSnapshot() {
     "HYDRA_USAGE_CACHE_READ_WEIGHT",
     "HYDRA_USAGE_DRIFT_REFERENCE_PERCENT",
     "HYDRA_USAGE_DRIFT_FACTOR",
+    "HYDRA_OAUTH_USAGE_TTL_MS",
+    "HYDRA_OAUTH_USAGE_MAX_STALE_MS",
   ];
   const prev: Record<string, string | undefined> = {};
   for (const k of keys) prev[k] = process.env[k];
@@ -944,6 +949,8 @@ describe("usage-tracker", () => {
         percentLast7d: 0,
         usageSource: "estimate",
         oauthError: null,
+        oauthStale: false,
+        oauthAgeMs: null,
         oauthFiveHourResetsAt: null,
         oauthSevenDayResetsAt: null,
         projectedWeeklyPercent: 0,
@@ -2029,6 +2036,227 @@ describe("usage-tracker", () => {
         assert.equal(snap.usageSource, "oauth");
         assert.equal(snap.percentLast5h, 0);
         assert.equal(snap.emergencyStop, false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // OAuth-read cadence decoupling + last-good-serve on transient failure
+  // (issue #1090). The module-level oauthCache is normally bypassed on the
+  // injected/fixture path; `useOAuthCache: true` opts these tests IN so they can
+  // drive the independent-TTL + last-good behaviour with a pinned reader. Each
+  // test clears the cache first (clearUsageCache nulls BOTH caches).
+  describe("OAuth read cadence + last-good (issue #1090)", () => {
+    let restoreEnv: () => void;
+    beforeEach(() => {
+      restoreEnv = withEnvSnapshot();
+      clearUsageCache();
+    });
+    afterEach(() => {
+      restoreEnv();
+      clearUsageCache();
+    });
+
+    // A reader that counts its calls and returns a programmable result, so the
+    // tests can assert OAuth GETs are NOT made on every snapshot scan.
+    function countingMeter(results: Array<{ ok: boolean; five?: number; seven?: number; code?: any }>) {
+      let calls = 0;
+      const reader = async () => {
+        const r = results[Math.min(calls, results.length - 1)];
+        calls++;
+        if (r.ok) {
+          return {
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: r.five ?? 0, resetsAt: null },
+              sevenDay: { utilization: r.seven ?? 0, resetsAt: null },
+            },
+          };
+        }
+        return { ok: false as const, code: r.code ?? "oauth-usage-non-2xx" };
+      };
+      return { reader, calls: () => calls };
+    }
+
+    test("getOAuthUsageTtlMs: default, override, and invalid fall-back", () => {
+      delete process.env.HYDRA_OAUTH_USAGE_TTL_MS;
+      assert.equal(getOAuthUsageTtlMs(), DEFAULT_OAUTH_USAGE_TTL_MS);
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "120000";
+      assert.equal(getOAuthUsageTtlMs(), 120000);
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "not-a-number";
+      assert.equal(getOAuthUsageTtlMs(), DEFAULT_OAUTH_USAGE_TTL_MS);
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "-5";
+      assert.equal(getOAuthUsageTtlMs(), DEFAULT_OAUTH_USAGE_TTL_MS);
+    });
+
+    test("getOAuthUsageMaxStaleMs: defaults to the effective TTL, honours override", () => {
+      delete process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS;
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "90000";
+      assert.equal(getOAuthUsageMaxStaleMs(), 90000);
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "30000";
+      assert.equal(getOAuthUsageMaxStaleMs(), 30000);
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "bad";
+      assert.equal(getOAuthUsageMaxStaleMs(), 90000); // falls back to TTL
+    });
+
+    test("AC1: cache reuse within TTL — one OAuth GET across many scans", async () => {
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "300000"; // 5 min
+      const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+        const m = countingMeter([{ ok: true, five: 50, seven: 34 }]);
+        const base = new Date("2026-05-25T12:00:00Z").getTime();
+        // 5 scans spaced 60s apart, all within the 5-min OAuth TTL.
+        for (let i = 0; i < 5; i++) {
+          const snap = await getUsage({
+            now: new Date(base + i * 60_000),
+            projectsRoot: root,
+            force: true, // bust the snapshot scan each time...
+            useOAuthCache: true,
+            readUsage: m.reader,
+          });
+          assert.equal(snap.usageSource, "oauth");
+          assert.equal(snap.percentLast5h, 50);
+          assert.equal(snap.oauthStale, false);
+        }
+        // ...but the OAuth endpoint was hit exactly ONCE (the cadence decoupling).
+        assert.equal(m.calls(), 1, "OAuth GET should fire once, not per-scan");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("AC4: force busts the snapshot scan but NOT the OAuth read", async () => {
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "300000";
+      const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+        const m = countingMeter([{ ok: true, five: 42, seven: 20 }]);
+        const now = new Date("2026-05-25T12:00:00Z");
+        // Two force=1 reads within the OAuth TTL — an operator hammering ?force=1.
+        await getUsage({ now, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        await getUsage({
+          now: new Date(now.getTime() + 1000),
+          projectsRoot: root,
+          force: true,
+          useOAuthCache: true,
+          readUsage: m.reader,
+        });
+        assert.equal(m.calls(), 1, "force must not spend the OAuth budget");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("AC2: a 429 serves the last-good value as STALE oauth (does NOT flip to estimate)", async () => {
+      // Calibrate so the estimate would be a concrete number — proving we stay
+      // on the OAuth last-good rather than degrading to it.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "300000"; // 5 min grace
+      const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 900, out: 50 })]);
+        // First read succeeds (seeds last-good = 55%); second (after TTL) 429s.
+        const m = countingMeter([
+          { ok: true, five: 55, seven: 33 },
+          { ok: false, code: "oauth-usage-non-2xx" },
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        const first = await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(first.usageSource, "oauth");
+        assert.equal(first.percentLast5h, 55);
+        assert.equal(first.oauthStale, false);
+
+        // 90s later (> 60s TTL, < TTL+grace) the meter 429s: serve last-good stale.
+        const t1 = new Date(t0.getTime() + 90_000);
+        const second = await getUsage({ now: t1, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(second.usageSource, "oauth", "stays on OAuth ground truth, not estimate");
+        assert.equal(second.percentLast5h, 55, "serves the last-good 55%, not the estimate");
+        assert.equal(second.oauthStale, true);
+        assert.equal(second.oauthError, "oauth-usage-stale");
+        assert.equal(second.oauthAgeMs, 90_000, "exposes the served value's age");
+        assert.equal(m.calls(), 2, "a fresh GET was attempted, then fell back to last-good");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("AC3: after TTL + maxStale with no successful read, falls through to estimate", async () => {
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000"; // 1 min grace
+      const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
+      try {
+        // Estimate = (950 / 1000) * 100 = 95% (>=90 => emergencyStop stays on).
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:30:00Z", { in: 900, out: 50 })]);
+        const m = countingMeter([
+          { ok: true, five: 55, seven: 33 },
+          { ok: false, code: "oauth-usage-non-2xx" },
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        // 5 min later: age (300s) >= TTL(60s)+maxStale(60s) => too stale.
+        const tFar = new Date(t0.getTime() + 300_000);
+        const snap = await getUsage({ now: tFar, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(snap.usageSource, "estimate", "too-stale last-good falls through to estimate");
+        assert.equal(snap.oauthError, "oauth-usage-non-2xx");
+        assert.equal(snap.oauthStale, false);
+        assert.equal(snap.oauthAgeMs, null);
+        assert.equal(snap.percentLast5h, 95, "estimate stands — never silently 0");
+        assert.equal(snap.emergencyStop, true, "gate stays conservative on the estimate");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a successful read after TTL REFRESHES the cache (fresh, not stale)", async () => {
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000";
+      const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 5 })]);
+        const m = countingMeter([
+          { ok: true, five: 40, seven: 20 },
+          { ok: true, five: 70, seven: 50 },
+        ]);
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        const first = await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(first.percentLast5h, 40);
+        // 2 min later (> TTL) a fresh successful read replaces the cached value.
+        const t1 = new Date(t0.getTime() + 120_000);
+        const second = await getUsage({ now: t1, projectsRoot: root, force: true, useOAuthCache: true, readUsage: m.reader });
+        assert.equal(second.usageSource, "oauth");
+        assert.equal(second.percentLast5h, 70, "refreshed to the new reading");
+        assert.equal(second.oauthStale, false);
+        assert.equal(second.oauthAgeMs, 0);
+        assert.equal(m.calls(), 2);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("a fresh failure with NO prior last-good falls straight to the estimate", async () => {
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 300 })]);
+        const m = countingMeter([{ ok: false, code: "oauth-usage-token-expired" }]);
+        const snap = await getUsage({
+          now: new Date("2026-05-25T12:00:00Z"),
+          projectsRoot: root,
+          force: true,
+          useOAuthCache: true,
+          readUsage: m.reader,
+        });
+        assert.equal(snap.usageSource, "estimate");
+        assert.equal(snap.oauthError, "oauth-usage-token-expired");
+        assert.equal(snap.oauthStale, false);
+        assert.equal(snap.oauthAgeMs, null);
+        assert.equal(snap.percentLast5h, 30); // (300/1000)*100
       } finally {
         await rm(root, { recursive: true, force: true });
       }

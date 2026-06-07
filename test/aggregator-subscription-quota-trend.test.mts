@@ -32,6 +32,8 @@ function fakeSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
     percentLast7d: 40,
     usageSource: "estimate",
     oauthError: null,
+    oauthStale: false,
+    oauthAgeMs: null,
     oauthFiveHourResetsAt: null,
     oauthSevenDayResetsAt: null,
     projectedWeeklyPercent: 50,
