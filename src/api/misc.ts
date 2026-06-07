@@ -24,7 +24,7 @@ const TierQuerySchema = z.object({
  * Residual "misc" routes that don't fit elsewhere.
  *
  * Issue #268 split this file — see api/openviking.ts, api/goals.ts,
- * api/events.ts, api/config.ts, api/alerts.ts, api/plan-cache.ts,
+ * api/events.ts, api/config.ts, api/alerts.ts,
  * api/reflections.ts, api/merge-lock.ts. What remains here are operational
  * routes without a natural domain home: kill switch, digest
  * trigger, tier classifier, and agent-memory CRUD.

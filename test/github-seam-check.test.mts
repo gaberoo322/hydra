@@ -55,7 +55,7 @@ describe("github-seam-check: child_process import grammar", () => {
     );
     assert.equal(
       fileViolatesGithubSeam(
-        "src/plan-cache.ts",
+        "src/grounding.ts",
         `import { gitExec } from "./github/git.ts";`,
       ),
       false,

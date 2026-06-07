@@ -101,7 +101,7 @@ describe("cost-attribution aggregation (issue #271)", () => {
   // in the role list as LEGACY entries.
   test("every role emitted by logAgentRun in src/ maps to a known tier (issue #303)", () => {
     const ROLES_FROM_SRC = [
-      "planner",        // plan-cache hit-recording + (legacy) src/planner-prompt.ts
+      "planner",        // LEGACY — historical runs from src/planner-prompt.ts
       "executor",       // LEGACY — historical runs from src/executor-agent.ts
       "fixer",          // LEGACY — historical runs from src/fixer.ts
       "jit-tester",     // LEGACY — historical runs from src/jit.ts

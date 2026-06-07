@@ -305,24 +305,6 @@ export const redisKeys = {
   mergeLock: () => "hydra:merge:lock",
 
   // ---------------------------------------------------------------------------
-  // Plan Cache
-  // ---------------------------------------------------------------------------
-  planCachePrefix: () => "hydra:plans:cache:",
-  planCache: (hash: string) => `hydra:plans:cache:${hash}`,
-  // Persisted stats — survive restarts so multi-day hit-rate can be measured
-  // (issue #325). Lifetime counters use a single key per metric; per-day
-  // counters use ISO-date suffix (UTC) with 7-day TTL for a rolling 24h view.
-  planCacheStatLifetime: (metric: string) => `hydra:plans:cache:stats:${metric}`,
-  planCacheStatDay: (metric: string, isoDate: string) =>
-    `hydra:plans:cache:stats:${metric}:${isoDate}`,
-  // Miss-reason histogram (issue #363). Hash keys are reasons (see
-  // PlanCacheMissReason), values are counts. Lifetime + per-day variants
-  // mirror the per-metric counter scheme above.
-  planCacheMissReasonsLifetime: () => `hydra:plans:cache:miss-reasons`,
-  planCacheMissReasonsDay: (isoDate: string) =>
-    `hydra:plans:cache:miss-reasons:${isoDate}`,
-
-  // ---------------------------------------------------------------------------
   // Pattern Detector
   // ---------------------------------------------------------------------------
   alerts: () => "hydra:alerts",
