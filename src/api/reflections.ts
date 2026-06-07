@@ -7,6 +7,7 @@ import {
   extractFilesFromAnchor,
 } from "../reflections/reflections.ts";
 import { getTargetName } from "../target-config.ts";
+import { ReflectionsQuerySchema } from "../schemas/reflections.ts";
 
 /**
  * Reflections + calibration proxy routes.
@@ -52,12 +53,16 @@ export function createReflectionsRouter() {
   //      A miss (no prior reflections) returns `formatted: ""`, `count: 0`
   //      so the skill can graceful-degrade to a no-op injection.
   router.get("/reflections", async (req, res) => {
-    const anchor = typeof req.query.anchor === "string" ? req.query.anchor.trim() : "";
+    // ADR-0022: read `anchor`/`files` through the Schemas seam. Both are
+    // optional (absent `anchor` = mode 1), so this never rejects; the schema
+    // carries the legacy `.trim()` on `anchor`.
+    const query = ReflectionsQuerySchema.safeParse(req.query).data ?? {};
+    const anchor = query.anchor ?? "";
 
     // Mode 2 — per-anchor content composition (live injection path).
     if (anchor) {
       try {
-        const filesParam = typeof req.query.files === "string" ? req.query.files : "";
+        const filesParam = query.files ?? "";
         const scopeFiles = filesParam
           ? filesParam.split(",").map((s) => s.trim()).filter(Boolean)
           : undefined;
