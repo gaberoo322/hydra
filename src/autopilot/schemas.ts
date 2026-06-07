@@ -67,12 +67,38 @@ export const RunStartBodySchema = z
 
 export type RunStartBody = z.infer<typeof RunStartBodySchema>;
 
+/**
+ * Structured crash snapshot captured at run-end for an abnormal termination
+ * (issue #1079). Durable on the run hash so a crash is drillable AFTER the
+ * ephemeral `/log` (`.log.prev`-bounded) and systemd journal have rotated.
+ *
+ * Every field is optional — the reap backstop fills what it can derive
+ * (`signal` / `exit_code` from systemd, `log_tail` from the run log) and a
+ * read-time sweep that never saw a POST may carry only the minimal shape.
+ * `log_tail` is bounded by the writer (`bootstrap.sh` ships a small slice;
+ * `endRun` re-truncates server-side as a defensive cap).
+ */
+export const CrashDetailSchema = z
+  .looseObject({
+    /** Signal name that killed the process (e.g. `SEGV`, `KILL`), when known. */
+    signal: z.string().optional(),
+    /** Process exit code, when systemd reported one. */
+    exit_code: z.number().optional(),
+    /** Last action / phase the loop reached before dying, when known. */
+    last_action: z.string().optional(),
+    /** Bounded tail of the run log at crash time (survives log rotation). */
+    log_tail: z.string().optional(),
+  });
+
+export type CrashDetail = z.infer<typeof CrashDetailSchema>;
+
 export const RunEndBodySchema = z
   .looseObject({
     run_id: z.string().trim().min(1, { message: "run_id must be a non-empty string" }),
     cause: z.string().optional(),
     ended_epoch: z.number().optional(),
     exit_code: z.number().optional(),
+    crash_detail: CrashDetailSchema.optional(),
   });
 
 export type RunEndBody = z.infer<typeof RunEndBodySchema>;

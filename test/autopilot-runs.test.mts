@@ -531,6 +531,123 @@ describe("autopilot runs API (issue #497)", () => {
     assert.equal(res._body.status, "killed");
     assert.equal(res._body.term_reason, "crash");
   });
+
+  // ---------------------------------------------------------------------------
+  // AC17 (issue #1079) — run-end with cause=crash persists a structured
+  //        crash_detail on the run hash and surfaces it on the projected view.
+  // ---------------------------------------------------------------------------
+  test("AC17: run-end cause=crash persists + surfaces crash_detail", async () => {
+    const startedEpoch = Math.floor(Date.now() / 1000) - 50;
+    await runStart(
+      mockReq({
+        run_id: "run-crash1",
+        started: new Date(startedEpoch * 1000).toISOString(),
+        started_epoch: startedEpoch,
+        pid: process.pid,
+        trigger: "manual",
+        limits: {},
+      }),
+      mockRes(),
+    );
+
+    const res = mockRes();
+    await runEnd(
+      mockReq({
+        run_id: "run-crash1",
+        cause: "crash",
+        ended_epoch: startedEpoch + 10,
+        exit_code: 139,
+        crash_detail: {
+          signal: "SEGV",
+          exit_code: 139,
+          log_tail: "slot_complete class=dev_orch\nfatal: segfault in tool\n",
+        },
+      }),
+      res,
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.term_reason, "crash");
+
+    // Persisted as a JSON string on the hash (durable past log rotation).
+    const row = await redis.hgetall("hydra:autopilot:run:run-crash1");
+    assert.ok(row.crash_detail, "crash_detail should be persisted on the hash");
+    const persisted = JSON.parse(row.crash_detail);
+    assert.equal(persisted.signal, "SEGV");
+    assert.equal(persisted.exit_code, 139);
+    assert.match(persisted.log_tail, /segfault/);
+
+    // Surfaced (parsed back to an object) on the projected runs/current view.
+    const view = mockRes();
+    await runsCurrent({ method: "GET" } as any, view);
+    assert.ok(view._body.crash_detail, "crash_detail should surface on the view");
+    assert.equal(view._body.crash_detail.signal, "SEGV");
+    assert.equal(view._body.crash_detail.exit_code, 139);
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC18 (issue #1079) — a CLEAN stop never persists crash_detail even if a
+  //        caller mistakenly sends one. The field stays a "died badly" signal.
+  // ---------------------------------------------------------------------------
+  test("AC18: run-end clean cause drops crash_detail", async () => {
+    const startedEpoch = Math.floor(Date.now() / 1000) - 50;
+    await runStart(
+      mockReq({
+        run_id: "run-clean1",
+        started: new Date(startedEpoch * 1000).toISOString(),
+        started_epoch: startedEpoch,
+        pid: process.pid,
+        trigger: "manual",
+        limits: {},
+      }),
+      mockRes(),
+    );
+
+    const res = mockRes();
+    await runEnd(
+      mockReq({
+        run_id: "run-clean1",
+        cause: "budget",
+        ended_epoch: startedEpoch + 10,
+        crash_detail: { signal: "SEGV", log_tail: "should-be-ignored" },
+      }),
+      res,
+    );
+    assert.equal(res._body.term_reason, "budget");
+
+    const row = await redis.hgetall("hydra:autopilot:run:run-clean1");
+    assert.equal(row.crash_detail, undefined, "clean stop must not persist crash_detail");
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC19 (issue #1079) — the read-time sweeper of a dead-pid running row (no
+  //        run-end POST ever landed) stamps a MINIMAL crash_detail so the
+  //        fallback crash path is still drillable / distinguishable.
+  // ---------------------------------------------------------------------------
+  test("AC19: dead-pid sweep stamps minimal crash_detail", async () => {
+    const deadPid = 2147483646;
+    const startedEpoch = Math.floor(Date.now() / 1000) - 300;
+    await runStart(
+      mockReq({
+        run_id: "run-sweep1",
+        started: new Date(startedEpoch * 1000).toISOString(),
+        started_epoch: startedEpoch,
+        pid: deadPid,
+        trigger: "manual",
+        limits: {},
+      }),
+      mockRes(),
+    );
+
+    const res = mockRes();
+    await runsCurrent({ method: "GET" } as any, res);
+    assert.equal(res._body.term_reason, "crash");
+    assert.ok(res._body.crash_detail, "sweep should stamp a crash_detail");
+    assert.match(res._body.crash_detail.last_action, /swept-dead-pid/);
+
+    // Persisted on the hash too.
+    const row = await redis.hgetall("hydra:autopilot:run:run-sweep1");
+    assert.ok(row.crash_detail, "sweep crash_detail should be persisted");
+  });
 });
 
 // ---------------------------------------------------------------------------

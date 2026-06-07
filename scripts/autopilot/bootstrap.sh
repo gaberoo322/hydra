@@ -200,12 +200,50 @@ if [ "${1:-}" = "--reap" ]; then
   __reap_derive_cause
   REAP_ENDED_EPOCH="$(date -u +%s)"
 
+  # Issue #1079: for an abnormal exit (cause=crash / failure_backstop) capture
+  # a durable structured crash_detail so the run is drillable AFTER the
+  # ephemeral /log (.log.prev-bounded) + journal rotate. We can derive the
+  # signal name from EXIT_STATUS on a signal-kill and ship a bounded tail of
+  # the run log read straight off disk here — the server (endRun) persists it
+  # on the run hash and re-truncates defensively. A clean stop sends no
+  # crash_detail, keeping the field a reliable "died badly" signal.
+  REAP_CRASH_DETAIL_JSON="null"
+  if [ "${REAP_CAUSE}" = "crash" ] || [ "${REAP_CAUSE}" = "failure_backstop" ]; then
+    # Signal name only when systemd reported a signal kill (EXIT_CODE=signal);
+    # REAP_EXIT_STATUS (set by __reap_derive_cause) then holds the name (e.g.
+    # SEGV, KILL, ABRT). A numeric status is an exit *code*, not a signal name,
+    # so leave signal empty there — exit_code already carries it.
+    REAP_SIGNAL=""
+    if [ "${REAP_EXIT_CODE_KIND:-}" = "signal" ]; then
+      case "${REAP_EXIT_STATUS}" in
+        ''|*[!0-9]*) REAP_SIGNAL="${REAP_EXIT_STATUS}" ;;
+        *) REAP_SIGNAL="" ;;
+      esac
+    fi
+    # Bounded log tail straight off disk — last 120 lines of the run log,
+    # capped to ~8 KB so the payload stays small. Best-effort: a missing /
+    # unreadable log yields an empty tail (the server simply omits the field).
+    REAP_LOG_TAIL=""
+    if [ -r "${REAP_LOG_PATH}" ]; then
+      REAP_LOG_TAIL="$(tail -n 120 "${REAP_LOG_PATH}" 2>/dev/null | tail -c 8192 || echo "")"
+    fi
+    REAP_CRASH_DETAIL_JSON="$(jq -n \
+      --arg signal "${REAP_SIGNAL}" \
+      --argjson exit_code "${REAP_EXIT_NUM}" \
+      --arg log_tail "${REAP_LOG_TAIL}" \
+      '{exit_code: $exit_code}
+        + (if $signal == "" then {} else {signal: $signal} end)
+        + (if $log_tail == "" then {} else {log_tail: $log_tail} end)')"
+  fi
+
   REAP_PAYLOAD="$(jq -n \
     --arg run_id "${REAP_RUN_ID}" \
     --arg cause "${REAP_CAUSE}" \
     --argjson ended_epoch "${REAP_ENDED_EPOCH}" \
     --argjson exit_code "${REAP_EXIT_NUM}" \
-    '{run_id: $run_id, cause: $cause, ended_epoch: $ended_epoch, exit_code: $exit_code}')"
+    --argjson crash_detail "${REAP_CRASH_DETAIL_JSON}" \
+    '{run_id: $run_id, cause: $cause, ended_epoch: $ended_epoch, exit_code: $exit_code}
+      + (if $crash_detail == null then {} else {crash_detail: $crash_detail} end)')"
 
   # endRun is idempotent: if term-check.py already POSTed run-end this turn,
   # the row is already terminal and this POST is a no-op (deduped=true). A
