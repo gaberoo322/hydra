@@ -68,6 +68,12 @@ HYDRA_API_BASE = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
 
 REAPED_TASK_IDS_CAP = 1000
 
+# Issue #1136 (Slice 2 of #1119): directory the code-writing dispatch deposits
+# its planning-time reflection-bucket string into, keyed by task_id, so reap can
+# forward it on the SINGLE authoritative cycle-record write. Overridable via
+# HYDRA_AUTOPILOT_REFL_DIR (mirrors the path the dispatch skills write to).
+REFL_SOURCES_DIR = Path(os.environ.get("HYDRA_AUTOPILOT_REFL_DIR", "/tmp"))
+
 # Code-writing skills whose completions trip a cycle-record write
 # (issue #430). QA, research, and discover dispatches are subagent work but
 # don't fit the "cycle" semantic — a cycle here is one autopilot turn that
@@ -147,11 +153,40 @@ def _bound_reaped(ids: list[str]) -> list[str]:
     return ids
 
 
+def _read_reflection_sources(task_id: str) -> str:
+    """Read the planning-time reflection-bucket deposit for `task_id` (issue #1136).
+
+    The code-writing dispatch (hydra-dev / hydra-target-build) is the ONLY actor
+    that knows what `GET /api/reflections` served it at planning time — reap runs
+    after the subagent exits and has no access to that. So the dispatch deposits
+    the MAPPED, comma-separated bucket tokens (`per-anchor` / `by-file` / ...)
+    to a task-scoped file, and reap reads it here to forward as the cycle metric
+    (Slice 2 of #1119). This keeps reap the SOLE cycle-record writer (no race
+    with a competing skill-side POST) while still stamping what was injected.
+
+    Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>.
+    Best-effort and fully non-fatal: a missing file (the common case — most
+    dispatches serve no reflections), an empty file, or any read error all
+    yield "" so the cycle truthfully buckets to 'none'. Never blocks the reap.
+    """
+    if not task_id:
+        return ""
+    try:
+        path = REFL_SOURCES_DIR / f"hydra-refl-sources-{task_id}"
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        _append_log(f"refl_sources_read_skipped task_id={task_id} err={exc}")
+        return ""
+
+
 def _fire_cycle_record(
     task_id: str,
     skill: str | None,
     status: str,
     total_tokens: int,
+    reflection_sources: str = "",
 ) -> None:
     """Best-effort POST to /api/autopilot/cycle-record (issue #430).
 
@@ -163,6 +198,12 @@ def _fire_cycle_record(
 
     The cycleId we send is the autopilot task_id, which the harness allocates
     once per dispatch — that gives natural dedup across retries.
+
+    `reflection_sources` (issue #1136): the comma-separated reflection bucket
+    tokens the dispatch served itself at planning time, forwarded as the 8th
+    positional `cycle-record` arg so the metric records what was injected.
+    Empty (the default + the common no-reflections case) → dispatch.sh omits
+    the field from the POST body → truthful 'none'.
     """
     if not skill or skill not in CYCLE_RECORD_SKILLS:
         return
@@ -182,6 +223,7 @@ def _fire_cycle_record(
                 "",  # task_title
                 "",  # anchor_ref
                 "0",  # duration_ms — reap doesn't track wall-clock per task
+                reflection_sources or "",  # issue #1136: served reflection buckets
             ],
             check=False,
             capture_output=True,
@@ -488,7 +530,12 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # we tag the cycle as "failed" so the cycles-failed counter ticks.
     soft_cap_hit = soft is not None and total_tokens >= soft
     status = "failed" if soft_cap_hit else "completed"
-    _fire_cycle_record(task_id, skill, status, total_tokens)
+    # Issue #1136 (Slice 2 of #1119): forward the planning-time reflection
+    # buckets the dispatch deposited for this task_id so the cycle metric
+    # records what was actually injected (instead of always 'none'). Missing
+    # deposit (the common case) → "" → field omitted downstream.
+    reflection_sources = _read_reflection_sources(task_id)
+    _fire_cycle_record(task_id, skill, status, total_tokens, reflection_sources)
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at
     # reap time rather than waiting for the daily timer. Best-effort, fully
