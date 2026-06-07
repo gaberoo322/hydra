@@ -101,6 +101,11 @@ export {
   cacheHitRatio,
   sessionIdFromPath,
   PACING_SHEDDABLE_CLASSES,
+  fiveHourThrottleShed,
+  FIVE_HOUR_THROTTLE_T1_CLASSES,
+  FIVE_HOUR_THROTTLE_T2_CLASSES,
+  DEFAULT_FIVE_HOUR_THROTTLE_T1,
+  DEFAULT_FIVE_HOUR_THROTTLE_T2,
   UNATTRIBUTED_SKILL,
 } from "./usage-tracker.ts";
 
