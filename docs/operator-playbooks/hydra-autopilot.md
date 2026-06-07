@@ -289,7 +289,7 @@ INV-008.
 
 | Action type | Tool the model invokes |
 |---|---|
-| `dispatch` | `Agent(run_in_background=True, isolation="worktree", ...)` — action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. |
+| `dispatch` | `Agent(run_in_background=True, isolation="worktree", model=<resolved>, ...)` — **resolve `<model>` from the action's `slot` (the dispatch class) via the Per-class model routing map below and pass it to the `Agent` call** (issue #1093). A class absent from the map → omit `model`, inheriting the parent session. `decide.py` stays pure: it emits no model field; the model lever lives here in the playbook, keyed off the `slot`/class the action already carries. The action carries `worktreeBranch` (stamped by `decide.py:_synthesize_worktree_branch`; issue #527) so the dashboard's slice-4 "Watch stream" cross-link can scope `/agents/stream?agent=<branch>`. The action ALSO carries `dispatchSentinel` (issue #692) — a hidden HTML comment of the form `<!-- hydra-dispatch v1 skill=… dispatchId=… runId=… -->`. **Prepend `action.dispatchSentinel` verbatim, on its own line, to the FIRST user message of the Agent prompt** (before the worktree-guard preamble). The project-scoped `SessionStart` hook (`scripts/hooks/session-start-capture.sh`, registered in `~/hydra/.claude/settings.json`) scrapes that sentinel from the session transcript and registers the subagent session into `hydra:dispatches:subagent:*` so every live session is recoverable to `(skill, dispatchId, runId, startedAt)`. When `decide.py` does not emit `dispatchSentinel` (legacy plans / a dispatch with no `skill`), skip the prepend — the session simply won't auto-register. |
 | `auto-merge` | `Bash` → `gh pr review --approve && gh pr merge --auto --squash` |
 | `route-prs-to-review` | `Bash` → emitted only while the operator-only **emergency brake** (issue #744) is engaged, IN PLACE OF every `auto-merge` action. The model routes the current open PRs to the `/hydra-review` pickup set: `gh pr list --repo gaberoo322/hydra --state open --json number` to enumerate them, then for each apply the review label (`gh api .../labels` — `gh pr edit` is broken, per operator memory) so `/hydra-review` surfaces them. The action carries no per-PR list — `decide()` is pure and cannot enumerate PRs. Because the brake suppresses all `auto-merge`, no PR auto-merges this turn; the operator clears the brake via `hydra brake off` once the incident is resolved. The autopilot NEVER engages or disengages the brake — there is no such action type. |
 | `apply-operator-approved` | `Bash` → `gh pr edit --add-label operator-approved` |
@@ -299,6 +299,42 @@ INV-008.
 | `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7 |
 | `wait` | sleep N; re-enter loop |
 | `wait-for-api` | `curl --retry`; re-enter loop |
+
+### Per-class model routing (issue #1093)
+
+Background `Agent`-dispatched subagents inherit the **parent autopilot
+session's model** (Opus 4.8) unless the dispatch passes an explicit `model`.
+Skill frontmatter is NOT a sufficient lever — a background dispatch ignores the
+skill's declared model and inherits the parent. So the `dispatch` action-to-tool
+row resolves `model` from the action's `slot` (the class) via the static map
+below and passes it to the `Agent` call. `decide.py` is **pure and emits no
+model field** (the README "Subagent Routing" design principle): the map lives in
+this playbook, not in `decide()`.
+
+Right-sized by **stakes × frequency** — drop the high-frequency non-authoring
+classes off Opus; keep authorship and behaviour-reshaping classes on Opus.
+
+| Class (`slot`) | Model | Rationale |
+|---|---|---|
+| `dev_orch` | Opus (keep) | Multi-file, tier-gated self-modification |
+| `dev_target` | Opus (keep) | Money-critical betting code |
+| `retro_orch` | Opus (keep) | Reshapes future behaviour; per-run low volume |
+| `design_concept_orch` | Opus (keep) | A weak design concept wastes a full dev+QA cycle |
+| `qa_orch` | Sonnet | Highest ROI; structured review against an artifact, ~every PR |
+| `qa_target` | Sonnet | Floor — money-critical review, do NOT drop below Sonnet |
+| `sweep_orch` / `sweep_target` | Sonnet | Board-routing decisions, not authorship |
+| `health` | Sonnet | Structured diagnosis; rare small fixes |
+| `research_orch` | Sonnet | Bounded codebase+web enrichment, not design |
+| `research_target` | Sonnet (trial) | Strategic; trial, watch priority quality, revert on drift |
+| `architecture_orch` | Sonnet | Non-interactive Explore+emit wrapper |
+| `scout_orch` | Sonnet | Search + rubric scoring (low frequency, modest ROI) |
+| `cleanup_orch` | Haiku | Deterministic knip output; LLM only formats findings into issues |
+| `discover_orch` / `discover_target` | Haiku | Patrol/diagnostics, designed small/fast/cheap |
+
+Use the harness's model alias (`opus` / `sonnet` / `haiku`) for the `model`
+kwarg so the operator's plan resolves the concrete version. A class not in the
+map (e.g. a legacy/unknown `slot`) → omit `model` and inherit the parent
+session, the conservative default.
 
 ## Phases (one-line each — full prose lives in code)
 
