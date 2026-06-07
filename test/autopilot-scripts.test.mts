@@ -107,6 +107,37 @@ function deriveReapCause(exitCode: string, exitStatus: string): {
   };
 }
 
+/**
+ * Invoke `bootstrap.sh --reap-session-decision` (issue #1130) with a simulated
+ * exit environment + an injected session-limit line, returning the cause-gated
+ * arming decision (`cause=… post=yes|no`). This pins the guard that stops a
+ * PHANTOM session block: only a `crash` (the code=1 session-limit exit) with a
+ * line may arm a block; a clean exit never does, so a stale line from a prior
+ * run cannot re-arm a block on a clean exit.
+ */
+function reapSessionDecision(exitCode: string, exitStatus: string, sessionLine: string): {
+  cause: string;
+  post: string;
+  stdout: string;
+} {
+  const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-session-decision"], {
+    env: {
+      ...process.env,
+      EXIT_CODE: exitCode,
+      EXIT_STATUS: exitStatus,
+      HYDRA_AUTOPILOT_REAP_SESSION_LINE: sessionLine,
+      PATH: process.env.PATH ?? "",
+    },
+    encoding: "utf-8",
+  });
+  const stdout = result.stdout ?? "";
+  const m = stdout.match(/cause=(\S+)\s+post=(\S+)/);
+  return { cause: m?.[1] ?? "", post: m?.[2] ?? "", stdout };
+}
+
+const SESSION_LIMIT_LINE =
+  "You've hit your session limit · resets 7:50pm (America/Los_Angeles)";
+
 describe("scripts/autopilot/bootstrap.sh", () => {
   test("initializes state.json with default limits", () => {
     const tmp = makeTempState();
@@ -277,6 +308,41 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     const r = deriveReapCause("exited", "37");
     assert.equal(r.cause, "crash");
     assert.equal(r.exitCodeNum, "37", "a non-zero exit preserves the real exit status");
+  });
+
+  // Issue #1130: phantom-session-block guard. The reap must arm a session block
+  // ONLY on a genuine session-limit crash (code=1) — never on a clean exit, so
+  // a stale `hit your session limit` line left in the journal by a PRIOR run
+  // cannot re-park the autopilot for hours while the usage meter is empty.
+  test("crash exit (code 1) with a session-limit line → arms block (post=yes)", () => {
+    const r = reapSessionDecision("exited", "1", SESSION_LIMIT_LINE);
+    assert.equal(r.cause, "crash");
+    assert.equal(r.post, "yes", "a genuine session-limit crash must arm the block");
+  });
+
+  test("clean exit (code 0) with a stale session-limit line → NO block (post=no)", () => {
+    const r = reapSessionDecision("exited", "0", SESSION_LIMIT_LINE);
+    assert.equal(r.cause, "interrupted");
+    assert.equal(r.post, "no",
+      "a clean code-0 exit must NOT arm a phantom block from a stale prior-run line (#1130)");
+  });
+
+  test("self-exit 143 with a stale session-limit line → NO block (post=no)", () => {
+    const r = reapSessionDecision("exited", "143", SESSION_LIMIT_LINE);
+    assert.equal(r.cause, "interrupted");
+    assert.equal(r.post, "no", "a 143 self-exit must NOT arm a phantom block (#1130)");
+  });
+
+  test("signal-kill (SIGTERM) with a stale session-limit line → NO block (post=no)", () => {
+    const r = reapSessionDecision("signal", "TERM", SESSION_LIMIT_LINE);
+    assert.equal(r.cause, "interrupted");
+    assert.equal(r.post, "no", "a SIGTERM restart must NOT arm a phantom block (#1130)");
+  });
+
+  test("crash exit with NO session-limit line → no block (post=no)", () => {
+    const r = reapSessionDecision("exited", "1", "");
+    assert.equal(r.cause, "crash");
+    assert.equal(r.post, "no", "a crash with no session-limit line records nothing");
   });
 
   test("records an alive owning-pid (not bootstrap.sh's short-lived $$)", () => {
