@@ -26,6 +26,7 @@ import {
   VERDICT_IDLE,
   VERDICT_STUCK,
   VERDICT_CRASHED,
+  VERDICT_PAUSED,
   classifyPace,
   flattenAttribution,
   formatRatio,
@@ -164,6 +165,62 @@ test("resolveVerdict → IDLE for a clean ended state without diagnostics", () =
 test("resolveVerdict tolerates empty/missing input", () => {
   const r = resolveVerdict({});
   assert.equal(r.verdict, VERDICT_IDLE);
+});
+
+// ---------------------------------------------------------------------------
+// PAUSED verdict (issue #989) — operator pause outranks EVERYTHING.
+// ---------------------------------------------------------------------------
+
+test("resolveVerdict → PAUSED outranks a live RUNNING session (draining copy)", () => {
+  const r = resolveVerdict({
+    lifecycle: { state: "running", runId: "abc12345" },
+    signals: [],
+    paused: { paused: true, since: 1 },
+  });
+  assert.equal(r.verdict, VERDICT_PAUSED);
+  // While a run is still live, the fact reads "draining…".
+  assert.match(r.fact, /draining/i);
+});
+
+test("resolveVerdict → PAUSED settles to a quiet fact when no live run", () => {
+  const r = resolveVerdict({
+    lifecycle: { state: "idle" },
+    signals: [],
+    paused: { paused: true },
+  });
+  assert.equal(r.verdict, VERDICT_PAUSED);
+  assert.doesNotMatch(r.fact, /draining/i);
+  assert.match(r.fact, /PAUSED/);
+});
+
+test("resolveVerdict → PAUSED outranks CRASHED and STUCK", () => {
+  const crashed = resolveVerdict({
+    lifecycle: { state: "crashed", termReason: "oom" },
+    paused: { paused: true },
+  });
+  assert.equal(crashed.verdict, VERDICT_PAUSED);
+
+  const stuck = resolveVerdict({
+    lifecycle: { state: "running" },
+    signals: [{ type: "unproductive-loop", severity: "critical", summary: "loop" }],
+    paused: { paused: true },
+  });
+  assert.equal(stuck.verdict, VERDICT_PAUSED);
+});
+
+test("resolveVerdict → paused:false (or absent flag) does NOT force PAUSED", () => {
+  const explicit = resolveVerdict({
+    lifecycle: { state: "running", runId: "deadbeef" },
+    signals: [],
+    paused: { paused: false },
+  });
+  assert.equal(explicit.verdict, VERDICT_RUNNING);
+
+  const absent = resolveVerdict({
+    lifecycle: { state: "running", runId: "deadbeef" },
+    signals: [],
+  });
+  assert.equal(absent.verdict, VERDICT_RUNNING);
 });
 
 // ---------------------------------------------------------------------------

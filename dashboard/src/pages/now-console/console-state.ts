@@ -86,12 +86,14 @@ export const VERDICT_RUNNING = "RUNNING" as const;
 export const VERDICT_IDLE = "IDLE" as const;
 export const VERDICT_STUCK = "STUCK" as const;
 export const VERDICT_CRASHED = "CRASHED" as const;
+export const VERDICT_PAUSED = "PAUSED" as const;
 
 export type ConsoleVerdict =
   | typeof VERDICT_RUNNING
   | typeof VERDICT_IDLE
   | typeof VERDICT_STUCK
-  | typeof VERDICT_CRASHED;
+  | typeof VERDICT_CRASHED
+  | typeof VERDICT_PAUSED;
 
 /** Slice-1 lifecycle states (mirrors `AutopilotLifecycleStateSchema`). */
 export type LifecycleState = "running" | "idle" | "ended" | "crashed";
@@ -116,6 +118,16 @@ export interface IdleDiagnosticsLike {
   isEligible?: boolean | null;
   blockedBy?: string | null;
   pace?: { state?: string | null } | null;
+}
+
+/**
+ * Operator-only autopilot pause flag (issue #988 backend, #989 UI). Mirrors
+ * the `AutopilotPauseState` returned by `GET /api/autopilot/paused`:
+ * `{ paused: boolean, since?: number }`.
+ */
+export interface PausedLike {
+  paused?: boolean | null;
+  since?: number | null;
 }
 
 export interface VerdictResult {
@@ -155,6 +167,14 @@ export function rankStuckSignals(
 /**
  * Resolve the composite verdict. Precedence:
  *
+ *   0. PAUSED   — the operator-only pause flag is set (issue #989). Operator
+ *      intent is the headline, so PAUSED outranks EVERYTHING — including a
+ *      live/draining run, a crash, or a stuck signal. Because there is no
+ *      auto-resume (#988), a forgotten pause silently halts all autopilot
+ *      work; the paused state must be the loudest thing on the page. While
+ *      a run is still draining (lifecycle still reports state="running"),
+ *      the fact reads "PAUSED — draining…"; once quiet it settles to
+ *      "PAUSED.".
  *   1. CRASHED  — lifecycle.state === "crashed" (a crash is the most urgent
  *      truth; the operator needs to know the session died abnormally).
  *   2. STUCK    — there is at least one warn/critical stuck signal. A stuck
@@ -170,6 +190,7 @@ export function resolveVerdict(input: {
   lifecycle?: LifecycleLike | null;
   signals?: readonly StuckSignalLike[] | null;
   idle?: IdleDiagnosticsLike | null;
+  paused?: PausedLike | null;
 }): VerdictResult {
   const lifecycle = input.lifecycle ?? {};
   const ranked = rankStuckSignals(input.signals);
@@ -179,6 +200,18 @@ export function resolveVerdict(input: {
         String(s?.severity) === "critical" || String(s?.severity) === "warn",
     ) ?? null;
   const state = String(lifecycle.state ?? "idle");
+
+  // PAUSED outranks all other verdicts — operator intent is the headline.
+  if (input.paused?.paused === true) {
+    const draining = state === "running";
+    return {
+      verdict: VERDICT_PAUSED,
+      fact: draining
+        ? "PAUSED — draining… (in-flight subagents finishing their atomic unit)."
+        : "PAUSED. Autopilot will not start new work until resumed.",
+      signal: null,
+    };
+  }
 
   if (state === "crashed") {
     const reason =

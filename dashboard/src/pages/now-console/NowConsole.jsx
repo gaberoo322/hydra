@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { useApi } from "../../hooks/useApi.js";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { apiFetch, useApi } from "../../hooks/useApi.js";
 import StatusVerdict from "./StatusVerdict.jsx";
 import UsagePanel from "./UsagePanel.jsx";
 import StuckSignals from "./StuckSignals.jsx";
@@ -90,10 +90,38 @@ function TurnJournal() {
 
 export default function NowConsole() {
   // Slice-1 lifecycle + slice-3 stuck signals feed the hero. Slice-2
-  // idle-diagnostics provides the "why idle" supporting fact.
+  // idle-diagnostics provides the "why idle" supporting fact. The
+  // operator-only pause flag (#988/#989) is polled fast so the hero reflects
+  // a kill-switch promptly.
   const tick = useApi("/now/autopilot-tick", { poll: 10_000 });
   const health = useApi("/now/autopilot-health", { poll: 30_000 });
   const idle = useApi("/autopilot/idle-diagnostics", { poll: 30_000 });
+  const paused = useApi("/autopilot/paused", { poll: 10_000 });
+
+  const [pausePending, setPausePending] = useState(false);
+  const [pauseError, setPauseError] = useState(null);
+
+  // Server-confirmed, never optimistic: POST the new state, then re-fetch the
+  // flag and only let the verdict flip once the read confirms the write. A
+  // failed POST surfaces the error and leaves the verdict where it was.
+  const handleTogglePause = useCallback(
+    async (next) => {
+      setPausePending(true);
+      setPauseError(null);
+      try {
+        await apiFetch("/autopilot/paused", {
+          method: "POST",
+          body: JSON.stringify({ paused: next }),
+        });
+        await paused.refresh();
+      } catch (err) {
+        setPauseError(err?.message || String(err));
+      } finally {
+        setPausePending(false);
+      }
+    },
+    [paused],
+  );
 
   const loading = tick.loading && !tick.data;
 
@@ -103,7 +131,11 @@ export default function NowConsole() {
         lifecycle={tick.data?.lifecycle}
         signals={health.data?.signals}
         idle={idle.data}
+        paused={paused.data}
         loading={loading}
+        onTogglePause={handleTogglePause}
+        pausePending={pausePending}
+        pauseError={pauseError}
       />
       <UsagePanel />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
