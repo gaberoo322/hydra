@@ -47,6 +47,7 @@ function dispatch(over: Partial<RetroDispatch> = {}): RetroDispatch {
     abandonReason: null,
     regressionIntroduced: false,
     flagged: false,
+    undrillable: false,
     ...over,
   };
 }
@@ -124,6 +125,49 @@ describe("flagDispatchesForDrill", () => {
     const b = dispatch({ cycleId: "b", status: "aborted", bucket: "failed" });
     const flagged = flagDispatchesForDrill([a, b]);
     assert.deepEqual(flagged.map((d) => d.cycleId), ["a", "b"]);
+  });
+
+  // issue #1184 — a dispatch with a failure signal but an EMPTY cycleId has no
+  // transcript handle to drill, so it must be EXCLUDED from the flagged subset
+  // (it is recorded undrillable in the assembled bundle instead). This enforces
+  // the invariant `flagged === true` ⟹ `cycleId !== ""`.
+  test("excludes empty-cycleId dispatches even when they carry a failure signal (#1184)", () => {
+    const drillableFailed = dispatch({ cycleId: "c1", status: "failed", bucket: "failed" });
+    const undrillableAbandon = dispatch({
+      cycleId: "",
+      status: null,
+      bucket: null,
+      abandonReason: "run-interrupted",
+    });
+    const undrillableFailed = dispatch({ cycleId: "", status: "failed", bucket: "failed" });
+    const undrillableRegressed = dispatch({
+      cycleId: "",
+      status: "merged",
+      bucket: "merged",
+      regressionIntroduced: true,
+    });
+
+    const flagged = flagDispatchesForDrill([
+      drillableFailed,
+      undrillableAbandon,
+      undrillableFailed,
+      undrillableRegressed,
+    ]);
+    // Only the cycleId-bearing failure is flagged; every empty-cycleId signal is
+    // dropped (no transcript handle).
+    assert.deepEqual(flagged.map((d) => d.cycleId), ["c1"]);
+    // Invariant: nothing flagged has an empty cycleId.
+    assert.ok(flagged.every((d) => d.cycleId !== ""), "flagged ⟹ cycleId !== ''");
+  });
+
+  test("a cycleId-bearing abandonReason is still flagged (the empty-cycleId exclusion is narrow) (#1184)", () => {
+    const errored = dispatch({
+      cycleId: "cReal",
+      status: "merged",
+      bucket: "merged",
+      abandonReason: "verification-failure",
+    });
+    assert.deepEqual(flagDispatchesForDrill([errored]).map((d) => d.cycleId), ["cReal"]);
   });
 });
 
@@ -461,26 +505,28 @@ describe("assembleRetroBundle — composition", () => {
     const qa = bundle.dispatches.find((d) => d.skill === "hydra-qa")!;
     assert.equal(qa.anchorReference, "PR#970");
     assert.equal(qa.prNumber, "970");
-    // Crash term_reason ⇒ best-effort failure-leaning abandonReason ⇒ flaggable.
+    // Crash term_reason ⇒ best-effort failure-leaning abandonReason (#1168
+    // visibility preserved): the dispatch still carries the run-crash signal.
     assert.equal(qa.abandonReason, "run-crash");
 
+    // issue #1184 — these slots-snapshot-fallback dispatches have cycleId="" (no
+    // transcript handle: the metrics/transcript enrichment loop skips them). So
+    // they are recorded undrillable, NOT flagged — there is nothing to drill.
     const flagged = flagDispatchesForDrill(bundle.dispatches);
-    assert.equal(flagged.length, 2, "both crashed-run dispatches are flagged for drill");
-
-    // issue #1094 — the SERVED bundle must materialise the drill-flag onto each
-    // dispatch (a JSON consumer cannot call the pure selector). Before this fix
-    // every served dispatch reported flagged=false even on a crashed run where
-    // all carried abandonReason=run-crash, so the rollup was flagged:0.
-    assert.equal(qa.flagged, true, "served dispatch carries flagged=true");
+    assert.equal(flagged.length, 0, "empty-cycleId dispatches are not flagged (no transcript handle)");
+    assert.equal(qa.flagged, false, "served dispatch is not flagged (undrillable)");
     assert.ok(
-      bundle.dispatches.every((d) => d.flagged === true),
-      "every crashed-run dispatch is flagged on the served bundle",
+      bundle.dispatches.every((d) => d.flagged === false),
+      "no empty-cycleId crashed-run dispatch is flagged on the served bundle",
+    );
+    assert.ok(
+      bundle.dispatches.every((d) => d.undrillable === true),
+      "every empty-cycleId crashed-run dispatch is recorded undrillable (#1168 visibility, #1184 honesty)",
     );
 
-    // The flagged dispatches' anchors got reflection reads — the retro is no
-    // longer structurally blind on a non-clean run.
-    assert.deepEqual(reflectionAnchors.sort(), ["#961", "PR#970"]);
-    assert.equal(bundle.reflections.length, 2);
+    // No flagged dispatch ⇒ no reflection reads (the drill subset is empty).
+    assert.deepEqual(reflectionAnchors.sort(), []);
+    assert.equal(bundle.reflections.length, 0);
   });
 
   // -------------------------------------------------------------------------
@@ -515,14 +561,21 @@ describe("assembleRetroBundle — composition", () => {
     const bundle = await assembleRetroBundle("run-1094", deps);
 
     assert.equal(bundle.dispatches.length, 3, "all three occupied slots projected");
-    // Reproduces the issue evidence: every dispatch carries run-crash and so
-    // every served dispatch must report flagged:true (was false → rollup 0).
+    // issue #1094 materialised the flagged signal onto the served bundle; issue
+    // #1184 refines it: these slots-snapshot-fallback dispatches all carry
+    // cycleId="" (no transcript handle), so the failure signal (run-crash) is
+    // recorded as undrillable rather than flagged. The served `undrillable`
+    // field is what the JSON consumer reads to count them honestly.
     for (const d of bundle.dispatches) {
-      assert.equal(d.abandonReason, "run-crash", `${d.skill} carries run-crash`);
-      assert.equal(d.flagged, true, `${d.skill} served dispatch is flagged`);
+      assert.equal(d.abandonReason, "run-crash", `${d.skill} carries run-crash (#1168 visibility)`);
+      assert.equal(d.cycleId, "", `${d.skill} has no transcript handle`);
+      assert.equal(d.flagged, false, `${d.skill} served dispatch is not flagged (no transcript)`);
+      assert.equal(d.undrillable, true, `${d.skill} served dispatch is recorded undrillable`);
     }
     const flaggedCount = bundle.dispatches.filter((d) => d.flagged).length;
-    assert.equal(flaggedCount, 3, "the served flagged subset is non-empty (was 0)");
+    assert.equal(flaggedCount, 0, "the served flagged subset is empty (no drillable handle)");
+    const undrillableCount = bundle.dispatches.filter((d) => d.undrillable).length;
+    assert.equal(undrillableCount, 3, "all three are recorded undrillable (honest count)");
   });
 
   // -------------------------------------------------------------------------
@@ -563,24 +616,110 @@ describe("assembleRetroBundle — composition", () => {
     const bundle = await assembleRetroBundle("run-interrupted", deps);
 
     assert.equal(bundle.dispatches.length, 3, "all three occupied slots projected");
-    // Reproduces the issue evidence: was abandonReason:null / flagged:false on
-    // every dispatch → flagged:0 → zero transcripts drilled.
+    // #1168 backfills the non-claiming run-interrupted abandonReason for
+    // visibility. #1184 refines #1168: these slots-snapshot-fallback dispatches
+    // all carry cycleId="" (no transcript handle), so they are recorded
+    // undrillable rather than flagged — #1168 went from "flags zero" to "flags
+    // N undrillable"; #1184 records them honestly so the retro reports
+    // "recorded N undrillable, flagged-for-drill 0".
     for (const d of bundle.dispatches) {
       assert.equal(
         d.abandonReason,
         "run-interrupted",
-        `${d.skill} carries the non-claiming run-interrupted abandonReason`,
+        `${d.skill} carries the non-claiming run-interrupted abandonReason (#1168 visibility)`,
       );
       // Never claim a positive outcome on a terminal status that was never written.
       assert.equal(d.status, null, `${d.skill} status stays null (no false merged)`);
-      assert.equal(d.flagged, true, `${d.skill} served dispatch is flagged for drill`);
+      assert.equal(d.cycleId, "", `${d.skill} has no transcript handle`);
+      assert.equal(d.flagged, false, `${d.skill} served dispatch is NOT flagged (no transcript to drill)`);
+      assert.equal(d.undrillable, true, `${d.skill} served dispatch is recorded undrillable`);
     }
     const flagged = flagDispatchesForDrill(bundle.dispatches);
-    assert.equal(flagged.length, 3, "the flagged subset is non-empty (was 0)");
-    // The flagged dispatches' anchors got reflection reads — the retro is no
-    // longer structurally blind on an interrupted run.
-    assert.deepEqual(reflectionAnchors.sort(), ["#1149", "#1162", "PR#1155"]);
-    assert.equal(bundle.reflections.length, 3);
+    assert.equal(flagged.length, 0, "the flagged subset is empty — no drillable handle (#1184)");
+    // No flagged dispatch ⇒ no reflection reads: the retro doesn't fan out a
+    // transcript read it cannot satisfy.
+    assert.deepEqual(reflectionAnchors.sort(), []);
+    assert.equal(bundle.reflections.length, 0);
+  });
+
+  // -------------------------------------------------------------------------
+  // issue #1184 — #1168's interrupted-run backfill flagged empty-cycleId
+  // slots-snapshot-fallback dispatches for drill, but they have NO transcript
+  // handle (the metrics/transcript enrichment loop skips them via
+  // `if (!d.cycleId) continue;`). So #1168 went from "flags zero" to "flags N
+  // undrillable". The fix (option b): record them undrillable:true,
+  // flagged:false — visibility preserved, drill-blindness eliminated. A flagged
+  // dispatch always has a transcript handle (cycleId !== ""). On a MIXED
+  // interrupted run (some dispatches carry a resolved cycleId, some don't) the
+  // drillable ones still flag normally.
+  // -------------------------------------------------------------------------
+  test("interrupted run: a cycleId-bearing failure still flags; empty-cycleId stays undrillable (#1184)", async () => {
+    const reflectionAnchors: string[] = [];
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-mixed", status: "ended", term_reason: "interrupted" },
+          turns: [
+            {
+              turn_n: 9,
+              actions: [
+                // A dispatch action DID record a resolved cycle that failed —
+                // it carries a transcript handle and must stay flagged.
+                {
+                  type: "dispatch",
+                  slot: "dev_orch",
+                  skill: "hydra-dev",
+                  anchorReference: "issue-1180",
+                  outcome: { cycleId: "cReal", status: "failed", prNumber: "1190" },
+                },
+              ],
+              slots_snapshot: {
+                // Same slot the action recorded — enrichment only, one dispatch.
+                dev_orch: { skill: "hydra-dev", anchor: "issue-1180" },
+                // A slots-snapshot-ONLY slot: no action, no cycleId — undrillable.
+                grill_orch: { skill: "hydra-grill", anchor: "issue-1181" },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}),
+      readAnchorReflections: async (anchor: string) => {
+        reflectionAnchors.push(anchor);
+        return { content: `## PRIOR ATTEMPTS for ${anchor}`, count: 1 };
+      },
+    });
+
+    const bundle = await assembleRetroBundle("run-mixed", deps);
+    assert.equal(bundle.dispatches.length, 2, "one action-derived + one snapshot-only dispatch");
+
+    const dev = bundle.dispatches.find((d) => d.skill === "hydra-dev")!;
+    assert.equal(dev.cycleId, "cReal", "action-derived dispatch carries its resolved cycleId");
+    assert.equal(dev.bucket, "failed");
+    assert.equal(dev.flagged, true, "a drillable failure is flagged for drill");
+    assert.equal(dev.undrillable, false, "a cycleId-bearing dispatch is never undrillable");
+
+    const grill = bundle.dispatches.find((d) => d.skill === "hydra-grill")!;
+    assert.equal(grill.cycleId, "", "snapshot-only dispatch has no transcript handle");
+    assert.equal(grill.abandonReason, "run-interrupted", "#1168 visibility backfill preserved");
+    assert.equal(grill.flagged, false, "empty-cycleId dispatch is NOT flagged");
+    assert.equal(grill.undrillable, true, "empty-cycleId failure is recorded undrillable");
+
+    // Only the drillable failure's anchor got a reflection read.
+    assert.deepEqual(reflectionAnchors, ["issue-1180"]);
+    assert.equal(bundle.reflections.length, 1);
+
+    // The bundle-level invariant: every flagged dispatch has a transcript handle.
+    assert.ok(
+      bundle.dispatches.every((d) => !d.flagged || d.cycleId !== ""),
+      "invariant: flagged === true ⟹ cycleId !== ''",
+    );
+    // And the served flagged subset agrees with the pure selector.
+    assert.equal(
+      bundle.dispatches.filter((d) => d.flagged).length,
+      flagDispatchesForDrill(bundle.dispatches).length,
+      "served flagged count equals the pure selector's output",
+    );
   });
 
   test("clean stop does NOT fabricate a failure status for a pending dispatch", async () => {
