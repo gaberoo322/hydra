@@ -55,6 +55,8 @@ Before dispatching, confirm the issue body contains a `## Files in scope` sectio
 
 If the issue is missing `## Files in scope`, stop and re-triage. The `issue-label-validation` workflow blocks the `ready-for-agent` label transition when this section is missing, so this should be rare in practice — but a freshly-labelled issue may still need a one-time correction.
 
+> **Code-span trap (recurring friction `scope-check-codespan-trap`):** the `scope-check` parser unions **every** backticked code-span it finds *anywhere inside* the `## Files in scope` / `## Files out of scope` sections into the scope set — not just the bullet-list entries. So a backticked filename buried in prose under those headings (an `Expected tier:` note, a parenthetical, a ⚠️ caveat) becomes a phantom scope entry that can HARD-block an otherwise in-scope file. Keep filenames in such prose **plain-text** (no backticks); reserve backticks for the actual bullet-list path entries.
+
 The dispatched child prompt MUST include the scope-respect block from Step 5 below.
 
 ### 4. Mark in-progress
@@ -268,6 +270,7 @@ The linked issue contains a `## Files in scope` section (mandatory) and may cont
        scope-justification: `test/helpers/fixtures.ts` — fixture used by the new test added in scope
 
 5. Mirror the issue's `## Files in scope` section into the PR body so the gate can match against either source.
+6. CODE-SPAN TRAP: the scope-check parser treats EVERY backticked code-span inside the `Files in scope` / `Files out of scope` sections as a scope entry, not just the bullet paths. When you write those sections (or any prose under those headings — Expected-tier notes, parentheticals, caveats), keep non-path filenames PLAIN-TEXT. A stray backticked filename in prose becomes a phantom entry that can hard-block one of your real in-scope files.
 
 The CI `scope-check` job at `.github/workflows/ci.yml` enforces this contract. Surprising the operator with out-of-scope edits is exactly the scope-creep failure mode the deleted `reconcilePlanVsActual` used to catch — the issue body + PR body convention replaces it.
 ```
