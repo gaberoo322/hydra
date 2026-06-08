@@ -104,8 +104,6 @@ export const KNOWN_CLASS_LABELS = [
   "discover_target",
 ] as const;
 
-export type KnownClassLabel = (typeof KNOWN_CLASS_LABELS)[number];
-
 const KNOWN_CLASS_SET: ReadonlySet<string> = new Set(KNOWN_CLASS_LABELS);
 
 /** The bucket name for issues carrying none of the known class labels. */
