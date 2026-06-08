@@ -92,11 +92,37 @@ Deliver real-money cross-venue proof, hardened execution controls, and operator-
 - [ ] Add venue-native sports identity matching before title fallback
 - [ ] Add OpticOdds supported-market capability gating to scanner scope
 - [x] Wire Polymarket CLOB V2 client (sdk-v2-compat, pUSD collateral) — went live upstream 2026-04-28
-- [x] Verify Polymarket CLOB V2 live submit path end-to-end (pUSD signing, keyset≤100 pagination clamp, 200 req/s rate-limit ceiling) — item-402 closed; corrected from the false "V3 / June-15" premise
+- [x] Verify Polymarket CLOB V2 live submit path end-to-end (pUSD signing, keyset<=100 pagination clamp, 200 req/s rate-limit ceiling) — item-402 closed; corrected from the false "V3 / June-15" premise
 - [x] Adopt Kalshi order_group_updates WS account channel for live execution-state lead (item-483)
 - [x] Migrate Kalshi off deprecated /portfolio/orders to V2 /trade-api/v2/orders (guard test in place)
 - [x] Extend SportsDataIO injury feed to MLB + MLS
 - [x] Add sharp-book lead-lag evidence to sports route ranking (item-429)
-- [ ] Wire live Kalshi GET /margin/fee_tiers per-market maker/taker map into resolveKalshiFeeRate so fee-adjusted sports edge uses the venue's actual per-ticker fee (2026-05-11 restructure, 2026-06-11 zeroed-rate fix) — priorities #2
-- [x] Surface Kalshi earned rate-limit tier (grants array, Premier/Paragon/Prime) + token-budget headroom on the dual-leg submit preflight — guards against silent throttle now that legacy mutation costs are 10x V2 (2026-06-04/06-05) — completed 2026-06-08
-- [ ] Fix web/src/lib/arbitrage/scanner.test.ts standalone @/-alias resolution so the scanner's 162 tests run in isolation, not only in the full suite — priorities #1
+- [x] Wire live Kalshi GET /margin/fee_tiers per-market maker/taker map into resolveKalshiFeeRate — kalshi-margin-fee-tiers.ts + kalshi-margin-fee-tier-map.ts wired (#43, #44, #47 merged 2026-06-06/06-08) — priorities #2 COMPLETE
+- [x] Surface Kalshi earned rate-limit tier (grants array, Premier/Paragon/Prime) + token-budget headroom on the dual-leg submit preflight — kalshi-rate-limit-tier-headroom.ts wired into live-submit-preview-draft.ts — completed 2026-06-08
+- [x] Fix web/src/lib/arbitrage/scanner.test.ts standalone @/-alias resolution so the scanner's 162 tests run in isolation — #42 merged 2026-06-06 — priorities #1 COMPLETE
+- [x] Build sports-pair-ranking-evidence-row mapper (mapStructuredSportsPairCandidatesToRankingEvidenceRows) — #46 merged 2026-06-08 — priorities #4 partial; persistence wiring is M7 #1
+- [x] Wire depth/half-life penalty terms into sports-candidate-ranking.ts — observationHalfLifeMs + executableDepth penalty inputs live — priorities #5 partial; measurement feedback loop is M7 #4
+- [x] Build sports-time-to-signal-buckets.ts (summarizeSportsTimeToSignalBuckets) — priorities #6 partial; calibration wiring is M7 #2
+- [x] Verify Kalshi RFQ accepted-quote promotion carries post_only; detect PostOnlyCrossCancel in kalshi-executor.ts — #48, #49 merged 2026-06-08 — priorities #7 COMPLETE
+- [ ] Wire SportsPairRankingEvidenceRow into run-cycle persistence — priorities #1 (new)
+- [ ] Wire sports-time-to-signal-buckets into calibration output — priorities #2 (new)
+- [ ] Wire World Cup 2026 settlement-timing and arb-clustering-heatmap into scanner output — priorities #3 (new); World Cup opens June 12
+- [ ] Wire opportunity-half-life-and-depth summarizer into scan-history persistence — priorities #4 (new)
+- [ ] Rename PolymarketExecutionResult.executed to submitted — priorities #5 (new)
+- [ ] Wire nba-finals-pair-seeding into the verified-pair registry seeding workflow — priorities #6 (new)
+- [ ] Per-sport and per-pair P&L attribution breakdown — priorities #7 (new)
+
+## M7: Signal Wiring & Learning Loop Closure
+status: planned
+started:
+completed:
+
+Wire the built pure modules into production paths and close the measurement feedback loops. No new pure modules — this milestone is about connecting existing signal infrastructure to durable outputs.
+
+- [ ] Wire SportsPairRankingEvidenceRow into run-cycle persistence (fee-adjusted ranking now durable)
+- [ ] Wire sports-time-to-signal-buckets into calibration output (catalyst reaction lag measurable)
+- [ ] Wire World Cup 2026 settlement-timing into scanner Opportunity output (June 12 deadline)
+- [ ] Wire opportunity-half-life-and-depth summarizer into scan-history persistence (observed half-life feeds ranking)
+- [ ] Rename PolymarketExecutionResult.executed to submitted (closes CONTEXT.md naming smell)
+- [ ] Wire nba-finals-pair-seeding into verified-pair registry seeding (live pair discovery)
+- [ ] Per-sport and per-pair P&L attribution breakdown (closes learning loop for real-money readiness)

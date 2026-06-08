@@ -1,56 +1,69 @@
 ---
-updated: 2026-06-06
+updated: 2026-06-08
 refreshedBy: claude-research
-researchCycle: research-target-2026-06-06
+researchCycle: research-target-2026-06-08b
 tags: [hydra, hydra/direction]
 ---
 # Current state
-Hydra is sports-first and execution-capable, and venue integration is currently fresh: the codebase already consumes Kalshi `/markets/orderbooks` batch reads, `/account/endpoint_costs`, V2 `/trade-api/v2/orders` (off the deprecated `/portfolio/orders`), `order_group_updates` WS, and the corrected Polymarket CLOB V2 (pUSD, keyset≤100 clamp, 200 req/s ceiling). Tests are green on a full run (5237 passing, 2026-06-06). Active backlog is deep (68 queued, work-queue empty); per operator preference the gate is **selection quality and external-state correctness, NOT backlog volume** — do not pad. This cycle surfaced a small set of verified, sports-edge findings against first-party changelogs plus one real test-isolation defect. Market context strongly reaffirms the sports-first mandate: prediction markets crossed a $5.6B week with Kalshi taking ~71% of volume, and the 2026 NBA Finals champion is the single largest market on BOTH Kalshi (~$274M) and Polymarket (~$413M) — sports forecast and execution edge is exactly where the money is right now.
+Hydra is sports-first and execution-capable. All 7 priorities from the 2026-06-08 morning research cycle shipped within the same day: scanner test isolation, live Kalshi fee-tiers wiring, 0DTE in-game scanner structure, fee-adjusted ranking evidence rows, depth/half-life ranking integration, lineup catalyst time-to-signal buckets, and RFQ post_only verification. Tests are green (5291 total, 5288 passing, 2 skipped — verified baseline 2026-06-08). Active backlog is 68 queued items. Work queue has 2 stale entries that match already-shipped work and will be pruned this cycle.
 
-# Verified external venue state (2026-06-06, first-party changelogs)
-- **Kalshi `GET /margin/fee_tiers` was restructured 2026-05-11** to return per-market `maker_fee_rates`/`taker_fee_rates` maps, and a **2026-06-11** fix restores active (non-zeroed) rates. The codebase has the *resolver* (`resolveKalshiFeeRate`, ticker-vs-default selection) wired into sports-candidate ranking (#18), but **nothing fetches the live per-market fee map** — ticker fees are caller-supplied and effectively default today. Wiring the live fetch sharpens fee-adjusted sports edge (money-critical).
-- **Kalshi automated rate-limit tiers (Premier/Paragon/Prime) went live 2026-06-05**, earned from trailing volume and visible via the `grants` array; **legacy order-mutation rate-limit costs rose to 10x V2 on 2026-06-04**. The codebase already migrated to V2 order endpoints and schematizes `endpoint_costs`, but has **no `grants`/earned-tier awareness** — the live submit path cannot see its current token-budget headroom, risking silent throttling during a dual-leg burst.
-- **Kalshi `POST /communications/quotes` accepts `post_only` (2026-05-05)** and post-only crossing now reports `PostOnlyCrossCancel` (2026-06-04). `post_only` already appears in `kalshi-orders/order-submission`; the open question is verification, not new code (the RFQ-accepted-quote promotion path should not cross).
-- **Polymarket CLOB V2 is correctly wired** (sdk-v2-compat, pUSD, keyset≤100 clamp via item-402, 200 req/s ceiling guard). There is **NO V3 API and NO June-15 forced-liquidation deadline** — that prior premise was FALSE (third-party SEO blogs). Always pin venue assumptions to docs.polymarket.com/changelog and docs.kalshi.com/changelog.
-- **Polymarket `builderCode` attribution fields (2026-05-18)** were added to builder leaderboard/volume endpoints — relevant only if pursuing builder-revenue-share accounting (a reconciler already exists); not a priority.
+The pattern this cycle: several pure modules were built but left without production callers — `sports-pair-ranking-evidence-row.ts`, `sports-time-to-signal-buckets.ts`, `nba-finals-pair-seeding.ts`, `world-cup-arb-clustering-heatmap.ts`, and `opportunity-half-life-and-depth.ts` all have zero non-test importers. The next priorities close this wiring gap rather than building more orphaned pure modules.
+
+World Cup 2026 starts June 12 (4 days) — group-stage settlement timing and WC market scanning are maximally timely now. Per operator preference: selection quality over backlog volume, sports edge over everything else.
+
+# Verified external venue state (2026-06-08, second cycle)
+- **Kalshi `GET /margin/fee_tiers`** — live per-market `maker_fee_rates`/`taker_fee_rates` map now fetched in production (`kalshi-margin-fee-tiers.ts`), wired into `resolveKalshiFeeRate` via `kalshi-margin-fee-tier-map.ts`. The live fetch is operational; `kalshiFeeSource: "ticker-specific"` is now producible on NBA Finals tickers.
+- **Kalshi rate-limit tiers (Premier/Paragon/Prime)** — `kalshi-rate-limit-tier-headroom.ts` wired into `live-submit-preview-draft.ts` as of 2026-06-08. Token-budget headroom advisory is live in the dual-leg submit preflight.
+- **Kalshi `post_only` / `PostOnlyCrossCancel`** — RFQ accepted-quote promotion path verified to carry `post_only`; `isKalshiPostOnlyCrossCancel` detector wired in `kalshi-executor.ts` as of 2026-06-08 (#48). Glossary entry added to execution CONTEXT.md (#49).
+- **Polymarket CLOB V2** — correctly wired (sdk-v2-compat, pUSD, keyset≤100, 200 req/s). No V3. No June-15 deadline. Do not re-verify.
+- **World Cup 2026** — opens June 12. `WORLD_CUP_2026_VERIFIED_PAIRS` seeded in `lib/sports/world-cup-2026.ts`; pair registry consumed by verified-pairs API route. Settlement-timing and arb-clustering-heatmap modules exist as pure functions with no production callers.
 
 # Priority tasks
-## 1. Fix `scanner.test.ts` standalone test isolation (technical / close-the-learning-loop)
-`web/src/lib/arbitrage/scanner.test.ts` (162 tests) passes in a full `npm test` run but fails 162/162 when run alone with `Cannot find package '@/lib/providers/polymarket'` (and sibling `@/`-alias errors from `scanner.ts`/`verified-pairs.ts`). The `@/` path alias is not resolved when vitest runs this file outside the full project graph.
-- **Why now**: this breaks targeted CI/dev test runs of the single most safety-critical module (the arbitrage scanner) and lets regressions hide behind a green full-suite. A self-evaluating system must be able to run its scanner tests in isolation. Concrete and bounded.
-- **Done when**: `npx vitest run web/src/lib/arbitrage/scanner.test.ts` passes standalone (alias resolution fixed in vitest config or via the importing chain), and the full suite stays green. Add a guard, if cheap, that the scanner test file resolves its `@/` imports independently.
 
-## 2. Wire live Kalshi `GET /margin/fee_tiers` into per-market sports fee resolution (domain / sharpen-forecasts / improve-execution-discipline)
-Fetch the live per-market `maker_fee_rates`/`taker_fee_rates` map and feed the matched ticker's rate into `resolveKalshiFeeRate` so `feeAdjustedEdge` reflects the venue's actual per-market fee instead of a caller default.
-- **Why now**: executable sports edge is fee-constrained; the resolver already exists but is fed defaults, so the fee-adjusted ranking can over- or under-state edge on the exact NBA/sports markets carrying the most volume right now. The endpoint was just restructured (2026-05-11) and its zeroed-response bug fixed (2026-06-11), so the data is finally trustworthy. Money-critical, bounded, sports-first.
-- **Done when**: a provider fetch loads `/margin/fee_tiers` into a per-ticker fee map (cached/normalized), the sports candidate path supplies `tickerKalshiTakerFeeRate`/`tickerKalshiMakerFeeRate` from that map when present, `kalshiFeeSource` reports `"ticker-specific"` on at least one live sports ticker, and tests cover a ticker-specific rate changing `feeAdjustedEdge` vs the default path.
+## 1. Wire `SportsPairRankingEvidenceRow` into run-cycle persistence (domain / deepen-structural-understanding / close-the-learning-loop)
+`mapStructuredSportsPairCandidatesToRankingEvidenceRows` exists in `lib/markets/sports-pair-ranking-evidence-row.ts` and produces durable, flat fee-adjusted ranking-evidence rows from `StructuredSportsPairReviewCandidate[]`. Zero non-test callers. The run-cycle that produces `StructuredSportsPairReviewCandidate[]` in `lib/markets/verified-sports-pairs.ts` → `run-cycle.ts` discards this evidence after in-memory scoring.
+- **Why now**: fee-adjusted ranking evidence (`preFeeEdge`, `feeAdjustedEdge`, `feeSource: "ticker-specific"` from the live fee-map now operational, `clvLeadTimeBucketId`, `rankDelta`, depth evidence) is being computed and thrown away every cycle. This is the persistence leg that completes priority #4. Without it, inspecting fee-accuracy improvements or debugging ranking deltas requires re-running a cycle.
+- **Done when**: `run-cycle.ts` (or the appropriate post-preview stage) calls `mapStructuredSportsPairCandidatesToRankingEvidenceRows` after building candidates and persists the resulting rows to a durable store (JSONB column on `sportsbookPredictionEdgeCandidates`, or a dedicated row appended to the existing persistence pattern); at least one Kalshi and one Polymarket ranking-evidence row is retrievable after a cycle run; tests cover a ticker-specific-fee row differing from a default-fee row in `feeSource` and `rankDelta`.
 
-## 3. Surface Kalshi earned rate-limit tier (`grants`) and token-budget headroom on the live submit path (protect-the-operation / compress-time-to-signal)
-Read the `grants` array / `/account/limits` refill-rate + bucket-capacity and expose current earned tier (Premier/Paragon/Prime) and remaining token headroom to the dual-leg execution preflight and operator health surface.
-- **Why now**: legacy mutation costs are now 10x V2 (2026-06-04) and tiers are volume-earned (2026-06-05); a dual-leg arbitrage burst that exceeds the current bucket gets silently throttled, turning a hedged pair into one-legged exposure. The codebase schematizes `endpoint_costs` but is blind to its earned tier. Protects live execution.
-- **Done when**: the execution preflight (or operator-health payload) reports active Kalshi rate-limit tier and remaining token headroom for the submit endpoints, with a test asserting a low-headroom state is detectable before a dual-leg submit.
+## 2. Wire `sports-time-to-signal-buckets` into calibration output (domain / compress-time-to-signal / close-the-learning-loop)
+`summarizeSportsTimeToSignalBuckets` in `lib/markets/sports-time-to-signal-buckets.ts` is a complete, tested pure function that bucketises catalyst to prediction-market reaction lag into `lt30s / s30_to_2m / m2_to_10m / m10_to_60m / gt60m / noReaction`. Zero non-test callers. The `BallDontLieInjurySignal` normalizer (`lib/markets/ball-dont-lie-injury-signals.ts`) and the SportsDataIO injury feed (`lib/providers/sportsdataio-injury-feed.ts`) produce the catalyst events. The scanner produces per-market price observations. No code assembles them through the bucket summarizer and outputs the result.
+- **Why now**: the catalyst time-to-signal measurement is the stated outcome of priority #6 from the prior cycle. That priority was counted done when the module was built, but the wiring is what creates measurable edge signal. NBA Finals catalysts are live now and the bucket report would immediately show prediction-market reaction lag on finals injury/lineup events — after the Finals ends, the next high-catalyst window is World Cup group stage (June 12).
+- **Done when**: a calibration runner or scheduled job calls `summarizeSportsTimeToSignalBuckets` with injury/lineup signals from the SportsDataIO feed (or BallDontLie) and price-move observations from the scanner, persists or logs the `SportsTimeToSignalReactionReport` per sport+league+event, and at least one test covers a real catalyst to bucket assignment against a simulated price-move sequence. The bucket distribution for NBA Finals events should be inspectable from the dashboard or logs.
 
-## 4. Persist fee-adjusted sports ranking evidence (carried forward — domain / deepen-structural-understanding)
-Promote the fee, rounding, slippage, depth, source-trust, and CLV evidence already computed in sports candidate mapping into durable sports edge candidate rows or structured metadata. Pairs naturally with #2 (live fee map) — together they make fee-adjusted edge both correct AND inspectable.
-- **Why now**: executable sports edge is depth- and fee-constrained, and the richest ranking inputs are currently lost after in-memory scoring.
-- **Done when**: persisted sports candidates expose pre-fee edge, fee-adjusted edge, fee source, rounding assumption, depth evidence, CLV bucket, source trust, and final rank delta, with mapper and persistence tests covering at least one Kalshi and one Polymarket row.
+## 3. Wire World Cup 2026 settlement-timing and arb-clustering-heatmap into scanner output (domain / deepen-structural-understanding / compress-time-to-signal)
+`world-cup-settlement-timing.ts` defines `WorldCupGroupStageSettlementTimingEntry[]` with 104 group-stage matches and per-venue settlement windows. `world-cup-arb-clustering-heatmap.ts` bucketises arbitrage divergence samples by edge and latency budget. Both are pure modules with zero non-test callers. The verified-pairs route already serves WC pairs. The scanner and opportunity output do not surface settlement-window evidence or heatmap data.
+- **Why now**: World Cup group stage begins June 12. Settlement timing is materially different from multi-day outright markets — a 1X2 group-stage bet on a June 13 match settles within 90-120 minutes of kickoff. Missing this means sizing and recovery decisions for WC pairs use generic assumptions that can misclassify 2-hour settlement windows as overnight. Four days of runway.
+- **Done when**: scanner Opportunity output (or a supplemental WC metadata sidecar) includes `kalshiSettlementWindowEstimate` and `polymarketSettlementWindowEstimate` keyed from `world-cup-settlement-timing.ts` when the pair's canonical identity maps to a WC group-stage match; at least one `WorldCupArbClusteringHeatmapCell` is produced per scan cycle when WC divergence samples are present; tests cover settlement-window injection for a known WC match and a heatmap cell classification for a sample with `edgeBps > 200` and `latencyBudgetMs < 500`.
 
-## 5. Rank executable depth and opportunity half-life ahead of raw edge (carried forward — improve-execution-discipline / compress-time-to-signal)
-Wire existing depth previews and timing evidence into sports opportunity ordering so shallow or fleeting opportunities are discounted before they reach operator review.
-- **Why now**: Polymarket NBA executable arbitrage windows can last only seconds and many combinatorial opportunities are size-constrained, so raw percentage edge is not enough for profitable ranking.
-- **Done when**: sports review candidates include executable depth, observed half-life or stale-duration estimate, depth-adjusted expected value, and rank impact, with tests showing a smaller raw edge outranking a larger but non-executable edge.
+## 4. Wire `opportunity-half-life-and-depth` summarizer into scan-history persistence (execution / improve-execution-discipline / close-the-learning-loop)
+`opportunity-half-life-and-depth.ts` computes per-opportunity half-life, peak depth, decay flag, and aggregate stats across observations. Zero non-test callers. The scanner (`scanner.ts`) finds Opportunities and `scan-history.ts` persists runs — but half-life and depth are not computed or stored across sequential scan cycles.
+- **Why now**: the `observationHalfLifeMs` and `executableDepthDollars` fields are used as penalty inputs in `sports-candidate-ranking.ts` but they carry assumed/static values because no measurement infrastructure feeds observed values back. Closing this loop produces real per-pair half-life priors that sharpen the depth penalty in ranking. NBA Finals pairs — the highest volume pairs right now — are the first beneficiaries.
+- **Done when**: sequential scan cycles accumulate `ArbitrageOpportunityObservation[]` per opportunity key (persisted in scan history or a Redis structure); `summarizeArbitrageOpportunityHalfLife` is called across those observations per pair; the resulting `halfLifeMs` and depth stats are written to `scan-history` or appended to the `scannerOpportunities` row; and at least two scan cycles on the same pair produce a meaningful half-life estimate that differs from the static default.
 
-## 6. Add lineup/inactive catalyst response cohorts (carried forward — compress-time-to-signal / sharpen-forecasts)
-Convert existing injury and lineup signal plumbing into measurable sports catalyst cohorts that report prediction-market lag after sharp-book movement.
-- **Why now**: lineup and inactive timing can become a measurable catalyst edge, and the repo already has injury signal modules (now extended to MLB+MLS) plus recency ranking. Advances time-to-signal without adding generic freshness labels.
-- **Done when**: candidate or calibration output groups catalyst candidates by catalyst type, observed timestamp, lead-time bucket, sharp-line move, prediction-market response delay, and CLV result, with tests for at least one injury or inactive-style catalyst.
+## 5. Rename `PolymarketExecutionResult.executed` to `submitted` (technical / protect-the-operation)
+`PolymarketExecutionResult.executed: boolean` in `lib/execution/polymarket-executor.ts` means "we sent the order" — identical semantics to `KalshiExecutionResult.submitted` after the 2026-05-27 rename (item-482). The CONTEXT.md flags this explicitly: "has the same naming smell" and "symmetric rename is tracked as a follow-up." The field name collides with the `executed` VenueOrderLifecycleStatus terminal state and the `Execution` arbitrage noun.
+- **Why now**: smallest friction item in this priority list. Zero new logic. Bounded blast radius (rename a field + all callers in the executor + callers of PolymarketExecutionResult). Eliminates the confusion the CONTEXT.md warns about. Defer it and it keeps compounding as more code is written against the confusing name.
+- **Done when**: `PolymarketExecutionResult.executed` is renamed to `submitted` everywhere; callers in `execute-arbitrage.ts` and the execute API route are updated; TypeScript strict-mode clean; full test suite passes; CONTEXT.md flagged ambiguity section updated to reflect the rename is complete.
 
-## 7. Verify Kalshi RFQ-accepted-quote promotion uses `post_only` (execution / verify-only)
-Confirm the RFQ accepted-quote → submit-ready promotion path (`accepted-rfq-promotion-handoff`) carries `post_only` so a promoted maker quote cannot accidentally cross and pay taker fees, and that `PostOnlyCrossCancel` is handled rather than treated as a generic rejection.
-- **Why now**: `post_only` exists in order-submission but the RFQ promotion handoff should be explicitly verified post the 2026-05-05/2026-06-04 changes. Smallest item; verify-or-fix.
-- **Done when**: a test asserts the RFQ-promoted submit packet sets `post_only` and that a `PostOnlyCrossCancel` update reason is classified as a no-cross outcome, not a failure.
+## 6. Wire `nba-finals-pair-seeding` into the verified-pair registry seeding workflow (domain / deepen-structural-understanding)
+`buildNbaFinalsPairSeedCandidates` in `lib/arbitrage/nba-finals-pair-seeding.ts` identifies NBA Finals market pairs from live Kalshi + Polymarket market discovery outputs, with freshness-gating and exact-match scoring. Zero non-test callers. The `kalshiPolymarketPairRegistry` and the `VERIFIED_PAIRS` registry are the current durable sources of pair identity — dynamic pair discovery from live market feeds is not yet wired.
+- **Why now**: if the NBA Finals run to Game 7 (June 20 at the latest), live-discovered Finals pairs have a short time window. More durably: the same seeding pattern can serve World Cup group-stage pair discovery, which starts June 12 and runs through July. Wiring it now makes the pattern available before the WC begins.
+- **Done when**: a scheduler or runner calls `buildNbaFinalsPairSeedCandidates` with live Kalshi and Polymarket market discovery results; fresh candidates with `rankScore > 0` are upserted into the verified-pair registry or surfaced in operator review; tests cover at least one live-discovered pair with a freshness delta within the 30-minute window; the scanner can consume newly-seeded pairs without restart.
+
+## 7. Per-sport and per-pair P&L attribution breakdown (execution / close-the-learning-loop)
+Implement a P&L attribution summary that groups settled `venueOrders` by sport and pair key, computing realized P&L, fee costs, settlement velocity, and win rate per group. This is listed in the backlog at priority 2 and is the most direct "close the learning loop" item for real-money readiness.
+- **Why now**: the system is approaching first real-money dual-leg runs. Without per-sport P&L attribution, the operator has no way to distinguish which sports or pairs are profitable from which are losing — raw aggregate P&L is insufficient for strategy refinement. The `venueOrders`, `arbitrageRuns`, and `venueOrderPnlPhase*` modules provide all the necessary inputs.
+- **Done when**: a new API route or dashboard data loader returns `{ sport, pairKey, totalRealizedPnlDollars, feesPaidDollars, settlementVelocityP50Ms, winRate, tradeCount }[]` for the trailing N settled executions; the PnL page surfaces per-sport and per-pair rows; tests cover at least one sport-grouped attribution from a set of mixed-sport settled VenueOrders.
 
 # What's been completed (DO NOT re-propose)
+- Wire live Kalshi GET /margin/fee_tiers into per-market sports fee resolution — `kalshi-margin-fee-tiers.ts`, `kalshi-margin-fee-tier-map.ts`, wired into `resolveKalshiFeeRate` (#43, #44, #47 merged 2026-06-06/06-08).
+- Surface Kalshi earned rate-limit tier (grants array, Premier/Paragon/Prime) + token-budget headroom on the dual-leg submit preflight — `kalshi-rate-limit-tier-headroom.ts` merged 2026-06-08.
+- Fix web/src/lib/arbitrage/scanner.test.ts standalone @/-alias resolution — `npx vitest run scanner.test.ts` passes standalone (#42 merged 2026-06-06).
+- Persist fee-adjusted ranking evidence into durable candidate rows — `sports-pair-ranking-evidence-row.ts` mapper built (#46 merged 2026-06-08); persistence wiring (priority #1 above) is the open follow-up.
+- Rank executable depth and opportunity half-life ahead of raw edge — penalty terms wired into `sports-candidate-ranking.ts`; measurement infrastructure to feed observed values back (priority #4 above) is the open follow-up.
+- Add lineup/inactive catalyst response cohorts — `sports-time-to-signal-buckets.ts` built; wiring into calibration (priority #2 above) is the open follow-up.
+- Verify Kalshi RFQ accepted-quote promotion carries post_only — `isKalshiPostOnlyCrossCancel` wired in `kalshi-executor.ts`; `PostOnlyCrossCancel` glossary added (#48, #49 merged 2026-06-08).
+- Build Kalshi 0DTE in-game sports contract scanner for NBA Finals and World Cup live markets — scanner structure built; WC verified-pairs wired in the API route.
 - Report CLV cohorts by source and lead-time bucket.
 - Normalize Kalshi `price_ranges` start/end fields at provider parse boundary.
 - Fix league-scoped CLV bucket matching to require exact league equality.
@@ -66,26 +79,28 @@ Confirm the RFQ accepted-quote → submit-ready promotion path (`accepted-rfq-pr
 - Paper LLM probability estimator and calibration dashboard (paper-LLM edge backend now on local Ollama, #641).
 - Pinnacle fair-line ingestion and no-vig derivation; Pinnacle CLV slices for injury-adjusted candidates (item-477).
 - Negative-risk and sports combinatorial scan modules.
-- Promote Kalshi RFQ accepted quotes into submit-ready execution packets (item-467) — `post_only` carry-through is the open verify (priority 7).
+- Promote Kalshi RFQ accepted quotes into submit-ready execution packets (item-467).
 - Expose sports forecast edge evidence on dashboard review flows (item-469).
-- Polymarket CLOB V2 client wiring AND verification: sdk-v2-compat, pUSD collateral, gamma keyset≤100 clamp, 200 req/s ceiling guard (item-402 closed).
+- Polymarket CLOB V2 client wiring AND verification (item-402 closed).
 - Adopt Kalshi `order_group_updates` WS account channel for live execution-state lead (item-483).
-- Migrate Kalshi off deprecated `/portfolio/orders` to V2 `/trade-api/v2/orders` (guard test in place).
+- Migrate Kalshi off deprecated `/portfolio/orders` to V2 `/trade-api/v2/orders`.
 - Consume Kalshi `/markets/orderbooks` batch read and `/account/endpoint_costs`.
-- Wire `resolveKalshiFeeRate` into sports-candidate ranking (#18) — live fee-map fetch is the open follow-up (priority 2).
 - Extend SportsDataIO injury feed to MLB + MLS.
 - Add sharp-book lead-lag evidence to sports route ranking (item-429).
 - Add standalone `pair_key` indexes on scanner_opportunities + alert_states (item-316).
 - Enforce Polymarket CLOB 200 req/s server rate ceiling guard (item-402).
+- Rename `KalshiExecutionResult.executed` to `submitted` (2026-05-27, item-482).
 
 # What NOT to work on
-- **Do NOT build a "Polymarket V3" client or treat a June-15 forced-liquidation deadline as real.** FALSE premise from third-party SEO blogs, contradicted by the official changelog. The real venue change is CLOB V2 (2026-04-28), already wired and verified.
-- Do not re-build the Kalshi `resolveKalshiFeeRate` resolver — it exists (#18). Priority 2 is the live fee-map *fetch* that feeds it, not the resolver.
-- Do not re-migrate Kalshi order endpoints to V2 — already done with a guard test. Do not re-clamp the Polymarket gamma keyset limit — done (item-402). Do not re-add the Polymarket 200 req/s ceiling guard — done (item-402).
-- Do not prioritize defensive hardening, fail-closed rewrites, generic preflights, guard rails, migration-drift gates, or broad executor refactors unless the operator explicitly asks. (Exception: the narrow, money-critical rate-limit-headroom probe in priority 3 is execution-protection, not generic hardening.)
-- Do not pull focus into politics, economics, culture, or crypto-adjacent markets while sports forecast and signal compounding work remains available — market data this week confirms sports IS the volume.
+- Do NOT re-propose the pure module builds for `sports-pair-ranking-evidence-row`, `sports-time-to-signal-buckets`, `nba-finals-pair-seeding`, `world-cup-arb-clustering-heatmap`, or `opportunity-half-life-and-depth` — all five are built. The work is the wiring, not the module.
+- Do NOT build a "Polymarket V3" client or treat a June-15 forced-liquidation deadline as real. FALSE premise. The real venue change is CLOB V2 (2026-04-28), already wired and verified.
+- Do not re-build the Kalshi `resolveKalshiFeeRate` resolver or re-fetch `/margin/fee_tiers` — both done. The open work is persistence (#1 above).
+- Do not re-migrate Kalshi order endpoints to V2 — done with guard test. Do not re-clamp Polymarket gamma keyset — done. Do not re-add Polymarket 200 req/s ceiling guard — done.
+- Do not re-propose the Kalshi earned rate-limit tier / grants array / token-budget headroom — completed 2026-06-08.
+- Do not re-propose the RFQ post_only verification or `PostOnlyCrossCancel` detection — completed 2026-06-08.
+- Do not prioritize defensive hardening, fail-closed rewrites, generic preflights, guard rails, migration-drift gates, or broad executor refactors unless the operator explicitly asks.
+- Do not pull focus into politics, economics, culture, or crypto-adjacent markets while sports forecast and signal compounding work remains available.
 - Do not re-propose completed CLV cohort reporting, Kalshi price range normalization, exact league CLV matching, World Cup team normalization, zero-persistence diagnostics, injury-recency ranking, CLV-gated sizing integration, sharp-line sizing provenance, fee-adjusted ranking delta, or timestamp-locked nomination replay metrics.
 - Do not re-propose the abandoned generic sharp-line movement boost; future sharp-line work must be cohort-based, timestamp-locked, or tied to catalyst response measurement.
-- Do not re-propose "Promote clean SportsGameOdds discovery matches into verified-pair candidates" or any variant wiring SGO discovery into verified-pair promotion as a multi-cycle drift loop.
-- Do not propose broad multi-cycle abstractions like "improve edge model" without a concrete single-cycle implementation target.
-- **Do not pad the backlog.** It holds 68 queued items across all five dimensions; adding low-edge items to hit a volume target is counterproductive (operator preference: maintainability/selection-quality over throughput). Prefer correcting stale/false items and pulling the best existing items into the work queue over inventing new ones.
+- Do not propose the Hyperliquid HIP-4 monitor as a priority — it is a pure module in a secondary domain. Monitor but do not prioritize.
+- Do not pad the backlog. It holds 68 queued items; adding low-edge items to hit a volume target is counterproductive (operator preference: maintainability/selection-quality over throughput).
