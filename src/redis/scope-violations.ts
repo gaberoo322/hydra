@@ -26,7 +26,7 @@ import { getRedisConnection } from "./connection.ts";
 export const SCOPE_VIOLATION_TTL_SECONDS = 90 * 24 * 60 * 60;
 
 /** Daily scope-violation counter key. INT string, one per UTC day. */
-export function scopeViolationsDailyKey(date: string): string {
+function scopeViolationsDailyKey(date: string): string {
   return `hydra:metrics:scope-violations:daily:${date}`;
 }
 
