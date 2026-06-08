@@ -276,14 +276,3 @@ export async function getCapacitySnapshot(
     recent: history,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Test seam
-// ---------------------------------------------------------------------------
-
-/**
- * Test-only: clear the history list. Production callers should not use this.
- */
-export async function _resetCapacityHistory(): Promise<void> {
-  await history.clear();
-}
