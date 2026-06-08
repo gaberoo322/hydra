@@ -89,6 +89,30 @@ Then drop a finding before it becomes an issue when ANY of:
 
 > **Quota:** aim for the highest-confidence findings first. If `knip` reports more than ~8 survivors, file the top 8 (whole-file deletions rank above single-export deletions — they reclaim the most surface) and note the remainder in the report; the next idle turn picks up where this one left off (the dedup filter ensures no double-filing).
 
+### 2.5 knip false-positive taxonomy + safe-fix recipe (issue #1299 — read before deleting anything)
+
+`knip` reports a symbol as an "unused export" without distinguishing a *truly dead* symbol from one whose only dead aspect is its `export` visibility, a re-export whose backing definition is still live, or a Redis key generator coupled to sibling generators and their test assertions. A naive **delete** on any of the last three breaks the build or orphans coupled code. The `hydra-dev` agent that picks up a `cleanup-scan` issue **MUST** classify the finding into one of the four cases below and apply the matching safe fix. This is durable guidance so the disambiguation is not re-derived per cycle (the recurring `dead-code-removal-leaves-orphan-redis-keys` / `knip-dead-export-still-internally-used` friction, cross-run recurrence 9).
+
+**Classification probe (run before writing the fix).** For the flagged symbol `<name>` in `<path>`, grep the whole repo for remaining references and inspect the flagged line:
+
+```bash
+# 1. Is the symbol still referenced ANYWHERE in the repo (src + test), ignoring its own definition site?
+rg -n --no-heading -w "<name>" src test | grep -v "<path>"
+# 2. Is the flagged line a re-export (`export { x } from './y'` / `export * from`) rather than the definition?
+rg -n "export .*\b<name>\b" "<path>"
+# 3. For a Redis key generator: are sibling generators in the same file referenced only by the same test assertions?
+rg -n "<name>" src/redis test/redis-keys.test.mts
+```
+
+| Case | knip says | What's actually true | Safe fix | Evidence anchor |
+|---|---|---|---|---|
+| **(a) Truly dead** | unused export | No references anywhere in `src/` or `test/` (probe 1 empty), not a re-export, no coupled keys. | **Delete** the symbol/file and any imports/re-exports that only existed to reference it. This is the only case where deletion is correct. | the default knip happy-path |
+| **(b) Internally referenced — demote, don't delete** | unused export | The symbol is still *called within its own file* (or module) — only its `export` visibility is dead (probe 1 shows in-file callers; probe 2 shows it's the definition). | **Drop only the `export` keyword**, keep the definition module-private. Do NOT delete the symbol — the build breaks. | `src/capacity-floor.ts:183,250,260` (function called internally); `src/autopilot/recommendation-engine.ts` incl. `MAX_RECS_PER_CALL` (const/interface still used) |
+| **(c) Re-export, definition live elsewhere** | unused export (the re-export line) | The flagged line is a `export { … } from …` / barrel re-export, but the backing **definition lives in another file and is still used** (probe 2 shows a `from` clause; probe 1 finds live uses of the definition). | **Remove only the re-export line**, leave the definition and its real consumers untouched. | `src/digest.ts` re-export block (definition lives + is used in `src/digest-format.ts`) |
+| **(d) Coupled Redis key generator** | unused export (a key generator) | The generator is coupled to **sibling generators in the same `src/redis/keys.ts` block AND their assertions in `test/redis-keys.test.mts`** (probe 3). Deleting the generator alone orphans the test assertions; deleting the assertions alone is a coverage false-green. | **Remove the full coupled set together** — the generator(s) *and* their test assertions — under a `scope-justification:` block in the PR body naming the test file (it is out of the single-file scope the issue names). Treat the key generator + its assertions as one atomic unit. | `planCache*` generators in `src/redis/keys.ts` + their assertions in `test/redis-keys.test.mts` (removed together under scope-justification) |
+
+**Decision rule:** delete (case a) is the *exception*, not the default. If probe 1 finds **any** live reference, you are in case (b) or (c) → demote / drop-re-export, never delete. If the symbol is a Redis key generator, run probe 3 → case (d) → atomic coupled-set removal with scope-justification. When still ambiguous after the probes, prefer the **narrowest** edit that turns the symbol dead (drop `export` / drop the re-export line) — a missed cleanup is cheaper than a broken build, and the deterministic acceptance check (`npm test` + `tsc` + `npm run typecheck:test` still green, no new knip finding) is what proves the fix correct. If `npm test`/`tsc` go red after a delete, that is knip's false positive surfacing — revert to the demote/drop-re-export fix, do not force the deletion.
+
 ### 3. Emit issues (labelled `ready-for-agent` + `cleanup-scan`)
 
 Each surviving finding becomes one GitHub issue. Use `gh issue create` directly (these are independent single-finding tickets, so the `hydra-prd` epic path is unnecessary).
@@ -199,6 +223,7 @@ Expected:
 - **Scope section present (issue #1077).** Every emitted issue body carries a section headed exactly `## Files in scope` listing the single target path. This is the heading `scope-check` matches (`/Files in scope/i`, read live from the linked issue body) and the canonical heading `hydra-prd-render.ts` emits — so a `hydra-dev` pickup can copy it straight into the PR body instead of hand-authoring it from the design-concept artifact.
 - Re-running `--apply` against an already-saturated board (> 10 open `cleanup-scan`) emits nothing and prints the saturation skip.
 - Re-running `--apply` does not double-file a finding that already has an open `cleanup-scan` issue.
+- **knip false-positive taxonomy present (issue #1299).** Step 2.5 carries a four-case table — (a) truly dead → delete, (b) internally referenced → demote `export`, (c) re-export with live definition → drop only the re-export line, (d) coupled Redis key generator → atomic removal of the generator(s) + their test assertions under scope-justification — each with a classification probe and an evidence anchor, so a `hydra-dev` pickup classifies the finding instead of re-deriving the disambiguation. A finding that turns `npm test`/`tsc` red after a delete is a knip false positive and routes to the demote/drop-re-export fix, never a forced deletion.
 - **No blank-title / double-file drafts (issue #1167).** Every emitted issue has a fully-formed title with the symbol name present — `validateFinding()` drops any finding with an empty name/path before render, and `renderTitle()`/`renderBody()` throw on an invalid finding, so the malformed `cleanup: remove unused export  (…)` / `cleanup: remove unused file ` drafts (run ef0a9847, #1151–#1158) are impossible. Re-running the parse → validate → dedup pipeline against the board it just filled emits **zero** new issues, because `dedupAgainstOpen()` keys on the stable `path::symbol` identity (not the title) and so recognises the canonical issues as duplicates. Pinned in `test/hydra-cleanup-render.test.mts`.
 
 ## Files
