@@ -540,7 +540,7 @@ const HAIKU_OUTPUT_PER_MTOK_USD = 5.0;
  * The `runId`/`turn_n` from the prompt input is stamped into the parsed
  * recommendations.
  */
-export function defaultLlmClient(opts: {
+function defaultLlmClient(opts: {
   fetchImpl?: typeof fetch;
   apiKey?: string;
 } = {}): LlmClient {
