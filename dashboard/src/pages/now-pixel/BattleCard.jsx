@@ -13,7 +13,7 @@
  */
 
 export const CARD_WIDTH = 220;
-export const CARD_HEIGHT = 150;
+const CARD_HEIGHT = 150;
 
 const SPRITE_PREFIX = "/sprites/pokemon/";
 
