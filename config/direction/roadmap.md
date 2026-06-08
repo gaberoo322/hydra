@@ -98,5 +98,5 @@ Deliver real-money cross-venue proof, hardened execution controls, and operator-
 - [x] Extend SportsDataIO injury feed to MLB + MLS
 - [x] Add sharp-book lead-lag evidence to sports route ranking (item-429)
 - [ ] Wire live Kalshi GET /margin/fee_tiers per-market maker/taker map into resolveKalshiFeeRate so fee-adjusted sports edge uses the venue's actual per-ticker fee (2026-05-11 restructure, 2026-06-11 zeroed-rate fix) — priorities #2
-- [ ] Surface Kalshi earned rate-limit tier (grants array, Premier/Paragon/Prime) + token-budget headroom on the dual-leg submit preflight — guards against silent throttle now that legacy mutation costs are 10x V2 (2026-06-04/06-05) — priorities #3
+- [x] Surface Kalshi earned rate-limit tier (grants array, Premier/Paragon/Prime) + token-budget headroom on the dual-leg submit preflight — guards against silent throttle now that legacy mutation costs are 10x V2 (2026-06-04/06-05) — completed 2026-06-08
 - [ ] Fix web/src/lib/arbitrage/scanner.test.ts standalone @/-alias resolution so the scanner's 162 tests run in isolation, not only in the full suite — priorities #1
