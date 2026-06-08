@@ -21,6 +21,7 @@
 import { getTargetCommitUrl } from "./target-config.ts";
 import { ORCHESTRATOR_FLOOR } from "./capacity-floor.ts";
 import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
 
 const MAX_DIGEST_LENGTH = 4000; // Telegram's ~4096 char limit with margin
 
@@ -242,18 +243,27 @@ function formatMinutes(mins) {
   return `${(m / (24 * 60)).toFixed(1)}d`;
 }
 
+/**
+ * Format a critical alert event into its Telegram string.
+ *
+ * Every `case` references a `NOTIFICATION_EVENT_TYPES` member (aliased `E`) —
+ * the typed vocabulary in `event-bus.ts` (issue #1182), satisfying the
+ * design-concept invariant that the digest critical-alert switch is typed
+ * against the source-of-truth map — so a misspelled event type is a compile
+ * error, and adding a new type surfaces here as a non-exhaustive switch.
+ */
 export function formatCriticalAlert(event) {
   const type = event.type || "unknown";
   const payload = event.payload || {};
 
   switch (type) {
-    case "cycle:rollback_failed":
+    case E.CYCLE_ROLLBACK_FAILED:
       return `🚨 *CRITICAL: Rollback Failed*\nTask: ${payload.title}\nCommit: \`${payload.commitSha?.slice(0, 7)}\`\nError: ${payload.error}\n\n⚠️ Manual intervention required immediately`;
-    case "scheduler:stopped":
+    case E.SCHEDULER_STOPPED:
       return `🛑 *Scheduler Stopped*\nReason: ${payload.reason}\nCycles run: ${payload.cyclesRun}`;
-    case "scheduler:paused_repetition":
+    case E.SCHEDULER_PAUSED_REPETITION:
       return `🔁 *Scheduler Paused — Repetitive Work*\n${payload.reason}\n\nRecent tasks:\n${(payload.recentTitles || []).map(t => `• ${t.slice(0, 70)}`).join("\n")}\n\n${payload.suggestion}`;
-    case "scheduler:backlog_empty":
+    case E.SCHEDULER_BACKLOG_EMPTY:
       return `📭 *Backlog Empty*\n${payload.message}\n\n${payload.suggestion}`;
     default:
       return `⚠️ *${type}*\n${JSON.stringify(payload).slice(0, 300)}`;

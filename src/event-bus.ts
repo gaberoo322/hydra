@@ -54,12 +54,96 @@ const RETAINED_STREAMS = {
  */
 type StreamKey = (typeof STREAMS)[keyof typeof STREAMS];
 
+// ---------------------------------------------------------------------------
+// Notification event vocabulary — the typed `type` discriminator (issue #1182).
+//
+// `NOTIFICATION_EVENT_TYPES` is the SINGLE SOURCE OF TRUTH for every event
+// type that flows on the `NOTIFICATIONS` (and internal `DLQ`) stream. It is a
+// frozen `const` map — mirroring `STREAMS` above — so:
+//
+//   - `NotificationEventType` (below) is the closed union of its values.
+//   - Every formatter that switches on the event type
+//     (`notify.ts` formatMessage, `index.ts` formatAlertMessage + ALERT_TYPES,
+//     `digest.ts` critical list) references these named members instead of raw
+//     string literals. A typo on a member name is then a compile error, and
+//     adding a new event type is a one-line edit here that surfaces every
+//     affected formatter as a non-exhaustive switch / missing arm.
+//
+// The on-wire string values are UNCHANGED — this is a type-safety pass over the
+// existing vocabulary, not a behaviour change.
+// ---------------------------------------------------------------------------
+const NOTIFICATION_EVENT_TYPES = {
+  // --- Cycle lifecycle ---
+  CYCLE_START: "cycle:start",
+  CYCLE_COMPLETED: "cycle:completed",
+  CYCLE_STALLED: "cycle:stalled",
+  CYCLE_FAILED: "cycle:failed",
+  CYCLE_AUTO_KILLED: "cycle:auto_killed",
+  CYCLE_STALE_PRIORITIES: "cycle:stale_priorities",
+  CYCLE_ROLLBACK: "cycle:rollback",
+  CYCLE_ROLLBACK_FAILED: "cycle:rollback_failed",
+  CYCLE_ROLLED_BACK: "cycle:rolled_back",
+  CYCLE_OPERATOR_BLOCKED: "cycle:operator_blocked",
+
+  // --- Task events ---
+  TASK_REJECTED: "task:rejected",
+  TASK_VERIFICATION_FAILED: "task:verification_failed",
+  TASK_DRIFT_DETECTED: "task:drift_detected",
+  TASK_MERGE_FAILED: "task:merge_failed",
+  TASK_SHELVED: "task:shelved",
+
+  // --- Scheduler ---
+  SCHEDULER_STOPPED: "scheduler:stopped",
+  SCHEDULER_BACKLOG_EMPTY: "scheduler:backlog_empty",
+  SCHEDULER_PAUSED_REPETITION: "scheduler:paused_repetition",
+  SCHEDULER_ERROR: "scheduler:error",
+
+  // --- Research / Architect ---
+  RESEARCH_COMPLETED: "research:completed",
+  ARCHITECT_REVIEW_COMPLETED: "architect:review_completed",
+
+  // --- Deploy ---
+  DEPLOY_COMPLETED: "deploy:completed",
+  DEPLOY_FAILED: "deploy:failed",
+
+  // --- DLQ / consumer health ---
+  DLQ_ALERT: "dlq:alert",
+  DLQ_ENTRY: "dlq:entry",
+  CONSUMER_DEAD: "consumer:dead",
+
+  // --- Operator review pickup (issue #745) ---
+  REVIEW_PICKUP_READY: "review:pickup_ready",
+
+  // --- Learning-system pattern alerts ---
+  PATTERN_LOW_MERGE_RATE: "pattern:low_merge_rate",
+  PATTERN_CONSECUTIVE_FAILURES: "pattern:consecutive_failures",
+  PATTERN_RECURRING_REGRESSIONS: "pattern:recurring_regressions",
+  PATTERN_ANCHOR_STUCK: "pattern:anchor_stuck",
+  PATTERN_TEST_DECLINE: "pattern:test_decline",
+  PATTERN_HIGH_ABANDONMENT: "pattern:high_abandonment",
+} as const;
+
+/**
+ * The closed union of every notification event type the bus vocabulary owns.
+ * Derived from `NOTIFICATION_EVENT_TYPES` so the map is the only place a value
+ * is declared.
+ */
+type NotificationEventType =
+  (typeof NOTIFICATION_EVENT_TYPES)[keyof typeof NOTIFICATION_EVENT_TYPES];
+
 /**
  * What a producer passes to `publish()`. The bus wraps this into a fixed
  * `EventEnvelope` (below). `payload` is serialised to JSON on the wire.
+ *
+ * `type` is the `NotificationEventType` vocabulary — the union members surface
+ * the known event types in tooling and let in-process producers be checked
+ * against the source-of-truth map. The `(string & {})` widening keeps the one
+ * sanctioned dynamic boundary (`POST /events/publish`, where `type` arrives
+ * from an external request body) able to forward arbitrary strings without a
+ * cast, exactly as the `streamKey()` escape hatch widens `StreamKey`.
  */
 interface EventInput {
-  type: string;
+  type: NotificationEventType | (string & {});
   source: string;
   payload?: unknown;
   correlationId?: string | null;
@@ -361,7 +445,7 @@ class EventBus {
     if (deliveryCount >= 3) {
       // Move to DLQ after 3 attempts
       await this.publish(STREAMS.DLQ, {
-        type: "dlq:entry",
+        type: NOTIFICATION_EVENT_TYPES.DLQ_ENTRY,
         source: "event-bus",
         payload: {
           originalStream: stream,
@@ -416,9 +500,10 @@ class EventBus {
   }
 }
 
-export { EventBus, STREAMS, RETAINED_STREAMS, CONSUMER_GROUPS };
+export { EventBus, STREAMS, RETAINED_STREAMS, CONSUMER_GROUPS, NOTIFICATION_EVENT_TYPES };
 export type {
   StreamKey,
+  NotificationEventType,
   EventInput,
   EventEnvelope,
   ConsumedEvent,

@@ -24,6 +24,7 @@
  */
 
 import { sendToTelegram } from "./notify.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
 import { getCapacitySnapshot, DEFAULT_WINDOW_CYCLES } from "./capacity-floor.ts";
 import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
 import {
@@ -72,12 +73,14 @@ function isQuietHours() {
 export function recordEvent(event) {
   const type = event.type || "unknown";
 
-  // Critical events bypass digest and send immediately
-  const critical = [
-    "cycle:rollback_failed",
-    "scheduler:stopped",
-    "scheduler:paused_repetition",
-    "scheduler:backlog_empty",
+  // Critical events bypass digest and send immediately. Members reference the
+  // typed NOTIFICATION_EVENT_TYPES vocabulary (issue #1182) so a misspelled
+  // event type here is a compile error.
+  const critical: string[] = [
+    E.CYCLE_ROLLBACK_FAILED,
+    E.SCHEDULER_STOPPED,
+    E.SCHEDULER_PAUSED_REPETITION,
+    E.SCHEDULER_BACKLOG_EMPTY,
   ];
   if (critical.includes(type)) {
     sendImmediate(formatCriticalAlert(event));
