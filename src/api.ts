@@ -6,6 +6,7 @@ import { createCyclesRouter } from "./api/cycles.ts";
 import { createQueueRouter } from "./api/queue.ts";
 import { createTasksRouter } from "./api/tasks.ts";
 import { createHealthRouter } from "./api/health.ts";
+import { createRecommendationsRouter } from "./api/recommendations.ts";
 import { createResearchRouter } from "./api/research.ts";
 import { createBacklogRouter } from "./api/backlog.ts";
 import { createDesignConceptsRouter } from "./api/design-concepts.ts";
@@ -65,6 +66,9 @@ function createApi(eventBus) {
   api.use(createQueueRouter());
   api.use(createTasksRouter());
   api.use(createHealthRouter(eventBus));
+  // Operator-action-items surface (issue #1322) — extracted out of the health
+  // router; mounts prefix-less so /api/recommendations stays byte-identical.
+  api.use(createRecommendationsRouter());
   api.use(createResearchRouter(eventBus));
   api.use(createBacklogRouter());
   api.use(createDesignConceptsRouter());
