@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { resolve } from "node:path";
 
 // Issue #939: the `df`/`free`/`systemctl` host-info probes are now routed
 // through the **Host-Probe Adapter** (`src/host-probe/*`) — a sibling Seam to
@@ -42,7 +41,6 @@ import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-pr
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
-const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
 
 // Issue #734 (deploy-drift backstop): expose the SHA the orchestrator is
 // running from so the watchdog (and operators) can compare it against
@@ -333,98 +331,10 @@ export function createHealthRouter(eventBus: any) {
     });
   });
 
-  // GET /recommendations — Operator action items computed from system state
-  router.get("/recommendations", async (req, res) => {
-    const recs = [];
-    try {
-      // 1. Triage items awaiting approval
-      const counts = await getBacklogCounts();
-      if (counts.triage > 0) {
-        recs.push({
-          type: "review",
-          priority: 2,
-          title: `${counts.triage} item${counts.triage > 1 ? "s" : ""} in Triage awaiting review`,
-          description: "Research suggestions need approval before entering the backlog",
-          action: "Review on the Backlog page",
-          link: "/backlog",
-        });
-      }
-
-      // 2. Blocked backlog items
-      if (counts.blocked > 0) {
-        recs.push({
-          type: "action",
-          priority: 1,
-          title: `${counts.blocked} blocked item${counts.blocked > 1 ? "s" : ""} need intervention`,
-          description: "These items can't proceed without operator action",
-          action: "Unblock on the Backlog page",
-          link: "/backlog",
-        });
-      }
-
-      // 3. Scheduler not running
-      const sched = await getSchedulerStatus();
-      if (!sched.running) {
-        recs.push({
-          type: "action",
-          priority: 1,
-          title: "Scheduler is stopped",
-          description: "Hydra won't run autonomous cycles until the scheduler is started",
-          action: "Start from the Overview page",
-          link: "/",
-        });
-      }
-
-      // 4. Empty work pipeline
-      if (counts.total === 0 && counts.inProgress === 0 && counts.triage === 0) {
-        recs.push({
-          type: "info",
-          priority: 3,
-          title: "Work pipeline is empty",
-          description: "No items in triage, backlog, or queue. Hydra will fall back to priorities.md or run research to find work.",
-          action: "Add items on the Backlog page or update Vision",
-          link: "/backlog",
-        });
-      }
-
-      // 5. Check priorities.md for BLOCKED items
-      try {
-        const prioritiesContent = await readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
-        const blockedHeaders = prioritiesContent.match(/^##.*\[BLOCKED\].*$/gim) || [];
-        const blockedReasons = prioritiesContent.match(/^\s*-\s*Blocked on.*$/gim) || [];
-        if (blockedHeaders.length > 0) {
-          const items = blockedHeaders.map((h: string) => h.replace(/^##\s*\d+\)\s*\[BLOCKED\]\s*/i, "").trim());
-          const reasons = blockedReasons.map((r: string) => r.replace(/^\s*-\s*Blocked on operator:\s*/i, "").trim());
-          recs.push({
-            type: "action",
-            priority: 1,
-            title: `${blockedHeaders.length} priorit${blockedHeaders.length > 1 ? "ies" : "y"} blocked on operator action`,
-            description: items.map((item: string, i: number) => `${item}${reasons[i] ? ` — needs: ${reasons[i]}` : ""}`).join("\n"),
-            action: "Provide required credentials/approvals to unblock",
-            link: "/vision",
-          });
-        }
-      } catch { /* intentional: no priorities file present yet — degrade silently */ }
-
-      // 6. Kill file present
-      if (existsSync(KILL_FILE)) {
-        recs.push({
-          type: "action",
-          priority: 1,
-          title: "Kill switch is active",
-          description: "All cycles are blocked. Remove the kill file to resume.",
-          action: "Investigate and remove ~/.hydra/.kill",
-          link: "/health",
-        });
-      }
-
-      // Sort by priority (1=urgent first)
-      recs.sort((a, b) => a.priority - b.priority);
-    } catch (err: any) {
-      console.error(`[API] recommendations error: ${err.message}`);
-    }
-    res.json(recs);
-  });
+  // GET /recommendations (operator action items) was extracted to
+  // createRecommendationsRouter in src/api/recommendations.ts (issue #1322).
+  // The public /api/recommendations path is unchanged — that router mounts
+  // prefix-less in src/api.ts, same as this one.
 
   return router;
 }

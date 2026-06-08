@@ -1,0 +1,161 @@
+import { Router } from "express";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { resolve, join } from "node:path";
+
+import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
+import { getBacklogCounts } from "../backlog/reads.ts";
+
+// Issue #1322: the operator-action-items surface — extracted out of
+// createHealthRouter (src/api/health.ts) into its own deep, named home. This
+// router owns the operator-action-items *policy*: which categories exist, their
+// priority ordering, and the trigger thresholds. Adding a category or moving a
+// threshold now touches exactly this one file.
+//
+// The public HTTP path stays byte-identical: this router mounts PREFIX-LESS in
+// src/api.ts (like createHealthRouter), so Express still registers the literal
+// `/recommendations` path → `/api/recommendations`. README documents it as a
+// public endpoint; no in-repo or dashboard caller exists (the dashboard moved
+// to /api/now/recommendations, #674), but external HTTP clients still rely on
+// it, so it is PRESERVED not deleted.
+//
+// CONTEXT.md L34: this `/recommendations` operator-action-item surface is
+// DISTINCT from a Health Diagnostic (the /health/deep ruleset) — they are
+// different surfaces, which is why this lives in its own router and NOT in
+// health-diagnostics.ts.
+
+const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
+const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
+const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
+
+/**
+ * The four narrow I/O readers the handler depends on. Each defaults to the real
+ * impl; tests inject in-memory stubs to drive each action-item category with no
+ * Redis and no live Express — mirroring the #674 RecommendationsReaderDeps
+ * injection pattern.
+ */
+export interface RecommendationsReaderDeps {
+  getBacklogCounts?: typeof getBacklogCounts;
+  getSchedulerStatus?: typeof getSchedulerStatus;
+  /** Read+return the raw priorities.md text; rejects/throws if the file is absent. */
+  readPriorities?: () => Promise<string>;
+  /** Whether the kill file is present. */
+  killFileExists?: () => boolean;
+}
+
+async function defaultReadPriorities(): Promise<string> {
+  return readFile(join(CONFIG_PATH, "direction", "priorities.md"), "utf-8");
+}
+
+function defaultKillFileExists(): boolean {
+  return existsSync(KILL_FILE);
+}
+
+export function createRecommendationsRouter(deps: RecommendationsReaderDeps = {}) {
+  const router = Router();
+
+  const readBacklogCounts = deps.getBacklogCounts ?? getBacklogCounts;
+  const readSchedulerStatus = deps.getSchedulerStatus ?? getSchedulerStatus;
+  const readPriorities = deps.readPriorities ?? defaultReadPriorities;
+  const killFileExists = deps.killFileExists ?? defaultKillFileExists;
+
+  // GET /recommendations — Operator action items computed from system state.
+  //
+  // Contract is 200-with-partial-array: the bespoke inner try/catch logs and
+  // returns whatever `recs` accumulated (possibly []), status 200. It MUST NOT
+  // be wrapped in aggregatorRouteNoQuery, which would convert a throw into a 500
+  // and break the wire contract.
+  router.get("/recommendations", async (req, res) => {
+    const recs = [];
+    try {
+      // 1. Triage items awaiting approval
+      const counts = await readBacklogCounts();
+      if (counts.triage > 0) {
+        recs.push({
+          type: "review",
+          priority: 2,
+          title: `${counts.triage} item${counts.triage > 1 ? "s" : ""} in Triage awaiting review`,
+          description: "Research suggestions need approval before entering the backlog",
+          action: "Review on the Backlog page",
+          link: "/backlog",
+        });
+      }
+
+      // 2. Blocked backlog items
+      if (counts.blocked > 0) {
+        recs.push({
+          type: "action",
+          priority: 1,
+          title: `${counts.blocked} blocked item${counts.blocked > 1 ? "s" : ""} need intervention`,
+          description: "These items can't proceed without operator action",
+          action: "Unblock on the Backlog page",
+          link: "/backlog",
+        });
+      }
+
+      // 3. Scheduler not running
+      const sched = await readSchedulerStatus();
+      if (!sched.running) {
+        recs.push({
+          type: "action",
+          priority: 1,
+          title: "Scheduler is stopped",
+          description: "Hydra won't run autonomous cycles until the scheduler is started",
+          action: "Start from the Overview page",
+          link: "/",
+        });
+      }
+
+      // 4. Empty work pipeline
+      if (counts.total === 0 && counts.inProgress === 0 && counts.triage === 0) {
+        recs.push({
+          type: "info",
+          priority: 3,
+          title: "Work pipeline is empty",
+          description: "No items in triage, backlog, or queue. Hydra will fall back to priorities.md or run research to find work.",
+          action: "Add items on the Backlog page or update Vision",
+          link: "/backlog",
+        });
+      }
+
+      // 5. Check priorities.md for BLOCKED items
+      try {
+        const prioritiesContent = await readPriorities();
+        const blockedHeaders = prioritiesContent.match(/^##.*\[BLOCKED\].*$/gim) || [];
+        const blockedReasons = prioritiesContent.match(/^\s*-\s*Blocked on.*$/gim) || [];
+        if (blockedHeaders.length > 0) {
+          const items = blockedHeaders.map((h: string) => h.replace(/^##\s*\d+\)\s*\[BLOCKED\]\s*/i, "").trim());
+          const reasons = blockedReasons.map((r: string) => r.replace(/^\s*-\s*Blocked on operator:\s*/i, "").trim());
+          recs.push({
+            type: "action",
+            priority: 1,
+            title: `${blockedHeaders.length} priorit${blockedHeaders.length > 1 ? "ies" : "y"} blocked on operator action`,
+            description: items.map((item: string, i: number) => `${item}${reasons[i] ? ` — needs: ${reasons[i]}` : ""}`).join("\n"),
+            action: "Provide required credentials/approvals to unblock",
+            link: "/vision",
+          });
+        }
+      } catch { /* intentional: no priorities file present yet — degrade silently */ }
+
+      // 6. Kill file present
+      if (killFileExists()) {
+        recs.push({
+          type: "action",
+          priority: 1,
+          title: "Kill switch is active",
+          description: "All cycles are blocked. Remove the kill file to resume.",
+          action: "Investigate and remove ~/.hydra/.kill",
+          link: "/health",
+        });
+      }
+
+      // Sort by priority (1=urgent first)
+      recs.sort((a, b) => a.priority - b.priority);
+    } catch (err: any) {
+      console.error(`[API] recommendations error: ${err.message}`);
+    }
+    res.json(recs);
+  });
+
+  return router;
+}
