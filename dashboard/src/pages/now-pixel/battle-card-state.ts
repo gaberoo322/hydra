@@ -43,7 +43,7 @@ export interface ToolCallCounters {
   reads: number;
 }
 
-export interface PermissionWait {
+interface PermissionWait {
   /** epoch seconds when the wait was opened */
   openedAt: number;
   /** tool name (may be empty in older event versions) */
@@ -71,7 +71,7 @@ export interface TaskRuntimeState {
   milestoneLog: MilestoneLogEntry[];
 }
 
-export interface MilestoneLogEntry {
+interface MilestoneLogEntry {
   ts: number;
   /** discriminator: subagent_tool_call | slot_waiting_permission | pr_opened | subagent_stop */
   kind: string;
@@ -292,7 +292,7 @@ function formatActivity(
 // the shape BattleCardRow.jsx renders.
 // ---------------------------------------------------------------------------
 
-export interface BattleCardRow {
+interface BattleCardRow {
   id: string;
   classLabel: string;
   /** sprite path under /sprites/pokemon/ — falls back to the placeholder when class has no mapping */
