@@ -19,7 +19,7 @@ export function createQueueRouter() {
           issues: parsed.error.issues,
         });
       }
-      const { reference, reason, context } = parsed.data;
+      const { reference, reason, context, source } = parsed.data;
 
       // Dedup: fuzzy check if a similar item already exists in the queue
       const matchedRef = await findWorkQueueDuplicate(reference);
@@ -32,7 +32,16 @@ export function createQueueRouter() {
         });
       }
 
-      const item = { reference, reason: reason || "queued by operator", context, queuedAt: new Date().toISOString() };
+      // Persist `source` provenance (issue #1140) so /queue/snapshot and
+      // indexWorkItem can read it. Omit the key entirely when absent so the
+      // snapshot's `item.source || "operator"` fallback still applies.
+      const item = {
+        reference,
+        reason: reason || "queued by operator",
+        context,
+        ...(source ? { source } : {}),
+        queuedAt: new Date().toISOString(),
+      };
       await pushToWorkQueue(JSON.stringify(item));
       const queueLen = await getWorkQueueLen();
       res.json({ queued: true, item, position: queueLen });

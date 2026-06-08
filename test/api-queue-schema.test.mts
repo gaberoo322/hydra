@@ -64,6 +64,22 @@ describe("QueuePostBodySchema — happy path", () => {
       assert.equal(result.data.reference, "Add stream freshness");
     }
   });
+
+  test("accepts the source provenance key (issue #1140 — `hydra queue add` round-trips)", () => {
+    // Before #1140 the `.strict()` schema 400'd this body with
+    // unrecognized_keys:["source"], so EVERY `hydra queue add` (which always
+    // injects source:"hydra-cli") failed. `source` is now an enumerated
+    // optional field — `.strict()` is retained, the key is explicitly allowed.
+    const result = QueuePostBodySchema.safeParse({
+      reference: "Add stream freshness",
+      reason: "Added by hydra CLI",
+      source: "hydra-cli",
+    });
+    assert.equal(result.success, true);
+    if (result.success) {
+      assert.equal(result.data.source, "hydra-cli");
+    }
+  });
 });
 
 describe("QueuePostBodySchema — rejection cases", () => {

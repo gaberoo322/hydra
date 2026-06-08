@@ -27,6 +27,17 @@ import { z } from "zod";
  *   findings, sweep dedup hints). We accept any JSON-serialisable value
  *   and let the consumer interpret it. Keeping it loose preserves the
  *   pre-zod behaviour while still rejecting non-JSON inputs.
+ * - `source` is optional provenance ("hydra-cli", "sweep", "operator").
+ *   The `hydra` CLI always injects `source:"hydra-cli"` (bin/hydra
+ *   cmd_queue), and downstream consumers READ it — `indexWorkItem`
+ *   (src/redis/work-queue.ts) and the `/queue/snapshot` route
+ *   (src/api/queue.ts) both surface `item.source`. Before issue #1140
+ *   the `.strict()` schema rejected this key with
+ *   `schema-validation-failed` (`unrecognized_keys: ["source"]`), so
+ *   EVERY `hydra queue add` 400'd. We keep `.strict()` (it is what
+ *   catches typo'd keys — the contract-drift class this fix targets) and
+ *   instead enumerate `source` as a legitimate optional field rather than
+ *   loosening to passthrough (ADR-0011).
  */
 export const QueuePostBodySchema = z
   .object({
@@ -36,6 +47,7 @@ export const QueuePostBodySchema = z
       .min(1, { message: "reference must be a non-empty string" }),
     reason: z.string().optional(),
     context: z.unknown().optional(),
+    source: z.string().optional(),
   })
   .strict();
 
