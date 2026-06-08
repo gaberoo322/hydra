@@ -91,8 +91,27 @@ export interface RetroDispatch {
    * abandonReason backfill, so a consumer reading the JSON (which cannot call
    * the pure TS selector) sees the flag directly. `projectDispatches` leaves it
    * `false`; the assemble loop is the sole writer (issue #1094).
+   *
+   * INVARIANT (issue #1184): `flagged === true` ⟹ `cycleId !== ""`. A flagged
+   * dispatch always has a transcript handle to drill — an empty-cycleId
+   * dispatch is recorded {@link undrillable} instead of flagged.
    */
   flagged: boolean;
+  /**
+   * `true` when this dispatch carries a failure/abort signal but has NO
+   * transcript handle to drill — i.e. `cycleId === ""` (issue #1184). The
+   * empty-cycleId slots-snapshot-fallback population (the interrupted-run case:
+   * the slots snapshot carries no cycleId, and the metrics/transcript
+   * enrichment loop skips it via `if (!d.cycleId) continue;`) gets the #1168
+   * `run-interrupted` abandonReason backfill for visibility, but cannot be
+   * drilled — there is no transcript to read. So we record it `undrillable` and
+   * EXCLUDE it from the flagged/drill subset rather than flagging an undrillable
+   * dispatch (#1168 went from "flags zero" to "flags N undrillable"; this closes
+   * the chain). The retro skill can then honestly report "recorded N
+   * undrillable, flagged-for-drill 0" instead of reading zero transcripts on N
+   * flags. A drillable (cycleId-bearing) dispatch is always `undrillable: false`.
+   */
+  undrillable: boolean;
 }
 
 /** A per-anchor reflection narrative attached to a flagged dispatch. */
@@ -204,13 +223,24 @@ const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
  * transcript drill. Pending dispatches (`status === null`) are not flagged:
  * nothing went wrong *yet*. Returns the flagged subset in input order so the
  * selection is deterministic.
+ *
+ * UNDRILLABLE EXCLUSION (issue #1184): a dispatch with an empty `cycleId` has no
+ * transcript handle — the metrics/transcript enrichment loop skips it
+ * (`if (!d.cycleId) continue;`), so flagging it produces a flag with nothing to
+ * drill. Such a dispatch (the interrupted-run slots-snapshot-fallback case that
+ * the #1168 backfill stamps with `run-interrupted`) is recorded
+ * {@link RetroDispatch.undrillable} = true and EXCLUDED here, enforcing the
+ * invariant `flagged === true` ⟹ `cycleId !== ""`. Visibility from #1168 is
+ * preserved (the abandonReason stays on the dispatch); only the empty flag is
+ * dropped.
  */
 export function flagDispatchesForDrill(dispatches: RetroDispatch[]): RetroDispatch[] {
   return dispatches.filter(
     (d) =>
-      d.bucket === "failed" ||
-      d.regressionIntroduced === true ||
-      (typeof d.abandonReason === "string" && d.abandonReason.length > 0),
+      d.cycleId !== "" &&
+      (d.bucket === "failed" ||
+        d.regressionIntroduced === true ||
+        (typeof d.abandonReason === "string" && d.abandonReason.length > 0)),
   );
 }
 
@@ -367,6 +397,10 @@ export function projectDispatches(
         // flagged is materialised in the assemble loop after the crash
         // abandonReason backfill — projection cannot know the final signal yet.
         flagged: false,
+        // undrillable is materialised in the assemble loop (issue #1184) — it
+        // depends on the final cycleId, which the metrics-sidecar enrichment can
+        // backfill. Default to drillable here.
+        undrillable: false,
       };
       out.push(dispatch);
       const slot = slotOfAction(a);
@@ -411,6 +445,7 @@ export function projectDispatches(
         abandonReason: null,
         regressionIntroduced: false,
         flagged: false,
+        undrillable: false,
       };
       out.push(dispatch);
       bySlot.set(slot, dispatch);
@@ -550,6 +585,27 @@ export async function assembleRetroBundle(
   // flagDispatchesForDrill returns members of `dispatches` (filter, not map),
   // so mutating them here is mutating the served objects in place.
   for (const d of flagged) d.flagged = true;
+  // Materialise the undrillable signal onto the served dispatches (issue
+  // #1184). A dispatch with a failure/abort signal but an EMPTY cycleId has no
+  // transcript handle to drill — the metrics/transcript enrichment loop above
+  // skips it (`if (!d.cycleId) continue;`). The #1168 `run-interrupted`
+  // backfill stamps such empty-cycleId slots-snapshot-fallback dispatches, but
+  // they cannot be drilled. So we EXCLUDE them from the flagged subset (the
+  // selector's `cycleId !== ""` clause already does this — they stay
+  // flagged:false) and record them undrillable:true so the JSON consumer can
+  // honestly count "recorded N undrillable, flagged-for-drill 0" rather than
+  // reading zero transcripts on N flags. This is the same in-place mutation of
+  // the served objects as the flagged write-back above, keeping the served
+  // bundle and the pure selector in agreement. Invariant: a flagged dispatch
+  // always has cycleId !== "" (a transcript handle), and an undrillable
+  // dispatch is never flagged.
+  const hasFailureSignal = (d: RetroDispatch): boolean =>
+    d.bucket === "failed" ||
+    d.regressionIntroduced === true ||
+    (typeof d.abandonReason === "string" && d.abandonReason.length > 0);
+  for (const d of dispatches) {
+    d.undrillable = d.cycleId === "" && hasFailureSignal(d);
+  }
   const reflections: RetroReflection[] = [];
   const seenAnchors = new Set<string>();
   for (const d of flagged) {
