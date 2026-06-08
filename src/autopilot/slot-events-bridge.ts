@@ -35,6 +35,21 @@ const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 const CONSUMER_GROUP = "now-pixel-bridge";
 const WS_STREAM_NAME = "autopilot:slot-events";
 
+/** Default consumer name for this process's bridge consumer (pid-scoped). */
+function defaultBridgeConsumerName(): string {
+  return `bridge-${process.pid}`;
+}
+
+/**
+ * The `{stream, group, consumer}` descriptor for THIS process's bridge
+ * consumer — so the SIGTERM shutdown path can best-effort DELCONSUMER its own
+ * name on graceful exit (issue #1221). Mirrors the name `startSlotEventsBridge`
+ * registers when called with no `consumerName` override.
+ */
+export function slotEventsBridgeConsumer(): { stream: string; group: string; consumer: string } {
+  return { stream: SLOT_EVENTS_STREAM, group: CONSUMER_GROUP, consumer: defaultBridgeConsumerName() };
+}
+
 export interface SlotEventEnvelope {
   type: "slot-event";
   id: string;
@@ -50,7 +65,7 @@ export async function startSlotEventsBridge(
   eventBus: EventBus,
   opts: { consumerName?: string } = {},
 ): Promise<void> {
-  const consumerName = opts.consumerName ?? `bridge-${process.pid}`;
+  const consumerName = opts.consumerName ?? defaultBridgeConsumerName();
 
   // Ensure the stream + consumer group exist. The hooks XADD with MKSTREAM
   // is opportunistic; we explicitly create the group here so the consumer can
@@ -70,7 +85,9 @@ export async function startSlotEventsBridge(
     async (event: any) => {
       bridgeBroadcast(eventBus, event);
     },
-    { count: 32, blockMs: 5000 },
+    // reapStale: this group is `$`-anchored (no backlog replay) and only
+    // animates NEW events, so dropping a dead zombie's PEL is correct (#1221).
+    { count: 32, blockMs: 5000, reapStale: true },
   );
 }
 

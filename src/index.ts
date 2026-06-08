@@ -14,8 +14,8 @@ import { cleanWorkQueue } from "./redis/work-queue.ts";
 import { recordCycleSide, classifySide } from "./capacity-floor.ts";
 import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
-import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
-import { startRecommendationConsumer } from "./autopilot/recommendation-engine.ts";
+import { startSlotEventsBridge, slotEventsBridgeConsumer } from "./autopilot/slot-events-bridge.ts";
+import { startRecommendationConsumer, recsEngineConsumer } from "./autopilot/recommendation-engine.ts";
 import {
   startPrLifecycleBridge,
   type PrLifecycleBridge,
@@ -317,6 +317,15 @@ async function main() {
     await stopScheduler({ reason: "shutdown" });
     stopObservabilityBridges();
     eventBus.stopConsuming();
+    // Issue #1221: best-effort unregister THIS process's own slot-events
+    // consumer names so a graceful exit never leaves a zombie the next process
+    // must reap. Only the `$`-anchored slot-events groups (PEL-loss-tolerant);
+    // notifications/DLQ are left registered so their at-least-once PELs survive.
+    // Each delConsumer is best-effort and never throws; the stateless startup
+    // reapStaleConsumers() sweep is the SIGKILL-safe backstop.
+    for (const { stream, group, consumer } of [slotEventsBridgeConsumer(), recsEngineConsumer()]) {
+      await eventBus.delConsumer(stream, group, consumer);
+    }
     clearInterval(heartbeat);
     // Issue #866: clear the two leaked polling intervals so neither the 30s
     // knowledge-indexer Redis poll nor the 24h cleanup prune survives shutdown.

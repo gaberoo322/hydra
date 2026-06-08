@@ -188,6 +188,14 @@ type RawStreamEntry = [string, string[]];
 interface ConsumeOptions {
   count?: number;
   blockMs?: number;
+  /**
+   * When true, sweep STALE (zombie) consumers from this group once at startup,
+   * BEFORE the XAUTOCLAIM pass, via `reapStaleConsumers()` (issue #1221). Opt-in
+   * because DELCONSUMER drops a consumer's pending entries — only safe on the
+   * `$`-anchored slot-events groups (now-pixel-bridge, recs-engine), NEVER on
+   * the at-least-once notifications/DLQ groups whose PELs must survive restart.
+   */
+  reapStale?: boolean;
 }
 
 /** Dynamic stream name lookup for `/events/:stream` and similar surfaces. */
@@ -276,6 +284,83 @@ class EventBus {
   }
 
   /**
+   * Reap STALE (zombie) consumers from a consumer group via XINFO CONSUMERS +
+   * DELCONSUMER (issue #1221). Each new process picks a fresh consumer name
+   * (`<role>-${pid}`), so an ungraceful death (SIGKILL/crash) leaves the old
+   * name registered forever; XAUTOCLAIM then re-scans a backlog that grows by
+   * one zombie per restart, spamming reclaim loops. This sweep removes the
+   * dead names so XAUTOCLAIM sees ~1 consumer, not hundreds.
+   *
+   * A consumer is reapable ONLY when BOTH hold:
+   *   - `idle > idleMs` (default 5min) — far above the 5s blockMs poll. A live
+   *     consumer blocked in XREADGROUP resets its idle clock to ~0 every 5s,
+   *     so it can never cross a 5-min floor. This is the safeguard against
+   *     reaping a live consumer mid-work; DO NOT lower it toward blockMs.
+   *   - `name !== ourConsumerName` — never reap the consumer we just created
+   *     (its idle clock can briefly read high before the first XREADGROUP).
+   *
+   * DELCONSUMER DROPS (does not transfer) the consumer's pending entries, so
+   * this is only safe to call on groups that tolerate PEL loss — the
+   * `$`-anchored slot-events groups (now-pixel-bridge, recs-engine) carrying
+   * advisory/animation events. NEVER call it on the at-least-once
+   * notifications / DLQ groups, whose PELs must survive a restart.
+   *
+   * Best-effort and never throws (fail-loud convention): a reaping failure
+   * must not block consumer startup. Returns the names actually reaped (for
+   * tests / logging).
+   *
+   * @param stream           - Stream key.
+   * @param group            - Consumer group name.
+   * @param ourConsumerName  - This instance's consumer name (never reaped).
+   * @param idleMs           - Idle floor in ms (default 300_000 = 5min).
+   * @returns Names of the consumers that were reaped.
+   */
+  async reapStaleConsumers(
+    stream: string,
+    group: string,
+    ourConsumerName: string,
+    idleMs: number = 300_000,
+  ): Promise<string[]> {
+    const reaped: string[] = [];
+    try {
+      // XINFO CONSUMERS reply: one array per consumer, a flat field/value
+      // list including `name` (string) and `idle` (ms since last interaction).
+      const consumers = (await this.publisher.xinfo(
+        "CONSUMERS", stream, group,
+      )) as unknown[];
+      if (!Array.isArray(consumers)) return reaped;
+
+      for (const entry of consumers) {
+        const info = this._parseFields(entry as string[]);
+        const name = typeof info.name === "string" ? info.name : null;
+        const idle = Number(info.idle);
+        if (!name || !Number.isFinite(idle)) continue;
+        if (name === ourConsumerName) continue; // never reap ourselves
+        if (idle <= idleMs) continue; // live (or recently active) — leave it
+
+        try {
+          await this.publisher.xgroup("DELCONSUMER", stream, group, name);
+          reaped.push(name);
+          console.log(
+            `[EventBus] Reaped stale consumer ${name} on ${stream}/${group} (idle ${idle}ms)`,
+          );
+        } catch (err: any) {
+          console.error(
+            `[EventBus] DELCONSUMER ${name} on ${stream}/${group} failed:`,
+            err?.message || err,
+          );
+        }
+      }
+    } catch (err: any) {
+      console.error(
+        `[EventBus] reapStaleConsumers failed on ${stream}/${group}:`,
+        err?.message || err,
+      );
+    }
+    return reaped;
+  }
+
+  /**
    * Publish a RAW event to a stream — a flat field/value list with no JSON
    * envelope, trimmed with `MAXLEN ~ <maxlen>`. This is the second sanctioned
    * wire format (ADR-0017 Category B): it matches shell producers like
@@ -357,7 +442,15 @@ class EventBus {
     handler: EventHandler,
     opts: ConsumeOptions = {},
   ): Promise<void> {
-    const { count = 1, blockMs = 5000 } = opts;
+    const { count = 1, blockMs = 5000, reapStale = false } = opts;
+
+    // Before reclaiming, sweep ZOMBIE consumers (issue #1221). Opt-in via
+    // `reapStale` and gated to the PEL-loss-tolerant slot-events groups. This
+    // must run BEFORE XAUTOCLAIM so reclamation scans ~1 consumer (this one),
+    // not the hundreds an ungraceful-restart history would otherwise leave.
+    if (reapStale) {
+      await this.reapStaleConsumers(stream, group, consumer);
+    }
 
     // First, reclaim pending messages from dead consumers via XAUTOCLAIM.
     // XREADGROUP with "0" only returns messages owned by THIS consumer,
@@ -425,6 +518,30 @@ class EventBus {
 
   stopConsuming(): void {
     this._consuming = false;
+  }
+
+  /**
+   * Best-effort DELCONSUMER of a single named consumer (issue #1221). Used by
+   * the SIGTERM shutdown path to unregister this instance's own consumer name
+   * on a graceful exit, so it never becomes a zombie the next process must
+   * reap. Never throws — a shutdown reap failure must not block exit, and the
+   * stateless startup `reapStaleConsumers()` sweep is the SIGKILL-safe backstop
+   * if this best-effort cleanup is skipped. Keeps the raw Redis verb inside the
+   * bus seam (CONTEXT.md: the bus owns consumer-group lifecycle).
+   *
+   * @param stream   - Stream key.
+   * @param group    - Consumer group name.
+   * @param consumer - Consumer name to remove.
+   */
+  async delConsumer(stream: string, group: string, consumer: string): Promise<void> {
+    try {
+      await this.publisher.xgroup("DELCONSUMER", stream, group, consumer);
+    } catch (err: any) {
+      console.error(
+        `[EventBus] DELCONSUMER ${consumer} on ${stream}/${group} (shutdown) failed:`,
+        err?.message || err,
+      );
+    }
   }
 
   async _handleFailure(

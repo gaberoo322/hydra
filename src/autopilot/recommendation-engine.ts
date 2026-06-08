@@ -655,6 +655,21 @@ const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 const RECS_CONSUMER_GROUP = "recs-engine";
 const TURN_END_BROADCAST_STREAM = "autopilot:recs-pause";
 
+/** Default consumer name for this process's recs-engine consumer (pid-scoped). */
+function defaultRecsConsumerName(): string {
+  return `recs-${process.pid}`;
+}
+
+/**
+ * The `{stream, group, consumer}` descriptor for THIS process's recs-engine
+ * consumer — so the SIGTERM shutdown path can best-effort DELCONSUMER its own
+ * name on graceful exit (issue #1221). Mirrors the name
+ * `startRecommendationConsumer` registers.
+ */
+export function recsEngineConsumer(): { stream: string; group: string; consumer: string } {
+  return { stream: SLOT_EVENTS_STREAM, group: RECS_CONSUMER_GROUP, consumer: defaultRecsConsumerName() };
+}
+
 /**
  * Parse a raw stream event (Redis XADD field/value pairs) into a typed
  * `TurnEndPayload`. Returns `null` when the event isn't a `turn_end` or
@@ -771,7 +786,7 @@ export async function startRecommendationConsumer(eventBus: {
     group: string,
     consumerName: string,
     handler: (event: any) => Promise<void>,
-    opts?: { count?: number; blockMs?: number },
+    opts?: { count?: number; blockMs?: number; reapStale?: boolean },
   ) => Promise<void>;
   ensureConsumerGroup: (
     stream: string,
@@ -813,7 +828,7 @@ export async function startRecommendationConsumer(eventBus: {
     },
   });
 
-  const consumerName = `recs-${process.pid}`;
+  const consumerName = defaultRecsConsumerName();
   console.log(
     `[recs-engine] consuming ${SLOT_EVENTS_STREAM} group=${RECS_CONSUMER_GROUP}` +
       ` consumer=${consumerName} cap_usd=${engine.getDailyCapUsd()}`,
@@ -835,6 +850,8 @@ export async function startRecommendationConsumer(eventBus: {
         );
       }
     },
-    { count: 16, blockMs: 5000 },
+    // reapStale: this group is `$`-anchored advisory recs work, so dropping a
+    // dead zombie consumer's PEL on restart is correct (#1221).
+    { count: 16, blockMs: 5000, reapStale: true },
   );
 }
