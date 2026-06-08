@@ -41,3 +41,23 @@ jobs:
 
       - name: Schema-seam check (ADR-0011 req.body validation ratchet)
         run: npx tsx scripts/ci/schema-seam-check.ts
+
+  # Query-Seam gate (issue #1040, parent #1033). ADR-0022 §1 decided that a
+  # `src/api/*.ts` handler never reads `req.query.<field>` directly — every
+  # query-string read routes the WHOLE `req.query` through a
+  # `src/schemas/<domain>.ts` zod safeParse/parse (or the reflections
+  # URLSearchParams(req.query) proxy), then reads typed fields off the parsed
+  # result. The per-router migration slices #1035-1039 closed the Seam; this is
+  # the shrink-only CI backstop that freezes it. It is a SECOND job inside this
+  # existing sibling workflow (NOT a step in ci.yml — Verifier Core, ADR-0015),
+  # co-located with schema-seam because both are Schemas-Seam ratchets
+  # (ADR-0022 §4). The check (scripts/ci/query-seam-check.ts) is a thin Adapter
+  # over the shared seam-check-lib.ts engine (#950): any NEW raw named-field
+  # req.query read in a handler fails the gate.
+  query-seam:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Query-seam check (ADR-0022 req.query validation ratchet)
+        run: npx tsx scripts/ci/query-seam-check.ts
