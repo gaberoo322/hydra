@@ -88,7 +88,7 @@ export const VERDICT_STUCK = "STUCK" as const;
 export const VERDICT_CRASHED = "CRASHED" as const;
 export const VERDICT_PAUSED = "PAUSED" as const;
 
-export type ConsoleVerdict =
+type ConsoleVerdict =
   | typeof VERDICT_RUNNING
   | typeof VERDICT_IDLE
   | typeof VERDICT_STUCK
@@ -96,7 +96,7 @@ export type ConsoleVerdict =
   | typeof VERDICT_PAUSED;
 
 /** Slice-1 lifecycle states (mirrors `AutopilotLifecycleStateSchema`). */
-export type LifecycleState = "running" | "idle" | "ended" | "crashed";
+type LifecycleState = "running" | "idle" | "ended" | "crashed";
 
 export interface LifecycleLike {
   state?: LifecycleState | string | null;
@@ -105,7 +105,7 @@ export interface LifecycleLike {
   endedEpoch?: number | null;
 }
 
-export type SignalSeverity = "info" | "warn" | "critical";
+type SignalSeverity = "info" | "warn" | "critical";
 
 export interface StuckSignalLike {
   type?: string;
