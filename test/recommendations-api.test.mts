@@ -14,12 +14,12 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  createNowPageRouter,
+  createNowRecommendationsRouter,
   filterActiveRecommendations,
   resolveRunId,
   type RecommendationsReaderDeps,
   type CurrentRunIdReader,
-} from "../src/api/now-page.ts";
+} from "../src/api/now-recommendations.ts";
 
 // ---------------------------------------------------------------------------
 // Test helpers — mirrors api-now-endpoints.test.mts
@@ -236,7 +236,7 @@ describe("GET /now/recommendations", () => {
         ],
       },
     });
-    const router = createNowPageRouter({
+    const router = createNowRecommendationsRouter({
       recsRedis: redis,
       readCurrentRunId: async () => "run-A",
       now: () => new Date("2026-05-28T00:00:30Z"),
@@ -253,7 +253,7 @@ describe("GET /now/recommendations", () => {
 
   test("returns empty list and null run_id when no current run", async () => {
     const { redis } = makeRecsFake();
-    const router = createNowPageRouter({
+    const router = createNowRecommendationsRouter({
       recsRedis: redis,
       readCurrentRunId: async () => null,
     });
@@ -277,7 +277,7 @@ describe("GET /now/recommendations", () => {
       dismissed: { "run-A": ["c"] },
       muted: { "run-A": ["info"] },
     });
-    const router = createNowPageRouter({
+    const router = createNowRecommendationsRouter({
       recsRedis: redis,
       readCurrentRunId: async () => "run-A",
     });
@@ -290,7 +290,7 @@ describe("GET /now/recommendations", () => {
 
   test("rejects an empty run_id with schema-validation-failed", async () => {
     const { redis } = makeRecsFake();
-    const router = createNowPageRouter({ recsRedis: redis });
+    const router = createNowRecommendationsRouter({ recsRedis: redis });
     const handler = findHandler(router, "GET", "/now/recommendations");
     const res = mockRes();
     await handler!(mockReq({ run_id: "  " }), res);
@@ -308,7 +308,7 @@ describe("POST /now/recommendations/:id/dismiss", () => {
     const { redis, state } = makeRecsFake({
       recs: { "run-A": [rec({ id: "a" })] },
     });
-    const router = createNowPageRouter({
+    const router = createNowRecommendationsRouter({
       recsRedis: redis,
       readCurrentRunId: async () => "run-A",
     });
@@ -325,7 +325,7 @@ describe("POST /now/recommendations/:id/dismiss", () => {
 
   test("404s when no current run and run_id is 'current'", async () => {
     const { redis } = makeRecsFake();
-    const router = createNowPageRouter({
+    const router = createNowRecommendationsRouter({
       recsRedis: redis,
       readCurrentRunId: async () => null,
     });
@@ -337,7 +337,7 @@ describe("POST /now/recommendations/:id/dismiss", () => {
 
   test("400s on an empty :id path param", async () => {
     const { redis } = makeRecsFake();
-    const router = createNowPageRouter({ recsRedis: redis });
+    const router = createNowRecommendationsRouter({ recsRedis: redis });
     const handler = findHandler(router, "POST", "/now/recommendations/:id/dismiss");
     const res = mockRes();
     await handler!(mockReq({}, {}, { id: "  " }), res);
@@ -353,7 +353,7 @@ describe("POST /now/recommendations/:id/dismiss", () => {
 describe("POST /now/recommendations/mute-class", () => {
   test("adds the severity to the muted set", async () => {
     const { redis, state } = makeRecsFake();
-    const router = createNowPageRouter({
+    const router = createNowRecommendationsRouter({
       recsRedis: redis,
       readCurrentRunId: async () => "run-A",
     });
@@ -369,7 +369,7 @@ describe("POST /now/recommendations/mute-class", () => {
 
   test("rejects an unknown severity value", async () => {
     const { redis } = makeRecsFake();
-    const router = createNowPageRouter({
+    const router = createNowRecommendationsRouter({
       recsRedis: redis,
       readCurrentRunId: async () => "run-A",
     });
@@ -383,7 +383,7 @@ describe("POST /now/recommendations/mute-class", () => {
   test("accepts an explicit run_id without consulting the reader", async () => {
     const { redis, state } = makeRecsFake();
     let readerCalled = false;
-    const router = createNowPageRouter({
+    const router = createNowRecommendationsRouter({
       recsRedis: redis,
       readCurrentRunId: async () => {
         readerCalled = true;
