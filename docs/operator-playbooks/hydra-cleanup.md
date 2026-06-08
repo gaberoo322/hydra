@@ -64,7 +64,17 @@ If `OPEN_CLEANUP > 10`, print the board-saturation skip and exit (emit nothing).
 
 ### 1. Detect (deterministic — knip)
 
-Run `knip` over the Orchestrator. `knip` reports unused files, unused exports, unused exported types, and unused dependencies. We scope the run to the highest-confidence categories (unused files + unused exports/types) and emit machine-readable JSON:
+**First, sync the scan base to current `origin/master` (HARD — issue #1318).** The harness `isolation: "worktree"` bases the dispatched worktree on the **main working tree's current HEAD**, which can lag `origin/master` (it was 7 commits behind during the 2026-06-08 run, filing 8 already-resolved stale findings — #1310–#1317). `knip` reads whatever code is checked out, so a stale base makes it report exports that an in-flight cleanup wave already removed. Before running `knip`, fast-forward the worktree onto the freshly-fetched `origin/master` so the scan reflects the same base a `hydra-dev` pickup would branch from:
+
+```bash
+git fetch origin master
+git merge --ff-only origin/master \
+  || { echo "hydra-cleanup: worktree not fast-forwardable onto origin/master — aborting (would scan a stale or diverged base)"; exit 1; }
+```
+
+The `--ff-only` is deliberate: this scan worktree should be a clean descendant of master, so a fast-forward is always expected. If the merge is **not** fast-forwardable (the worktree has diverged commits), the base is untrustworthy — abort rather than scan a stale/diverged tree, exactly the failure #1318 describes. After the fast-forward, `git rev-parse HEAD` equals `origin/master`, so every finding is derived from the up-to-date base and a finding already resolved on `origin/master` is never reported.
+
+Then run `knip` over the now-current Orchestrator. `knip` reports unused files, unused exports, unused exported types, and unused dependencies. We scope the run to the highest-confidence categories (unused files + unused exports/types) and emit machine-readable JSON:
 
 ```bash
 npx knip --reporter json --no-exit-code > /tmp/knip-report.json 2>/dev/null || true
@@ -173,6 +183,7 @@ In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the e
 
 - **Zero `AskUserQuestion`.** Present findings into issue bodies and stop.
 - **Deterministic detection only.** The findings are `knip`'s output, not the model's guess. Never file a "this looks unused" finding that the tool didn't report.
+- **Scan against current `origin/master`, never the inherited stale worktree base (issue #1318).** `git fetch origin master` + `git merge --ff-only origin/master` before `knip`, so the scan reflects the same base a `hydra-dev` pickup branches from. A non-fast-forwardable worktree aborts the run rather than scanning a diverged/stale tree. A finding already resolved on `origin/master` must never be filed.
 - **Every issue carries `cleanup-scan` + `ready-for-agent`.** The label is the count seam for `cleanup_board_saturated`; the routing is the confidence decision.
 - **Acceptance criterion is always "remove X AND `npm test` / `tsc` still pass".** The deletion is self-checking — that is what justifies routing to `ready-for-agent` instead of `needs-triage`.
 - **Never steer at the Verifier Core** (`src/untouchable.ts` paths). Reported as friction, never filed as an actionable cleanup.
@@ -192,6 +203,7 @@ In dry-run mode the header reads `(dry-run; no GitHub issues created)` and the e
 
 Expected:
 
+- **Fresh base before scan (issue #1318).** The run fetches `origin/master` and fast-forwards the worktree onto it before invoking `knip`, so `git rev-parse HEAD` equals `origin/master` at scan time. A finding already resolved on `origin/master` (e.g. an export an in-flight cleanup wave removed) is never reported — reproducing the 2026-06-08 stale-base run (#1310–#1317) against a freshly-fetched base emits zero of those findings. A worktree that cannot fast-forward onto `origin/master` aborts the run instead of scanning a diverged base.
 - `knip` runs and the report parses; findings are categorised into files vs exports.
 - The filter drops verifier-core, test-only, entrypoint, and duplicate findings.
 - `--apply` files issues labelled `cleanup-scan` + `ready-for-agent` — each with the deterministic "remove X AND test/tsc green" acceptance criterion.
