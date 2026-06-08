@@ -499,7 +499,6 @@ async function autoStart(eventBus) {
 
 export {
   start, stop, getStatus, autoStart,
-  formatDuration,
   // Exported for test coverage (issue #381 / #383):
   runScheduledCycle,
 };
