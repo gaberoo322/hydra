@@ -37,7 +37,7 @@ import {
 // Re-export the pure-core formatters so existing importers of ./digest.ts that
 // reach for these (e.g. formatBuilderHealthLines, previously exported here)
 // keep working without churn.
-export { buildDailyHeartbeat, formatCriticalAlert, formatBuilderHealthLines };
+export { buildDailyHeartbeat, formatBuilderHealthLines };
 
 const DIGEST_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const QUIET_START_HOUR = 22; // 10pm
