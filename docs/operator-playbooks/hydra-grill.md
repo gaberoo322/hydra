@@ -21,6 +21,13 @@ Redis via `POST /api/design-concepts` and is consumed in later phases by:
   dispatch (Phase B);
 - the rewritten `hydra-qa` two-axis review (sub-issue #440).
 
+**Consumer-side shape (ADR-0008).** `GET /api/design-concepts/:anchorRef`
+returns a **flat** body: the artifact fields (`anchorRef`, `scope`,
+`invariants`, `qaTrace`, `modulesTouched`, ...) at the **top level**, plus a
+single `gate` sub-object. There is **no `.concept` envelope** — consumers read
+`.invariants` / `.scope` / `.gate` directly, never `.concept.*`. Probing for a
+`.concept` field returns `undefined`.
+
 Phase A: **build & shadow only**. The autopilot does not yet refuse dispatch
 without an artifact. The skill is invocable on demand by the operator and
 exists for end-to-end shakedown.
