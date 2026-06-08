@@ -130,7 +130,7 @@ export type DesignConcept = {
  * does. Used as the input to `sha256` for `artifactHash`, so two
  * artifacts with the same body always produce the same hash.
  */
-export function canonicalJson(value: unknown): string {
+function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
   }
