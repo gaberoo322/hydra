@@ -32,7 +32,6 @@ describe("redisKeys naming convention", () => {
     ["backlogCounter", redisKeys.backlogCounter],
     ["schedulerState", redisKeys.schedulerState],
     ["mergeLock", redisKeys.mergeLock],
-    ["planCachePrefix", redisKeys.planCachePrefix],
     ["alerts", redisKeys.alerts],
     ["blockedLastEscalation", redisKeys.blockedLastEscalation],
     ["digestLastWeekly", redisKeys.digestLastWeekly],
@@ -70,7 +69,6 @@ describe("redisKeys naming convention", () => {
     ["memoryRules", redisKeys.memoryRules("executor")],
     ["reflection", redisKeys.reflection("some-anchor-ref")],
     ["backlogLane", redisKeys.backlogLane("queued")],
-    ["planCache", redisKeys.planCache("abc123")],
     ["stream", redisKeys.stream("notifications")],
   ];
 
@@ -164,7 +162,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.memoryRules("executor"), "hydra:memory:executor:rules");
     assert.equal(redisKeys.reflection("test-ref"), "hydra:reflections:test-ref");
     assert.equal(redisKeys.backlogLane("queued"), "hydra:backlog:lane:queued");
-    assert.equal(redisKeys.planCache("abc"), "hydra:plans:cache:abc");
     assert.equal(redisKeys.anchorAbandonmentCount("ref"), "hydra:anchors:abandonment-count:ref");
     assert.equal(redisKeys.anchorPermSkip("ref"), "hydra:anchors:perm-skip:ref");
     assert.equal(redisKeys.stream("notifications"), "hydra:notifications");

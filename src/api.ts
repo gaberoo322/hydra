@@ -21,7 +21,6 @@ import { createGoalsRouter } from "./api/goals.ts";
 import { createEventsRouter } from "./api/events.ts";
 import { createConfigRouter } from "./api/config.ts";
 import { createAlertsRouter } from "./api/alerts.ts";
-import { createPlanCacheRouter } from "./api/plan-cache.ts";
 import { createReflectionsRouter } from "./api/reflections.ts";
 import { createMergeLockRouter } from "./api/merge-lock.ts";
 import { createCapacityRouter } from "./api/capacity.ts";
@@ -80,7 +79,6 @@ function createApi(eventBus) {
   api.use(createEventsRouter(eventBus));
   api.use(createConfigRouter());
   api.use(createAlertsRouter(eventBus));
-  api.use(createPlanCacheRouter());
   api.use(createReflectionsRouter());
   api.use(createMergeLockRouter());
   api.use(createCapacityRouter());

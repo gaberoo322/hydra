@@ -255,8 +255,9 @@ function generateAdvice(opts: { outcome: string; reason: string; filesChanged?: 
 /**
  * Load the raw per-anchor reflection records (parsed, not formatted) for
  * `anchorRef`. Returns the same data `loadAnchorReflections()` formats, but in
- * structured form so callers (e.g. plan-cache digest computation, issue #375)
- * can hash deterministic subsets of the records.
+ * structured form so callers (e.g. anchor-candidate scoring in
+ * src/anchor-candidates.ts) can inspect or hash deterministic subsets of the
+ * records.
  *
  * Filters out malformed entries silently. Order is preserved (oldest first,
  * matching the Redis list order from `pushAnchorReflection`).
