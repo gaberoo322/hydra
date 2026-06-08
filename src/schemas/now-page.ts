@@ -20,7 +20,7 @@ import { z } from "zod";
 // Service strip
 // ---------------------------------------------------------------------------
 
-export const ServiceStatusSchema = z.enum(["ok", "degraded", "down"]);
+const ServiceStatusSchema = z.enum(["ok", "degraded", "down"]);
 
 export const ServiceRowSchema = z
   .object({
