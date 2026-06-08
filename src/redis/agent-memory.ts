@@ -57,6 +57,52 @@ export async function savePatternsRaw(
 }
 
 /**
+ * One `{name, raw}` tuple as scanned off a `hydra:{memory|friction}:*:patterns`
+ * key: `name` is the agent/skill segment between the namespace prefix and the
+ * `:patterns` suffix; `raw` is the unparsed stored JSON string (or null when
+ * the key vanished between SCAN and GET). Callers own the JSON parse + shape
+ * narrowing — this seam returns the raw read only (ADR-0009: the key shapes and
+ * the cursor walk live here, the validation lives at the caller).
+ */
+export interface PatternGroupRaw {
+  name: string;
+  raw: string | null;
+}
+
+/**
+ * Scan every `hydra:{namespace}:*:patterns` key (memory or friction) and GET
+ * each value, returning one `{name, raw}` tuple per key. The cursor walk + the
+ * `hydra:{namespace}:` → name strip live here so the dashboard aggregators
+ * (lessons-explorer, friction-source) don't hand-roll the SCAN-and-GET loop
+ * against a dynamically-imported raw connection (issue #1121). Per-key JSON
+ * parse + array narrowing stay with each caller.
+ */
+export async function scanPatternGroupsRaw(
+  namespace: PatternNamespace = "memory",
+): Promise<PatternGroupRaw[]> {
+  const r = getRedisConnection();
+  const matchPrefix = namespace === "friction" ? "hydra:friction:" : "hydra:memory:";
+  const match = `${matchPrefix}*:patterns`;
+  const keys: string[] = [];
+  let cursor = "0";
+  do {
+    const [next, page] = await r.scan(cursor, "MATCH", match, "COUNT", "200");
+    cursor = next;
+    keys.push(...page);
+  } while (cursor !== "0");
+
+  const out: PatternGroupRaw[] = [];
+  for (const key of keys) {
+    const name = (
+      key.startsWith(matchPrefix) ? key.slice(matchPrefix.length) : key
+    ).replace(/:patterns$/, "");
+    const raw = await r.get(key);
+    out.push({ name, raw });
+  }
+  return out;
+}
+
+/**
  * Get the length of old rules list for an agent.
  */
 export async function getOldRulesCount(agent: string): Promise<number> {

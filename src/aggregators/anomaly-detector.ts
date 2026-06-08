@@ -33,6 +33,8 @@
  *   matches.
  */
 
+import { getAutopilotDailyTokensRaw } from "../redis/cost.ts";
+
 import type { AnomalyDirection, AnomalyMetric } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -254,8 +256,9 @@ async function defaultReadSeries(): Promise<SeriesInput[]> {
   // detector + UI; subsequent passes populate more series).
   const out: SeriesInput[] = [];
   try {
-    const { getRedisConnection } = await import("../redis/connection.ts");
-    const r = getRedisConnection();
+    // The daily-spend surrogate key shape + GET live behind the typed cost seam
+    // (`getAutopilotDailyTokensRaw`) instead of a dynamically-imported raw
+    // connection (issue #1121).
     // Walk the last 30 daily-spend surrogate keys (newest to oldest) and
     // turn each into a per-hour rate against the day's elapsed wall clock.
     const now = new Date();
@@ -263,8 +266,7 @@ async function defaultReadSeries(): Promise<SeriesInput[]> {
     for (let i = 29; i >= 0; i -= 1) {
       const day = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
       const dateStr = day.toISOString().split("T")[0];
-      const key = `hydra:metrics:tokens:autopilot:daily:${dateStr}`;
-      const raw = await r.get(key).catch(() => null);
+      const raw = await getAutopilotDailyTokensRaw(dateStr).catch(() => null);
       if (raw === null) continue;
       const tokens = Number(raw);
       if (!Number.isFinite(tokens)) continue;

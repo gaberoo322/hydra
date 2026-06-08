@@ -13,9 +13,14 @@
  * stream (`x*`) ops that have no typed-hash accessor shape. The fix-path for a
  * flagged file is to route through B (Event Bus), A (a domain accessor), or C
  * (the shared `boundedJsonList` primitive) — never a linter-appeasing wrapper.
- * Scoped to STATIC `from` imports, consistent with the existing grammar;
- * dynamic `await import(...)` + getRedisConnection() call sites are a
- * documented follow-up, not flagged here.
+ *
+ * Issue #1121 closes the dynamic-import follow-up: a DYNAMIC
+ * `await import('.../redis/connection')` or `await import('.../redis/keys')`
+ * (the runtime equivalent of the static bypass) is now flagged everywhere
+ * outside `src/redis/*` AND the sanctioned `src/event-bus.ts` owner, with the
+ * same shrink-only baseline as the static rule. The baseline starts empty (the
+ * seven aggregator/recs sites that motivated the issue were migrated in the
+ * same change), so this rule fails closed on any NEW dynamic bypass.
  *
  * This is a thin Adapter over the shared baseline-ratchet engine in
  * `seam-check-lib.ts` (issue #950): it declares its policy (the forbidden-import
@@ -50,6 +55,18 @@ const FORBIDDEN_PATTERNS = [
  */
 const RAW_CONNECTION_PATTERN = /from\s+['"][^'"]*\/redis\/connection(?:\.ts)?['"]/;
 
+/**
+ * Issue #1121: DYNAMIC `await import('.../redis/connection')` /
+ * `await import('.../redis/keys')` — the runtime equivalent of the static
+ * bypass `RAW_CONNECTION_PATTERN` / `redis/keys` `from`-import rules above.
+ * Matches `import("...")` and `import('...')` (the `await` is optional in the
+ * grammar — a bare `import('...').then(...)` is the same bypass). Carved out
+ * for `src/redis/*` (the seam family) and the sanctioned `src/event-bus.ts`
+ * owner, identically to the static raw-connection rule.
+ */
+const DYNAMIC_IMPORT_PATTERN =
+  /import\s*\(\s*['"][^'"]*\/redis\/(?:connection|keys)(?:\.ts)?['"]\s*\)/;
+
 /** The Redis Seam family prefix. Files inside `src/redis/` ARE the seam (exempt). */
 const REDIS_DIR_PREFIX = "src/redis/";
 
@@ -79,7 +96,7 @@ export function fileViolatesSeam(relPath: string, body: string): boolean {
   }
   if (
     !SANCTIONED_RAW_CONNECTION_OWNERS.has(relPath) &&
-    RAW_CONNECTION_PATTERN.test(body)
+    (RAW_CONNECTION_PATTERN.test(body) || DYNAMIC_IMPORT_PATTERN.test(body))
   ) {
     return true;
   }
@@ -94,8 +111,10 @@ const CONFIG = {
   noteSuffix: "ADR-0009 closure ratchet: shrink only.",
   newViolationsHeadline: "NEW Redis-seam violations (ADR-0009):",
   newViolationsHelp: [
-    "These files import from redis-keys / redis-adapter / redis/keys / redis/kv.",
-    "Move the access behind a typed accessor in src/redis/<domain>.ts.",
+    "These files import (statically OR via dynamic await import()) from",
+    "redis-keys / redis-adapter / redis/keys / redis/kv / redis/connection.",
+    "Move the access behind a typed accessor in src/redis/<domain>.ts, or (for",
+    "stream x* ops) route through the Event Bus (ADR-0017 Category B).",
   ],
 };
 

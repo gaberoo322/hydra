@@ -24,6 +24,7 @@
  */
 
 import { PROMOTION_THRESHOLD } from "../pattern-memory/agent-memory.ts";
+import { scanPatternGroupsRaw } from "../redis/agent-memory.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -179,26 +180,20 @@ export function skillMatches(skill: string, filter: string): boolean {
 async function defaultReadMemoryPatterns(): Promise<
   Array<{ skill: string; patterns: RawMemoryPattern[] }>
 > {
-  const { getRedisConnection } = await import("../redis/connection.ts");
-  const r = getRedisConnection();
-  const matches: string[] = [];
-  let cursor = "0";
-  do {
-    const [next, page] = await r.scan(cursor, "MATCH", "hydra:memory:*:patterns", "COUNT", "200");
-    cursor = next;
-    matches.push(...page);
-  } while (cursor !== "0");
-
+  // The SCAN cursor walk + GET against `hydra:memory:*:patterns` lives behind
+  // the typed seam (`scanPatternGroupsRaw`); this reader owns only the per-key
+  // JSON parse + array narrowing into its `RawMemoryPattern` shape.
+  const groups = await scanPatternGroupsRaw("memory");
   const out: Array<{ skill: string; patterns: RawMemoryPattern[] }> = [];
-  for (const key of matches) {
-    const skill = key.replace(/^hydra:memory:/, "").replace(/:patterns$/, "");
-    const raw = await r.get(key);
+  for (const { name: skill, raw } of groups) {
     if (!raw) continue;
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) out.push({ skill, patterns: parsed as RawMemoryPattern[] });
     } catch (err: any) {
-      console.error(`[lessons-explorer] failed to parse ${key}: ${err?.message || err}`);
+      console.error(
+        `[lessons-explorer] failed to parse hydra:memory:${skill}:patterns: ${err?.message || err}`,
+      );
     }
   }
   return out;

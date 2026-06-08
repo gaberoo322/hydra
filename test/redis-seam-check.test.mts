@@ -65,21 +65,73 @@ describe("redis-seam-check: ADR-0017 raw-connection rule", () => {
     );
   });
 
-  test("does NOT flag a dynamic await-import of getRedisConnection (static `from` only)", () => {
-    assert.equal(
-      fileViolatesSeam(
-        "src/some-aggregator.ts",
-        `const { getRedisConnection } = await import("../redis/connection.ts");`,
-      ),
-      false,
-    );
-  });
-
   test("clean module that uses a typed accessor is not flagged", () => {
     assert.equal(
       fileViolatesSeam(
         "src/capacity-floor.ts",
         `import { boundedJsonList } from "./redis/bounded-list.ts";`,
+      ),
+      false,
+    );
+  });
+});
+
+describe("redis-seam-check: issue #1121 dynamic-import rule", () => {
+  test("flags a dynamic await import of redis/connection from a non-sanctioned file", () => {
+    assert.equal(
+      fileViolatesSeam(
+        "src/aggregators/lessons-explorer.ts",
+        `const { getRedisConnection } = await import("../redis/connection.ts");`,
+      ),
+      true,
+    );
+  });
+
+  test("flags a dynamic await import of redis/keys from a non-sanctioned file", () => {
+    assert.equal(
+      fileViolatesSeam(
+        "src/aggregators/overnight-summary.ts",
+        `const { redisKeys } = await import("../redis/keys.ts");`,
+      ),
+      true,
+    );
+  });
+
+  test("flags a dynamic import without await (import('...').then(...))", () => {
+    assert.equal(
+      fileViolatesSeam(
+        "src/foo.ts",
+        `import("./redis/connection").then((m) => m.getRedisConnection());`,
+      ),
+      true,
+    );
+  });
+
+  test("exempts the sanctioned Event Bus owner from the dynamic rule", () => {
+    assert.equal(
+      fileViolatesSeam(
+        "src/event-bus.ts",
+        `const { getRedisConnection } = await import("./redis/connection.ts");`,
+      ),
+      false,
+    );
+  });
+
+  test("exempts the redis family itself from the dynamic rule", () => {
+    assert.equal(
+      fileViolatesSeam(
+        "src/redis/some-accessor.ts",
+        `const { getRedisConnection } = await import("./connection.ts");`,
+      ),
+      false,
+    );
+  });
+
+  test("does NOT flag a dynamic import of an unrelated module", () => {
+    assert.equal(
+      fileViolatesSeam(
+        "src/foo.ts",
+        `const { getUsage } = await import("../cost/index.ts");`,
       ),
       false,
     );
