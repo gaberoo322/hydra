@@ -291,6 +291,20 @@ export function createDesignConceptsRouter() {
     }
   });
 
+  /**
+   * GET /api/design-concepts/:anchorRef — fetch one artifact.
+   *
+   * RESPONSE SHAPE IS FLAT (ADR-0008 — authoritative). The body spreads the
+   * stored artifact's top-level fields (`anchorRef`, `scope`, `invariants`,
+   * `qaTrace`, `modulesTouched`, `glossaryTerms`, `rejectedAlternatives`,
+   * `prototypes`, `status`, `approvedBy`, `artifactHash`, `createdAt`, ...)
+   * plus a single `gate` sub-object (`gateCheck(dc, now)`). There is NO
+   * `.concept` envelope — consumers read the artifact fields at the TOP
+   * level (e.g. `.invariants`, NOT `.concept.invariants`) and the gate verdict
+   * at `.gate`. Probing for a `.concept` field returns `undefined`; do not add
+   * one — it would break `test/api-design-concepts-schema.test.mts` and every
+   * existing consumer (decide.py, hydra-qa's Spec axis, grill-artifact.sh).
+   */
   router.get("/design-concepts/:anchorRef", async (req, res) => {
     try {
       const dc = await getDesignConcept(req.params.anchorRef);

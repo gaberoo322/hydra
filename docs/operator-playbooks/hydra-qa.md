@@ -134,6 +134,13 @@ ARTIFACT_JSON=$(curl -fsS --max-time 5 \
   2>/dev/null || echo "")
 ```
 
+**Response shape is FLAT (ADR-0008).** The artifact fields live at the **top
+level** of `ARTIFACT_JSON` — read `.anchorRef`, `.scope`, `.invariants`,
+`.qaTrace`, `.modulesTouched`, etc. directly, plus the gate verdict at `.gate`.
+There is **no `.concept` envelope**: `.concept` is always `undefined`, so do
+not probe for it (`.concept.invariants` is wrong — use `.invariants`). The Spec
+sub-agent below consumes these top-level fields verbatim.
+
 Decide what to do with the result:
 
 ```bash
