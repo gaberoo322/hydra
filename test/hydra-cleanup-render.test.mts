@@ -201,6 +201,48 @@ describe("renderTitle / renderBody — never emit a malformed title", () => {
   test("renderBody THROWS on an invalid finding", () => {
     assert.throws(() => renderBody({ kind: "file", path: "", name: "" }, ISO), /refusing to render/);
   });
+
+  test("renderBody '## What to do' embeds the knip false-positive taxonomy (#1299)", () => {
+    // The picking hydra-dev agent reads the EMITTED body, not the playbook —
+    // so the body must surface the classification taxonomy or a naive delete on
+    // a false-positive "unused export" breaks the build / orphans coupled code.
+    // This keeps the rendered body and the Step 3 playbook template in lock-step
+    // (the 2nd-QA-FAIL was: playbook updated, renderBody NOT).
+    const body = renderBody({ kind: "export", path: "src/capacity-floor.ts", name: "_resetCapacityHistory" }, ISO);
+
+    // The classify-before-delete preamble.
+    assert.match(body, /classify before you delete/);
+    assert.match(body, /\*\*delete is the exception, not the default\*\*/);
+
+    // The classification probe, with the finding's actual symbol substituted.
+    assert.match(body, /Still referenced ANYWHERE \(src \+ test\)/);
+    assert.match(body, /rg -n --no-heading -w "_resetCapacityHistory" src test \| grep -v "src\/capacity-floor\.ts"/);
+    assert.match(body, /rg -n "_resetCapacityHistory" src\/redis test\/redis-keys\.test\.mts/);
+
+    // All four sub-cases (a)–(d), each with its directive verb.
+    assert.match(body, /\*\*\(a\) Truly dead\*\*.*\*\*delete\*\*/);
+    assert.match(body, /\*\*\(b\) Internally referenced\*\*.*\*\*drop only the `export` keyword\*\*/);
+    assert.match(body, /\*\*\(c\) Re-export, definition live elsewhere\*\*.*\*\*remove only the re-export line\*\*/);
+    assert.match(body, /\*\*\(d\) Coupled Redis key generator\*\*.*\*\*remove the full coupled set atomically\*\*/);
+
+    // The false-positive revert note + a pointer to Step 2.5 of the playbook.
+    assert.match(body, /that is knip's false positive surfacing/);
+    assert.match(body, /Step 2\.5 of the hydra-cleanup playbook/);
+
+    // The old one-liner must be gone — doc/code can no longer contradict.
+    assert.ok(
+      !/Remove the unused export and any now-orphaned imports/.test(body),
+      "stale one-line '## What to do' must be replaced by the taxonomy",
+    );
+  });
+
+  test("renderBody '## What to do' taxonomy renders for a whole-file finding too (probe on path)", () => {
+    const body = renderBody({ kind: "file", path: "dashboard/src/components/Toast.jsx", name: "" }, ISO);
+    assert.match(body, /classify before you delete/);
+    // A file finding has no symbol, so the probe substitutes the path.
+    assert.match(body, /rg -n --no-heading -w "dashboard\/src\/components\/Toast\.jsx" src test/);
+    assert.match(body, /\*\*\(d\) Coupled Redis key generator\*\*/);
+  });
 });
 
 describe("findingIdentity / identityFromOpenIssueTitle — stable identity, not title (#1167 cause 2)", () => {
