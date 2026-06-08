@@ -34,8 +34,15 @@ import Redis from "ioredis";
 
 process.env.REDIS_URL = "redis://localhost:6379/1";
 
-const schedulerMod = await import("../src/scheduler/heartbeat.ts");
-const { start, stop, getStatus, runScheduledCycle } = schedulerMod as any;
+// Typed dynamic import (not `as any`): the `typeof import(...)` cast keeps the
+// runtime dynamic-import — needed for the module-reset / DB-1 isolation intent —
+// while letting knip statically resolve the export references. A bare `as any`
+// destructure defeats knip's reference tracker, so test-only seam exports like
+// `runScheduledCycle` get false-positived as unused (issue #1170).
+const schedulerMod = (await import(
+  "../src/scheduler/heartbeat.ts"
+)) as typeof import("../src/scheduler/heartbeat.ts");
+const { start, stop, getStatus, runScheduledCycle } = schedulerMod;
 
 let testRedis: any;
 
