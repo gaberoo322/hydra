@@ -19,6 +19,10 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { extname, join, resolve, relative, basename } from "node:path";
 import { createHash } from "node:crypto";
 import { indexText } from "./ov-upload.ts";
+import {
+  loadSourceHashes as redisLoadSourceHashes,
+  persistSourceHash as redisPersistSourceHash,
+} from "../redis/source-index.ts";
 
 const SKIP_DIRS = new Set([".git", "node_modules"]);
 const DEBOUNCE_MS = parseInt(process.env.INDEXER_DEBOUNCE_MS as any) || 2000;
@@ -68,9 +72,52 @@ export const SOURCE_INITIAL_WINDOW_MS =
     : 7 * 86400_000;
 
 // Path-based dedup: tracks indexed source paths + content hash so we skip
-// re-uploading unchanged files. Resets on process restart (idempotent w.r.t.
-// content because OV uses the title as the resource key).
+// re-uploading unchanged files. This in-memory Map is a hot read cache for the
+// per-file index path; the durable copy lives in Redis (issue #1123) and is
+// hydrated into this Map on startup via loadPersistedHashes() and written
+// through on each successful index. Before #1123 this Map was in-memory ONLY
+// and reset on every restart, so each of the orchestrator's dozens-per-day
+// bounces re-embedded the whole modified-window tree (~13k "Indexed text:"
+// lines/day) for zero new information.
 const indexedSourceHashes = new Map<string, string>();
+
+// Persistence seam (issue #1123). Defaults to the real Redis accessors but is
+// swappable so tests can drive the load/persist behavior without a live Redis.
+// Both default impls are best-effort no-ops on a Redis error (the indexer then
+// degrades to the pre-#1123 re-upload behavior — wasteful but correct).
+type LoadHashesFn = () => Promise<Map<string, string>>;
+type PersistHashFn = (path: string, hash: string) => Promise<void>;
+let loadHashesImpl: LoadHashesFn = redisLoadSourceHashes;
+let persistHashImpl: PersistHashFn = redisPersistSourceHash;
+
+/**
+ * Test-only: override the persistence layer so tests exercise the
+ * load-on-startup + write-through behavior against an in-memory fake instead
+ * of a live Redis. Pass no args to restore the real Redis-backed accessors.
+ */
+export function _setHashPersistence(
+  impl?: { load?: LoadHashesFn; persist?: PersistHashFn },
+): void {
+  loadHashesImpl = impl?.load ?? redisLoadSourceHashes;
+  persistHashImpl = impl?.persist ?? redisPersistSourceHash;
+}
+
+/**
+ * Hydrate the in-memory dedup cache from the durable Redis copy. Call once on
+ * startup (from startKnowledgeIndexer) BEFORE the initial-index pass so files
+ * unchanged since a previous process's run are recognised as already-indexed
+ * and skipped instead of re-embedded. Best-effort: a load failure leaves the
+ * cache as-is (empty on a cold start), degrading to the old re-upload behavior.
+ * Returns the number of entries loaded (for logging/tests).
+ */
+export async function loadPersistedHashes(): Promise<number> {
+  const persisted = await loadHashesImpl();
+  for (const [path, hash] of persisted) {
+    // Don't clobber a hotter in-memory entry written this process lifetime.
+    if (!indexedSourceHashes.has(path)) indexedSourceHashes.set(path, hash);
+  }
+  return persisted.size;
+}
 
 // Issue #210: knowledge coverage stats for /api/learning/coverage
 interface CoverageStats {
@@ -217,6 +264,9 @@ async function indexSourceFile(
   // Reuse indexText machinery for upload.
   await indexText(title, `${header}\`\`\`\n${content}\n\`\`\``);
   indexedSourceHashes.set(filePath, hash);
+  // Write through to the durable copy so the next process restart can skip this
+  // file (issue #1123). Best-effort — persistHashImpl swallows Redis errors.
+  await persistHashImpl(filePath, hash);
   coverageStats.sourceFilesIndexed++;
   coverageStats.resourceCount++;
   coverageStats.lastIndexAt = new Date().toISOString();
