@@ -36,7 +36,7 @@ import { spawn } from "node:child_process";
 import type { HydraErrorCode } from "../errors.ts";
 
 /** Default timeout for a single gh/git invocation. */
-export const DEFAULT_GH_TIMEOUT_MS = 15_000;
+const DEFAULT_GH_TIMEOUT_MS = 15_000;
 
 /** Max bytes captured from stdout/stderr each. */
 const DEFAULT_MAX_BUFFER = 10 * 1024 * 1024; // 10MB
