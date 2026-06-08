@@ -704,3 +704,87 @@ describe("projectRunView wedge cross-check (issue #1091)", () => {
     assert.equal(v.wedge_likely, false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// summarizeTerminationHealth — clean-termination-rate observability (#1352)
+//
+// Pure rollup over run digests. The retro learning loop is structurally
+// starved when this rate sits at ~0 over dispatch-bearing runs (every run dies
+// `interrupted` before its dispatches' terminal cycle records materialise), so
+// a consumer can alarm on it. Pure → no Redis (the file-level `after` still
+// closes the shared client for the Redis-backed suites above).
+// ---------------------------------------------------------------------------
+describe("summarizeTerminationHealth (issue #1352)", () => {
+  let summarizeTerminationHealth: any;
+
+  beforeEach(async () => {
+    if (!summarizeTerminationHealth) {
+      const mod = await import("../src/autopilot/runs.ts");
+      summarizeTerminationHealth = mod.summarizeTerminationHealth;
+    }
+  });
+
+  test("clean rate is the fraction of ended runs with a clean term_reason", () => {
+    const h = summarizeTerminationHealth([
+      { status: "ended", term_reason: "idle", dispatches: 3 },
+      { status: "ended", term_reason: "budget", dispatches: 5 },
+      { status: "ended", term_reason: "interrupted", dispatches: 7 },
+      { status: "ended", term_reason: "wall_clock", dispatches: 2 },
+    ]);
+    assert.equal(h.endedRuns, 4);
+    assert.equal(h.cleanRuns, 3);
+    assert.equal(h.cleanTerminationRate, 0.75);
+    assert.equal(h.endedDispatchTotal, 17);
+  });
+
+  test("the all-interrupted starvation case reports rate 0 with non-trivial dispatches (the #1352 alarm)", () => {
+    const h = summarizeTerminationHealth([
+      { status: "ended", term_reason: "interrupted", dispatches: 12 },
+      { status: "ended", term_reason: "interrupted", dispatches: 8 },
+      { status: "ended", term_reason: "interrupted", dispatches: 4 },
+    ]);
+    assert.equal(h.cleanTerminationRate, 0, "all interrupted → rate 0");
+    assert.equal(h.cleanRuns, 0);
+    assert.equal(h.endedRuns, 3);
+    assert.equal(h.endedDispatchTotal, 24, "non-trivial dispatch total gates the alarm");
+  });
+
+  test("crash / failure_backstop are NOT clean", () => {
+    const h = summarizeTerminationHealth([
+      { status: "ended", term_reason: "crash", dispatches: 1 },
+      { status: "ended", term_reason: "failure_backstop", dispatches: 1 },
+      { status: "ended", term_reason: "idle", dispatches: 1 },
+    ]);
+    assert.equal(h.cleanRuns, 1);
+    assert.equal(h.cleanTerminationRate, 1 / 3);
+  });
+
+  test("running rows are excluded from the denominator", () => {
+    const h = summarizeTerminationHealth([
+      { status: "running", term_reason: null, dispatches: 9 },
+      { status: "ended", term_reason: "idle", dispatches: 2 },
+    ]);
+    assert.equal(h.endedRuns, 1, "only ended runs count");
+    assert.equal(h.cleanRuns, 1);
+    assert.equal(h.cleanTerminationRate, 1);
+    assert.equal(h.endedDispatchTotal, 2, "running-run dispatches excluded");
+  });
+
+  test("no ended runs → null rate (no-data, not a misleading 0)", () => {
+    const h = summarizeTerminationHealth([
+      { status: "running", term_reason: null, dispatches: 3 },
+    ]);
+    assert.equal(h.cleanTerminationRate, null);
+    assert.equal(h.endedRuns, 0);
+  });
+
+  test("empty input → null rate, zero counts", () => {
+    const h = summarizeTerminationHealth([]);
+    assert.deepEqual(h, {
+      cleanTerminationRate: null,
+      endedRuns: 0,
+      cleanRuns: 0,
+      endedDispatchTotal: 0,
+    });
+  });
+});

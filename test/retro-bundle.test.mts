@@ -493,6 +493,12 @@ describe("assembleRetroBundle — composition", () => {
           ],
         }) as any,
       readCycleMetrics: async () => ({}), // no cycle ⇒ no status from the sidecar
+      // No terminal cycle record exists for these task_ids (the slots were
+      // still in-flight when the crash truncated the run), so the #1352
+      // candidate-cycleId recovery finds nothing to confirm and they stay
+      // undrillable. The empty hash makes the fixture faithful to that intent
+      // (baseDeps' default returns a merged hash, which would falsely confirm).
+      readCycleHash: async () => ({}),
       readAnchorReflections: async (anchor: string) => {
         reflectionAnchors.push(anchor);
         return { content: `## PRIOR ATTEMPTS for ${anchor}`, count: 1 };
@@ -720,6 +726,111 @@ describe("assembleRetroBundle — composition", () => {
       flagDispatchesForDrill(bundle.dispatches).length,
       "served flagged count equals the pure selector's output",
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // issue #1352 — an interrupted run starves retro because a genuinely-
+  // COMPLETED dispatch (a terminal cycle record durably written by reap) was
+  // projected with an empty cycleId and recorded undrillable. The fix (option
+  // b): recover the candidate cycleId from the slot's task_id, then KEEP it iff
+  // a terminal cycle record is confirmed to exist — making the completed
+  // dispatch drillable while a still-in-flight slot stays undrillable.
+  // -------------------------------------------------------------------------
+  test("interrupted run: a completed snapshot-only dispatch (task_id → confirmed cycle record) becomes drillable (#1352)", async () => {
+    const reflectionAnchors: string[] = [];
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-1352", status: "ended", term_reason: "interrupted" },
+          turns: [
+            {
+              turn_n: 8,
+              actions: [], // print-mode session exited before the dispatch action was recorded
+              slots_snapshot: {
+                // Genuinely completed: reap wrote a FAILED cycle record keyed on this task_id.
+                dev_orch: { skill: "hydra-dev", anchor: "issue-1340", task_id: "tid-completed" },
+                // Still in-flight when the session died: a task_id but NO terminal cycle record.
+                qa_orch: { skill: "hydra-qa", anchor: "PR#1341", task_id: "tid-inflight" },
+              },
+            },
+          ],
+        }) as any,
+      // The cycle metrics sidecar resolves only for the completed dispatch's task_id.
+      readCycleMetrics: async (cycleId: string) =>
+        cycleId === "tid-completed"
+          ? { abandonReason: "verification-failure", anchorReference: "issue-1340" }
+          : {},
+      // The cycle hash carries the terminal status for the completed dispatch only.
+      readCycleHash: async (cycleId: string) =>
+        cycleId === "tid-completed" ? { status: "failed" } : {},
+      readAnchorReflections: async (anchor: string) => {
+        reflectionAnchors.push(anchor);
+        return { content: `## PRIOR ATTEMPTS for ${anchor}`, count: 1 };
+      },
+    });
+
+    const bundle = await assembleRetroBundle("run-1352", deps);
+    assert.equal(bundle.dispatches.length, 2, "both occupied slots projected");
+
+    const dev = bundle.dispatches.find((d) => d.skill === "hydra-dev")!;
+    assert.equal(dev.cycleId, "tid-completed", "completed dispatch keeps its recovered cycleId handle");
+    assert.equal(dev.status, "failed", "terminal status backfilled from the confirmed cycle record");
+    assert.equal(dev.bucket, "failed");
+    assert.equal(dev.abandonReason, "verification-failure");
+    assert.equal(dev.flagged, true, "a confirmed-drillable failure is flagged for drill (#1352)");
+    assert.equal(dev.undrillable, false, "a confirmed cycle record is drillable, not undrillable");
+
+    const qa = bundle.dispatches.find((d) => d.skill === "hydra-qa")!;
+    assert.equal(qa.cycleId, "", "in-flight dispatch's unconfirmed candidate is dropped back to ''");
+    assert.equal(qa.abandonReason, "run-interrupted", "#1168 visibility backfill still applies");
+    assert.equal(qa.flagged, false, "an unconfirmed (in-flight) dispatch is NOT flagged");
+    assert.equal(qa.undrillable, true, "an unconfirmed (in-flight) dispatch stays undrillable");
+
+    // Only the confirmed-drillable failure's anchor got a reflection read — the
+    // retro now deep-reads a real transcript on an interrupted run.
+    assert.deepEqual(reflectionAnchors, ["issue-1340"]);
+    assert.equal(bundle.reflections.length, 1);
+
+    // Bundle-level invariant preserved: every flagged dispatch has a handle.
+    assert.ok(
+      bundle.dispatches.every((d) => !d.flagged || d.cycleId !== ""),
+      "invariant: flagged === true ⟹ cycleId !== ''",
+    );
+  });
+
+  test("interrupted run: a merged snapshot-only dispatch (task_id → confirmed) is drillable but not flagged (#1352)", async () => {
+    // Q&A 7 of the design concept: a genuinely-completed dispatch that MERGED
+    // is drillable (real cycleId) but the happy path needs no transcript drill,
+    // so it must not be flagged. This pins that the recovery does not over-flag.
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-1352-merged", status: "ended", term_reason: "interrupted" },
+          turns: [
+            {
+              turn_n: 3,
+              actions: [],
+              slots_snapshot: {
+                dev_orch: { skill: "hydra-dev", anchor: "issue-1300", task_id: "tid-merged" },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}), // no failure-shape fields
+      readCycleHash: async (cycleId: string) =>
+        cycleId === "tid-merged" ? { status: "merged" } : {},
+    });
+
+    const bundle = await assembleRetroBundle("run-1352-merged", deps);
+    const dev = bundle.dispatches[0];
+    assert.equal(dev.cycleId, "tid-merged", "merged dispatch keeps its confirmed handle");
+    assert.equal(dev.status, "merged");
+    assert.equal(dev.bucket, "merged");
+    assert.equal(dev.flagged, false, "a merged, regression-free dispatch is not flagged (happy path)");
+    assert.equal(dev.undrillable, false, "a confirmed cycle record is not undrillable even when unflagged");
+    assert.equal(dev.abandonReason, null, "no run-interrupted backfill once a terminal status is confirmed");
   });
 
   test("clean stop does NOT fabricate a failure status for a pending dispatch", async () => {

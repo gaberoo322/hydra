@@ -66,7 +66,18 @@ export interface RetroBundleError {
  * {@link flagDispatchesForDrill} operates on.
  */
 export interface RetroDispatch {
-  /** The cycle id this dispatch resolved to (or the synthesised turn key). */
+  /**
+   * The cycle id (transcript handle) this dispatch resolved to, or `""` when
+   * none exists. An action/outcome-joined dispatch carries the recorded
+   * `outcome.cycleId`. A snapshot-only dispatch (the crashed/interrupted-run
+   * case) RECOVERS a candidate from the slot's `task_id` — the same id reap
+   * sends on its durable `cycle-record` write — and {@link assembleRetroBundle}
+   * keeps it ONLY if a terminal cycle record is confirmed to exist (issue
+   * #1352, the genuinely-completed-but-interrupted dispatch); an unconfirmed
+   * candidate (a slot still in-flight when the run was interrupted) is reset to
+   * `""` so it stays {@link undrillable}. INVARIANT: `cycleId !== ""` is the
+   * drillability gate — a flagged dispatch always has a non-empty cycleId.
+   */
   cycleId: string;
   /** Autopilot turn this dispatch was launched on, when known. */
   turn_n: number | null;
@@ -337,6 +348,14 @@ function slotStr(slotObj: unknown, key: string): string | null {
  * exactly one RetroDispatch, so a clean run with action-carried identity is
  * byte-identical (action values win, no double-count).
  *
+ * A snapshot-only dispatch additionally seeds a CANDIDATE `cycleId` from the
+ * slot's `task_id` (issue #1352) — the same id reap sends on its durable
+ * `cycle-record` write, so it is the transcript handle for a dispatch that
+ * genuinely completed before the run was interrupted. The candidate is
+ * PROVISIONAL: {@link assembleRetroBundle} confirms a terminal cycle record
+ * exists for it and resets it back to `""` (undrillable) if not. This
+ * projection only recovers the candidate; it does not read Redis.
+ *
  * Pure over the already-fetched turns — `slots_snapshot` is already on each
  * turn member, so there is no Redis round-trip here.
  */
@@ -415,6 +434,15 @@ export function projectDispatches(
       if (slotObj == null) continue; // empty slot — nothing dispatched here.
       const slotSkill = slotStr(slotObj, "skill");
       const slotAnchor = slotStr(slotObj, "anchor");
+      // The slot carries the dispatch's `task_id` — the SAME id `reap.py` sends
+      // as the `cycleId` on its durable `cycle-record` write (issue #1352). It
+      // is a *candidate* transcript handle, not yet a confirmed one: a slot
+      // still occupied when the session was interrupted has a task_id but no
+      // terminal cycle record. The assemble loop confirms it by reading the
+      // cycle metrics/hash and DROPS it back to "" if no terminal record
+      // exists, so an in-flight slot stays undrillable. See
+      // `confirmDrillableCycleIds` in assembleRetroBundle.
+      const slotTaskId = slotStr(slotObj, "task_id");
       const existing = bySlot.get(slot);
       if (existing) {
         if (!existing.skill && slotSkill) existing.skill = slotSkill;
@@ -423,6 +451,9 @@ export function projectDispatches(
           const pr = prNumberFromAnchor(slotAnchor);
           if (pr) existing.prNumber = pr;
         }
+        // Only fill a candidate cycleId when the action-join left it empty —
+        // an action/outcome-carried cycleId always wins (clean-run identity).
+        if (!existing.cycleId && slotTaskId) existing.cycleId = slotTaskId;
         continue;
       }
       // A slot member with no matching action that carries NO usable identity
@@ -432,10 +463,15 @@ export function projectDispatches(
       // the prior action-derived dispatches, not a junk row).
       if (!slotSkill && !slotAnchor) continue;
       // Slot present only in the snapshot — the dispatch action was never
-      // recorded (a crash truncated the turn). Synthesise a RetroDispatch so
-      // the crashed-run dispatch is still attributable and flaggable.
+      // recorded (a crash/interrupt truncated the turn). Synthesise a
+      // RetroDispatch so the dispatch is still attributable. Seed the candidate
+      // cycleId from the slot's task_id (issue #1352): if a terminal cycle
+      // record exists for it (the genuinely-completed dispatch on an
+      // interrupted run), the assemble loop keeps it and the dispatch becomes
+      // drillable; if not (still in-flight), the loop resets it to "" and it
+      // stays undrillable.
       const dispatch: RetroDispatch = {
-        cycleId: "",
+        cycleId: slotTaskId ?? "",
         turn_n: turnN,
         skill: slotSkill,
         anchorReference: slotAnchor,
@@ -508,6 +544,31 @@ export async function assembleRetroBundle(
   // 3. Enrich each dispatch from its cycle metrics sidecar (abandonReason,
   //    regressionIntroduced) — getRun's join already attached status/PR, but
   //    the sidecar carries the failure-shape fields the drill selector needs.
+  //
+  //    Issue #1352: a snapshot-only dispatch on an interrupted/crashed run
+  //    carries a CANDIDATE cycleId derived from the slot's task_id (the same id
+  //    reap uses on its durable cycle-record write). We must confirm a TERMINAL
+  //    cycle record actually exists for that candidate before trusting it as a
+  //    transcript handle — a slot still in-flight when the session died has a
+  //    task_id but no terminal record. The cycle hash's `status` is the
+  //    authoritative "this dispatch reached a terminal cycle state" marker; the
+  //    metrics sidecar's failure-shape fields (abandonReason / regression) are
+  //    a secondary terminal-record signal. We read the hash for a status-less
+  //    candidate so we can confirm-or-drop it (step 3a below resets an
+  //    unconfirmed candidate back to "" so it stays undrillable).
+  // A cycleId is "action-derived" — a clean transcript handle that needs no
+  // confirmation — when it came from a dispatch action/outcome. Those always
+  // carry a resolved `status`/`bucket` from the outcome join, so a non-empty
+  // cycleId paired with a non-null status at projection time is a real handle.
+  // A snapshot-derived CANDIDATE (recovered from the slot's task_id, issue
+  // #1352) starts status:null / bucket:null, so it is PROVISIONAL: we keep its
+  // handle only if the metrics-sidecar / cycle-hash read confirms a terminal
+  // cycle record was durably written (the genuinely-completed-but-interrupted
+  // dispatch). Capture provenance BEFORE enrichment mutates status.
+  const provisionalCycleIds = new Set<string>(
+    dispatches.filter((d) => d.cycleId && d.status === null).map((d) => d.cycleId),
+  );
+  const confirmedCycleIds = new Set<string>();
   for (const d of dispatches) {
     if (!d.cycleId) continue;
     const metrics = await safeSource(
@@ -516,13 +577,17 @@ export async function assembleRetroBundle(
       {} as Record<string, string>,
       () => readCycleMetrics(d.cycleId),
     );
+    let terminalRecordSeen = d.status !== null; // action-join already terminal
     if (metrics && typeof metrics === "object") {
       if (typeof metrics.abandonReason === "string" && metrics.abandonReason.length > 0) {
         d.abandonReason = metrics.abandonReason;
+        terminalRecordSeen = true;
       }
       d.regressionIntroduced = metrics.regressionIntroduced === "true";
+      if (d.regressionIntroduced) terminalRecordSeen = true;
       // Backfill status/anchor from the metrics sidecar when the turn join
-      // didn't carry them (e.g. a cycle recorded out-of-band of a turn).
+      // didn't carry them (e.g. a cycle recorded out-of-band of a turn, OR a
+      // snapshot-only dispatch whose cycleId we recovered from the task_id).
       if (!d.status) {
         const hash = await safeSource(
           "cycle-record",
@@ -533,6 +598,7 @@ export async function assembleRetroBundle(
         if (hash && typeof hash.status === "string" && hash.status.length > 0) {
           d.status = hash.status;
           d.bucket = bucketOf(d.status);
+          terminalRecordSeen = true;
         }
       }
       if (!d.anchorReference && typeof metrics.anchorReference === "string") {
@@ -541,6 +607,28 @@ export async function assembleRetroBundle(
       if (!d.prNumber && typeof metrics.prNumber === "string" && metrics.prNumber.length > 0) {
         d.prNumber = metrics.prNumber;
       }
+    }
+    if (terminalRecordSeen) confirmedCycleIds.add(d.cycleId);
+  }
+
+  // 3a. Confirm-or-drop PROVISIONAL candidate cycleIds (issue #1352). A
+  //     snapshot-only dispatch whose recovered task_id-cycleId pointed at NO
+  //     terminal cycle record (the slot was still in-flight when the run was
+  //     interrupted) has no transcript handle — reset its cycleId to "" so it
+  //     stays undrillable, exactly as before #1352. A confirmed candidate (a
+  //     genuinely-completed dispatch on an interrupted run — the case #1352
+  //     unstarves) keeps its cycleId and becomes drillable through the normal
+  //     flag machinery below. A NON-provisional (action-derived) cycleId is
+  //     never dropped: its handle came from a recorded outcome (the provisional
+  //     set is keyed on status===null at projection time, which only a
+  //     snapshot-recovered candidate satisfies — an action/outcome join always
+  //     carries the resolved status alongside the cycleId).
+  for (const d of dispatches) {
+    if (!d.cycleId) continue;
+    if (provisionalCycleIds.has(d.cycleId) && !confirmedCycleIds.has(d.cycleId)) {
+      // Unconfirmed candidate: no terminal cycle record materialised. Drop the
+      // handle so the dispatch is recorded undrillable (the pre-#1352 shape).
+      d.cycleId = "";
     }
   }
 
