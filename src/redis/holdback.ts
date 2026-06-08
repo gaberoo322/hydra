@@ -135,7 +135,7 @@ export function holdbackBaselineKey(commitSha: string): string {
 }
 
 /** Per-UTC-day revert counter. INT string. */
-export function holdbackRevertCountKey(date: string): string {
+function holdbackRevertCountKey(date: string): string {
   return `hydra:holdback:reverts:${date}`;
 }
 
