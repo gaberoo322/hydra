@@ -98,7 +98,7 @@ function getDefaultEventBus(): EventBus {
  * target swap (ADR-0013, ADR-0002). Computed at call-time because the target
  * env vars may be set after this module is imported.
  */
-export function defaultRepos(): readonly string[] {
+function defaultRepos(): readonly string[] {
   return [ORCHESTRATOR_REPO, getTargetGithubRepo()];
 }
 
@@ -116,7 +116,7 @@ export interface PullRequestSnapshot {
   createdAt: string;
 }
 
-export type PrTransition = "opened" | "merged" | "closed";
+type PrTransition = "opened" | "merged" | "closed";
 
 export interface PrLifecycleEvent {
   repo: string;
@@ -234,7 +234,7 @@ export function sanitizeField(raw: string): string {
 // gh fetch + bridge entrypoint
 // ---------------------------------------------------------------------------
 
-export interface GhFetcher {
+interface GhFetcher {
   (repo: string): Promise<PullRequestSnapshot[]>;
 }
 
@@ -247,7 +247,7 @@ export interface GhFetcher {
  * Returns [] on any failure (missing `gh`, auth error, network blip) so
  * the bridge can continue against its existing snapshot.
  */
-export async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
+async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
   // Routes through the GitHub CLI Adapter seam (issue #899). The seam never
   // throws and owns the JSON parse + the four external-process error modes; a
   // failure arm (missing `gh`, auth error, network blip, empty/malformed JSON)
