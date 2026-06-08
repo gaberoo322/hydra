@@ -147,7 +147,7 @@ export function classLabelFromLabels(labels: readonly string[]): string | null {
 export const ISSUE_JSON_FIELDS = "number,title,url,createdAt,labels,body,state";
 
 /** The canonical open-PR list `--json` field set (CI-rollup view). */
-export const PR_LIST_JSON_FIELDS = "number,title,url,updatedAt,statusCheckRollup";
+const PR_LIST_JSON_FIELDS = "number,title,url,updatedAt,statusCheckRollup";
 
 /**
  * One GitHub issue as the read seam returns it. A defensively-parsed superset
