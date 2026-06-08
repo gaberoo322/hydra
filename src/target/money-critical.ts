@@ -22,14 +22,20 @@
  * Matching rules (deliberately dumb and auditable — no globs, mirroring the
  * Verifier-Core matcher in `src/untouchable.ts`):
  *   1. Normalize a leading "./" away.
- *   2. Directory prefix: an entry ending in "/" matches the directory itself
+ *   2. Normalize a leading "web/" away (issue #1235): every hydra-betting
+ *      source path lives under `web/` (e.g. `web/src/lib/providers/...`), so
+ *      the diff paths the classifier sees are `web/`-rooted. Stripping that
+ *      prefix lets the bare `src/lib/...` entries match the real layout.
+ *   3. Directory prefix: an entry ending in "/" matches the directory itself
  *      and anything beneath it.
- *   3. Exact match: an entry without a trailing "/" matches that path only.
+ *   4. Exact match: an entry without a trailing "/" matches that path only.
  *
  * Note these paths are relative to the **Target** repo (hydra-betting), not
- * the Orchestrator — e.g. `src/lib/providers/` is a hydra-betting path. The
- * Orchestrator merely owns the classifier so the build-quality machinery can
- * route on it.
+ * the Orchestrator. In hydra-betting the source tree is rooted at `web/`, so
+ * a real diff path looks like `web/src/lib/providers/kalshi/x.ts`; `normalize`
+ * strips the `web/` prefix so the declared `src/lib/providers/` entry matches.
+ * The Orchestrator merely owns the classifier so the build-quality machinery
+ * can route on it.
  */
 
 /**
@@ -66,9 +72,16 @@ export const MONEY_CRITICAL_TARGET_PATHS: readonly string[] = Object.freeze([
   "src/lib/bet-math/",
 ]);
 
-/** Normalize a path for matching: drop a single leading "./". */
+/**
+ * Normalize a path for matching: drop a single leading "./", then a single
+ * leading "web/" (issue #1235). hydra-betting roots its source tree at `web/`,
+ * so a real diff path is `web/src/lib/providers/...`; stripping the `web/`
+ * prefix lets the bare `src/lib/...` entries in MONEY_CRITICAL_TARGET_PATHS
+ * match. A bare `src/...` path (no `web/` prefix) is unaffected, so both the
+ * real `web/`-rooted layout and the forward-compat bare layout match.
+ */
 function normalize(path: string): string {
-  return path.replace(/^\.\//, "");
+  return path.replace(/^\.\//, "").replace(/^web\//, "");
 }
 
 /**
