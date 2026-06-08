@@ -170,14 +170,20 @@ const DEFAULT_FRICTION_SKILLS = [
  * failure-leaning `abandonReason` (`run-<reason>`) so a stalled dispatch is
  * still flagged for drill (issue #975). `crash` / `killed` are the abnormal
  * exits; `failure_backstop` is the reap-on-exit cause for a run that stopped
- * on a failure. Clean stops (`budget` / `wall_clock` / `idle` /
- * `interrupted`) are NOT here — a status-less dispatch on a clean stop is
- * genuinely still pending and must stay unflagged.
+ * on a failure. `interrupted` is the SIGTERM/exit-143 truncation (the common
+ * terminator — 36/39 ended runs at the time of #1168): it kills the session
+ * mid-turn just like a crash, leaving occupied slots status-less, so its
+ * dispatches must be drilled too rather than silently dropped (issue #1168 —
+ * an interrupted run was producing a structurally-empty retro that flagged 0
+ * dispatches and deep-read nothing). Genuinely-clean stops (`budget` /
+ * `wall_clock` / `idle`) are NOT here — a status-less dispatch on a clean stop
+ * is genuinely still pending and must stay unflagged.
  */
 const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
   "crash",
   "killed",
   "failure_backstop",
+  "interrupted",
 ]);
 
 // ---------------------------------------------------------------------------
