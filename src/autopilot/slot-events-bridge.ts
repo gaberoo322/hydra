@@ -31,7 +31,7 @@
 
 import type { EventBus } from "../event-bus.ts";
 
-export const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
+const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 const CONSUMER_GROUP = "now-pixel-bridge";
 const WS_STREAM_NAME = "autopilot:slot-events";
 
