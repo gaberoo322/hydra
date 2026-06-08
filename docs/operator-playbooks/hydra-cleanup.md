@@ -137,7 +137,25 @@ Issue body schema (one per finding):
 
 ## What to do
 
-Remove the unused <file / export> and any now-orphaned imports it leaves behind.
+**`knip` reports an "unused export" without telling you *why* it is dead — classify before you delete.** A naive delete is correct only when the symbol is *truly* dead; if its only dead aspect is `export` visibility, a still-live re-export, or a coupled Redis key generator, a delete breaks the build or orphans coupled code. Run this classification probe first (for the flagged `<name>` in `<path>`):
+
+```bash
+# 1. Still referenced ANYWHERE (src + test), ignoring its own definition site?
+rg -n --no-heading -w "<name>" src test | grep -v "<path>"
+# 2. Is the flagged line a re-export (`export { x } from './y'` / `export *`) rather than the definition?
+rg -n "export .*\b<name>\b" "<path>"
+# 3. Redis key generator? Are sibling generators referenced only by the same test assertions?
+rg -n "<name>" src/redis test/redis-keys.test.mts
+```
+
+Then apply the matching fix — **delete is the exception, not the default** (full table with evidence anchors lives in Step 2.5 of the hydra-cleanup playbook, `docs/operator-playbooks/hydra-cleanup.md`):
+
+- **(a) Truly dead** — probe 1 empty, not a re-export, no coupled keys → **delete** the symbol/file and any imports/re-exports that only existed to reference it.
+- **(b) Internally referenced** — probe 1 shows in-file callers, probe 2 shows it's the definition → **drop only the `export` keyword**, keep the definition module-private. Do NOT delete (the build breaks).
+- **(c) Re-export, definition live elsewhere** — probe 2 shows a `from` clause, probe 1 finds live uses of the definition → **remove only the re-export line**, leave the definition and its consumers.
+- **(d) Coupled Redis key generator** — probe 3 shows sibling generators coupled to assertions in `test/redis-keys.test.mts` → **remove the full coupled set atomically** (generator(s) + their test assertions) under a `scope-justification:` block naming the test file.
+
+If `npm test` / `tsc` go red after a delete, that is knip's false positive surfacing — revert to the demote / drop-re-export fix; never force the deletion.
 
 ## Files in scope
 
