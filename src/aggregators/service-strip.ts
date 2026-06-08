@@ -30,6 +30,7 @@ import { resolve } from "node:path";
 // aggregator keeps its injectable generic `probe(url, timeout)` dep; only the
 // OV URL it passes is no longer a hardcoded literal.
 import { ovBaseUrl } from "../knowledge-base/ov-request.ts";
+import { pingRedis } from "../redis/utility.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -221,17 +222,12 @@ async function defaultProbe(url: string, timeoutMs: number): Promise<ProbeResult
   }
 }
 
-async function defaultPingRedis(): Promise<boolean> {
-  try {
-    const { getRedisConnection } = await import("../redis/connection.ts");
-    const r = getRedisConnection();
-    const reply = await r.ping();
-    return reply === "PONG" || reply === "PONG\n" || reply === true || reply === "PONG\r\n";
-  } catch (err: any) {
-    console.error(`[service-strip] redis ping failed: ${err?.message || err}`);
-    return false;
-  }
-}
+// The Redis liveness probe goes through the typed `pingRedis()` accessor in
+// the redis/connection seam module (issue #1121) — no dynamic await-import of
+// the raw connection, no raw `getRedisConnection()`. The accessor already
+// swallows connection errors and resolves `false`, preserving the
+// degrade-to-down contract.
+const defaultPingRedis = pingRedis;
 
 async function defaultOrchestratorOk(): Promise<boolean> {
   // Same convention as src/api/health.ts: presence of `~/hydra/.kill`

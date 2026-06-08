@@ -179,6 +179,23 @@ export async function listRecentAutopilotRunIds(limit: number): Promise<string[]
   return r.zrevrange(redisKeys.autopilotRunsIndex(), 0, limit - 1);
 }
 
+/**
+ * Count runs in the index whose score (started_epoch, seconds) is at or after
+ * `sinceEpochSeconds`. A single ZCOUNT round-trip — returns the cardinality of
+ * the score range without pulling the IDs. Owns the runs-index key shape so the
+ * overnight-summary aggregator no longer dynamically imports `redis/connection`
+ * + `redis/keys` to do this read (issue #1121).
+ */
+export async function countAutopilotRunsSince(sinceEpochSeconds: number): Promise<number> {
+  const r = getRedisConnection();
+  const count = await r.zcount(
+    redisKeys.autopilotRunsIndex(),
+    String(Math.floor(sinceEpochSeconds)),
+    "+inf",
+  );
+  return Number(count) || 0;
+}
+
 // ---------------------------------------------------------------------------
 // Turn records (ZSET scored by turn_n)
 // ---------------------------------------------------------------------------

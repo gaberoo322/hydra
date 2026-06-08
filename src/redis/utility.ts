@@ -12,6 +12,32 @@ export async function redisInfo(section: string): Promise<string> {
 }
 
 /**
+ * Liveness probe: PING the shared connection and report whether Redis answered
+ * PONG. Owns the raw `getRedisConnection().ping()` call inside the seam so
+ * liveness consumers (the service-strip health aggregator) reach a typed
+ * accessor here instead of a dynamic `await import` of the raw connection or a
+ * static `from .../redis/connection` import — both of which the seam-check
+ * forbids outside the family (issue #1121). Lives in `utility.ts`, not
+ * `connection.ts`, so the consumer's import does not itself trip the
+ * raw-connection rule. Never throws — a connection error resolves `false`
+ * (logged with context), matching the aggregator's degrade-to-down contract.
+ */
+export async function pingRedis(): Promise<boolean> {
+  try {
+    const reply = await getRedisConnection().ping();
+    return (
+      reply === "PONG" ||
+      reply === "PONG\n" ||
+      reply === "PONG\r\n" ||
+      reply === true
+    );
+  } catch (err: any) {
+    console.error(`[redis/utility] ping failed: ${err?.message || err}`);
+    return false;
+  }
+}
+
+/**
  * Scan for keys matching a pattern with cursor-based iteration.
  * Returns all matching keys.
  */

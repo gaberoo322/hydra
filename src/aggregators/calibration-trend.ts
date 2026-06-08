@@ -31,6 +31,7 @@
  */
 
 import { isAutoMergeTier } from "../tier-policy.ts";
+import { readCalibrationRecordsRaw } from "../redis/calibration.ts";
 import {
   windowStart as trendWindowStart,
   bucketByDay as foldByDay,
@@ -125,23 +126,16 @@ async function defaultReadCalibrationRecords(
   windowStart: Date,
   now: Date,
 ): Promise<CalibrationRecord[]> {
-  // Use the typed seam — `src/redis/connection.ts` is the only allowed
-  // Redis import outside `src/redis/`. ZRANGEBYSCORE on the calibration
-  // index returns cycleIds in the window; we then GET each key.
-  const { getRedisConnection } = await import("../redis/connection.ts");
-  const r = getRedisConnection();
-  const startMs = windowStart.getTime();
-  const endMs = now.getTime();
-  const cycleIds = await r.zrangebyscore(
-    "hydra:anchors:calibration:index",
-    startMs,
-    endMs,
+  // The calibration index ZRANGEBYSCORE + per-record GET live behind the typed
+  // `readCalibrationRecordsRaw` accessor in `src/redis/calibration.ts` (issue
+  // #1121) — no dynamic await-import of the raw connection. This reader owns
+  // only the per-record JSON parse + shape narrowing.
+  const records = await readCalibrationRecordsRaw(
+    windowStart.getTime(),
+    now.getTime(),
   );
-  if (!Array.isArray(cycleIds) || cycleIds.length === 0) return [];
-
   const out: CalibrationRecord[] = [];
-  for (const cycleId of cycleIds) {
-    const raw = await r.get(`hydra:anchors:calibration:${cycleId}`);
+  for (const { cycleId, raw } of records) {
     if (!raw) continue;
     try {
       const parsed = JSON.parse(raw);

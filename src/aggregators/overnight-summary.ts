@@ -34,6 +34,7 @@ import { resolve } from "node:path";
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
 import { listIssuesBySearchOrEmpty, type IssueRow } from "../github/issues.ts";
+import { countAutopilotRunsSince as countAutopilotRunsSinceSeam } from "../redis/autopilot-runs.ts";
 
 import type { HeadroomLevel } from "./types.ts";
 import { settledOr } from "./settle.ts";
@@ -178,18 +179,16 @@ async function countMerges(windowStart: Date, deps: OvernightSummaryDeps): Promi
 // ---------------------------------------------------------------------------
 
 async function countAutopilotRuns(windowStart: Date, deps: OvernightSummaryDeps): Promise<number> {
+  const epoch = Math.floor(windowStart.getTime() / 1000);
   if (deps.countAutopilotRunsSince) {
-    return deps.countAutopilotRunsSince(Math.floor(windowStart.getTime() / 1000));
+    return deps.countAutopilotRunsSince(epoch);
   }
-  // Default: count members in the runs index ZSET with score >= windowStartEpoch.
-  // We use ZCOUNT for a single round-trip — it returns the cardinality of
-  // the score range directly without pulling the IDs.
-  const { getRedisConnection } = await import("../redis/connection.ts");
-  const { redisKeys } = await import("../redis/keys.ts");
-  const r = getRedisConnection();
-  const min = String(Math.floor(windowStart.getTime() / 1000));
-  const count = await r.zcount(redisKeys.autopilotRunsIndex(), min, "+inf");
-  return Number(count) || 0;
+  // Default: the runs-index key shape + ZCOUNT (single round-trip; returns the
+  // cardinality of the score range without pulling the IDs) live behind the
+  // typed `countAutopilotRunsSince` accessor in `src/redis/autopilot-runs.ts`,
+  // so this aggregator no longer dynamically imports `redis/connection` +
+  // `redis/keys` (issue #1121).
+  return countAutopilotRunsSinceSeam(epoch);
 }
 
 // ---------------------------------------------------------------------------

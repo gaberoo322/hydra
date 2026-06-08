@@ -773,21 +773,20 @@ export async function startRecommendationConsumer(eventBus: {
     handler: (event: any) => Promise<void>,
     opts?: { count?: number; blockMs?: number },
   ) => Promise<void>;
+  ensureConsumerGroup: (
+    stream: string,
+    group: string,
+    startId?: string,
+  ) => Promise<void>;
   _broadcastToClients?: (stream: string, event: unknown) => void;
 }): Promise<void> {
-  const { getRedisConnection } = await import("../redis/connection.ts");
-  const redis = getRedisConnection();
-  try {
-    await redis.xgroup(
-      "CREATE",
-      SLOT_EVENTS_STREAM,
-      RECS_CONSUMER_GROUP,
-      "$",
-      "MKSTREAM",
-    );
-  } catch (err: any) {
-    if (!err?.message?.includes("BUSYGROUP")) throw err;
-  }
+  // Stream (x*) ops are ADR-0017 Category B — the Event Bus is the sanctioned
+  // raw-connection owner. Route the consumer-group CREATE through
+  // `ensureConsumerGroup` instead of a dynamically-imported raw connection
+  // (issue #1121). The start-id MUST stay "$" (only-new-events): a regression to
+  // "0" would replay the entire slot-events stream on every restart. The Event
+  // Bus already swallows BUSYGROUP internally, so the manual try/catch is gone.
+  await eventBus.ensureConsumerGroup(SLOT_EVENTS_STREAM, RECS_CONSUMER_GROUP, "$");
 
   const engine = createRecommendationEngine({
     llm: defaultLlmClient(),

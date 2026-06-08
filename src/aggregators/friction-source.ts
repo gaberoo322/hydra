@@ -20,9 +20,11 @@
  * Deletion test: remove this file and the identical SCAN-and-parse loop
  * re-concentrates in three aggregators — so the seam earns its place.
  *
- * **Redis seam.** The connection is pulled through `redis/connection.ts` only,
- * so `scripts/ci/redis-seam-check.ts` stays green (no `new Redis()`, no import
- * of `redis/keys` | `redis/kv`).
+ * **Redis seam.** The SCAN-and-GET walk goes through the typed
+ * `scanPatternGroupsRaw("friction")` accessor in `src/redis/agent-memory.ts`
+ * (issue #1121) — no dynamic await-import of the raw connection, no raw
+ * `getRedisConnection()`, no `redis/keys` | `redis/kv` — so
+ * `scripts/ci/redis-seam-check.ts` stays green.
  *
  * ---
  *
@@ -43,6 +45,7 @@
  */
 
 import { listIssuesBySearchOrEmpty, type IssueRow } from "../github/issues.ts";
+import { scanPatternGroupsRaw } from "../redis/agent-memory.ts";
 
 /**
  * One `meta-friction` GitHub issue, as the dashboard aggregators render it.
@@ -158,32 +161,20 @@ export interface FrictionGroup<P> {
 export async function readFrictionPatterns<P>(
   label: string,
 ): Promise<Array<FrictionGroup<P>>> {
-  const { getRedisConnection } = await import("../redis/connection.ts");
-  const r = getRedisConnection();
-  const matches: string[] = [];
-  let cursor = "0";
-  do {
-    const [next, page] = await r.scan(
-      cursor,
-      "MATCH",
-      "hydra:friction:*:patterns",
-      "COUNT",
-      "200",
-    );
-    cursor = next;
-    matches.push(...page);
-  } while (cursor !== "0");
-
+  // The SCAN cursor walk + GET against `hydra:friction:*:patterns` lives behind
+  // the typed seam (`scanPatternGroupsRaw`); the `<P>` cast stays here at the
+  // call boundary so each consumer's validate-at-caller contract is preserved.
+  const groups = await scanPatternGroupsRaw("friction");
   const out: Array<FrictionGroup<P>> = [];
-  for (const key of matches) {
-    const skill = key.replace(/^hydra:friction:/, "").replace(/:patterns$/, "");
-    const raw = await r.get(key);
+  for (const { name: skill, raw } of groups) {
     if (!raw) continue;
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) out.push({ skill, patterns: parsed as P[] });
     } catch (err: any) {
-      console.error(`[${label}] failed to parse ${key}: ${err?.message || err}`);
+      console.error(
+        `[${label}] failed to parse hydra:friction:${skill}:patterns: ${err?.message || err}`,
+      );
     }
   }
   return out;
