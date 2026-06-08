@@ -76,7 +76,7 @@ const POKEDEX: Record<number, string> = {
   150: "150-mewtwo.png",
 };
 
-export function spriteFile(pokedexId: number): string {
+function spriteFile(pokedexId: number): string {
   const f = POKEDEX[pokedexId];
   if (!f) throw new Error(`sprite-map: unknown Pokedex id ${pokedexId}`);
   return f;
