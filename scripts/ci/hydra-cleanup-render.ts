@@ -211,6 +211,15 @@ export function renderTitle(finding: CleanupFinding): string {
  * path are derived from the SAME finding the title is — no parallel arrays,
  * no index-aligned zip (the #1005 drift guard).
  *
+ * The `## What to do` section embeds the knip false-positive classification
+ * taxonomy (issue #1299): the classification probe plus the four sub-cases
+ * (a delete / b demote-export / c drop-re-export / d coupled Redis-key-set),
+ * pointing at Step 2.5 of the playbook for the full table. The picking
+ * hydra-dev agent reads THIS rendered body, not the playbook prose, so the
+ * taxonomy MUST live here for the doc and the emitted issue to agree — a body
+ * that only said "remove the unused export" left the recurrence (naive delete
+ * on a false-positive "unused export") unbroken.
+ *
  * `isoDate` is the scan date (e.g. new Date().toISOString().slice(0, 10)),
  * injected so this function stays pure/deterministic for tests.
  */
@@ -227,10 +236,13 @@ export function renderBody(finding: CleanupFinding, isoDate: string): string {
   const findingSubject = isFile
     ? `\`${finding.path}\``
     : `the named export \`${finding.name}\` in \`${finding.path}\``;
-  const removeSubject = isFile ? "file" : "export";
   const acceptanceSubject = isFile
     ? `\`${finding.path}\``
     : `the named export \`${finding.name}\` (in \`${finding.path}\`)`;
+  // For the classification probe, substitute the finding's actual symbol/path.
+  // A whole-file finding has no symbol, so probe on its path — the grep still
+  // surfaces remaining references to the file (e.g. residual imports).
+  const probeName = isFile ? finding.path : finding.name;
 
   const lines: string[] = [];
   lines.push(`# cleanup: remove unused ${h1Subject}`);
@@ -242,9 +254,48 @@ export function renderBody(finding: CleanupFinding, isoDate: string): string {
   lines.push("");
   lines.push(`\`knip\` reports ${findingSubject} as **provably unused** — it has no remaining references in the orchestrator codebase.`);
   lines.push("");
+  // ## What to do — MUST mirror the Step 3 template in
+  // docs/operator-playbooks/hydra-cleanup.md. The picking hydra-dev agent reads
+  // THIS emitted body, NOT the playbook, so the knip false-positive taxonomy
+  // (issue #1299) has to live in the rendered body — otherwise the doc and the
+  // code contradict and emitted issues still lack the classification guidance
+  // (the recurrence: a naive delete on a false-positive "unused export" breaks
+  // the build / orphans coupled Redis-key sets).
   lines.push("## What to do");
   lines.push("");
-  lines.push(`Remove the unused ${removeSubject} and any now-orphaned imports it leaves behind.`);
+  lines.push(
+    '**`knip` reports an "unused export" without telling you *why* it is dead — classify before you delete.** A naive delete is correct only when the symbol is *truly* dead; if its only dead aspect is `export` visibility, a still-live re-export, or a coupled Redis key generator, a delete breaks the build or orphans coupled code. Run this classification probe first (for the flagged `<name>` in `<path>`):',
+  );
+  lines.push("");
+  lines.push("```bash");
+  lines.push("# 1. Still referenced ANYWHERE (src + test), ignoring its own definition site?");
+  lines.push(`rg -n --no-heading -w "${probeName}" src test | grep -v "${finding.path}"`);
+  lines.push("# 2. Is the flagged line a re-export (`export { x } from './y'` / `export *`) rather than the definition?");
+  lines.push(`rg -n "export .*\\b${probeName}\\b" "${finding.path}"`);
+  lines.push("# 3. Redis key generator? Are sibling generators referenced only by the same test assertions?");
+  lines.push(`rg -n "${probeName}" src/redis test/redis-keys.test.mts`);
+  lines.push("```");
+  lines.push("");
+  lines.push(
+    "Then apply the matching fix — **delete is the exception, not the default** (full table with evidence anchors lives in Step 2.5 of the hydra-cleanup playbook, `docs/operator-playbooks/hydra-cleanup.md`):",
+  );
+  lines.push("");
+  lines.push(
+    "- **(a) Truly dead** — probe 1 empty, not a re-export, no coupled keys → **delete** the symbol/file and any imports/re-exports that only existed to reference it.",
+  );
+  lines.push(
+    "- **(b) Internally referenced** — probe 1 shows in-file callers, probe 2 shows it's the definition → **drop only the `export` keyword**, keep the definition module-private. Do NOT delete (the build breaks).",
+  );
+  lines.push(
+    "- **(c) Re-export, definition live elsewhere** — probe 2 shows a `from` clause, probe 1 finds live uses of the definition → **remove only the re-export line**, leave the definition and its consumers.",
+  );
+  lines.push(
+    "- **(d) Coupled Redis key generator** — probe 3 shows sibling generators coupled to assertions in `test/redis-keys.test.mts` → **remove the full coupled set atomically** (generator(s) + their test assertions) under a `scope-justification:` block naming the test file.",
+  );
+  lines.push("");
+  lines.push(
+    "If `npm test` / `tsc` go red after a delete, that is knip's false positive surfacing — revert to the demote / drop-re-export fix; never force the deletion.",
+  );
   lines.push("");
   lines.push("## Files in scope");
   lines.push("");
