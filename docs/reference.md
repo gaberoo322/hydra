@@ -72,10 +72,10 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 
 **Cycles** (`api/cycles.ts`): GET /cycle/status, GET /cycle/history, GET /cycle/report, POST /cycle/register, POST /cycle/complete
 **Tasks** (`api/tasks.ts`): GET /tasks, GET /tasks/:id, GET /tasks/:id/evidence
-**Queue** (`api/queue.ts`): POST /queue `{reference, reason, context}`, GET /queue
+**Queue** (`api/queue.ts`): POST /queue `{reference, reason?, context?, source?}` (body schema `src/schemas/queue.ts`, `.strict()` — extra keys 400 with `schema-validation-failed`; `source` is optional provenance the `hydra` CLI injects as `"hydra-cli"` and `/queue/snapshot` reads), GET /queue, GET /queue/snapshot. There is **no** `GET /api/work-queue/<id>` route — the work queue is a Redis LIST (`hydra:anchors:work-queue`) with no per-item id addressing; read it via `GET /api/queue` (items) or `GET /api/queue/snapshot` (human summary).
 **Scheduler** (`api/scheduler.ts`): POST /scheduler/start, POST /scheduler/stop, GET /scheduler/status
 **Research** (`api/research.ts`): POST /research/start, GET /research/latest, GET /research/history, POST /research/veto
-**Backlog** (`api/backlog.ts`): GET /backlog, GET /backlog/counts, POST /backlog, POST /backlog/enhance, PATCH /backlog/:id, PATCH /backlog/:id/move, POST /backlog/:id/approve, GET /backlog/:id/children, DELETE /backlog/:id, POST /backlog/claim
+**Backlog** (`api/backlog.ts`): GET /backlog, GET /backlog/counts, POST /backlog, POST /backlog/enhance, PATCH /backlog/:id, PATCH /backlog/:id/move `{lane}` (lane MUST be camelCase — `triage|backlog|queued|blocked|inProgress|done`; `hydra backlog move` alias-normalizes `inprogress`/`in-progress`/`in_progress` → `inProgress`), POST /backlog/:id/approve, GET /backlog/:id/children, DELETE /backlog/:id, POST /backlog/claim. **`POST /backlog/claim` is claim-NEXT, not claim-by-id** — `claimNextQueuedItem` (Lua-atomic) returns the highest-priority QUEUED item regardless of any `id` in the body; there is no claim-by-id path.
 **Specs** (`api/specs.ts`): GET /specs, GET /specs/:slug, POST /specs, POST /specs/:slug/archive
 **Proposals** (`api/proposals.ts`): GET /proposals, POST /proposals/:id/approve, POST /proposals/:id/reject
 **Metrics** (`api/metrics.ts`): GET /metrics, GET /spending, GET /summary, POST /metrics/record

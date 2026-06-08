@@ -154,11 +154,23 @@ cmd_backlog() {
     move   )
       shift
       [ "$#" -ge 2 ] || { echo "hydra backlog move: need <id> <lane>" >&2; exit 2; }
+      # Issue #1140: LANES (src/backlog/internal.ts) is camelCase
+      # (triage|backlog|queued|blocked|inProgress|done). Agents/operators
+      # keep typing lowercase `inprogress` / `in-progress`, which the server
+      # rejects with `Invalid lane`. Alias-normalize the common variants to
+      # the canonical camelCase before sending so muscle-memory casing works;
+      # any other value is forwarded verbatim and the server validates it.
+      local lane="$2"
+      local lane_lc
+      lane_lc="$(printf '%s' "$lane" | tr '[:upper:]' '[:lower:]')"
+      if [ "$lane_lc" = "inprogress" ] || [ "$lane_lc" = "in-progress" ] || [ "$lane_lc" = "in_progress" ]; then
+        lane="inProgress"
+      fi
       # Issue #537: the move sub-route is `/backlog/:id/move`. Hitting
       # `/backlog/:id` (updateItem) silently drops `lane` because it's not
       # on updateItem's ALLOWED list — every move returned ok:true while
       # the backlog state was unchanged. Always use the /move suffix.
-      _patch "/backlog/$1/move" "{\"lane\":\"$2\"}" ;;
+      _patch "/backlog/$1/move" "{\"lane\":\"$lane\"}" ;;
     *      ) echo "hydra backlog: need ls|counts|move" >&2; exit 2 ;;
   esac
 }
@@ -168,9 +180,21 @@ cmd_queue() {
     ls|"") _get "/queue" ;;
     add )
       shift
-      [ "$#" -ge 1 ] || { echo "hydra queue add: need <reference>" >&2; exit 2; }
-      local ref="$1"; shift
-      local reason="${1:-Added by hydra CLI}"
+      # Issue #1140: accept the reason via EITHER a `-d <reason>` flag (curl
+      # muscle-memory, the form every playbook already writes) OR the second
+      # positional argument. The first non-flag arg is the <reference>; a
+      # bare positional after it remains a valid reason (backward-compatible).
+      # Pre-fix, `hydra queue add "<title>" -d "<why>"` put `-d` into the
+      # reason literal and dropped the real reason.
+      local ref="" reason=""
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          -d|--reason) reason="$2"; shift 2 ;;
+          *) if [ -z "$ref" ]; then ref="$1"; elif [ -z "$reason" ]; then reason="$1"; fi; shift ;;
+        esac
+      done
+      [ -n "$ref" ] || { echo "hydra queue add: need <reference>" >&2; exit 2; }
+      [ -n "$reason" ] || reason="Added by hydra CLI"
       _post "/queue" "{\"reference\":$(printf '%s' "$ref" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"reason\":$(printf '%s' "$reason" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"source\":\"hydra-cli\"}" ;;
     *   ) echo "hydra queue: need ls|add" >&2; exit 2 ;;
   esac
