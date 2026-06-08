@@ -28,9 +28,9 @@ import { readFile, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";
 import { parseOutcomesYaml, type YamlScalar } from "./outcomes-yaml.ts";
 
-// Re-export the extracted YAML parser surface so existing importers of
-// `parseOutcomesYaml` from this Module keep working (back-compat, #933).
-export { parseOutcomesYaml, stripComment, parseScalar } from "./outcomes-yaml.ts";
+// Re-export the extracted YAML parser surface so existing importers of these
+// helpers from this module keep working (back-compat, #933).
+export { stripComment, parseScalar } from "./outcomes-yaml.ts";
 export type { ParsedYaml, ParseResult, YamlScalar } from "./outcomes-yaml.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
