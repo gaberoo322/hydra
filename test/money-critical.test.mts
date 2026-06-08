@@ -57,6 +57,31 @@ describe("classifyTargetRisk — money-critical surfaces", () => {
     assert.equal(r.moneyCritical, true);
   });
 
+  test("flags a web/-rooted money-critical path (issue #1235)", () => {
+    // Every real hydra-betting source path is under web/, so the diff paths
+    // the classifier sees are web/-rooted. Before #1235 the bare src/lib/...
+    // entries failed to prefix-match these, silently skipping the gate.
+    const r = classifyTargetRisk([
+      "web/src/lib/providers/kalshi/margin-fee-tier-map-loader.ts",
+    ]);
+    assert.equal(r.moneyCritical, true);
+    // matchedPaths reports the original (web/-rooted) input verbatim.
+    assert.deepEqual(r.matchedPaths, [
+      "web/src/lib/providers/kalshi/margin-fee-tier-map-loader.ts",
+    ]);
+  });
+
+  test("flags a web/-rooted bet-math path (issue #1235)", () => {
+    assert.equal(isMoneyCriticalPath("web/src/lib/bet-math/edge.ts"), true);
+  });
+
+  test("flags a web/-rooted providers path via isMoneyCriticalPath (issue #1235)", () => {
+    assert.equal(
+      isMoneyCriticalPath("web/src/lib/providers/kalshi/x.ts"),
+      true,
+    );
+  });
+
   test("a mixed set is money-critical if ANY path matches", () => {
     const r = classifyTargetRisk([
       "src/components/Button.tsx",
@@ -107,6 +132,19 @@ describe("classifyTargetRisk — safe surfaces", () => {
     ]);
     assert.equal(r.moneyCritical, false);
     assert.deepEqual(r.matchedPaths, []);
+  });
+
+  test("a web/-rooted UI path is safe (issue #1235)", () => {
+    // Stripping the web/ prefix must not accidentally flag a safe web/-rooted
+    // path: web/src/components/... normalizes to src/components/... which
+    // matches none of the money-critical entries.
+    const r = classifyTargetRisk([
+      "web/src/components/Scoreboard.tsx",
+      "web/src/app/page.tsx",
+    ]);
+    assert.equal(r.moneyCritical, false);
+    assert.deepEqual(r.matchedPaths, []);
+    assert.equal(isMoneyCriticalPath("web/src/lib/ui/button.ts"), false);
   });
 
   test("a sibling path that merely shares a prefix substring is NOT matched", () => {
