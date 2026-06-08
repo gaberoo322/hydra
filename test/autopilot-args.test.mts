@@ -53,8 +53,23 @@ function runBootstrap(env: Record<string, string>, argv: string[], tmp: Tmp): Bo
     HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
     HYDRA_AUTOPILOT_LOG: tmp.log,
   };
+  // issue #1231 — neutralize host-env contamination. The host (and the
+  // running autopilot's systemd drop-in) may export HYDRA_AUTOPILOT_* vars —
+  // e.g. the orch-only/budget drop-in sets HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD=0
+  // (reference_autopilot_scope_orch_only_dropin). If those leaked through
+  // ...process.env into bootstrap, the "documented defaults" assertion would
+  // read the HOST's override (cap=0) instead of bootstrap's own default (50),
+  // making the test flake purely on the dispatch environment. Strip every
+  // HYDRA_AUTOPILOT_* key from the inherited env so the test exercises the
+  // parse/default logic in isolation; the per-case `env` arg re-supplies only
+  // the vars a given assertion wants present.
+  const sanitizedProcessEnv = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([k]) => !k.startsWith("HYDRA_AUTOPILOT_"),
+    ),
+  );
   const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), argv, {
-    env: { ...process.env, ...isolatedEnv, ...env, PATH: process.env.PATH ?? "" },
+    env: { ...sanitizedProcessEnv, ...isolatedEnv, ...env, PATH: process.env.PATH ?? "" },
     encoding: "utf-8",
   });
   const out: BootstrapResult = {

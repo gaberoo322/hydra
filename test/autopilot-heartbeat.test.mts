@@ -169,14 +169,23 @@ describe("scripts/autopilot/heartbeat.py", () => {
     try {
       const now = Math.floor(Date.now() / 1000);
       // sweep_orch cooldown is 900s; fire it 60s ago — should count as active.
-      // discover_orch cooldown is 1800s; fire it 2000s ago — cooled, NOT active.
+      // discover_orch must be UNAMBIGUOUSLY cooled regardless of which
+      // SIGNAL_COOLDOWNS source is live. heartbeat.py imports the value from
+      // the sibling decide.py when it can (3600s since #959) and falls back to
+      // a hard-coded table (1800s) only when that import fails. Firing
+      // discover_orch 2000s ago made this test env-dependent: cooled under the
+      // 1800 fallback but STILL ACTIVE under the live 3600 value (2000 < 3600),
+      // which is exactly why subtest 3 flaked in agent worktrees (issue #1231,
+      // observed `3 !== 2`). Fire it 5000s ago instead — older than BOTH the
+      // 3600 live and the 1800 fallback cooldown, so it is cooled in every
+      // environment.
       // health cooldown is 0; fire it 10s ago — active (special-cased: within 60s).
       writeState(tmp.state, {
         signal_last_fired: {
           health: now - 10,
           sweep_orch: now - 60,
           sweep_target: 0,
-          discover_orch: now - 2000,
+          discover_orch: now - 5000,
           discover_target: 0,
         },
       });

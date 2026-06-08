@@ -32,6 +32,10 @@ If your output contradicts an existing ADR, surface it explicitly rather than si
 
 When a code change resolves a new term or makes a decision worth recording, open a **separate** `ubiquitous-language`-labelled PR for the glossary/ADR delta — do not bundle it with the code PR. Code-writing subagents declare `Glossary impact` / `ADR impact` in every code PR body.
 
+## Full-suite test flakes are resolved — a fresh-worktree green is trustworthy (issue #1231)
+
+`npm test` runs serial files (`--test-concurrency=1`) and is deterministic-green whether or not OpenViking/Ollama is reachable and regardless of host `HYDRA_AUTOPILOT_*` env. The historically-flaky trio (`test/semantic-dedup.test.mts`, `test/autopilot-args.test.mts`, `test/autopilot-heartbeat.test.mts`) now asserts each function's **contract**, not an environment-specific value, so they no longer depend on OV liveness or a host budget/scope drop-in. Do **not** re-run the stash-and-diff-against-master ritual to "confirm a flake pre-exists" — trust the green. If a Redis-touching test needs a guaranteed-clean keyspace, use the backstop `test/_helpers/redis-db.mts` (`useCleanRedisDb()`) rather than relying on another file's `after()` cleanup.
+
 ## The target repo (`~/hydra-betting`)
 
 The **Target** has its own parallel contract that target-dispatched subagents (`hydra-target-build`, `hydra-target-sweep`, `hydra-target-research`) follow — it is *not* this repo's:
