@@ -18,6 +18,7 @@ import {
   runSourceInitialPass,
   makeSourceWatcher,
   setWatchedPaths,
+  loadPersistedHashes,
 } from "./source-indexer.ts";
 import { getMemoryPatterns } from "../redis/agent-memory.ts";
 
@@ -112,9 +113,20 @@ export function startKnowledgeIndexer() {
     }
   }
 
-  // Initial-index pass: upload recently-modified source files in the
-  // background so agents have code-level context after a restart.
-  runSourceInitialPass()
+  // Issue #1123: hydrate the in-memory dedup cache from its durable Redis copy
+  // BEFORE the initial pass, so files unchanged since a previous process's run
+  // are skipped instead of re-embedded on every restart. Best-effort — a load
+  // failure degrades to the pre-#1123 re-upload behavior, never blocks startup.
+  loadPersistedHashes()
+    .then((loaded) => {
+      console.log(`[Learning:Indexer] Loaded ${loaded} persisted source hashes`);
+    })
+    .catch((err: any) => console.error(`[Learning:Indexer] Hash hydrate failed: ${err.message}`))
+    // Initial-index pass: upload recently-modified source files in the
+    // background so agents have code-level context after a restart. Chained
+    // after the hydrate so the cache is warm before the pass decides what to
+    // skip.
+    .then(() => runSourceInitialPass())
     .then(({ scanned, indexed, skipped }) => {
       console.log(`[Learning:Indexer] Initial source pass: scanned=${scanned} indexed=${indexed} skipped=${skipped}`);
     })

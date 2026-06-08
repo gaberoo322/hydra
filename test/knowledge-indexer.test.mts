@@ -9,7 +9,7 @@
  * validate behavior without standing up an OV instance.
  */
 
-import { test, describe, before, after } from "node:test";
+import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, utimes, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,6 +23,8 @@ import {
   runSourceInitialPass,
   getCoverageStats,
   resetCoverageStats,
+  loadPersistedHashes,
+  _setHashPersistence,
 } from "../src/knowledge-base/source-indexer.ts";
 
 // Use a unique temp root for each describe block so we don't collide with
@@ -274,5 +276,129 @@ describe("runSourceInitialPass", () => {
       String(c.body || "").includes("node_modules")
     );
     assert.equal(nodeModuleUploads.length, 0);
+  });
+});
+
+// Issue #1123: the dedup hash map is persisted to Redis and reloaded on startup
+// so unchanged files are skipped ACROSS process restarts (not just within one
+// process lifetime). These tests drive the persistence seam through an in-memory
+// fake — no live Redis — and simulate a restart by clearing the in-memory cache
+// (resetCoverageStats) while keeping the persisted store, exactly the cold-cache /
+// warm-Redis condition every orchestrator bounce hits.
+describe("source-index persistence across restarts (issue #1123)", () => {
+  let tempRoot: string;
+  let src: string;
+  let originalFetch: typeof fetch;
+  // The in-memory stand-in for the durable Redis hash.
+  let fakeStore: Map<string, string>;
+  let persistCalls: { path: string; hash: string }[];
+
+  before(async () => {
+    const t = await makeTempProject();
+    tempRoot = t.root;
+    src = t.src;
+
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url);
+      if (u.endsWith("/api/v1/resources/temp_upload")) {
+        return {
+          ok: true,
+          json: async () => ({ temp_path: "/tmp/fake-temp-path" }),
+          text: async () => "",
+        } as any;
+      }
+      return { ok: true, json: async () => ({}), text: async () => "" } as any;
+    }) as any;
+  });
+
+  after(async () => {
+    globalThis.fetch = originalFetch;
+    _setHashPersistence(); // restore real Redis-backed accessors
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    fakeStore = new Map<string, string>();
+    persistCalls = [];
+    resetCoverageStats(); // clears the in-memory cache
+    _setHashPersistence({
+      load: async () => new Map(fakeStore),
+      persist: async (path: string, hash: string) => {
+        fakeStore.set(path, hash);
+        persistCalls.push({ path, hash });
+      },
+    });
+  });
+
+  test("first pass persists each indexed file's hash to the durable store", async () => {
+    const result = await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    // makeTempProject creates control-loop.ts + nested/thing.ts under src.
+    assert.equal(result.indexed, 2);
+    assert.equal(fakeStore.size, 2, "both indexed files should be persisted");
+    assert.equal(persistCalls.length, 2);
+  });
+
+  test("a file unchanged since its last persisted hash is skipped with a fresh in-memory cache", async () => {
+    // Pass 1: index + persist.
+    await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    assert.equal(fakeStore.size, 2);
+
+    // Simulate a process restart: the in-memory cache is gone, but the durable
+    // store survives. resetCoverageStats() drops the in-memory hashes; the
+    // fakeStore (Redis stand-in) is untouched.
+    resetCoverageStats();
+
+    // Hydrate from the durable store — the startup hook does this before the pass.
+    const loaded = await loadPersistedHashes();
+    assert.equal(loaded, 2, "hydrated both hashes from the durable store");
+
+    // Pass 2 (post-restart): no file changed → zero re-uploads, all skipped.
+    const persistCallsBefore = persistCalls.length;
+    const result = await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    assert.equal(result.indexed, 0, "unchanged files must NOT be re-embedded after restart");
+    assert.equal(result.skipped, 2, "both files skipped via the rehydrated dedup map");
+    assert.equal(
+      persistCalls.length,
+      persistCallsBefore,
+      "skipped files trigger no new persist writes",
+    );
+  });
+
+  test("a changed file is re-indexed and re-persisted after a restart", async () => {
+    await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+
+    // Restart: drop in-memory cache, keep durable store.
+    resetCoverageStats();
+    await loadPersistedHashes();
+
+    // Mutate one file so its content hash changes.
+    await writeFile(join(src, "control-loop.ts"), "export const scheduler = 12345;\n");
+    const now = new Date();
+    await utimes(join(src, "control-loop.ts"), now, now);
+
+    const result = await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    assert.equal(result.indexed, 1, "only the changed file is re-embedded");
+    assert.equal(result.skipped, 1, "the unchanged file is still skipped");
+    // The durable store now reflects the new hash for the changed file.
+    const newHash = fakeStore.get(join(src, "control-loop.ts"));
+    assert.ok(newHash, "changed file's new hash persisted");
+  });
+
+  test("loadPersistedHashes does not clobber a hotter in-memory entry", async () => {
+    // Index once this lifetime (writes both in-memory + durable).
+    await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    const liveHash = fakeStore.get(join(src, "control-loop.ts"));
+
+    // Simulate the durable store holding a STALE hash for the same path (e.g. a
+    // racing writer). loadPersistedHashes must not overwrite the live cache.
+    fakeStore.set(join(src, "control-loop.ts"), "stale-hash-deadbeef");
+    await loadPersistedHashes();
+
+    // Re-run: the live (correct) hash still matches on disk → skipped, NOT
+    // re-indexed off the stale durable value.
+    const result = await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }] });
+    assert.equal(result.indexed, 0, "live in-memory hash wins over stale durable hash");
+    assert.ok(liveHash, "sanity: a live hash existed");
   });
 });
