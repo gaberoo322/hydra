@@ -120,7 +120,7 @@ export interface LlmResult {
 
 /** Constants */
 export const MIN_CALL_INTERVAL_SECONDS = 30;
-export const DEFAULT_DAILY_CAP_USD = 1.0;
+const DEFAULT_DAILY_CAP_USD = 1.0;
 export const PROMPT_SIZE_BUDGET_BYTES = 4 * 1024;
 export const MAX_RECS_PER_CALL = 3;
 
