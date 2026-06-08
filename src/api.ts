@@ -35,6 +35,7 @@ import { createAutopilotIdleRouter } from "./api/autopilot-idle.ts";
 import { createAutopilotBoardRouter } from "./api/autopilot-board.ts";
 import { createTodayPageRouter } from "./api/today-page.ts";
 import { createNowPageRouter } from "./api/now-page.ts";
+import { createNowRecommendationsRouter } from "./api/now-recommendations.ts";
 import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
 import { createExplorePageRouter } from "./api/explore-page.ts";
 import { createDispatchesRouter } from "./api/dispatches.ts";
@@ -108,6 +109,8 @@ function createApi(eventBus) {
   api.use(createTodayPageRouter());
   // Now page — slice 3 (issue #618).
   api.use(createNowPageRouter());
+  // Now page recommendation write-path — extracted from now-page (#1323).
+  api.use(createNowRecommendationsRouter());
   // Slice 4 (issue #619) — Outcomes page: 4 weekly-trend endpoints.
   api.use(createOutcomesPageRouter());
   // Explore tabbed hub — slice 5 (issue #620).
