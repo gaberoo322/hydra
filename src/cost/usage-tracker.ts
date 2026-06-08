@@ -1158,10 +1158,13 @@ async function scanUsage(
   // rebased onto the real utilization — the meter IS the ground-truth 5h/7d
   // utilization, strictly better than a calibration guess. HARD INVARIANT: on
   // ANY failed/expired/garbage read the estimate stands; the headline NEVER
-  // silently reads 0 (which would unblock dispatch during an outage), so
-  // emergencyStop stays conservative. The ADR-0021 since-reset / Pace-Gate
-  // machinery (percentSinceReset, weeklyEmergencyStop, projectPacingCurve) is
-  // byte-for-byte untouched — only the rolling headline + 5h emergencyStop move.
+  // silently reads 0 (which would unblock dispatch during an outage). Since
+  // #1124 BOTH hard-stops (5h `emergencyStop` and `weeklyEmergencyStop`) are
+  // gated on `usageSource === "oauth"` so a failed read can no longer trigger a
+  // stop on the estimate — autopilot fails open and defers to Claude's own
+  // session-limit enforcement (#1089) + the operator. The ADR-0021 since-reset /
+  // Pace-Gate PACING machinery (percentSinceReset, projectPacingCurve) is
+  // byte-for-byte untouched — only the two hard-stops + rolling headline move.
   const cachedOAuth = await oauthPromise;
   const oauth = cachedOAuth.result;
   let percentLast5h: number;
@@ -1209,14 +1212,18 @@ async function scanUsage(
     oauthAgeMs = null;
   }
 
-  // emergencyStop rides whichever headline is authoritative. On the OAuth path
-  // the meter is a real 0–100 utilization so the calibration gate does not
-  // apply; on the estimate path the historical `calibrated && >=90` gate holds
-  // (an uncalibrated estimate is 0, so it stays false — unchanged behaviour).
-  const emergencyStop =
-    usageSource === "oauth"
-      ? percentLast5h >= EMERGENCY_STOP_PERCENT
-      : calibrated && percentLast5h >= EMERGENCY_STOP_PERCENT;
+  // emergencyStop is driven EXCLUSIVELY by the real OAuth meter (issue #1124).
+  // On the OAuth path the meter is a real 0–100 utilization (a served-stale
+  // last-good is `usageSource === "oauth"` too — stale-but-real still stops),
+  // so the >=90 gate fires on ground truth. On the estimate fallback path the
+  // headline is the transcript+calibration guess (~half-of-real, #1083), which
+  // caused FALSE stops during OAuth outages — so the estimate NEVER triggers
+  // emergencyStop regardless of percentLast5h. During a prolonged OAuth outage
+  // autopilot does not self-stop on usage; it fails open and defers to Claude's
+  // own session-limit enforcement (the #1089 pace-gate block) plus the operator.
+  // The estimate is still surfaced as the displayed headline (#1090) — only the
+  // STOP decision is decoupled from it.
+  const emergencyStop = usageSource === "oauth" && percentLast5h >= EMERGENCY_STOP_PERCENT;
 
   const weightedTotal = (acc: Record<ModelFamily, TokenBreakdown>): number =>
     MODEL_FAMILIES.reduce((sum, f) => sum + acc[f].total * familyWeight(f, weights), 0);
@@ -1289,10 +1296,19 @@ async function scanUsage(
   }
 
   // Weekly hard-stop (the reset-aligned analogue of the 5h `emergencyStop`).
-  // Computed here, AFTER `percentSinceReset` is finalised against the
-  // effective Weekly Reset Anchor boundary. Stays false when the Anchor is
-  // unset (percentSinceReset === 0) or the quota is uncalibrated.
-  const weeklyEmergencyStop = calibrated && percentSinceReset >= EMERGENCY_STOP_PERCENT;
+  // Driven EXCLUSIVELY by the real OAuth meter (issue #1124): it rides the
+  // OAuth-backed rolling 7-day utilization (`percentLast7d` when
+  // `usageSource === "oauth"`, incl. a served-stale last-good — stale-but-real
+  // still stops). It previously rode `percentSinceReset`, the ADR-0021
+  // since-reset CALIBRATION estimate, which is never OAuth-derived — letting a
+  // ~half-of-real transcript guess (#1083) trigger a full autopilot stop during
+  // an OAuth outage (the false-stop #1124 fixes). On the estimate fallback path
+  // (`usageSource === "estimate"`) the stop is suppressed: autopilot fails open
+  // and defers to Claude's own session-limit enforcement (#1089) + the operator.
+  // The ADR-0021 since-reset machinery (`percentSinceReset`, the Pacing Curve)
+  // is untouched — it remains the pacing signal; only this hard-stop moves onto
+  // the real meter.
+  const weeklyEmergencyStop = usageSource === "oauth" && percentLast7d >= EMERGENCY_STOP_PERCENT;
 
   return {
     tokensLast5h: acc5h,
