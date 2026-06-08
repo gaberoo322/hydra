@@ -45,6 +45,36 @@ function extractCmdBacklog(text: string): string {
   return match[0];
 }
 
+/**
+ * Extract the `move )` case arm out of a `cmd_backlog()` body.
+ *
+ * Issue #1319: a bash `case` clause is terminated by `;;`, but a clause MAY
+ * itself contain a nested `case` whose inner clauses also end in `;;`. The
+ * old extractor (`/move\s*\)[\s\S]*?;;/`) stopped at the FIRST `;;`, which
+ * truncated the captured span before the real `_patch` line whenever the
+ * `move )` arm used a nested `case` (e.g. for the #1140 lane-alias
+ * normalization). That forced production shell into an awkward `if`-chain
+ * purely to satisfy a brittle test — the dependency arrow pointed the wrong
+ * way (recurrence 8x, cue `test-branch-extractor-stops-at-first-semicolon`).
+ *
+ * Instead, anchor on the NEXT top-level case label or the closing `esac`.
+ * Top-level clause labels in `cmd_backlog()` are indented four spaces and
+ * carry a `)` after the pattern; anything more deeply nested (a nested
+ * `case`'s clauses) is indented further, so it is not mistaken for the arm
+ * boundary. The captured span therefore survives any control-flow shape
+ * inside the `move )` arm — `if`-chain or nested `case` alike. The contract
+ * under test is the route path + `lane` field, never the shell structure.
+ */
+function extractMoveBranch(cmdBacklogBody: string): string {
+  // From the `move )` label up to (but not including) the next top-level
+  // clause label (4-space indent + pattern + `)`) or the closing `esac`.
+  const match = cmdBacklogBody.match(
+    /move\s*\)[\s\S]*?(?=\n {4}\S[^\n]*\)|\n {2}esac\b)/,
+  );
+  if (!match) throw new Error("`move )` branch not found in cmd_backlog()");
+  return match[0];
+}
+
 describe("hydra CLI: backlog move (issue #537)", () => {
   test("move PATCHes /backlog/<id>/move, never the bare /backlog/<id>", async () => {
     const text = await readBin();
@@ -60,15 +90,14 @@ describe("hydra CLI: backlog move (issue #537)", () => {
     // Within the `move )` branch specifically, the bare /backlog/$1
     // PATCH path (the bug) must not appear — the path must always
     // include the /move suffix.
-    const moveBranch = body.match(/move\s*\)[\s\S]*?;;/);
-    assert.ok(moveBranch, "cmd_backlog() must define a `move )` branch");
+    const moveBranch = extractMoveBranch(body);
     assert.doesNotMatch(
-      moveBranch![0],
+      moveBranch,
       /_patch\s+"\/backlog\/\$\{?1\}?"\s/,
       "hydra backlog move must NOT PATCH the bare /backlog/<id> path (silently drops lane)",
     );
     assert.doesNotMatch(
-      moveBranch![0],
+      moveBranch,
       /_patch\s+"\/backlog\/\$\{?1\}?"$/m,
       "hydra backlog move must NOT PATCH the bare /backlog/<id> path (silently drops lane)",
     );
@@ -87,15 +116,14 @@ describe("hydra CLI: backlog move (issue #537)", () => {
     // interpolates `$lane` rather than the raw `$2`. Accept either form —
     // the contract this test protects is the `lane` FIELD NAME, not which
     // variable carries the value.
-    const moveBranch = body.match(/move\s*\)[\s\S]*?;;/);
-    assert.ok(moveBranch, "cmd_backlog() must define a `move )` branch");
+    const moveBranch = extractMoveBranch(body);
     assert.match(
-      moveBranch![0],
+      moveBranch,
       /\{\\?"lane\\?":\\?"\$\{?(2|lane)\}?\\?"\}/,
       "hydra backlog move must send {\"lane\": \"<lane>\"} (the field moveItemToLane reads)",
     );
     assert.doesNotMatch(
-      moveBranch![0],
+      moveBranch,
       /\{\\?"to\\?":/,
       "hydra backlog move must NOT use the `to` field (the API reads `lane`)",
     );
@@ -104,23 +132,22 @@ describe("hydra CLI: backlog move (issue #537)", () => {
   test("move alias-normalizes lowercase lane input to camelCase (issue #1140)", async () => {
     const text = await readBin();
     const body = extractCmdBacklog(text);
-    const moveBranch = body.match(/move\s*\)[\s\S]*?;;/);
-    assert.ok(moveBranch, "cmd_backlog() must define a `move )` branch");
+    const moveBranch = extractMoveBranch(body);
     // LANES (src/backlog/internal.ts) is camelCase; agents keep typing
     // lowercase `inprogress`, which the server rejects with `Invalid lane`.
     // The CLI maps the common variants to canonical `inProgress`.
     assert.match(
-      moveBranch![0],
+      moveBranch,
       /inProgress/,
       "hydra backlog move must normalize lane aliases to camelCase inProgress",
     );
     assert.match(
-      moveBranch![0],
+      moveBranch,
       /inprogress/,
       "hydra backlog move must accept the lowercase inprogress alias",
     );
     assert.match(
-      moveBranch![0],
+      moveBranch,
       /in-progress/,
       "hydra backlog move must accept the hyphenated in-progress alias",
     );
