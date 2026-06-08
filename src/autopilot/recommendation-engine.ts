@@ -51,7 +51,7 @@ export interface TurnEndPayload {
   ts_epoch: number;
 }
 
-export interface RecentTurn {
+interface RecentTurn {
   turn_n: number;
   dispatches: number;
   skipped: number;
