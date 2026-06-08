@@ -38,7 +38,7 @@ const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hy
  * `config/direction/outcomes.yaml`. Relative paths are resolved against
  * HYDRA_ROOT so the same code works under systemd or `npx tsx`.
  */
-export const DEFAULT_SHARE_METRIC_PATH = join(HYDRA_ROOT, "metrics", "orchestrator-share.txt");
+const DEFAULT_SHARE_METRIC_PATH = join(HYDRA_ROOT, "metrics", "orchestrator-share.txt");
 
 /**
  * Resolve a metric path against HYDRA_ROOT when relative.
