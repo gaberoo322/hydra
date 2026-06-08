@@ -525,6 +525,64 @@ describe("assembleRetroBundle — composition", () => {
     assert.equal(flaggedCount, 3, "the served flagged subset is non-empty (was 0)");
   });
 
+  // -------------------------------------------------------------------------
+  // issue #1168 — an `interrupted` run (the COMMON terminator: 36/39 ended
+  // runs) was excluded from the backfill set, so every status-less dispatch
+  // stayed unflagged and the retro deep-read zero transcripts on exactly the
+  // runs it exists to learn from. Pin the live evidence shape from run
+  // ef0a9847-…: a substantive interrupted run with occupied, status-less slots
+  // must tag each with a non-claiming run-interrupted abandonReason and flag
+  // every one for drill.
+  // -------------------------------------------------------------------------
+  test("interrupted run: status-less dispatches backfill run-interrupted and flag for drill (#1168)", async () => {
+    const reflectionAnchors: string[] = [];
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-interrupted", status: "ended", term_reason: "interrupted" },
+          turns: [
+            {
+              turn_n: 12,
+              actions: [], // SIGTERM truncated the turn — no dispatch action recorded
+              slots_snapshot: {
+                dev_orch: { skill: "hydra-dev", anchor: "#1162" },
+                qa_orch: { skill: "hydra-qa", anchor: "PR#1155" },
+                grill_orch: { skill: "hydra-grill", anchor: "#1149" },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}), // no cycle ⇒ no status from the sidecar
+      readAnchorReflections: async (anchor: string) => {
+        reflectionAnchors.push(anchor);
+        return { content: `## PRIOR ATTEMPTS for ${anchor}`, count: 1 };
+      },
+    });
+
+    const bundle = await assembleRetroBundle("run-interrupted", deps);
+
+    assert.equal(bundle.dispatches.length, 3, "all three occupied slots projected");
+    // Reproduces the issue evidence: was abandonReason:null / flagged:false on
+    // every dispatch → flagged:0 → zero transcripts drilled.
+    for (const d of bundle.dispatches) {
+      assert.equal(
+        d.abandonReason,
+        "run-interrupted",
+        `${d.skill} carries the non-claiming run-interrupted abandonReason`,
+      );
+      // Never claim a positive outcome on a terminal status that was never written.
+      assert.equal(d.status, null, `${d.skill} status stays null (no false merged)`);
+      assert.equal(d.flagged, true, `${d.skill} served dispatch is flagged for drill`);
+    }
+    const flagged = flagDispatchesForDrill(bundle.dispatches);
+    assert.equal(flagged.length, 3, "the flagged subset is non-empty (was 0)");
+    // The flagged dispatches' anchors got reflection reads — the retro is no
+    // longer structurally blind on an interrupted run.
+    assert.deepEqual(reflectionAnchors.sort(), ["#1149", "#1162", "PR#1155"]);
+    assert.equal(bundle.reflections.length, 3);
+  });
+
   test("clean stop does NOT fabricate a failure status for a pending dispatch", async () => {
     // A status-less dispatch on a clean (budget) stop is genuinely pending —
     // it must stay unflagged (no run-<reason> abandonReason fabricated).
