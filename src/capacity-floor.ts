@@ -180,7 +180,7 @@ export async function recordOrchestratorSideMerge(
  *
  * Tolerates corrupt JSON entries by skipping them.
  */
-export async function getCycleHistory(limit: number = DEFAULT_WINDOW_CYCLES): Promise<CycleSideEntry[]> {
+async function getCycleHistory(limit: number = DEFAULT_WINDOW_CYCLES): Promise<CycleSideEntry[]> {
   try {
     // boundedJsonList.read() does the tolerant JSON.parse (skipping corrupt
     // entries); the cycleId/side validity filter below is domain validation
