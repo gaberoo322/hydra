@@ -775,6 +775,65 @@ export async function getRunRow(runId: string): Promise<GetRunRowResult> {
   }
 }
 
+/**
+ * `term_reason` values that mark a CLEAN self-termination — the run's own
+ * decision loop (`term-check.py` / `decide._check_termination`) reached a stop
+ * rule and POSTed run-end, rather than the reap backstop catching a truncated
+ * print-mode session. These are the numerator of the clean-termination rate.
+ *
+ * `interrupted` / `crash` / `failure_backstop` are NOT clean: `interrupted` is
+ * the reap backstop's cause for a print-mode session that exited (code 0/143/
+ * 130) before the loop reached a stop rule — the exact starvation mechanism in
+ * issue #1352 (the session physically ends before it logically drains).
+ */
+export const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
+  "idle",
+  "budget",
+  "wall_clock",
+]);
+
+/**
+ * Pure observability rollup over the run digests (issue #1352, acceptance
+ * clause 3). Computes the **clean-termination rate** — the fraction of ENDED
+ * runs that self-terminated via a clean `term_reason` ({@link CLEAN_TERM_REASONS})
+ * rather than the `interrupted`/`crash` reap backstop. When this rate sits at
+ * ~0 over a non-trivial sample of dispatch-bearing runs, the retro learning
+ * loop is structurally starved (every run dies before its dispatches'
+ * terminal cycle records materialise) — the alarm condition #1352 was filed on.
+ *
+ * Read-only and total: takes already-fetched digests, returns counts + a
+ * nullable rate (null when there are no ended runs to divide by, so a fresh
+ * system reports "no data" rather than a misleading 0). `endedDispatchTotal`
+ * lets a consumer gate the alarm on "non-trivial dispatch counts" — a rate of 0
+ * over runs that did real work is the starvation signal; a rate of 0 over runs
+ * that immediately ran out of work is not.
+ */
+export function summarizeTerminationHealth(
+  runs: Array<Record<string, unknown>>,
+): {
+  cleanTerminationRate: number | null;
+  endedRuns: number;
+  cleanRuns: number;
+  endedDispatchTotal: number;
+} {
+  let endedRuns = 0;
+  let cleanRuns = 0;
+  let endedDispatchTotal = 0;
+  for (const run of runs) {
+    if (run.status !== "ended") continue;
+    endedRuns += 1;
+    endedDispatchTotal += numberOrDefault(run.dispatches, 0);
+    const termReason = typeof run.term_reason === "string" ? run.term_reason : "";
+    if (CLEAN_TERM_REASONS.has(termReason)) cleanRuns += 1;
+  }
+  return {
+    cleanTerminationRate: endedRuns > 0 ? cleanRuns / endedRuns : null,
+    endedRuns,
+    cleanRuns,
+    endedDispatchTotal,
+  };
+}
+
 export type ListRunsResult = Ok<{ runs: Array<Record<string, unknown>> }> | Err;
 
 /** List recent runs as digests for the history table. */

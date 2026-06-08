@@ -49,6 +49,7 @@ import {
   getRun,
   getRunRow,
   listRuns,
+  summarizeTerminationHealth,
 } from "../autopilot/runs.ts";
 // Read projection — owned by `run-projections.ts` after the #1183 split.
 import { fetchTurnsWithJoins } from "../autopilot/run-projections.ts";
@@ -266,7 +267,14 @@ export function createAutopilotRouter(eventBus?: any) {
     if (!result.ok) {
       return res.status(500).json({ error: result.detail || result.code });
     }
-    return res.json({ runs: result.runs });
+    // Issue #1352: surface the clean-termination-rate observability rollup
+    // alongside the history table. The retro learning loop is structurally
+    // starved when this rate sits at ~0 over dispatch-bearing runs (every run
+    // dies `interrupted` before its dispatches' terminal cycle records
+    // materialise), so a consumer (hydra-doctor / the dashboard) can alarm on
+    // it. Pure + read-only over the digests already fetched — no extra reads.
+    const terminationHealth = summarizeTerminationHealth(result.runs);
+    return res.json({ runs: result.runs, terminationHealth });
   });
 
   // -------------------------------------------------------------------------
