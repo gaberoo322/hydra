@@ -29,7 +29,7 @@ import * as defaultRedis from "../redis/recommendations.ts";
 // Public types
 // ---------------------------------------------------------------------------
 
-export type RecSeverity = "info" | "warn" | "critical";
+type RecSeverity = "info" | "warn" | "critical";
 
 export interface Recommendation {
   id: string;
