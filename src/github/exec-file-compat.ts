@@ -54,7 +54,7 @@ export type ExecFileAsyncLike = (
  * and `Promise.allSettled` error handling at the call sites is preserved
  * verbatim.
  */
-export class ExecFileSeamError extends Error {
+class ExecFileSeamError extends Error {
   readonly code: string;
   readonly stderr: string;
   constructor(code: string, stderr: string, cmd: string, args: readonly string[]) {
