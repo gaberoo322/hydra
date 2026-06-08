@@ -42,6 +42,7 @@ import {
   type UsageEligibility,
   type TokenBreakdown,
   type SkillResolver,
+  type OAuthUsageResult,
 } from "../src/cost/index.ts";
 
 function breakdown(p: Partial<TokenBreakdown> = {}): TokenBreakdown {
@@ -419,7 +420,11 @@ describe("usage-tracker", () => {
       }
     });
 
-    test("calibrated: emergencyStop fires once percentLast5h >= 90", async () => {
+    test("emergencyStop fires once the OAuth meter percentLast5h >= 90", async () => {
+      // Post-#1124 the hard-stop rides the real OAuth meter, never the
+      // transcript estimate. Inject a 95% meter read so percentLast5h is the
+      // authoritative OAuth headline that trips the stop. (The transcript
+      // fixture is retained only to keep the raw token accounting populated.)
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
       process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
 
@@ -430,9 +435,21 @@ describe("usage-tracker", () => {
           assistantLine("2026-05-25T11:00:00Z", { in: 900, out: 50 }),
         ]);
 
-        const snap = await getUsage({ now, projectsRoot: root, force: true });
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: async () => ({
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: 95, resetsAt: null },
+              sevenDay: { utilization: 40, resetsAt: null },
+            },
+          }),
+        });
         assert.equal(snap.calibrated, true);
         assert.equal(snap.tokensLast5h.total, 950);
+        assert.equal(snap.usageSource, "oauth");
         assert.equal(snap.percentLast5h, 95);
         assert.equal(snap.emergencyStop, true);
       } finally {
@@ -2118,10 +2135,13 @@ describe("usage-tracker", () => {
       }
     });
 
-    test("HARD INVARIANT: a FAILED meter read falls back to the estimate, NEVER 0", async () => {
-      // Estimate computes 95% (>=90 => emergencyStop). A failed OAuth read must
-      // keep that conservative number, NOT silently degrade to 0 (which would
-      // unblock dispatch during an outage).
+    test("HARD INVARIANT: a FAILED meter read falls back to the estimate gauge, NEVER 0", async () => {
+      // The GAUGE invariant (the only one this test still guards): the estimate
+      // computes 95% and a failed OAuth read keeps that headline, NOT a silent 0.
+      // Since #1124 the STOP decision is decoupled from this estimate — the
+      // headline staying 95 no longer implies a stop (see the dedicated #1124
+      // "estimate never stops" test). emergencyStop is now false on the estimate
+      // path; the gauge invariant is unchanged.
       process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
       process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
       const root = await mkdtemp(join(tmpdir(), "usage-test-"));
@@ -2138,9 +2158,10 @@ describe("usage-tracker", () => {
         });
         assert.equal(snap.usageSource, "estimate");
         assert.equal(snap.oauthError, "oauth-usage-token-expired");
-        assert.equal(snap.percentLast5h, 95); // estimate stands — NOT 0
-        assert.equal(snap.emergencyStop, true);
-        assert.equal(projectEligibility(snap).allow, false);
+        assert.equal(snap.percentLast5h, 95); // estimate gauge stands — NOT 0
+        // #1124: the estimate gauge no longer drives the stop.
+        assert.equal(snap.emergencyStop, false);
+        assert.equal(projectEligibility(snap).allow, true);
         // OAuth reset boundaries are null on the fallback path.
         assert.equal(snap.oauthFiveHourResetsAt, null);
         assert.equal(snap.oauthSevenDayResetsAt, null);
@@ -2198,6 +2219,183 @@ describe("usage-tracker", () => {
         assert.equal(snap.usageSource, "oauth");
         assert.equal(snap.percentLast5h, 0);
         assert.equal(snap.emergencyStop, false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // Hard-stop fires ONLY on the real OAuth meter, never on the transcript
+  // estimate (issue #1124). The estimate is a ~half-of-real guess (#1083) whose
+  // false stops during OAuth outages this decouples — the gauge still shows it
+  // (#1090), but the STOP decision is gated on `usageSource === "oauth"`.
+  describe("hard-stop gated on real OAuth, never the estimate (issue #1124)", () => {
+    let restoreEnv: () => void;
+    beforeEach(() => {
+      restoreEnv = withEnvSnapshot();
+      clearUsageCache();
+    });
+    afterEach(() => {
+      restoreEnv();
+      clearUsageCache();
+    });
+
+    const meterFail = (code: any) => async () => ({ ok: false as const, code });
+
+    test("AC: usageSource=estimate @95% → emergencyStop=false AND projectEligibility().allow=true", async () => {
+      // Calibrated so the estimate computes a concrete 95% (>=90); a FAILED
+      // OAuth read flips usageSource to 'estimate'. Pre-#1124 this stopped
+      // autopilot on a guess; now the estimate never stops.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000";
+      const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [
+          assistantLine("2026-05-25T11:00:00Z", { in: 900, out: 50 }),
+        ]);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: meterFail("oauth-usage-token-expired"),
+        });
+        assert.equal(snap.usageSource, "estimate");
+        // Gauge preserved (#1090): the headline still reads the estimate, NOT 0.
+        assert.equal(snap.percentLast5h, 95);
+        // But the STOP decision is decoupled: the estimate never stops.
+        assert.equal(snap.emergencyStop, false);
+        assert.equal(snap.weeklyEmergencyStop, false);
+        assert.equal(projectEligibility(snap).allow, true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("AC: usageSource=oauth @95% → emergencyStop=true, allow=false (real cap still stops)", async () => {
+      // Uncalibrated estimate (no quota env) — proves the OAuth meter ALONE
+      // trips the stop independent of any transcript calibration.
+      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
+      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
+      const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 10 })]);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: async () => ({
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: 95, resetsAt: null },
+              sevenDay: { utilization: 40, resetsAt: null },
+            },
+          }),
+        });
+        assert.equal(snap.usageSource, "oauth");
+        assert.equal(snap.percentLast5h, 95);
+        assert.equal(snap.emergencyStop, true);
+        assert.equal(projectEligibility(snap).allow, false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("AC: weekly hard-stop rides OAuth percentLast7d — fires @90%+ on the meter path", async () => {
+      delete process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS;
+      delete process.env.HYDRA_USAGE_5H_QUOTA_TOKENS;
+      const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 10 })]);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: async () => ({
+            ok: true as const,
+            data: {
+              fiveHour: { utilization: 40, resetsAt: null }, // 5h well under cap
+              sevenDay: { utilization: 91, resetsAt: null }, // 7d over the cap
+            },
+          }),
+        });
+        assert.equal(snap.usageSource, "oauth");
+        assert.equal(snap.emergencyStop, false, "5h is under the cap");
+        assert.equal(snap.weeklyEmergencyStop, true, "OAuth 7d >=90 trips the weekly stop");
+        assert.equal(projectEligibility(snap).allow, false);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("AC: weekly hard-stop SUPPRESSED on the estimate path even when since-reset is high", async () => {
+      // Pre-#1124 weeklyEmergencyStop rode percentSinceReset (a calibration
+      // estimate). Seed the anchor + enough burn to drive percentSinceReset
+      // >=90, then FAIL the OAuth read so usageSource='estimate'. The weekly
+      // stop must NOT fire on that guess.
+      process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS = "1000";
+      process.env.HYDRA_USAGE_5H_QUOTA_TOKENS = "1000000"; // 5h huge => no 5h stop
+      process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR = "2026-05-25T00:00:00Z";
+      const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
+      try {
+        const now = new Date("2026-05-25T12:00:00Z");
+        // 950 tokens since the anchor against a 1000 weekly quota => 95%.
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T06:00:00Z", { in: 900, out: 50 })]);
+        const snap = await getUsage({
+          now,
+          projectsRoot: root,
+          force: true,
+          readUsage: meterFail("oauth-usage-network"),
+        });
+        assert.equal(snap.usageSource, "estimate");
+        assert.ok(snap.percentSinceReset >= 90, "since-reset estimate is high (would have stopped pre-#1124)");
+        assert.equal(snap.weeklyEmergencyStop, false, "estimate never trips the weekly stop");
+        assert.equal(projectEligibility(snap).allow, true);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    test("AC: a served-stale last-good OAuth value @95% STILL stops (stale-but-real)", async () => {
+      // usageSource stays 'oauth' (oauthStale=true) when a 429 serves last-good.
+      // A stale-but-REAL meter value at >=90 must still trigger emergencyStop —
+      // only the (non-OAuth) estimate path is decoupled.
+      process.env.HYDRA_OAUTH_USAGE_TTL_MS = "60000"; // 1 min
+      process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "300000"; // 5 min grace
+      const root = await mkdtemp(join(tmpdir(), "usage-1124-"));
+      try {
+        await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:00:00Z", { in: 10 })]);
+        // First read seeds last-good = 95%; second (post-TTL) 429s → served stale.
+        let calls = 0;
+        const reader = async (): Promise<OAuthUsageResult> => {
+          const seed = calls === 0;
+          calls++;
+          if (seed) {
+            return {
+              ok: true as const,
+              data: {
+                fiveHour: { utilization: 95, resetsAt: null },
+                sevenDay: { utilization: 40, resetsAt: null },
+              },
+            };
+          }
+          return { ok: false as const, code: "oauth-usage-non-2xx" };
+        };
+        const t0 = new Date("2026-05-25T12:00:00Z");
+        const first = await getUsage({ now: t0, projectsRoot: root, force: true, useOAuthCache: true, readUsage: reader });
+        assert.equal(first.usageSource, "oauth");
+        assert.equal(first.emergencyStop, true);
+
+        // 90s later (> 60s TTL, < TTL+grace): serve last-good as STALE oauth.
+        const t1 = new Date(t0.getTime() + 90_000);
+        const second = await getUsage({ now: t1, projectsRoot: root, force: true, useOAuthCache: true, readUsage: reader });
+        assert.equal(second.usageSource, "oauth", "served-stale is still oauth, not estimate");
+        assert.equal(second.oauthStale, true);
+        assert.equal(second.percentLast5h, 95);
+        assert.equal(second.emergencyStop, true, "stale-but-real still stops");
+        assert.equal(projectEligibility(second).allow, false);
       } finally {
         await rm(root, { recursive: true, force: true });
       }
@@ -2353,7 +2551,8 @@ describe("usage-tracker", () => {
       process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS = "60000"; // 1 min grace
       const root = await mkdtemp(join(tmpdir(), "usage-1090-"));
       try {
-        // Estimate = (950 / 1000) * 100 = 95% (>=90 => emergencyStop stays on).
+        // Estimate = (950 / 1000) * 100 = 95% (the gauge stands; #1124 decouples
+        // the STOP from it so emergencyStop is false on this estimate path).
         await writeFixture(root, "p/s.jsonl", [assistantLine("2026-05-25T11:30:00Z", { in: 900, out: 50 })]);
         const m = countingMeter([
           { ok: true, five: 55, seven: 33 },
@@ -2368,8 +2567,9 @@ describe("usage-tracker", () => {
         assert.equal(snap.oauthError, "oauth-usage-non-2xx");
         assert.equal(snap.oauthStale, false);
         assert.equal(snap.oauthAgeMs, null);
-        assert.equal(snap.percentLast5h, 95, "estimate stands — never silently 0");
-        assert.equal(snap.emergencyStop, true, "gate stays conservative on the estimate");
+        assert.equal(snap.percentLast5h, 95, "estimate gauge stands — never silently 0");
+        // #1124: the estimate gauge no longer drives the stop.
+        assert.equal(snap.emergencyStop, false, "estimate path never trips the hard-stop");
       } finally {
         await rm(root, { recursive: true, force: true });
       }
