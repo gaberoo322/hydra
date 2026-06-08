@@ -91,6 +91,21 @@ fi
 # never fired on orch work even after Phase B shipped. This loop sources
 # an orch-scope anchor directly.
 #
+# Mechanical/non-implementable gate (issue #1230): some ready-for-agent
+# issues need NO design concept and grilling them wastes an Opus
+# design_concept_orch subagent before dev_orch even runs:
+#
+#   - `cleanup-scan` findings (hydra-cleanup output) are mechanical and
+#     self-checking ("remove X AND npm test/tsc pass") — they route straight
+#     to dev. Grilling a one-line dead-code deletion is pure waste.
+#   - `track:`-prefixed measurement-window trackers are not implementable
+#     now (their window is open); a design concept for them is premature.
+#
+# These are suppressed UNCONDITIONALLY (a positive "skip" signal, unlike the
+# trivial gate below which only suppresses on an explicit T1 stamp). The
+# `cleanup-scan` exclusion is firm; the `track:` title-prefix exclusion is
+# the "consider also skipping calendar-bound issues" half of #1230.
+#
 # Trivial-anchor gate (issue #1088): grilling EVERY ready-for-agent anchor
 # made design_concept_orch the highest-frequency subagent class (~14% of
 # burn) — most orch issues (T1 prompt tweaks, doc edits, dead-code removal)
@@ -126,7 +141,7 @@ fi
 #   - Best-effort: any failure prints `none` so dispatch is never blocked
 #     by a transient orchestrator outage.
 echo -n "orch_pending_grill_anchor="
-ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --json number,updatedAt,body,labels --jq '
+ORCH_GRILL_LIST_JSON=$(gh issue list --repo gaberoo322/hydra --state open --label ready-for-agent --json number,updatedAt,body,labels,title --jq '
   sort_by(.updatedAt) | reverse | .[0:10]
 ' 2>/dev/null || true)
 ORCH_GRILL_CANDIDATES=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
@@ -161,10 +176,39 @@ except Exception:
         continue
       fi
     fi
-    # No fresh artifact for issue-<N>: it would be a grill candidate. Apply
-    # the trivial gate (issue #1088) — suppress ONLY on a positive trivial
-    # signal. TRIVIAL=1 means "explicit Expected tier: T1/1 stamp AND no
-    # needs-design-concept label". Any ambiguity (parse error, missing
+    # No fresh artifact for issue-<N>: it would be a grill candidate. First
+    # apply the mechanical/non-implementable gate (issue #1230) — suppress
+    # UNCONDITIONALLY when the issue carries the `cleanup-scan` label (routes
+    # straight to dev, needs no design) OR has a `track:` title prefix
+    # (calendar-bound measurement window, not implementable now). MECHANICAL=1
+    # means suppress; any parse error prints 0 → fall through to the next gate.
+    MECHANICAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
+import json, sys
+target = int('${n}')
+try:
+  items = json.load(sys.stdin)
+  it = next((x for x in items if int(x.get('number', -1)) == target), None)
+  if it is None:
+    print('0'); sys.exit(0)
+  labels = {l.get('name', '') for l in (it.get('labels') or [])}
+  if 'cleanup-scan' in labels:
+    # Mechanical, self-checking dead-code removal — routes straight to dev.
+    print('1'); sys.exit(0)
+  title = (it.get('title') or '').lstrip()
+  if title.lower().startswith('track:'):
+    # Calendar-bound measurement-window tracker — not implementable now.
+    print('1'); sys.exit(0)
+  print('0')
+except Exception:
+  print('0')" 2>/dev/null || echo "0")
+    if [ "$MECHANICAL" = "1" ]; then
+      # Mechanical (cleanup-scan) or calendar-bound (track:) anchor — needs no
+      # design concept. Suppress the grill and let dev_orch dispatch directly.
+      continue
+    fi
+    # Apply the trivial gate (issue #1088) next — suppress ONLY on a positive
+    # trivial signal. TRIVIAL=1 means "explicit Expected tier: T1/1 stamp AND
+    # no needs-design-concept label". Any ambiguity (parse error, missing
     # field) prints 0 → fail-toward-grill.
     TRIVIAL=$(printf '%s' "$ORCH_GRILL_LIST_JSON" | python3 -c "
 import json, re, sys

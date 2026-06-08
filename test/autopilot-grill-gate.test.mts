@@ -49,6 +49,7 @@ interface Issue {
   updatedAt: string;
   body: string;
   labels: { name: string }[];
+  title: string;
 }
 
 /**
@@ -76,7 +77,7 @@ function runGrillGate(issues: Issue[]): string {
       "gh",
       `#!/usr/bin/env bash
 for a in "$@"; do
-  if [ "$a" = "number,updatedAt,body,labels" ]; then
+  if [ "$a" = "number,updatedAt,body,labels,title" ]; then
     cat "${join(dir, "issues.json")}"
     exit 0
   fi
@@ -137,12 +138,14 @@ function issue(
   number: number,
   body: string,
   labels: string[] = [],
+  title = "Some implementation work",
 ): Issue {
   return {
     number,
     updatedAt: new Date(Date.now() - number * 1000).toISOString(),
     body,
     labels: labels.map((name) => ({ name })),
+    title,
   };
 }
 
@@ -259,6 +262,107 @@ describe("collect-state.sh — trivial-anchor grill gate (issue #1088)", () => {
       pick,
       "none",
       "a lowercase 'expected tier: t1' stamp is still a positive trivial signal",
+    );
+  });
+});
+
+describe("collect-state.sh — mechanical/non-implementable grill gate (issue #1230)", () => {
+  test("suppresses grill on a cleanup-scan anchor (mechanical → straight to dev)", () => {
+    // A cleanup-scan finding is self-checking and needs no design concept,
+    // even when its body carries no T1 stamp (so the #1088 trivial gate would
+    // otherwise promote it).
+    const pick = runGrillGate([
+      issue(
+        1228,
+        "cleanup: remove unused export DEFAULT_GH_TIMEOUT_MS\n",
+        ["ready-for-agent", "cleanup-scan"],
+        "cleanup: remove unused export DEFAULT_GH_TIMEOUT_MS",
+      ),
+    ]);
+    assert.equal(
+      pick,
+      "none",
+      "a cleanup-scan anchor must not be promoted to a grill — it routes straight to dev",
+    );
+  });
+
+  test("emits 'none' when every ready-for-agent issue is a cleanup-scan finding", () => {
+    // The acceptance criterion from #1230: a board whose only candidates are
+    // cleanup-scan findings emits none so dev_orch dispatches directly.
+    const pick = runGrillGate([
+      issue(501, "remove dead export A.\n", ["ready-for-agent", "cleanup-scan"]),
+      issue(502, "remove dead file B.\n", ["ready-for-agent", "cleanup-scan"]),
+    ]);
+    assert.equal(
+      pick,
+      "none",
+      "an all-cleanup-scan board must produce no grill anchor",
+    );
+  });
+
+  test("skips a cleanup-scan anchor and promotes the next non-trivial one", () => {
+    // The cleanup-scan anchor is suppressed; the loop falls through to the
+    // unstamped (non-mechanical) anchor, which still grills.
+    const pick = runGrillGate([
+      issue(601, "remove dead code.\n", ["ready-for-agent", "cleanup-scan"]),
+      issue(602, "Complex refactor, no stamp.\n", ["ready-for-agent"]),
+    ]);
+    assert.equal(
+      pick,
+      "issue-602",
+      "a suppressed cleanup-scan anchor must not block grilling of a later non-trivial anchor",
+    );
+  });
+
+  test("suppresses grill on a 'track:'-prefixed measurement-window tracker", () => {
+    // A track: tracker is calendar-bound and not implementable now — no design
+    // concept should precede it. Title carries the prefix; body has no stamp.
+    const pick = runGrillGate([
+      issue(
+        627,
+        "Measurement window closes 2026-06-18.\n",
+        ["ready-for-agent"],
+        "track: weekly merge-rate baseline (window 2026-06-11 → 2026-06-18)",
+      ),
+    ]);
+    assert.equal(
+      pick,
+      "none",
+      "a track:-prefixed calendar-bound tracker must not be promoted to a grill",
+    );
+  });
+
+  test("the track: prefix match is case-insensitive and tolerates leading space", () => {
+    const pick = runGrillGate([
+      issue(
+        628,
+        "Another tracker.\n",
+        ["ready-for-agent"],
+        "  Track: monthly cost ceiling check",
+      ),
+    ]);
+    assert.equal(
+      pick,
+      "none",
+      "a leading-space, capitalised 'Track:' title is still a calendar-bound tracker",
+    );
+  });
+
+  test("a non-cleanup, non-track anchor still grills (no false suppression)", () => {
+    // Guard against over-broad suppression: 'tracking' is not the 'track:'
+    // prefix, and an ordinary label set does not trigger the mechanical gate.
+    const pick = runGrillGate([
+      issue(
+        701,
+        "Add tracking for X.\n",
+        ["ready-for-agent", "enhancement"],
+        "Add request tracking to the scheduler",
+      ),
+    ]);
+    assert.equal(
+      pick,
+      "issue-701",
+      "an ordinary anchor (title merely containing 'track', no cleanup-scan label) must still grill",
     );
   });
 });
