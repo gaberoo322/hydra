@@ -49,8 +49,9 @@ import {
   getRun,
   getRunRow,
   listRuns,
-  fetchTurnsWithJoins,
 } from "../autopilot/runs.ts";
+// Read projection — owned by `run-projections.ts` after the #1183 split.
+import { fetchTurnsWithJoins } from "../autopilot/run-projections.ts";
 import { assembleRetroBundle } from "../autopilot/retro-bundle.ts";
 import { RetroBundleParamsSchema, RecentRetrosQuerySchema } from "../schemas/retro.ts";
 import { listRecentRetroArtifacts } from "../redis/retro.ts";
