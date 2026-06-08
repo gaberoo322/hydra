@@ -1,7 +1,7 @@
 // Sentry must be imported FIRST
 import { Sentry } from "./instrument.ts";
 
-import { EventBus, STREAMS } from "./event-bus.ts";
+import { EventBus, STREAMS, NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
 import { createApi } from "./api.ts";
 import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule, stopCleanupSchedule } from "./cleanup.ts";
@@ -46,7 +46,7 @@ async function startConsumerWithRecovery(name, startFn) {
       if (restarts > MAX_CONSUMER_RESTARTS) {
         console.error(`[Consumer] ${name} exceeded max restarts — giving up`);
         await sendNotification({
-          type: "consumer:dead",
+          type: E.CONSUMER_DEAD,
           payload: { consumer: name, error: err.message, restarts },
         });
         break;
@@ -58,31 +58,34 @@ async function startConsumerWithRecovery(name, startFn) {
   }
 }
 
+// Each `case` references a NOTIFICATION_EVENT_TYPES member (aliased `E`) — the
+// typed vocabulary in event-bus.ts (issue #1182) — so a misspelled event type
+// is a compile error, kept in lock-step with the ALERT_TYPES set below.
 function formatAlertMessage(event) {
   const p = event.payload || {};
   switch (event.type) {
-    case "cycle:failed": return `Cycle failed: ${p.taskTitle || p.cycleId || "unknown"} — ${p.reason || "verification failed"}`;
-    case "cycle:rolled_back": return `Cycle rolled back: ${p.taskTitle || ""} — tests regressed`;
-    case "cycle:auto_killed": return `Cycle auto-killed after ${p.elapsed || "?"} (TTL exceeded)`;
-    case "cycle:stalled": return `Cycle stalled: ${p.inProgress || 0} tasks running for ${p.elapsed || "?"}`;
-    case "dlq:alert": return `Dead letter: ${p.eventType || "unknown"} failed ${p.deliveryCount || 0}x — ${p.error || ""}`;
-    case "consumer:dead": return `Consumer ${p.consumer || "unknown"} died after ${p.restarts || 0} restarts`;
-    case "research:completed": return `Research cycle complete: ${p.opportunityCount || 0} opportunities found`;
-    case "scheduler:error": return `Scheduler error: ${p.message || p.error || "unknown"}`;
-    case "cycle:operator_blocked": return `BLOCKED — needs your action: "${p.title}" — ${p.blockedReason}`;
+    case E.CYCLE_FAILED: return `Cycle failed: ${p.taskTitle || p.cycleId || "unknown"} — ${p.reason || "verification failed"}`;
+    case E.CYCLE_ROLLED_BACK: return `Cycle rolled back: ${p.taskTitle || ""} — tests regressed`;
+    case E.CYCLE_AUTO_KILLED: return `Cycle auto-killed after ${p.elapsed || "?"} (TTL exceeded)`;
+    case E.CYCLE_STALLED: return `Cycle stalled: ${p.inProgress || 0} tasks running for ${p.elapsed || "?"}`;
+    case E.DLQ_ALERT: return `Dead letter: ${p.eventType || "unknown"} failed ${p.deliveryCount || 0}x — ${p.error || ""}`;
+    case E.CONSUMER_DEAD: return `Consumer ${p.consumer || "unknown"} died after ${p.restarts || 0} restarts`;
+    case E.RESEARCH_COMPLETED: return `Research cycle complete: ${p.opportunityCount || 0} opportunities found`;
+    case E.SCHEDULER_ERROR: return `Scheduler error: ${p.message || p.error || "unknown"}`;
+    case E.CYCLE_OPERATOR_BLOCKED: return `BLOCKED — needs your action: "${p.title}" — ${p.blockedReason}`;
     default: return `${event.type}: ${JSON.stringify(p).slice(0, 200)}`;
   }
 }
 
 function startConsumers(eventBus) {
   // Notification consumer — stores alerts in Redis for dashboard + digest
-  const ALERT_TYPES = new Set([
-    "cycle:failed", "cycle:rolled_back", "cycle:auto_killed", "cycle:stalled",
-    "dlq:alert", "consumer:dead",
-    "research:completed", "scheduler:error", "cycle:operator_blocked",
-    "pattern:low_merge_rate", "pattern:consecutive_failures",
-    "pattern:recurring_regressions", "pattern:anchor_stuck",
-    "pattern:test_decline", "pattern:high_abandonment",
+  const ALERT_TYPES = new Set<string>([
+    E.CYCLE_FAILED, E.CYCLE_ROLLED_BACK, E.CYCLE_AUTO_KILLED, E.CYCLE_STALLED,
+    E.DLQ_ALERT, E.CONSUMER_DEAD,
+    E.RESEARCH_COMPLETED, E.SCHEDULER_ERROR, E.CYCLE_OPERATOR_BLOCKED,
+    E.PATTERN_LOW_MERGE_RATE, E.PATTERN_CONSECUTIVE_FAILURES,
+    E.PATTERN_RECURRING_REGRESSIONS, E.PATTERN_ANCHOR_STUCK,
+    E.PATTERN_TEST_DECLINE, E.PATTERN_HIGH_ABANDONMENT,
   ]);
   startConsumerWithRecovery("notifications", () =>
     eventBus.consume(STREAMS.NOTIFICATIONS, "openclaw", `notify-${process.pid}`, async (event) => {
@@ -140,7 +143,7 @@ function startConsumers(eventBus) {
       const { originalStream, originalGroup, originalEvent, error, deliveryCount } = event.payload || {};
       console.error(`[DLQ] Failed event from ${originalStream}/${originalGroup}: ${originalEvent?.type} — ${error} (${deliveryCount} attempts)`);
       await sendNotification({
-        type: "dlq:alert",
+        type: E.DLQ_ALERT,
         payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
       });
     }, { count: 1, blockMs: 10000 }),
