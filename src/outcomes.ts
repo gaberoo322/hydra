@@ -28,11 +28,6 @@ import { readFile, stat } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";
 import { parseOutcomesYaml, type YamlScalar } from "./outcomes-yaml.ts";
 
-// Re-export the extracted YAML parser surface so existing importers of
-// helpers from this module keep working (back-compat, #933).
-export { parseScalar } from "./outcomes-yaml.ts";
-export type { ParsedYaml, ParseResult, YamlScalar } from "./outcomes-yaml.ts";
-
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
 const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.yaml");
@@ -41,7 +36,7 @@ const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.yaml");
 // Types
 // ---------------------------------------------------------------------------
 
-export type OutcomeKind = "leading" | "terminal";
+type OutcomeKind = "leading" | "terminal";
 export type OutcomeDirection = "up" | "down";
 /**
  * Where an outcome's current value is read from. Today this is `file` only —
@@ -49,7 +44,7 @@ export type OutcomeDirection = "up" | "down";
  * sql` were live-looking stubs; they re-enter this union the day a real second
  * adapter lands (the "two adapters means a real seam" trigger, LANGUAGE.md).
  */
-export type OutcomeSource = "file";
+type OutcomeSource = "file";
 
 export interface Outcome {
   name: string;
@@ -297,8 +292,6 @@ export async function getOutcomeValue(outcome: Outcome): Promise<OutcomeReading 
     return null;
   }
 }
-
-export { DEFAULT_OUTCOMES_FILE };
 
 // ---------------------------------------------------------------------------
 // Outcome Holdback helpers (issue #786, ADR-0004 step 4)
