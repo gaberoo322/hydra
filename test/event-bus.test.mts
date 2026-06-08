@@ -255,3 +255,140 @@ test("_parseFields: round-trips a publish() envelope back to a typed event", asy
   assert.equal(parsed.source, "unit");
   assert.deepEqual(parsed.payload, { ok: true });
 });
+
+// ---------------------------------------------------------------------------
+// reapStaleConsumers — zombie sweep on the $-anchored slot-events groups (#1221)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fake publisher for the reaper: `xinfo("CONSUMERS", ...)` returns the supplied
+ * consumer rows (each a flat field/value list, exactly as Redis replies), and
+ * `xgroup("DELCONSUMER", stream, group, name)` records the reaped names.
+ */
+function makeFakeReaperPublisher(consumers: string[][]) {
+  const delconsumerCalls: { stream: string; group: string; name: string }[] = [];
+  return {
+    publisher: {
+      async xinfo(sub: string, _stream: string, _group: string) {
+        assert.equal(sub, "CONSUMERS");
+        return consumers;
+      },
+      async xgroup(verb: string, stream: string, group: string, name: string) {
+        assert.equal(verb, "DELCONSUMER");
+        delconsumerCalls.push({ stream, group, name });
+        return 0;
+      },
+    },
+    delconsumerCalls,
+  };
+}
+
+/** A Redis XINFO-CONSUMERS row as a flat field/value list. */
+function consumerRow(name: string, idle: number): string[] {
+  return ["name", name, "pending", "0", "idle", String(idle), "inactive", String(idle)];
+}
+
+test("reapStaleConsumers: reaps a consumer idle past the floor, leaves live and self", async () => {
+  const { publisher, delconsumerCalls } = makeFakeReaperPublisher([
+    consumerRow("bridge-OLD", 600_000),   // 10min idle — STALE, reap
+    consumerRow("bridge-LIVE", 1_000),    // 1s idle — live, keep
+    consumerRow("bridge-SELF", 999_999),  // high idle but it's us — keep
+  ]);
+  const bus = makeBus(publisher);
+
+  const reaped = await bus.reapStaleConsumers(
+    "hydra:autopilot:slot-events",
+    "now-pixel-bridge",
+    "bridge-SELF",
+  );
+
+  // Only the stale, non-self consumer is reaped.
+  assert.deepEqual(reaped, ["bridge-OLD"]);
+  assert.equal(delconsumerCalls.length, 1);
+  assert.deepEqual(delconsumerCalls[0], {
+    stream: "hydra:autopilot:slot-events",
+    group: "now-pixel-bridge",
+    name: "bridge-OLD",
+  });
+});
+
+test("reapStaleConsumers: never reaps our own name even when its idle is high", async () => {
+  const { publisher, delconsumerCalls } = makeFakeReaperPublisher([
+    consumerRow("recs-SELF", 10_000_000), // freshly created, idle clock briefly high
+  ]);
+  const bus = makeBus(publisher);
+
+  const reaped = await bus.reapStaleConsumers(
+    "hydra:autopilot:slot-events",
+    "recs-engine",
+    "recs-SELF",
+  );
+
+  assert.deepEqual(reaped, []);
+  assert.equal(delconsumerCalls.length, 0);
+});
+
+test("reapStaleConsumers: a consumer exactly at the floor is NOT reaped (strict >)", async () => {
+  const { publisher, delconsumerCalls } = makeFakeReaperPublisher([
+    consumerRow("bridge-AT", 300_000), // exactly 5min — not strictly greater
+  ]);
+  const bus = makeBus(publisher);
+
+  const reaped = await bus.reapStaleConsumers(
+    "hydra:autopilot:slot-events",
+    "now-pixel-bridge",
+    "bridge-NEW",
+    300_000,
+  );
+
+  assert.deepEqual(reaped, []);
+  assert.equal(delconsumerCalls.length, 0);
+});
+
+test("reapStaleConsumers: a recently-active consumer (idle < floor) is left untouched", async () => {
+  const { publisher, delconsumerCalls } = makeFakeReaperPublisher([
+    consumerRow("bridge-RECENT", 4_000), // active 4s ago — well under 5min
+  ]);
+  const bus = makeBus(publisher);
+
+  const reaped = await bus.reapStaleConsumers(
+    "hydra:autopilot:slot-events",
+    "now-pixel-bridge",
+    "bridge-NEW",
+  );
+
+  assert.deepEqual(reaped, []);
+  assert.equal(delconsumerCalls.length, 0);
+});
+
+test("reapStaleConsumers: never throws — an XINFO failure returns [] and is swallowed", async () => {
+  const bus = makeBus({
+    publisher: {
+      async xinfo() { throw new Error("CONNREFUSED"); },
+      async xgroup() { throw new Error("should not be called"); },
+    },
+  }.publisher);
+
+  const reaped = await bus.reapStaleConsumers("s", "g", "self");
+  assert.deepEqual(reaped, []);
+});
+
+test("delConsumer: best-effort DELCONSUMER of our own name on graceful shutdown", async () => {
+  const calls: string[][] = [];
+  const bus = makeBus({
+    publisher: {
+      async xgroup(...args: string[]) { calls.push(args); return 0; },
+    },
+  }.publisher);
+
+  await bus.delConsumer("hydra:autopilot:slot-events", "recs-engine", "recs-123");
+  assert.deepEqual(calls, [["DELCONSUMER", "hydra:autopilot:slot-events", "recs-engine", "recs-123"]]);
+});
+
+test("delConsumer: swallows a DELCONSUMER failure (never throws on shutdown)", async () => {
+  const bus = makeBus({
+    publisher: { async xgroup() { throw new Error("NOGROUP"); } },
+  }.publisher);
+  // Must resolve, not reject.
+  await bus.delConsumer("s", "g", "c");
+});
