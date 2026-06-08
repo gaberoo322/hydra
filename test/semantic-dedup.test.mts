@@ -32,22 +32,46 @@ describe("SEMANTIC_DEDUP_THRESHOLD", () => {
 });
 
 describe("searchOVForDedup", () => {
-  test("returns null when OV is unavailable (graceful fallback)", async () => {
-    // In test environment OV is not running -- should fall back gracefully
+  // Contract-based assertions (issue #1231): searchOVForDedup() resolves to
+  // `string | null`, never throws, and falls back to `null` only when OV is
+  // *unreachable*. We must NOT assert `result === null` for a real query: OV
+  // (OpenViking) IS reachable in agent worktrees (localhost:1933), so a live
+  // backend can legitimately return a non-null match. Asserting the env-
+  // specific `null` made these tests flake whenever OV was up — the headline
+  // friction in #1231. Assert the documented CONTRACT, which holds whether or
+  // not OV is reachable, instead of the environment-specific value.
+  test("resolves to the string|null union, never throwing (graceful fallback)", async () => {
     const result = await searchOVForDedup("Add user authentication flow");
-    assert.equal(result, null, "should return null when OV is unavailable");
+    assert.ok(
+      result === null || typeof result === "string",
+      `searchOVForDedup must resolve to string|null, got ${typeof result}`,
+    );
   });
 
-  test("accepts custom threshold parameter", async () => {
-    // Even with a very low threshold, unavailable OV returns null
+  test("accepts custom threshold parameter without throwing", async () => {
+    // A very low threshold widens what OV may match, but the return contract
+    // is unchanged: string|null, never a throw.
     const result = await searchOVForDedup("some reference", 0.1);
-    assert.equal(result, null);
+    assert.ok(result === null || typeof result === "string");
   });
 
-  test("does not throw on network errors", async () => {
-    // Should not throw, just return null
-    const result = await searchOVForDedup("");
-    assert.equal(result, null);
+  test("does not throw on empty input / network errors", async () => {
+    // The adapter owns transport + error classification and never throws;
+    // searchOVForDedup must surface that contract regardless of OV liveness.
+    await assert.doesNotReject(() => searchOVForDedup(""));
+  });
+
+  test("an impossible threshold (>1) can never match -> returns null", async () => {
+    // Scores are in [0,1]; a threshold above 1 is unsatisfiable, so even a
+    // reachable OV backend must fall through every candidate and return null.
+    // This pins the threshold-respecting half of the contract independent of
+    // whether OV is up.
+    const result = await searchOVForDedup("Add user authentication flow", 1.1);
+    assert.equal(
+      result,
+      null,
+      "threshold > 1 is unsatisfiable, so no candidate can match",
+    );
   });
 });
 
