@@ -32,10 +32,28 @@
  * error can't break the daily consolidation pass or a `recordPattern` hit.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME!, "hydra", "config");
+
+/**
+ * Issue #1125 — the on-disk feedback lifecycle is LIVE (recordPattern's 3-hit
+ * promote → `promoteToFeedbackFile`, plus the daily `consolidateStalePromotedRules`
+ * sweep), but `config/feedback/` was retired from the repo (#710) so the directory
+ * no longer exists on a fresh checkout. The result was an ENOENT logged on every
+ * promotion and every daily consolidation pass, and promotions that never
+ * persisted. We keep the lifecycle (Option B) and make it self-healing: ensure
+ * the directory exists before any write so a promotion actually lands on disk.
+ * Best-effort — a failure to mkdir only forfeits this one write, never throws.
+ */
+async function ensureFeedbackDir(feedbackPath: string): Promise<void> {
+  try {
+    await mkdir(dirname(feedbackPath), { recursive: true });
+  } catch (err: any) {
+    console.error(`[Learning] Failed to ensure feedback dir for ${feedbackPath}: ${err.message}`);
+  }
+}
 
 // ===========================================================================
 // Grammar constants — the single definition of the Feedback File format
@@ -121,8 +139,14 @@ export function appendPromotedRuleBlock(
 
 /**
  * Side-effecting — read `to-{agent}.md`, append the promoted block, write back.
- * Best-effort: logs + swallows I/O errors (the file may not exist yet on a
- * fresh checkout, in which case there is nothing to promote into).
+ * Best-effort: logs + swallows I/O errors.
+ *
+ * Issue #1125 — when the file (or its `config/feedback/` directory) doesn't
+ * exist yet, this is the path that creates them: a missing file is treated as
+ * empty content (not an error), the directory is `mkdir -p`'d, and the appended
+ * block is written. Before #1125 a missing file ENOENT-failed the read and the
+ * promotion was silently lost, so the recordPattern → 3-hit promote lifecycle
+ * never persisted a single rule on a post-#710 checkout.
  */
 export async function promoteToFeedbackFile(
   agentName: string,
@@ -130,8 +154,16 @@ export async function promoteToFeedbackFile(
 ): Promise<void> {
   const feedbackPath = feedbackFilePath(agentName);
   try {
-    const content = await readFile(feedbackPath, "utf-8");
+    let content = "";
+    try {
+      content = await readFile(feedbackPath, "utf-8");
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") throw err;
+      // First promotion on a fresh checkout — start from empty content and let
+      // the mkdir below create config/feedback/ so this rule actually persists.
+    }
     const today = new Date().toISOString().split("T")[0];
+    await ensureFeedbackDir(feedbackPath);
     await writeFile(feedbackPath, appendPromotedRuleBlock(content, p, today));
   } catch (err: any) {
     console.error(`[Learning] Failed to promote to ${feedbackPath}: ${err.message}`);
@@ -292,7 +324,18 @@ export async function consolidateStalePromotedRules(): Promise<void> {
   for (const agent of ["planner", "executor", "skeptic"]) {
     const feedbackPath = feedbackFilePath(agent);
     try {
-      const content = await readFile(feedbackPath, "utf-8");
+      let content: string;
+      try {
+        content = await readFile(feedbackPath, "utf-8");
+      } catch (err: any) {
+        // Issue #1125 — a feedback file that doesn't exist yet has no promoted
+        // rules to sweep, so this is a clean no-op, NOT an error. Before #1125
+        // this ENOENT was logged on every daily consolidation pass because
+        // config/feedback/ was retired from the repo (#710) but the consumer
+        // stayed live. Only ENOENT is benign here; surface anything else.
+        if (err?.code === "ENOENT") continue;
+        throw err;
+      }
       const { newContent, archived } = processStaleRules(content, agent);
 
       if (newContent !== content) {
@@ -372,7 +415,15 @@ export async function demotePromotedRuleFromFeedbackFile(
 ): Promise<boolean> {
   const feedbackPath = feedbackFilePath(agentName);
   try {
-    const content = await readFile(feedbackPath, "utf-8");
+    let content: string;
+    try {
+      content = await readFile(feedbackPath, "utf-8");
+    } catch (err: any) {
+      // Issue #1125 — a missing feedback file has no block to demote; clean
+      // no-op rather than a logged error (config/feedback/ is absent post-#710).
+      if (err?.code === "ENOENT") return false;
+      throw err;
+    }
     const { newContent, removed } = removePromotedRuleBlock(content, category);
     if (!removed || newContent === content) return false;
     await writeFile(feedbackPath, newContent);
