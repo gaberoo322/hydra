@@ -32,7 +32,15 @@ let admin: any;
 let redis: any;
 let redisAvailable = false;
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+// issue #1446 — dedicated non-zero logical DB so this file's
+// `hydra:backlog:*` fixtures can never be clobbered by a concurrently-running
+// sibling backlog file (backlog.test.mts on DB-1,
+// backlog-stale-claim-reaper.test.mts on DB-5). See that file's header for the
+// full rationale: serial `--test-concurrency=1` masks the shared-DB-1
+// collision, but a subset run without the flag re-surfaces the recurring
+// "redis-shared-backlog-tests-flaky-in-full-run" flake. 3 dedicated DBs is
+// inside the 16-DB budget #1231 was protecting.
+process.env.REDIS_URL = "redis://localhost:6379/6";
 
 async function cleanBacklogKeys() {
   const patterns = ["hydra:backlog:*", "hydra:alerts", "hydra:metrics:claims-reaped*"];
