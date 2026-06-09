@@ -118,7 +118,6 @@ export type {
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
 // ---------------------------------------------------------------------------
 export {
-  readOAuthUsage,
   readAccessToken,
   credentialsPath,
   parseOAuthUsageBody,
