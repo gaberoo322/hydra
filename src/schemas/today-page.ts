@@ -159,7 +159,7 @@ const StuckThresholdsSchema = z
   })
   .strict();
 
-export const StuckItemsResponseSchema = z
+const StuckItemsResponseSchema = z
   .object({
     blockedOver2d: z.array(StuckIssueSchema),
     needsInfoWaiting: z.array(StuckIssueSchema),
@@ -188,7 +188,7 @@ export const RecentMergesQuerySchema = z
 
 export type RecentMergesQuery = z.infer<typeof RecentMergesQuerySchema>;
 
-export const MergeItemSchema = z
+const MergeItemSchema = z
   .object({
     prNumber: z.number().int().positive(),
     title: z.string(),
@@ -199,7 +199,7 @@ export const MergeItemSchema = z
   })
   .strict();
 
-export const RecentMergesResponseSchema = z
+const RecentMergesResponseSchema = z
   .object({
     items: z.array(MergeItemSchema),
     limit: z.number().int().positive(),
@@ -228,7 +228,7 @@ export const WindowedQuerySchema = z
 
 export type WindowedQuery = z.infer<typeof WindowedQuerySchema>;
 
-export const FindingSchema = z
+const FindingSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -239,7 +239,7 @@ export const FindingSchema = z
   })
   .strict();
 
-export const FindingsResponseSchema = z
+const FindingsResponseSchema = z
   .object({
     items: z.array(FindingSchema),
     windowHours: z.number().int().positive(),
@@ -249,7 +249,7 @@ export const FindingsResponseSchema = z
 
 export type FindingsResponse = z.infer<typeof FindingsResponseSchema>;
 
-export const PromotionCandidateSchema = z
+const PromotionCandidateSchema = z
   .object({
     skill: z.string(),
     cue: z.string(),
@@ -260,7 +260,7 @@ export const PromotionCandidateSchema = z
   })
   .strict();
 
-export const MetaFrictionIssueSchema = z
+const MetaFrictionIssueSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
