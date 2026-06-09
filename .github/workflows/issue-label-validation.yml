@@ -73,30 +73,30 @@ jobs:
             --repo "${{ github.repository }}" \
             --body "> *Automated label-validation comment (issue #396)*
 
-The \`ready-for-agent\` label was just applied, but this issue is missing a \`## Files in scope\` section.
+          The \`ready-for-agent\` label was just applied, but this issue is missing a \`## Files in scope\` section.
 
-Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. Without it, the subagent has no contract to honour and the gate has nothing to check against.
+          Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. Without it, the subagent has no contract to honour and the gate has nothing to check against.
 
-The label has been moved to \`needs-info\`. To re-arm:
+          The label has been moved to \`needs-info\`. To re-arm:
 
-1. Add a \`## Files in scope\` section to the issue body listing the paths the agent is allowed to touch (backticked code spans or bullet items work). Optionally add a \`## Files out of scope\` block — anything matching it becomes a hard merge blocker.
-2. Re-apply the \`ready-for-agent\` label.
+          1. Add a \`## Files in scope\` section to the issue body listing the paths the agent is allowed to touch (backticked code spans or bullet items work). Optionally add a \`## Files out of scope\` block — anything matching it becomes a hard merge blocker.
+          2. Re-apply the \`ready-for-agent\` label.
 
-Example:
+          Example:
 
-\`\`\`markdown
-## Files in scope
+          \`\`\`markdown
+          ## Files in scope
 
-- \`src/foo.ts\`
-- \`src/foo/\`
-- \`docs/quality-gates.md\`
+          - \`src/foo.ts\`
+          - \`src/foo/\`
+          - \`docs/quality-gates.md\`
 
-## Files out of scope
+          ## Files out of scope
 
-- \`src/control-loop.ts\`
-\`\`\`
+          - \`src/control-loop.ts\`
+          \`\`\`
 
-See \`docs/agents/issue-tracker.md\` for the full convention."
+          See \`docs/agents/issue-tracker.md\` for the full convention."
 
   audit-ready-for-agent:
     # Issue #505: nightly audit. Iterates every open `ready-for-agent`
@@ -148,16 +148,16 @@ See \`docs/agents/issue-tracker.md\` for the full convention."
               --repo "$REPO" \
               --body "> *Automated label-validation comment (scheduled audit, issues #396 / #505)*
 
-This issue carried the \`ready-for-agent\` label but is missing a \`## Files in scope\` section. The nightly audit detected the drift and moved the label to \`needs-info\`.
+          This issue carried the \`ready-for-agent\` label but is missing a \`## Files in scope\` section. The nightly audit detected the drift and moved the label to \`needs-info\`.
 
-Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. Without it, the subagent has no contract to honour and the gate has nothing to check against.
+          Subagents (hydra-dev, hydra-target-build) and the CI \`scope-check\` gate both rely on this section to bound the blast radius of changes. Without it, the subagent has no contract to honour and the gate has nothing to check against.
 
-To re-arm:
+          To re-arm:
 
-1. Add a \`## Files in scope\` section to the issue body listing the paths the agent is allowed to touch (backticked code spans or bullet items work). Optionally add a \`## Files out of scope\` block — anything matching it becomes a hard merge blocker.
-2. Re-apply the \`ready-for-agent\` label.
+          1. Add a \`## Files in scope\` section to the issue body listing the paths the agent is allowed to touch (backticked code spans or bullet items work). Optionally add a \`## Files out of scope\` block — anything matching it becomes a hard merge blocker.
+          2. Re-apply the \`ready-for-agent\` label.
 
-See \`docs/agents/issue-tracker.md\` for the full convention."
+          See \`docs/agents/issue-tracker.md\` for the full convention."
 
             demoted=$((demoted + 1))
           done

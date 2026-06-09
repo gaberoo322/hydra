@@ -88,14 +88,14 @@ jobs:
             # No artifact — post the warning and stop.
             gh pr comment "$PR_NUM" --repo "$REPO" --body "> *Automated design-concept comment (issue #464)*
 
-:warning: No design-concept artifact for issue #$ANCHOR_REF.
+          :warning: No design-concept artifact for issue #$ANCHOR_REF.
 
-The \`hydra-grill\` skill normally produces a design-concept before \`dev_orch\` dispatches an implementation. Either:
+          The \`hydra-grill\` skill normally produces a design-concept before \`dev_orch\` dispatches an implementation. Either:
 
-- Run \`/hydra-grill $ANCHOR_REF\` on the parent issue to produce the artifact, or
-- Apply the \`$EXEMPT_LABEL\` label (operator-only) to record an explicit exemption.
+          - Run \`/hydra-grill $ANCHOR_REF\` on the parent issue to produce the artifact, or
+          - Apply the \`$EXEMPT_LABEL\` label (operator-only) to record an explicit exemption.
 
-Phase B is warn-only — this PR can still merge. Phase C will require an artifact or an exemption."
+          Phase B is warn-only — this PR can still merge. Phase C will require an artifact or an exemption."
             exit 0
           fi
 
@@ -146,17 +146,17 @@ Phase B is warn-only — this PR can still merge. Phase C will require an artifa
 
           gh pr comment "$PR_NUM" --repo "$REPO" --body "> *Automated design-concept comment (issue #464)*
 
-**Artifact:** \`$ARTIFACT_HASH_SHORT\`
-**Status:** \`$STATUS_BADGE\`
-**Anchor:** issue #$ANCHOR_REF
+          **Artifact:** \`$ARTIFACT_HASH_SHORT\`
+          **Status:** \`$STATUS_BADGE\`
+          **Anchor:** issue #$ANCHOR_REF
 
-${GATE_LINE}**Top modules touched:**
-$TOP_MODULES
+          ${GATE_LINE}**Top modules touched:**
+          $TOP_MODULES
 
-**Top invariants:**
-$TOP_INVARIANTS
+          **Top invariants:**
+          $TOP_INVARIANTS
 
-Fetch the full artifact: \`curl $ORCH_BASE_URL/api/design-concepts/$ANCHOR_REF\`"
+          Fetch the full artifact: \`curl $ORCH_BASE_URL/api/design-concepts/$ANCHOR_REF\`"
 
   exempt-handler:
     # Fires when ANY label is applied. Bail out fast inside the job if
@@ -196,9 +196,9 @@ Fetch the full artifact: \`curl $ORCH_BASE_URL/api/design-concepts/$ANCHOR_REF\`
             gh pr edit "$PR_NUM" --repo "$REPO" --remove-label "$EXEMPT_LABEL"
             gh pr comment "$PR_NUM" --repo "$REPO" --body "> *Automated design-concept comment (issue #464)*
 
-\`$EXEMPT_LABEL\` is operator-only; label removed.
+          \`$EXEMPT_LABEL\` is operator-only; label removed.
 
-This label suppresses the (Phase C) design-concept gate. Only operators on the allowlist (\`$EXEMPT_ALLOWLIST\`) can apply it. To request an exemption, comment on the PR and an operator can apply the label themselves."
+          This label suppresses the (Phase C) design-concept gate. Only operators on the allowlist (\`$EXEMPT_ALLOWLIST\`) can apply it. To request an exemption, comment on the PR and an operator can apply the label themselves."
             exit 1
           fi
 
@@ -262,11 +262,11 @@ This label suppresses the (Phase C) design-concept gate. Only operators on the a
 
           gh pr comment "$PR_NUM" --repo "$REPO" --body "> *Automated design-concept comment (issue #464)*
 
-:white_check_mark: \`$EXEMPT_LABEL\` applied by **@$APPLIER**.
+          :white_check_mark: \`$EXEMPT_LABEL\` applied by **@$APPLIER**.
 
-**Anchor:** \`$ANCHOR_REF\`
+          **Anchor:** \`$ANCHOR_REF\`
 
-**Gate-fail reasons that would have blocked:**
-$REASONS_MD
+          **Gate-fail reasons that would have blocked:**
+          $REASONS_MD
 
-This exemption is recorded in the audit log (\`hydra:dc:exempt_log\`). Retrieve via \`curl $ORCH_BASE_URL/api/design-concepts/exempt-log\`."
+          This exemption is recorded in the audit log (\`hydra:dc:exempt_log\`). Retrieve via \`curl $ORCH_BASE_URL/api/design-concepts/exempt-log\`."
