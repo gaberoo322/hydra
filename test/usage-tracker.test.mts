@@ -15,12 +15,8 @@ import {
   parseUsageLine,
   parseObservedResetMs,
   cacheHitRatio,
-  projectEligibility,
   projectResetWindow,
   getWeeklyResetAnchorMs,
-  getWeeklyPaceCeiling,
-  DEFAULT_WEEKLY_PACE_CEILING,
-  PACE_STATE_TOLERANCE_PERCENT,
   getCacheReadWeight,
   DEFAULT_CACHE_READ_WEIGHT,
   weightedTokens,
@@ -28,22 +24,31 @@ import {
   getDriftFactor,
   DEFAULT_DRIFT_FACTOR,
   sessionIdFromPath,
+  UNATTRIBUTED_SKILL,
+  parseSessionLimitReset,
+  type UsageSnapshot,
+  type TokenBreakdown,
+  type SkillResolver,
+  type OAuthUsageResult,
+} from "../src/cost/index.ts";
+// The pure eligibility-projection fold now lives in its own module
+// (issue #1377). Import it directly from cost/eligibility.ts to prove the seam
+// is importable without pulling in the JSONL-scan machinery.
+import {
+  projectEligibility,
+  getWeeklyPaceCeiling,
+  DEFAULT_WEEKLY_PACE_CEILING,
+  PACE_STATE_TOLERANCE_PERCENT,
   PACING_SHEDDABLE_CLASSES,
   fiveHourThrottleShed,
   FIVE_HOUR_THROTTLE_T1_CLASSES,
   FIVE_HOUR_THROTTLE_T2_CLASSES,
   DEFAULT_FIVE_HOUR_THROTTLE_T1,
   DEFAULT_FIVE_HOUR_THROTTLE_T2,
-  UNATTRIBUTED_SKILL,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
-  parseSessionLimitReset,
-  type UsageSnapshot,
   type UsageEligibility,
-  type TokenBreakdown,
-  type SkillResolver,
-  type OAuthUsageResult,
-} from "../src/cost/index.ts";
+} from "../src/cost/eligibility.ts";
 
 function breakdown(p: Partial<TokenBreakdown> = {}): TokenBreakdown {
   const input = p.input ?? 0;
