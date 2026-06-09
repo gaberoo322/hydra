@@ -289,6 +289,32 @@ describe("reflections buffer", () => {
     assert.equal(bufLen, 0);
   });
 
+  test("consolidateReflections routes through recordAnchorReflection — by-file index warms (invariant #2)", async (t) => {
+    requireRedis(t);
+    // Anchor reference embeds a file path so the by-file index (#326) keys off it.
+    // If consolidation re-implemented the per-anchor write with a raw push (the
+    // rejected alternative), this index would stay empty. Routing through
+    // recordAnchorReflection populates it for free.
+    await reflections.recordReflection({
+      cycleId: "cyc-byfile-1", anchorType: "prior-failure",
+      anchorReference: "Fix bug in src/calibration/widget.ts deriveSport",
+      failureMode: "verification-failed", whatFailed: "tsc broke",
+      whyItFailed: "missing import", whatToTryDifferently: "add the import first",
+    });
+
+    const summary = await reflections.consolidateReflections();
+    assert.equal(summary.consolidated, 1);
+
+    // By-file secondary index populated via the shared write primitive.
+    const members = await redis.smembers("hydra:reflections:by-file:src/calibration/widget.ts");
+    assert.equal(members.length, 1, "consolidation must warm the by-file index via recordAnchorReflection");
+
+    // Narrative fidelity preserved: the buffer's whatToTryDifferently survives as
+    // the per-anchor advice (not replaced by generic generateAdvice text).
+    const block = await reflections.loadAnchorReflections("Fix bug in src/calibration/widget.ts deriveSport");
+    assert.ok(block.content.includes("add the import first"));
+  });
+
   test("clearReflectionsForAnchor returns 0 when no matches", async (t) => {
     requireRedis(t);
     await reflections.recordReflection({
