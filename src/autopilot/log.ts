@@ -228,9 +228,16 @@ interface JournalSpawnResult {
  * at JOURNAL_MAX_BYTES; over-cap reads SIGTERM the child and append a
  * truncation marker. Timeouts SIGTERM after JOURNAL_TIMEOUT_MS.
  *
- * Exported so the autopilot-logs test can drive it with a mocked
- * binary via `HYDRA_AUTOPILOT_JOURNAL_CMD`. Module-level constant
- * `JOURNAL_CMD_OVERRIDE` reads that env once at import time.
+ * Internally consumed by `readJournalSlice` (below). Also exported so
+ * `test/autopilot-logs.test.mts` can drive it with a mocked binary via
+ * `HYDRA_AUTOPILOT_JOURNAL_CMD` — the `journalCmdOverride()` /
+ * `journalTimeoutMs()` helpers read those env vars at call time. The test
+ * imports it through a cache-busted dynamic `import()` knip cannot resolve
+ * statically, so the export is tagged `@public` to keep it off the
+ * unused-export report (the prior `src/api/autopilot.ts` re-export that knip
+ * could see was removed in #1425).
+ *
+ * @public
  */
 export function runJournalctl(
   unit: string,

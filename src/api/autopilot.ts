@@ -61,17 +61,14 @@ import {
   readJournalSlice,
   LOG_TAIL_DEFAULT,
   LOG_TAIL_MAX,
-  runJournalctl,
 } from "../autopilot/log.ts";
 
 /**
- * Re-exported for `test/autopilot-logs.test.mts` (drives `journalctl`
- * via the `HYDRA_AUTOPILOT_JOURNAL_CMD` mock) and for `src/api/agents.ts`
- * (consumes `fetchTurnsWithJoins` to attach turn detail to agent runs).
- * New code should import from `src/autopilot/log.ts` or
- * `src/autopilot/runs.ts` directly.
+ * Re-exported for `src/api/agents.ts`, which consumes `fetchTurnsWithJoins`
+ * to attach turn detail to agent runs. New code should import from
+ * `src/autopilot/run-projections.ts` directly.
  */
-export { runJournalctl, fetchTurnsWithJoins };
+export { fetchTurnsWithJoins };
 
 /**
  * Query schema for `GET /autopilot/runs?limit=N` (ADR-0022). Coerces the wire

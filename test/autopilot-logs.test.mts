@@ -331,7 +331,13 @@ describe("autopilot logs API (issue #499, slice 3)", () => {
       // To keep this hermetic, we call runJournalctl directly with no env
       // change after restoring; instead we drive it via a fresh import by
       // mutating env and re-importing with cache bust.
-      const fresh = await import(`../src/api/autopilot.ts?ts=${Date.now()}`);
+      // runJournalctl is defined in src/autopilot/log.ts; import it from there
+      // directly (the src/api/autopilot.ts re-export was dead per knip — these
+      // AC9/AC10 assertions were its sole consumers — issue #1425). Re-imported
+      // with a cache-bust query so each case gets a fresh module instance; the
+      // env knobs (HYDRA_AUTOPILOT_JOURNAL_CMD / _TIMEOUT_MS) are read at
+      // call-time inside runJournalctl, so the mutated env is picked up.
+      const fresh = await import(`../src/autopilot/log.ts?ts=${Date.now()}`);
       const r = await fresh.runJournalctl("hydra-autopilot.service", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
       assert.equal(r.truncated, true, "output >1MB must set truncated=true");
       assert.ok(r.text.length <= 1024 * 1024 + 500, `text should be ~capped, got ${r.text.length}`);
@@ -360,7 +366,7 @@ describe("autopilot logs API (issue #499, slice 3)", () => {
     process.env.HYDRA_AUTOPILOT_JOURNAL_CMD = slowShim;
     process.env.HYDRA_AUTOPILOT_JOURNAL_TIMEOUT_MS = "300";
     try {
-      const fresh = await import(`../src/api/autopilot.ts?ts=${Date.now()}-slow`);
+      const fresh = await import(`../src/autopilot/log.ts?ts=${Date.now()}-slow`);
       const start = Date.now();
       const r = await fresh.runJournalctl("hydra-autopilot.service", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
       const elapsed = Date.now() - start;
