@@ -165,6 +165,63 @@ describe("architecture-graph aggregator", () => {
     assert.equal(graph.scannedAt, NOW.toISOString());
   });
 
+  test("concurrent scans don't corrupt each other's import regex lastIndex", async () => {
+    // Regression for PR #1416 QA blocker: a module-scoped `/g` regex carries
+    // mutable `lastIndex`, and `scanArchitecture` awaits `readFile` mid-loop.
+    // A shared hoisted regex would let two interleaved cache-miss scans clobber
+    // each other's match position, silently dropping edges. With a per-call
+    // regex, two scans run against the SAME synthetic tree must produce
+    // identical edge sets — even when their readFile awaits interleave.
+    //
+    // Force interleaving: readFile returns a promise that only resolves once
+    // BOTH concurrent scans have entered their first readFile. That guarantees
+    // scan A is parked at the await while scan B starts (and vice versa), the
+    // exact window where a shared regex would corrupt.
+    const files: Record<string, string> = {
+      "index.ts": `import { run } from "./cycle.ts";\nimport { x } from "./redis.ts";`,
+      "cycle.ts": `import { y } from "./redis.ts";`,
+      "redis.ts": `export const x = 1; export const y = 2;`,
+    };
+
+    let waiting = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const interleavingStub = () => ({
+      srcDir: "/synthetic/src",
+      now: NOW,
+      readdir: async (_dir: string) => Object.keys(files),
+      readFile: async (path: string) => {
+        const base = path.split("/").pop() ?? path;
+        // Park on the first readFile of each scan until both have arrived,
+        // then proceed concurrently from a shared await suspension point.
+        if (++waiting <= 2) {
+          if (waiting === 2) release();
+          await gate;
+        }
+        const body = files[base];
+        if (body === undefined) throw new Error(`no stub for ${path}`);
+        return body;
+      },
+    });
+
+    const [a, b] = await Promise.all([
+      scanArchitecture(interleavingStub()),
+      scanArchitecture(interleavingStub()),
+    ]);
+
+    const sortEdges = (es: typeof a.edges) =>
+      [...es].sort((p, q) => (p.from + p.to).localeCompare(q.from + q.to));
+
+    // Expected edges: index->cycle, index->redis, cycle->redis (3 total).
+    assert.equal(a.edgeCount, 3, "scan A must find all 3 edges");
+    assert.equal(b.edgeCount, 3, "scan B must find all 3 edges");
+    assert.deepEqual(
+      sortEdges(a.edges),
+      sortEdges(b.edges),
+      "interleaved scans must produce identical edge sets",
+    );
+  });
+
   test("GROUP_MAP and GROUP_POSITIONS are module-level constants", () => {
     // GROUP_MAP is derived from GROUPS; spot-check a couple of mappings.
     assert.equal(GROUP_MAP["index"].id, "core");

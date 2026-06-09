@@ -150,8 +150,6 @@ export interface ArchitectureGraphDeps {
 // Public entrypoint
 // ---------------------------------------------------------------------------
 
-const importRe = /from\s+["']\.\/([^"']+?)(?:\.ts)?["']/g;
-
 /**
  * Scan `srcDir` for `.ts` modules, parse their relative imports into an
  * edge list, and lay the nodes out on a grouped grid.
@@ -162,6 +160,13 @@ const importRe = /from\s+["']\.\/([^"']+?)(?:\.ts)?["']/g;
 export async function scanArchitecture(
   deps: ArchitectureGraphDeps = {},
 ): Promise<ArchitectureGraph> {
+  // Declared per-call, NOT at module scope: a `/g` regex carries mutable
+  // `lastIndex`, and this function `await`s `readFile` mid-loop. A hoisted
+  // shared instance would let concurrent cache-miss scans interleave at the
+  // await and corrupt each other's match position, silently producing wrong
+  // edge sets. A fresh regex per invocation keeps each scan isolated.
+  const importRe = /from\s+["']\.\/([^"']+?)(?:\.ts)?["']/g;
+
   const srcDir = deps.srcDir ?? resolveDefaultSrcDir();
   const readdir = deps.readdir ?? fsReaddir;
   // Default readFile pins utf-8 so the dep contract is `(path) => Promise<string>`
