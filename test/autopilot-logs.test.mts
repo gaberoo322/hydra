@@ -380,17 +380,25 @@ describe("autopilot logs API (issue #499, slice 3)", () => {
   // ---------------------------------------------------------------------------
   // AC11 — sanitizeIso rejects junk (defense-in-depth)
   // ---------------------------------------------------------------------------
-  test("AC11: sanitizeIso accepts valid ISO and rejects junk", () => {
-    assert.equal(helpers.sanitizeIso("2026-05-19T10:00:00Z"), "2026-05-19T10:00:00Z");
-    assert.equal(helpers.sanitizeIso("2026-05-19T10:00:00.123Z"), "2026-05-19T10:00:00.123Z");
-    assert.equal(helpers.sanitizeIso("2026-05-19T10:00:00+02:00"), "2026-05-19T10:00:00+02:00");
-    assert.equal(helpers.sanitizeIso(""), null);
-    assert.equal(helpers.sanitizeIso(null), null);
-    assert.equal(helpers.sanitizeIso(undefined), null);
-    assert.equal(helpers.sanitizeIso("2026-05-19"), null);
-    assert.equal(helpers.sanitizeIso("$(rm -rf /)"), null);
-    assert.equal(helpers.sanitizeIso("2026-05-19T10:00:00Z; ls"), null);
-    assert.equal(helpers.sanitizeIso("2026-05-19T10:00:00Z && true"), null);
+  test("AC11: sanitizeIso accepts valid ISO and rejects junk", async () => {
+    // sanitizeIso is defined in src/autopilot/log.ts; import it from there
+    // directly (the src/api/autopilot.ts re-export was dead per knip, with this
+    // assertion block its sole consumer — issue #1426). Imported lazily inside
+    // the test (not at module top-level) because log.ts binds env-derived path
+    // constants at module-eval time, and the suite's `before()` hook sets those
+    // env vars; a top-level static import would freeze the defaults and break
+    // the AC1/AC2/AC6 log-path fixtures.
+    const { sanitizeIso } = await import("../src/autopilot/log.ts");
+    assert.equal(sanitizeIso("2026-05-19T10:00:00Z"), "2026-05-19T10:00:00Z");
+    assert.equal(sanitizeIso("2026-05-19T10:00:00.123Z"), "2026-05-19T10:00:00.123Z");
+    assert.equal(sanitizeIso("2026-05-19T10:00:00+02:00"), "2026-05-19T10:00:00+02:00");
+    assert.equal(sanitizeIso(""), null);
+    assert.equal(sanitizeIso(null), null);
+    assert.equal(sanitizeIso(undefined), null);
+    assert.equal(sanitizeIso("2026-05-19"), null);
+    assert.equal(sanitizeIso("$(rm -rf /)"), null);
+    assert.equal(sanitizeIso("2026-05-19T10:00:00Z; ls"), null);
+    assert.equal(sanitizeIso("2026-05-19T10:00:00Z && true"), null);
   });
 
   // ---------------------------------------------------------------------------

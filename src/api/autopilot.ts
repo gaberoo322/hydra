@@ -62,7 +62,6 @@ import {
   LOG_TAIL_DEFAULT,
   LOG_TAIL_MAX,
   runJournalctl,
-  sanitizeIso,
 } from "../autopilot/log.ts";
 
 /**
@@ -72,7 +71,7 @@ import {
  * New code should import from `src/autopilot/log.ts` or
  * `src/autopilot/runs.ts` directly.
  */
-export { runJournalctl, fetchTurnsWithJoins, sanitizeIso };
+export { runJournalctl, fetchTurnsWithJoins };
 
 /**
  * Query schema for `GET /autopilot/runs?limit=N` (ADR-0022). Coerces the wire
