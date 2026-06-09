@@ -1,21 +1,18 @@
 // Sentry must be imported FIRST
 import { Sentry } from "./instrument.ts";
 
-import { EventBus, STREAMS, NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
+import { EventBus } from "./event-bus.ts";
 import { createApi } from "./api.ts";
-import { sendNotification } from "./notify.ts";
 import { startCleanupSchedule, stopCleanupSchedule } from "./cleanup.ts";
 import { stopKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
-import { startDigest, stopDigest, recordEvent } from "./digest.ts";
+import { startDigest, stopDigest } from "./digest.ts";
 import { initLearning } from "./learning.ts";
-import { pushAlert } from "./redis/alerts.ts";
 import { cleanWorkQueue } from "./redis/work-queue.ts";
-import { recordCycleSide, classifySide } from "./capacity-floor.ts";
-import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
-import { startSlotEventsBridge, slotEventsBridgeConsumer } from "./autopilot/slot-events-bridge.ts";
-import { startRecommendationConsumer, recsEngineConsumer } from "./autopilot/recommendation-engine.ts";
+import { startConsumers } from "./notification-consumer.ts";
+import { slotEventsBridgeConsumer } from "./autopilot/slot-events-bridge.ts";
+import { recsEngineConsumer } from "./autopilot/recommendation-engine.ts";
 import {
   startPrLifecycleBridge,
   type PrLifecycleBridge,
@@ -27,148 +24,10 @@ import { WebSocketServer } from "ws";
 
 const PORT = parseInt(process.env.HYDRA_PORT) || 4000;
 
-// ---------------------------------------------------------------------------
-// Background stream consumers (folded from pipeline.mjs)
-// ---------------------------------------------------------------------------
-
-const MAX_CONSUMER_RESTARTS = 5;
-const BACKOFF_BASE_MS = 5000;
-
-async function startConsumerWithRecovery(name, startFn) {
-  let restarts = 0;
-  while (true) {
-    try {
-      await startFn();
-      break;
-    } catch (err) {
-      restarts++;
-      console.error(`[Consumer] ${name} crashed (restart ${restarts}/${MAX_CONSUMER_RESTARTS}):`, err.message);
-      if (restarts > MAX_CONSUMER_RESTARTS) {
-        console.error(`[Consumer] ${name} exceeded max restarts — giving up`);
-        await sendNotification({
-          type: E.CONSUMER_DEAD,
-          payload: { consumer: name, error: err.message, restarts },
-        });
-        break;
-      }
-      const delay = BACKOFF_BASE_MS * restarts;
-      console.log(`[Consumer] Restarting ${name} in ${delay}ms...`);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-}
-
-// Each `case` references a NOTIFICATION_EVENT_TYPES member (aliased `E`) — the
-// typed vocabulary in event-bus.ts (issue #1182) — so a misspelled event type
-// is a compile error, kept in lock-step with the ALERT_TYPES set below.
-function formatAlertMessage(event) {
-  const p = event.payload || {};
-  switch (event.type) {
-    case E.CYCLE_FAILED: return `Cycle failed: ${p.taskTitle || p.cycleId || "unknown"} — ${p.reason || "verification failed"}`;
-    case E.CYCLE_ROLLED_BACK: return `Cycle rolled back: ${p.taskTitle || ""} — tests regressed`;
-    case E.CYCLE_AUTO_KILLED: return `Cycle auto-killed after ${p.elapsed || "?"} (TTL exceeded)`;
-    case E.CYCLE_STALLED: return `Cycle stalled: ${p.inProgress || 0} tasks running for ${p.elapsed || "?"}`;
-    case E.DLQ_ALERT: return `Dead letter: ${p.eventType || "unknown"} failed ${p.deliveryCount || 0}x — ${p.error || ""}`;
-    case E.CONSUMER_DEAD: return `Consumer ${p.consumer || "unknown"} died after ${p.restarts || 0} restarts`;
-    case E.RESEARCH_COMPLETED: return `Research cycle complete: ${p.opportunityCount || 0} opportunities found`;
-    case E.SCHEDULER_ERROR: return `Scheduler error: ${p.message || p.error || "unknown"}`;
-    case E.CYCLE_OPERATOR_BLOCKED: return `BLOCKED — needs your action: "${p.title}" — ${p.blockedReason}`;
-    default: return `${event.type}: ${JSON.stringify(p).slice(0, 200)}`;
-  }
-}
-
-function startConsumers(eventBus) {
-  // Notification consumer — stores alerts in Redis for dashboard + digest
-  const ALERT_TYPES = new Set<string>([
-    E.CYCLE_FAILED, E.CYCLE_ROLLED_BACK, E.CYCLE_AUTO_KILLED, E.CYCLE_STALLED,
-    E.DLQ_ALERT, E.CONSUMER_DEAD,
-    E.RESEARCH_COMPLETED, E.SCHEDULER_ERROR, E.CYCLE_OPERATOR_BLOCKED,
-    E.PATTERN_LOW_MERGE_RATE, E.PATTERN_CONSECUTIVE_FAILURES,
-    E.PATTERN_RECURRING_REGRESSIONS, E.PATTERN_ANCHOR_STUCK,
-    E.PATTERN_TEST_DECLINE, E.PATTERN_HIGH_ABANDONMENT,
-  ]);
-  startConsumerWithRecovery("notifications", () =>
-    eventBus.consume(STREAMS.NOTIFICATIONS, "openclaw", `notify-${process.pid}`, async (event) => {
-      recordEvent(event);
-
-      // Issue #245: stamp each completed cycle's "side" in the capacity-floor
-      // history so autopilot can enforce the 25% orchestrator self-improvement
-      // floor. Codex cycles only ever merge against the target workspace, but
-      // we still run classifySide() so the call site stays honest if that
-      // ever changes (e.g. mixed-repo cycles). Best-effort — recordCycleSide
-      // swallows its own errors so digest/alerting can never break a cycle.
-      if (event.type === "cycle:completed") {
-        const p = event.payload || {};
-        const finalState = p.task?.finalState;
-        const files: string[] = Array.isArray(p.filesChanged) ? p.filesChanged : [];
-        const isMerged = (finalState === "merged") && !p.rolledBack;
-        const side = isMerged ? classifySide(files, { workspaceHint: "target" }) : "idle";
-        await recordCycleSide(p.cycleId || event.correlationId || `evt-${Date.now()}`, side, {
-          commitSha: p.commitSha || undefined,
-          filesChanged: files.length > 0 ? files.slice(0, 50) : undefined,
-          source: "cycle-completed-listener",
-        });
-
-        // Issue #315: publish the current self-improvement share to disk so
-        // the outcomes file adapter (config/direction/outcomes.yaml ->
-        // metrics/orchestrator-share.txt) has a real value to read. Without
-        // this, the only seeded Target Outcome is permanently unobservable.
-        // (The stuckness detector + 25% capacity floor that originally
-        // consumed this signal were retired in ADR-0010.) Best-effort —
-        // publisher logs and never throws.
-        await publishOrchestratorShareMetric();
-      }
-
-      // Persist important events as dashboard alerts
-      if (ALERT_TYPES.has(event.type)) {
-        const alert = {
-          id: event.id || `alert-${Date.now()}`,
-          type: event.type,
-          timestamp: event.timestamp || new Date().toISOString(),
-          message: formatAlertMessage(event),
-          severity: event.type.includes("failed") || event.type.includes("dead") || event.type.includes("rolled_back") ? "error"
-            : event.type.includes("stalled") || event.type.includes("auto_killed") ? "warning"
-            : "info",
-          dismissed: false,
-          payload: event.payload,
-        };
-        await pushAlert(JSON.stringify(alert), 100);
-      }
-    }, { count: 1, blockMs: 5000 }),
-  );
-
-  // Dead-letter queue consumer — alert and mark tasks failed
-  startConsumerWithRecovery("dlq", () =>
-    eventBus.consume(STREAMS.DLQ, "dlq-processor", `dlq-${process.pid}`, async (event) => {
-      const { originalStream, originalGroup, originalEvent, error, deliveryCount } = event.payload || {};
-      console.error(`[DLQ] Failed event from ${originalStream}/${originalGroup}: ${originalEvent?.type} — ${error} (${deliveryCount} attempts)`);
-      await sendNotification({
-        type: E.DLQ_ALERT,
-        payload: { originalStream, originalGroup, eventType: originalEvent?.type, error, deliveryCount },
-      });
-    }, { count: 1, blockMs: 10000 }),
-  );
-
-  // Slot-events bridge — re-broadcasts hydra:autopilot:slot-events over WS
-  // for the /now-pixel dashboard's one-shot sprite animations (epic #642,
-  // slice 4 of #646). Read-only — the autopilot's own consumer group is
-  // unaffected.
-  startConsumerWithRecovery("slot-events-bridge", () =>
-    startSlotEventsBridge(eventBus),
-  );
-
-  // Recommendation engine — reacts to `turn_end` events from slice A
-  // (#668) by firing at most one claude-haiku-4-5 call per turn (gated on
-  // a 30s interval, a material-change predicate, and a daily USD cap).
-  // Slice F of /now-pixel observability (#674).
-  startConsumerWithRecovery("recs-engine", () =>
-    startRecommendationConsumer(eventBus),
-  );
-
-  console.log(
-    "[Hydra] Background consumers started (notifications, dlq, slot-events-bridge, recs-engine)",
-  );
-}
+// Background stream consumers (notifications, DLQ, slot-events bridge, recs
+// engine) plus the alert-routing grammar were extracted into the
+// notification-consumer Module (issue #1376). index.ts stays a thin caller of
+// startConsumers() and retains only process lifecycle below.
 
 // ---------------------------------------------------------------------------
 // Autopilot observability bridges (issue #673) — module-level handles so the
