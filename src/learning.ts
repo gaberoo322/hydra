@@ -42,6 +42,11 @@ import {
 } from "./reflections/reflections.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
 import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
+// Issue #1440: per-cycle knowledge-context-availability tracking. The planner
+// enrichment block below records whether the dispatch-time OV search produced
+// non-empty context, so the health surface can trend it. Behind a best-effort
+// wrapper so a Redis error never breaks planner-context assembly.
+import { recordKnowledgeContextAvailability } from "./redis/ov-search-metrics.ts";
 
 // ===========================================================================
 // Public API — getContext
@@ -206,6 +211,19 @@ async function loadAgentMemoryBlock(agent: string): Promise<LearningContextBlock
  * Fail-loud: an OV outage surfaces as `status: "error"` with the message, not
  * a silent drop (the old folded path swallowed OV errors with a bare catch).
  */
+/**
+ * Best-effort, never-throw wrapper around the per-cycle context-availability
+ * record (issue #1440). Observability must never break planner-context
+ * assembly, so a Redis error here is logged and swallowed.
+ */
+async function recordContextAvailability(hadContext: boolean): Promise<void> {
+  try {
+    await recordKnowledgeContextAvailability(hadContext);
+  } catch (err: any) {
+    console.error(`[Learning] knowledge-context availability record failed: ${err?.message ?? err}`);
+  }
+}
+
 async function loadKnowledgeBaseBlock(agent: string): Promise<LearningContextBlock> {
   try {
     const { trackedOvSearch } = await import("./knowledge-base/ov-search.ts");
@@ -219,6 +237,13 @@ async function loadKnowledgeBaseBlock(agent: string): Promise<LearningContextBlo
       const abstract = mem.abstract || mem.content || "";
       if (abstract.trim()) parts.push(`- ${abstract.slice(0, 300)}`);
     }
+    // Issue #1440: record per-cycle knowledge-context availability so the
+    // operator can see "what fraction of planned cycles saw non-empty knowledge
+    // context" — 0 search results ≠ context is empty until we trend it. The
+    // planner block is the dispatch-time enrichment seam, so `hadContext` here
+    // is exactly the signal the issue asks for. Best-effort and never-throws:
+    // a Redis hiccup must not break planner-context assembly.
+    await recordContextAvailability(parts.length > 0);
     if (parts.length === 0) return mkBlock("knowledge-base", "miss", "", 0);
     const content = `# ${agent} — Learned Patterns (from OpenViking)\n\n${parts.join("\n")}`;
     return mkBlock("knowledge-base", "hit", content, parts.length);
