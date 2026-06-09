@@ -41,11 +41,6 @@ export {
   // public Interface rather than reaching into `surrogate.ts`.
 } from "./surrogate.ts";
 
-export type {
-  RecordTokensResult,
-  DailyTokenCounter,
-} from "./surrogate.ts";
-
 // ---------------------------------------------------------------------------
 // Attribution — pure aggregation for /api/metrics/cost-attribution (issue #271)
 // ---------------------------------------------------------------------------
@@ -60,7 +55,6 @@ export {
 export type {
   AgentRun,
   CycleSummary,
-  CostAttributionResult,
 } from "./attribution.ts";
 
 // ---------------------------------------------------------------------------
@@ -94,10 +88,7 @@ export {
 export type {
   UsageSnapshot,
   TokenBreakdown,
-  ParsedUsageLine,
-  ModelFamily,
   SkillResolver,
-  ResetWindow,
 } from "./usage-tracker.ts";
 
 // ---------------------------------------------------------------------------
@@ -109,25 +100,9 @@ export {
   overlaySessionBlockEligibility,
 } from "./eligibility.ts";
 
-export type {
-  UsageEligibility,
-  PaceState,
-} from "./eligibility.ts";
-
 // ---------------------------------------------------------------------------
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
 // ---------------------------------------------------------------------------
-export {
-  readAccessToken,
-  credentialsPath,
-  parseOAuthUsageBody,
-  isOAuthUsageFailure,
-  isOAuthUsageOk,
-  OAUTH_USAGE_URL,
-  OAUTH_USAGE_BETA,
-  OAUTH_USAGE_TIMEOUT_MS,
-} from "./oauth-usage.ts";
-
 export type {
   OAuthUsageResult,
   OAuthUsageData,
