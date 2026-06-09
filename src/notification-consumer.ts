@@ -153,7 +153,7 @@ export function formatAlertMessage(event: NotificationEvent): string {
  * effort — issue #245 / #315 contract preserved), and persist alert-worthy
  * events as dashboard alerts.
  */
-export async function handleNotificationEvent(event: NotificationEvent): Promise<void> {
+async function handleNotificationEvent(event: NotificationEvent): Promise<void> {
   recordEvent(event);
 
   // Issue #245: stamp each completed cycle's "side" in the capacity-floor
