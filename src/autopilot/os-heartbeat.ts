@@ -42,7 +42,7 @@
 import { readFileSync, statSync } from "node:fs";
 
 /** Default OS-heartbeat path; overridable via env for tests / non-default deploys. */
-export const OS_HEARTBEAT_PATH =
+const OS_HEARTBEAT_PATH =
   process.env.HYDRA_AUTOPILOT_HEARTBEAT || "/tmp/hydra-autopilot-heartbeat.txt";
 
 /**
