@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { getMetricsTrend } from "../metrics/trend.ts";
-import { getAggregateStats, getCumulativeAccomplishments } from "../metrics/aggregate.ts";
+import { getAggregateStats, getCumulativeAccomplishments, getCostByClass } from "../metrics/aggregate.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
 import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
@@ -59,7 +59,17 @@ export function createMetricsRouter() {
       const count = countQuerySchema(20).safeParse(req.query).data?.count ?? 20;
       const trend = await getMetricsTrend(count);
       const stats = await getAggregateStats(count);
-      res.json({ stats, trend });
+      // Issue #1439: per-class cost attribution. Folded from the per-skill
+      // daily token surrogate (today UTC) so operators can answer "what
+      // fraction of spend does research vs dev vs QA consume?". Best-effort —
+      // a Redis hiccup yields an empty breakdown rather than failing /metrics.
+      let costByClass: Awaited<ReturnType<typeof getCostByClass>> | null = null;
+      try {
+        costByClass = await getCostByClass();
+      } catch (costErr: any) {
+        console.error(`[api/metrics] costByClass projection failed: ${costErr?.message || costErr}`);
+      }
+      res.json({ stats, trend, costByClass });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -287,6 +297,25 @@ export function createMetricsRouter() {
       res.json(snapshot);
     } catch (err: any) {
       console.error(`[api/metrics] /metrics/cost failed: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /metrics/cost-by-class — Per-class token attribution (issue #1439).
+  //
+  // Folds the per-skill daily token surrogate into the autopilot dispatch
+  // classes (research / dev-orch / dev-target / qa / cleanup / retro / other)
+  // so the operator can see "QA is now 25% of daily spend" or "research
+  // spiked today". The per-skill data already carries the class signal via
+  // the skill name — no new Redis write path. `?date=YYYY-MM-DD` optional.
+  router.get("/metrics/cost-by-class", async (req, res) => {
+    try {
+      const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
+      const date = parsedDate || todayDateString();
+      const breakdown = await getCostByClass(date);
+      res.json(breakdown);
+    } catch (err: any) {
+      console.error(`[api/metrics] /metrics/cost-by-class failed: ${err.message}`);
       res.status(500).json({ error: err.message });
     }
   });

@@ -5,6 +5,148 @@
  */
 
 import { getMetricsTrend } from "./trend.ts";
+import { getDailyTokenCounter, todayDateString } from "../cost/index.ts";
+
+// ---------------------------------------------------------------------------
+// Per-class cost attribution (issue #1439)
+// ---------------------------------------------------------------------------
+
+/**
+ * The dispatch-class buckets used for per-class cost attribution. These mirror
+ * the autopilot class taxonomy (docs/operator-playbooks/hydra-autopilot.md):
+ * the cost-driving code-writing / review / research / housekeeping classes,
+ * plus an `other` long-tail bucket for everything else (sweep, digest, doctor,
+ * autopilot itself, …) so no token spend silently disappears.
+ */
+export type CostClass =
+  | "research"
+  | "dev-orch"
+  | "dev-target"
+  | "qa"
+  | "cleanup"
+  | "retro"
+  | "other";
+
+/** Stable ordering for the stacked-chart series. `other` always last. */
+export const COST_CLASS_ORDER: readonly CostClass[] = Object.freeze([
+  "research",
+  "dev-orch",
+  "dev-target",
+  "qa",
+  "cleanup",
+  "retro",
+  "other",
+]);
+
+/**
+ * Map a dispatched skill name to its cost-attribution class. Pure + exported
+ * so the test suite can pin the mapping. Unknown / housekeeping skills fall to
+ * `other` rather than `unknown` so the bucket sum always equals the daily
+ * total. Target-scoped QA (`hydra-target-qa`) is attributed to `qa` since the
+ * operator's question is "how much does review cost", not "orch vs target".
+ */
+export function skillToCostClass(skill: string | undefined | null): CostClass {
+  const s = (skill || "").trim().toLowerCase();
+  if (!s) return "other";
+
+  // Order matters: check the more specific `target` variants before the
+  // generic prefixes so `hydra-target-build` doesn't fall into `dev-orch`.
+  if (s === "hydra-target-build") return "dev-target";
+  if (s === "hydra-dev") return "dev-orch";
+  if (s === "hydra-qa" || s === "hydra-target-qa") return "qa";
+  if (s === "hydra-retro" || s === "hydra-target-retro") return "retro";
+  if (s === "hydra-cleanup") return "cleanup";
+  // Research family: hydra-research, hydra-issue-research, hydra-target-research,
+  // and the discover/scout/architecture scouting skills that feed the research
+  // pipeline.
+  if (
+    s === "hydra-research" ||
+    s === "hydra-issue-research" ||
+    s === "hydra-target-research" ||
+    s === "hydra-discover" ||
+    s === "hydra-target-discover" ||
+    s === "hydra-tool-scout" ||
+    s === "hydra-architecture-scan" ||
+    s === "hydra-architect"
+  ) {
+    return "research";
+  }
+  return "other";
+}
+
+export interface CostByClassEntry {
+  /** Total tokens attributed to this class for the window. */
+  tokens: number;
+  /** Fraction of the window's total tokens (0..1, rounded to 2 dp). */
+  fraction: number;
+  /** Skills that rolled up into this class (sorted by tokens desc). */
+  skills: Array<{ skill: string; tokens: number }>;
+}
+
+export interface CostByClassResult {
+  /** YYYY-MM-DD (UTC) the breakdown was computed for. */
+  date: string;
+  /** Total subagent tokens across all classes for the date. */
+  totalTokens: number;
+  /** Per-class breakdown keyed by CostClass; every class present, zeros included. */
+  byClass: Record<CostClass, CostByClassEntry>;
+}
+
+/**
+ * Pure projection: fold a per-skill token breakdown (the shape returned by
+ * `getDailyTokenCounter().bySkill`) into per-class totals + fractions.
+ *
+ * Exported separately from the Redis-reading `getCostByClass` so the fold is
+ * unit-testable on fixtures without a live Redis (ADR-0014 pure-core seam).
+ */
+export function projectCostByClass(
+  bySkill: Array<{ skill: string; tokens: number }>,
+  date: string,
+): CostByClassResult {
+  const byClass: Record<CostClass, CostByClassEntry> = {
+    research: { tokens: 0, fraction: 0, skills: [] },
+    "dev-orch": { tokens: 0, fraction: 0, skills: [] },
+    "dev-target": { tokens: 0, fraction: 0, skills: [] },
+    qa: { tokens: 0, fraction: 0, skills: [] },
+    cleanup: { tokens: 0, fraction: 0, skills: [] },
+    retro: { tokens: 0, fraction: 0, skills: [] },
+    other: { tokens: 0, fraction: 0, skills: [] },
+  };
+
+  let totalTokens = 0;
+  for (const { skill, tokens } of bySkill) {
+    const n = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
+    if (n === 0) continue;
+    const cls = skillToCostClass(skill);
+    byClass[cls].tokens += n;
+    byClass[cls].skills.push({ skill, tokens: n });
+    totalTokens += n;
+  }
+
+  for (const cls of COST_CLASS_ORDER) {
+    const entry = byClass[cls];
+    entry.fraction = totalTokens > 0
+      ? Math.round((entry.tokens / totalTokens) * 100) / 100
+      : 0;
+    entry.skills.sort((a, b) => b.tokens - a.tokens);
+  }
+
+  return { date, totalTokens, byClass };
+}
+
+/**
+ * Read the per-class cost breakdown for a given date (defaults to today UTC).
+ *
+ * Composes the existing per-skill daily token counter (`getDailyTokenCounter`,
+ * the surrogate this orchestrator already populates at autopilot reap time)
+ * with the pure `projectCostByClass` fold. No new Redis write path — the
+ * per-skill data already carries the class signal via the skill name.
+ */
+export async function getCostByClass(dateOverride?: string): Promise<CostByClassResult> {
+  const date = dateOverride || todayDateString();
+  const counter = await getDailyTokenCounter(date);
+  return projectCostByClass(counter.bySkill, counter.date);
+}
 
 /**
  * Compute aggregate stats from metrics trend.
