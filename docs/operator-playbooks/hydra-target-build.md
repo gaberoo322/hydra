@@ -98,9 +98,18 @@ esac
 # Worktrees do not share node_modules with the main checkout — install once per worktree.
 # Cost: ~30–60s. Acceptable; this is the price of parallel-safe target builds.
 (cd "$TARGET_WT/web" && npm ci --prefer-offline --no-audit --no-fund)
+
+# Mirror the Target SDLC gate scripts into the worktree (issue #1451). The gate
+# scripts (mutation-check / target-design-concept / post-merge-health) and their
+# small src closure live ONLY in this orchestrator repo and import `../../src/…`,
+# so they do not exist in the hydra-betting checkout. This sync copies them into
+# `$TARGET_WT/.hydra-gate/` (git-excluded, so it never pollutes the Target PR
+# diff) so Steps 4.5 / 6.6 / 8.6 run the REAL gate from the worktree — never from
+# ~/hydra, never by hand-rolling the money-critical classification.
+bash ~/hydra/scripts/sync-target-gate.sh "$TARGET_WT"
 ```
 
-`scripts/branch-prune.sh` (issue #443) sweeps `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` so we don't have to clean these up on the happy path. We DO remove the worktree in Step 9 on success — leaking is only acceptable on crash.
+`scripts/branch-prune.sh` (issue #443) sweeps `/dev/shm/hydra-worktrees/hydra-betting-worktree-*` so we don't have to clean these up on the happy path. We DO remove the worktree in Step 9 on success — leaking is only acceptable on crash. The `.hydra-gate/` mirror is inside the worktree, so it is GC'd with it.
 
 ### 0.5. Drift check
 ```bash
@@ -280,8 +289,11 @@ Target analogue of the Orchestrator's `hydra-grill` design-concept — but
 **deliberately lighter**: a flat 4-field record (scope / modules-touched /
 invariants / rejected-alternatives), NOT the full Q&A loop, NOT a
 draft/approved/stale gate, NOT a tier ladder (epic #1052: selectively
-converge, do not mirror). The pure builder/serializer lives in
-`scripts/target/target-design-concept.ts`; this step is the I/O wrapper.
+converge, do not mirror). The pure builder/serializer lives in the gate
+mirror at `.hydra-gate/scripts/target/target-design-concept.ts` (synced into
+the worktree by Step 0.6, issue #1451); this step is the I/O wrapper. Run it
+from `$TARGET_WT` so the mirror's `../../src/…` imports resolve — never from
+`~/hydra`.
 
 **Gate on money-critical first — safe-path builds skip this step entirely.**
 `shouldCaptureDesignConcept()` routes on the keystone classifier
@@ -290,12 +302,13 @@ converge, do not mirror). The pure builder/serializer lives in
 persist, or diff against — proceed straight to Step 5.
 
 ```bash
+cd "$TARGET_WT"   # the .hydra-gate mirror's ../../src imports resolve from here
 # EXPECTED_PATHS is the planner's `scopeBoundary.in` money-critical surface,
 # space- or newline-separated; ANCHOR_REF is anchor.reference (e.g. "issue-1056").
 DC_KEY="hydra:target:design-concept:${ANCHOR_REF}"
 
 CAPTURE=$(node --input-type=module -e '
-  import { shouldCaptureDesignConcept } from "./scripts/target/target-design-concept.ts";
+  import { shouldCaptureDesignConcept } from "./.hydra-gate/scripts/target/target-design-concept.ts";
   const paths = process.argv.slice(1);
   process.stdout.write(shouldCaptureDesignConcept(paths) ? "yes" : "no");
 ' -- $EXPECTED_PATHS)
@@ -306,7 +319,7 @@ else
   # Reuse-on-retry: if a prior attempt persisted one, read it back and reuse.
   EXISTING=$(docker exec hydra-redis-1 redis-cli GET "$DC_KEY" 2>/dev/null)
   REUSED=$(node --input-type=module -e '
-    import { parseDesignConcept } from "./scripts/target/target-design-concept.ts";
+    import { parseDesignConcept } from "./.hydra-gate/scripts/target/target-design-concept.ts";
     const dc = parseDesignConcept(process.argv[1] || "");
     process.stdout.write(dc ? JSON.stringify(dc) : "");
   ' -- "$EXISTING")
@@ -319,7 +332,7 @@ else
     # First attempt (or corrupt prior value): the planner authors the four
     # fields now and persists. Build the input JSON from the plan, then:
     DC_JSON=$(node --input-type=module -e '
-      import { buildDesignConcept, serializeDesignConcept } from "./scripts/target/target-design-concept.ts";
+      import { buildDesignConcept, serializeDesignConcept } from "./.hydra-gate/scripts/target/target-design-concept.ts";
       const input = JSON.parse(process.argv[1]);
       process.stdout.write(serializeDesignConcept(buildDesignConcept(input)));
     ' -- "$DC_INPUT_JSON")
@@ -402,15 +415,23 @@ epic #1052:
   money-critical files clear the one floor or the build fails. Mirrors the
   classifier's own two-level boolean (money-critical vs. safe).
 
-Invoke it from the target worktree, feeding it the PR diff against the merge
-base:
+Invoke the **mirrored** gate script from the target worktree (issue #1451 —
+synced into `$TARGET_WT/.hydra-gate/` by Step 0.6), feeding it the PR diff
+against the merge base. Do NOT run `scripts/target/mutation-check.ts` from
+`~/hydra`, and do NOT hand-strip the `web/` prefix from `CHANGED_FILES` — pass
+the raw `web/`-rooted diff paths straight through. `classifyTargetRisk()`
+(inside the mirrored script) already normalizes the `web/` prefix (#1235), so
+hand-stripping re-introduces an already-solved bug and runs the gate
+inconsistently.
 
 ```bash
-# CHANGED_FILES is the newline-separated diff against origin/main's merge base.
-CHANGED_FILES=$(cd "$TARGET_WT" && git diff --name-only "$(git merge-base origin/main HEAD)"...HEAD)
+cd "$TARGET_WT"
+# CHANGED_FILES is the newline-separated diff against origin/main's merge base,
+# in raw web/-rooted form — the gate normalizes web/ itself, do NOT strip it.
+CHANGED_FILES=$(git diff --name-only "$(git merge-base origin/main HEAD)"...HEAD)
 CHANGED_FILES="$CHANGED_FILES" \
 TARGET_PROJECT_DIR="$TARGET_WT/web" \
-  npx tsx scripts/target/mutation-check.ts
+  npx tsx "$TARGET_WT/.hydra-gate/scripts/target/mutation-check.ts"
 ```
 
 Exit codes: 0 = pass (or skipped/neutral), 2 = kill-rate below the floor (block
@@ -537,11 +558,16 @@ post-merge and routes to `hydra-incident`, which decides whether to
 investigate/fix/revert. The auto-revert path is Step 7.5 (deploy failure) /
 Step 8 (test regression) only — do NOT add a revert here.
 
+Run the **mirrored** script from the worktree (issue #1451 — synced into
+`$TARGET_WT/.hydra-gate/` by Step 0.6); do NOT invoke it from `~/hydra`. This
+step runs BEFORE the Step 8.5 worktree cleanup, so the mirror is still present.
+
 ```bash
+cd "$TARGET_WT"
 # Pass --dispatch so a real regression actually fires hydra-incident.
 # Without --dispatch it is a dry-run (prints the alarm context, spawns nothing),
 # which is what you want when smoke-testing the watcher itself.
-npx tsx scripts/target/post-merge-health.ts --merge-sha "$COMMIT_SHA" --dispatch
+npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" --merge-sha "$COMMIT_SHA" --dispatch
 ```
 
 Fail-soft: if the Target API is unreachable (service still restarting, port not
