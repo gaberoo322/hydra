@@ -38,7 +38,7 @@ import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-reque
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
-import { parseProbes, assessHealth, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "../health-diagnostics.ts";
+import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "../health-diagnostics.ts";
 import { gitExec } from "../github/git.ts";
 import { isGhFailure } from "../github/exec.ts";
 // Issue #939: Host-Probe Adapter — typed, never-throw disk/mem/service-status
@@ -307,21 +307,10 @@ export function createHealthRouter(eventBus: any) {
     const snapshot = parseProbes(settled);
     const { diagnostics, status, summary } = assessHealth(snapshot);
 
-    // Destructure the snapshot fields the wire envelope projects below. The
-    // `cycle` probe (index 3) drives only the activeCycle block, which stays
-    // here at the HTTP layer (out of scope per the issue — vestigial concern).
-    const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, ovSearch, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
-    const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
+    // The `cycle` probe (index 3) drives only the activeCycle block, which stays
+    // here at the HTTP layer (out of scope per issue #1513 — a vestigial concern).
+    // The already-built activeCycle object is handed to the pure projection.
     const cycle = (settled[3] && settled[3].status === "fulfilled" ? (settled[3] as any).value : null) || {};
-
-    // Issue #1440: coalesce the two persisted OV-quality reads (indices 17/18).
-    // A rejected settle (Redis error) becomes null — surfaced as absent trend
-    // data, never a 500. These ride alongside the existing live `ovSearch`
-    // liveness probe in the `intelligence` block below.
-    const ovSearchWindow = settled[17] && settled[17].status === "fulfilled" ? (settled[17] as any).value : null;
-    const ovContextAvailability = settled[18] && settled[18].status === "fulfilled" ? (settled[18] as any).value : null;
-
-    const fmtUp = (s: number) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? `${h}h ${m}m` : `${m}m`; };
 
     let activeCycle = null;
     if (cycle.status === "running" && cycle.cycleId) {
@@ -330,29 +319,14 @@ export function createHealthRouter(eventBus: any) {
       activeCycle = { id: cycle.cycleId, status: cycle.status, startedAt: sa, durationMs: dur, durationHuman: dur > 60000 ? `${Math.round(dur / 60000)}m ${Math.round((dur % 60000) / 1000)}s` : `${Math.round(dur / 1000)}s`, tasks: (cycle.tasks || []).map(t => ({ id: t.taskId || t.id, title: t.title, state: t.state || t.status })) };
     }
 
-    res.json({
-      status, summary, checkedAt,
-      services: {
-        orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
-        redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },
-        scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt, research: { lastResearchAt: sched.research?.lastResearchAt || null } },
-        vikingdb: svcProbes.vikingdb, openviking: svcProbes.openviking,
-      },
-      activeCycle,
-      // Issue #744: emergency-brake state alongside the kill switch — both are
-      // operator-controlled merge/cycle gates the dashboard surfaces.
-      // recentMetrics projects only the rate fields the wire contract has
-      // always carried — the new raw counts (mergedN/noTaskN/revertN) on the
-      // snapshot's `recent` are for rule guards, not the HTTP envelope.
-      pipeline: { queueDepth, backlogCounts: blCounts, recentMetrics: { cycleCount: recent.cycleCount, mergeRate: recent.mergeRate, failedRate: recent.failedRate, noTaskRate: recent.noTaskRate, revertRate: recent.revertRate, avgDurationMs: recent.avgDurationMs, avgDurationHuman: recent.avgDurationHuman }, killSwitch: health.status === "killed", emergencyBrake },
-      infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
-      // Issue #1440: `ovSearch` is the live in-memory snapshot + liveness probe
-      // (resets on restart). `ovSearchTrend` is the restart-surviving 24h
-      // hour-bucketed rollup (zeroResultRate/fallbackSuccessRate trends) and
-      // `knowledgeContext` the 7d per-day context-availability rate.
-      intelligence: { patterns, reflections: reflCount, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
-      diagnostics,
-    });
+    // Issue #1513: the wire-projection half (the former inline res.json block)
+    // is now the pure, unit-tested projectHealthDeepResponse in
+    // src/health-diagnostics.ts — the third leg of the Snapshot pipeline
+    // alongside parseProbes/assessHealth (#840). The handler owns only the
+    // Promise.allSettled fan-out (I/O) and the activeCycle derivation; settled
+    // is passed through for indices 17/18 (ovSearchTrend/knowledgeContext),
+    // which parseProbes does not consume.
+    res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt, settled));
   });
 
   // GET /recommendations (operator action items) was extracted to

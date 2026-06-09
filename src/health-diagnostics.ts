@@ -641,3 +641,125 @@ export function assessHealth(snapshot: HealthSnapshot): HealthAssessment {
 
   return { diagnostics, status, summary };
 }
+
+// ---- projectHealthDeepResponse — the pure wire-projection ----------------
+//
+// Issue #1513: the third leg of the Snapshot pipeline, lifted out of the inline
+// `res.json({...})` block in the `GET /health/deep` route handler. #840 already
+// pulled the parse (`parseProbes`) and assessment (`assessHealth`) halves behind
+// this seam; the wire projection was still inline and only reachable via Express
+// supertest. This maps a HealthSnapshot + HealthAssessment (already typed) into
+// the documented `/health/deep` wire envelope — byte-identically — so the field
+// names and settled-index subscripts (`ovSearchTrend` not `ovSeachTrend`,
+// settled[17] vs [18]) are unit-testable without standing up Redis/OpenViking.
+//
+// The handler keeps ONLY the I/O fan-out and the `activeCycle` derivation from
+// settled[3] (a vestigial HTTP-layer concern, out of scope per the issue); the
+// already-built `activeCycle` object and `checkedAt` ISO string are passed in.
+//
+// `settled` is taken ONLY for indices 17/18 (ovSearchTrend/knowledgeContext),
+// which `parseProbes` stops short of (it ends at index 16, the brake). A rejected
+// settle coalesces to null — surfaced as absent trend data, never a 500 — exactly
+// as the inline #1440 lines did.
+
+/** The wire shape of the `/health/deep` response envelope. */
+export interface HealthDeepResponse {
+  status: HealthAssessment["status"];
+  summary: string;
+  checkedAt: string;
+  services: {
+    orchestrator: { status: string; uptime: number; uptimeHuman: string; cycle: string };
+    redis: {
+      status: string;
+      memoryHuman: string | null;
+      connectedClients: number | null;
+      uptimeSeconds: number | null;
+    };
+    scheduler: {
+      status: string;
+      intervalHuman: string | undefined;
+      cyclesRun: number | undefined;
+      cyclesMerged: number;
+      cyclesFailed: number;
+      mergeRate: number;
+      consecutiveErrors: number;
+      lastError: string | null | undefined;
+      lastCycleAt: string | null | undefined;
+      research: { lastResearchAt: string | null };
+    };
+    vikingdb: HealthSnapshot["svcProbes"]["vikingdb"];
+    openviking: HealthSnapshot["svcProbes"]["openviking"];
+  };
+  activeCycle: unknown;
+  pipeline: {
+    queueDepth: number;
+    backlogCounts: HealthSnapshot["blCounts"];
+    recentMetrics: {
+      cycleCount: number;
+      mergeRate: number;
+      failedRate: number;
+      noTaskRate: number;
+      revertRate: number;
+      avgDurationMs: number;
+      avgDurationHuman: string;
+    };
+    killSwitch: boolean;
+    emergencyBrake: HealthSnapshot["emergencyBrake"];
+  };
+  infrastructure: {
+    disk: HealthSnapshot["disk"];
+    memory: HealthSnapshot["mem"];
+    systemd: { orchestrator: string; watchdog: string; targetWeb: string };
+  };
+  intelligence: {
+    patterns: HealthSnapshot["patterns"];
+    reflections: number;
+    ovSearch: HealthSnapshot["ovSearch"];
+    ovSearchTrend: unknown;
+    knowledgeContext: unknown;
+  };
+  diagnostics: HealthDiagnostic[];
+}
+
+export function projectHealthDeepResponse(
+  snapshot: HealthSnapshot,
+  diagnostics: HealthDiagnostic[],
+  status: HealthAssessment["status"],
+  summary: string,
+  activeCycle: unknown,
+  checkedAt: string,
+  settled: SettledLike,
+): HealthDeepResponse {
+  const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, ovSearch, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
+  const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
+
+  // Issue #1440: coalesce the two persisted OV-quality reads (indices 17/18).
+  // A rejected settle (Redis error) becomes null — surfaced as absent trend
+  // data, never a 500. parseProbes stops at index 16, so these are read here.
+  const ovSearchWindow = settled[17] && settled[17].status === "fulfilled" ? (settled[17] as any).value : null;
+  const ovContextAvailability = settled[18] && settled[18].status === "fulfilled" ? (settled[18] as any).value : null;
+
+  return {
+    status, summary, checkedAt,
+    services: {
+      orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
+      redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },
+      scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt, research: { lastResearchAt: sched.research?.lastResearchAt || null } },
+      vikingdb: svcProbes.vikingdb, openviking: svcProbes.openviking,
+    },
+    activeCycle,
+    // Issue #744: emergency-brake state alongside the kill switch — both are
+    // operator-controlled merge/cycle gates the dashboard surfaces.
+    // recentMetrics projects only the rate fields the wire contract has
+    // always carried — the new raw counts (mergedN/noTaskN/revertN) on the
+    // snapshot's `recent` are for rule guards, not the HTTP envelope.
+    pipeline: { queueDepth, backlogCounts: blCounts, recentMetrics: { cycleCount: recent.cycleCount, mergeRate: recent.mergeRate, failedRate: recent.failedRate, noTaskRate: recent.noTaskRate, revertRate: recent.revertRate, avgDurationMs: recent.avgDurationMs, avgDurationHuman: recent.avgDurationHuman }, killSwitch: health.status === "killed", emergencyBrake },
+    infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
+    // Issue #1440: `ovSearch` is the live in-memory snapshot + liveness probe
+    // (resets on restart). `ovSearchTrend` is the restart-surviving 24h
+    // hour-bucketed rollup (zeroResultRate/fallbackSuccessRate trends) and
+    // `knowledgeContext` the 7d per-day context-availability rate.
+    intelligence: { patterns, reflections: reflCount, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
+    diagnostics,
+  };
+}

@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import {
   parseProbes,
   assessHealth,
+  projectHealthDeepResponse,
   classifyOvSearchProbe,
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type HealthSnapshot,
@@ -662,5 +663,194 @@ describe("parseProbes", () => {
     assert.ok(components.includes("openviking"));
     assert.ok(components.includes("disk"));
     assert.ok(components.includes("infrastructure"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// projectHealthDeepResponse — pure wire-projection (issue #1513)
+//
+// The ~60-line res.json({...}) block in the GET /health/deep handler used to be
+// reachable only via Express supertest. Extracted into a pure function, the
+// HealthSnapshot → wire-envelope mapping (field names, settled[17]/[18]
+// subscripts) is now unit-testable with a stub snapshot — no Redis/OpenViking.
+// ---------------------------------------------------------------------------
+
+describe("projectHealthDeepResponse", () => {
+  const CHECKED_AT = "2026-06-09T00:00:00.000Z";
+
+  // A settled array long enough to carry indices 17/18, with everything
+  // rejected by default — the projection only reads 17/18 (parseProbes owns the
+  // rest), so a `values` override sets just those.
+  function settled(values: Record<number, any> = {}) {
+    const arr: any[] = [];
+    for (let i = 0; i <= 18; i++) {
+      if (i in values) arr.push({ status: "fulfilled", value: values[i] });
+      else arr.push({ status: "rejected", reason: new Error("probe failed") });
+    }
+    return arr;
+  }
+
+  function project(
+    snap: HealthSnapshot,
+    opts: { activeCycle?: unknown; settledValues?: Record<number, any> } = {},
+  ) {
+    const { diagnostics, status, summary } = assessHealth(snap);
+    return projectHealthDeepResponse(
+      snap,
+      diagnostics,
+      status,
+      summary,
+      opts.activeCycle ?? null,
+      CHECKED_AT,
+      settled(opts.settledValues),
+    );
+  }
+
+  test("top-level envelope carries status/summary/checkedAt and the documented key set", () => {
+    const r = project(healthySnapshot());
+    assert.equal(r.status, "healthy");
+    assert.equal(r.checkedAt, CHECKED_AT);
+    assert.match(r.summary, /All systems operational/);
+    assert.deepEqual(Object.keys(r).sort(), [
+      "activeCycle",
+      "checkedAt",
+      "diagnostics",
+      "infrastructure",
+      "intelligence",
+      "pipeline",
+      "services",
+      "status",
+      "summary",
+    ]);
+  });
+
+  test("intelligence carries the EXACT field names (ovSearchTrend, knowledgeContext — typo regression guard)", () => {
+    const r = project(healthySnapshot());
+    // The #1513 friction: a `ovSeachTrend` typo or a 17/18 swap silently nulls a
+    // field. Pin the exact key set so a rename/typo fails the test, not the UI.
+    assert.deepEqual(Object.keys(r.intelligence).sort(), [
+      "knowledgeContext",
+      "ovSearch",
+      "ovSearchTrend",
+      "patterns",
+      "reflections",
+    ]);
+  });
+
+  test("ovSearchTrend/knowledgeContext coalesce to null when settled[17]/[18] rejected", () => {
+    const r = project(healthySnapshot()); // settled() rejects 17 and 18 by default
+    assert.equal(r.intelligence.ovSearchTrend, null);
+    assert.equal(r.intelligence.knowledgeContext, null);
+  });
+
+  test("ovSearchTrend ← settled[17], knowledgeContext ← settled[18] (correct subscripts)", () => {
+    const trend = { window: "24h", buckets: [{ hour: 0, zeroResultRate: 0.1 }] };
+    const ctx = { window: "7d", days: [{ day: "2026-06-09", availability: 0.9 }] };
+    const r = project(healthySnapshot(), { settledValues: { 17: trend, 18: ctx } });
+    assert.deepEqual(r.intelligence.ovSearchTrend, trend);
+    assert.deepEqual(r.intelligence.knowledgeContext, ctx);
+    // ovSearch (the live probe) still flows straight from the snapshot.
+    assert.deepEqual(r.intelligence.ovSearch, { status: "running", latencyMs: 40, resultCount: 3 });
+  });
+
+  test("services block maps health/redis/scheduler/probes; uptimeHuman uses fmtUp", () => {
+    const r = project(healthySnapshot());
+    // uptime 3600 → "1h 0m" (the local fmtUp the projection now owns).
+    assert.deepEqual(r.services.orchestrator, {
+      status: "running",
+      uptime: 3600,
+      uptimeHuman: "1h 0m",
+      cycle: "idle",
+    });
+    assert.deepEqual(r.services.redis, {
+      status: "running",
+      memoryHuman: "12M",
+      connectedClients: 4,
+      uptimeSeconds: 9999,
+    });
+    assert.equal(r.services.scheduler.status, "running");
+    assert.deepEqual(r.services.scheduler.research, { lastResearchAt: null });
+    assert.deepEqual(r.services.vikingdb, { status: "running" });
+    assert.deepEqual(r.services.openviking, { status: "running" });
+  });
+
+  test("orchestrator.status reflects a non-ok health status; redis.status flips to failed", () => {
+    const r = project(
+      clone((s) => {
+        s.health.status = "killed";
+        s.health.redis = false;
+      }),
+    );
+    assert.equal(r.services.orchestrator.status, "killed");
+    assert.equal(r.services.redis.status, "failed");
+    assert.equal(r.pipeline.killSwitch, true);
+  });
+
+  test("scheduler.status is 'failed' at >=5 consecutiveErrors, else 'idle' when stopped", () => {
+    const failed = project(
+      clone((s) => {
+        s.sched.running = false;
+        s.sched.consecutiveErrors = 5;
+      }),
+    );
+    assert.equal(failed.services.scheduler.status, "failed");
+    const idle = project(
+      clone((s) => {
+        s.sched.running = false;
+        s.sched.consecutiveErrors = 0;
+      }),
+    );
+    assert.equal(idle.services.scheduler.status, "idle");
+  });
+
+  test("pipeline projects rate fields only — NOT the raw rule-guard counts", () => {
+    const r = project(healthySnapshot());
+    assert.equal(r.pipeline.queueDepth, 3);
+    assert.deepEqual(Object.keys(r.pipeline.recentMetrics).sort(), [
+      "avgDurationHuman",
+      "avgDurationMs",
+      "cycleCount",
+      "failedRate",
+      "mergeRate",
+      "noTaskRate",
+      "revertRate",
+    ]);
+    // mergedN/noTaskN/revertN are rule guards, never on the wire envelope.
+    assert.ok(!("mergedN" in r.pipeline.recentMetrics));
+    assert.ok(!("revertN" in r.pipeline.recentMetrics));
+  });
+
+  test("infrastructure maps disk/mem/systemd (mem under the `memory` key)", () => {
+    const r = project(healthySnapshot());
+    assert.deepEqual(r.infrastructure.disk, { availableGb: 120, totalGb: 500, usedPercent: 60 });
+    assert.deepEqual(r.infrastructure.memory, { totalGb: 32, availableGb: 20, usedPercent: 40 });
+    assert.deepEqual(r.infrastructure.systemd, {
+      orchestrator: "active",
+      watchdog: "active",
+      targetWeb: "active",
+    });
+  });
+
+  test("activeCycle is passed through verbatim from the handler", () => {
+    const ac = { id: "c1", status: "running", startedAt: "x", durationMs: 1, durationHuman: "1s", tasks: [] };
+    const r = project(healthySnapshot(), { activeCycle: ac });
+    assert.equal(r.activeCycle, ac);
+    // null when the handler derives none.
+    assert.equal(project(healthySnapshot()).activeCycle, null);
+  });
+
+  test("diagnostics array is the assessment's, passed straight through", () => {
+    const snap = clone((s) => (s.svcProbes.openviking = { status: "failed" }));
+    const { diagnostics } = assessHealth(snap);
+    const r = project(snap);
+    assert.deepEqual(r.diagnostics, diagnostics);
+    assert.equal(r.status, "degraded");
+  });
+
+  test("redis info nulls coalesce when redisInfo is absent (probe rejected)", () => {
+    const r = project(clone((s) => (s.redisInfo = null)));
+    assert.equal(r.services.redis.memoryHuman, null);
+    assert.equal(r.services.redis.connectedClients, null);
+    assert.equal(r.services.redis.uptimeSeconds, null);
   });
 });
