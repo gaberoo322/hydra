@@ -397,3 +397,92 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
 
   return lines.filter(Boolean).join("\n");
 }
+
+/**
+ * Injectable readers for `buildWeeklySummary`. Each defaults to the real
+ * module import, so the production wrapper calls `buildWeeklySummary()` with
+ * no args; tests pass stubs to exercise the grammar without Redis or GitHub.
+ * Mirrors the `DailyHeartbeatDeps` pattern above (and
+ * `src/aggregators/builder-health.ts`).
+ */
+export interface WeeklySummaryDeps {
+  getMetricsTrend?: (n: number) => Promise<any[]>;
+  getFixFeatureRatio?: (n: number) => Promise<any>;
+  getCurrentMilestoneProgress?: () => Promise<any>;
+  getBacklogCounts?: () => Promise<any>;
+  now?: () => number;
+}
+
+/**
+ * Build a weekly progress summary for the operator (issue #1412 — moved out of
+ * `src/digest.ts` into this pure-core seam).
+ *
+ * Returns the assembled Telegram string, or `null` when no metrics were
+ * recorded in the last 7 days. Readers are injectable via `deps` (defaulting
+ * to the real imports) so the assembly grammar is testable without Redis or
+ * GitHub — the production wrapper in `src/digest.ts` calls it with no args.
+ *
+ * The on-wire output is unchanged from the pre-extraction `digest.ts`.
+ */
+export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<string | null> {
+  const now = deps.now ?? (() => Date.now());
+  const getMetricsTrend =
+    deps.getMetricsTrend ?? (await import("./metrics/trend.ts")).getMetricsTrend;
+  const getFixFeatureRatio =
+    deps.getFixFeatureRatio ?? (await import("./metrics/aggregate.ts")).getFixFeatureRatio;
+  const getCurrentMilestoneProgress =
+    deps.getCurrentMilestoneProgress ??
+    (await import("./backlog/reads.ts")).getCurrentMilestoneProgress;
+  const getBacklogCounts =
+    deps.getBacklogCounts ?? (await import("./backlog/reads.ts")).getBacklogCounts;
+
+  const trend = await getMetricsTrend(50);
+  const weekAgo = now() - 7 * 24 * 60 * 60 * 1000;
+  const thisWeek = trend.filter(m => {
+    const t = m.recordedAt ? new Date(m.recordedAt).getTime() : 0;
+    return t > weekAgo;
+  });
+
+  if (thisWeek.length === 0) return null;
+
+  const merged = thisWeek.filter(m => parseInt(m.tasksMerged) > 0).length;
+  const failed = thisWeek.filter(m => parseInt(m.tasksFailed) > 0).length;
+  const rolledBack = thisWeek.filter(m => m.rolledBack === true || m.rolledBack === "true").length;
+  const abandoned = thisWeek.filter(m => parseInt(m.tasksAbandoned) > 0).length;
+  const ratio = await getFixFeatureRatio(thisWeek.length);
+  const milestone = await getCurrentMilestoneProgress();
+  const counts = await getBacklogCounts();
+
+  const lines = [
+    `📈 *Hydra Weekly Summary*`,
+    ``,
+    `*Cycles:* ${thisWeek.length} run — ${merged} merged, ${failed} failed, ${rolledBack} rolled back, ${abandoned} abandoned`,
+    `*Fix:Feature ratio:* ${ratio.fixes}:${ratio.features} (${ratio.ratio}:1)`,
+  ];
+
+  if (milestone) {
+    lines.push(`*Milestone:* ${milestone.name} — ${milestone.pctComplete}% (${milestone.done}/${milestone.total} epics)`);
+    if (milestone.remainingTitles.length > 0) {
+      lines.push(`*Remaining:* ${milestone.remainingTitles.slice(0, 3).join(", ")}${milestone.remainingTitles.length > 3 ? ` +${milestone.remainingTitles.length - 3} more` : ""}`);
+    }
+  }
+
+  lines.push(`*Backlog:* ${counts.queued || 0} queued, ${counts.blocked || 0} blocked, ${counts.triage || 0} triage`);
+  lines.push("");
+
+  // Warnings
+  if (ratio.ratio > 2) {
+    lines.push(`⚠️ Fix ratio is ${ratio.ratio}:1 — most cycles are fixing previous work`);
+  }
+  if (rolledBack >= 3) {
+    lines.push(`⚠️ ${rolledBack} rollbacks this week — executor quality needs attention`);
+  }
+  if ((counts.blocked || 0) > 0) {
+    lines.push(`⚠️ ${counts.blocked} items blocked — check Telegram for unblock commands`);
+  }
+  if (milestone && milestone.pctComplete === 100) {
+    lines.push(`🎉 Milestone "${milestone.name}" is 100% complete — ready for operator review`);
+  }
+
+  return lines.filter(Boolean).join("\n");
+}
