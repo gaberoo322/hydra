@@ -106,23 +106,25 @@ Deliver real-money cross-venue proof, hardened execution controls, and operator-
 - [x] Verify Kalshi RFQ accepted-quote promotion carries post_only; detect PostOnlyCrossCancel in kalshi-executor.ts — #48, #49 merged 2026-06-08 — priorities #7 COMPLETE
 - [ ] Wire SportsPairRankingEvidenceRow into run-cycle persistence — priorities #1 (new)
 - [ ] Wire sports-time-to-signal-buckets into calibration output — priorities #2 (new)
-- [ ] Wire World Cup 2026 settlement-timing and arb-clustering-heatmap into scanner output — priorities #3 (new); World Cup opens June 12
-- [ ] Wire opportunity-half-life-and-depth summarizer into scan-history persistence — priorities #4 (new)
+- [x] Wire World Cup 2026 settlement-timing into scanner Opportunity output — #57 merged 2026-06-08; worldCupSettlementTiming live on Opportunity output
+- [x] Wire opportunity-half-life-and-depth summarizer into scan-history accumulation — #59 merged 2026-06-08; opportunity-observation-accumulator + scanner/opportunity-half-life-history built and wired
 - [ ] Rename PolymarketExecutionResult.executed to submitted — priorities #5 (new)
-- [ ] Wire nba-finals-pair-seeding into the verified-pair registry seeding workflow — priorities #6 (new)
-- [ ] Per-sport and per-pair P&L attribution breakdown — priorities #7 (new)
+- [ ] Wire nba-finals-pair-seeding into the verified-pair registry seeding workflow — priorities #3 (new)
+- [ ] Per-sport and per-pair P&L attribution breakdown — priorities #6 (new)
 
 ## M7: Signal Wiring & Learning Loop Closure
-status: planned
-started:
+status: active
+started: 2026-06-08
 completed:
 
 Wire the built pure modules into production paths and close the measurement feedback loops. No new pure modules — this milestone is about connecting existing signal infrastructure to durable outputs.
 
-- [ ] Wire SportsPairRankingEvidenceRow into run-cycle persistence (fee-adjusted ranking now durable)
-- [ ] Wire sports-time-to-signal-buckets into calibration output (catalyst reaction lag measurable)
-- [ ] Wire World Cup 2026 settlement-timing into scanner Opportunity output (June 12 deadline)
-- [ ] Wire opportunity-half-life-and-depth summarizer into scan-history persistence (observed half-life feeds ranking)
-- [ ] Rename PolymarketExecutionResult.executed to submitted (closes CONTEXT.md naming smell)
-- [ ] Wire nba-finals-pair-seeding into verified-pair registry seeding (live pair discovery)
-- [ ] Per-sport and per-pair P&L attribution breakdown (closes learning loop for real-money readiness)
+- [ ] Wire SportsPairRankingEvidenceRow into run-cycle persistence (fee-adjusted ranking now durable) — priorities #1
+- [ ] Wire sports-time-to-signal-buckets into calibration output (catalyst reaction lag measurable) — priorities #2
+- [x] Wire World Cup 2026 settlement-timing into scanner Opportunity output (June 12 deadline) — #57 COMPLETE
+- [x] Wire opportunity-half-life-and-depth summarizer into scan-history accumulation (observed half-life feeds ranking) — #59 COMPLETE; surface via API is priorities #4
+- [ ] Surface loadOpportunityHalfLifeHistory in a scanner API route (measured half-life readable by dashboard) — priorities #4
+- [ ] Rename PolymarketExecutionResult.executed to submitted (closes CONTEXT.md naming smell) — priorities #5
+- [ ] Wire nba-finals-pair-seeding into verified-pair registry seeding (live pair discovery, enables WC) — priorities #3
+- [ ] Per-sport and per-pair P&L attribution breakdown (closes learning loop for real-money readiness) — priorities #6
+- [ ] Retire deprecated pinnacle* field aliases from SportsbookPredictionEdgeSignal (35 call sites) — priorities #7
