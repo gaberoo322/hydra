@@ -74,6 +74,7 @@ Tier names verification *depth*, not merge authority (ADR-0015, #742). Every PR 
 - **Port 4000 conflict**: running `npx tsx src/index.ts` while the service is up trips the port guard. Check `lsof -ti:4000` first; `systemctl --user restart hydra-orchestrator.service` is the safe restart after a crash leaves the port held.
 - **Worktree isolation**: every code-writing dispatch (`hydra-dev`, `hydra-target-build`) MUST run in a fresh `git worktree` — the harness aborts if cwd is the main working tree (`/home/gabe/hydra` or `/home/gabe/hydra-betting`). Abort rather than falling back to the main repo.
 - **Kanban title matching**: use `anchor.reference`, not `task.title`, when calling `backlog.ts` functions — subagent-generated titles don't always match Kanban rows.
+- **zsh `$status` is read-only**: never name a shell loop/poll variable `status` — zsh aliases `$status` to `$?`, so the assignment fails and the script exits 1 (bites Monitor/CI-poll loops). Use `st` / `run_state` instead.
 
 ## Agent skills
 
