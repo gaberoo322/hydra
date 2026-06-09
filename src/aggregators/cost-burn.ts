@@ -5,35 +5,35 @@
  *
  * Shape:
  *
- *   { lastHourSpark: number[] }
+ *   { tokensPerHour5h: number, tokensPerHour24h: number }
  *
- * # Why the spark is "coarse" today
+ * # Token-denominated burn rate (issue #1413)
  *
- * The cost surrogate (`src/cost/surrogate.ts`) is day-bucketed. The
- * Subscription Usage Tracker (`src/cost/usage-tracker.ts`) exposes rolling
- * 5h / 24h windows by re-scanning Claude Code JSONL transcripts. Neither
- * exposes per-hour buckets today. We synthesise a small spark by deriving
- * two averaged rates — last-5h hourly average and last-24h hourly average,
- * both denominated in USD per hour — so the dashboard can render a tiny
- * "is the burn rate rising or falling?" comparison without an O(N) JSONL
- * re-scan inside this aggregator. Tooling for honest per-hour buckets is
- * a follow-up; documenting the shape as a `number[]` lets that future
- * change ship without a schema migration.
+ * The Subscription Usage Tracker (`src/cost/usage-tracker.ts`) measures
+ * rolling 5h / 24h token windows by re-scanning Claude Code JSONL
+ * transcripts. That is the real, live metric: under the Claude Code
+ * subscription the orchestrator pays no per-call charge, so tokens — not
+ * dollars — are what's actually consumed (see CONTEXT.md **Quota Weight**).
  *
- * # Retired: daySpent / dailyBudget / headroomPct (issue #885)
+ * We derive two averaged token rates — the last-5h hourly average and the
+ * last-24h hourly average — so the dashboard can render a tiny "is the burn
+ * rate rising or falling?" comparison without an O(N) JSONL re-scan inside
+ * this aggregator.
+ *
+ * # Retired: USD conversion (issues #885, #704, #1413)
  *
  * The USD dollar-budget fields — `daySpent`, `dailyBudget`, `headroomPct` —
- * were removed in #885. Under the Claude Code subscription the orchestrator
- * pays no per-call charge, so a USD attribution is a fiction (see CONTEXT.md
- * **Quota Weight**): the dollar-conversion machinery was deleted in #704
- * (`HYDRA_TOKEN_USD_RATE` was structurally $0 and no live dollar cap
- * existed), leaving `daySpent` always 0 and `headroomPct` always 100% — a
- * display-only signal that fed no live decision. The real enforcement
- * surface is the Subscription Usage Tracker / Pace Gate
- * (`/api/usage/eligibility`), which is token-and-quota denominated. The
- * re-expression of "burn + headroom" in that vocabulary is the interface-
- * design step deferred to a separate triaged pickup; this change is the
- * honest deletion only.
+ * were removed in #885; the dollar-conversion machinery in the surrogate was
+ * deleted in #704. The remaining token-to-USD *display* interface here
+ * (`getTokenUsdRate`, `tokensToUsdPerMillion`, and the `HYDRA_TOKEN_USD_RATE`
+ * read) was structurally $0 — `HYDRA_TOKEN_USD_RATE` defaults to 0 and no
+ * live dollar cap consumes this aggregator's output — so it rendered a flat
+ * `$0/h` line that fed no decision. #1413 honest-deletes it, re-expressing
+ * the spark in the token vocabulary the usage tracker actually measures.
+ *
+ * NOTE: the live USD cost gates (`HYDRA_RECS_DAILY_CAP_USD`, the per-cycle
+ * cap in `src/cost/cap.ts`, `HYDRA_AUTOPILOT_DAILY_SPEND_CAP_USD`) are
+ * unrelated and untouched — this file was a display surface only.
  *
  * # Design contract — same as overnight-summary.ts
  *
@@ -51,12 +51,15 @@ import { settledOr } from "./settle.ts";
 
 export interface CostBurn {
   /**
-   * Coarse burn-rate spark — see file JSDoc. Today: two USD-per-hour
-   * averages — 5h average then 24h average — so the dashboard can render
-   * a two-point line. May grow into a 12-bucket spark in a follow-up
-   * without changing the type.
+   * Average tokens consumed per hour over the rolling 5h window
+   * (5h token total / 5). Token-denominated — see file JSDoc.
    */
-  lastHourSpark: number[];
+  tokensPerHour5h: number;
+  /**
+   * Average tokens consumed per hour over the rolling 24h window
+   * (24h token total / 24). Token-denominated — see file JSDoc.
+   */
+  tokensPerHour24h: number;
 }
 
 export interface CostBurnDeps {
@@ -65,13 +68,6 @@ export interface CostBurnDeps {
    * `getUsage()` from `src/cost/`.
    */
   readUsage?: () => Promise<Pick<UsageSnapshot, "tokensLast5h" | "tokensLast24h">>;
-  /**
-   * USD-per-million-tokens rate for the burn-rate spark. Defaults to a local
-   * read of `HYDRA_TOKEN_USD_RATE` (structurally $0 since #704 removed the
-   * surrogate's dollar machinery). Exposed so callers/tests can drive the
-   * spark math with a concrete rate.
-   */
-  getTokenUsdRate?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,15 +83,10 @@ export async function getCostBurn(deps: CostBurnDeps = {}): Promise<CostBurn> {
     "cost-burn/usage",
   );
 
-  const rate = (deps.getTokenUsdRate ?? getDefaultRate)();
-
-  const lastHourSpark = computeSpark({
+  return computeBurnRates({
     tokensLast5hTotal: usage.tokensLast5h?.total ?? 0,
     tokensLast24hTotal: usage.tokensLast24h ?? 0,
-    tokenUsdRate: rate,
   });
-
-  return { lastHourSpark };
 }
 
 async function readUsage(
@@ -107,55 +98,36 @@ async function readUsage(
   return { tokensLast5h: usage.tokensLast5h, tokensLast24h: usage.tokensLast24h };
 }
 
-function getDefaultRate(): number {
-  // Synchronous env read for the burn-rate spark. The surrogate's
-  // `getTokenUsdRate` helper was removed in #704 (the dollar machinery was
-  // dead — `HYDRA_TOKEN_USD_RATE` was structurally $0). This local read keeps
-  // the spark self-contained; it returns 0 unless an operator sets the rate.
-  const raw = process.env.HYDRA_TOKEN_USD_RATE;
-  if (raw === undefined || raw === "") return 0;
-  const parsed = parseFloat(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return 0;
-  return parsed;
-}
-
 // ---------------------------------------------------------------------------
 // Pure helpers — exported for tests
 // ---------------------------------------------------------------------------
 
 /**
- * Convert tokens to USD using `rate` USD per million tokens. Self-contained
- * helper for the burn-rate spark (the surrogate's `tokensToUsd` was removed
- * in #704). Returns 0 when the rate is 0/negative or tokens are 0/negative.
+ * Average a rolling-window token total down to a per-hour rate over
+ * `windowHours`. Returns 0 for non-finite / non-positive inputs. Tokens are
+ * whole numbers, so the per-hour rate is rounded to the nearest token.
  */
-export function tokensToUsdPerMillion(tokens: number, rate: number): number {
-  if (!Number.isFinite(tokens) || tokens <= 0) return 0;
-  if (!Number.isFinite(rate) || rate <= 0) return 0;
-  // Round to four decimal places — sub-cent precision is the right
-  // resolution for the dashboard widget.
-  return Math.round((tokens / 1_000_000) * rate * 10_000) / 10_000;
+export function tokensPerHour(windowTotal: number, windowHours: number): number {
+  if (!Number.isFinite(windowTotal) || windowTotal <= 0) return 0;
+  if (!Number.isFinite(windowHours) || windowHours <= 0) return 0;
+  return Math.round(windowTotal / windowHours);
 }
 
 /**
- * Pure helper — derive the coarse burn-rate spark.
+ * Pure helper — derive the token-denominated burn-rate pair.
  *
- * Returns `[usd_per_hour_5h_avg, usd_per_hour_24h_avg]`. Both points are
- * USD per hour, averaged over the 5h / 24h rolling window.
+ * Returns `{ tokensPerHour5h, tokensPerHour24h }`, each the average tokens
+ * per hour over the respective rolling window (5h → /5, 24h → /24).
  *
  * Edge cases:
- *   - rate 0 → returns `[0, 0]` (the spark collapses to a flat line; the
- *     dashboard should still render the row).
- *   - missing 5h or 24h → that bucket goes to 0.
+ *   - missing 5h or 24h total → that rate goes to 0.
  */
-export function computeSpark(input: {
+export function computeBurnRates(input: {
   tokensLast5hTotal: number;
   tokensLast24hTotal: number;
-  tokenUsdRate: number;
-}): number[] {
-  const usd5h = tokensToUsdPerMillion(input.tokensLast5hTotal, input.tokenUsdRate);
-  const usd24h = tokensToUsdPerMillion(input.tokensLast24hTotal, input.tokenUsdRate);
-  // Average to per-hour. 5h window → /5, 24h window → /24.
-  const ratePerHour5h = Math.round((usd5h / 5) * 10_000) / 10_000;
-  const ratePerHour24h = Math.round((usd24h / 24) * 10_000) / 10_000;
-  return [ratePerHour5h, ratePerHour24h];
+}): CostBurn {
+  return {
+    tokensPerHour5h: tokensPerHour(input.tokensLast5hTotal, 5),
+    tokensPerHour24h: tokensPerHour(input.tokensLast24hTotal, 24),
+  };
 }

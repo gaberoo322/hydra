@@ -7,7 +7,7 @@
  *   GET /api/v2/now/service-strip      — health strip pinned to the top
  *   GET /api/v2/now/autopilot-tick     — current autopilot tick + run
  *   GET /api/v2/now/active-dispatches  — every live Claude Code session
- *   GET /api/v2/now/cost-burn          — burn-rate spark (USD budget fields retired in #885)
+ *   GET /api/v2/now/cost-burn          — token-denominated burn rate (USD interface honest-deleted in #1413)
  *   GET /api/v2/now/alerts             — recent alerts within a window
  *
  * Each route follows the slice-1/slice-2 pattern: parse the query through

@@ -23,29 +23,31 @@ import { shouldTweenFrame } from "./derive-dispatch-tween.ts";
  * /now and the pixel route is the canonical surface (the /now-classic
  * fallback was retired in slice 7 PR2).
  */
-function formatMoney(n) {
-  if (typeof n !== "number" || !Number.isFinite(n)) return "$0";
-  if (n >= 100) return `$${Math.round(n)}`;
-  return `$${n.toFixed(2)}`;
+function formatTokens(n) {
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "0";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${Math.round(n)}`;
 }
 
 /**
  * CoinBag — hourly burn-rate tile. Polls `/api/now/cost-burn` every 30s for
- * the 5h / 24h burn-rate spark.
+ * the token-denominated 5h / 24h burn rate.
  *
  * The `budget_threshold` WS flash (issue #673) was removed in #703 along
  * with the dead budget-threshold bridge that emitted those frames — the
  * bridge polled a Redis key with no live writer and never fired.
  *
- * The USD spend / budget / headroom-bar half was retired in #885 — under
- * the Claude Code subscription a dollar attribution is a fiction (the
- * dollar machinery was already structurally $0 since #704). Re-expressing
- * "headroom" in token/quota vocabulary is deferred to a separate pickup.
+ * The USD spend / budget / headroom-bar half was retired in #885; the
+ * structurally-$0 token-to-USD interface was honest-deleted in #1413. Under
+ * the Claude Code subscription the orchestrator consumes tokens, not dollars,
+ * so the tile now renders the token-per-hour rate the Subscription Usage
+ * Tracker actually measures.
  */
 function CoinBag() {
   const { data } = useApi("/now/cost-burn", { poll: 30_000 });
-  const spark = Array.isArray(data?.lastHourSpark) ? data.lastHourSpark : [];
-  const [r5h, r24h] = [Number(spark[0] ?? 0), Number(spark[1] ?? 0)];
+  const r5h = Number(data?.tokensPerHour5h ?? 0);
+  const r24h = Number(data?.tokensPerHour24h ?? 0);
 
   return (
     <section
@@ -61,9 +63,9 @@ function CoinBag() {
         </div>
         <div className="text-sm text-zinc-100 font-mono">
           <span className="text-zinc-500">5h </span>
-          <span className="text-zinc-300">{formatMoney(r5h)}/h</span>
+          <span className="text-zinc-300">{formatTokens(r5h)} tok/h</span>
           <span className="ml-2 text-zinc-500">24h </span>
-          <span className="text-zinc-300">{formatMoney(r24h)}/h</span>
+          <span className="text-zinc-300">{formatTokens(r24h)} tok/h</span>
         </div>
       </div>
     </section>
