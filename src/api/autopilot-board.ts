@@ -76,7 +76,7 @@ export const STALE_IN_PROGRESS_SECONDS = 5400; // 90 min
 export const STALE_BLOCKED_SECONDS = 43200; // 12 h
 
 /** `--json` field set this projection needs — the canonical set plus `updatedAt`. */
-export const BOARD_ISSUE_FIELDS = `${ISSUE_JSON_FIELDS},updatedAt`;
+const BOARD_ISSUE_FIELDS = `${ISSUE_JSON_FIELDS},updatedAt`;
 
 // ---------------------------------------------------------------------------
 // Pure derivation — exported for tests
@@ -175,7 +175,7 @@ function emptyCounts(): Omit<
 // ---------------------------------------------------------------------------
 
 /** Reader for the open-issue list. Defaults to the GitHub-Read seam. */
-export interface OpenIssuesReader {
+interface OpenIssuesReader {
   (): Promise<IssueReadResult<IssueRow>>;
 }
 

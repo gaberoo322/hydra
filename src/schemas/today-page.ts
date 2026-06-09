@@ -36,8 +36,6 @@ export const OvernightSummaryQuerySchema = z
   })
   .strict();
 
-export type OvernightSummaryQuery = z.infer<typeof OvernightSummaryQuerySchema>;
-
 /**
  * Headroom verdict — derived from the Subscription Usage Tracker.
  *
@@ -186,8 +184,6 @@ export const RecentMergesQuerySchema = z
   })
   .strict();
 
-export type RecentMergesQuery = z.infer<typeof RecentMergesQuerySchema>;
-
 const MergeItemSchema = z
   .object({
     prNumber: z.number().int().positive(),
@@ -225,8 +221,6 @@ export const WindowedQuerySchema = z
       .default(24),
   })
   .strict();
-
-export type WindowedQuery = z.infer<typeof WindowedQuerySchema>;
 
 const FindingSchema = z
   .object({
@@ -269,7 +263,7 @@ const MetaFrictionIssueSchema = z
   })
   .strict();
 
-export const LessonsOvernightResponseSchema = z
+const LessonsOvernightResponseSchema = z
   .object({
     promotionCandidates: z.array(PromotionCandidateSchema),
     metaFrictionOpened: z.array(MetaFrictionIssueSchema),
