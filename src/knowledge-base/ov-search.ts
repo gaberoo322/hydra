@@ -9,6 +9,8 @@
  *   getOvSearchMetrics, resetOvSearchMetrics — metrics for /api/health
  *   buildFallbackQuery                       — pure helper, exported for tests
  *   trackedOvSearch                          — used by codex-runner + this module
+ *   loadKnowledgeBaseForPrompt               — {content,itemCount} read for the
+ *                                              learning context seam (#1455)
  *
  * Behavior preserved 1:1 from the previous learning.ts implementation.
  */
@@ -284,4 +286,46 @@ export async function trackedOvSearch(
   await flushOvSearchMetrics(false);
 
   return { resources, memories };
+}
+
+// ===========================================================================
+// Prompt-block read (issue #1455)
+// ===========================================================================
+
+/**
+ * Knowledge Base read for the dispatch-time learning context (issue #1455).
+ *
+ * Searches OpenViking for the agent's learned patterns and renders them into a
+ * prompt block, returning `{content,itemCount}` — the `{content,itemCount}`
+ * surface every learning source exposes so the composition seam (learning.ts)
+ * can drive a single generic loader rather than a bespoke per-source one.
+ *
+ * `itemCount` is the count of OV memories that actually contributed to the
+ * block (non-empty abstracts), sourced from the search data here — never
+ * regex-scanned out of the rendered markdown at the seam (#804 count-from-data
+ * contract). `content` is "" / `itemCount` 0 when the search returned nothing.
+ *
+ * Per CONTEXT.md the Knowledge Base is queried by subagents directly at their
+ * own seam; this read only *enriches* the planner prompt, so the cluster stays
+ * composed-not-owned at learning.ts. The render lives here (cluster-local
+ * work), the envelope mapping (hit/miss/error) stays at the seam.
+ */
+export async function loadKnowledgeBaseForPrompt(
+  agent: string,
+): Promise<{ content: string; itemCount: number }> {
+  const { memories } = await trackedOvSearch(
+    `${agent} agent lessons failures prevention`,
+    5,
+  );
+  const top = memories.slice(0, 5);
+  const parts: string[] = [];
+  for (const mem of top) {
+    const abstract = mem.abstract || mem.content || "";
+    if (abstract.trim()) parts.push(`- ${abstract.slice(0, 300)}`);
+  }
+  if (parts.length === 0) return { content: "", itemCount: 0 };
+  return {
+    content: `# ${agent} — Learned Patterns (from OpenViking)\n\n${parts.join("\n")}`,
+    itemCount: parts.length,
+  };
 }

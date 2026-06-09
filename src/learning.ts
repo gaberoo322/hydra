@@ -155,61 +155,62 @@ function buildContext(blocks: LearningContextBlock[]): LearningContext {
 }
 
 /**
- * Construct a LearningContextBlock, stamping the within-bundle `dropPriority`
- * from the frozen `LEARNING_DROP_PRIORITY` table (issue #804 PR-B). Centralised
- * so the drop-order contract lives in exactly one place — every block flows
- * through here and inherits its priority by source, never by hand.
+ * What every learning source's read returns: rendered prompt `content` and the
+ * structured `itemCount` of items that contributed to it. Both are sourced
+ * from the underlying data inside the source's own read (#804 count-from-data),
+ * never re-derived from the rendered markdown at this seam. An empty `content`
+ * means the source ran but had nothing to say (→ a `miss` block).
  */
-function mkBlock(
-  source: LearningContextSource,
-  status: "hit" | "miss" | "error",
-  content: string,
-  itemCount: number,
-  error?: string,
-): LearningContextBlock {
-  const block: LearningContextBlock = {
-    source,
-    status,
-    content,
-    itemCount,
-    dropPriority: LEARNING_DROP_PRIORITY[source],
-  };
-  if (error !== undefined) block.error = error;
-  return block;
-}
-
-async function loadAgentMemoryBlock(agent: string): Promise<LearningContextBlock> {
-  try {
-    const memory = await loadAgentMemory(agent);
-    const formatted = formatMemoryForPrompt(memory, agent);
-    if (formatted) {
-      // itemCount = number of formatted pattern groups. Each pattern block is
-      // rendered with an `### [severity]` header by formatMemoryForPrompt.
-      const itemCount = (formatted.match(/^### \[/gm) || []).length;
-      return mkBlock("agent-memory", "hit", formatted, itemCount);
-    }
-    return mkBlock("agent-memory", "miss", "", 0);
-  } catch (err: any) {
-    console.error(`[Learning] getContext: agent memory load failed for ${agent}: ${err.message}`);
-    return mkBlock("agent-memory", "error", "", 0, err.message);
-  }
+export interface SourceRead {
+  content: string;
+  itemCount: number;
 }
 
 /**
- * Knowledge Base (OpenViking) block (issue #804). This call used to live
- * buried inside `loadAgentMemory` (pattern-memory/agent-memory.ts), folding
- * OV memories into the `agent-memory` block so the trace dishonestly reported
- * `agent-memory: hit` when the content was really OV search results. Lifting
- * it here makes the OV source a first-class, attributable block.
- *
- * Per CONTEXT.md, the Knowledge Base is queried by subagents directly at their
- * own seam; this dispatch-time block only *enriches* the planner prompt. So
- * the OV reach stays a dynamic import behind the cluster boundary — composed
- * here, not owned here.
- *
- * Fail-loud: an OV outage surfaces as `status: "error"` with the message, not
- * a silent drop (the old folded path swallowed OV errors with a bare catch).
+ * Issue #1455 — the composition seam over a uniform per-source descriptor.
+ * Each descriptor pairs a `source` name (the public trace key) with a `load`
+ * thunk returning `{content,itemCount}`. The thunk owns its cluster-specific
+ * work (per-anchor backfill side effect, by-file extract gate, OV availability
+ * record); the seam owns only the composition contract — block envelope,
+ * hit/miss/error mapping, ordering, and `dropPriority` stamping. Clusters never
+ * import `LearningContextBlock` — they hand back the cluster-agnostic
+ * `SourceRead` and the descriptor adapts it.
  */
+export interface SourceDescriptor {
+  source: LearningContextSource;
+  load: () => Promise<SourceRead>;
+}
+
+/**
+ * The one generic block loader (issue #1455). Runs a source descriptor's thunk
+ * and maps its `{content,itemCount}` read into a `LearningContextBlock`,
+ * stamping the within-bundle `dropPriority` from the frozen
+ * `LEARNING_DROP_PRIORITY` table (issue #804 PR-B):
+ *
+ *   - thunk resolves with non-empty `content` → `hit` (itemCount from data)
+ *   - thunk resolves with empty `content`     → `miss` (itemCount forced to 0)
+ *   - thunk throws                            → `error` (content "", count 0)
+ *
+ * This replaces the four bespoke per-source block loaders: the hit/miss/error
+ * envelope is defined ONCE here rather than re-hand-rolled per source. The
+ * drop-order contract lives in exactly one place — every block flows through
+ * here and inherits its priority by source, never by hand.
+ */
+export async function loadBlock(descriptor: SourceDescriptor): Promise<LearningContextBlock> {
+  const { source, load } = descriptor;
+  const dropPriority = LEARNING_DROP_PRIORITY[source];
+  try {
+    const { content, itemCount } = await load();
+    if (content.length > 0) {
+      return { source, status: "hit", content, itemCount, dropPriority };
+    }
+    return { source, status: "miss", content: "", itemCount: 0, dropPriority };
+  } catch (err: any) {
+    console.error(`[Learning] getContext: ${source} load failed: ${err.message}`);
+    return { source, status: "error", content: "", itemCount: 0, dropPriority, error: err.message };
+  }
+}
+
 /**
  * Best-effort, never-throw wrapper around the per-cycle context-availability
  * record (issue #1440). Observability must never break planner-context
@@ -223,76 +224,12 @@ async function recordContextAvailability(hadContext: boolean): Promise<void> {
   }
 }
 
-async function loadKnowledgeBaseBlock(agent: string): Promise<LearningContextBlock> {
-  try {
-    const { trackedOvSearch } = await import("./knowledge-base/ov-search.ts");
-    const { memories } = await trackedOvSearch(
-      `${agent} agent lessons failures prevention`,
-      5,
-    );
-    const top = memories.slice(0, 5);
-    const parts: string[] = [];
-    for (const mem of top) {
-      const abstract = mem.abstract || mem.content || "";
-      if (abstract.trim()) parts.push(`- ${abstract.slice(0, 300)}`);
-    }
-    // Issue #1440: record per-cycle knowledge-context availability so the
-    // operator can see "what fraction of planned cycles saw non-empty knowledge
-    // context" — 0 search results ≠ context is empty until we trend it. The
-    // planner block is the dispatch-time enrichment seam, so `hadContext` here
-    // is exactly the signal the issue asks for. Best-effort and never-throws:
-    // a Redis hiccup must not break planner-context assembly.
-    await recordContextAvailability(parts.length > 0);
-    if (parts.length === 0) return mkBlock("knowledge-base", "miss", "", 0);
-    const content = `# ${agent} — Learned Patterns (from OpenViking)\n\n${parts.join("\n")}`;
-    return mkBlock("knowledge-base", "hit", content, parts.length);
-  } catch (err: any) {
-    console.error(`[Learning] getContext: knowledge-base (OV) search failed for ${agent}: ${err.message}`);
-    return mkBlock("knowledge-base", "error", "", 0, err.message);
-  }
-}
-
-async function loadPerAnchorReflectionsBlock(
-  anchor: { reference: string; files?: string[] },
-): Promise<LearningContextBlock> {
-  try {
-    const reflections = await loadAnchorReflections(anchor.reference);
-    if (reflections.count === 0) return mkBlock("per-anchor-reflections", "miss", "", 0);
-    // Acceptance: "Backfill on read: when an old reflection is hit by the
-    // legacy path, opportunistically index it under by-file:". Side effect
-    // is intentional and bounded — pre-#326 reflections age out at TTL.
-    try {
-      await backfillByFileIndex(anchor.reference, anchor.files);
-    } catch (err: any) {
-      console.error(`[Learning] getContext: by-file backfill failed for "${anchor.reference}": ${err.message}`);
-    }
-    return mkBlock("per-anchor-reflections", "hit", reflections.content, reflections.count);
-  } catch (err: any) {
-    console.error(`[Learning] getContext: per-anchor reflections failed for "${anchor.reference}": ${err.message}`);
-    return mkBlock("per-anchor-reflections", "error", "", 0, err.message);
-  }
-}
-
-async function loadByFileReflectionsBlock(
-  anchor: { reference: string; files?: string[] },
-): Promise<LearningContextBlock> {
-  try {
-    const files = extractFilesFromAnchor(anchor.reference, anchor.files);
-    if (files.length === 0) return mkBlock("by-file-reflections", "miss", "", 0);
-    const byFile = await loadAnchorReflectionsByFile(files, anchor.reference);
-    if (byFile.count > 0) return mkBlock("by-file-reflections", "hit", byFile.content, byFile.count);
-    return mkBlock("by-file-reflections", "miss", "", 0);
-  } catch (err: any) {
-    console.error(`[Learning] getContext: by-file reflections failed for "${anchor.reference}": ${err.message}`);
-    return mkBlock("by-file-reflections", "error", "", 0, err.message);
-  }
-}
-
 /**
  * Load Pattern Memory + Reflections context for an agent + anchor.
  * Returns a structured trace: each source contributes a block with a
  * status ("hit" / "miss" / "error"). Never throws — sources degrade
- * individually.
+ * individually (the one generic `loadBlock` maps each source's read into the
+ * hit/miss/error envelope).
  *
  * The composed prompt string (what callers historically consumed) is
  * available via `result.toPrompt()`.
@@ -301,27 +238,86 @@ async function loadByFileReflectionsBlock(
  * lookup. When omitted, file paths are extracted from `anchor.reference`.
  *
  * The four sources, in prompt order (issue #804 added knowledge-base; issue
- * #1454 removed the dead global-reflections block):
+ * #1454 removed the dead global-reflections block; issue #1455 collapsed the
+ * four bespoke block loaders into one generic loader over these descriptors):
  *
- *   1. agent-memory             — promoted pattern lessons for `agent`
+ *   1. agent-memory             — promoted pattern lessons for `agent`; the
+ *                                 itemCount is the rendered pattern-group count
+ *                                 reported by formatMemoryForPrompt (from data,
+ *                                 not a regex over the markdown).
  *   2. knowledge-base           — OpenViking memory search (lifted out of the
  *                                 agent-memory block so OV is honestly
- *                                 attributed in the trace)
- *   3. per-anchor-reflections   — legacy verbatim-key match on `reference`
- *   4. by-file-reflections      — reflections from *other* anchors that
- *                                 touched the same files (issue #326)
+ *                                 attributed in the trace); the thunk also
+ *                                 records #1440 context availability.
+ *   3. per-anchor-reflections   — legacy verbatim-key match on `reference`; the
+ *                                 thunk keeps the opportunistic by-file backfill
+ *                                 side effect on a hit.
+ *   4. by-file-reflections      — reflections from *other* anchors that touched
+ *                                 the same files (issue #326); the thunk keeps
+ *                                 the extractFilesFromAnchor gate.
  */
 export async function getContext(
   agent: string,
   anchor: { type: string; reference: string; files?: string[] },
 ): Promise<LearningContext> {
+  const descriptors: SourceDescriptor[] = [
+    {
+      source: "agent-memory",
+      load: async () => {
+        const memory = await loadAgentMemory(agent);
+        // formatMemoryForPrompt reports the rendered pattern-group count from
+        // the structured blocks it assembles — the count-from-data source.
+        return formatMemoryForPrompt(memory, agent);
+      },
+    },
+    {
+      source: "knowledge-base",
+      load: async () => {
+        const { loadKnowledgeBaseForPrompt } = await import("./knowledge-base/ov-search.ts");
+        const read = await loadKnowledgeBaseForPrompt(agent);
+        // Issue #1440: record per-cycle knowledge-context availability so the
+        // operator can trend "what fraction of planned cycles saw non-empty
+        // knowledge context". itemCount > 0 ⇔ the block had content. Best-effort
+        // and never-throws — a Redis hiccup must not break context assembly.
+        await recordContextAvailability(read.itemCount > 0);
+        return read;
+      },
+    },
+    {
+      source: "per-anchor-reflections",
+      load: async () => {
+        const reflections = await loadAnchorReflections(anchor.reference);
+        if (reflections.count === 0) return { content: "", itemCount: 0 };
+        // Backfill on read: when an old reflection is hit by the legacy path,
+        // opportunistically index it under by-file:. Side effect is intentional
+        // and bounded — pre-#326 reflections age out at TTL.
+        try {
+          await backfillByFileIndex(anchor.reference, anchor.files);
+        } catch (err: any) {
+          console.error(`[Learning] getContext: by-file backfill failed for "${anchor.reference}": ${err.message}`);
+        }
+        return { content: reflections.content, itemCount: reflections.count };
+      },
+    },
+    {
+      source: "by-file-reflections",
+      load: async () => {
+        const files = extractFilesFromAnchor(anchor.reference, anchor.files);
+        if (files.length === 0) return { content: "", itemCount: 0 };
+        const byFile = await loadAnchorReflectionsByFile(files, anchor.reference);
+        return { content: byFile.content, itemCount: byFile.count };
+      },
+    },
+  ];
+
+  // Sequential, in descriptor order: the per-anchor thunk's by-file backfill
+  // side effect must commit BEFORE the by-file thunk reads the index (the
+  // backfill-then-read ordering the bespoke loaders had). Running them
+  // concurrently would let by-file miss a freshly-backfilled entry.
   const blocks: LearningContextBlock[] = [];
-
-  blocks.push(await loadAgentMemoryBlock(agent));
-  blocks.push(await loadKnowledgeBaseBlock(agent));
-  blocks.push(await loadPerAnchorReflectionsBlock(anchor));
-  blocks.push(await loadByFileReflectionsBlock(anchor));
-
+  for (const descriptor of descriptors) {
+    blocks.push(await loadBlock(descriptor));
+  }
   return buildContext(blocks);
 }
 
