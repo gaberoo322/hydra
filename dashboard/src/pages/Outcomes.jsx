@@ -12,8 +12,9 @@
  *                               share, rework, scope-violations, learning.
  *   3. CalibrationTrend        — tier + cost accuracy time series
  *   4. CacheEconomics          — point-in-time cache-hit ratio (5h / 7d)
- *   5. LessonsTrend            — promotion rate + top friction + meta count
- *   6. SubscriptionQuotaTrend  — % burned + headroom
+ *   5. CostByClass             — per-class token-spend share today (issue #1439)
+ *   6. LessonsTrend            — promotion rate + top friction + meta count
+ *   7. SubscriptionQuotaTrend  — % burned + headroom
  *
  * NB: the page deliberately does NOT reference `/api/stuckness` or any
  * stuckness-detector surface — that subsystem was retired by ADR-0010.
@@ -22,6 +23,7 @@ import { OutcomeCards } from "../components/pages/outcomes/OutcomeCards.jsx";
 import { BuilderHealth } from "../components/pages/outcomes/BuilderHealth.jsx";
 import { CalibrationTrend } from "../components/pages/outcomes/CalibrationTrend.jsx";
 import { CacheEconomics } from "../components/pages/outcomes/CacheEconomics.jsx";
+import { CostByClass } from "../components/pages/outcomes/CostByClass.jsx";
 import { LessonsTrend } from "../components/pages/outcomes/LessonsTrend.jsx";
 import { SubscriptionQuotaTrend } from "../components/pages/outcomes/SubscriptionQuotaTrend.jsx";
 
@@ -40,6 +42,7 @@ export default function Outcomes() {
       <BuilderHealth />
       <CalibrationTrend />
       <CacheEconomics />
+      <CostByClass />
       <LessonsTrend />
       <SubscriptionQuotaTrend />
     </div>
