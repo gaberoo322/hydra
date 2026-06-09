@@ -1,9 +1,13 @@
 /**
- * Reflection Redis ops (buffer + per-anchor + outcomes).
+ * Reflection Redis ops (per-anchor + outcomes).
  * Extracted from redis-adapter.ts (issue #269).
  *
  * Note: low-level Redis primitives. Higher-level reflection logic lives in
  * src/learning/reflections.ts.
+ *
+ * Issue #1454: the global reflection buffer (a Redis list) and its accessors
+ * were deleted as a dead subsystem. The per-anchor list, the by-file index,
+ * and the outcome zset survive — they back the live #841 injection path.
  */
 
 import { redisKeys } from "./keys.ts";
@@ -27,39 +31,6 @@ export async function countReflectionKeys(): Promise<number> {
     count += batch.length;
   } while (cursor !== "0");
   return count;
-}
-
-/**
- * Append a reflection to the global buffer list and cap at maxSize.
- */
-export async function pushReflection(json: string, maxSize: number): Promise<void> {
-  const r = getRedisConnection();
-  await r.rpush("hydra:reflections:buffer", json);
-  const len = await r.llen("hydra:reflections:buffer");
-  if (len > maxSize) {
-    await r.ltrim("hydra:reflections:buffer", len - maxSize, -1);
-  }
-}
-
-/**
- * Fetch all entries from the reflections buffer.
- */
-export async function getReflectionBuffer(): Promise<string[]> {
-  const r = getRedisConnection();
-  return r.lrange("hydra:reflections:buffer", 0, -1);
-}
-
-/**
- * Atomically replace the reflections buffer with a filtered list.
- */
-export async function replaceReflectionBuffer(entries: string[]): Promise<void> {
-  const r = getRedisConnection();
-  const pipeline = r.pipeline();
-  pipeline.del("hydra:reflections:buffer");
-  if (entries.length > 0) {
-    pipeline.rpush("hydra:reflections:buffer", ...entries);
-  }
-  await pipeline.exec();
 }
 
 /**

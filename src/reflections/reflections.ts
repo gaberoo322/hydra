@@ -1,18 +1,22 @@
 /**
- * learning/reflections.ts — Per-anchor episodic + global reflection storage
+ * learning/reflections.ts — Per-anchor episodic reflection storage
  *
  * Holds the Reflexion-style reflection state used to inject failure context
- * into future planner calls for the same anchor (per-anchor) or the same
- * anchor type (global buffer).
+ * into future planner calls for the same anchor (per-anchor) or any anchor
+ * that touched the same files (by-file index, #326).
+ *
+ * Issue #1454: the dead global reflection buffer subsystem
+ * (recordReflection / loadRelevantReflections / formatReflectionsForPrompt /
+ * clearReflectionsForAnchor / getAllReflections / consolidateReflections and
+ * the GlobalReflection type) was deleted. It had no live producers after the
+ * codex control loop was retired; the live #841 injection path reads only the
+ * per-anchor + by-file stores.
  *
  * Public API used outside this module:
  *   recordAnchorReflection / loadAnchorReflections / loadAnchorReflectionsRaw
  *   loadAnchorReflectionsByFile (both return ReflectionBlock {content,count} —
  *   the count is sourced here so callers don't regex the rendered header)
  *   backfillByFileIndex / reflectionKey
- *   recordReflection / loadRelevantReflections / formatReflectionsForPrompt
- *   clearReflectionsForAnchor — clears the global buffer entries for an anchor
- *   getAllReflections          — GET /api/reflections
  *   closeReflectionsRedis      — kept for test back-compat (no-op)
  *   getReflectionEffectiveness — per-anchor success/failure stats + injection rate
  *
@@ -24,9 +28,6 @@ import {
   REFLECTION_PREFIX,
   getAnchorReflections,
   pushAnchorReflection,
-  pushReflection,
-  getReflectionBuffer,
-  replaceReflectionBuffer,
   getReflectionOutcomes,
   addReflectionToFileIndex,
   getReflectionKeysByFile,
@@ -38,7 +39,6 @@ import {
 
 export const REFLECTION_TTL = 7 * 24 * 60 * 60; // 7 days
 export const MAX_REFLECTIONS_PER_ANCHOR = 5;
-export const MAX_BUFFER_SIZE = 20;
 
 /**
  * Cap for by-file fan-out (issue #326). When a planner anchor touches a hot
@@ -49,17 +49,6 @@ export const MAX_BY_FILE_REFLECTIONS = 5;
 // ===========================================================================
 // Types
 // ===========================================================================
-
-export type GlobalReflection = {
-  cycleId: string;
-  anchorType: string;
-  anchorReference: string;
-  failureMode: string;
-  whatFailed: string;
-  whyItFailed: string;
-  whatToTryDifferently: string;
-  timestamp: string;
-};
 
 export type AnchorReflection = {
   cycleId: string;
@@ -462,287 +451,6 @@ export async function backfillByFileIndex(
     console.error(`[Learning] By-file backfill failed for "${anchorRef.slice(0, 60)}": ${err.message}`);
     return 0;
   }
-}
-
-// ===========================================================================
-// Global reflection buffer
-// ===========================================================================
-
-export async function recordReflection(opts: {
-  cycleId: string;
-  anchorType: string;
-  anchorReference: string;
-  failureMode: string;
-  whatFailed: string;
-  whyItFailed: string;
-  whatToTryDifferently: string;
-}): Promise<void> {
-  const reflection: GlobalReflection = {
-    cycleId: opts.cycleId,
-    anchorType: opts.anchorType,
-    anchorReference: opts.anchorReference,
-    failureMode: opts.failureMode,
-    whatFailed: opts.whatFailed,
-    whyItFailed: opts.whyItFailed,
-    whatToTryDifferently: opts.whatToTryDifferently,
-    timestamp: new Date().toISOString(),
-  };
-
-  await pushReflection(JSON.stringify(reflection), MAX_BUFFER_SIZE);
-  console.log(`[Learning] Recorded global reflection for cycle ${opts.cycleId}: ${opts.failureMode}`);
-}
-
-export async function loadRelevantReflections(
-  anchor: { type: string; reference: string },
-  limit = 3,
-): Promise<GlobalReflection[]> {
-  const raw = await getReflectionBuffer();
-  if (raw.length === 0) return [];
-
-  const all: GlobalReflection[] = [];
-  for (const entry of raw) {
-    try {
-      all.push(JSON.parse(entry));
-    } catch { /* intentional: skip unparseable entries */ }
-  }
-
-  const refLower = (anchor.reference || "").toLowerCase();
-  const relevant = all.filter((r) => {
-    const rRefLower = (r.anchorReference || "").toLowerCase();
-    if (rRefLower === refLower) return true;
-    if (refLower && rRefLower && (rRefLower.includes(refLower) || refLower.includes(rRefLower))) return true;
-    if (r.anchorType === anchor.type) return true;
-    return false;
-  });
-
-  return relevant.reverse().slice(0, limit);
-}
-
-export function formatReflectionsForPrompt(reflections: GlobalReflection[]): string {
-  if (reflections.length === 0) return "";
-
-  const lines = [
-    `## Recent Failures`,
-    ``,
-    `IMPORTANT: These recent failures are relevant to the current anchor. Do NOT repeat the same approaches.`,
-    ``,
-  ];
-
-  for (const ref of reflections) {
-    lines.push(`### ${ref.cycleId} (${ref.failureMode})`);
-    lines.push(`- **What failed**: ${ref.whatFailed}`);
-    lines.push(`- **Why**: ${ref.whyItFailed}`);
-    lines.push(`- **Try differently**: ${ref.whatToTryDifferently}`);
-    lines.push(``);
-  }
-
-  return lines.join("\n");
-}
-
-export async function clearReflectionsForAnchor(anchorReference: string): Promise<number> {
-  const raw = await getReflectionBuffer();
-  if (raw.length === 0) return 0;
-
-  const refLower = (anchorReference || "").toLowerCase();
-  let removed = 0;
-
-  const kept: string[] = [];
-  for (const entry of raw) {
-    try {
-      const parsed: GlobalReflection = JSON.parse(entry);
-      const entryRefLower = (parsed.anchorReference || "").toLowerCase();
-      if (entryRefLower === refLower || (refLower && entryRefLower.includes(refLower))) {
-        removed++;
-      } else {
-        kept.push(entry);
-      }
-    } catch {
-      kept.push(entry);
-    }
-  }
-
-  if (removed > 0) {
-    await replaceReflectionBuffer(kept);
-    console.log(`[Learning] Cleared ${removed} reflection(s) for anchor "${anchorReference.slice(0, 60)}"`);
-  }
-
-  return removed;
-}
-
-/**
- * Return all reflections in the global buffer (for GET /api/reflections).
- * Most recent first.
- */
-export async function getAllReflections(): Promise<GlobalReflection[]> {
-  const raw = await getReflectionBuffer();
-
-  const reflections: GlobalReflection[] = [];
-  for (const entry of raw) {
-    try {
-      reflections.push(JSON.parse(entry));
-    } catch { /* intentional: skip unparseable entries */ }
-  }
-
-  return reflections.reverse();
-}
-
-/**
- * Map a buffered GlobalReflection onto the `recordAnchorReflection` opts shape
- * (issue #1356).
- *
- * The two stores carry different schemas: the global buffer is the reap-side
- * WRITE target (#1119), while the per-anchor store is what planning-time
- * injection READS via loadAnchorReflections. Consolidation is the bridge — and
- * it routes through the single `recordAnchorReflection` write primitive
- * (artifact invariant #2: reuse it so the ring cap, 7-day TTL, cycleId dedup,
- * and by-file index #326 all stay in force, rather than re-deriving them).
- *
- * The buffer's richer narrative is preserved by passing `whatToTryDifferently`
- * through the new `whatShouldChange` override (so the per-anchor row keeps full
- * fidelity instead of the generic `generateAdvice` text), and `timestamp`
- * through so recency ordering reflects when the failure happened.
- */
-function globalToRecordOpts(g: GlobalReflection): {
-  cycleId: string;
-  anchorRef: string;
-  taskTitle: string;
-  outcome: string;
-  reason: string;
-  whatShouldChange: string;
-  timestamp: string;
-} {
-  return {
-    cycleId: g.cycleId,
-    anchorRef: g.anchorReference,
-    taskTitle: g.whatFailed || g.anchorReference || "Unknown task",
-    outcome: g.failureMode || "failed",
-    reason: g.whyItFailed || "Unknown reason",
-    whatShouldChange: g.whatToTryDifferently || `Previous attempt failed: ${g.whyItFailed || "unknown"}. Take a different approach.`,
-    timestamp: g.timestamp || new Date().toISOString(),
-  };
-}
-
-/**
- * Daily consolidation: flush the global reflection buffer into the per-anchor
- * reflection store (issue #1356).
- *
- * Why this exists: the reap-side reflection writer (#1119) appends failure
- * narratives to `hydra:reflections:buffer`, but nothing ever moved them to the
- * per-anchor `hydra:reflections:<ref>` lists that loadAnchorReflections reads at
- * planning time. The buffer grew monotonically while per-anchor lookups stayed
- * empty — breaking the ADR #841 retry-correctness invariant (a prior-failure
- * retry must see its own failure context). This is the missing bridge,
- * invoked from learning.ts::consolidate() once per day.
- *
- * Behavior:
- *   - Reads a snapshot of the buffer (drain-what-you-read). Only entries we
- *     actually CONSUMED this run are removed afterward; a reflection pushed
- *     concurrently survives, and — critically — an entry whose per-anchor push
- *     THREW stays in the buffer so the next daily run retries it (no silent
- *     loss on a transient Redis error).
- *   - Each entry is mapped and written through the single `recordAnchorReflection`
- *     primitive (artifact invariant #2), which owns the ring cap, TTL, cycleId
- *     dedup, and by-file index (#326). The buffer narrative is preserved via the
- *     `whatShouldChange`/`timestamp` overrides.
- *   - Idempotent on cycleId: `recordAnchorReflection` reports `written:false`
- *     when the cycleId already exists in the target list, so a re-run (or an
- *     overlapping consolidation) never duplicates a narrative — counted as
- *     skipped.
- *   - Clears only the consumed entries from the buffer once writes are done.
- *
- * Never throws — a consolidation failure is logged and the buffer is left intact
- * so the next daily run retries. Returns a summary for telemetry/tests.
- */
-export async function consolidateReflections(): Promise<{
-  scanned: number;
-  consolidated: number;
-  skipped: number;
-}> {
-  let snapshot: string[];
-  try {
-    snapshot = await getReflectionBuffer();
-  } catch (err: any) {
-    console.error(`[Learning] Reflection consolidation: buffer read failed: ${err.message}`);
-    return { scanned: 0, consolidated: 0, skipped: 0 };
-  }
-
-  if (snapshot.length === 0) {
-    return { scanned: 0, consolidated: 0, skipped: 0 };
-  }
-
-  let consolidated = 0;
-  let skipped = 0;
-
-  // Drain-what-you-CONSUMED: collect the exact raw strings we successfully
-  // processed (written, deduped, or unconsolidatable) so the drain removes only
-  // those. An entry whose push THREW is intentionally absent here, so it stays
-  // in the buffer for the next run — fixing the QA-flagged silent-loss bug where
-  // the old drain removed every snapshotted entry including push failures.
-  const consumed: string[] = [];
-
-  for (const raw of snapshot) {
-    let parsed: GlobalReflection;
-    try {
-      parsed = JSON.parse(raw) as GlobalReflection;
-    } catch {
-      /* intentional: skip malformed entry — cannot be consolidated, drain to avoid leak */
-      skipped++;
-      consumed.push(raw);
-      continue;
-    }
-
-    const anchorRef = parsed.anchorReference;
-    if (!anchorRef) {
-      // No anchor to key on — nothing to consolidate; drain it so it can't leak.
-      skipped++;
-      consumed.push(raw);
-      continue;
-    }
-
-    try {
-      const { written } = await recordAnchorReflection(globalToRecordOpts(parsed));
-      if (written) {
-        consolidated++;
-      } else {
-        // cycleId already present in the target list — idempotent no-op.
-        skipped++;
-      }
-      consumed.push(raw);
-    } catch (err: any) {
-      // A push failure for one entry shouldn't sink the whole run, AND it must
-      // NOT be drained — leave it in the buffer (not in `consumed`) so the next
-      // run retries it. This is the QA-flagged retry invariant.
-      console.error(`[Learning] Reflection consolidation: per-anchor write failed for "${anchorRef.slice(0, 60)}": ${err.message}`);
-      continue;
-    }
-  }
-
-  // Drain only the entries we actually consumed, preserving any pushed
-  // concurrently AND any whose write threw. Build the keep-set from the live
-  // buffer minus a multiset of the consumed raw strings.
-  try {
-    const live = await getReflectionBuffer();
-    const toRemove = new Map<string, number>();
-    for (const e of consumed) toRemove.set(e, (toRemove.get(e) ?? 0) + 1);
-    const kept: string[] = [];
-    for (const e of live) {
-      const n = toRemove.get(e) ?? 0;
-      if (n > 0) {
-        toRemove.set(e, n - 1); // consume one occurrence
-      } else {
-        kept.push(e);
-      }
-    }
-    await replaceReflectionBuffer(kept);
-  } catch (err: any) {
-    console.error(`[Learning] Reflection consolidation: buffer drain failed: ${err.message}`);
-  }
-
-  if (consolidated > 0 || skipped > 0) {
-    console.log(`[Learning] Reflection consolidation: ${consolidated} consolidated, ${skipped} skipped, ${snapshot.length} scanned`);
-  }
-
-  return { scanned: snapshot.length, consolidated, skipped };
 }
 
 /**
