@@ -31,11 +31,11 @@ import { readFile, stat } from "node:fs/promises";
 // Constants
 // ---------------------------------------------------------------------------
 
-export const AUTOPILOT_LOG_PATH =
+const AUTOPILOT_LOG_PATH =
   process.env.HYDRA_AUTOPILOT_LOG || "/tmp/hydra-autopilot-nightly.log";
-export const AUTOPILOT_LOG_PREV_PATH =
+const AUTOPILOT_LOG_PREV_PATH =
   process.env.HYDRA_AUTOPILOT_LOG_PREV || `${AUTOPILOT_LOG_PATH}.prev`;
-export const AUTOPILOT_STATE_PATH =
+const AUTOPILOT_STATE_PATH =
   process.env.HYDRA_AUTOPILOT_STATE || "/tmp/hydra-autopilot-state.json";
 
 export const LOG_TAIL_DEFAULT = 50;
@@ -47,7 +47,7 @@ export const LOG_TAIL_MAX = 2000;
  * file's mtime is ~= the new run's start time. 5 minutes is generous enough
  * for slow disks and clock skew without matching a much older rotated file.
  */
-export const LOG_PREV_MTIME_TOLERANCE_S = 300;
+const LOG_PREV_MTIME_TOLERANCE_S = 300;
 
 const JOURNAL_MAX_BYTES = 1024 * 1024; // 1 MB output cap (issue #499 AC)
 
@@ -78,7 +78,7 @@ function journalCmdOverride(): string | undefined {
  * file is missing or unparseable — both are normal pre-first-run states
  * and the caller treats them as "no live run".
  */
-export async function readCurrentRunIdFromState(): Promise<string | null> {
+async function readCurrentRunIdFromState(): Promise<string | null> {
   try {
     const raw = await readFile(AUTOPILOT_STATE_PATH, "utf-8");
     const parsed = JSON.parse(raw);
@@ -102,7 +102,7 @@ export async function readCurrentRunIdFromState(): Promise<string | null> {
  *     `LOG_PREV_MTIME_TOLERANCE_S` of `row.started_epoch` → prev log
  *   - else null
  */
-export async function resolveLogFileForRun(
+async function resolveLogFileForRun(
   runId: string,
   row: Record<string, string>,
 ): Promise<{ path: string; source: "live" | "prev" } | null> {
@@ -209,7 +209,7 @@ export function sanitizeIso(s: string | undefined | null): string | null {
  * runs with a recorded `ended_epoch`, returns that as ISO. Otherwise
  * returns the current time (live run window).
  */
-export function computeUntilIso(row: Record<string, string>): string {
+function computeUntilIso(row: Record<string, string>): string {
   const endedEpoch = Number(row.ended_epoch || "0");
   if (Number.isFinite(endedEpoch) && endedEpoch > 0) {
     return new Date(endedEpoch * 1000).toISOString();
