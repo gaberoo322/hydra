@@ -86,7 +86,7 @@ The child prompt MUST include the worktree-guard preamble (see below) AND the sc
 9. **Classifies the change via the live tier API (see "Tier classification — live API" below).** Never self-classify by path patterns.
 10. Opens a PR with `closes #$issue_number` in the body, a `## Files in scope` mirror of the issue's section, and a `Tier: <0|1|2|3>` line populated from the API. **Acceptance criteria MUST be written as checkboxes with a mechanical "verified by:" assertion** — each criterion must name the exact command or observable output a reviewer can check without reading code. Format:
     ```
-    - [ ] Criterion A — verified by: `npm test -- --grep "criterion-A"` exits 0
+    - [ ] Criterion A — verified by: `npm test -- --test-name-pattern "criterion-A"` exits 0
     - [ ] Criterion B — verified by: `curl -s http://localhost:4000/api/foo | jq '.status'` returns "ok"
     - [ ] Criterion C — verified by: `git diff --name-only master...HEAD` includes path/to/file.ts
     ```
