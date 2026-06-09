@@ -29,6 +29,7 @@ import {
   listDesignConcepts,
   approveDesignConcept,
   gateCheck,
+  resolveDesignConceptForQa,
   type DesignConceptScope,
 } from "../design-concept.ts";
 import {
@@ -288,6 +289,59 @@ export function createDesignConceptsRouter() {
     } catch (err: any) {
       console.error("[api/design-concepts] list failed", err);
       res.status(500).json({ error: err?.message ?? "list failed" });
+    }
+  });
+
+  /**
+   * GET /api/design-concepts/:anchorRef/resolve — QA-time retrievability probe
+   * (issue #1450).
+   *
+   * The single retrieval path the hydra-qa verdict flow consumes. Returns the
+   * resolution discriminated on `found`:
+   *
+   *   200 { found:true,  handle, concept:{...flat artifact..., gate} }
+   *   404 { found:false, handle, reason }
+   *
+   * `handle` is ALWAYS present (the stable canonical Redis key + API path the
+   * artifact lives under for the anchor's lifetime), so a 404 tells QA exactly
+   * WHERE the artifact was looked for and carries a loud, structured `reason`.
+   * QA logs that reason rather than silently falling back to
+   * `recordAnchorReflection` — the gap #1450 closes.
+   *
+   * NOTE the `.concept` envelope here is intentional and scoped to THIS route
+   * only: the discriminated result needs `found`/`handle`/`reason` at the top
+   * level, so the artifact fields nest under `.concept`. The bare
+   * `/:anchorRef` route below keeps its FLAT ADR-0008 shape unchanged.
+   *
+   * Declared BEFORE the bare `/:anchorRef` route so the literal `resolve`
+   * sub-path is matched here and never captured as an anchorRef.
+   */
+  router.get("/design-concepts/:anchorRef/resolve", async (req, res) => {
+    try {
+      const resolution = await resolveDesignConceptForQa(req.params.anchorRef);
+      if (resolution.found && resolution.concept) {
+        const gate = gateCheck(resolution.concept, Date.now());
+        res.json({
+          found: true,
+          handle: resolution.handle,
+          concept: { ...resolution.concept, gate },
+        });
+        return;
+      }
+      // Miss — loud server-side log; a missing artifact at QA time is a real
+      // gap, not noise. The handle names exactly where we looked.
+      console.error("[api/design-concepts] QA resolve MISS", {
+        handle: resolution.handle,
+        reason: resolution.reason,
+      });
+      res.status(404).json({
+        found: false,
+        handle: resolution.handle,
+        reason: resolution.reason,
+      });
+    } catch (err: any) {
+      console.error("[api/design-concepts] QA resolve failed", err);
+      res.status(500).json({ error: err?.message ?? "resolve failed" });
     }
   });
 

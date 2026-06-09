@@ -121,25 +121,37 @@ Pass `FIXED_SHA`, `DIFF_CMD`, and `LOG_CMD` to both sub-agents verbatim.
 
 ### 4. Resolve the spec source — design-concept artifact
 
-The PR body must reference an issue via `Closes #N` / `Fixes #N` / `Refs #N`. Extract the parent issue number, then fetch the artifact:
+The PR body must reference an issue via `Closes #N` / `Fixes #N` / `Refs #N`. Extract the parent issue number, then resolve the **persisted** artifact through the QA-time resolve endpoint (issue #1450):
 
 ```bash
 PARENT_ISSUE=$(gh pr view $pr_number --repo gaberoo322/hydra --json body \
   --jq '.body' | grep -oiP '(?:closes|fixes|refs)\s*#\K\d+' | head -1)
 
-# anchorRef may be the issue number as a string, or a richer reference;
-# the API accepts either. We try the issue number first.
-ARTIFACT_JSON=$(curl -fsS --max-time 5 \
-  "http://localhost:4000/api/design-concepts/${PARENT_ISSUE}" \
+# /resolve is the single retrievability path: it reads the DURABLE Redis
+# artifact via its stable canonical handle and discriminates found vs missing.
+# 200 → {found:true, handle, concept:{...flat artifact..., gate}}.
+# 404 → {found:false, handle, reason}  (a loud, structured miss — never a bare
+#        null and never an ephemeral grill artifact).
+# anchorRef may be the issue number ("1450") or canonical ("issue-1450"); the
+# seam canonicalizes either, so the handle a producer persisted under and the
+# handle we read from always agree.
+RESOLVE_JSON=$(curl -sS --max-time 5 \
+  "http://localhost:4000/api/design-concepts/${PARENT_ISSUE}/resolve" \
   2>/dev/null || echo "")
+RESOLVE_FOUND=$(printf '%s' "$RESOLVE_JSON" | jq -r '.found // false' 2>/dev/null || echo false)
 ```
 
-**Response shape is FLAT (ADR-0008).** The artifact fields live at the **top
-level** of `ARTIFACT_JSON` — read `.anchorRef`, `.scope`, `.invariants`,
-`.qaTrace`, `.modulesTouched`, etc. directly, plus the gate verdict at `.gate`.
-There is **no `.concept` envelope**: `.concept` is always `undefined`, so do
-not probe for it (`.concept.invariants` is wrong — use `.invariants`). The Spec
-sub-agent below consumes these top-level fields verbatim.
+**Resolve-envelope shape.** `RESOLVE_JSON` is the discriminated result —
+`.found` (bool) and `.handle` (`{anchorRef, redisKey, apiPath}`) are ALWAYS
+present. On a hit the artifact nests under `.concept`; on a miss `.reason`
+carries the loud, handle-named explanation.
+
+**The Spec sub-agent input stays FLAT (ADR-0008).** Extract the inner artifact
+once with `jq '.concept'` and hand THAT to the Spec sub-agent — it still reads
+`.anchorRef`, `.scope`, `.invariants`, `.qaTrace`, `.modulesTouched`, `.gate`,
+etc. at the top level (the `.concept` envelope is the resolve route's wrapper,
+not part of the artifact the sub-agent consumes — `.concept.invariants` is the
+WRAPPED path, `.invariants` is the path INSIDE `SPEC_INPUT_JSON`).
 
 Decide what to do with the result:
 
@@ -150,18 +162,25 @@ HAS_EXEMPT_LABEL=$(gh pr view $pr_number --repo gaberoo322/hydra \
   && echo 1 || echo 0)
 SPEC_SKIPPED_REASON=""
 
-if [ -n "$ARTIFACT_JSON" ] && echo "$ARTIFACT_JSON" | jq -e '.anchorRef' >/dev/null 2>&1; then
-  # Have a real artifact — Spec sub-agent will use it (unless exempt-labelled).
-  SPEC_INPUT_JSON="$ARTIFACT_JSON"
+if [ "$RESOLVE_FOUND" = "true" ]; then
+  # Have a real PERSISTED artifact — unwrap the flat artifact for the Spec
+  # sub-agent (unless exempt-labelled).
+  SPEC_INPUT_JSON=$(printf '%s' "$RESOLVE_JSON" | jq -c '.concept')
 elif [ "$HAS_EXEMPT_LABEL" = "1" ]; then
   # Operator override — skip Spec axis with audit log.
   SPEC_SKIPPED_REASON="design-concept-exempt label present (operator override)"
 elif [ "$MODE" = "enforce" ]; then
-  # Phase B/C — hard fail.
+  # Phase B/C — hard fail. Surface the resolver's loud, handle-named reason so
+  # the operator sees exactly WHERE the artifact was looked for (issue #1450).
+  MISS_REASON=$(printf '%s' "$RESOLVE_JSON" | jq -r '.reason // "design-concept artifact missing"' 2>/dev/null || echo "design-concept artifact missing")
+  MISS_HANDLE=$(printf '%s' "$RESOLVE_JSON" | jq -r '.handle.redisKey // "(handle unknown)"' 2>/dev/null || echo "(handle unknown)")
   gh pr review $pr_number --repo gaberoo322/hydra --request-changes --body \
     "> *Automated QA — design-concept artifact required*
 
-This PR cannot be reviewed because the design-concept artifact for issue #${PARENT_ISSUE} is missing.
+This PR cannot be reviewed because the design-concept artifact for issue #${PARENT_ISSUE} is not persisted/retrievable.
+
+**Resolver reason:** ${MISS_REASON}
+**Stable handle probed:** \`${MISS_HANDLE}\`
 
 **To unblock:**
 1. Run \`hydra-grill\` on issue #${PARENT_ISSUE} to produce the artifact, OR
@@ -170,9 +189,12 @@ This PR cannot be reviewed because the design-concept artifact for issue #${PARE
 QA mode: \`${MODE}\`. See [epic #437](https://github.com/gaberoo322/hydra/issues/437) for the design-concept gate rollout plan."
   exit 0
 else
-  # Phase A warn — log and skip Spec axis.
-  echo "WARN: design-concept artifact missing for issue #${PARENT_ISSUE} — proceeding in Phase A shadow mode (Standards axis only)."
-  SPEC_SKIPPED_REASON="no artifact (Phase A shadow mode — DESIGN_CONCEPT_MODE=${MODE})"
+  # Phase A warn — log the resolver's LOUD reason (handle named) and skip the
+  # Spec axis. Issue #1450: a missing artifact is logged loud with its handle,
+  # never silently worked around (no recordAnchorReflection fallback).
+  MISS_REASON=$(printf '%s' "$RESOLVE_JSON" | jq -r '.reason // "design-concept artifact missing (resolve unreachable)"' 2>/dev/null || echo "design-concept artifact missing (resolve unreachable)")
+  echo "WARN: ${MISS_REASON} — proceeding in Phase A shadow mode (Standards axis only)." >&2
+  SPEC_SKIPPED_REASON="no persisted artifact (Phase A shadow mode — DESIGN_CONCEPT_MODE=${MODE}): ${MISS_REASON}"
 fi
 ```
 
