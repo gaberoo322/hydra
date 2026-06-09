@@ -39,7 +39,6 @@ export {
   todayDateString,
   // Re-export key helpers so tests that probe Redis directly stay on the
   // public Interface rather than reaching into `surrogate.ts`.
-  tokensByCycleKey,
 } from "./surrogate.ts";
 
 export type {
