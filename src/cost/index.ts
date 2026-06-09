@@ -109,7 +109,6 @@ export {
   projectEligibility,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
-  DEFAULT_FIVE_HOUR_THROTTLE_T1,
   DEFAULT_FIVE_HOUR_THROTTLE_T2,
 } from "./eligibility.ts";
 
