@@ -379,11 +379,6 @@ def _normalize_emergency_brake(raw) -> dict:
         return {"engaged": False}
     return {"engaged": raw.get("engaged") is True}
 
-# Confidence threshold: candidates below this don't justify a dev dispatch;
-# we force research instead (grilled decision 6, AC: research dispatched
-# when no candidate >= 0.5, capped at 4/day).
-DEV_CONFIDENCE_THRESHOLD = 0.5
-
 # Daily research-force cap (grilled decision 6).
 RESEARCH_FORCE_DAILY_CAP = 4
 
@@ -937,9 +932,10 @@ def research_recommended(candidates_payload: dict | None) -> bool:
 
     `src/anchor-candidates.ts` is the single source of truth for "the
     target board is empty / top score is too weak → recommend research"
-    (it applies RESEARCH_THRESHOLD). The research_target selector consumes
-    this flag instead of re-deriving `best_score < DEV_CONFIDENCE_THRESHOLD`
-    inline, so the two thresholds can't silently diverge (issue #1129).
+    (it applies RESEARCH_THRESHOLD). Both the research_target slot and the
+    dev_target steer slot consume this one flag rather than each re-deriving
+    a private score threshold, so the dispatch/research boundary has a single
+    home and cannot silently diverge (issue #1129 finished).
 
     A missing/unusable payload (feed unreachable, or no `candidates` array)
     defaults to True — degrade toward research direction rather than
@@ -1951,7 +1947,14 @@ def _select_for_slot(
         # unified candidates feed IS target-product work in this deployment.
         if _signal_present(state, events, "target_work_available"):
             prompt_args: dict = {}
-            if best and best_score >= DEV_CONFIDENCE_THRESHOLD:
+            # ISSUE #1129 (finished): the dev-steer half of the single target
+            # candidate boundary now reads the SAME feed-owned flag the
+            # research_target slot does. `not research_recommended(candidates)`
+            # means the feed judged the top candidate strong enough to steer a
+            # build — the exact negation of "recommend research". This is the
+            # one home for the boundary; decide.py holds no private threshold.
+            # The `best` guard stays only to extract the anchorRef/score hint.
+            if best and not research_recommended(candidates):
                 ref = best.get("anchorRef") or best.get("issue")
                 if ref is not None:
                     prompt_args["anchor"] = ref
@@ -1979,11 +1982,11 @@ def _select_for_slot(
         # the candidates feed IS the target backlog, so a feed that flags
         # "board empty / top score too weak" means the target product needs
         # more research direction (post-#458, this trigger moved here from
-        # research_orch). We consume the flag the feed already computed
-        # (anchor-candidates.ts applies RESEARCH_THRESHOLD) rather than
-        # re-deriving `best_score < DEV_CONFIDENCE_THRESHOLD` inline — two
-        # thresholds that coincide today (both 0.5) but could silently
-        # diverge if either is tuned (issue #1129).
+        # research_orch). Both this slot AND the dev_target steer slot now
+        # consume the one flag the feed computes (anchor-candidates.ts applies
+        # RESEARCH_THRESHOLD). The boundary has a single home: there is no
+        # second threshold constant in decide.py to silently diverge from
+        # (issue #1129 finished — the private dev-side threshold was deleted).
         if _signal_present(state, events, "target_research_due"):
             return make_dispatch(cls, "hydra-target-research", reason="target research due")
         if candidates is not None and research_recommended(candidates):
