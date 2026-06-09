@@ -289,6 +289,119 @@ export async function getDesignConcept(
   return hydrate(raw);
 }
 
+// ---------------------------------------------------------------------------
+// QA-time retrievability (issue #1450)
+// ---------------------------------------------------------------------------
+
+/**
+ * The stable retrieval handle for a design-concept artifact.
+ *
+ * `redisKey` is the canonical Redis hash key the artifact lives under for the
+ * lifetime of the anchor (7-day TTL); `apiPath` is the HTTP route QA fetches
+ * it through. Both are derived from the SAME canonical `anchorRef`
+ * (`normalizeAnchorRef`), so the handle a producer (grill) persists under and
+ * the handle a consumer (QA) reads from can never disagree — the wedge that
+ * orphaned artifacts in #736.
+ *
+ * The handle is meaningful even when the artifact is absent: it tells QA
+ * (and the operator) EXACTLY where the artifact was looked for, so a miss is
+ * loud and diagnosable rather than a silent "not reachable".
+ */
+export type DesignConceptHandle = {
+  /** The canonical anchorRef the handle resolves to (e.g. `issue-1450`). */
+  anchorRef: string;
+  /** Canonical Redis hash key — `hydra:design-concept:<canonical-anchorRef>`. */
+  redisKey: string;
+  /** HTTP route QA reads the artifact through. */
+  apiPath: string;
+};
+
+/**
+ * Compute the stable retrieval handle for `anchorRef` without touching Redis.
+ * Pure — used both by the resolver below and exposed so callers can render the
+ * handle in logs/comments even before (or after) the artifact exists.
+ */
+export function designConceptHandle(anchorRef: string): DesignConceptHandle {
+  const canonical = normalizeAnchorRef(anchorRef);
+  return {
+    anchorRef: canonical,
+    redisKey: `hydra:design-concept:${canonical}`,
+    apiPath: `/api/design-concepts/${canonical}`,
+  };
+}
+
+/**
+ * Result of resolving an artifact at QA time.
+ *
+ * `found` is the explicit signal: `true` carries the hydrated `concept`;
+ * `false` carries a loud, structured `reason` string. `handle` is ALWAYS
+ * present (even on a miss it names exactly where the artifact was probed). The
+ * resolver NEVER returns a bare null, so a missing artifact can be logged loud
+ * (the #1450 acceptance criterion) instead of silently worked around via
+ * `recordAnchorReflection` side-effects.
+ *
+ * Modelled as a single shape with optional `concept`/`reason` rather than a
+ * discriminated union on purpose: the repo type-checks with `strict:false`
+ * (so `strictNullChecks` is off), under which a `boolean`-discriminant union
+ * does NOT narrow on `if (r.found)`. A flat shape with `found` + optionals is
+ * the contract that stays sound for every caller regardless of strictness.
+ */
+export type DesignConceptResolution = {
+  /** True iff a persisted artifact was retrieved. */
+  found: boolean;
+  /** Stable handle the artifact lives under — present on hit AND miss. */
+  handle: DesignConceptHandle;
+  /** The hydrated artifact — present iff `found`. */
+  concept?: DesignConcept;
+  /** Loud, structured miss reason — present iff NOT `found`. */
+  reason?: string;
+};
+
+/**
+ * Resolve the design-concept artifact a QA verdict must be checked against
+ * (issue #1450).
+ *
+ * This is the single retrieval path QA's verdict flow consumes: it reads the
+ * PERSISTED artifact via the canonical handle (the durable Redis hash, NOT an
+ * ephemeral in-memory grill artifact), and on a miss returns a structured,
+ * loud reason naming the exact handle that was probed. The premise of the
+ * design-concept gate (ADR-0008) is that the artifact is the durable spec a PR
+ * is QA'd against; this resolver makes "durable + retrievable at QA time"
+ * mechanically checkable.
+ *
+ * Contract:
+ *   - blank `anchorRef`            → found:false, reason names the bad input.
+ *   - hash present + hydrates      → found:true, concept + handle.
+ *   - hash absent / TTL'd / unhydratable → found:false, reason names the
+ *     canonical handle so the caller logs WHERE it looked, not just THAT it
+ *     missed.
+ */
+export async function resolveDesignConceptForQa(
+  anchorRef: string,
+): Promise<DesignConceptResolution> {
+  const handle = designConceptHandle(anchorRef ?? "");
+  if (!anchorRef || typeof anchorRef !== "string" || anchorRef.trim() === "") {
+    return {
+      found: false,
+      handle,
+      reason:
+        "design-concept artifact unreachable: blank/invalid anchorRef supplied to QA resolver",
+    };
+  }
+  const concept = await getDesignConcept(anchorRef);
+  if (!concept) {
+    return {
+      found: false,
+      handle,
+      reason:
+        `design-concept artifact NOT persisted/retrievable at handle ${handle.redisKey} ` +
+        `(GET ${handle.apiPath}) — produce it with hydra-grill or apply 'design-concept-exempt'; ` +
+        "do NOT silently fall back to recordAnchorReflection (issue #1450)",
+    };
+  }
+  return { found: true, handle, concept };
+}
+
 /**
  * Opportunistic prune of stale (>7d) entries from the index. Reads the
  * whole index, drops members whose score is older than `cutoff`. Cheap
