@@ -236,12 +236,12 @@ describe("decide.py — research force-dispatch when no candidate >= 0.5", () =>
     assert.ok(dispatch);
   });
 
-  // ISSUE #1129: the research_target trigger consumes the candidate feed's
-  // precomputed `research_recommended` flag — NOT a re-derivation of
-  // `best_score < DEV_CONFIDENCE_THRESHOLD`. These two tests pin that the
-  // flag is authoritative independent of best_score, so the feed's
-  // RESEARCH_THRESHOLD and decide.py's DEV_CONFIDENCE_THRESHOLD can diverge
-  // without the forced-research decision silently going stale.
+  // ISSUE #1129 (finished): the research_target trigger consumes the
+  // candidate feed's precomputed `research_recommended` flag — NOT a
+  // re-derivation of any private score threshold. These tests pin that the
+  // flag is authoritative independent of best_score. decide.py no longer
+  // holds a second threshold constant, so the boundary has one home and
+  // cannot silently diverge from the feed's RESEARCH_THRESHOLD.
   test("research_recommended=true forces research_target even when best_score >= threshold (#1129)", () => {
     const state = baseState();
     // Strong top score (0.9 >= 0.5) but the feed still recommends research.
@@ -1895,16 +1895,51 @@ describe("decide.py — ISSUE #458 dev_orch / dev_target routing", () => {
     assert.equal(dispatch.prompt_args.score, 0.85);
   });
 
-  test("ISSUE-458: dev_target with weak top candidate fires WITHOUT an anchor hint", () => {
-    // The 0.5 threshold still gates the anchor hint — a weak candidate
-    // is no better than no candidate, so dev_target fires bare.
+  test("ISSUE-458/#1129: dev_target with a research-recommended board fires WITHOUT an anchor hint", () => {
+    // The feed's `research_recommended` flag — not a private score threshold
+    // — gates the anchor hint. When the feed judges the board too weak to
+    // steer (research_recommended=true), dev_target fires bare; the same flag
+    // also forces research_target, so the boundary fires exactly once.
     const state = baseState({ signals: { target_work_available: true } });
-    const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.3 }] };
+    const cands = { candidates: [{ issue: 1, anchorRef: "x", score: 0.3 }], research_recommended: true };
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
     assert.ok(dispatch);
     assert.equal(dispatch.prompt_args.anchor, undefined,
-      "below-threshold candidate must NOT be surfaced as a dev_target anchor");
+      "a research-recommended board must NOT be surfaced as a dev_target anchor");
+  });
+
+  test("ISSUE #1129 (finished): research_recommended=true suppresses the dev_target anchor hint even with a high candidate score", () => {
+    // The dev-steer half of the boundary now reads the SAME feed flag the
+    // research_target slot does (mirrors the #1129 research_target tests).
+    // A strong score (0.9) that the feed nonetheless flags for research must
+    // NOT be steered — keying both slots off the one flag eliminates the
+    // dead-zone / double-fire risk the original #1129 comment only mitigated.
+    const state = baseState({ signals: { target_work_available: true } });
+    const cands = { candidates: [{ issue: 42, anchorRef: "item-42", score: 0.9 }], research_recommended: true };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+    assert.ok(dispatch, "dev_target must still dispatch on the work signal");
+    assert.equal(dispatch.skill, "hydra-target-build");
+    assert.equal(dispatch.prompt_args.anchor, undefined,
+      "research_recommended=true must suppress the anchor hint regardless of score (#1129)");
+    assert.equal(dispatch.prompt_args.score, undefined,
+      "no score hint when the feed recommends research");
+  });
+
+  test("ISSUE #1129 (finished): research_recommended=false attaches the dev_target anchor hint even with a low candidate score", () => {
+    // The inverse: the boundary is the flag, not the score. A weak score
+    // (0.4) the feed does NOT flag for research IS steerable — under the
+    // unified semantics decide.py no longer second-guesses the feed with a
+    // private 0.5 cutoff.
+    const state = baseState({ signals: { target_work_available: true } });
+    const cands = { candidates: [{ issue: 43, anchorRef: "item-43", score: 0.4 }], research_recommended: false };
+    const plan = runDecide(state, cands);
+    const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "dev_target");
+    assert.ok(dispatch);
+    assert.equal(dispatch.prompt_args.anchor, "item-43",
+      "research_recommended=false must surface the candidate as a dev_target anchor regardless of score (#1129)");
+    assert.equal(dispatch.prompt_args.score, 0.4);
   });
 
   test("ISSUE-458: dev_target with NO candidates feed fires bare (no anchor)", () => {
