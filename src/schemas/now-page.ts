@@ -22,7 +22,7 @@ import { z } from "zod";
 
 const ServiceStatusSchema = z.enum(["ok", "degraded", "down"]);
 
-export const ServiceRowSchema = z
+const ServiceRowSchema = z
   .object({
     service: z.string(),
     status: ServiceStatusSchema,
@@ -64,14 +64,14 @@ export type ServiceStripResponse = z.infer<typeof ServiceStripResponseSchema>;
  *   `ended_epoch` populated when the most-recent run is terminal so the
  *   UI can render "last run ended N ago (<term_reason>)".
  */
-export const AutopilotLifecycleStateSchema = z.enum([
+const AutopilotLifecycleStateSchema = z.enum([
   "running",
   "idle",
   "ended",
   "crashed",
 ]);
 
-export const AutopilotLifecycleSchema = z
+const AutopilotLifecycleSchema = z
   .object({
     state: AutopilotLifecycleStateSchema,
     runId: z.string().nullable(),
@@ -112,9 +112,9 @@ export type AutopilotLifecyclePayload = z.infer<typeof AutopilotLifecycleSchema>
 // "subagent" added in issue #692 — the active-dispatches aggregator now
 // merges a third source (Agent-tool subagent sessions captured by the
 // SessionStart hook) alongside autopilot runs and operator-launched sessions.
-export const DispatchSourceSchema = z.enum(["autopilot", "operator", "subagent"]);
+const DispatchSourceSchema = z.enum(["autopilot", "operator", "subagent"]);
 
-export const DispatchSchema = z
+const DispatchSchema = z
   .object({
     id: z.string(),
     classLabel: z.string(),
@@ -185,7 +185,7 @@ export type AlertsNowQuery = z.infer<typeof AlertsNowQuerySchema>;
  * Required fields (the existing `/api/alerts` writers always set them):
  *   id, timestamp, message, severity
  */
-export const AlertRowSchema = z
+const AlertRowSchema = z
   .object({
     id: z.string(),
     timestamp: z.string(),
@@ -238,14 +238,14 @@ export type AutopilotHealthQuery = z.infer<typeof AutopilotHealthQuerySchema>;
  *   - `issue-pr-churn`     — the same issue or PR re-dispatched repeatedly
  *                            without resolving.
  */
-export const StuckSignalTypeSchema = z.enum([
+const StuckSignalTypeSchema = z.enum([
   "stalled-dispatch",
   "unproductive-loop",
   "idle-streak",
   "issue-pr-churn",
 ]);
 
-export const StuckSignalSeveritySchema = z.enum(["info", "warn", "critical"]);
+const StuckSignalSeveritySchema = z.enum(["info", "warn", "critical"]);
 
 /**
  * One ranked stuck signal. `evidence` is an open key/value bag carrying the
