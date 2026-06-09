@@ -113,18 +113,33 @@ Deliver real-money cross-venue proof, hardened execution controls, and operator-
 - [ ] Per-sport and per-pair P&L attribution breakdown — priorities #6 (new)
 
 ## M7: Signal Wiring & Learning Loop Closure
-status: active
+status: complete
 started: 2026-06-08
-completed:
+completed: 2026-06-09
 
 Wire the built pure modules into production paths and close the measurement feedback loops. No new pure modules — this milestone is about connecting existing signal infrastructure to durable outputs.
 
-- [ ] Wire SportsPairRankingEvidenceRow into run-cycle persistence (fee-adjusted ranking now durable) — priorities #1
-- [ ] Wire sports-time-to-signal-buckets into calibration output (catalyst reaction lag measurable) — priorities #2
+- [x] Wire SportsPairRankingEvidenceRow into run-cycle persistence (fee-adjusted ranking now durable) — #65 COMPLETE 2026-06-09
+- [x] Wire sports-time-to-signal-buckets into calibration output (catalyst reaction lag measurable) — #61 COMPLETE; accumulator wiring is M8 #1
 - [x] Wire World Cup 2026 settlement-timing into scanner Opportunity output (June 12 deadline) — #57 COMPLETE
-- [x] Wire opportunity-half-life-and-depth summarizer into scan-history accumulation (observed half-life feeds ranking) — #59 COMPLETE; surface via API is priorities #4
-- [ ] Surface loadOpportunityHalfLifeHistory in a scanner API route (measured half-life readable by dashboard) — priorities #4
-- [ ] Rename PolymarketExecutionResult.executed to submitted (closes CONTEXT.md naming smell) — priorities #5
-- [ ] Wire nba-finals-pair-seeding into verified-pair registry seeding (live pair discovery, enables WC) — priorities #3
-- [ ] Per-sport and per-pair P&L attribution breakdown (closes learning loop for real-money readiness) — priorities #6
-- [ ] Retire deprecated pinnacle* field aliases from SportsbookPredictionEdgeSignal (35 call sites) — priorities #7
+- [x] Wire opportunity-half-life-and-depth summarizer into scan-history accumulation (observed half-life feeds ranking) — #59 COMPLETE
+- [x] Surface loadOpportunityHalfLifeHistory in a scanner API route (measured half-life readable by dashboard) — #65 COMPLETE 2026-06-09
+- [x] Rename PolymarketExecutionResult.executed to submitted (closes CONTEXT.md naming smell) — #60 COMPLETE 2026-06-08
+- [x] Wire nba-finals-pair-seeding into verified-pair registry seeding (live pair discovery, enables WC) — #62 COMPLETE 2026-06-09
+- [x] Per-sport and per-pair P&L attribution breakdown (closes learning loop for real-money readiness) — #63 COMPLETE 2026-06-09
+- [x] Retire deprecated pinnacle* field aliases from SportsbookPredictionEdgeSignal (35 call sites) — #64 COMPLETE 2026-06-09
+
+## M8: Catalyst Wiring & Pre-Live Safety
+status: active
+started: 2026-06-09
+completed:
+
+Wire the remaining zero-caller pure modules, close the last learning-loop gaps before first real-money dual-leg runs, and add operator-visibility tools for WC 2026.
+
+- [ ] Wire accumulateSportsTimeToSignal into a calibration route (catalyst reaction lag populated for WC) — priorities #1
+- [ ] Surface buildWorldCupArbClusteringHeatmap via API route (operator divergence-by-phase visibility ahead of June 12) — priorities #2
+- [ ] Wire buildSportExposureClusters into preflight risk check (sport-cluster correlation guard for real-money safety) — priorities #3
+- [ ] Wire summarizeVenueOrderPnlPhasesByPolicy into PnL page (scan edge vs slippage vs fee decomposition) — priorities #4
+- [ ] Add circuit breaker status indicator to SiteNav (at-a-glance execution health on every page) — priorities #5
+- [ ] Add error observability to WebSocket silent catch blocks (audit + annotate all provider WS handlers) — priorities #6
+- [ ] Wire detectSettlementOrphans into reconciliation health route (pre-live orphan detection baseline) — priorities #7
