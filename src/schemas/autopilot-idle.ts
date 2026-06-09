@@ -48,10 +48,6 @@ import { z } from "zod";
  */
 export const AutopilotIdleDiagnosticsQuerySchema = z.object({}).strict();
 
-export type AutopilotIdleDiagnosticsQuery = z.infer<
-  typeof AutopilotIdleDiagnosticsQuerySchema
->;
-
 // ---------------------------------------------------------------------------
 // Response
 // ---------------------------------------------------------------------------
@@ -72,8 +68,6 @@ export type IdleBlockedBy = z.infer<typeof IdleBlockedBySchema>;
  * unset or the quota is uncalibrated (no curve to compare against).
  */
 const IdlePaceStateSchema = z.enum(["behind", "on", "ahead"]);
-
-export type IdlePaceState = z.infer<typeof IdlePaceStateSchema>;
 
 /**
  * The pacing numerics the Gate compares each tick — surfaced so the Console
