@@ -14,9 +14,10 @@
  * # Pure core vs. orchestration (issue #1181)
  *
  * The pure assembly grammar (`buildDigestMessage`, `buildDailyHeartbeat`,
- * `formatCriticalAlert`, `formatBuilderHealthLines`) lives in
- * `./digest-format.ts` — no timers, no Telegram calls, no module state, and
- * fully testable. THIS module keeps the side-effecting wrappers (`startDigest`,
+ * `buildWeeklySummary`, `formatCriticalAlert`, `formatBuilderHealthLines`)
+ * lives in `./digest-format.ts` — no timers, no Telegram calls, no module
+ * state, and fully testable. THIS module keeps the side-effecting wrappers
+ * (`startDigest`,
  * `stopDigest`, `sendDigestNow`, `sendDailyHeartbeatNow`) and the only mutable
  * state (`pendingEvents`, `lastDigestAt`, the timer handles) as thin
  * orchestrators over that core. The formatters are re-exported here so existing
@@ -30,14 +31,16 @@ import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
 import {
   buildDigestMessage,
   buildDailyHeartbeat,
+  buildWeeklySummary,
   formatCriticalAlert,
   formatBuilderHealthLines,
 } from "./digest-format.ts";
 
 // Re-export the pure-core formatters so existing importers of ./digest.ts that
-// reach for these (e.g. formatBuilderHealthLines, previously exported here)
-// keep working without churn.
-export { formatBuilderHealthLines };
+// reach for these (e.g. formatBuilderHealthLines, previously exported here;
+// buildWeeklySummary, consumed by src/scheduler/housekeeping.ts) keep working
+// without churn.
+export { formatBuilderHealthLines, buildWeeklySummary };
 
 const DIGEST_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const QUIET_START_HOUR = 22; // 10pm
@@ -190,63 +193,4 @@ async function sendDailyHeartbeat() {
  */
 export async function sendDailyHeartbeatNow() {
   await sendDailyHeartbeat();
-}
-
-/**
- * Build a weekly progress summary for the operator.
- */
-export async function buildWeeklySummary() {
-  const { getMetricsTrend } = await import("./metrics/trend.ts");
-  const { getFixFeatureRatio } = await import("./metrics/aggregate.ts");
-  const { getCurrentMilestoneProgress, getBacklogCounts } = await import("./backlog/reads.ts");
-
-  const trend = await getMetricsTrend(50);
-  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const thisWeek = trend.filter(m => {
-    const t = m.recordedAt ? new Date(m.recordedAt).getTime() : 0;
-    return t > weekAgo;
-  });
-
-  if (thisWeek.length === 0) return null;
-
-  const merged = thisWeek.filter(m => parseInt(m.tasksMerged) > 0).length;
-  const failed = thisWeek.filter(m => parseInt(m.tasksFailed) > 0).length;
-  const rolledBack = thisWeek.filter(m => m.rolledBack === true || m.rolledBack === "true").length;
-  const abandoned = thisWeek.filter(m => parseInt(m.tasksAbandoned) > 0).length;
-  const ratio = await getFixFeatureRatio(thisWeek.length);
-  const milestone = await getCurrentMilestoneProgress();
-  const counts = await getBacklogCounts();
-
-  const lines = [
-    `📈 *Hydra Weekly Summary*`,
-    ``,
-    `*Cycles:* ${thisWeek.length} run — ${merged} merged, ${failed} failed, ${rolledBack} rolled back, ${abandoned} abandoned`,
-    `*Fix:Feature ratio:* ${ratio.fixes}:${ratio.features} (${ratio.ratio}:1)`,
-  ];
-
-  if (milestone) {
-    lines.push(`*Milestone:* ${milestone.name} — ${milestone.pctComplete}% (${milestone.done}/${milestone.total} epics)`);
-    if (milestone.remainingTitles.length > 0) {
-      lines.push(`*Remaining:* ${milestone.remainingTitles.slice(0, 3).join(", ")}${milestone.remainingTitles.length > 3 ? ` +${milestone.remainingTitles.length - 3} more` : ""}`);
-    }
-  }
-
-  lines.push(`*Backlog:* ${counts.queued || 0} queued, ${counts.blocked || 0} blocked, ${counts.triage || 0} triage`);
-  lines.push("");
-
-  // Warnings
-  if (ratio.ratio > 2) {
-    lines.push(`⚠️ Fix ratio is ${ratio.ratio}:1 — most cycles are fixing previous work`);
-  }
-  if (rolledBack >= 3) {
-    lines.push(`⚠️ ${rolledBack} rollbacks this week — executor quality needs attention`);
-  }
-  if ((counts.blocked || 0) > 0) {
-    lines.push(`⚠️ ${counts.blocked} items blocked — check Telegram for unblock commands`);
-  }
-  if (milestone && milestone.pctComplete === 100) {
-    lines.push(`🎉 Milestone "${milestone.name}" is 100% complete — ready for operator review`);
-  }
-
-  return lines.filter(Boolean).join("\n");
 }
