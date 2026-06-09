@@ -109,20 +109,6 @@ describe("issue #326: reflection by-file index", () => {
     assert.equal(metrics.deriveReflectionMatchSource(undefined), "none");
   });
 
-  test("reflectionTelemetry attributes the by-file block (issue #804)", () => {
-    // Replaces the deleted inspectReflections by-file header-regex test. The
-    // by-file block's structured itemCount drives count + the "by-file" label.
-    const ctx = {
-      blocks: [
-        { source: "by-file-reflections", status: "hit", content: "## RELATED FILES …", itemCount: 2 },
-      ],
-      toPrompt: () => "",
-    };
-    const result = learning.reflectionTelemetry(ctx);
-    assert.equal(result.count, 2);
-    assert.deepEqual(result.sources, ["by-file"]);
-  });
-
   // ---------- Redis-backed behaviour ---------------------------------------
 
   test("recordAnchorReflection writes to the by-file index when scopeFiles given", async (t) => {

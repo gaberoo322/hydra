@@ -138,48 +138,6 @@ export interface LearningContext {
   toPrompt(): string;
 }
 
-/**
- * Categorical reflection-source labels used by cycle metrics. These mirror the
- * historical `ReflectionSource` union in context-builder.ts (kept identical so
- * the `reflectionSources` Redis field and its dashboards are unchanged).
- */
-export type ReflectionSource = "per-anchor" | "global" | "by-file";
-
-/** Map a LearningContextSource to its metric-facing reflection label. */
-const REFLECTION_SOURCE_LABEL: Partial<Record<LearningContextSource, ReflectionSource>> = {
-  "per-anchor-reflections": "per-anchor",
-  "by-file-reflections": "by-file",
-  "global-reflections": "global",
-};
-
-/**
- * Issue #804: derive reflection-injection telemetry directly from the
- * structured blocks — NO regex over rendered markdown. This is the function
- * that replaces context-builder.ts's `inspectReflections`, which used to
- * re-parse `## PRIOR ATTEMPTS (N…` headers out of the flattened prompt string.
- *
- * `count` sums `itemCount` across the three reflection blocks that scored a
- * "hit"; `sources` lists which of them contributed, in canonical order.
- * Pattern-memory and knowledge-base blocks are NOT reflections and never count
- * here (they were never counted by the old regex either).
- */
-export function reflectionTelemetry(ctx: LearningContext): {
-  count: number;
-  sources: ReflectionSource[];
-} {
-  let count = 0;
-  const sources: ReflectionSource[] = [];
-  for (const block of ctx.blocks) {
-    const label = REFLECTION_SOURCE_LABEL[block.source];
-    if (!label) continue;
-    if (block.status === "hit" && block.itemCount > 0) {
-      count += block.itemCount;
-      sources.push(label);
-    }
-  }
-  return { count, sources };
-}
-
 function buildContext(blocks: LearningContextBlock[]): LearningContext {
   return {
     blocks,
