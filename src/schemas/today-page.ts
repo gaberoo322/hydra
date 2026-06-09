@@ -51,7 +51,7 @@ export type OvernightSummaryQuery = z.infer<typeof OvernightSummaryQuerySchema>;
  * Keeping this as a discriminated string (not a number) so the dashboard
  * can render a colored chip directly without re-thresholding.
  */
-export const HeadroomLevelSchema = z.enum(["green", "yellow", "red", "unknown"]);
+const HeadroomLevelSchema = z.enum(["green", "yellow", "red", "unknown"]);
 
 /**
  * Response body for `GET /api/v2/today/summary`.
@@ -93,7 +93,7 @@ export type OvernightSummaryResponse = z.infer<typeof OvernightSummaryResponseSc
 // ---------------------------------------------------------------------------
 
 /** Source vocabulary for `DecisionItem.source` — mirror of the aggregator type. */
-export const DecisionItemSourceSchema = z.enum([
+const DecisionItemSourceSchema = z.enum([
   "operator-decision-queue",
   "ready-for-human",
   "needs-info",
@@ -105,7 +105,7 @@ export const DecisionItemSourceSchema = z.enum([
  * has a place to grow other top-level fields (counts, generatedAt) later
  * without breaking clients.
  */
-export const DecisionItemSchema = z
+const DecisionItemSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -117,7 +117,7 @@ export const DecisionItemSchema = z
   })
   .strict();
 
-export const DecisionQueueResponseSchema = z
+const DecisionQueueResponseSchema = z
   .object({
     items: z.array(DecisionItemSchema),
     generatedAt: z.string(),
@@ -131,7 +131,7 @@ export type DecisionQueueResponse = z.infer<typeof DecisionQueueResponseSchema>;
  * buckets plus the thresholds used so the dashboard can render labels
  * like "blocked > 2d".
  */
-export const StuckIssueSchema = z
+const StuckIssueSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -142,7 +142,7 @@ export const StuckIssueSchema = z
   })
   .strict();
 
-export const StuckPrSchema = z
+const StuckPrSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -152,7 +152,7 @@ export const StuckPrSchema = z
   })
   .strict();
 
-export const StuckThresholdsSchema = z
+const StuckThresholdsSchema = z
   .object({
     blockedDays: z.number().int().positive(),
     needsInfoDays: z.number().int().positive(),
