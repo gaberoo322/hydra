@@ -78,7 +78,6 @@ export {
   DEFAULT_OAUTH_USAGE_TTL_MS,
   getWeeklyResetAnchorMs,
   projectResetWindow,
-  getQuotaWeightSonnet,
   getCacheReadWeight,
   DEFAULT_CACHE_READ_WEIGHT,
   weightedTokens,
