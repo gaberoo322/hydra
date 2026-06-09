@@ -205,6 +205,116 @@ describe("reflections buffer", () => {
     assert.equal(formatted, "");
   });
 
+  test("consolidateReflections flushes buffer into per-anchor store and clears buffer", async (t) => {
+    requireRedis(t);
+    await reflections.recordReflection({
+      cycleId: "cyc-consol-1", anchorType: "prior-failure", anchorReference: "issue-9001",
+      failureMode: "verification-failed", whatFailed: "tsc broke",
+      whyItFailed: "missing import", whatToTryDifferently: "add the import first",
+    });
+    await reflections.recordReflection({
+      cycleId: "cyc-consol-2", anchorType: "prior-failure", anchorReference: "issue-9002",
+      failureMode: "no-diff", whatFailed: "no changes",
+      whyItFailed: "task already done", whatToTryDifferently: "verify before re-dispatch",
+    });
+
+    const summary = await reflections.consolidateReflections();
+    assert.equal(summary.scanned, 2);
+    assert.equal(summary.consolidated, 2);
+    assert.equal(summary.skipped, 0);
+
+    // Buffer is now empty (the success-criteria invariant: LLEN → 0).
+    const bufLen = await redis.llen("hydra:reflections:buffer");
+    assert.equal(bufLen, 0);
+
+    // Per-anchor store has the migrated narrative, readable by the planner path.
+    const block = await reflections.loadAnchorReflections("issue-9001");
+    assert.equal(block.count, 1);
+    assert.ok(block.content.includes("missing import"));
+    assert.ok(block.content.includes("add the import first"));
+
+    const block2 = await reflections.loadAnchorReflections("issue-9002");
+    assert.equal(block2.count, 1);
+  });
+
+  test("consolidateReflections is idempotent on cycleId across re-runs", async (t) => {
+    requireRedis(t);
+    await reflections.recordReflection({
+      cycleId: "cyc-idem-1", anchorType: "prior-failure", anchorReference: "issue-9100",
+      failureMode: "verification-failed", whatFailed: "broke",
+      whyItFailed: "reason", whatToTryDifferently: "advice",
+    });
+
+    await reflections.consolidateReflections();
+
+    // Re-record the SAME cycleId, then re-consolidate — must not duplicate.
+    await reflections.recordReflection({
+      cycleId: "cyc-idem-1", anchorType: "prior-failure", anchorReference: "issue-9100",
+      failureMode: "verification-failed", whatFailed: "broke",
+      whyItFailed: "reason", whatToTryDifferently: "advice",
+    });
+    const summary = await reflections.consolidateReflections();
+    assert.equal(summary.scanned, 1);
+    assert.equal(summary.consolidated, 0);
+    assert.equal(summary.skipped, 1);
+
+    const block = await reflections.loadAnchorReflections("issue-9100");
+    assert.equal(block.count, 1, "duplicate cycleId must not produce a second per-anchor row");
+  });
+
+  test("consolidateReflections is a clean no-op on an empty buffer", async (t) => {
+    requireRedis(t);
+    const summary = await reflections.consolidateReflections();
+    assert.deepEqual(summary, { scanned: 0, consolidated: 0, skipped: 0 });
+  });
+
+  test("consolidateReflections drains malformed and anchorless entries", async (t) => {
+    requireRedis(t);
+    // Directly seed the buffer: one malformed, one anchorless, one valid.
+    await redis.rpush("hydra:reflections:buffer", "{not json");
+    await redis.rpush("hydra:reflections:buffer", JSON.stringify({ cycleId: "c", failureMode: "x", whatFailed: "y", whyItFailed: "z", whatToTryDifferently: "w", anchorType: "t", timestamp: "2026-06-08T00:00:00Z" }));
+    await reflections.recordReflection({
+      cycleId: "cyc-valid", anchorType: "prior-failure", anchorReference: "issue-9200",
+      failureMode: "no-diff", whatFailed: "nope",
+      whyItFailed: "reason", whatToTryDifferently: "advice",
+    });
+
+    const summary = await reflections.consolidateReflections();
+    assert.equal(summary.scanned, 3);
+    assert.equal(summary.consolidated, 1);
+    assert.equal(summary.skipped, 2);
+
+    // All three drained — the unconsolidatable ones don't leak.
+    const bufLen = await redis.llen("hydra:reflections:buffer");
+    assert.equal(bufLen, 0);
+  });
+
+  test("consolidateReflections routes through recordAnchorReflection — by-file index warms (invariant #2)", async (t) => {
+    requireRedis(t);
+    // Anchor reference embeds a file path so the by-file index (#326) keys off it.
+    // If consolidation re-implemented the per-anchor write with a raw push (the
+    // rejected alternative), this index would stay empty. Routing through
+    // recordAnchorReflection populates it for free.
+    await reflections.recordReflection({
+      cycleId: "cyc-byfile-1", anchorType: "prior-failure",
+      anchorReference: "Fix bug in src/calibration/widget.ts deriveSport",
+      failureMode: "verification-failed", whatFailed: "tsc broke",
+      whyItFailed: "missing import", whatToTryDifferently: "add the import first",
+    });
+
+    const summary = await reflections.consolidateReflections();
+    assert.equal(summary.consolidated, 1);
+
+    // By-file secondary index populated via the shared write primitive.
+    const members = await redis.smembers("hydra:reflections:by-file:src/calibration/widget.ts");
+    assert.equal(members.length, 1, "consolidation must warm the by-file index via recordAnchorReflection");
+
+    // Narrative fidelity preserved: the buffer's whatToTryDifferently survives as
+    // the per-anchor advice (not replaced by generic generateAdvice text).
+    const block = await reflections.loadAnchorReflections("Fix bug in src/calibration/widget.ts deriveSport");
+    assert.ok(block.content.includes("add the import first"));
+  });
+
   test("clearReflectionsForAnchor returns 0 when no matches", async (t) => {
     requireRedis(t);
     await reflections.recordReflection({

@@ -38,6 +38,7 @@ import {
   extractFilesFromAnchor,
   loadRelevantReflections,
   formatReflectionsForPrompt,
+  consolidateReflections,
 } from "./reflections/reflections.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
 import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
@@ -366,6 +367,16 @@ export async function getContext(
  * auto-promoted feedback rules. Called by the scheduler once per day.
  */
 export async function consolidate(): Promise<void> {
+  // Issue #1356 — flush the global reflection buffer into the per-anchor store
+  // FIRST, so planning-time injection (loadAnchorReflections) sees the
+  // reap-side failure narratives (#1119) instead of staying starved. Runs
+  // before pattern/rule consolidation; best-effort, never throws.
+  try {
+    await consolidateReflections();
+  } catch (err: any) {
+    console.error(`[Learning] Reflection consolidation failed: ${err.message}`);
+  }
+
   await consolidateAgentPatterns();
 
   // Detect and process stale auto-promoted rules in feedback files
