@@ -25,7 +25,18 @@ let admin: any;
 let redis: any;
 let redisAvailable = false;
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+// issue #1446 — this file shares the `hydra:backlog:*` keyspace with
+// backlog.test.mts and backlog-reaper-open-pr-guard.test.mts. Under the
+// canonical `npm test` (`--test-concurrency=1`) serial ordering hides the
+// collision, but any invocation that runs these files concurrently (an agent
+// running a subset without the flag, a future concurrency bump) had them
+// clobber each other's fixtures on the shared DB-1 — the recurring
+// "redis-shared-backlog-tests-flaky-in-full-run" friction. Pin this file to a
+// DEDICATED non-zero logical DB so its keyspace can never be touched by a
+// sibling backlog file, regardless of concurrency. (#1231 rejected unique-DB
+// allocation for the ~28-file DB-1 set on the 16-DB budget; only 3 backlog
+// files actually collide, so 3 dedicated DBs is well inside the budget.)
+process.env.REDIS_URL = "redis://localhost:6379/5";
 
 async function cleanBacklogKeys() {
   const patterns = ["hydra:backlog:*", "hydra:alerts", "hydra:metrics:claims-reaped*"];
