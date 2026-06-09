@@ -243,6 +243,43 @@ describe("renderTitle / renderBody — never emit a malformed title", () => {
     assert.match(body, /rg -n --no-heading -w "dashboard\/src\/components\/Toast\.jsx" src test/);
     assert.match(body, /\*\*\(d\) Coupled Redis key generator\*\*/);
   });
+
+  test("renderBody leads with a DEMOTE recommendation when finding.fix is 'demote' (#1449)", () => {
+    // The pre-computed demote verdict (classifyExportFix) must surface as a
+    // banner BEFORE the generic probe, so the picking agent's default action is
+    // to drop the `export` keyword, not delete (the recurring
+    // knip-unused-export-demote-not-delete defect).
+    const body = renderBody(
+      { kind: "export", path: "src/schemas/autopilot-idle.ts", name: "IdleBlockedBySchema", fix: "demote" },
+      ISO,
+    );
+    assert.match(body, /## Recommended fix: \*\*demote\*\* \(drop the `export` keyword\) — NOT delete/);
+    assert.match(body, /still \*\*referenced within its own file\*\*/);
+    assert.match(body, /Deleting it would break `tsc`/);
+    // The banner appears before the generic "## What to do" probe.
+    assert.ok(body.indexOf("## Recommended fix") < body.indexOf("## What to do"));
+  });
+
+  test("renderBody leads with a DELETE recommendation when finding.fix is 'delete' (#1449)", () => {
+    const body = renderBody(
+      { kind: "export", path: "src/x.ts", name: "deadConst", fix: "delete" },
+      ISO,
+    );
+    assert.match(body, /## Recommended fix: \*\*delete\*\* \(no in-file references found\)/);
+    // Even on a delete verdict, the body still tells the agent to run the probe
+    // (cross-file re-export / coupled-key false positives).
+    assert.match(body, /Still run the probe below before deleting/);
+  });
+
+  test("renderBody omits the recommendation banner when fix is unset/unknown (probe-only fallback)", () => {
+    const unset = renderBody({ kind: "export", path: "src/x.ts", name: "foo" }, ISO);
+    const unknown = renderBody({ kind: "export", path: "src/x.ts", name: "foo", fix: "unknown" }, ISO);
+    for (const body of [unset, unknown]) {
+      assert.ok(!/## Recommended fix/.test(body), "no banner without a deterministic verdict");
+      // The full classification probe is still present.
+      assert.match(body, /classify before you delete/);
+    }
+  });
 });
 
 describe("findingIdentity / identityFromOpenIssueTitle — stable identity, not title (#1167 cause 2)", () => {

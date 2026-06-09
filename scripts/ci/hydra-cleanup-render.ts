@@ -49,6 +49,30 @@
 export type CleanupFindingKind = "file" | "export";
 
 /**
+ * The recommended safe fix for an export finding, classified deterministically
+ * from the defining file's source (issue #1449).
+ *
+ * knip flags a symbol as an "unused export" whenever nothing OUTSIDE the file
+ * imports it — but the symbol may still be referenced WITHIN its own file (a
+ * sibling schema, a `z.infer<typeof X>` type alias, an in-file caller). Deleting
+ * such a symbol breaks compilation; the only dead aspect is its `export`
+ * visibility, so the correct fix is to DROP the `export` keyword, not delete it.
+ *
+ * - `delete` — no in-file reference beyond the definition site: the symbol is
+ *   truly dead and can be removed.
+ * - `demote` — the symbol IS referenced within its own file: drop only the
+ *   `export` keyword (make it module-private), NEVER delete (the #1449
+ *   recurrence `knip-unused-export-demote-not-delete` /
+ *   `knip-unused-export-is-internally-referenced-not-dead`).
+ * - `unknown` — the file source was unavailable, so the classification could
+ *   not be made deterministically; the issue body falls back to the full probe.
+ *
+ * Whole-file findings never carry a fix class (deleting a whole unused file has
+ * no demote alternative).
+ */
+export type ExportFixClass = "delete" | "demote" | "unknown";
+
+/**
  * One normalised, ready-to-render dead-code finding.
  *
  * - `kind: "file"`  → a provably-unused whole file. `path` is the file; `name`
@@ -65,6 +89,14 @@ export interface CleanupFinding {
    * `kind: "file"` (a whole-file deletion names no symbol).
    */
   name: string;
+  /**
+   * Deterministic safe-fix classification for an export finding (issue #1449),
+   * set by classifyExportFix() when the defining file's source is available.
+   * Absent → the renderer emits the full classification probe (the pre-#1449
+   * behaviour) instead of leading with a pre-computed recommendation. Always
+   * absent for `kind: "file"`.
+   */
+  fix?: ExportFixClass;
 }
 
 /**
@@ -185,6 +217,80 @@ export function findingIdentity(finding: CleanupFinding): string {
 }
 
 /**
+ * Deterministically classify the safe fix for an EXPORT finding from the
+ * defining file's source text (issue #1449).
+ *
+ * knip's "unused export" only means "no importer OUTSIDE this file". The
+ * recurring `cleanup_orch` defect (`knip-unused-export-demote-not-delete`,
+ * cross-run recurrence 6+) is a naive DELETE on a symbol that is still
+ * referenced WITHIN its own file — a sibling `z.infer<typeof X>` type alias, a
+ * schema composed into another schema in the same file, an in-file caller.
+ * Deleting it breaks `tsc`. The correct fix is to drop only the `export`
+ * keyword (demote to module-private).
+ *
+ * This is the deterministic version of probe #1 from the issue body, scoped to
+ * the symbol's OWN file: count word-boundary references to `name` in
+ * `fileSource` that are NOT the export/declaration site. If any remain → the
+ * symbol is internally referenced → `demote`. If none remain → `delete`.
+ *
+ * Detecting references in the symbol's own file is the deterministic, low-false-
+ * positive half of the taxonomy — it never needs to grep the whole repo (knip
+ * already proved there are no external importers). Cross-file re-export (case c)
+ * and coupled-Redis-key (case d) disambiguation stay in the issue-body probe,
+ * which the picking hydra-dev agent runs; this classifier resolves the most
+ * common false positive (case b, internally referenced) up front so the emitted
+ * issue says "demote" instead of inviting a build-breaking delete.
+ *
+ * Returns:
+ * - `"demote"` when at least one in-file reference survives stripping the
+ *   declaration site(s).
+ * - `"delete"` when no in-file reference survives.
+ * - `"unknown"` for a non-export finding, an empty symbol name, or empty
+ *   `fileSource` (source unavailable) — the renderer then falls back to the
+ *   full probe rather than asserting a fix it could not verify.
+ *
+ * Pure: takes the file text as an argument, performs no fs/IO, so it unit-tests
+ * directly. The caller (the emit runner) is responsible for reading the file.
+ */
+export function classifyExportFix(
+  finding: CleanupFinding,
+  fileSource: string,
+): ExportFixClass {
+  if (finding.kind !== "export") return "unknown";
+  const name = finding.name.trim();
+  if (!name) return "unknown";
+  if (typeof fileSource !== "string" || fileSource.length === 0) return "unknown";
+
+  // Escape the symbol for a literal word-boundary regex.
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const wordRef = new RegExp(`\\b${esc}\\b`);
+
+  // Walk the file line by line. A line is the symbol's own DECLARATION site
+  // (and so does not count as an internal reference) when it both mentions the
+  // symbol AND carries a declaration keyword for it. Every OTHER line that
+  // mentions the symbol by word boundary is an internal reference → demote.
+  //
+  // We deliberately treat a `z.infer<typeof Name>` type-alias line, a
+  // `field: Name` schema-composition line, and an in-file call site all as
+  // internal references — those are exactly the demote cases the recurrence
+  // is about.
+  const declAtThisLine = new RegExp(
+    // export? (const|let|var|function|class|type|interface|enum) ... Name
+    `\\b(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?(?:const|let|var|function|class|type|interface|enum)\\s+${esc}\\b`,
+  );
+
+  let internalRefs = 0;
+  for (const rawLine of fileSource.split("\n")) {
+    if (!wordRef.test(rawLine)) continue;
+    if (declAtThisLine.test(rawLine)) continue; // the declaration itself, not a use
+    internalRefs++;
+    if (internalRefs > 0) break; // one is enough to demote
+  }
+
+  return internalRefs > 0 ? "demote" : "delete";
+}
+
+/**
  * Render the GitHub issue title for a finding. Title, body H1, and the
  * `## Files in scope` path are all derived from the one finding (see
  * renderBody), so they cannot drift.
@@ -254,6 +360,30 @@ export function renderBody(finding: CleanupFinding, isoDate: string): string {
   lines.push("");
   lines.push(`\`knip\` reports ${findingSubject} as **provably unused** — it has no remaining references in the orchestrator codebase.`);
   lines.push("");
+  // ## Recommended fix — a deterministic, pre-computed demote-vs-delete verdict
+  // when the emit runner classified the finding from its own file's source
+  // (issue #1449). knip's "unused export" only means "no EXTERNAL importer"; a
+  // symbol still referenced WITHIN its own file (a sibling `z.infer<typeof X>`
+  // alias, a schema composed into another schema, an in-file caller) must be
+  // DEMOTED (drop the `export` keyword), never deleted — deleting it breaks
+  // `tsc`. Leading with this verdict is what stops the recurring
+  // `knip-unused-export-demote-not-delete` defect: the picking agent reads the
+  // classification BEFORE the generic probe, so the default action is correct.
+  if (!isFile && finding.fix === "demote") {
+    lines.push("## Recommended fix: **demote** (drop the `export` keyword) — NOT delete");
+    lines.push("");
+    lines.push(
+      `The emit scan found that \`${finding.name}\` is still **referenced within its own file** (\`${finding.path}\`) — e.g. a sibling schema composes it, a \`z.infer<typeof ${finding.name}>\` type alias derives from it, or an in-file caller uses it. knip flagged it only because nothing OUTSIDE the file imports it. **Deleting it would break \`tsc\`.** The correct, deterministic fix is to **drop only the \`export\` keyword** so the symbol stays module-private. Do NOT delete the definition. Confirm with the probe below, then demote.`,
+    );
+    lines.push("");
+  } else if (!isFile && finding.fix === "delete") {
+    lines.push("## Recommended fix: **delete** (no in-file references found)");
+    lines.push("");
+    lines.push(
+      `The emit scan found no reference to \`${finding.name}\` within \`${finding.path}\` beyond its declaration site, so a delete is safe. **Still run the probe below before deleting** — a cross-file re-export (case c) or a coupled Redis key generator (case d) can make even an in-file-dead symbol a false positive. If \`npm test\` / \`tsc\` go red after the delete, revert to the demote / drop-re-export fix.`,
+    );
+    lines.push("");
+  }
   // ## What to do — MUST mirror the Step 3 template in
   // docs/operator-playbooks/hydra-cleanup.md. The picking hydra-dev agent reads
   // THIS emitted body, NOT the playbook, so the knip false-positive taxonomy

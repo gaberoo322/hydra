@@ -87,6 +87,8 @@ Parse the report's `files` (provably-unused whole files) and `issues[].exports` 
 
 **Use the pure parser `parseKnipReport()` in `scripts/ci/hydra-cleanup-render.ts` (issue #1167) to do this normalisation** — it reads the symbol `name` (for an export/type) and the `path` (for a whole file) out of the SAME knip object the title is later derived from, producing a `CleanupFinding { kind, path, name }` per finding. Do NOT hand-roll the parse into parallel title/path arrays: the helper is what guarantees the title can never drift from the path (the #1005 off-by-one) and that a finding which failed to yield a name/path arrives at the validation gate (Step 2) with an empty field rather than silently rendering a blank title (the #1167 double-space / trailing-space drafts).
 
+> In normal operation you do not call `parseKnipReport()` by hand — the Step 3 runner `scripts/ci/hydra-cleanup-emit.ts` (issue #1449) owns the whole parse → validate → filter → classify → dedup → render → create pipeline. Steps 1–2 below describe what that runner does so the contract is auditable, but the emit is a single `npx tsx scripts/ci/hydra-cleanup-emit.ts` invocation — never a transcribed bash loop, which is exactly where the #1421–#1426 blank titles came from.
+
 ### 2. Filter (keep the findings high-confidence)
 
 **First, the blank-title guard (issue #1167 — HARD, runs before every other drop rule).** Run each `CleanupFinding` through `validateFinding()` (in `scripts/ci/hydra-cleanup-render.ts`) and DROP any finding for which it returns a non-null reason. This rejects a finding with an empty `path` (the `cleanup: remove unused file ` draft, trailing space, no path) or — for an export — an empty `name` (the `cleanup: remove unused export  (src/scheduler/heartbeat.ts)` draft, double-space where the symbol belongs). This is the single chokepoint that makes a malformed/blank-title draft *impossible to emit*: a finding that fails to parse a name or path never reaches `gh issue create`. `renderTitle()` / `renderBody()` additionally **throw** on an invalid finding, so any finding that slips past this gate fails loud in the run instead of quietly filing junk. The blank-title drafts #1151–#1158 (run ef0a9847) are exactly what this gate prevents.
@@ -124,15 +126,23 @@ rg -n "<name>" src/redis test/redis-keys.test.mts
 
 **Decision rule:** delete (case a) is the *exception*, not the default. If probe 1 finds **any** live reference, you are in case (b) or (c) → demote / drop-re-export, never delete. If the symbol is a Redis key generator, run probe 3 → case (d) → atomic coupled-set removal with scope-justification. When still ambiguous after the probes, prefer the **narrowest** edit that turns the symbol dead (drop `export` / drop the re-export line) — a missed cleanup is cheaper than a broken build, and the deterministic acceptance check (`npm test` + `tsc` + `npm run typecheck:test` still green, no new knip finding) is what proves the fix correct. If `npm test`/`tsc` go red after a delete, that is knip's false positive surfacing — revert to the demote/drop-re-export fix, do not force the deletion.
 
-### 3. Emit issues (labelled `ready-for-agent` + `cleanup-scan`)
+### 3. Emit issues — run the deterministic emitter, do NOT hand-roll a bash loop (issue #1449 — HARD)
 
-Each surviving finding becomes one GitHub issue. Use `gh issue create` directly (these are independent single-finding tickets, so the `hydra-prd` epic path is unnecessary).
+**Do not drive `gh issue create` from a hand-written bash loop. Invoke the deterministic emit runner `scripts/ci/hydra-cleanup-emit.ts` instead** — it owns parse → validate → filter → classify → dedup → render → create as one pass, and it is the recurrence fix for #1449.
 
-**Render every title and body with the pure helpers `renderTitle()` / `renderBody()` from `scripts/ci/hydra-cleanup-render.ts` (issue #1167).** Both derive the title, the body H1, and the `## Files in scope` path from the one `CleanupFinding`, and both **throw** if handed an invalid finding — so the title/body cannot drift and a blank-title issue cannot be emitted. Do not hand-author the title/body strings in bash.
+```bash
+# Dry-run first (prints the plan: every title + body + demote/delete verdict, files nothing):
+npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json
 
-**Emit as a SINGLE loop over the filtered, validated, de-duplicated findings — one finding at a time, render-then-create atomically (HARD).** For each finding: derive its title, its body H1, AND its `## Files in scope` path from the **same finding object** inside the same iteration, then immediately call `gh issue create` with both `--title` and `--body-file` built from that one finding, *before advancing to the next finding*. The `## Files in scope` path is the same target path the title names, rendered from the one `$finding` — so the scoped file can never drift from the issue title or the body H1. Never build a list of all titles in one pass and a list of all body files in a second pass and then zip the two by index — that index-aligned parallel-array pattern is exactly what produced the off-by-one title/body rotation across the #997–#1004 batch (issue #1005), where `title[i]` was paired with `body[i+1]`. There is no second pass and no shared running counter linking two separate lists: the title and body for a given issue are produced and consumed together within one iteration, so they cannot drift.
+# Apply (files one cleanup-scan + ready-for-agent issue per planned finding):
+npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json --apply
+```
 
-If you stage the body to a temp file, name it by the finding's **stable identity** (a slug of its `<name / path>`), e.g. `/tmp/cleanup-issue-$slug.md`, NOT by a running counter shared with a separate title loop. The slug binds the body file to the same finding the title is derived from.
+**Why the runner, not a bash loop (issue #1449).** #1167 moved the *parse → validate → dedup → render* helpers into `scripts/ci/hydra-cleanup-render.ts`, but the **emit step stayed LLM-prose-executed** — the playbook described a bash `gh issue create` loop the model transcribed by hand. On run f6403146 the model rendered each issue **body** via `renderBody()` (so the body H1 carried the correct symbol, e.g. `RecentMergesQuery`) yet **hand-built the issue title** by interpolating knip's raw output, which lost the symbol — producing the blank `cleanup: remove unused export  (src/schemas/today-page.ts)` titles on #1421–#1426 (the #1167 regression). The title and body diverged because they came from two different sources. The runner removes that discretionary step: the title comes **only** from `renderTitle()` and the body **only** from `renderBody()`, both from the **same** `CleanupFinding` inside one iteration, so the title can no longer drift from the body. There is no second pass, no index-aligned zip (the #997–#1004 / #1005 off-by-one), and no place for the model to build a title by hand. The runner also reads the open `cleanup-scan` board itself and aborts the dedup if it can't, applies the board-saturation cap, and ranks whole-file deletions ahead of single-export deletions.
+
+**Demote-vs-delete is classified deterministically (issue #1449).** For every export finding the runner reads the symbol's **own file** and calls `classifyExportFix()`: if the symbol is still referenced within that file (a sibling `z.infer<typeof X>` type alias, a schema composed into another schema, an in-file caller) it stamps `fix: "demote"` and the rendered body **leads with a "Recommended fix: demote (drop the `export` keyword) — NOT delete"** banner before the generic probe; otherwise it stamps `fix: "delete"`. This is the deterministic, low-false-positive half of the Step 2.5 taxonomy (case b, internally referenced) — it resolves the most common false positive up front so the emitted issue never invites a build-breaking delete (the recurring `knip-unused-export-demote-not-delete` / `knip-unused-export-is-internally-referenced-not-dead` friction). Cross-file re-export (case c) and coupled-Redis-key (case d) disambiguation stay in the issue-body probe the picking `hydra-dev` agent runs.
+
+If you ever need to inspect or stage a single body, render it via the helper (never hand-author it): both `renderTitle()` / `renderBody()` **throw** on an invalid finding, so a blank-title issue is impossible. But the normal path is the runner — do not reconstruct the loop in bash.
 
 Issue body schema (one per finding):
 
@@ -189,21 +199,13 @@ This is a mechanically-verifiable cleanup: the deletion is correct **iff** the t
 
 **Labelling rule (HARD):** every emitted issue carries `cleanup-scan` and `ready-for-agent`. The `cleanup-scan` label is the emit/count seam that `collect-state.sh` reads for `cleanup_board_saturated`, so it MUST be present on every issue. Routing to `ready-for-agent` (NOT `needs-triage`) is the deliberate confidence-routing decision (epic #958): the acceptance criterion is self-checking, so no operator triage gate is needed — a `hydra-dev` pickup will only merge if the deletion keeps `npm test` and `tsc` green, and CI is the merge gate.
 
+The emit itself is **not** a hand-written bash loop (issue #1449). It is the deterministic runner from the top of this step — it renders the title and body for each finding from the same object and creates the issue in one pass, so the title cannot drift from the body:
+
 ```bash
-# Single loop over the filtered findings — render THIS finding's body and create
-# THIS finding's issue together, before moving on. Title, body H1, and the
-# `## Files in scope` path are all derived from the one $finding object, so they
-# cannot drift (no parallel title/body lists).
-for finding in "${findings[@]}"; do
-  title=$(render_title "$finding")          # e.g. "cleanup: remove unused export `foo` (src/bar.ts)"
-  slug=$(slugify "$finding")                # stable identity, NOT a running counter
-  body_file="/tmp/cleanup-issue-$slug.md"
-  render_body "$finding" > "$body_file"     # body H1 + `## Files in scope` from the SAME $finding
-  gh issue create --repo gaberoo322/hydra \
-    --title "$title" \
-    --label cleanup-scan --label ready-for-agent \
-    --body-file "$body_file"
-done
+# The runner owns parse → validate → filter → classify → dedup → render → create.
+# Title from renderTitle(), body from renderBody(), both from the SAME finding —
+# no hand-built title, no parallel title/body lists (the #1449 / #1005 drift guard).
+npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json --apply
 ```
 
 ### 4. Report (deterministic summary)
@@ -254,14 +256,18 @@ Expected:
 - **Scope section present (issue #1077).** Every emitted issue body carries a section headed exactly `## Files in scope` listing the single target path. This is the heading `scope-check` matches (`/Files in scope/i`, read live from the linked issue body) and the canonical heading `hydra-prd-render.ts` emits — so a `hydra-dev` pickup can copy it straight into the PR body instead of hand-authoring it from the design-concept artifact.
 - Re-running `--apply` against an already-saturated board (> 10 open `cleanup-scan`) emits nothing and prints the saturation skip.
 - Re-running `--apply` does not double-file a finding that already has an open `cleanup-scan` issue.
+- **Deterministic emit runner — no hand-built titles, demote-vs-delete classified (issue #1449).** The dry-run prints the plan via `npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json`: for every planned issue the title (from `renderTitle()`) and the body H1 (from `renderBody()`) name the same symbol — they cannot diverge because both come from the same finding in one pass, so the #1421–#1426 blank-title regression (body H1 carried the symbol, the hand-built title did not) is structurally impossible. Each export finding additionally carries a `[fix: demote|delete]` verdict: an export still referenced within its own file (a `z.infer<typeof X>` alias, a sibling-schema composition like `IdleBlockedBySchema` in `src/schemas/autopilot-idle.ts`) is classified `demote` and its body leads with "Recommended fix: demote (drop the `export` keyword) — NOT delete", never inviting a build-breaking deletion. Pinned in `test/hydra-cleanup-emit.test.mts`.
 - **knip false-positive taxonomy present (issue #1299).** Step 2.5 carries a four-case table — (a) truly dead → delete, (b) internally referenced → demote `export`, (c) re-export with live definition → drop only the re-export line, (d) coupled Redis key generator → atomic removal of the generator(s) + their test assertions under scope-justification — each with a classification probe and an evidence anchor, so a `hydra-dev` pickup classifies the finding instead of re-deriving the disambiguation. A finding that turns `npm test`/`tsc` red after a delete is a knip false positive and routes to the demote/drop-re-export fix, never a forced deletion.
 - **No blank-title / double-file drafts (issue #1167).** Every emitted issue has a fully-formed title with the symbol name present — `validateFinding()` drops any finding with an empty name/path before render, and `renderTitle()`/`renderBody()` throw on an invalid finding, so the malformed `cleanup: remove unused export  (…)` / `cleanup: remove unused file ` drafts (run ef0a9847, #1151–#1158) are impossible. Re-running the parse → validate → dedup pipeline against the board it just filled emits **zero** new issues, because `dedupAgainstOpen()` keys on the stable `path::symbol` identity (not the title) and so recognises the canonical issues as duplicates. Pinned in `test/hydra-cleanup-render.test.mts`.
+- **Deterministic emit runner kills the #1167 regression (issue #1449).** The emit is `npx tsx scripts/ci/hydra-cleanup-emit.ts` — a single pass that renders the title from `renderTitle()` and the body from `renderBody()` on the **same** finding, so the model can never hand-build a title that drifts from the body (the #1421–#1426 blank titles, where the body H1 named the symbol but the title was blank). The runner also classifies each export demote-vs-delete from the symbol's own source (`classifyExportFix()`): an export still referenced within its own file (a `z.infer<typeof X>` alias, a sibling-schema composition) is stamped `demote` and the body leads with a "drop the `export` keyword — NOT delete" banner. Pinned in `test/hydra-cleanup-emit.test.mts`.
 
 ## Files
 
 - `docs/operator-playbooks/hydra-cleanup.md` — this playbook (source of truth; the skill is generated by `scripts/sync-skills.sh`).
-- `scripts/ci/hydra-cleanup-render.ts` — pure parse → validate → render → dedup helpers (issue #1167): `parseKnipReport`, `validateFinding`, `findingIdentity`, `renderTitle`, `renderBody`, `identityFromOpenIssueTitle`, `dedupAgainstOpen`. The deterministic seam this skill's Steps 1–3 call.
-- `test/hydra-cleanup-render.test.mts` — regression for the #1167 blank-title + double-file failure (no malformed titles; identity-keyed dedup; re-run files nothing).
+- `scripts/ci/hydra-cleanup-render.ts` — pure parse → validate → classify → render → dedup helpers (issues #1167, #1449): `parseKnipReport`, `validateFinding`, `findingIdentity`, `classifyExportFix`, `renderTitle`, `renderBody`, `identityFromOpenIssueTitle`, `dedupAgainstOpen`. The deterministic seam the emit runner calls.
+- `scripts/ci/hydra-cleanup-emit.ts` — the deterministic emit runner (issue #1449): `planCleanupEmit()` (pure: parse → validate → filter → classify → dedup → render) plus the thin `gh` CLI wrapper. Replaces the hand-rolled bash emit loop that regressed #1167.
+- `test/hydra-cleanup-render.test.mts` — regression for the #1167 blank-title + double-file failure and the #1449 demote/delete recommendation banner (no malformed titles; identity-keyed dedup; re-run files nothing).
+- `test/hydra-cleanup-emit.test.mts` — regression for the #1449 emit runner: title/body coherence (no hand-built title), deterministic demote-vs-delete classification, filter/dedup/cap/recurrence.
 - `package.json` — `knip` is the devDependency this skill invokes (`npx knip`).
 - `scripts/autopilot/decide.py` — the `cleanup_orch` signal class + selector that dispatches this skill.
 - `scripts/autopilot/collect-state.sh` — emits `cleanup_board_saturated` (the anti-flood cap).
