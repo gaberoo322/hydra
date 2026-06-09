@@ -32,17 +32,17 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "
 const GOALS_FILE = join(CONFIG_PATH, "direction", "goals.md");
 
 /**
- * Parse the project goals document.
- * Returns a structured object or null if no goals file exists.
+ * Parse the raw text of a project goals document into a structured
+ * `GoalsDocument`.
+ *
+ * This is the **Seam** (mirroring `parseOutcomesYaml` in `src/outcomes-yaml.ts`):
+ * one pure function owning "raw markdown → structured record", separate from the
+ * file-loading wrapper (`loadProjectGoals`). Keeping it standalone lets the parse
+ * edge cases — malformed tables, missing frontmatter, unknown sections, empty
+ * pain points — be exercised directly in `test/project-goals.test.mts` instead of
+ * only indirectly through the file-reading path. Never throws.
  */
-export async function loadProjectGoals() {
-  let raw;
-  try {
-    raw = await readFile(GOALS_FILE, "utf-8");
-  } catch {
-    return null;
-  }
-
+export function parseProjectGoals(raw) {
   const goals = {
     name: "",
     raw,
@@ -129,6 +129,23 @@ export async function loadProjectGoals() {
   }
 
   return goals;
+}
+
+/**
+ * Load and parse the project goals document.
+ * Returns a structured object or null if no goals file exists.
+ *
+ * Thin file-loading wrapper around the pure `parseProjectGoals` Seam.
+ */
+export async function loadProjectGoals() {
+  let raw;
+  try {
+    raw = await readFile(GOALS_FILE, "utf-8");
+  } catch {
+    return null;
+  }
+
+  return parseProjectGoals(raw);
 }
 
 /**
