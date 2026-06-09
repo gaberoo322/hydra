@@ -60,7 +60,7 @@ export type AutopilotIdleDiagnosticsQuery = z.infer<
  * The Pace Gate's launch verdict for RIGHT NOW. `null` means eligible —
  * the Gate would launch a run on its next tick.
  */
-export const IdleBlockedBySchema = z
+const IdleBlockedBySchema = z
   .enum(["running", "emergency-stop", "pacing-ahead", "endpoint-error"])
   .nullable();
 
@@ -71,7 +71,7 @@ export type IdleBlockedBy = z.infer<typeof IdleBlockedBySchema>;
  * `PaceState` from the usage tracker. `"on"` when the Weekly Reset Anchor is
  * unset or the quota is uncalibrated (no curve to compare against).
  */
-export const IdlePaceStateSchema = z.enum(["behind", "on", "ahead"]);
+const IdlePaceStateSchema = z.enum(["behind", "on", "ahead"]);
 
 export type IdlePaceState = z.infer<typeof IdlePaceStateSchema>;
 
@@ -80,7 +80,7 @@ export type IdlePaceState = z.infer<typeof IdlePaceStateSchema>;
  * can show *how far* ahead/behind the curve the burn is, not just the
  * categorical verdict.
  */
-export const IdlePaceSchema = z
+const IdlePaceSchema = z
   .object({
     /** Pacing Curve verdict for this instant in the week. */
     state: IdlePaceStateSchema,
@@ -100,7 +100,7 @@ export type IdlePace = z.infer<typeof IdlePaceSchema>;
  * is the boolean the verdict keys off (`state === "running"`); the rest is
  * carried so the Console can render "last run ended N ago (<termReason>)".
  */
-export const IdleAutopilotLivenessSchema = z
+const IdleAutopilotLivenessSchema = z
   .object({
     alive: z.boolean(),
     state: z.enum(["running", "idle", "ended", "crashed"]),
