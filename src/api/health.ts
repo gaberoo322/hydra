@@ -18,6 +18,13 @@ import { getWorkQueueLen } from "../redis/work-queue.ts";
 import { countReflectionKeys } from "../redis/reflections.ts";
 import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
+// Issue #1440: persisted, restart-surviving OpenViking search-quality trends.
+// The /health/deep `intelligence.ovSearch` block has always carried the live
+// liveness probe; these add the hour-bucketed zero-result/fallback-success
+// trend and the per-day knowledge-context-availability rate so the operator can
+// see "search quality degraded this hour" without the counters resetting on
+// every restart.
+import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 import { getTargetServiceName } from "../target-config.ts";
 // Issue #954: the OpenViking health/search probes route through the OpenViking
 // Request Adapter, which resolves the base URL from OPENVIKING_URL (via
@@ -284,6 +291,12 @@ export function createHealthRouter(eventBus: any) {
         } catch { return null; }
       })(),
       /* 16: emergency brake (issue #744) */ getEmergencyBrake(),
+      // Issue #1440: persisted OV search-quality trend (24h hour-buckets) and
+      // per-day knowledge-context availability (7d). Both degrade to null on a
+      // Redis error so the probe never blocks /health/deep — the projection
+      // below coalesces a rejected settle to null.
+      /* 17 */ getOvSearchWindow(24),
+      /* 18 */ getKnowledgeContextAvailability(7),
     ]);
 
     // Issue #840: parse the raw probe fan-out into the normalized Health
@@ -300,6 +313,13 @@ export function createHealthRouter(eventBus: any) {
     const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, ovSearch, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
     const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
     const cycle = (settled[3] && settled[3].status === "fulfilled" ? (settled[3] as any).value : null) || {};
+
+    // Issue #1440: coalesce the two persisted OV-quality reads (indices 17/18).
+    // A rejected settle (Redis error) becomes null — surfaced as absent trend
+    // data, never a 500. These ride alongside the existing live `ovSearch`
+    // liveness probe in the `intelligence` block below.
+    const ovSearchWindow = settled[17] && settled[17].status === "fulfilled" ? (settled[17] as any).value : null;
+    const ovContextAvailability = settled[18] && settled[18].status === "fulfilled" ? (settled[18] as any).value : null;
 
     const fmtUp = (s: number) => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? `${h}h ${m}m` : `${m}m`; };
 
@@ -326,7 +346,11 @@ export function createHealthRouter(eventBus: any) {
       // snapshot's `recent` are for rule guards, not the HTTP envelope.
       pipeline: { queueDepth, backlogCounts: blCounts, recentMetrics: { cycleCount: recent.cycleCount, mergeRate: recent.mergeRate, failedRate: recent.failedRate, noTaskRate: recent.noTaskRate, revertRate: recent.revertRate, avgDurationMs: recent.avgDurationMs, avgDurationHuman: recent.avgDurationHuman }, killSwitch: health.status === "killed", emergencyBrake },
       infrastructure: { disk, memory: mem, systemd: { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } },
-      intelligence: { patterns, reflections: reflCount, ovSearch },
+      // Issue #1440: `ovSearch` is the live in-memory snapshot + liveness probe
+      // (resets on restart). `ovSearchTrend` is the restart-surviving 24h
+      // hour-bucketed rollup (zeroResultRate/fallbackSuccessRate trends) and
+      // `knowledgeContext` the 7d per-day context-availability rate.
+      intelligence: { patterns, reflections: reflCount, ovSearch, ovSearchTrend: ovSearchWindow, knowledgeContext: ovContextAvailability },
       diagnostics,
     });
   });
