@@ -71,9 +71,6 @@ export type {
 // ---------------------------------------------------------------------------
 export {
   getUsage,
-  projectEligibility,
-  overlayPauseEligibility,
-  overlaySessionBlockEligibility,
   parseSessionLimitReset,
   clearUsageCache,
   getWeeklyQuotaTokens,
@@ -83,9 +80,6 @@ export {
   DEFAULT_OAUTH_USAGE_TTL_MS,
   getWeeklyResetAnchorMs,
   projectResetWindow,
-  getWeeklyPaceCeiling,
-  DEFAULT_WEEKLY_PACE_CEILING,
-  PACE_STATE_TOLERANCE_PERCENT,
   getQuotaWeightOpus,
   getQuotaWeightSonnet,
   getQuotaWeightHaiku,
@@ -100,25 +94,40 @@ export {
   parseObservedResetMs,
   cacheHitRatio,
   sessionIdFromPath,
+  UNATTRIBUTED_SKILL,
+} from "./usage-tracker.ts";
+
+export type {
+  UsageSnapshot,
+  TokenBreakdown,
+  ParsedUsageLine,
+  ModelFamily,
+  SkillResolver,
+  ResetWindow,
+} from "./usage-tracker.ts";
+
+// ---------------------------------------------------------------------------
+// Eligibility — the pure dispatch-gating fold over UsageSnapshot (issue #1377)
+// ---------------------------------------------------------------------------
+export {
+  projectEligibility,
+  overlayPauseEligibility,
+  overlaySessionBlockEligibility,
+  getWeeklyPaceCeiling,
+  DEFAULT_WEEKLY_PACE_CEILING,
+  PACE_STATE_TOLERANCE_PERCENT,
   PACING_SHEDDABLE_CLASSES,
   fiveHourThrottleShed,
   FIVE_HOUR_THROTTLE_T1_CLASSES,
   FIVE_HOUR_THROTTLE_T2_CLASSES,
   DEFAULT_FIVE_HOUR_THROTTLE_T1,
   DEFAULT_FIVE_HOUR_THROTTLE_T2,
-  UNATTRIBUTED_SKILL,
-} from "./usage-tracker.ts";
+} from "./eligibility.ts";
 
 export type {
-  UsageSnapshot,
   UsageEligibility,
-  TokenBreakdown,
-  ParsedUsageLine,
-  ModelFamily,
-  SkillResolver,
-  ResetWindow,
   PaceState,
-} from "./usage-tracker.ts";
+} from "./eligibility.ts";
 
 // ---------------------------------------------------------------------------
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
