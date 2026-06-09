@@ -141,8 +141,14 @@ export type ActiveDispatchesResponse = z.infer<typeof ActiveDispatchesResponseSc
 
 export const CostBurnResponseSchema = z
   .object({
-    /** Coarse burn-rate spark — see `src/aggregators/cost-burn.ts` JSDoc. */
-    lastHourSpark: z.array(z.number()),
+    /**
+     * Average tokens consumed per hour over the rolling 5h window —
+     * token-denominated, no USD conversion (issue #1413). See
+     * `src/aggregators/cost-burn.ts` JSDoc.
+     */
+    tokensPerHour5h: z.number(),
+    /** Average tokens consumed per hour over the rolling 24h window. */
+    tokensPerHour24h: z.number(),
     generatedAt: z.string(),
   })
   .strict();

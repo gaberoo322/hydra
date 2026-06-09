@@ -106,19 +106,23 @@ describe("Response schemas — aggregator shape pins", () => {
     assert.equal(result.success, false);
   });
 
-  test("CostBurnResponseSchema accepts the spark-only shape", () => {
+  test("CostBurnResponseSchema accepts the token-rate shape", () => {
     const result = CostBurnResponseSchema.safeParse({
-      lastHourSpark: [1.2, 0.8],
+      tokensPerHour5h: 1_200_000,
+      tokensPerHour24h: 800_000,
       generatedAt: "ts",
     });
     assert.equal(result.success, true);
   });
 
-  test("CostBurnResponseSchema rejects the retired USD fields (#885)", () => {
-    // The strict schema rejects daySpent / dailyBudget / headroomPct — the
-    // USD dollar-budget fiction retired in #885. Re-adding any of them is a
-    // regression the strict() catches.
+  test("CostBurnResponseSchema rejects the retired USD fields (#885, #1413)", () => {
+    // The strict schema rejects daySpent / dailyBudget / headroomPct (the USD
+    // dollar-budget fiction retired in #885) and lastHourSpark (the
+    // structurally-$0 USD-per-hour interface honest-deleted in #1413).
+    // Re-adding any of them is a regression the strict() catches.
     const result = CostBurnResponseSchema.safeParse({
+      tokensPerHour5h: 0,
+      tokensPerHour24h: 0,
       lastHourSpark: [],
       daySpent: 0,
       dailyBudget: 0,
@@ -322,7 +326,8 @@ describe("GET /now/cost-burn", () => {
   test("happy path — stamps generatedAt and passes through aggregator fields", async () => {
     const router = createNowPageRouter({
       getCostBurn: async () => ({
-        lastHourSpark: [10, 8],
+        tokensPerHour5h: 1_000_000,
+        tokensPerHour24h: 800_000,
       }),
       now: () => new Date("2026-05-26T12:00:00.000Z"),
     });
@@ -331,7 +336,9 @@ describe("GET /now/cost-burn", () => {
     const res = mockRes();
     await handler!(mockReq(), res);
     assert.equal(res._status, 200);
-    assert.deepEqual(res._body.lastHourSpark, [10, 8]);
+    assert.equal(res._body.tokensPerHour5h, 1_000_000);
+    assert.equal(res._body.tokensPerHour24h, 800_000);
+    assert.equal(res._body.lastHourSpark, undefined);
     assert.equal(res._body.daySpent, undefined);
     assert.equal(res._body.headroomPct, undefined);
     assert.equal(res._body.generatedAt, "2026-05-26T12:00:00.000Z");
