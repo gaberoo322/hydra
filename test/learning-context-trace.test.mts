@@ -136,3 +136,47 @@ describe("getContext returns a structured LearningContext", () => {
     closeRedisConnections();
   });
 });
+
+/**
+ * Issue #1455: the four bespoke block loaders collapsed into ONE generic
+ * loader (`loadBlock`) over per-source descriptors. The hit/miss/error envelope
+ * mapping is therefore covered by a SINGLE test exercising the loader directly
+ * with stub thunks — no Redis, no four near-identical per-source variants.
+ */
+describe("loadBlock maps a source read into the hit/miss/error envelope", () => {
+  test("hit / miss / error from one loader, dropPriority stamped from the table", async () => {
+    // hit: non-empty content → status "hit", itemCount carried from the read.
+    const hit = await learning.loadBlock({
+      source: "agent-memory",
+      load: async () => ({ content: "rendered patterns", itemCount: 3 }),
+    });
+    assert.equal(hit.status, "hit");
+    assert.equal(hit.content, "rendered patterns");
+    assert.equal(hit.itemCount, 3);
+    assert.equal(hit.dropPriority, learning.LEARNING_DROP_PRIORITY["agent-memory"]);
+    assert.equal(hit.error, undefined);
+
+    // miss: empty content → status "miss", itemCount forced to 0 regardless of
+    // what the read reported (the seam never emits a count for an empty block).
+    const miss = await learning.loadBlock({
+      source: "knowledge-base",
+      load: async () => ({ content: "", itemCount: 7 }),
+    });
+    assert.equal(miss.status, "miss");
+    assert.equal(miss.content, "");
+    assert.equal(miss.itemCount, 0);
+    assert.equal(miss.dropPriority, learning.LEARNING_DROP_PRIORITY["knowledge-base"]);
+    assert.equal(miss.error, undefined);
+
+    // error: thunk throws → status "error", content "", itemCount 0, error msg.
+    const err = await learning.loadBlock({
+      source: "by-file-reflections",
+      load: async () => { throw new Error("redis down"); },
+    });
+    assert.equal(err.status, "error");
+    assert.equal(err.content, "");
+    assert.equal(err.itemCount, 0);
+    assert.equal(err.dropPriority, learning.LEARNING_DROP_PRIORITY["by-file-reflections"]);
+    assert.equal(err.error, "redis down");
+  });
+});

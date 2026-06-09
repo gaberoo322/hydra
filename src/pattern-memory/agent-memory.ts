@@ -16,7 +16,8 @@
  *   PROMOTION_THRESHOLD            — exported constant
  *   recordPattern                  — POST /api/memory/:agent/pattern
  *   loadAgentMemory                — used by getContext()
- *   formatMemoryForPrompt          — formats raw memory string for prompts
+ *   formatMemoryForPrompt          — formats raw memory string for prompts;
+ *                                    returns {content,itemCount} (#1455)
  *   consolidateAgentPatterns       — daily prune driven by consolidate()
  *   detectStalePromotedRules       — pure helper (tests)
  *   processStaleRules              — pure helper (tests)
@@ -318,20 +319,43 @@ export async function loadAgentMemory(agentName: string): Promise<string> {
   return parts.join("\n");
 }
 
-export function formatMemoryForPrompt(memory: string, agentName: string): string {
-  if (!memory || memory.trim().length === 0) return "";
+/**
+ * Render the agent's Pattern Memory into a prompt block AND report how many
+ * promoted-pattern groups it actually emitted.
+ *
+ * Issue #1455 — the count is sourced from the structured group list this
+ * function assembles (the `prevent`/`reinforce` blocks that survive the
+ * frequency-rank cap), NOT regex-scanned out of the rendered markdown at the
+ * composition seam. The #804 count-from-data contract requires `itemCount` to
+ * come from the underlying data; counting the groups here — where the data is
+ * still structured — is the data source. `content` is "" / `itemCount` 0 when
+ * the agent has no renderable patterns.
+ */
+export function formatMemoryForPrompt(
+  memory: string,
+  agentName: string,
+): { content: string; itemCount: number } {
+  if (!memory || memory.trim().length === 0) return { content: "", itemCount: 0 };
 
   const blocks = memory.split(/^(?=### \[)/m).filter(r => r.trim().startsWith("### ["));
   if (blocks.length === 0) {
     const lines = memory.split("\n").filter(l => l.startsWith("- ") || l.startsWith("ACTION:"));
-    if (lines.length === 0) return "";
-    return `\n## PAST OUTCOMES (learn from these)\n${lines.slice(-10).join("\n")}\n`;
+    if (lines.length === 0) return { content: "", itemCount: 0 };
+    const kept = lines.slice(-10);
+    return {
+      content: `\n## PAST OUTCOMES (learn from these)\n${kept.join("\n")}\n`,
+      itemCount: kept.length,
+    };
   }
 
   const preventBlocks = blocks.filter(b => b.includes("[prevent]"));
   const reinforceBlocks = blocks.filter(b => b.includes("[reinforce]"));
 
   const parts: string[] = [];
+  // itemCount tracks the promoted-pattern GROUPS actually rendered into the
+  // prompt — one per `### [severity]` block emitted, counted from the block
+  // list here rather than re-parsed from the final string.
+  let itemCount = 0;
 
   if (preventBlocks.length > 0) {
     parts.push(`\n## PREVENTION PATTERNS (ranked by frequency — follow these)`);
@@ -344,7 +368,10 @@ export function formatMemoryForPrompt(memory: string, agentName: string): string
       const lines = block.split("\n").filter(l =>
         l.startsWith("ACTION:") || l.startsWith("LAST:") || l.startsWith("### [")
       );
-      if (lines.length > 0) parts.push(lines.join("\n"));
+      if (lines.length > 0) {
+        parts.push(lines.join("\n"));
+        itemCount++;
+      }
     }
   }
 
@@ -354,11 +381,15 @@ export function formatMemoryForPrompt(memory: string, agentName: string): string
       const lines = block.split("\n").filter(l =>
         l.startsWith("ACTION:") || l.startsWith("LAST:") || l.startsWith("### [")
       );
-      if (lines.length > 0) parts.push(lines.join("\n"));
+      if (lines.length > 0) {
+        parts.push(lines.join("\n"));
+        itemCount++;
+      }
     }
   }
 
-  return parts.length > 0 ? parts.join("\n\n") + "\n" : "";
+  if (parts.length === 0) return { content: "", itemCount: 0 };
+  return { content: parts.join("\n\n") + "\n", itemCount };
 }
 
 // ===========================================================================
