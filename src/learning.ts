@@ -36,9 +36,6 @@ import {
   loadAnchorReflectionsByFile,
   backfillByFileIndex,
   extractFilesFromAnchor,
-  loadRelevantReflections,
-  formatReflectionsForPrompt,
-  consolidateReflections,
 } from "./reflections/reflections.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
 import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
@@ -63,13 +60,15 @@ import { recordKnowledgeContextAvailability } from "./redis/ov-search-metrics.ts
  * cluster is still *composed* here, not *owned* here — the dynamic import that
  * reaches OV lives behind `loadKnowledgeBaseBlock`, keeping the cluster
  * boundary visible (see CONTEXT.md — Learning Context).
+ *
+ * Issue #1454: the `"global-reflections"` member was removed with the dead
+ * global reflection buffer subsystem. getContext() now composes four blocks.
  */
 export type LearningContextSource =
   | "agent-memory"
   | "knowledge-base"
   | "per-anchor-reflections"
-  | "by-file-reflections"
-  | "global-reflections";
+  | "by-file-reflections";
 
 /**
  * Per-source diagnostic envelope. `status` distinguishes three real cases:
@@ -96,9 +95,10 @@ export type LearningContextSource =
  * bundle is dropped WHOLE BLOCKS at a time (never sliced mid-text — slicing a
  * reflection body while leaving its header intact is exactly the corruption
  * that made post-budget counts unreliable). LOWER number = dropped FIRST.
- * The contract is the design-concept drop order:
+ * The contract is the design-concept drop order (issue #1454 removed the
+ * global-reflections head of the order with the dead buffer subsystem):
  *
- *   global (0) → knowledge-base (1) → agent-memory (2) → by-file (3) → per-anchor (4)
+ *   knowledge-base (0) → agent-memory (1) → by-file (2) → per-anchor (3)
  *
  * Per-anchor reflections carry the HIGHEST dropPriority so they are the LAST
  * learning block to be shed — retry-correctness invariant (#193: prior-failure
@@ -124,11 +124,10 @@ export interface LearningContextBlock {
  * read this table was retired in issue #1128.)
  */
 export const LEARNING_DROP_PRIORITY: Record<LearningContextSource, number> = {
-  "global-reflections": 0,
-  "knowledge-base": 1,
-  "agent-memory": 2,
-  "by-file-reflections": 3,
-  "per-anchor-reflections": 4,
+  "knowledge-base": 0,
+  "agent-memory": 1,
+  "by-file-reflections": 2,
+  "per-anchor-reflections": 3,
 };
 
 /**
@@ -289,20 +288,6 @@ async function loadByFileReflectionsBlock(
   }
 }
 
-async function loadGlobalReflectionsBlock(
-  anchor: { type: string; reference: string },
-): Promise<LearningContextBlock> {
-  try {
-    const relevant = await loadRelevantReflections(anchor);
-    const formatted = formatReflectionsForPrompt(relevant);
-    if (formatted) return mkBlock("global-reflections", "hit", formatted, relevant.length);
-    return mkBlock("global-reflections", "miss", "", 0);
-  } catch (err: any) {
-    console.error(`[Learning] getContext: global reflections failed for "${anchor.reference}": ${err.message}`);
-    return mkBlock("global-reflections", "error", "", 0, err.message);
-  }
-}
-
 /**
  * Load Pattern Memory + Reflections context for an agent + anchor.
  * Returns a structured trace: each source contributes a block with a
@@ -315,7 +300,8 @@ async function loadGlobalReflectionsBlock(
  * `anchor.files` (optional) hints scope files for the by-file index
  * lookup. When omitted, file paths are extracted from `anchor.reference`.
  *
- * The five sources, in prompt order (issue #804 added knowledge-base):
+ * The four sources, in prompt order (issue #804 added knowledge-base; issue
+ * #1454 removed the dead global-reflections block):
  *
  *   1. agent-memory             — promoted pattern lessons for `agent`
  *   2. knowledge-base           — OpenViking memory search (lifted out of the
@@ -324,7 +310,6 @@ async function loadGlobalReflectionsBlock(
  *   3. per-anchor-reflections   — legacy verbatim-key match on `reference`
  *   4. by-file-reflections      — reflections from *other* anchors that
  *                                 touched the same files (issue #326)
- *   5. global-reflections       — Reflexion-style relevant reflections
  */
 export async function getContext(
   agent: string,
@@ -336,7 +321,6 @@ export async function getContext(
   blocks.push(await loadKnowledgeBaseBlock(agent));
   blocks.push(await loadPerAnchorReflectionsBlock(anchor));
   blocks.push(await loadByFileReflectionsBlock(anchor));
-  blocks.push(await loadGlobalReflectionsBlock(anchor));
 
   return buildContext(blocks);
 }
@@ -350,16 +334,11 @@ export async function getContext(
  * auto-promoted feedback rules. Called by the scheduler once per day.
  */
 export async function consolidate(): Promise<void> {
-  // Issue #1356 — flush the global reflection buffer into the per-anchor store
-  // FIRST, so planning-time injection (loadAnchorReflections) sees the
-  // reap-side failure narratives (#1119) instead of staying starved. Runs
-  // before pattern/rule consolidation; best-effort, never throws.
-  try {
-    await consolidateReflections();
-  } catch (err: any) {
-    console.error(`[Learning] Reflection consolidation failed: ${err.message}`);
-  }
-
+  // Issue #1454 — the daily reflection-buffer consolidation step was removed
+  // with the dead global reflection buffer subsystem. The reap-side writer it
+  // used to drain had already been severed (no live producer), so the bridge
+  // had nothing to flush. Per-anchor reflections are written directly by
+  // recordAnchorReflection on the live #841 path.
   await consolidateAgentPatterns();
 
   // Detect and process stale auto-promoted rules in feedback files

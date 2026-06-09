@@ -156,24 +156,23 @@ describe("GET /api/reflections?anchor= (#841 live injection)", () => {
     assert.ok(body.formatted.includes("cycle-other-anchor-002"));
   });
 
-  test("no anchor param preserves the global-buffer behavior", async (t) => {
+  test("no anchor param is a 400 (issue #1454: anchor is required)", async (t) => {
     requireRedis(t);
-    await reflections.recordReflection({
-      cycleId: "cycle-global-003",
-      anchorType: "failing-test",
-      anchorReference: "global buffer entry",
-      failureMode: "verification-failed",
-      whatFailed: "x",
-      whyItFailed: "y",
-      whatToTryDifferently: "z",
-    });
-
+    // The legacy no-anchor "mode 1" returned the dead global reflection buffer.
+    // That buffer subsystem was deleted (#1454); `anchor` is now required, so a
+    // missing anchor is a schema-validation failure rather than a buffer dump.
     const res = await fetch(`${baseUrl}/api/reflections`);
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 400);
     const body = await res.json();
-    // Global mode shape: { reflections: [...], count } — NOT the anchor shape.
-    assert.ok(Array.isArray(body.reflections));
-    assert.equal(typeof body.count, "number");
-    assert.equal(body.anchor, undefined, "global mode must not carry the anchor field");
+    assert.equal(body.code, "schema-validation-failed");
+    assert.ok(Array.isArray(body.issues), "400 carries the zod issues array");
+  });
+
+  test("blank anchor param is a 400 (trimmed to empty)", async (t) => {
+    requireRedis(t);
+    const res = await fetch(`${baseUrl}/api/reflections?anchor=${encodeURIComponent("   ")}`);
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.code, "schema-validation-failed");
   });
 });

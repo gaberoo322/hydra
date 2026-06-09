@@ -5,16 +5,15 @@
  * read routes: a handler reads typed fields off a parsed `src/schemas/*` zod
  * schema rather than `typeof req.query.x === "string"` raw reads.
  *
- * `GET /reflections?anchor=&files=` has two modes selected by `anchor`:
- *   - absent → global reflection buffer;
- *   - present → per-anchor + by-file reflection narrative (the live injection
- *     path, issue #841), with an optional `files` CSV scope hint.
+ * `GET /reflections?anchor=&files=` returns the per-anchor + by-file
+ * reflection narrative (the live injection path, issue #841), with an optional
+ * `files` CSV scope hint.
  *
- * Both fields are OPTIONAL strings — an absent `anchor` is a valid request
- * (mode 1), not a client error — so this schema never rejects; the route reads
- * the typed fields and branches on `anchor` exactly as before. The legacy code
- * `.trim()`ed `anchor`; the schema carries that trim so the route's
- * mode-select branch behaves identically.
+ * Issue #1454: `anchor` is now REQUIRED and non-empty. The legacy no-anchor
+ * "mode 1" returned the dead global reflection buffer, which was deleted with
+ * the buffer subsystem — so an absent/blank `anchor` is a client error (400),
+ * not a valid request. The `.trim()` runs before the min-length check so a
+ * whitespace-only `anchor` rejects too. `files` stays optional.
  *
  * NOTE: the sibling `GET /calibration/outcomes` proxy builds
  * `new URLSearchParams(req.query)` to forward the WHOLE query string
@@ -23,9 +22,9 @@
  */
 import { z } from "zod";
 
-/** `GET /reflections?anchor=&files=` — both optional; non-strict. */
+/** `GET /reflections?anchor=&files=` — `anchor` required non-empty; `files` optional. */
 export const ReflectionsQuerySchema = z.object({
-  anchor: z.string().trim().optional(),
+  anchor: z.string().trim().min(1, "anchor is required"),
   files: z.string().optional(),
 });
 

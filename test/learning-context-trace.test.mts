@@ -7,6 +7,10 @@
  * — Knowledge Base sits at a different seam queried by subagents directly).
  * Test exercises the pure shape; doesn't require Redis-resident reflections
  * to be present (the four-block layout holds even when every block misses).
+ *
+ * Issue #1454: the dead global-reflections block was removed — getContext()
+ * composes four blocks (agent-memory, knowledge-base, per-anchor-reflections,
+ * by-file-reflections).
  */
 
 import { test, describe } from "node:test";
@@ -35,7 +39,8 @@ describe("getContext returns a structured LearningContext", () => {
 
     // Issue #804: the Knowledge Base (OpenViking) is now its own honest block,
     // composed between agent-memory and the reflection sources.
-    assert.equal(ctx.blocks.length, 5, "five sources contribute one block each");
+    // Issue #1454: the dead global-reflections block was removed — four blocks.
+    assert.equal(ctx.blocks.length, 4, "four sources contribute one block each");
     assert.deepEqual(
       ctx.blocks.map((b: any) => b.source),
       [
@@ -43,9 +48,8 @@ describe("getContext returns a structured LearningContext", () => {
         "knowledge-base",
         "per-anchor-reflections",
         "by-file-reflections",
-        "global-reflections",
       ],
-      "block order is the prompt order — agent-memory first, global-reflections last",
+      "block order is the prompt order — agent-memory first, by-file-reflections last",
     );
     // Issue #804 PR-B: per-anchor carries the highest dropPriority of all five
     // blocks (dropped last under budget pressure — #193 retry correctness).
@@ -106,11 +110,11 @@ describe("getContext returns a structured LearningContext", () => {
     }
   });
 
-  test("missing or empty agent name still returns five blocks", async (t) => {
+  test("missing or empty agent name still returns four blocks", async (t) => {
     // The function shouldn't throw on weird-but-non-crashing inputs; it
     // should return a structured trace where each source decided what
-    // to do. The contract is "five blocks, one per source" (issue #804 added
-    // the knowledge-base block).
+    // to do. The contract is "four blocks, one per source" (issue #804 added
+    // the knowledge-base block; issue #1454 removed global-reflections).
     let ctx;
     try {
       ctx = await learning.getContext("", {
@@ -125,7 +129,7 @@ describe("getContext returns a structured LearningContext", () => {
       throw err;
     }
 
-    assert.equal(ctx.blocks.length, 5);
+    assert.equal(ctx.blocks.length, 4);
   });
 
   test("after() — close Redis connections", () => {
