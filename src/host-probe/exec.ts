@@ -229,9 +229,3 @@ export function classifyProbeFailure(raw: RawProbeResult): HostProbeErrorCode {
   if (raw.timedOut) return "host-probe-timeout";
   return "host-probe-failed";
 }
-
-/** Internal constants exposed for unit tests only. */
-export const _testing = {
-  DEFAULT_PROBE_TIMEOUT_MS,
-  DEFAULT_MAX_BUFFER,
-};
