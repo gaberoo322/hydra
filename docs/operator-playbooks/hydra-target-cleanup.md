@@ -1,6 +1,6 @@
 ---
 name: hydra-target-cleanup
-description: Non-interactive deterministic demote-only dead-export sweep over the Target (~/hydra-betting/web). Runs knip, keeps only demote-class findings (export still referenced in-file) in files past the 45-day wiring grace period, and files one ready-for-agent backlog item per file whose acceptance criterion is "drop the export keyword AND npm test/typecheck/deadcode:check still pass with a tightened baseline". Dry-run by default; --apply files backlog items. Zero AskUserQuestion.
+description: Non-interactive deterministic dead-code pass over the Target (~/hydra-betting/web), in two phases. Phase 1 (mechanical): knip-driven demote-only dead-export sweep — one ready-for-agent backlog item per file whose acceptance criterion is "drop the export keyword AND npm test/typecheck/deadcode:check still pass with a tightened baseline". Phase 2 (judgment): reads the Target's wiring-status ledger and files needs-triage wire-or-retire decision items for modules past the grace period. Dry-run by default; --apply files backlog items. Zero AskUserQuestion.
 when_to_use: "When the Target backlog is idle and the autopilot wants to turn spare capacity into high-confidence dead-code hygiene on hydra-betting, or when the operator says 'target cleanup scan', '/hydra-target-cleanup', or 'sweep target dead code'. Dispatched by the autopilot `cleanup_target` signal class on the `target_backfill_idle` signal, suppressed first by `target_cleanup_board_saturated`."
 allowed_tools_claude: Read(*) Glob(*) Grep(*) Bash(*)
 arguments: [apply]
@@ -37,7 +37,7 @@ The Target's `CLAUDE.md` forbids ad-hoc cleanup commits, with one carve-out (rul
 ## What this skill is NOT
 
 - **NOT a code-writer.** It never edits the Target, never opens a PR. The actual demote is a later `hydra-target-build` pickup of the backlog item it files.
-- **NOT a deleter.** It emits zero deletions — not of exports, not of files, not in `src/lib/providers/`, not anywhere. Delete-class findings are counted in the report and deferred to the wire-or-retire phase (step 4 of the plan).
+- **NOT a deleter.** It emits zero deletions — not of exports, not of files, not in `src/lib/providers/`, not anywhere. Delete-class export findings are counted in the report and deferred; module-level retirements only ever happen downstream of a wire-or-retire decision item that triage explicitly resolved to RETIRE (and `ready-for-human` when intent is unclear).
 - **NOT interactive.** Zero `AskUserQuestion` calls.
 - **NOT a heuristic pass.** Findings are whatever `knip` reports; the classification is `classifyExportFix()` on the symbol's own source. Never file a "this looks dead" finding the tool didn't report.
 
@@ -93,6 +93,22 @@ The runner (`planTargetCleanupEmit()`, pure + tested) owns the whole pipeline:
 
 Every emitted item carries labels **`cleanup-scan` + `ready-for-agent`** (the label is the saturation/dedup count seam; the routing is the confidence decision — the acceptance check is deterministic, so no triage gate is needed) and instructs the picker to: demote each listed symbol, run `npm test` + `npm run typecheck`, run `npm run deadcode:update-baseline`, and commit with the scan citation the Target's CLAUDE.md rule 3 requires.
 
+### 3.5 Wire-or-retire decision items (the judgment phase — step 4 of the plan)
+
+After the demote emit, run the second deterministic emitter. Its input is the Target's **committed wiring-status ledger** (`docs/agents/wiring-status.md`, generated Target-side by `npm run deadcode:ledger` — hydra-betting PR #98). Never regenerate the ledger from this skill: the scan must not mutate the Target's working tree; staleness is handled by each item's verify-first step plus dedup.
+
+```bash
+# Dry-run (prints the plan, files nothing):
+npx tsx scripts/ci/hydra-target-wire-or-retire-emit.ts
+
+# Apply (files one needs-triage decision item per module, moved to the triage lane):
+npx tsx scripts/ci/hydra-target-wire-or-retire-emit.ts --apply
+```
+
+The runner (`planWireOrRetireEmit()`, pure + tested) keeps only ledger rows with status `wire-or-retire` (modules past the 45-day grace with no runtime importer — `awaiting-wiring` and `protected-provider` rows are never eligible), dedups per module against open `wire-or-retire`-labelled items, caps at **3 per run** (oldest last-touched first; saturation back-stop at 5 open items), and renders title + body from the same row.
+
+**Confidence routing — this is the judgment half of the gate.** Where a demote is mechanically verifiable (→ `ready-for-agent`), wire-vs-retire is an *opinion*: the module was built with intent that either stalled or died, and deciding which requires recovering that intent. So these items route to **`needs-triage`** (the `triage` lane), mirroring how `hydra-architecture-scan` routes judgment candidates on the orch side. The item body carries the three-way decision protocol for the sweep agent or operator: **(a) WIRE** — intent live → rewrite into a concrete ready-for-agent wiring task; **(b) RETIRE** — intent gone → rewrite into a ready-for-agent retirement task citing the scan (Target CLAUDE.md rule 3); **(c) UNCLEAR** — route to `ready-for-human` and stop. **Ambiguity never resolves to deletion** (rule 6); nothing is deleted while an item sits in triage.
+
 ### 4. Report
 
 ```
@@ -128,7 +144,9 @@ Expected: demote-class findings batch one-item-per-file with the symbol-led titl
 ## Files
 
 - `docs/operator-playbooks/hydra-target-cleanup.md` — this playbook (source of truth; the skill is generated by `scripts/sync-skills.sh`).
-- `scripts/ci/hydra-target-cleanup-emit.ts` — the deterministic emit runner: `planTargetCleanupEmit()` (pure) + the thin fs/git/API wrapper.
+- `scripts/ci/hydra-target-cleanup-emit.ts` — the demote-phase emit runner: `planTargetCleanupEmit()` (pure) + the thin fs/git/API wrapper.
+- `scripts/ci/hydra-target-wire-or-retire-emit.ts` — the judgment-phase emit runner: `planWireOrRetireEmit()` (pure, ledger-driven) + the thin fs/API wrapper; routes to `needs-triage`.
+- `test/hydra-target-wire-or-retire-emit.test.mts` — ledger parse, eligibility (only wire-or-retire rows), dedup, cap, decision-protocol rendering, fail-closed ambiguity.
 - `scripts/ci/hydra-cleanup-render.ts` — shared pure helpers (`parseKnipReport`, `validateFinding`, `classifyExportFix`).
 - `test/hydra-target-cleanup-emit.test.mts` — demote-only filter, grace gate, per-file batching, dedup, cap, title/body coherence, fuzzy-dedup title diversity.
 - `scripts/autopilot/decide.py` — the `cleanup_target` signal class + selector that dispatches this skill.
