@@ -124,7 +124,7 @@ export const OAUTH_USAGE_TIMEOUT_MS = 5_000;
  * Store, but kept here (not there) because the credentials file is not a
  * transcript — each boundary seam stays single-purpose.
  */
-export function credentialsPath(): string {
+function credentialsPath(): string {
   return (
     process.env.HYDRA_CLAUDE_CREDENTIALS_PATH ||
     join(homedir(), ".claude", ".credentials.json")
