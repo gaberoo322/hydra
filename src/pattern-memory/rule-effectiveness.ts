@@ -358,7 +358,7 @@ export function applyDemotionToPattern(p: MemoryPattern, todayIso: string): void
  * Returns the list of actions taken (excluding skips) — useful for the
  * scheduler to log a one-line summary.
  */
-export async function processPromotedPatternEffectiveness(
+async function processPromotedPatternEffectiveness(
   agentName: "planner" | "executor" | "skeptic",
   now: Date = new Date(),
   env: NodeJS.ProcessEnv = process.env,
