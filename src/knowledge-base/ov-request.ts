@@ -94,7 +94,7 @@ export function ovBaseUrl(): string {
 }
 
 /** Default timeouts, matching the per-call-site values preserved 1:1 across the migration. */
-export const OV_DEFAULT_TIMEOUT_MS = 10_000; // ovFetch's historical POST default
+const OV_DEFAULT_TIMEOUT_MS = 10_000; // ovFetch's historical POST default
 
 /** How the success body should be unwrapped. `"json"` parses; `"text"` reads text; `"none"` ignores it. */
 type ParseMode = "json" | "text" | "none";
