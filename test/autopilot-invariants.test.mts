@@ -379,6 +379,73 @@ describe("autopilot invariants — assert_invariants.py (issue #426)", () => {
     assert.equal(runAsserts(plan, stateTarget).status, 0);
   });
 
+  // INV-010 (issue #1666 — defense-in-depth for the forced-research daily
+  // cap). Phase 4 runs AFTER the decide CLI's state write-back, so a
+  // legitimate forced dispatch is already reflected in the counter the
+  // check reads: counter == stamps is healthy, counter < in-plan stamps
+  // means the write half is unwired (the original #1666 defect), and
+  // counter > cap means _research_force_allowed failed to suppress.
+  const FORCED_RESEARCH = {
+    type: "dispatch", slot: "research_target", skill: "hydra-target-research",
+    prompt_args: { forced: true },
+  };
+  const TODAY_UTC = new Date().toISOString().slice(0, 10);
+
+  test("INV-010: forced research dispatch with an unstamped counter is rejected (write half unwired, #1666)", () => {
+    const plan = { actions: [FORCED_RESEARCH] };
+    const state = { ...baseState(), research_force_counter: {} };
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 1, "an uncounted forced research dispatch is the #1666 bug class and must raise");
+    assert.match(r.stderr, /INV-010/);
+    assert.match(r.stderr, /unwired/);
+  });
+
+  test("INV-010: forced research dispatch with today's counter over the cap is rejected", () => {
+    const plan = { actions: [FORCED_RESEARCH] };
+    const state = {
+      ...baseState(),
+      research_force_counter: { [TODAY_UTC]: { research_target: 5 } },
+    };
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 1, "post-stamp counter 5 > cap 4 means the read guard failed to suppress");
+    assert.match(r.stderr, /INV-010/);
+    assert.match(r.stderr, /failed to suppress/);
+  });
+
+  test("INV-010: forced research dispatch with a matching post-stamp counter passes (including the 4th of the day)", () => {
+    const plan = { actions: [FORCED_RESEARCH] };
+    // 1st of the day (post-stamp counter = 1) and the legitimate 4th
+    // (post-stamp counter = cap exactly) must both pass — `>` not `>=`.
+    for (const count of [1, 4]) {
+      const state = {
+        ...baseState(),
+        research_force_counter: { [TODAY_UTC]: { research_target: count } },
+      };
+      const r = runAsserts(plan, state);
+      assert.equal(r.status, 0,
+        `post-stamp counter ${count} must pass INV-010, got: ${r.stderr}`);
+    }
+  });
+
+  test("INV-010: non-forced research dispatch ignores the counter entirely", () => {
+    const plan = {
+      actions: [{ type: "dispatch", slot: "research_target", skill: "hydra-target-research", prompt_args: {} }],
+    };
+    const state = { ...baseState(), research_force_counter: {} };
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 0, `unforced research dispatch must not trip INV-010: ${r.stderr}`);
+  });
+
+  test("INV-010: over-cap counter with NO forced dispatch in the plan passes (suppression working)", () => {
+    const plan = { actions: [{ type: "dispatch", slot: "dev_orch", skill: "hydra-dev" }] };
+    const state = {
+      ...baseState(),
+      research_force_counter: { [TODAY_UTC]: { research_target: 9 } },
+    };
+    const r = runAsserts(plan, state);
+    assert.equal(r.status, 0, `an exhausted cap with no forced dispatch is healthy: ${r.stderr}`);
+  });
+
   test("happy path: empty plan passes all invariants", () => {
     const r = runAsserts({ actions: [] }, baseState());
     assert.equal(r.status, 0);

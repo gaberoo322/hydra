@@ -29,6 +29,9 @@ Greppable IDs (also asserted by `test/autopilot-invariants.test.mts`):
   INV-009  design_concept_orch precedes dev_orch on the same anchor in
            the same plan (issue #466 — Phase B warn-only: violations are
            logged to state.warnings[] rather than raised)
+  INV-010  forced research dispatches are counted and under the daily
+           cap (issue #1666 — defense-in-depth for the
+           research_force_counter write half)
 
 Usage from decide.py / Bash:
 
@@ -46,6 +49,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import Iterable
 
 
@@ -76,6 +80,12 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # construction. Mirror of decide.py's SCOPE_TARGET_ONLY_EXCLUDE.
     "scout_orch",
 )
+
+
+# Forced-research daily cap mirror — kept in sync with
+# decide.py:RESEARCH_FORCE_DAILY_CAP (grilled decision 6). Same standalone
+# rationale as the scope constants above: we do NOT import decide here.
+RESEARCH_FORCE_DAILY_CAP = 4
 
 
 def _scope_excluded(scope: str, cls: str) -> bool:
@@ -262,6 +272,89 @@ def check_inv009(actions: list[dict], state: dict) -> None:
             })
 
 
+def check_inv010(actions: list[dict], state: dict) -> None:
+    """INV-010 forced research dispatches are counted and under the daily cap.
+
+    Issue #1666 defense-in-depth (design-concept artifact qaTrace item 7):
+    the 4/day forced-research cap shipped as dead code once before — the
+    read guard existed but nothing wrote `research_force_counter`, and one
+    run force-dispatched research_target 46 times. This invariant defends
+    against BOTH halves of that bug class re-surfacing.
+
+    Timing: Phase 4 runs after the `decide` CLI has already written the
+    plan-time stamp back to the state file (`_persist_state_writeback`),
+    so the counter read here INCLUDES this plan's own forced dispatches.
+    Both arms are calibrated to that post-stamp view:
+
+      (a) cap arm — a forced research dispatch while the slot's TODAY
+          (UTC) counter is STRICTLY ABOVE the cap means
+          `_research_force_allowed` failed to suppress (the legitimate
+          4th dispatch reads exactly cap=4 post-stamp, so `>` not `>=`).
+      (b) wiring arm — a forced research dispatch whose slot counter
+          (summed across day keys; prune-on-write keeps exactly one)
+          records FEWER stamps than this plan's forced dispatches means
+          the write half (`_research_force_stamp` + CLI write-back) is
+          unwired — the original #1666 defect. Failing the turn here is
+          the correct direction: an uncounted forced dispatch is exactly
+          the unbounded-churn input the cap exists to break, and the
+          next turn starts fresh.
+
+    Non-forced research dispatches and forced dispatches on non-research
+    slots are out of scope. A counter that is over-cap with NO forced
+    dispatch in the plan is fine — that is suppression working.
+    """
+    counters = state.get("research_force_counter")
+    if not isinstance(counters, dict):
+        counters = {}
+    forced_in_plan: dict[str, int] = {}
+    for a in actions:
+        if a.get("type") != "dispatch":
+            continue
+        prompt = a.get("prompt_args") or {}
+        if prompt.get("forced") is not True:
+            continue
+        slot = str(a.get("slot") or "")
+        if not slot.startswith("research"):
+            continue
+        forced_in_plan[slot] = forced_in_plan.get(slot, 0) + 1
+    if not forced_in_plan:
+        return
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    today_bucket = counters.get(today)
+    for slot, in_plan in forced_in_plan.items():
+        used_today = 0
+        if isinstance(today_bucket, dict):
+            try:
+                used_today = int(today_bucket.get(slot, 0))
+            except (TypeError, ValueError):
+                used_today = 0
+        if used_today > RESEARCH_FORCE_DAILY_CAP:
+            raise InvariantError(
+                "INV-010",
+                f"forced {slot} dispatch with today's research_force_counter="
+                f"{used_today} > cap {RESEARCH_FORCE_DAILY_CAP} — "
+                "_research_force_allowed failed to suppress",
+            )
+        # Wiring arm sums across ALL day keys so a stamp landing just
+        # before a UTC-midnight Phase 4 cannot false-positive.
+        recorded = 0
+        for by_day in counters.values():
+            if not isinstance(by_day, dict):
+                continue
+            try:
+                recorded += int(by_day.get(slot, 0))
+            except (TypeError, ValueError):
+                pass  # intentional: corrupt entry counts as 0 (fail toward raising)
+        if recorded < in_plan:
+            raise InvariantError(
+                "INV-010",
+                f"plan carries {in_plan} forced {slot} dispatch(es) but "
+                f"research_force_counter records only {recorded} — the "
+                "stamp/write-back half of the daily cap is unwired "
+                "(#1666 bug class)",
+            )
+
+
 # ---------------------------------------------------------------------------
 # Aggregate entry point
 # ---------------------------------------------------------------------------
@@ -276,6 +369,7 @@ ALL_CHECKS = (
     ("INV-007", check_inv007, False),
     ("INV-008", check_inv008, True),
     ("INV-009", check_inv009, True),
+    ("INV-010", check_inv010, True),
 )
 
 
