@@ -130,16 +130,39 @@ Wire the built pure modules into production paths and close the measurement feed
 - [x] Retire deprecated pinnacle* field aliases from SportsbookPredictionEdgeSignal (35 call sites) — #64 COMPLETE 2026-06-09
 
 ## M8: Catalyst Wiring & Pre-Live Safety
+status: complete
+started: 2026-06-09
+completed: 2026-06-09
+
+Wire the remaining zero-caller pure modules, close the last learning-loop gaps before first real-money dual-leg runs, and add operator-visibility tools for WC 2026.
+
+- [x] Wire accumulateSportsTimeToSignal into a calibration route (catalyst reaction lag populated for WC) — POST /api/calibration/sports-time-to-signal + sports-catalyst-response-cohorts COMPLETE
+- [x] Surface buildWorldCupArbClusteringHeatmap via API route (operator divergence-by-phase visibility ahead of June 12) — #69 COMPLETE
+- [x] Wire buildSportExposureClusters into preflight risk check (sport-cluster correlation guard for real-money safety) — #68 COMPLETE
+- [x] Wire summarizeVenueOrderPnlPhasesByPolicy into PnL page (scan edge vs slippage vs fee decomposition) — #67 COMPLETE
+- [x] Add circuit breaker status indicator to SiteNav (at-a-glance execution health on every page) — #66 COMPLETE
+- [x] Add error observability to WebSocket silent catch blocks (audit + annotate all provider WS handlers) — bd11a263 COMPLETE
+- [x] Wire detectSettlementOrphans into reconciliation health route (pre-live orphan detection baseline) — c6eb5a7c COMPLETE
+- [x] Wire Kalshi incentive-maker ranking into KXWC+KXNBA scanner candidate ranking — 8a36ad23 COMPLETE (beyond-plan)
+- [x] Wire settlement-criteria preflight into arbitrage execute route — 88ac675d COMPLETE (beyond-plan)
+- [x] Wire Kalshi 0DTE sports scanner into GET /api/scanner/0dte-sports — #73 COMPLETE (beyond-plan)
+- [x] Wire phase-aware Polymarket maker-reward EV into sports candidate ranking — #72 COMPLETE (beyond-plan)
+- [x] Wire fill-rate-discrepancy + slippage attribution into operator-health — #71 COMPLETE (beyond-plan)
+- [x] Surface sequential dual-leg latency-SLA breaches in execution-timeline — #70 COMPLETE (beyond-plan)
+- [x] Wire sports-catalyst-response-cohorts into calibration route — #74 COMPLETE (beyond-plan)
+- [x] Source Polymarket reward phase overrides into run-cycle ranking — #75 COMPLETE (beyond-plan)
+
+## M9: Capital Velocity & Execution Lifecycle
 status: active
 started: 2026-06-09
 completed:
 
-Wire the remaining zero-caller pure modules, close the last learning-loop gaps before first real-money dual-leg runs, and add operator-visibility tools for WC 2026.
+Wire the remaining zero-caller execution and accounting modules to complete the pre-live operator readiness picture. Focused on capital allocation, settlement verification, GTD order lifecycle, and daily P&L accounting.
 
-- [ ] Wire accumulateSportsTimeToSignal into a calibration route (catalyst reaction lag populated for WC) — priorities #1
-- [ ] Surface buildWorldCupArbClusteringHeatmap via API route (operator divergence-by-phase visibility ahead of June 12) — priorities #2
-- [ ] Wire buildSportExposureClusters into preflight risk check (sport-cluster correlation guard for real-money safety) — priorities #3
-- [ ] Wire summarizeVenueOrderPnlPhasesByPolicy into PnL page (scan edge vs slippage vs fee decomposition) — priorities #4
-- [ ] Add circuit breaker status indicator to SiteNav (at-a-glance execution health on every page) — priorities #5
-- [ ] Add error observability to WebSocket silent catch blocks (audit + annotate all provider WS handlers) — priorities #6
-- [ ] Wire detectSettlementOrphans into reconciliation health route (pre-live orphan detection baseline) — priorities #7
+- [ ] Wire operator-day-accounting.ts into daily P&L summary route + build /wagers page — priorities #1
+- [ ] Wire fund-distribution-monitor.ts into operator health dashboard (venue rebalancing alerts) — priorities #2
+- [ ] Wire settlement-velocity-allocation.ts into dual-leg sizing preflight (settlement-speed-aware stake) — priorities #3
+- [ ] Wire settlement-verification-polling.ts into reconciliation polling job (active divergence detection) — priorities #4
+- [ ] Wire maker-order-lifecycle.ts into Polymarket GTD maker order management (drift-triggered cancel/refresh) — priorities #5
+- [ ] Wire polymarket-builder-revenue-share-reconciler.ts into daily reconciliation job (fee credit accounting) — priorities #6
+- [ ] Wire venue-maintenance-deferral.ts into execute route preflight (maintenance-window execution deferral) — priorities #7
