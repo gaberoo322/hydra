@@ -102,6 +102,7 @@ export async function claimNextQueuedBacklogItem(
   lua: string,
   nowMs: number,
   wipLimit: number,
+  itemId?: string,
 ): Promise<string | null> {
   const r = getRedisConnection();
   const result = await r.eval(
@@ -112,6 +113,9 @@ export async function claimNextQueuedBacklogItem(
     redisKeys.backlogLane("inProgress"),
     nowMs,
     wipLimit,
+    // ARGV[3]: optional targeted-claim item id (issue #1682). Empty string
+    // means "pop the queue head" — the pre-#1682 behavior.
+    itemId ?? "",
   );
   return result === null || result === undefined ? null : String(result);
 }
