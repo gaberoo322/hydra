@@ -233,9 +233,3 @@ export function classifyFailure(raw: RawExecResult): GhErrorCode {
   }
   return "gh-failed";
 }
-
-/** Internal helpers exposed for unit tests only. */
-export const _testing = {
-  DEFAULT_GH_TIMEOUT_MS,
-  DEFAULT_MAX_BUFFER,
-};
