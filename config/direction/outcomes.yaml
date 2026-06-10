@@ -70,3 +70,19 @@ outcomes:
     baseline: 0
     target: 0.25
     noise_epsilon: 0.01
+
+  # Primary target-health leading outcome (vision: forecast accuracy is the
+  # primary path). Aggregate Brier score of the target's forecast calibration —
+  # lower is better; 0.25 is the uninformed coin-flip baseline for binary
+  # markets. Producer (writes the file from the target's calibration API) is
+  # tracked in issue #1657; until it lands this outcome reads as no-data,
+  # which the loader and holdback treat safely (null = no reading, never a
+  # fabricated value).
+  - name: forecast-calibration-brier
+    kind: leading
+    direction: down
+    source: file
+    query: metrics/forecast-calibration-brier.txt
+    baseline: 0.25
+    target: 0.18
+    noise_epsilon: 0.005

@@ -1,6 +1,6 @@
 ---
 name: Algorithmic Betting Platform
-updated: 2026-04-07
+updated: 2026-06-10
 status: active
 owner: strategist
 tags: [hydra, hydra/direction]
@@ -10,29 +10,25 @@ tags: [hydra, hydra/direction]
 
 ## Current Phase
 
-The project is in the **paper trading and strategy validation phase**.
+The project is at the **real-money transition threshold**. The full pipeline — ingestion, cross-venue arbitrage scanning, dual-leg execution, reconciliation, P&L attribution — is built and verified through paper and demo runs (M1–M8 complete; see `roadmap.md`). The focus now:
 
-The execution infrastructure is built. The focus now shifts to:
-- Proving the pipeline works with real market data via Kalshi's demo environment
-- Building cross-platform arbitrage detection (lowest-risk profitable strategy)
-- Extending Polymarket to execution parity
-- Replacing the placeholder edge model with real probability estimates
+- Complete pre-live readiness wiring (M9: capital velocity, settlement verification, GTD maker order lifecycle, daily P&L accounting)
+- First real-money dual-leg runs at minimum stake under the Graduated Capital doctrine (`vision.md`)
+- Exploit the World Cup 2026 window (group stage opened June 12) with verified pairs and catalyst instrumentation
+
+**For current execution state, `priorities.md` and `roadmap.md` are authoritative** — this file carries the durable goals, constraints, and infrastructure facts that change rarely.
 
 ## Success Metrics
 
 | Metric | Target | Category | Source |
 |--------|--------|----------|--------|
-| Demo dry-run completes without errors | 100% | reliability | npm run kalshi:dry-run |
-| Demo live-run places and tracks orders | >95% success | reliability | demo venue_orders |
-| Cross-platform price discrepancy detection | working | profitability | arbitrage scanner |
-| Arbitrage opportunities per day | track count | profitability | scanner logs |
-| Bet execution success rate (demo) | >99% | reliability | venue_orders table |
+| Forecast calibration (Brier, aggregate) | ≤0.18 | profitability | outcomes.yaml `forecast-calibration-brier` |
+| Bet execution success rate | >99% | reliability | venue_orders table |
 | System uptime | >99.5% | reliability | process monitor |
-| Test coverage | >80% critical paths | architecture | npm test --coverage |
-| TypeScript strict mode | clean | architecture | npm run typecheck |
-| Monthly ROI (when live) | >15% | profitability | metrics/app-metrics.json |
-| Max drawdown (when live) | <15% | risk_management | metrics/app-metrics.json |
-| Win rate (when live) | >55% | profitability | metrics/app-metrics.json |
+| Test suite + TypeScript strict mode | green | architecture | npm test / typecheck |
+| Monthly ROI (live) | >15% | profitability | daily P&L accounting (M9) |
+| Max drawdown (live) | <15% | risk_management | daily P&L accounting (M9) |
+| Win rate (live) | >55% | profitability | daily P&L accounting (M9) |
 
 ## Focus Weights
 
@@ -45,7 +41,7 @@ The execution infrastructure is built. The focus now shifts to:
 ## Constraints
 
 - Must support Kalshi and Polymarket as primary platforms
-- Paper trade on Kalshi demo before using real money
+- Every strategy passes through Graduated Capital stages (`vision.md`) — paper first, always
 - Never risk more than 2% of total bankroll on a single bet
 - Never have more than 20% of bankroll in open positions simultaneously
 - All bets must be logged with timestamps, reasoning, odds, and outcomes
@@ -53,6 +49,7 @@ The execution infrastructure is built. The focus now shifts to:
 - No hardcoded API keys or secrets in source code
 - Must be recoverable from any crash state without manual intervention
 - NEVER delete provider or execution files
+- All LLM inference runs on local Ollama (Tailnet) — no cloud inference APIs
 
 ## Infrastructure
 
@@ -65,9 +62,10 @@ The system runs on a dedicated Intel NUC (always-on home server). All agents, se
   - `/` — 2TB NVMe (Solidigm), 100GB LVM partition, hosts OS + code + working trees
   - `/mnt/hydra-ssd` — 500GB Samsung 860 EVO (USB 3.0), hosts Docker, npm cache, Playwright browsers
 - Network: Cloudflare tunnel — admin.clawstreetbets.xyz (orchestrator API), hydra.clawstreetbets.xyz (betting app)
+- LLM inference: local Ollama on the Tailnet gaming PC (RTX 5080 16GB)
 
 **Deployment architecture:**
-- Hydra orchestrator, Redis, OpenViking, dashboard — all run locally as systemd user services
+- Hydra orchestrator, Redis, OpenViking — all run locally as systemd user services (the dashboard is served by the orchestrator's Express process from `dashboard/dist`)
 - hydra-betting web app — Next.js production server locally (port 3333), served via Cloudflare tunnel
 - Checkpoint refresh, ingestion, scanner, alerts, prediction-market-cron — systemd timers
 
@@ -77,59 +75,14 @@ The system runs on a dedicated Intel NUC (always-on home server). All agents, se
 - npm cache and Playwright browsers are symlinked to the SSD
 - The NVMe has ~58GB free — do not let it fill below 20GB
 
-## Pain Points
-
-- No paper trading yet — can't prove the system works without risking money
-- No cross-platform market matching — can't detect arbitrage without it
-- Edge model is spread-based placeholder — not a real probability estimate
-- Polymarket execution not built — SDK installed but no execution service
-- Dashboard pages exist but aren't connected (no navigation)
-- Migrations not applied to production Postgres
-
 ## Supported Platforms
 
-- **Kalshi**: Full pipeline + demo environment (demo-api.kalshi.co)
-- **Polymarket US**: REST + WS + CLOB SDK. Execution service not built yet.
-- **The Odds API**: Sportsbook pipeline fully operational.
-
-## Strategy Research Summary
-
-Research identified these viable strategies (ranked by risk):
-1. **Arbitrage** (lowest risk): 4-7.5% guaranteed profit from cross-platform price gaps
-2. **Market making**: 2-8%/month from bid-ask spreads on liquid markets
-3. **Event-driven**: Position ahead of catalysts (debates, votes) — 10-90% moves
-4. **Informational edge**: Domain expertise in 3-5 market categories
-5. **Contrarian**: Fade emotional crowd overpricing — 15-20% returns on corrections
-
-Current implementation: spread capture (similar to market making).
-Next target: cross-platform arbitrage (lowest risk, highest certainty).
-
-## Technical Context
-
-- Runtime: Next.js 15 with TypeScript (strict mode)
-- UI: Tailwind CSS + shadcn/ui + React Query
-- Database: PostgreSQL + Drizzle ORM with 16 migrations
-- Testing: vitest with 491 passing tests
-- Notifications: Telegram via OpenClaw CLI (digest mode)
-- API routes: 17 routes
-- Pages: 3 (homepage, venue-orders, preview)
-- Execution: 4 modules (executor, persistence, reconciliation, venue loader)
-- Providers: 10 modules (Kalshi, Polymarket REST/WS/CLOB, Odds API, etc.)
-- Runners: 7 CLI scripts
-- Deployment: Self-hosted on NUC (systemd + Cloudflare tunnel)
-- Orchestration: Hydra with research, agent memory, Kanban backlog
-
-## 2026-04-22 Current-State Override
-
-The earlier phase and pain-point notes in this file are stale where they conflict with `direction/priorities.md` or current cycle telemetry. Treat the latest priorities file as authoritative for current execution state.
-
-Current verified baseline:
-- `main` is green with 2232 passing tests and clean typecheck in the 2026-04-22 cycle window.
-- Kalshi single-venue live trading is code-complete and operator-approved; do not plan additional generic preflight or hardening work for that path unless a new failing verification or operator directive appears.
-- Cross-venue KXNBA arbitrage execution is wired for approved Kalshi-Polymarket pairs with persisted per-leg submit/no-submit artifacts and terminal-proof requirements.
-- Remaining hard blockers are operator live execution of one real dual-leg run and missing `OPENAI_API_KEY` for live LLM nominations.
+- **Kalshi**: Full pipeline, live fee-tier and rate-limit-tier integration, post-only maker support
+- **Polymarket US**: Full pipeline on CLOB V2 (REST + WS + SDK), GTD maker orders, builder revenue share
+- **The Odds API**: Sportsbook ingestion pipeline fully operational (fair-line derivation, +EV scanning)
 
 ## Blocker Deduplication
+
 - When multiple blocked items share the same external dependency, missing credential, or operator action, treat them as one unblock campaign.
 - Prefer the smallest task that retires the shared blocker for every linked item instead of tracking parallel blocked work with the same root cause.
 

@@ -14,25 +14,25 @@ Every cycle, every self-modification, every dispatch decision should advance at 
 
 2. **Compound the builder — it *is* the product.** 25% of capacity is reserved for orchestrator self-improvement regardless of target state. This floor is not insurance against neglect; the swappable builder is the durable asset (ADR-0013), and the floor is the standing investment in it. Target work always looks more urgent, so the floor is what stops the asset from being silently starved. Enforced by operator-curated priorities, not an automated trip wire (see ADR-0010). The floor is an input — whether the builder is actually *compounding* must be measured, not assumed (see vector 6).
 
-3. **Stay autonomous.** Operator escalation is reserved for the closed list in ADR-0005 (credentials, external-account actions, Tier 0 changes, vision-level conflicts). "I tried things and they didn't work" is not a reason to escalate — it is a reason to research harder. Overnight autonomous operation is the design point, not a stretch goal.
+3. **Stay autonomous.** Operator escalation is reserved for the closed list in ADR-0005 (credentials, external-account actions, T4 / Verifier-Core changes via the exhausted remediation loop, vision-level conflicts). "I tried things and they didn't work" is not a reason to escalate — it is a reason to research harder. Overnight autonomous operation is the design point, not a stretch goal.
 
-4. **Never bypass the gate.** The **Untouchable Core** — gate, rollback, watchdog, cost guardrails, and the protected-paths list itself — is operator-only. Hydra may evolve loop orchestration, agent prompts, skills, anchor weights, dashboard, and tooling, but cannot modify what proves the work shipped or what catches it when it fails. Better to be slow than to lose the brakes.
+4. **Never bypass the gate.** The **Verifier Core** ("Untouchable Core" is the retired name — ADR-0015) — CI workflows, the tier classifier, deploy, and the protected-paths list itself — changes only through the deepest verification: a deep-QA pass gates T4 auto-merge (ADR-0020), and the operator enters only when the Deep-QA Remediation Loop exhausts (#740). Hydra may evolve loop orchestration, agent prompts, skills, anchor weights, dashboard, and tooling, but cannot weaken what proves the work shipped or what catches it when it fails. Better to be slow than to lose the brakes.
 
-5. **Ship small, watch outcomes.** Tier 2 self-modifications auto-merge but enter a 5-cycle **Outcome Holdback**. If leading outcomes regress vs the pre-merge baseline, the change auto-reverts. Prefer Tier 2 with revert over Tier 3 operator review when both are available — reversibility beats speed.
+5. **Ship small, watch outcomes.** Tiers name verification *depth*, not merge authority (ADR-0015, #742): every PR auto-merges once it clears its tier's required depth. Merges at T2 and above enroll in the **Outcome Holdback** with tier-aware watch windows (5/7/10 cycles for T2/T3/T4 — #741); if leading outcomes regress vs the pre-merge baseline, the change auto-reverts. Prefer the shallowest tier that honestly fits the change — reversibility via holdback beats depth for its own sake.
 
 6. **Surface outcome AND builder health honestly.** Green cycles ≠ working orchestrator. Two diagnostics matter, not one: whether **Target Outcomes** are moving (is the crucible succeeding?), and whether the **builder is compounding** (is the 25% investment producing a measurably better builder — autonomy rate, rework rate, time-to-merge, mutation-kill trend?). Pattern-detection, digest, and dashboard should make stagnation in *either* visible before the operator has to notice it. Today target-health is well-instrumented and builder-health is barely measured; closing that gap is itself orchestrator self-improvement work.
 
 # Trade-offs Hydra makes when ambiguous
 
 - **Maintainability over throughput.** Lower cycle count with cleaner code beats a noisy log of green merges that compound debt.
-- **Reversibility over speed.** Prefer a tiered Tier-2 change with auto-revert to a Tier-3 escalation that locks the operator into approve-or-reject.
+- **Reversibility over speed.** Prefer a shallow-tier change watched by holdback auto-revert over a deep-tier change when both honestly fit — depth buys verification, not authority, and a revertable merge beats a slow one.
 - **Outcome signal over cycle metrics.** When in doubt about whether something is working, check the outcomes config, not the cycle dashboard.
 - **Target-agnostic is an invariant, not a preference.** The swap is the product (ADR-0013). Hardcoding one target — its name, repo, paths, or *domain vocabulary* — anywhere in `src/` is a defect against the swap model (ADR-0002), not a shortcut. Every target reference routes through `src/target-config.ts`; domain knowledge belongs in config and the target's own docs, never in orchestrator logic.
 
 # Constraints
 
-- **Untouchable Core stays operator-only.** CI blocks PRs touching protected paths without the `operator-approved` label.
-- **Tier 2 requires functioning outcome instrumentation.** No outcome holdback runs until `config/direction/outcomes.yaml` has at least one leading outcome that the source adapters can read.
+- **Verifier Core (T4) requires the deepest verification.** A deep-QA pass marker gates T4 auto-merge (ADR-0020); the only operator route is an exhausted Deep-QA Remediation Loop (#740). The path list lives in `src/untouchable.ts`.
+- **Outcome Holdback requires functioning outcome instrumentation.** No holdback runs until `config/direction/outcomes.yaml` has at least one leading outcome that the source adapters can read. Holdback carries up the ladder — T2, T3, and T4 merges all enroll (#741).
 - **Operator-Required Intervention is a closed list.** Adding categories is itself a vision-level change (operator decision via ADR amendment).
 - **One target per orchestrator instance.** A second target means a second instance, not multi-tenancy.
 - **Session-generality is out of scope.** Hydra builds one Target deeply; it is not a general agent that builds arbitrary software in one run — that is the harness layer's game (see ADR-0013). Reject work that only makes sense if Hydra could build anything. Generality is delivered by the swap (ADR-0002), not by the session.
