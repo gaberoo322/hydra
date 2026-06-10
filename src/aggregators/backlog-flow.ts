@@ -1,11 +1,16 @@
 /**
  * Backlog-flow aggregator (issue #620, PRD #615) — Explore page Flow tab.
  *
- * Per-class counts of issues `added`, `closed`, and `blocked` inside a
- * sliding window (default 7 days). "Class" here is the autopilot dispatch
- * taxonomy (`dev_orch`, `dev_target`, `qa`, `sweep_orch`, …) read from a
- * GitHub label — the same taxonomy used by `recent-merges.ts` for the Today
- * page. Issues without a known class label are bucketed under `unclassified`.
+ * Counts of issues `added`, `closed`, and `blocked` inside a sliding window
+ * (default 7 days), bucketed by **provenance label** — *which filing pipeline
+ * produced the issue* (`tool-scout`, `architecture-scan`, `cleanup-scan`,
+ * `sentry`), the same vocabulary `recent-merges.ts` uses for the Today page.
+ * The vocabulary is served by the Dispatch-Class Taxonomy Module
+ * (`src/taxonomy/classes.ts`), derived from the classes.json
+ * `provenanceLabel` column plus its residual list (#1672 — the prior
+ * `dev_orch`/`qa`/… class-label alphabet matched zero real labels, so every
+ * issue bucketed `unclassified`). Issues carrying no provenance label fall
+ * to the `unclassified` residual bucket; none are dropped.
  *
  * # Data path
  *
@@ -20,21 +25,22 @@
  *
  * # Design contract
  *
- * - **Pure classifiers exported.** `classFromLabels`, `bucketByClass`, and
- *   `iso8601DateOnly` are pure functions tested directly.
+ * - **Pure helpers exported.** `bucketByClass` and `iso8601DateOnly` are pure
+ *   functions tested directly (classification itself is the taxonomy
+ *   Module's `provenanceFromLabels`).
  * - **Never throws.** Each `gh` call runs under `Promise.allSettled`; a
- *   sub-source failure leaves that column at 0 for every class.
+ *   sub-source failure leaves that column at 0 for every bucket.
  * - **Window clamped.** windowDays is clamped to [1, 30] — the upper bound
- *   matches the `gh issue list` search-date sanity and keeps the per-class
+ *   matches the `gh issue list` search-date sanity and keeps the per-bucket
  *   table small enough to render without pagination.
  */
 
 import {
-  classFromLabels as seamClassFromLabels,
   listIssuesByLabelOrEmpty,
   listIssuesBySearchOrEmpty,
   type IssueRow,
 } from "../github/issues.ts";
+import { provenanceFromLabels } from "../taxonomy/classes.ts";
 import { settledOrEmpty } from "./settle.ts";
 import { windowStart as trendWindowStart, dayKey } from "./trend-series.ts";
 
@@ -43,7 +49,11 @@ import { windowStart as trendWindowStart, dayKey } from "./trend-series.ts";
 // ---------------------------------------------------------------------------
 
 export interface ClassFlowRow {
-  /** Autopilot class label, OR the literal "unclassified" bucket. */
+  /**
+   * Provenance label (`tool-scout` / `cleanup-scan` / …), OR the literal
+   * "unclassified" residual bucket. Wire key stays `class` for dashboard
+   * stability (FlowTab) — only the value vocabulary changed (#1672).
+   */
   class: string;
   added: number;
   closed: number;
@@ -78,10 +88,12 @@ type FlowIssue = Pick<IssueRow, "labels">;
 const MAX_WINDOW_DAYS = 30;
 const DEFAULT_WINDOW_DAYS = 7;
 
-// The autopilot dispatch-class taxonomy + the "unclassified" sentinel live in
-// the GitHub Issue/PR Read seam (issue #908) — one authoritative copy, no more
-// array-vs-Set drift with recent-merges.ts. `classFromLabels` below re-exports
-// the seam's classifier so existing importers/tests are unaffected.
+// The provenance vocabulary + classifier live in the Dispatch-Class Taxonomy
+// Module (`src/taxonomy/classes.ts`, #1672) — one authoritative copy derived
+// from classes.json. Only the residual bucket NAME is local: it folds the
+// classifier's null arm so the BacklogFlow wire shape keeps the literal
+// "unclassified" the dashboard already renders.
+const UNCLASSIFIED_BUCKET = "unclassified";
 
 // ---------------------------------------------------------------------------
 // Public entrypoint
@@ -143,18 +155,11 @@ export function clampWindowDays(d: number): number {
 }
 
 /**
- * Pure helper — exported for tests and the dashboard. Returns the first known
- * autopilot-class label on the issue, or "unclassified" if none match.
- * Case-sensitive. Delegates to the GitHub Issue/PR Read seam (issue #908) so
- * the taxonomy has exactly one home; re-exported here for backward
- * compatibility with existing importers.
- */
-export const classFromLabels = seamClassFromLabels;
-
-/**
- * Pure helper — exported for tests. Produces one row per class that appears
- * in ANY of the three buckets. Sorted by `added + closed + blocked`
- * descending so the busiest class lands at the top.
+ * Pure helper — exported for tests. Produces one row per provenance bucket
+ * that appears in ANY of the three columns (classification via the taxonomy
+ * Module's `provenanceFromLabels`; the null arm folds to the "unclassified"
+ * residual bucket). Sorted by `added + closed + blocked` descending so the
+ * busiest bucket lands at the top.
  */
 export function bucketByClass(
   added: readonly FlowIssue[],
@@ -170,9 +175,11 @@ export function bucketByClass(
     }
     return row;
   };
-  for (const i of added) ensure(classFromLabels(i.labels)).added += 1;
-  for (const i of closed) ensure(classFromLabels(i.labels)).closed += 1;
-  for (const i of blocked) ensure(classFromLabels(i.labels)).blocked += 1;
+  const bucketOf = (labels: readonly string[]): string =>
+    provenanceFromLabels(labels) ?? UNCLASSIFIED_BUCKET;
+  for (const i of added) ensure(bucketOf(i.labels)).added += 1;
+  for (const i of closed) ensure(bucketOf(i.labels)).closed += 1;
+  for (const i of blocked) ensure(bucketOf(i.labels)).blocked += 1;
   return [...tally.values()].sort((a, b) => {
     const aTotal = a.added + a.closed + a.blocked;
     const bTotal = b.added + b.closed + b.blocked;

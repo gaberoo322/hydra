@@ -6,16 +6,13 @@
  * outside `src/github/` and hands back the generic, untyped `ghJson<T>(args)`
  * primitive. But `ghJson` is a *shallow* interface — a caller still has to know
  * the entire `gh issue list` CLI surface (flags, search syntax, the `--json`
- * field names, the parsed JSON shape) PLUS the autopilot dispatch-class
- * taxonomy. So ~10 aggregators each re-decided "how do I read a GitHub issue?":
+ * field names, the parsed JSON shape). So ~10 aggregators each re-decided
+ * "how do I read a GitHub issue?":
  *
  *   - the repo handle was re-spelled (`deps.githubRepo ?? "gaberoo322/hydra"`)
- *     in 8+ files,
+ *     in 8+ files, and
  *   - the `--json` field lists were copy-pasted verbatim, each parsed into a
- *     bespoke local issue shape, and
- *   - the label->class classifier was reimplemented as an **array** in
- *     `backlog-flow.ts` and as a **Set** in `recent-merges.ts` — two divergent
- *     copies of the dispatch-class taxonomy.
+ *     bespoke local issue shape.
  *
  * This module is the *domain-read* seam that sits ABOVE the Adapter and BELOW
  * the aggregators. It owns, in exactly one place each:
@@ -23,15 +20,20 @@
  *   1. **The repo handle** — {@link resolveGithubRepo} (env-overridable via
  *      `HYDRA_GITHUB_REPO`, default `gaberoo322/hydra`). Moving repos is now a
  *      one-env-var change, not a 10-file sweep.
- *   2. **The dispatch-class taxonomy** — {@link KNOWN_CLASS_LABELS} +
- *      {@link classFromLabels} / {@link classLabelFromLabels}. One taxonomy;
- *      the array-vs-Set drift becomes impossible.
- *   3. **The canonical field set + typed return shapes** — {@link IssueRow} /
+ *   2. **The canonical field set + typed return shapes** — {@link IssueRow} /
  *      {@link PrRow}, parsed once by {@link parseIssueRows} / {@link parsePrRows}.
- *   4. **The label-filtered / search-windowed list queries** the aggregators
+ *   3. **The label-filtered / search-windowed list queries** the aggregators
  *      actually need ({@link listIssuesByLabel}, {@link listIssuesBySearch},
  *      {@link listOpenPrs}, {@link viewPr}), reading through the Adapter's
  *      `ghJson`.
+ *
+ * Label *classification* does NOT live here: the provenance-label vocabulary
+ * and classifier (`provenanceFromLabels`) belong to the Dispatch-Class
+ * Taxonomy Module (`src/taxonomy/classes.ts`), which derives them from the
+ * classes.json `provenanceLabel` column (#1672). This seam once carried a
+ * hand-listed class-label classifier (`dev_orch`/`qa`/…), but the repo's
+ * label inventory never contained those class names — every issue bucketed
+ * `unclassified` — so that plane was deleted, not moved.
  *
  * # Never throws (CLAUDE.md)
  *
@@ -81,60 +83,7 @@ export function resolveGithubRepo(override?: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// 2. The dispatch-class taxonomy — one authoritative copy
-// ---------------------------------------------------------------------------
-
-/**
- * The autopilot dispatch-class label taxonomy (`dev_orch`, `dev_target`, `qa`,
- * …) — the SINGLE source of truth. Before this seam it was reimplemented as an
- * array in `backlog-flow.ts` and as a Set in `recent-merges.ts`; those two
- * copies could silently drift. Adding a new autopilot class is now a one-line
- * edit here. Mirrors the class column in the autopilot playbook taxonomy.
- */
-export const KNOWN_CLASS_LABELS = [
-  "dev_orch",
-  "dev_target",
-  "qa",
-  "health",
-  "research_orch",
-  "research_target",
-  "sweep_orch",
-  "sweep_target",
-  "discover_orch",
-  "discover_target",
-] as const;
-
-const KNOWN_CLASS_SET: ReadonlySet<string> = new Set(KNOWN_CLASS_LABELS);
-
-/** The bucket name for issues carrying none of the known class labels. */
-export const UNCLASSIFIED = "unclassified";
-
-/**
- * Return the first known dispatch-class label on the issue, or
- * {@link UNCLASSIFIED} when none match. Case-sensitive — the `gh` payload
- * preserves the label as stored. (The `backlog-flow.ts` flavor: never null.)
- */
-export function classFromLabels(labels: readonly string[]): string {
-  for (const label of labels) {
-    if (typeof label === "string" && KNOWN_CLASS_SET.has(label)) return label;
-  }
-  return UNCLASSIFIED;
-}
-
-/**
- * Return the first known dispatch-class label on the issue/PR, or `null` when
- * none match. (The `recent-merges.ts` flavor: nullable rather than an
- * `"unclassified"` sentinel — both read the SAME {@link KNOWN_CLASS_LABELS}.)
- */
-export function classLabelFromLabels(labels: readonly string[]): string | null {
-  for (const label of labels) {
-    if (typeof label === "string" && KNOWN_CLASS_SET.has(label)) return label;
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// 3. The canonical field set + typed return shapes
+// 2. The canonical field set + typed return shapes
 // ---------------------------------------------------------------------------
 
 /**
@@ -210,7 +159,7 @@ export function isIssueReadFailure<T>(
 }
 
 // ---------------------------------------------------------------------------
-// 3b. Pure parsers — exported for tests
+// 2b. Pure parsers — exported for tests
 // ---------------------------------------------------------------------------
 
 function issueUrlFallback(repo: string, number: number): string {
@@ -297,7 +246,7 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
 }
 
 // ---------------------------------------------------------------------------
-// 4. The list / view queries — read through the Adapter's ghJson
+// 3. The list / view queries — read through the Adapter's ghJson
 // ---------------------------------------------------------------------------
 
 /** Per-query knobs the aggregators vary. All optional with behaviour-preserving defaults. */
@@ -429,7 +378,7 @@ export async function listOpenPrs(
 }
 
 // ---------------------------------------------------------------------------
-// 4a. Per-PR view — transport, REST normalization, cache, rate-limit guard
+// 3a. Per-PR view — transport, REST normalization, cache, rate-limit guard
 //      (issue #968: GraphQL pool drains while REST sits idle)
 // ---------------------------------------------------------------------------
 
@@ -658,7 +607,7 @@ export async function viewPr<T = unknown>(
 }
 
 // ---------------------------------------------------------------------------
-// 4b. Convenience wrappers — preserve the legacy "degrade to [] + log" contract
+// 3b. Convenience wrappers — preserve the legacy "degrade to [] + log" contract
 // ---------------------------------------------------------------------------
 
 /**

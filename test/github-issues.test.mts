@@ -2,8 +2,10 @@
  * Regression tests for the GitHub Issue/PR Read seam (issue #908).
  *
  * Splits into two halves:
- *   - PURE: repo-handle resolution, the single dispatch-class taxonomy + its two
- *     classifier flavors, and the canonical row parsers — no subprocess.
+ *   - PURE: repo-handle resolution and the canonical row parsers — no
+ *     subprocess. (The dispatch-class label classifiers this seam once
+ *     carried were deleted by #1672 — provenance classification now lives in
+ *     the taxonomy Module and is pinned in `taxonomy-classes.test.mts`.)
  *   - WIRED: the list/view readers driven through a fake `gh` binary
  *     (HYDRA_GH_BIN, the same DI point github-seam.test.mts uses) so the argv
  *     construction, the JSON parse, and the never-throw failure mapping are all
@@ -20,10 +22,6 @@ import { existsSync } from "node:fs";
 import {
   DEFAULT_GITHUB_REPO,
   resolveGithubRepo,
-  KNOWN_CLASS_LABELS,
-  UNCLASSIFIED,
-  classFromLabels,
-  classLabelFromLabels,
   parseIssueRows,
   parsePrRows,
   listIssuesByLabel,
@@ -74,42 +72,6 @@ describe("resolveGithubRepo", () => {
   test("blank env is ignored, falls back to default", () => {
     process.env.HYDRA_GITHUB_REPO = "   ";
     assert.equal(resolveGithubRepo(), DEFAULT_GITHUB_REPO);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// PURE — one taxonomy, two classifier flavors
-// ---------------------------------------------------------------------------
-
-describe("dispatch-class taxonomy", () => {
-  test("KNOWN_CLASS_LABELS carries the autopilot classes", () => {
-    assert.ok(KNOWN_CLASS_LABELS.includes("dev_orch"));
-    assert.ok(KNOWN_CLASS_LABELS.includes("dev_target"));
-    assert.ok(KNOWN_CLASS_LABELS.includes("qa"));
-    assert.ok(KNOWN_CLASS_LABELS.includes("sweep_target"));
-  });
-
-  test("classFromLabels returns the first known class", () => {
-    assert.equal(classFromLabels(["ready-for-agent", "dev_orch"]), "dev_orch");
-    assert.equal(classFromLabels(["qa", "dev_orch"]), "qa");
-  });
-
-  test("classFromLabels returns the unclassified sentinel when none match", () => {
-    assert.equal(classFromLabels(["bug", "needs-info"]), UNCLASSIFIED);
-    assert.equal(classFromLabels([]), UNCLASSIFIED);
-    assert.equal(UNCLASSIFIED, "unclassified");
-  });
-
-  test("classLabelFromLabels returns null (not the sentinel) when none match", () => {
-    assert.equal(classLabelFromLabels(["bug"]), null);
-    assert.equal(classLabelFromLabels(["sweep_target", "tier:2"]), "sweep_target");
-  });
-
-  test("both flavors agree on the same taxonomy — no array-vs-Set drift", () => {
-    for (const cls of KNOWN_CLASS_LABELS) {
-      assert.equal(classFromLabels([cls]), cls);
-      assert.equal(classLabelFromLabels([cls]), cls);
-    }
   });
 });
 

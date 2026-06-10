@@ -54,9 +54,10 @@ import {
  * now a one-line edit here, not a parallel edit in `collect-state.sh`.
  *
  * NOTE: this is the orchestrator's triage vocabulary (see
- * `docs/agents/triage-labels.md`), distinct from the autopilot dispatch-class
- * taxonomy (`KNOWN_CLASS_LABELS` in `src/github/issues.ts`) which buckets
- * issues by *which agent* handles them, not by *board state*.
+ * `docs/agents/triage-labels.md`), distinct from the Dispatch-Class Taxonomy
+ * Module's provenance vocabulary (`PROVENANCE_LABELS` in
+ * `src/taxonomy/classes.ts`) which buckets issues by *which filing pipeline
+ * produced them*, not by *board state*.
  */
 export const ORCH_BOARD_LABELS = {
   needs_qa: "needs-qa",

@@ -2,8 +2,11 @@
  * Regression tests for the recent-merges aggregator (issue #617, PRD #615).
  *
  * Pure helpers (`extractPrNumbersFromGitLog`, `tierFromLabels`,
- * `classLabelFromLabels`, `clampLimit`, `parsePrMeta`) are tested
- * directly. Integration tests use exec stubs + a `fetchPrMeta` override.
+ * `clampLimit`, `prMetaFromView`) are tested directly. Provenance
+ * classification (#1672) is the taxonomy Module's `provenanceFromLabels`,
+ * pinned in `taxonomy-classes.test.mts`; here the integration suite pins
+ * that `classLabel` carries the live provenance vocabulary. Integration
+ * tests use exec stubs + a `fetchPrMeta` override.
  */
 
 import { test, describe } from "node:test";
@@ -13,7 +16,6 @@ import {
   getRecentMerges,
   extractPrNumbersFromGitLog,
   tierFromLabels,
-  classLabelFromLabels,
   clampLimit,
   prMetaFromView,
 } from "../src/aggregators/recent-merges.ts";
@@ -81,7 +83,7 @@ describe("extractPrNumbersFromGitLog — pure helper", () => {
 
 describe("tierFromLabels — pure helper", () => {
   test("returns null when no tier label exists", () => {
-    assert.equal(tierFromLabels(["dev_orch", "needs-qa"]), null);
+    assert.equal(tierFromLabels(["cleanup-scan", "needs-qa"]), null);
   });
 
   test("parses tier:N", () => {
@@ -91,17 +93,6 @@ describe("tierFromLabels — pure helper", () => {
 
   test("ignores tier-without-number labels", () => {
     assert.equal(tierFromLabels(["tier:unknown"]), null);
-  });
-});
-
-describe("classLabelFromLabels — pure helper", () => {
-  test("finds a known autopilot class label", () => {
-    assert.equal(classLabelFromLabels(["dev_orch", "tier:2"]), "dev_orch");
-    assert.equal(classLabelFromLabels(["sweep_target"]), "sweep_target");
-  });
-
-  test("returns null when none of the labels match a known class", () => {
-    assert.equal(classLabelFromLabels(["ready-for-agent", "tier:0"]), null);
   });
 });
 
@@ -131,26 +122,31 @@ describe("prMetaFromView — pure helper", () => {
 // ---------------------------------------------------------------------------
 
 describe("getRecentMerges — happy path", () => {
-  test("git log + per-PR meta → enriched MergeItem[]", async () => {
-    const gitLogStdout = ["feat: a (#100)", "fix: b (#101)"].join("\n");
+  test("git log + per-PR meta → enriched MergeItem[] with provenance classLabel (#1672)", async () => {
+    const gitLogStdout = ["feat: a (#100)", "fix: b (#101)", "fix: c (#102)"].join("\n");
     const exec = makeExecStub({
       "git log master": { stdout: gitLogStdout },
     });
     const meta = new Map([
-      [100, { title: "feat: a", labels: ["tier:2", "dev_orch"], mergedAt: "2026-05-26T02:00:00Z", url: "u100" }],
-      [101, { title: "fix: b", labels: ["tier:1"], mergedAt: "2026-05-26T01:00:00Z", url: "u101" }],
+      [100, { title: "feat: a", labels: ["tier:2", "cleanup-scan"], mergedAt: "2026-05-26T03:00:00Z", url: "u100" }],
+      // dev_orch is NOT a provenance label — the dead class alphabet must not classify.
+      [101, { title: "fix: b", labels: ["tier:1", "dev_orch"], mergedAt: "2026-05-26T02:00:00Z", url: "u101" }],
+      // sentry is the residual provenance label with no owning dispatch class.
+      [102, { title: "fix: c", labels: ["sentry"], mergedAt: "2026-05-26T01:00:00Z", url: "u102" }],
     ]);
     const result = await getRecentMerges(10, {
       execFileAsync: exec,
       fetchPrMeta: async (n) => meta.get(n) ?? null,
     });
-    assert.equal(result.length, 2);
+    assert.equal(result.length, 3);
     assert.equal(result[0].prNumber, 100);
     assert.equal(result[0].tier, 2);
-    assert.equal(result[0].classLabel, "dev_orch");
+    assert.equal(result[0].classLabel, "cleanup-scan");
     assert.equal(result[1].prNumber, 101);
     assert.equal(result[1].tier, 1);
     assert.equal(result[1].classLabel, null);
+    assert.equal(result[2].prNumber, 102);
+    assert.equal(result[2].classLabel, "sentry");
   });
 });
 

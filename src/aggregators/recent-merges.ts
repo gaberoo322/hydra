@@ -2,8 +2,8 @@
  * Recent-merges aggregator (issue #617, PRD #615).
  *
  * Returns the most recent N merged PRs on master, each enriched with the
- * Hydra-specific Tier classification and "class" label (dev_orch /
- * dev_target / sweep_orch / etc.) so the dashboard can render a
+ * Hydra-specific Tier classification and provenance label (tool-scout /
+ * architecture-scan / cleanup-scan / sentry) so the dashboard can render a
  * compact "what happened" log.
  *
  * # Data path
@@ -14,15 +14,17 @@
  *    parse the subject for the canonical `(#NNN)` PR-number suffix that
  *    GitHub's squash-merge UI appends.
  * 2. For each merged PR number, we fetch labels via `gh pr view --json`.
- *    Tier comes from a label of the form `tier:N`; the class label comes
- *    from the autopilot-class taxonomy (`dev_orch`, `dev_target`, etc.).
- *    Either may be absent — both fields are nullable on the output.
+ *    Tier comes from a label of the form `tier:N`; the provenance label
+ *    comes from the Dispatch-Class Taxonomy Module (classes.json
+ *    `provenanceLabel` column + residual list, #1672). Either may be
+ *    absent — both fields are nullable on the output.
  *
  * # Design contract
  *
- * - **Pure parser core.** `extractPrNumbersFromGitLog`,
- *   `tierFromLabels`, and `classLabelFromLabels` are pure functions
- *   exported for tests. The aggregator wires them up against
+ * - **Pure parser core.** `extractPrNumbersFromGitLog` and
+ *   `tierFromLabels` are pure functions exported for tests
+ *   (provenance classification is the taxonomy Module's
+ *   `provenanceFromLabels`). The aggregator wires them up against
  *   subprocess-backed defaults.
  * - **Never throws.** Sub-fetch failures degrade to a partial list rather
  *   than aborting the whole call.
@@ -33,10 +35,8 @@
 import { resolve } from "node:path";
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
-import {
-  classLabelFromLabels as seamClassLabelFromLabels,
-  viewPr,
-} from "../github/issues.ts";
+import { viewPr } from "../github/issues.ts";
+import { provenanceFromLabels } from "../taxonomy/classes.ts";
 
 // The production default routes the `git log` read through the GitHub CLI
 // Adapter seam (issue #899). Tests still inject `deps.execFileAsync` for the
@@ -54,7 +54,11 @@ export interface MergeItem {
   title: string;
   /** Tier extracted from a `tier:N` label, if any. Null when unlabeled. */
   tier: number | null;
-  /** Autopilot class label (`dev_orch` / `dev_target` / …), if any. */
+  /**
+   * Provenance label (`tool-scout` / `cleanup-scan` / …), if any. Wire key
+   * stays `classLabel` for dashboard stability (RecentMerges/ClassLabelBadge)
+   * — only the value vocabulary changed (#1672).
+   */
   classLabel: string | null;
   mergedAt: string;
   url: string;
@@ -84,10 +88,9 @@ export interface PrMeta {
   url: string;
 }
 
-// The autopilot dispatch-class taxonomy lives in the GitHub Issue/PR Read seam
-// (issue #908) — one authoritative copy. `classLabelFromLabels` below re-exports
-// the seam's classifier (formerly a divergent local Set copy of backlog-flow's
-// array taxonomy).
+// The provenance vocabulary + classifier live in the Dispatch-Class Taxonomy
+// Module (`src/taxonomy/classes.ts`, #1672) — one authoritative copy derived
+// from classes.json; no label alphabet is hand-listed here.
 
 const MAX_LIMIT = 50;
 
@@ -134,7 +137,7 @@ export async function getRecentMerges(
       prNumber: number,
       title: meta.title,
       tier: tierFromLabels(meta.labels),
-      classLabel: classLabelFromLabels(meta.labels),
+      classLabel: provenanceFromLabels(meta.labels),
       mergedAt: meta.mergedAt,
       url: meta.url,
     });
@@ -268,15 +271,6 @@ export function tierFromLabels(labels: readonly string[]): number | null {
   }
   return null;
 }
-
-/**
- * Pure helper — exported for tests. Finds the first autopilot-class label
- * (`dev_orch`, `qa`, `sweep_target`, …). Returns null when none of the
- * known classes appear. Delegates to the GitHub Issue/PR Read seam (issue
- * #908) so the taxonomy has exactly one home; re-exported for backward
- * compatibility with existing importers.
- */
-export const classLabelFromLabels = seamClassLabelFromLabels;
 
 function resolveDefaultRepoPath(): string {
   const env = process.env.HYDRA_ROOT;

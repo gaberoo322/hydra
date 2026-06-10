@@ -13,7 +13,9 @@ export function FlowTab() {
   const totals = data?.totals ?? { added: 0, closed: 0, blocked: 0 };
   const empty = !loading && !error && rows.length === 0;
 
-  const subtitle = `Per-class issue flow over last ${data?.windowDays ?? 7}d. Blocked is a snapshot.`;
+  // "byClass"/"class" wire keys are stable; the values are provenance labels
+  // (which filing pipeline produced the issue) since #1672.
+  const subtitle = `Issue flow by source (provenance label) over last ${data?.windowDays ?? 7}d. Blocked is a snapshot.`;
 
   const actions = (
     <select
@@ -43,7 +45,7 @@ export function FlowTab() {
       <table className="w-full text-sm">
         <thead>
           <tr className="text-left text-xs uppercase tracking-wide text-zinc-500 border-b border-zinc-700">
-            <th className="py-2 pr-4 font-normal">Class</th>
+            <th className="py-2 pr-4 font-normal">Source</th>
             <th className="py-2 pr-4 font-normal text-right">Added</th>
             <th className="py-2 pr-4 font-normal text-right">Closed</th>
             <th className="py-2 pr-4 font-normal text-right">Blocked (now)</th>

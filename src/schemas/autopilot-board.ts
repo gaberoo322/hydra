@@ -24,8 +24,9 @@
  * stops re-deriving `gh` shapes and reads one surface instead.
  *
  * The label literals counted here are the orchestrator's triage/dispatch
- * vocabulary (see `docs/agents/triage-labels.md`), not the autopilot
- * dispatch-class taxonomy (`KNOWN_CLASS_LABELS`); they live in `ORCH_BOARD_LABELS`
+ * vocabulary (see `docs/agents/triage-labels.md`), not the Dispatch-Class
+ * Taxonomy Module's provenance vocabulary (`PROVENANCE_LABELS` in
+ * `src/taxonomy/classes.ts`); they live in `ORCH_BOARD_LABELS`
  * in `src/api/autopilot-board.ts`, the single place a bash copy used to mirror.
  *
  * Schema discipline mirrors `src/schemas/autopilot-idle.ts` (ADR-0011):

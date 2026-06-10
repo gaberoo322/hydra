@@ -7,12 +7,14 @@
  * time, so the Python and TS views can never drift: there is exactly one
  * alphabet. This module re-exports that alphabet as typed rows + per-class
  * lookups so every hand-maintained TS projection (slice #1671 folds
- * `KNOWN_CLASS_LABELS` in `src/github/issues.ts`, `skillToCostClass` in
- * `src/metrics/aggregate.ts`, `agentForSkill`/`VALID_SKILLS` in
- * `src/pattern-memory/subagent-capture.ts`, and the hand-mirrored scout
- * cooldown in `src/scout/calendar-walk.ts`) becomes a column read — adding a
- * class then forces an explicit decision on every projection instead of a
- * silent fallthrough to `other`/`unclassified`.
+ * `skillToCostClass` in `src/metrics/aggregate.ts`,
+ * `agentForSkill`/`VALID_SKILLS` in `src/pattern-memory/subagent-capture.ts`,
+ * and the hand-mirrored scout cooldown in `src/scout/calendar-walk.ts`;
+ * slice #1672 replaces the fictional hand-listed class-label plane that
+ * lived in `src/github/issues.ts` with the derived provenance vocabulary
+ * below)
+ * becomes a column read — adding a class then forces an explicit decision on
+ * every projection instead of a silent fallthrough to `other`/`unclassified`.
  *
  * # Fail-loud contract
  *
@@ -244,4 +246,52 @@ export function classByName(name: string): DispatchClassRow | undefined {
 /** Look up a class row by the skill it dispatches (`hydra-dev`, …). */
 export function classBySkill(skill: string): DispatchClassRow | undefined {
   return BY_SKILL.get(skill);
+}
+
+// ---------------------------------------------------------------------------
+// Provenance labels (slice #1672)
+// ---------------------------------------------------------------------------
+
+/**
+ * The **provenance labels** the filing skills actually stamp on issues —
+ * derived from the non-null `provenanceLabel` column rows, in file order.
+ * "Provenance" = *which filing pipeline produced this issue*, NOT *which
+ * autopilot class will handle it*: the repo's label inventory carries none of
+ * the class names (`dev_orch`, …), so classifying issues by class labels was
+ * fiction (#1672 deleted that plane from `src/github/issues.ts`).
+ */
+export const PROVENANCE_LABELS: readonly string[] = Object.freeze(
+  DISPATCH_CLASSES.filter((r) => r.provenanceLabel !== null).map(
+    (r) => r.provenanceLabel as string,
+  ),
+);
+
+/**
+ * Filing labels with NO owning dispatch class. Sentry incident filing stamps
+ * `sentry` but no taxonomy row owns it — and a fake classes.json row would
+ * pollute decide.py's `PIPELINE_SLOTS`/`SIGNAL_CLASSES` derivations, so the
+ * residual list lives here as a constant instead (the honest shape). This is
+ * the ONLY place provenance vocabulary may be hand-listed.
+ */
+export const RESIDUAL_PROVENANCE_LABELS: readonly string[] = Object.freeze([
+  "sentry",
+]);
+
+const PROVENANCE_SET: ReadonlySet<string> = new Set([
+  ...PROVENANCE_LABELS,
+  ...RESIDUAL_PROVENANCE_LABELS,
+]);
+
+/**
+ * Return the first provenance label on an issue/PR's labels, or `null` when
+ * none match. Pure function over a labels array — no IO, never throws.
+ * Case-sensitive (the `gh` payload preserves labels as stored). Consumers
+ * that want a bucket name instead of `null` fold the null arm themselves
+ * (e.g. backlog-flow's `"unclassified"` residual bucket).
+ */
+export function provenanceFromLabels(labels: readonly string[]): string | null {
+  for (const label of labels) {
+    if (typeof label === "string" && PROVENANCE_SET.has(label)) return label;
+  }
+  return null;
 }
