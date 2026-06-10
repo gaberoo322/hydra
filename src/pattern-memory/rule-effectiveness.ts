@@ -44,15 +44,14 @@ import {
 // + the side-effecting `demotePromotedRuleFromFeedbackFile`) is now owned by the
 // `feedback-file.ts` Module, co-located with the matching append/render grammar
 // it parses against (the writer/reader coupling is now structural, not a doc
-// comment). `demotePromotedRuleFromFeedbackFile` is re-exported so the demotion
-// caller below keeps a stable local name; `removePromotedRuleBlock` is
-// re-exported under its historical name `removePromotedRuleFromFeedback` so the
-// existing test import (test/promoted-rule-effectiveness.test.mts) keeps
-// resolving against `rule-effectiveness.ts`.
-export {
-  demotePromotedRuleFromFeedbackFile,
-  removePromotedRuleBlock as removePromotedRuleFromFeedback,
-};
+// comment). `demotePromotedRuleFromFeedbackFile` is imported above and used by
+// the demotion caller below; it no longer needs to be re-exported (no external
+// importer resolves it through `rule-effectiveness.ts` — issue #1612).
+// `removePromotedRuleBlock` is re-exported under its historical name
+// `removePromotedRuleFromFeedback` so the existing test import
+// (test/promoted-rule-effectiveness.test.mts) keeps resolving against
+// `rule-effectiveness.ts`.
+export { removePromotedRuleBlock as removePromotedRuleFromFeedback };
 
 // ===========================================================================
 // Types
@@ -269,8 +268,10 @@ export async function getIneffectivePromotedPatterns(
 // `removePromotedRuleBlock` transform, re-exported here under its historical
 // name `removePromotedRuleFromFeedback`, and the side-effecting
 // `demotePromotedRuleFromFeedbackFile` wrapper) moved verbatim into the
-// `feedback-file.ts` Module and is re-exported at the top of this file. The
-// auto-demote orchestration below calls the re-exported wrapper.
+// `feedback-file.ts` Module. `removePromotedRuleBlock` is re-exported at the
+// top of this file (under its historical name); `demotePromotedRuleFromFeedbackFile`
+// is now only imported there (issue #1612 dropped its redundant re-export). The
+// auto-demote orchestration below calls the imported wrapper directly.
 
 /**
  * Append a rule-action audit entry to the bounded Redis list. Tail entries
