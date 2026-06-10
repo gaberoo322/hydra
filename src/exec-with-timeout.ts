@@ -251,10 +251,3 @@ export function execWithGroupCleanup(
     });
   });
 }
-
-// Internal helpers exposed for unit tests only.
-export const _testing = {
-  DEFAULT_TIMEOUT,
-  DEFAULT_KILL_GRACE,
-  DEFAULT_MAX_BUFFER,
-};
