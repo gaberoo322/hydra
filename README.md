@@ -1,319 +1,146 @@
 # Hydra
 
-Hydra is an autonomous software development orchestrator. It runs continuous development against a target codebase — grounding itself in real project state, selecting work, dispatching a bounded task to a Claude Code subagent in an isolated worktree, verifying with hard checks (tests, typecheck, build, mutation kill-rate, scope enforcement), and merging to main via PR. Every dispatch produces a structured reality report backed by evidence in Redis. Hydra steers itself via two vision documents (target product + orchestrator-self) and improves its own architecture gradually within safety bounds.
+Hydra is an **autonomous software development orchestrator**: a control plane that builds software continuously — selecting its own work, dispatching Claude Code subagents in isolated git worktrees, verifying with hard checks, and merging via PR — without a human in the per-change loop. The operator steers through vision documents, outcome metrics, and a narrow escalation channel, not per-PR review.
 
-Hydra is driven by **`hydra-autopilot`** — a long-running Claude Code session that dispatches background subagents in parallel, one per **class** (`dev_orch`, `dev_target`, `research_orch`, `research_target`, `sweep_orch`, `sweep_target`, `discover_orch`, `discover_target`, `health`, `qa`). Code-writing classes (`hydra-dev`, `hydra-target-build`) run in fresh `git worktree`s and open PRs; CI is the merge gate. Verification, merge, and the tier classifier are deterministic command execution — not agents making claims. The Codex CLI runtime was retired on 2026-05-14 (see [ADR-0006](./docs/adr/0006-codex-cli-removed-autopilot-only.md)).
+Hydra is a **swappable single-target builder** ([ADR-0013](./docs/adr/0013-swappable-single-target-builder.md)): one instance points at exactly one target codebase and specializes into it. The current target is [hydra-betting](https://github.com/gaberoo322/hydra-betting), chosen as a crucible because it has an external, adversarial success metric. The durable asset is the builder itself — generality lives in the *swap*, never in the session.
 
 > **Dashboard**: [admin.clawstreetbets.xyz](https://admin.clawstreetbets.xyz) — orchestrator dashboard (also at `http://localhost:4000`)
 > **App**: [hydra.clawstreetbets.xyz](https://hydra.clawstreetbets.xyz) — the [hydra-betting](https://github.com/gaberoo322/hydra-betting) web app
 
-For the language and architectural decisions that shape the codebase, see [CONTEXT.md](./CONTEXT.md), [`config/orchestrator/vision.md`](./config/orchestrator/vision.md) (orchestrator-self vision), and the [ADR set](./docs/adr/).
-
-## Architecture
+## How It Works
 
 ```
-                    ┌────────────────────────────────────────────────────┐
-                    │                hydra-autopilot                      │
-                    │   (long-running Claude Code session, parallel BGs)  │
-                    │                                                     │
-                    │  1. health probe        — /api/health               │
-                    │  2. budget + cooldowns  — daily-spend, per-class    │
-                    │  3. pick eligible cls   — health / qa / dev_orch /  │
-                    │                           dev_target / research /   │
-                    │                           sweep / discover           │
-                    │  4. dispatch in parallel — one BG subagent per       │
-                    │                            eligible class            │
-                    │  5. collect lessons     — subagent-capture hook      │
-                    │  6. sleep / next tick                                │
-                    └────────────────────────────────────────────────────┘
-                                            │
-                       ┌────────────────────┴─────────────────────┐
-                       ▼                                          ▼
-            ┌──────────────────────────┐         ┌──────────────────────────┐
-            │  Code-writing subagents  │         │  Read-only subagents     │
-            │  (worktree-isolated)     │         │                          │
-            │                          │         │  hydra-doctor (health)   │
-            │  hydra-dev    → PR       │         │  hydra-qa     (PR review)│
-            │  hydra-target-build → PR │         │  hydra-research          │
-            │                          │         │  hydra-sweep             │
-            │  ── CI gate ──►          │         │  hydra-discover          │
-            │      npm test                       │  hydra-target-research   │
-            │      npm run typecheck              │  hydra-target-sweep      │
-            │      dashboard build                │  hydra-target-discover   │
-            │      tier-gate                      │                          │
-            │      mutation kill ≥ 30%            │  Output: Redis updates,  │
-            │      scope ≤ 80% in                 │  GitHub issues, lessons. │
-            │  ── merge ──►                       │                          │
-            │      Tier-2 holdback watcher        │                          │
-            │      (auto-revert on regression)    │                          │
-            └──────────────────────────┘         └──────────────────────────┘
-                       │
-                       ▼
-            Hydra orchestrator service (port 4000)
-              — Dashboard + REST API
-              — Redis state (backlog, queue, reports, memory, reflections)
-              — Event bus + WebSocket
-              — Knowledge plane (OpenViking)
-              — Scheduler (research-floor, daily-spend)
-              — Merge-gate facade + tier classifier
+┌─────────────────────────────────────────────────────────────┐
+│                       hydra-autopilot                        │
+│        long-running Claude Code session — the brain          │
+│                                                              │
+│  health probe → budget + per-class cooldowns → decide.py     │
+│  picks eligible classes → dispatches one background          │
+│  subagent per class, in parallel → collects lessons          │
+└──────────────────────────────┬───────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+┌───────────────────────────┐       ┌───────────────────────────┐
+│  Code-writing subagents   │       │  Read-only subagents      │
+│  (fresh git worktree each)│       │                           │
+│                           │       │  qa · research · sweep    │
+│  hydra-dev          → PR  │       │  discover · health ·      │
+│  hydra-target-build → PR  │       │  cleanup · retro          │
+│                           │       │                           │
+│  ── CI is the merge gate ─│       │  Output: GitHub issues,   │
+│     typecheck + tests     │       │  Redis state, lessons     │
+│     dashboard build       │       │                           │
+│     tier-gate             │       │                           │
+│     mutation kill-rate    │       │                           │
+│     scope enforcement     │       │                           │
+└─────────────┬─────────────┘       └───────────────────────────┘
+              ▼
+   Orchestrator service (port 4000) — the data plane
+     Dashboard + REST API · Redis state + event bus ·
+     observability heartbeat · knowledge plane (OpenViking) ·
+     tier classifier
 ```
+
+Three layers:
+
+1. **The brain — [`hydra-autopilot`](./docs/operator-playbooks/hydra-autopilot.md).** A long-running Claude Code session and the single decision loop ([ADR-0012](./docs/adr/0012-autopilot-is-the-single-brain.md)). Each tick, `decide.py` turns system state (the [Candidate Feed](./docs/reference.md), board labels, budgets, cooldowns) into typed dispatch actions — one background subagent per work class, routed to a right-sized model per class.
+2. **The hands — Claude Code subagents.** Code-writing classes (`hydra-dev` for orchestrator work, `hydra-target-build` for target work) each run in a fresh `git worktree` and open a PR. **CI is the merge gate** — verification is deterministic command execution (tests, typecheck, build, mutation kill-rate, scope enforcement; see [quality gates](./docs/quality-gates.md)), never an agent claim. Read-only classes (QA, research, discovery, sweeps, health, cleanup, retro) emit issues, Redis updates, and lessons.
+3. **The data plane — the orchestrator HTTP service (port 4000).** Express + Redis: state, the `hydra:*` event streams, the dashboard and [REST API](./docs/reference.md), the tier classifier, and the OpenViking knowledge plane. Every task transition stores evidence in Redis, so state is proof-backed, not self-reported.
 
 ## Key Concepts
 
-**Two-Vision Steering** — Hydra answers to two vision documents that the operator edits:
-- [`config/direction/vision.md`](./config/direction/vision.md) — the *target* product vision (prose for humans)
-- [`config/orchestrator/vision.md`](./config/orchestrator/vision.md) — what good autonomous building looks like
-- [`config/direction/outcomes.yaml`](./config/direction/outcomes.yaml) (when configured) — structured *target outcome metrics* the orchestrator optimizes against
+Terms in **bold** are defined precisely in [`CONTEXT.md`](./CONTEXT.md); [`CONTEXT-MAP.md`](./CONTEXT-MAP.md) maps domain language to code areas.
 
-**Anchor Selection** — `selectAnchor()` in `src/anchor-selection.ts` runs a priority waterfall, first-match-wins. Notable slots:
-1. Explicit operator request (passed via `opts.anchor`)
-2. Capacity-floor pre-emption (reframe-queue floor; see `src/anchor-selection/capacity-floors.ts`)
-3. Kanban queued lane (atomic Lua-script claim, gated by WIP limit)
-4. Failing tests / Typecheck errors (from grounding)
-5. Work queue (LMOVE to processing)
-6. Reframe queue (failed 3+ times)
-7. Prior failures (capped at 2 retries)
-8. TODO/FIXME markers
-9. Regression hunt (every 10 merges)
-10. Codebase health
-11. Priorities doc
+- **Two-Vision Steering** — [`config/direction/vision.md`](./config/direction/vision.md) describes what the *target product* should become; [`config/orchestrator/vision.md`](./config/orchestrator/vision.md) describes what good autonomous building looks like and how Hydra resolves ambiguous trade-offs. [`config/direction/outcomes.yaml`](./config/direction/outcomes.yaml) declares the **Target Outcomes** — the terminal success signal ("outcome signal over cycle metrics").
+- **Self-Modification Tiers** — every PR, regardless of author, is classified by blast radius on a monotonic ladder T1→T4; the tier names required *verification depth*, not merge authority ([ADR-0004](./docs/adr/0004-self-modification-tiers.md), [ADR-0015](./docs/adr/0015-verification-depth-replaces-merge-authority.md)). See [Safety Model](#safety-model).
+- **Verifier Core** — the files that prove the work shipped (CI workflows, the tier classifier, the protected-paths list itself, `src/untouchable.ts`). Hydra cannot quietly modify its own brakes ([ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md)).
+- **Outcome Holdback** — Tier-2 changes auto-merge but enter a multi-cycle watch against the pre-merge outcome baseline; regressions auto-revert. Reversibility over speed.
+- **Evidence-Backed State** — verification output, test results, diffs, and verdicts are stored in Redis per task transition. Agents don't self-report success; the system records proof.
+- **Compound Learning** — per-dispatch lesson capture, failure-pattern consolidation in Redis (recurring patterns promote to durable feedback rules), and retro skills that turn completed runs into capped, deduplicated improvement proposals.
+- **Capacity floor** — 25% of capacity is reserved for orchestrator self-improvement regardless of target state; under-investing in the builder is the most expensive mistake to discover late ([ADR-0003](./docs/adr/0003-terminal-goal-hierarchy.md)).
 
-**Untouchable Core** — A designated set of files Hydra cannot self-modify (only the operator can): the merge gate, rollback, watchdog, cost guardrails, and the protected-paths list itself. Enforced via CI: PRs touching protected paths require an `operator-approved` label. See [ADR-0001](./docs/adr/0001-untouchable-core-and-gate-extraction.md) and `src/untouchable.ts`.
+## Safety Model
 
-**Self-Modification Tiers** — Hydra's PRs against itself are classified by blast radius. Tier 0 = Untouchable, operator-only. Tier 1 = prompt-shaped changes, auto-merge. Tier 2 = skill / weight / verification-additions, auto-merge with **Outcome Holdback** (5-cycle watch + auto-revert on regression). Tier 3 = everything else in `src/`, operator merges. See [ADR-0004](./docs/adr/0004-self-modification-tiers.md).
+| Tier | Scope | Required verification depth |
+|------|-------|-----------------------------|
+| T1 — Prompt-shaped | Lesson files, prompt-only tweaks (`config/agents/`, `config/feedback/`) | QA PASS → auto-merge |
+| T2 — Skill / verification | Skills, dashboard, `src/anchor-selection/` | QA PASS + Outcome Holdback → auto-merge |
+| T3 — Core `src/` | Everything else in `src/`, watchdog scripts, deploy script | QA PASS → auto-merge |
+| T4 — Verifier Core | `ci.yml`, `deploy.yml`, tier classifier, `src/untouchable.ts` | Deep-QA pass; operator only via an exhausted remediation loop |
 
-**Evidence-Backed State** — Every task transition stores proof in Redis (`hydra:task:{id}:evidence:{state}`). Verification output, test results, diffs, preflight verdicts, mutation kill rates.
+Operator escalation is a **closed list** ([ADR-0005](./docs/adr/0005-operator-escalation-is-narrow.md)): credentials/secrets, external-account actions, T4/Verifier-Core changes, vision-level conflicts. Everything else Hydra researches and retries autonomously — "I tried and it didn't work" is a reason to research harder, not to escalate. A hard `$50/day` cost cap lives inside the Verifier Core; Hydra cannot raise it on itself.
 
-**Automatic Rollback** — If tests regress after merge, Hydra reverts the commit, pushes, and stores the task as a prior-failure for the next cycle.
+## Operating Hydra
 
-**Compound Learning** — Two-tier memory: OpenViking sessions log per-cycle agent interactions and trigger automatic memory extraction on commit. Redis-fallback patterns (`hydra:memory:{agent}:patterns`) consolidate failures; at 5 occurrences, a pattern auto-promotes to the durable feedback file as a cardinal rule. Episodic reflections (`hydra:reflections:{anchor}`) are injected as planner context on retry.
+The intended rhythm: the autopilot runs unattended (overnight operation is the design point), and the operator periodically reviews a small queue of genuine decisions and adjusts direction. Steering levers, in order of leverage:
 
-## Dashboard
+- **Vision documents** — edit `config/direction/vision.md` (target) or `config/orchestrator/vision.md` (builder trade-offs)
+- **Outcomes** — declare named metrics in `config/direction/outcomes.yaml` (role, direction, baseline, target); consumed by the dashboard and the Tier-2 holdback watcher
+- **Priorities** — curate `config/direction/priorities.md`; for "do this next", `POST /api/queue`
+- **Feedback files** — edit `config/feedback/` to correct agent behavior, no code change required
+- **Review skills** — `/hydra-review` drains the decision queue, `/hydra-digest` summarizes activity, `/hydra-doctor` diagnoses health
 
-React + Vite + Tailwind operator UI at port 3000 (or via Cloudflare tunnel). Features:
+The dashboard (React + Vite, served by Express from `dashboard/dist/`) is organized around four operator questions: **Today** (what happened), **Now** (what's running), **Outcomes** (is it working), and **Explore** (dig into anything).
 
-- **Overview** — system health, cycle status, scheduler controls, daily spend, recommended operator actions
-- **Cycles** — pipeline visualization, task introspection with evidence timeline
-- **Backlog** — 6-lane Kanban (Triage → Backlog → Queued → Blocked → In Progress → Done) with priority, labels, estimates, descriptions, and slide-in detail panel
-- **Config** — edit agent personalities, feedback files, and direction configs
-- **Proposals** — review and approve/reject Meta agent improvement suggestions
-- **Vision** — edit the operator north-star document
-- **Queue** — add work items, trigger research cycles
-- **Metrics** — 30-cycle charts (outcomes, test trends, costs)
-- **Health** — service status with latency probes for all infrastructure
-- **Search** — OpenViking knowledge base semantic search
+## Getting Started
 
-## Backlog System
+### Prerequisites
 
-Linear-inspired project management with priority-based promotion:
-
-| Field | Description |
-|-------|-------------|
-| Priority | Urgent / High / Medium / Low / None — promotion picks highest first |
-| Description | Markdown with acceptance criteria, rationale, prerequisites |
-| Labels | Flexible tags (execution, scanner, infra, research, etc.) |
-| Estimate | T-shirt sizes: XS, S, M, L, XL |
-| Parent | Group related items under a parent |
-
-**Triage lane** — Research suggestions land here for operator review before entering the backlog. Approve or reject from the dashboard.
-
-## Research System
-
-Three parallel research agents discover what to build next:
-
-- **Domain Researcher** — web search for strategies, competitive intelligence
-- **Technical Researcher** — codebase analysis, architecture assessment
-- **Market Researcher** — external API capabilities, platform changes
-
-A **Director** synthesizes findings into ranked opportunities. High-confidence items auto-queue; everything else goes to Triage for review.
-
-## Self-Improvement
-
-Hydra's terminal goal is to move the **Target Outcomes**. Self-improvement is instrumental, but with a **25% capacity floor** reserved for orchestrator work regardless of target state — the floor exists because under-investment in the builder is the most expensive mistake to discover late. See [ADR-0003](./docs/adr/0003-terminal-goal-hierarchy.md).
-
-Three loops drive orchestrator self-improvement:
-
-1. **Meta agent** (frontier model) — runs every 20 cycles or after consecutive failures. Receives 20 cycles of metrics, reality reports, spending, backlog state, memory rules, and current agent configs. Proposes config tweaks (auto-applied) or backlog items (operator approves).
-2. **Pattern detection** — `detectPatterns()` runs each cycle, surfacing systemic issues across recent runs.
-3. **Adversarial validation** — nano-model self-play after merge probes for edge cases and queues fix tasks.
-
-Operator escalation is reserved for **Operator-Required Intervention** (credentials, external-account actions, Tier-0 changes, vision-level conflicts — see [ADR-0005](./docs/adr/0005-operator-escalation-is-narrow.md)). Everything else, Hydra researches and tries autonomously.
-
-## Prerequisites
-
-- **Node.js** >= 22
+- **Node.js** ≥ 22
 - **Docker** + **Docker Compose** (Redis, VikingDB, OpenViking)
 - **Claude Code** — installed and authenticated (the harness that runs `hydra-autopilot` and its subagents)
-- **Git** — target project with `main` branch and remote
-- A target project with `npm test`, `npm run typecheck`, and `npm run build`
+- A target project with a `main` branch, a remote, and working `npm test` / `npm run typecheck` / `npm run build`
 
-## Quick Start
+### Quick Start
 
 ```bash
-# Clone and install
 git clone https://github.com/gaberoo322/hydra.git
 cd hydra && npm install
 
-# Configure
 cp .env.example .env
 # Edit .env: set HYDRA_PROJECT_WORKSPACE to your target project path
 
-# Start infrastructure
-docker compose up -d
-
-# Start Hydra
-npm start
-
-# Open dashboard
-open http://localhost:3000
+docker compose up -d          # infrastructure
+npm start                     # orchestrator service (port 4000)
+open http://localhost:4000    # dashboard (after `cd dashboard && npm run build`)
 ```
 
-## Configuration
+Production runs as systemd user services with timer-driven autopilot pacing; deploy happens automatically on merge to master via a self-hosted runner. The full deploy recipe, service list, environment variables, Redis keys, and API endpoints live in [`docs/reference.md`](./docs/reference.md).
 
-### Environment
+## Development
 
 ```bash
-HYDRA_PORT=4000                    # REST API port
-REDIS_URL=redis://localhost:6379   # Redis connection
-HYDRA_PROJECT_WORKSPACE=~/project  # Target project directory
-HYDRA_CONFIG_PATH=~/hydra/config   # Agent configs and direction files
+npm test                  # regression suite (node:test — ~3,500 tests, zero test-framework deps)
+npm run typecheck
+npx tsx src/index.ts      # dev service — check port 4000 is free first
 ```
 
-### Config Directory
+- All changes to `master` go through a PR; branch protection enforces CI.
+- Runtime dependencies are operator-approved only: `express`, `ioredis`, `ws`, `@sentry/node`, `zod` — Node stdlib for everything else ([ADR-0014](./docs/adr/0014-simplicity-discipline.md)).
+- Coding conventions, common pitfalls, and agent contracts: [`CLAUDE.md`](./CLAUDE.md).
 
-```
-config/
-├── direction/              # Target product direction
-│   ├── vision.md           # Target vision (prose, operator-edited)
-│   ├── outcomes.yaml       # Target outcome metrics (parsed by orchestrator)
-│   ├── priorities.md       # Refreshed by /hydra-target-research
-│   ├── goals.md
-│   └── tech-preferences.md
-├── orchestrator/           # Orchestrator-self direction
-│   └── vision.md           # What good autonomous building looks like
-└── research/               # Research agent configs (director, researchers, strategist)
-```
+## Documentation Map
 
-> Pre-2026-05-14, `config/agents/` and `config/feedback/` held in-process
-> planner/executor/skeptic/meta personalities and operator feedback files.
-> Those were moved to `docs/historical/agent-personalities/` when the Codex
-> CLI runtime was retired. Subagent personalities now live under
-> `~/.claude/skills/` (operator's Claude Code install), not in this repo.
-
-### Steering Hydra
-
-- **Target vision** — Edit `config/direction/vision.md` (or via dashboard) to set what the target product should become
-- **Orchestrator vision** — Edit `config/orchestrator/vision.md` to set the trade-offs Hydra makes when ambiguous
-- **Outcomes** — Declare named target metrics in `config/direction/outcomes.yaml` (role: leading | terminal, direction, baseline, target). Surfaced on the dashboard and consumed by the Tier-2 outcome holdback watcher.
-- **Feedback** — Edit `config/feedback/to-*.md` to correct agent behavior
-- **Queue** — `POST /api/queue` for specific work items (highest priority)
-- **Backlog** — Add/prioritize items via dashboard Kanban board
-- **Operator approval** — Apply the `operator-approved` GitHub label to merge a Tier-0 PR
-
-## Services
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| Hydra API | 4000 | REST API + WebSocket + autopilot data plane |
-| Dashboard | 3000 | React operator UI (Vite dev server) |
-| OpenAI Proxy | 4001 | OAuth-bridged proxy used by OpenViking for embeddings (legacy of the Codex OAuth setup; retained because OV's embedding model still routes through it) |
-| Redis | 6379 | Event bus, state, metrics, backlog |
-| VikingDB | 5000 | Vector database backend |
-| OpenViking | 1933 | Knowledge base with semantic retrieval |
-
-## API
-
-All endpoints are under `/api/`. Full list:
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/cycle/start` | Start a cycle. Body: `{"anchor": {"type": "...", "reference": "..."}}` |
-| `GET` | `/api/cycle/status` | Current cycle state |
-| `GET` | `/api/cycle/history` | Recent completed cycles |
-| `GET` | `/api/cycle/report` | Structured report with agent runs and costs |
-| `GET` | `/api/tasks` | All tasks in current cycle |
-| `GET` | `/api/tasks/:id/evidence` | Full evidence chain |
-| `POST` | `/api/queue` | Queue work. Body: `{"reference": "...", "reason": "..."}` |
-| `GET` | `/api/backlog` | Full Kanban state (all lanes) |
-| `POST` | `/api/backlog` | Add item with priority, description, labels, estimate |
-| `PATCH` | `/api/backlog/:id` | Update item fields |
-| `POST` | `/api/backlog/:id/approve` | Move triage item → backlog |
-| `GET` | `/api/recommendations` | Operator action items from system state |
-| `GET` | `/api/metrics` | Cycle metrics. `?count=N` |
-| `GET` | `/api/spending` | Token usage and costs. `?count=N` |
-| `GET` | `/api/health` | System health |
-| `GET` | `/api/health/services` | Probe all infrastructure services |
-| `POST` | `/api/scheduler/start` | Start auto-scheduling |
-| `POST` | `/api/scheduler/stop` | Stop auto-scheduling |
-| `GET` | `/api/proposals` | List proposals. `?status=pending` |
-| `POST` | `/api/proposals/:id/approve` | Approve (auto-applies if possible, else creates backlog item) |
-| `POST` | `/api/proposals/:id/reject` | Reject. Body: `{"reason": "..."}` |
-| `POST` | `/api/research/start` | Run research cycle |
-| `POST` | `/api/kill` | Emergency stop |
-| `GET` | `/api/config/:section` | List config files in section |
-| `GET` | `/api/config/:section/:name` | Read config file |
-| `PUT` | `/api/config/:section/:name` | Update config file |
-
-## Subagent Routing
-
-The autopilot routes a model **per dispatch class** at the Phase 5 `dispatch` step (issue #1093). `decide.py` stays pure (it emits no model field — keeping model selection a playbook concern, not a decision-brain one); the static class→model map lives in the autopilot playbook's "Per-class model routing" section, keyed off the `slot`/class the dispatch action already carries, and the model is passed to the `Agent` call. Background-dispatched subagents inherit the parent session's model unless the dispatch passes an explicit `model`, so skill frontmatter alone is **not** a sufficient lever for them. The operator's subscription determines the concrete versions the harness's model aliases resolve to.
-
-Right-sized by stakes × frequency — high-frequency non-authoring classes drop off Opus; authorship and behaviour-reshaping classes stay on Opus:
-
-| Class | Model | Purpose |
-|----------|--------------|---------|
-| dev_orch / dev_target / retro_orch / design_concept_orch | Opus (1M context) | Multi-file self-modification, money-critical betting code, behaviour-reshaping retros, design concepts |
-| qa_orch / qa_target / sweep_orch / sweep_target / health / research_orch / research_target / architecture_orch / scout_orch | Sonnet | Structured review, board routing, diagnosis, bounded research — not authorship (qa_target is the money-critical floor, never below Sonnet) |
-| cleanup_orch / discover_orch / discover_target | Haiku | Deterministic knip findings + patrol/diagnostics; small/fast/cheap |
-| lesson-capture hook | Haiku | Per-dispatch lesson extraction for the feedback loop |
-
-A class absent from the map → no explicit `model`, inheriting the parent session (the conservative default). Daily token spend (when the harness exposes it) flows into `hydra:scheduler:daily-spend` for the same dashboard widget that previously tracked Codex usage. Pricing is determined by the operator's Claude Code plan, not by this repo.
-
-## Systemd Services
-
-Production deployment uses systemd user services:
-
-| Service | Description |
-|---------|-------------|
-| `hydra-orchestrator` | Main API + cycle engine. Express serves `dashboard/dist/` on port 4000. |
-| `hydra-openai-proxy` | Embedding proxy for OpenViking |
-| `hydra-docker` | Docker Compose infrastructure |
-| `hydra-vault-watcher` | Knowledge indexer for OpenViking |
-| `hydra-tunnel` | Cloudflare tunnel for external access |
-| `hydra-cycle.timer` | Cycle trigger (every 15 minutes) |
-| `hydra-watchdog.timer` | Health check (every 2 minutes) |
-
-## CI/CD & Deployment
-
-All changes to `master` go through a PR; branch protection enforces CI passing before merge.
-
-**CI** (`.github/workflows/ci.yml`) on every PR:
-- `npm run typecheck` + `npm test` (orchestrator)
-- `cd dashboard && npm run build`
-- `tier-gate` job (when [#243](https://github.com/gaberoo322/hydra/issues/243) lands) — blocks PRs touching Untouchable Core paths unless an `operator-approved` label is present
-
-**Deploy** runs automatically on merge to master via a self-hosted GitHub Actions runner: `git pull`, `npm ci`, dashboard build, `systemctl restart`, health check. Manual emergency deploy: `./scripts/deploy.sh`.
+| Doc | What it covers |
+|-----|----------------|
+| [`CLAUDE.md`](./CLAUDE.md) | Agent/contributor entry point: conventions, pitfalls, tier rules |
+| [`CONTEXT.md`](./CONTEXT.md) / [`CONTEXT-MAP.md`](./CONTEXT-MAP.md) | Domain glossary and where each term lives in code |
+| [`docs/adr/`](./docs/adr/) | Architectural decision records — the "why" behind every major shape |
+| [`docs/reference.md`](./docs/reference.md) | Redis keys, event streams, API endpoints, model tiers, config, deploy |
+| [`docs/quality-gates.md`](./docs/quality-gates.md) | CI gate details: mutation kill-rate, scope enforcement, tier-gate |
+| [`docs/operator-playbooks/hydra-autopilot.md`](./docs/operator-playbooks/hydra-autopilot.md) | Autopilot class taxonomy and dispatch contract |
+| [`docs/historical/`](./docs/historical/) | Retired subsystems (Codex CLI, in-process control loop, Specs, in-process Gate) |
 
 ## Design Principles
 
-1. **Evidence over claims** — Every state transition is backed by proof. Agents don't self-report success; the system verifies it.
-2. **Single task per cycle** — One thing at a time, done properly, with full audit trail.
-3. **Hard verification** — Real commands, real output, real exit codes. Not an agent claiming tests pass.
-4. **Fail forward** — Failed tasks become prior-failures with context for the next cycle.
-5. **Never bypass the gate** — The Untouchable Core stays operator-only. Better slow than brakes-less.
-6. **Outcome signal over cycle metrics** — Green cycles ≠ working orchestrator. Target outcomes are the success signal, not test status. The Tier-2 outcome holdback watcher reads them to auto-revert regressions.
-7. **Reversibility over speed** — Tier-2 with outcome holdback + auto-revert is preferred over Tier-3 operator review when both are options.
-8. **Stay autonomous** — Operator escalation is reserved for a narrow closed list (creds, external accounts, Tier-0 changes, vision conflicts). Everything else, Hydra researches and tries.
-
-## Stats
-
-- 1200+ regression tests (node:test, zero external deps; each test corresponds to a real bug)
-- 4 runtime dependencies: `express`, `ioredis`, `ws`, `@sentry/node` (Codex SDK removed 2026-05-14)
-- Two-vision steering (target prose + orchestrator-self), structured outcomes config, 6 ADRs
+1. **Evidence over claims** — agents don't self-report success; the system verifies it with real commands and real exit codes.
+2. **Never bypass the gate** — the Verifier Core stays operator-only. Better slow than brakes-less.
+3. **Outcome signal over cycle metrics** — green CI ≠ working system; Target Outcomes are the success signal.
+4. **Reversibility over speed** — auto-merge with holdback-and-revert beats waiting on human review.
+5. **Maintainability over throughput** — fewer, cleaner merges beat a noisy log of green debt.
+6. **Stay autonomous** — escalation is a narrow closed list; everything else Hydra researches and tries.
 
 ## License
 
-[GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0-only). The AGPL's
-network-use clause (§13) is deliberate: anyone who runs a modified Hydra as a
-network service must offer their source to its users, which is the strongest
-copyleft protection for a server-side autonomous system.
+[GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0-only). The AGPL's network-use clause (§13) is deliberate: anyone who runs a modified Hydra as a network service must offer their source to its users — the strongest copyleft protection for a server-side autonomous system.
