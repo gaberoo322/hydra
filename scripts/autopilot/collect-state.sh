@@ -92,7 +92,7 @@ fi
 # an orch-scope anchor directly.
 #
 # Mechanical/non-implementable gate (issue #1230): some ready-for-agent
-# issues need NO design concept and grilling them wastes an Opus
+# issues need NO design concept and grilling them wastes a Fable 5
 # design_concept_orch subagent before dev_orch even runs:
 #
 #   - `cleanup-scan` findings (hydra-cleanup output) are mechanical and
