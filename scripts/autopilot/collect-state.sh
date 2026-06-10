@@ -407,6 +407,64 @@ print('cleanup_board_open_scan=' + str(cleanup))
 print('cleanup_board_saturated=' + ('true' if cleanup_saturated else 'false'))
 " 2>/dev/null || { echo "orch_backfill_idle=false"; echo "arch_board_open_scan=0"; echo "arch_board_saturated=false"; echo "cleanup_board_open_scan=0"; echo "cleanup_board_saturated=false"; }
 
+# Target cleanup backfill — cleanup_target signal class (the Target mirror of
+# cleanup_orch; operator-approved 2026-06-10).
+#
+# `target_backfill_idle` — true when the Target backlog has NO actionable
+# work: the `triage` and `queued` lanes are empty AND the Redis work-queue is
+# empty (the same `hydra:anchors:work-queue` read that feeds
+# orch_backfill_idle above, reused via $ARCH_WORK_QUEUE). The Target's
+# `backlog` lane (ready-for-human / unapproved items) deliberately does NOT
+# block the backfill — those items are parked for the operator, not agent
+# work. Mirrors how orch_backfill_idle reads only the actionable label
+# counts.
+#
+# `target_cleanup_board_saturated` — true when more than the cap (10,
+# mirroring CLEANUP_BOARD_SATURATION_CAP) backlog items carrying the stable
+# `cleanup-scan` label sit in any lane except `done`. The
+# /hydra-target-cleanup emit runner stamps every item with this label (the
+# emit/count seam) and re-checks the cap itself as a belt-and-braces
+# back-stop. Orchestrator-API-down degrades to idle=false / saturated=true —
+# BOTH in the suppressing direction (fail closed: never dispatch a scan that
+# cannot read its own board).
+TARGET_CLEANUP_SCAN_LABEL="cleanup-scan"
+TARGET_CLEANUP_BOARD_SATURATION_CAP=10
+TARGET_BACKLOG_JSON=$(curl -sf --max-time 5 "http://localhost:4000/api/backlog" 2>/dev/null || echo '')
+if [ -n "$TARGET_BACKLOG_JSON" ]; then
+  printf '%s' "$TARGET_BACKLOG_JSON" | TARGET_WORK_QUEUE="$ARCH_WORK_QUEUE" \
+    TARGET_CLEANUP_SCAN_LABEL="$TARGET_CLEANUP_SCAN_LABEL" \
+    TARGET_CLEANUP_BOARD_SATURATION_CAP="$TARGET_CLEANUP_BOARD_SATURATION_CAP" python3 -c "
+import json, os, sys
+try:
+  lanes = json.load(sys.stdin)
+  triage = lanes.get('triage') or []
+  queued = lanes.get('queued') or []
+  label = os.environ.get('TARGET_CLEANUP_SCAN_LABEL', 'cleanup-scan')
+  cap = int(os.environ.get('TARGET_CLEANUP_BOARD_SATURATION_CAP', '10') or 10)
+  wq = int(os.environ.get('TARGET_WORK_QUEUE', '0') or 0)
+  open_scan = 0
+  for lane, rows in lanes.items():
+    if lane in ('done', 'counts') or not isinstance(rows, list):
+      continue
+    for row in rows:
+      labels = row.get('labels') if isinstance(row, dict) else None
+      if isinstance(labels, list) and label in labels:
+        open_scan += 1
+  idle = (len(triage) == 0 and len(queued) == 0 and wq == 0)
+  print('target_backfill_idle=' + ('true' if idle else 'false'))
+  print('target_cleanup_board_open_scan=' + str(open_scan))
+  print('target_cleanup_board_saturated=' + ('true' if open_scan > cap else 'false'))
+except Exception:
+  print('target_backfill_idle=false')
+  print('target_cleanup_board_open_scan=0')
+  print('target_cleanup_board_saturated=true')
+" 2>/dev/null || { echo "target_backfill_idle=false"; echo "target_cleanup_board_open_scan=0"; echo "target_cleanup_board_saturated=true"; }
+else
+  echo "target_backfill_idle=false"
+  echo "target_cleanup_board_open_scan=0"
+  echo "target_cleanup_board_saturated=true"
+fi
+
 # Per-run retrospective — daily trigger (issue #920, epic #917).
 #
 # `retro_run_available` is true when at least one COMPLETED autopilot run

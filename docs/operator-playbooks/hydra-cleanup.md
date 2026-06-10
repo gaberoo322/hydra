@@ -40,7 +40,7 @@ This skill is the **mechanical** half of that gate: every finding it emits is a 
 
 - **When the board is already saturated** with open `cleanup-scan` findings. Mirror the scout/architecture discipline: if there are already more than the cap (`CLEANUP_BOARD_SATURATION_CAP = 10` in `collect-state.sh`) open issues carrying the `cleanup-scan` label, **emit nothing** and print a board-saturation skip. The autopilot's `cleanup_board_saturated` signal is the hard suppressor; this in-skill check is a belt-and-braces back-stop so a manual run never floods the board.
 - **From inside a `dev_orch` / `dev_target` subagent.** Those work a single issue and must not produce sibling work. This belongs to the autopilot parent context or a manual operator invocation, same as `hydra-prd` / `hydra-architecture-scan`.
-- **Against the Target (`~/hydra-betting`).** This skill is **Orchestrator-scoped** (`~/hydra`) by design. A target-scoped cleanup would be a separate skill (and is blocked on the Target PR merge backlog, #718).
+- **Against the Target (`~/hydra-betting`).** This skill is **Orchestrator-scoped** (`~/hydra`) by design. The target-scoped sweep is the separate `/hydra-target-cleanup` skill (demote-only, backlog-item-producing — see `docs/operator-playbooks/hydra-target-cleanup.md`), dispatched by the `cleanup_target` signal class.
 
 ## Inputs
 
