@@ -110,6 +110,18 @@ rm -f "$HOME/.config/systemd/user/hydra-autopilot-morning.timer" \
 
 install -D -m 0644 scripts/systemd/hydra-pace-gate.service "$HOME/.config/systemd/user/hydra-pace-gate.service"
 install -D -m 0644 scripts/systemd/hydra-pace-gate.timer "$HOME/.config/systemd/user/hydra-pace-gate.timer"
+
+# Issue #1089 (recurrence): hydra-autopilot.service's ExecStart now routes
+# through the pace-gate wrapper (`--exec-autopilot`) so systemd's
+# Restart=on-failure relaunch passes the same admission check as the timer
+# path (a session-limit exit used to storm: relaunch every 180s into the
+# exhausted quota). The unit was previously host-managed; install it here so
+# unit-file fixes actually deploy. NOT enabled/started — the Pace Gate timer
+# remains the sole launcher, and installing the file does not disturb a
+# running session (takes effect on the next start after daemon-reload).
+# Host-local drop-ins (hydra-autopilot.service.d/) are preserved by design.
+install -D -m 0644 scripts/systemd/hydra-autopilot.service "$HOME/.config/systemd/user/hydra-autopilot.service"
+
 systemctl --user daemon-reload
 systemctl --user enable --now hydra-pace-gate.timer
 

@@ -78,11 +78,28 @@ Environment=PATH=/home/gabe/.npm-global/bin:/home/gabe/.local/bin:/usr/local/bin
 # The skill itself enforces all phase logic; the CLI just stays alive while the
 # model produces tool calls and exits when the session terminates.
 #
-# --dangerously-skip-permissions is REQUIRED. Headless `claude -p` denies all
-# confirmation-required tool calls by default; without skip-permissions, the
-# subagents the autopilot dispatches return skill_denied and Phase 2 reaps
-# them as immediate failures. Observed in the 2026-05-13 v1 smoke test.
-ExecStart=/usr/bin/env claude --dangerously-skip-permissions -p "/hydra-autopilot"
+# ExecStart routes through the Pace Gate's exec mode (issue #1089 recurrence).
+# Restart=on-failure relaunches this unit WITHOUT consulting the pace-gate
+# timer's admission check, so a session-limit exit (code=1) used to storm:
+# systemd relaunched into the still-exhausted quota every RestartSec=180s
+# (journal 2026-06-10, restart counter 53→60) even though the #1112
+# session-limit block was armed — that block only gated the timer path. The
+# wrapper makes EVERY start (timer `systemctl start` AND systemd-internal
+# Restart=) pass the same /api/usage/eligibility check: blocked/paused/
+# fail-safe → clean exit 0 (Restart=on-failure disarms, no start slot
+# burned); eligible → exec's the claude CLI below as the main process.
+#
+# The wrapped invocation is: claude --dangerously-skip-permissions -p
+# "/hydra-autopilot". --dangerously-skip-permissions is REQUIRED. Headless
+# `claude -p` denies all confirmation-required tool calls by default; without
+# skip-permissions, the subagents the autopilot dispatches return
+# skill_denied and Phase 2 reaps them as immediate failures. Observed in the
+# 2026-05-13 v1 smoke test.
+#
+# %h/.local/bin/hydra-pace-gate.sh is the deploy-installed copy
+# (scripts/deploy.sh keeps it AND this unit in sync with the repo on every
+# merge to master).
+ExecStart=/usr/bin/env bash %h/.local/bin/hydra-pace-gate.sh --exec-autopilot
 
 # Reap-on-exit backstop (issue #898). Fires when the claude session exits for
 # ANY reason that did not route through a term-check stop decision —
@@ -105,6 +122,11 @@ StandardError=journal
 # (non-zero exit) get a single 3-min-delayed retry, which absorbs transient
 # Anthropic API 5xx errors. Sustained failure hits the burst cap and surfaces
 # to the operator via OnFailure=.
+#
+# Issue #1089: the retry start runs the ExecStart wrapper above, so a relaunch
+# into a blocked window (session-limit, operator pause, ahead-of-curve,
+# eligibility unreachable) exits 0 cleanly instead of dying code=1 — the retry
+# chain self-terminates after at most one cheap wrapper start.
 Restart=on-failure
 RestartSec=180
 
