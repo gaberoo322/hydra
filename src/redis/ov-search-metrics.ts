@@ -34,7 +34,7 @@ import { getRedisConnection } from "./connection.ts";
 export const OV_SEARCH_METRICS_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /** 30 days for the per-day context-availability counters (coarser, longer-lived). */
-export const OV_CONTEXT_TTL_SECONDS = 30 * 24 * 60 * 60;
+const OV_CONTEXT_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 /** The metric fields persisted per hour bucket. Stable string keys (Redis hash fields). */
 export const OV_SEARCH_METRIC_FIELDS = [
