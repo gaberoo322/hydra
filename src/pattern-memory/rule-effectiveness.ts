@@ -268,8 +268,10 @@ export async function getIneffectivePromotedPatterns(
 // `removePromotedRuleBlock` transform, re-exported here under its historical
 // name `removePromotedRuleFromFeedback`, and the side-effecting
 // `demotePromotedRuleFromFeedbackFile` wrapper) moved verbatim into the
-// `feedback-file.ts` Module and is re-exported at the top of this file. The
-// auto-demote orchestration below calls the re-exported wrapper.
+// `feedback-file.ts` Module. `removePromotedRuleBlock` is re-exported at the
+// top of this file (under its historical name); `demotePromotedRuleFromFeedbackFile`
+// is now only imported there (issue #1612 dropped its redundant re-export). The
+// auto-demote orchestration below calls the imported wrapper directly.
 
 /**
  * Append a rule-action audit entry to the bounded Redis list. Tail entries
