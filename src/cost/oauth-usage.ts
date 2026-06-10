@@ -140,7 +140,7 @@ function credentialsPath(): string {
  * Read fresh on every call (no token cache): Claude Code rotates this file on
  * re-login, and caching the token would defeat the account auto-follow.
  */
-export async function readAccessToken(path: string = credentialsPath()): Promise<string | null> {
+async function readAccessToken(path: string = credentialsPath()): Promise<string | null> {
   let raw: string;
   try {
     raw = await readFile(path, "utf-8");
