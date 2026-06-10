@@ -16,11 +16,14 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   filterMoneyCriticalCandidates,
   classifyNoSignal,
 } from "../scripts/target/mutation-check.ts";
-import type { MutationTestReport } from "../src/mutation.ts";
+import { runMutationTests, type MutationTestReport } from "../src/mutation.ts";
 
 /**
  * Build a MutationTestReport for the no-signal tests. Only the fields
@@ -168,6 +171,71 @@ describe("filterMoneyCriticalCandidates — money-critical diff scoping (issue #
     ]);
     assert.deepEqual(result, ["./src/lib/execution/place-bet.ts"]);
   });
+
+  // --- issue #1649: web/-prefix strip so runMutationTests gets projectDir- ---
+  // --- relative paths (hydra-betting roots its tree at web/).             ---
+  test("strips a single leading web/ from money-critical paths (issue #1649)", () => {
+    // The hydra-betting layout: real diff paths are web/-rooted. The classifier
+    // matches them (its normalize() strips web/ for matching) but returns them
+    // verbatim; this filter must strip web/ so runMutationTests doesn't double
+    // the prefix into web/web/... → ENOENT → silent zero-mutant warn.
+    const result = filterMoneyCriticalCandidates([
+      "web/src/lib/providers/draftkings.ts",
+      "web/src/lib/execution/place-bet.ts",
+      "web/src/lib/staking/kelly.ts",
+      "web/src/lib/bet-math/edge.ts",
+    ]);
+    assert.deepEqual(
+      result,
+      [
+        "src/lib/providers/draftkings.ts",
+        "src/lib/execution/place-bet.ts",
+        "src/lib/staking/kelly.ts",
+        "src/lib/bet-math/edge.ts",
+      ],
+      "web/-prefixed inputs must come out projectDir-relative (no web/ prefix)",
+    );
+  });
+
+  test("web/-strip is idempotent — bare src/... inputs are unaffected (issue #1649)", () => {
+    // Idempotency guard: feeding the ALREADY-stripped output back in must be a
+    // fixed point. A bare src/... path has no web/ prefix to strip, so the
+    // output equals the input — the exact property that keeps CI (which strips
+    // upstream) and the default synced invocation in agreement.
+    const stripped = [
+      "src/lib/providers/draftkings.ts",
+      "src/lib/execution/place-bet.ts",
+    ];
+    assert.deepEqual(
+      filterMoneyCriticalCandidates(stripped),
+      stripped,
+      "bare src/... paths must pass through unchanged (idempotent strip)",
+    );
+    // And applying the filter twice (strip-of-a-strip) is a fixed point.
+    const once = filterMoneyCriticalCandidates(["web/src/lib/staking/kelly.ts"]);
+    assert.deepEqual(filterMoneyCriticalCandidates(once), once);
+  });
+
+  test("strips exactly one web/ — never recursive (issue #1649)", () => {
+    // Defensive: a pathological web/web/... must lose exactly ONE prefix, not
+    // collapse recursively. (No such path exists in the real tree, but the
+    // non-global ^web/ regex must be provably single-shot.) web/web/src/... is
+    // NOT money-critical after one strip (web/src/... isn't a money path), so
+    // it correctly drops — the point is the regex never double-strips.
+    const result = filterMoneyCriticalCandidates([
+      "web/web/src/lib/providers/x.ts",
+    ]);
+    // web/web/src/lib/providers/x.ts → classifier normalize strips one web/ →
+    // web/src/lib/providers/x.ts, which is NOT a money path → not matched.
+    assert.deepEqual(result, []);
+  });
+
+  test("strips web/ behind a leading ./ (./web/src/...) (issue #1649)", () => {
+    const result = filterMoneyCriticalCandidates([
+      "./web/src/lib/bet-math/probability.ts",
+    ]);
+    assert.deepEqual(result, ["src/lib/bet-math/probability.ts"]);
+  });
 });
 
 describe("classifyNoSignal — tier-less no-signal gate (issue #1132)", () => {
@@ -265,5 +333,96 @@ describe("classifyNoSignal — tier-less no-signal gate (issue #1132)", () => {
     );
     assert.ok(result);
     assert.strictEqual(result!.killRate, null);
+  });
+});
+
+describe("web/-prefix integration — gate generates mutants, not a silent warn (issue #1649)", () => {
+  // This is the end-to-end proof of #1649: a web/-prefixed money-critical
+  // changed-file list must, after filterMoneyCriticalCandidates' strip, resolve
+  // against a web/-rooted projectDir and yield candidatesGenerated > 0. The
+  // pre-fix bug pushed the web/ prefix through verbatim, runMutationTests joined
+  // projectDir (= .../web) → .../web/web/src/... → ENOENT (silently caught) →
+  // candidatesGenerated === 0 → classifyNoSignal warn, bypassing the kill-floor.
+  //
+  // We assert ONLY mutant generation (candidatesGenerated > 0), not execution:
+  // a 1ms time budget breaks the runner's execute loop after the candidate
+  // count is recorded but before any mutant runs the test command, so the test
+  // is fast and hermetic (no npm install / test run in the temp dir).
+
+  // A money-critical source file with a mutable line (the `===` comparison and
+  // the `return true;`/`return false;` are both mutator targets).
+  const MONEY_SRC = [
+    "export function isWinningBet(actual: string, predicted: string): boolean {",
+    "  if (actual === predicted) {",
+    "    return true;",
+    "  }",
+    "  return false;",
+    "}",
+    "",
+  ].join("\n");
+
+  test("web/-prefixed money-critical file → candidatesGenerated > 0", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mut-1649-"));
+    try {
+      // hydra-betting layout: source tree rooted at <project>/web/.
+      const projectDir = join(root, "web");
+      const relPath = "src/lib/providers/draftkings.ts";
+      await mkdir(join(projectDir, "src/lib/providers"), { recursive: true });
+      await writeFile(join(projectDir, relPath), MONEY_SRC, "utf-8");
+
+      // The diff comes in web/-prefixed (the synced default invocation). Run it
+      // through the SAME filter the gate uses, then hand the result to the runner
+      // exactly as runMutationTests is called in mutation-check.ts.
+      const changedFiles = filterMoneyCriticalCandidates([`web/${relPath}`]);
+      assert.deepEqual(
+        changedFiles,
+        [relPath],
+        "filter must strip web/ so the path is projectDir-relative",
+      );
+
+      const report: MutationTestReport = await runMutationTests(
+        projectDir,
+        changedFiles,
+        // 1ms budget: the execute loop breaks before running any mutant, but
+        // candidatesGenerated is recorded first — that's all we assert.
+        { timeBudgetMs: 1, testCommand: "true" },
+      );
+
+      assert.ok(
+        report.candidatesGenerated > 0,
+        `the money-critical file must produce mutants (got ${report.candidatesGenerated}); ` +
+          "candidatesGenerated === 0 here is the #1649 silent no-signal warn",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("pre-fix shape: a web/web-doubled path generates ZERO mutants (counter-proof)", async () => {
+    // Pin WHY the strip matters: hand runMutationTests the path WITHOUT the
+    // strip and the doubled web/web/... resolves to nothing → 0 candidates.
+    const root = await mkdtemp(join(tmpdir(), "mut-1649-neg-"));
+    try {
+      const projectDir = join(root, "web");
+      const relPath = "src/lib/providers/draftkings.ts";
+      await mkdir(join(projectDir, "src/lib/providers"), { recursive: true });
+      await writeFile(join(projectDir, relPath), MONEY_SRC, "utf-8");
+
+      // The BUG: feed the web/-prefixed path straight to the runner (no strip).
+      // projectDir is already .../web, so this joins to .../web/web/src/... →
+      // ENOENT → silently skipped → zero mutants.
+      const report = await runMutationTests(
+        projectDir,
+        [`web/${relPath}`],
+        { timeBudgetMs: 1, testCommand: "true" },
+      );
+      assert.equal(
+        report.candidatesGenerated,
+        0,
+        "doubled web/web/... must read nothing — this is the silent-warn bug #1649 fixes",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
