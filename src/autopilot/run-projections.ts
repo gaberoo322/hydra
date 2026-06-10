@@ -131,7 +131,7 @@ export interface ProjectionDeps {
   getCycleHashesBatch: (cycleIds: string[]) => Promise<Record<string, Record<string, string>>>;
 }
 
-export const defaultProjectionDeps: ProjectionDeps = {
+const defaultProjectionDeps: ProjectionDeps = {
   listTurnsDesc: listAutopilotRunTurnsDesc,
   getCycleHashesBatch,
 };
