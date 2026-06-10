@@ -16,9 +16,9 @@
  */
 
 // OpenViking connection config — single source of truth in ov-config.ts (issue #231).
-// Re-exported under the historical OV_URL / OV_KEY / OV_HEADERS names so existing
+// Re-exported under the historical OV_URL / OV_KEY names so existing
 // importers keep compiling without churn.
-import { OPENVIKING_URL, OPENVIKING_API_KEY, OPENVIKING_HEADERS } from "./ov-config.ts";
+import { OPENVIKING_URL, OPENVIKING_API_KEY } from "./ov-config.ts";
 // Issue #954: the OpenViking Request Adapter — all OV HTTP request mechanics
 // (URL join, auth headers, timeout, error classification, JSON unwrap) live
 // behind this seam now. This module keeps its domain behaviour (metrics +
@@ -36,7 +36,6 @@ import {
 
 export const OV_URL = OPENVIKING_URL;
 export const OV_KEY = OPENVIKING_API_KEY;
-export const OV_HEADERS = OPENVIKING_HEADERS;
 
 // ===========================================================================
 // Metrics (in-memory, resets on restart)
