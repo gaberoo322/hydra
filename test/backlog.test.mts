@@ -9,12 +9,27 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-let admin: any;
+// Set REDIS_URL before any import of backlog modules so the singleton picks up DB 1.
+// Safe to set before the static namespace imports below: the Redis singleton in
+// src/redis/connection.ts reads process.env.REDIS_URL lazily on first connect (inside
+// a function), not at module-eval time, and no backlog module opens a connection at
+// import scope — so import order does not pin the DB.
+process.env.REDIS_URL = "redis://localhost:6379/1";
+
+// Static namespace imports (not a dynamic-import spread) so knip can trace that these
+// exports are live test infrastructure. The prior `admin = { ...await import(...) }`
+// spread was untraceable by knip, which repeatedly mis-filed these exports as unused
+// (issues #1573–#1581).
+import * as reads from "../src/backlog/reads.ts";
+import * as items from "../src/backlog/items.ts";
+import * as lanes from "../src/backlog/lanes.ts";
+import * as claims from "../src/backlog/claims.ts";
+import * as wip from "../src/backlog/wip.ts";
+import * as reaper from "../src/backlog/reaper.ts";
+
+const admin: any = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
 let redis: any;
 let redisAvailable = false;
-
-// Set REDIS_URL before any import of backlog modules so the singleton picks up DB 1
-process.env.REDIS_URL = "redis://localhost:6379/1";
 
 async function cleanBacklogKeys() {
   const keys = await redis.keys("hydra:backlog:*");
@@ -39,13 +54,6 @@ describe("backlog state machine", () => {
         console.error("Redis unavailable at localhost:6379/1, skipping backlog tests");
         return;
       }
-      const reads = await import("../src/backlog/reads.ts");
-      const items = await import("../src/backlog/items.ts");
-      const lanes = await import("../src/backlog/lanes.ts");
-      const claims = await import("../src/backlog/claims.ts");
-      const wip = await import("../src/backlog/wip.ts");
-      const reaper = await import("../src/backlog/reaper.ts");
-      admin = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
     }
     if (!redisAvailable) return;
     await cleanBacklogKeys();
