@@ -181,12 +181,69 @@ def _read_reflection_sources(task_id: str) -> str:
         return ""
 
 
+def _slot_started_epoch(slot: dict | None) -> int | None:
+    """Best-effort dispatch-start epoch (seconds) for an occupied pipeline slot.
+
+    Issue #1591: the per-slot `started_epoch` / `started` (ISO8601) field is
+    stamped by the dispatch harness when a code-writing class is dispatched —
+    it is the documented slot contract (see `decide.py`'s state docstring and
+    the wall-clock watchdog at `decide.py::_reap_stale_claims`). reap reads it
+    to compute the cycle's wall-clock duration so the `totalDurationMs` cycle
+    metric is non-zero for BOTH orchestrator (`hydra-dev`) AND target/betting
+    (`hydra-target-build`) cycles — previously reap hardcoded `0`, so every
+    target cycle dropped its duration (the 46% dropout in #1591); only the
+    model-fired auto-merge follow-up (orchestrator-only in practice) ever
+    populated a non-zero value.
+
+    Mirrors `decide.py`'s defensive read EXACTLY: prefer the int
+    `started_epoch`, fall back to parsing a legacy `started` ISO8601 string,
+    tolerate anything unparseable by returning None (the caller then records a
+    0 duration → dispatch.sh's 0-default applies, the correct truthful
+    fallback).
+    """
+    if not isinstance(slot, dict):
+        return None
+    started_epoch = slot.get("started_epoch")
+    if started_epoch is None:
+        started_iso = slot.get("started")
+        if isinstance(started_iso, str):
+            try:
+                from datetime import datetime
+
+                started_epoch = int(
+                    datetime.fromisoformat(started_iso.replace("Z", "+00:00")).timestamp()
+                )
+            except (ValueError, TypeError):
+                started_epoch = None
+    try:
+        return int(started_epoch) if started_epoch is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_duration_ms(slot: dict | None) -> int:
+    """Wall-clock cycle duration in ms from a slot's start stamp (issue #1591).
+
+    Returns 0 when the start stamp is missing/unparseable or the computed span
+    is negative (clock skew) — 0 is the truthful "unknown" sentinel, identical
+    to the pre-#1591 hardcoded fallback, so the metric never goes backwards.
+    """
+    started_epoch = _slot_started_epoch(slot)
+    if started_epoch is None:
+        return 0
+    import time
+
+    duration_ms = int(time.time() * 1000) - started_epoch * 1000
+    return duration_ms if duration_ms > 0 else 0
+
+
 def _fire_cycle_record(
     task_id: str,
     skill: str | None,
     status: str,
     total_tokens: int,
     reflection_sources: str = "",
+    duration_ms: int = 0,
 ) -> None:
     """Best-effort POST to /api/autopilot/cycle-record (issue #430).
 
@@ -204,6 +261,13 @@ def _fire_cycle_record(
     positional `cycle-record` arg so the metric records what was injected.
     Empty (the default + the common no-reflections case) → dispatch.sh omits
     the field from the POST body → truthful 'none'.
+
+    `duration_ms` (issue #1591): the cycle's wall-clock span in ms, computed by
+    the caller from the slot's dispatch-start stamp (`_compute_duration_ms`).
+    Forwarded as the 7th positional `cycle-record` arg so `totalDurationMs` is
+    non-zero for target/betting cycles too — not just orchestrator cycles that
+    happened to get a model-fired auto-merge follow-up. 0 (the default) keeps
+    the prior truthful "unknown" behaviour when no start stamp is available.
     """
     if not skill or skill not in CYCLE_RECORD_SKILLS:
         return
@@ -222,7 +286,7 @@ def _fire_cycle_record(
                      # carries the PR number on the merged path.
                 "",  # task_title
                 "",  # anchor_ref
-                "0",  # duration_ms — reap doesn't track wall-clock per task
+                str(duration_ms or 0),  # issue #1591: wall-clock cycle span (ms)
                 reflection_sources or "",  # issue #1136: served reflection buckets
             ],
             check=False,
@@ -507,8 +571,15 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # Pipeline-only slot bookkeeping. The slot may already be cleared
     # (e.g. hard-cap already fired) or absent (signal classes) — both
     # are tolerated. `s["slots"]` only contains pipeline keys.
+    #
+    # Issue #1591: compute the wall-clock cycle duration from the slot's
+    # dispatch-start stamp BEFORE the slot is nulled, so the cycle-record
+    # write carries a non-zero `totalDurationMs` for target/betting cycles
+    # (not just orchestrator cycles that got a model-fired auto-merge
+    # follow-up). 0 when the slot is absent/cleared or carries no start stamp.
     slots = s.get("slots") or {}
     slot = slots.get(cls)
+    duration_ms = _compute_duration_ms(slot)
     if slot is not None:
         slot["tokens"] = total_tokens
         s["slots"][cls] = None  # release the pipeline slot
@@ -517,7 +588,8 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
 
     line = (
         f"slot_complete class={cls} skill={skill or '?'} task_id={task_id} "
-        f"tokens={total_tokens} cumulative={s['cumulative_tokens']}"
+        f"tokens={total_tokens} cumulative={s['cumulative_tokens']} "
+        f"duration_ms={duration_ms}"
     )
     print(f"[autopilot] {line}")
     _append_log(line)
@@ -535,7 +607,9 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # records what was actually injected (instead of always 'none'). Missing
     # deposit (the common case) → "" → field omitted downstream.
     reflection_sources = _read_reflection_sources(task_id)
-    _fire_cycle_record(task_id, skill, status, total_tokens, reflection_sources)
+    _fire_cycle_record(
+        task_id, skill, status, total_tokens, reflection_sources, duration_ms
+    )
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at
     # reap time rather than waiting for the daily timer. Best-effort, fully
