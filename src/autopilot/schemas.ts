@@ -91,7 +91,7 @@ export type RunStartBody = z.infer<typeof RunStartBodySchema>;
  * `log_tail` is bounded by the writer (`bootstrap.sh` ships a small slice;
  * `endRun` re-truncates server-side as a defensive cap).
  */
-export const CrashDetailSchema = z
+const CrashDetailSchema = z
   .looseObject({
     /** Signal name that killed the process (e.g. `SEGV`, `KILL`), when known. */
     signal: z.string().optional(),
@@ -126,7 +126,7 @@ export type RunEndBody = z.infer<typeof RunEndBodySchema>;
  * count dispatches and join cycle outcomes). All other fields pass
  * through and are surfaced in the dashboard's turn timeline verbatim.
  */
-export const TurnActionSchema = z
+const TurnActionSchema = z
   .looseObject({
     type: z.string().optional(),
   });
@@ -145,7 +145,6 @@ export const TurnBodySchema = z
   });
 
 export type TurnBody = z.infer<typeof TurnBodySchema>;
-export type TurnAction = z.infer<typeof TurnActionSchema>;
 
 // ---------------------------------------------------------------------------
 // Emergency brake — POST /api/autopilot/emergency-brake (issue #744)
@@ -169,8 +168,6 @@ export const EmergencyBrakeBodySchema = z
     engagedBy: z.string().trim().min(1).optional(),
   });
 
-export type EmergencyBrakeBody = z.infer<typeof EmergencyBrakeBodySchema>;
-
 // ---------------------------------------------------------------------------
 // Autopilot pause — POST /api/autopilot/paused (issue #988)
 // ---------------------------------------------------------------------------
@@ -191,8 +188,6 @@ export const AutopilotPauseBodySchema = z
   .strictObject({
     paused: z.boolean({ message: "paused must be a boolean" }),
   });
-
-export type AutopilotPauseBody = z.infer<typeof AutopilotPauseBodySchema>;
 
 // ---------------------------------------------------------------------------
 // Reflection record — POST /api/autopilot/reflection-record (issue #1119)
