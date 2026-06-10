@@ -11,6 +11,7 @@ import {
   getClaimsReapedLast,
 } from "../redis/backlog.ts";
 import { z } from "zod";
+import { BacklogClaimBodySchema } from "../schemas/backlog.ts";
 
 /**
  * Query schema for `GET /backlog/stale-claims?maxAgeMs=N` (ADR-0022).
@@ -177,11 +178,26 @@ export function createBacklogRouter() {
     }
   });
 
-  // Atomic claim of next queued backlog item
+  // POST /backlog/claim — Atomic claim of a queued backlog item.
+  //
+  // Issue #1682: the body validates through the Schemas seam and honours an
+  // optional `itemId` for targeted claims. Absent `itemId` keeps the pop-head
+  // behavior (including 200 + {claimed:false, reason} for wip-limit/empty/
+  // race). Targeted-claim failures map to HTTP status here — and ONLY here:
+  // not-found → 404 (no such item), not-queued → 409 (exists, wrong lane).
   router.post("/backlog/claim", async (req, res) => {
     try {
-      const { claimedBy } = req.body || {};
-      const result = await claimNextQueuedItem(claimedBy || "claude");
+      const parsed = BacklogClaimBodySchema.safeParse(req.body || {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          code: "schema-validation-failed",
+          issues: parsed.error.issues,
+        });
+      }
+      const { claimedBy, itemId } = parsed.data;
+      const result = await claimNextQueuedItem(claimedBy || "claude", itemId);
+      if (!result.claimed && result.reason === "not-found") return res.status(404).json(result);
+      if (!result.claimed && result.reason === "not-queued") return res.status(409).json(result);
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
