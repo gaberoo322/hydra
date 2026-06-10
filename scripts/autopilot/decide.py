@@ -2021,6 +2021,12 @@ def _select_for_slot(
             return make_dispatch(cls, "hydra-target-research", reason="target research due")
         if candidates is not None and research_recommended(candidates):
             if _research_force_allowed(state, "research_target", now):
+                # Issue #1666: stamp the daily force counter at the commit
+                # point — every drop-gate (burned/scope/busy/shed) has already
+                # passed in _rule_pipeline_dispatch, so this dispatch WILL be
+                # emitted. Without the stamp the 4/day cap was dead code and
+                # one run forced 46 research_target dispatches.
+                _research_force_stamp(state, "research_target", now)
                 return make_dispatch(
                     cls,
                     "hydra-target-research",
@@ -2324,11 +2330,65 @@ def _signal_present(state: dict, events: list[dict], signal: str) -> bool:
 
 
 def _research_force_allowed(state: dict, slot: str, now: int) -> bool:
-    """Per-day cap on forced research dispatches (grilled decision 6, AC: capped at 4/day)."""
+    """Per-day cap on forced research dispatches (grilled decision 6, AC: capped at 4/day).
+
+    Reads `state.research_force_counter[<UTC day>][<slot>]`. The counterpart
+    WRITE is `_research_force_stamp` below (issue #1666) — before that fix
+    nothing in the repo ever incremented the counter, so this guard always
+    evaluated `0 < 4` and one run force-dispatched `research_target` 46 times
+    in 52 turns (11x over the documented cap).
+    """
     today = time.strftime("%Y-%m-%d", time.gmtime(now))
-    counters = state.get("research_force_counter") or {}
-    by_day = counters.get(today) or {}
-    return int(by_day.get(slot, 0)) < RESEARCH_FORCE_DAILY_CAP
+    counters = state.get("research_force_counter")
+    if not isinstance(counters, dict):
+        return True
+    by_day = counters.get(today)
+    if not isinstance(by_day, dict):
+        return True
+    try:
+        used = int(by_day.get(slot, 0))
+    except (TypeError, ValueError):
+        used = 0
+    return used < RESEARCH_FORCE_DAILY_CAP
+
+
+def _research_force_stamp(state: dict, slot: str, now: int) -> None:
+    """Mutates state: increment today's forced-research counter for `slot`.
+
+    Issue #1666 — the write half of the daily force-research cap. Called at
+    plan time, at the exact point `_select_for_slot` commits to the forced
+    dispatch (every gate that could drop the action — burned class, scope,
+    busy slot, usage shed — has already passed by then, so a stamp always
+    corresponds to an emitted dispatch action). Stamping at plan time rather
+    than reap time is deliberate: the motivating run left 49 dispatch records
+    unreaped (run-interrupted), so a reap-side increment would have stayed
+    dead in exactly the failure mode the cap exists to break.
+
+    Prunes prior-day keys on every write: `_research_force_allowed` only ever
+    reads today's UTC bucket, so the map never needs to carry more than one
+    day key (this is the "counter resets across UTC days" semantics — a new
+    day starts a fresh bucket and drops yesterday's).
+
+    Persistence: decide() mutates the loaded dict in place (same pattern as
+    the slot_history/failure_log telemetry writes); the CLI `decide`
+    subcommand in main() detects the counter change and writes the state file
+    back atomically. In-process callers (tests importing decide()) see the
+    mutation directly on the dict they passed.
+    """
+    today = time.strftime("%Y-%m-%d", time.gmtime(now))
+    counters = state.get("research_force_counter")
+    if not isinstance(counters, dict):
+        counters = {}
+    by_day = counters.get(today)
+    if not isinstance(by_day, dict):
+        by_day = {}
+    try:
+        used = int(by_day.get(slot, 0))
+    except (TypeError, ValueError):
+        used = 0
+    by_day[slot] = used + 1
+    # Prune: keep only today's bucket (prior-day keys are never read again).
+    state["research_force_counter"] = {today: by_day}
 
 
 def scout_cost_cap_state(state: dict) -> dict:
@@ -2605,6 +2665,47 @@ def _xadd_observability_events(events: list[dict]) -> None:
             )
 
 
+def _persist_state_writeback(path: str, state: dict) -> None:
+    """Atomically write the post-decide state dict back to the state file.
+
+    Issue #1666: the daily force-research counter is incremented in-memory by
+    `_research_force_stamp` at plan time, but the `decide` CLI historically
+    discarded the mutated dict after printing the plan — so the counter never
+    survived to the next turn's read and the 4/day cap was dead code. The
+    caller (main) invokes this ONLY when the counter actually changed this
+    turn, so decide stays a pure JSON emitter on every other turn (the same
+    conservatism as the env-gated XADD above).
+
+    Write is tmp-file + os.replace in the state file's own directory so a
+    crash mid-write can never leave a torn state.json (bootstrap/reap.py
+    readers jq/json.load it). Failure is loud but non-fatal: losing one
+    increment degrades back to the pre-fix behaviour for this turn only,
+    which must never abort the autopilot's decision turn.
+    """
+    import tempfile
+    dirname = os.path.dirname(os.path.abspath(path)) or "."
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=".decide-state-", dir=dirname)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp_path, path)
+        tmp_path = None
+    except OSError as exc:
+        print(
+            f"decide.py: state write-back to {path} failed ({exc}); "
+            "research_force_counter increment NOT persisted this turn",
+            file=sys.stderr,
+        )
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass  # intentional: tmp file may never have been created
+
+
 def main(argv: list[str]) -> int:
     if len(argv) <= 1:
         print(
@@ -2623,8 +2724,19 @@ def main(argv: list[str]) -> int:
         state = _load_json(argv[2])
         candidates = _load_json(argv[3]) if len(argv) > 3 else None
         events = _load_json(argv[4]) if len(argv) > 4 else None
+        # Issue #1666: snapshot the force-research counter so we can detect a
+        # plan-time stamp and persist it. Serialised compare (not identity) —
+        # _research_force_stamp replaces the nested dict in place.
+        force_counter_before = json.dumps(
+            state.get("research_force_counter"), sort_keys=True,
+        )
         plan = decide(state, candidates, events)
         _xadd_observability_events(plan.events)
+        force_counter_after = json.dumps(
+            state.get("research_force_counter"), sort_keys=True,
+        )
+        if force_counter_after != force_counter_before:
+            _persist_state_writeback(argv[2], state)
         print(plan.to_json())
         return 0
     print(f"decide.py: unknown subcommand {sub!r}", file=sys.stderr)

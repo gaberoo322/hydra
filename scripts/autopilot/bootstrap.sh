@@ -524,6 +524,41 @@ STARTED_EPOCH="$(date -u +%s)"
 # legacy run; bootstrap re-runs and writes v2 on the next tick.
 SCHEMA_VERSION=2
 
+# Issue #1666 — carry the forced-research daily cap across runs.
+#
+# The heredoc below OVERWRITES state.json on every bootstrap, and the
+# pace-gate relaunches the autopilot roughly every 15 minutes — so any
+# counter that lives only in the state file resets per-RUN unless
+# bootstrap reseeds it. Without this seed the documented 4/day
+# forced-research cap (decide.py RESEARCH_FORCE_DAILY_CAP, grilled
+# decision 6) silently degraded to 4/run (QA finding on PR #1678;
+# design-concept artifact for #1666, Invariant 4).
+#
+# Seed = the prior state file's research_force_counter pruned to TODAY's
+# UTC key, matching decide.py's prune-on-write semantics. Missing prior
+# file, missing jq, unparseable JSON, or a non-object shape all degrade
+# to {} — the breaker fails open (at worst one extra day of forced
+# dispatches), and a seed failure must never block bootstrap. The read
+# happens BEFORE the heredoc clobbers the file; the prior-PID guard
+# above established this read-prior-state path.
+RESEARCH_FORCE_SEED="{}"
+if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
+  SEED_TODAY_UTC="$(date -u +%Y-%m-%d)"
+  RESEARCH_FORCE_SEED="$(jq -c --arg today "${SEED_TODAY_UTC}" '
+    (.research_force_counter // {}) as $c
+    | if ($c | type) == "object" and (($c[$today] // null) | type) == "object"
+      then { ($today): $c[$today] }
+      else {}
+      end
+  ' "${STATE_PATH}" 2>/dev/null || echo "{}")"
+  # Belt-and-braces: anything that does not look like a JSON object would
+  # corrupt the heredoc below into invalid JSON — degrade to {}.
+  case "${RESEARCH_FORCE_SEED}" in
+    "{"*) ;;
+    *) RESEARCH_FORCE_SEED="{}" ;;
+  esac
+fi
+
 # Initialize state file — limits are now first-class members.
 #
 # Schema migration (issue #426 decision brain rewrite + issue #466 Phase B):
@@ -547,6 +582,11 @@ SCHEMA_VERSION=2
 #     consumed by `self_heal.py` (issue #426 self-heal table).
 #   - `reaped_task_ids` (issue #411) and `burned_classes` (issue #395)
 #     are preserved unchanged.
+#   - `research_force_counter` (issue #1666) is the ONLY field seeded
+#     from the prior state file (see RESEARCH_FORCE_SEED above) — the
+#     4/day forced-research cap must survive the pace-gate's
+#     multi-run-per-day relaunch cadence. Additive + tolerated-missing
+#     by all readers, so no schema_version bump.
 #   - `schema_version` (issue #434) participates in the Phase 0 handshake.
 #
 # Backward compat: this heredoc OVERWRITES the existing file. A v1
@@ -578,6 +618,7 @@ cat > "${STATE_PATH}" <<EOF
   "burned_classes": [],
   "reaped_task_ids": [],
   "failure_log": [],
+  "research_force_counter": ${RESEARCH_FORCE_SEED},
   "slots": {
     "dev_orch": null,
     "qa_orch": null,

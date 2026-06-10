@@ -28,7 +28,7 @@ need to know what the autopilot will do:**
   its docstring own the policy)
 - Merge policy: `decide.py:should_auto_merge.__doc__`
 - Failure self-heal table: `scripts/autopilot/self_heal.py` docstring
-- Runtime invariants: `scripts/autopilot/assert_invariants.py` (INV-001..INV-009; INV-009 is warn-only in Phase B per #466)
+- Runtime invariants: `scripts/autopilot/assert_invariants.py` (INV-001..INV-010; INV-009 is warn-only in Phase B per #466; INV-010 guards the forced-research daily cap per #1666)
 - Architecture rationale: [ADR-0007](../adr/0007-decision-brain-orchestration.md)
 
 ## Loop

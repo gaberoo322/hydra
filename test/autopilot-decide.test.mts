@@ -31,7 +31,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -106,18 +106,26 @@ function baseState(o: StateOverrides = {}): any {
   };
 }
 
-function runDecide(state: any, candidates: any = null, events: any[] = [], tmp?: Tmp): any {
-  const t = tmp ?? makeTmp();
-  writeFileSync(t.state, JSON.stringify(state));
-  writeFileSync(t.cands, JSON.stringify(candidates));
-  writeFileSync(t.events, JSON.stringify(events));
+// Run the decide CLI against already-written files WITHOUT rewriting them —
+// lets a test observe the issue #1666 state-file write-back accumulate
+// across consecutive turns (runDecide below would clobber the persisted
+// counter on every call).
+function runDecideOnFiles(t: Tmp): any {
   const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
     encoding: "utf-8",
   });
   if (r.status !== 0) {
     throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
   }
-  const parsed = JSON.parse(r.stdout);
+  return JSON.parse(r.stdout);
+}
+
+function runDecide(state: any, candidates: any = null, events: any[] = [], tmp?: Tmp): any {
+  const t = tmp ?? makeTmp();
+  writeFileSync(t.state, JSON.stringify(state));
+  writeFileSync(t.cands, JSON.stringify(candidates));
+  writeFileSync(t.events, JSON.stringify(events));
+  const parsed = runDecideOnFiles(t);
   if (!tmp) rmSync(t.dir, { recursive: true, force: true });
   return parsed;
 }
@@ -285,6 +293,91 @@ describe("decide.py — research force-dispatch when no candidate >= 0.5", () =>
     const plan = runDecide(state, cands);
     const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
     assert.equal(dispatch, undefined, "force cap must suppress further research_target dispatches");
+  });
+
+  // ISSUE #1666: before this fix nothing ever WROTE research_force_counter —
+  // the read at _research_force_allowed always saw 0 < 4 and one production
+  // run force-dispatched research_target 46 times in 52 turns. These tests
+  // pin the write half: the stamp at plan time, the CLI's atomic state-file
+  // write-back, the 4-allowed/5th-suppressed cap, and the UTC-day reset.
+  test("forced dispatch increments research_force_counter and persists — 4 allowed, 5th suppressed (#1666)", () => {
+    const t = makeTmp();
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      writeFileSync(t.state, JSON.stringify(baseState()));
+      writeFileSync(t.cands, JSON.stringify({ candidates: [], research_recommended: true }));
+      writeFileSync(t.events, JSON.stringify([]));
+      // Turns 1-4: forced dispatch allowed, counter accumulates in the
+      // state FILE across separate CLI processes (the actual #1666 bug was
+      // the increment never surviving the process exit).
+      for (let i = 1; i <= 4; i += 1) {
+        const plan = runDecideOnFiles(t);
+        const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+        assert.ok(dispatch, `forced dispatch ${i} of 4 must be allowed`);
+        assert.equal(dispatch.prompt_args.forced, true);
+        const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+        assert.deepEqual(
+          persisted.research_force_counter,
+          { [today]: { research_target: i } },
+          `state file must carry counter=${i} after turn ${i}`,
+        );
+      }
+      // Turn 5: cap reached — suppressed, and the state file is untouched.
+      const before = readFileSync(t.state, "utf-8");
+      const plan5 = runDecideOnFiles(t);
+      const dispatch5 = findAction(plan5, (a) => a.type === "dispatch" && a.slot === "research_target");
+      assert.equal(dispatch5, undefined, "5th forced dispatch within one UTC day must be suppressed");
+      assert.equal(readFileSync(t.state, "utf-8"), before,
+        "a suppressed turn must not rewrite the state file");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("counter resets across UTC days and prior-day keys are pruned (#1666)", () => {
+    const t = makeTmp();
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      // Yesterday exhausted the cap — must NOT gate today, and the stale
+      // bucket must be pruned on today's first stamp.
+      writeFileSync(t.state, JSON.stringify(baseState({
+        research_force_counter: { "2000-01-01": { research_target: 4 } },
+      })));
+      writeFileSync(t.cands, JSON.stringify({ candidates: [], research_recommended: true }));
+      writeFileSync(t.events, JSON.stringify([]));
+      const plan = runDecideOnFiles(t);
+      const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+      assert.ok(dispatch, "a prior-day exhausted cap must not suppress today's forced dispatch");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(
+        persisted.research_force_counter,
+        { [today]: { research_target: 1 } },
+        "stamp must start today's bucket at 1 AND drop the prior-day key",
+      );
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no forced dispatch -> decide CLI does not rewrite the state file (#1666)", () => {
+    const t = makeTmp();
+    try {
+      writeFileSync(t.state, JSON.stringify(baseState()));
+      // Feed does NOT recommend research — no force, no stamp, no write-back.
+      writeFileSync(t.cands, JSON.stringify({
+        candidates: [{ issue: 8, anchorRef: "x", score: 0.4 }],
+        research_recommended: false,
+      }));
+      writeFileSync(t.events, JSON.stringify([]));
+      const before = readFileSync(t.state, "utf-8");
+      const plan = runDecideOnFiles(t);
+      const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
+      assert.equal(dispatch, undefined);
+      assert.equal(readFileSync(t.state, "utf-8"), before,
+        "decide must stay a pure JSON emitter when no force-stamp happened");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
   });
 
   test("low-score candidate does NOT force research_orch (#458)", () => {
