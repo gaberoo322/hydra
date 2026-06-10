@@ -78,7 +78,7 @@ const META_LESSON_LABEL = "meta-friction"; // share the label; titles distinguis
 //                                    Surface only at much higher thresholds.
 //
 // Any other cue uses the default threshold (`PROMOTION_THRESHOLD` = 3).
-export const ACCEPTANCE_CRITERION_DEFERRED_CUE = "acceptance-criterion-deferred";
+const ACCEPTANCE_CRITERION_DEFERRED_CUE = "acceptance-criterion-deferred";
 
 /**
  * Per-cue escalation thresholds. Cues not listed fall back to the caller's
