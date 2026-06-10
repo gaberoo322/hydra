@@ -120,3 +120,115 @@ export async function publishOrchestratorShareMetric(
     path: resolveMetricPath(filePath),
   };
 }
+
+// ---------------------------------------------------------------------------
+// forecast-calibration-brier producer (issue #1657)
+// ---------------------------------------------------------------------------
+
+/**
+ * Default on-disk path for the forecast-calibration-brier metric. Matches
+ * `query: metrics/forecast-calibration-brier.txt` in
+ * `config/direction/outcomes.yaml` (declared in the 2026-06-10 direction
+ * refresh, PR #1658).
+ */
+const DEFAULT_BRIER_METRIC_PATH = join(HYDRA_ROOT, "metrics", "forecast-calibration-brier.txt");
+
+/**
+ * Time-bound on the target fetch so an unresponsive hydra-betting service
+ * can never wedge the housekeeping endpoint.
+ */
+const DEFAULT_BRIER_FETCH_TIMEOUT_MS = 10_000;
+
+export interface PublishBrierResult {
+  ok: boolean;
+  /**
+   * Why the file was left untouched (absent on success):
+   *   - `fetch-failed`        target unreachable / timed out
+   *   - `non-200`             target answered but not OK
+   *   - `malformed-response`  body was not parseable JSON
+   *   - `no-score`            `brierScore` was null / non-finite (null until
+   *                           enough resolved forecasts exist — by design)
+   *   - `write-failed`        fs write failed (already logged by writeMetricFile)
+   */
+  reason?: "fetch-failed" | "non-200" | "malformed-response" | "no-score" | "write-failed";
+  /** The Brier score fetched (present once parsed, even if the write failed). */
+  value?: number;
+  /** Absolute path written (or attempted). */
+  path: string;
+}
+
+/**
+ * Fetch the target's aggregate Brier score and publish it to
+ * `metrics/forecast-calibration-brier.txt` so the outcomes file adapter can
+ * read the `forecast-calibration-brier` leading outcome (issue #1657).
+ *
+ * Source of truth: hydra-betting `GET /api/calibration/forecast-metrics`,
+ * whose top-level `brierScore: number | null` is the aggregate over scoreable
+ * resolved forecasts. Base URL comes from `HYDRA_BETTING_URL` (default
+ * `http://localhost:3333`) — same precedent as `src/api/reflections.ts`.
+ *
+ * NEVER writes a fabricated value: on fetch failure, non-200, malformed JSON,
+ * or null/non-finite `brierScore`, the metric file is left untouched — its
+ * stale mtime is the staleness signal, and `getOutcomeValue` already treats a
+ * missing file as no-data (never a regression). Never throws; every failure
+ * path logs with `[metrics-publisher]` context and returns a result object.
+ *
+ * `fetchImpl` / `filePath` / `baseUrl` are injectable so tests run without a
+ * live target.
+ */
+export async function publishForecastCalibrationBrierMetric(
+  opts: {
+    filePath?: string;
+    baseUrl?: string;
+    fetchImpl?: typeof fetch;
+    timeoutMs?: number;
+  } = {},
+): Promise<PublishBrierResult> {
+  const filePath = opts.filePath || DEFAULT_BRIER_METRIC_PATH;
+  const path = resolveMetricPath(filePath);
+  const baseUrl = opts.baseUrl || process.env.HYDRA_BETTING_URL || "http://localhost:3333";
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_BRIER_FETCH_TIMEOUT_MS;
+  const url = `${baseUrl}/api/calibration/forecast-metrics`;
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err: any) {
+    console.error(
+      `[metrics-publisher] forecast-calibration-brier: target fetch failed (${url}): ${err?.message || String(err)} — leaving ${path} untouched`,
+    );
+    return { ok: false, reason: "fetch-failed", path };
+  }
+
+  if (!response.ok) {
+    console.error(
+      `[metrics-publisher] forecast-calibration-brier: target returned HTTP ${response.status} (${url}) — leaving ${path} untouched`,
+    );
+    return { ok: false, reason: "non-200", path };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (err: any) {
+    console.error(
+      `[metrics-publisher] forecast-calibration-brier: malformed JSON from ${url}: ${err?.message || String(err)} — leaving ${path} untouched`,
+    );
+    return { ok: false, reason: "malformed-response", path };
+  }
+
+  const brierScore = (body as { brierScore?: unknown } | null)?.brierScore;
+  if (typeof brierScore !== "number" || !Number.isFinite(brierScore)) {
+    console.error(
+      `[metrics-publisher] forecast-calibration-brier: brierScore is ${JSON.stringify(brierScore ?? null)} (null until enough resolved forecasts exist) — leaving ${path} untouched`,
+    );
+    return { ok: false, reason: "no-score", path };
+  }
+
+  const wrote = await writeMetricFile(brierScore, filePath);
+  if (!wrote) {
+    return { ok: false, reason: "write-failed", value: brierScore, path };
+  }
+  return { ok: true, value: brierScore, path };
+}
