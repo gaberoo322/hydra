@@ -315,9 +315,3 @@ export async function _resetOvSearchWindow(hour: string): Promise<void> {
   const r = getRedisConnection();
   await r.del(windowHashKey(hour));
 }
-
-/** Test-only: clear a specific day's context counters. Production callers should not use this. */
-export async function _resetKnowledgeContext(date: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(contextDayKey(date));
-}
