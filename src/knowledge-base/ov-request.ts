@@ -39,7 +39,7 @@
  * error-classification + JSON/text unwrap.
  */
 
-import { OPENVIKING_URL, OPENVIKING_HEADERS, OPENVIKING_API_KEY } from "./ov-config.ts";
+import { OPENVIKING_URL, OPENVIKING_HEADERS } from "./ov-config.ts";
 import type { HydraErrorCode } from "../errors.ts";
 
 /** The subset of `HydraErrorCode` the OpenViking Request Adapter can return. */
@@ -262,6 +262,3 @@ export async function ovHealthGet(
 ): Promise<OvResult<void>> {
   return ovRequest<void>(path, { method: "GET" }, { ...opts, parse: "none" });
 }
-
-/** Re-export the API key for the rare caller that still needs the raw header value (none today). */
-export { OPENVIKING_API_KEY };
