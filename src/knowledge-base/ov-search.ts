@@ -106,7 +106,7 @@ let flushedSnapshot: OvSearchMetrics = { ...ovSearchMetrics };
 let lastFlushMs = 0;
 
 /** Batch window: persist at most this often from the hot search path. */
-export const OV_SEARCH_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
+const OV_SEARCH_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 
 /**
  * Compute the per-field delta between the live counters and the last-flushed
