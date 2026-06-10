@@ -202,5 +202,3 @@ export function summarizeGoalsForPrompt(goals) {
 
   return parts.join("\n");
 }
-
-export { GOALS_FILE };
