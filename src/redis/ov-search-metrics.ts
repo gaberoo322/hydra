@@ -309,9 +309,3 @@ function num(raw: unknown): number {
   const n = typeof raw === "string" ? Number(raw) : NaN;
   return Number.isFinite(n) ? n : 0;
 }
-
-/** Test-only: clear a specific hour bucket. Production callers should not use this. */
-export async function _resetOvSearchWindow(hour: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(windowHashKey(hour));
-}
