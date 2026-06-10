@@ -13,9 +13,11 @@
  *
  * Cooldown tiers (all checked, drop the target if ANY says "skip"):
  *
- *   1. Per-class (`scout_orch`): 7 days. Owned by `decide.py`'s
- *      `SIGNAL_COOLDOWNS` — this module assumes the class-level cooldown
- *      has already been honored by the caller and does not re-check it.
+ *   1. Per-class (`scout_orch`): 7 days, read from the Dispatch-Class
+ *      Taxonomy (`scripts/autopilot/classes.json` — the same row decide.py
+ *      derives `SIGNAL_COOLDOWNS` from). This module assumes the class-level
+ *      cooldown has already been honored by the caller and does not
+ *      re-check it.
  *   2. Per-category: 30 days default. Stored at
  *      `hydra:scout:category-last-walked:<category>`. Default chosen to
  *      keep `typed-schemas` from being re-walked every weekly tick.
@@ -57,18 +59,35 @@ import {
   setScoutLastCalendarWalk,
   setScoutSpendDaily,
 } from "../redis/scout.ts";
+import { classByName } from "../taxonomy/classes.ts";
+import { InvariantViolationError } from "../errors.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Per-class cooldown for `scout_orch` (mirrors `decide.py:SIGNAL_COOLDOWNS`). */
-export const CLASS_COOLDOWN_DAYS = 7;
+const SECONDS_PER_DAY = 24 * 60 * 60;
+const MS_PER_DAY = SECONDS_PER_DAY * 1000;
+
+const SCOUT_ORCH_ROW = classByName("scout_orch");
+if (!SCOUT_ORCH_ROW || SCOUT_ORCH_ROW.cooldownSeconds === null) {
+  // Boundary/invariant guard (CLAUDE.md): the taxonomy is the single source
+  // of truth for class cooldowns — there is deliberately no fallback
+  // constant here (epic #1669, slice #1671).
+  throw new InvariantViolationError(
+    'scout calendar-walk: dispatch-class taxonomy lacks a "scout_orch" ' +
+      "signal row with cooldownSeconds (scripts/autopilot/classes.json)",
+  );
+}
+
+/** Per-class cooldown for `scout_orch`, read from the Dispatch-Class
+ * Taxonomy — the same row decide.py derives `SIGNAL_COOLDOWNS` from, so the
+ * two runtimes read one file and cannot drift. */
+export const CLASS_COOLDOWN_DAYS =
+  SCOUT_ORCH_ROW.cooldownSeconds / SECONDS_PER_DAY;
 
 /** Default per-category cooldown — research question #2 default. */
 export const CATEGORY_COOLDOWN_DAYS = 30;
-
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /** Steady-state cost slice as a fraction of the daily token budget.
  *

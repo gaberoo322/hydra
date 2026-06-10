@@ -6,14 +6,17 @@
 
 import { getMetricsTrend } from "./trend.ts";
 import { getDailyTokenCounter, todayDateString } from "../cost/index.ts";
+import { DISPATCH_CLASSES, classBySkill } from "../taxonomy/classes.ts";
+import { InvariantViolationError } from "../errors.ts";
 
 // ---------------------------------------------------------------------------
 // Per-class cost attribution (issue #1439)
 // ---------------------------------------------------------------------------
 
 /**
- * The dispatch-class buckets used for per-class cost attribution. These mirror
- * the autopilot class taxonomy (docs/operator-playbooks/hydra-autopilot.md):
+ * The dispatch-class buckets used for per-class cost attribution. This is the
+ * alphabet of the `costClass` column in the Dispatch-Class Taxonomy
+ * (`scripts/autopilot/classes.json`, typed view in `src/taxonomy/classes.ts`):
  * the cost-driving code-writing / review / research / housekeeping classes,
  * plus an `other` long-tail bucket for everything else (sweep, digest, doctor,
  * autopilot itself, …) so no token spend silently disappears.
@@ -38,40 +41,56 @@ export const COST_CLASS_ORDER: readonly CostClass[] = Object.freeze([
   "other",
 ]);
 
+const COST_CLASS_SET: ReadonlySet<string> = new Set(COST_CLASS_ORDER);
+
+// Module-load invariant (epic #1669, slice #1671): every taxonomy row's
+// costClass must be one of the declared buckets above, so the cast inside
+// skillToCostClass is proven safe. Adding a class with a NEW bucket therefore
+// forces an explicit edit to CostClass / COST_CLASS_ORDER / projectCostByClass
+// instead of silently mis-bucketing its tokens to `other`. This is a
+// boundary/invariant guard, not merge/verification code, so throwing is the
+// documented convention (CLAUDE.md; mirrors src/taxonomy/classes.ts's
+// fail-loud contract).
+for (const row of DISPATCH_CLASSES) {
+  if (!COST_CLASS_SET.has(row.costClass)) {
+    throw new InvariantViolationError(
+      `cost attribution: dispatch class "${row.name}" carries unknown ` +
+        `costClass "${row.costClass}" — add the bucket to CostClass / ` +
+        `COST_CLASS_ORDER / projectCostByClass in src/metrics/aggregate.ts`,
+    );
+  }
+}
+
 /**
- * Map a dispatched skill name to its cost-attribution class. Pure + exported
- * so the test suite can pin the mapping. Unknown / housekeeping skills fall to
+ * Skills that appear in the per-skill token counters but are NOT dispatch
+ * classes (no row in the taxonomy — nothing in decide.py dispatches them;
+ * they run operator-invoked or sub-dispatched). The taxonomy deliberately
+ * covers only the dispatch alphabet, so these few attributions stay local.
+ * Pinned by test/cost-by-class.test.mts.
+ */
+const NON_CLASS_SKILL_COST: Readonly<Record<string, CostClass>> = Object.freeze({
+  "hydra-issue-research": "research",
+  "hydra-architect": "research",
+  "hydra-target-retro": "retro",
+});
+
+/**
+ * Map a dispatched skill name to its cost-attribution class — a read of the
+ * taxonomy's `costClass` column (which is where e.g. `hydra-target-qa` → `qa`
+ * and the discover/scout/architecture research-family folding now live as
+ * table rows). Pure + exported so the test suite can pin the mapping. Skills
+ * absent from the taxonomy (and from the non-class residual above) fall to
  * `other` rather than `unknown` so the bucket sum always equals the daily
- * total. Target-scoped QA (`hydra-target-qa`) is attributed to `qa` since the
- * operator's question is "how much does review cost", not "orch vs target".
+ * total.
  */
 export function skillToCostClass(skill: string | undefined | null): CostClass {
   const s = (skill || "").trim().toLowerCase();
   if (!s) return "other";
-
-  // Order matters: check the more specific `target` variants before the
-  // generic prefixes so `hydra-target-build` doesn't fall into `dev-orch`.
-  if (s === "hydra-target-build") return "dev-target";
-  if (s === "hydra-dev") return "dev-orch";
-  if (s === "hydra-qa" || s === "hydra-target-qa") return "qa";
-  if (s === "hydra-retro" || s === "hydra-target-retro") return "retro";
-  if (s === "hydra-cleanup") return "cleanup";
-  // Research family: hydra-research, hydra-issue-research, hydra-target-research,
-  // and the discover/scout/architecture scouting skills that feed the research
-  // pipeline.
-  if (
-    s === "hydra-research" ||
-    s === "hydra-issue-research" ||
-    s === "hydra-target-research" ||
-    s === "hydra-discover" ||
-    s === "hydra-target-discover" ||
-    s === "hydra-tool-scout" ||
-    s === "hydra-architecture-scan" ||
-    s === "hydra-architect"
-  ) {
-    return "research";
-  }
-  return "other";
+  const row = classBySkill(s);
+  // Cast is safe: the module-load invariant above proves every row's
+  // costClass is a member of COST_CLASS_ORDER.
+  if (row) return row.costClass as CostClass;
+  return NON_CLASS_SKILL_COST[s] ?? "other";
 }
 
 export interface CostByClassEntry {
