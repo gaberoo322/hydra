@@ -116,7 +116,7 @@ export const HOLDBACK_BASELINE_TTL_SECONDS = numFromEnv(
 );
 
 /** Per-day revert-counter TTL — 7 days of audit headroom past the UTC day. */
-export const HOLDBACK_REVERT_COUNT_TTL_SECONDS = 7 * 24 * 60 * 60;
+const HOLDBACK_REVERT_COUNT_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 function numFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
