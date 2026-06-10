@@ -115,7 +115,7 @@ export const OAUTH_USAGE_BETA = "oauth-2025-04-20";
  * discipline so a hung endpoint can't wedge the 60s usage scan. A timeout
  * degrades to the transcript estimate exactly like any other failure.
  */
-export const OAUTH_USAGE_TIMEOUT_MS = 5_000;
+const OAUTH_USAGE_TIMEOUT_MS = 5_000;
 
 /**
  * Resolve the credentials file path — the single owner of the
