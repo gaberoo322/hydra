@@ -37,7 +37,35 @@
 # Per ADR-0012 the Gate governs ADMISSION (should a run start now?), never
 # WHAT WORK to do — that stays with decide.py. The Gate reuses the existing
 # watchdog, bootstrap concurrent-run guard, and the service's
-# Restart=on-failure untouched; it only ever *starts* the service.
+# Restart=on-failure untouched; in timer mode it only ever *starts* the
+# service.
+#
+# Exec mode — `pace-gate.sh --exec-autopilot` (issue #1089 recurrence)
+# --------------------------------------------------------------------
+# The timer path above is NOT the only way hydra-autopilot.service starts:
+# the unit's Restart=on-failure relaunches it 180s after any failed exit,
+# and that systemd-internal restart never consults this gate. Observed
+# 2026-06-10 (run 342aba81): a session-limit exit (code=1) armed
+# Restart=on-failure, and systemd relaunched the unit into the still-
+# exhausted quota every 180s for hours (restart counter 53→60) even though
+# the session-limit block from #1112 was armed — that block only gated the
+# timer path.
+#
+# Fix: the unit's ExecStart now routes through THIS script in exec mode, so
+# every start — timer-initiated `systemctl start` AND systemd-internal
+# Restart= — passes the same admission check:
+#
+#   - Step 1's `systemctl is-active` self-check is skipped (the unit IS
+#     active: it's us). The state.json live-PID check stays, guarding
+#     against stacking a unit run on a hand-launched session.
+#   - Steps 2–3 (eligibility consult + pause/session-block/emergencyStop/
+#     pacing checks) run identically. A blocked or fail-safe outcome exits
+#     0 — a CLEAN exit, so Restart=on-failure disarms instead of storming,
+#     and no start slot is burned. The ~15-min timer resumes admission once
+#     the block passes.
+#   - Step 4, when eligible, `exec`s the claude CLI (same invocation the
+#     unit used to run directly), replacing this shell so systemd keeps
+#     tracking the session as the main process.
 #
 # Style + idempotency
 # -------------------
@@ -53,8 +81,13 @@
 #       inactive. Lets the test exercise the launch-decision path without
 #       poking systemd.
 #   HYDRA_PACE_GATE_DRY_RUN=1
-#       In the launch branch, log "would-start" and exit 0 instead of
-#       actually `systemctl --user start`-ing the service.
+#       In the launch branch, log "would-start" (timer mode) / "would-exec"
+#       (exec mode) and exit 0 instead of actually starting/exec'ing
+#       anything.
+#   HYDRA_PACE_GATE_EXEC_CMD
+#       Exec-mode only: override the claude CLI invocation with an
+#       arbitrary command line (word-split). Lets the test pin that the
+#       eligible branch really execs without spawning a Claude session.
 #   HYDRA_PACE_GATE_ELIGIBILITY_URL
 #       Override the eligibility endpoint URL (default
 #       http://localhost:4000/api/usage/eligibility) so the test can point
@@ -69,9 +102,20 @@ SERVICE="hydra-autopilot.service"
 STATE_PATH="${HYDRA_AUTOPILOT_STATE:-/tmp/hydra-autopilot-state.json}"
 ELIGIBILITY_URL="${HYDRA_PACE_GATE_ELIGIBILITY_URL:-http://localhost:4000/api/usage/eligibility}"
 
+# Mode: "timer" (default — the ~15-min admission timer; launches the unit) or
+# "exec" (--exec-autopilot — the unit's ExecStart wrapper; execs the CLI).
+MODE="timer"
+if [[ "${1:-}" == "--exec-autopilot" ]]; then
+  MODE="exec"
+fi
+
 log() {
   echo "hydra-pace-gate: $*"
 }
+
+if [[ "$MODE" == "exec" ]]; then
+  log "exec-autopilot mode (unit ExecStart wrapper, issue #1089)"
+fi
 
 # --- Step 1: skip if an Autopilot Run is already live ---
 #
@@ -80,7 +124,11 @@ log() {
 # PID. We check both because an operator can hand-launch /hydra-autopilot
 # with the unit stopped, and we must not stack a second run on top.
 
-if [[ "${HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE:-0}" != "1" ]] \
+# In exec mode the unit is BY DEFINITION active — it's us — so the is-active
+# self-check is skipped (it would always trip and make every start a no-op).
+# systemd itself guarantees single-instance per unit; the state-PID check
+# below still guards against stacking onto a hand-launched session.
+if [[ "$MODE" != "exec" && "${HYDRA_PACE_GATE_FORCE_SERVICE_INACTIVE:-0}" != "1" ]] \
   && systemctl --user is-active --quiet "$SERVICE"; then
   log "already running ($SERVICE active); skipping"
   exit 0
@@ -162,7 +210,30 @@ if [[ "$PACE_STATE" == "ahead" ]]; then
   exit 0
 fi
 
-# --- Step 4: eligible (paceState on/behind, not emergency) — launch ---
+# --- Step 4: eligible (paceState on/behind, not emergency) — launch/exec ---
+
+if [[ "$MODE" == "exec" ]]; then
+  log "eligible (paceState=$PACE_STATE, emergencyStop=$EMERGENCY_STOP) — exec'ing autopilot session"
+
+  if [[ "${HYDRA_PACE_GATE_DRY_RUN:-0}" == "1" ]]; then
+    log "would-exec autopilot session (DRY_RUN=1, test mode)"
+    exit 0
+  fi
+
+  if [[ -n "${HYDRA_PACE_GATE_EXEC_CMD:-}" ]]; then
+    # Test-only hook: intentional word-split so the test can pass a full
+    # command line (e.g. "echo exec-marker").
+    # shellcheck disable=SC2086
+    exec ${HYDRA_PACE_GATE_EXEC_CMD}
+  fi
+
+  # Same invocation hydra-autopilot.service's ExecStart used to run directly
+  # (--dangerously-skip-permissions rationale lives in the unit file). exec
+  # replaces this shell, so systemd tracks the CLI as the main process and
+  # RuntimeMaxSec / SIGTERM semantics are unchanged.
+  exec claude --dangerously-skip-permissions -p "/hydra-autopilot"
+fi
+
 log "eligible (paceState=$PACE_STATE, emergencyStop=$EMERGENCY_STOP) — launching $SERVICE"
 
 if [[ "${HYDRA_PACE_GATE_DRY_RUN:-0}" == "1" ]]; then

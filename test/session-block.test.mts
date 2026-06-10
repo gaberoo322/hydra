@@ -14,7 +14,11 @@
  *     returns recorded:false for a non-session-limit line; 400 on a bad body;
  *   - GET /api/usage/eligibility: overlays reasons.sessionBlockedUntil +
  *     allow=false while the block is in the future;
- *   - pace-gate.sh: skips launch on a future block; launches once it passes.
+ *   - pace-gate.sh: skips launch on a future block; launches once it passes;
+ *   - pace-gate.sh --exec-autopilot (the unit's ExecStart wrapper — the
+ *     systemd Restart=on-failure path that bypassed the timer gate): exits 0
+ *     WITHOUT exec'ing on a future block / unreachable eligibility, and
+ *     exec's the session when eligible.
  *
  * Uses Redis DB 1 — never touches production (DB 0). A file-level after() hook
  * closes the Redis client so the runner emits `# pass N` lines (PR #518 lesson).
@@ -296,6 +300,122 @@ describe("pace-gate.sh launch-skip on session block (issue #1089)", () => {
       const r = await runPaceGate(srv.url);
       assert.equal(r.status, 0);
       assert.match(r.stdout, /would-start/);
+    } finally {
+      srv.close();
+    }
+  });
+});
+
+describe("pace-gate.sh --exec-autopilot — systemd Restart= path (issue #1089 recurrence)", () => {
+  // The unit's ExecStart wrapper. Restart=on-failure relaunches the unit
+  // without consulting the timer gate, so the wrapper must re-run the same
+  // admission check on EVERY start: blocked => clean exit 0 (disarms the
+  // restart storm), eligible => exec the session.
+  function runExecMode(
+    eligibilityUrl: string,
+    extraEnv: Record<string, string> = {},
+  ): Promise<{ status: number; stdout: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn("bash", [PACE_GATE, "--exec-autopilot"], {
+        env: {
+          ...process.env,
+          // NOTE: no FORCE_SERVICE_INACTIVE — exec mode must skip the
+          // is-active self-check on its own (the unit IS active: it's us).
+          HYDRA_PACE_GATE_ELIGIBILITY_URL: eligibilityUrl,
+          HYDRA_AUTOPILOT_STATE: "/tmp/hydra-pace-gate-sessionblock-nonexistent.json",
+          ...extraEnv,
+        },
+      });
+      let stdout = "";
+      child.stdout.on("data", (d) => { stdout += d.toString(); });
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ status: code ?? -1, stdout }));
+    });
+  }
+
+  const eligible = {
+    allow: true,
+    shed: [],
+    reasons: {
+      emergencyStop: false,
+      pacingShed: false,
+      calibrated: true,
+      paused: false,
+      sessionBlockedUntil: null as string | null,
+    },
+    paceState: "on",
+  };
+
+  test("a future sessionBlockedUntil => clean exit 0, does NOT exec", async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const srv = await eligibilityServer({
+      ...eligible,
+      allow: false,
+      reasons: { ...eligible.reasons, sessionBlockedUntil: future },
+    });
+    try {
+      const r = await runExecMode(srv.url, {
+        HYDRA_PACE_GATE_EXEC_CMD: "echo exec-marker-should-not-appear",
+      });
+      assert.equal(r.status, 0); // CLEAN exit — Restart=on-failure must disarm
+      assert.match(r.stdout, /session-limit block until/);
+      assert.doesNotMatch(r.stdout, /exec-marker-should-not-appear/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("eligible => execs the session (test hook command runs)", async () => {
+    const srv = await eligibilityServer(eligible);
+    try {
+      const r = await runExecMode(srv.url, {
+        HYDRA_PACE_GATE_EXEC_CMD: "echo exec-marker-ran",
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /exec-marker-ran/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("eligible + DRY_RUN=1 => would-exec, exits 0 without exec'ing", async () => {
+    const srv = await eligibilityServer(eligible);
+    try {
+      const r = await runExecMode(srv.url, {
+        HYDRA_PACE_GATE_DRY_RUN: "1",
+        HYDRA_PACE_GATE_EXEC_CMD: "echo exec-marker-should-not-appear",
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /would-exec autopilot session/);
+      assert.doesNotMatch(r.stdout, /exec-marker-should-not-appear/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("eligibility unreachable => fail-safe clean exit 0, does NOT exec", async () => {
+    // Closed port — curl fails; the wrapper must NOT burn quota while blind.
+    const r = await runExecMode("http://127.0.0.1:1/api/usage/eligibility", {
+      HYDRA_PACE_GATE_EXEC_CMD: "echo exec-marker-should-not-appear",
+    });
+    assert.equal(r.status, 0); // clean — no Restart=on-failure re-arm
+    assert.match(r.stdout, /eligibility endpoint unreachable/);
+    assert.doesNotMatch(r.stdout, /exec-marker-should-not-appear/);
+  });
+
+  test("operator pause => clean exit 0, does NOT exec", async () => {
+    const srv = await eligibilityServer({
+      ...eligible,
+      allow: false,
+      reasons: { ...eligible.reasons, paused: true },
+    });
+    try {
+      const r = await runExecMode(srv.url, {
+        HYDRA_PACE_GATE_EXEC_CMD: "echo exec-marker-should-not-appear",
+      });
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /autopilot paused \(operator\)/);
+      assert.doesNotMatch(r.stdout, /exec-marker-should-not-appear/);
     } finally {
       srv.close();
     }
