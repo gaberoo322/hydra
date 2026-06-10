@@ -12,16 +12,17 @@ import { shouldTweenFrame } from "./derive-dispatch-tween.ts";
 /**
  * NowPixel — pixel-art habitat dashboard.
  *
- * Slice 7 PR1 (#642 / #649) — closes the last parity gap with the
- * classic /now: a small Coin Bag tile that hits /api/now/cost-burn so
- * the audit-now-parity.js script passes.
+ * Slice 7 PR1 (#642 / #649) — closed the last parity gap with the
+ * (now-retired) classic /now: a small Coin Bag tile that hits
+ * /api/now/cost-burn. The classic view and its parity audit were
+ * removed once the deprecation window closed (issue #664).
  *
  * NowPixel hosts the shared `hoveredSubagentId` from slice 6 so the
  * in-zone SubagentSprite and the BattleCardRow (slice D of the
  * /now-observability epic #667 / issue #672, which replaced the legacy
  * ActiveDispatchesStrip) highlight together. The page is reachable at
- * /now and the pixel route is the canonical surface (the /now-classic
- * fallback was retired in slice 7 PR2).
+ * /now and the pixel Habitat is the canonical surface (the /now-classic
+ * fallback was retired by issue #664 after slice 7 PR2 deprecated it).
  */
 function formatTokens(n) {
   if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return "0";
@@ -118,7 +119,7 @@ export default function NowPixel({ ws }) {
         <p className="text-sm text-zinc-400">
           Pokemon-habitat rendering of the live orchestrator — the alternate
           surface to the /now Console (toggle above, or deep-link
-          <code className="text-zinc-300"> /now-pixel</code>).
+          <code className="text-zinc-300"> /now?view=habitat</code>).
         </p>
       </header>
       <AutopilotPavilion spriteRef={pavilionSpriteRef} />

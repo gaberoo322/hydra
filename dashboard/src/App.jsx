@@ -5,7 +5,6 @@ import Layout from "./components/Layout.jsx";
 import Today from "./pages/Today.jsx";
 import NowConsole from "./pages/now-console/NowConsole.jsx";
 import NowPixel from "./pages/now-pixel/NowPixel.jsx";
-import NowClassic from "./pages/NowClassic.jsx";
 import Outcomes from "./pages/Outcomes.jsx";
 import Explore from "./pages/Explore.jsx";
 import Autopilot from "./pages/Autopilot.jsx";
@@ -22,10 +21,9 @@ import {
 // (#649) made the pixel-habitat view the canonical /now. The /now Console
 // redesign (epic #887, issue #891) then made /now a mode-toggled shell:
 // the diagnostics Console is the default surface and the pixel Habitat is
-// the preserved alternate. The /now-classic route lingers as a fallback
-// through 2026-06-10 (PRD #615 window).
-//
-// /now-pixel is retained as a direct-to-Habitat alias for old bookmarks.
+// the preserved alternate. The deprecated /now-classic fallback route and
+// the /now-pixel direct-to-Habitat alias were retired on 2026-06-10 once
+// the PRD #615 deprecation window closed (issue #664).
 
 /**
  * NowRoute — /now mode-toggle shell (issue #891, now-console-4).
@@ -92,9 +90,6 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Today />} />
           <Route path="/now" element={<NowRoute ws={ws} />} />
-          <Route path="/now-classic" element={<NowClassic ws={ws} />} />
-          {/* /now-pixel — direct-to-Habitat alias (skips the Console default). */}
-          <Route path="/now-pixel" element={<NowPixel ws={ws} />} />
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/explore" element={<Explore />} />
           <Route path="/explore/:tab" element={<Explore />} />
