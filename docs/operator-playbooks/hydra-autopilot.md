@@ -303,7 +303,8 @@ INV-008.
 ### Per-class model routing (issue #1093)
 
 Background `Agent`-dispatched subagents inherit the **parent autopilot
-session's model** (Opus 4.8) unless the dispatch passes an explicit `model`.
+session's model** (the operator's saved default — Fable 5 since 2026-06-10)
+unless the dispatch passes an explicit `model`.
 Skill frontmatter is NOT a sufficient lever — a background dispatch ignores the
 skill's declared model and inherits the parent. So the `dispatch` action-to-tool
 row resolves `model` from the action's `slot` (the class) via the static map
@@ -312,14 +313,15 @@ model field** (the README "Subagent Routing" design principle): the map lives in
 this playbook, not in `decide()`.
 
 Right-sized by **stakes × frequency** — drop the high-frequency non-authoring
-classes off Opus; keep authorship and behaviour-reshaping classes on Opus.
+classes off the frontier model; keep authorship and behaviour-reshaping classes
+on Fable 5 (the frontier model, replacing Opus as of 2026-06-10).
 
 | Class (`slot`) | Model | Rationale |
 |---|---|---|
-| `dev_orch` | Opus (keep) | Multi-file, tier-gated self-modification |
-| `dev_target` | Opus (keep) | Money-critical betting code |
-| `retro_orch` | Opus (keep) | Reshapes future behaviour; per-run low volume |
-| `design_concept_orch` | Opus (keep) | A weak design concept wastes a full dev+QA cycle |
+| `dev_orch` | Fable 5 (keep) | Multi-file, tier-gated self-modification |
+| `dev_target` | Fable 5 (keep) | Money-critical betting code |
+| `retro_orch` | Fable 5 (keep) | Reshapes future behaviour; per-run low volume |
+| `design_concept_orch` | Fable 5 (keep) | A weak design concept wastes a full dev+QA cycle |
 | `qa_orch` | Sonnet | Highest ROI; structured review against an artifact, ~every PR |
 | `qa_target` | Sonnet | Floor — money-critical review, do NOT drop below Sonnet |
 | `sweep_orch` / `sweep_target` | Sonnet | Board-routing decisions, not authorship |
@@ -331,7 +333,7 @@ classes off Opus; keep authorship and behaviour-reshaping classes on Opus.
 | `cleanup_orch` | Haiku | Deterministic knip output; LLM only formats findings into issues |
 | `discover_orch` / `discover_target` | Haiku | Patrol/diagnostics, designed small/fast/cheap |
 
-Use the harness's model alias (`opus` / `sonnet` / `haiku`) for the `model`
+Use the harness's model alias (`fable` / `sonnet` / `haiku`) for the `model`
 kwarg so the operator's plan resolves the concrete version. A class not in the
 map (e.g. a legacy/unknown `slot`) → omit `model` and inherit the parent
 session, the conservative default.

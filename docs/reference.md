@@ -463,7 +463,7 @@ The orchestrator no longer routes per-call models — model selection is the har
 
 | Tier | Model (Claude Code) | Typical use |
 |---|---|---|
-| frontier | claude-opus (1M context) | hydra-dev, hydra-target-build, hydra-research, hydra-architect — deep multi-file edits and design work |
+| frontier | claude-fable-5 (1M context) | hydra-dev, hydra-target-build, hydra-research, hydra-architect — deep multi-file edits and design work |
 | balanced | claude-sonnet | hydra-sweep, hydra-target-sweep, hydra-qa, hydra-doctor — board/health work with structured outputs |
 | fast | claude-haiku | hydra-discover, hydra-target-discover, lesson-capture hooks, classification — small/fast/cheap calls |
 

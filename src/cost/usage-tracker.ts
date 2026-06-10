@@ -42,6 +42,7 @@
  *
  * Quota-weight env (issue #691):
  *   - HYDRA_QUOTA_WEIGHT_OPUS    — per-token multiplier for the opus family
+ *     (the frontier bucket: claude-opus* AND claude-fable* model strings)
  *   - HYDRA_QUOTA_WEIGHT_SONNET  — per-token multiplier for the sonnet family
  *   - HYDRA_QUOTA_WEIGHT_HAIKU   — per-token multiplier for the haiku family
  * These convert raw per-family token counts into a comparable
@@ -618,17 +619,22 @@ export function getQuotaWeightHaiku(): number {
 /**
  * Classify a model string into a Quota-Weight family by prefix.
  *
- * Pure prefix matcher: `claude-opus*` → opus, `claude-sonnet*` → sonnet,
- * `claude-haiku*` → haiku, anything else → unknown. This is intentionally a
- * NEW classifier and NOT `modelToTier` from `attribution.ts` — that function
- * returns legacy tier labels (frontier/codex/mini) keyed on GPT model names
- * and would bucket every real `claude-opus-4-7` string into `unknown`. The
- * no-duplication intent is honoured by keeping this the ONE canonical family
- * classifier. (issue #691)
+ * Pure prefix matcher: `claude-opus*`/`claude-fable*` → opus,
+ * `claude-sonnet*` → sonnet, `claude-haiku*` → haiku, anything else →
+ * unknown. The `opus` family is the frontier-tier bucket: Fable 5 replaced
+ * Opus as the dispatched frontier model (2026-06-10) and burns at the same
+ * HYDRA_QUOTA_WEIGHT_OPUS weight — without this mapping every frontier token
+ * would fall into `unknown` (uncalibrated weight 1.0). This is intentionally
+ * a NEW classifier and NOT `modelToTier` from `attribution.ts` — that
+ * function returns legacy tier labels (frontier/codex/mini) keyed on GPT
+ * model names and would bucket every real `claude-opus-4-7` string into
+ * `unknown`. The no-duplication intent is honoured by keeping this the ONE
+ * canonical family classifier. (issue #691)
  */
 export function modelToFamily(model: string | null | undefined): ModelFamily {
   const l = String(model ?? "").toLowerCase();
   if (l.startsWith("claude-opus")) return "opus";
+  if (l.startsWith("claude-fable")) return "opus";
   if (l.startsWith("claude-sonnet")) return "sonnet";
   if (l.startsWith("claude-haiku")) return "haiku";
   return "unknown";

@@ -204,6 +204,11 @@ describe("usage-tracker", () => {
       assert.equal(modelToFamily("claude-haiku-4-5"), "haiku");
     });
 
+    test("maps claude-fable strings into the opus (frontier) family", () => {
+      assert.equal(modelToFamily("claude-fable-5"), "opus");
+      assert.equal(modelToFamily("claude-fable-5[1m]"), "opus");
+    });
+
     test("is case-insensitive on the prefix", () => {
       assert.equal(modelToFamily("Claude-Opus-4-7"), "opus");
     });
