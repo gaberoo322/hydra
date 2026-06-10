@@ -92,6 +92,19 @@ const DEFAULT_TIME_BUDGET_MS = 540_000;
  * becomes a mutation target. Order and de-duplication follow `classifyTargetRisk`'s
  * matched-path contract (input order, de-duplicated).
  *
+ * hydra-betting roots its source tree at `web/`, so a real diff path is
+ * `web/src/lib/providers/...`. `classifyTargetRisk().matchedPaths` deliberately
+ * returns the ORIGINAL input strings verbatim (a `web/`-prefixed audit trail
+ * consumed by `target-design-concept.ts`), but `runMutationTests` joins each
+ * returned path against `projectDir` — which is already `.../web` — so a
+ * `web/`-prefixed path resolves to `.../web/web/src/...`, ENOENT (silently
+ * caught), zero mutants, and a false no-signal `warn` that bypasses the
+ * money-critical kill-floor (issue #1649). We strip a single leading `web/`
+ * here — AFTER matching, BEFORE returning to the runner — so the runner receives
+ * `projectDir`-relative paths. The strip is exactly-once (non-global `^web/`,
+ * optionally behind a leading `./`) and idempotent on bare `src/...` inputs,
+ * mirroring `classifyTargetRisk`'s own `normalize()` `web/`-stripping.
+ *
  * Pure — no filesystem, no git, no env. Test it by passing arbitrary string
  * lists. Mirrors `filterMutationCandidates` in the Orchestrator gate but routes
  * on the money-critical classifier instead of a `src/**\/*.ts` allowlist.
@@ -101,7 +114,14 @@ export function filterMoneyCriticalCandidates(changedFiles: string[]): string[] 
     .map((f) => (typeof f === "string" ? f.trim() : ""))
     .filter((f) => f.length > 0);
   const { matchedPaths } = classifyTargetRisk(trimmed);
-  return matchedPaths.filter((f) => !shouldSkipMutation(f));
+  return matchedPaths
+    .filter((f) => !shouldSkipMutation(f))
+    // Strip a single leading `web/` (optionally behind `./`) so the path is
+    // projectDir-relative for `runMutationTests` (issue #1649). Non-global + `^`
+    // anchor = exactly once; a bare `src/...` path has no `web/` prefix and is
+    // unaffected (idempotent). A lone `./` with no `web/` is left intact so the
+    // strip stays a pure de-doubling, not a general normalizer.
+    .map((f) => f.replace(/^(?:\.\/)?web\//, ""));
 }
 
 /**
