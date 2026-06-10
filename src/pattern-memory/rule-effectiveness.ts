@@ -44,15 +44,14 @@ import {
 // + the side-effecting `demotePromotedRuleFromFeedbackFile`) is now owned by the
 // `feedback-file.ts` Module, co-located with the matching append/render grammar
 // it parses against (the writer/reader coupling is now structural, not a doc
-// comment). `demotePromotedRuleFromFeedbackFile` is re-exported so the demotion
-// caller below keeps a stable local name; `removePromotedRuleBlock` is
-// re-exported under its historical name `removePromotedRuleFromFeedback` so the
-// existing test import (test/promoted-rule-effectiveness.test.mts) keeps
-// resolving against `rule-effectiveness.ts`.
-export {
-  demotePromotedRuleFromFeedbackFile,
-  removePromotedRuleBlock as removePromotedRuleFromFeedback,
-};
+// comment). `demotePromotedRuleFromFeedbackFile` is imported above and used by
+// the demotion caller below; it no longer needs to be re-exported (no external
+// importer resolves it through `rule-effectiveness.ts` — issue #1612).
+// `removePromotedRuleBlock` is re-exported under its historical name
+// `removePromotedRuleFromFeedback` so the existing test import
+// (test/promoted-rule-effectiveness.test.mts) keeps resolving against
+// `rule-effectiveness.ts`.
+export { removePromotedRuleBlock as removePromotedRuleFromFeedback };
 
 // ===========================================================================
 // Types
