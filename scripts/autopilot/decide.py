@@ -161,133 +161,154 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable, Sequence
 
 # ---------------------------------------------------------------------------
-# Public constants
+# Public constants — derived from the Dispatch-Class Taxonomy (classes.json)
 # ---------------------------------------------------------------------------
+# scripts/autopilot/classes.json (epic #1669, slice #1670) is the single
+# machine-readable table that owns the dispatch-class alphabet: one row per
+# class with columns kind / skill / costClass / learningAgent /
+# cooldownSeconds / scope / provenanceLabel (+ a free-form `notes` field that
+# carries the per-class design rationale formerly inlined here as comments).
+# decide.py derives PIPELINE_SLOTS, SIGNAL_CLASSES and SIGNAL_COOLDOWNS from
+# it at import time and FAILS LOUD (TaxonomyError → non-zero exit) on a
+# missing/malformed file or a row missing a required column. There is
+# DELIBERATELY no fallback to embedded tuples — a silent fallback would
+# resurrect the four-file taxonomy drift this table exists to kill.
+#
+# TaxonomyError subclasses RuntimeError (NOT SystemExit) so heartbeat.py's
+# best-effort `from decide import SIGNAL_COOLDOWNS` keeps its documented
+# `except Exception` degrade path, while any CLI invocation of decide.py
+# still exits non-zero with the message.
+#
+# The brain keeps all POLICY — selectors, cooldown enforcement, scope masks
+# (SCOPE_*_EXCLUDE), the BACKFILL_SIGNAL_CLASSES stagger set, cost-cap gates.
+# The table is only the ALPHABET (ADR-0012). Row order in the file IS the
+# dispatch order of the derived tuples.
 
-PIPELINE_SLOTS = (
-    "dev_orch",
-    "qa_orch",
-    "research_orch",
-    "dev_target",
-    "qa_target",
-    "research_target",
-    # design_concept_orch (issue #466, Phase B of #437): grills an
-    # orchestrator anchor before its dev_orch dispatch. Phase B is warn-
-    # only — a draft artifact whose gateCheck() returns ok:false is still
-    # treated as "fresh artifact present" and dev_orch proceeds. Phase C
-    # (separate issue) will flip this to a hard block. The target mirror
-    # (design_concept_target) lands in Phase D.
-    "design_concept_orch",
+_TAXONOMY_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "classes.json"
 )
 
-SIGNAL_CLASSES = (
-    "health",
-    "sweep_orch",
-    "sweep_target",
-    "discover_orch",
-    "discover_target",
-    # scout_orch (issue #485, Phase B of /hydra-tool-scout epic): weekly
-    # calendar walk over the AI-leverage taxonomy + runtime deps. Calendar-
-    # driven, 7d cooldown — see src/scout/calendar-walk.ts for the walker
-    # itself. Phase A (#484) shipped the skill + seen-list; Phase B wires
-    # the autopilot dispatch so the walk runs unattended.
-    "scout_orch",
-    # architecture_orch (issue #790, parent #787; unified by #959, epic #958):
-    # board-idle backfill that dispatches the headless /hydra-architecture-scan
-    # wrapper (#788) to turn spare capacity into self-improvement issues. Fires
-    # when orch_backfill_idle AND NOT arch_board_saturated; the 1h class
-    # cooldown is the back-stop, arch_board_saturated is the primary suppressor.
-    # collect-state.sh (#789) owns signal emission; decide.py only reads the
-    # precomputed signals.
-    "architecture_orch",
-    # retro_orch (issue #920, parent #917): daily per-run retrospective.
-    # Dispatches the /hydra-retro skill (#919) to turn the most-recent
-    # COMPLETED run into conservative, recurrence-gated improvement proposals.
-    # Calendar-driven, 24h cooldown — a once-per-day cadence. Fires on the
-    # `retro_run_available` signal (collect-state.sh emits it when a completed
-    # run exists to analyse). Being a signal class — no slot semantics, and
-    # decide.py dispatches all pipeline slots BEFORE signal classes — is what
-    # satisfies the issue's "spare capacity / does not preempt pipeline
-    # classes" requirement: a retro never blocks a dev/QA/research dispatch.
-    # The 24h class cooldown is the daily cadence back-stop; decide.py reads
-    # the precomputed signal verbatim and never recomputes run state here.
-    "retro_orch",
-    # cleanup_orch (issue #960, parent #958): board-idle backfill that dispatches
-    # the headless /hydra-cleanup skill — a DETERMINISTIC dead-code + simplification
-    # detector (knip/ts-prune devDependency) that files high-confidence,
-    # mechanically-verifiable findings ("remove X AND npm test/tsc still pass") as
-    # ready-for-agent issues. Keyed off the same unified `orch_backfill_idle`
-    # signal as architecture_orch / discover_orch (#959), but with a 1h cooldown
-    # and DELIBERATELY NOT in BACKFILL_SIGNAL_CLASSES so it is NOT subject to the
-    # one-per-turn stagger — cleanup is the high-confidence mechanical workhorse
-    # and is meant to "run hot" alongside the staggered backfill set. Its own
-    # anti-flood cap is `cleanup_board_saturated` (collect-state.sh, mirroring
-    # arch_board_saturated), checked FIRST in the selector. collect-state.sh owns
-    # signal emission; decide.py only reads the precomputed signals.
-    "cleanup_orch",
-    # cleanup_target: the TARGET mirror of cleanup_orch — dispatches the
-    # headless /hydra-target-cleanup skill, a DETERMINISTIC demote-only
-    # dead-export sweep over ~/hydra-betting/web (knip is a Target
-    # devDependency since hydra-betting PR #93). It files Redis backlog items
-    # (the Target's tracker), NOT GitHub issues, and emits ONLY demote-class
-    # findings in files past the Target's 45-day wiring grace period — the
-    # carve-out the Target's CLAUDE.md rule 3 authorises. Keyed off
-    # `target_backfill_idle` (target backlog has no actionable work), with
-    # `target_cleanup_board_saturated` as the anti-flood cap checked FIRST,
-    # mirroring cleanup_orch's signal discipline exactly. collect-state.sh
-    # owns signal emission; decide.py only reads the precomputed signals.
-    "cleanup_target",
+# Every column must be PRESENT on every row (nullable columns carry an
+# explicit null, never an absent key) so a projection miss is loud.
+_TAXONOMY_REQUIRED_COLUMNS = (
+    "name",
+    "kind",
+    "skill",
+    "costClass",
+    "learningAgent",
+    "cooldownSeconds",
+    "scope",
+    "provenanceLabel",
 )
+
+_TAXONOMY_KINDS = ("pipeline", "signal")
+_TAXONOMY_SCOPES = ("orch", "target", "both")
+_TAXONOMY_LEARNING_AGENTS = ("planner", "executor")
+
+
+class TaxonomyError(RuntimeError):
+    """classes.json is missing, malformed, or violates the row contract.
+
+    Raised at import time (issue #1670) — decide.py refuses to start
+    without a valid Dispatch-Class Taxonomy. NEVER caught internally to
+    fall back to embedded tuples.
+    """
+
+
+def _taxonomy_fail(reason: str) -> "TaxonomyError":
+    return TaxonomyError(
+        f"decide.py: dispatch-class taxonomy {_TAXONOMY_PATH}: {reason} "
+        "— refusing to start (no fallback tuples; epic #1669 / issue #1670)"
+    )
+
+
+def _load_class_taxonomy(path: str) -> tuple[dict, ...]:
+    """Load + validate classes.json. Hard-fails on any contract violation."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        raise _taxonomy_fail("file is missing") from None
+    except json.JSONDecodeError as exc:
+        raise _taxonomy_fail(f"malformed JSON ({exc})") from None
+
+    if not isinstance(raw, dict) or not isinstance(raw.get("classes"), list):
+        raise _taxonomy_fail('top level must be an object with a "classes" list')
+    rows = raw["classes"]
+    if not rows:
+        raise _taxonomy_fail('"classes" list is empty')
+
+    seen_names: set[str] = set()
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise _taxonomy_fail(f"row {i} is not an object")
+        missing = [c for c in _TAXONOMY_REQUIRED_COLUMNS if c not in row]
+        if missing:
+            raise _taxonomy_fail(
+                f"row {i} ({row.get('name', '?')}) lacks required column(s): "
+                + ", ".join(missing)
+            )
+        name = row["name"]
+        if not isinstance(name, str) or not name:
+            raise _taxonomy_fail(f"row {i}: name must be a non-empty string")
+        if name in seen_names:
+            raise _taxonomy_fail(f"duplicate class name: {name}")
+        seen_names.add(name)
+        if row["kind"] not in _TAXONOMY_KINDS:
+            raise _taxonomy_fail(
+                f"{name}: kind must be one of {_TAXONOMY_KINDS}, got {row['kind']!r}"
+            )
+        if not isinstance(row["skill"], str) or not row["skill"]:
+            raise _taxonomy_fail(f"{name}: skill must be a non-empty string")
+        if not isinstance(row["costClass"], str) or not row["costClass"]:
+            raise _taxonomy_fail(f"{name}: costClass must be a non-empty string")
+        if row["learningAgent"] is not None and (
+            row["learningAgent"] not in _TAXONOMY_LEARNING_AGENTS
+        ):
+            raise _taxonomy_fail(
+                f"{name}: learningAgent must be null or one of "
+                f"{_TAXONOMY_LEARNING_AGENTS}, got {row['learningAgent']!r}"
+            )
+        if row["scope"] not in _TAXONOMY_SCOPES:
+            raise _taxonomy_fail(
+                f"{name}: scope must be one of {_TAXONOMY_SCOPES}, got {row['scope']!r}"
+            )
+        if row["provenanceLabel"] is not None and (
+            not isinstance(row["provenanceLabel"], str) or not row["provenanceLabel"]
+        ):
+            raise _taxonomy_fail(
+                f"{name}: provenanceLabel must be null or a non-empty string"
+            )
+        cooldown = row["cooldownSeconds"]
+        if row["kind"] == "signal":
+            # bool is an int subclass in Python — exclude it explicitly.
+            if isinstance(cooldown, bool) or not isinstance(cooldown, int) or cooldown < 0:
+                raise _taxonomy_fail(
+                    f"{name}: signal rows need a non-negative integer "
+                    f"cooldownSeconds, got {cooldown!r}"
+                )
+        elif cooldown is not None:
+            raise _taxonomy_fail(
+                f"{name}: pipeline rows must carry cooldownSeconds: null "
+                f"(slots have no class cooldown), got {cooldown!r}"
+            )
+
+    return tuple(rows)
+
+
+# The validated row tuple, exposed for future slices (#1671 folds the TS
+# projections; decide.py itself only consumes the three derivations below).
+CLASS_TAXONOMY = _load_class_taxonomy(_TAXONOMY_PATH)
+
+PIPELINE_SLOTS = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "pipeline")
+
+SIGNAL_CLASSES = tuple(r["name"] for r in CLASS_TAXONOMY if r["kind"] == "signal")
 
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
-# /tmp/hydra-last-*.txt files but lives inside state.json now.
+# /tmp/hydra-last-*.txt files but lives inside state.json now. Per-class
+# cadence rationale lives in the row's `notes` field in classes.json.
 SIGNAL_COOLDOWNS = {
-    "health":          0,      # health is always allowed; rate-limited by signal
-    "sweep_orch":      900,    # 15 min
-    "sweep_target":    900,
-    # discover_orch (issue #959, epic #958): 1h backfill cadence. Dropped from
-    # 30m to 3600s so it round-robins with architecture_orch off the unified
-    # `orch_backfill_idle` signal — both backfill-set classes share the same
-    # 1h cadence and the one-per-turn stagger guard picks one per idle turn.
-    "discover_orch":   3600,   # 1h (board-idle backfill set)
-    "discover_target": 1800,
-    # 7 days. The calendar walk takes ~a week's worth of context to digest
-    # (10 categories + 2 dep manifests ≈ 12 dispatches; running it more
-    # often produces duplicate work because the per-category cooldown is
-    # 30d). Per-class cooldown is the back-stop; per-category cooldown is
-    # the primary suppressor. See docs/operator-playbooks/hydra-autopilot.md.
-    "scout_orch":      7 * 24 * 60 * 60,
-    # architecture_orch (issue #790; dropped to 1h by issue #959, epic #958):
-    # 1h backfill cadence. The scan is a board-idle backfill pass keyed off the
-    # unified `orch_backfill_idle` signal. arch_board_saturated stays the
-    # PRIMARY suppressor (checked FIRST in the selector) and matters MORE at
-    # hourly cadence because the class can now attempt ~24x more often; the 1h
-    # class cooldown is only the back-stop. Together with the one-per-turn
-    # stagger guard in _rule_signals, the per-class 1h cooldown makes the two
-    # backfill classes round-robin across idle turns with no persistent state.
-    "architecture_orch": 3600,
-    # retro_orch (issue #920): 24h. The per-run retrospective runs at most
-    # once per day. The `retro_run_available` signal (collect-state.sh) only
-    # asserts that a completed run EXISTS to analyse; the 24h class cooldown
-    # is what enforces the daily cadence so the same run isn't re-analysed on
-    # every idle turn. Mirrors architecture_orch's daily idle-reclamation
-    # cadence rather than scout's weekly walk.
-    "retro_orch": 24 * 60 * 60,
-    # cleanup_orch (issue #960, epic #958): 1h backfill cadence. Mirrors
-    # discover_orch / architecture_orch's hourly cadence so the high-confidence
-    # mechanical workhorse can run hot on an idle board. The 1h class cooldown is
-    # the back-stop; `cleanup_board_saturated` (collect-state.sh) is the PRIMARY
-    # suppressor, checked FIRST in the selector exactly like arch_board_saturated.
-    # Unlike the staggered backfill set, cleanup_orch is NOT in
-    # BACKFILL_SIGNAL_CLASSES, so it may dispatch on the same idle turn as a
-    # staggered backfill class — by design, since dead-code removal is the
-    # highest-confidence (mechanically-verifiable) continuous-backfill work.
-    "cleanup_orch": 3600,
-    # cleanup_target: the Target mirror, same 1h backfill cadence as
-    # cleanup_orch. `target_cleanup_board_saturated` (collect-state.sh) is the
-    # PRIMARY suppressor — with a per-run cap of 8 file-items and a saturation
-    # cap of 10 open items, the cooldown is only the cadence back-stop.
-    "cleanup_target": 3600,
+    r["name"]: r["cooldownSeconds"] for r in CLASS_TAXONOMY if r["kind"] == "signal"
 }
 
 # Board-idle backfill set (issue #959, epic #958). Both classes key off the
