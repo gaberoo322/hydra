@@ -31,7 +31,7 @@ import { getRedisConnection } from "./connection.ts";
  * 7 days. A rolling-window read of the last N hours never needs more, and the
  * hour buckets are tiny (one small hash each), so a week of history is cheap.
  */
-export const OV_SEARCH_METRICS_TTL_SECONDS = 7 * 24 * 60 * 60;
+const OV_SEARCH_METRICS_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /** 30 days for the per-day context-availability counters (coarser, longer-lived). */
 const OV_CONTEXT_TTL_SECONDS = 30 * 24 * 60 * 60;
