@@ -92,9 +92,8 @@ export {
   projectRunView,
   deriveLifecycleState,
 };
-export { WEDGE_AGE_THRESHOLD_S, parseCrashDetail } from "./run-projections.ts";
+export { WEDGE_AGE_THRESHOLD_S } from "./run-projections.ts";
 export type {
-  ProjectionDeps,
   AutopilotLifecycleState,
   AutopilotLifecycle,
 } from "./run-projections.ts";
@@ -103,7 +102,7 @@ export type {
 // Constants
 // ---------------------------------------------------------------------------
 
-export const CYCLE_TTL_SECONDS = 7 * 24 * 3600;
+const CYCLE_TTL_SECONDS = 7 * 24 * 3600;
 export const RUN_TTL_SECONDS = 7 * 24 * 3600;
 
 /**
@@ -116,7 +115,7 @@ export const RUN_TTL_SECONDS = 7 * 24 * 3600;
  * SIGTERM from `systemctl restart` / `RuntimeMaxSec`) — distinct from a genuine
  * `crash` (issue #898), which is an abnormal exit that also missed a run-end.
  */
-export const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
+const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
   "budget",
   "wall_clock",
   "idle",
@@ -131,7 +130,7 @@ export const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
  * carries no crash detail even if a caller sends one, so the field stays a
  * reliable "this run died badly, here's why" signal rather than ambient noise.
  */
-export const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
+const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
   "crash",
   "failure_backstop",
 ]);
@@ -142,7 +141,7 @@ export const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
  * truncation stops a misbehaving / future writer bloating the run hash. ~8 KB
  * comfortably holds the last ~50-100 log lines.
  */
-export const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
+const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -180,7 +179,7 @@ function numberOrDefault(v: unknown, fallback: number): number {
  * caller then writes no `crash_detail` field at all rather than an empty
  * object, so a read can treat presence as "we captured something".
  */
-export function sanitizeCrashDetail(detail: CrashDetail | undefined): Record<string, unknown> | null {
+function sanitizeCrashDetail(detail: CrashDetail | undefined): Record<string, unknown> | null {
   if (!detail || typeof detail !== "object") return null;
   const out: Record<string, unknown> = {};
   if (typeof detail.signal === "string" && detail.signal.trim().length > 0) {
@@ -784,7 +783,7 @@ export async function getRunRow(runId: string): Promise<GetRunRowResult> {
  * 130) before the loop reached a stop rule — the exact starvation mechanism in
  * issue #1352 (the session physically ends before it logically drains).
  */
-export const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
+const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
   "idle",
   "budget",
   "wall_clock",
