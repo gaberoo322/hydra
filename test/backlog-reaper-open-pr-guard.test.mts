@@ -27,6 +27,10 @@
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
+// Static import keeps the pure matcher statically traceable (knip) — the
+// Redis-backed cases below still reach the rest of the backlog surface through
+// the dynamic-import `admin` namespace, but the pure helper needs no Redis.
+import { itemMatchesOpenPr } from "../src/backlog/reaper.ts";
 
 let admin: any;
 let redis: any;
@@ -102,12 +106,12 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
   test("itemMatchesOpenPr matches whole-word item IDs in PR title or body", () => {
     const item = { id: "item-302", title: "Add scanner run history page with suppression rate trends" };
     assert.equal(
-      admin.itemMatchesOpenPr(item, ["feat(scanner): item-302 add run history page\nCloses item-302."]),
+      itemMatchesOpenPr(item, ["feat(scanner): item-302 add run history page\nCloses item-302."]),
       true,
       "matches ID in title",
     );
     assert.equal(
-      admin.itemMatchesOpenPr(item, ["random title\ncloses item-302 in the body"]),
+      itemMatchesOpenPr(item, ["random title\ncloses item-302 in the body"]),
       true,
       "matches ID in body",
     );
@@ -117,12 +121,12 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     const item = { id: "item-302", title: "Short title" };
     // item-3020 should NOT cause item-302 to match
     assert.equal(
-      admin.itemMatchesOpenPr(item, ["feat(scanner): item-3020 do something else"]),
+      itemMatchesOpenPr(item, ["feat(scanner): item-3020 do something else"]),
       false,
       "rejects substring collision item-302 vs item-3020",
     );
     assert.equal(
-      admin.itemMatchesOpenPr(item, ["touches item-3025 and item-30200"]),
+      itemMatchesOpenPr(item, ["touches item-3025 and item-30200"]),
       false,
       "rejects multiple longer IDs",
     );
@@ -131,7 +135,7 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
   test("itemMatchesOpenPr falls back to exact title match when ID is absent", () => {
     const item = { id: "item-77", title: "Add scanner run history page with suppression rate trends" };
     assert.equal(
-      admin.itemMatchesOpenPr(item, [
+      itemMatchesOpenPr(item, [
         "feat: scanner page\nAdd scanner run history page with suppression rate trends — initial pass",
       ]),
       true,
@@ -141,16 +145,16 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
 
   test("itemMatchesOpenPr returns false for empty / null inputs", () => {
     const item = { id: "item-302", title: "Foo" };
-    assert.equal(admin.itemMatchesOpenPr(item, []), false);
-    assert.equal(admin.itemMatchesOpenPr(item, null as any), false);
-    assert.equal(admin.itemMatchesOpenPr({ id: "", title: "Foo" }, ["foo"]), false);
+    assert.equal(itemMatchesOpenPr(item, []), false);
+    assert.equal(itemMatchesOpenPr(item, null as any), false);
+    assert.equal(itemMatchesOpenPr({ id: "", title: "Foo" }, ["foo"]), false);
   });
 
   test("itemMatchesOpenPr rejects very short titles to avoid false positives", () => {
     // A 5-char title like "Fix X" must not match every PR mentioning "Fix X" in their body.
     const item = { id: "item-99", title: "Fix" };
     assert.equal(
-      admin.itemMatchesOpenPr(item, ["some PR\nFix this thing"]),
+      itemMatchesOpenPr(item, ["some PR\nFix this thing"]),
       false,
       "short titles (<12 chars) should not match by title alone",
     );

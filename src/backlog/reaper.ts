@@ -76,7 +76,7 @@ export async function getStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<
  * reaper falls back to time-only behaviour in that case — better to over-reap
  * once than wedge a WIP slot because gh is unavailable.
  */
-export async function fetchOpenTargetPrBlobs(): Promise<string[] | null> {
+async function fetchOpenTargetPrBlobs(): Promise<string[] | null> {
   const repo = getTargetGithubRepo();
   // Routes through the GitHub CLI Adapter seam (issue #899). The seam never
   // throws and owns the JSON parse + the four error modes; any failure arm
@@ -112,7 +112,10 @@ export async function fetchOpenTargetPrBlobs(): Promise<string[] | null> {
  * item-302"). Falls back to substring title match for the rare case where the
  * subagent embedded the item title verbatim.
  *
- * Exported so tests can exercise the matcher without invoking `gh`.
+ * Exported so tests can exercise the matcher without invoking `gh` — the
+ * open-PR-guard regression suite imports it directly (statically) rather than
+ * reaching it through the dynamic-import `admin` namespace, so the export stays
+ * statically traceable.
  */
 export function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs: string[]): boolean {
   if (!Array.isArray(prBlobs) || prBlobs.length === 0) return false;
