@@ -123,7 +123,7 @@ export const ABSOLUTE_AGE_DAYS = 14;
  *  no-ops, preventing alert spam if the operator restarts the orchestrator. */
 export const EFFECTIVENESS_CHECK_COOLDOWN_HOURS = 24;
 /** Cap on the rule-action audit log to keep the Redis list bounded. */
-export const RULE_ACTION_LOG_CAP = 200;
+const RULE_ACTION_LOG_CAP = 200;
 /** Minimum observation window after promotion before judging effectiveness. */
 export const MIN_DAYS_POST_PROMOTION = 3;
 
