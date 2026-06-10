@@ -103,7 +103,7 @@ export function isPidAlive(pid: number): boolean {
  * "no crash detail captured") rather than throwing — the read surface must
  * stay loud-but-non-fatal.
  */
-export function parseCrashDetail(raw: string | undefined): Record<string, unknown> | null {
+function parseCrashDetail(raw: string | undefined): Record<string, unknown> | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
