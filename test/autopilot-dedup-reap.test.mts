@@ -417,6 +417,142 @@ describe("scripts/autopilot/reap.py completion — dedup by task_id (issue #411)
     }
   });
 
+  // ---------------------------------------------------------------------
+  // Cycle-duration on reap (issue #1591)
+  // ---------------------------------------------------------------------
+  //
+  // Bug: reap.py hardcoded duration_ms="0" on EVERY cycle-record write, so
+  // betting/target cycles (which only ever got their cycle record from the
+  // reap path) recorded totalDurationMs=0 — the 46% dropout in #1591. Only
+  // orchestrator cycles that got a model-fired auto-merge follow-up ever
+  // carried a real duration. The fix computes the wall-clock span from the
+  // slot's dispatch-start stamp (`started_epoch` / legacy `started` ISO8601)
+  // at reap time, for BOTH dev_orch and dev_target. The deterministic,
+  // network-free observable is the `duration_ms=<N>` field on the
+  // `slot_complete` run-log line (the cycle-record POST itself goes to the
+  // live API, which this isolated test never reaches).
+
+  test("ISSUE-1591: a dev_target completion records a NON-ZERO duration_ms from the slot start stamp", () => {
+    const tmp = makeTempState();
+    try {
+      // Slot dispatched ~5 minutes ago — a realistic betting/target build.
+      const startedEpoch = Math.floor(Date.now() / 1000) - 300;
+      writeBaseState(tmp.state, {
+        slots: {
+          dev_orch: null,
+          qa_orch: null,
+          research_orch: null,
+          dev_target: {
+            skill: "hydra-target-build",
+            started_epoch: startedEpoch,
+            task_id: "betting-build-1591",
+            partial_tokens: 0,
+          },
+          qa_target: null,
+          research_target: null,
+        },
+      });
+
+      const r = runReap(
+        ["completion", "dev_target", "betting-build-1591", "120000", "hydra-target-build"],
+        tmp,
+      );
+      assert.equal(r.status, 0, `target reap failed: ${r.stderr}`);
+
+      const log = readFileSync(tmp.log, "utf-8");
+      const m = log.match(/slot_complete .*task_id=betting-build-1591.* duration_ms=(\d+)/);
+      assert.ok(
+        m,
+        "slot_complete line must carry a duration_ms field (absent entirely before the #1591 fix)",
+      );
+      const durationMs = Number(m![1]);
+      assert.ok(
+        durationMs > 0,
+        `target cycle duration_ms must be > 0 (got ${durationMs}); the #1591 bug recorded 0`,
+      );
+      // Sanity: ~5 minutes (300_000ms) within a generous wall-clock window.
+      assert.ok(
+        durationMs >= 290_000 && durationMs <= 600_000,
+        `duration_ms must reflect the ~5min slot age (got ${durationMs})`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ISSUE-1591: legacy `started` ISO8601 slot stamp also yields a non-zero duration_ms", () => {
+    const tmp = makeTempState();
+    try {
+      // Older state.json shape: ISO8601 `started`, no `started_epoch`.
+      const startedIso = new Date(Date.now() - 120_000).toISOString();
+      writeBaseState(tmp.state, {
+        slots: {
+          dev_orch: {
+            skill: "hydra-dev",
+            started: startedIso,
+            task_id: "legacy-iso-task",
+            partial_tokens: 0,
+          },
+          qa_orch: null,
+          research_orch: null,
+          dev_target: null,
+          qa_target: null,
+          research_target: null,
+        },
+      });
+
+      const r = runReap(
+        ["completion", "dev_orch", "legacy-iso-task", "80000", "hydra-dev"],
+        tmp,
+      );
+      assert.equal(r.status, 0, `legacy-iso reap failed: ${r.stderr}`);
+
+      const log = readFileSync(tmp.log, "utf-8");
+      const m = log.match(/slot_complete .*task_id=legacy-iso-task.* duration_ms=(\d+)/);
+      assert.ok(m, "slot_complete line must carry a duration_ms field");
+      assert.ok(
+        Number(m![1]) > 0,
+        `legacy ISO8601 start stamp must still compute a non-zero duration_ms (got ${m![1]})`,
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ISSUE-1591: a slot with no start stamp records duration_ms=0 (truthful fallback)", () => {
+    const tmp = makeTempState();
+    try {
+      writeBaseState(tmp.state, {
+        slots: {
+          dev_orch: null,
+          qa_orch: null,
+          research_orch: null,
+          // No started_epoch / started — the unknown-start case.
+          dev_target: { skill: "hydra-target-build", task_id: "no-stamp", partial_tokens: 0 },
+          qa_target: null,
+          research_target: null,
+        },
+      });
+
+      const r = runReap(
+        ["completion", "dev_target", "no-stamp", "50000", "hydra-target-build"],
+        tmp,
+      );
+      assert.equal(r.status, 0, `no-stamp reap failed: ${r.stderr}`);
+
+      const log = readFileSync(tmp.log, "utf-8");
+      const m = log.match(/slot_complete .*task_id=no-stamp.* duration_ms=(\d+)/);
+      assert.ok(m, "slot_complete line must always carry a duration_ms field");
+      assert.equal(
+        Number(m![1]),
+        0,
+        "a missing start stamp must fall back to duration_ms=0, never crash or fabricate",
+      );
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
   test("default invocation (no subcommand) still runs hard-cap enforcement", () => {
     // Sanity check that adding the `completion` subcommand did not
     // regress the pre-existing default-mode behaviour exercised by
