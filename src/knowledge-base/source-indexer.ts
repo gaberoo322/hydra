@@ -66,7 +66,7 @@ export const SOURCE_PATHS: SourcePath[] = parseSourcePaths(
   process.env.HYDRA_INDEX_SOURCE_PATHS || DEFAULT_SOURCE_SPEC
 );
 // Files modified within this window get the initial-index pass on startup.
-export const SOURCE_INITIAL_WINDOW_MS =
+const SOURCE_INITIAL_WINDOW_MS =
   parseInt(process.env.HYDRA_INDEX_INITIAL_DAYS as any) > 0
     ? parseInt(process.env.HYDRA_INDEX_INITIAL_DAYS as any) * 86400_000
     : 7 * 86400_000;
