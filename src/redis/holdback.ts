@@ -110,7 +110,7 @@ export const HOLDBACK_MAX_REVERTS_PER_DAY = numFromEnv("HYDRA_HOLDBACK_MAX_REVER
  * poll loop can't act on a stale baseline, yet bounded so Redis stays tidy.
  * 14 days mirrors the historical in-process record TTL (docs/reference.md).
  */
-export const HOLDBACK_BASELINE_TTL_SECONDS = numFromEnv(
+const HOLDBACK_BASELINE_TTL_SECONDS = numFromEnv(
   "HYDRA_HOLDBACK_BASELINE_TTL_SECONDS",
   14 * 24 * 60 * 60,
 );
