@@ -28,16 +28,30 @@
  *     own category-merge semantics — two calls with the same `cue` merge
  *     into the same pattern (hit count increments, examples roll) which is
  *     the same behaviour the codex-cycle path always had.
- *   - The skill→agent mapping is intentional: `hydra-qa` failures train the
- *     planner (the missed criterion), `hydra-dev` / `hydra-target-build`
- *     verification failures train the executor. The mapping is exposed via
- *     `agentForSkill()` so the API endpoint can validate inputs.
+ *   - The skill→agent mapping is the `learningAgent` column of the
+ *     Dispatch-Class Taxonomy (`scripts/autopilot/classes.json`, epic #1669):
+ *     QA failures train the planner (the missed criterion), `hydra-dev` /
+ *     `hydra-target-build` verification failures train the executor. The
+ *     mapping is exposed via `agentForSkill()` so the API endpoint can
+ *     validate inputs.
  */
 
 import { recordPattern } from "./agent-memory.ts";
+import { DISPATCH_CLASSES } from "../taxonomy/classes.ts";
+import { InvariantViolationError } from "../errors.ts";
 
-/** Skills that produce subagent lessons. Keep in sync with autopilot dispatch. */
-export type SubagentSkill = "hydra-qa" | "hydra-dev" | "hydra-target-build";
+/**
+ * Skills that produce subagent lessons — exactly the rows of the
+ * Dispatch-Class Taxonomy whose `learningAgent` column is non-null. The
+ * literal union below is the compile-time mirror of those rows; the runtime
+ * list and the skill→agent mapping derive from the table itself, and
+ * test/taxonomy-classes.test.mts pins union and table in lock-step.
+ */
+export type SubagentSkill =
+  | "hydra-qa"
+  | "hydra-dev"
+  | "hydra-target-build"
+  | "hydra-target-qa";
 
 /** Outcomes that warrant a learning hit. Other outcomes are ignored. */
 export type SubagentOutcome =
@@ -81,11 +95,19 @@ export type SubagentLesson = {
   cycleId?: string;
 };
 
+// Derived views over the taxonomy's learningAgent column (slice #1671).
+const LEARNING_ROWS = DISPATCH_CLASSES.filter((r) => r.learningAgent !== null);
+
+const AGENT_BY_SKILL: ReadonlyMap<string, "planner" | "executor"> = new Map(
+  LEARNING_ROWS.map((r) => [r.skill, r.learningAgent as "planner" | "executor"]),
+);
+
 /**
- * Map subagent skills to the agent whose memory the lesson trains.
- *   - `hydra-qa` failures → planner (it approved a plan whose AC the QA
- *     pass couldn't verify; planner should narrow its acceptance criteria
- *     or scope).
+ * Map subagent skills to the agent whose memory the lesson trains — a read
+ * of the taxonomy's `learningAgent` column.
+ *   - QA failures (`hydra-qa`, `hydra-target-qa`) → planner (it approved a
+ *     plan whose AC the QA pass couldn't verify; planner should narrow its
+ *     acceptance criteria or scope).
  *   - `hydra-dev` and `hydra-target-build` failures → executor (the code
  *     written didn't satisfy verification; executor should be stricter
  *     about npm test / typecheck before committing).
@@ -94,8 +116,17 @@ export type SubagentLesson = {
  * the mapping stays stable.
  */
 export function agentForSkill(skill: SubagentSkill): "planner" | "executor" {
-  if (skill === "hydra-qa") return "planner";
-  return "executor";
+  const agent = AGENT_BY_SKILL.get(skill);
+  if (!agent) {
+    // Unreachable when callers validate via isValidSkill() first — reaching
+    // here means the SubagentSkill union and the taxonomy table drifted.
+    // Boundary/invariant guard, so throwing is the documented convention.
+    throw new InvariantViolationError(
+      `agentForSkill: skill "${skill}" has no learningAgent row in the ` +
+        "dispatch-class taxonomy (scripts/autopilot/classes.json)",
+    );
+  }
+  return agent;
 }
 
 function defaultAction(skill: SubagentSkill, outcome: SubagentOutcome): string {
@@ -111,11 +142,12 @@ function defaultAction(skill: SubagentSkill, outcome: SubagentOutcome): string {
   }
 }
 
-const VALID_SKILLS: readonly SubagentSkill[] = [
-  "hydra-qa",
-  "hydra-dev",
-  "hydra-target-build",
-];
+// Derived from the taxonomy, not hand-enumerated: every skill some dispatch
+// class trains a learning agent with. The cast is pinned against the
+// SubagentSkill union by test/taxonomy-classes.test.mts.
+const VALID_SKILLS: readonly SubagentSkill[] = Object.freeze(
+  Array.from(new Set(LEARNING_ROWS.map((r) => r.skill))),
+) as readonly SubagentSkill[];
 const VALID_OUTCOMES: readonly SubagentOutcome[] = [
   "qa-fail",
   "verification-failure",

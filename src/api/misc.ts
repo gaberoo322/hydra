@@ -138,7 +138,7 @@ export function createMiscRouter(_eventBus: any) {
 
       if (!isValidSkill(skill)) {
         return res.status(400).json({
-          error: `Invalid or missing 'skill' — expected hydra-qa | hydra-dev | hydra-target-build`,
+          error: `Invalid or missing 'skill' — expected a skill whose dispatch class carries a learningAgent in the Dispatch-Class Taxonomy (scripts/autopilot/classes.json)`,
         });
       }
       if (!isValidOutcome(outcome)) {
@@ -181,7 +181,7 @@ export function createMiscRouter(_eventBus: any) {
 
       if (!isValidSkill(skill)) {
         return res.status(400).json({
-          error: `Invalid or missing 'skill' — expected hydra-qa | hydra-dev | hydra-target-build`,
+          error: `Invalid or missing 'skill' — expected a skill whose dispatch class carries a learningAgent in the Dispatch-Class Taxonomy (scripts/autopilot/classes.json)`,
         });
       }
       if (typeof cue !== "string" || cue.trim().length === 0) {

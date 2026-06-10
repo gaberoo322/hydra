@@ -333,3 +333,80 @@ describe("taxonomy: TS parser hard-fails with InvariantViolationError", () => {
     }, /learningAgent must be null or/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice #1671 — the three TS projections derive from the table.
+//
+// These pins make the consolidation mechanical: changing a row's costClass /
+// learningAgent / cooldownSeconds column must be reflected by the projection
+// with NO edit to the projection module, and (for subagent-capture) the
+// hand-written SubagentSkill literal union cannot silently drift from the
+// table's learningAgent rows.
+// ---------------------------------------------------------------------------
+
+describe("TS projections read the taxonomy (slice #1671)", () => {
+  test("skillToCostClass returns each row's costClass column verbatim", async () => {
+    const { skillToCostClass } = await import("../src/metrics/aggregate.ts");
+    for (const row of DISPATCH_CLASSES) {
+      assert.equal(
+        skillToCostClass(row.skill),
+        row.costClass,
+        `costClass projection drifted for class "${row.name}" (${row.skill})`,
+      );
+    }
+  });
+
+  test("every taxonomy costClass is a declared CostClass bucket", async () => {
+    const { COST_CLASS_ORDER } = await import("../src/metrics/aggregate.ts");
+    const buckets: readonly string[] = COST_CLASS_ORDER;
+    for (const row of DISPATCH_CLASSES) {
+      assert.ok(
+        buckets.includes(row.costClass),
+        `class "${row.name}" carries undeclared costClass "${row.costClass}"`,
+      );
+    }
+  });
+
+  test("agentForSkill / isValidSkill mirror the learningAgent column", async () => {
+    const mod = await import("../src/pattern-memory/subagent-capture.ts");
+    for (const row of DISPATCH_CLASSES) {
+      if (row.learningAgent !== null) {
+        assert.equal(
+          mod.isValidSkill(row.skill),
+          true,
+          `${row.skill} has a learningAgent row but isValidSkill rejects it`,
+        );
+        assert.equal(
+          mod.agentForSkill(row.skill as never),
+          row.learningAgent,
+          `agentForSkill projection drifted for class "${row.name}"`,
+        );
+      } else {
+        assert.equal(
+          mod.isValidSkill(row.skill),
+          false,
+          `${row.skill} has no learningAgent row but isValidSkill accepts it`,
+        );
+      }
+    }
+  });
+
+  test("scout CLASS_COOLDOWN_DAYS equals the scout_orch row's cooldownSeconds", async () => {
+    const { CLASS_COOLDOWN_DAYS } = await import("../src/scout/calendar-walk.ts");
+    const row = classByName("scout_orch");
+    assert.ok(row, "taxonomy must carry a scout_orch row");
+    assert.equal(CLASS_COOLDOWN_DAYS * 24 * 60 * 60, row!.cooldownSeconds);
+  });
+
+  test('no "mirrors decide.py" hand-mirror comment remains in calendar-walk', () => {
+    const src = readFileSync(
+      join(REPO_ROOT, "src", "scout", "calendar-walk.ts"),
+      "utf-8",
+    );
+    assert.equal(
+      /mirrors\s+`?decide\.py/i.test(src),
+      false,
+      "calendar-walk.ts still claims to hand-mirror decide.py",
+    );
+  });
+});
