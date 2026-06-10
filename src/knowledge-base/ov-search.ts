@@ -137,7 +137,7 @@ export function computeFlushDelta(
  * with `force=false`, so a burst of searches triggers at most one write per
  * flush window.
  */
-export async function flushOvSearchMetrics(
+async function flushOvSearchMetrics(
   force = false,
   now: number = Date.now(),
 ): Promise<void> {
