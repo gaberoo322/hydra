@@ -79,9 +79,3 @@ export function utcDateKey(d: Date): string {
   const day = String(d.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
-
-/** Test-only: clear a day's counter. Production callers should not use this. */
-export async function _resetScopeViolations(date: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(scopeViolationsDailyKey(date));
-}
