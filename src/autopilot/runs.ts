@@ -4,10 +4,11 @@
  * readers that power `GET /api/autopilot/runs(/...)`.
  *
  * The read-only **projections** were split into the sibling
- * `run-projections.ts` (issue #1183) and are re-exported here so existing
- * `from "../autopilot/runs.ts"` import paths keep resolving. The high-level
- * readers below compose Redis reads + the dead-pid sweeper with those
- * projections, so they stay here.
+ * `run-projections.ts` (issue #1183). A few are still re-exported here so
+ * existing `from "../autopilot/runs.ts"` import paths keep resolving; the
+ * ones with no external consumer of the old path are now imported only for
+ * the high-level readers below, which compose Redis reads + the dead-pid
+ * sweeper with those projections.
  *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
@@ -86,12 +87,9 @@ import {
 } from "./run-projections.ts";
 import type { AutopilotLifecycle } from "./run-projections.ts";
 export {
-  RUN_TURNS_MAX_FETCH,
   MERGED_STATUSES,
   FAILED_STATUSES,
-  fetchTurnsWithJoins,
   projectRunView,
-  projectRunDigest,
   deriveLifecycleState,
 };
 export { WEDGE_AGE_THRESHOLD_S, parseCrashDetail } from "./run-projections.ts";
