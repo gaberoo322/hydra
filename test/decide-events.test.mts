@@ -59,6 +59,9 @@ const SIGNAL_CLASSES = [
   // cleanup_orch (issue #960) — board-idle deterministic dead-code /
   // simplification detector signal class.
   "cleanup_orch",
+  // cleanup_target — the Target mirror of cleanup_orch: demote-only
+  // dead-export sweep over ~/hydra-betting, backlog-item-producing.
+  "cleanup_target",
 ] as const;
 const ALL_CLASSES = [...PIPELINE_CLASSES, ...SIGNAL_CLASSES];
 
@@ -257,7 +260,7 @@ describe("decide.py — dispatch_decision per candidate class", () => {
   test("emits exactly one dispatch_decision per candidate class on an idle turn", () => {
     const plan = runDecide(baseState());
     const decisions = eventsOfType(plan, "dispatch_decision");
-    // ALL_CLASSES = 7 pipeline + 9 signal = 16 total.
+    // ALL_CLASSES = 7 pipeline + 10 signal = 17 total.
     assert.equal(
       decisions.length,
       ALL_CLASSES.length,

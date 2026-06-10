@@ -225,6 +225,18 @@ SIGNAL_CLASSES = (
     # arch_board_saturated), checked FIRST in the selector. collect-state.sh owns
     # signal emission; decide.py only reads the precomputed signals.
     "cleanup_orch",
+    # cleanup_target: the TARGET mirror of cleanup_orch — dispatches the
+    # headless /hydra-target-cleanup skill, a DETERMINISTIC demote-only
+    # dead-export sweep over ~/hydra-betting/web (knip is a Target
+    # devDependency since hydra-betting PR #93). It files Redis backlog items
+    # (the Target's tracker), NOT GitHub issues, and emits ONLY demote-class
+    # findings in files past the Target's 45-day wiring grace period — the
+    # carve-out the Target's CLAUDE.md rule 3 authorises. Keyed off
+    # `target_backfill_idle` (target backlog has no actionable work), with
+    # `target_cleanup_board_saturated` as the anti-flood cap checked FIRST,
+    # mirroring cleanup_orch's signal discipline exactly. collect-state.sh
+    # owns signal emission; decide.py only reads the precomputed signals.
+    "cleanup_target",
 )
 
 # Cooldowns for signal-driven classes (seconds). Mirrors the legacy
@@ -271,6 +283,11 @@ SIGNAL_COOLDOWNS = {
     # staggered backfill class — by design, since dead-code removal is the
     # highest-confidence (mechanically-verifiable) continuous-backfill work.
     "cleanup_orch": 3600,
+    # cleanup_target: the Target mirror, same 1h backfill cadence as
+    # cleanup_orch. `target_cleanup_board_saturated` (collect-state.sh) is the
+    # PRIMARY suppressor — with a per-run cap of 8 file-items and a saturation
+    # cap of 10 open items, the cooldown is only the cadence back-stop.
+    "cleanup_target": 3600,
 }
 
 # Board-idle backfill set (issue #959, epic #958). Both classes key off the
@@ -414,7 +431,13 @@ PER_CYCLE_COST_CAP_USD_DEFAULT = 25.0
 # Slots that are scope-disallowed exclusion mask. Scope filter is an
 # exclusion mask (grilled decision 3); `health` and `qa_*` are always
 # allowed regardless of scope (qa reviews any PR, health is whole-system).
-SCOPE_ORCH_ONLY_EXCLUDE = ("dev_target", "research_target", "qa_target", "sweep_target", "discover_target")
+SCOPE_ORCH_ONLY_EXCLUDE = (
+    "dev_target", "research_target", "qa_target", "sweep_target", "discover_target",
+    # cleanup_target scans the TARGET (~/hydra-betting) and files target-
+    # backlog items — target-scope by definition, so orch-only excludes it
+    # (the mirror of cleanup_orch's place in SCOPE_TARGET_ONLY_EXCLUDE).
+    "cleanup_target",
+)
 SCOPE_TARGET_ONLY_EXCLUDE = (
     "dev_orch", "research_orch", "qa_orch", "sweep_orch", "discover_orch",
     # design_concept_orch is orch-scope by definition (issue #466) —
@@ -441,8 +464,10 @@ SCOPE_TARGET_ONLY_EXCLUDE = (
     # scan over the ORCHESTRATOR's own codebase and files orch-scope issues —
     # orch-scope by definition. Under `target-only` the autopilot stays out of
     # orch work, so cleanup_orch is excluded, mirroring scout_orch /
-    # architecture_orch / retro_orch (no cleanup_target mirror — the Target has a
-    # PR merge backlog, #718).
+    # architecture_orch / retro_orch. Its Target mirror (`cleanup_target`,
+    # operator-approved 2026-06-10 once the Target merge queue proved healthy —
+    # the #718 PR-backlog blocker that deferred it is resolved) is target-scope
+    # and so lives in SCOPE_ORCH_ONLY_EXCLUDE instead.
     "cleanup_orch",
 )
 
@@ -1460,6 +1485,11 @@ def _rule_signal_classes(
         # high-confidence mechanical workhorse runs hot, gated only by its own
         # `cleanup_board_saturated` cap + the 1h class cooldown.
         "cleanup_orch",
+        # cleanup_target — the Target mirror: demote-only dead-export sweep
+        # over ~/hydra-betting, filing target-backlog items. Keyed off
+        # `target_backfill_idle`, capped by `target_cleanup_board_saturated`
+        # (checked FIRST in the selector) + the 1h class cooldown.
+        "cleanup_target",
     ):
         if dispatch_blocked:
             out.events.append(
@@ -2248,6 +2278,37 @@ def _select_for_signal(sig: str, state: dict, events: list[dict], now: int) -> d
                 sig,
                 "hydra-cleanup",
                 reason="orch board idle — dead-code / simplification backfill",
+            )
+        return None
+    if sig == "cleanup_target":
+        # The Target mirror of cleanup_orch (operator-approved 2026-06-10).
+        # When the Target backlog has no actionable work (collect-state.sh
+        # emits `target_backfill_idle` — triage, queued, and the Redis
+        # work-queue are all empty), reclaim spare capacity by dispatching the
+        # headless /hydra-target-cleanup skill: a DETERMINISTIC demote-only
+        # dead-export sweep over ~/hydra-betting/web. It emits ONLY findings
+        # the Target's CLAUDE.md rule-3 carve-out authorises (demote-class,
+        # past the 45-day wiring grace) as ready-for-agent backlog items whose
+        # acceptance check is self-checking ("drop the export keyword AND
+        # test/typecheck/deadcode:check stay green with a tightened baseline").
+        #
+        # `target_cleanup_board_saturated` is the anti-feedback-loop guard,
+        # checked FIRST (before the cooldown via signal_is_cooled above) —
+        # exactly the cleanup_orch / arch_board_saturated discipline. The cap
+        # (10 open `cleanup-scan`-labelled backlog items) is owned by
+        # collect-state.sh; the emit runner re-checks it as a belt-and-braces
+        # back-stop.
+        #
+        # decide.py reads the precomputed signals only — it never recomputes
+        # board-empty / saturation / cooldown here (the signal-seam discipline).
+        if _signal_present(state, events, "target_cleanup_board_saturated"):
+            return None
+        if _signal_present(state, events, "target_backfill_idle"):
+            return make_dispatch(
+                sig,
+                "hydra-target-cleanup",
+                prompt_args={"apply": True},
+                reason="target backlog idle — demote-only dead-export backfill",
             )
         return None
     return None
