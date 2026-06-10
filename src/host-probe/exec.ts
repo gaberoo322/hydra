@@ -36,7 +36,7 @@ import { spawn } from "node:child_process";
 import type { HydraErrorCode } from "../errors.ts";
 
 /** Default timeout for a single host-info probe (matches the old inline 3000ms). */
-export const DEFAULT_PROBE_TIMEOUT_MS = 3_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 3_000;
 
 /** Max bytes captured from stdout/stderr each. Host-info output is tiny; cap generously anyway. */
 const DEFAULT_MAX_BUFFER = 1 * 1024 * 1024; // 1MB
