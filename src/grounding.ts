@@ -321,8 +321,13 @@ export async function groundProject(projectDir,  opts: Record<string, any> = {})
 /**
  * Summarize a grounding report into a concise string for agent prompts.
  * This replaces the old getProjectState() output.
+ *
+ * Module-private: nothing outside this file consumes it any longer. Kept (not
+ * deleted) as the canonical report→prompt formatter colocated with
+ * groundProject(); demoted from `export` to clear a knip unused-export finding
+ * (issue #1589). Read-only — formats a report, never touches the workspace.
  */
-export function summarizeForPrompt(report,  opts: Record<string, any> = {}) {
+function summarizeForPrompt(report,  opts: Record<string, any> = {}) {
   const parts = [];
 
   parts.push(`## Current Repository State (grounded at ${new Date(report.timestamp).toISOString()})`);
@@ -410,7 +415,6 @@ export function summarizeForPrompt(report,  opts: Record<string, any> = {}) {
 
 /**
  * Internal helpers exposed for regression tests only. Not part of the public
- * API — external modules should use groundProject() / summarizeForPrompt()
- * instead.
+ * API — external modules should use groundProject() instead.
  */
 export const _testing = { truncate, stripAnsi, parseTestCounts, parseFailingTests, runCmd };
