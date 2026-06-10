@@ -1,0 +1,192 @@
+{
+  "doc": "Dispatch-Class Taxonomy (epic #1669, slice #1670). The single machine-readable table that owns the autopilot dispatch-class alphabet: one row per class. decide.py derives PIPELINE_SLOTS / SIGNAL_CLASSES / SIGNAL_COOLDOWNS from this file at import time (fail-loud, no fallback tuples); src/taxonomy/classes.ts re-exports the same rows as typed views for TS call sites. Row order is significant: it IS the slot/signal dispatch order. Columns: name, kind (pipeline|signal), skill (the Claude Code skill the class dispatches), costClass (src/metrics/aggregate.ts CostClass bucket), learningAgent (planner|executor|null — which pattern-memory agent the class's lessons train), cooldownSeconds (signal classes only; null for pipeline slots), scope (orch|target|both), provenanceLabel (the GitHub label the class's filing skill stamps; null for classes that file nothing). Nullable columns are explicitly null, never absent. POLICY stays in decide.py (selectors, scope masks, BACKFILL_SIGNAL_CLASSES stagger set, cost-cap gates) — this table is only the ALPHABET (ADR-0012).",
+  "classes": [
+    {
+      "name": "dev_orch",
+      "kind": "pipeline",
+      "skill": "hydra-dev",
+      "costClass": "dev-orch",
+      "learningAgent": "executor",
+      "cooldownSeconds": null,
+      "scope": "orch",
+      "provenanceLabel": null,
+      "notes": "Implements ready-for-agent orchestrator issues in a fresh worktree and opens a PR. Verification failures train the executor pattern memory."
+    },
+    {
+      "name": "qa_orch",
+      "kind": "pipeline",
+      "skill": "hydra-qa",
+      "costClass": "qa",
+      "learningAgent": "planner",
+      "cooldownSeconds": null,
+      "scope": "orch",
+      "provenanceLabel": null,
+      "notes": "Reviews orchestrator PRs (Standards + Spec sub-agents). QA failures train the planner pattern memory (the missed criterion)."
+    },
+    {
+      "name": "research_orch",
+      "kind": "pipeline",
+      "skill": "hydra-research",
+      "costClass": "research",
+      "learningAgent": null,
+      "cooldownSeconds": null,
+      "scope": "orch",
+      "provenanceLabel": null,
+      "notes": "Board-level orchestrator research. The playbook also routes per-issue enrichment to hydra-issue-research; hydra-research is the canonical class skill."
+    },
+    {
+      "name": "dev_target",
+      "kind": "pipeline",
+      "skill": "hydra-target-build",
+      "costClass": "dev-target",
+      "learningAgent": "executor",
+      "cooldownSeconds": null,
+      "scope": "target",
+      "provenanceLabel": null,
+      "notes": "Full Target (~/hydra-betting) build cycle. Verification failures train the executor pattern memory. Per-cycle USD backstop: issue #1059."
+    },
+    {
+      "name": "qa_target",
+      "kind": "pipeline",
+      "skill": "hydra-target-qa",
+      "costClass": "qa",
+      "learningAgent": "planner",
+      "cooldownSeconds": null,
+      "scope": "target",
+      "provenanceLabel": null,
+      "notes": "Independent Target PR review (money-critical Sonnet floor per the model-routing map). The autopilot playbook's older 'hydra-qa (target scope)' phrasing predates the dedicated hydra-target-qa playbook. NOTE for slice #1671: today's VALID_SKILLS in src/pattern-memory/subagent-capture.ts omits hydra-target-qa, so its planner lessons are not yet captured — folding that projection onto this row is an intentional decision point."
+    },
+    {
+      "name": "research_target",
+      "kind": "pipeline",
+      "skill": "hydra-target-research",
+      "costClass": "research",
+      "learningAgent": null,
+      "cooldownSeconds": null,
+      "scope": "target",
+      "provenanceLabel": null,
+      "notes": "Full Target research cycle: vision, grounding, priorities.md/roadmap.md, work-queue items."
+    },
+    {
+      "name": "design_concept_orch",
+      "kind": "pipeline",
+      "skill": "hydra-grill",
+      "costClass": "other",
+      "learningAgent": null,
+      "cooldownSeconds": null,
+      "scope": "orch",
+      "provenanceLabel": null,
+      "notes": "issue #466, Phase B of #437: grills an orchestrator anchor before its dev_orch dispatch. Phase B is warn-only — a draft artifact whose gateCheck() returns ok:false is still treated as 'fresh artifact present' and dev_orch proceeds. Phase C (separate issue) will flip this to a hard block. The target mirror (design_concept_target) lands in Phase D."
+    },
+    {
+      "name": "health",
+      "kind": "signal",
+      "skill": "hydra-doctor",
+      "costClass": "other",
+      "learningAgent": null,
+      "cooldownSeconds": 0,
+      "scope": "both",
+      "provenanceLabel": null,
+      "notes": "Whole-system health probe. Always allowed — cooldown 0; rate-limited by the signal itself. The only scope-agnostic class: never excluded by the orch-only/target-only scope masks."
+    },
+    {
+      "name": "sweep_orch",
+      "kind": "signal",
+      "skill": "hydra-sweep",
+      "costClass": "other",
+      "learningAgent": null,
+      "cooldownSeconds": 900,
+      "scope": "orch",
+      "provenanceLabel": null,
+      "notes": "Orchestrator issue-board sweep; 15 min cooldown."
+    },
+    {
+      "name": "sweep_target",
+      "kind": "signal",
+      "skill": "hydra-target-sweep",
+      "costClass": "other",
+      "learningAgent": null,
+      "cooldownSeconds": 900,
+      "scope": "target",
+      "provenanceLabel": null,
+      "notes": "Target backlog sweep; 15 min cooldown."
+    },
+    {
+      "name": "discover_orch",
+      "kind": "signal",
+      "skill": "hydra-discover",
+      "costClass": "research",
+      "learningAgent": null,
+      "cooldownSeconds": 3600,
+      "scope": "orch",
+      "provenanceLabel": null,
+      "notes": "issue #959, epic #958: 1h backfill cadence. Dropped from 30m to 3600s so it round-robins with architecture_orch off the unified orch_backfill_idle signal — both backfill-set classes share the same 1h cadence and the one-per-turn stagger guard (BACKFILL_SIGNAL_CLASSES in decide.py) picks one per idle turn. Files issues via the standard triage flow; stamps no dedicated provenance label."
+    },
+    {
+      "name": "discover_target",
+      "kind": "signal",
+      "skill": "hydra-target-discover",
+      "costClass": "research",
+      "learningAgent": null,
+      "cooldownSeconds": 1800,
+      "scope": "target",
+      "provenanceLabel": null,
+      "notes": "Runtime diagnostic discovery on the Target; 30 min cooldown."
+    },
+    {
+      "name": "scout_orch",
+      "kind": "signal",
+      "skill": "hydra-tool-scout",
+      "costClass": "research",
+      "learningAgent": null,
+      "cooldownSeconds": 604800,
+      "scope": "orch",
+      "provenanceLabel": "tool-scout",
+      "notes": "issue #485, Phase B of /hydra-tool-scout epic: weekly calendar walk over the AI-leverage taxonomy + runtime deps (src/scout/calendar-walk.ts). 7d class cooldown: the walk takes ~a week's worth of context to digest (10 categories + 2 dep manifests ≈ 12 dispatches; running it more often produces duplicate work because the per-category cooldown is 30d). Per-class cooldown is the back-stop; per-category (30d) + per-tool (90d seen-list) cooldowns are the primary suppressors, and the issue #532 cost-cap gate fires before the cooldown."
+    },
+    {
+      "name": "architecture_orch",
+      "kind": "signal",
+      "skill": "hydra-architecture-scan",
+      "costClass": "research",
+      "learningAgent": null,
+      "cooldownSeconds": 3600,
+      "scope": "orch",
+      "provenanceLabel": "architecture-scan",
+      "notes": "issue #790, parent #787; unified by #959, epic #958: board-idle backfill that dispatches the headless /hydra-architecture-scan wrapper (#788) to turn spare capacity into self-improvement issues. Fires when orch_backfill_idle AND NOT arch_board_saturated; arch_board_saturated is the PRIMARY suppressor (checked FIRST in the selector) and matters MORE at hourly cadence; the 1h class cooldown is only the back-stop. In BACKFILL_SIGNAL_CLASSES (one-per-turn stagger). collect-state.sh owns signal emission; decide.py only reads the precomputed signals."
+    },
+    {
+      "name": "retro_orch",
+      "kind": "signal",
+      "skill": "hydra-retro",
+      "costClass": "retro",
+      "learningAgent": null,
+      "cooldownSeconds": 86400,
+      "scope": "orch",
+      "provenanceLabel": null,
+      "notes": "issue #920, parent #917: daily per-run retrospective. Dispatches /hydra-retro (#919) to turn the most-recent COMPLETED run into conservative, recurrence-gated improvement proposals (≤2 issues, ≤1 gated PR — stamps no dedicated provenance label). Fires on retro_run_available (collect-state.sh emits it when a completed run exists); the 24h class cooldown enforces the once-per-day cadence so the same run isn't re-analysed every idle turn. Signal classes dispatch AFTER pipeline slots, so a retro never preempts a dev/QA/research dispatch. NOT in BACKFILL_SIGNAL_CLASSES (run-anchored, 24h)."
+    },
+    {
+      "name": "cleanup_orch",
+      "kind": "signal",
+      "skill": "hydra-cleanup",
+      "costClass": "cleanup",
+      "learningAgent": null,
+      "cooldownSeconds": 3600,
+      "scope": "orch",
+      "provenanceLabel": "cleanup-scan",
+      "notes": "issue #960, parent #958: board-idle backfill dispatching the headless /hydra-cleanup skill — a DETERMINISTIC dead-code + simplification detector (knip) that files high-confidence, mechanically-verifiable findings ('remove X AND npm test/tsc still pass') as ready-for-agent issues. Keyed off the same unified orch_backfill_idle signal as architecture_orch/discover_orch (#959) with a 1h cooldown, but DELIBERATELY NOT in BACKFILL_SIGNAL_CLASSES — cleanup is the high-confidence mechanical workhorse and is meant to 'run hot' alongside the staggered backfill set. Its anti-flood cap is cleanup_board_saturated, checked FIRST in the selector."
+    },
+    {
+      "name": "cleanup_target",
+      "kind": "signal",
+      "skill": "hydra-target-cleanup",
+      "costClass": "cleanup",
+      "learningAgent": null,
+      "cooldownSeconds": 3600,
+      "scope": "target",
+      "provenanceLabel": null,
+      "notes": "The TARGET mirror of cleanup_orch — dispatches the headless /hydra-target-cleanup skill, a DETERMINISTIC demote-only dead-export sweep over ~/hydra-betting/web (knip is a Target devDependency since hydra-betting PR #93). Files Redis backlog items (the Target's tracker), NOT GitHub issues — hence provenanceLabel null — and emits ONLY demote-class findings in files past the Target's 45-day wiring grace period (the carve-out the Target's CLAUDE.md rule 3 authorises). Keyed off target_backfill_idle with target_cleanup_board_saturated as the anti-flood cap checked FIRST, mirroring cleanup_orch's signal discipline exactly. Same 1h cadence as cleanup_orch. NOTE for slice #1671: today's skillToCostClass in src/metrics/aggregate.ts omits hydra-target-cleanup (buckets to 'other'); this row records the intended 'cleanup' attribution — folding that projection onto this row is an intentional decision point."
+    }
+  ]
+}

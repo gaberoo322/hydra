@@ -278,9 +278,13 @@ describe("decide.py make_dispatch_sentinel", () => {
     return r.stdout.trim();
   }
 
+  // NOTE: `__file__` must be predefined — decide.py resolves its sibling
+  // classes.json (the Dispatch-Class Taxonomy, issue #1670) relative to
+  // `__file__` at import time, and a bare `python -c "exec(...)"` context
+  // does not define it.
   test("emits a well-formed sentinel WITH runId", () => {
     const out = runPy(
-      `import sys; sys.argv=['x']; ` +
+      `import sys; sys.argv=['x']; __file__=${JSON.stringify(DECIDE)}; ` +
         `exec(open(${JSON.stringify(DECIDE)}).read().split("if __name__")[0]); ` +
         `print(make_dispatch_sentinel("hydra-dev", "wt-1", "run-9"))`,
     );
@@ -289,7 +293,8 @@ describe("decide.py make_dispatch_sentinel", () => {
 
   test("omits runId when not in an autopilot run", () => {
     const out = runPy(
-      `exec(open(${JSON.stringify(DECIDE)}).read().split("if __name__")[0]); ` +
+      `__file__=${JSON.stringify(DECIDE)}; ` +
+        `exec(open(${JSON.stringify(DECIDE)}).read().split("if __name__")[0]); ` +
         `print(make_dispatch_sentinel("hydra-grill", "wt-2", None))`,
     );
     assert.equal(out, "<!-- hydra-dispatch v1 skill=hydra-grill dispatchId=wt-2 -->");
