@@ -1,37 +1,43 @@
 /**
- * Regression tests for the forecast-calibration-brier outcome producer
- * (issue #1657, src/metrics/forecast-brier.ts).
+ * Regression tests for the forecast-calibration-brier producer (issue #1657).
  *
- * Bug classes this guards against:
- *   - `metrics/forecast-calibration-brier.txt` never written → the
- *     forecast-calibration-brier leading outcome reads as no-data forever and
- *     Outcome Holdback has no real target-health signal.
- *   - A fabricated value written while the target is unreachable / returns
- *     garbage → silently poisons holdback baselines. The contract is: any
- *     failure path leaves the file UNTOUCHED (stale mtime is the staleness
- *     signal).
- *   - `brierScore: null` (target up, no scoreable forecasts) treated as 0 —
- *     null must mean no-write, never a synthetic number.
+ * The 2026-06-10 direction refresh (PR #1658) declared a new leading outcome
+ * `forecast-calibration-brier` backed by `source: file` reading
+ * `metrics/forecast-calibration-brier.txt`. The producer
+ * (`publishForecastCalibrationBrierMetric`, src/metrics/publish.ts) samples
+ * the target's aggregate Brier score from hydra-betting
+ * `GET /api/calibration/forecast-metrics` and writes the single numeric value
+ * to disk; it runs as a Housekeeping chore (src/scheduler/housekeeping.ts).
+ *
+ * Bug classes guarded:
+ *   - Fabricated values: any failure path (unreachable target, non-200,
+ *     malformed JSON, null/non-finite brierScore) must leave the metric file
+ *     UNTOUCHED — stale mtime is the staleness signal, and a fabricated value
+ *     would poison the Outcome Holdback regression check.
+ *   - Round-trip break: the written file must parse through the outcomes
+ *     file adapter (`getOutcomeValue`) as the same finite number.
+ *   - Wiring rot: the Housekeeping summary must report the chore so an
+ *     operator can see it sampled (ran) vs threw unexpectedly (skipped).
+ *
+ * Uses real Redis (DB 7) for the runHousekeeping wiring tests only — the
+ * sibling chores read/write guard keys (mirrors api-maintenance.test.mts,
+ * issue #948 dedicated-DB convention). The producer tests themselves are
+ * hermetic: injectable fetchImpl + tmpdir filePath, no live target.
  */
 
-import { test, describe, beforeEach, after, before } from "node:test";
+import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AddressInfo } from "node:net";
 
-import {
-  publishForecastBrierMetric,
-  maybePublishForecastBrierMetric,
-  resetForecastBrierThrottle,
-} from "../src/metrics/forecast-brier.ts";
+const REDIS_URL = "redis://localhost:6379/7";
+process.env.REDIS_URL = REDIS_URL;
+
+import { publishForecastCalibrationBrierMetric } from "../src/metrics/publish.ts";
 import { getOutcomeValue, type Outcome } from "../src/outcomes.ts";
 
 let tmpDir: string;
-const servers: Server[] = [];
 
 before(async () => {
   tmpDir = await mkdtemp(join(tmpdir(), "hydra-brier-producer-test-"));
@@ -39,213 +45,207 @@ before(async () => {
 
 after(async () => {
   if (tmpDir) await rm(tmpDir, { recursive: true, force: true });
-  for (const s of servers) s.close();
 });
 
-beforeEach(() => {
-  resetForecastBrierThrottle();
-});
-
-/** Spin up a one-route HTTP server standing in for the target's calibration API. */
-function startStubTarget(
-  handler: (path: string) => { status: number; body: string },
-): Promise<{ baseUrl: string; server: Server; requests: string[] }> {
-  return new Promise((resolvePromise) => {
-    const requests: string[] = [];
-    const server = createServer((req, res) => {
-      requests.push(req.url || "");
-      const { status, body } = handler(req.url || "");
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(body);
-    });
-    servers.push(server);
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address() as AddressInfo;
-      resolvePromise({ baseUrl: `http://127.0.0.1:${addr.port}`, server, requests });
-    });
-  });
+/** Build a fetch stub returning a canned response. */
+function fetchOk(body: unknown): typeof fetch {
+  return (async () => ({
+    ok: true,
+    status: 200,
+    json: async () => body,
+  })) as unknown as typeof fetch;
 }
 
-describe("publishForecastBrierMetric — successful write", () => {
-  test("writes the aggregate brierScore to the metric file", async () => {
-    const { baseUrl, requests } = await startStubTarget(() => ({
-      status: 200,
-      body: JSON.stringify({ totalForecasts: 12, brierScore: 0.21, logLoss: 0.5 }),
-    }));
-    const filePath = join(tmpDir, "written", "brier.txt");
-
-    const result = await publishForecastBrierMetric({ baseUrl, filePath });
-
+describe("publishForecastCalibrationBrierMetric — successful sample", () => {
+  test("writes the fetched brierScore and reports ok", async () => {
+    const filePath = join(tmpDir, "brier-ok.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({ brierScore: 0.21, sampleCount: 40 }),
+    });
     assert.equal(result.ok, true);
-    assert.equal(result.wrote, true);
-    assert.equal(result.reason, "written");
     assert.equal(result.value, 0.21);
-    // It hit the calibration route we verified live on the target.
-    assert.deepEqual(requests, ["/api/calibration/forecast-metrics"]);
-    // Single numeric line, same round-trip contract as the outcomes adapter.
+    assert.equal(result.reason, undefined);
     const raw = await readFile(filePath, "utf-8");
     assert.equal(Number(raw.trim()), 0.21);
-    assert.ok(raw.endsWith("\n"), "trailing newline expected");
+    assert.ok(raw.endsWith("\n"), "trailing newline expected (file-adapter contract)");
   });
 
-  test("getOutcomeValue returns a real reading from the produced file", async () => {
-    const { baseUrl } = await startStubTarget(() => ({
-      status: 200,
-      body: JSON.stringify({ brierScore: 0.19 }),
-    }));
-    const filePath = join(tmpDir, "outcome-read", "brier.txt");
-    await publishForecastBrierMetric({ baseUrl, filePath });
+  test("written value round-trips through the outcomes file adapter", async () => {
+    const filePath = join(tmpDir, "brier-roundtrip.txt");
+    const written = 0.183;
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({ brierScore: written }),
+    });
+    assert.equal(result.ok, true);
 
     const outcome: Outcome = {
       name: "forecast-calibration-brier",
       kind: "leading",
       direction: "down",
       source: "file",
-      query: filePath, // absolute, so HYDRA_ROOT resolution is a no-op
+      // Absolute path so resolveFilePath() doesn't append HYDRA_ROOT.
+      query: filePath,
       baseline: 0.25,
       target: 0.18,
-      noise_epsilon: 0.005,
+      noise_epsilon: 0.01,
     };
     const reading = await getOutcomeValue(outcome);
-    assert.ok(reading, "expected a real reading, got null");
-    assert.equal(reading!.value, 0.19);
-  });
-});
-
-describe("publishForecastBrierMetric — unreachable target leaves file untouched", () => {
-  test("connection refused → no write, target-unreachable", async () => {
-    // Grab a port that is guaranteed closed: listen then close.
-    const { baseUrl, server } = await startStubTarget(() => ({ status: 200, body: "{}" }));
-    await new Promise<void>((r) => server.close(() => r()));
-
-    const filePath = join(tmpDir, "unreachable", "brier.txt");
-    const result = await publishForecastBrierMetric({ baseUrl, filePath, timeoutMs: 2000 });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.wrote, false);
-    assert.equal(result.reason, "target-unreachable");
-    assert.equal(existsSync(filePath), false, "file must not be created on failure");
+    assert.ok(reading, "outcomes file adapter should return a reading, not null");
+    assert.equal(reading!.value, written);
   });
 
-  test("unreachable target never clobbers a previously-written value", async () => {
-    const filePath = join(tmpDir, "stale.txt");
-    // A prior good cycle wrote 0.22.
-    const { baseUrl: goodUrl } = await startStubTarget(() => ({
-      status: 200,
-      body: JSON.stringify({ brierScore: 0.22 }),
-    }));
-    await publishForecastBrierMetric({ baseUrl: goodUrl, filePath });
-
-    // Target goes down — stale value must survive (stale mtime is the signal).
-    const { baseUrl: deadUrl, server } = await startStubTarget(() => ({ status: 200, body: "{}" }));
-    await new Promise<void>((r) => server.close(() => r()));
-    const result = await publishForecastBrierMetric({ baseUrl: deadUrl, filePath, timeoutMs: 2000 });
-
-    assert.equal(result.wrote, false);
+  test("re-publish overwrites with the current value (hourly idempotency)", async () => {
+    const filePath = join(tmpDir, "brier-rolling.txt");
+    await publishForecastCalibrationBrierMetric({ filePath, fetchImpl: fetchOk({ brierScore: 0.3 }) });
+    const second = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({ brierScore: 0.22 }),
+    });
+    assert.equal(second.ok, true);
     assert.equal(Number((await readFile(filePath, "utf-8")).trim()), 0.22);
   });
-
-  test("non-2xx response → no write", async () => {
-    const { baseUrl } = await startStubTarget(() => ({
-      status: 500,
-      body: JSON.stringify({ error: "Failed to compute calibration forecast metrics" }),
-    }));
-    const filePath = join(tmpDir, "http500", "brier.txt");
-    const result = await publishForecastBrierMetric({ baseUrl, filePath });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, "target-unreachable");
-    assert.equal(existsSync(filePath), false);
-  });
 });
 
-describe("publishForecastBrierMetric — malformed response leaves file untouched", () => {
-  test("non-JSON body → malformed-response, no write", async () => {
-    const { baseUrl } = await startStubTarget(() => ({ status: 200, body: "<html>nope</html>" }));
-    const filePath = join(tmpDir, "notjson", "brier.txt");
-    const result = await publishForecastBrierMetric({ baseUrl, filePath });
-
-    assert.equal(result.ok, false);
-    assert.equal(result.reason, "malformed-response");
-    assert.equal(existsSync(filePath), false);
-  });
-
-  test("brierScore non-numeric → malformed-response, no write", async () => {
-    const { baseUrl } = await startStubTarget(() => ({
-      status: 200,
-      body: JSON.stringify({ brierScore: "0.21-ish" }),
-    }));
-    const filePath = join(tmpDir, "nonnumeric", "brier.txt");
-    const result = await publishForecastBrierMetric({ baseUrl, filePath });
-
-    assert.equal(result.reason, "malformed-response");
-    assert.equal(existsSync(filePath), false);
-  });
-
-  test("brierScore missing entirely → malformed-response, no write", async () => {
-    const { baseUrl } = await startStubTarget(() => ({
-      status: 200,
-      body: JSON.stringify({ totalForecasts: 3 }),
-    }));
-    const filePath = join(tmpDir, "missingfield", "brier.txt");
-    const result = await publishForecastBrierMetric({ baseUrl, filePath });
-
-    assert.equal(result.reason, "malformed-response");
-    assert.equal(existsSync(filePath), false);
-  });
-
-  test("brierScore null (no scoreable forecasts yet) → no-data, no write — never a fabricated 0", async () => {
-    const { baseUrl } = await startStubTarget(() => ({
-      status: 200,
-      body: JSON.stringify({ totalForecasts: 0, brierScore: null }),
-    }));
-    const filePath = join(tmpDir, "nodata", "brier.txt");
-    const result = await publishForecastBrierMetric({ baseUrl, filePath });
-
-    // Healthy target, legitimately no data: ok=true but nothing written.
-    assert.equal(result.ok, true);
-    assert.equal(result.wrote, false);
-    assert.equal(result.reason, "no-data");
-    assert.equal(existsSync(filePath), false);
-  });
-});
-
-describe("maybePublishForecastBrierMetric — heartbeat throttle", () => {
-  test("publishes on the first call, throttles within the interval, republishes after it", async () => {
-    let served = 0;
-    const { baseUrl } = await startStubTarget(() => {
-      served++;
-      return { status: 200, body: JSON.stringify({ brierScore: 0.2 }) };
+describe("publishForecastCalibrationBrierMetric — never write a fabricated value", () => {
+  test("unreachable target -> no file, fetch-failed", async () => {
+    const filePath = join(tmpDir, "brier-unreachable.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: (async () => {
+        throw new TypeError("fetch failed: ECONNREFUSED");
+      }) as unknown as typeof fetch,
     });
-    const filePath = join(tmpDir, "throttle", "brier.txt");
-    const hour = 60 * 60 * 1000;
-    const t0 = 10 * hour; // any epoch offset > 0 so the cold throttle (0) fires
-
-    const first = await maybePublishForecastBrierMetric({ baseUrl, filePath, nowMs: t0 });
-    assert.ok(first, "first call must publish");
-    assert.equal(first!.wrote, true);
-
-    // 5-minute-tick cadence inside the hour → throttled, no fetch.
-    const second = await maybePublishForecastBrierMetric({ baseUrl, filePath, nowMs: t0 + 5 * 60 * 1000 });
-    assert.equal(second, null);
-    assert.equal(served, 1, "throttled call must not hit the target");
-
-    // Past the interval → publishes again.
-    const third = await maybePublishForecastBrierMetric({ baseUrl, filePath, nowMs: t0 + hour });
-    assert.ok(third, "post-interval call must publish");
-    assert.equal(served, 2);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "fetch-failed");
+    await assert.rejects(stat(filePath), /ENOENT/, "file must not be created on fetch failure");
   });
 
-  test("throttle stamps at attempt start: an unreachable target is not retried inside the window", async () => {
-    const { baseUrl, server } = await startStubTarget(() => ({ status: 200, body: "{}" }));
-    await new Promise<void>((r) => server.close(() => r()));
-    const filePath = join(tmpDir, "throttle-fail", "brier.txt");
-    const t0 = 99 * 60 * 60 * 1000;
+  test("non-200 response -> no file, non-200", async () => {
+    const filePath = join(tmpDir, "brier-500.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: (async () => ({
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+      })) as unknown as typeof fetch,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "non-200");
+    await assert.rejects(stat(filePath), /ENOENT/);
+  });
 
-    const first = await maybePublishForecastBrierMetric({ baseUrl, filePath, nowMs: t0, timeoutMs: 2000 });
-    assert.equal(first!.reason, "target-unreachable");
+  test("malformed JSON body -> no file, malformed-response", async () => {
+    const filePath = join(tmpDir, "brier-malformed.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError("Unexpected token < in JSON");
+        },
+      })) as unknown as typeof fetch,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "malformed-response");
+    await assert.rejects(stat(filePath), /ENOENT/);
+  });
 
-    const second = await maybePublishForecastBrierMetric({ baseUrl, filePath, nowMs: t0 + 60 * 1000 });
-    assert.equal(second, null, "failure must still consume the hourly attempt slot");
+  test("null brierScore (not enough resolved forecasts) -> no file, no-score", async () => {
+    const filePath = join(tmpDir, "brier-null.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({ brierScore: null, sampleCount: 0 }),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "no-score");
+    await assert.rejects(stat(filePath), /ENOENT/);
+  });
+
+  test("non-numeric brierScore -> no file, no-score", async () => {
+    const filePath = join(tmpDir, "brier-string.txt");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: fetchOk({ brierScore: "0.21" }),
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "no-score");
+    await assert.rejects(stat(filePath), /ENOENT/);
+  });
+
+  test("failure leaves a previously-written value untouched (stale mtime is the signal)", async () => {
+    const filePath = join(tmpDir, "brier-stale.txt");
+    await writeFile(filePath, "0.24\n", "utf-8");
+    const result = await publishForecastCalibrationBrierMetric({
+      filePath,
+      fetchImpl: (async () => {
+        throw new TypeError("fetch failed: timeout");
+      }) as unknown as typeof fetch,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(
+      (await readFile(filePath, "utf-8")),
+      "0.24\n",
+      "prior value must survive a failed sample verbatim",
+    );
+  });
+});
+
+describe("Housekeeping wiring (issue #1657 — seventh chore)", () => {
+  // runHousekeeping's sibling chores read/write Redis guard keys, so these
+  // tests need a live Redis (DB 7, dedicated per #948). The producer itself
+  // is injected so no live target is required.
+  test("chore reports 'ran' when the producer resolves", async () => {
+    const { runHousekeeping } = await import("../src/scheduler/housekeeping.ts");
+    let calls = 0;
+    const summary = await runHousekeeping(
+      { publish: async () => {} },
+      {
+        publishBrierMetric: async () => {
+          calls++;
+          return { ok: true };
+        },
+      },
+    );
+    assert.equal(calls, 1, "producer must be invoked exactly once per housekeeping run");
+    assert.ok(
+      summary.ran.includes("forecast-calibration-brier"),
+      `forecast-calibration-brier should be in ran, got ran=${JSON.stringify(summary.ran)}`,
+    );
+  });
+
+  test("chore reports 'ran' even when the sample failed (no-write is not a throw)", async () => {
+    const { runHousekeeping } = await import("../src/scheduler/housekeeping.ts");
+    const summary = await runHousekeeping(
+      { publish: async () => {} },
+      { publishBrierMetric: async () => ({ ok: false }) },
+    );
+    assert.ok(
+      summary.ran.includes("forecast-calibration-brier"),
+      "a clean failed sample still counts as ran (producer never throws by contract)",
+    );
+  });
+
+  test("chore reports 'skipped' on an unexpected throw", async () => {
+    const { runHousekeeping } = await import("../src/scheduler/housekeeping.ts");
+    const summary = await runHousekeeping(
+      { publish: async () => {} },
+      {
+        publishBrierMetric: async () => {
+          throw new Error("unexpected producer crash");
+        },
+      },
+    );
+    assert.ok(
+      summary.skipped.includes("forecast-calibration-brier"),
+      "an unexpected throw must surface in skipped, not abort the run",
+    );
+    assert.ok(
+      !summary.ran.includes("forecast-calibration-brier"),
+      "a throwing chore must not also count as ran",
+    );
   });
 });

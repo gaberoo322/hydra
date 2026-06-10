@@ -32,7 +32,6 @@
  */
 
 import { getMetricsTrend } from "../metrics/trend.ts";
-import { maybePublishForecastBrierMetric } from "../metrics/forecast-brier.ts";
 import {
   getSchedulerCyclesRun,
   getSchedulerCyclesMerged,
@@ -284,17 +283,6 @@ async function runScheduledCycle(eventBus) {
   // the status endpoint) — the tick keeps the heartbeat advancing so the
   // watchdog can distinguish alive from wedged.
   state.lastTickAt = new Date().toISOString();
-
-  // Issue #1657: forecast-calibration-brier outcome producer. Observability
-  // write only (no policy decision — the heartbeat stays non-decisional):
-  // fetches the Target's aggregate Brier score and publishes it to
-  // `metrics/forecast-calibration-brier.txt` for the outcomes file adapter.
-  // Internally throttled to hourly; fire-and-forget so a slow/unreachable
-  // target can never delay the liveness heartbeat.
-  maybePublishForecastBrierMetric().catch((err: any) =>
-    console.error(`[Heartbeat] forecast-brier publish failed: ${err?.message || err}`),
-  );
-
   if (state.running) {
     const delay = state.intervalMs || DEFAULT_INTERVAL_MS;
     state.timer = setTimeout(

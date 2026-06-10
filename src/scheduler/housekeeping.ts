@@ -15,13 +15,15 @@
  * Heartbeat's "strictly observability-and-counters only" contract is no longer
  * contradicted by chore code sharing the same file.
  *
- * The set is the six chores moved off the 5-minute tick in #723:
+ * The set is the six chores moved off the 5-minute tick in #723, plus the
+ * forecast-calibration-brier producer added in #1657:
  *   - blocked-item re-escalation (+ its operator unblock-command builder),
  *   - the `/hydra-review` pickup-set edge-triggered phone-notify,
  *   - done-lane pruning,
  *   - the weekly Telegram digest,
  *   - daily memory consolidation,
- *   - the daily design-concept snapshot.
+ *   - the daily design-concept snapshot,
+ *   - the forecast-calibration-brier leading-outcome producer (#1657).
  *
  * Each chore carries its own Redis time-guard (per-item / daily / weekly), so
  * an hourly invocation is idempotent — a chore whose window has not elapsed is
@@ -210,7 +212,17 @@ async function checkReviewPickupNotify(
  * time-guard. Never throws — each chore is independently try/caught so one
  * failure doesn't abort the rest.
  */
-async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: string[] }> {
+async function runHousekeeping(
+  eventBus,
+  deps: {
+    /**
+     * Injectable forecast-calibration-brier producer (issue #1657) so the
+     * wiring test runs without a live hydra-betting target. Defaults to the
+     * real `publishForecastCalibrationBrierMetric` from `src/metrics/publish.ts`.
+     */
+    publishBrierMetric?: () => Promise<{ ok: boolean }>;
+  } = {},
+): Promise<{ ran: string[]; skipped: string[] }> {
   const ran: string[] = [];
   const skipped: string[] = [];
 
@@ -329,6 +341,30 @@ async function runHousekeeping(eventBus): Promise<{ ran: string[]; skipped: stri
       level: "error",
     });
     skipped.push("design-concept-snapshot");
+  }
+
+  // Forecast-calibration-brier leading-outcome producer (issue #1657) —
+  // samples the target's aggregate Brier score (hydra-betting
+  // GET /api/calibration/forecast-metrics) and publishes it to
+  // metrics/forecast-calibration-brier.txt for the outcomes file adapter.
+  // The producer itself never throws and never writes on failure (target
+  // unreachable / malformed / null brierScore — stale mtime is the staleness
+  // signal), so "ran" here means "sampled", not necessarily "wrote". Hourly
+  // re-publish of the same current value is idempotent, so no Redis
+  // time-guard is needed; "skipped" only on an unexpected throw.
+  try {
+    const publishBrier = deps.publishBrierMetric
+      ?? (await import("../metrics/publish.ts")).publishForecastCalibrationBrierMetric;
+    await publishBrier();
+    ran.push("forecast-calibration-brier");
+  } catch (err: any) {
+    console.error(`[Housekeeping] forecast-calibration-brier producer failed: ${err.message}`);
+    Sentry.addBreadcrumb({
+      category: "scheduler",
+      message: `forecast-calibration-brier producer failed: ${err.message}`,
+      level: "error",
+    });
+    skipped.push("forecast-calibration-brier");
   }
 
   return { ran, skipped };
