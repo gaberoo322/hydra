@@ -22,8 +22,9 @@
 
 import { getRedisConnection } from "./connection.ts";
 
-/** 90 days — comfortably covers any scorecard rolling window. */
-export const SCOPE_VIOLATION_TTL_SECONDS = 90 * 24 * 60 * 60;
+/** 90 days — comfortably covers any scorecard rolling window. Module-private:
+ * the only consumer is incrScopeViolation() below (demoted in #1585). */
+const SCOPE_VIOLATION_TTL_SECONDS = 90 * 24 * 60 * 60;
 
 /** Daily scope-violation counter key. INT string, one per UTC day. */
 function scopeViolationsDailyKey(date: string): string {
