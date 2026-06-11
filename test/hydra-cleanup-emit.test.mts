@@ -43,9 +43,12 @@ import {
 import {
   planCleanupEmit,
   resolveNamespaceImportTargets,
+  filterPrsInDedupWindow,
   EMIT_CAP,
   SYMBOLS_PER_BATCH,
+  MERGED_PR_DEDUP_WINDOW_MS,
 } from "../scripts/ci/hydra-cleanup-emit.ts";
+import type { PullRequestRef } from "../scripts/ci/hydra-cleanup-render.ts";
 
 const ISO = "2026-06-09";
 
@@ -582,5 +585,99 @@ import { named } from "../redis/other.ts";
       names.slice(0, SYMBOLS_PER_BATCH),
       "chunk 1 is the first 20 in (path, name) order",
     );
+  });
+});
+
+describe("covering-PR dedup (#1766) — in-flight/just-merged sibling fixes suppress re-filing", () => {
+  // The grounded 2026-06-11 timeline: the dup batch #1747–#1755 was filed at
+  // 15:57Z, AFTER every covering fix PR had merged — #1719/#1720/#1722/#1723
+  // at ~11:30–11:40Z and #1743 at 15:26Z. An open-PR-only check would have
+  // caught NOTHING; the merged-window refs are what close the recurrence.
+  const SCAN_NOW_MS = Date.parse("2026-06-11T15:57:00Z");
+  const INCIDENT_PRS: PullRequestRef[] = [
+    { number: 1719, paths: ["src/aggregators/run-summary.ts"], mergedAt: "2026-06-11T11:30:00Z" },
+    { number: 1720, paths: ["src/redis/holdback.ts"], mergedAt: "2026-06-11T11:33:00Z" },
+    { number: 1722, paths: ["src/redis/ov-search-metrics.ts"], mergedAt: "2026-06-11T11:37:00Z" },
+    { number: 1723, paths: ["src/redis/retro.ts"], mergedAt: "2026-06-11T11:40:00Z" },
+    { number: 1743, paths: ["src/aggregators/digest-index.ts"], mergedAt: "2026-06-11T15:26:00Z" },
+  ];
+  // A stale knip report still listing the findings those PRs resolved, plus
+  // one genuinely-new finding no PR touched.
+  const INCIDENT_REPORT: KnipReport = {
+    files: [],
+    issues: [
+      { file: "src/aggregators/run-summary.ts", exports: [{ name: "deadSummaryHelper" }], types: [] },
+      { file: "src/redis/holdback.ts", exports: [{ name: "deadHoldbackRead" }], types: [] },
+      { file: "src/redis/ov-search-metrics.ts", exports: [{ name: "deadMetric" }], types: [] },
+      { file: "src/redis/retro.ts", exports: [{ name: "deadRetroKey" }], types: [] },
+      { file: "src/aggregators/digest-index.ts", exports: [{ name: "deadDigestEntry" }], types: [] },
+      { file: "src/genuinely-new.ts", exports: [{ name: "actuallyDead" }], types: [] },
+    ],
+  };
+
+  test("REGRESSION (2026-06-11): every PR-covered finding is suppressed; zero of the dup wave re-files", () => {
+    const covering = filterPrsInDedupWindow(INCIDENT_PRS, SCAN_NOW_MS);
+    assert.equal(covering.length, 5, "all five fix PRs are inside the 24h window at 15:57Z");
+    const plan = planCleanupEmit(
+      INCIDENT_REPORT, [], () => "", ISO, EMIT_CAP, SYMBOLS_PER_BATCH, new Set(), covering,
+    );
+    const emittedPaths = plan.issues.flatMap((i) => i.findings.map((f) => f.path));
+    assert.deepEqual(emittedPaths, ["src/genuinely-new.ts"], "only the un-covered finding emits");
+    // Every suppression is audited with the covering PR number — never silent.
+    const prDrops = plan.dropped.filter((d) => /covered by .*PR #\d+/.test(d.reason));
+    assert.equal(prDrops.length, 5);
+    for (const [i, pr] of INCIDENT_PRS.entries()) {
+      const drop = prDrops.find((d) => d.finding.path === pr.paths[0]);
+      assert.ok(drop, `finding ${i} has an audited drop`);
+      assert.match(drop.reason, new RegExp(`recently-merged PR #${pr.number} \\(merged ${pr.mergedAt}\\)`));
+      assert.ok(drop.reason.includes(pr.paths[0]), "the reason names the intersecting path");
+    }
+  });
+
+  test("an OPEN PR covers the same way (the acceptance-criteria case), cited as open", () => {
+    const openPr: PullRequestRef[] = [{ number: 1801, paths: ["src/redis/holdback.ts"] }];
+    const report: KnipReport = {
+      files: [],
+      issues: [{ file: "src/redis/holdback.ts", exports: [{ name: "deadHoldbackRead" }], types: [] }],
+    };
+    const plan = planCleanupEmit(report, [], () => "", ISO, EMIT_CAP, SYMBOLS_PER_BATCH, new Set(), openPr);
+    assert.equal(plan.issues.length, 0);
+    assert.equal(plan.dropped.length, 1);
+    assert.match(plan.dropped[0].reason, /covered by open PR #1801/);
+  });
+
+  test("OPTIONAL parameter: an absent/empty PR list degrades to the pre-#1766 plan", () => {
+    const withEmpty = planCleanupEmit(
+      INCIDENT_REPORT, [], () => "", ISO, EMIT_CAP, SYMBOLS_PER_BATCH, new Set(), [],
+    );
+    const withAbsent = planCleanupEmit(INCIDENT_REPORT, [], () => "", ISO);
+    for (const plan of [withEmpty, withAbsent]) {
+      const covered = plan.issues.reduce((n, i) => n + i.findings.length, 0);
+      assert.equal(covered, 6, "no PR refs → no suppression, every finding plans");
+      assert.equal(plan.dropped.length, 0);
+    }
+  });
+
+  test("filterPrsInDedupWindow: open PRs always pass; merged PRs pass iff within the trailing window", () => {
+    const now = Date.parse("2026-06-12T12:00:00Z");
+    const prs: PullRequestRef[] = [
+      { number: 1, paths: ["a.ts"] }, // open — always in
+      { number: 2, paths: ["b.ts"], mergedAt: "2026-06-12T11:00:00Z" }, // 1h ago — in
+      { number: 3, paths: ["c.ts"], mergedAt: "2026-06-11T12:00:00Z" }, // exactly 24h — in (inclusive)
+      { number: 4, paths: ["d.ts"], mergedAt: "2026-06-11T11:59:59Z" }, // 24h+1s — out
+      { number: 5, paths: ["e.ts"], mergedAt: "not-a-timestamp" }, // unparseable — out
+    ];
+    assert.deepEqual(
+      filterPrsInDedupWindow(prs, now).map((p) => p.number),
+      [1, 2, 3],
+      "open + in-window merged survive; aged-out and unparseable refs are excluded",
+    );
+    // A custom window narrows the surface deterministically.
+    assert.deepEqual(
+      filterPrsInDedupWindow(prs, now, 30 * 60 * 1000).map((p) => p.number),
+      [1],
+      "a 30-min window keeps only the open PR",
+    );
+    assert.equal(MERGED_PR_DEDUP_WINDOW_MS, 24 * 60 * 60 * 1000, "default window is 24h");
   });
 });
