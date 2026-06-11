@@ -74,6 +74,25 @@ gh issue edit $issue_number --remove-label ready-for-agent --add-label in-progre
   (cd "$WT" && codex exec --skill hydra-dev-child --json "{\"issue\":${issue_number}}")
   ```
 
+**Branch name held by a stale sibling worktree (cue:
+pr-branch-checked-out-in-stale-sibling-worktree).** `git worktree add -b
+issue-N-…` / `git checkout issue-N-…` fails with `fatal: '<branch>' is
+already used by worktree …` when a prior dispatch's worktree still holds
+that branch — common on remediation/follow-up dispatches against an existing
+PR. Do NOT delete the other worktree, do NOT `git branch -D` the held branch
+(blocked while its worktree exists), and do NOT fall back to the main tree.
+Recover on a differently-named local branch and push via refspec:
+
+```bash
+git fetch origin "$REMOTE_BRANCH"
+git checkout -b "${REMOTE_BRANCH}-r$(date +%s)" FETCH_HEAD  # fresh local name
+# …edit, commit, verify…
+git push origin "HEAD:${REMOTE_BRANCH}"  # refspec push updates the PR branch
+```
+
+(Proven recovery on hydra-dev-1666 2026-06-10 and hydra-dev-1667 2026-06-11;
+cross-run recurrence 3 promoted this lesson via /hydra-retro.)
+
 The child prompt MUST include the worktree-guard preamble (see below) AND the scope-respect block (see below). The child:
 1. Verifies it is in a worktree (NOT `/home/gabe/hydra`). Aborts if not.
 2. Reads CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs
