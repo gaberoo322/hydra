@@ -343,6 +343,33 @@ async function runHousekeeping(
     skipped.push("design-concept-snapshot");
   }
 
+  // Work-queue hygiene (issue #1690) — reconcile `hydra:anchors:work-queue`
+  // entries against resolved state: entries that are merged work (the #882
+  // token scan) or reference orchestrator issues that are ALL closed get
+  // LREM'd, so anchors resolved out-of-band stop resurfacing at work-queue
+  // tier and burning dev_target dispatches on no-op verify+LREM. The engine
+  // is fail-open + idempotent (a second run finds nothing to remove) and its
+  // `gh` cost is bounded by an internal per-run cap, so no Redis time-guard is
+  // needed; "skipped" only on an unexpected throw.
+  try {
+    const { reconcileWorkQueue } = await import("../anchor-candidates.ts");
+    const wq = await reconcileWorkQueue();
+    if (wq.removed > 0) {
+      console.log(
+        `[Housekeeping] Work-queue hygiene: removed ${wq.removed} resolved entr${wq.removed === 1 ? "y" : "ies"} (scanned ${wq.scanned})`,
+      );
+    }
+    ran.push("work-queue-hygiene");
+  } catch (err: any) {
+    console.error(`[Housekeeping] Work-queue hygiene failed: ${err.message}`);
+    Sentry.addBreadcrumb({
+      category: "scheduler",
+      message: `work-queue-hygiene failed: ${err.message}`,
+      level: "error",
+    });
+    skipped.push("work-queue-hygiene");
+  }
+
   // Forecast-calibration-brier leading-outcome producer (issue #1657) —
   // samples the target's aggregate Brier score (hydra-betting
   // GET /api/calibration/forecast-metrics) and publishes it to

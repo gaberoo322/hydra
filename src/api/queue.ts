@@ -2,6 +2,7 @@ import { Router } from "express";
 import { getWorkQueueItems, pushToWorkQueue, getWorkQueueLen, findWorkQueueDuplicate } from "../redis/work-queue.ts";
 import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
 import { QueuePostBodySchema } from "../schemas/queue.ts";
+import { reconcileWorkQueue } from "../anchor-candidates.ts";
 
 export function createQueueRouter() {
   const router = Router();
@@ -45,6 +46,20 @@ export function createQueueRouter() {
       await pushToWorkQueue(JSON.stringify(item));
       const queueLen = await getWorkQueueLen();
       res.json({ queued: true, item, position: queueLen });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /queue/reconcile — Reap work-queue entries resolved out-of-band
+  // (issue #1690). Operator/test hook over the same engine the hourly
+  // `work-queue-hygiene` housekeeping chore runs: removes entries that are
+  // merged work or reference only-closed orchestrator issues. Fail-open —
+  // uncertainty keeps the entry; the engine never throws.
+  router.post("/queue/reconcile", async (req, res) => {
+    try {
+      const result = await reconcileWorkQueue();
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
