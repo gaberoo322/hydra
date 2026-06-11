@@ -800,7 +800,15 @@ const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
  * lets a consumer gate the alarm on "non-trivial dispatch counts" — a rate of 0
  * over runs that did real work is the starvation signal; a rate of 0 over runs
  * that immediately ran out of work is not.
+ *
+ * `starved` is the pre-derived alarm bit (issue #1352 acceptance clause 3):
+ * true when a non-trivial sample of ended runs ({@link STARVATION_MIN_ENDED_RUNS})
+ * that collectively did real dispatch work produced ZERO clean terminations.
+ * Consumers (hydra-doctor, the dashboard) alarm on the boolean directly
+ * instead of re-deriving thresholds.
  */
+export const STARVATION_MIN_ENDED_RUNS = 5;
+
 export function summarizeTerminationHealth(
   runs: Array<Record<string, unknown>>,
 ): {
@@ -808,6 +816,7 @@ export function summarizeTerminationHealth(
   endedRuns: number;
   cleanRuns: number;
   endedDispatchTotal: number;
+  starved: boolean;
 } {
   let endedRuns = 0;
   let cleanRuns = 0;
@@ -824,6 +833,10 @@ export function summarizeTerminationHealth(
     endedRuns,
     cleanRuns,
     endedDispatchTotal,
+    starved:
+      endedRuns >= STARVATION_MIN_ENDED_RUNS &&
+      endedDispatchTotal > 0 &&
+      cleanRuns === 0,
   };
 }
 
