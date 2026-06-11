@@ -30,9 +30,6 @@ export const ScoutStatsQuerySchema = z.object({
   window: countQuerySchema(DEFAULT_STATS_WINDOW_DAYS).shape.count,
 });
 
-/** Inferred shape: `{ window: number }`. */
-export type ScoutStatsQuery = z.infer<typeof ScoutStatsQuerySchema>;
-
 /**
  * `GET /scout/dispatches?limit=N` — newest-first audit page size.
  * Absent/non-numeric → 50; exposed under the `limit` key.
@@ -40,6 +37,3 @@ export type ScoutStatsQuery = z.infer<typeof ScoutStatsQuerySchema>;
 export const ScoutDispatchesQuerySchema = z.object({
   limit: countQuerySchema(DEFAULT_DISPATCHES_LIMIT).shape.count,
 });
-
-/** Inferred shape: `{ limit: number }`. */
-export type ScoutDispatchesQuery = z.infer<typeof ScoutDispatchesQuerySchema>;
