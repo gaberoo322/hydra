@@ -378,7 +378,7 @@ export async function projectRunDigest(
  *     in a way that is neither a clean end nor a crash (defensive
  *     fallback). The UI shows "last run ended N ago".
  */
-export type AutopilotLifecycleState = "running" | "idle" | "ended" | "crashed";
+type AutopilotLifecycleState = "running" | "idle" | "ended" | "crashed";
 
 export interface AutopilotLifecycle {
   state: AutopilotLifecycleState;

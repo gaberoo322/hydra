@@ -92,10 +92,6 @@ export {
   deriveLifecycleState,
 };
 export { WEDGE_AGE_THRESHOLD_S } from "./run-projections.ts";
-export type {
-  AutopilotLifecycleState,
-  AutopilotLifecycle,
-} from "./run-projections.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -146,7 +142,7 @@ const CRASH_DETAIL_LOG_TAIL_MAX_CHARS = 8 * 1024;
 // Result type
 // ---------------------------------------------------------------------------
 
-export type ErrorCode = "duplicate" | "not-found" | "invalid" | "redis";
+type ErrorCode = "duplicate" | "not-found" | "invalid" | "redis";
 
 type Ok<T> = { ok: true; code?: undefined; detail?: undefined } & T;
 type Err = { ok: false; code: ErrorCode; detail?: string };
@@ -807,7 +803,7 @@ const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
  * Consumers (hydra-doctor, the dashboard) alarm on the boolean directly
  * instead of re-deriving thresholds.
  */
-export const STARVATION_MIN_ENDED_RUNS = 5;
+const STARVATION_MIN_ENDED_RUNS = 5;
 
 export function summarizeTerminationHealth(
   runs: Array<Record<string, unknown>>,
