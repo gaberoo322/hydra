@@ -82,6 +82,26 @@ describe("classifyTargetRisk — money-critical surfaces", () => {
     );
   });
 
+  test("flags the web/-rooted trade-submitting bin runner (issue #1694)", () => {
+    // Regression pin for the exact gap that shipped hydra-betting PR #117's
+    // scan-to-submit loop without the money-critical gate: normalize strips
+    // web/, leaving src/bin/..., which matched no entry before #1694.
+    const r = classifyTargetRisk([
+      "web/src/bin/arbitrage-auto-approval-runner.ts",
+    ]);
+    assert.equal(r.moneyCritical, true);
+    assert.deepEqual(r.matchedPaths, [
+      "web/src/bin/arbitrage-auto-approval-runner.ts",
+    ]);
+  });
+
+  test("flags a bare src/bin/ runner path (issue #1694)", () => {
+    assert.equal(isMoneyCriticalPath("src/bin/some-runner.ts"), true);
+    // Directory itself (no trailing slash) matches too, mirroring the
+    // Verifier-Core matcher contract pinned above for src/lib/providers.
+    assert.equal(isMoneyCriticalPath("src/bin"), true);
+  });
+
   test("a mixed set is money-critical if ANY path matches", () => {
     const r = classifyTargetRisk([
       "src/components/Button.tsx",
@@ -154,6 +174,9 @@ describe("classifyTargetRisk — safe surfaces", () => {
     const r = classifyTargetRisk(["src/lib/providers-readme.md"]);
     assert.equal(r.moneyCritical, false);
     assert.deepEqual(r.matchedPaths, []);
+    // Same guard for the #1694 bin entry: bin-adjacent names are not bin/.
+    assert.equal(isMoneyCriticalPath("src/bin-utils/helper.ts"), false);
+    assert.equal(isMoneyCriticalPath("web/src/binding/x.ts"), false);
   });
 });
 
@@ -194,13 +217,15 @@ describe("classifyTargetRisk — edge cases (pure & total)", () => {
 });
 
 describe("MONEY_CRITICAL_TARGET_PATHS — declared set", () => {
-  test("is a single frozen const covering the four money-critical surfaces", () => {
+  test("is a single frozen const covering the money-critical surfaces", () => {
     assert.ok(Object.isFrozen(MONEY_CRITICAL_TARGET_PATHS));
     assert.deepEqual([...MONEY_CRITICAL_TARGET_PATHS], [
       "src/lib/providers/",
       "src/lib/execution/",
       "src/lib/staking/",
       "src/lib/bet-math/",
+      // Issue #1694 — runner entrypoints that drive trade submission.
+      "src/bin/",
     ]);
   });
 
