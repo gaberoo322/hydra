@@ -28,6 +28,8 @@ import {
   normalizeIdentity,
   loadMergedAnchorRefsImpl,
   __resetMergedScanCacheForTests,
+  harvestOrchIssueRefs,
+  reconcileWorkQueue,
   type CandidateFeedDeps,
   type CandidateDesignConcept,
 } from "../src/anchor-candidates.ts";
@@ -51,6 +53,9 @@ function makeDeps(over: Partial<CandidateFeedDeps> = {}): CandidateFeedDeps {
     loadLastReflectionAt: async () => null,
     loadDesignConcept: async () => ABSENT_DC,
     loadMergedAnchorRefs: async () => new Set<string>(),
+    // Issue #1690: stub the work-queue reap so suppression tests never touch
+    // a real Redis. Individual tests override to assert on the calls.
+    removeWorkQueueItem: async () => 0,
     ...over,
   };
 }
@@ -718,5 +723,194 @@ describe("GET /anchor/candidates — thin route", () => {
     assert.ok("in_flight_suppressed" in res._body);
     assert.ok("merged_suppressed" in res._body);
     assert.equal(typeof res._body.generated_at, "string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Work-queue hygiene (issue #1690): self-healing reap + reconcile engine.
+// ---------------------------------------------------------------------------
+
+describe("getCandidateFeed — merged work-queue entries are reaped, not just hidden (#1690)", () => {
+  test("a merged-suppressed work-queue entry is LREM'd via the injected reap", async () => {
+    const reaped: string[] = [];
+    const staleRaw = JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) });
+    const liveRaw = JSON.stringify({ reference: "item-999 unbuilt", queuedAt: isoAgo(0) });
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [staleRaw, liveRaw],
+      loadMergedAnchorRefs: async () => new Set(["item-322"]),
+      removeWorkQueueItem: async (raw) => { reaped.push(raw); return 1; },
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.merged_suppressed, 1);
+    assert.deepEqual(reaped, [staleRaw], "exactly the stale raw entry is removed");
+    assert.ok(feed.candidates.some((c) => c.anchorRef.includes("item-999")));
+  });
+
+  test("kanban merged suppression does NOT trigger the work-queue reap", async () => {
+    const reaped: string[] = [];
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: 882, title: "Merged anchor", movedAt: isoAgo(0) }],
+        backlog: [],
+      }),
+      loadMergedAnchorRefs: async () => new Set(["882"]),
+      removeWorkQueueItem: async (raw) => { reaped.push(raw); return 1; },
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.merged_suppressed, 1);
+    assert.deepEqual(reaped, [], "kanban lane never touches the work queue");
+  });
+
+  test("a failing reap degrades to suppress-only (never throws, still suppressed)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) }),
+      ],
+      loadMergedAnchorRefs: async () => new Set(["item-322"]),
+      removeWorkQueueItem: async () => { throw new Error("redis down"); },
+    });
+    await assert.doesNotReject(async () => {
+      const feed = await getCandidateFeed({ now: NOW }, deps);
+      assert.equal(feed.merged_suppressed, 1);
+      assert.equal(feed.candidates.length, 0);
+    });
+  });
+});
+
+describe("harvestOrchIssueRefs — pure ref harvesting (#1690)", () => {
+  test("harvests #NNN and issue-NNN from reference + reason; dedupes", () => {
+    const refs = harvestOrchIssueRefs({
+      reference: "fix the feed (#1683) per issue-1683",
+      reason: "filed from retro, see #1690",
+    });
+    assert.deepEqual(refs.sort(), ["1683", "1690"]);
+  });
+
+  test("context is excluded; bare numbers and item-NNN never match", () => {
+    assert.deepEqual(
+      harvestOrchIssueRefs({
+        reference: "betting-prod-api-status-500-db-migration-drift item-322",
+        reason: "no refs here either",
+      }),
+      [],
+      "status-500 / item-322 / bare numbers are not orch issue refs",
+    );
+    // `context` is not part of the harvest surface at all.
+    assert.deepEqual(
+      harvestOrchIssueRefs({ reference: "slug-anchor", reason: "r" } as any),
+      [],
+    );
+  });
+
+  test("non-string fields degrade to no refs", () => {
+    assert.deepEqual(harvestOrchIssueRefs({ reference: 42 as any, reason: null as any }), []);
+  });
+});
+
+describe("reconcileWorkQueue — resolved-state reaper (#1690)", () => {
+  const closedRaw = JSON.stringify({
+    reference: "betting-prod-api-status-500-db-migration-drift (#1683)",
+    queuedAt: isoAgo(0),
+  });
+  const openRaw = JSON.stringify({ reference: "live anchor (#1700)", queuedAt: isoAgo(0) });
+  const mergedRaw = JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) });
+  const noRefRaw = JSON.stringify({ reference: "slug-with-no-refs", queuedAt: isoAgo(0) });
+
+  function makeReconcileDeps(over: any = {}) {
+    const removed: string[] = [];
+    const deps = {
+      getWorkQueueItems: async () => [closedRaw, openRaw, mergedRaw, noRefRaw],
+      removeWorkQueueItem: async (raw: string) => { removed.push(raw); return 1; },
+      loadMergedAnchorRefs: async () => new Set<string>(["item-322"]),
+      getIssueState: async (n: string) => (n === "1683" ? "closed" as const : "open" as const),
+      ...over,
+    };
+    return { deps, removed };
+  }
+
+  test("removes closed-issue and merged entries; keeps open and ref-less entries", async () => {
+    const { deps, removed } = makeReconcileDeps();
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.scanned, 4);
+    assert.equal(result.removed, 2);
+    assert.deepEqual(removed.sort(), [closedRaw, mergedRaw].sort());
+    assert.deepEqual(
+      result.details.map((d) => d.cause).sort(),
+      ["closed-issue", "merged-work"],
+    );
+  });
+
+  test("an undeterminable issue state keeps the entry (fail open)", async () => {
+    const { deps, removed } = makeReconcileDeps({
+      getWorkQueueItems: async () => [closedRaw],
+      getIssueState: async () => null,
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 0);
+    assert.deepEqual(removed, []);
+  });
+
+  test("an entry referencing one closed and one open issue is kept", async () => {
+    const mixedRaw = JSON.stringify({ reference: "epic slice (#1683, #1700)", queuedAt: isoAgo(0) });
+    const { deps, removed } = makeReconcileDeps({
+      getWorkQueueItems: async () => [mixedRaw],
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 0);
+    assert.deepEqual(removed, []);
+  });
+
+  test("duplicate raws are reaped once and counted by LREM total", async () => {
+    let lremCalls = 0;
+    const { deps } = makeReconcileDeps({
+      getWorkQueueItems: async () => [closedRaw, closedRaw],
+      removeWorkQueueItem: async () => { lremCalls++; return lremCalls === 1 ? 2 : 0; },
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 2, "LREM count 0 removed both duplicates in one call");
+    assert.equal(result.details.length, 1, "second encounter LREMs 0 and is not re-reported");
+  });
+
+  test("issue-state lookups are cached per run (one gh call per distinct issue)", async () => {
+    const lookups: string[] = [];
+    const a = JSON.stringify({ reference: "slice A (#1683)", queuedAt: isoAgo(0) });
+    const b = JSON.stringify({ reference: "slice B (#1683)", queuedAt: isoAgo(0) });
+    const { deps } = makeReconcileDeps({
+      getWorkQueueItems: async () => [a, b],
+      getIssueState: async (n: string) => { lookups.push(n); return "closed" as const; },
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.deepEqual(lookups, ["1683"], "second entry reuses the cached state");
+    assert.equal(result.removed, 2);
+  });
+
+  test("a failing queue read degrades to a no-op result (never throws)", async () => {
+    const { deps } = makeReconcileDeps({
+      getWorkQueueItems: async () => { throw new Error("redis down"); },
+    });
+    await assert.doesNotReject(async () => {
+      const result = await reconcileWorkQueue(deps);
+      assert.deepEqual(result, { scanned: 0, removed: 0, details: [] });
+    });
+  });
+
+  test("a failing merged-refs reader still allows the closed-issue path", async () => {
+    const { deps, removed } = makeReconcileDeps({
+      getWorkQueueItems: async () => [closedRaw],
+      loadMergedAnchorRefs: async () => { throw new Error("gh unreachable"); },
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 1);
+    assert.deepEqual(removed, [closedRaw]);
+  });
+
+  test("corrupt JSON entries are kept (cleanWorkQueue's concern)", async () => {
+    const { deps, removed } = makeReconcileDeps({
+      getWorkQueueItems: async () => ["not-json{{{", closedRaw],
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.scanned, 2);
+    assert.deepEqual(removed, [closedRaw]);
   });
 });

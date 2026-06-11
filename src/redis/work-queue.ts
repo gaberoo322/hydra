@@ -25,6 +25,18 @@ export async function getWorkQueueItems(): Promise<string[]> {
   return r.lrange(redisKeys.anchorWorkQueue(), 0, -1);
 }
 
+/**
+ * Remove a work-queue item by its exact raw (JSON-string) value.
+ * `count 0` removes ALL occurrences — stale anchors have been observed queued
+ * more than once (issue #1690: two duplicate entries for the same resolved
+ * anchor). Returns the number of entries removed (0 = nothing matched, which
+ * is a safe no-op for callers reconciling a snapshot that raced a writer).
+ */
+export async function removeWorkQueueItem(raw: string): Promise<number> {
+  const r = getRedisConnection();
+  return r.lrem(redisKeys.anchorWorkQueue(), 0, raw);
+}
+
 /** Push an item to the work queue and index into OV for semantic dedup. */
 export async function pushToWorkQueue(json: string): Promise<void> {
   const r = getRedisConnection();
