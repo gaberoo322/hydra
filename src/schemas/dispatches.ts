@@ -63,8 +63,6 @@ export const SubagentDispatchPostBodySchema = z
   })
   .strict();
 
-/** Inferred TS type — canonical shape of a subagent-dispatch POST body. */
-export type SubagentDispatchPostBody = z.infer<typeof SubagentDispatchPostBodySchema>;
 
 /**
  * Body accepted by `PATCH /api/dispatches/subagent/:sessionId/current-step`.
@@ -79,10 +77,6 @@ export const SubagentDispatchStepPatchBodySchema = z
   })
   .strict();
 
-/** Inferred TS type — canonical shape of a current-step PATCH body. */
-export type SubagentDispatchStepPatchBody = z.infer<
-  typeof SubagentDispatchStepPatchBodySchema
->;
 
 /**
  * Query params accepted by
@@ -115,5 +109,3 @@ export const TranscriptQuerySchema = z
   })
   .strict();
 
-/** Inferred TS type — canonical shape of the transcript query params. */
-export type TranscriptQuery = z.infer<typeof TranscriptQuerySchema>;

@@ -22,7 +22,7 @@ import { z } from "zod";
 // Shared vocabulary (mirrors aggregators/types.ts)
 // ---------------------------------------------------------------------------
 
-export const AutopilotRunOutcomeSchema = z.enum([
+const AutopilotRunOutcomeSchema = z.enum([
   "success",
   "failure",
   "aborted",
@@ -30,19 +30,19 @@ export const AutopilotRunOutcomeSchema = z.enum([
   "unknown",
 ]);
 
-export const AnomalyMetricSchema = z.enum([
+const AnomalyMetricSchema = z.enum([
   "cost-per-hour",
   "abandonment-rate",
   "dispatch-class-failure-rate",
 ]);
 
-export const AnomalyDirectionSchema = z.enum(["high", "low"]);
+const AnomalyDirectionSchema = z.enum(["high", "low"]);
 
 // ---------------------------------------------------------------------------
 // /v2/explore/friction
 // ---------------------------------------------------------------------------
 
-export const FrictionPatternRowSchema = z
+const FrictionPatternRowSchema = z
   .object({
     skill: z.string(),
     cue: z.string(),
@@ -57,7 +57,7 @@ export const FrictionPatternRowSchema = z
   })
   .strict();
 
-export const FrictionGroupSchema = z
+const FrictionGroupSchema = z
   .object({
     skill: z.string(),
     patterns: z.array(FrictionPatternRowSchema),
@@ -73,7 +73,7 @@ export const MetaFrictionIssueRefSchema = z
   })
   .strict();
 
-export const FrictionPatternsResponseSchema = z
+const FrictionPatternsResponseSchema = z
   .object({
     bySkill: z.array(FrictionGroupSchema),
     thresholdCandidates: z.array(FrictionPatternRowSchema),
@@ -104,9 +104,7 @@ export const BehaviorGalleryQuerySchema = z
   })
   .strict();
 
-export type BehaviorGalleryQuery = z.infer<typeof BehaviorGalleryQuerySchema>;
-
-export const BehaviorRowSchema = z
+const BehaviorRowSchema = z
   .object({
     runId: z.string(),
     startedAt: z.string(),
@@ -126,7 +124,7 @@ export const BehaviorRowSchema = z
   })
   .strict();
 
-export const BehaviorGalleryResponseSchema = z
+const BehaviorGalleryResponseSchema = z
   .object({
     items: z.array(BehaviorRowSchema),
     limit: z.number().int().positive(),
@@ -156,9 +154,7 @@ export const BacklogFlowQuerySchema = z
   })
   .strict();
 
-export type BacklogFlowQuery = z.infer<typeof BacklogFlowQuerySchema>;
-
-export const ClassFlowRowSchema = z
+const ClassFlowRowSchema = z
   .object({
     class: z.string(),
     added: z.number().int().nonnegative(),
@@ -167,7 +163,7 @@ export const ClassFlowRowSchema = z
   })
   .strict();
 
-export const BacklogFlowResponseSchema = z
+const BacklogFlowResponseSchema = z
   .object({
     byClass: z.array(ClassFlowRowSchema),
     windowDays: z.number().int().positive(),
@@ -225,7 +221,7 @@ export type LessonsExplorerResponse = z.infer<typeof LessonsExplorerResponseSche
 // /v2/explore/anomalies
 // ---------------------------------------------------------------------------
 
-export const AnomalySchema = z
+const AnomalySchema = z
   .object({
     metric: AnomalyMetricSchema,
     subKey: z.string().nullable(),
@@ -239,7 +235,7 @@ export const AnomalySchema = z
   })
   .strict();
 
-export const AnomalyDetectorResponseSchema = z
+const AnomalyDetectorResponseSchema = z
   .object({
     anomalies: z.array(AnomalySchema),
     threshold: z.number(),
