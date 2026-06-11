@@ -42,6 +42,7 @@ import {
 } from "../scripts/ci/hydra-cleanup-render.ts";
 import {
   planCleanupEmit,
+  resolveNamespaceImportTargets,
   EMIT_CAP,
   SYMBOLS_PER_BATCH,
 } from "../scripts/ci/hydra-cleanup-emit.ts";
@@ -454,6 +455,108 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
     assert.deepEqual(ids(forward), expectedOrder, "files first, then exports sorted by (path, name)");
     assert.deepEqual(ids(reversed), expectedOrder, "the same order regardless of knip insertion order");
     assert.equal(forward.issues[0].body, reversed.issues[0].body, "byte-identical body across insertion orders");
+  });
+
+  test("NAMESPACE FACADE (#1737): export findings for a namespace-imported module are dropped with the audit reason", () => {
+    // The #1724 false-positive family: knip flags exports of a module that is
+    // live through `import * as defaultRedis` folded into a `deps.x ?? defaultX`
+    // DI facade. Once the module is in the namespace-consumed set, its EXPORT
+    // findings must never reach an issue — and the suppression must be visible
+    // in the dropped audit list, never silent.
+    const report: KnipReport = {
+      files: [],
+      issues: [
+        {
+          file: "src/redis/recommendations.ts",
+          exports: [{ name: "readRecommendations" }, { name: "writeRecommendations" }],
+          types: [],
+        },
+        { file: "src/clean.ts", exports: [{ name: "trulyDead" }], types: [] },
+      ],
+    };
+    const consumed = new Set(["src/redis/recommendations.ts"]);
+    const plan = planCleanupEmit(report, [], () => "", ISO, EMIT_CAP, SYMBOLS_PER_BATCH, consumed);
+    const emittedPaths = plan.issues.flatMap((i) => i.findings.map((f) => f.path));
+    assert.deepEqual(emittedPaths, ["src/clean.ts"], "only the non-facade finding survives");
+    const facadeDrops = plan.dropped.filter((d) => /namespace-import \/ DI-facade/.test(d.reason));
+    assert.equal(facadeDrops.length, 2, "both facade-module export findings are dropped, audited");
+    assert.ok(
+      facadeDrops.every((d) => /#1737/.test(d.reason)),
+      "the drop reason names the recurrence family",
+    );
+  });
+
+  test("NAMESPACE FACADE (#1737): file-kind findings are NOT suppressed; an absent set degrades to today's behavior", () => {
+    // File-kind findings are unaffected by the probe (a namespace-imported file
+    // is never flagged as an unused file, so a file finding for that path means
+    // knip saw no importer at all — still a real harvest).
+    const report: KnipReport = {
+      files: ["src/redis/recommendations.ts"],
+      issues: [{ file: "src/redis/recommendations.ts", exports: [{ name: "readRecommendations" }], types: [] }],
+    };
+    const consumed = new Set(["src/redis/recommendations.ts"]);
+    const withSet = planCleanupEmit(report, [], () => "", ISO, EMIT_CAP, SYMBOLS_PER_BATCH, consumed);
+    assert.deepEqual(
+      withSet.issues.flatMap((i) => i.findings.map((f) => `${f.kind}:${f.path}`)),
+      ["file:src/redis/recommendations.ts"],
+      "the file finding survives; only the export finding is suppressed",
+    );
+    // OPTIONAL parameter: omitting the set keeps the pre-#1737 plan — both
+    // findings emit (existing call sites and tests stay valid unmodified).
+    const withoutSet = planCleanupEmit(report, [], () => "", ISO);
+    const kinds = withoutSet.issues.flatMap((i) => i.findings.map((f) => f.kind)).sort();
+    assert.deepEqual(kinds, ["export", "file"], "absent set → no suppression, today's exact behavior");
+    assert.equal(withoutSet.dropped.length, 0);
+  });
+
+  test("NAMESPACE FACADE (#1737): the #1724 acceptance scenario — consumer sources to resolved set to zero export issues", () => {
+    // End-to-end through the pure pieces: the real consumer shapes from
+    // src/autopilot/recommendation-engine.ts:26 and src/api/now-recommendations.ts:24
+    // resolve to src/redis/recommendations.ts, and feeding that set into the
+    // planner yields ZERO export-kind issues for the module (the issue's
+    // acceptance invariant on the #1724 evidence).
+    const consumers: Array<[string, string]> = [
+      ["src/autopilot/recommendation-engine.ts", `import * as defaultRedis from "../redis/recommendations.ts";`],
+      ["src/api/now-recommendations.ts", `import * as defaultRecsRedis from "../redis/recommendations.ts";`],
+    ];
+    const consumed = new Set(consumers.flatMap(([p, src]) => resolveNamespaceImportTargets(p, src)));
+    assert.ok(consumed.has("src/redis/recommendations.ts"), "both consumers resolve to the facade module");
+    const report: KnipReport = {
+      files: [],
+      issues: [
+        {
+          file: "src/redis/recommendations.ts",
+          exports: Array.from({ length: 11 }, (_, i) => ({ name: `liveExport${i}` })),
+          types: [],
+        },
+      ],
+    };
+    const plan = planCleanupEmit(report, [], () => "", ISO, EMIT_CAP, SYMBOLS_PER_BATCH, consumed);
+    assert.equal(plan.issues.length, 0, "zero export-kind issues for the namespace-consumed module");
+    assert.equal(plan.dropped.length, 11, "every false positive is audited, none silently vanishes");
+  });
+
+  test("resolveNamespaceImportTargets (#1737): relative specs resolve repo-rooted; bare specifiers are ignored", () => {
+    const src = `
+import * as Sentry from "@sentry/node";
+import * as defaultRedis from "../redis/recommendations.ts";
+import * as sibling from "./helpers.ts";
+import { named } from "../redis/other.ts";
+`;
+    const targets = resolveNamespaceImportTargets("src/autopilot/recommendation-engine.ts", src);
+    assert.ok(targets.includes("src/redis/recommendations.ts"), "../ spec resolves against the importer dir");
+    assert.ok(targets.includes("src/autopilot/helpers.ts"), "./ spec resolves to a sibling");
+    assert.ok(!targets.some((t) => t.includes("@sentry")), "bare package specifiers are skipped");
+    assert.ok(!targets.includes("src/redis/other.ts"), "named (non-namespace) imports do not count");
+  });
+
+  test("resolveNamespaceImportTargets (#1737): extensionless and .js specs yield their TS candidates", () => {
+    const targets = (spec: string) =>
+      resolveNamespaceImportTargets("src/a/b.ts", `import * as x from "${spec}";`);
+    assert.deepEqual(targets("../redis/recs"), ["src/redis/recs.ts", "src/redis/recs.mts", "src/redis/recs/index.ts"]);
+    assert.deepEqual(targets("./util.js"), ["src/a/util.js", "src/a/util.ts"]);
+    // Determinism: same input, same output, order included.
+    assert.deepEqual(targets("../redis/recs"), targets("../redis/recs"));
   });
 
   test("WITHIN-KIND SORT: chunk BOUNDARIES are deterministic across insertion orders (#1653 forward-fix)", () => {
