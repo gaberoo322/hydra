@@ -144,7 +144,7 @@ function holdbackRevertCountKey(date: string): string {
 // ---------------------------------------------------------------------------
 
 /** One leading-outcome reading captured at enroll time. */
-export interface HoldbackBaselineReading {
+interface HoldbackBaselineReading {
   name: string;
   /** Favorable direction for `value` — used to detect *unfavorable* moves. */
   direction: "up" | "down";

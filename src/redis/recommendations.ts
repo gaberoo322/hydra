@@ -32,27 +32,27 @@ import { getRedisConnection } from "./connection.ts";
 // Key shapes — exported so tests can assert against them by name
 // ---------------------------------------------------------------------------
 
-export function recsHashKey(runId: string): string {
+function recsHashKey(runId: string): string {
   return `hydra:autopilot:recs:${runId}`;
 }
 
-export function recsDismissedKey(runId: string): string {
+function recsDismissedKey(runId: string): string {
   return `hydra:autopilot:recs:${runId}:dismissed`;
 }
 
-export function recsMutedClassesKey(runId: string): string {
+function recsMutedClassesKey(runId: string): string {
   return `hydra:autopilot:recs:${runId}:muted-classes`;
 }
 
-export function recsLastCallKey(runId: string): string {
+function recsLastCallKey(runId: string): string {
   return `hydra:autopilot:recs:last-call:${runId}`;
 }
 
-export function recsLastSignatureKey(runId: string): string {
+function recsLastSignatureKey(runId: string): string {
   return `hydra:autopilot:recs:last-signature:${runId}`;
 }
 
-export function recsDailySpendKey(date: string): string {
+function recsDailySpendKey(date: string): string {
   return `hydra:autopilot:recs:daily-spend:${date}`;
 }
 
