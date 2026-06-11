@@ -85,7 +85,8 @@ test("STREAMS advertises only the live streams a consumer reads", () => {
 });
 
 test("RETAINED_STREAMS holds the back-compat-only names, separate from the live set", () => {
-  assert.deepEqual(Object.keys(RETAINED_STREAMS).sort(), ["CYCLE", "META", "TASKS"]);
+  // TASKS/META deleted in #1655 — zero producers/consumers; only CYCLE remains.
+  assert.deepEqual(Object.keys(RETAINED_STREAMS).sort(), ["CYCLE"]);
   // The dead names must NOT leak back into the live STREAMS map.
   for (const k of Object.keys(RETAINED_STREAMS)) {
     assert.ok(!(k in STREAMS), `${k} must not be in the live STREAMS set`);

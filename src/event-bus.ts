@@ -31,18 +31,16 @@ const STREAMS = {
  * advertised live set matches reality, while the names survive for any
  * external listener:
  *
- *   - `META`  — consumer removed in #345 (meta agent deleted).
- *   - `TASKS` — legacy-pipeline-only (gated on `HYDRA_LEGACY_PIPELINE`); no
- *               in-process consumer.
  *   - `CYCLE` — cycle-start events; no in-process bus consumer today.
+ *
+ * (`TASKS` / `META` were deleted in #1655 — zero producers and zero consumers
+ * after the #345 / legacy-pipeline retirements left nothing writing them.)
  *
  * Producing to these is intentionally NOT type-checked against `StreamKey`;
  * a caller that needs one passes the literal explicitly via `RETAINED_STREAMS`.
  */
 const RETAINED_STREAMS = {
   CYCLE: "hydra:cycle",
-  TASKS: "hydra:tasks",
-  META: "hydra:meta",
 } as const;
 
 /**
