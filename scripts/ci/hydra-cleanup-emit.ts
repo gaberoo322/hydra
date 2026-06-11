@@ -199,14 +199,29 @@ export function planCleanupEmit(
     groups.set(key, [...(groups.get(key) ?? []), finding]);
   }
 
-  const batches: Array<{ moduleDir: string; findings: CleanupFinding[] }> = [];
+  const batches: Array<{
+    moduleDir: string;
+    findings: CleanupFinding[];
+    chunkIndex: number;
+    totalChunks: number;
+  }> = [];
   for (const [moduleDir, group] of groups) {
+    // Invariant 6 (#1653 forward-fix): whole files first, then an explicit
+    // (path, name) sort within each kind — chunk boundaries are deterministic
+    // across runs and machines, never dependent on knip's output order.
     const ordered = [...group].sort((a, b) => {
-      if (a.kind === b.kind) return 0;
-      return a.kind === "file" ? -1 : 1; // whole files first, stable otherwise
+      if (a.kind !== b.kind) return a.kind === "file" ? -1 : 1;
+      if (a.path !== b.path) return a.path.localeCompare(b.path);
+      return a.name.localeCompare(b.name);
     });
+    const totalChunks = Math.ceil(ordered.length / symbolsPerBatch);
     for (let i = 0; i < ordered.length; i += symbolsPerBatch) {
-      batches.push({ moduleDir, findings: ordered.slice(i, i + symbolsPerBatch) });
+      batches.push({
+        moduleDir,
+        findings: ordered.slice(i, i + symbolsPerBatch),
+        chunkIndex: i / symbolsPerBatch + 1,
+        totalChunks,
+      });
     }
   }
 
@@ -228,11 +243,13 @@ export function planCleanupEmit(
 
   // 5. Render title + body from the SAME findings, in ONE pass. No hand-built
   //    title, no index-aligned second loop — the #1449 / #1005 drift guard.
-  //    A 1-finding batch keeps the legacy single-finding format (its identity
-  //    lives in the title); a multi-finding batch renders the checklist body
-  //    whose identities live in the cleanup-identities manifest.
-  const issues: PlannedCleanupIssue[] = toEmit.map(({ moduleDir, findings }) =>
-    findings.length === 1
+  //    An UNSPLIT 1-finding batch keeps the legacy single-finding format (its
+  //    identity lives in the title); every other batch — including a 1-finding
+  //    remainder chunk of a SPLIT module (Invariant 6: all chunks of a split
+  //    carry the [i/k] suffix) — renders the checklist body whose identities
+  //    live in the cleanup-identities manifest.
+  const issues: PlannedCleanupIssue[] = toEmit.map(({ moduleDir, findings, chunkIndex, totalChunks }) =>
+    findings.length === 1 && totalChunks === 1
       ? {
           moduleDir,
           findings,
@@ -242,8 +259,8 @@ export function planCleanupEmit(
       : {
           moduleDir,
           findings,
-          title: renderBatchTitle(moduleDir, findings),
-          body: renderBatchBody(moduleDir, findings, isoDate),
+          title: renderBatchTitle(moduleDir, findings, { index: chunkIndex, total: totalChunks }),
+          body: renderBatchBody(moduleDir, findings, isoDate, { index: chunkIndex, total: totalChunks }),
         },
   );
 

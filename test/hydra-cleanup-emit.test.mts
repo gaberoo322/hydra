@@ -356,4 +356,128 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
     const allIds = plan.issues.flatMap((i) => i.findings.map((f) => findingIdentity(f)));
     assert.equal(new Set(allIds).size, allIds.length, "no finding is double-batched");
   });
+
+  test("CHUNK TITLES: equal-sized single-file chunks render DISTINCT [i/k]-suffixed titles (Invariant 6, #1653 forward-fix)", () => {
+    // The exact QA-verdict reproduction on PR #1696: a 40-export module where
+    // every finding lives in ONE file splits into two chunks of 20 — without
+    // the [i/k] suffix both issues rendered the byte-identical title.
+    const n = SYMBOLS_PER_BATCH * 2; // 40 findings, all in one file
+    const report: KnipReport = {
+      files: [],
+      issues: Array.from({ length: n }, (_, i) => ({
+        file: "src/schemas/big.ts",
+        exports: [{ name: `sym${String(i).padStart(2, "0")}` }],
+        types: [],
+      })),
+    };
+    const plan = planCleanupEmit(report, [], () => "", ISO, 100);
+    assert.equal(plan.issues.length, 2, "40 findings chunk into 20 + 20");
+    const [first, second] = plan.issues;
+    assert.notEqual(first.title, second.title, "sibling chunks must never render identical titles");
+    assert.match(first.title, / \[1\/2\]$/, "first chunk carries the [1/2] suffix");
+    assert.match(second.title, / \[2\/2\]$/, "second chunk carries the [2/2] suffix");
+    // Title/H1 coherence by construction survives the suffix (the #1005 guard).
+    for (const issue of plan.issues) {
+      assert.equal(issue.body.split("\n")[0], `# ${issue.title}`);
+    }
+    // Re-running against the board these two filled emits nothing — the suffix
+    // must not disturb manifest-keyed dedup.
+    const filledBoard = plan.issues.map((i) => ({ title: i.title, body: i.body }));
+    const second_run = planCleanupEmit(report, filledBoard, () => "", ISO, 100);
+    assert.equal(second_run.issues.length, 0, "suffixed chunk titles dedup via the body manifest");
+  });
+
+  test("CHUNK TITLES: an unsplit batch carries NO suffix; a 1-finding remainder chunk of a split DOES (#1653 forward-fix)", () => {
+    // 21 findings in one module dir → chunks of 20 + 1. The remainder chunk is
+    // a chunk of a SPLIT module, so it renders the batch format with [2/2] —
+    // NOT the legacy single-finding title (whose identity-in-title contract is
+    // reserved for unsplit 1-finding groups).
+    const n = SYMBOLS_PER_BATCH + 1;
+    const report: KnipReport = {
+      files: [],
+      issues: Array.from({ length: n }, (_, i) => ({
+        file: `src/schemas/f${i % 3}.ts`,
+        exports: [{ name: `sym${String(i).padStart(2, "0")}` }],
+        types: [],
+      })),
+    };
+    const plan = planCleanupEmit(report, [], () => "", ISO, 100);
+    assert.equal(plan.issues.length, 2, "21 findings chunk into 20 + 1");
+    // Ranking puts the 20-finding chunk first (bigger harvest).
+    assert.match(plan.issues[0].title, / \[1\/2\]$/);
+    assert.equal(plan.issues[0].findings.length, SYMBOLS_PER_BATCH);
+    assert.match(plan.issues[1].title, / \[2\/2\]$/, "the 1-finding remainder of a split is still a suffixed chunk");
+    assert.equal(plan.issues[1].findings.length, 1);
+    // The remainder chunk carries the manifest (batch dedup surface), so its
+    // identity is recoverable from the body even though its title is batch-shaped.
+    assert.deepEqual(
+      identitiesFromIssueBody(plan.issues[1].body),
+      plan.issues[1].findings.map((f) => findingIdentity(f)),
+    );
+    // An UNSPLIT 1-finding group still uses the legacy format, suffix-free.
+    const single: KnipReport = {
+      files: [],
+      issues: [{ file: "src/clean/a.ts", exports: [{ name: "onlyOne" }], types: [] }],
+    };
+    const singlePlan = planCleanupEmit(single, [], () => "", ISO, 100);
+    assert.equal(singlePlan.issues.length, 1);
+    assert.equal(singlePlan.issues[0].title, renderTitle(singlePlan.issues[0].findings[0]));
+    assert.doesNotMatch(singlePlan.issues[0].title, /\[\d+\/\d+\]$/);
+  });
+
+  test("WITHIN-KIND SORT: findings sort by (path, name) within each kind — chunking is insertion-order independent (Invariant 6, #1653 forward-fix)", () => {
+    // Feed the SAME findings in two different insertion orders (knip output
+    // order is not a stability guarantee). Both plans must produce identical
+    // chunk contents in identical order: files first, then exports by (path, name).
+    const entries = [
+      { file: "src/schemas/zz.ts", name: "alpha" },
+      { file: "src/schemas/aa.ts", name: "zulu" },
+      { file: "src/schemas/aa.ts", name: "alpha" },
+      { file: "src/schemas/mm.ts", name: "mid" },
+    ];
+    const mkReport = (ordered: typeof entries): KnipReport => ({
+      files: ["src/schemas/deadfile.ts"],
+      issues: ordered.map((e) => ({ file: e.file, exports: [{ name: e.name }], types: [] })),
+    });
+    const forward = planCleanupEmit(mkReport(entries), [], () => "", ISO, 100);
+    const reversed = planCleanupEmit(mkReport([...entries].reverse()), [], () => "", ISO, 100);
+    assert.equal(forward.issues.length, 1);
+    const expectedOrder = [
+      "src/schemas/deadfile.ts::", // whole-file deletion leads
+      "src/schemas/aa.ts::alpha", // then exports by (path, name)
+      "src/schemas/aa.ts::zulu",
+      "src/schemas/mm.ts::mid",
+      "src/schemas/zz.ts::alpha",
+    ];
+    const ids = (plan: typeof forward) =>
+      plan.issues[0].findings.map((f) => `${f.path}::${f.name}`);
+    assert.deepEqual(ids(forward), expectedOrder, "files first, then exports sorted by (path, name)");
+    assert.deepEqual(ids(reversed), expectedOrder, "the same order regardless of knip insertion order");
+    assert.equal(forward.issues[0].body, reversed.issues[0].body, "byte-identical body across insertion orders");
+  });
+
+  test("WITHIN-KIND SORT: chunk BOUNDARIES are deterministic across insertion orders (#1653 forward-fix)", () => {
+    // 25 single-file exports fed forward and reversed: the (path, name) sort —
+    // not knip's output order — must decide which 20 land in chunk 1.
+    const names = Array.from({ length: 25 }, (_, i) => `sym${String(i).padStart(2, "0")}`);
+    const mkReport = (ns: string[]): KnipReport => ({
+      files: [],
+      issues: ns.map((name) => ({ file: "src/schemas/big.ts", exports: [{ name }], types: [] })),
+    });
+    const forward = planCleanupEmit(mkReport(names), [], () => "", ISO, 100);
+    const reversed = planCleanupEmit(mkReport([...names].reverse()), [], () => "", ISO, 100);
+    assert.equal(forward.issues.length, 2);
+    for (let c = 0; c < 2; c++) {
+      assert.deepEqual(
+        forward.issues[c].findings.map((f) => f.name),
+        reversed.issues[c].findings.map((f) => f.name),
+        `chunk ${c + 1} holds the same findings in the same order regardless of insertion order`,
+      );
+    }
+    assert.deepEqual(
+      forward.issues[0].findings.map((f) => f.name),
+      names.slice(0, SYMBOLS_PER_BATCH),
+      "chunk 1 is the first 20 in (path, name) order",
+    );
+  });
 });

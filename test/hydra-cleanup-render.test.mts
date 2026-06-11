@@ -452,6 +452,41 @@ describe("renderBatchTitle — batch titles never collide with legacy parsing (#
       /invalid finding/,
     );
   });
+
+  test("[i/k] SUFFIX: a split-module chunk ref appends the suffix; total 1 / omitted does not (Invariant 6, #1653 forward-fix)", () => {
+    const findings = [exp("src/schemas/a.ts", "A"), exp("src/schemas/a.ts", "B")];
+    assert.equal(
+      renderBatchTitle("src/schemas", findings, { index: 1, total: 3 }),
+      "cleanup(src/schemas): demote/remove 2 unused exports (1 file) [1/3]",
+    );
+    assert.equal(
+      renderBatchTitle("src/schemas", findings, { index: 3, total: 3 }),
+      "cleanup(src/schemas): demote/remove 2 unused exports (1 file) [3/3]",
+    );
+    // total: 1 (an unsplit module) and an omitted ref render identically, suffix-free.
+    assert.equal(
+      renderBatchTitle("src/schemas", findings, { index: 1, total: 1 }),
+      renderBatchTitle("src/schemas", findings),
+    );
+    assert.doesNotMatch(renderBatchTitle("src/schemas", findings), /\[\d+\/\d+\]$/);
+    // The suffix applies to every title shape (files-only and mixed too).
+    assert.equal(
+      renderBatchTitle("dashboard/src", [file("dashboard/src/X.jsx"), file("dashboard/src/Y.jsx")], { index: 2, total: 2 }),
+      "cleanup(dashboard/src): remove 2 unused files [2/2]",
+    );
+  });
+
+  test("[i/k] SUFFIX: a suffixed title is still NOT parseable as a legacy identity", () => {
+    const t = renderBatchTitle("src/schemas", [exp("src/schemas/a.ts", "A")], { index: 1, total: 2 });
+    assert.equal(identityFromOpenIssueTitle(t), null, "suffixed batch titles carry no identity either");
+  });
+
+  test("[i/k] SUFFIX: throws on a malformed chunk ref (loud backstop)", () => {
+    const findings = [exp("src/schemas/a.ts", "A")];
+    assert.throws(() => renderBatchTitle("src/schemas", findings, { index: 0, total: 2 }), /invalid chunk ref/);
+    assert.throws(() => renderBatchTitle("src/schemas", findings, { index: 3, total: 2 }), /invalid chunk ref/);
+    assert.throws(() => renderBatchTitle("src/schemas", findings, { index: 1.5, total: 2 }), /invalid chunk ref/);
+  });
 });
 
 describe("renderBatchBody — checklist + Files in scope + identity manifest (#1653)", () => {
@@ -465,6 +500,15 @@ describe("renderBatchBody — checklist + Files in scope + identity manifest (#1
 
   test("H1 equals the batch title — coherence by construction", () => {
     assert.equal(body.split("\n")[0], `# ${renderBatchTitle("src/schemas", findings)}`);
+  });
+
+  test("H1 carries the SAME [i/k] suffix as the title when a chunk ref is passed (#1653 forward-fix)", () => {
+    const chunked = renderBatchBody("src/schemas", findings, ISO, { index: 2, total: 3 });
+    assert.equal(
+      chunked.split("\n")[0],
+      `# ${renderBatchTitle("src/schemas", findings, { index: 2, total: 3 })}`,
+    );
+    assert.match(chunked.split("\n")[0], / \[2\/3\]$/);
   });
 
   test("one checklist line per finding, leading with its verdict", () => {
