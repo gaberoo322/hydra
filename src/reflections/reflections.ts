@@ -18,7 +18,6 @@
  *   the count is sourced here so callers don't regex the rendered header)
  *   backfillByFileIndex / reflectionKey
  *   closeReflectionsRedis      — kept for test back-compat (no-op)
- *   getReflectionEffectiveness — per-anchor success/failure stats + injection rate
  *
  * Constants (REFLECTION_TTL etc.) live here so callers don't reach into
  * learning.ts internals.
@@ -28,7 +27,6 @@ import {
   REFLECTION_PREFIX,
   getAnchorReflections,
   pushAnchorReflection,
-  getReflectionOutcomes,
   addReflectionToFileIndex,
   getReflectionKeysByFile,
 } from "../redis/reflections.ts";
@@ -60,22 +58,6 @@ export type AnchorReflection = {
   whyItFailed: string;
   whatShouldChange: string;
   timestamp: string;
-};
-
-export type ReflectionOutcome = {
-  anchorRef: string;
-  hadReflections: true;
-  outcome: "merged" | "failed" | "abandoned";
-  cycleId: string;
-  timestamp: string;
-};
-
-export type ReflectionEffectiveness = {
-  ref: string;
-  totalRetries: number;
-  successes: number;
-  failures: number;
-  successRate: number;
 };
 
 // ===========================================================================
@@ -289,10 +271,9 @@ export async function loadAnchorReflectionsRaw(
  * A formatted reflection block plus the structured count of items it carries.
  *
  * Issue #804: the count is sourced HERE — from the parsed reflection array —
- * so downstream telemetry (`reflectionInjected` / `reflectionSources`) reads
- * it as data instead of regex-scanning the rendered `## PRIOR ATTEMPTS (N…`
- * header out of the formatted markdown. `content` is "" exactly when
- * `count === 0`.
+ * so downstream telemetry (`reflectionSources`) reads it as data instead of
+ * regex-scanning the rendered `## PRIOR ATTEMPTS (N…` header out of the
+ * formatted markdown. `content` is "" exactly when `count === 0`.
  */
 export interface ReflectionBlock {
   content: string;
@@ -459,82 +440,4 @@ export async function backfillByFileIndex(
  */
 export function closeReflectionsRedis() {
   // No-op: connection managed by src/redis/connection.ts singleton
-}
-
-// ===========================================================================
-// Reflection effectiveness
-// ===========================================================================
-
-/**
- * Compute per-anchor effectiveness scores from reflection outcomes.
- * Returns anchors that had reflections when retried, with success/failure counts.
- *
- * Issue #193: also returns `injection` aggregate stats from recent cycle metrics
- * so the operator can verify reflections are actually reaching the planner.
- */
-export async function getReflectionEffectiveness(): Promise<{
-  anchors: ReflectionEffectiveness[];
-  injection: { totalCycles: number; cyclesWithReflections: number; injectionRate: number };
-}> {
-  let anchors: ReflectionEffectiveness[] = [];
-  try {
-    const raw = await getReflectionOutcomes();
-    const byAnchor = new Map<string, { successes: number; failures: number }>();
-
-    for (const entry of raw) {
-      try {
-        const outcome: ReflectionOutcome = JSON.parse(entry);
-        if (!outcome.anchorRef) continue;
-
-        const existing = byAnchor.get(outcome.anchorRef) || { successes: 0, failures: 0 };
-        if (outcome.outcome === "merged") {
-          existing.successes++;
-        } else {
-          existing.failures++;
-        }
-        byAnchor.set(outcome.anchorRef, existing);
-      } catch { /* intentional: skip unparseable entries */ }
-    }
-
-    for (const [ref, counts] of byAnchor) {
-      const totalRetries = counts.successes + counts.failures;
-      anchors.push({
-        ref,
-        totalRetries,
-        successes: counts.successes,
-        failures: counts.failures,
-        successRate: totalRetries > 0 ? counts.successes / totalRetries : 0,
-      });
-    }
-  } catch (err: any) {
-    console.error(`[Learning] Failed to compute reflection effectiveness: ${err.message}`);
-    anchors = [];
-  }
-
-  // Aggregate injection rate from recent metrics (issue #193 telemetry).
-  // Failure-tolerant — never throws.
-  const injection = await computeInjectionStats();
-
-  return { anchors, injection };
-}
-
-/**
- * Compute reflection injection rate from the last 50 cycles.
- * Returns zeros if metrics are unavailable.
- */
-async function computeInjectionStats(): Promise<{ totalCycles: number; cyclesWithReflections: number; injectionRate: number }> {
-  try {
-    const { getMetricsTrend } = await import("../metrics/trend.ts");
-    const recent = await getMetricsTrend(50);
-    const totalCycles = recent.length;
-    const cyclesWithReflections = recent.filter((m: any) => m.reflectionInjected === "true").length;
-    return {
-      totalCycles,
-      cyclesWithReflections,
-      injectionRate: totalCycles > 0 ? cyclesWithReflections / totalCycles : 0,
-    };
-  } catch (err: any) {
-    console.error(`[Learning] Failed to compute injection stats: ${err.message}`);
-    return { totalCycles: 0, cyclesWithReflections: 0, injectionRate: 0 };
-  }
 }

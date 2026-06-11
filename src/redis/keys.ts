@@ -146,7 +146,6 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   reflectionPrefix: () => "hydra:reflections:",
   reflection: (normalizedRef: string) => `hydra:reflections:${normalizedRef}`,
-  reflectionOutcomes: () => "hydra:learning:reflection:outcomes",
 
   // ---------------------------------------------------------------------------
   // Backlog
@@ -337,8 +336,6 @@ export const redisKeys = {
   // Event Streams
   // ---------------------------------------------------------------------------
   streamCycle: () => "hydra:cycle",
-  streamTasks: () => "hydra:tasks",
-  streamMeta: () => "hydra:meta",
   streamNotifications: () => "hydra:notifications",
   streamDlq: () => "hydra:dlq",
   streamAgentStream: () => "hydra:agent-stream",

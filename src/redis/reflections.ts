@@ -1,13 +1,14 @@
 /**
- * Reflection Redis ops (per-anchor + outcomes).
+ * Reflection Redis ops (per-anchor + by-file index).
  * Extracted from redis-adapter.ts (issue #269).
  *
  * Note: low-level Redis primitives. Higher-level reflection logic lives in
  * src/learning/reflections.ts.
  *
  * Issue #1454: the global reflection buffer (a Redis list) and its accessors
- * were deleted as a dead subsystem. The per-anchor list, the by-file index,
- * and the outcome zset survive — they back the live #841 injection path.
+ * were deleted as a dead subsystem. Issue #1655: the reflection-outcomes zset
+ * reader followed (its writer died in earlier retirements). The per-anchor
+ * list and the by-file index survive — they back the live #841 injection path.
  */
 
 import { redisKeys } from "./keys.ts";
@@ -58,14 +59,6 @@ export async function pushAnchorReflection(
 export async function getAnchorReflections(key: string): Promise<string[]> {
   const r = getRedisConnection();
   return r.lrange(key, 0, -1);
-}
-
-/**
- * Get all reflection outcomes (oldest first).
- */
-export async function getReflectionOutcomes(): Promise<string[]> {
-  const r = getRedisConnection();
-  return r.zrange(redisKeys.reflectionOutcomes(), 0, -1);
 }
 
 // ===========================================================================

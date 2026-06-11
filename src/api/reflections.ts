@@ -1,6 +1,5 @@
 import { Router } from "express";
 import {
-  getReflectionEffectiveness,
   loadAnchorReflections,
   loadAnchorReflectionsByFile,
   extractFilesFromAnchor,
@@ -86,16 +85,6 @@ export function createReflectionsRouter() {
           { source: "by-file-reflections", count: byFile.count },
         ],
       });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // GET /reflections/effectiveness — Per-anchor effectiveness scores (issue #150)
-  router.get("/reflections/effectiveness", async (req, res) => {
-    try {
-      const result = await getReflectionEffectiveness();
-      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

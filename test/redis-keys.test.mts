@@ -37,8 +37,6 @@ describe("redisKeys naming convention", () => {
     ["digestLastWeekly", redisKeys.digestLastWeekly],
     ["regressionHuntLast", redisKeys.regressionHuntLast],
     ["streamCycle", redisKeys.streamCycle],
-    ["streamTasks", redisKeys.streamTasks],
-    ["streamMeta", redisKeys.streamMeta],
     ["streamNotifications", redisKeys.streamNotifications],
     ["streamDlq", redisKeys.streamDlq],
     ["streamAgentStream", redisKeys.streamAgentStream],

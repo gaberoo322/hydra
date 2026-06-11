@@ -58,8 +58,6 @@ Redis Streams-based event bus (`src/event-bus.ts`). Streams:
 | Stream | Purpose |
 |---|---|
 | `hydra:cycle` | Cycle start events |
-| `hydra:tasks` | Task events (legacy) |
-| `hydra:meta` | Meta analysis triggers |
 | `hydra:proposals` | Proposal lifecycle events |
 | `hydra:notifications` | All notifications (consumed by Telegram digest) |
 | `hydra:dlq` | Dead letter queue (after 3 failed deliveries) |
