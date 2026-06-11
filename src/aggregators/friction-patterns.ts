@@ -87,7 +87,7 @@ export interface FrictionPatternRow {
   lastEscalation: FrictionLastEscalation | null;
 }
 
-export interface FrictionGroup {
+interface FrictionGroup {
   skill: string;
   /** Patterns for this skill, newest-`lastSeen`-first. */
   patterns: FrictionPatternRow[];
@@ -98,7 +98,7 @@ export interface FrictionGroup {
  * `MetaFrictionIssue` (issue #864) so the four-field shape lives in one place;
  * the `MetaFrictionIssueRef` name is retained for the Explore-page surface.
  */
-export type MetaFrictionIssueRef = MetaFrictionIssue;
+type MetaFrictionIssueRef = MetaFrictionIssue;
 
 export interface FrictionPatternsSnapshot {
   bySkill: FrictionGroup[];

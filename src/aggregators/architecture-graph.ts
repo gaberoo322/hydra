@@ -85,7 +85,7 @@ const COLS_PER_GROUP = 3;
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface ArchitectureNode {
+interface ArchitectureNode {
   id: string;
   label: string;
   group: string;
@@ -95,12 +95,12 @@ export interface ArchitectureNode {
   y: number;
 }
 
-export interface ArchitectureEdge {
+interface ArchitectureEdge {
   from: string;
   to: string;
 }
 
-export interface ArchitectureGroup {
+interface ArchitectureGroup {
   id: string;
   label: string;
   color: string;

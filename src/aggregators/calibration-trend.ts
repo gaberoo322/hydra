@@ -43,7 +43,7 @@ import {
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface TimeSeries {
+interface TimeSeries {
   /** Daily-bucketed accuracy points (0..1). */
   points: TrendPoint[];
   /** Total records the average is computed from. */

@@ -49,7 +49,7 @@ import {
 /** Re-export of the shared trend-series point shape (issue #956). */
 export type { TrendPoint };
 
-export interface OutcomeTrend {
+interface OutcomeTrend {
   name: string;
   direction: "up" | "down";
   /**
