@@ -29,7 +29,7 @@
 export type YamlScalar = string | number | boolean;
 
 /** The parsed document shape: an optional `outcomes:` list of record maps. */
-export interface ParsedYaml {
+interface ParsedYaml {
   outcomes?: Array<Record<string, YamlScalar>>;
 }
 

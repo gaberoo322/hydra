@@ -218,7 +218,7 @@ export interface CandidateDesignConcept {
 // Public result shapes.
 // ---------------------------------------------------------------------------
 
-export interface ScoredCandidate {
+interface ScoredCandidate {
   issue: string | number;
   title: string;
   score: number;

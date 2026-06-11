@@ -77,23 +77,23 @@ const MIN_QA_TRACE_LENGTH = 6;
 
 export type DesignConceptScope = "orch" | "target";
 
-export type DesignConceptStatus = "draft" | "approved" | "stale";
+type DesignConceptStatus = "draft" | "approved" | "stale";
 
-export type InterfaceImpact = "none" | "extend" | "breaking";
+type InterfaceImpact = "none" | "extend" | "breaking";
 
-export type DepthClassification = "deep" | "shallow" | "unknown";
+type DepthClassification = "deep" | "shallow" | "unknown";
 
-export type ModuleTouched = {
+type ModuleTouched = {
   path: string;
   interfaceImpact: InterfaceImpact;
   depthClassification: DepthClassification;
 };
 
-export type RejectedAlternative = { alt: string; why: string };
+type RejectedAlternative = { alt: string; why: string };
 
-export type QaTurn = { q: string; a: string };
+type QaTurn = { q: string; a: string };
 
-export type Prototype = {
+type Prototype = {
   question: string;
   branch: "logic" | "ui";
   snippet: string;

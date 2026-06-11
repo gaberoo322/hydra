@@ -172,7 +172,7 @@ export interface HealthSnapshot {
 
 // ---- Health Diagnostic — one finding -------------------------------------
 
-export type HealthSeverity = "critical" | "error" | "warning" | "info";
+type HealthSeverity = "critical" | "error" | "warning" | "info";
 
 export interface HealthDiagnostic {
   severity: HealthSeverity;
