@@ -18,7 +18,7 @@
 // duplicate the types so the dashboard does not import from src/.)
 // ---------------------------------------------------------------------------
 
-export interface AutopilotTickRun {
+interface AutopilotTickRun {
   id: string;
   startedAt: string;
   trigger: string;
@@ -54,7 +54,7 @@ export interface ActiveDispatchesPayload {
 // PavilionState — derived from autopilot-tick. Drives AutopilotPavilion.jsx.
 // ---------------------------------------------------------------------------
 
-export type PavilionMode = "no-run" | "running" | "stopped";
+type PavilionMode = "no-run" | "running" | "stopped";
 
 export interface PavilionState {
   mode: PavilionMode;
@@ -123,7 +123,7 @@ export function derivePavilionState(payload: AutopilotTickPayload | null | undef
 // ActiveDispatchesStrip.jsx.
 // ---------------------------------------------------------------------------
 
-export interface DispatchSpriteRow {
+interface DispatchSpriteRow {
   id: string;
   classLabel: string;
   source: "autopilot" | "operator";
@@ -173,7 +173,7 @@ import {
   type ClassName,
 } from "./sprite-map.ts";
 
-export type ZoneStatus = "sleeping" | "active";
+type ZoneStatus = "sleeping" | "active";
 
 export interface ZoneState {
   /** Map of class → "active" / "sleeping". Covers all 12 classes. */
@@ -275,7 +275,7 @@ export function deriveZoneState(
  * `HabitatGrid` component) holds this in a `useRef` and threads it back
  * through `deriveThinking` on every /api/autopilot/runs/current poll.
  */
-export interface ThinkingSlotState {
+interface ThinkingSlotState {
   /** Last seen partial_tokens value for this slot. Used to detect deltas. */
   lastTokens: number;
   /** Epoch (Unix seconds) at which `lastTokens` last changed. */

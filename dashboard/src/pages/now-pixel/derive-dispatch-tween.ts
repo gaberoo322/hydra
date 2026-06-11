@@ -31,8 +31,6 @@
 export const DISPATCH_TWEEN_DURATION_MS = 800;
 export const DISPATCH_TWEEN_DUST_DURATION_MS = 200;
 
-export type DispatchOutcome = "dispatched" | "cooldown" | "budget" | "idle";
-
 /**
  * Loose shape — `slot-event` envelopes are forwarded verbatim from the
  * autopilot side, so we keep the payload typing permissive and validate
