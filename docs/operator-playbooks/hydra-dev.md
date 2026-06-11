@@ -93,6 +93,22 @@ git push origin "HEAD:${REMOTE_BRANCH}"  # refspec push updates the PR branch
 (Proven recovery on hydra-dev-1666 2026-06-10 and hydra-dev-1667 2026-06-11;
 cross-run recurrence 3 promoted this lesson via /hydra-retro.)
 
+**`/dev/shm` worktree has no `node_modules` (cue:
+devshm-verify-worktree-needs-node-modules-symlink).** Worktrees under
+`~/hydra/.claude/worktrees/` resolve `node_modules` through Node's upward
+directory walk (`/home/gabe/hydra/node_modules` is an ancestor), but a
+`/dev/shm/hydra-worktrees/` worktree has no such ancestor — `npm test` /
+`npx tsx` / `npm run typecheck` fail with module-not-found. Symlink instead
+of a slow `npm ci`:
+
+```bash
+ln -sfn /home/gabe/hydra/node_modules "$WT/node_modules"
+```
+
+`git worktree move` does NOT carry the symlink — re-create it after any
+move. (Observed on hydra-dev-1676 2026-06-11; cross-run recurrence 3
+promoted this lesson via /hydra-retro.)
+
 The child prompt MUST include the worktree-guard preamble (see below) AND the scope-respect block (see below). The child:
 1. Verifies it is in a worktree (NOT `/home/gabe/hydra`). Aborts if not.
 2. Reads CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs
