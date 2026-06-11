@@ -605,6 +605,7 @@ class EventBus {
       }
       return parsed;
     } catch {
+      /* intentional: XINFO throws when the stream does not exist yet — report as null */
       return null;
     }
   }

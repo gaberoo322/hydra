@@ -249,6 +249,7 @@ export function projectRunView(
     try {
       limits = JSON.parse(row.limits);
     } catch {
+      /* intentional: corrupt limits JSON in the run row degrades to {} — the row itself stays usable */
       limits = {};
     }
   }

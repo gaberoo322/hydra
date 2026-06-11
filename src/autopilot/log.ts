@@ -85,6 +85,7 @@ async function readCurrentRunIdFromState(): Promise<string | null> {
     const rid = parsed && typeof parsed.run_id === "string" ? parsed.run_id.trim() : "";
     return rid || null;
   } catch {
+    /* intentional: missing/unparseable state file is a normal pre-first-run state → "no live run" */
     return null;
   }
 }
@@ -112,6 +113,7 @@ async function resolveLogFileForRun(
       await stat(AUTOPILOT_LOG_PATH);
       return { path: AUTOPILOT_LOG_PATH, source: "live" };
     } catch {
+      /* intentional: live log file missing → log not available for this run */
       return null;
     }
   }
@@ -120,6 +122,7 @@ async function resolveLogFileForRun(
   try {
     prevStat = await stat(AUTOPILOT_LOG_PREV_PATH);
   } catch {
+    /* intentional: no .prev log → rotated past the window or never existed */
     return null;
   }
   const startedEpoch = Number(row.started_epoch || "0");

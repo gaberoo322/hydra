@@ -552,6 +552,7 @@ export function mergedTokensFromGhJson(jsonStdout: string): string[] {
   try {
     parsed = JSON.parse(jsonStdout);
   } catch {
+    /* intentional: malformed gh JSON → [] per the documented never-throws contract */
     return [];
   }
   if (!Array.isArray(parsed)) return [];
@@ -696,7 +697,8 @@ export async function reconcileWorkQueue(
     try {
       item = JSON.parse(raw);
     } catch {
-      continue; /* corrupt entries are cleanWorkQueue's concern — keep */
+      /* intentional: corrupt entries are cleanWorkQueue's concern — keep going */
+      continue;
     }
     const ref: string = item.reference || item.description || "";
     if (!ref) continue;
@@ -893,7 +895,7 @@ export async function getCandidateFeed(
     const raw = await d.getWorkQueueItems();
     for (const r of raw) {
       let item: any;
-      try { item = JSON.parse(r); } catch { continue; }
+      try { item = JSON.parse(r); } catch { /* intentional: skip corrupt work-queue entry */ continue; }
       const ref = item.reference || item.description;
       if (!ref) continue;
       if (

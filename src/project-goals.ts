@@ -142,6 +142,7 @@ export async function loadProjectGoals() {
   try {
     raw = await readFile(GOALS_FILE, "utf-8");
   } catch {
+    /* intentional: no goals file → null per the documented contract above */
     return null;
   }
 
