@@ -13,7 +13,10 @@
  *     currentBranch: string,    // e.g. "master"
  *     locks: { [worktreePath: string]: string },  // lock-file body per worktree
  *     audit: boolean,           // true = audit-only, false = apply
- *     // Worktree-orphan GC inputs (issue #911) — optional; absent = GC off:
+ *     // Worktree-orphan GC inputs (issue #911) — optional; absent = GC off.
+ *     // worktreeAges/minAgeSeconds ALSO gate the `[gone]`-branch pass's
+ *     // delete-worktree-and-branch arm (issue #1773): a worktree with no /
+ *     // unknown age is never reclaimed by either pass.
  *     mainWorktreePath?: string,                 // path of the main working tree
  *     openPrHeads?: string[],                    // `gh pr list --json headRefName`
  *     worktreeAges?: { [worktreePath: string]: number }, // dir age in seconds
@@ -85,9 +88,24 @@ const branches = String(input.branchesRaw || "")
   .filter((b): b is NonNullable<typeof b> => b !== null);
 
 const locks = new Map<string, string>(Object.entries(input.locks || {}));
-const worktrees = parseWorktreeList(String(input.worktreesRaw || ""), locks);
+// Attach caller-computed dir ages to EVERY row up front (issue #1773): the
+// `[gone]`-branch pass needs them too — its delete-worktree-and-branch arm
+// defers (`skip-too-young`) under the age floor, so an in-flight cycle whose
+// branch went `[gone]` the moment auto-merge deleted it is not reaped
+// mid-cycle. A missing entry stays null = unknown age = conservative skip of
+// the worktree (the branch itself is then left alone too).
+const worktrees: WorktreeRow[] = parseWorktreeList(String(input.worktreesRaw || ""), locks).map(
+  (wt) => ({
+    ...wt,
+    ageSeconds: input.worktreeAges ? input.worktreeAges[wt.path] ?? null : null,
+  }),
+);
 const currentBranch = input.currentBranch || "master";
 const audit = input.audit !== false;
+const minAgeSeconds =
+  typeof input.minAgeSeconds === "number" && input.minAgeSeconds >= 0
+    ? input.minAgeSeconds
+    : DEFAULT_WORKTREE_MIN_AGE_SECONDS;
 
 function isLivePid(pid: number): boolean {
   try {
@@ -103,6 +121,7 @@ const buckets = classifyBatch(branches, {
   currentBranch,
   worktrees,
   isLivePid,
+  minAgeSeconds,
 });
 
 const report = renderReport(buckets, new Date().toISOString(), audit);
@@ -114,12 +133,10 @@ const report = renderReport(buckets, new Date().toISOString(), audit);
 const branchPassWorktreePaths = new Set(
   buckets.deleteWorktreeAndBranch.map((e) => e.worktree.path),
 );
-const orphanCandidates: WorktreeRow[] = worktrees
-  .filter((wt) => !branchPassWorktreePaths.has(wt.path))
-  .map((wt) => ({
-    ...wt,
-    ageSeconds: input.worktreeAges ? input.worktreeAges[wt.path] ?? null : null,
-  }));
+// Ages are already attached to every row above (issue #1773).
+const orphanCandidates: WorktreeRow[] = worktrees.filter(
+  (wt) => !branchPassWorktreePaths.has(wt.path),
+);
 
 // The 250-deletion hard cap spans BOTH passes: seed the worktree pass with the
 // branch pass's deletion count so we never blow past the ceiling in one run.
@@ -131,10 +148,7 @@ const orphanBuckets = classifyWorktreeOrphans(orphanCandidates, {
   currentBranch,
   isLivePid,
   openPrHeads: new Set(input.openPrHeads || []),
-  minAgeSeconds:
-    typeof input.minAgeSeconds === "number" && input.minAgeSeconds >= 0
-      ? input.minAgeSeconds
-      : DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+  minAgeSeconds,
   priorDeletions,
 });
 
