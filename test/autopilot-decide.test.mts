@@ -30,8 +30,9 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -113,6 +114,11 @@ function baseState(o: StateOverrides = {}): any {
 function runDecideOnFiles(t: Tmp): any {
   const r = spawnSync("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
     encoding: "utf-8",
+    // Belt-and-braces: keep the CLI's run-end POST (#1352) off so a fixture
+    // that both carries a run_id and terminates can never POST to a live
+    // orchestrator from the test suite. The POST wire contract is pinned by
+    // its own dedicated test below with an explicit local server.
+    env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
   });
   if (r.status !== 0) {
     throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);
@@ -1771,14 +1777,27 @@ describe("decide.py — cleanup_orch signal class (issue #960)", () => {
 // ---------------------------------------------------------------------------
 
 describe("decide.py — idle fallback / heartbeat", () => {
-  test("nothing to do, all slots empty -> wait(900) heartbeat", () => {
+  test("nothing to do, all slots empty -> clean terminate(idle), not a heartbeat wait (#1352)", () => {
+    // The print-mode session exits the moment the model emits its final
+    // message — a wait-only plan was never honoured, the process died and
+    // the reap backstop stamped the run `interrupted` (the retro-starvation
+    // mechanism of issue #1352). A wait-only turn with zero occupied slots
+    // now records the designed exit as a clean idle drain.
     const plan = runDecide(baseState(), null);
-    const w = findAction(plan, (a) => a.type === "wait");
-    assert.ok(w);
-    assert.equal(w.seconds, 900);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t, "wait-only turn with empty slots must terminate cleanly");
+    assert.equal(t.cause, "idle");
+    assert.equal(
+      findAction(plan, (a) => a.type === "wait"),
+      undefined,
+      "no wait action alongside the clean idle drain",
+    );
   });
 
-  test("nothing new to dispatch but slot busy -> short busy-wait nap", () => {
+  test("nothing new to dispatch but slot busy -> short busy-wait nap (no terminate)", () => {
+    // Background dispatches hold the print-mode process alive and re-invoke
+    // it on completion — the busy-wait nap is real there, and terminating
+    // would orphan the in-flight slot.
     const state = baseState({
       slots: {
         dev_orch: { skill: "hydra-dev", started: "t0", partial_tokens: 100_000 },
@@ -1790,6 +1809,176 @@ describe("decide.py — idle fallback / heartbeat", () => {
     const w = findAction(plan, (a) => a.type === "wait");
     assert.ok(w);
     assert.equal(w.seconds, 60);
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "in-flight slots must never trigger the idle drain",
+    );
+  });
+
+  test("idle-drain terminate carries merged_prs from state", () => {
+    const state = baseState();
+    (state as any).merged_prs = 3;
+    const plan = runDecide(state, null);
+    const t = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(t);
+    assert.equal(t.merged_prs, 3);
+  });
+
+  test("housekeeping-only turn (auto-merge, no dispatch, empty slots) keeps the heartbeat wait", () => {
+    // A turn that emitted other actions (here: an auto-merge from a
+    // qa-verdict) but no dispatch must NOT terminate — only a true
+    // wait-only turn drains. The heartbeat wait stays so the model
+    // finishes the housekeeping before the session ends.
+    const events = [{
+      type: "qa-verdict", pr_number: 555, tier: 1,
+      mechanical: null, has_scope_justification: false, verdict: "PASS",
+    }];
+    const plan = runDecide(baseState(), null, events);
+    assert.ok(
+      findAction(plan, (a) => a.type === "auto-merge" && a.pr_number === 555),
+      "fixture must produce an auto-merge action",
+    );
+    assert.equal(
+      findAction(plan, (a) => a.type === "terminate"),
+      undefined,
+      "a turn with housekeeping actions must not idle-drain",
+    );
+    assert.ok(
+      findAction(plan, (a) => a.type === "wait" && a.reason === "idle heartbeat"),
+      "housekeeping turn keeps the heartbeat wait",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8.5 Terminate run-end POST (#1352) — the CLI records a clean run-end for
+//     any decide-side terminate BEFORE the print-mode session exits, so the
+//     reap backstop's `interrupted` stamp becomes an idempotent no-op.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — terminate run-end POST (#1352)", () => {
+  const RUN_ID = "11111111-2222-3333-4444-555555555555";
+
+  interface Captured { url: string; method: string; body: Record<string, unknown> }
+
+  async function withCaptureServer(
+    fn: (baseUrl: string, requests: Captured[]) => Promise<void>,
+  ): Promise<void> {
+    const requests: Captured[] = [];
+    const server: Server = createServer((req, res) => {
+      let buf = "";
+      req.on("data", (c) => (buf += c));
+      req.on("end", () => {
+        requests.push({
+          url: req.url ?? "",
+          method: req.method ?? "",
+          body: buf ? JSON.parse(buf) : {},
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      await fn(`http://127.0.0.1:${port}`, requests);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }
+
+  // Async spawn (NOT spawnSync): the local capture server must be able to
+  // answer the CLI's POST, and spawnSync would block the event loop.
+  function spawnDecideAsync(
+    state: unknown,
+    env: Record<string, string>,
+  ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    const t = makeTmp();
+    writeFileSync(t.state, JSON.stringify(state));
+    writeFileSync(t.cands, JSON.stringify(null));
+    writeFileSync(t.events, JSON.stringify([]));
+    return new Promise((resolveSpawn) => {
+      const child = spawn("python3", [DECIDE, "decide", t.state, t.cands, t.events], {
+        env: { ...process.env, ...env },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("close", (code) => {
+        rmSync(t.dir, { recursive: true, force: true });
+        resolveSpawn({ code, stdout, stderr });
+      });
+    });
+  }
+
+  test("a terminating plan POSTs run-end with the plan's cause before exit", async () => {
+    await withCaptureServer(async (baseUrl, requests) => {
+      const state = baseState(); // wait-only turn → terminate(idle)
+      (state as any).run_id = RUN_ID;
+      const out = await spawnDecideAsync(state, {
+        HYDRA_API_BASE: baseUrl,
+        HYDRA_AUTOPILOT_RUN_END_POST: "",
+      });
+      assert.equal(out.code, 0, out.stderr);
+      const plan = JSON.parse(out.stdout);
+      assert.ok(
+        (plan.actions as any[]).some((a) => a.type === "terminate"),
+        "fixture must produce a terminating plan",
+      );
+      assert.equal(requests.length, 1, "exactly one run-end POST");
+      assert.equal(requests[0].method, "POST");
+      assert.equal(requests[0].url, "/api/autopilot/run-end");
+      assert.equal(requests[0].body.run_id, RUN_ID);
+      assert.equal(requests[0].body.cause, "idle");
+      assert.ok(
+        Number.isInteger(requests[0].body.ended_epoch),
+        "ended_epoch must be an integer epoch",
+      );
+    });
+  });
+
+  test("no run_id in state -> no POST (test fixtures / isolated runs)", async () => {
+    await withCaptureServer(async (baseUrl, requests) => {
+      const out = await spawnDecideAsync(baseState(), {
+        HYDRA_API_BASE: baseUrl,
+        HYDRA_AUTOPILOT_RUN_END_POST: "",
+      });
+      assert.equal(out.code, 0, out.stderr);
+      assert.equal(requests.length, 0, "no run_id → no run-end POST");
+    });
+  });
+
+  test("HYDRA_AUTOPILOT_RUN_END_POST=off -> no POST even with run_id + terminate", async () => {
+    await withCaptureServer(async (baseUrl, requests) => {
+      const state = baseState();
+      (state as any).run_id = RUN_ID;
+      const out = await spawnDecideAsync(state, {
+        HYDRA_API_BASE: baseUrl,
+        HYDRA_AUTOPILOT_RUN_END_POST: "off",
+      });
+      assert.equal(out.code, 0, out.stderr);
+      assert.equal(requests.length, 0, "off-switch must suppress the POST");
+    });
+  });
+
+  test("non-terminating plan -> no POST", async () => {
+    await withCaptureServer(async (baseUrl, requests) => {
+      const state = baseState({ signals: { orch_work_available: true } });
+      (state as any).run_id = RUN_ID;
+      const out = await spawnDecideAsync(state, {
+        HYDRA_API_BASE: baseUrl,
+        HYDRA_AUTOPILOT_RUN_END_POST: "",
+      });
+      assert.equal(out.code, 0, out.stderr);
+      const plan = JSON.parse(out.stdout);
+      assert.ok(
+        (plan.actions as any[]).some((a) => a.type === "dispatch"),
+        "fixture must dispatch (non-terminating turn)",
+      );
+      assert.equal(requests.length, 0, "no terminate in plan → no POST");
+    });
   });
 });
 
@@ -2223,15 +2412,16 @@ describe("decide.py — worktreeBranch stamping (issue #527)", () => {
   });
 
   test("non-dispatch actions are not stamped with worktreeBranch", () => {
-    // The wait/heartbeat fallback fires when nothing dispatches — confirm the
-    // stamping loop is dispatch-scoped and doesn't leak the field onto other
-    // action types (which would confuse the schema-additivity gates).
-    const state = baseState(); // no signals → idle heartbeat
+    // The idle fallback fires when nothing dispatches (a clean
+    // terminate(idle) since #1352) — confirm the stamping loop is
+    // dispatch-scoped and doesn't leak the field onto other action types
+    // (which would confuse the schema-additivity gates).
+    const state = baseState(); // no signals → idle drain terminate
     const plan = runDecide(state, null);
-    const waitAction = findAction(plan, (a) => a.type === "wait");
-    assert.ok(waitAction, "idle path must emit a wait action");
+    const idleAction = findAction(plan, (a) => a.type === "terminate");
+    assert.ok(idleAction, "idle path must emit a terminate action");
     assert.equal(
-      (waitAction as any).worktreeBranch,
+      (idleAction as any).worktreeBranch,
       undefined,
       "non-dispatch actions must NOT carry worktreeBranch",
     );

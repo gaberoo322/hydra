@@ -154,7 +154,13 @@ function runDecide(
     const r = spawnSync(
       "python3",
       [DECIDE, "decide", t.state, t.cands, t.events],
-      { encoding: "utf-8" },
+      {
+        encoding: "utf-8",
+        // These fixtures carry a run_id AND (since #1352) an idle turn
+        // terminates — keep the CLI's run-end POST off so the suite never
+        // POSTs to a live orchestrator.
+        env: { ...process.env, HYDRA_AUTOPILOT_RUN_END_POST: "off" },
+      },
     );
     if (r.status !== 0) {
       throw new Error(`decide.py decide exited ${r.status}: ${r.stderr}`);

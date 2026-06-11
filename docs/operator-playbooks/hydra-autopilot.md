@@ -297,8 +297,8 @@ INV-008.
 | `update-branch` | `Bash` → `gh pr update-branch` |
 | `queue-decision` | `Bash` → `./scripts/autopilot/queue-decision.sh ...` |
 | `reap` | `Bash` → `./scripts/autopilot/reap.py completion ...` (also fires `dispatch.sh cycle-record` for `hydra-dev` / `hydra-target-build`; see Phase 6) |
-| `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7 |
-| `wait` | sleep N; re-enter loop |
+| `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7. The decide CLI has already POSTed the clean run-end for this cause (issue #1352) — drain + digest are all that remain. |
+| `wait` | sleep N; re-enter loop. Only emitted while slots are in flight (busy-wait nap / `wait_or_reap`) or after a non-dispatch housekeeping turn — a wait-only turn with zero occupied slots emits `terminate` (cause `idle`) instead, because a print-mode session exits on its final message and the wait would never be honoured (issue #1352). |
 | `wait-for-api` | `curl --retry`; re-enter loop |
 
 ### Per-class model routing (issue #1093)
@@ -466,6 +466,26 @@ no in-place upgrader: bootstrap is the single writer for state.json.
 2. `elapsed >= limits.wall_clock_max_sec`
 3. `idle_turns >= limits.idle_drain_turns` AND all slots empty
 4. 5 consecutive failures of the same pattern (failure backstop; see `self_heal.py`)
+5. The turn is wait-only with zero occupied slots (issue #1352): nothing
+   dispatched, no other actions, no slots in flight → `terminate` with cause
+   `idle`. A `claude -p` print-mode session exits the moment the model emits
+   its final message, so an idle-heartbeat `wait` was never honoured — the
+   process died and the ExecStopPost reap stamped the run `interrupted`,
+   leaving retro with zero drillable dispatches. Per ADR-0021 D5, continuity
+   comes from the pace-gate relaunch, so the designed exit is recorded as the
+   clean idle drain it is.
+
+When the emitted plan carries a `terminate`, the decide CLI itself POSTs
+`/api/autopilot/run-end` with the plan's cause before printing the plan
+(issue #1352) — `term-check.py` only covers its own Phase-3 trips, and the
+reap backstop would otherwise stamp `interrupted`. The POST is idempotent
+(first terminal cause wins) and skipped when state carries no `run_id` or
+`HYDRA_AUTOPILOT_RUN_END_POST=off`.
+
+The clean-termination rate over recent runs is surfaced as
+`terminationHealth` (with a pre-derived `starved` alarm boolean) on
+`GET /api/autopilot/runs` — `starved: true` means ≥5 ended dispatch-bearing
+runs produced zero clean terminations, the #1352 retro-starvation condition.
 
 ## Worktree-guard preamble (REQUIRED for code-writing dispatches)
 

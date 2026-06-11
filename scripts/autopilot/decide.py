@@ -37,7 +37,9 @@ order and dispatches each action through the appropriate tool:
   update-branch        Bash(gh pr update-branch)
   reap                 Bash(./scripts/autopilot/reap.py completion ...)
   terminate            Bash(./scripts/autopilot/drain.sh <N>) + Phase 7
-  wait                 Sleep + re-enter loop (heartbeat fallback)
+  wait                 Sleep + re-enter loop (busy-wait nap while slots in
+                       flight; a wait-only turn with zero occupied slots
+                       terminates cleanly instead — issue #1352)
   wait-for-api         Bash(curl --retry ...) then re-enter loop
 
 The function is **pure** (no fs / network / Redis side effects), so it is
@@ -1672,17 +1674,44 @@ def _rule_silent_wedge(state: dict, events: list[dict], now: int) -> _RuleOutput
     return out
 
 
-def _rule_idle_fallback(state: dict, *, dispatched_any: bool) -> _RuleOutput:
+def _rule_idle_fallback(
+    state: dict, *, dispatched_any: bool, plan_has_actions: bool
+) -> _RuleOutput:
     """Step 6 — idle fallback.
 
-    If nothing dispatched and no slots in flight, emit a `wait` for the
-    heartbeat interval; if the pipeline is busy but we have nothing new, emit a
-    short busy-wait nap. Also records the `occupied_slots` debug hint.
+    Issue #1352: a wait-only turn with zero occupied slots now TERMINATES the
+    run cleanly (`cause=idle`) instead of emitting an idle-heartbeat `wait`.
+    The `claude -p` print-mode session physically exits the moment the model
+    emits its final message — a foreground 900s sleep never happens, so the
+    old heartbeat wait was a fiction: the process died one second after the
+    plan and the ExecStopPost reap backstop stamped the run `interrupted`
+    (13/13 sampled ended runs, 0 drillable retro dispatches). Per ADR-0021 D5
+    continuity comes from the pace-gate relaunch, not from one immortal
+    session, so ending the run here loses nothing — it just records the
+    designed exit as the clean idle drain it actually is.
+
+    Slots in flight keep the old behaviour: background dispatches hold the
+    print-mode process alive and re-invoke it on completion, so a short
+    busy-wait nap is real there. A turn that emitted other actions (merges,
+    reaps, queue-decisions) but no dispatch also keeps the heartbeat wait —
+    terminating mid-housekeeping is not this rule's call.
+
+    Also records the `occupied_slots` debug hint.
     """
     out = _RuleOutput()
     slots = state.get("slots") or {}
     occupied = sum(1 for v in slots.values() if v is not None)
-    if not dispatched_any and occupied == 0:
+    if not dispatched_any and occupied == 0 and not plan_has_actions:
+        out.emit(
+            make_terminate(
+                "idle",
+                merged_prs=int(state.get("merged_prs", 0) or 0),
+                reason="wait-only turn, no slots in flight — print-mode session exits on wait; clean idle drain (issue #1352)",
+            ),
+            reason="idle-drain",
+        )
+        out.debug["idle_fallback"] = "terminate"
+    elif not dispatched_any and occupied == 0:
         out.emit(make_wait(WALL_CLOCK_HEARTBEAT_SEC, "idle heartbeat"), reason="heartbeat")
     elif not dispatched_any:
         # Pipeline is busy but we have nothing new to do — short nap
@@ -1848,8 +1877,17 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     #      decisions so a slot-clear can't race a same-slot dispatch (INV-006).
     fold(_rule_silent_wedge(state, events, now))
 
-    # 6. Idle fallback (heartbeat / busy-wait nap).
-    fold(_rule_idle_fallback(state, dispatched_any=dispatched_any))
+    # 6. Idle fallback (clean idle-drain terminate / heartbeat / busy-wait nap).
+    #    `plan_has_actions` distinguishes a true wait-only turn (terminate
+    #    cleanly, issue #1352) from a turn that did housekeeping work
+    #    (merges / reaps / queue-decisions) without dispatching.
+    fold(
+        _rule_idle_fallback(
+            state,
+            dispatched_any=dispatched_any,
+            plan_has_actions=bool(plan.actions),
+        )
+    )
 
     plan.debug["scope"] = scope
 
@@ -2686,6 +2724,79 @@ def _xadd_observability_events(events: list[dict]) -> None:
             )
 
 
+def _post_run_end_for_terminate(actions: list, state: dict) -> None:
+    """POST /api/autopilot/run-end when the plan carries a `terminate` action.
+
+    Issue #1352: a decide-emitted `terminate` historically had NO clean
+    run-end writer — `term-check.py` only POSTs when its own Phase-3 check
+    trips (which runs BEFORE decide in the turn), and the playbook's
+    terminate arm goes to `drain.sh`, which prints a summary but never POSTs.
+    So every decide-side termination (the `_check_termination` mirror, the
+    failure backstop, and the new wait-only idle drain) fell through to the
+    ExecStopPost reap backstop and was stamped `interrupted` — starving the
+    retro loop of clean terminal runs. This closes that gap: the cause the
+    plan decided on is recorded BEFORE the print-mode session exits.
+
+    Deliberately a CLI-side effect (like `_xadd_observability_events` /
+    `_persist_state_writeback`) so `decide()` stays pure for tests. Skipped
+    when state carries no `run_id` (test fixtures, isolated runs) or when
+    `HYDRA_AUTOPILOT_RUN_END_POST` is an off-value (CLI-spawning tests set
+    `off`; production needs no env change). The endpoint is idempotent — if
+    term-check already recorded an end this turn, the first cause wins, and
+    the later reap POST dedups to a no-op. Failure is loud but never fatal:
+    the reap backstop still records a terminal status if this POST loses.
+    """
+    flag = os.environ.get("HYDRA_AUTOPILOT_RUN_END_POST", "").strip().lower()
+    if flag in ("0", "off", "no", "false"):
+        return
+    term = next(
+        (a for a in actions if isinstance(a, dict) and a.get("type") == "terminate"),
+        None,
+    )
+    if term is None:
+        return
+    run_id = str(state.get("run_id") or "").strip()
+    if not run_id:
+        return
+    import urllib.request
+    import urllib.error
+
+    api_base = os.environ.get("HYDRA_API_BASE", "http://localhost:4000")
+    payload = json.dumps({
+        "run_id": run_id,
+        "cause": str(term.get("cause") or "idle"),
+        "ended_epoch": int(time.time()),
+    }).encode("utf-8")
+    last_exc: Exception | None = None
+    for attempt in (1, 2, 3):
+        req = urllib.request.Request(
+            f"{api_base}/api/autopilot/run-end",
+            data=payload,
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+            return
+        except urllib.error.HTTPError as exc:
+            if 400 <= exc.code < 500:
+                # 404 unknown run / 409-class already-terminal — a
+                # deterministic answer, not a transient fault.
+                return
+            last_exc = exc
+        except (urllib.error.URLError, OSError) as exc:
+            last_exc = exc
+        if attempt < 3:
+            time.sleep(float(attempt))
+    print(
+        f"decide.py: run-end POST failed after 3 attempts "
+        f"(run_id={run_id} cause={term.get('cause')!r}): {last_exc}. "
+        "The ExecStopPost reap backstop will record the terminal status.",
+        file=sys.stderr,
+    )
+
+
 def _persist_state_writeback(path: str, state: dict) -> None:
     """Atomically write the post-decide state dict back to the state file.
 
@@ -2753,6 +2864,9 @@ def main(argv: list[str]) -> int:
         )
         plan = decide(state, candidates, events)
         _xadd_observability_events(plan.events)
+        # Issue #1352: record a clean run-end for any decide-side terminate
+        # BEFORE the print-mode session exits (reap would stamp `interrupted`).
+        _post_run_end_for_terminate(plan.actions, state)
         force_counter_after = json.dumps(
             state.get("research_force_counter"), sort_keys=True,
         )

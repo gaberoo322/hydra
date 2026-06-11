@@ -747,6 +747,39 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     assert.equal(h.cleanRuns, 0);
     assert.equal(h.endedRuns, 3);
     assert.equal(h.endedDispatchTotal, 24, "non-trivial dispatch total gates the alarm");
+    assert.equal(h.starved, false, "below the 5-run sample floor the alarm stays off");
+  });
+
+  test("starved flips true at >=5 dispatch-bearing ended runs with zero clean terminations", () => {
+    const runs = Array.from({ length: 5 }, (_, i) => ({
+      status: "ended", term_reason: "interrupted", dispatches: i === 0 ? 6 : 0,
+    }));
+    const h = summarizeTerminationHealth(runs);
+    assert.equal(h.endedRuns, 5);
+    assert.equal(h.cleanRuns, 0);
+    assert.equal(h.starved, true, "the #1352 starvation alarm");
+  });
+
+  test("a single clean termination clears the starvation alarm", () => {
+    const runs = [
+      { status: "ended", term_reason: "idle", dispatches: 0 },
+      ...Array.from({ length: 5 }, () => ({
+        status: "ended", term_reason: "interrupted", dispatches: 3,
+      })),
+    ];
+    const h = summarizeTerminationHealth(runs);
+    assert.equal(h.cleanRuns, 1);
+    assert.equal(h.starved, false);
+  });
+
+  test("zero-dispatch all-interrupted runs do NOT alarm (ran-out-of-work, not starvation)", () => {
+    const runs = Array.from({ length: 6 }, () => ({
+      status: "ended", term_reason: "interrupted", dispatches: 0,
+    }));
+    const h = summarizeTerminationHealth(runs);
+    assert.equal(h.endedRuns, 6);
+    assert.equal(h.endedDispatchTotal, 0);
+    assert.equal(h.starved, false, "no dispatch work → rate 0 is not the starvation signal");
   });
 
   test("crash / failure_backstop are NOT clean", () => {
@@ -785,6 +818,7 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
       endedRuns: 0,
       cleanRuns: 0,
       endedDispatchTotal: 0,
+      starved: false,
     });
   });
 });
