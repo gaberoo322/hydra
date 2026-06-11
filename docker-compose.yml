@@ -81,6 +81,19 @@ services:
     depends_on:
       - redis
       - vikingdb
+    # Overrides the image's HEALTHCHECK (5s timeout). OV's /health answers in
+    # <5ms when idle, but the event loop blocks ~12-15s during each
+    # hierarchical-retrieval burst (every ~16-20s under load), so the image
+    # default flags a busy-but-healthy container unhealthy (issue #1755).
+    # 30s timeout tolerates a full burst; 3 retries means only ~2min of solid
+    # unresponsiveness marks real degradation. curl --max-time 25 keeps curl's
+    # own deadline inside Docker's 30s so failures exit 1 instead of SIGKILL.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 25 http://127.0.0.1:1933/health || exit 1"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
     deploy:
       resources:
