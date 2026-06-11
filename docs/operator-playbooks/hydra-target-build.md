@@ -424,6 +424,16 @@ the raw `web/`-rooted diff paths straight through. `classifyTargetRisk()`
 hand-stripping re-introduces an already-solved bug and runs the gate
 inconsistently.
 
+**Commit brand-new files BEFORE running the gate.** Mutant scoping follows the
+git diff, so an untracked (or unstaged-new) money-critical file produces
+**zero mutants** — the gate degrades to a non-blocking `0-mutant` warn instead
+of actually testing the new code (friction cue
+`stryker-no-mutants-on-untracked-files`, recurred 4×). The `CHANGED_FILES`
+computation below only sees committed work: run the gate only after every new
+file the cycle created is committed on the feature branch, and treat a
+`0-mutant` warn on a diff that adds money-critical files as a red flag, not a
+pass.
+
 ```bash
 cd "$TARGET_WT"
 # CHANGED_FILES is the newline-separated diff against origin/main's merge base,
