@@ -185,6 +185,10 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
       fetchOpenPrBlobs,
+      // issue #1714: inject a null merged-PR feed so these tests stay
+      // hermetic — without it the new merged-PR guard's default fetcher
+      // would shell out to `gh` (and real merged PRs could match test IDs).
+      fetchMergedPrBlobs: async () => null,
     });
 
     assert.equal(result.reaped.length, 0, "no items reaped — open PR guard protected the item");
@@ -226,6 +230,10 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
       fetchOpenPrBlobs,
+      // issue #1714: inject a null merged-PR feed so these tests stay
+      // hermetic — without it the new merged-PR guard's default fetcher
+      // would shell out to `gh` (and real merged PRs could match test IDs).
+      fetchMergedPrBlobs: async () => null,
     });
 
     assert.equal(result.reaped.length, 1, "exactly one item reaped (the unprotected one)");
@@ -254,6 +262,10 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
       fetchOpenPrBlobs,
+      // issue #1714: inject a null merged-PR feed so these tests stay
+      // hermetic — without it the new merged-PR guard's default fetcher
+      // would shell out to `gh` (and real merged PRs could match test IDs).
+      fetchMergedPrBlobs: async () => null,
     });
 
     assert.equal(result.reaped.length, 1, "item reaped when PR feed is unavailable");
@@ -276,6 +288,10 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
       fetchOpenPrBlobs,
+      // issue #1714: inject a null merged-PR feed so these tests stay
+      // hermetic — without it the new merged-PR guard's default fetcher
+      // would shell out to `gh` (and real merged PRs could match test IDs).
+      fetchMergedPrBlobs: async () => null,
     });
 
     assert.equal(result.reaped.length, 1, "unrelated open PR does not protect the item");
@@ -298,6 +314,10 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
       fetchOpenPrBlobs,
+      // issue #1714: inject a null merged-PR feed so these tests stay
+      // hermetic — without it the new merged-PR guard's default fetcher
+      // would shell out to `gh` (and real merged PRs could match test IDs).
+      fetchMergedPrBlobs: async () => null,
     });
 
     assert.equal(result.reaped.length, 0);

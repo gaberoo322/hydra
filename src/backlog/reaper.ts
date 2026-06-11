@@ -105,8 +105,45 @@ async function fetchOpenTargetPrBlobs(): Promise<string[] | null> {
 }
 
 /**
- * Decide whether an in-progress backlog item is already covered by an OPEN PR
- * in the target repo. Match is on the item ID as a whole word — this is the
+ * Fetch the set of recently MERGED PRs in the target repo and return their
+ * title+body blobs. Used by reapStaleClaims to detect items whose implementing
+ * PR already merged but whose claimant died before moving the item to done
+ * (issue #1714 — the item-490 phantom-requeue incident, 2026-06-10).
+ *
+ * Same fail-open contract as fetchOpenTargetPrBlobs: returns `null` on any
+ * failure so the caller treats it as "no information" and falls back to
+ * time-only reaping rather than wedging a slot.
+ */
+async function fetchMergedTargetPrBlobs(): Promise<string[] | null> {
+  const repo = getTargetGithubRepo();
+  // Routes through the GitHub CLI Adapter seam (issue #899) — see
+  // fetchOpenTargetPrBlobs above for the error-mode contract.
+  const result = await ghJson<unknown>(
+    [
+      "pr", "list",
+      "--repo", repo,
+      "--state", "merged",
+      "--limit", "50",
+      "--json", "title,body,number",
+    ],
+    { timeout: 10000 },
+  );
+  if (isGhFailure(result)) {
+    console.error(
+      `[Backlog] fetchMergedTargetPrBlobs failed for ${repo} (${result.code}): ${result.stderr.slice(0, 200)}`,
+    );
+    return null;
+  }
+  const prs = result.data;
+  if (!Array.isArray(prs)) return null;
+  return prs.map((pr: any) => `${pr.title ?? ""}\n${pr.body ?? ""}`);
+}
+
+/**
+ * Decide whether an in-progress backlog item is already covered by a PR
+ * in the target repo (the same matcher serves both the open-PR guard, #490,
+ * and the merged-PR guard, #1714 — only the blob feed differs). Match is on
+ * the item ID as a whole word — this is the
  * convention autopilot subagents use when opening PRs (e.g. PR title
  * "feat(scanner): item-302 add run history page" or body line "closes
  * item-302"). Falls back to substring title match for the rare case where the
@@ -148,8 +185,20 @@ export function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs:
  * (over-reap once rather than wedge a slot). Tests inject the PR feed via
  * `opts.fetchOpenPrBlobs` so they don't shell out.
  *
- * Returns `{ reaped, skippedOpenPr }`. `skippedOpenPr` lists items the
- * open-PR guard preserved so operators and tests can audit the decision.
+ * **Merged-PR guard (issue #1714).** After the open-PR check, a stale item
+ * whose ID (or exact title) appears in a recently MERGED target PR is moved
+ * to `done` — not back to `queued`. This closes the gap where a build agent
+ * merges its PR and dies before releasing the claim: the open-PR guard no
+ * longer matches (the PR is closed), so the pre-#1714 reaper re-queued
+ * verifiably finished work as a phantom item (item-490, 2026-06-10). Order of
+ * checks: open-PR skip first (work in flight), then merged-PR → done, then
+ * default re-queue. Same fail-open posture: a `gh` outage on the merged
+ * fetch falls back to time-only reaping. Tests inject via
+ * `opts.fetchMergedPrBlobs`.
+ *
+ * Returns `{ reaped, reapedToDone, skippedOpenPr }`. `skippedOpenPr` lists
+ * items the open-PR guard preserved and `reapedToDone` lists items the
+ * merged-PR guard completed, so operators and tests can audit the decisions.
  *
  * Never throws — Redis errors during metric/alert publication are logged and
  * swallowed so a metrics outage can't leave a wedged WIP slot.
@@ -157,8 +206,10 @@ export function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs:
 export async function reapStaleClaims(opts: {
   maxAgeMs?: number;
   fetchOpenPrBlobs?: () => Promise<string[] | null>;
+  fetchMergedPrBlobs?: () => Promise<string[] | null>;
 } = {}): Promise<{
   reaped: Array<{ id: string; title: string; ageMs: number; escalated: boolean }>;
+  reapedToDone: Array<{ id: string; title: string; ageMs: number }>;
   skippedOpenPr: Array<{ id: string; title: string; ageMs: number }>;
   maxAgeMs: number;
 }> {
@@ -166,10 +217,13 @@ export async function reapStaleClaims(opts: {
   const now = Date.now();
   const ids = await getBacklogLaneIds("inProgress");
   const reaped: Array<{ id: string; title: string; ageMs: number; escalated: boolean }> = [];
+  const reapedToDone: Array<{ id: string; title: string; ageMs: number }> = [];
   const skippedOpenPr: Array<{ id: string; title: string; ageMs: number }> = [];
 
   const prFetcher = opts.fetchOpenPrBlobs ?? fetchOpenTargetPrBlobs;
   const prBlobs = await prFetcher();
+  const mergedFetcher = opts.fetchMergedPrBlobs ?? fetchMergedTargetPrBlobs;
+  const mergedPrBlobs = await mergedFetcher();
 
   for (const id of ids) {
     const item = await getItem(id);
@@ -187,6 +241,71 @@ export async function reapStaleClaims(opts: {
         `[Backlog] Skipping reap of ${id} ("${(item.title || "").slice(0, 60)}") — open PR in target repo references this item. claimedBy=${item.claimedBy ?? "?"} ageMs=${ageMs}`,
       );
       skippedOpenPr.push({ id, title: item.title, ageMs });
+      continue;
+    }
+
+    if (mergedPrBlobs && itemMatchesOpenPr(item, mergedPrBlobs)) {
+      // Merged-PR guard (issue #1714): the work is verifiably complete — the
+      // claimant merged its PR and died before releasing the claim. Move the
+      // item to done (mirroring moveToDone's completedAt/outcome/checked
+      // stamps so done-retention prunes it) instead of re-queuing a phantom.
+      const previousClaimedBy = item.claimedBy ?? null;
+      const reapCount = (typeof item.meta?.reapCount === "number" ? item.meta.reapCount : 0) + 1;
+      const reapReason = "stale-claim-merged";
+
+      await removeFromBacklogLane("inProgress", id);
+      item.checked = true;
+      item.meta = {
+        ...item.meta,
+        reapedAt: new Date().toISOString(),
+        reapReason,
+        previousClaimedBy,
+        reapCount,
+        completedAt: new Date().toISOString().split("T")[0],
+        outcome: "merged",
+      };
+      applyLaneTransition(item, "done");
+      await saveItem(item);
+      await addToBacklogLane("done", -Date.now(), id);
+
+      console.warn(
+        `[Backlog] Reaped stale claim ${id} ("${(item.title || "").slice(0, 60)}") to DONE — merged PR in target repo references this item. claimedBy=${previousClaimedBy ?? "?"} ageMs=${ageMs} threshold=${maxAgeMs} reapCount=${reapCount}`,
+      );
+
+      try {
+        await incrClaimsReapedLifetime();
+        const isoDate = new Date().toISOString().split("T")[0];
+        await incrClaimsReapedDay(isoDate, CLAIMS_REAPED_DAY_TTL_S);
+        await setClaimsReapedLast(new Date().toISOString());
+      } catch (err: any) {
+        console.error(`[Backlog] reapStaleClaims metrics failed for ${id}: ${err.message}`);
+      }
+
+      try {
+        await pushAlert(
+          JSON.stringify({
+            type: "stale-claim-reaped",
+            ts: new Date().toISOString(),
+            payload: {
+              itemId: id,
+              title: item.title,
+              previousClaimedBy,
+              claimedAt: claimedAtIso,
+              ageMs,
+              maxAgeMs,
+              reapCount,
+              reapReason,
+              targetLane: "done",
+              escalated: false,
+            },
+          }),
+          100,
+        );
+      } catch (err: any) {
+        console.error(`[Backlog] reapStaleClaims alert publish failed for ${id}: ${err.message}`);
+      }
+
+      reapedToDone.push({ id, title: item.title, ageMs });
       continue;
     }
 
@@ -253,5 +372,5 @@ export async function reapStaleClaims(opts: {
     reaped.push({ id, title: item.title, ageMs, escalated: escalate });
   }
 
-  return { reaped, skippedOpenPr, maxAgeMs };
+  return { reaped, reapedToDone, skippedOpenPr, maxAgeMs };
 }
