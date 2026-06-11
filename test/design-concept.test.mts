@@ -15,7 +15,7 @@ import Redis from "ioredis";
 import type { DesignConcept, DesignConceptInput } from "../src/design-concept.ts";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const dc = await import("../src/design-concept.ts");
 const dcSeam = await import("../src/redis/design-concept.ts");
@@ -55,7 +55,7 @@ function buildComplete(overrides: Partial<DesignConcept> = {}): DesignConceptInp
 
 describe("design-concept Redis store + gate", () => {
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
     const keys = await testRedis.keys(TEST_NS + "*");
     if (keys.length > 0) await testRedis.del(...keys);
   });
@@ -440,7 +440,7 @@ describe("design-concept seam canonicalizes anchorRef at entry (#797)", () => {
   let seamRedis: any;
 
   beforeEach(async () => {
-    if (!seamRedis) seamRedis = new Redis("redis://localhost:6379/1");
+    if (!seamRedis) seamRedis = new Redis(process.env.REDIS_URL);
     const keys = await seamRedis.keys(TEST_NS + "*");
     if (keys.length > 0) await seamRedis.del(...keys);
   });

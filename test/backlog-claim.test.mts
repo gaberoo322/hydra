@@ -25,7 +25,7 @@ import Redis from "ioredis";
 // Set REDIS_URL before any import of backlog modules so the singleton picks
 // up DB 1 (lazy connect — import order does not pin the DB; see
 // test/backlog.test.mts for the full rationale).
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 import { claimNextQueuedItem } from "../src/backlog/claims.ts";
 import { addToBacklog } from "../src/backlog/items.ts";

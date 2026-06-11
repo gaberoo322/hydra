@@ -38,7 +38,7 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/3";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/3";
 
 const adapter = {
   ...(await import("../src/redis/scheduler.ts")),

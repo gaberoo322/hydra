@@ -16,7 +16,7 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const {
   registerOperatorDispatch,
@@ -31,7 +31,7 @@ const {
 let testRedis: any;
 
 async function cleanDispatchKeys() {
-  if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+  if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
   const keys = await testRedis.keys("hydra:dispatches:operator:*");
   if (keys.length > 0) await testRedis.del(...keys);
 }
@@ -150,7 +150,7 @@ describe("registerOperatorDispatch + listActiveOperatorDispatches round-trip", (
   test("listActiveOperatorDispatches skips index entries whose hash expired", async () => {
     // Manually insert an orphan index entry pointing at a hash that doesn't
     // exist. This simulates the partial-expiry case the JSDoc covers.
-    if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
     await testRedis.zadd(operatorDispatchIndexKey(), 1779796800, "orphan-dispatch");
 
     // Also register a real one so we can confirm the orphan is filtered, not

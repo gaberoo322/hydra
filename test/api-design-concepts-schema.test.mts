@@ -25,7 +25,7 @@ import type { AddressInfo } from "node:net";
 import Redis from "ioredis";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { createDesignConceptsRouter } = await import(
   "../src/api/design-concepts.ts"
@@ -88,7 +88,7 @@ function buildValidConceptBody(overrides: Record<string, unknown> = {}) {
 
 describe("design-concepts schema migration — ADR-0011 slice 1", () => {
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
     const keys = await testRedis.keys(TEST_NS + "*");
     if (keys.length > 0) await testRedis.del(...keys);
     await testRedis.del(EXEMPT_LOG_KEY);

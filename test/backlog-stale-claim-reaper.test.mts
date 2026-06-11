@@ -36,7 +36,7 @@ let redisAvailable = false;
 // sibling backlog file, regardless of concurrency. (#1231 rejected unique-DB
 // allocation for the ~28-file DB-1 set on the 16-DB budget; only 3 backlog
 // files actually collide, so 3 dedicated DBs is well inside the budget.)
-process.env.REDIS_URL = "redis://localhost:6379/5";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/5";
 
 async function cleanBacklogKeys() {
   const patterns = ["hydra:backlog:*", "hydra:alerts", "hydra:metrics:claims-reaped*"];

@@ -44,7 +44,7 @@ let redisAvailable = false;
 // collision, but a subset run without the flag re-surfaces the recurring
 // "redis-shared-backlog-tests-flaky-in-full-run" flake. 3 dedicated DBs is
 // inside the 16-DB budget #1231 was protecting.
-process.env.REDIS_URL = "redis://localhost:6379/6";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/6";
 
 async function cleanBacklogKeys() {
   const patterns = ["hydra:backlog:*", "hydra:alerts", "hydra:metrics:claims-reaped*"];

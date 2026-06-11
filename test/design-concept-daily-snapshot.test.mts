@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const SNAPSHOT_KEY = "hydra:dc:daily-snapshot";
 const DC_INDEX_KEY = "hydra:design-concept:index";
@@ -39,7 +39,7 @@ async function cleanDc() {
 
 describe("design-concept daily snapshot (#628)", () => {
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
     if (!dcRedisMod) {
       dcRedisMod = await import("../src/redis/design-concept.ts");
     }

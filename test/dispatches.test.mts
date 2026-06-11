@@ -22,7 +22,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const {
   registerSubagentDispatch,
@@ -40,7 +40,7 @@ const { getActiveDispatches } = await import("../src/aggregators/active-dispatch
 let testRedis: any;
 
 async function cleanSubagentKeys() {
-  if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+  if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
   const keys = await testRedis.keys("hydra:dispatches:subagent:*");
   if (keys.length > 0) await testRedis.del(...keys);
 }

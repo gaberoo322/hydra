@@ -33,7 +33,7 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const schedulerMod = await import("../src/scheduler/heartbeat.ts");
 const { start, stop, getStatus } = schedulerMod as any;
@@ -73,7 +73,7 @@ async function ensureRunning() {
 describe("scheduler deliberate-stop marker (issue #388)", () => {
   beforeEach(async () => {
     if (!testRedis) {
-      testRedis = new Redis("redis://localhost:6379/1");
+      testRedis = new Redis(process.env.REDIS_URL);
     }
     await cleanKeys();
   });

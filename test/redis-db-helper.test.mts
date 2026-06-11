@@ -1,5 +1,6 @@
 /**
- * Tests for the Redis test-isolation backstop helper (issue #1231).
+ * Tests for the Redis test-isolation backstop helper (issue #1231) and the
+ * per-run DB-index launcher scripts/test/redis-db-launch.mjs (issue #1676).
  *
  * Pins three contract points of test/_helpers/redis-db.mts:
  *   1. It refuses to run against production DB-0 (the "DB-0 is never touched"
@@ -15,8 +16,13 @@
 
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Redis from "ioredis";
 import { useCleanRedisDb, TEST_REDIS_URL } from "./_helpers/redis-db.mts";
 
@@ -89,5 +95,113 @@ describe("test/_helpers/redis-db — URL is constructable", () => {
     } finally {
       client.disconnect();
     }
+  });
+});
+
+/**
+ * Per-run launcher contract (issue #1676): scripts/test/redis-db-launch.mjs
+ * derives a stable per-worktree DB index in 2..15, respects a pre-set
+ * REDIS_URL verbatim, and never derives DB 0 (production) or DB 1 (the legacy
+ * shared test DB).
+ *
+ * Pinned via `--print-url` — the launcher's side-effect-free mode (no FLUSHDB,
+ * no spawn) — so these tests cannot wipe a DB another run is using. The
+ * launcher is spawned as a child process rather than imported: tsconfig.test
+ * type-checks the test and scripts trees, and an `.mjs` import would need a
+ * declaration file just for this test.
+ */
+describe("scripts/test/redis-db-launch.mjs — per-run DB derivation (#1676)", () => {
+  const LAUNCHER = fileURLToPath(
+    new URL("../scripts/test/redis-db-launch.mjs", import.meta.url),
+  );
+  const scratchDirs: string[] = [];
+
+  after(() => {
+    for (const dir of scratchDirs) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* intentional: best-effort scratch-dir cleanup on teardown */
+      }
+    }
+  });
+
+  function scratchRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), "hydra-redis-db-launch-"));
+    scratchDirs.push(dir);
+    return dir;
+  }
+
+  /** Run the launcher in --print-url mode and return the resolved URL. */
+  function launcherPrintUrl(opts: { redisUrl?: string; cwd?: string } = {}): string {
+    // Start from the current env minus REDIS_URL (this run's launcher already
+    // set it) so the child only sees a pre-set value when the test injects one.
+    const env: Record<string, string | undefined> = { ...process.env };
+    delete env.REDIS_URL;
+    if (opts.redisUrl !== undefined) env.REDIS_URL = opts.redisUrl;
+    const run = spawnSync(process.execPath, [LAUNCHER, "--print-url"], {
+      cwd: opts.cwd ?? process.cwd(),
+      env,
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(
+      run.status,
+      0,
+      `launcher --print-url must exit 0 (stderr: ${run.stderr})`,
+    );
+    return run.stdout.trim();
+  }
+
+  /** Extract the numeric DB index from a redis://host:port/<n> URL. */
+  function dbIndexOf(url: string): number {
+    const match = url.match(/^redis:\/\/localhost:6379\/(\d+)$/);
+    assert.ok(match, `derived URL must be redis://localhost:6379/<n>, got: ${url}`);
+    return Number(match![1]);
+  }
+
+  test("respects a pre-set REDIS_URL verbatim (CI / operator override)", () => {
+    const preset = "redis://localhost:6379/5";
+    assert.equal(
+      launcherPrintUrl({ redisUrl: preset }),
+      preset,
+      "a pre-set REDIS_URL must pass through unrewritten",
+    );
+  });
+
+  test("derives an index in 2..15 — never DB 0, never DB 1", () => {
+    // Several distinct roots: every derived index must stay inside 2..15
+    // (production DB 0 and the legacy shared DB 1 are unreachable by
+    // construction — the launcher additionally hard-refuses to flush them).
+    for (let i = 0; i < 5; i++) {
+      const db = dbIndexOf(launcherPrintUrl({ cwd: scratchRoot() }));
+      assert.ok(
+        db >= 2 && db <= 15,
+        `derived DB index must be within 2..15, got ${db}`,
+      );
+    }
+  });
+
+  test("same worktree root always derives the same DB (stable per run)", () => {
+    const root = scratchRoot();
+    const first = launcherPrintUrl({ cwd: root });
+    const second = launcherPrintUrl({ cwd: root });
+    assert.equal(first, second, "serial re-runs from one root must share a DB");
+  });
+
+  test("this worktree's npm test run is itself launcher-derived (env inherited)", (t) => {
+    // Under `npm test` the launcher exported REDIS_URL before node:test
+    // started; the helper picked it up via its `?? ` defer. Direct single-file
+    // invocations bypass the launcher (DB-1 fallback), so only assert when the
+    // env value is present AND not the fallback literal.
+    if (!process.env.REDIS_URL) {
+      t.skip("REDIS_URL unset — direct node --test invocation, launcher bypassed");
+      return;
+    }
+    assert.equal(
+      TEST_REDIS_URL,
+      process.env.REDIS_URL,
+      "the helper must defer to the launcher-provided REDIS_URL",
+    );
   });
 });

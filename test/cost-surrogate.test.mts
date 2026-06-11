@@ -27,7 +27,7 @@ import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const {
   recordSubagentTokens,
@@ -62,7 +62,7 @@ async function cleanKeys() {
 }
 
 before(async () => {
-  testRedis = new Redis("redis://localhost:6379/1");
+  testRedis = new Redis(process.env.REDIS_URL);
 });
 
 beforeEach(async () => {

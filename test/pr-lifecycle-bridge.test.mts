@@ -10,7 +10,7 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/2";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/2";
 
 const {
   extractTaskId,
@@ -25,7 +25,7 @@ let testRedis: any;
 
 async function ensureRedis() {
   if (!testRedis) {
-    testRedis = new Redis("redis://localhost:6379/2");
+    testRedis = new Redis(process.env.REDIS_URL);
   }
   return testRedis;
 }

@@ -28,7 +28,7 @@ import type { AddressInfo } from "node:net";
 import Redis from "ioredis";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const dc = await import("../src/design-concept.ts");
 const { createDesignConceptsRouter } = await import(
@@ -86,7 +86,7 @@ async function persistArtifact(anchorRef: string) {
 
 describe("design-concept QA retrievability (#1450)", () => {
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
     const keys = await testRedis.keys(TEST_NS + "*");
     if (keys.length > 0) await testRedis.del(...keys);
   });

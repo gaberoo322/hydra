@@ -25,7 +25,7 @@ import Redis from "ioredis";
 
 // Use Redis DB 1 — same convention as other regression tests in this repo.
 // Must be set before the seen-list module imports the connection adapter.
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { canonicalizeSlug, normalizeSlug, listKnownAliases } = await import(
   "../src/scout/aliases.ts"
@@ -47,7 +47,7 @@ function getTestRedis(): any {
   // left the runner hanging on the production-singleton ioredis socket — see
   // PR #518 friction items 2/3 and the follow-up commit.
   if (!testRedis) {
-    testRedis = new Redis("redis://localhost:6379/1");
+    testRedis = new Redis(process.env.REDIS_URL);
   }
   return testRedis;
 }

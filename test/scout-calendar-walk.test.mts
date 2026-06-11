@@ -22,7 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const {
   parseCategorySlugs,
@@ -43,7 +43,7 @@ const {
 
 let testRedis: any = null;
 function getTestRedis(): any {
-  if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+  if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
   return testRedis;
 }
 

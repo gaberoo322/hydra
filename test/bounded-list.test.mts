@@ -9,7 +9,7 @@ import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/2";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/2";
 
 const { boundedJsonList } = await import("../src/redis/bounded-list.ts");
 const { closeRedisConnections } = await import("../src/redis/connection.ts");
@@ -18,7 +18,7 @@ const KEY = "hydra:test:bounded-list";
 let raw: any;
 
 async function rawRedis() {
-  if (!raw) raw = new Redis("redis://localhost:6379/2");
+  if (!raw) raw = new Redis(process.env.REDIS_URL);
   return raw;
 }
 
