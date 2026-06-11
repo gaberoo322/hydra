@@ -39,16 +39,16 @@ const ModuleTouchedSchema = z
 type ModuleTouched = z.infer<typeof ModuleTouchedSchema>;
 
 /** One rejected alternative — paired text fields. */
-export const RejectedAlternativeSchema = z
+const RejectedAlternativeSchema = z
   .object({
     alt: z.string(),
     why: z.string(),
   })
   .strict();
-export type RejectedAlternative = z.infer<typeof RejectedAlternativeSchema>;
+type RejectedAlternative = z.infer<typeof RejectedAlternativeSchema>;
 
 /** One Q&A turn in the design trace. */
-export const QaTurnSchema = z
+const QaTurnSchema = z
   .object({
     q: z.string(),
     a: z.string(),
