@@ -26,7 +26,7 @@ The original skill only ever acted on `[gone]` upstreams. A snapshot on **2026-0
 
 The fix adds a second pass that closes the gap:
 
-1. **Branch pass (`[gone]`)** — unchanged. Reclaims branches whose upstream is gone after a squash-merge, plus their attached worktrees.
+1. **Branch pass (`[gone]`)** — reclaims branches whose upstream is gone after a squash-merge, plus their attached worktrees. Since issue #1773 the worktree-deletion arm is age-gated (see `skip-too-young` below): auto-merge with `--delete-branch` flips the upstream to `[gone]` the instant a PR merges, while the dispatching cycle may still be running post-merge steps inside its worktree — and a manually-created worktree (e.g. a target-build cycle's `/dev/shm` dir) carries no lock file, so the live-PID rail alone cannot protect it.
 2. **Worktree-orphan GC** (issue #911) — keyed on the *worktree*, not the branch. Reclaims a worktree **regardless of upstream state** when every liveness rail holds (see below).
 
 Both passes share the same 250-deletion hard cap in a single run (the worktree pass is seeded with the branch pass's deletion count), and both refuse to touch a live-PID worktree or the current branch.
@@ -45,15 +45,16 @@ The pure classifier lives at `scripts/ci/branch-prune.ts` and is exercised by `t
 2. `git worktree list --porcelain` — every attached worktree and the branch it has checked out.
 3. The body of each `.git/worktrees/<name>/locked` file (if present) — these are the lock notes the Claude harness writes when an agent claims a worktree, and they contain `(pid <N>)` markers for the live process.
 
-The classifier emits one of six actions per branch:
+The classifier emits one of seven actions per branch:
 
 | Action                          | Condition                                                                              | What the driver does                                  |
 | ------------------------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `delete-worktree-and-branch`    | Upstream gone; worktree attached; no live PID holding the lock                         | `git worktree unlock` → `git worktree remove --force` → `git branch -D` |
+| `delete-worktree-and-branch`    | Upstream gone; worktree attached; no live PID holding the lock; dir older than the age floor (6h) | `git worktree unlock` → `git worktree remove --force` → `git branch -D` |
 | `delete-branch-only`            | Upstream gone; no attached worktree                                                    | `git branch -D`                                       |
 | `skip-live-agent`               | Upstream gone; worktree attached; lock-file PID is a live process (`kill -0` succeeds) | Leave alone; the *next* run will retry once the agent finishes |
 | `skip-current-branch`           | Branch IS the currently-checked-out branch                                             | Refuse — never delete the current branch              |
 | `skip-not-gone`                 | Upstream is healthy (no `[gone]` marker)                                               | Skip — not a prune candidate                          |
+| `skip-too-young`                | Upstream gone; worktree attached; dir younger than the age floor OR age unknown (issue #1773) | Defer — protects an in-flight cycle whose branch auto-merge just deleted |
 | `skip-cap`                      | Already issued `HARD_CAP_DELETIONS_PER_RUN` (250) delete-* actions this run            | Skip — defer to the next run; defense against script bugs |
 
 ### Worktree-orphan GC actions (issue #911)
@@ -70,10 +71,10 @@ The second pass classifies each *worktree* (from `git worktree list --porcelain`
 | `skip-too-young`          | The dir is younger than the age floor, OR its age is unknown (couldn't `stat`)                                | Defer — protects an in-flight dispatch that hasn't locked yet |
 | `skip-cap`                | The shared 250-deletion hard cap is already reached this run                                                   | Defer to the next run                                      |
 
-The two extra signals the `[gone]` pass never needed:
+The two extra signals this pass introduced:
 
-- **Open-PR-head set** — built from `gh pr list --state open --json headRefName`. A worktree whose branch heads an open PR is preserved even with a dead PID (the PR may still merge). A missing/unauthenticated `gh` degrades to an *empty* set, which only ever makes the GC **more** conservative (it then relies on age + dead-PID alone) — never less.
-- **Age floor** — the worktree dir's mtime vs now. Default **6h** (`DEFAULT_WORKTREE_MIN_AGE_SECONDS`), overridable via `HYDRA_WORKTREE_MIN_AGE_SECONDS`. 6h comfortably exceeds the subagent wall-clock cap (default 3600s), so a worktree past the floor whose PID is also dead is unambiguously abandoned. Age is the **last** gate — checked only after the worktree is provably not live and not an open-PR head — so a never-reaped live agent surfaces as `skip-live-agent`, not `skip-too-young`.
+- **Open-PR-head set** — built from `gh pr list --state open --json headRefName`. A worktree whose branch heads an open PR is preserved even with a dead PID (the PR may still merge). A missing/unauthenticated `gh` degrades to an *empty* set, which only ever makes the GC **more** conservative (it then relies on age + dead-PID alone) — never less. This rail is GC-pass-only (a `[gone]` upstream already proves the PR closed).
+- **Age floor** — the worktree dir's mtime vs now. Default **6h** (`DEFAULT_WORKTREE_MIN_AGE_SECONDS`), overridable via `HYDRA_WORKTREE_MIN_AGE_SECONDS`. 6h comfortably exceeds the subagent wall-clock cap (default 3600s), so a worktree past the floor whose PID is also dead is unambiguously abandoned. Age is the **last** gate — checked only after the worktree is provably not live and not an open-PR head — so a never-reaped live agent surfaces as `skip-live-agent`, not `skip-too-young`. Since issue #1773 the **same floor also gates the `[gone]` pass's worktree-deletion arm** (same env override, same unknown-age-means-skip discipline): a `[gone]` upstream no longer proves *abandonment*, because auto-merge `--delete-branch` creates it mid-cycle — in `claude-cycle-2026-06-11-0401` a prune sweep landed between the merge and the cycle's post-merge-health step and GC'd the cycle's `/dev/shm` worktree out from under it.
 
 ### Why these signals (and not the obvious ones)
 
