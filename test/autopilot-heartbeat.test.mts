@@ -29,8 +29,9 @@
 
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, statSync, utimesSync } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -376,6 +377,173 @@ describe("scripts/autopilot/heartbeat.py", () => {
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Issue #1732 — heartbeat.py post_turn must NOT attribute a stale plan.
+ *
+ * Before #1732, post_turn joined the live state.json with whatever the
+ * default plan path (/tmp/hydra-autopilot-plan.json) held — with no check
+ * that the plan belonged to the current run/turn. The autopilot session
+ * frequently writes decide output to ad-hoc per-turn filenames
+ * (`...-plan-r5t1.json`), leaving the default path holding a previous
+ * run's plan; runs ebcfebd2/b2422e61 (2026-06-11) each recorded a turn
+ * with a foreign run's `dispatch:dev_target` action, drifting the run's
+ * dispatch counters and polluting the retro bundle's idle-streak signal.
+ *
+ * The fix: decide.py stamps `run_id` + `turn` into the plan JSON, and
+ * post_turn posts empty actions with a `plan-stale-skipped: ...` reason
+ * whenever the stamp is missing or mismatched. These tests pin the wire
+ * contract against a local capture server (async spawn — spawnSync would
+ * block the event loop and the server could never answer the POST).
+ */
+describe("scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #1732)", () => {
+  const RUN_ID = "test-run-1732";
+
+  interface Captured { url: string; method: string; body: Record<string, unknown> }
+
+  async function withCaptureServer(
+    fn: (baseUrl: string, requests: Captured[]) => Promise<void>,
+  ): Promise<void> {
+    const requests: Captured[] = [];
+    const server: Server = createServer((req, res) => {
+      let buf = "";
+      req.on("data", (c) => (buf += c));
+      req.on("end", () => {
+        requests.push({
+          url: req.url ?? "",
+          method: req.method ?? "",
+          body: buf ? JSON.parse(buf) : {},
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      await fn(`http://127.0.0.1:${port}`, requests);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  }
+
+  function spawnHeartbeatAsync(
+    env: Record<string, string>,
+  ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    return new Promise((resolveSpawn) => {
+      const child = spawn("python3", [HEARTBEAT_PY], {
+        env: { ...process.env, ...env, PATH: process.env.PATH ?? "" },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("close", (code) => resolveSpawn({ code, stdout, stderr }));
+    });
+  }
+
+  /** Run heartbeat.py against a state + plan fixture; return the captured turn POST. */
+  async function runWithPlan(
+    plan: unknown | null,
+    stateOverrides: Record<string, unknown> = {},
+  ): Promise<{ requests: Captured[]; stderr: string }> {
+    const tmp = makeTmp();
+    const planPath = join(tmp.dir, "plan.json");
+    let stderrOut = "";
+    try {
+      writeState(tmp.state, { run_id: RUN_ID, turn: 3, ...stateOverrides });
+      if (plan !== null) writeFileSync(planPath, JSON.stringify(plan));
+      let captured: Captured[] = [];
+      await withCaptureServer(async (baseUrl, requests) => {
+        const r = await spawnHeartbeatAsync({
+          HYDRA_AUTOPILOT_STATE: tmp.state,
+          HYDRA_AUTOPILOT_HEARTBEAT: tmp.heartbeat,
+          HYDRA_AUTOPILOT_PLAN: planPath,
+          HYDRA_API_BASE: baseUrl,
+        });
+        assert.equal(r.code, 0, `heartbeat.py exited non-zero: ${r.stderr}`);
+        stderrOut = r.stderr;
+        captured = requests;
+      });
+      return { requests: captured, stderr: stderrOut };
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  }
+
+  test("fresh plan (matching run_id + turn stamp) is attributed verbatim", async () => {
+    const { requests, stderr } = await runWithPlan({
+      actions: [{ type: "dispatch", class: "dev_orch" }],
+      reasons: ["ready-for-agent present"],
+      run_id: RUN_ID,
+      turn: 3,
+    });
+    assert.equal(requests.length, 1, "exactly one turn POST");
+    assert.equal(requests[0].url, "/api/autopilot/turn");
+    assert.equal(requests[0].body.run_id, RUN_ID);
+    assert.equal(requests[0].body.turn_n, 3);
+    assert.deepEqual(
+      requests[0].body.actions,
+      [{ type: "dispatch", class: "dev_orch" }],
+      "fresh plan's actions pass through",
+    );
+    assert.deepEqual(requests[0].body.reasons, ["ready-for-agent present"]);
+    assert.ok(!stderr.includes("stale plan"), "no stale warning for a fresh plan");
+  });
+
+  test("foreign run_id stamp → empty actions + plan-stale-skipped reason (core #1732 AC)", async () => {
+    const { requests, stderr } = await runWithPlan({
+      actions: [{ type: "dispatch", class: "dev_target" }],
+      reasons: ["stale reason from a previous run"],
+      run_id: "fb6ae849-dead-beef-0000-000000000000",
+      turn: 3,
+    });
+    assert.equal(requests.length, 1, "turn POST still happens (record the turn, not the stale plan)");
+    assert.deepEqual(requests[0].body.actions, [], "foreign-run plan actions must NOT be attributed");
+    const reasons = requests[0].body.reasons as string[];
+    assert.equal(reasons.length, 1);
+    assert.match(reasons[0], /^plan-stale-skipped: /, "reason carries the stale-skip marker");
+    assert.match(reasons[0], /run_id/, "reason names the mismatched field");
+    assert.match(stderr, /stale plan skipped/, "skip is logged loud to stderr");
+  });
+
+  test("stale turn stamp (same run) → empty actions + plan-stale-skipped reason", async () => {
+    const { requests } = await runWithPlan({
+      actions: [{ type: "dispatch", class: "qa_orch" }],
+      reasons: ["from turn 1"],
+      run_id: RUN_ID,
+      turn: 1, // state.turn is 3
+    });
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].body.actions, [], "previous turn's plan must NOT be attributed");
+    assert.match(
+      (requests[0].body.reasons as string[])[0],
+      /^plan-stale-skipped: plan turn=1 != state turn=3/,
+    );
+  });
+
+  test("unstamped plan (pre-#1732 shape) → empty actions + plan-stale-skipped reason", async () => {
+    const { requests } = await runWithPlan({
+      actions: [{ type: "dispatch", class: "dev_target" }],
+      reasons: ["unstamped"],
+      // no run_id / turn keys — exactly what a stale pre-#1732 file holds
+    });
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].body.actions, [], "unverifiable plan must NOT be attributed");
+    assert.match(
+      (requests[0].body.reasons as string[])[0],
+      /^plan-stale-skipped: plan carries no run_id\/turn stamp/,
+    );
+  });
+
+  test("missing plan file → turn POST with empty actions and NO stale marker (pre-#1732 behaviour)", async () => {
+    const { requests, stderr } = await runWithPlan(null);
+    assert.equal(requests.length, 1, "turn POST proceeds without a plan file");
+    assert.deepEqual(requests[0].body.actions, []);
+    assert.deepEqual(requests[0].body.reasons, [], "no plan ≠ stale plan — no skip reason");
+    assert.ok(!stderr.includes("stale plan"), "no stale warning when the plan file is simply absent");
   });
 });
 

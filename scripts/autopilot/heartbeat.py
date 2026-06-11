@@ -184,11 +184,58 @@ def _read_plan() -> dict:
         return {}
 
 
+def _plan_stale_reason(state: dict, plan: dict) -> str | None:
+    """Issue #1732 — freshness check before attributing plan actions.
+
+    Returns None when `plan` verifiably belongs to the current
+    (run_id, turn) in `state`; otherwise a short reason string explaining
+    why the plan must not be attributed to this turn record.
+
+    Background: the default PLAN_PATH (/tmp/hydra-autopilot-plan.json)
+    frequently holds a STALE plan — the autopilot session often writes
+    decide output to ad-hoc per-turn filenames (`...-plan-r5t1.json`),
+    leaving the default path untouched across runs. Joining the live
+    state with whatever the default path held misattributed a foreign
+    run's `dispatch` actions into turn records (runs ebcfebd2/b2422e61,
+    2026-06-11), drifting the run's dispatch counters and polluting the
+    retro bundle's idle-streak signal.
+
+    Rules:
+      - empty plan ({} — missing/unreadable file) is NOT stale: the turn
+        POST proceeds with no actions, exactly as before #1732;
+      - a non-empty plan must carry a `run_id` + `turn` stamp matching
+        the live state (decide.py stamps both since #1732); an unstamped
+        or mismatched plan is stale.
+    """
+    if not plan:
+        return None
+    plan_run = plan.get("run_id")
+    plan_turn = plan.get("turn")
+    if plan_run is None or plan_turn is None:
+        return "plan carries no run_id/turn stamp (pre-#1732 plan or foreign writer)"
+    state_run = str(state.get("run_id") or "")
+    if str(plan_run) != state_run:
+        return f"plan run_id={plan_run} != state run_id={state_run}"
+    try:
+        plan_turn_i = int(plan_turn)
+    except (TypeError, ValueError):
+        return f"plan turn={plan_turn!r} is not an integer"
+    state_turn = int(state.get("turn", 0) or 0)
+    if plan_turn_i != state_turn:
+        return f"plan turn={plan_turn_i} != state turn={state_turn}"
+    return None
+
+
 def post_turn(state: dict, plan: dict, now: int) -> None:
     """Issue #498 — POST one immutable turn record to /api/autopilot/turn.
 
     Idempotent on (run_id, turn_n): re-POST at the same turn_n is a no-op
     server-side, so a heartbeat retry never double-counts dispatches.
+
+    Issue #1732 — the plan is attributed ONLY when its run_id/turn stamp
+    matches the live state (see `_plan_stale_reason`). A stale plan still
+    produces a turn record, but with empty `actions` and an explicit
+    `plan-stale-skipped: ...` reason instead of another run's dispatches.
 
     NEVER raises — every failure path logs to stderr and returns. Heartbeat
     is best-effort observability (issue #435 contract), so an orchestrator
@@ -201,12 +248,23 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
     if turn_n is None:
         return
 
+    stale_reason = _plan_stale_reason(state, plan)
+    if stale_reason is None:
+        actions = plan.get("actions") or []
+        reasons = plan.get("reasons") or []
+    else:
+        # Fail loud (observability contract): record the skip, never
+        # attribute a stale plan's actions to this turn.
+        print(f"[autopilot] heartbeat: stale plan skipped ({stale_reason})", file=sys.stderr)
+        actions = []
+        reasons = [f"plan-stale-skipped: {stale_reason}"]
+
     body = {
         "run_id": run_id,
         "turn_n": int(turn_n),
         "epoch": now,
-        "actions": plan.get("actions") or [],
-        "reasons": plan.get("reasons") or [],
+        "actions": actions,
+        "reasons": reasons,
         "slots_snapshot": state.get("slots") or {},
         "signals_snapshot": state.get("signal_last_fired") or {},
         "tokens_after": int(state.get("cumulative_tokens", 0) or 0),
