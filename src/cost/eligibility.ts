@@ -67,7 +67,7 @@ export const PACE_STATE_TOLERANCE_PERCENT = 2;
  * — mirroring how `pacingState` defaults to the inert "under" when uncalibrated.
  * This field is ADDITIVE and does NOT yet gate dispatch (that is #858).
  */
-export type PaceState = "behind" | "on" | "ahead";
+type PaceState = "behind" | "on" | "ahead";
 
 /**
  * The operator-tunable **Pacing Ceiling** as a fraction in (0, 1], read from

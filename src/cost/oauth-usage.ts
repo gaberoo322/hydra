@@ -57,7 +57,7 @@ export type OAuthUsageErrorCode = Extract<HydraErrorCode, `oauth-usage-${string}
  * boundary as an ISO-8601 string, or `null` when the meter reported a
  * non-string / unparseable / absent boundary.
  */
-export interface OAuthUsageWindow {
+interface OAuthUsageWindow {
   utilization: number;
   resetsAt: string | null;
 }
