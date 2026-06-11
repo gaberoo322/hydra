@@ -61,19 +61,19 @@ import {
 
 type AutopilotCurrentRun = z.infer<typeof AutopilotCurrentRunSchema>;
 
-export interface SchedulerStatusReader {
+interface SchedulerStatusReader {
   (): Promise<{ running: boolean; lastTickAt: string | null }>;
 }
 
-export interface CurrentAutopilotRunReader {
+interface CurrentAutopilotRunReader {
   (): Promise<AutopilotCurrentRun | null>;
 }
 
-export interface AutopilotLifecycleReader {
+interface AutopilotLifecycleReader {
   (): Promise<AutopilotLifecyclePayload>;
 }
 
-export interface AlertsReader {
+interface AlertsReader {
   (limit: number): Promise<string[]>;
 }
 

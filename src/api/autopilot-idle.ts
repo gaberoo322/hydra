@@ -48,11 +48,11 @@ export interface EligibilityView {
   percentLast5h: number;
 }
 
-export interface EligibilityReader {
+interface EligibilityReader {
   (): Promise<EligibilityView>;
 }
 
-export interface AutopilotLivenessReader {
+interface AutopilotLivenessReader {
   (): Promise<IdleAutopilotLiveness>;
 }
 
