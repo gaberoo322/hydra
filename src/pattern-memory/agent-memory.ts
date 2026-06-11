@@ -72,6 +72,18 @@ export {
 const MAX_PATTERNS = 15;
 export const PROMOTION_THRESHOLD = 3;
 const MAX_EXAMPLES = 3;
+/** Issue #1667 — cap on merged-spelling aliases retained per pattern. */
+const MAX_ALIASES = 5;
+/**
+ * Issue #1667 — minimum cue-similarity (overlap coefficient over stemmed
+ * kebab tokens) for a new cue to merge into an existing pattern instead of
+ * fragmenting into a fresh hitCount:1 entry. Calibrated against the retro
+ * evidence in #1667: the four knip-demote spellings and the three
+ * sentry-vercel-edge spellings all score >= 0.6 against their oldest
+ * sibling, while unrelated cues sharing a prefix token (e.g. two distinct
+ * scope-check gotchas) stay below it.
+ */
+const CUE_MERGE_THRESHOLD = 0.6;
 
 export type MemoryPattern = {
   category: string;
@@ -126,6 +138,17 @@ export type MemoryPattern = {
     error?: string;
     at: string;
   };
+  /**
+   * Issue #1667 — alternate cue spellings that fuzzy-merged into this
+   * pattern (write-side normalization in `recordPattern`). Subagents
+   * free-author kebab-case cues, so the same gotcha used to land under
+   * several spellings, each stuck at hitCount:1 — starving the
+   * hitCount-based promotion/escalation machinery. The canonical spelling
+   * stays `category` (the OLDER spelling wins); merged variants are kept
+   * here, capped at MAX_ALIASES, purely for observability. Additive field:
+   * pre-#1667 records simply lack it.
+   */
+  aliases?: string[];
 };
 
 /**
@@ -393,6 +416,95 @@ export function formatMemoryForPrompt(
 }
 
 // ===========================================================================
+// Issue #1667 — fuzzy cue dedup (write-side normalization)
+// ===========================================================================
+
+/**
+ * Light suffix stem so trivial inflection differences ("missing"/"misses",
+ * "referenced"/"references", "internally"/"internal") collapse to one token.
+ * Deliberately crude — a stem only has to be CONSISTENT across spellings of
+ * the same gotcha, not linguistically correct. Minimum stem length 3 so short
+ * tokens ("is", "ci", "npm") pass through untouched.
+ */
+function stemCueToken(token: string): string {
+  for (const suffix of ["ing", "ed", "es", "ly", "s"]) {
+    if (token.length - suffix.length >= 3 && token.endsWith(suffix)) {
+      return token.slice(0, -suffix.length);
+    }
+  }
+  return token;
+}
+
+function tokenizeCue(cue: string): Set<string> {
+  return new Set(
+    cue
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)
+      .map(stemCueToken),
+  );
+}
+
+/**
+ * Similarity between two free-authored kebab-case cues in [0, 1]: the overlap
+ * coefficient (|intersection| / min(|A|, |B|)) over stemmed tokens. Overlap
+ * coefficient (not Jaccard) so a short cue that is a near-subset of a longer
+ * restatement still scores high — the fragmentation pattern in the #1667
+ * evidence is precisely "same tokens, different elaborations".
+ *
+ * Guard: when either cue has fewer than 2 tokens the metric degenerates (any
+ * superset of a single-token cue would score 1.0), so single-token cues
+ * match exact-spelling only.
+ *
+ * Exported for direct unit testing; production callers go through
+ * `findPatternForCue`.
+ */
+export function cueSimilarity(a: string, b: string): number {
+  const ta = tokenizeCue(a);
+  const tb = tokenizeCue(b);
+  const minSize = Math.min(ta.size, tb.size);
+  if (minSize === 0) return 0;
+  if (minSize < 2) return a.trim().toLowerCase() === b.trim().toLowerCase() ? 1 : 0;
+  let intersection = 0;
+  for (const t of ta) if (tb.has(t)) intersection++;
+  return intersection / minSize;
+}
+
+/**
+ * Resolve the pattern a cue should land on: exact category match first
+ * (cheap, and pre-existing fragments keep their identity), otherwise the
+ * best fuzzy match at or above CUE_MERGE_THRESHOLD. Ties prefer the OLDER
+ * pattern (firstSeen) so the earliest spelling of a gotcha stays canonical
+ * regardless of store order. Returns undefined when nothing matches — the
+ * caller creates a fresh pattern, exactly as before #1667.
+ *
+ * Exported for direct unit testing.
+ */
+export function findPatternForCue(
+  patterns: MemoryPattern[],
+  category: string,
+): MemoryPattern | undefined {
+  const exact = patterns.find(p => p.category === category);
+  if (exact) return exact;
+
+  let best: MemoryPattern | undefined;
+  let bestScore = 0;
+  for (const p of patterns) {
+    const score = cueSimilarity(p.category, category);
+    if (score < CUE_MERGE_THRESHOLD) continue;
+    if (
+      !best ||
+      score > bestScore ||
+      (score === bestScore && p.firstSeen < best.firstSeen)
+    ) {
+      best = p;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+// ===========================================================================
 // recordPattern (with auto-promotion)
 // ===========================================================================
 
@@ -422,6 +534,16 @@ export function formatMemoryForPrompt(
  * stays best-effort and never throws (the default `escalateIfNeeded` swallows
  * + logs, and `escalatePatternToIssue` honours `HYDRA_ESCALATION_DISABLED`).
  * Pass a no-op `escalate` to exercise pattern accounting in isolation.
+ *
+ * Issue #1667 — `category` is normalized write-side IN THE FRICTION
+ * NAMESPACE ONLY: an incoming friction cue that fuzzy-matches an existing
+ * pattern (see `findPatternForCue`) increments that pattern instead of
+ * creating a fragment, with the older spelling kept canonical and the
+ * variant retained in `aliases`. All downstream decisions (metadata-cue
+ * classification, escalation threshold/cue/context) key on the canonical
+ * `pattern.category`. The `memory` namespace stays exact-match: its cues
+ * are deliberate identifiers (#524 metadata cues carry per-cue escalation
+ * thresholds) and a fuzzy merge there would collapse distinct thresholds.
  */
 export async function recordPattern(
   agentName: string,
@@ -446,15 +568,44 @@ export async function recordPattern(
   const patterns = await loadPatterns(agentName, namespace);
   const today = new Date().toISOString().split("T")[0];
 
-  const existing = patterns.find(p => p.category === category);
+  // Issue #1667 — exact match first, then fuzzy (token-overlap) merge so
+  // free-authored respellings of the same gotcha increment ONE pattern
+  // instead of fragmenting into parallel hitCount:1 entries that never
+  // reach PROMOTION_THRESHOLD. Fuzzy resolution applies to the FRICTION
+  // namespace ONLY (design invariant 1): memory-namespace cues are
+  // deliberately-spelled identifiers (e.g. the #524 metadata cue pair
+  // acceptance-criterion-unmet / acceptance-criterion-deferred, which
+  // token-overlap at 0.667 ≥ CUE_MERGE_THRESHOLD) whose per-cue escalation
+  // thresholds would be corrupted by a fuzzy merge — they stay exact-match.
+  const existing =
+    namespace === "friction"
+      ? findPatternForCue(patterns, category)
+      : patterns.find(p => p.category === category);
   let crossedThreshold = false;
   let pattern: MemoryPattern;
 
   if (existing) {
+    if (existing.category !== category) {
+      // Fuzzy merge: the older spelling stays canonical; keep the variant
+      // as an alias for observability.
+      existing.aliases = [
+        ...new Set([...(existing.aliases ?? []), category]),
+      ].slice(0, MAX_ALIASES);
+      console.log(
+        `[Learning] Cue "${category}" fuzzy-merged into existing cue "${existing.category}" (${agentName}/${namespace})`,
+      );
+    }
     existing.hitCount++;
     existing.lastSeen = today;
     existing.lastCycleId = details.cycleId;
-    existing.action = details.action;
+    // Design invariant 2 (issue #1667): an alias merge never overwrites the
+    // canonical pattern's action — only exact-category hits keep the existing
+    // action-update behaviour. Caps the blast radius of a false fuzzy merge
+    // to hitCount/examples/aliases; the oldest spelling's fix prescription
+    // survives later-arriving variants.
+    if (existing.category === category) {
+      existing.action = details.action;
+    }
     existing.examples = [details.example, ...existing.examples].slice(0, MAX_EXAMPLES);
     if (details.source) existing.source = details.source;
 
@@ -462,7 +613,10 @@ export async function recordPattern(
       // Issue #524 — metadata cues (acceptance-criterion-deferred) record
       // hits and stamp `promoted: true` so we don't re-evaluate, but skip
       // the feedback-file write because they aren't defects.
-      const metadataOnly = isMetadataCue(category);
+      // Issue #1667 — judged on the CANONICAL spelling (existing.category),
+      // not the raw input, so a fuzzy-merged variant can't dodge or trigger
+      // the metadata classification.
+      const metadataOnly = isMetadataCue(existing.category);
       if (namespace === "memory" && !metadataOnly) {
         await promoteToFeedback(agentName, existing);
       }
@@ -473,7 +627,7 @@ export async function recordPattern(
       const target = metadataOnly
         ? `(metadata-only — feedback-file write skipped)`
         : namespace === "memory" ? `to-${agentName}.md` : `friction:${agentName}`;
-      console.log(`[Learning] Promoted "${category}" to ${target} (${existing.hitCount} hits)`);
+      console.log(`[Learning] Promoted "${existing.category}" to ${target} (${existing.hitCount} hits)`);
     }
     pattern = existing;
   } else {
@@ -502,11 +656,14 @@ export async function recordPattern(
   // Issue #524 — per-cue threshold override. `acceptance-criterion-deferred`
   // uses a much higher threshold (20+) so it doesn't fire on every PR with
   // operator-observable ACs; everything else keeps the legacy 3-hit threshold.
-  const threshold = escalationThresholdForCue(category, PROMOTION_THRESHOLD);
+  // Issue #1667 — escalation decisions key on the CANONICAL category
+  // (pattern.category), so hits arriving under merged alias spellings count
+  // toward — and are reported under — one cue.
+  const threshold = escalationThresholdForCue(pattern.category, PROMOTION_THRESHOLD);
   const escalation: EscalationInput | null = shouldEscalateAtHitCount(pattern.hitCount, threshold)
     ? {
         kind: namespace === "friction" ? "friction" : "lesson",
-        cue: category,
+        cue: pattern.category,
         hitCount: pattern.hitCount,
         skills: [agentName],
         workarounds: pattern.examples.filter(e => typeof e === "string" && e.trim().length > 0),
@@ -528,8 +685,8 @@ export async function recordPattern(
   const escalate = details.escalate ?? escalateIfNeeded;
   const escalationContext =
     namespace === "friction"
-      ? `friction/${agentName}/${category}`
-      : `${agentName}/${category}`;
+      ? `friction/${agentName}/${pattern.category}`
+      : `${agentName}/${pattern.category}`;
   // The default `escalateIfNeeded` is best-effort and never throws, but a
   // misbehaving injected dep could. recordPattern must NEVER throw (the #823
   // invariant + AC), so a thrown dispatch becomes an error Escalation Outcome
