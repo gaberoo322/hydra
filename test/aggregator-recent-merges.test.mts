@@ -125,7 +125,8 @@ describe("getRecentMerges — happy path", () => {
   test("git log + per-PR meta → enriched MergeItem[] with provenance classLabel (#1672)", async () => {
     const gitLogStdout = ["feat: a (#100)", "fix: b (#101)", "fix: c (#102)"].join("\n");
     const exec = makeExecStub({
-      "git log master": { stdout: gitLogStdout },
+      "git fetch origin master": { stdout: "" },
+      "git log origin/master": { stdout: gitLogStdout },
     });
     const meta = new Map([
       [100, { title: "feat: a", labels: ["tier:2", "cleanup-scan"], mergedAt: "2026-05-26T03:00:00Z", url: "u100" }],
@@ -157,7 +158,8 @@ describe("getRecentMerges — happy path", () => {
 describe("getRecentMerges — empty state", () => {
   test("git log returns nothing → []", async () => {
     const exec = makeExecStub({
-      "git log master": { stdout: "" },
+      "git fetch origin master": { stdout: "" },
+      "git log origin/master": { stdout: "" },
     });
     const result = await getRecentMerges(10, {
       execFileAsync: exec,
@@ -178,6 +180,58 @@ describe("getRecentMerges — empty state", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Ref freshness (issue #1757): read origin/master, not the deploy-lagged
+// local master; fetch is bounded + fail-open; local master is the fallback.
+// ---------------------------------------------------------------------------
+
+describe("getRecentMerges — origin/master ref freshness (#1757)", () => {
+  test("reads origin/master, not local master, when both exist", async () => {
+    // Stale local master knows only #100; origin/master has the merge wave.
+    const exec = makeExecStub({
+      "git fetch origin master": { stdout: "" },
+      "git log origin/master": { stdout: ["fix: wave (#200)", "feat: a (#100)"].join("\n") },
+      "git log master": { stdout: "feat: a (#100)" },
+    });
+    const result = await getRecentMerges(10, {
+      execFileAsync: exec,
+      fetchPrMeta: async () => null,
+    });
+    assert.deepEqual(result.map((m) => m.prNumber), [200, 100]);
+  });
+
+  test("fetch failure is fail-open → still reads cached origin/master", async () => {
+    const exec = async (cmd: string, args: readonly string[]) => {
+      const key = `${cmd} ${args.join(" ")}`;
+      if (key.includes("fetch")) throw new Error("network down");
+      if (key.includes("git log origin/master")) return { stdout: "fix: cached (#300)", stderr: "" };
+      throw new Error(`unexpected: ${key}`);
+    };
+    const result = await getRecentMerges(10, {
+      execFileAsync: exec,
+      fetchPrMeta: async () => null,
+    });
+    assert.deepEqual(result.map((m) => m.prNumber), [300]);
+  });
+
+  test("missing origin/master ref → falls back to local master", async () => {
+    const exec = async (cmd: string, args: readonly string[]) => {
+      const key = `${cmd} ${args.join(" ")}`;
+      if (key.includes("fetch")) throw new Error("no remote");
+      if (key.includes("origin/master")) {
+        throw new Error("fatal: ambiguous argument 'origin/master'");
+      }
+      if (key.includes("git log master")) return { stdout: "feat: local (#400)", stderr: "" };
+      throw new Error(`unexpected: ${key}`);
+    };
+    const result = await getRecentMerges(10, {
+      execFileAsync: exec,
+      fetchPrMeta: async () => null,
+    });
+    assert.deepEqual(result.map((m) => m.prNumber), [400]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Boundary: per-PR meta failure → tier/classLabel null, item still listed
 // ---------------------------------------------------------------------------
 
@@ -185,7 +239,8 @@ describe("getRecentMerges — per-PR meta failure isolation", () => {
   test("missing meta → MergeItem with nulls but PR number preserved", async () => {
     const gitLogStdout = ["feat: x (#999)"].join("\n");
     const exec = makeExecStub({
-      "git log master": { stdout: gitLogStdout },
+      "git fetch origin master": { stdout: "" },
+      "git log origin/master": { stdout: gitLogStdout },
     });
     const result = await getRecentMerges(10, {
       execFileAsync: exec,

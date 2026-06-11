@@ -8,11 +8,16 @@
  *
  * # Data path
  *
- * 1. `git log master --first-parent --merges|--no-merges` is the cheapest
- *    way to list merge commits. We use `--first-parent` so squash merges
- *    (one-parent commits on master) and true merges both surface. We
- *    parse the subject for the canonical `(#NNN)` PR-number suffix that
- *    GitHub's squash-merge UI appends.
+ * 1. `git log origin/master --first-parent` is the cheapest way to list
+ *    merge commits. We use `--first-parent` so squash merges (one-parent
+ *    commits on master) and true merges both surface. We parse the subject
+ *    for the canonical `(#NNN)` PR-number suffix that GitHub's squash-merge
+ *    UI appends. We read the `origin/master` remote-tracking ref — refreshed
+ *    by a bounded, fail-open `git fetch` — NOT the local `master` ref: in
+ *    HYDRA_ROOT local master only advances when deploy pulls, and deploy
+ *    waves cancel each other, so local master goes stale exactly when fresh
+ *    merges need to be visible (issue #1757 — false-positive
+ *    `unproductive-loop` signals during merge waves).
  * 2. For each merged PR number, we fetch labels via `gh pr view --json`.
  *    Tier comes from a label of the form `tier:N`; the provenance label
  *    comes from the Dispatch-Class Taxonomy Module (classes.json
@@ -165,17 +170,61 @@ export function clampLimit(limit: number): number {
 // Sub-source: recent PR numbers from `git log`
 // ---------------------------------------------------------------------------
 
+/** Bounded cap on the pre-read `git fetch` — fail-open past this. */
+const FETCH_TIMEOUT_MS = 5000;
+
 async function listRecentPrNumbers(
   limit: number,
   deps: RecentMergesDeps,
 ): Promise<number[]> {
   const exec = deps.execFileAsync ?? execFile;
   const cwd = deps.repoPath ?? resolveDefaultRepoPath();
-  const { stdout } = await exec(
-    "git",
-    ["log", "master", "--first-parent", `-n`, String(limit * 2), "--pretty=format:%s"],
-    { cwd, timeout: 5000, maxBuffer: 1024 * 1024 },
-  );
+  const logArgs = (ref: string) => [
+    "log",
+    ref,
+    "--first-parent",
+    "-n",
+    String(limit * 2),
+    "--pretty=format:%s",
+  ];
+
+  // Refresh the remote-tracking ref first (issue #1757). Bounded + fail-open:
+  // a slow/offline fetch degrades to the cached `origin/master`, which is
+  // still fresher than local `master` in practice (sibling worktree
+  // dispatches fetch into the shared gitdir), never an error.
+  try {
+    await exec("git", ["fetch", "origin", "master", "--quiet"], {
+      cwd,
+      timeout: FETCH_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (err: any) {
+    console.error(
+      `[recent-merges] git fetch origin master failed (fail-open to cached origin/master): ${err?.message || err}`,
+    );
+  }
+
+  // Primary read: `origin/master`. The local `master` ref in HYDRA_ROOT only
+  // advances when deploy pulls — stale during merge waves (issue #1757) — so
+  // it is only the fallback for repos with no remote-tracking ref.
+  try {
+    const { stdout } = await exec("git", logArgs("origin/master"), {
+      cwd,
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    });
+    return extractPrNumbersFromGitLog(stdout, limit);
+  } catch (err: any) {
+    console.error(
+      `[recent-merges] git log origin/master failed (falling back to local master): ${err?.message || err}`,
+    );
+  }
+
+  const { stdout } = await exec("git", logArgs("master"), {
+    cwd,
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+  });
   return extractPrNumbersFromGitLog(stdout, limit);
 }
 
