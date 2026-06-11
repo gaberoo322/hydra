@@ -44,13 +44,30 @@ import {
   classifyExportFix,
   renderTitle,
   renderBody,
+  renderBatchTitle,
+  renderBatchBody,
+  moduleDirKey,
   dedupAgainstOpen,
   type CleanupFinding,
   type KnipReport,
+  type OpenIssueRef,
 } from "./hydra-cleanup-render.ts";
 
-/** Max issues a single cleanup run files (whole-file deletions rank first). */
+/**
+ * Max issues a single cleanup run files. Since #1653 an "issue" is a BATCH
+ * (one module dir, up to SYMBOLS_PER_BATCH findings), so the cap counts batch
+ * issues — 8 batches can cover ~150 findings, which is the point.
+ */
 export const EMIT_CAP = 8;
+
+/**
+ * Max findings folded into one batch issue (issue #1653). A 70-finding module
+ * (src/schemas at the time of writing) splits into reviewable chunks instead
+ * of one unreviewable wall — the largest single-batch precedent that cleared
+ * the merge gate is 16 exports (PR #1549), so ~20 keeps each PR in the proven
+ * reviewable range while still collapsing the per-symbol churn.
+ */
+export const SYMBOLS_PER_BATCH = 20;
 
 /**
  * Verifier Core paths (src/untouchable.ts VERIFIER_CORE_PATHS) — operator-only,
@@ -65,9 +82,17 @@ export const VERIFIER_CORE_SUBSTRINGS = [
   "src/untouchable.ts",
 ];
 
-/** A finding that survived the full pipeline and will be emitted. */
+/**
+ * One issue that survived the full pipeline and will be emitted. Since #1653
+ * an issue covers a BATCH of findings sharing one module dir (`moduleDir` is
+ * the moduleDirKey the batch grouped on). A batch of exactly one finding is
+ * rendered in the legacy single-finding format (renderTitle/renderBody) so
+ * the long tail of 1-finding modules keeps the proven shape; multi-finding
+ * batches render the checklist + identity-manifest body (renderBatchBody).
+ */
 export interface PlannedCleanupIssue {
-  finding: CleanupFinding;
+  moduleDir: string;
+  findings: CleanupFinding[];
   title: string;
   body: string;
 }
@@ -128,10 +153,11 @@ function filterReason(finding: CleanupFinding): string | null {
  */
 export function planCleanupEmit(
   report: KnipReport,
-  openIssueTitles: string[],
+  openIssues: Array<string | OpenIssueRef>,
   readSource: (path: string) => string,
   isoDate: string,
   cap: number = EMIT_CAP,
+  symbolsPerBatch: number = SYMBOLS_PER_BATCH,
 ): CleanupEmitPlan {
   const raw = parseKnipReport(report);
   const dropped: DroppedCleanupFinding[] = [];
@@ -154,30 +180,72 @@ export function planCleanupEmit(
     return { ...finding, fix: classifyExportFix(finding, src) };
   });
 
-  // 3. Dedup against the open board AND within this batch (identity-keyed).
-  const { kept: deduped, dropped: dups } = dedupAgainstOpen(classified, openIssueTitles);
+  // 3. Dedup against the open board AND within this run (identity-keyed).
+  //    Identities are recovered from legacy titles AND batch body manifests
+  //    (#1653), so both issue generations dedup correctly.
+  const { kept: deduped, dropped: dups } = dedupAgainstOpen(classified, openIssues);
   for (const finding of dups) {
     dropped.push({ finding, reason: "duplicate of an open cleanup-scan issue (or in-batch dup)" });
   }
 
-  // 4. Rank whole-file deletions ahead of single-export deletions (they reclaim
-  //    the most surface), then cap. Stable within each kind (input order).
-  const ranked = [...deduped].sort((a, b) => {
-    if (a.kind === b.kind) return 0;
-    return a.kind === "file" ? -1 : 1;
-  });
-  const toEmit = ranked.slice(0, cap);
-  for (const finding of ranked.slice(cap)) {
-    dropped.push({ finding, reason: `over the per-run cap of ${cap}` });
+  // 4. BATCH (issue #1653): group per-symbol findings by module dir — the
+  //    granularity flip happens HERE, at the render boundary, so every guard
+  //    above (validate/filter/classify/dedup) stayed per-symbol. Within each
+  //    group, whole-file deletions lead the checklist (they reclaim the most
+  //    surface); groups over symbolsPerBatch split into reviewable chunks.
+  const groups = new Map<string, CleanupFinding[]>();
+  for (const finding of deduped) {
+    const key = moduleDirKey(finding.path);
+    groups.set(key, [...(groups.get(key) ?? []), finding]);
   }
 
-  // 5. Render title + body from the SAME finding, in ONE pass. No hand-built
+  const batches: Array<{ moduleDir: string; findings: CleanupFinding[] }> = [];
+  for (const [moduleDir, group] of groups) {
+    const ordered = [...group].sort((a, b) => {
+      if (a.kind === b.kind) return 0;
+      return a.kind === "file" ? -1 : 1; // whole files first, stable otherwise
+    });
+    for (let i = 0; i < ordered.length; i += symbolsPerBatch) {
+      batches.push({ moduleDir, findings: ordered.slice(i, i + symbolsPerBatch) });
+    }
+  }
+
+  //    Rank batches: most whole-file deletions first, then biggest harvest,
+  //    then module dir for a deterministic plan. Cap counts BATCH issues.
+  batches.sort((a, b) => {
+    const aFiles = a.findings.filter((f) => f.kind === "file").length;
+    const bFiles = b.findings.filter((f) => f.kind === "file").length;
+    if (aFiles !== bFiles) return bFiles - aFiles;
+    if (a.findings.length !== b.findings.length) return b.findings.length - a.findings.length;
+    return a.moduleDir < b.moduleDir ? -1 : a.moduleDir > b.moduleDir ? 1 : 0;
+  });
+  const toEmit = batches.slice(0, cap);
+  for (const batch of batches.slice(cap)) {
+    for (const finding of batch.findings) {
+      dropped.push({ finding, reason: `over the per-run cap of ${cap} batch issues` });
+    }
+  }
+
+  // 5. Render title + body from the SAME findings, in ONE pass. No hand-built
   //    title, no index-aligned second loop — the #1449 / #1005 drift guard.
-  const issues: PlannedCleanupIssue[] = toEmit.map((finding) => ({
-    finding,
-    title: renderTitle(finding),
-    body: renderBody(finding, isoDate),
-  }));
+  //    A 1-finding batch keeps the legacy single-finding format (its identity
+  //    lives in the title); a multi-finding batch renders the checklist body
+  //    whose identities live in the cleanup-identities manifest.
+  const issues: PlannedCleanupIssue[] = toEmit.map(({ moduleDir, findings }) =>
+    findings.length === 1
+      ? {
+          moduleDir,
+          findings,
+          title: renderTitle(findings[0]),
+          body: renderBody(findings[0], isoDate),
+        }
+      : {
+          moduleDir,
+          findings,
+          title: renderBatchTitle(moduleDir, findings),
+          body: renderBatchBody(moduleDir, findings, isoDate),
+        },
+  );
 
   return { issues, dropped, rawCount: raw.length };
 }
@@ -188,15 +256,20 @@ export function planCleanupEmit(
 
 const REPO = "gaberoo322/hydra";
 
-function readBoardTitles(): string[] {
+function readBoardIssues(): OpenIssueRef[] {
   try {
     const out = execFileSync(
       "gh",
-      ["issue", "list", "--repo", REPO, "--state", "open", "--label", "cleanup-scan", "--json", "title", "--limit", "100"],
+      ["issue", "list", "--repo", REPO, "--state", "open", "--label", "cleanup-scan", "--json", "title,body", "--limit", "100"],
       { encoding: "utf-8" },
     );
-    const parsed = JSON.parse(out) as Array<{ title?: unknown }>;
-    return parsed.map((i) => (typeof i.title === "string" ? i.title : "")).filter(Boolean);
+    const parsed = JSON.parse(out) as Array<{ title?: unknown; body?: unknown }>;
+    return parsed
+      .filter((i) => typeof i.title === "string" && i.title.length > 0)
+      .map((i) => ({
+        title: i.title as string,
+        body: typeof i.body === "string" ? i.body : undefined,
+      }));
   } catch (err) {
     console.error(
       "hydra-cleanup-emit: failed to read the open cleanup-scan board via gh — aborting (cannot dedup safely):",
@@ -245,9 +318,9 @@ function main(argv: string[]): void {
     process.exit(1);
   }
 
-  const openTitles = readBoardTitles();
-  if (openTitles.length > 10) {
-    console.log(`hydra-cleanup-emit: board saturated (${openTitles.length} open cleanup-scan issues > 10 cap) — emitting nothing.`);
+  const openIssues = readBoardIssues();
+  if (openIssues.length > 10) {
+    console.log(`hydra-cleanup-emit: board saturated (${openIssues.length} open cleanup-scan issues > 10 cap) — emitting nothing.`);
     process.exit(0);
   }
 
@@ -260,17 +333,27 @@ function main(argv: string[]): void {
     }
   };
 
-  const plan = planCleanupEmit(report, openTitles, readSource, isoDate);
+  const plan = planCleanupEmit(report, openIssues, readSource, isoDate);
+  const plannedFindings = plan.issues.reduce((n, i) => n + i.findings.length, 0);
 
   console.log(`hydra-cleanup-emit — Orchestrator (~/hydra) — ${new Date().toISOString()} — ${apply ? "apply" : "dry-run"}`);
   console.log("");
   console.log(`knip raw findings:   ${plan.rawCount}`);
-  console.log(`After filter+dedup:  ${plan.issues.length} to emit (cap ${EMIT_CAP})`);
+  console.log(`After filter+dedup:  ${plan.issues.length} batch issue(s) covering ${plannedFindings} finding(s) (cap ${EMIT_CAP} issues, ≤${SYMBOLS_PER_BATCH} findings each)`);
   console.log(`Dropped:             ${plan.dropped.length}`);
   console.log("");
 
   for (const issue of plan.issues) {
-    const fix = issue.finding.kind === "export" ? ` [fix: ${issue.finding.fix ?? "unknown"}]` : "";
+    const verdicts = issue.findings
+      .filter((f) => f.kind === "export")
+      .reduce<Record<string, number>>((acc, f) => {
+        const fix = f.fix ?? "unknown";
+        acc[fix] = (acc[fix] ?? 0) + 1;
+        return acc;
+      }, {});
+    const fix = Object.keys(verdicts).length
+      ? ` [fix: ${Object.entries(verdicts).map(([k, v]) => `${k}×${v}`).join(", ")}]`
+      : "";
     console.log(`• ${issue.title}${fix}`);
     if (!apply) {
       console.log("  --- body ---");

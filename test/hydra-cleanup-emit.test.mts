@@ -34,12 +34,16 @@ import assert from "node:assert/strict";
 import {
   classifyExportFix,
   renderTitle,
+  renderBatchTitle,
+  findingIdentity,
+  identitiesFromIssueBody,
   type CleanupFinding,
   type KnipReport,
 } from "../scripts/ci/hydra-cleanup-render.ts";
 import {
   planCleanupEmit,
   EMIT_CAP,
+  SYMBOLS_PER_BATCH,
 } from "../scripts/ci/hydra-cleanup-emit.ts";
 
 const ISO = "2026-06-09";
@@ -133,7 +137,8 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
     // This is the assertion that would have caught #1421–#1426: there, the body
     // H1 had `RecentMergesQuery` but the title was blank. Here we assert the
     // title and the body H1 can never name different symbols, because both come
-    // from the same finding in one pass.
+    // from the same finding in one pass. Two findings in two different module
+    // dirs → two 1-finding batches → the legacy single-finding format.
     const report: KnipReport = {
       files: [],
       issues: [
@@ -146,16 +151,18 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
     const plan = planCleanupEmit(report, noOpenIssues, () => "", ISO);
     assert.equal(plan.issues.length, 2);
     for (const issue of plan.issues) {
+      assert.equal(issue.findings.length, 1, "one finding per module dir → legacy single format");
+      const finding = issue.findings[0];
       // The title carries the symbol name — never blank, never double-space.
-      assert.ok(issue.title.includes(issue.finding.name), `title must name the symbol: ${issue.title}`);
+      assert.ok(issue.title.includes(finding.name), `title must name the symbol: ${issue.title}`);
       assert.ok(!/remove unused export  /.test(issue.title), "no double-space blank title (the #1421 defect)");
       assert.ok(!/ $/.test(issue.title), "no trailing-space title");
       // The body H1 names the SAME symbol the title does.
       const h1 = issue.body.split("\n")[0];
-      assert.ok(h1.includes(issue.finding.name), `body H1 must name the same symbol as the title: ${h1}`);
+      assert.ok(h1.includes(finding.name), `body H1 must name the same symbol as the title: ${h1}`);
       // Title is exactly what renderTitle produces from the finding — i.e. the
       // runner cannot have hand-built it.
-      assert.equal(issue.title, renderTitle(issue.finding));
+      assert.equal(issue.title, renderTitle(finding));
     }
   });
 
@@ -172,7 +179,8 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
     };
     const plan = planCleanupEmit(report, noOpenIssues, () => "", ISO);
     assert.equal(plan.issues.length, 1, "only the well-formed finding is emitted");
-    assert.equal(plan.issues[0].finding.name, "RealExport");
+    assert.equal(plan.issues[0].findings.length, 1);
+    assert.equal(plan.issues[0].findings[0].name, "RealExport");
     assert.ok(plan.dropped.some((d) => /blank-title|empty symbol name/.test(d.reason)));
   });
 
@@ -186,10 +194,37 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
     const plan = planCleanupEmit(report, noOpenIssues, readSource, ISO);
     assert.equal(plan.issues.length, 1);
     const issue = plan.issues[0];
-    assert.equal(issue.finding.fix, "demote", "internally-referenced export routes to demote");
+    assert.equal(issue.findings[0].fix, "demote", "internally-referenced export routes to demote");
     // The emitted BODY must lead with the demote recommendation, not invite a delete.
     assert.match(issue.body, /Recommended fix: \*\*demote\*\* \(drop the `export` keyword\) — NOT delete/);
     assert.match(issue.body, /Deleting it would break `tsc`/);
+  });
+
+  test("DEMOTE ROUTING in a BATCH: the checklist line carries the demote verdict (#1653)", () => {
+    // Two findings in the SAME module dir → one batch issue; the demote verdict
+    // must survive into the per-symbol checklist line.
+    const report: KnipReport = {
+      files: [],
+      issues: [
+        { file: "src/schemas/autopilot-idle.ts", exports: [{ name: "IdleBlockedBySchema" }], types: [] },
+        { file: "src/schemas/other.ts", exports: [{ name: "deadConst" }], types: [] },
+      ],
+    };
+    const readSource = (p: string) =>
+      p === "src/schemas/autopilot-idle.ts" ? SCHEMA_SOURCE_INTERNALLY_REFERENCED : SOURCE_TRULY_DEAD;
+    const plan = planCleanupEmit(report, noOpenIssues, readSource, ISO);
+    assert.equal(plan.issues.length, 1, "same module dir → one batch issue");
+    const issue = plan.issues[0];
+    assert.equal(issue.moduleDir, "src/schemas");
+    assert.match(issue.body, /- \[ \] `IdleBlockedBySchema` \(`src\/schemas\/autopilot-idle\.ts`\) — fix: \*\*demote\*\*/);
+    assert.match(issue.body, /- \[ \] `deadConst` \(`src\/schemas\/other\.ts`\) — fix: \*\*delete\*\*/);
+    // Batch title comes ONLY from renderBatchTitle on the same findings.
+    assert.equal(issue.title, renderBatchTitle("src/schemas", issue.findings));
+    // The body manifest carries exactly the batch's identities (the dedup surface).
+    assert.deepEqual(identitiesFromIssueBody(issue.body), issue.findings.map((f) => findingIdentity(f)));
+    // Files in scope lists both distinct paths.
+    assert.match(issue.body, /- `src\/schemas\/autopilot-idle\.ts`/);
+    assert.match(issue.body, /- `src\/schemas\/other\.ts`/);
   });
 
   test("DELETE ROUTING: a truly-dead export is planned with fix=delete and the body says so", () => {
@@ -199,7 +234,7 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
     };
     const readSource = (p: string) => (p === "src/x.ts" ? SOURCE_TRULY_DEAD : "");
     const plan = planCleanupEmit(report, noOpenIssues, readSource, ISO);
-    assert.equal(plan.issues[0].finding.fix, "delete");
+    assert.equal(plan.issues[0].findings[0].fix, "delete");
     assert.match(plan.issues[0].body, /Recommended fix: \*\*delete\*\*/);
   });
 
@@ -212,7 +247,7 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
       ],
     };
     const plan = planCleanupEmit(report, [], () => "", ISO);
-    const emittedPaths = plan.issues.map((i) => i.finding.path);
+    const emittedPaths = plan.issues.flatMap((i) => i.findings.map((f) => f.path));
     assert.deepEqual(emittedPaths, ["src/clean.ts"], "only the clean, non-core, non-test finding survives");
     assert.ok(plan.dropped.some((d) => /verifier-core/.test(d.reason)));
   });
@@ -229,6 +264,9 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
   });
 
   test("RECURRENCE: re-running the plan against the board it just filled emits ZERO new issues", () => {
+    // Mixed board after the first run: a 1-finding batch (legacy title carries
+    // the identity) AND a multi-finding batch (identities live in the body
+    // manifest). The second run must recover identities from BOTH surfaces.
     const report: KnipReport = {
       files: ["dashboard/src/components/Card.jsx"],
       issues: [
@@ -237,26 +275,85 @@ describe("planCleanupEmit — title/body coherence, the #1449 blank-title guard"
       ],
     };
     const first = planCleanupEmit(report, [], () => "", ISO);
-    assert.equal(first.issues.length, 3);
-    const filledBoard = first.issues.map((i) => i.title);
+    // dashboard/src (1 file finding) + src (2 export findings) → 2 batches.
+    assert.equal(first.issues.length, 2);
+    const filledBoard = first.issues.map((i) => ({ title: i.title, body: i.body }));
     const second = planCleanupEmit(report, filledBoard, () => "", ISO);
     assert.equal(second.issues.length, 0, "re-run double-files nothing");
   });
 
-  test("CAP + RANK: whole-file deletions rank ahead of export deletions, capped at EMIT_CAP", () => {
-    const files = Array.from({ length: 5 }, (_, i) => `dashboard/src/F${i}.jsx`);
-    const exports = Array.from({ length: 6 }, (_, i) => ({
-      file: `src/e${i}.ts`,
+  test("GROUPING + CAP: one batch per module dir, capped at EMIT_CAP batch issues (#1653)", () => {
+    // 10 findings in 10 DIFFERENT module dirs → 10 one-finding batches; the cap
+    // keeps the first EMIT_CAP and drops the rest with the over-cap reason.
+    const exports = Array.from({ length: 10 }, (_, i) => ({
+      file: `src/mod${i}/e.ts`,
       exports: [{ name: `e${i}` }],
       types: [],
     }));
-    const report: KnipReport = { files, issues: exports };
+    const report: KnipReport = { files: [], issues: exports };
     const plan = planCleanupEmit(report, [], () => "", ISO);
     assert.equal(plan.issues.length, EMIT_CAP);
-    // The first 5 emitted are the whole files (they rank first).
-    for (let i = 0; i < 5; i++) {
-      assert.equal(plan.issues[i].finding.kind, "file");
+    const overCap = plan.dropped.filter((d) => /over the per-run cap/.test(d.reason));
+    assert.equal(overCap.length, 2, "the 2 batches over the cap are dropped with the over-cap reason");
+  });
+
+  test("RANK: a batch holding whole-file deletions ranks ahead of export-only batches", () => {
+    const report: KnipReport = {
+      files: ["dashboard/src/F0.jsx", "dashboard/src/F1.jsx"],
+      issues: [
+        { file: "src/schemas/a.ts", exports: [{ name: "a1" }, { name: "a2" }, { name: "a3" }], types: [] },
+      ],
+    };
+    const plan = planCleanupEmit(report, [], () => "", ISO);
+    assert.equal(plan.issues.length, 2);
+    assert.equal(plan.issues[0].moduleDir, "dashboard/src", "whole-file batch first");
+    assert.ok(plan.issues[0].findings.every((f) => f.kind === "file"));
+    assert.equal(plan.issues[1].moduleDir, "src/schemas");
+  });
+
+  test("CHUNKING: a module over SYMBOLS_PER_BATCH splits into reviewable chunks (#1653)", () => {
+    const n = SYMBOLS_PER_BATCH * 2 + 5; // 45 findings in ONE module dir
+    const report: KnipReport = {
+      files: [],
+      issues: Array.from({ length: n }, (_, i) => ({
+        file: `src/schemas/f${i % 9}.ts`,
+        exports: [{ name: `sym${i}` }],
+        types: [],
+      })),
+    };
+    // Generous cap so chunking, not the cap, decides the issue count.
+    const plan = planCleanupEmit(report, [], () => "", ISO, 100);
+    assert.equal(plan.issues.length, 3, "45 findings chunk into 20 + 20 + 5");
+    assert.deepEqual(plan.issues.map((i) => i.findings.length), [SYMBOLS_PER_BATCH, SYMBOLS_PER_BATCH, 5]);
+    for (const issue of plan.issues) {
+      assert.equal(issue.moduleDir, "src/schemas");
+      assert.ok(issue.findings.length <= SYMBOLS_PER_BATCH);
     }
-    assert.equal(plan.issues[5].finding.kind, "export");
+  });
+
+  test("COVERAGE: a 179-finding / 21-module backlog plans into ~24 batches covering every finding (#1653)", () => {
+    // The real 2026-06-10 backlog shape from the accepted proposal: 179
+    // outstanding findings across 21 module buckets, the largest (src/schemas)
+    // holding 70. Per-symbol granularity = 179 issues; batched = one per module
+    // bucket plus the chunk splits for the 70-finding bucket (4 chunks) →
+    // 21 + 3 = 24 issues, an ~87% reduction, with EVERY finding covered.
+    const bucketSizes = [70, 17, 10, 9, 8, 8, 7, 6, 6, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2, 2, 1];
+    assert.equal(bucketSizes.reduce((a, b) => a + b, 0), 179);
+    const issues = bucketSizes.flatMap((size, m) =>
+      Array.from({ length: size }, (_, i) => ({
+        file: `src/mod${m}/f${i % 7}.ts`,
+        exports: [{ name: `m${m}sym${i}` }],
+        types: [],
+      })),
+    );
+    const report: KnipReport = { files: [], issues };
+    // Uncapped plan (cap = 1000) to measure full-backlog coverage.
+    const plan = planCleanupEmit(report, [], () => "", ISO, 1000);
+    const covered = plan.issues.reduce((acc, i) => acc + i.findings.length, 0);
+    assert.equal(covered, 179, "every finding lands in exactly one batch");
+    assert.equal(plan.issues.length, 24, "21 module buckets + 3 chunk splits for the 70-finding bucket");
+    // No identity appears in two batches.
+    const allIds = plan.issues.flatMap((i) => i.findings.map((f) => findingIdentity(f)));
+    assert.equal(new Set(allIds).size, allIds.length, "no finding is double-batched");
   });
 });
