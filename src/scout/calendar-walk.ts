@@ -211,7 +211,7 @@ export function parseCategorySlugs(markdown: string): WalkTarget[] {
 /**
  * Convenience: read + parse `docs/ai-leverage-categories.md` from disk.
  */
-export async function listCategories(hydraRoot: string): Promise<WalkTarget[]> {
+async function listCategories(hydraRoot: string): Promise<WalkTarget[]> {
   const path = resolve(hydraRoot, "docs", "ai-leverage-categories.md");
   let raw: string;
   try {

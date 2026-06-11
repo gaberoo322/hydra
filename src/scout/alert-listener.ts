@@ -156,10 +156,10 @@ export const ALERT_PER_PATTERN_COOLDOWN_HOURS = 24;
 export const ALERT_PER_CATEGORY_COOLDOWN_HOURS = 24;
 
 /** TTL on per-pattern dedup keys — twice the cooldown so forgotten patterns self-clean. */
-export const ALERT_PATTERN_KEY_TTL_SECONDS = 2 * 24 * 60 * 60;
+const ALERT_PATTERN_KEY_TTL_SECONDS = 2 * 24 * 60 * 60;
 
 /** Bound on the alerts-list scan so we don't iterate the whole list every tick. */
-export const ALERT_SCAN_BATCH = 100;
+const ALERT_SCAN_BATCH = 100;
 
 /** Bound the audit stream — keep last 1000 dispatches. */
 export const SCOUT_DISPATCHES_MAXLEN = 1000;
