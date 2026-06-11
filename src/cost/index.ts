@@ -87,9 +87,4 @@ export {
 // ---------------------------------------------------------------------------
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
 // ---------------------------------------------------------------------------
-export type {
-  OAuthUsageResult,
-  OAuthUsageData,
-  OAuthUsageWindow,
-  OAuthUsageErrorCode,
-} from "./oauth-usage.ts";
+export type { OAuthUsageResult } from "./oauth-usage.ts";
