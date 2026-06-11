@@ -46,7 +46,11 @@ import {
   renderTitle,
   renderBody,
   identityFromOpenIssueTitle,
+  identitiesFromIssueBody,
   dedupAgainstOpen,
+  moduleDirKey,
+  renderBatchTitle,
+  renderBatchBody,
   type CleanupFinding,
   type KnipReport,
 } from "../scripts/ci/hydra-cleanup-render.ts";
@@ -382,5 +386,177 @@ describe("dedupAgainstOpen — recognises duplicates by identity, recurrence-pre
     const secondPass = dedupAgainstOpen(second, emittedTitles);
     assert.equal(secondPass.kept.length, 0, "re-run double-files nothing — board stays at the real finding count");
     assert.equal(secondPass.dropped.length, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch rendering + manifest dedup (issue #1653) — one issue per module dir.
+// ---------------------------------------------------------------------------
+
+describe("moduleDirKey — the per-module batch key (#1653)", () => {
+  test("truncates to the top-2 path segments of the containing directory", () => {
+    assert.equal(moduleDirKey("src/schemas/explore-page.ts"), "src/schemas");
+    assert.equal(moduleDirKey("src/redis/sub/deep.ts"), "src/redis");
+    assert.equal(moduleDirKey("dashboard/src/components/Card.jsx"), "dashboard/src");
+  });
+
+  test("a file directly under a top-level dir keys on that dir", () => {
+    assert.equal(moduleDirKey("src/outcomes.ts"), "src");
+    assert.equal(moduleDirKey("scripts/deploy.sh"), "scripts");
+  });
+
+  test("a repo-root file keys on (root)", () => {
+    assert.equal(moduleDirKey("standalone.ts"), "(root)");
+  });
+});
+
+describe("renderBatchTitle — batch titles never collide with legacy parsing (#1653)", () => {
+  const exp = (path: string, name: string, fix?: "demote" | "delete" | "unknown"): CleanupFinding =>
+    ({ kind: "export", path, name, ...(fix ? { fix } : {}) });
+  const file = (path: string): CleanupFinding => ({ kind: "file", path, name: "" });
+
+  test("exports-only batch counts symbols and distinct files", () => {
+    const t = renderBatchTitle("src/schemas", [
+      exp("src/schemas/a.ts", "A"),
+      exp("src/schemas/a.ts", "B"),
+      exp("src/schemas/b.ts", "C"),
+    ]);
+    assert.equal(t, "cleanup(src/schemas): demote/remove 3 unused exports (2 files)");
+  });
+
+  test("singular forms for a 1-export batch", () => {
+    const t = renderBatchTitle("src/schemas", [exp("src/schemas/a.ts", "A")]);
+    assert.equal(t, "cleanup(src/schemas): demote/remove 1 unused export (1 file)");
+  });
+
+  test("files-only and mixed batches name both kinds", () => {
+    assert.equal(
+      renderBatchTitle("dashboard/src", [file("dashboard/src/X.jsx"), file("dashboard/src/Y.jsx")]),
+      "cleanup(dashboard/src): remove 2 unused files",
+    );
+    assert.equal(
+      renderBatchTitle("src/foo", [file("src/foo/dead.ts"), exp("src/foo/live.ts", "Z")]),
+      "cleanup(src/foo): remove 1 unused file + demote/remove 1 unused export (2 files)",
+    );
+  });
+
+  test("a batch title is NOT parseable as a legacy single-finding identity", () => {
+    const t = renderBatchTitle("src/schemas", [exp("src/schemas/a.ts", "A")]);
+    assert.equal(identityFromOpenIssueTitle(t), null, "batch titles carry no identity — the body manifest does");
+  });
+
+  test("throws on an empty batch or an invalid finding (loud backstop)", () => {
+    assert.throws(() => renderBatchTitle("src/x", []), /empty batch/);
+    assert.throws(
+      () => renderBatchTitle("src/x", [exp("src/x/a.ts", "")]),
+      /invalid finding/,
+    );
+  });
+});
+
+describe("renderBatchBody — checklist + Files in scope + identity manifest (#1653)", () => {
+  const findings: CleanupFinding[] = [
+    { kind: "file", path: "src/schemas/dead.ts", name: "" },
+    { kind: "export", path: "src/schemas/a.ts", name: "DemoteMe", fix: "demote" },
+    { kind: "export", path: "src/schemas/a.ts", name: "DeleteMe", fix: "delete" },
+    { kind: "export", path: "src/schemas/b.ts", name: "MysterySym" },
+  ];
+  const body = renderBatchBody("src/schemas", findings, ISO);
+
+  test("H1 equals the batch title — coherence by construction", () => {
+    assert.equal(body.split("\n")[0], `# ${renderBatchTitle("src/schemas", findings)}`);
+  });
+
+  test("one checklist line per finding, leading with its verdict", () => {
+    assert.match(body, /- \[ \] `src\/schemas\/dead\.ts` — fix: \*\*delete the whole file\*\*/);
+    assert.match(body, /- \[ \] `DemoteMe` \(`src\/schemas\/a\.ts`\) — fix: \*\*demote\*\*/);
+    assert.match(body, /- \[ \] `DeleteMe` \(`src\/schemas\/a\.ts`\) — fix: \*\*delete\*\*/);
+    assert.match(body, /- \[ \] `MysterySym` \(`src\/schemas\/b\.ts`\) — fix: unknown/);
+    // The demote line must warn against deletion (the #1449 recurrence).
+    assert.match(body, /drop only the `export` keyword — still referenced within its own file/);
+  });
+
+  test("Files in scope lists each DISTINCT path exactly once", () => {
+    const scope = body.split("## Files in scope")[1].split("## Acceptance criteria")[0];
+    const bullets = scope.split("\n").filter((l) => l.startsWith("- "));
+    assert.deepEqual(bullets, [
+      "- `src/schemas/dead.ts`",
+      "- `src/schemas/a.ts`",
+      "- `src/schemas/b.ts`",
+    ]);
+  });
+
+  test("the cleanup-identities manifest round-trips through identitiesFromIssueBody", () => {
+    assert.deepEqual(identitiesFromIssueBody(body), [
+      "src/schemas/dead.ts::<file>",
+      "src/schemas/a.ts::DemoteMe",
+      "src/schemas/a.ts::DeleteMe",
+      "src/schemas/b.ts::MysterySym",
+    ]);
+    // …and those are exactly the findingIdentity() keys dedup uses.
+    assert.deepEqual(identitiesFromIssueBody(body), findings.map((f) => findingIdentity(f)));
+  });
+
+  test("carries the taxonomy probe once and the deterministic acceptance checks", () => {
+    assert.match(body, /classify before you delete/);
+    assert.match(body, /## Acceptance criteria/);
+    assert.match(body, /`npm test` still passes/);
+    assert.match(body, /No new `knip` finding/);
+  });
+
+  test("throws on an invalid finding (validate gate backstop)", () => {
+    assert.throws(
+      () => renderBatchBody("src/x", [{ kind: "export", path: "", name: "X" }], ISO),
+      /invalid finding/,
+    );
+  });
+});
+
+describe("identitiesFromIssueBody — manifest parsing is junk-tolerant (#1653)", () => {
+  test("returns [] for a legacy single-finding body (no manifest)", () => {
+    const legacy = renderBody({ kind: "export", path: "src/a.ts", name: "X" }, ISO);
+    assert.deepEqual(identitiesFromIssueBody(legacy), []);
+  });
+
+  test("returns [] for empty / non-manifest bodies", () => {
+    assert.deepEqual(identitiesFromIssueBody(""), []);
+    assert.deepEqual(identitiesFromIssueBody("no comment here"), []);
+  });
+
+  test("ignores junk lines without the :: separator", () => {
+    const body = "<!-- cleanup-identities:\nsrc/a.ts::X\nnot-an-identity\n\nsrc/b.ts::<file>\n-->";
+    assert.deepEqual(identitiesFromIssueBody(body), ["src/a.ts::X", "src/b.ts::<file>"]);
+  });
+});
+
+describe("dedupAgainstOpen — recognises BOTH legacy titles and batch manifests (#1653)", () => {
+  const findings: CleanupFinding[] = [
+    { kind: "export", path: "src/schemas/a.ts", name: "InBatch" },
+    { kind: "export", path: "src/clean.ts", name: "InLegacy" },
+    { kind: "export", path: "src/fresh.ts", name: "Fresh" },
+  ];
+
+  test("a batch issue's manifest dedups its findings; legacy titles still dedup theirs", () => {
+    const batchBody = renderBatchBody(
+      "src/schemas",
+      [
+        { kind: "export", path: "src/schemas/a.ts", name: "InBatch" },
+        { kind: "export", path: "src/schemas/a.ts", name: "OtherBatched" },
+      ],
+      ISO,
+    );
+    const board = [
+      { title: renderBatchTitle("src/schemas", [{ kind: "export", path: "src/schemas/a.ts", name: "InBatch" } as CleanupFinding]), body: batchBody },
+      "cleanup: remove unused export `InLegacy` (src/clean.ts)", // legacy bare-title ref
+    ];
+    const { kept, dropped } = dedupAgainstOpen(findings, board);
+    assert.deepEqual(kept.map((f) => f.name), ["Fresh"], "only the genuinely-new finding survives");
+    assert.equal(dropped.length, 2);
+  });
+
+  test("an OpenIssueRef without a body falls back to title-only dedup", () => {
+    const board = [{ title: "cleanup: remove unused export `InLegacy` (src/clean.ts)" }];
+    const { kept } = dedupAgainstOpen(findings, board);
+    assert.deepEqual(kept.map((f) => f.name), ["InBatch", "Fresh"]);
   });
 });

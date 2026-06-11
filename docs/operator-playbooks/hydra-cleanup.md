@@ -98,9 +98,9 @@ Then drop a finding before it becomes an issue when ANY of:
 - **It touches the Verifier Core** (`src/untouchable.ts` `VERIFIER_CORE_PATHS`: `ci.yml`, `deploy.yml`, `scripts/tier-classify.ts`, `src/tier-classifier.ts`, `src/untouchable.ts`). Those are operator-only (ADR-0001/0004/0015). Never steer an agent at them. Note the finding in the report, but do not file it.
 - **It is a test file, a type-only `.d.ts`, or a file `knip` flags only because its sole consumers are tests** — deleting a test or a test-only export is a coverage regression, not a cleanup. The acceptance check (`npm test` still passes) would pass trivially while silently removing a test; exclude these.
 - **It is a public entrypoint by configuration** — `src/index.ts`, an export re-exported through a barrel that IS imported elsewhere, or anything `knip` lists under `production`-entry ambiguity. When in doubt, drop it: a false-positive deletion that breaks a runtime path is worse than a missed cleanup.
-- **It duplicates an already-open `cleanup-scan` issue.** Dedup on the **stable `path::symbol` identity, NOT the title** (issue #1167). Read the open `cleanup-scan` issue titles from the board (step 0), then pass them with your validated findings to `dedupAgainstOpen()` (in `scripts/ci/hydra-cleanup-render.ts`): it recovers each open issue's identity via `identityFromOpenIssueTitle()` and drops any finding whose `findingIdentity()` already has an open issue. **Why identity, not title:** the #1167 double-file happened because the dedup key was the *title*, and the malformed draft titles did not byte-match the canonical titles, so dedup did not recognise the drafts as duplicates of their own canonical siblings. Keying on `path::symbol` is robust to that. `dedupAgainstOpen()` also de-duplicates **within the current batch**, so a single run can never file two issues for one identity. Re-filing the same finding every idle tick is the exact churn the saturation cap and this dedup guard prevent.
+- **It duplicates an already-open `cleanup-scan` issue.** Dedup on the **stable `path::symbol` identity, NOT the title** (issue #1167). Read the open `cleanup-scan` issues (title **and body**, issue #1653) from the board (step 0), then pass them with your validated findings to `dedupAgainstOpen()` (in `scripts/ci/hydra-cleanup-render.ts`): it recovers each open issue's identities from **both surfaces** — the title via `identityFromOpenIssueTitle()` (legacy single-finding issues) and the body's `cleanup-identities` HTML-comment manifest via `identitiesFromIssueBody()` (batch issues, #1653) — and drops any finding whose `findingIdentity()` already has an open issue. **Why identity, not title:** the #1167 double-file happened because the dedup key was the *title*, and the malformed draft titles did not byte-match the canonical titles, so dedup did not recognise the drafts as duplicates of their own canonical siblings. Keying on `path::symbol` is robust to that. `dedupAgainstOpen()` also de-duplicates **within the current run**, so a single run can never file two issues for one identity. Re-filing the same finding every idle tick is the exact churn the saturation cap and this dedup guard prevent. **Partial completion (#1653):** a closed batch issue releases *all* its identities at once; the next scan re-files only the findings knip still reports.
 
-> **Quota:** aim for the highest-confidence findings first. If `knip` reports more than ~8 survivors, file the top 8 (whole-file deletions rank above single-export deletions — they reclaim the most surface) and note the remainder in the report; the next idle turn picks up where this one left off (the dedup filter ensures no double-filing).
+> **Quota:** the per-run cap (`EMIT_CAP = 8`) counts **batch issues**, not findings (issue #1653) — 8 batches can cover ~150 findings. Batches holding whole-file deletions rank first (they reclaim the most surface), then the biggest harvests; the remainder is noted in the report and the next idle turn picks up where this one left off (the dedup filter ensures no double-filing).
 
 ### 2.5 knip false-positive taxonomy + safe-fix recipe (issue #1299 — read before deleting anything)
 
@@ -131,12 +131,14 @@ rg -n "<name>" src/redis test/redis-keys.test.mts
 **Do not drive `gh issue create` from a hand-written bash loop. Invoke the deterministic emit runner `scripts/ci/hydra-cleanup-emit.ts` instead** — it owns parse → validate → filter → classify → dedup → render → create as one pass, and it is the recurrence fix for #1449.
 
 ```bash
-# Dry-run first (prints the plan: every title + body + demote/delete verdict, files nothing):
+# Dry-run first (prints the plan: every title + body + demote/delete verdicts, files nothing):
 npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json
 
-# Apply (files one cleanup-scan + ready-for-agent issue per planned finding):
+# Apply (files one cleanup-scan + ready-for-agent BATCH issue per module-dir group):
 npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json --apply
 ```
+
+**The unit of work is one module batch, not one finding (issue #1653).** After validate → filter → classify → dedup (all still per-symbol, so the #1167 blank-title and #1449 demote-vs-delete guards are untouched), the runner groups the surviving findings by **module dir** — `moduleDirKey()`, the top-2 path segments of the containing directory (`src/schemas/explore-page.ts` → `src/schemas`) — and renders **one issue per group**. Groups over `SYMBOLS_PER_BATCH = 20` findings split into reviewable chunks (the largest single-batch precedent that cleared the merge gate is 16 exports, PR #1549). A 1-finding group keeps the legacy single-finding format below; a multi-finding group renders the batch format: a **per-symbol checklist** (each line leading with its `classifyExportFix()` verdict), the probe/taxonomy prose **once**, a `## Files in scope` section listing each distinct path, and a machine-readable **`cleanup-identities` manifest** (an HTML comment, one `path::symbol` line per finding) that `identitiesFromIssueBody()` parses back for dedup. This is the granularity flip that turns ~179 per-export PRs (~8,400 CI-job-minutes) into ~2 dozen batch PRs at byte-identical final code state — every downstream layer (dispatch, tier-gate, scope-check, auto-merge) operates on issues and paths, so it batches for free.
 
 **Why the runner, not a bash loop (issue #1449).** #1167 moved the *parse → validate → dedup → render* helpers into `scripts/ci/hydra-cleanup-render.ts`, but the **emit step stayed LLM-prose-executed** — the playbook described a bash `gh issue create` loop the model transcribed by hand. On run f6403146 the model rendered each issue **body** via `renderBody()` (so the body H1 carried the correct symbol, e.g. `RecentMergesQuery`) yet **hand-built the issue title** by interpolating knip's raw output, which lost the symbol — producing the blank `cleanup: remove unused export  (src/schemas/today-page.ts)` titles on #1421–#1426 (the #1167 regression). The title and body diverged because they came from two different sources. The runner removes that discretionary step: the title comes **only** from `renderTitle()` and the body **only** from `renderBody()`, both from the **same** `CleanupFinding` inside one iteration, so the title can no longer drift from the body. There is no second pass, no index-aligned zip (the #997–#1004 / #1005 off-by-one), and no place for the model to build a title by hand. The runner also reads the open `cleanup-scan` board itself and aborts the dedup if it can't, applies the board-saturation cap, and ranks whole-file deletions ahead of single-export deletions.
 
@@ -144,7 +146,7 @@ npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json --apply
 
 If you ever need to inspect or stage a single body, render it via the helper (never hand-author it): both `renderTitle()` / `renderBody()` **throw** on an invalid finding, so a blank-title issue is impossible. But the normal path is the runner — do not reconstruct the loop in bash.
 
-Issue body schema (one per finding):
+Issue body schema — **legacy single-finding format**, used when a module group holds exactly one finding (its identity lives in the title, so legacy dedup keeps working):
 
 ```markdown
 # cleanup: remove unused <export|file> `<name / path>`
@@ -197,13 +199,54 @@ This is a mechanically-verifiable cleanup: the deletion is correct **iff** the t
 *Generated by hydra-cleanup (issue #960, epic #958). Routes to `ready-for-agent` because the acceptance check is deterministic.*
 ```
 
+Issue body schema — **batch format** (issue #1653), used when a module group holds 2+ findings (rendered by `renderBatchBody()`):
+
+```markdown
+# cleanup(<module dir>): demote/remove <N> unused exports (<M> files)
+
+> Surfaced by `/hydra-cleanup` on <ISO date> against the Orchestrator (~/hydra).
+> Deterministic detection via `knip` (devDependency). High-confidence mechanical cleanup,
+> batched per module dir (issue #1653) — one PR resolves every finding below in `<module dir>`.
+
+## Findings (per-symbol checklist)
+
+- [ ] `<name>` (`<path>`) — fix: **demote** (drop only the `export` keyword — still referenced within its own file; deleting breaks `tsc`)
+- [ ] `<name>` (`<path>`) — fix: **delete** (no in-file reference found — still run the probe below before deleting)
+- [ ] `<path>` — fix: **delete the whole file** (knip reports it provably unused)
+
+## What to do
+
+<the Step 2.5 classification probe + four-case taxonomy, ONCE for the whole batch>
+
+## Files in scope
+
+- `<each distinct path, one bullet per file>`
+
+## Acceptance criteria
+
+- [ ] Every checklist item above is resolved per its verdict, or recorded in the PR body as a knip false positive with probe evidence.
+- [ ] `npm test` / `tsc` / `npm run typecheck:test` still pass; no new `knip` finding.
+
+## Why this is safe (deterministic check)
+
+<the deterministic-acceptance paragraph + the partial-completion note>
+
+<!-- cleanup-identities:
+<path>::<symbol>
+<path>::<file>
+-->
+```
+
+The trailing `cleanup-identities` HTML comment is the **machine-readable dedup manifest**: one `findingIdentity()` key per line. `readBoardIssues()` fetches each open issue's title **and body**, and `dedupAgainstOpen()` unions identities from legacy titles and batch manifests — so neither issue generation can be double-filed. The batch title deliberately does NOT match the legacy title patterns; a batch's identities live only in its manifest.
+
 **Labelling rule (HARD):** every emitted issue carries `cleanup-scan` and `ready-for-agent`. The `cleanup-scan` label is the emit/count seam that `collect-state.sh` reads for `cleanup_board_saturated`, so it MUST be present on every issue. Routing to `ready-for-agent` (NOT `needs-triage`) is the deliberate confidence-routing decision (epic #958): the acceptance criterion is self-checking, so no operator triage gate is needed — a `hydra-dev` pickup will only merge if the deletion keeps `npm test` and `tsc` green, and CI is the merge gate.
 
 The emit itself is **not** a hand-written bash loop (issue #1449). It is the deterministic runner from the top of this step — it renders the title and body for each finding from the same object and creates the issue in one pass, so the title cannot drift from the body:
 
 ```bash
-# The runner owns parse → validate → filter → classify → dedup → render → create.
-# Title from renderTitle(), body from renderBody(), both from the SAME finding —
+# The runner owns parse → validate → filter → classify → dedup → group → render → create.
+# Title and body both come from the SAME findings in one pass — renderTitle()/renderBody()
+# for a 1-finding group, renderBatchTitle()/renderBatchBody() for a multi-finding batch —
 # no hand-built title, no parallel title/body lists (the #1449 / #1005 drift guard).
 npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json --apply
 ```
@@ -215,9 +258,9 @@ Print a single-pass summary — this is the operator's audit surface:
 ```
 hydra-cleanup — Orchestrator (~/hydra) — 2026-06-03T12:00:00Z — apply
 
-knip findings:        12 unused (4 files, 8 exports)
-After filter (verifier-core/test-only/entrypoint/dup):  6
-Emitted:              6 issues  [ready-for-agent, cleanup-scan]  (#NNN ... #NNN)
+knip findings:        42 unused (4 files, 38 exports)
+After filter (verifier-core/test-only/entrypoint/dup):  36
+Emitted:              4 batch issues covering 36 findings  [ready-for-agent, cleanup-scan]  (#NNN ... #NNN)
 Dropped:              6  (2 verifier-core, 3 test-only, 1 duplicate of open #NNN)
 Board saturation:     ok (3 open cleanup-scan issues, under the 10 cap)
 ```
@@ -255,7 +298,8 @@ Expected:
 - **Title/body pairing (multi-finding regression, issue #1005).** Run the dry-run (or `--apply`) over a scenario with **≥2 findings** and assert that, for **every** emitted issue, the body's H1 (`# cleanup: remove unused <export|file> \`<name / path>\``) AND its `## Files in scope` path name the **same** target as that issue's title — no off-by-one, no rotation across the batch. The dry-run already prints both the title and the rendered body for each finding, so the check is: in a multi-finding run, every printed `(title, body-H1, files-in-scope)` triple matches. A failure here means the emit step has regressed back to two index-aligned passes (the #997–#1004 drift); the single render-then-create loop in Step 3 is what guarantees the match.
 - **Scope section present (issue #1077).** Every emitted issue body carries a section headed exactly `## Files in scope` listing the single target path. This is the heading `scope-check` matches (`/Files in scope/i`, read live from the linked issue body) and the canonical heading `hydra-prd-render.ts` emits — so a `hydra-dev` pickup can copy it straight into the PR body instead of hand-authoring it from the design-concept artifact.
 - Re-running `--apply` against an already-saturated board (> 10 open `cleanup-scan`) emits nothing and prints the saturation skip.
-- Re-running `--apply` does not double-file a finding that already has an open `cleanup-scan` issue.
+- Re-running `--apply` does not double-file a finding that already has an open `cleanup-scan` issue — whether that issue is a legacy single (identity in the title) or a batch (identities in the body's `cleanup-identities` manifest, issue #1653).
+- **Batched emit (issue #1653).** Findings sharing a module dir (top-2 path segments of the containing directory) land in ONE issue with a per-symbol checklist, each line leading with its demote/delete verdict; groups over 20 findings split into chunks; `EMIT_CAP` counts batch issues; whole-file batches rank first. Every batch body carries `## Files in scope` (each distinct path) and the `cleanup-identities` manifest. A 1-finding group keeps the legacy single-finding format. Pinned in `test/hydra-cleanup-emit.test.mts` + `test/hydra-cleanup-render.test.mts`.
 - **Deterministic emit runner — no hand-built titles, demote-vs-delete classified (issue #1449).** The dry-run prints the plan via `npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json`: for every planned issue the title (from `renderTitle()`) and the body H1 (from `renderBody()`) name the same symbol — they cannot diverge because both come from the same finding in one pass, so the #1421–#1426 blank-title regression (body H1 carried the symbol, the hand-built title did not) is structurally impossible. Each export finding additionally carries a `[fix: demote|delete]` verdict: an export still referenced within its own file (a `z.infer<typeof X>` alias, a sibling-schema composition like `IdleBlockedBySchema` in `src/schemas/autopilot-idle.ts`) is classified `demote` and its body leads with "Recommended fix: demote (drop the `export` keyword) — NOT delete", never inviting a build-breaking deletion. Pinned in `test/hydra-cleanup-emit.test.mts`.
 - **knip false-positive taxonomy present (issue #1299).** Step 2.5 carries a four-case table — (a) truly dead → delete, (b) internally referenced → demote `export`, (c) re-export with live definition → drop only the re-export line, (d) coupled Redis key generator → atomic removal of the generator(s) + their test assertions under scope-justification — each with a classification probe and an evidence anchor, so a `hydra-dev` pickup classifies the finding instead of re-deriving the disambiguation. A finding that turns `npm test`/`tsc` red after a delete is a knip false positive and routes to the demote/drop-re-export fix, never a forced deletion.
 - **No blank-title / double-file drafts (issue #1167).** Every emitted issue has a fully-formed title with the symbol name present — `validateFinding()` drops any finding with an empty name/path before render, and `renderTitle()`/`renderBody()` throw on an invalid finding, so the malformed `cleanup: remove unused export  (…)` / `cleanup: remove unused file ` drafts (run ef0a9847, #1151–#1158) are impossible. Re-running the parse → validate → dedup pipeline against the board it just filled emits **zero** new issues, because `dedupAgainstOpen()` keys on the stable `path::symbol` identity (not the title) and so recognises the canonical issues as duplicates. Pinned in `test/hydra-cleanup-render.test.mts`.
@@ -264,10 +308,10 @@ Expected:
 ## Files
 
 - `docs/operator-playbooks/hydra-cleanup.md` — this playbook (source of truth; the skill is generated by `scripts/sync-skills.sh`).
-- `scripts/ci/hydra-cleanup-render.ts` — pure parse → validate → classify → render → dedup helpers (issues #1167, #1449): `parseKnipReport`, `validateFinding`, `findingIdentity`, `classifyExportFix`, `renderTitle`, `renderBody`, `identityFromOpenIssueTitle`, `dedupAgainstOpen`. The deterministic seam the emit runner calls.
-- `scripts/ci/hydra-cleanup-emit.ts` — the deterministic emit runner (issue #1449): `planCleanupEmit()` (pure: parse → validate → filter → classify → dedup → render) plus the thin `gh` CLI wrapper. Replaces the hand-rolled bash emit loop that regressed #1167.
-- `test/hydra-cleanup-render.test.mts` — regression for the #1167 blank-title + double-file failure and the #1449 demote/delete recommendation banner (no malformed titles; identity-keyed dedup; re-run files nothing).
-- `test/hydra-cleanup-emit.test.mts` — regression for the #1449 emit runner: title/body coherence (no hand-built title), deterministic demote-vs-delete classification, filter/dedup/cap/recurrence.
+- `scripts/ci/hydra-cleanup-render.ts` — pure parse → validate → classify → render → dedup helpers (issues #1167, #1449, #1653): `parseKnipReport`, `validateFinding`, `findingIdentity`, `classifyExportFix`, `renderTitle`, `renderBody`, `identityFromOpenIssueTitle`, `identitiesFromIssueBody`, `dedupAgainstOpen`, `moduleDirKey`, `renderBatchTitle`, `renderBatchBody`. The deterministic seam the emit runner calls.
+- `scripts/ci/hydra-cleanup-emit.ts` — the deterministic emit runner (issues #1449, #1653): `planCleanupEmit()` (pure: parse → validate → filter → classify → dedup → group-by-module → render) plus the thin `gh` CLI wrapper. Replaces the hand-rolled bash emit loop that regressed #1167; batches per module dir since #1653 (`SYMBOLS_PER_BATCH = 20`, `EMIT_CAP` counts batch issues).
+- `test/hydra-cleanup-render.test.mts` — regression for the #1167 blank-title + double-file failure, the #1449 demote/delete recommendation banner, and the #1653 batch rendering + manifest dedup (no malformed titles; identity-keyed dedup across legacy titles AND batch manifests; re-run files nothing).
+- `test/hydra-cleanup-emit.test.mts` — regression for the #1449/#1653 emit runner: title/body coherence (no hand-built title), deterministic demote-vs-delete classification, filter/dedup, module-dir grouping, chunking, batch-cap, ranking, recurrence, and full-backlog coverage.
 - `package.json` — `knip` is the devDependency this skill invokes (`npx knip`).
 - `scripts/autopilot/decide.py` — the `cleanup_orch` signal class + selector that dispatches this skill.
 - `scripts/autopilot/collect-state.sh` — emits `cleanup_board_saturated` (the anti-flood cap).

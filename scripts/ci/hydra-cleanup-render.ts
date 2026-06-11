@@ -481,24 +481,76 @@ export function identityFromOpenIssueTitle(title: string): string | null {
 }
 
 /**
+ * An open cleanup-scan board entry, as read from `gh issue list --json
+ * title,body`. The `body` is optional so legacy callers (and tests) that only
+ * have titles keep working — a bare string is accepted as a title-only ref.
+ */
+export interface OpenIssueRef {
+  title: string;
+  body?: string;
+}
+
+/**
+ * Recover the finding identities recorded in a BATCH issue's body manifest
+ * (issue #1653). A batch issue covers N findings, so its title cannot carry N
+ * identities the way a legacy single-finding title does — instead the batch
+ * body embeds a machine-readable HTML-comment manifest:
+ *
+ *   <!-- cleanup-identities:
+ *   src/schemas/explore-page.ts::AnomalyMetricSchema
+ *   src/schemas/dead.ts::<file>
+ *   -->
+ *
+ * Each non-empty line is one `findingIdentity()` key (`path::symbol` /
+ * `path::<file>`). Lines without the `::` separator are ignored (junk-tolerant:
+ * a hand-edited manifest line can degrade to a missed dedup, never a crash).
+ * Returns [] for a body with no manifest — including every legacy single-
+ * finding body, whose identity is recovered from the title instead.
+ */
+export function identitiesFromIssueBody(body: string): string[] {
+  if (typeof body !== "string" || body.length === 0) return [];
+  const m = body.match(/<!--\s*cleanup-identities:\s*\n([\s\S]*?)-->/);
+  if (!m) return [];
+  return m[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.includes("::"));
+}
+
+/**
  * Drop findings whose identity already has an open cleanup-scan issue.
  *
- * `openIssueTitles` is the list of open cleanup-scan issue titles read from the
- * board (Step 0). They are normalised to identities via
- * identityFromOpenIssueTitle, so dedup is keyed on the stable `path::symbol`
- * identity — NOT on title equality (#1167 cause 2).
+ * `openIssues` is the open cleanup-scan board read in Step 0 — either bare
+ * title strings (legacy callers) or `{ title, body }` refs. Identities are
+ * recovered from BOTH surfaces (issue #1653):
+ *
+ *   - the title, via identityFromOpenIssueTitle() — legacy single-finding
+ *     issues carry their one identity in the canonical title;
+ *   - the body's `cleanup-identities` manifest, via identitiesFromIssueBody()
+ *     — batch issues carry N identities in the HTML-comment manifest.
+ *
+ * Either way dedup is keyed on the stable `path::symbol` identity — NOT on
+ * title equality (#1167 cause 2). A closed batch issue releases ALL its
+ * identities at once; the next scan re-files only the findings knip still
+ * reports (partial-completion handling, #1653).
  *
  * Returns `{ kept, dropped }` so the caller can both emit the survivors and
  * report the de-duplicated count.
  */
 export function dedupAgainstOpen(
   findings: CleanupFinding[],
-  openIssueTitles: string[],
+  openIssues: Array<string | OpenIssueRef>,
 ): { kept: CleanupFinding[]; dropped: CleanupFinding[] } {
   const openIdentities = new Set<string>();
-  for (const title of openIssueTitles) {
+  for (const ref of openIssues) {
+    const title = typeof ref === "string" ? ref : ref.title;
     const id = identityFromOpenIssueTitle(title);
     if (id) openIdentities.add(id);
+    if (typeof ref !== "string" && ref.body) {
+      for (const bodyId of identitiesFromIssueBody(ref.body)) {
+        openIdentities.add(bodyId);
+      }
+    }
   }
 
   const kept: CleanupFinding[] = [];
@@ -518,4 +570,197 @@ export function dedupAgainstOpen(
     kept.push(finding);
   }
   return { kept, dropped };
+}
+
+// ---------------------------------------------------------------------------
+// Batch rendering (issue #1653) — one issue per module dir, not per symbol.
+// ---------------------------------------------------------------------------
+
+/**
+ * The batch key for a finding: its containing module directory, truncated to
+ * the top-2 path segments (issue #1653). Examples:
+ *
+ *   src/schemas/explore-page.ts          → src/schemas
+ *   src/outcomes.ts                      → src
+ *   src/redis/sub/deep.ts                → src/redis
+ *   dashboard/src/components/Card.jsx    → dashboard/src
+ *   standalone.ts                        → (root)
+ *
+ * Grouping on the module dir (not per-file) is the judgement call from the
+ * accepted proposal: per-file batching leaves a long tail of 1–2-finding
+ * issues, while per-module compresses the same backlog ~88% and the merged
+ * multi-file precedent (PR #1597) shows the gate is batch-indifferent.
+ */
+export function moduleDirKey(path: string): string {
+  const parts = path.trim().split("/").filter(Boolean);
+  parts.pop(); // drop the filename — the key is the containing directory
+  if (parts.length === 0) return "(root)";
+  return parts.slice(0, 2).join("/");
+}
+
+/** Pluralisation helper for batch titles ("1 unused export" / "3 unused exports"). */
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Render the title for a BATCH issue covering every finding in one module-dir
+ * group (issue #1653). Like renderTitle(), it throws on any invalid finding —
+ * callers MUST validate first; the throw is the same loud backstop.
+ *
+ * The title deliberately does NOT match the legacy single-finding patterns
+ * `identityFromOpenIssueTitle()` parses — a batch's identities live in the
+ * body manifest (see renderBatchBody), never the title.
+ */
+export function renderBatchTitle(moduleDir: string, findings: CleanupFinding[]): string {
+  if (findings.length === 0) {
+    throw new Error("renderBatchTitle: refusing to render an empty batch");
+  }
+  for (const finding of findings) {
+    const reason = validateFinding(finding);
+    if (reason) {
+      throw new Error(`renderBatchTitle: refusing to render an invalid finding — ${reason}`);
+    }
+  }
+  const fileCount = findings.filter((f) => f.kind === "file").length;
+  const exportCount = findings.length - fileCount;
+  const distinctPaths = new Set(findings.map((f) => f.path.trim())).size;
+
+  if (exportCount === 0) {
+    return `cleanup(${moduleDir}): remove ${plural(fileCount, "unused file")}`;
+  }
+  const exportsPart = `demote/remove ${plural(exportCount, "unused export")} (${plural(distinctPaths, "file")})`;
+  if (fileCount === 0) {
+    return `cleanup(${moduleDir}): ${exportsPart}`;
+  }
+  return `cleanup(${moduleDir}): remove ${plural(fileCount, "unused file")} + ${exportsPart}`;
+}
+
+/** One checklist line for a finding inside a batch body, leading with its verdict. */
+function checklistLine(finding: CleanupFinding): string {
+  if (finding.kind === "file") {
+    return `- [ ] \`${finding.path}\` — fix: **delete the whole file** (knip reports it provably unused)`;
+  }
+  const subject = `\`${finding.name}\` (\`${finding.path}\`)`;
+  switch (finding.fix) {
+    case "demote":
+      return `- [ ] ${subject} — fix: **demote** (drop only the \`export\` keyword — still referenced within its own file; deleting breaks \`tsc\`)`;
+    case "delete":
+      return `- [ ] ${subject} — fix: **delete** (no in-file reference found — still run the probe below before deleting)`;
+    default:
+      return `- [ ] ${subject} — fix: unknown (source unavailable at scan time — classify via the probe below)`;
+  }
+}
+
+/**
+ * Render the body for a BATCH issue (issue #1653). Structure:
+ *
+ *   - H1 derived from renderBatchTitle() on the SAME findings (coherence by
+ *     construction — the #1005/#1449 drift guard extends to batches).
+ *   - `## Findings (per-symbol checklist)` — one checkbox per finding, leading
+ *     with its pre-computed demote/delete verdict from classifyExportFix().
+ *   - `## What to do` — the knip false-positive taxonomy + probe ONCE for the
+ *     whole batch (generic `<name>` / `<path>` placeholders).
+ *   - `## Files in scope` — every distinct path, one code-span bullet each
+ *     (the section scope-check matches; code-spans ONLY in the bullets).
+ *   - `## Acceptance criteria` — the deterministic "resolve every checklist
+ *     item AND test/tsc green" check.
+ *   - the `cleanup-identities` HTML-comment manifest — one findingIdentity()
+ *     per line, the machine-readable dedup surface identitiesFromIssueBody()
+ *     parses back.
+ *
+ * Throws on an empty batch or any invalid finding (same backstop as
+ * renderTitle/renderBody — validateFinding gates earlier in the pipeline).
+ */
+export function renderBatchBody(
+  moduleDir: string,
+  findings: CleanupFinding[],
+  isoDate: string,
+): string {
+  // renderBatchTitle performs the empty/invalid validation backstop.
+  const title = renderBatchTitle(moduleDir, findings);
+  const distinctPaths = [...new Set(findings.map((f) => f.path.trim()))];
+
+  const lines: string[] = [];
+  lines.push(`# ${title}`);
+  lines.push("");
+  lines.push(`> Surfaced by \`/hydra-cleanup\` on ${isoDate} against the Orchestrator (~/hydra).`);
+  lines.push("> Deterministic detection via `knip` (devDependency). High-confidence mechanical cleanup,");
+  lines.push(`> batched per module dir (issue #1653) — one PR resolves every finding below in \`${moduleDir}\`.`);
+  lines.push("");
+  lines.push("## Findings (per-symbol checklist)");
+  lines.push("");
+  lines.push("`knip` reports each entry below as **provably unused** — no remaining external references in the orchestrator codebase. Resolve every checkbox per its verdict; if a probe proves one a false positive, skip it and note the evidence in the PR body (the next scan re-files only true survivors).");
+  lines.push("");
+  for (const finding of findings) {
+    lines.push(checklistLine(finding));
+  }
+  lines.push("");
+  lines.push("## What to do");
+  lines.push("");
+  lines.push(
+    '**`knip` reports an "unused export" without telling you *why* it is dead — classify before you delete.** A naive delete is correct only when the symbol is *truly* dead; if its only dead aspect is `export` visibility, a still-live re-export, or a coupled Redis key generator, a delete breaks the build or orphans coupled code. For each checklist symbol `<name>` in `<path>` whose verdict you need to confirm, run this classification probe first:',
+  );
+  lines.push("");
+  lines.push("```bash");
+  lines.push("# 1. Still referenced ANYWHERE (src + test), ignoring its own definition site?");
+  lines.push('rg -n --no-heading -w "<name>" src test | grep -v "<path>"');
+  lines.push("# 2. Is the flagged line a re-export (`export { x } from './y'` / `export *`) rather than the definition?");
+  lines.push('rg -n "export .*\\b<name>\\b" "<path>"');
+  lines.push("# 3. Redis key generator? Are sibling generators referenced only by the same test assertions?");
+  lines.push('rg -n "<name>" src/redis test/redis-keys.test.mts');
+  lines.push("```");
+  lines.push("");
+  lines.push(
+    "Then apply the matching fix — **delete is the exception, not the default** (full table with evidence anchors lives in Step 2.5 of the hydra-cleanup playbook, `docs/operator-playbooks/hydra-cleanup.md`):",
+  );
+  lines.push("");
+  lines.push(
+    "- **(a) Truly dead** — probe 1 empty, not a re-export, no coupled keys → **delete** the symbol/file and any imports/re-exports that only existed to reference it.",
+  );
+  lines.push(
+    "- **(b) Internally referenced** — probe 1 shows in-file callers, probe 2 shows it's the definition → **drop only the `export` keyword**, keep the definition module-private. Do NOT delete (the build breaks).",
+  );
+  lines.push(
+    "- **(c) Re-export, definition live elsewhere** — probe 2 shows a `from` clause, probe 1 finds live uses of the definition → **remove only the re-export line**, leave the definition and its consumers.",
+  );
+  lines.push(
+    "- **(d) Coupled Redis key generator** — probe 3 shows sibling generators coupled to assertions in `test/redis-keys.test.mts` → **remove the full coupled set atomically** (generator(s) + their test assertions) under a `scope-justification:` block naming the test file.",
+  );
+  lines.push("");
+  lines.push(
+    "If `npm test` / `tsc` go red after a delete, that is knip's false positive surfacing — revert to the demote / drop-re-export fix; never force the deletion.",
+  );
+  lines.push("");
+  lines.push("## Files in scope");
+  lines.push("");
+  for (const path of distinctPaths) {
+    lines.push(`- \`${path}\``);
+  }
+  lines.push("");
+  lines.push("## Acceptance criteria");
+  lines.push("");
+  lines.push(
+    "- [ ] Every checklist item above is resolved per its verdict (demote / delete / drop-re-export / atomic coupled-set removal), or recorded in the PR body as a knip false positive with probe evidence.",
+  );
+  lines.push("- [ ] `npm test` still passes (the change breaks no test).");
+  lines.push("- [ ] `tsc` (`npm run typecheck` and `npm run typecheck:test`) still passes (the change breaks no type).");
+  lines.push("- [ ] No new `knip` finding is introduced by the change.");
+  lines.push("");
+  lines.push("## Why this is safe (deterministic check)");
+  lines.push("");
+  lines.push(
+    "This is a mechanically-verifiable cleanup: each removal is correct **iff** the test suite and the type-checker still pass afterward. If either fails, that export/file was not actually dead — skip it (note the false positive in the PR body) rather than forcing it. Partial completion is fine: closing this issue releases every identity below, and the next scan re-files only the findings knip still reports.",
+  );
+  lines.push("");
+  lines.push("<!-- cleanup-identities:");
+  for (const finding of findings) {
+    lines.push(findingIdentity(finding));
+  }
+  lines.push("-->");
+  lines.push("");
+  lines.push("---");
+  lines.push("*Generated by hydra-cleanup (issue #960, epic #958; batched per #1653). Routes to `ready-for-agent` because the acceptance check is deterministic.*");
+
+  return lines.join("\n").trimEnd() + "\n";
 }
