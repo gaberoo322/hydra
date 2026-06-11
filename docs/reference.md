@@ -76,7 +76,7 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 **Backlog** (`api/backlog.ts`): GET /backlog, GET /backlog/counts, POST /backlog, POST /backlog/enhance, PATCH /backlog/:id, PATCH /backlog/:id/move `{lane}` (lane MUST be camelCase — `triage|backlog|queued|blocked|inProgress|done`; `hydra backlog move` alias-normalizes `inprogress`/`in-progress`/`in_progress` → `inProgress`), POST /backlog/:id/approve, GET /backlog/:id/children, DELETE /backlog/:id, POST /backlog/claim. **`POST /backlog/claim` is claim-NEXT, not claim-by-id** — `claimNextQueuedItem` (Lua-atomic) returns the highest-priority QUEUED item regardless of any `id` in the body; there is no claim-by-id path.
 **Specs** (`api/specs.ts`): GET /specs, GET /specs/:slug, POST /specs, POST /specs/:slug/archive
 **Proposals** (`api/proposals.ts`): GET /proposals, POST /proposals/:id/approve, POST /proposals/:id/reject
-**Metrics** (`api/metrics.ts`): GET /metrics, GET /spending, GET /summary, POST /metrics/record
+**Metrics** (`api/metrics.ts`): GET /metrics, GET /summary, POST /metrics/record
 **Health** (`api/health.ts`): GET /health, GET /health/services, GET /health/deep, GET /recommendations
 **Misc** (`api/misc.ts`): Meta, goals, config, alerts, events, memory, merge locks, plan cache, digest, grounding, OpenViking, calibration, env, OpenAI proxy, webhooks, kill
 **Outcomes** (`api/outcomes.ts`): GET /outcomes — declared Target Outcomes + current readings (issue #241)

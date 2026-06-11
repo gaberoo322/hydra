@@ -21,7 +21,8 @@
  *   AC5 — GET /runs/:runId returns hash + ALL turns (no 50 cap) + joins
  *   AC6 — GET /runs/:runId returns 404 for unknown runId
  *   AC7 — GET /runs/:runId is read-only relative to Redis (sweep aside)
- *   AC8 — cost breakdown sums costUsd across dispatch outcomes
+ *   AC8 — retired with the USD attribution plane (#1651): the cost
+ *         breakdown projection no longer exists
  *   AC9 — slice-1/2/3 schema closure: slice 4 writes NO new run-hash fields
  *         (slice-2 AC10 + slice-3 AC12 invariant continues)
  *   AC10 — `/runs` history rows expose merged_count/failed_count from outcomes
@@ -297,7 +298,6 @@ describe("autopilot history API (issue #500)", () => {
     for (let i = 1; i <= 60; i++) {
       await seedCycle(`cyc-${i}`, {
         status: i % 2 === 0 ? "merged" : "failed",
-        costUsd: "0.05",
       });
       await seedTurn("run-detail", i, [
         { type: "dispatch", slot: "dev_orch", cycleId: `cyc-${i}` },
@@ -316,15 +316,9 @@ describe("autopilot history API (issue #500)", () => {
     const a0 = (res._body.turns[0] as any).actions[0];
     assert.equal(a0.outcome.status, "merged");
     assert.equal(a0.outcome.cycleId, "cyc-60");
-    // Cost breakdown surfaces on the run view.
-    assert.ok(res._body.run.cost, "run.cost is present");
-    assert.equal(res._body.run.cost.dispatch_count, 60);
-    assert.equal(res._body.run.cost.dispatch_count_with_cost, 60);
-    assert.ok(
-      Math.abs((res._body.run.cost.dispatched_cost_usd as number) - 3.0) < 0.001,
-      "60 dispatches × $0.05 = $3.00",
-    );
-    assert.equal(res._body.run.cost.orchestration_cost_usd, 0);
+    // The USD cost breakdown was retired with the attribution plane (#1651):
+    // the run view must no longer carry a `cost` key.
+    assert.equal(res._body.run.cost, undefined, "run.cost retired (#1651)");
   });
 
   // ---------------------------------------------------------------------------
@@ -364,48 +358,6 @@ describe("autopilot history API (issue #500)", () => {
     const afterKeys = (await redis.keys("hydra:autopilot:run:run-readonly*")).sort();
     assert.deepEqual(after, before, "run hash unchanged");
     assert.deepEqual(afterKeys, beforeKeys, "no sidecar keys created");
-  });
-
-  // ---------------------------------------------------------------------------
-  // AC8 — cost breakdown sums costUsd across dispatch outcomes
-  // ---------------------------------------------------------------------------
-  test("AC8: cost breakdown sums costUsd from dispatched cycle outcomes", async () => {
-    await seedRunRow("run-cost", {
-      run_id: "run-cost",
-      started: "2026-05-19T10:00:00Z",
-      started_epoch: 1747648800,
-      status: "ended",
-      trigger: "manual",
-      turns: 3,
-      dispatches: 3,
-      cumulative_tokens: 1234,
-      ended_epoch: 1747652400,
-    });
-    await seedCycle("cyc-cost-1", { status: "merged", costUsd: "0.10" });
-    await seedCycle("cyc-cost-2", { status: "merged", costUsd: "0.25" });
-    // cyc-cost-3 missing costUsd → contributes to dispatch_count but not
-    // dispatched_cost_usd / dispatch_count_with_cost.
-    await seedCycle("cyc-cost-3", { status: "failed" });
-    await seedTurn("run-cost", 1, [
-      { type: "dispatch", slot: "dev_orch", cycleId: "cyc-cost-1" },
-    ]);
-    await seedTurn("run-cost", 2, [
-      { type: "dispatch", slot: "dev_target", cycleId: "cyc-cost-2" },
-    ]);
-    await seedTurn("run-cost", 3, [
-      { type: "dispatch", slot: "qa_orch", cycleId: "cyc-cost-3" },
-      { type: "discover_orch" }, // non-dispatch — contributes nothing
-    ]);
-
-    const res = mockRes();
-    await runDetail(mockReq({ runId: "run-cost" }, {}), res);
-    assert.equal(res._body.run.cost.orchestration_cost_usd, 0);
-    assert.ok(
-      Math.abs((res._body.run.cost.dispatched_cost_usd as number) - 0.35) < 0.0001,
-      "dispatched cost = 0.10 + 0.25",
-    );
-    assert.equal(res._body.run.cost.dispatch_count, 3);
-    assert.equal(res._body.run.cost.dispatch_count_with_cost, 2);
   });
 
   // ---------------------------------------------------------------------------
@@ -473,7 +425,7 @@ describe("autopilot history API (issue #500)", () => {
   // ---------------------------------------------------------------------------
   // AC10 — history digest exposes merged_count / failed_count from outcomes
   // ---------------------------------------------------------------------------
-  test("AC10: history digest exposes merged_count / failed_count + cost total", async () => {
+  test("AC10: history digest exposes merged_count / failed_count", async () => {
     await seedRunRow("run-counts", {
       run_id: "run-counts",
       started: "2026-05-19T10:00:00Z",
@@ -486,10 +438,10 @@ describe("autopilot history API (issue #500)", () => {
       ended_epoch: 1747652400,
       exit_code: 0,
     });
-    await seedCycle("c-m1", { status: "merged", costUsd: "0.10" });
-    await seedCycle("c-m2", { status: "completed", costUsd: "0.20" });
-    await seedCycle("c-f1", { status: "failed", costUsd: "0.05" });
-    await seedCycle("c-f2", { status: "abandoned" }); // no cost
+    await seedCycle("c-m1", { status: "merged" });
+    await seedCycle("c-m2", { status: "completed" });
+    await seedCycle("c-f1", { status: "failed" });
+    await seedCycle("c-f2", { status: "abandoned" });
     await seedTurn("run-counts", 1, [{ type: "dispatch", cycleId: "c-m1" }]);
     await seedTurn("run-counts", 2, [{ type: "dispatch", cycleId: "c-m2" }]);
     await seedTurn("run-counts", 3, [{ type: "dispatch", cycleId: "c-f1" }]);
@@ -507,10 +459,6 @@ describe("autopilot history API (issue #500)", () => {
     assert.equal(d.dispatches, 4);
     assert.equal(d.duration_s, 3600, "1h ended_epoch - started_epoch");
     assert.equal(d.exit_code, 0);
-    assert.ok(
-      Math.abs((d.total_cost_usd as number) - 0.35) < 0.0001,
-      "total_cost_usd = 0.10 + 0.20 + 0.05 (c-f2 has no cost)",
-    );
   });
 
   // ---------------------------------------------------------------------------
@@ -537,7 +485,7 @@ describe("autopilot history API (issue #500)", () => {
       ended_epoch: 1747652400,
       exit_code: 0,
     });
-    await seedCycle("cyc-527", { status: "merged", costUsd: "0.10" });
+    await seedCycle("cyc-527", { status: "merged" });
     await seedTurn("run-527", 1, [
       {
         type: "dispatch",
@@ -579,34 +527,4 @@ describe("autopilot history API (issue #500)", () => {
     );
   });
 
-  // ---------------------------------------------------------------------------
-  // Bonus — /runs/current also surfaces the cost breakdown (so the LIVE
-  // header strip can render it identically to the detail page).
-  // ---------------------------------------------------------------------------
-  test("/runs/current attaches cost breakdown for the live header strip", async () => {
-    await seedRunRow("run-live", {
-      run_id: "run-live",
-      started: "2026-05-19T10:00:00Z",
-      started_epoch: Math.floor(Date.now() / 1000) - 60,
-      status: "running",
-      trigger: "manual",
-      pid: process.pid, // live → sweeper no-op
-      turns: 1,
-      dispatches: 1,
-      cumulative_tokens: 200,
-      last_heartbeat_epoch: Math.floor(Date.now() / 1000),
-      limits: JSON.stringify({}),
-    });
-    await seedCycle("c-live", { status: "merged", costUsd: "0.42" });
-    await seedTurn("run-live", 1, [{ type: "dispatch", cycleId: "c-live" }]);
-
-    const res = mockRes();
-    await runsCurrent(mockReq({}, {}), res);
-    assert.equal(res._status, 200);
-    assert.ok(res._body.cost, "/runs/current includes cost on live page");
-    assert.equal(res._body.cost.dispatch_count, 1);
-    assert.ok(
-      Math.abs((res._body.cost.dispatched_cost_usd as number) - 0.42) < 0.0001,
-    );
-  });
 });

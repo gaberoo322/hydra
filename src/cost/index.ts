@@ -4,8 +4,8 @@
  * The Cost Module owns Claude Code subagent token accounting on the
  * orchestrator side: recording per-skill / per-cycle token usage, exposing
  * the daily token counter consumed by the `/api/metrics/cost` dashboard
- * tile, aggregating per-tier attribution, AND projecting Anthropic-quota
- * consumption via the Subscription Usage Tracker. Storage is delegated to
+ * tile, AND projecting Anthropic-quota consumption via the Subscription
+ * Usage Tracker. Storage is delegated to
  * `src/redis/cost.ts` (the Redis Adapter for `hydra:cost:*`); the tracker
  * has no Redis surface — it scans Claude Code's on-disk JSONL transcripts.
  *
@@ -18,16 +18,16 @@
  *   - the JSONL reconciliation pipeline (#602)
  *   - the dollar-based daily-spend cap on the scheduler side (B-series)
  *   - the per-cycle circuit breaker in `cap.ts`
- *   - the dollar-conversion surrogate machinery — `tokensToUsd`,
- *     `getTokenUsdRate`, `getCycleSubagentCostUsd`, and the `costUsd` /
- *     `ratePerMillion` / `source` / `legacyRecordSpendUsd` fields (#704).
- *     `HYDRA_TOKEN_USD_RATE` was structurally $0 and no live dollar cap
- *     existed; the surrogate is now a pure token counter.
+ *   - the dollar-conversion surrogate machinery (#704) and the writer-less
+ *     USD attribution plane — `attribution.ts`, `/metrics/cost-attribution`,
+ *     `/spending` (#1651). The surrogate is a pure token counter; the sole
+ *     sanctioned USD surface left is the recs-engine daily-spend ledger
+ *     (direct Anthropic API, real money).
  *
  * This file is the ONLY public import surface. Everything outside
  * `src/cost/` imports from here (`from "../cost/index.ts"`); the internal
- * split between `surrogate.ts`, `attribution.ts`, and `usage-tracker.ts`
- * is an implementation detail.
+ * split between `surrogate.ts` and `usage-tracker.ts` is an implementation
+ * detail.
  */
 
 // ---------------------------------------------------------------------------
@@ -40,22 +40,6 @@ export {
   // Re-export key helpers so tests that probe Redis directly stay on the
   // public Interface rather than reaching into `surrogate.ts`.
 } from "./surrogate.ts";
-
-// ---------------------------------------------------------------------------
-// Attribution — pure aggregation for /api/metrics/cost-attribution (issue #271)
-// ---------------------------------------------------------------------------
-export {
-  aggregateCostAttribution,
-  modelToTier,
-  agentRoleToTier,
-  deriveOutcome,
-  KNOWN_AGENT_ROLES,
-} from "./attribution.ts";
-
-export type {
-  AgentRun,
-  CycleSummary,
-} from "./attribution.ts";
 
 // ---------------------------------------------------------------------------
 // Subscription Usage Tracker — Anthropic-quota projection (PR A #606, B-series)

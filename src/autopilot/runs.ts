@@ -80,7 +80,6 @@ import {
   FAILED_STATUSES,
   isPidAlive,
   fetchTurnsWithJoins,
-  computeCostBreakdown,
   projectRunView,
   projectRunDigest,
   deriveLifecycleState,
@@ -345,7 +344,6 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
       regressionIntroduced: body.regressionIntroduced === true ? true : undefined,
       autopilotTurnId: body.autopilotTurnId,
       worktreeBranch: body.worktreeBranch,
-      costUsd: typeof body.costUsd === "number" ? body.costUsd : undefined,
       // Issue #1136 (Slice 2 of #1119): PURE PASS-THROUGH of the planning-time
       // reflection bucket tokens the dispatch served itself. recordCycle MUST
       // NOT derive this — reap (the only caller) doesn't know what
@@ -709,8 +707,8 @@ export type GetCurrentRunResult =
 
 /**
  * Read the most recent run, apply the dead-pid sweeper, project, and
- * attach the latest 50 turns with cycle joins + cost breakdown. 404
- * surfaces as `{ ok: false, code: "not-found" }`.
+ * attach the latest 50 turns with cycle joins. 404 surfaces as
+ * `{ ok: false, code: "not-found" }`.
  */
 export async function getCurrentRun(): Promise<GetCurrentRunResult> {
   try {
@@ -727,7 +725,6 @@ export async function getCurrentRun(): Promise<GetCurrentRunResult> {
     const view = projectRunView(sweepResult.row);
     const turns = await fetchTurnsWithJoins(runId, 50);
     (view as any).turns = turns;
-    (view as any).cost = computeCostBreakdown(turns);
     return { ok: true, view };
   } catch (err: any) {
     return errRedis(err);
@@ -748,7 +745,6 @@ export async function getRun(runId: string): Promise<GetRunResult> {
     const sweepResult = await sweepRunIfDead(runId, row);
     const view = projectRunView(sweepResult.row);
     const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH);
-    (view as any).cost = computeCostBreakdown(turns);
     return { ok: true, run: view, turns };
   } catch (err: any) {
     return errRedis(err);

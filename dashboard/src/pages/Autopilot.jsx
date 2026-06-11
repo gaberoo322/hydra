@@ -5,8 +5,9 @@ import { useApi } from "../hooks/useApi.js";
 // Slice 1 of epic #496 — "Is it alive?" header strip.
 // Slice 2 of epic #496 (issue #498) — pipeline snapshot + turn timeline.
 // Slice 3 of epic #496 (issue #499) — "Why did that crash?" log tail + journal.
-// Slice 4 of epic #496 (issue #500) — previous runs + cost breakdown +
-// cross-links. Dashboard v2 atomic swap (issue #621) removed the LIVE list
+// Slice 4 of epic #496 (issue #500) — previous runs + token budget +
+// cross-links (the USD cost breakdown was retired in #1651).
+// Dashboard v2 atomic swap (issue #621) removed the LIVE list
 // route at `/autopilot`; the live view now lives on the Now page. Only the
 // per-run DETAIL route at `/autopilot/:runId` remains — one-shot fetch of
 // /api/autopilot/runs/:runId, frozen (non-polling) mode.
@@ -249,9 +250,6 @@ function ActionRow({ action }) {
                   #{outcome.prNumber}
                 </a>
               </span>
-            )}
-            {outcome.costUsd !== null && outcome.costUsd !== undefined && (
-              <span>cost: ${outcome.costUsd.toFixed(2)}</span>
             )}
             {outcome.filesChanged && <span>files: {outcome.filesChanged}</span>}
           </div>
@@ -569,45 +567,26 @@ function LogsSection({ runId }) {
 }
 
 // ---------------------------------------------------------------------------
-// Slice 4 — Cost breakdown subsection
+// Token budget subsection
 //
-// Renders the two-line cost summary spec'd by issue #500: orchestration
-// (always $0 — subscription-billed) and dispatched-subagent total (joined
-// from cycle records). Tooltip explains the #471 surrogate caveat for any
-// rows whose cycle record didn't include a costUsd.
+// The two-line USD cost summary that used to live here rendered a writer-less
+// plane ($0.00 forever — retired in #1651). Spend truth under the
+// subscription is tokens, so this renders the run's cumulative tokens
+// against its token budget.
 // ---------------------------------------------------------------------------
 
-function CostBreakdown({ run }) {
-  const cost = run.cost || { orchestration_cost_usd: 0, dispatched_cost_usd: 0, dispatch_count: 0, dispatch_count_with_cost: 0 };
+function TokenBudget({ run }) {
   const tokens = Number(run.cumulative_tokens || 0);
   const limits = run.limits || {};
   const tokenBudget = Number(limits.token_budget) || 0;
-  const incompleteCost =
-    cost.dispatch_count > 0 && cost.dispatch_count_with_cost < cost.dispatch_count;
   return (
-    <div className="pt-3 border-t border-zinc-800/60 space-y-1.5">
+    <div className="pt-3 border-t border-zinc-800/60">
       <div className="flex items-baseline gap-2 text-xs">
-        <span className="text-zinc-500 uppercase tracking-widest text-[10px]">Cost</span>
+        <span className="text-zinc-500 uppercase tracking-widest text-[10px]">Tokens</span>
         <span className="text-zinc-200">
-          Orchestration:{" "}
-          <span className="font-mono">$0.00</span>{" "}
-          <span className="text-zinc-500">(subscription); tokens {tokens.toLocaleString()} / {tokenBudget.toLocaleString()}</span>
+          <span className="font-mono">{tokens.toLocaleString()}</span>{" "}
+          <span className="text-zinc-500">/ {tokenBudget.toLocaleString()} budget (subscription-billed)</span>
         </span>
-      </div>
-      <div className="flex items-baseline gap-2 text-xs">
-        <span className="text-zinc-500 uppercase tracking-widest text-[10px]">Subagents</span>
-        <span className="text-zinc-200">
-          Dispatched: <span className="font-mono">${cost.dispatched_cost_usd.toFixed(2)}</span>{" "}
-          <span className="text-zinc-500">({cost.dispatch_count_with_cost}/{cost.dispatch_count} dispatches with cost)</span>
-        </span>
-        {incompleteCost && (
-          <span
-            className="text-[10px] text-amber-400 cursor-help"
-            title="costUsd is $0 for many cycles until the surrogate lands — see #471"
-          >
-            ⚠ incomplete
-          </span>
-        )}
       </div>
     </div>
   );
@@ -680,7 +659,6 @@ function HistoryTable() {
                 <th className="text-right py-2 pr-3 font-semibold">Turns</th>
                 <th className="text-right py-2 pr-3 font-semibold">Disp (M/F)</th>
                 <th className="text-right py-2 pr-3 font-semibold">Tokens</th>
-                <th className="text-right py-2 pr-3 font-semibold">Cost</th>
                 <th className="text-right py-2 pr-1 font-semibold">Cycles</th>
               </tr>
             </thead>
@@ -716,9 +694,6 @@ function HistoryTable() {
                   </td>
                   <td className="py-2 pr-3 text-right font-mono text-zinc-300">
                     {formatTokens(r.total_tokens)}
-                  </td>
-                  <td className="py-2 pr-3 text-right font-mono text-zinc-300">
-                    ${Number(r.total_cost_usd || 0).toFixed(2)}
                   </td>
                   <td className="py-2 pr-1 text-right">
                     <Link
@@ -816,7 +791,7 @@ function RunView({ run, turns, mode }) {
           <MetaCell label="Idle turns" value={String(run.idle_turns || 0)} mono />
         </div>
 
-        <CostBreakdown run={run} />
+        <TokenBudget run={run} />
       </div>
 
       <PipelineSnapshot run={run} latestTurn={latestTurn} />

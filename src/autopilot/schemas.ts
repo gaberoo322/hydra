@@ -46,7 +46,6 @@ export const CycleRecordBodySchema = z
     regressionIntroduced: z.boolean().optional(),
     autopilotTurnId: z.string().optional(),
     worktreeBranch: z.string().optional(),
-    costUsd: z.number().optional(),
     // Issue #1136 (Slice 2 of #1119): the comma-separated reflection bucket
     // tokens (`per-anchor` / `by-file` / ...) the code-writing dispatch was
     // SERVED at planning time by `GET /api/reflections`, reported back so
