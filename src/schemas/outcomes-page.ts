@@ -49,8 +49,6 @@ export const WindowedDaysQuerySchema = z
   })
   .strict();
 
-export type WindowedDaysQuery = z.infer<typeof WindowedDaysQuerySchema>;
-
 // ---------------------------------------------------------------------------
 // Shared time-series shape — reused by trends, calibration, lessons, quota
 // ---------------------------------------------------------------------------
@@ -73,7 +71,7 @@ const TimeSeriesSchema = z
 // GET /api/v2/outcomes/trends
 // ---------------------------------------------------------------------------
 
-export const OutcomeTrendSchema = z
+const OutcomeTrendSchema = z
   .object({
     name: z.string(),
     direction: z.enum(["up", "down"]),
@@ -84,7 +82,7 @@ export const OutcomeTrendSchema = z
   })
   .strict();
 
-export const OutcomeTrendsResponseSchema = z
+const OutcomeTrendsResponseSchema = z
   .object({
     windowDays: z.number().int().positive(),
     generatedAt: z.string(),
@@ -98,7 +96,7 @@ export type OutcomeTrendsResponse = z.infer<typeof OutcomeTrendsResponseSchema>;
 // GET /api/v2/outcomes/calibration
 // ---------------------------------------------------------------------------
 
-export const CalibrationTrendResponseSchema = z
+const CalibrationTrendResponseSchema = z
   .object({
     windowDays: z.number().int().positive(),
     generatedAt: z.string(),
@@ -115,7 +113,7 @@ export type CalibrationTrendResponse = z.infer<
 // GET /api/v2/outcomes/lessons
 // ---------------------------------------------------------------------------
 
-export const FrictionItemSchema = z
+const FrictionItemSchema = z
   .object({
     skill: z.string(),
     cue: z.string(),
@@ -124,7 +122,7 @@ export const FrictionItemSchema = z
   })
   .strict();
 
-export const LessonsTrendResponseSchema = z
+const LessonsTrendResponseSchema = z
   .object({
     windowDays: z.number().int().positive(),
     generatedAt: z.string(),
@@ -147,7 +145,7 @@ const QuotaSeriesSchema = z
   })
   .strict();
 
-export const QuotaTrendResponseSchema = z
+const QuotaTrendResponseSchema = z
   .object({
     windowDays: z.number().int().positive(),
     generatedAt: z.string(),

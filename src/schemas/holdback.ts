@@ -28,16 +28,12 @@ export const HoldbackEnrollBodySchema = z
   })
   .strict();
 
-export type HoldbackEnrollBody = z.infer<typeof HoldbackEnrollBodySchema>;
-
 /** Body for POST /api/holdback/check — evaluate one window sample. */
 export const HoldbackCheckBodySchema = z
   .object({
     commitSha,
   })
   .strict();
-
-export type HoldbackCheckBody = z.infer<typeof HoldbackCheckBodySchema>;
 
 /** Body for POST /api/holdback/revert-failed — emit holdback.revert_failed. */
 export const HoldbackRevertFailedBodySchema = z
@@ -46,5 +42,3 @@ export const HoldbackRevertFailedBodySchema = z
     reason: z.string().max(2000).optional(),
   })
   .strict();
-
-export type HoldbackRevertFailedBody = z.infer<typeof HoldbackRevertFailedBodySchema>;
