@@ -370,6 +370,33 @@ async function runHousekeeping(
     skipped.push("work-queue-hygiene");
   }
 
+  // Merge→done reconciler (issue #1715) — sweeps recently merged target PRs
+  // and default-branch merge commits for `item-NNN` references and moves any
+  // referenced item still in a non-done lane to `done` with audit stamps
+  // (`reconciledAt`/`reconciledFrom`). Generalises the reaper's merged-PR
+  // guard (#1714), which only covers stale inProgress claims. Fail-closed +
+  // idempotent (done items aren't scanned; a `gh` outage is a guaranteed
+  // no-op) and its `gh` cost is two bounded list calls, so no Redis
+  // time-guard is needed; "skipped" only on an unexpected throw.
+  try {
+    const { reconcileMergedItems } = await import("../backlog/reconciler.ts");
+    const rec = await reconcileMergedItems();
+    if (rec.reconciled.length > 0) {
+      console.log(
+        `[Housekeeping] Merge→done reconciler: closed ${rec.reconciled.length} item${rec.reconciled.length === 1 ? "" : "s"} (scanned ${rec.scanned}): ${rec.reconciled.map((r) => `${r.id}←${r.ref}`).join(", ")}`,
+      );
+    }
+    ran.push("merged-item-reconciler");
+  } catch (err: any) {
+    console.error(`[Housekeeping] Merge→done reconciler failed: ${err.message}`);
+    Sentry.addBreadcrumb({
+      category: "scheduler",
+      message: `merged-item-reconciler failed: ${err.message}`,
+      level: "error",
+    });
+    skipped.push("merged-item-reconciler");
+  }
+
   // Forecast-calibration-brier leading-outcome producer (issue #1657) —
   // samples the target's aggregate Brier score (hydra-betting
   // GET /api/calibration/forecast-metrics) and publishes it to
