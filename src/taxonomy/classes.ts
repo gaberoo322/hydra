@@ -40,13 +40,13 @@ import { InvariantViolationError } from "../errors.ts";
 // ---------------------------------------------------------------------------
 
 /** `pipeline` = slot semantics (≤1 in flight); `signal` = cooldown-gated. */
-export type DispatchClassKind = "pipeline" | "signal";
+type DispatchClassKind = "pipeline" | "signal";
 
 /** Which side of the system the class works on; `health` alone is `both`. */
-export type DispatchClassScope = "orch" | "target" | "both";
+type DispatchClassScope = "orch" | "target" | "both";
 
 /** Which pattern-memory agent the class's lessons train (null = neither). */
-export type LearningAgent = "planner" | "executor";
+type LearningAgent = "planner" | "executor";
 
 /** One row of the Dispatch-Class Taxonomy. Nullable columns are always
  * present (explicit `null`, never absent) so a projection miss is loud. */
