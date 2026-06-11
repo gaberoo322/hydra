@@ -18,16 +18,12 @@
  * calibration aggregator) work with raw integer tier values, including
  * `0`, which the live `Tier` type (`1 | 2 | 3 | 4`) cannot express.
  *
- * This module imports ONLY the `Tier` *type* from `tier-classifier.ts`
- * (a type-only import, erased at compile time). It does NOT edit the
- * Verifier Core — `tier-classifier.ts` and `untouchable.ts` are
- * untouched — which is what keeps a PR that adds this file at Tier 3
- * rather than Verifier Core / Tier 0. (ADR-0019 decision 3.)
+ * This module deliberately carries NO dependency on the Verifier Core —
+ * `tier-classifier.ts` (home of the live `Tier` type) and
+ * `untouchable.ts` are untouched — which is what keeps a PR that adds
+ * this file at Tier 3 rather than Verifier Core / Tier 0. (ADR-0019
+ * decision 3.)
  */
-
-// Type-only import: erased at compile time, so this file carries no
-// runtime dependency on the Verifier Core and does not widen its diff.
-import type { Tier } from "./tier-classifier.ts";
 
 /**
  * The auto-merge boundary in the legacy `0|1|2|3` numbering.
@@ -59,8 +55,3 @@ export function isAutoMergeTier(tier: number): boolean {
 export function permitsBreakingChange(tier: number): boolean {
   return tier >= 2;
 }
-
-// `Tier` is re-referenced here only to document the type relationship
-// without forcing an unused-import error; the predicates deliberately
-// accept the wider `number` (see module header — legacy 0|1|2|3).
-export type { Tier };

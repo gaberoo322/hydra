@@ -69,7 +69,7 @@ export type OpenPr = {
 };
 
 /** Where a diverted issue is routed, or `ready-for-agent` when promotion is allowed. */
-export type PromotionLane = "ready-for-agent" | "needs-qa" | "ready-for-human" | "has-open-pr";
+type PromotionLane = "ready-for-agent" | "needs-qa" | "ready-for-human" | "has-open-pr";
 
 export type PromotionDecision = {
   /** True when no open PR references the issue → normal promotion proceeds. */
