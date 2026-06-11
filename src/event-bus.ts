@@ -616,12 +616,3 @@ class EventBus {
 }
 
 export { EventBus, STREAMS, RETAINED_STREAMS, CONSUMER_GROUPS, NOTIFICATION_EVENT_TYPES };
-export type {
-  StreamKey,
-  NotificationEventType,
-  EventInput,
-  EventEnvelope,
-  ConsumedEvent,
-  EventHandler,
-  ConsumeOptions,
-};

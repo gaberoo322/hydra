@@ -173,7 +173,7 @@ export interface CheckInput {
   now?: Date;
 }
 
-export type CheckDecision =
+type CheckDecision =
   /** No enrollment found (expired/never recorded) — nothing to watch. */
   | { decision: "no-enrollment" }
   /** Window completed clean — baseline cleared, no revert. */

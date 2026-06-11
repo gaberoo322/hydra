@@ -50,7 +50,7 @@
  * mergeable`). We only branch on the three values that matter for routing;
  * any other/absent value falls through to the conservative "neither" lane.
  */
-export type PrMergeable = "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | string | null | undefined;
+type PrMergeable = "MERGEABLE" | "CONFLICTING" | "UNKNOWN" | string | null | undefined;
 
 /**
  * The shape the caller extracts from `gh pr list ... --json
@@ -172,11 +172,3 @@ export function evaluateReadyForAgentPromotion(
     reason: reasonByLane[lane],
   };
 }
-
-// ---------------------------------------------------------------------------
-// Test surface — exported for white-box testing of the matcher internals.
-// ---------------------------------------------------------------------------
-
-export const __test__ = {
-  laneForMergeable,
-};
