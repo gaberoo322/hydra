@@ -611,10 +611,31 @@ function plural(n: number, word: string): string {
  * The title deliberately does NOT match the legacy single-finding patterns
  * `identityFromOpenIssueTitle()` parses — a batch's identities live in the
  * body manifest (see renderBatchBody), never the title.
+ *
+ * When a module dir splits into multiple chunks (artifact Invariant 6,
+ * forward-fix #1653), pass `chunk` so the title carries an ` [i/k]` suffix —
+ * equal-sized single-file chunks would otherwise render identical titles.
+ * Omitted (or `total: 1`) → no suffix, the unsplit-batch format is unchanged.
  */
-export function renderBatchTitle(moduleDir: string, findings: CleanupFinding[]): string {
+export interface BatchChunkRef {
+  /** 1-based chunk index within the split module dir. */
+  index: number;
+  /** Total chunks the module dir split into. */
+  total: number;
+}
+
+export function renderBatchTitle(
+  moduleDir: string,
+  findings: CleanupFinding[],
+  chunk?: BatchChunkRef,
+): string {
   if (findings.length === 0) {
     throw new Error("renderBatchTitle: refusing to render an empty batch");
+  }
+  if (chunk && (!Number.isInteger(chunk.index) || !Number.isInteger(chunk.total) || chunk.index < 1 || chunk.total < 1 || chunk.index > chunk.total)) {
+    throw new Error(
+      `renderBatchTitle: invalid chunk ref ${chunk.index}/${chunk.total} — index must be 1-based and ≤ total`,
+    );
   }
   for (const finding of findings) {
     const reason = validateFinding(finding);
@@ -625,15 +646,18 @@ export function renderBatchTitle(moduleDir: string, findings: CleanupFinding[]):
   const fileCount = findings.filter((f) => f.kind === "file").length;
   const exportCount = findings.length - fileCount;
   const distinctPaths = new Set(findings.map((f) => f.path.trim())).size;
+  // Invariant 6 (#1653 forward-fix): a split module's chunks each carry an
+  // ` [i/k]` suffix so sibling chunks are independently identifiable.
+  const suffix = chunk && chunk.total > 1 ? ` [${chunk.index}/${chunk.total}]` : "";
 
   if (exportCount === 0) {
-    return `cleanup(${moduleDir}): remove ${plural(fileCount, "unused file")}`;
+    return `cleanup(${moduleDir}): remove ${plural(fileCount, "unused file")}${suffix}`;
   }
   const exportsPart = `demote/remove ${plural(exportCount, "unused export")} (${plural(distinctPaths, "file")})`;
   if (fileCount === 0) {
-    return `cleanup(${moduleDir}): ${exportsPart}`;
+    return `cleanup(${moduleDir}): ${exportsPart}${suffix}`;
   }
-  return `cleanup(${moduleDir}): remove ${plural(fileCount, "unused file")} + ${exportsPart}`;
+  return `cleanup(${moduleDir}): remove ${plural(fileCount, "unused file")} + ${exportsPart}${suffix}`;
 }
 
 /** One checklist line for a finding inside a batch body, leading with its verdict. */
@@ -676,9 +700,12 @@ export function renderBatchBody(
   moduleDir: string,
   findings: CleanupFinding[],
   isoDate: string,
+  chunk?: BatchChunkRef,
 ): string {
-  // renderBatchTitle performs the empty/invalid validation backstop.
-  const title = renderBatchTitle(moduleDir, findings);
+  // renderBatchTitle performs the empty/invalid validation backstop. The
+  // chunk ref is forwarded so the H1 carries the same [i/k] suffix as the
+  // issue title (coherence by construction — the #1005/#1449 drift guard).
+  const title = renderBatchTitle(moduleDir, findings, chunk);
   const distinctPaths = [...new Set(findings.map((f) => f.path.trim()))];
 
   const lines: string[] = [];
