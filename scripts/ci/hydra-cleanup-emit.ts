@@ -36,8 +36,9 @@
  *   npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json --apply
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { posix as posixPath } from "node:path";
 import {
   parseKnipReport,
   validateFinding,
@@ -114,12 +115,61 @@ export interface CleanupEmitPlan {
 }
 
 /**
+ * Resolve the namespace-import targets of one source file (issue #1737, pure).
+ *
+ * Finds every `import * as <ns> from "<spec>"` in `source` and resolves each
+ * RELATIVE spec against the importer's directory to a repo-rooted path. Bare
+ * package specifiers (`@sentry/node`, `zod`) are skipped — only repo-local
+ * modules can be cleanup-finding targets. Extension handling is deliberately
+ * generous (string-only, no fs probing, so the helper stays pure): a `.js` /
+ * `.mjs` / `.jsx` spec additionally yields its TS twin, and an extensionless
+ * spec yields `.ts` / `.mts` / `/index.ts` candidates — knip reports findings
+ * against the on-disk TS path, so the candidate set just has to contain it.
+ */
+export function resolveNamespaceImportTargets(importerPath: string, source: string): string[] {
+  const targets: string[] = [];
+  const namespaceImportRe = /import\s*\*\s*as\s+[A-Za-z_$][\w$]*\s+from\s*["']([^"']+)["']/g;
+  for (const match of source.matchAll(namespaceImportRe)) {
+    const spec = match[1];
+    if (!spec.startsWith("./") && !spec.startsWith("../")) continue; // bare package specifier
+    const resolved = posixPath.normalize(posixPath.join(posixPath.dirname(importerPath), spec));
+    const extension = /\.([cm]?[jt]sx?)$/.exec(resolved)?.[1];
+    if (extension === undefined) {
+      targets.push(`${resolved}.ts`, `${resolved}.mts`, `${resolved}/index.ts`);
+    } else {
+      targets.push(resolved);
+      const tsTwin = resolved.replace(/\.js$/, ".ts").replace(/\.mjs$/, ".mts").replace(/\.jsx$/, ".tsx");
+      if (tsTwin !== resolved) targets.push(tsTwin);
+    }
+  }
+  return targets;
+}
+
+/**
+ * Drop reason for an export finding whose module is consumed via a namespace
+ * import (issue #1737). Machine-readable family name first so the dropped
+ * audit list groups the suppression with its recurrence cue.
+ */
+const NAMESPACE_FACADE_DROP_REASON =
+  "namespace-import / DI-facade consumer — knip loses per-export liveness through `import * as` folded into a deps.x ?? defaultX facade (#1737)";
+
+/**
  * Decide whether a finding is dropped by the high-confidence filter (playbook
  * Step 2), returning the drop reason or null to keep. validateFinding (the
  * blank-title guard) runs FIRST and is the single chokepoint — a finding with
  * an empty name/path can never reach render.
+ *
+ * `namespaceConsumedModules` (issue #1737) is the set of repo-rooted module
+ * paths consumed somewhere via `import * as` — knip's per-export liveness for
+ * those modules is untrustworthy wholesale (the namespace object escapes
+ * through DI facades like `deps.redis ?? defaultRedis`), so EXPORT findings
+ * against them are dropped with an audit reason. File-kind findings are
+ * unaffected: a namespace-imported file is never flagged as an unused file.
  */
-function filterReason(finding: CleanupFinding): string | null {
+function filterReason(
+  finding: CleanupFinding,
+  namespaceConsumedModules: ReadonlySet<string>,
+): string | null {
   const invalid = validateFinding(finding);
   if (invalid) return invalid; // blank-title guard (#1167) — runs first, HARD
 
@@ -132,6 +182,9 @@ function filterReason(finding: CleanupFinding): string | null {
   }
   if (path === "src/index.ts") {
     return "public entrypoint (src/index.ts)";
+  }
+  if (finding.kind === "export" && namespaceConsumedModules.has(path)) {
+    return NAMESPACE_FACADE_DROP_REASON; // #1737 false-positive family
   }
   return null;
 }
@@ -150,6 +203,15 @@ function filterReason(finding: CleanupFinding): string | null {
  * from the same finding the body is rendered from — there is no second pass and
  * no hand-built title, so the #1449 title/body divergence is structurally
  * impossible.
+ *
+ * `namespaceConsumedModules` (issue #1737, OPTIONAL — an absent/empty set
+ * degrades to the pre-#1737 behavior, never a crash) is computed by the CLI
+ * wrapper (`collectNamespaceConsumedModules`) and injected so the planner
+ * stays pure: export findings against a module consumed via `import * as`
+ * anywhere in src/ or scripts/ are dropped in the step-1 filter — knip cannot
+ * attribute member usage once the namespace object escapes through a
+ * `deps.x ?? defaultX` DI facade, so those findings are the false-positive
+ * family that burnt 11/15 findings on #1724.
  */
 export function planCleanupEmit(
   report: KnipReport,
@@ -158,6 +220,7 @@ export function planCleanupEmit(
   isoDate: string,
   cap: number = EMIT_CAP,
   symbolsPerBatch: number = SYMBOLS_PER_BATCH,
+  namespaceConsumedModules: ReadonlySet<string> = new Set(),
 ): CleanupEmitPlan {
   const raw = parseKnipReport(report);
   const dropped: DroppedCleanupFinding[] = [];
@@ -165,7 +228,7 @@ export function planCleanupEmit(
   // 1. Validate + high-confidence filter.
   const kept: CleanupFinding[] = [];
   for (const finding of raw) {
-    const reason = filterReason(finding);
+    const reason = filterReason(finding, namespaceConsumedModules);
     if (reason) {
       dropped.push({ finding, reason });
       continue;
@@ -273,6 +336,41 @@ export function planCleanupEmit(
 
 const REPO = "gaberoo322/hydra";
 
+/**
+ * Scan src/ and scripts/ for `import * as` consumers and return the set of
+ * repo-rooted module paths they consume (issue #1737). Runs in the impure CLI
+ * shell — the result is injected into {@link planCleanupEmit} so the planner
+ * stays pure (mirrors the injected readSource).
+ */
+function collectNamespaceConsumedModules(): Set<string> {
+  const consumed = new Set<string>();
+  for (const root of ["src", "scripts"]) {
+    if (!existsSync(root)) continue;
+    let entries: string[];
+    try {
+      entries = readdirSync(root, { recursive: true, encoding: "utf-8" });
+    } catch (err) {
+      console.error(
+        `hydra-cleanup-emit: failed to scan ${root}/ for namespace-import consumers (#1737 probe degrades to empty for this root):`,
+        err instanceof Error ? err.message : String(err),
+      );
+      continue;
+    }
+    for (const entry of entries) {
+      if (!/\.(ts|mts)$/.test(entry)) continue;
+      const filePath = posixPath.join(root, entry);
+      let source: string;
+      try {
+        source = readFileSync(filePath, "utf-8");
+      } catch {
+        continue; /* intentional: an unreadable file contributes no consumers; missing a consumer only re-admits a knip finding, never breaks the emit */
+      }
+      for (const target of resolveNamespaceImportTargets(filePath, source)) consumed.add(target);
+    }
+  }
+  return consumed;
+}
+
 function readBoardIssues(): OpenIssueRef[] {
   try {
     const out = execFileSync(
@@ -350,7 +448,15 @@ function main(argv: string[]): void {
     }
   };
 
-  const plan = planCleanupEmit(report, openIssues, readSource, isoDate);
+  const plan = planCleanupEmit(
+    report,
+    openIssues,
+    readSource,
+    isoDate,
+    EMIT_CAP,
+    SYMBOLS_PER_BATCH,
+    collectNamespaceConsumedModules(),
+  );
   const plannedFindings = plan.issues.reduce((n, i) => n + i.findings.length, 0);
 
   console.log(`hydra-cleanup-emit — Orchestrator (~/hydra) — ${new Date().toISOString()} — ${apply ? "apply" : "dry-run"}`);
