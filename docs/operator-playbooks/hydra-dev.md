@@ -292,7 +292,7 @@ of #846). Mirror `hydra-qa` Step 10 discipline: quote the label literals and
 make the edit non-fatal with a `|| echo WARN` guard so a transient `gh` failure
 can't abort the run. The transition is keyed by the **issue number** (exact, so
 the `anchor.reference`/title pitfall does not apply) via raw `gh issue edit` —
-NOT `safeKanban()`, which is a `src/` helper this bash playbook cannot call.
+NOT `moveItemToLane` (`src/backlog/lanes.ts`), which is a `src/` helper this bash playbook cannot call.
 
 CRITICAL: remove BOTH `ready-for-agent` AND `in-progress`. The #846 failures
 left issues stuck on `ready-for-agent`, so removing only `in-progress` is

@@ -285,7 +285,7 @@ Each reviewer (A and B) independently yields a per-reviewer verdict via the step
 - Hydra-specific checks the sub-agent must apply:
   - **CONTEXT.md vocabulary** — new identifiers in the diff must either appear in the glossary or be local-scope (test fixtures, private helpers). Flag vocabulary drift.
   - **ADR conformance** — if the diff touches an area governed by an ADR, the change must not contradict it.
-  - **CLAUDE.md coding conventions** — `safeKanban()` discipline, `redis-adapter` / `src/redis/*` access pattern, `eventBus` passed as parameter (not module global), no silent `catch` (every catch logs `console.error` with context OR is annotated `/* intentional: reason */`).
+  - **CLAUDE.md coding conventions** — `moveItemToLane` lane-mutation discipline (`src/backlog/lanes.ts`), `redis-adapter` / `src/redis/*` access pattern, `eventBus` passed as parameter (not module global), no silent `catch` (every catch logs `console.error` with context OR is annotated `/* intentional: reason */`).
   - **Tier alignment** — the PR body's `Tier: N` line (populated by `hydra-dev` from `/api/tier`) must agree with the artifact's `interfaceImpact` if an artifact is present. `breaking` ⇒ tier ≥ 2.
 
 **Spec sub-agent prompt** — include:
