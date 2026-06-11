@@ -47,7 +47,7 @@ export const OV_SEARCH_METRIC_FIELDS = [
   "errors",
 ] as const;
 
-export type OvSearchMetricField = (typeof OV_SEARCH_METRIC_FIELDS)[number];
+type OvSearchMetricField = (typeof OV_SEARCH_METRIC_FIELDS)[number];
 
 /** The delta shape `trackedOvSearch` flushes — a subset/superset of the fields above. */
 export type OvSearchMetricsDelta = Partial<Record<OvSearchMetricField, number>>;

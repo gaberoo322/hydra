@@ -99,7 +99,7 @@ import { getRedisConnection } from "./connection.ts";
 // ---------------------------------------------------------------------------
 
 /** The emit lane a retrospective finding was routed to. */
-export type RetroEmitKind = "issue" | "pr" | "artifact";
+type RetroEmitKind = "issue" | "pr" | "artifact";
 
 /**
  * One seen-list entry — the persisted record that a cue was already emitted on
