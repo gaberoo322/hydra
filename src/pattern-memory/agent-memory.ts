@@ -535,12 +535,15 @@ export function findPatternForCue(
  * + logs, and `escalatePatternToIssue` honours `HYDRA_ESCALATION_DISABLED`).
  * Pass a no-op `escalate` to exercise pattern accounting in isolation.
  *
- * Issue #1667 — `category` is normalized write-side: an incoming cue that
- * fuzzy-matches an existing pattern (see `findPatternForCue`) increments
- * that pattern instead of creating a fragment, with the older spelling kept
- * canonical and the variant retained in `aliases`. All downstream decisions
- * (metadata-cue classification, escalation threshold/cue/context) key on the
- * canonical `pattern.category`.
+ * Issue #1667 — `category` is normalized write-side IN THE FRICTION
+ * NAMESPACE ONLY: an incoming friction cue that fuzzy-matches an existing
+ * pattern (see `findPatternForCue`) increments that pattern instead of
+ * creating a fragment, with the older spelling kept canonical and the
+ * variant retained in `aliases`. All downstream decisions (metadata-cue
+ * classification, escalation threshold/cue/context) key on the canonical
+ * `pattern.category`. The `memory` namespace stays exact-match: its cues
+ * are deliberate identifiers (#524 metadata cues carry per-cue escalation
+ * thresholds) and a fuzzy merge there would collapse distinct thresholds.
  */
 export async function recordPattern(
   agentName: string,
@@ -568,8 +571,16 @@ export async function recordPattern(
   // Issue #1667 — exact match first, then fuzzy (token-overlap) merge so
   // free-authored respellings of the same gotcha increment ONE pattern
   // instead of fragmenting into parallel hitCount:1 entries that never
-  // reach PROMOTION_THRESHOLD.
-  const existing = findPatternForCue(patterns, category);
+  // reach PROMOTION_THRESHOLD. Fuzzy resolution applies to the FRICTION
+  // namespace ONLY (design invariant 1): memory-namespace cues are
+  // deliberately-spelled identifiers (e.g. the #524 metadata cue pair
+  // acceptance-criterion-unmet / acceptance-criterion-deferred, which
+  // token-overlap at 0.667 ≥ CUE_MERGE_THRESHOLD) whose per-cue escalation
+  // thresholds would be corrupted by a fuzzy merge — they stay exact-match.
+  const existing =
+    namespace === "friction"
+      ? findPatternForCue(patterns, category)
+      : patterns.find(p => p.category === category);
   let crossedThreshold = false;
   let pattern: MemoryPattern;
 

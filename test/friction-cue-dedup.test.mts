@@ -20,6 +20,11 @@
  *   5. Three fragment spellings of one gotcha now cross PROMOTION_THRESHOLD
  *      (crossedThreshold fires on the 3rd hit) — the exact recurrence the
  *      issue documents as structurally starved.
+ *   6. Fuzzy dedup is FRICTION-ONLY (design invariant 1): the #524
+ *      memory-namespace metadata cue pair acceptance-criterion-unmet /
+ *      acceptance-criterion-deferred scores above the merge threshold yet
+ *      must remain two distinct patterns, or their per-cue escalation
+ *      thresholds (3 vs 20+) would silently collapse.
  *
  * Tests run against Redis DB 1 to avoid colliding with production state.
  */
@@ -258,5 +263,96 @@ describe("fuzzy cue dedup (issue #1667)", () => {
     assert.equal(stored.length, 2);
     assert.ok(stored.every((p: any) => p.hitCount === 1));
     assert.ok(stored.every((p: any) => p.aliases === undefined));
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. memory-namespace isolation — fuzzy dedup is friction-only (invariant 1)
+  // -------------------------------------------------------------------------
+
+  async function loadMemoryPatterns(agent: string): Promise<any[]> {
+    const raw = await redis.get(`hydra:memory:${agent}:patterns`);
+    if (!raw) return [];
+    try { return JSON.parse(raw); } catch { return []; }
+  }
+
+  // The #524 metadata cue pair: similar enough to fuzzy-merge (0.667 >= 0.6)
+  // but carrying different per-cue escalation thresholds — merging them in the
+  // memory namespace would corrupt the threshold-override system.
+  const METADATA_CUE_A = "acceptance-criterion-unmet";
+  const METADATA_CUE_B = "acceptance-criterion-deferred";
+
+  test("memory namespace stays exact-match: the #524 metadata cue pair does NOT merge", async () => {
+    // Precondition: the pair really is above the merge threshold — the only
+    // thing keeping them apart must be the friction-only guard.
+    assert.ok(
+      agentMemory.cueSimilarity(METADATA_CUE_A, METADATA_CUE_B) >= 0.6,
+      "test premise: the #524 pair must score >= CUE_MERGE_THRESHOLD",
+    );
+
+    for (const [cue, cycleId] of [
+      [METADATA_CUE_A, "mem-cycle-1"],
+      [METADATA_CUE_B, "mem-cycle-2"],
+    ] as const) {
+      await agentMemory.recordPattern("planner", cue, {
+        action: "metadata record only",
+        example: `sighting of ${cue}`,
+        cycleId,
+        source: "subagent",
+        namespace: "memory",
+        escalate: noopEscalate,
+      });
+    }
+
+    const stored = await loadMemoryPatterns("planner");
+    assert.equal(
+      stored.length,
+      2,
+      "memory-namespace cues must NOT fuzzy-merge — per-cue escalation thresholds depend on distinct identities",
+    );
+    assert.deepEqual(
+      stored.map((p: any) => p.category).sort(),
+      [METADATA_CUE_B, METADATA_CUE_A].sort(),
+    );
+    assert.ok(stored.every((p: any) => p.hitCount === 1));
+    assert.ok(
+      stored.every((p: any) => p.aliases === undefined),
+      "no alias stamping in the memory namespace",
+    );
+
+    // Exact-match dedup still works in the memory namespace.
+    await agentMemory.recordPattern("planner", METADATA_CUE_A, {
+      action: "metadata record only",
+      example: "repeat sighting",
+      cycleId: "mem-cycle-3",
+      source: "subagent",
+      namespace: "memory",
+      escalate: noopEscalate,
+    });
+    const after = await loadMemoryPatterns("planner");
+    assert.equal(after.length, 2, "exact repeat must increment, not append");
+    const unmet = after.find((p: any) => p.category === METADATA_CUE_A);
+    assert.equal(unmet?.hitCount, 2);
+  });
+
+  test("contrast: the same above-threshold pair WOULD merge in the friction namespace (guard is the differentiator)", async () => {
+    for (const [cue, cycleId] of [
+      [METADATA_CUE_A, "fr-cycle-1"],
+      [METADATA_CUE_B, "fr-cycle-2"],
+    ] as const) {
+      await agentMemory.recordPattern("contrast-skill", cue, {
+        action: "n/a",
+        example: `sighting of ${cue}`,
+        cycleId,
+        source: "subagent",
+        namespace: "friction",
+        escalate: noopEscalate,
+      });
+    }
+
+    const stored = await loadFrictionPatterns("contrast-skill");
+    assert.equal(stored.length, 1, "friction namespace fuzzy-merges the pair");
+    assert.equal(stored[0].category, METADATA_CUE_A);
+    assert.equal(stored[0].hitCount, 2);
+    assert.deepEqual(stored[0].aliases, [METADATA_CUE_B]);
   });
 });
