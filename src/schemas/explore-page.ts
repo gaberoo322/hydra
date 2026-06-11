@@ -64,7 +64,7 @@ const FrictionGroupSchema = z
   })
   .strict();
 
-export const MetaFrictionIssueRefSchema = z
+const MetaFrictionIssueRefSchema = z
   .object({
     number: z.number().int().positive(),
     title: z.string(),
@@ -190,9 +190,7 @@ export const LessonsExplorerQuerySchema = z
   })
   .strict();
 
-export type LessonsExplorerQuery = z.infer<typeof LessonsExplorerQuerySchema>;
-
-export const PromotedLessonSchema = z
+const PromotedLessonSchema = z
   .object({
     skill: z.string(),
     cue: z.string(),
@@ -207,7 +205,7 @@ export const PromotedLessonSchema = z
   })
   .strict();
 
-export const LessonsExplorerResponseSchema = z
+const LessonsExplorerResponseSchema = z
   .object({
     lessons: z.array(PromotedLessonSchema),
     promotionThreshold: z.number().int().positive(),

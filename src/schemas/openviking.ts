@@ -31,6 +31,3 @@ export const OpenVikingSearchQuerySchema = z.object({
   q: z.string().trim().min(1),
   limit: countQuerySchema(10).shape.count,
 });
-
-/** Inferred TS type — `{ q: string; limit: number }` for the OV search proxy. */
-export type OpenVikingSearchQuery = z.infer<typeof OpenVikingSearchQuerySchema>;

@@ -180,8 +180,6 @@ export const AlertsNowQuerySchema = z
   })
   .strict();
 
-export type AlertsNowQuery = z.infer<typeof AlertsNowQuerySchema>;
-
 /**
  * One alert row. Alerts are stored as opaque JSON in `hydra:alerts`; we
  * pass through the fields we know about and tolerate extras with
@@ -231,8 +229,6 @@ export const AutopilotHealthQuerySchema = z
   })
   .strict();
 
-export type AutopilotHealthQuery = z.infer<typeof AutopilotHealthQuerySchema>;
-
 /**
  * The four stuck-signal heuristic types the autopilot-health aggregator
  * computes (issue #890):
@@ -276,7 +272,6 @@ export const AutopilotHealthResponseSchema = z
   })
   .strict();
 
-export type StuckSignalType = z.infer<typeof StuckSignalTypeSchema>;
 export type StuckSignalSeverity = z.infer<typeof StuckSignalSeveritySchema>;
 export type StuckSignal = z.infer<typeof StuckSignalSchema>;
 export type AutopilotHealthResponse = z.infer<typeof AutopilotHealthResponseSchema>;

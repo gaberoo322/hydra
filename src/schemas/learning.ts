@@ -33,9 +33,6 @@ export const RuleActionLogQuerySchema = z.object({
   limit: countQuerySchema(50, 200).shape.count,
 });
 
-/** Inferred TS type — `{ limit: number }` for the rule-action-log pager. */
-export type RuleActionLogQuery = z.infer<typeof RuleActionLogQuerySchema>;
-
 /**
  * `GET /learning/context-trace?agent=&reference=&type=&files=`.
  *
@@ -53,6 +50,3 @@ export const ContextTraceQuerySchema = z.object({
   type: z.string().trim().min(1),
   files: z.string().optional(),
 });
-
-/** Inferred TS type — canonical shape of the context-trace query params. */
-export type ContextTraceQuery = z.infer<typeof ContextTraceQuerySchema>;
