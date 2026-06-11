@@ -59,7 +59,12 @@ export interface TargetRiskClassification {
  *   - provider integrations (sportsbook / exchange API clients),
  *   - execution (bet placement / order routing),
  *   - staking (stake sizing / bankroll allocation),
- *   - bet-math (odds, edge, probability, settlement math).
+ *   - bet-math (odds, edge, probability, settlement math),
+ * plus the runner entrypoints that *drive* them:
+ *   - bin (issue #1694 — scan-to-submit runners such as
+ *     web/src/bin/arbitrage-auto-approval-runner.ts author and submit machine
+ *     trade approvals; an entrypoint that drives money-critical behavior is
+ *     itself money-critical, even though it lives outside src/lib/).
  */
 export const MONEY_CRITICAL_TARGET_PATHS: readonly string[] = Object.freeze([
   // Provider integrations — the hardcoded rule's first protected directory.
@@ -70,6 +75,11 @@ export const MONEY_CRITICAL_TARGET_PATHS: readonly string[] = Object.freeze([
   "src/lib/staking/",
   // Bet-math — odds, edge, probability, and settlement math.
   "src/lib/bet-math/",
+  // Bin runner entrypoints — drive scan-to-submit / trade-submitting loops
+  // (issue #1694). The whole directory is listed, not single files, because a
+  // false positive merely buys stricter QA while a surface gap silently
+  // defeats the keystone gate.
+  "src/bin/",
 ]);
 
 /**
