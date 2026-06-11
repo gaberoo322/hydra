@@ -18,6 +18,8 @@
  *   - feed outage (both fetchers null) → guaranteed no-op
  *   - idempotent: re-running over the same window is a no-op
  *   - closure emits a `merged-item-reconciled` alert (auditable)
+ *   - blocked-lane items are NEVER reconciled even with a merged ref
+ *     (design-concept invariant 3 — operator-attention lane)
  *
  * Feeds are injected via `opts.fetchMergedPrRefs` / `opts.fetchMergeCommitRefs`
  * (same seam style as `reaper.ts` `opts.fetchOpenPrBlobs`) so no test shells
@@ -259,6 +261,41 @@ describe("backlog merge→done reconciler (issue #1715)", () => {
     assert.equal(matching[0].payload.fromLane, "queued");
     assert.equal(matching[0].payload.reconciledFrom, "pr-111");
     assert.ok(matching[0].ts, "alert carries a timestamp");
+  });
+
+  test("blocked-lane items are NEVER reconciled, even with a matching merged ref (invariant 3)", async (t) => {
+    requireRedis(t);
+
+    // The blocked lane is an operator-attention lane: a blocked item with a
+    // merged PR still needs its blocker resolved by a human/agent decision,
+    // never a silent auto-done (approved design-concept invariant 3).
+    const { id } = await admin.addToBacklog({ title: "Blocked despite merge", category: "test", lane: "queued" });
+    await admin.blockByTitle("Blocked despite merge", "waiting on operator decision");
+
+    const result = await admin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => [
+        { ref: "pr-112", blob: `feat: lands the work anyway (${id})\ncloses ${id}` },
+      ],
+      fetchMergeCommitRefs: async () => [
+        { ref: "commit-beef123", blob: `merge: claude cycle — blocked item work (${id})` },
+      ],
+    });
+
+    assert.equal(result.reconciled.length, 0, "a blocked item must never be auto-reconciled");
+    assert.equal(result.scanned, 0, "the blocked lane must not even be scanned");
+
+    const lanes = await admin.loadBacklog();
+    assert.equal(lanes.blocked.length, 1, "item stays in blocked");
+    assert.equal(lanes.blocked[0].id, id);
+    assert.equal(lanes.blocked[0].lane, "blocked");
+    assert.equal(lanes.blocked[0].meta.reconciledFrom, undefined, "no reconciled stamp may be written");
+    assert.equal(lanes.done.length, 0);
+
+    const alerts = await redis.lrange("hydra:alerts", 0, -1);
+    const matching = alerts
+      .map((a: string) => JSON.parse(a))
+      .filter((a: any) => a.type === "merged-item-reconciled");
+    assert.equal(matching.length, 0, "no reconciliation alert for a blocked item");
   });
 
   test("empty feeds (available but nothing merged) is a no-op without scanning movement", async (t) => {

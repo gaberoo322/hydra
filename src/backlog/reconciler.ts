@@ -12,7 +12,8 @@
  * the target's default branch (cycle merges bypass PRs — e.g.
  * "merge: claude cycle — ... (item-485)"), extracts `item-NNN` references via
  * the same whole-word matcher the reaper uses (`itemMatchesOpenPr`), and moves
- * every referenced item found in a non-done lane to `done`, stamping
+ * every referenced item found in a swept lane (`inProgress`/`queued`/`backlog`
+ * — NEVER `blocked`, see `RECONCILE_LANES`) to `done`, stamping
  * `meta.reconciledAt` / `meta.reconciledFrom` plus the same
  * `completedAt`/`outcome`/`checked` fields `moveToDone` writes so done-lane
  * retention prunes the item normally.
@@ -22,7 +23,7 @@
  *     that feed contributes nothing; both feeds down → complete no-op. An
  *     unreadable board (Redis error) aborts the sweep with what was done so
  *     far. An item is NEVER moved without a concrete merged reference.
- *   - Idempotent: only non-done lanes are scanned, so re-running over the
+ *   - Idempotent: the `done` lane is never scanned, so re-running over the
  *     same window finds nothing to move.
  *   - Never throws — returns a result object; per-item failures are logged
  *     and skipped (CLAUDE.md: never throw from merge/verification paths).
@@ -55,8 +56,14 @@ export interface MergedRef {
   blob: string;
 }
 
-/** Lanes the reconciler sweeps — every lane except `done` that `moveToDone` also drains. */
-const RECONCILE_LANES = ["inProgress", "blocked", "queued", "backlog"] as const;
+/**
+ * Lanes the reconciler sweeps. `blocked` is deliberately EXCLUDED (design-concept
+ * invariant 3): it is an operator-attention lane — a blocked item with a merged
+ * PR still needs its blocker resolved by a human/agent decision, never a silent
+ * auto-done. The blocked-item re-escalation chore surfaces merged-but-blocked
+ * items instead. `done` is excluded for idempotency.
+ */
+const RECONCILE_LANES = ["inProgress", "queued", "backlog"] as const;
 
 const MERGED_PR_LIMIT = 50;
 const MERGE_COMMIT_LIMIT = 50;
@@ -128,7 +135,8 @@ async function fetchTargetMergeCommitRefs(): Promise<MergedRef[] | null> {
 }
 
 /**
- * Sweep non-done lanes for items referenced by a recently merged target PR or
+ * Sweep the reconcilable lanes (`inProgress`/`queued`/`backlog` — never
+ * `blocked` or `done`) for items referenced by a recently merged target PR or
  * merge commit, and move each match to `done` with audit stamps.
  *
  * Options (test seam, mirrors `reapStaleClaims`):
