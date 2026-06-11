@@ -88,7 +88,7 @@ The child prompt MUST include the worktree-guard preamble (see below) AND the sc
     ```
     - [ ] Criterion A — verified by: `npm test -- --test-name-pattern "criterion-A"` exits 0
     - [ ] Criterion B — verified by: `curl -s http://localhost:4000/api/foo | jq '.status'` returns "ok"
-    - [ ] Criterion C — verified by: `git diff --name-only master...HEAD` includes path/to/file.ts
+    - [ ] Criterion C — verified by: `git diff --name-only origin/master...HEAD` includes path/to/file.ts
     ```
     Prose-only criteria ("implementation detail X is handled correctly") are rejected by QA — always pair a what with a how-to-verify.
 11. Returns: PR URL + summary table
@@ -192,7 +192,7 @@ is the live path a dispatch actually consumes.
 The orchestrator service exposes a deterministic tier classifier at
 `GET http://localhost:4000/api/tier?files=<comma-separated paths>`. The child
 MUST call this endpoint with the exact list of files it changed (relative to
-the repo root, as `git diff --name-only master...HEAD` would emit) and use
+the repo root, as `git diff --name-only origin/master...HEAD` would emit) and use
 the returned `tier` value verbatim in the PR body. Do NOT infer tier from
 path patterns — that was the failure mode that motivated this rule
 (autopilot run 2026-05-14 mis-classified PR #404 as Tier 2 when the live
@@ -210,7 +210,11 @@ classifier returns Tier 3 for the same file list, wasting a QA cycle).
 
 ```bash
 # After all file changes are committed on the feature branch, before opening the PR:
-CHANGED=$(git diff --name-only master...HEAD | paste -sd, -)
+# Diff against origin/master, never local master — the worktree shares ~/hydra's
+# gitdir, whose local master ref goes stale as sibling PRs merge mid-cycle
+# (cue: stale-local-master-ref). A stale base inflates the diff and mis-tiers the PR.
+git fetch origin --quiet
+CHANGED=$(git diff --name-only origin/master...HEAD | paste -sd, -)
 TIER_JSON=$(curl -sf --max-time 5 \
   "http://localhost:4000/api/tier?files=$(printf '%s' "$CHANGED" | jq -sRr @uri)")
 
