@@ -38,11 +38,14 @@ import { join, resolve } from "node:path";
 import {
   DISPATCH_CLASSES,
   PIPELINE_SLOT_NAMES,
+  PROVENANCE_LABELS,
+  RESIDUAL_PROVENANCE_LABELS,
   SIGNAL_CLASS_NAMES,
   SIGNAL_CLASS_COOLDOWNS,
   classByName,
   classBySkill,
   parseClassTaxonomy,
+  provenanceFromLabels,
 } from "../src/taxonomy/classes.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
@@ -407,6 +410,61 @@ describe("TS projections read the taxonomy (slice #1671)", () => {
       /mirrors\s+`?decide\.py/i.test(src),
       false,
       "calendar-walk.ts still claims to hand-mirror decide.py",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6. Provenance vocabulary + classifier (slice #1672)
+// ---------------------------------------------------------------------------
+
+describe("taxonomy: provenance labels derive from the provenanceLabel column (slice #1672)", () => {
+  test("PROVENANCE_LABELS equals exactly the non-null provenanceLabel rows, in file order", () => {
+    const expected = DISPATCH_CLASSES.filter((r) => r.provenanceLabel !== null).map(
+      (r) => r.provenanceLabel,
+    );
+    assert.deepEqual([...PROVENANCE_LABELS], expected);
+    // The live column today: scout, architecture, cleanup. A change here is a
+    // deliberate classes.json taxonomy edit, not drift.
+    assert.deepEqual([...PROVENANCE_LABELS], [
+      "tool-scout",
+      "architecture-scan",
+      "cleanup-scan",
+    ]);
+  });
+
+  test("residual list carries sentry — a filing label with no owning class", () => {
+    assert.deepEqual([...RESIDUAL_PROVENANCE_LABELS], ["sentry"]);
+    // sentry must NOT gain a fake classes.json row (it would pollute the
+    // decide.py PIPELINE_SLOTS/SIGNAL_CLASSES derivations).
+    assert.equal(
+      DISPATCH_CLASSES.some((r) => r.provenanceLabel === "sentry"),
+      false,
+    );
+  });
+
+  test("provenanceFromLabels matches column labels and residual labels alike", () => {
+    assert.equal(provenanceFromLabels(["ready-for-agent", "cleanup-scan"]), "cleanup-scan");
+    assert.equal(provenanceFromLabels(["tool-scout"]), "tool-scout");
+    assert.equal(provenanceFromLabels(["architecture-scan", "tier:3"]), "architecture-scan");
+    assert.equal(provenanceFromLabels(["sentry", "bug"]), "sentry");
+  });
+
+  test("provenanceFromLabels returns null for no-match — including the dead class alphabet", () => {
+    assert.equal(provenanceFromLabels([]), null);
+    assert.equal(provenanceFromLabels(["bug", "needs-info"]), null);
+    // The pre-#1672 fictional class labels never classify: no writer stamps them.
+    assert.equal(provenanceFromLabels(["dev_orch", "qa", "sweep_target"]), null);
+  });
+
+  test("first matching label wins and non-string entries are skipped", () => {
+    assert.equal(
+      provenanceFromLabels(["cleanup-scan", "tool-scout"]),
+      "cleanup-scan",
+    );
+    assert.equal(
+      provenanceFromLabels([undefined as unknown as string, "sentry"]),
+      "sentry",
     );
   });
 });
