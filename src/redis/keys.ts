@@ -19,8 +19,6 @@ export const redisKeys = {
   // downstream consumers paginate without an O(N) scan.
   cycleIndex: () => "hydra:cycle:index",
   cycleTasks: (id: string) => `hydra:cycle:${id}:tasks`,
-  cycleAgents: (id: string) => `hydra:cycle:${id}:agents`,
-  cycleCosts: (id: string) => `hydra:cycle:${id}:costs`,
   cycleActiveSource: (source: string) => `hydra:cycle:active:${source}`,
 
   // ---------------------------------------------------------------------------

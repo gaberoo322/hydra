@@ -8,7 +8,6 @@
  * mostly-pure derivation surface:
  *
  *   - `fetchTurnsWithJoins` — turn-fetch + cycle-outcome join
- *   - `computeCostBreakdown` — cost rollup from joined turns
  *   - `projectRunView` — raw hash → public run view
  *   - `projectRunDigest` — raw hash + joins → history-table digest
  *   - `deriveLifecycleState` — pure discriminated lifecycle derivation (#888)
@@ -205,7 +204,6 @@ export async function fetchTurnsWithJoins(
             status: hash.status || "unknown",
             prNumber: hash.prNumber || hash.pr_number || null,
             filesChanged: hash.filesChanged || null,
-            costUsd: hash.costUsd ? Number(hash.costUsd) : null,
             startedAt: hash.startedAt || null,
             completedAt: hash.completedAt || null,
           };
@@ -217,52 +215,6 @@ export async function fetchTurnsWithJoins(
   }
 
   return turns;
-}
-
-// ---------------------------------------------------------------------------
-// Projection: cost breakdown
-// ---------------------------------------------------------------------------
-
-/**
- * Compute the slice-4 cost breakdown from already-joined turn rows.
- * `orchestration_cost_usd` is always 0 — the outer
- * `claude -p /hydra-autopilot` call is subscription-billed; surfaced
- * as a separate field so the dashboard can render the
- * "(subscription)" annotation without inferring it.
- */
-export function computeCostBreakdown(
-  turns: Array<Record<string, unknown>>,
-): {
-  orchestration_cost_usd: number;
-  dispatched_cost_usd: number;
-  dispatch_count: number;
-  dispatch_count_with_cost: number;
-} {
-  let dispatched = 0;
-  let dispatchCount = 0;
-  let withCost = 0;
-  for (const turn of turns) {
-    const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
-    for (const a of actions) {
-      if (a && a.type === "dispatch") {
-        dispatchCount += 1;
-        const outcome = a.outcome;
-        if (outcome && typeof outcome === "object") {
-          const c = (outcome as any).costUsd;
-          if (typeof c === "number" && Number.isFinite(c)) {
-            dispatched += c;
-            withCost += 1;
-          }
-        }
-      }
-    }
-  }
-  return {
-    orchestration_cost_usd: 0,
-    dispatched_cost_usd: Number(dispatched.toFixed(6)),
-    dispatch_count: dispatchCount,
-    dispatch_count_with_cost: withCost,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -352,10 +304,9 @@ export function projectRunView(
 
 /**
  * Project a single run hash + its joined turns into the digest shape
- * used by the history table. One turn-fetch per run; the table needs
- * the cost total, which we get from the same joins we'd do for the
- * live page. `deps` is injectable so the digest boundary can be pinned
- * without Redis.
+ * used by the history table. One turn-fetch per run, reusing the same
+ * joins we'd do for the live page. `deps` is injectable so the digest
+ * boundary can be pinned without Redis.
  */
 export async function projectRunDigest(
   runId: string,
@@ -363,7 +314,6 @@ export async function projectRunDigest(
   deps: ProjectionDeps = defaultProjectionDeps,
 ): Promise<Record<string, unknown>> {
   const turns = await fetchTurnsWithJoins(runId, RUN_TURNS_MAX_FETCH, deps);
-  const cost = computeCostBreakdown(turns);
 
   let merged = 0;
   let failed = 0;
@@ -401,7 +351,6 @@ export async function projectRunDigest(
     merged_count: merged,
     failed_count: failed,
     total_tokens: Number(row.cumulative_tokens || "0"),
-    total_cost_usd: cost.dispatched_cost_usd,
     exit_code: row.exit_code !== undefined ? Number(row.exit_code) : null,
   };
 }

@@ -4,10 +4,8 @@ import { getAggregateStats, getCumulativeAccomplishments, getCostByClass } from 
 import { recordCycleMetrics } from "../metrics/record.ts";
 import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
-import { loadCycleSummaries, loadCycleSpending } from "../metrics/cycle-summary.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
 import {
-  aggregateCostAttribution,
   getDailyTokenCounter,
   recordSubagentTokens,
   todayDateString,
@@ -75,17 +73,6 @@ export function createMetricsRouter() {
     }
   });
 
-  // GET /spending — Token consumption and dollar costs from Redis
-  router.get("/spending", async (req, res) => {
-    try {
-      const count = countQuerySchema(20).safeParse(req.query).data?.count ?? 20;
-      const report = await loadCycleSpending(count);
-      res.json(report);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // GET /metrics/abandonment — Aggregated abandonment causes from recent cycles (issue #195)
   router.get("/metrics/abandonment", async (req, res) => {
     try {
@@ -125,19 +112,6 @@ export function createMetricsRouter() {
     }
   });
 
-  // GET /metrics/cost-attribution — Per-role / tier / anchor / complexity cost breakdown (issue #271)
-  router.get("/metrics/cost-attribution", async (req, res) => {
-    try {
-      const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
-      const cycles = await loadCycleSummaries(count);
-      const result = aggregateCostAttribution(cycles);
-      res.json(result);
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/cost-attribution failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // GET /metrics/anchor-distribution — Per-priority view of who served what
   // over the recent window (issue #377). Aggregates cycle metrics for `served`
   // by anchorType. The reframe / prior-failure lanes and their starvation
@@ -152,8 +126,8 @@ export function createMetricsRouter() {
         return [];
       });
 
-      // Bucket cycles by anchorType. Mirrors the byAnchorType shape in
-      // src/cost/attribution.ts but counts cycles only (no cost).
+      // Bucket cycles by anchorType — counts cycles only (no cost; the USD
+      // attribution plane was retired in #1651).
       const served: Record<string, number> = {};
       for (const m of trend) {
         const type = (m.anchorType && String(m.anchorType).trim()) || "unknown";

@@ -20,12 +20,6 @@ function fmtDuration(s) {
   return `${h}h${m % 60 ? ` ${m % 60}m` : ""}`;
 }
 
-function fmtMoney(n) {
-  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
-  if (n >= 100) return `$${Math.round(n)}`;
-  return `$${n.toFixed(2)}`;
-}
-
 export function BehaviorTab() {
   const [outcome, setOutcome] = useState("");
   const [classFilter, setClassFilter] = useState("");
@@ -102,9 +96,6 @@ export function BehaviorTab() {
               </span>
               <span className="text-xs text-zinc-300 shrink-0 w-20 font-mono">
                 {row.mergedCount}m/{row.failedCount}f
-              </span>
-              <span className="text-xs text-zinc-300 shrink-0 w-16 font-mono">
-                {fmtMoney(row.totalCostUsd)}
               </span>
               <span className="flex-1 min-w-0 text-xs text-zinc-500 truncate">
                 {row.classes.join(", ")}

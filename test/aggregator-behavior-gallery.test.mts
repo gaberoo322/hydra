@@ -26,7 +26,6 @@ function row(overrides: Partial<BehaviorRow> = {}): BehaviorRow {
     mergedCount: 0,
     failedCount: 0,
     totalTokens: 0,
-    totalCostUsd: 0,
     exitCode: 0,
     termReason: null,
     classes: [],
@@ -130,7 +129,6 @@ describe("getBehaviorGallery — happy path", () => {
           merged_count: 1,
           failed_count: 0,
           total_tokens: 5000,
-          total_cost_usd: 0.05,
         },
         {
           run_id: "r2",
@@ -145,7 +143,6 @@ describe("getBehaviorGallery — happy path", () => {
           merged_count: 0,
           failed_count: 0,
           total_tokens: 0,
-          total_cost_usd: 0,
         },
       ],
     });
@@ -164,9 +161,9 @@ describe("getBehaviorGallery — happy path", () => {
     const listRuns = async () => ({
       ok: true as const,
       runs: [
-        { run_id: "a", started: "x", status: "running", duration_s: null, trigger: "m", turns: 0, dispatches: 0, merged_count: 0, failed_count: 0, total_tokens: 0, total_cost_usd: 0 },
-        { run_id: "b", started: "x", status: "completed", exit_code: 0, duration_s: 1, trigger: "m", turns: 0, dispatches: 0, merged_count: 0, failed_count: 0, total_tokens: 0, total_cost_usd: 0 },
-        { run_id: "c", started: "x", status: "failed", duration_s: 1, trigger: "m", turns: 0, dispatches: 0, merged_count: 0, failed_count: 0, total_tokens: 0, total_cost_usd: 0 },
+        { run_id: "a", started: "x", status: "running", duration_s: null, trigger: "m", turns: 0, dispatches: 0, merged_count: 0, failed_count: 0, total_tokens: 0 },
+        { run_id: "b", started: "x", status: "completed", exit_code: 0, duration_s: 1, trigger: "m", turns: 0, dispatches: 0, merged_count: 0, failed_count: 0, total_tokens: 0 },
+        { run_id: "c", started: "x", status: "failed", duration_s: 1, trigger: "m", turns: 0, dispatches: 0, merged_count: 0, failed_count: 0, total_tokens: 0 },
       ],
     });
     const fetchClasses = async () => [];

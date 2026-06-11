@@ -85,7 +85,7 @@ export function createAgentsRouter() {
   //     runId: "<run_id>",
   //     turnN: <number>,
   //     dispatch: { type: "dispatch", worktreeBranch: "<branch>", ... },
-  //     outcome: { cycleId, status, prNumber, costUsd, startedAt, completedAt }
+  //     outcome: { cycleId, status, prNumber, startedAt, completedAt }
   //              | null   // when the cycle hasn't been recorded yet
   //   }
   //

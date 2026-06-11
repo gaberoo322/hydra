@@ -310,7 +310,6 @@ describe("autopilot turn API (issue #498, slice 2)", () => {
       `hydra:cycle:${cycleId}`,
       "status", "merged",
       "prNumber", "999",
-      "costUsd", "0.42",
       "startedAt", "2026-05-19T10:00:00Z",
       "completedAt", "2026-05-19T10:05:00Z",
     );
@@ -332,7 +331,6 @@ describe("autopilot turn API (issue #498, slice 2)", () => {
     assert.ok(a.outcome, "dispatch action must carry an outcome");
     assert.equal(a.outcome.status, "merged");
     assert.equal(a.outcome.prNumber, "999");
-    assert.equal(a.outcome.costUsd, 0.42);
   });
 
   // ---------------------------------------------------------------------------

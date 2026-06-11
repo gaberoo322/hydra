@@ -119,7 +119,6 @@ export const BehaviorRowSchema = z
     mergedCount: z.number().int().nonnegative(),
     failedCount: z.number().int().nonnegative(),
     totalTokens: z.number().int().nonnegative(),
-    totalCostUsd: z.number().nonnegative(),
     exitCode: z.number().int().nullable(),
     termReason: z.string().nullable(),
     classes: z.array(z.string()),

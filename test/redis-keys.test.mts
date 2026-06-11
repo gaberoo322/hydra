@@ -53,8 +53,6 @@ describe("redisKeys naming convention", () => {
   const dynamicGenerators: [string, string][] = [
     ["cycle", redisKeys.cycle("test-id")],
     ["cycleTasks", redisKeys.cycleTasks("test-id")],
-    ["cycleAgents", redisKeys.cycleAgents("test-id")],
-    ["cycleCosts", redisKeys.cycleCosts("test-id")],
     ["cycleActiveSource", redisKeys.cycleActiveSource("codex")],
     ["task", redisKeys.task("task-1")],
     ["taskEvidence", redisKeys.taskEvidence("task-1", "merged")],
@@ -149,8 +147,6 @@ describe("redisKeys snapshot", () => {
   test("dynamic keys match expected patterns", () => {
     assert.equal(redisKeys.cycle("cycle-2026-04-30"), "hydra:cycle:cycle-2026-04-30");
     assert.equal(redisKeys.cycleTasks("c1"), "hydra:cycle:c1:tasks");
-    assert.equal(redisKeys.cycleAgents("c1"), "hydra:cycle:c1:agents");
-    assert.equal(redisKeys.cycleCosts("c1"), "hydra:cycle:c1:costs");
     assert.equal(redisKeys.cycleActiveSource("claude"), "hydra:cycle:active:claude");
     assert.equal(redisKeys.task("task-1"), "hydra:task:task-1");
     assert.equal(redisKeys.taskEvidence("t1", "merged"), "hydra:task:t1:evidence:merged");

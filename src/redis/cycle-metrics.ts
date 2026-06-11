@@ -1,17 +1,11 @@
 /**
- * Cycle metrics + cost Redis ops. Extracted from redis-adapter.ts (issue #269).
+ * Cycle metrics Redis ops. Extracted from redis-adapter.ts (issue #269).
+ * The cost accessors over the writer-less `:agents`/`:costs` sub-keys were
+ * retired with the USD attribution plane (#1651, ADR-0016).
  */
 
 import { redisKeys } from "./keys.ts";
 import { getRedisConnection } from "./connection.ts";
-
-/**
- * Fetch the list of agent run entries for a cycle.
- */
-export async function getCycleAgentRuns(cycleId: string): Promise<string[]> {
-  const r = getRedisConnection();
-  return r.lrange(redisKeys.cycleAgents(cycleId), 0, -1);
-}
 
 /**
  * Store a cycle's flattened metrics hash and add to the index.
@@ -75,18 +69,4 @@ export async function trimMetricsIndex(excess: number): Promise<void> {
 export async function getRecentMetricIdsDesc(count: number): Promise<string[]> {
   const r = getRedisConnection();
   return r.zrevrange(redisKeys.metricsIndex(), 0, count - 1);
-}
-
-/**
- * Get the cost microdollars field from a cycle's costs hash.
- */
-export async function getCycleCostMicrodollars(cycleId: string): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.hget(redisKeys.cycleCosts(cycleId), "costMicrodollars");
-}
-
-/** Get all cost fields for a cycle. */
-export async function getCycleCosts(cycleId: string): Promise<Record<string, string>> {
-  const r = getRedisConnection();
-  return r.hgetall(redisKeys.cycleCosts(cycleId));
 }

@@ -59,7 +59,6 @@ export interface BehaviorRow {
   mergedCount: number;
   failedCount: number;
   totalTokens: number;
-  totalCostUsd: number;
   exitCode: number | null;
   termReason: string | null;
   /** Distinct autopilot classes dispatched during this run, alphabetised. */
@@ -217,7 +216,6 @@ async function liftRunDigest(
     mergedCount: typeof raw.merged_count === "number" ? raw.merged_count : 0,
     failedCount: typeof raw.failed_count === "number" ? raw.failed_count : 0,
     totalTokens: typeof raw.total_tokens === "number" ? raw.total_tokens : 0,
-    totalCostUsd: typeof raw.total_cost_usd === "number" ? raw.total_cost_usd : 0,
     exitCode,
     termReason,
     classes,

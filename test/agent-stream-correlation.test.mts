@@ -183,7 +183,6 @@ describe("agent stream correlation API (issue #531)", () => {
       startedAt: "2026-05-19T10:01:00Z",
       completedAt: "2026-05-19T10:05:00Z",
       prNumber: "531",
-      costUsd: "0.42",
     });
 
     await seedTurn("run-531-ac1", 3, [
@@ -217,7 +216,6 @@ describe("agent stream correlation API (issue #531)", () => {
     assert.equal(res._body.outcome.status, "merged");
     assert.equal(res._body.outcome.cycleId, "cyc-531-ac1");
     assert.equal(res._body.outcome.prNumber, "531");
-    assert.equal(res._body.outcome.costUsd, 0.42);
   });
 
   // ---------------------------------------------------------------------------

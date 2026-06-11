@@ -25,7 +25,7 @@ const NUMERIC_FIELDS = [
   "driftPreFilteredCost", // issue #233: estimated planner $ saved
   "testsBefore", "testsAfter", "testsPassingBefore", "testsPassingAfter",
   "filesChanged", "totalDurationMs", "groundingDurationMs", "verificationDurationMs",
-  "planningDurationMs", "executionDurationMs", "tokenCost", "costUsd",
+  "planningDurationMs", "executionDurationMs", "tokenCost",
   "jitTestsGenerated", "jitTestsKept", "jitTestsCaughtBug",
   "mutationKillRate", "mutationKilled", "mutationSurvived",
   // Quality gate trend (issue #212)
