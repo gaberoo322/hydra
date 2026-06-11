@@ -19,7 +19,7 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { createReflectionsRouter } = await import("../src/api/reflections.ts");
 const reflections = await import("../src/reflections/reflections.ts");

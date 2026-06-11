@@ -31,7 +31,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const REDIS_URL = "redis://localhost:6379/7";
+const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/7";
 process.env.REDIS_URL = REDIS_URL;
 
 import { publishForecastCalibrationBrierMetric } from "../src/metrics/publish.ts";

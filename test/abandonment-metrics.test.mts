@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 
 // Set test DB before any adapter imports
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { recordCycleMetrics } = await import("../src/metrics/record.ts");
 const { getAbandonmentBreakdown, categorizeAbandonReason } = await import("../src/metrics/abandonment.ts");
@@ -35,7 +35,7 @@ async function cleanTestKeys() {
 describe("abandonment metrics aggregation (issue #195)", () => {
   beforeEach(async () => {
     if (!testRedis) {
-      testRedis = new Redis("redis://localhost:6379/1");
+      testRedis = new Redis(process.env.REDIS_URL);
     }
     await cleanTestKeys();
   });

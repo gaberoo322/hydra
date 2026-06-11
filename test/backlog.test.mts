@@ -14,7 +14,7 @@ import Redis from "ioredis";
 // src/redis/connection.ts reads process.env.REDIS_URL lazily on first connect (inside
 // a function), not at module-eval time, and no backlog module opens a connection at
 // import scope — so import order does not pin the DB.
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 // Static namespace imports (not a dynamic-import spread) so knip can trace that these
 // exports are live test infrastructure. The prior `admin = { ...await import(...) }`

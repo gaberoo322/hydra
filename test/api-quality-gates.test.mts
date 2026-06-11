@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 
 // Set test DB before any adapter imports
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { recordCycleMetrics } = await import("../src/metrics/record.ts");
 const { getQualityGateTrend, percentile } = await import("../src/metrics/quality-gates.ts");
@@ -33,7 +33,7 @@ async function cleanTestKeys() {
 describe("quality-gate trend aggregation (issue #212)", () => {
   beforeEach(async () => {
     if (!testRedis) {
-      testRedis = new Redis("redis://localhost:6379/1");
+      testRedis = new Redis(process.env.REDIS_URL);
     }
     await cleanTestKeys();
   });

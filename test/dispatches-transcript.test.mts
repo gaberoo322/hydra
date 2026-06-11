@@ -28,7 +28,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const {
   resolveTranscriptPath,
@@ -169,7 +169,7 @@ describe("GET /dispatches/:dispatchId/transcript — route contract", () => {
   const origHome = process.env.HOME;
 
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
     const keys = await testRedis.keys("hydra:dispatches:subagent:*");
     if (keys.length > 0) await testRedis.del(...keys);
   });

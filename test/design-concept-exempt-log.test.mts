@@ -17,7 +17,7 @@ import type { AddressInfo } from "node:net";
 import Redis from "ioredis";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { createDesignConceptsRouter } = await import(
   "../src/api/design-concepts.ts"
@@ -50,7 +50,7 @@ async function stopApi(): Promise<void> {
 
 describe("design-concept exempt-log API (#464)", () => {
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
     await testRedis.del(EXEMPT_LOG_KEY);
   });
 

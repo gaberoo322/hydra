@@ -1,11 +1,22 @@
 /**
- * Shared Redis test-isolation backstop (issue #1231).
+ * Shared Redis test-isolation backstop (issue #1231; per-run convention #1676).
  *
  * The full `npm test` suite runs with `--test-concurrency=1` (serial *files*,
  * node v22), so the primary isolation guarantee is already in place: each
  * test file runs start-to-finish before the next begins, and every Redis-
- * touching file pins `REDIS_URL` to a NON-ZERO logical DB (DB-1 by convention)
- * so production DB-0 is never touched.
+ * touching file pins `REDIS_URL` to a NON-ZERO logical DB so production DB-0
+ * is never touched.
+ *
+ * Per-RUN isolation (issue #1676): `npm test` routes through the launcher
+ * scripts/test/redis-db-launch.mjs, which sets REDIS_URL once per run to a
+ * stable per-worktree DB index inside 2..15 (and FLUSHDBs it at run start).
+ * Every test file defers to that env value via the
+ * `process.env.REDIS_URL = process.env.REDIS_URL ?? "...1"` pin, so two
+ * worktrees running `npm test` concurrently land in different logical DBs
+ * and can no longer wipe each other's fixtures mid-test. The DB-1 literal in
+ * the pins (and in TEST_REDIS_URL below) is only the fallback for direct
+ * single-file `node --test --test-force-exit <file>` invocations that bypass
+ * the launcher.
  *
  * The residual hazard this helper guards against is a file that only cleans
  * its keyspace in `after()` (or cleans specific keys per-test) rather than
@@ -41,9 +52,11 @@ import Redis from "ioredis";
 type RedisClient = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 /**
- * The DB-1 convention used across the Redis-touching test suite. A non-zero
- * DB index is the invariant that keeps production DB-0 untouched; we default
- * to 1 to match the existing `redis://localhost:6379/1` files.
+ * Defers to the env value — under `npm test` that is the per-run DB index the
+ * launcher (scripts/test/redis-db-launch.mjs, #1676) derived for this
+ * worktree. A non-zero DB index is the invariant that keeps production DB-0
+ * untouched; the DB-1 literal is only the fallback for direct single-file
+ * `node --test` invocations that bypass the launcher.
  */
 export const TEST_REDIS_URL =
   process.env.REDIS_URL ?? "redis://localhost:6379/1";
@@ -62,8 +75,9 @@ export interface RedisDbHandle {
 
 /**
  * Refuse to point a test at production DB-0. Every test file MUST pin a
- * non-zero DB; this is the last line of defence for the "DB-0 is never
- * touched by any test" invariant (#1231).
+ * non-zero DB (under `npm test` the per-run launcher provides one in 2..15);
+ * this is the last line of defence for the "DB-0 is never touched by any
+ * test" invariant (#1231, extended per-run by #1676).
  */
 function assertNonZeroDb(url: string): void {
   // redis://host:port/<db> — the path segment after the last `/` is the DB.

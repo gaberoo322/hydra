@@ -15,20 +15,21 @@
  *   2. It is idempotent — a second immediate call SKIPS the time-guarded chores
  *      that the first call already performed (the per-day / daily guards fire).
  *
- * Uses real Redis (DB 4) since runHousekeeping reads/writes guard keys. A
- * dedicated DB isolates this suite's bulk `keys("hydra:*")` + `del(...)`
- * cleanup from fixtures other suites (notably scheduler-status) seed
- * concurrently under default parallel node:test (issue #948). REDIS_URL is
- * overridden here — before the maintenance router is imported in beforeEach —
- * so the production singleton (getRedisConnection) and this suite's own
- * client both resolve to the same isolated DB.
+ * Uses real Redis since runHousekeeping reads/writes guard keys. Defers to
+ * the per-run REDIS_URL the launcher derives (#1676) — a hard DB-4 pin here
+ * collided across concurrent worktree runs — with DB 4 as the fallback for
+ * direct single-file invocations (the dedicated-DB rationale from issue #948
+ * predates --test-concurrency=1; serial files make the shared run DB safe).
+ * REDIS_URL is pinned here — before the maintenance router is imported in
+ * beforeEach — so the production singleton (getRedisConnection) and this
+ * suite's own client both resolve to the same DB.
  */
 
 import { test, describe, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
-const REDIS_URL = "redis://localhost:6379/4";
+const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/4";
 process.env.REDIS_URL = REDIS_URL;
 
 let redis: any;

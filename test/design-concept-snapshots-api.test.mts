@@ -22,7 +22,7 @@ import express from "express";
 import type { AddressInfo } from "node:net";
 import Redis from "ioredis";
 
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { createDesignConceptsRouter } = await import(
   "../src/api/design-concepts.ts"
@@ -62,7 +62,7 @@ async function cleanAll() {
 
 describe("GET /api/design-concepts/snapshots (#628)", () => {
   beforeEach(async () => {
-    if (!testRedis) testRedis = new Redis("redis://localhost:6379/1");
+    if (!testRedis) testRedis = new Redis(process.env.REDIS_URL);
     await cleanAll();
   });
 

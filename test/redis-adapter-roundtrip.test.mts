@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 
 // Set test DB before any adapter imports
-process.env.REDIS_URL = "redis://localhost:6379/1";
+process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const adapter = {
   ...(await import("../src/redis/kv.ts")),
@@ -26,7 +26,7 @@ let testRedis: any;
 describe("redis-adapter write → read round-trip", () => {
   beforeEach(async () => {
     if (!testRedis) {
-      testRedis = new Redis("redis://localhost:6379/1");
+      testRedis = new Redis(process.env.REDIS_URL);
     }
     // Clean test keys
     const keys = await testRedis.keys("hydra:test:*");
