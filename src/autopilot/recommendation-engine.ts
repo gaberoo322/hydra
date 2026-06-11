@@ -64,7 +64,7 @@ export interface SlotSnapshot {
   [slot: string]: { status: string; since_epoch?: number };
 }
 
-export interface SignalsSnapshot {
+interface SignalsSnapshot {
   /** Map of signal class → free-form payload from decide.py. */
   [signal: string]: unknown;
 }
@@ -373,7 +373,7 @@ export function shouldFire(input: {
 // Engine API — invoked from the turn_end stream consumer
 // ---------------------------------------------------------------------------
 
-export type OnTurnEndResult =
+type OnTurnEndResult =
   | { fired: true; recs: Recommendation[]; cost_usd: number }
   | { fired: false; reason: "cap" | "interval" | "no-change" | "no-llm" | "llm-error" }
   | { fired: false; reason: "cap"; pause_emitted: boolean };

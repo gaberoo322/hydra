@@ -53,7 +53,7 @@ import type { MemoryPattern } from "../pattern-memory/agent-memory.ts";
 // ---------------------------------------------------------------------------
 
 /** One sub-source that failed to load — surfaced instead of thrown. */
-export interface RetroBundleError {
+interface RetroBundleError {
   /** Stable, machine-readable source name, e.g. `"run-record"`, `"friction"`. */
   source: string;
   /** The error message (best-effort string coercion). */
@@ -126,7 +126,7 @@ export interface RetroDispatch {
 }
 
 /** A per-anchor reflection narrative attached to a flagged dispatch. */
-export interface RetroReflection {
+interface RetroReflection {
   anchorReference: string;
   /** Prompt-ready markdown narrative; `""` when no prior reflections exist. */
   formatted: string;
