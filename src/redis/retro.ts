@@ -226,7 +226,7 @@ export const RETRO_ARTIFACT_TTL_SECONDS = 14 * 24 * 60 * 60;
 // ---------------------------------------------------------------------------
 
 /** One synthesised finding the retrospective drew from the run. */
-export interface RetroFinding {
+interface RetroFinding {
   /** Stable kebab-case cue naming the gotcha (matches friction-memory cues). */
   cue: string;
   /** One-line human-readable summary of what the retrospective concluded. */
@@ -242,7 +242,7 @@ export interface RetroFinding {
 }
 
 /** A GitHub ref (issue or PR) the retrospective produced from the run. */
-export interface RetroEmittedRef {
+interface RetroEmittedRef {
   /** `"issue"` or `"pr"`. */
   kind: "issue" | "pr";
   /** The GitHub number, e.g. 921. */

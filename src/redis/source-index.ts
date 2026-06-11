@@ -36,7 +36,7 @@ import { getRedisConnection } from "./connection.ts";
  * field count is bounded by the indexed file count (low thousands), so the
  * hash stays small.
  */
-export function sourceHashesKey(): string {
+function sourceHashesKey(): string {
   return "hydra:knowledge:source-hashes";
 }
 
@@ -86,10 +86,4 @@ export async function persistSourceHash(path: string, hash: string): Promise<voi
       `[source-index] persistSourceHash failed for ${path}: ${err?.message || String(err)}`,
     );
   }
-}
-
-/** Test-only: drop the persisted map so tests start from a clean slate. */
-export async function _clearSourceHashes(): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(sourceHashesKey());
 }
