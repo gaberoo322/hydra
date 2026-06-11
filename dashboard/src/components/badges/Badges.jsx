@@ -33,7 +33,7 @@ export function TierBadge({ tier }) {
 }
 
 /** SourceBadge — dispatch source chip (autopilot/operator/subagent). */
-export function SourceBadge({ source }) {
+function SourceBadge({ source }) {
   return (
     <span className={`${CHIP_BASE} shrink-0 ${paletteClass(SOURCE_PALETTE, source)}`}>
       {source}
@@ -42,7 +42,7 @@ export function SourceBadge({ source }) {
 }
 
 /** SeverityBadge — alert severity chip (critical/error/warning/info). */
-export function SeverityBadge({ severity }) {
+function SeverityBadge({ severity }) {
   return (
     <span className={`${CHIP_BASE} shrink-0 ${paletteClass(SEVERITY_PALETTE, severity)}`}>
       {severity}

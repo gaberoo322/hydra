@@ -31,8 +31,6 @@
  * sooner.
  */
 
-import type { PipelineClass } from "./sprite-map.ts";
-
 export const TAB_LIVE = "live" as const;
 export const TAB_JOURNAL = "journal" as const;
 export const TAB_RECS = "recs" as const;
@@ -92,7 +90,7 @@ export function isOakTabId(v: unknown): v is OakTabId {
  * `/api/autopilot/runs/current.turns[].actions[]`. We type only the
  * fields the journal renderer needs — the upstream payload carries more.
  */
-export interface TurnAction {
+interface TurnAction {
   type?: string;
   slot?: string | null;
   skill?: string | null;
@@ -111,7 +109,7 @@ export interface TurnRecord {
   idle_turns?: number | null;
 }
 
-export interface DispatchSummary {
+interface DispatchSummary {
   slot: string;
   skill: string | null;
   reason: string | null;
@@ -254,7 +252,3 @@ export function formatRelativeTime(
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
 }
-
-/** All pipeline classes that can carry a sprite-icon in a turn row.
- *  Re-exported here so tests don't need to import sprite-map.ts twice. */
-export type ClassWithSprite = PipelineClass | string;
