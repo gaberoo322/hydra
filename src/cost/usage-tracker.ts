@@ -972,6 +972,7 @@ async function scanUsage(
     try {
       st = await stat(file);
     } catch {
+      /* intentional: file deleted/rotated between listing and stat — skip it */
       continue;
     }
     // mtime is the last append; if the file hasn't been touched in 7
@@ -1328,6 +1329,7 @@ export function parseUsageLine(line: string): ParsedUsageLine | "skip" | null {
   try {
     obj = JSON.parse(line);
   } catch {
+    /* intentional: non-JSON transcript line → null per the documented contract above */
     return null;
   }
   const ts = obj?.timestamp;
@@ -1377,6 +1379,7 @@ export function parseObservedResetMs(line: string): number | null {
   try {
     obj = JSON.parse(line);
   } catch {
+    /* intentional: non-JSON transcript line → null; the scan must never throw on format drift */
     return null;
   }
   const candidates: unknown[] = [
@@ -1480,7 +1483,7 @@ function resolveWallClockInZone(
     if (!Number.isFinite(asUtc)) return null;
     offsetMin = Math.round((asUtc - nowMs) / 60_000);
   } catch {
-    // Unknown/invalid IANA timezone → Intl throws a RangeError. Bail to null.
+    /* intentional: unknown/invalid IANA timezone → Intl throws a RangeError — bail to null */
     return null;
   }
 

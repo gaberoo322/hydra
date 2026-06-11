@@ -248,7 +248,8 @@ export function projectRunView(
   if (row.limits) {
     try {
       limits = JSON.parse(row.limits);
-    } catch {
+    } catch (err) {
+      console.error(`[autopilot] corrupt limits JSON in run row — degrading to {}: ${err}`);
       limits = {};
     }
   }

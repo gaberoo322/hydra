@@ -387,7 +387,8 @@ export async function buildDailyHeartbeat(deps: DailyHeartbeatDeps = {}): Promis
         const ts = JSON.parse(a)?.timestamp;
         if (!ts || new Date(ts).getTime() >= since) count++;
       } catch {
-        count++; // unparseable → count it rather than hide it
+        /* intentional: unparseable alert → count it rather than hide it */
+        count++;
       }
     }
     lines.push(`*Alerts (24h):* ${count}${count > 0 ? " — see the 4h alert digest" : ""}`);

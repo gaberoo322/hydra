@@ -733,8 +733,8 @@ export async function assembleRetroBundle(
     try {
       recommendations.push(JSON.parse(raw));
     } catch {
-      // A non-JSON rec value is a corrupt write; keep the raw string so the
-      // bundle is still legible rather than silently dropping it.
+      /* intentional: a non-JSON rec value is a corrupt write; keep the raw
+         string so the bundle is still legible rather than silently dropping it */
       recommendations.push(raw);
     }
   }

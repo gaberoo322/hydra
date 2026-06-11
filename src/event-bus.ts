@@ -604,7 +604,8 @@ class EventBus {
         parsed[info[i] as string] = info[i + 1];
       }
       return parsed;
-    } catch {
+    } catch (err: any) {
+      console.error(`[EventBus] XINFO failed on ${stream} (stream missing or unexpected reply):`, err.message);
       return null;
     }
   }

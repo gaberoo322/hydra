@@ -299,6 +299,7 @@ export function parseLlmResponse(input: {
   try {
     parsed = JSON.parse(input.rawJsonText);
   } catch {
+    /* intentional: malformed JSON returns empty recommendations */
     return [];
   }
   if (!parsed || typeof parsed !== "object") return [];
