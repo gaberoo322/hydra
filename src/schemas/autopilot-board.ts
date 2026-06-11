@@ -48,10 +48,6 @@ import { z } from "zod";
  */
 export const AutopilotBoardStateQuerySchema = z.object({}).strict();
 
-export type AutopilotBoardStateQuery = z.infer<
-  typeof AutopilotBoardStateQuerySchema
->;
-
 // ---------------------------------------------------------------------------
 // Response
 // ---------------------------------------------------------------------------

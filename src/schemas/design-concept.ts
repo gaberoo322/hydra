@@ -29,14 +29,14 @@ import { z } from "zod";
  * One entry in `modulesTouched`. Mirrors the `ModuleTouched` type that
  * `src/design-concept.ts` used to define inline.
  */
-export const ModuleTouchedSchema = z
+const ModuleTouchedSchema = z
   .object({
     path: z.string().trim().min(1, { message: "path must be a non-empty string" }),
     interfaceImpact: z.enum(["none", "extend", "breaking"]),
     depthClassification: z.enum(["deep", "shallow", "unknown"]),
   })
   .strict();
-export type ModuleTouched = z.infer<typeof ModuleTouchedSchema>;
+type ModuleTouched = z.infer<typeof ModuleTouchedSchema>;
 
 /** One rejected alternative — paired text fields. */
 export const RejectedAlternativeSchema = z
@@ -54,10 +54,10 @@ export const QaTurnSchema = z
     a: z.string(),
   })
   .strict();
-export type QaTurn = z.infer<typeof QaTurnSchema>;
+type QaTurn = z.infer<typeof QaTurnSchema>;
 
 /** One prototype snippet that resolved a hard logic/UI question. */
-export const PrototypeSchema = z
+const PrototypeSchema = z
   .object({
     question: z.string(),
     branch: z.enum(["logic", "ui"]),
@@ -66,17 +66,15 @@ export const PrototypeSchema = z
     workTreePath: z.string(),
   })
   .strict();
-export type Prototype = z.infer<typeof PrototypeSchema>;
+type Prototype = z.infer<typeof PrototypeSchema>;
 
 // ---------------------------------------------------------------------------
 // Top-level enums (re-exported as the canonical type source)
 // ---------------------------------------------------------------------------
 
-export const DesignConceptScopeSchema = z.enum(["orch", "target"]);
-export type DesignConceptScope = z.infer<typeof DesignConceptScopeSchema>;
+const DesignConceptScopeSchema = z.enum(["orch", "target"]);
 
-export const DesignConceptStatusSchema = z.enum(["draft", "approved", "stale"]);
-export type DesignConceptStatus = z.infer<typeof DesignConceptStatusSchema>;
+const DesignConceptStatusSchema = z.enum(["draft", "approved", "stale"]);
 
 /**
  * `approvedBy` is one of:
@@ -88,8 +86,8 @@ export type DesignConceptStatus = z.infer<typeof DesignConceptStatusSchema>;
  * literals + template, because zod's template-literal support is limited
  * and a refine gives a clearer error message.
  */
-export type ApprovedBy = "" | "auto-gate" | `operator:${string}`;
-export const ApprovedBySchema: z.ZodType<ApprovedBy> = z
+type ApprovedBy = "" | "auto-gate" | `operator:${string}`;
+const ApprovedBySchema: z.ZodType<ApprovedBy> = z
   .string()
   .refine(
     (s): s is ApprovedBy =>
@@ -164,9 +162,6 @@ export const DesignConceptApproveBodySchema = z
       .optional(),
   })
   .strict();
-export type DesignConceptApproveBody = z.infer<
-  typeof DesignConceptApproveBodySchema
->;
 
 // ---------------------------------------------------------------------------
 // Body for POST /api/design-concepts/exempt-log
@@ -198,4 +193,3 @@ export const ExemptLogEntryInputSchema = z
     gate_fail_reasons: z.array(z.string()),
   })
   .strict();
-export type ExemptLogEntryInput = z.infer<typeof ExemptLogEntryInputSchema>;

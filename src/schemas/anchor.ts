@@ -35,6 +35,3 @@ export const AnchorCandidatesQuerySchema = z.object({
   excludeInFlight: booleanFlag(true),
   excludeMerged: booleanFlag(true),
 });
-
-/** Inferred shape: `{ count: number; excludeInFlight: boolean; excludeMerged: boolean }`. */
-export type AnchorCandidatesQuery = z.infer<typeof AnchorCandidatesQuerySchema>;
