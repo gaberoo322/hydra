@@ -105,7 +105,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     await backdateClaim(staleId, 3 * 60 * 60 * 1000);
 
     // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
 
     assert.equal(result.reaped.length, 1, "exactly one item reaped");
     assert.equal(result.reaped[0].id, staleId);
@@ -139,7 +139,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     await backdateClaim(id, 30 * 60 * 1000);
 
     // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
     assert.equal(result.reaped.length, 0);
 
     const counts = await admin.getBacklogCounts();
@@ -157,7 +157,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     const lifetimeBefore = await redis.get("hydra:metrics:claims-reaped");
     assert.equal(lifetimeBefore, null, "metric should start unset");
 
-    await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
+    await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
 
     const lifetimeAfter = await redis.get("hydra:metrics:claims-reaped");
     assert.equal(parseInt(lifetimeAfter, 10), 1, "lifetime counter incremented by 1");
@@ -196,7 +196,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     await backdateClaim(id, 3 * 60 * 60 * 1000);
 
     // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
     assert.equal(result.reaped.length, 1);
     assert.equal(result.reaped[0].escalated, true);
 
@@ -239,7 +239,135 @@ describe("backlog stale-claim reaper (issue #374)", () => {
   test("reapStaleClaims is safe to call when inProgress is empty", async (t) => {
     requireRedis(t);
     // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null });
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
     assert.deepEqual(result.reaped, []);
+  });
+
+  // ---------------------------------------------------------------------
+  // Merged-PR guard (issue #1714) — stale claims on merged work go to done,
+  // not queued. Repro of the item-490 phantom-requeue incident (2026-06-10).
+  // ---------------------------------------------------------------------
+
+  test("reapStaleClaims moves a stale claim with a MERGED PR to done, not queued (issue #1714 repro)", async (t) => {
+    requireRedis(t);
+
+    const { id } = await admin.addToBacklog({ title: "Merged orphan", category: "test" });
+    await admin.moveToInProgress("Merged orphan", { claimedBy: "pr-109" });
+    await backdateClaim(id, 3 * 60 * 60 * 1000);
+
+    const result = await admin.reapStaleClaims({
+      maxAgeMs: 2 * 60 * 60 * 1000,
+      fetchOpenPrBlobs: async () => [],
+      fetchMergedPrBlobs: async () => [
+        `cleanup(target): demote stuff\ncloses ${id} — verified complete`,
+      ],
+    });
+
+    assert.equal(result.reaped.length, 0, "nothing re-queued");
+    assert.equal(result.reapedToDone.length, 1, "exactly one item completed");
+    assert.equal(result.reapedToDone[0].id, id);
+    assert.ok(result.reapedToDone[0].ageMs >= 2 * 60 * 60 * 1000);
+
+    const lanes = await admin.loadBacklog();
+    assert.equal(lanes.inProgress.length, 0);
+    assert.equal(lanes.queued.length, 0, "item must NOT return to queued");
+    assert.equal(lanes.done.length, 1);
+
+    const done = lanes.done[0];
+    assert.equal(done.id, id);
+    assert.equal(done.meta.reapReason, "stale-claim-merged");
+    assert.equal(done.meta.previousClaimedBy, "pr-109");
+    assert.equal(done.meta.reapCount, 1);
+    assert.ok(done.meta.reapedAt, "reapedAt must be set");
+    assert.equal(done.meta.outcome, "merged");
+    assert.ok(done.meta.completedAt, "completedAt must be set so done-retention prunes it");
+    assert.equal(done.checked, true);
+    // claimedAt/claimedBy cleared by lane transition out of inProgress.
+    assert.equal(done.claimedAt, null);
+    assert.equal(done.claimedBy, null);
+
+    // Alert is emitted with the done lane so the resolution is auditable.
+    const alerts = await redis.lrange("hydra:alerts", 0, -1);
+    const matching = alerts
+      .map((a: string) => JSON.parse(a))
+      .filter((a: any) => a.type === "stale-claim-reaped");
+    assert.equal(matching.length, 1);
+    assert.equal(matching[0].payload.itemId, id);
+    assert.equal(matching[0].payload.reapReason, "stale-claim-merged");
+    assert.equal(matching[0].payload.targetLane, "done");
+    assert.equal(matching[0].payload.escalated, false);
+
+    // Reap metrics still count it (it IS a reaped claim).
+    const lifetime = await redis.get("hydra:metrics:claims-reaped");
+    assert.equal(parseInt(lifetime, 10), 1);
+  });
+
+  test("open-PR skip takes precedence over the merged-PR guard (work in flight wins)", async (t) => {
+    requireRedis(t);
+
+    const { id } = await admin.addToBacklog({ title: "Reopened work", category: "test" });
+    await admin.moveToInProgress("Reopened work", { claimedBy: "claude" });
+    await backdateClaim(id, 3 * 60 * 60 * 1000);
+
+    // Item referenced by BOTH an open PR (follow-up in flight) and a merged
+    // PR (earlier attempt). The open-PR skip must win — order of checks is
+    // open-skip first, then merged → done, then re-queue.
+    const result = await admin.reapStaleClaims({
+      maxAgeMs: 2 * 60 * 60 * 1000,
+      fetchOpenPrBlobs: async () => [`fix: ${id} follow-up`],
+      fetchMergedPrBlobs: async () => [`feat: ${id} first pass`],
+    });
+
+    assert.equal(result.reaped.length, 0);
+    assert.equal(result.reapedToDone.length, 0);
+    assert.equal(result.skippedOpenPr.length, 1);
+    assert.equal(result.skippedOpenPr[0].id, id);
+
+    const counts = await admin.getBacklogCounts();
+    assert.equal(counts.inProgress, 1, "item stays inProgress while the open PR is in flight");
+  });
+
+  test("reapStaleClaims falls back to time-only re-queue when the merged-PR fetcher returns null (gh outage)", async (t) => {
+    requireRedis(t);
+
+    const { id } = await admin.addToBacklog({ title: "Outage victim", category: "test" });
+    await admin.moveToInProgress("Outage victim", { claimedBy: "codex" });
+    await backdateClaim(id, 3 * 60 * 60 * 1000);
+
+    const result = await admin.reapStaleClaims({
+      maxAgeMs: 2 * 60 * 60 * 1000,
+      fetchOpenPrBlobs: async () => null,
+      fetchMergedPrBlobs: async () => null,
+    });
+
+    assert.equal(result.reapedToDone.length, 0);
+    assert.equal(result.reaped.length, 1, "falls back to the pre-#1714 time-only reap");
+    assert.equal(result.reaped[0].id, id);
+
+    const lanes = await admin.loadBacklog();
+    assert.equal(lanes.queued.length, 1, "outage fallback re-queues (never silently completes)");
+    assert.equal(lanes.queued[0].meta.reapReason, "stale-claim");
+  });
+
+  test("merged-PR guard ignores merged PRs that mention a different item ID", async (t) => {
+    requireRedis(t);
+
+    const { id } = await admin.addToBacklog({ title: "Unrelated to merged PR", category: "test" });
+    await admin.moveToInProgress("Unrelated to merged PR", { claimedBy: "codex" });
+    await backdateClaim(id, 3 * 60 * 60 * 1000);
+
+    const result = await admin.reapStaleClaims({
+      maxAgeMs: 2 * 60 * 60 * 1000,
+      fetchOpenPrBlobs: async () => [],
+      // item-3020 must not whole-word-match e.g. item-302 (and vice versa).
+      fetchMergedPrBlobs: async () => [`feat: ${id}0 something else entirely`],
+    });
+
+    assert.equal(result.reapedToDone.length, 0);
+    assert.equal(result.reaped.length, 1, "unmatched stale claim re-queues normally");
+
+    const counts = await admin.getBacklogCounts();
+    assert.equal(counts.queued, 1);
+    assert.equal(counts.done, 0);
   });
 });
