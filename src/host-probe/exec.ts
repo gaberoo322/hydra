@@ -42,7 +42,7 @@ const DEFAULT_PROBE_TIMEOUT_MS = 3_000;
 const DEFAULT_MAX_BUFFER = 1 * 1024 * 1024; // 1MB
 
 /** The subset of `HydraErrorCode` the Host-Probe Adapter can return. */
-export type HostProbeErrorCode = Extract<HydraErrorCode, `host-probe-${string}`>;
+type HostProbeErrorCode = Extract<HydraErrorCode, `host-probe-${string}`>;
 
 /**
  * The discriminated result every Host-Probe Adapter accessor returns.
