@@ -37,8 +37,6 @@ export const BuilderHealthQuerySchema = z
   })
   .strict();
 
-export type BuilderHealthQuery = z.infer<typeof BuilderHealthQuerySchema>;
-
 /**
  * Body for POST /api/builder-health/scope-violation. Written best-effort by
  * the CI `scope-check` gate when it blocks a PR for scope. `date` defaults to
@@ -58,8 +56,6 @@ export const ScopeViolationBodySchema = z
   })
   .strict();
 
-export type ScopeViolationBody = z.infer<typeof ScopeViolationBodySchema>;
-
 /**
  * Body for POST /api/builder-health/dispatch-pr. Stamps the dispatch->PR link
  * the Autonomy Rate + time-to-merge metrics derive from. Only `prNumber` is
@@ -78,5 +74,3 @@ export const DispatchPrBodySchema = z
     openedAt: z.string().trim().min(1).optional(),
   })
   .strict();
-
-export type DispatchPrBody = z.infer<typeof DispatchPrBodySchema>;

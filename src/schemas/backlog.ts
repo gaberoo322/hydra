@@ -37,6 +37,3 @@ export const BacklogClaimBodySchema = z
       .optional(),
   })
   .strict();
-
-/** Inferred TypeScript type — the canonical shape of a /backlog/claim POST body. */
-export type BacklogClaimBody = z.infer<typeof BacklogClaimBodySchema>;

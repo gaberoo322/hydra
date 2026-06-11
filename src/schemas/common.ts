@@ -59,9 +59,6 @@ export function countQuerySchema(defaultN: number, max = 1000) {
   });
 }
 
-/** Inferred shape of a `countQuerySchema` result: `{ count: number }`. */
-export type CountQuery = z.infer<ReturnType<typeof countQuerySchema>>;
-
 /**
  * Boolean-flag coercion for the `?flag=1` / `?flag=true` query idiom.
  *
