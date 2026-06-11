@@ -828,6 +828,16 @@ class Plan:
     # forward them to dashboard WS clients. `decide()` itself stays pure
     # — it only appends dicts; the side-effect lives in `main()`.
     events: list[dict] = field(default_factory=list)
+    # Freshness stamp (issue #1732): the run_id + turn of the state this
+    # plan was decided against. heartbeat.py's `post_turn` refuses to
+    # attribute a plan whose stamp does not match the live state — the
+    # default plan path (/tmp/hydra-autopilot-plan.json) frequently holds
+    # a stale plan from a previous run, which misattributed foreign-run
+    # dispatch actions into turn records (runs ebcfebd2/b2422e61,
+    # 2026-06-11). Stamped by decide() from its input state; None when
+    # the state carries no run_id (test fixtures, isolated runs).
+    run_id: str | None = None
+    turn: int | None = None
 
     def to_json(self) -> str:
         return json.dumps({
@@ -835,6 +845,8 @@ class Plan:
             "reasons": self.reasons,
             "debug": self.debug,
             "events": self.events,
+            "run_id": self.run_id,
+            "turn": self.turn,
         })
 
     def add(self, action: dict, reason: str = "") -> None:
@@ -1805,6 +1817,14 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
         raise TypeError("decide(): state must be a dict")
     events = list(events or [])
     now = int(time.time())
+
+    # Issue #1732 — stamp the plan with the (run_id, turn) identity of the
+    # state it was decided against, so heartbeat.py can verify the plan file
+    # it reads belongs to THIS run/turn before attributing its actions to a
+    # turn record. Pure: derived solely from the input state.
+    run_id_raw = state.get("run_id")
+    plan.run_id = str(run_id_raw) if run_id_raw else None
+    plan.turn = int(state.get("turn", 0) or 0)
 
     limits = state.get("limits") or {}
     scope = str(limits.get("scope", "all"))

@@ -1994,6 +1994,27 @@ describe("decide.py — plan shape contract", () => {
     assert.ok(plan.debug && typeof plan.debug === "object", "plan.debug must be an object");
   });
 
+  /**
+   * Issue #1732 — the plan carries a (run_id, turn) freshness stamp so
+   * heartbeat.py post_turn can refuse to attribute a stale default-path
+   * plan (a previous run's dispatch actions were misattributed into the
+   * turn records of runs ebcfebd2/b2422e61 on 2026-06-11).
+   */
+  test("plan JSON is stamped with the state's run_id + turn (#1732)", () => {
+    const state = baseState();
+    (state as any).run_id = "stamp-run-1732";
+    (state as any).turn = 4;
+    const plan = runDecide(state, null);
+    assert.equal(plan.run_id, "stamp-run-1732", "plan.run_id mirrors state.run_id");
+    assert.equal(plan.turn, 4, "plan.turn mirrors state.turn");
+  });
+
+  test("plan stamp degrades to run_id=null + turn=0 when state has no run_id (#1732)", () => {
+    const plan = runDecide(baseState(), null); // baseState has no run_id, turn: 0
+    assert.equal(plan.run_id, null, "no state.run_id → plan.run_id null");
+    assert.equal(plan.turn, 0, "state.turn 0 → plan.turn 0");
+  });
+
   test("every action carries the expected `type` literal", () => {
     const VALID = new Set([
       "dispatch", "queue-decision", "auto-merge", "apply-operator-approved",
