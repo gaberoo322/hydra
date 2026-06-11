@@ -206,6 +206,27 @@ fi
 architecture), so a `hit` there is not proof of delivery — `/api/reflections`
 is the live path a dispatch actually consumes.
 
+### Design-concept artifact — live API (cue: design-concept-endpoint-path-plural)
+
+A grilled anchor carries a **design-concept artifact**. When the dispatch
+prompt references one ("consult the design-concept API"), fetch it at
+planning time — same point as the reflections + tier reads:
+
+- Method: `GET`
+- Path: `/api/design-concepts/<anchor.reference>` — **plural** resource
+  name, anchor ref as a **path param** (e.g.
+  `/api/design-concepts/issue-1699`). There is no singular
+  `/api/design-concept` route and no `?anchor=` query form — that guess
+  returns an empty/404 that looks like "no artifact" and silently drops the
+  design context (cue `design-concept-endpoint-path-plural`, recurred 3×
+  across runs).
+- Response (200): the artifact fields at the **top level** plus a `gate`
+  sub-object (`gateCheck` verdict). There is **NO `.concept` envelope** —
+  read `.invariants` etc. directly; probing `.concept` returns `undefined`
+  (cue `design-concept-endpoint-concept-field-absent`).
+- 404 → no artifact persisted for that anchor — proceed without one; do not
+  retry alternate route spellings.
+
 ### Tier classification — live API (issue #406)
 
 The orchestrator service exposes a deterministic tier classifier at
