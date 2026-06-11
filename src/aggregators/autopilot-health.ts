@@ -64,7 +64,7 @@ export {
   oldestRunStartEpochS,
   rankSignals,
 };
-export type { AutopilotHealthThresholds, LiveRunView, RunDigest };
+export type { LiveRunView, RunDigest };
 
 // ---------------------------------------------------------------------------
 // I/O-facing dependency bag

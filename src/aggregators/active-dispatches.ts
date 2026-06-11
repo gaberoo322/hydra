@@ -39,7 +39,7 @@ import { settledOrEmpty } from "./settle.ts";
 // Public types
 // ---------------------------------------------------------------------------
 
-export type DispatchSource = "autopilot" | "operator" | "subagent";
+type DispatchSource = "autopilot" | "operator" | "subagent";
 
 export interface Dispatch {
   id: string;

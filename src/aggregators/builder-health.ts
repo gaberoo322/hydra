@@ -74,7 +74,7 @@ const MERGE_RATE_WINDOW = (() => {
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface SelfImprovementShareMetric {
+interface SelfImprovementShareMetric {
   share: number;
   floor: number;
   floorMet: boolean;
@@ -82,7 +82,7 @@ export interface SelfImprovementShareMetric {
   window: number;
 }
 
-export interface AutonomyRateMetric {
+interface AutonomyRateMetric {
   rate: number;
   autonomous: number;
   total: number;
@@ -91,37 +91,37 @@ export interface AutonomyRateMetric {
   breakdown: AutonomyDecision[];
 }
 
-export interface AutonomyDecision {
+interface AutonomyDecision {
   prNumber: number;
   autonomous: boolean;
   reason: string;
 }
 
-export interface ReworkRateMetric {
+interface ReworkRateMetric {
   regressionRate: number;
   noOpMergeRate: number;
   window: number;
 }
 
-export interface TimeToMergeMetric {
+interface TimeToMergeMetric {
   medianMinutes: number | null;
   p90Minutes: number | null;
   samples: number;
   window: number;
 }
 
-export interface MutationTrendMetric {
+interface MutationTrendMetric {
   series: TrendPoint[];
   window: number;
 }
 
-export interface ScopeViolationMetric {
+interface ScopeViolationMetric {
   series: TrendPoint[];
   total: number;
   windowDays: number;
 }
 
-export interface LearningThroughputMetric {
+interface LearningThroughputMetric {
   promotionRate: TrendPoint[];
   metaFrictionOpened: number;
   designConceptsProducedToday: number;

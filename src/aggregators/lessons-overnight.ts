@@ -55,8 +55,6 @@ export interface PromotionCandidate {
   examples: string[];
 }
 
-export type { MetaFrictionIssue };
-
 export interface OvernightLessons {
   promotionCandidates: PromotionCandidate[];
   metaFrictionOpened: MetaFrictionIssue[];

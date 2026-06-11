@@ -85,7 +85,7 @@ export interface BehaviorGalleryDeps {
  * (which pass plain `{ ok, error, code }`). We keep the type loose so the
  * stub doesn't have to mimic the full ErrorCode union.
  */
-export type ListRunsLike =
+type ListRunsLike =
   | { ok: true; runs: Array<Record<string, unknown>> }
   | { ok: false; code?: string; error?: string; detail?: string };
 

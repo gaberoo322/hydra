@@ -41,7 +41,7 @@ import type { AnomalyDirection, AnomalyMetric } from "./types.ts";
 // Public types
 // ---------------------------------------------------------------------------
 
-export interface Anomaly {
+interface Anomaly {
   metric: AnomalyMetric;
   /** Sub-key — for `dispatch-class-failure-rate`, the autopilot class. Null otherwise. */
   subKey: string | null;
