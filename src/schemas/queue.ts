@@ -50,6 +50,3 @@ export const QueuePostBodySchema = z
     source: z.string().optional(),
   })
   .strict();
-
-/** Inferred TypeScript type — the canonical shape of an /api/queue POST body. */
-export type QueuePostBody = z.infer<typeof QueuePostBodySchema>;

@@ -27,6 +27,3 @@ export const ReflectionsQuerySchema = z.object({
   anchor: z.string().trim().min(1, "anchor is required"),
   files: z.string().optional(),
 });
-
-/** Inferred TS type — canonical shape of the reflections query params. */
-export type ReflectionsQuery = z.infer<typeof ReflectionsQuerySchema>;

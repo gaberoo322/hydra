@@ -33,9 +33,6 @@ export const RetroBundleParamsSchema = z
   })
   .strict();
 
-/** Inferred TS type — canonical shape of the retro-bundle path params. */
-export type RetroBundleParams = z.infer<typeof RetroBundleParamsSchema>;
-
 // ---------------------------------------------------------------------------
 // Persisted retro artifacts (issue #921, retro-4)
 // ---------------------------------------------------------------------------
@@ -62,14 +59,11 @@ export const RecentRetrosQuerySchema = z
   })
   .strict();
 
-/** Inferred TS type — canonical shape of the recent-retros query params. */
-export type RecentRetrosQuery = z.infer<typeof RecentRetrosQuerySchema>;
-
 /**
  * One synthesised finding inside a persisted artifact. `recurrence` is the
  * cross-run gotcha count that gates whether a prompt/doc fix is emitted.
  */
-export const RetroFindingSchema = z
+const RetroFindingSchema = z
   .object({
     cue: z.string().min(1, { message: "cue must be a non-empty string" }),
     summary: z.string(),
@@ -79,7 +73,7 @@ export const RetroFindingSchema = z
   .strict();
 
 /** A GitHub ref (issue or PR) the retrospective produced from the run. */
-export const RetroEmittedRefSchema = z
+const RetroEmittedRefSchema = z
   .object({
     kind: z.enum(["issue", "pr"]),
     number: z.number().int().positive(),
@@ -101,8 +95,3 @@ export const RetroArtifactSchema = z
     summary: z.string().optional(),
   })
   .strict();
-
-/** Inferred TS types — canonical shapes of the persisted artifact + parts. */
-export type RetroFindingShape = z.infer<typeof RetroFindingSchema>;
-export type RetroEmittedRefShape = z.infer<typeof RetroEmittedRefSchema>;
-export type RetroArtifactShape = z.infer<typeof RetroArtifactSchema>;
