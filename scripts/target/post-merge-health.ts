@@ -30,11 +30,42 @@
  * FAIL-SOFT
  * ---------
  * If the Target API is unreachable (service down mid-deploy, port not yet up,
- * network blip), this is a clean no-op: it logs and returns a non-alarm result.
+ * network blip, or a body that is not health-shaped JSON — e.g. a proxy HTML
+ * error page), this is a clean no-op: it logs and returns a non-alarm result.
  * It MUST NOT throw — an unreachable Target is not itself a merge regression,
  * and a throwing post-merge probe must never look like a build failure. Per the
  * Orchestrator convention, nothing here ever throws on the I/O path; callers
  * read the returned result object.
+ *
+ * NON-2xx WITH A HEALTH BODY IS A VALID SAMPLE (issue #1699)
+ * ----------------------------------------------------------
+ * `/api/health/full` answers HTTP 503 *with a full per-service JSON body* when
+ * the overall status is degraded/error — that is the endpoint's convention, not
+ * an outage. Discarding non-2xx responses (the pre-#1699 behavior) meant the
+ * watcher yielded ZERO signal exactly when the Target was unhealthy, so a
+ * merge-caused regression was indistinguishable from ambient degradation. Any
+ * HTTP response — regardless of status code — whose body parses as a JSON
+ * object with a string `status` field is therefore a valid health sample; only
+ * network errors, timeouts, and non-JSON / shape-invalid bodies count as
+ * unreachable.
+ *
+ * BASELINE-DELTA MODE (issue #1699)
+ * ---------------------------------
+ * While the Target baseline is ambiently degraded, absolute thresholds cannot
+ * tell "this merge broke it" from "it was already broken". The caller
+ * (hydra-target-build) therefore captures a pre-merge baseline snapshot via
+ * `--snapshot-out <path>` just before the merge lands, and passes
+ * `--baseline <path>` to the post-merge run. In delta mode, ambient
+ * (pre-existing) degradation alone NEVER alarms — only deltas do:
+ *   - services newly not-ok (were ok or absent in the baseline),
+ *   - per-service severity worsening (degraded -> error),
+ *   - overall severity-rank worsening (ok=0 < degraded=unknown=1 < error=2).
+ * The HYDRA_PMH_* floors keep their names and meanings; in delta mode they
+ * apply to *delta* counts instead of absolute counts. When no --baseline is
+ * supplied (legacy/manual callers, lost file), the watcher falls back to the
+ * absolute-threshold semantics below. The baseline is a plain file (node:fs) —
+ * never Redis / the orchestrator API — so the script stays stdlib-only and
+ * leaf-level for sync-target-gate.sh mirroring (#1451).
  *
  * SIGNAL MODEL
  * ------------
@@ -65,7 +96,10 @@
  *
  * USAGE
  * -----
- *   tsx scripts/target/post-merge-health.ts [--merge-sha <sha>] [--dry-run]
+ *   # pre-merge (hydra-target-build Step 7): capture the baseline
+ *   tsx scripts/target/post-merge-health.ts --snapshot-out <path>
+ *   # post-merge (hydra-target-build Step 8.6): compare against the baseline
+ *   tsx scripts/target/post-merge-health.ts [--merge-sha <sha>] [--baseline <path>] [--dry-run]
  *
  * Intended to be fired by hydra-target-build right after an emulated
  * merge-on-green lands (see docs/operator-playbooks/hydra-target-build.md). It
@@ -74,6 +108,8 @@
  */
 
 import { spawn } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 // ── Defaults ────────────────────────────────────────────────────────────────
 
@@ -112,7 +148,13 @@ export interface PostMergeHealthConfig {
   dispatch: boolean;
 }
 
-export interface HealthSnapshot {
+/**
+ * Script-local normalized view of /api/health/full. Named TargetHealthSnapshot
+ * (not HealthSnapshot) to avoid colliding with the orchestrator's CONTEXT.md
+ * **Health Snapshot** term (the /api/health/deep internal model) — this leaf
+ * script never imports orchestrator code, but the name should not lie.
+ */
+export interface TargetHealthSnapshot {
   /** Overall `status` field from /api/health/full (lowercased). */
   overall: ServiceStatus;
   /** Per-service status map, service name => lowercased status string. */
@@ -130,17 +172,29 @@ export interface RegressionVerdict {
   regressed: boolean;
   /** Human-readable reasons (one per breached threshold). Empty when healthy. */
   reasons: string[];
-  snapshot: HealthSnapshot;
+  snapshot: TargetHealthSnapshot;
 }
+
+/** How the post-merge verdict was computed (issue #1699). */
+export type EvaluationMode = "absolute" | "delta";
 
 /** Discriminated result of one watcher run. Never thrown — always returned. */
 export type WatchResult =
   | { kind: "unreachable"; reason: string }
-  | { kind: "healthy"; verdict: RegressionVerdict }
-  | { kind: "alarm"; verdict: RegressionVerdict; dispatched: boolean };
+  | { kind: "baseline-written"; path: string; snapshot: TargetHealthSnapshot }
+  | { kind: "baseline-write-failed"; reason: string }
+  | { kind: "healthy"; verdict: RegressionVerdict; mode: EvaluationMode }
+  | { kind: "alarm"; verdict: RegressionVerdict; dispatched: boolean; mode: EvaluationMode };
 
-/** Discriminated result of a Target health fetch. Never thrown — always returned. */
-export type FetchHealthResult = { ok: true; body: unknown } | { ok: false; reason: string };
+/**
+ * Discriminated result of a Target health fetch. Never thrown — always
+ * returned. `httpStatus` rides along on success because a valid sample may
+ * arrive on a non-2xx response (issue #1699): /api/health/full answers 503
+ * with a full health body when the overall status is degraded/error.
+ */
+export type FetchHealthResult =
+  | { ok: true; body: unknown; httpStatus: number }
+  | { ok: false; reason: string };
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -184,12 +238,13 @@ function classify(serviceName: string, keywords: string[]): boolean {
 }
 
 /**
- * Parse a raw `/api/health/full` JSON body into a normalized HealthSnapshot.
- * Tolerant of shape drift: a missing/oddly-typed `services` map yields an empty
- * service set rather than throwing, and unknown statuses are preserved verbatim
- * (lowercased) so a future status string still counts as "not ok".
+ * Parse a raw `/api/health/full` JSON body into a normalized
+ * TargetHealthSnapshot. Tolerant of shape drift: a missing/oddly-typed
+ * `services` map yields an empty service set rather than throwing, and unknown
+ * statuses are preserved verbatim (lowercased) so a future status string still
+ * counts as "not ok".
  */
-export function parseHealthSnapshot(body: unknown): HealthSnapshot {
+export function parseHealthSnapshot(body: unknown): TargetHealthSnapshot {
   const obj = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   const overall = typeof obj.status === "string" ? obj.status.toLowerCase() : "unknown";
 
@@ -223,10 +278,12 @@ export function parseHealthSnapshot(body: unknown): HealthSnapshot {
 }
 
 /**
- * Evaluate a HealthSnapshot against the configured noise floor. Pure — returns
- * a verdict with one reason string per breached threshold.
+ * Evaluate a TargetHealthSnapshot against the configured ABSOLUTE noise floor.
+ * Pure — returns a verdict with one reason string per breached threshold. This
+ * is the fallback evaluator when no pre-merge baseline is available (legacy /
+ * manual callers); the paved hydra-target-build road uses evaluateDelta.
  */
-export function evaluateRegression(snapshot: HealthSnapshot, config: PostMergeHealthConfig): RegressionVerdict {
+export function evaluateRegression(snapshot: TargetHealthSnapshot, config: PostMergeHealthConfig): RegressionVerdict {
   const reasons: string[] = [];
 
   if (config.alarmOnOverall.includes(snapshot.overall)) {
@@ -250,10 +307,91 @@ export function evaluateRegression(snapshot: HealthSnapshot, config: PostMergeHe
 }
 
 /**
+ * Rank a status string by severity for delta comparison (issue #1699):
+ * ok=0 < degraded=unknown(=any other not-ok convention, e.g. "stale",
+ * "not_configured")=1 < error=2. Pure.
+ */
+export function severityRank(status: ServiceStatus): number {
+  if (status === "ok") return 0;
+  if (status === "error") return 2;
+  return 1;
+}
+
+/**
+ * Evaluate the post-merge snapshot AGAINST a pre-merge baseline (issue #1699
+ * baseline-delta mode). Pure. Ambient (pre-existing) degradation alone never
+ * alarms — only deltas do:
+ *   - a service newly not-ok (was ok, or absent, in the baseline);
+ *   - a per-service severity worsening (e.g. degraded -> error);
+ *   - an overall severity-rank worsening (ok=0 < degraded=unknown=1 < error=2).
+ * Recovered/improved services and same-rank status drift are ignored. The
+ * HYDRA_PMH_* floors keep their meanings but apply to the DELTA counts: e.g.
+ * with maxProviderErrors=1, one provider service newly failing post-merge is
+ * still tolerated, two alarm.
+ */
+export function evaluateDelta(
+  baseline: TargetHealthSnapshot,
+  current: TargetHealthSnapshot,
+  config: PostMergeHealthConfig,
+): RegressionVerdict {
+  const reasons: string[] = [];
+
+  // Per-service deltas: newly not-ok or severity-worsened vs the baseline.
+  // A service absent from the baseline ranks as ok=0 so a brand-new failing
+  // service still counts as a delta.
+  const deltas: Array<{ name: string; from: ServiceStatus | "(absent)"; to: ServiceStatus }> = [];
+  for (const [name, status] of Object.entries(current.services)) {
+    const before = baseline.services[name];
+    const beforeRank = before === undefined ? 0 : severityRank(before);
+    if (severityRank(status) > beforeRank) {
+      deltas.push({ name, from: before ?? "(absent)", to: status });
+    }
+  }
+
+  let executionDelta = 0;
+  let providerDelta = 0;
+  for (const d of deltas) {
+    if (classify(d.name, EXECUTION_SERVICE_KEYWORDS)) executionDelta += 1;
+    if (classify(d.name, PROVIDER_SERVICE_KEYWORDS)) providerDelta += 1;
+  }
+  const describe = (names: Array<{ name: string; from: string; to: string }>): string =>
+    names.map((d) => `${d.name}: ${d.from} -> ${d.to}`).join(", ");
+
+  if (severityRank(current.overall) > severityRank(baseline.overall)) {
+    reasons.push(
+      `overall health worsened vs pre-merge baseline: "${baseline.overall}" -> "${current.overall}"`,
+    );
+  }
+  if (executionDelta > config.maxExecutionErrors) {
+    reasons.push(
+      `execution-class services newly failing/worsened vs baseline: ${executionDelta} > floor ` +
+        `${config.maxExecutionErrors} (${describe(deltas.filter((d) => classify(d.name, EXECUTION_SERVICE_KEYWORDS)))})`,
+    );
+  }
+  if (providerDelta > config.maxProviderErrors) {
+    reasons.push(
+      `provider-class services newly failing/worsened vs baseline: ${providerDelta} > floor ` +
+        `${config.maxProviderErrors} (${describe(deltas.filter((d) => classify(d.name, PROVIDER_SERVICE_KEYWORDS)))})`,
+    );
+  }
+  if (deltas.length > config.maxDegradedServices) {
+    reasons.push(
+      `services newly failing/worsened vs baseline: ${deltas.length} > floor ` +
+        `${config.maxDegradedServices} (${describe(deltas)})`,
+    );
+  }
+
+  return { regressed: reasons.length > 0, reasons, snapshot: current };
+}
+
+/**
  * Compose the `$context` argument handed to the hydra-incident skill. Pure +
  * deterministic so it can be asserted in tests.
  */
-export function buildIncidentContext(verdict: RegressionVerdict, opts: { mergeSha?: string; apiUrl: string }): string {
+export function buildIncidentContext(
+  verdict: RegressionVerdict,
+  opts: { mergeSha?: string; apiUrl: string; mode?: EvaluationMode },
+): string {
   const failing = Object.entries(verdict.snapshot.services)
     .filter(([, status]) => status !== "ok")
     .map(([name, status]) => `${name}=${status}`)
@@ -263,6 +401,7 @@ export function buildIncidentContext(verdict: RegressionVerdict, opts: { mergeSh
     "ALARM-ONLY signal from scripts/target/post-merge-health.ts (issue #1054) — investigate; do NOT assume an auto-revert happened.",
     opts.mergeSha ? `Merge SHA: ${opts.mergeSha}` : "Merge SHA: (not provided)",
     `Target API: ${opts.apiUrl}/api/health/full`,
+    `Comparison mode: ${opts.mode === "delta" ? "baseline-delta (regression vs the pre-merge snapshot — issue #1699)" : "absolute thresholds (no pre-merge baseline supplied)"}`,
     `Overall status: ${verdict.snapshot.overall}`,
     `Failing services: ${failing || "(none reported individually)"}`,
     "Breached thresholds:",
@@ -274,9 +413,18 @@ export function buildIncidentContext(verdict: RegressionVerdict, opts: { mergeSh
 // ── I/O ────────────────────────────────────────────────────────────────────────
 
 /**
- * Fetch `/api/health/full` from the Target. Never throws: on any network error,
- * timeout, non-2xx, or non-JSON body returns `{ ok: false, reason }`. On success
- * returns `{ ok: true, body }` with the parsed JSON.
+ * Fetch `/api/health/full` from the Target. Never throws: on a network error,
+ * timeout, non-JSON body, or a JSON body that is not health-shaped, returns
+ * `{ ok: false, reason }`. On success returns `{ ok: true, body, httpStatus }`.
+ *
+ * The HTTP status code is deliberately NOT a validity gate (issue #1699): the
+ * endpoint answers 503 WITH a full per-service health body when the overall
+ * status is degraded/error, and discarding that body made the watcher yield
+ * zero signal exactly when the Target was unhealthy. Any response whose body
+ * parses as a JSON object with a string `status` field is a valid sample —
+ * regardless of status code, so a future 500-with-body convention keeps
+ * working too. Only a truly-unreachable Target (network error, timeout,
+ * non-JSON body such as a proxy HTML error page) is classified unreachable.
  */
 export async function fetchTargetHealth(
   config: PostMergeHealthConfig,
@@ -287,22 +435,87 @@ export async function fetchTargetHealth(
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   try {
     const res = await fetchImpl(url, { signal: controller.signal });
-    if (!res.ok) {
-      return { ok: false, reason: `Target health endpoint returned HTTP ${res.status} from ${url}` };
-    }
     let body: unknown;
     try {
       body = await res.json();
     } catch (err) {
-      return { ok: false, reason: `Target health endpoint returned non-JSON body from ${url}: ${String(err)}` };
+      return {
+        ok: false,
+        reason:
+          `Target health endpoint returned a non-JSON body (HTTP ${res.status}) from ${url}: ` +
+          `${String(err)} — treating as unreachable`,
+      };
     }
-    return { ok: true, body };
+    if (!body || typeof body !== "object" || typeof (body as Record<string, unknown>).status !== "string") {
+      return {
+        ok: false,
+        reason:
+          `Target health endpoint returned a JSON body without a string "status" field ` +
+          `(HTTP ${res.status}) from ${url} — not a health sample, treating as unreachable`,
+      };
+    }
+    return { ok: true, body, httpStatus: res.status };
   } catch (err) {
     // AbortError (timeout) or connection-refused (service down mid-deploy) both
     // land here. Treat as unreachable — never throw, never alarm.
     return { ok: false, reason: `Target health endpoint unreachable at ${url}: ${String(err)}` };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// ── Baseline persistence (issue #1699 — file-based, stdlib-only) ─────────────
+
+/**
+ * On-disk shape of a pre-merge baseline snapshot. A plain file (NOT Redis /
+ * the orchestrator API) keeps this script leaf-level so sync-target-gate.sh
+ * mirroring into hydra-betting worktrees keeps working unchanged.
+ */
+export interface BaselineFile {
+  version: 1;
+  capturedAt: string;
+  snapshot: TargetHealthSnapshot;
+}
+
+/** Write a baseline snapshot to disk. Never throws — returns a result object. */
+export function writeBaseline(
+  path: string,
+  snapshot: TargetHealthSnapshot,
+): { ok: true } | { ok: false; reason: string } {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const payload: BaselineFile = { version: 1, capturedAt: new Date().toISOString(), snapshot };
+    writeFileSync(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `failed to write baseline snapshot to ${path}: ${String(err)}` };
+  }
+}
+
+/**
+ * Read a baseline snapshot from disk. Never throws — a missing, unparsable, or
+ * shape-invalid file returns `{ ok: false }` and the caller falls back to the
+ * absolute-threshold evaluator.
+ */
+export function readBaseline(
+  path: string,
+): { ok: true; snapshot: TargetHealthSnapshot } | { ok: false; reason: string } {
+  try {
+    const raw = readFileSync(path, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown> | null;
+    const snap = parsed && typeof parsed === "object" ? (parsed.snapshot as Record<string, unknown> | undefined) : undefined;
+    if (
+      !snap ||
+      typeof snap !== "object" ||
+      typeof snap.overall !== "string" ||
+      !snap.services ||
+      typeof snap.services !== "object"
+    ) {
+      return { ok: false, reason: `baseline file at ${path} is not a valid baseline snapshot` };
+    }
+    return { ok: true, snapshot: snap as unknown as TargetHealthSnapshot };
+  } catch (err) {
+    return { ok: false, reason: `failed to read baseline snapshot from ${path}: ${String(err)}` };
   }
 }
 
@@ -338,34 +551,73 @@ export function dispatchIncident(
 // ── Orchestration ───────────────────────────────────────────────────────────────
 
 /**
- * Run one post-merge health watch. Fetches the Target health, evaluates against
- * the noise floor, and — only on a regression and only when `config.dispatch` is
- * true — fires hydra-incident. Returns a WatchResult; never throws.
+ * Run one post-merge health watch. Fetches the Target health and then:
+ *   - `opts.snapshotOut` set (pre-merge mode): persists the snapshot as the
+ *     baseline file and returns — never evaluates, never alarms;
+ *   - `opts.baselinePath` set and readable: evaluates DELTAS vs the baseline
+ *     (issue #1699) so ambient degradation alone never alarms;
+ *   - otherwise: evaluates against the absolute noise floor.
+ * Only on a regression and only when `config.dispatch` is true does it fire
+ * hydra-incident. Returns a WatchResult; never throws.
  */
 export async function runWatch(
   config: PostMergeHealthConfig,
-  opts: { mergeSha?: string } = {},
+  opts: { mergeSha?: string; snapshotOut?: string; baselinePath?: string } = {},
   deps: { fetchImpl?: typeof fetch; spawnImpl?: typeof spawn } = {},
 ): Promise<WatchResult> {
   const fetched: FetchHealthResult = await fetchTargetHealth(config, deps.fetchImpl ?? fetch);
   if (fetched.ok !== true) {
     // Fail-soft: unreachable Target is a clean no-op (acceptance criterion).
+    // In snapshot mode this means no baseline file is written, so the
+    // post-merge run falls back to absolute thresholds — coherent and loud.
     console.error(`[post-merge-health] no-op: ${fetched.reason}`);
     return { kind: "unreachable", reason: fetched.reason };
   }
 
   const snapshot = parseHealthSnapshot(fetched.body);
-  const verdict = evaluateRegression(snapshot, config);
+
+  if (opts.snapshotOut) {
+    const wrote = writeBaseline(opts.snapshotOut, snapshot);
+    if (wrote.ok !== true) {
+      // Fail-soft: a baseline-write failure must never look like a build
+      // failure; the post-merge run will fall back to absolute thresholds.
+      console.error(`[post-merge-health] baseline write failed (no-op): ${wrote.reason}`);
+      return { kind: "baseline-write-failed", reason: wrote.reason };
+    }
+    console.log(
+      `[post-merge-health] pre-merge baseline written to ${opts.snapshotOut} ` +
+        `(overall=${snapshot.overall} servicesNotOk=${snapshot.servicesNotOk} httpStatus=${fetched.httpStatus})`,
+    );
+    return { kind: "baseline-written", path: opts.snapshotOut, snapshot };
+  }
+
+  let mode: EvaluationMode = "absolute";
+  let verdict: RegressionVerdict;
+  if (opts.baselinePath) {
+    const baseline = readBaseline(opts.baselinePath);
+    if (baseline.ok === true) {
+      mode = "delta";
+      verdict = evaluateDelta(baseline.snapshot, snapshot, config);
+    } else {
+      console.error(
+        `[post-merge-health] ${baseline.reason} — falling back to absolute thresholds`,
+      );
+      verdict = evaluateRegression(snapshot, config);
+    }
+  } else {
+    verdict = evaluateRegression(snapshot, config);
+  }
 
   if (!verdict.regressed) {
     console.log(
-      `[post-merge-health] healthy: overall=${snapshot.overall} servicesNotOk=${snapshot.servicesNotOk} ` +
+      `[post-merge-health] healthy (mode=${mode}, httpStatus=${fetched.httpStatus}): ` +
+        `overall=${snapshot.overall} servicesNotOk=${snapshot.servicesNotOk} ` +
         `executionErrors=${snapshot.executionErrors} providerErrors=${snapshot.providerErrors}`,
     );
-    return { kind: "healthy", verdict };
+    return { kind: "healthy", verdict, mode };
   }
 
-  const context = buildIncidentContext(verdict, { mergeSha: opts.mergeSha, apiUrl: config.apiUrl });
+  const context = buildIncidentContext(verdict, { mergeSha: opts.mergeSha, apiUrl: config.apiUrl, mode });
   console.error(`[post-merge-health] ALARM — post-merge operational-health regression:\n${context}`);
 
   if (!config.dispatch) {
@@ -373,14 +625,14 @@ export async function runWatch(
       "[post-merge-health] dry-run (HYDRA_PMH_DISPATCH != 1): NOT dispatching hydra-incident. " +
         "Re-run with --dispatch to alarm.",
     );
-    return { kind: "alarm", verdict, dispatched: false };
+    return { kind: "alarm", verdict, dispatched: false, mode };
   }
 
   const { dispatched } = dispatchIncident(context, deps.spawnImpl ?? spawn);
   if (dispatched) {
     console.error("[post-merge-health] dispatched hydra-incident (alarm-only; no revert performed).");
   }
-  return { kind: "alarm", verdict, dispatched };
+  return { kind: "alarm", verdict, dispatched, mode };
 }
 
 // ── CLI ──────────────────────────────────────────────────────────────────────────
@@ -389,6 +641,10 @@ interface CliArgs {
   mergeSha?: string;
   dispatch?: boolean;
   dryRun?: boolean;
+  /** Pre-merge mode: write the current health snapshot to this path and exit. */
+  snapshotOut?: string;
+  /** Post-merge delta mode: compare against the baseline snapshot at this path. */
+  baseline?: string;
 }
 
 /** Parse argv (everything after `node script.ts`). Pure for testability. */
@@ -402,6 +658,10 @@ export function parseArgs(argv: string[]): CliArgs {
       args.dispatch = true;
     } else if (a === "--dry-run") {
       args.dryRun = true;
+    } else if (a === "--snapshot-out") {
+      args.snapshotOut = argv[++i];
+    } else if (a === "--baseline") {
+      args.baseline = argv[++i];
     }
   }
   return args;
@@ -414,12 +674,17 @@ async function main(): Promise<number> {
   if (args.dispatch) config.dispatch = true;
   if (args.dryRun) config.dispatch = false;
 
-  const result = await runWatch(config, { mergeSha: args.mergeSha });
+  const result = await runWatch(config, {
+    mergeSha: args.mergeSha,
+    snapshotOut: args.snapshotOut,
+    baselinePath: args.baseline,
+  });
 
   // Exit code is informational only — this is alarm-only and must never look
-  // like a failing merge gate. 0 = no regression / clean no-op. We use a
-  // distinct non-blocking code (75 / EX_TEMPFAIL) ONLY for an alarm so a wrapper
-  // can optionally notice it, but callers that ignore exit codes are unaffected.
+  // like a failing merge gate. 0 = no regression / clean no-op (including the
+  // snapshot-write and unreachable modes). We use a distinct non-blocking code
+  // (75 / EX_TEMPFAIL) ONLY for an alarm so a wrapper can optionally notice it,
+  // but callers that ignore exit codes are unaffected.
   if (result.kind === "alarm") return 75;
   return 0;
 }

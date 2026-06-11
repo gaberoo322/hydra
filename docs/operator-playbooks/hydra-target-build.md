@@ -478,6 +478,21 @@ $SCOPE_IN_LIST
 $SCOPE_JUSTIFICATIONS
 ```
 
+Just before merging, capture the **pre-merge health baseline** for the Step 8.6
+delta comparison (issue #1699). While the Target baseline is ambiently degraded
+(stale feeds, missing provider creds), absolute thresholds cannot tell a
+merge-caused regression from the pre-existing state — the snapshot lets the
+post-merge check alarm only on what THIS merge changed. Run the mirrored script
+from the worktree (synced into the gate dir by Step 0.6). Fail-soft: if the
+Target is unreachable, no baseline file is written and Step 8.6 falls back to
+absolute thresholds — do NOT branch the cycle on this step's outcome.
+
+```bash
+# Pre-merge health baseline (issue #1699) — consumed by Step 8.6 via --baseline.
+npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
+  --snapshot-out "$TARGET_WT/.hydra-gate/pmh-baseline.json"
+```
+
 For direct-to-main merges (target repo), embed the same block in the merge commit message body so reviewers can audit blast radius after the fact:
 
 ```bash
@@ -567,17 +582,28 @@ cd "$TARGET_WT"
 # Pass --dispatch so a real regression actually fires hydra-incident.
 # Without --dispatch it is a dry-run (prints the alarm context, spawns nothing),
 # which is what you want when smoke-testing the watcher itself.
-npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" --merge-sha "$COMMIT_SHA" --dispatch
+# --baseline points at the pre-merge snapshot captured in Step 7 (issue #1699):
+# the watcher then alarms only on DELTAS vs that baseline — services newly
+# not-ok, per-service worsening (degraded -> error), or overall severity-rank
+# worsening — so ambient pre-existing degradation never false-alarms.
+npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
+  --merge-sha "$COMMIT_SHA" --dispatch \
+  --baseline "$TARGET_WT/.hydra-gate/pmh-baseline.json"
 ```
 
-Fail-soft: if the Target API is unreachable (service still restarting, port not
-yet up), the script logs and exits 0 — an unreachable Target is not a merge
-regression and must never look like a build failure. Tune the noise floor via
-the `HYDRA_PMH_*` env vars documented at the top of
+Fail-soft: if the Target API is truly unreachable (service still restarting,
+port not yet up, non-JSON body), the script logs and exits 0 — an unreachable
+Target is not a merge regression and must never look like a build failure.
+Note (issue #1699): a non-2xx response that still carries a health JSON body
+IS a valid sample — `/api/health/full` answers 503 with a full body when the
+overall status is degraded/error — so a degraded baseline still yields signal.
+If the baseline file is missing (Step 7 snapshot skipped or Target was down
+pre-merge), the watcher falls back to the absolute thresholds. Tune the noise
+floor via the `HYDRA_PMH_*` env vars documented at the top of
 `scripts/target/post-merge-health.ts` (overall-status alarm set, and the
-tolerated counts of degraded / execution-class / provider-class services). The
-exit code is informational only (75 on alarm, 0 otherwise); do NOT branch the
-cycle on it.
+tolerated counts of degraded / execution-class / provider-class services —
+applied to delta counts when a baseline is supplied). The exit code is
+informational only (75 on alarm, 0 otherwise); do NOT branch the cycle on it.
 
 ### 8.5. Worktree cleanup (issue #542)
 
