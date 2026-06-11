@@ -27,7 +27,7 @@ import {
 } from "./exec.ts";
 
 export { isProbeFailure, isProbeOk } from "./exec.ts";
-export type { ProbeResult, HostProbeErrorCode } from "./exec.ts";
+export type { ProbeResult } from "./exec.ts";
 
 /** Normalized disk reading. Gibibytes, rounded to one decimal — matches the old inline parse. */
 export interface DiskUsage {

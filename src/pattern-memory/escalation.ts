@@ -120,7 +120,7 @@ export function isMetadataCue(cue: string): boolean {
   return cue === ACCEPTANCE_CRITERION_DEFERRED_CUE;
 }
 
-export type EscalationKind = "friction" | "lesson";
+type EscalationKind = "friction" | "lesson";
 
 export type EscalationInput = {
   /** Pattern namespace — `friction` or `lesson` (memory). */
