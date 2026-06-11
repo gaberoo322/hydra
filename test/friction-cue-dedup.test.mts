@@ -208,6 +208,68 @@ describe("fuzzy cue dedup (issue #1667)", () => {
     assert.deepEqual(stored[0].aliases, [KNIP_SPELLINGS[1]]);
   });
 
+  test("fuzzy merge with a DIFFERENT action string preserves the canonical action; exact repeat still refreshes it (invariant 2)", async () => {
+    const CANONICAL_ACTION = "demote the export, don't delete the symbol";
+    const VARIANT_ACTION = "delete the symbol outright"; // deliberately conflicting prescription
+    const REFRESHED_ACTION = "demote the export; re-run knip to tighten the baseline";
+
+    await agentMemory.recordPattern("hydra-dev", KNIP_SPELLINGS[0], {
+      action: CANONICAL_ACTION,
+      example: "first sighting",
+      cycleId: "cycle-1",
+      source: "subagent",
+      namespace: "friction",
+      escalate: noopEscalate,
+    });
+
+    // Fuzzy-merged variant arrives with a DIFFERING action — the canonical
+    // pattern's action must survive (alias merge mutates only
+    // hitCount/examples/aliases, never action).
+    const merged = await agentMemory.recordPattern("hydra-dev", KNIP_SPELLINGS[1], {
+      action: VARIANT_ACTION,
+      example: "second sighting, conflicting prescription",
+      cycleId: "cycle-2",
+      source: "subagent",
+      namespace: "friction",
+      escalate: noopEscalate,
+    });
+
+    assert.equal(merged.pattern.category, KNIP_SPELLINGS[0]);
+    assert.equal(merged.pattern.hitCount, 2);
+    assert.equal(
+      merged.pattern.action,
+      CANONICAL_ACTION,
+      "fuzzy merge must NOT overwrite the canonical action with the alias's action",
+    );
+
+    let stored = await loadFrictionPatterns("hydra-dev");
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].action, CANONICAL_ACTION);
+    assert.deepEqual(stored[0].aliases, [KNIP_SPELLINGS[1]]);
+    // The merge still records the sighting itself (hitCount/examples grow).
+    assert.equal(stored[0].hitCount, 2);
+    assert.equal(stored[0].examples[0], "second sighting, conflicting prescription");
+
+    // An EXACT-category repeat keeps the pre-existing action-update behaviour.
+    await agentMemory.recordPattern("hydra-dev", KNIP_SPELLINGS[0], {
+      action: REFRESHED_ACTION,
+      example: "third sighting under the canonical spelling",
+      cycleId: "cycle-3",
+      source: "subagent",
+      namespace: "friction",
+      escalate: noopEscalate,
+    });
+
+    stored = await loadFrictionPatterns("hydra-dev");
+    assert.equal(stored.length, 1);
+    assert.equal(
+      stored[0].action,
+      REFRESHED_ACTION,
+      "exact-category hit must still refresh the action",
+    );
+    assert.equal(stored[0].hitCount, 3);
+  });
+
   test("three fragment spellings cross PROMOTION_THRESHOLD — recurrence promotion fires again", async () => {
     let crossed = false;
     let lastEscalationCue: string | null = null;

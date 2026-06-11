@@ -598,7 +598,14 @@ export async function recordPattern(
     existing.hitCount++;
     existing.lastSeen = today;
     existing.lastCycleId = details.cycleId;
-    existing.action = details.action;
+    // Design invariant 2 (issue #1667): an alias merge never overwrites the
+    // canonical pattern's action — only exact-category hits keep the existing
+    // action-update behaviour. Caps the blast radius of a false fuzzy merge
+    // to hitCount/examples/aliases; the oldest spelling's fix prescription
+    // survives later-arriving variants.
+    if (existing.category === category) {
+      existing.action = details.action;
+    }
     existing.examples = [details.example, ...existing.examples].slice(0, MAX_EXAMPLES);
     if (details.source) existing.source = details.source;
 
