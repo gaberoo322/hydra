@@ -20,17 +20,22 @@
  *     mainWorktreePath?: string,                 // path of the main working tree
  *     openPrHeads?: string[],                    // `gh pr list --json headRefName`
  *     worktreeAges?: { [worktreePath: string]: number }, // dir age in seconds
- *     minAgeSeconds?: number                     // override the 6h age floor
+ *     minAgeSeconds?: number,                    // override the 6h age floor
+ *     // Dead-branch GC input (issue #1784) — optional; absent = every
+ *     // no-upstream branch has unknown age → conservative skip.
+ *     branchAges?: { [branchName: string]: number } // ref age in seconds
  *   }
  *
  * Output JSON shape:
  *   {
- *     report: string,           // human-readable report (both passes)
+ *     report: string,           // human-readable report (all three passes)
  *     plan: {
  *       deleteWorktreeAndBranch: Array<{ branch: string, worktreePath: string }>,
  *       deleteBranchOnly: string[],
  *       // Worktree-orphan GC plan (issue #911):
  *       deleteOrphanWorktree: Array<{ worktreePath: string, branch: string | null }>,
+ *       // Dead-branch GC plan (issue #1784) — never-pushed dead-dispatch branches:
+ *       deleteBranchNoUpstream: string[],
  *     }
  *   }
  *
@@ -47,6 +52,8 @@ import {
   renderReport,
   classifyWorktreeOrphans,
   renderWorktreeOrphanReport,
+  classifyDeadBranches,
+  renderDeadBranchReport,
   DEFAULT_WORKTREE_MIN_AGE_SECONDS,
   type WorktreeRow,
 } from "./branch-prune.ts";
@@ -62,6 +69,9 @@ interface RunnerInput {
   openPrHeads?: string[];
   worktreeAges?: Record<string, number>;
   minAgeSeconds?: number;
+  // Dead-branch GC input (issue #1784): branch-name → seconds since the ref
+  // was last updated. Absent entries = unknown age = conservative skip.
+  branchAges?: Record<string, number>;
 }
 
 function readStdin(): string {
@@ -85,7 +95,13 @@ try {
 const branches = String(input.branchesRaw || "")
   .split("\n")
   .map(parseBranchLine)
-  .filter((b): b is NonNullable<typeof b> => b !== null);
+  .filter((b): b is NonNullable<typeof b> => b !== null)
+  // Attach caller-computed ref ages (issue #1784) — consumed by the dead-
+  // branch GC age floor. A missing entry stays null = unknown = skip.
+  .map((b) => ({
+    ...b,
+    ageSeconds: input.branchAges ? input.branchAges[b.name] ?? null : null,
+  }));
 
 const locks = new Map<string, string>(Object.entries(input.locks || {}));
 // Attach caller-computed dir ages to EVERY row up front (issue #1773): the
@@ -153,7 +169,25 @@ const orphanBuckets = classifyWorktreeOrphans(orphanCandidates, {
 });
 
 const orphanReport = renderWorktreeOrphanReport(orphanBuckets, audit);
-const fullReport = `${report}\n\n${orphanReport}`;
+
+// ── Dead-branch GC pass (issue #1784) ──────────────────────────────────────
+// Never-pushed dead-dispatch branches: no upstream (pass 1 can never see
+// them), worktree already reaped (pass 2 can never see them). The classifier
+// itself filters to dispatch-shaped names, skips open-PR heads and attached
+// worktrees, and applies the shared age floor — so we feed it ALL branch rows
+// and let its rails decide. The hard cap is seeded with BOTH prior passes'
+// deletion counts so the 250 ceiling spans the whole run.
+const deadBranchBuckets = classifyDeadBranches(branches, {
+  currentBranch,
+  worktrees,
+  isLivePid,
+  openPrHeads: new Set(input.openPrHeads || []),
+  minAgeSeconds,
+  priorDeletions: priorDeletions + orphanBuckets.deleteOrphan.length,
+});
+
+const deadBranchReport = renderDeadBranchReport(deadBranchBuckets, audit);
+const fullReport = `${report}\n\n${orphanReport}\n\n${deadBranchReport}`;
 
 const plan = {
   deleteWorktreeAndBranch: buckets.deleteWorktreeAndBranch.map((e) => ({
@@ -165,6 +199,7 @@ const plan = {
     worktreePath: e.worktree.path,
     branch: e.branch,
   })),
+  deleteBranchNoUpstream: deadBranchBuckets.deleteBranch.map((b) => b.name),
 };
 
 process.stdout.write(JSON.stringify({ report: fullReport, plan }));

@@ -8,13 +8,13 @@ claude_only: true
 
 # Hydra Branch Prune
 
-Sister skill to `hydra-pr-rebase` (open-PR side). This one handles the *post-merge* janitorial side: branches whose upstream is gone after a squash-merge, plus the worktrees that were attached to them — AND, since issue #911, the **local-only orphan worktrees** the `[gone]` signal can never reclaim.
+Sister skill to `hydra-pr-rebase` (open-PR side). This one handles the *post-merge* janitorial side: branches whose upstream is gone after a squash-merge, plus the worktrees that were attached to them — AND, since issue #911, the **local-only orphan worktrees** the `[gone]` signal can never reclaim — AND, since issue #1784, the **never-pushed dead-dispatch branches** (no upstream, no PR, worktree already reaped) that escape both of those passes.
 
 After the codex-removal cut-over (ADR-0006) every code-writing dispatch runs inside a `git worktree` under `~/hydra/.claude/worktrees/agent-*` or `/dev/shm/hydra-worktrees/`. When the agent finishes (or crashes, or is force-quit) the worktree often leaks — `git branch -vv` accumulates `[gone]` upstreams and the worktree dirs stay around indefinitely. A single manual sweep on 2026-05-15 cleaned **167 branches and 71 worktrees** in one pass; the orchestrator should not need a human for that.
 
 The skill is one pass over the local repo, then exit. The scheduling cadence is owned by `scripts/systemd/hydra-branch-prune.timer` (see "Scheduling" below) — the skill itself is on-demand.
 
-## Two reclamation passes (root cause — issue #911)
+## Three reclamation passes (root causes — issues #911 and #1784)
 
 The original skill only ever acted on `[gone]` upstreams. A snapshot on **2026-06-02, taken immediately after a full `--apply` run**, exposed the structural gap:
 
@@ -28,8 +28,9 @@ The fix adds a second pass that closes the gap:
 
 1. **Branch pass (`[gone]`)** — reclaims branches whose upstream is gone after a squash-merge, plus their attached worktrees. Since issue #1773 the worktree-deletion arm is age-gated (see `skip-too-young` below): auto-merge with `--delete-branch` flips the upstream to `[gone]` the instant a PR merges, while the dispatching cycle may still be running post-merge steps inside its worktree — and a manually-created worktree (e.g. a target-build cycle's `/dev/shm` dir) carries no lock file, so the live-PID rail alone cannot protect it.
 2. **Worktree-orphan GC** (issue #911) — keyed on the *worktree*, not the branch. Reclaims a worktree **regardless of upstream state** when every liveness rail holds (see below).
+3. **Dead-branch GC** (issue #1784) — keyed on the *branch* again, but for the case the first two passes structurally miss: a dispatch that died **without ever opening a PR** leaves a branch with **no upstream at all** (never `[gone]`, so pass 1 classifies it `skip-not-gone` forever), and once its worktree is reaped there is nothing for pass 2 to key on either. Run f00da325 hit exactly this: two stale `issue-1676` branches (no PR, no upstream, ~4h idle) that a later dispatch had to liveness-check by hand, plus the sibling cue `pr-branch-held-by-stale-worktree` where a stale branch blocked a later checkout outright (cross-run recurrence 4 for cue `dead-prior-dispatch-branches-no-pr`). This pass deletes a local branch only when **all** of: no upstream, dispatch-shaped name (`issue-*`, `worktree-agent-*`, `agent-*`, `pr-<N>*` — operator branches are never eligible), not the current branch, not checked out in any worktree, not the head of an open PR, and past the same age floor.
 
-Both passes share the same 250-deletion hard cap in a single run (the worktree pass is seeded with the branch pass's deletion count), and both refuse to touch a live-PID worktree or the current branch.
+All three passes share the same 250-deletion hard cap in a single run (each later pass is seeded with the earlier passes' deletion counts), and all refuse to touch a live-PID worktree or the current branch.
 
 ## When NOT to run this
 
@@ -75,6 +76,28 @@ The two extra signals this pass introduced:
 
 - **Open-PR-head set** — built from `gh pr list --state open --json headRefName`. A worktree whose branch heads an open PR is preserved even with a dead PID (the PR may still merge). A missing/unauthenticated `gh` degrades to an *empty* set, which only ever makes the GC **more** conservative (it then relies on age + dead-PID alone) — never less. This rail is GC-pass-only (a `[gone]` upstream already proves the PR closed).
 - **Age floor** — the worktree dir's mtime vs now. Default **6h** (`DEFAULT_WORKTREE_MIN_AGE_SECONDS`), overridable via `HYDRA_WORKTREE_MIN_AGE_SECONDS`. 6h comfortably exceeds the subagent wall-clock cap (default 3600s), so a worktree past the floor whose PID is also dead is unambiguously abandoned. Age is the **last** gate — checked only after the worktree is provably not live and not an open-PR head — so a never-reaped live agent surfaces as `skip-live-agent`, not `skip-too-young`. Since issue #1773 the **same floor also gates the `[gone]` pass's worktree-deletion arm** (same env override, same unknown-age-means-skip discipline): a `[gone]` upstream no longer proves *abandonment*, because auto-merge `--delete-branch` creates it mid-cycle — in `claude-cycle-2026-06-11-0401` a prune sweep landed between the merge and the cycle's post-merge-health step and GC'd the cycle's `/dev/shm` worktree out from under it.
+
+### Dead-branch GC actions (issue #1784)
+
+The third pass classifies each *branch with no upstream* (from the same `git branch -vv` parse) into one of:
+
+| Action                       | Condition                                                                                                   | What the driver does |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------- |
+| `delete-branch-no-upstream`  | No upstream; dispatch-shaped name; not current; no attached worktree; not an open-PR head; past the age floor | `git branch -D`      |
+| `skip-has-upstream`          | Branch has an upstream (gone or healthy) — pass 1's domain                                                  | Nothing (dropped from this pass's report; pass 1 already lists it) |
+| `skip-not-dispatch-branch`   | Name doesn't match a dispatch-generated pattern                                                              | Never auto-delete operator branches |
+| `skip-current-branch`        | Branch IS the currently-checked-out branch                                                                  | Refuse |
+| `skip-live-agent`            | Checked out in a worktree held by a live PID                                                                | Defer — checked BEFORE age, so a fresh live agent is safe |
+| `skip-open-pr-head`          | Branch heads an OPEN PR — a push without `-u` sets no local upstream, so this case is real                  | Preserve until the PR closes |
+| `skip-attached-worktree`     | Checked out in a worktree (dead/no PID)                                                                      | Defer — the worktree-orphan GC owns attached worktrees and deletes worktree + branch together |
+| `skip-too-young`             | Ref age under the floor, OR age unknown                                                                      | Defer — protects an in-flight dispatch |
+| `skip-cap`                   | The shared 250-deletion hard cap is already reached this run                                                 | Defer to the next run |
+
+The extra signal this pass introduced:
+
+- **Per-branch ref age** — `now` minus the ref's last reflog update (`git log -g -1 --format=%ct refs/heads/<name>`), falling back to the tip committer date when the reflog is unavailable. The reflog signal matters: a branch freshly cut from master has an *old* tip commit but a *new* reflog entry, and the floor must protect it. A branch with neither signal gets unknown age → conservative skip, never delete. Same floor (`DEFAULT_WORKTREE_MIN_AGE_SECONDS`, 6h, `HYDRA_WORKTREE_MIN_AGE_SECONDS` override) as the other passes.
+- **Dispatch-name rail** — a no-upstream branch is the *natural state* of any operator-made local branch (`git branch scratch`), so the pass only ever deletes names matching `DEAD_DISPATCH_BRANCH_PATTERNS` (`issue-<N>*`, `worktree-agent-*`, `agent-*`, `pr-<N>*`). Everything else surfaces in the report as `skip-not-dispatch-branch` so the operator can extend the list deliberately.
+- Note the open-PR-head rail degrades to an empty set when `gh` is missing/unauthenticated — for THIS pass that is the less-safe direction (unlike the orphan GC, where the upstream signal backstops it), but the dispatch-name + age + attached-worktree rails still hold, and only *local* refs are ever deleted: the PR's remote branch is untouched, so the worst case is re-fetching the branch, not data loss.
 
 ### Why these signals (and not the obvious ones)
 
@@ -128,6 +151,9 @@ git worktree remove --force "$wt"
 git branch -D "$br"
 
 # delete-branch-only entries
+git branch -D "$br"
+
+# delete-branch-no-upstream entries (dead-dispatch leftovers, issue #1784)
 git branch -D "$br"
 
 # final pass to clean up metadata for hand-removed worktree dirs
@@ -223,6 +249,8 @@ The daily timer bounds the *steady-state* population, but a worktree leaked at 0
 - **Live PID becomes dead between the classifier and the driver**: harmless. The next run picks up the branch (now `[gone]` + no live PID) and prunes it.
 - **`gh` missing / unauthenticated (worktree-orphan GC)**: the open-PR-head set degrades to empty, making the GC *more* conservative — it then relies on dead-PID + age alone. It never becomes less safe.
 - **`stat` fails for a worktree dir**: that worktree's age is reported as unknown, which the classifier treats as `skip-too-young` — it is never reclaimed on an unknown age.
+- **Ref age unavailable (dead-branch GC)**: a branch with no reflog entry AND no readable tip committer date is omitted from the `branchAges` map → unknown age → `skip-too-young`, never deleted.
+- **`gh` missing / unauthenticated (dead-branch GC)**: the open-PR-head rail degrades to empty — see the note in "Dead-branch GC actions" above; the remaining rails hold and only local refs are deleted, so an open PR's remote branch is never at risk.
 
 ## Worktree-orphan GC acceptance criteria (issue #911)
 
@@ -231,6 +259,13 @@ The daily timer bounds the *steady-state* population, but a worktree leaked at 0
 - [x] Never removes a worktree held by a live PID (`skip-live-agent`, checked before age) and never deletes the current branch (`skip-current-worktree` / `skip-main-worktree`). Covered by `test/hydra-branch-prune.test.mts`.
 - [x] Steady-state population is bounded: every reaped dispatch triggers the GC (reap.py) and the daily timer is the backstop, so orphans no longer monotonically accumulate.
 - [x] `npm run typecheck:test` and `npm test` pass; the pure classifier change is covered by `test/hydra-branch-prune.test.mts`.
+
+## Dead-branch GC acceptance criteria (issue #1784)
+
+- [x] A new `delete-branch-no-upstream` action handles local branches with no upstream, no open PR, past the age floor, and not checked out in any live worktree — `classifyDeadBranch` / `classifyDeadBranches` in `scripts/ci/branch-prune.ts`, driven by `scripts/branch-prune.sh`.
+- [x] Branches with no upstream that ARE checked out in a live-PID worktree classify as `skip-live-agent`; open-PR heads as `skip-open-pr-head`; under-floor/unknown-age as `skip-too-young`. Covered by `test/hydra-branch-prune.test.mts`.
+- [x] Operator-made branches are never eligible — the dispatch-name rail (`skip-not-dispatch-branch`) restricts deletion to `issue-*` / `worktree-agent-*` / `agent-*` / `pr-<N>*` names.
+- [x] `npm test` and `npm run typecheck:test` pass.
 
 ## Acceptance criteria (issue #443)
 
