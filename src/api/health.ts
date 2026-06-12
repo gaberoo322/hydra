@@ -38,7 +38,7 @@ import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-reque
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
-import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "../health-diagnostics.ts";
+import { parseProbes, assembleProbeInputs, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "../health-diagnostics.ts";
 import { gitExec } from "../github/git.ts";
 import { isGhFailure } from "../github/exec.ts";
 // Issue #939: Host-Probe Adapter — typed, never-throw disk/mem/service-status
@@ -304,7 +304,11 @@ export function createHealthRouter(eventBus: any) {
     // only I/O (the fan-out above) and the wire-envelope projection below;
     // disk/mem parsing, the `recent` derivation, every diagnostic rule, and the
     // status/summary fold now live in src/health-diagnostics.ts.
-    const snapshot = parseProbes(settled);
+    // Issue #1771: map the positional settled array to the named ProbeInputs record
+    // immediately after the fan-out so parseProbes receives field names, not integer
+    // subscripts. The integer index table comment in health-diagnostics.ts is gone;
+    // the name says what each field is. Indices 17/18 stay with projectHealthDeepResponse.
+    const snapshot = parseProbes(assembleProbeInputs(settled));
     const { diagnostics, status, summary } = assessHealth(snapshot);
 
     // The `cycle` probe (index 3) drives only the activeCycle block, which stays

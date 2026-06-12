@@ -13,11 +13,13 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseProbes,
+  assembleProbeInputs,
   assessHealth,
   projectHealthDeepResponse,
   classifyOvSearchProbe,
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type HealthSnapshot,
+  type ProbeInputs,
 } from "../src/health-diagnostics.ts";
 
 // ---------------------------------------------------------------------------
@@ -561,34 +563,38 @@ describe("assessHealth — summary", () => {
 // ---------------------------------------------------------------------------
 
 describe("parseProbes", () => {
-  function settled(values: Record<number, any>) {
-    const arr: any[] = [];
-    for (let i = 0; i <= 16; i++) {
-      if (i in values) arr.push({ status: "fulfilled", value: values[i] });
-      else arr.push({ status: "rejected", reason: new Error("probe failed") });
-    }
-    return arr;
+  // Issue #1771: tests now build ProbeInputs named records directly —
+  // no integer subscripts, no count-to-the-right-index to understand the fixture.
+  // emptyProbes() is the "all probes failed" baseline; spread to override one field.
+  function emptyProbes(): ProbeInputs {
+    return {
+      basicHealth: null, serviceProbes: null, scheduler: null,
+      queueDepth: null, backlogCounts: null, metrics: null,
+      disk: null, mem: null,
+      sysdOrchestrator: null, sysdWatchdog: null, sysdTargetWeb: null,
+      patterns: null, reflections: null, ovSearch: null,
+      redisInfo: null, emergencyBrake: null,
+    };
   }
 
   // Issue #939: the df/free COLUMNAR PARSE moved to the Host-Probe Adapter
   // (src/host-probe/probe.ts — tested in test/host-probe.test.mts via
   // parseDfOutput/parseFreeOutput). parseProbes now receives already-parsed
-  // DiskUsage/MemUsage at indices 7/8 and simply passes them through, with the
-  // same zeroed default on a probe failure.
-  test("passes the already-parsed DiskUsage through (index 7)", () => {
+  // DiskUsage/MemUsage via ProbeInputs.disk/mem and simply passes them through.
+  test("passes the already-parsed DiskUsage through (disk field)", () => {
     const disk = { availableGb: 50, totalGb: 500, usedPercent: 90 };
-    const snap = parseProbes(settled({ 7: disk }));
+    const snap = parseProbes({ ...emptyProbes(), disk });
     assert.deepEqual(snap.disk, disk);
   });
 
-  test("passes the already-parsed MemUsage through (index 8)", () => {
+  test("passes the already-parsed MemUsage through (mem field)", () => {
     const mem = { totalGb: 32, availableGb: 20, usedPercent: 38 };
-    const snap = parseProbes(settled({ 8: mem }));
+    const snap = parseProbes({ ...emptyProbes(), mem });
     assert.deepEqual(snap.mem, mem);
   });
 
-  test("disk/mem probe failure (null) → zeros (degraded fallback, no throw)", () => {
-    const snap = parseProbes(settled({})); // indices 7/8 rejected → val() null
+  test("disk/mem probe failure (null) -> zeros (degraded fallback, no throw)", () => {
+    const snap = parseProbes(emptyProbes()); // disk/mem null -> zeroed defaults
     assert.deepEqual(snap.disk, { availableGb: 0, totalGb: 0, usedPercent: 0 });
     assert.deepEqual(snap.mem, { totalGb: 0, availableGb: 0, usedPercent: 0 });
   });
@@ -601,7 +607,7 @@ describe("parseProbes", () => {
       { tasksMerged: "0", rolledBack: "true", tasksFailed: "1" },
       { tasksMerged: "0", taskTitle: "Skipped: low value" },
     ];
-    const snap = parseProbes(settled({ 6: { trend, stats: {} } }));
+    const snap = parseProbes({ ...emptyProbes(), metrics: { trend, stats: {} } });
     assert.equal(snap.recent.cycleCount, 5);
     assert.equal(snap.recent.mergedN, 2);
     assert.equal(snap.recent.noTaskN, 2); // "Planner produced no task" + "Skipped:"
@@ -614,16 +620,16 @@ describe("parseProbes", () => {
     assert.equal(snap.recent.avgDurationHuman, "2m"); // > 60000
   });
 
-  test("empty trend → zero rates, no divide-by-zero", () => {
-    const snap = parseProbes(settled({ 6: { trend: [], stats: {} } }));
+  test("empty trend -> zero rates, no divide-by-zero", () => {
+    const snap = parseProbes({ ...emptyProbes(), metrics: { trend: [], stats: {} } });
     assert.equal(snap.recent.cycleCount, 0);
     assert.equal(snap.recent.mergeRate, 0);
     assert.equal(snap.recent.revertRate, 0); // mergedN=0 guard
     assert.equal(snap.recent.avgDurationHuman, "0s");
   });
 
-  test("all probes rejected → safe defaults across the snapshot", () => {
-    const snap = parseProbes(settled({}));
+  test("all probes null -> safe defaults across the snapshot", () => {
+    const snap = parseProbes(emptyProbes());
     assert.equal(snap.health.status, "failed");
     assert.equal(snap.health.redis, false);
     assert.equal(snap.sched.running, false);
@@ -637,32 +643,83 @@ describe("parseProbes", () => {
     assert.equal(snap.sysd.orchestrator, "unknown");
   });
 
-  test("end-to-end: parseProbes → assessHealth on a degraded fan-out", () => {
+  test("end-to-end: parseProbes -> assessHealth on a degraded fan-out", () => {
     // A realistic partial-failure: OV down, watchdog inactive, disk low.
-    const snap = parseProbes(
-      settled({
-        0: { status: "ok", redis: true, cycle: "idle", uptime: 1000 },
-        1: { vikingdb: { status: "running" }, openviking: { status: "failed" } },
-        2: { running: true, consecutiveErrors: 0, lastCycleAt: new Date().toISOString() },
-        4: 2,
-        5: { triage: 0, backlog: 1, inProgress: 0, blocked: 0, done: 0, total: 1 },
-        6: { trend: [], stats: {} },
-        7: { availableGb: 12, totalGb: 500, usedPercent: 90 }, // already-parsed (issue #939) → low
-        9: "active",
-        10: "inactive", // watchdog
-        11: "active",
-        12: { planner: 1, executor: 1, skeptic: 1 },
-        13: 3,
-        14: { status: "running", latencyMs: 10, resultCount: 2 },
-        16: { engaged: false },
-      }),
-    );
+    const snap = parseProbes({
+      basicHealth: { status: "ok", redis: true, cycle: "idle", uptime: 1000 },
+      serviceProbes: { vikingdb: { status: "running" }, openviking: { status: "failed" } },
+      scheduler: { running: true, consecutiveErrors: 0, lastCycleAt: new Date().toISOString() },
+      queueDepth: 2,
+      backlogCounts: { triage: 0, backlog: 1, inProgress: 0, blocked: 0, done: 0, total: 1 },
+      metrics: { trend: [], stats: {} },
+      disk: { availableGb: 12, totalGb: 500, usedPercent: 90 }, // low (issue #939: already-parsed)
+      mem: null,
+      sysdOrchestrator: "active",
+      sysdWatchdog: "inactive",
+      sysdTargetWeb: "active",
+      patterns: { planner: 1, executor: 1, skeptic: 1 },
+      reflections: 3,
+      ovSearch: { status: "running", latencyMs: 10, resultCount: 2 },
+      redisInfo: null,
+      emergencyBrake: { engaged: false },
+    });
     const a = assessHealth(snap);
     assert.equal(a.status, "degraded"); // only warnings
     const components = a.diagnostics.map((d) => d.component);
     assert.ok(components.includes("openviking"));
     assert.ok(components.includes("disk"));
     assert.ok(components.includes("infrastructure"));
+  });
+
+  test("assembleProbeInputs round-trip: positional settled -> ProbeInputs -> HealthSnapshot", () => {
+    // Verifies the integer-to-field mapping in assembleProbeInputs by constructing
+    // a settled array at the exact positions, assembling ProbeInputs, and checking
+    // parseProbes produces the expected snapshot field values. This is the
+    // regression guard for the index table that used to live in health-diagnostics.ts.
+    const disk = { availableGb: 50, totalGb: 500, usedPercent: 10 };
+    const mem = { totalGb: 32, availableGb: 20, usedPercent: 38 };
+    const fv = (v: any) => ({ status: "fulfilled" as const, value: v });
+    const rv = () => ({ status: "rejected" as const, reason: new Error("failed") });
+
+    // Build a 17-element settled array (indices 0-16)
+    const settled: Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }> = [
+      fv({ status: "ok", redis: true, cycle: "idle", uptime: 42 }), // 0 basicHealth
+      fv({ vikingdb: { status: "running" }, openviking: { status: "running" } }), // 1 serviceProbes
+      fv({ running: true, consecutiveErrors: 2 }), // 2 scheduler
+      rv(), // 3 cycle (handler-only, not in ProbeInputs)
+      fv(7),   // 4 queueDepth
+      fv({ triage: 1, backlog: 2, inProgress: 0, blocked: 0, done: 0, total: 3 }), // 5 backlogCounts
+      fv({ trend: [], stats: {} }), // 6 metrics
+      fv(disk), // 7 disk
+      fv(mem),  // 8 mem
+      fv("active"),   // 9 sysdOrchestrator
+      fv("active"),   // 10 sysdWatchdog
+      fv("inactive"), // 11 sysdTargetWeb
+      fv({ planner: 5, executor: 3, skeptic: 1 }), // 12 patterns
+      fv(12),  // 13 reflections
+      fv({ status: "running", latencyMs: 100, resultCount: 4 }), // 14 ovSearch
+      fv({ memoryHuman: "512M", connectedClients: 3, uptimeSeconds: 900 }), // 15 redisInfo
+      fv({ engaged: true, since: 1234 }), // 16 emergencyBrake
+    ];
+
+    const probeInputs = assembleProbeInputs(settled);
+    const snap = parseProbes(probeInputs);
+
+    assert.equal(snap.health.uptime, 42);
+    assert.equal(snap.health.redis, true);
+    assert.equal(snap.sched.consecutiveErrors, 2);
+    assert.equal(snap.queueDepth, 7);
+    assert.equal(snap.blCounts.total, 3);
+    assert.deepEqual(snap.disk, disk);
+    assert.deepEqual(snap.mem, mem);
+    assert.equal(snap.sysd.orchestrator, "active");
+    assert.equal(snap.sysd.watchdog, "active");
+    assert.equal(snap.sysd.targetWeb, "inactive");
+    assert.deepEqual(snap.patterns, { planner: 5, executor: 3, skeptic: 1 });
+    assert.equal(snap.reflCount, 12);
+    assert.equal(snap.ovSearch.resultCount, 4);
+    assert.equal(snap.redisInfo?.memoryHuman, "512M");
+    assert.equal(snap.emergencyBrake.engaged, true);
   });
 });
 

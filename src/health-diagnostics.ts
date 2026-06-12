@@ -192,33 +192,95 @@ export interface HealthAssessment {
   summary: string;
 }
 
-// ---- parseProbes — owns the `recent` pipeline derivation ----------------
+// ---- ProbeInputs — named record replacing the integer-indexed settled array --
 //
-// Maps the raw `Promise.allSettled` results from the handler's probe fan-out
-// into a HealthSnapshot. Indices match the handler's settled array exactly:
-//   0 basic health, 1 service probes, 2 scheduler, 3 cycle, 4 queue depth,
-//   5 backlog counts, 6 metrics {trend,stats}, 7 df, 8 free,
-//   9 systemd orchestrator, 10 systemd watchdog, 11 systemd target web,
-//   12 patterns, 13 reflections, 14 ov search, 15 redis info, 16 brake.
+// Issue #1771: the GET /health/deep handler fans out 19 probes in a
+// Promise.allSettled([]) positional array, then passed the raw settled array to
+// parseProbes(), which extracted values by integer subscript (settled[0]...[16]).
+// The integer subscripts were a shared secret between api/health.ts and
+// health-diagnostics.ts documented only in comments.
 //
-// Issue #939: the df/free columnar PARSE moved to the **Host-Probe Adapter**
-// (`src/host-probe/probe.ts`) — indices 7/8 now arrive ALREADY-PARSED as a
-// `DiskUsage`/`MemUsage` (or null on probe failure), so parseProbes just reads
-// them, with the same zeroed defaults the old re-parse fell back to. The only
-// host-info shaping left here is the systemd-status "unknown" coalesce.
+// Fix: the handler's assembleProbeInputs() (in api/health.ts) maps the settled
+// results into this named record immediately after the fan-out, then passes it to
+// parseProbes(). Adding a probe is now a new named field — the compiler enforces
+// that the parser sees it by name. The integer index table comment is gone.
+//
+// Indices 17/18 (ovSearchWindow/ovContextAvailability) are consumed only by
+// projectHealthDeepResponse() and are NOT part of ProbeInputs.
+
+export interface ProbeInputs {
+  basicHealth: any;
+  serviceProbes: any;
+  scheduler: any;
+  queueDepth: any;
+  backlogCounts: any;
+  metrics: any;
+  disk: any;
+  mem: any;
+  sysdOrchestrator: any;
+  sysdWatchdog: any;
+  sysdTargetWeb: any;
+  patterns: any;
+  reflections: any;
+  ovSearch: any;
+  redisInfo: any;
+  emergencyBrake: any;
+}
+
+// ---- assembleProbeInputs — maps the positional settled array to named fields --
+//
+// Lives here (rather than in api/health.ts) so the integer → field-name mapping
+// is colocated with the ProbeInputs definition and unit-testable without Express.
+// The handler calls this immediately after Promise.allSettled([...]) — the raw
+// settled array never crosses a file boundary as a positional contract.
+//
+// Index legend (for posterity — these ONLY appear in this one function, nowhere else):
+//   0 basicHealth, 1 serviceProbes, 2 scheduler, 3 cycle (handler-only, not in ProbeInputs),
+//   4 queueDepth, 5 backlogCounts, 6 metrics, 7 disk, 8 mem,
+//   9 sysdOrchestrator, 10 sysdWatchdog, 11 sysdTargetWeb,
+//   12 patterns, 13 reflections, 14 ovSearch, 15 redisInfo, 16 emergencyBrake.
+//   17/18 are ovSearchWindow/ovContextAvailability — consumed only by
+//   projectHealthDeepResponse, not part of ProbeInputs.
 
 type SettledLike = Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }>;
 
-export function parseProbes(settled: SettledLike): HealthSnapshot {
-  const val = (i: number) =>
+export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
+  const val = (i: number): any =>
     settled[i] && settled[i].status === "fulfilled" ? (settled[i] as any).value : null;
+  return {
+    basicHealth: val(0),
+    serviceProbes: val(1),
+    scheduler: val(2),
+    queueDepth: val(4),
+    backlogCounts: val(5),
+    metrics: val(6),
+    disk: val(7),
+    mem: val(8),
+    sysdOrchestrator: val(9),
+    sysdWatchdog: val(10),
+    sysdTargetWeb: val(11),
+    patterns: val(12),
+    reflections: val(13),
+    ovSearch: val(14),
+    redisInfo: val(15),
+    emergencyBrake: val(16),
+  };
+}
 
-  const health = val(0) || { status: "failed", redis: false, cycle: "unknown", uptime: 0 };
-  const svcProbes = val(1) || {
+// ---- parseProbes — owns the `recent` pipeline derivation ----------------
+//
+// Maps the ProbeInputs named record into a HealthSnapshot. Each field is
+// named after the probe it carries — no integer subscripts, no shared-secret
+// index table. A null field means the probe failed (rejected settle); safe
+// defaults apply identically to the prior implementation.
+
+export function parseProbes(probes: ProbeInputs): HealthSnapshot {
+  const health = probes.basicHealth || { status: "failed", redis: false, cycle: "unknown", uptime: 0 };
+  const svcProbes = probes.serviceProbes || {
     vikingdb: { status: "failed" },
     openviking: { status: "failed" },
   };
-  const sched = val(2) || {
+  const sched = probes.scheduler || {
     running: false,
     cyclesRun: 0,
     cyclesMerged: 0,
@@ -226,8 +288,8 @@ export function parseProbes(settled: SettledLike): HealthSnapshot {
     mergeRate: 0,
     consecutiveErrors: 0,
   };
-  const queueDepth = val(4) || 0;
-  const blCounts = val(5) || {
+  const queueDepth = probes.queueDepth || 0;
+  const blCounts = probes.backlogCounts || {
     triage: 0,
     backlog: 0,
     inProgress: 0,
@@ -235,24 +297,24 @@ export function parseProbes(settled: SettledLike): HealthSnapshot {
     done: 0,
     total: 0,
   };
-  const mData = val(6) || { trend: [], stats: {} };
-  const patterns = val(12) || { planner: 0, executor: 0, skeptic: 0 };
-  const reflCount = val(13) || 0;
-  const ovSearch = val(14) || { status: "failed", latencyMs: null, resultCount: 0 };
-  const redisInfo = val(15);
+  const mData = probes.metrics || { trend: [], stats: {} };
+  const patterns = probes.patterns || { planner: 0, executor: 0, skeptic: 0 };
+  const reflCount = probes.reflections || 0;
+  const ovSearch = probes.ovSearch || { status: "failed", latencyMs: null, resultCount: 0 };
+  const redisInfo = probes.redisInfo ?? null;
   // Issue #744: emergency-brake state. Fail-safe to disengaged if the read
-  // rejected (val(16) === null) so a Redis blip never reports a phantom brake.
-  const emergencyBrake = val(16) || { engaged: false };
+  // rejected (probes.emergencyBrake === null) so a Redis blip never reports a phantom brake.
+  const emergencyBrake = probes.emergencyBrake || { engaged: false };
 
   // Issue #939: disk/mem arrive already parsed from the Host-Probe Adapter
   // (DiskUsage/MemUsage, or null on a probe failure). The zeroed default matches
-  // the old "unparseable → all-zero" fallback, so every downstream disk/mem rule
+  // the old "unparseable \u2192 all-zero" fallback, so every downstream disk/mem rule
   // sees the identical values.
-  const disk = val(7) || { availableGb: 0, totalGb: 0, usedPercent: 0 };
-  const mem = val(8) || { totalGb: 0, availableGb: 0, usedPercent: 0 };
-  const sysdOrch = val(9) || "unknown",
-    sysdWatch = val(10) || "unknown",
-    sysdWeb = val(11) || "unknown";
+  const disk = probes.disk || { availableGb: 0, totalGb: 0, usedPercent: 0 };
+  const mem = probes.mem || { totalGb: 0, availableGb: 0, usedPercent: 0 };
+  const sysdOrch = probes.sysdOrchestrator || "unknown",
+    sysdWatch = probes.sysdWatchdog || "unknown",
+    sysdWeb = probes.sysdTargetWeb || "unknown";
 
   // Pipeline metrics
   const trend = mData.trend || [];
