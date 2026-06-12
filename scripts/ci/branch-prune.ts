@@ -87,6 +87,21 @@ export interface BranchRow {
   upstreamGone: boolean;
   /** True iff this branch is the currently-checked-out branch (the one prefixed by `* `). */
   isCurrent: boolean;
+  /**
+   * True iff the branch has a configured upstream AT ALL — gone or healthy.
+   * False for never-pushed local-only branches (no tracking bracket after the
+   * SHA column). The dead-branch GC (issue #1784) keys on this: a branch from
+   * a dead dispatch that never opened a PR has NO upstream, so the `[gone]`
+   * pass can never see it.
+   */
+  hasUpstream: boolean;
+  /**
+   * Age in seconds since the branch ref was last updated (caller-computed —
+   * the shell driver reads the ref's reflog tail, falling back to the tip
+   * committer date). Consumed by the dead-branch GC (issue #1784) age floor.
+   * Null/absent = unknown age = conservative skip, never delete.
+   */
+  ageSeconds?: number | null;
 }
 
 export type PruneAction =
@@ -169,10 +184,25 @@ export function parseBranchLine(line: string): BranchRow | null {
   // word inside the bracket.
   const upstreamGone = /\[[^\]]*:\s*gone\]/.test(rest);
 
+  // Upstream presence (issue #1784). `git branch -vv` renders the tracking
+  // bracket as the token immediately after the SHA column:
+  //   `<name>  <sha> [<upstream>...] <subject>`
+  // A never-pushed local branch has NO bracket there — the subject follows the
+  // SHA directly. We only inspect the first token after the SHA, so a subject
+  // that merely CONTAINS brackets later (`fix [WIP] thing`) is not mistaken
+  // for an upstream. A subject that BEGINS with `[` (rare) false-positives to
+  // hasUpstream=true — the conservative direction (the branch is then never a
+  // dead-branch GC candidate).
+  const afterName = rest.slice(m[0].length).replace(/^\s+/, "");
+  const shaSplit = afterName.match(/^\S+\s+(.*)$/s);
+  const tail = shaSplit ? shaSplit[1].replace(/^\s+/, "") : "";
+  const hasUpstream = tail.startsWith("[") || upstreamGone;
+
   return {
     name,
     upstreamGone,
     isCurrent: marker === "*",
+    hasUpstream,
   };
 }
 
@@ -726,6 +756,279 @@ export function renderWorktreeOrphanReport(buckets: WorktreeOrphanBuckets, audit
   if (buckets.cappedOut) {
     lines.push("");
     lines.push(`> Hit per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}). Remaining worktrees will be picked up on the next run.`);
+  }
+
+  return lines.join("\n");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Dead-branch GC (issue #1784)
+//
+// Pass 1 ([gone]) only fires on branches that HAD an upstream; pass 2
+// (worktree-orphan GC, #911) is keyed on the WORKTREE. A branch from a dead
+// dispatch that never opened a PR has no upstream at all, and once its
+// worktree is reaped neither pass can ever reclaim it — run f00da325 found
+// two stale issue-1676 branches (no PR, no upstream, dead worktree) that a
+// later dispatch had to liveness-check by hand, and the sibling cue
+// pr-branch-held-by-stale-worktree blocked a checkout outright. Cross-run
+// recurrence for cue dead-prior-dispatch-branches-no-pr: 4.
+//
+// classifyDeadBranch closes the gap: local branch, NO upstream, dispatch-
+// shaped name, not the current branch, not checked out in any worktree
+// (attached worktrees belong to pass 2, which deletes worktree AND branch on
+// its own rails), not the head of an open PR, and past the age floor → delete.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Branch-name patterns a code-writing dispatch generates. The dead-branch GC
+ * ONLY ever deletes branches matching one of these — a no-upstream branch is
+ * the natural state of any operator-made local branch (`git branch scratch`),
+ * and those must never be eligible. Known generators:
+ *
+ *   issue-<N>-*        — hydra-dev / codex `git worktree add -b issue-N-...`
+ *                        (covers the `-r<ts>` refspec-recovery variants too)
+ *   worktree-agent-*   — Claude harness worktree dispatch branches
+ *   agent-*            — QA worktree branches (agent-qa-NNN, agent-<hash>)
+ *   pr-<N>-*           — QA per-PR worktree branches (pr-NNN-qa)
+ */
+export const DEAD_DISPATCH_BRANCH_PATTERNS: readonly RegExp[] = [
+  /^issue-\d+/,
+  /^worktree-agent-/,
+  /^agent-/,
+  /^pr-\d+/,
+];
+
+/** Predicate: does the branch name look dispatch-generated? */
+export function isDispatchBranchName(name: string): boolean {
+  return DEAD_DISPATCH_BRANCH_PATTERNS.some((p) => p.test(name));
+}
+
+export type DeadBranchAction =
+  | "delete-branch-no-upstream"
+  | "skip-has-upstream"
+  | "skip-not-dispatch-branch"
+  | "skip-current-branch"
+  | "skip-live-agent"
+  | "skip-open-pr-head"
+  | "skip-attached-worktree"
+  | "skip-too-young"
+  | "skip-cap";
+
+export interface DeadBranchResult {
+  action: DeadBranchAction;
+  reason: string;
+}
+
+export interface DeadBranchContext {
+  /** Branch the orchestrator is currently sitting on — never deleted. */
+  currentBranch: string;
+  /** Worktrees parsed from `git worktree list --porcelain` (with lock PIDs). */
+  worktrees: readonly WorktreeRow[];
+  /** Live-PID predicate — true iff the given PID is currently running. */
+  isLivePid: LivePidCheck;
+  /**
+   * Set of branch names that are the head of an OPEN PR. A push without `-u`
+   * sets no local upstream, so a no-upstream branch CAN still head an open
+   * PR — this rail preserves it. Built from `gh pr list --json headRefName`;
+   * a missing/unauthenticated `gh` degrades to an empty set, which is the
+   * LESS safe direction for this pass (unlike the orphan GC) — but the
+   * dispatch-name + age + worktree rails still hold, and the PR's remote
+   * branch is untouched (this pass only deletes local refs).
+   */
+  openPrHeads: ReadonlySet<string>;
+  /**
+   * Minimum branch age (seconds) before deletion — reuses the same floor as
+   * the worktree passes ({@link DEFAULT_WORKTREE_MIN_AGE_SECONDS} via the
+   * caller) so in-flight cycles are safe. Age = seconds since the ref was
+   * last updated (reflog tail / tip committer date), caller-computed.
+   */
+  minAgeSeconds: number;
+  /** Optional injected counter — shares the per-run hard cap with the other passes. */
+  deletionCount?: () => number;
+}
+
+/**
+ * Classify a single branch row for the dead-branch GC. Pure — no I/O.
+ *
+ * Decision order (highest priority first), never-touch-first like the other
+ * two passes:
+ *
+ *  1. Branch HAS an upstream (gone or healthy)        → skip-has-upstream
+ *     (pass 1's domain — this pass only handles never-pushed branches)
+ *  2. Branch is the current branch                    → skip-current-branch
+ *  3. Name is not dispatch-shaped                     → skip-not-dispatch-branch
+ *  4. We already hit the per-run hard cap             → skip-cap
+ *  5. Attached worktree held by a live PID            → skip-live-agent
+ *  6. Branch is the head of an open PR                → skip-open-pr-head
+ *  7. Attached worktree (dead/no PID)                 → skip-attached-worktree
+ *     (the worktree-orphan GC owns it — it deletes worktree AND branch on its
+ *     own rails; deleting the branch under a checked-out worktree would fail
+ *     anyway)
+ *  8. Branch younger than the age floor / unknown age → skip-too-young
+ *  9. Otherwise                                       → delete-branch-no-upstream
+ */
+export function classifyDeadBranch(row: BranchRow, ctx: DeadBranchContext): DeadBranchResult {
+  if (row.hasUpstream) {
+    return {
+      action: "skip-has-upstream",
+      reason: `${row.name} has an upstream — the [gone] pass owns it.`,
+    };
+  }
+
+  if (row.isCurrent || row.name === ctx.currentBranch) {
+    return {
+      action: "skip-current-branch",
+      reason: `${row.name} is the current branch — refusing to delete.`,
+    };
+  }
+
+  if (!isDispatchBranchName(row.name)) {
+    return {
+      action: "skip-not-dispatch-branch",
+      reason: `${row.name} does not match a dispatch-generated name pattern — never auto-delete operator branches.`,
+    };
+  }
+
+  if (ctx.deletionCount && ctx.deletionCount() >= HARD_CAP_DELETIONS_PER_RUN) {
+    return {
+      action: "skip-cap",
+      reason: `Per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}) reached — refusing to delete more.`,
+    };
+  }
+
+  const wt = ctx.worktrees.find((w) => w.branch === row.name) ?? null;
+
+  if (wt && wt.lockedByPid !== null && ctx.isLivePid(wt.lockedByPid)) {
+    return {
+      action: "skip-live-agent",
+      reason: `${row.name} is checked out in worktree ${wt.path} held by live PID ${wt.lockedByPid} — leave for next run.`,
+    };
+  }
+
+  if (ctx.openPrHeads.has(row.name)) {
+    return {
+      action: "skip-open-pr-head",
+      reason: `${row.name} is the head of an open PR (pushed without -u) — preserve until the PR closes.`,
+    };
+  }
+
+  if (wt) {
+    return {
+      action: "skip-attached-worktree",
+      reason: `${row.name} is checked out in worktree ${wt.path} — the worktree-orphan GC owns attached worktrees (it deletes worktree and branch together).`,
+    };
+  }
+
+  // Age floor — the LAST gate, mirroring the other passes. Unknown age is
+  // treated conservatively as too-young: never delete a ref we know nothing
+  // about.
+  if (row.ageSeconds === null || row.ageSeconds === undefined || row.ageSeconds < ctx.minAgeSeconds) {
+    const ageNote =
+      row.ageSeconds === null || row.ageSeconds === undefined ? "unknown age" : `${row.ageSeconds}s old`;
+    return {
+      action: "skip-too-young",
+      reason: `${row.name} has no upstream but is ${ageNote}, under the ${ctx.minAgeSeconds}s floor — defer in case it is an in-flight dispatch.`,
+    };
+  }
+
+  return {
+    action: "delete-branch-no-upstream",
+    reason: `${row.name} is a dead-dispatch leftover (no upstream, no open PR, no attached worktree, ${row.ageSeconds}s old) — delete branch.`,
+  };
+}
+
+export interface DeadBranchBuckets {
+  /** Branches to delete (`git branch -D`). */
+  deleteBranch: BranchRow[];
+  /**
+   * Skipped candidates with their reasons. `skip-has-upstream` rows are
+   * dropped silently — pass 1's report already lists every upstream-bearing
+   * branch, so repeating them here would double the noise.
+   */
+  skip: Array<{ row: BranchRow; action: DeadBranchAction; reason: string }>;
+  /** True iff any candidate was deferred because the hard cap was reached. */
+  cappedOut: boolean;
+}
+
+/**
+ * Classify a batch of branch rows for the dead-branch GC. Maintains a running
+ * deletion counter seeded with `priorDeletions` (the other passes' deletion
+ * counts) so the 250-deletion hard cap spans ALL passes in a single run.
+ * Input order is preserved within each bucket.
+ */
+export function classifyDeadBranches(
+  rows: readonly BranchRow[],
+  ctx: Omit<DeadBranchContext, "deletionCount"> & { priorDeletions?: number },
+): DeadBranchBuckets {
+  const buckets: DeadBranchBuckets = {
+    deleteBranch: [],
+    skip: [],
+    cappedOut: false,
+  };
+
+  let localDeletions = 0;
+  const prior = ctx.priorDeletions ?? 0;
+  const ctxWithCounter: DeadBranchContext = {
+    ...ctx,
+    deletionCount: () => prior + localDeletions,
+  };
+
+  for (const row of rows) {
+    const r = classifyDeadBranch(row, ctxWithCounter);
+    switch (r.action) {
+      case "delete-branch-no-upstream":
+        buckets.deleteBranch.push(row);
+        localDeletions++;
+        break;
+      case "skip-has-upstream":
+        /* intentional: pass 1's report already covers upstream-bearing branches */
+        break;
+      case "skip-cap":
+        buckets.cappedOut = true;
+        buckets.skip.push({ row, action: r.action, reason: r.reason });
+        break;
+      default:
+        buckets.skip.push({ row, action: r.action, reason: r.reason });
+        break;
+    }
+  }
+
+  return buckets;
+}
+
+/**
+ * Render the dead-branch GC section of the report. Pure — deterministic.
+ * Appended below the worktree-orphan section so a single run shows all three
+ * passes.
+ */
+export function renderDeadBranchReport(buckets: DeadBranchBuckets, auditOnly: boolean): string {
+  const verb = auditOnly ? "Would delete" : "Deleted";
+  const lines: string[] = [];
+  lines.push("### Dead-branch GC (issue #1784)");
+  lines.push("");
+
+  lines.push(`#### ${verb} (no-upstream dead-dispatch branches)`);
+  if (buckets.deleteBranch.length === 0) {
+    lines.push("- _none_");
+  } else {
+    for (const r of buckets.deleteBranch) {
+      lines.push(`- ${r.name}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("#### Skipped — dead-branch GC");
+  if (buckets.skip.length === 0) {
+    lines.push("- _none_");
+  } else {
+    for (const s of buckets.skip) {
+      lines.push(`- ${s.row.name}: ${s.reason}`);
+    }
+  }
+
+  if (buckets.cappedOut) {
+    lines.push("");
+    lines.push(`> Hit per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}). Remaining candidates will be picked up on the next run.`);
   }
 
   return lines.join("\n");

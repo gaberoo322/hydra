@@ -171,6 +171,32 @@ prune_repo() {
       AGES_JSON=$(printf '%s\n' "${AGE_ENTRIES[@]}" | jq -s 'add // {}')
     fi
 
+    # Per-branch ref ages (issue #1784) — feeds the dead-branch GC's age
+    # floor. Age = now - the ref's last reflog update (the moment the branch
+    # was created or last moved), falling back to the tip committer date when
+    # the reflog is unavailable. The reflog signal matters: a branch freshly
+    # cut from master has an OLD tip commit but a NEW reflog entry, and the
+    # floor must protect it. A branch with neither signal is simply omitted —
+    # the classifier treats unknown age as skip, never delete.
+    local -a BRANCH_AGE_ENTRIES=()
+    local br_name br_ts br_age
+    while IFS= read -r br_name; do
+      [ -z "$br_name" ] && continue
+      br_ts=$(git log -g -1 --format=%ct "refs/heads/$br_name" -- 2>/dev/null | head -1)
+      [ -z "$br_ts" ] && br_ts=$(git log -1 --format=%ct "refs/heads/$br_name" -- 2>/dev/null | head -1)
+      [ -z "$br_ts" ] && continue
+      br_age=$((now - br_ts))
+      [ "$br_age" -lt 0 ] && br_age=0
+      BRANCH_AGE_ENTRIES+=("$(jq -nc --arg n "$br_name" --argjson s "$br_age" '{($n): $s}')")
+    done < <(git for-each-ref refs/heads --format='%(refname:short)' 2>/dev/null)
+
+    local BRANCH_AGES_JSON
+    if [ ${#BRANCH_AGE_ENTRIES[@]} -eq 0 ]; then
+      BRANCH_AGES_JSON='{}'
+    else
+      BRANCH_AGES_JSON=$(printf '%s\n' "${BRANCH_AGE_ENTRIES[@]}" | jq -s 'add // {}')
+    fi
+
     # Open-PR head branches — a worktree whose branch heads an open PR is
     # preserved even when its lock PID is dead (the PR may still merge). A
     # missing/unauthenticated `gh` degrades to an empty set: the GC then
@@ -210,11 +236,13 @@ prune_repo() {
       --arg m "$MAIN_WT" \
       --argjson l "$LOCKS_JSON" \
       --argjson ag "$AGES_JSON" \
+      --argjson ba "$BRANCH_AGES_JSON" \
       --argjson ph "$OPEN_PR_HEADS_JSON" \
       --argjson mn "$MIN_AGE_JSON" \
       --argjson a "$AUDIT_JSON" \
       '{branchesRaw: $b, worktreesRaw: $w, currentBranch: $c, mainWorktreePath: $m,
-        locks: $l, worktreeAges: $ag, openPrHeads: $ph, minAgeSeconds: $mn, audit: $a}')
+        locks: $l, worktreeAges: $ag, branchAges: $ba, openPrHeads: $ph,
+        minAgeSeconds: $mn, audit: $a}')
 
     PLAN=$(printf '%s' "$INPUT_JSON" | npx -y tsx "$REPO_ROOT/scripts/ci/branch-prune-runner.ts")
     if [ -z "$PLAN" ]; then
@@ -295,6 +323,21 @@ prune_repo() {
         fi
       fi
     done < <(printf '%s' "$PLAN" | jq -c '.plan.deleteOrphanWorktree[]')
+
+    # Dead-branch GC (issue #1784): never-pushed dead-dispatch branches — no
+    # upstream (invisible to the [gone] pass), worktree already reaped
+    # (invisible to the orphan GC). The classifier guarantees these are
+    # dispatch-shaped names, not the current branch, not an open-PR head, not
+    # checked out anywhere, and past the age floor — so a plain branch -D is
+    # all that's left. `// []` tolerates an older runner emitting no such key.
+    while IFS= read -r br; do
+      [ -z "$br" ] && continue
+      echo "branch-prune: [$LABEL] deleting dead-dispatch branch $br (no upstream, no PR)"
+      if ! git branch -D "$br" 2>&1 | sed "s/^/  [$LABEL] /"; then
+        echo "  branch-prune: [$LABEL] branch -D failed for dead-dispatch $br" >&2
+        ERRORS=$((ERRORS+1))
+      fi
+    done < <(printf '%s' "$PLAN" | jq -r '.plan.deleteBranchNoUpstream // [] | .[]')
 
     # Final pass: prune metadata for manually-deleted worktree dirs.
     echo "branch-prune: [$LABEL] git worktree prune"

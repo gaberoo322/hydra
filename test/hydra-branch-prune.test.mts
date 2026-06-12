@@ -30,6 +30,10 @@ import {
   classifyWorktreeOrphan,
   classifyWorktreeOrphans,
   renderWorktreeOrphanReport,
+  classifyDeadBranch,
+  classifyDeadBranches,
+  renderDeadBranchReport,
+  isDispatchBranchName,
   DEFAULT_WORKTREE_MIN_AGE_SECONDS,
   HARD_CAP_DELETIONS_PER_RUN,
   type BranchRow,
@@ -40,11 +44,34 @@ import {
 const NEVER_LIVE: LivePidCheck = () => false;
 const ALWAYS_LIVE: LivePidCheck = () => true;
 
-function branch(name: string, opts: { gone?: boolean; current?: boolean } = {}): BranchRow {
+function branch(
+  name: string,
+  opts: { gone?: boolean; current?: boolean; upstream?: boolean } = {},
+): BranchRow {
   return {
     name,
     upstreamGone: opts.gone ?? true,
     isCurrent: opts.current ?? false,
+    // Pass-1 fixtures model branches that WERE pushed (gone or healthy
+    // upstream) — default hasUpstream true. The dead-branch GC fixtures
+    // (issue #1784) use localBranch() below instead.
+    hasUpstream: opts.upstream ?? true,
+  };
+}
+
+// Dead-branch GC fixture (issue #1784): a never-pushed local-only branch.
+// Default age is comfortably past the floor; pass an explicit ageSeconds
+// (or null = unknown) to exercise the floor.
+function localBranch(
+  name: string,
+  opts: { current?: boolean; ageSeconds?: number | null } = {},
+): BranchRow {
+  return {
+    name,
+    upstreamGone: false,
+    isCurrent: opts.current ?? false,
+    hasUpstream: false,
+    ageSeconds: "ageSeconds" in opts ? (opts.ageSeconds ?? null) : OLD,
   };
 }
 
@@ -131,27 +158,27 @@ describe("parseLockPid (lock-file PID extraction)", () => {
 describe("parseBranchLine (git branch -vv parsing)", () => {
   test("parses current branch with [gone] upstream", () => {
     const r = parseBranchLine("* issue-1-foo                abc1234 [origin/issue-1-foo: gone] wip");
-    assert.deepEqual(r, { name: "issue-1-foo", upstreamGone: true, isCurrent: true });
+    assert.deepEqual(r, { name: "issue-1-foo", upstreamGone: true, isCurrent: true, hasUpstream: true });
   });
 
   test("parses non-current branch with [gone] upstream", () => {
     const r = parseBranchLine("  issue-2-bar                def5678 [origin/issue-2-bar: gone] feat");
-    assert.deepEqual(r, { name: "issue-2-bar", upstreamGone: true, isCurrent: false });
+    assert.deepEqual(r, { name: "issue-2-bar", upstreamGone: true, isCurrent: false, hasUpstream: true });
   });
 
   test("parses branch checked out in another worktree (`+ ` marker)", () => {
     const r = parseBranchLine("+ issue-3-baz                aaaaaaa [origin/issue-3-baz: gone] ongoing");
-    assert.deepEqual(r, { name: "issue-3-baz", upstreamGone: true, isCurrent: false });
+    assert.deepEqual(r, { name: "issue-3-baz", upstreamGone: true, isCurrent: false, hasUpstream: true });
   });
 
   test("parses healthy branch (no [gone] marker)", () => {
     const r = parseBranchLine("* master                     f4d3ecc [origin/master] fix(autopilot): ...");
-    assert.deepEqual(r, { name: "master", upstreamGone: false, isCurrent: true });
+    assert.deepEqual(r, { name: "master", upstreamGone: false, isCurrent: true, hasUpstream: true });
   });
 
   test("parses branch with no tracking info", () => {
     const r = parseBranchLine("  worktree-agent-xyz        def5678 (no tracking info)");
-    assert.deepEqual(r, { name: "worktree-agent-xyz", upstreamGone: false, isCurrent: false });
+    assert.deepEqual(r, { name: "worktree-agent-xyz", upstreamGone: false, isCurrent: false, hasUpstream: false });
   });
 
   test("returns null on empty / whitespace-only input", () => {
@@ -163,7 +190,25 @@ describe("parseBranchLine (git branch -vv parsing)", () => {
     // Subject line legitimately contains the word "gone" but the upstream is
     // healthy. We must not strip it as a prune candidate.
     const r = parseBranchLine("  feat-undo  abc1234 [origin/feat-undo] revert: undo something that's gone");
-    assert.deepEqual(r, { name: "feat-undo", upstreamGone: false, isCurrent: false });
+    assert.deepEqual(r, { name: "feat-undo", upstreamGone: false, isCurrent: false, hasUpstream: true });
+  });
+
+  // hasUpstream detection (issue #1784) — the dead-branch GC keys on it.
+  test("never-pushed branch (plain subject after the SHA) → hasUpstream false", () => {
+    const r = parseBranchLine("  issue-1676-dev            abc1234 fix(autopilot): wip attempt");
+    assert.deepEqual(r, { name: "issue-1676-dev", upstreamGone: false, isCurrent: false, hasUpstream: false });
+  });
+
+  test("subject that CONTAINS brackets mid-line does not fake an upstream", () => {
+    const r = parseBranchLine("  issue-9-x                 abc1234 fix [WIP] something bracketed");
+    assert.equal(r?.hasUpstream, false);
+  });
+
+  test("subject that BEGINS with a bracket false-positives to hasUpstream (conservative direction)", () => {
+    // Documented trade-off: the branch is then never a dead-branch GC
+    // candidate, which only ever makes the pass MORE conservative.
+    const r = parseBranchLine("  issue-9-y                 abc1234 [WIP] odd subject");
+    assert.equal(r?.hasUpstream, true);
   });
 });
 
@@ -694,6 +739,248 @@ describe("renderWorktreeOrphanReport — deterministic output", () => {
   test("notes the cap when cappedOut is true", () => {
     const buckets = { deleteOrphan: [], skip: [], cappedOut: true };
     const out = renderWorktreeOrphanReport(buckets, false);
+    assert.match(out, /hard cap/);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Dead-branch GC (issue #1784)
+//
+// Pass 1 only fires on [gone] upstreams; pass 2 is keyed on the worktree. A
+// branch from a dead dispatch that NEVER opened a PR has no upstream at all,
+// and once its worktree is reaped neither pass can ever reclaim it — run
+// f00da325 found two stale issue-1676 branches a later dispatch had to
+// liveness-check by hand (cue dead-prior-dispatch-branches-no-pr, cross-run
+// recurrence 4). These tests guard the third pass that closes the gap.
+// ───────────────────────────────────────────────────────────────────────────
+
+function deadCtx(over: Partial<Parameters<typeof classifyDeadBranch>[1]> = {}) {
+  return {
+    currentBranch: "master",
+    worktrees: [] as WorktreeRow[],
+    isLivePid: NEVER_LIVE,
+    openPrHeads: new Set<string>(),
+    minAgeSeconds: DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+    ...over,
+  };
+}
+
+describe("isDispatchBranchName — name-pattern rail (issue #1784)", () => {
+  test("matches dispatch-generated branch shapes", () => {
+    assert.equal(isDispatchBranchName("issue-1676-dev"), true);
+    assert.equal(isDispatchBranchName("issue-1676-per-run-redis-db"), true);
+    assert.equal(isDispatchBranchName("issue-1667-cue-fuzzy-dedup-r1718000000"), true);
+    assert.equal(isDispatchBranchName("worktree-agent-acaf7dba565448c37"), true);
+    assert.equal(isDispatchBranchName("agent-qa-123"), true);
+    assert.equal(isDispatchBranchName("pr-1515-qa"), true);
+  });
+
+  test("rejects operator-shaped branch names", () => {
+    assert.equal(isDispatchBranchName("master"), false);
+    assert.equal(isDispatchBranchName("scratch"), false);
+    assert.equal(isDispatchBranchName("feat/manual-experiment"), false);
+    assert.equal(isDispatchBranchName("my-issue-123"), false); // prefix-anchored
+  });
+});
+
+describe("classifyDeadBranch — never-touch rails", () => {
+  test("branch WITH an upstream (healthy) → skip-has-upstream (pass 1's domain)", () => {
+    const r = classifyDeadBranch(branch("issue-5-pushed", { gone: false, upstream: true }), deadCtx());
+    assert.equal(r.action, "skip-has-upstream");
+  });
+
+  test("branch WITH a [gone] upstream → skip-has-upstream (pass 1 deletes it)", () => {
+    const r = classifyDeadBranch(branch("issue-6-merged", { gone: true, upstream: true }), deadCtx());
+    assert.equal(r.action, "skip-has-upstream");
+  });
+
+  test("current branch → skip-current-branch", () => {
+    const r = classifyDeadBranch(localBranch("issue-7-cur", { current: true }), deadCtx());
+    assert.equal(r.action, "skip-current-branch");
+    assert.match(r.reason, /current branch/);
+  });
+
+  test("non-dispatch name → skip-not-dispatch-branch (never auto-delete operator branches)", () => {
+    const r = classifyDeadBranch(
+      { name: "scratch-experiment", upstreamGone: false, isCurrent: false, hasUpstream: false, ageSeconds: OLD },
+      deadCtx(),
+    );
+    assert.equal(r.action, "skip-not-dispatch-branch");
+    assert.match(r.reason, /operator branches/);
+  });
+
+  test("AC (b): no upstream + checked out in a live-PID worktree → skip-live-agent", () => {
+    const w = wt("/wt/live-dispatch", "issue-8-live", 4242, { ageSeconds: OLD });
+    const r = classifyDeadBranch(
+      localBranch("issue-8-live"),
+      deadCtx({ worktrees: [w], isLivePid: ALWAYS_LIVE }),
+    );
+    assert.equal(r.action, "skip-live-agent");
+    assert.match(r.reason, /live PID 4242/);
+  });
+
+  test("AC (c): no upstream but head of an OPEN PR (pushed without -u) → skip-open-pr-head", () => {
+    const r = classifyDeadBranch(
+      localBranch("issue-9-pr-head"),
+      deadCtx({ openPrHeads: new Set(["issue-9-pr-head"]) }),
+    );
+    assert.equal(r.action, "skip-open-pr-head");
+    assert.match(r.reason, /open PR/);
+  });
+
+  test("no upstream + attached worktree with DEAD pid → skip-attached-worktree (orphan GC owns it)", () => {
+    const w = wt("/wt/dead-but-attached", "issue-10-attached", 99999, { ageSeconds: OLD });
+    const r = classifyDeadBranch(
+      localBranch("issue-10-attached"),
+      deadCtx({ worktrees: [w], isLivePid: NEVER_LIVE }),
+    );
+    assert.equal(r.action, "skip-attached-worktree");
+    assert.match(r.reason, /worktree-orphan GC/);
+  });
+
+  test("AC (d): no upstream + younger than the age floor → skip-too-young", () => {
+    const r = classifyDeadBranch(localBranch("issue-11-fresh", { ageSeconds: YOUNG }), deadCtx());
+    assert.equal(r.action, "skip-too-young");
+    assert.match(r.reason, /in-flight dispatch/);
+  });
+
+  test("no upstream + UNKNOWN age (null) → skip-too-young (conservative)", () => {
+    const r = classifyDeadBranch(localBranch("issue-12-noage", { ageSeconds: null }), deadCtx());
+    assert.equal(r.action, "skip-too-young");
+    assert.match(r.reason, /unknown age/);
+  });
+
+  test("hard cap → skip-cap", () => {
+    const r = classifyDeadBranch(
+      localBranch("issue-13-capped"),
+      deadCtx({ deletionCount: () => HARD_CAP_DELETIONS_PER_RUN }),
+    );
+    assert.equal(r.action, "skip-cap");
+    assert.match(r.reason, /hard cap/);
+  });
+
+  test("live-PID rail beats the age floor — fresh LIVE dispatch is skip-live-agent, not skip-too-young", () => {
+    const w = wt("/wt/fresh-live", "issue-14-fresh-live", 7, { ageSeconds: YOUNG });
+    const r = classifyDeadBranch(
+      localBranch("issue-14-fresh-live", { ageSeconds: YOUNG }),
+      deadCtx({ worktrees: [w], isLivePid: ALWAYS_LIVE }),
+    );
+    assert.equal(r.action, "skip-live-agent");
+  });
+});
+
+describe("classifyDeadBranch — reclaim path (AC (a), the actual fix)", () => {
+  test("no upstream, worktree already reaped, no open PR, past the age floor → delete-branch-no-upstream", () => {
+    // The exact run-f00da325 shape: issue-1676-dev / issue-1676-per-run-redis-db
+    // from prior dead dispatches — ~4h+ idle, no live processes, no PR, no
+    // upstream, worktree long reaped.
+    const r = classifyDeadBranch(localBranch("issue-1676-dev", { ageSeconds: OLD }), deadCtx());
+    assert.equal(r.action, "delete-branch-no-upstream");
+    assert.match(r.reason, /no upstream/);
+    assert.match(r.reason, /no open PR/);
+  });
+
+  test("worktree-agent-* leftover is also reclaimed", () => {
+    const r = classifyDeadBranch(localBranch("worktree-agent-deadbeef"), deadCtx());
+    assert.equal(r.action, "delete-branch-no-upstream");
+  });
+});
+
+describe("classifyDeadBranches — batch + cap accounting", () => {
+  test("buckets delete vs skip, silently drops has-upstream rows, preserves order", () => {
+    const liveWt = wt("/wt/live", "issue-22-live", 5, { ageSeconds: OLD });
+    const rows: BranchRow[] = [
+      branch("master", { gone: false, current: true }),       // has upstream → dropped silently
+      branch("issue-20-merged", { gone: true }),               // has upstream → dropped silently
+      localBranch("issue-21-dead"),                            // → delete
+      localBranch("issue-22-live"),                            // live worktree → skip
+      localBranch("issue-23-young", { ageSeconds: YOUNG }),    // → skip
+      localBranch("scratch"),                                  // not dispatch-shaped → skip
+    ];
+    const buckets = classifyDeadBranches(rows, {
+      currentBranch: "master",
+      worktrees: [liveWt],
+      isLivePid: (pid) => pid === 5,
+      openPrHeads: new Set<string>(),
+      minAgeSeconds: DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+    });
+    assert.equal(buckets.deleteBranch.length, 1);
+    assert.equal(buckets.deleteBranch[0].name, "issue-21-dead");
+    // live + young + scratch → three skips; the two upstream-bearing rows are
+    // NOT in the skip list (pass 1's report already covers them).
+    assert.equal(buckets.skip.length, 3);
+    assert.deepEqual(
+      buckets.skip.map((s) => s.action),
+      ["skip-live-agent", "skip-too-young", "skip-not-dispatch-branch"],
+    );
+    assert.equal(buckets.cappedOut, false);
+  });
+
+  test("priorDeletions seeds the shared hard cap — earlier passes already at cap → all skip-cap", () => {
+    const rows = [localBranch("issue-30-a"), localBranch("issue-31-b")];
+    const buckets = classifyDeadBranches(rows, {
+      currentBranch: "master",
+      worktrees: [],
+      isLivePid: NEVER_LIVE,
+      openPrHeads: new Set<string>(),
+      minAgeSeconds: DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+      priorDeletions: HARD_CAP_DELETIONS_PER_RUN,
+    });
+    assert.equal(buckets.deleteBranch.length, 0);
+    assert.equal(buckets.cappedOut, true);
+    assert.ok(buckets.skip.every((s) => s.action === "skip-cap"));
+  });
+
+  test("hard cap fires within the pass once its own deletions accumulate", () => {
+    const rows: BranchRow[] = [];
+    for (let i = 0; i < HARD_CAP_DELETIONS_PER_RUN + 4; i++) {
+      rows.push(localBranch(`issue-${i}-dead`));
+    }
+    const buckets = classifyDeadBranches(rows, {
+      currentBranch: "master",
+      worktrees: [],
+      isLivePid: NEVER_LIVE,
+      openPrHeads: new Set<string>(),
+      minAgeSeconds: DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+    });
+    assert.equal(buckets.deleteBranch.length, HARD_CAP_DELETIONS_PER_RUN);
+    assert.equal(buckets.cappedOut, true);
+    assert.equal(buckets.skip.length, 4);
+  });
+});
+
+describe("renderDeadBranchReport — deterministic output", () => {
+  test("lists deleted + skipped branches", () => {
+    const buckets = {
+      deleteBranch: [localBranch("issue-40-dead"), localBranch("worktree-agent-old")],
+      skip: [
+        {
+          row: localBranch("issue-41-young", { ageSeconds: YOUNG }),
+          action: "skip-too-young" as const,
+          reason: "issue-41-young has no upstream but is 60s old, under the floor — defer.",
+        },
+      ],
+      cappedOut: false,
+    };
+    const out = renderDeadBranchReport(buckets, false);
+    assert.match(out, /### Dead-branch GC \(issue #1784\)/);
+    assert.match(out, /#### Deleted \(no-upstream dead-dispatch branches\)/);
+    assert.match(out, /- issue-40-dead/);
+    assert.match(out, /- worktree-agent-old/);
+    assert.match(out, /#### Skipped — dead-branch GC/);
+    assert.match(out, /- issue-41-young: .*under the floor/);
+  });
+
+  test("audit-only mode says 'Would delete'", () => {
+    const buckets = { deleteBranch: [], skip: [], cappedOut: false };
+    const out = renderDeadBranchReport(buckets, true);
+    assert.match(out, /#### Would delete/);
+    assert.doesNotMatch(out, /#### Deleted/);
+  });
+
+  test("notes the cap when cappedOut is true", () => {
+    const buckets = { deleteBranch: [], skip: [], cappedOut: true };
+    const out = renderDeadBranchReport(buckets, false);
     assert.match(out, /hard cap/);
   });
 });
