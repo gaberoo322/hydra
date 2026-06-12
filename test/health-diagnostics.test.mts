@@ -13,7 +13,6 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseProbes,
-  assembleProbeInputs,
   assessHealth,
   projectHealthDeepResponse,
   classifyOvSearchProbe,
@@ -21,6 +20,9 @@ import {
   type HealthSnapshot,
   type ProbeInputs,
 } from "../src/health-diagnostics.ts";
+// assembleProbeInputs lives in src/api/health.ts (the I/O owner per #840 seam purity),
+// exported for unit testing the positional index mapping in isolation.
+import { assembleProbeInputs } from "../src/api/health.ts";
 
 // ---------------------------------------------------------------------------
 // A baseline all-healthy snapshot. Each test clones it and perturbs ONE field
@@ -574,6 +576,7 @@ describe("parseProbes", () => {
       sysdOrchestrator: null, sysdWatchdog: null, sysdTargetWeb: null,
       patterns: null, reflections: null, ovSearch: null,
       redisInfo: null, emergencyBrake: null,
+      ovSearchWindow: null, knowledgeContext: null,
     };
   }
 
@@ -662,6 +665,8 @@ describe("parseProbes", () => {
       ovSearch: { status: "running", latencyMs: 10, resultCount: 2 },
       redisInfo: null,
       emergencyBrake: { engaged: false },
+      ovSearchWindow: null,
+      knowledgeContext: null,
     });
     const a = assessHealth(snap);
     assert.equal(a.status, "degraded"); // only warnings
@@ -681,7 +686,7 @@ describe("parseProbes", () => {
     const fv = (v: any) => ({ status: "fulfilled" as const, value: v });
     const rv = () => ({ status: "rejected" as const, reason: new Error("failed") });
 
-    // Build a 17-element settled array (indices 0-16)
+    // Build a 19-element settled array (indices 0-18)
     const settled: Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }> = [
       fv({ status: "ok", redis: true, cycle: "idle", uptime: 42 }), // 0 basicHealth
       fv({ vikingdb: { status: "running" }, openviking: { status: "running" } }), // 1 serviceProbes
@@ -700,6 +705,8 @@ describe("parseProbes", () => {
       fv({ status: "running", latencyMs: 100, resultCount: 4 }), // 14 ovSearch
       fv({ memoryHuman: "512M", connectedClients: 3, uptimeSeconds: 900 }), // 15 redisInfo
       fv({ engaged: true, since: 1234 }), // 16 emergencyBrake
+      fv([{ hour: 0, count: 5 }]), // 17 ovSearchWindow
+      fv({ available: 0.95 }), // 18 knowledgeContext
     ];
 
     const probeInputs = assembleProbeInputs(settled);
@@ -735,16 +742,18 @@ describe("parseProbes", () => {
 describe("projectHealthDeepResponse", () => {
   const CHECKED_AT = "2026-06-09T00:00:00.000Z";
 
-  // A settled array long enough to carry indices 17/18, with everything
-  // rejected by default — the projection only reads 17/18 (parseProbes owns the
-  // rest), so a `values` override sets just those.
-  function settled(values: Record<number, any> = {}) {
-    const arr: any[] = [];
+  // Build a ProbeInputs from a Record<number, any> of settled values.
+  // Carries indices 0-18 with everything rejected by default.
+  // After issue #1771 the positional index mapping lives in assembleProbeInputs
+  // (src/api/health.ts); the tests reuse it here to keep the integer-to-field
+  // correspondence a single source of truth.
+  function makeProbes(values: Record<number, any> = {}): ProbeInputs {
+    const arr: Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }> = [];
     for (let i = 0; i <= 18; i++) {
       if (i in values) arr.push({ status: "fulfilled", value: values[i] });
       else arr.push({ status: "rejected", reason: new Error("probe failed") });
     }
-    return arr;
+    return assembleProbeInputs(arr);
   }
 
   function project(
@@ -759,7 +768,7 @@ describe("projectHealthDeepResponse", () => {
       summary,
       opts.activeCycle ?? null,
       CHECKED_AT,
-      settled(opts.settledValues),
+      makeProbes(opts.settledValues),
     );
   }
 

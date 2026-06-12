@@ -200,13 +200,15 @@ export interface HealthAssessment {
 // The integer subscripts were a shared secret between api/health.ts and
 // health-diagnostics.ts documented only in comments.
 //
-// Fix: the handler's assembleProbeInputs() (in api/health.ts) maps the settled
-// results into this named record immediately after the fan-out, then passes it to
-// parseProbes(). Adding a probe is now a new named field — the compiler enforces
-// that the parser sees it by name. The integer index table comment is gone.
+// Fix: the handler's assembleProbeInputs() (in api/health.ts, the I/O owner)
+// maps the settled results into this named record immediately after the fan-out,
+// then passes it to parseProbes() and projectHealthDeepResponse(). Only the
+// named-record TYPE lives here in the pure seam (#840); the integer-indexed
+// mapping stays in the I/O handler. Adding a probe is now a new named field —
+// the compiler enforces that the builder (api/health.ts) and both consumers
+// agree by name.
 //
-// Indices 17/18 (ovSearchWindow/ovContextAvailability) are consumed only by
-// projectHealthDeepResponse() and are NOT part of ProbeInputs.
+// Index 3 (cycle) is handler-only and not part of ProbeInputs.
 
 export interface ProbeInputs {
   basicHealth: any;
@@ -225,46 +227,9 @@ export interface ProbeInputs {
   ovSearch: any;
   redisInfo: any;
   emergencyBrake: any;
-}
-
-// ---- assembleProbeInputs — maps the positional settled array to named fields --
-//
-// Lives here (rather than in api/health.ts) so the integer → field-name mapping
-// is colocated with the ProbeInputs definition and unit-testable without Express.
-// The handler calls this immediately after Promise.allSettled([...]) — the raw
-// settled array never crosses a file boundary as a positional contract.
-//
-// Index legend (for posterity — these ONLY appear in this one function, nowhere else):
-//   0 basicHealth, 1 serviceProbes, 2 scheduler, 3 cycle (handler-only, not in ProbeInputs),
-//   4 queueDepth, 5 backlogCounts, 6 metrics, 7 disk, 8 mem,
-//   9 sysdOrchestrator, 10 sysdWatchdog, 11 sysdTargetWeb,
-//   12 patterns, 13 reflections, 14 ovSearch, 15 redisInfo, 16 emergencyBrake.
-//   17/18 are ovSearchWindow/ovContextAvailability — consumed only by
-//   projectHealthDeepResponse, not part of ProbeInputs.
-
-type SettledLike = Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }>;
-
-export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
-  const val = (i: number): any =>
-    settled[i] && settled[i].status === "fulfilled" ? (settled[i] as any).value : null;
-  return {
-    basicHealth: val(0),
-    serviceProbes: val(1),
-    scheduler: val(2),
-    queueDepth: val(4),
-    backlogCounts: val(5),
-    metrics: val(6),
-    disk: val(7),
-    mem: val(8),
-    sysdOrchestrator: val(9),
-    sysdWatchdog: val(10),
-    sysdTargetWeb: val(11),
-    patterns: val(12),
-    reflections: val(13),
-    ovSearch: val(14),
-    redisInfo: val(15),
-    emergencyBrake: val(16),
-  };
+  // Indices 17/18: consumed by projectHealthDeepResponse for OV quality trends
+  ovSearchWindow: any;
+  knowledgeContext: any;
 }
 
 // ---- parseProbes — owns the `recent` pipeline derivation ----------------
@@ -790,16 +755,17 @@ export function projectHealthDeepResponse(
   summary: string,
   activeCycle: unknown,
   checkedAt: string,
-  settled: SettledLike,
+  probes: ProbeInputs,
 ): HealthDeepResponse {
   const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, ovSearch, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
   const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
 
-  // Issue #1440: coalesce the two persisted OV-quality reads (indices 17/18).
+  // Issue #1440: coalesce the two persisted OV-quality reads.
   // A rejected settle (Redis error) becomes null — surfaced as absent trend
-  // data, never a 500. parseProbes stops at index 16, so these are read here.
-  const ovSearchWindow = settled[17] && settled[17].status === "fulfilled" ? (settled[17] as any).value : null;
-  const ovContextAvailability = settled[18] && settled[18].status === "fulfilled" ? (settled[18] as any).value : null;
+  // data, never a 500. parseProbes stops at emergencyBrake, so these arrive
+  // via the ProbeInputs named fields ovSearchWindow/knowledgeContext.
+  const ovSearchWindow = probes.ovSearchWindow ?? null;
+  const ovContextAvailability = probes.knowledgeContext ?? null;
 
   return {
     status, summary, checkedAt,
