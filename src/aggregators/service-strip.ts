@@ -36,7 +36,7 @@ import { pingRedis } from "../redis/utility.ts";
 // Public types
 // ---------------------------------------------------------------------------
 
-export type ServiceStatus = "ok" | "degraded" | "down";
+type ServiceStatus = "ok" | "degraded" | "down";
 
 export interface ServiceRow {
   service: string;

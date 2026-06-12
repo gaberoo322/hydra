@@ -36,7 +36,7 @@
  *   npx tsx scripts/ci/hydra-cleanup-emit.ts /tmp/knip-report.json --apply
  */
 
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { posix as posixPath } from "node:path";
 import {
@@ -52,6 +52,7 @@ import {
   type CleanupFinding,
   type KnipReport,
   type OpenIssueRef,
+  type PullRequestRef,
 } from "./hydra-cleanup-render.ts";
 
 /**
@@ -69,6 +70,50 @@ export const EMIT_CAP = 8;
  * reviewable range while still collapsing the per-symbol churn.
  */
 export const SYMBOLS_PER_BATCH = 20;
+
+/**
+ * Trailing window for merged-PR dedup (issue #1766, default 24h). A finding
+ * whose path was changed by a PR merged within this window is suppressed: the
+ * motivating 2026-06-11 incident filed dup batch #1747–#1755 at 15:57Z when
+ * ALL covering fix PRs (#1719/#1720/#1722/#1723/#1743) had already MERGED
+ * (11:30–11:40Z and 15:26Z) — an open-PR-only check would have caught nothing,
+ * so the dedup surface must include just-merged PRs the knip report may
+ * predate. 24h comfortably covers a stale-report race at the 1h scan cadence
+ * while keeping the suppression horizon short (one day's PRs).
+ */
+export const MERGED_PR_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Max age of the knip report the runner will consume (issue #1766, ~60 min).
+ * The 15:57Z dup wave reproduced the 10:40Z batch title-for-title HOURS after
+ * the fixes merged — the signature of a stale /tmp/knip-report.json (or a
+ * skipped fresh-base fetch) feeding the emit. A report older than one scan
+ * cadence (1h) cannot be trusted to reflect origin/master; fail loud with a
+ * re-run instruction rather than filing findings a merged PR already fixed.
+ */
+export const KNIP_REPORT_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Keep only the PR refs that belong in the dedup surface at `nowMs` (issue
+ * #1766, pure): every OPEN PR (no `mergedAt`), plus every merged PR whose
+ * `mergedAt` parses and lies within the trailing window. A merged ref with an
+ * unparseable timestamp is excluded — coverage cannot be asserted for it.
+ *
+ * This is the single time-aware decision of the #1766 mechanism; it runs in
+ * the impure CLI shell's data path so dedupAgainstOpen (and planCleanupEmit)
+ * stay deterministic and time-free.
+ */
+export function filterPrsInDedupWindow(
+  prs: ReadonlyArray<PullRequestRef>,
+  nowMs: number,
+  windowMs: number = MERGED_PR_DEDUP_WINDOW_MS,
+): PullRequestRef[] {
+  return prs.filter((pr) => {
+    if (pr.mergedAt === undefined) return true; // open PR — always covering
+    const merged = Date.parse(pr.mergedAt);
+    return !Number.isNaN(merged) && nowMs - merged <= windowMs;
+  });
+}
 
 /**
  * Verifier Core paths (src/untouchable.ts VERIFIER_CORE_PATHS) — operator-only,
@@ -212,6 +257,15 @@ function filterReason(
  * attribute member usage once the namespace object escapes through a
  * `deps.x ?? defaultX` DI facade, so those findings are the false-positive
  * family that burnt 11/15 findings on #1724.
+ *
+ * `coveringPrs` (issue #1766, OPTIONAL — an absent/empty list degrades to the
+ * pre-#1766 behavior, never a crash) is fetched by the CLI wrapper
+ * (`readCoveringPrs`: open PRs + PRs merged within MERGED_PR_DEDUP_WINDOW_MS,
+ * already window-filtered via filterPrsInDedupWindow) and injected, mirroring
+ * the #1737 parameter shape. A finding whose path is in the changed files of
+ * any provided PR is dropped in step 3 with a reason citing the covering PR
+ * number(s) — an in-flight or just-merged sibling fix means the finding is
+ * (or is about to be) resolved, and re-filing it is the #1747–#1755 dup wave.
  */
 export function planCleanupEmit(
   report: KnipReport,
@@ -221,6 +275,7 @@ export function planCleanupEmit(
   cap: number = EMIT_CAP,
   symbolsPerBatch: number = SYMBOLS_PER_BATCH,
   namespaceConsumedModules: ReadonlySet<string> = new Set(),
+  coveringPrs: ReadonlyArray<PullRequestRef> = [],
 ): CleanupEmitPlan {
   const raw = parseKnipReport(report);
   const dropped: DroppedCleanupFinding[] = [];
@@ -243,12 +298,30 @@ export function planCleanupEmit(
     return { ...finding, fix: classifyExportFix(finding, src) };
   });
 
-  // 3. Dedup against the open board AND within this run (identity-keyed).
-  //    Identities are recovered from legacy titles AND batch body manifests
-  //    (#1653), so both issue generations dedup correctly.
-  const { kept: deduped, dropped: dups } = dedupAgainstOpen(classified, openIssues);
+  // 3. Dedup against the open board AND within this run (identity-keyed),
+  //    AND against covering PRs (path-keyed, #1766). Identities are recovered
+  //    from legacy titles AND batch body manifests (#1653), so both issue
+  //    generations dedup correctly; PR coverage drops a finding whose path an
+  //    open / recently-merged PR changed, citing the covering PR number(s) —
+  //    never silently.
+  const { kept: deduped, dropped: dups, prCovered } = dedupAgainstOpen(
+    classified,
+    openIssues,
+    coveringPrs,
+  );
   for (const finding of dups) {
     dropped.push({ finding, reason: "duplicate of an open cleanup-scan issue (or in-batch dup)" });
+  }
+  for (const { finding, prs } of prCovered) {
+    const cites = prs.map((pr) =>
+      pr.mergedAt === undefined
+        ? `open PR #${pr.number}`
+        : `recently-merged PR #${pr.number} (merged ${pr.mergedAt})`,
+    );
+    dropped.push({
+      finding,
+      reason: `covered by ${cites.join(" + ")} — ${finding.path.trim()} is in its changed files (#1766)`,
+    });
   }
 
   // 4. BATCH (issue #1653): group per-symbol findings by module dir — the
@@ -371,6 +444,69 @@ function collectNamespaceConsumedModules(): Set<string> {
   return consumed;
 }
 
+/**
+ * Fetch the covering-PR dedup surface (issue #1766): every OPEN PR plus every
+ * PR merged within MERGED_PR_DEDUP_WINDOW_MS of `nowMs`, each expanded to its
+ * changed-file paths. The result is already window-filtered (via the pure
+ * filterPrsInDedupWindow) and ready to inject into {@link planCleanupEmit}.
+ *
+ * Uses `gh api repos/...` REST deliberately — the GraphQL pool that backs
+ * `gh pr list --json` gets exhausted under a running autopilot, and a failed
+ * fetch here ABORTS the emit (fail loud, mirroring readBoardIssues): an emit
+ * that cannot dedup against in-flight/just-merged fixes safely must emit
+ * nothing, because degrading to an empty PR set silently re-opens the exact
+ * duplicate-wave hole (#1747–#1755) this surface exists to close.
+ */
+function readCoveringPrs(nowMs: number): PullRequestRef[] {
+  try {
+    // --jq projects the payload down to the consumed fields BEFORE it reaches
+    // this process — a raw 100-entry PR page (full bodies included) blows past
+    // execFileSync's default 1 MiB stdout buffer (ENOBUFS). The raised
+    // maxBuffer is belt-and-braces on top.
+    const fetchJson = (path: string, jq: string): unknown =>
+      JSON.parse(
+        execFileSync("gh", ["api", path, "--jq", jq], {
+          encoding: "utf-8",
+          maxBuffer: 16 * 1024 * 1024,
+        }),
+      );
+
+    const candidates: PullRequestRef[] = [];
+    const openRaw = fetchJson(`repos/${REPO}/pulls?state=open&per_page=100`, "[.[] | {number}]");
+    for (const pr of Array.isArray(openRaw) ? openRaw : []) {
+      const number = (pr as { number?: unknown }).number;
+      if (typeof number === "number") candidates.push({ number, paths: [] });
+    }
+    // Closed PRs sorted by most-recently-updated: a PR merged within the last
+    // 24h is necessarily near the top, so one 100-entry page covers the window.
+    const closedRaw = fetchJson(
+      `repos/${REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100`,
+      "[.[] | {number, merged_at}]",
+    );
+    for (const pr of Array.isArray(closedRaw) ? closedRaw : []) {
+      const number = (pr as { number?: unknown }).number;
+      const mergedAt = (pr as { merged_at?: unknown }).merged_at;
+      if (typeof number !== "number" || typeof mergedAt !== "string") continue; // closed-unmerged
+      candidates.push({ number, paths: [], mergedAt });
+    }
+
+    const covering = filterPrsInDedupWindow(candidates, nowMs);
+    for (const ref of covering) {
+      const filesRaw = fetchJson(`repos/${REPO}/pulls/${ref.number}/files?per_page=100`, "[.[].filename]");
+      ref.paths = (Array.isArray(filesRaw) ? filesRaw : [])
+        .map((f) => (typeof f === "string" ? f : ""))
+        .filter((p) => p.length > 0);
+    }
+    return covering;
+  } catch (err) {
+    console.error(
+      "hydra-cleanup-emit: failed to read open/recently-merged PRs via gh REST — aborting (cannot dedup against in-flight fixes safely, #1766):",
+      err instanceof Error ? err.message : String(err),
+    );
+    process.exit(1);
+  }
+}
+
 function readBoardIssues(): OpenIssueRef[] {
   try {
     const out = execFileSync(
@@ -425,6 +561,18 @@ function main(argv: string[]): void {
     process.exit(1);
   }
 
+  // Staleness guard (#1766): a knip report older than one scan cadence cannot
+  // be trusted to reflect origin/master — the 2026-06-11 dup wave reproduced a
+  // 5-hour-old batch title-for-title, the signature of a stale report feeding
+  // the emit. Refuse it loudly rather than filing already-fixed findings.
+  const reportAgeMs = Date.now() - statSync(reportPath).mtimeMs;
+  if (reportAgeMs > KNIP_REPORT_MAX_AGE_MS) {
+    console.error(
+      `hydra-cleanup-emit: knip report at ${reportPath} is ${Math.round(reportAgeMs / 60_000)} min old (max ${KNIP_REPORT_MAX_AGE_MS / 60_000} min, #1766) — a stale report re-files findings already fixed on master. Re-fetch origin/master (playbook Step 1) and re-run \`npx knip --reporter json --no-exit-code > ${reportPath}\` first.`,
+    );
+    process.exit(1);
+  }
+
   let report: KnipReport;
   try {
     report = JSON.parse(readFileSync(reportPath, "utf-8")) as KnipReport;
@@ -448,6 +596,8 @@ function main(argv: string[]): void {
     }
   };
 
+  const coveringPrs = readCoveringPrs(Date.now());
+
   const plan = planCleanupEmit(
     report,
     openIssues,
@@ -456,14 +606,20 @@ function main(argv: string[]): void {
     EMIT_CAP,
     SYMBOLS_PER_BATCH,
     collectNamespaceConsumedModules(),
+    coveringPrs,
   );
   const plannedFindings = plan.issues.reduce((n, i) => n + i.findings.length, 0);
+  const prCoveredDrops = plan.dropped.filter((d) => /covered by .*PR #/.test(d.reason));
 
   console.log(`hydra-cleanup-emit — Orchestrator (~/hydra) — ${new Date().toISOString()} — ${apply ? "apply" : "dry-run"}`);
   console.log("");
   console.log(`knip raw findings:   ${plan.rawCount}`);
+  console.log(`PR dedup surface:    ${coveringPrs.length} PR(s) (open + merged within ${MERGED_PR_DEDUP_WINDOW_MS / 3_600_000}h, #1766)`);
   console.log(`After filter+dedup:  ${plan.issues.length} batch issue(s) covering ${plannedFindings} finding(s) (cap ${EMIT_CAP} issues, ≤${SYMBOLS_PER_BATCH} findings each)`);
-  console.log(`Dropped:             ${plan.dropped.length}`);
+  console.log(`Dropped:             ${plan.dropped.length}${prCoveredDrops.length ? ` (${prCoveredDrops.length} covered by in-flight/just-merged PRs)` : ""}`);
+  for (const drop of prCoveredDrops) {
+    console.log(`  ↳ ${drop.reason}`);
+  }
   console.log("");
 
   for (const issue of plan.issues) {

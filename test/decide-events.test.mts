@@ -202,7 +202,7 @@ describe("decide.py — turn_start / turn_end events (issue #668)", () => {
       baseState({ turn: 42, run_id: "abcd1234-deadbeef", started_epoch: epoch }),
     );
     const start = eventsOfType(plan, "turn_start")[0];
-    assert.equal(start.turn_n, "42");
+    assert.equal(start.turn_n, "43", "input turn 42 + the #1769 CLI bump");
     assert.equal(start.epoch, String(epoch));
     assert.equal(start.run_id, "abcd1234-deadbeef");
     assert.ok(start.ts_epoch, "ts_epoch must be set on turn_start");
@@ -219,7 +219,7 @@ describe("decide.py — turn_start / turn_end events (issue #668)", () => {
       }),
     );
     const end = eventsOfType(plan, "turn_end")[0];
-    assert.equal(end.turn_n, "9");
+    assert.equal(end.turn_n, "10", "input turn 9 + the #1769 CLI bump");
     assert.equal(end.epoch, String(epoch));
     assert.equal(end.run_id, "cafef00d-1234-5678");
     assert.equal(end.tokens_after, "99999");
@@ -378,11 +378,11 @@ describe("decide.py — dispatch_decision per candidate class", () => {
     assert.match(decision.reason, /shed/i);
   });
 
-  test("dispatch_decision events carry turn_n matching state.turn", () => {
+  test("dispatch_decision events carry turn_n matching the bumped state.turn", () => {
     const plan = runDecide(baseState({ turn: 33 }));
     const decisions = eventsOfType(plan, "dispatch_decision");
     for (const d of decisions) {
-      assert.equal(d.turn_n, "33");
+      assert.equal(d.turn_n, "34", "input turn 33 + the #1769 CLI bump");
     }
   });
 });

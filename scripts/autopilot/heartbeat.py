@@ -205,7 +205,14 @@ def _plan_stale_reason(state: dict, plan: dict) -> str | None:
         POST proceeds with no actions, exactly as before #1732;
       - a non-empty plan must carry a `run_id` + `turn` stamp matching
         the live state (decide.py stamps both since #1732); an unstamped
-        or mismatched plan is stale.
+        or mismatched plan is stale. The `(run_id, turn)` equality is
+        STRICT — no tolerance window. Since #1769 the decide.py CLI is
+        the SINGLE writer of `state.turn` (one pre-decide bump, persisted
+        atomically before the plan is stamped), so a fresh plan matches
+        by construction and any mismatch is a real contract violation —
+        an exact `plan.turn == state.turn - 1` lag means something other
+        than decide.py incremented the counter, and the reason string
+        names that cause so the retro bundle can self-diagnose.
     """
     if not plan:
         return None
@@ -222,7 +229,17 @@ def _plan_stale_reason(state: dict, plan: dict) -> str | None:
         return f"plan turn={plan_turn!r} is not an integer"
     state_turn = int(state.get("turn", 0) or 0)
     if plan_turn_i != state_turn:
-        return f"plan turn={plan_turn_i} != state turn={state_turn}"
+        reason = f"plan turn={plan_turn_i} != state turn={state_turn}"
+        if plan_turn_i == state_turn - 1:
+            # Diagnostic only — the guard stays strict. decide.py owns the
+            # turn counter (#1769), so an exact off-by-one can only mean a
+            # second writer (e.g. a session-improvised bump) violated the
+            # single-writer contract.
+            reason += (
+                " (exact off-by-one: state.turn is only incremented by"
+                " decide.py — see #1769)"
+            )
+        return reason
     return None
 
 
@@ -236,6 +253,13 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
     matches the live state (see `_plan_stale_reason`). A stale plan still
     produces a turn record, but with empty `actions` and an explicit
     `plan-stale-skipped: ...` reason instead of another run's dispatches.
+
+    Issue #1769 — the freshness equality is strict because the decide.py
+    CLI is the single writer of `state.turn` (pre-decide bump, persisted
+    atomically before the plan is stamped), so plan and state agree by
+    construction. A stale-plan record still POSTs — empty `actions`, but
+    the explicit reason — so an idle or contract-violating turn keeps its
+    diagnostic trail (the run-69442b4c failure was losing exactly that).
 
     NEVER raises — every failure path logs to stderr and returns. Heartbeat
     is best-effort observability (issue #435 contract), so an orchestrator

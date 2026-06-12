@@ -48,14 +48,28 @@ function branch(name: string, opts: { gone?: boolean; current?: boolean } = {}):
   };
 }
 
-function wt(path: string, branch: string | null, lockedByPid: number | null = null): WorktreeRow {
-  return { path, branch, lockedByPid };
-}
-
-// Worktree-orphan GC test helpers (issue #911). `OLD` is comfortably past the
-// 6h floor; `YOUNG` is under it.
+// Age fixtures: `OLD` is comfortably past the 6h floor; `YOUNG` is under it.
+// Shared by the worktree-orphan GC tests (issue #911) and the [gone]-pass
+// age-floor tests (issue #1773).
 const OLD = DEFAULT_WORKTREE_MIN_AGE_SECONDS + 3600;
 const YOUNG = 60;
+
+function wt(
+  path: string,
+  branch: string | null,
+  lockedByPid: number | null = null,
+  opts: { ageSeconds?: number | null } = {},
+): WorktreeRow {
+  return {
+    path,
+    branch,
+    lockedByPid,
+    // Default comfortably past the [gone]-pass age floor (issue #1773) so the
+    // pre-existing delete-path tests keep exercising the delete arm. Pass an
+    // explicit ageSeconds (or null = unknown age) to exercise the floor.
+    ageSeconds: "ageSeconds" in opts ? (opts.ageSeconds ?? null) : OLD,
+  };
+}
 
 function owt(
   path: string,
@@ -274,6 +288,86 @@ describe("classifyBranch — happy path", () => {
     const r = classifyBranch(branch("feat-c"), ctx);
     assert.equal(r.action, "skip-live-agent");
     assert.match(r.reason, /live PID 12345/);
+  });
+});
+
+describe("classifyBranch — [gone]-pass age floor (issue #1773)", () => {
+  // The incident shape (claude-cycle-2026-06-11-0401): a target-build cycle's
+  // manually-created /dev/shm worktree carries NO lock file (never claimed by
+  // the Claude harness), its PR auto-merges with --delete-branch, the upstream
+  // flips [gone] instantly — and the old classifier reaped the worktree while
+  // the cycle was still running its post-merge steps.
+
+  test("[gone] + attached worktree under the floor, no lock file → skip-too-young (the #1773 fix)", () => {
+    const w = wt("/dev/shm/hydra-worktrees/cycle-0401", "feat-merged", null, { ageSeconds: YOUNG });
+    const ctx = { currentBranch: "master", worktrees: [w], isLivePid: NEVER_LIVE };
+    const r = classifyBranch(branch("feat-merged"), ctx);
+    assert.equal(r.action, "skip-too-young");
+    assert.match(r.reason, /in-flight cycle/);
+    assert.equal(r.worktree, w);
+  });
+
+  test("[gone] + attached worktree with UNKNOWN age (null) → skip-too-young (conservative)", () => {
+    const w = wt("/wt/no-stat", "feat-x", null, { ageSeconds: null });
+    const ctx = { currentBranch: "master", worktrees: [w], isLivePid: NEVER_LIVE };
+    const r = classifyBranch(branch("feat-x"), ctx);
+    assert.equal(r.action, "skip-too-young");
+    assert.match(r.reason, /unknown age/);
+  });
+
+  test("[gone] + attached worktree past the floor → delete-worktree-and-branch (unchanged)", () => {
+    const w = wt("/wt/old", "feat-old", null, { ageSeconds: OLD });
+    const ctx = { currentBranch: "master", worktrees: [w], isLivePid: NEVER_LIVE };
+    const r = classifyBranch(branch("feat-old"), ctx);
+    assert.equal(r.action, "delete-worktree-and-branch");
+  });
+
+  test("live-PID rail beats the age floor — fresh LIVE worktree is skip-live-agent, not skip-too-young", () => {
+    const w = wt("/wt/fresh-live", "feat-live", 4242, { ageSeconds: YOUNG });
+    const ctx = { currentBranch: "master", worktrees: [w], isLivePid: ALWAYS_LIVE };
+    const r = classifyBranch(branch("feat-live"), ctx);
+    assert.equal(r.action, "skip-live-agent");
+  });
+
+  test("delete-branch-only is NOT age-gated — no attached worktree means nothing to protect", () => {
+    const ctx = { currentBranch: "master", worktrees: [] as WorktreeRow[], isLivePid: NEVER_LIVE };
+    const r = classifyBranch(branch("no-wt-branch"), ctx);
+    assert.equal(r.action, "delete-branch-only");
+  });
+
+  test("ctx.minAgeSeconds override is respected", () => {
+    const w = wt("/wt/young-but-ok", "feat-y", null, { ageSeconds: YOUNG });
+    const ctx = {
+      currentBranch: "master",
+      worktrees: [w],
+      isLivePid: NEVER_LIVE,
+      minAgeSeconds: 10, // YOUNG (60s) is past a 10s floor
+    };
+    const r = classifyBranch(branch("feat-y"), ctx);
+    assert.equal(r.action, "delete-worktree-and-branch");
+  });
+
+  test("omitted ctx.minAgeSeconds defaults to DEFAULT_WORKTREE_MIN_AGE_SECONDS", () => {
+    const w = wt("/wt/under-default", "feat-d", null, {
+      ageSeconds: DEFAULT_WORKTREE_MIN_AGE_SECONDS - 1,
+    });
+    const ctx = { currentBranch: "master", worktrees: [w], isLivePid: NEVER_LIVE };
+    const r = classifyBranch(branch("feat-d"), ctx);
+    assert.equal(r.action, "skip-too-young");
+  });
+
+  test("classifyBatch routes skip-too-young into the skip bucket and does NOT count it as a deletion", () => {
+    const young = wt("/wt/young", "feat-young", null, { ageSeconds: YOUNG });
+    const old = wt("/wt/old", "feat-old", null, { ageSeconds: OLD });
+    const buckets = classifyBatch(
+      [branch("feat-young"), branch("feat-old")],
+      { currentBranch: "master", worktrees: [young, old], isLivePid: NEVER_LIVE },
+    );
+    assert.equal(buckets.deleteWorktreeAndBranch.length, 1);
+    assert.equal(buckets.deleteWorktreeAndBranch[0].row.name, "feat-old");
+    assert.equal(buckets.skip.length, 1);
+    assert.match(buckets.skip[0].reason, /under the .*floor/);
+    assert.equal(buckets.cappedOut, false);
   });
 });
 

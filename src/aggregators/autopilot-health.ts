@@ -92,7 +92,8 @@ export interface AutopilotHealthDeps {
    * `unproductive-loop` heuristic cross-checks against, because per-run
    * `merged_count` is structurally near-zero when CI (the async merge gate)
    * lands PRs after their dispatching run has ended (issue #924). Defaults to a
-   * thin `git log master --since` count via the recent-merges aggregator.
+   * thin `git log origin/master` count via the recent-merges aggregator
+   * (remote-tracking ref, not local master — issue #1757).
    * Returns 0 when no merges landed or the read fails (the latter logs and
    * fails open to the legacy per-run behaviour).
    */
@@ -200,9 +201,11 @@ async function defaultReadRecentRuns(limit: number): Promise<RunDigest[]> {
 
 /**
  * Default `readWindowMergeCount` — counts master merges that landed at or after
- * `sinceEpochS` via the recent-merges aggregator (`git log master` through the
- * GitHub CLI Adapter seam, issue #924). This is the out-of-band delivery proxy
- * the per-run `merged_count` can't see because CI merges PRs after their
+ * `sinceEpochS` via the recent-merges aggregator (`git log origin/master`
+ * through the GitHub CLI Adapter seam, issue #924; the remote-tracking ref —
+ * not the deploy-lagged local `master` — so the count stays truthful during
+ * merge waves, issue #1757). This is the out-of-band delivery proxy the
+ * per-run `merged_count` can't see because CI merges PRs after their
  * dispatching run ends. Never throws: any failure logs and returns 0, failing
  * open to the legacy per-run boundary.
  */

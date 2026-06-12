@@ -26,15 +26,6 @@ export type DecisionItemSource =
   | "ready-for-human"
   | "needs-info";
 
-/**
- * Why an item is "stuck". Pure classifier output — each bucket has its own
- * age threshold (see `stuck-items.ts`).
- */
-export type StuckCategory =
-  | "blocked-over-2d"
-  | "needs-info-waiting"
-  | "pr-with-failed-ci";
-
 // ---------------------------------------------------------------------------
 // Slice-5 vocabulary (issue #620)
 // ---------------------------------------------------------------------------

@@ -38,7 +38,51 @@ import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-reque
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
-import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "../health-diagnostics.ts";
+import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ProbeInputs } from "../health-diagnostics.ts";
+
+// ---- assembleProbeInputs — maps the positional settled array to named ProbeInputs --
+//
+// Issue #1771: the I/O layer (this handler) is the only file that ever sees the
+// raw positional Promise.allSettled results — that positional identity is
+// internal to the fan-out and should not cross a module boundary.
+// assembleProbeInputs() maps the array immediately after the fan-out so
+// parseProbes() (in the pure seam src/health-diagnostics.ts) receives field
+// names, not integer subscripts. The ProbeInputs type is the only thing that
+// crosses the seam; the SettledLike shape and all integer index knowledge live
+// here, the I/O owner (#840).
+//
+// Index legend (the ONLY place these numbers appear):
+//   0 basicHealth, 1 serviceProbes, 2 scheduler, 3 cycle (handler-only),
+//   4 queueDepth, 5 backlogCounts, 6 metrics, 7 disk, 8 mem,
+//   9 sysdOrchestrator, 10 sysdWatchdog, 11 sysdTargetWeb,
+//   12 patterns, 13 reflections, 14 ovSearch, 15 redisInfo, 16 emergencyBrake.
+//   17/18 are ovSearchWindow/ovContextAvailability — consumed only by
+//   projectHealthDeepResponse, not part of ProbeInputs.
+type SettledLike = Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }>;
+export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
+  const val = (i: number): any =>
+    settled[i] && settled[i].status === "fulfilled" ? (settled[i] as any).value : null;
+  return {
+    basicHealth: val(0),
+    serviceProbes: val(1),
+    scheduler: val(2),
+    queueDepth: val(4),
+    backlogCounts: val(5),
+    metrics: val(6),
+    disk: val(7),
+    mem: val(8),
+    sysdOrchestrator: val(9),
+    sysdWatchdog: val(10),
+    sysdTargetWeb: val(11),
+    patterns: val(12),
+    reflections: val(13),
+    ovSearch: val(14),
+    redisInfo: val(15),
+    emergencyBrake: val(16),
+    ovSearchWindow: val(17),
+    knowledgeContext: val(18),
+  };
+}
 import { gitExec } from "../github/git.ts";
 import { isGhFailure } from "../github/exec.ts";
 // Issue #939: Host-Probe Adapter — typed, never-throw disk/mem/service-status
@@ -304,7 +348,13 @@ export function createHealthRouter(eventBus: any) {
     // only I/O (the fan-out above) and the wire-envelope projection below;
     // disk/mem parsing, the `recent` derivation, every diagnostic rule, and the
     // status/summary fold now live in src/health-diagnostics.ts.
-    const snapshot = parseProbes(settled);
+    // Issue #1771: map the positional settled array to the named ProbeInputs record
+    // immediately after the fan-out. The ProbeInputs type — defined in health-diagnostics.ts,
+    // the pure seam (#840) — carries all 19 probes (0-18, except 3=cycle handled below).
+    // parseProbes and projectHealthDeepResponse both receive the named record;
+    // no integer subscript crosses a file boundary.
+    const probeInputs = assembleProbeInputs(settled);
+    const snapshot = parseProbes(probeInputs);
     const { diagnostics, status, summary } = assessHealth(snapshot);
 
     // The `cycle` probe (index 3) drives only the activeCycle block, which stays
@@ -326,7 +376,7 @@ export function createHealthRouter(eventBus: any) {
     // Promise.allSettled fan-out (I/O) and the activeCycle derivation; settled
     // is passed through for indices 17/18 (ovSearchTrend/knowledgeContext),
     // which parseProbes does not consume.
-    res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt, settled));
+    res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt, probeInputs));
   });
 
   // GET /recommendations (operator action items) was extracted to

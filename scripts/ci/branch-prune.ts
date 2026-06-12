@@ -14,10 +14,15 @@
  * which worktree (if any) is attached to each branch, and classifies each
  * candidate as one of:
  *
- *   delete-worktree-and-branch — worktree exists, no live agent holding it
+ *   delete-worktree-and-branch — worktree exists, no live agent holding it,
+ *                                past the age floor
  *   delete-branch-only         — no worktree attached, just delete the branch
  *   skip-live-agent            — worktree is held by a live `claude` PID
  *   skip-current-branch        — the candidate IS our current branch
+ *   skip-too-young             — worktree under the age floor / unknown age
+ *                                (issue #1773 — auto-merge `--delete-branch`
+ *                                makes an in-flight cycle's upstream `[gone]`
+ *                                mid-cycle; defer instead of reaping)
  *   skip-cap                   — we already hit the hard cap (250) this run
  *
  * Idempotency is naturally enforced by `git branch -D` (the branch ceases to
@@ -64,10 +69,12 @@ export interface WorktreeRow {
   lockedByPid: number | null;
   /**
    * Age of the worktree dir in seconds (caller-computed from the dir mtime),
-   * or null if the caller could not stat it. Consumed only by the worktree-orphan
-   * GC ({@link classifyWorktreeOrphan}) — the original `[gone]`-branch pass
-   * ignores it. Optional so the older single-pass call sites (and every existing
-   * test fixture) keep compiling unchanged.
+   * or null if the caller could not stat it. Consumed by the worktree-orphan
+   * GC ({@link classifyWorktreeOrphan}) AND — since issue #1773 — by the
+   * `[gone]`-branch pass's `delete-worktree-and-branch` arm, which defers
+   * (`skip-too-young`) when the age is unknown or under the floor. Optional so
+   * older call sites keep compiling; an absent age is treated conservatively
+   * as unknown (skip, never delete the worktree).
    */
   ageSeconds?: number | null;
 }
@@ -88,6 +95,7 @@ export type PruneAction =
   | "skip-live-agent"
   | "skip-current-branch"
   | "skip-not-gone"
+  | "skip-too-young"
   | "skip-cap";
 
 export interface ClassifyResult {
@@ -265,6 +273,19 @@ export interface ClassifyContext {
    * its own cap accounting).
    */
   deletionCount?: () => number;
+  /**
+   * Minimum worktree age (seconds) before the `delete-worktree-and-branch`
+   * arm may fire (issue #1773). Defaults to
+   * {@link DEFAULT_WORKTREE_MIN_AGE_SECONDS}. An auto-merge with
+   * `--delete-branch` flips the local upstream to `[gone]` the instant the PR
+   * merges — while the dispatching cycle may still be running post-merge
+   * steps inside its worktree (and a manually-created worktree carries no
+   * lock file, so the live-PID rail never protects it). The age floor gives
+   * such an in-flight cycle a grace window; a worktree under the floor (or
+   * with unknown age) classifies as `skip-too-young` and is deferred to the
+   * next sweep. Branch-only deletions (no attached worktree) are unaffected.
+   */
+  minAgeSeconds?: number;
 }
 
 /**
@@ -276,8 +297,16 @@ export interface ClassifyContext {
  *  2. Branch's upstream is NOT `gone`                 → skip-not-gone
  *  3. We already hit the per-run hard cap             → skip-cap
  *  4. Branch has an attached worktree held by a live PID → skip-live-agent
- *  5. Branch has an attached worktree (no live PID)   → delete-worktree-and-branch
- *  6. Otherwise (no attached worktree)                → delete-branch-only
+ *  5. Attached worktree is under the age floor (or its age is unknown)
+ *                                                     → skip-too-young
+ *  6. Branch has an attached worktree (no live PID, past the floor)
+ *                                                     → delete-worktree-and-branch
+ *  7. Otherwise (no attached worktree)                → delete-branch-only
+ *
+ * The age floor (issue #1773) mirrors the worktree-orphan pass (#911): age is
+ * the LAST gate before worktree deletion, checked only after the live-PID
+ * rail, so a fresh worktree held by a live agent still surfaces as
+ * `skip-live-agent` (the precise reason) rather than `skip-too-young`.
  */
 export function classifyBranch(row: BranchRow, ctx: ClassifyContext): ClassifyResult {
   if (row.isCurrent || row.name === ctx.currentBranch) {
@@ -316,9 +345,26 @@ export function classifyBranch(row: BranchRow, ctx: ClassifyContext): ClassifyRe
   }
 
   if (wt) {
+    // Age floor (issue #1773). An auto-merged PR's `--delete-branch` makes the
+    // upstream `[gone]` immediately, but the dispatching cycle may still be
+    // mid-flight in this worktree (manually-created worktrees carry no lock
+    // file, so the live-PID rail above cannot protect them). Defer young
+    // worktrees; treat unknown age conservatively as too-young — never reap a
+    // dir we know nothing about (same discipline as classifyWorktreeOrphan).
+    const minAge = ctx.minAgeSeconds ?? DEFAULT_WORKTREE_MIN_AGE_SECONDS;
+    if (wt.ageSeconds === null || wt.ageSeconds === undefined || wt.ageSeconds < minAge) {
+      const ageNote =
+        wt.ageSeconds === null || wt.ageSeconds === undefined ? "unknown age" : `${wt.ageSeconds}s old`;
+      return {
+        action: "skip-too-young",
+        reason: `${row.name} upstream gone but worktree ${wt.path} is ${ageNote}, under the ${minAge}s floor — defer in case it is an in-flight cycle (auto-merge deletes the branch before the cycle finishes).`,
+        worktree: wt,
+      };
+    }
+
     return {
       action: "delete-worktree-and-branch",
-      reason: `${row.name} upstream gone; worktree ${wt.path} attached (no live agent) — remove worktree, then delete branch.`,
+      reason: `${row.name} upstream gone; worktree ${wt.path} attached (no live agent, ${wt.ageSeconds}s old) — remove worktree, then delete branch.`,
       worktree: wt,
     };
   }

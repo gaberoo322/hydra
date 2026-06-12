@@ -39,7 +39,8 @@
  *                          path all derived from the one CleanupFinding, so
  *                          they cannot drift (the #1005 off-by-one guard).
  *   - dedupAgainstOpen() — drop findings whose identity already has an open
- *                          cleanup-scan issue.
+ *                          cleanup-scan issue, or (issue #1766) whose path is
+ *                          changed by an open / recently-merged covering PR.
  *
  * This module is pure — no fs / network / process — so it can be unit tested
  * directly. See test/hydra-cleanup-render.test.mts.
@@ -491,6 +492,34 @@ export interface OpenIssueRef {
 }
 
 /**
+ * A pull request whose changed files suppress findings (issue #1766) — either
+ * an OPEN PR (an in-flight fix) or a PR merged within the trailing dedup
+ * window (a just-landed fix the knip report may predate). The motivating
+ * incident: the 2026-06-11 scan re-filed batch #1747–#1755 duplicating
+ * #1707–#1713 AFTER the covering fix PRs #1719/#1720/#1722/#1723/#1743 had
+ * merged — live-at-scan-time findings already resolved by sibling PRs.
+ *
+ * Granularity is deliberately PATH-level, not symbol-level: GitHub's PR files
+ * surface exposes changed paths, not symbols. Over-suppression (an unrelated
+ * PR touching the file suppresses a legit finding) costs one scan cycle and
+ * self-heals on the next hourly run; under-suppression burns a full dev+QA
+ * cycle — the same cost asymmetry the #1737 per-module drop accepted.
+ */
+export interface PullRequestRef {
+  /** PR number on the repo (for the audit reason). */
+  number: number;
+  /** Repo-relative changed-file paths of the PR. */
+  paths: string[];
+  /**
+   * ISO `merged_at` timestamp for a recently-merged PR. Absent/undefined for
+   * an OPEN PR. The window filtering (which merged PRs qualify) happens in
+   * the CALLER (`filterPrsInDedupWindow` in hydra-cleanup-emit.ts) so this
+   * module stays time-free and deterministic.
+   */
+  mergedAt?: string;
+}
+
+/**
  * Recover the finding identities recorded in a BATCH issue's body manifest
  * (issue #1653). A batch issue covers N findings, so its title cannot carry N
  * identities the way a legacy single-finding title does — instead the batch
@@ -534,13 +563,29 @@ export function identitiesFromIssueBody(body: string): string[] {
  * identities at once; the next scan re-files only the findings knip still
  * reports (partial-completion handling, #1653).
  *
- * Returns `{ kept, dropped }` so the caller can both emit the survivors and
- * report the de-duplicated count.
+ * `coveringPrs` (issue #1766, OPTIONAL — an absent/empty list degrades to the
+ * pre-#1766 two-argument behavior, never a crash) extends the dedup surface
+ * to pull requests: a finding whose `path` appears in the changed files of
+ * any provided PR ref is returned in `prCovered` (with the covering refs, so
+ * the caller can attach a per-PR audit reason) instead of `kept`. The caller
+ * is responsible for window-filtering merged PRs BEFORE injecting them — this
+ * function is time-free and treats every provided ref as covering. Identity
+ * dedup runs FIRST, so existing open-issue semantics are unchanged: a finding
+ * that is both an open-issue dup and PR-covered lands in `dropped`.
+ *
+ * Returns `{ kept, dropped, prCovered }` so the caller can emit the
+ * survivors and report every suppression with its reason. The three lists
+ * partition the input: kept ∪ dropped ∪ prCovered findings, no overlap.
  */
 export function dedupAgainstOpen(
   findings: CleanupFinding[],
   openIssues: Array<string | OpenIssueRef>,
-): { kept: CleanupFinding[]; dropped: CleanupFinding[] } {
+  coveringPrs: ReadonlyArray<PullRequestRef> = [],
+): {
+  kept: CleanupFinding[];
+  dropped: CleanupFinding[];
+  prCovered: Array<{ finding: CleanupFinding; prs: PullRequestRef[] }>;
+} {
   const openIdentities = new Set<string>();
   for (const ref of openIssues) {
     const title = typeof ref === "string" ? ref : ref.title;
@@ -553,8 +598,20 @@ export function dedupAgainstOpen(
     }
   }
 
+  // Index the PR changed-file paths once (trimmed, exact match — the same
+  // normalisation findingIdentity applies to finding paths).
+  const prsByPath = new Map<string, PullRequestRef[]>();
+  for (const pr of coveringPrs) {
+    for (const rawPath of pr.paths) {
+      const path = rawPath.trim();
+      if (!path) continue;
+      prsByPath.set(path, [...(prsByPath.get(path) ?? []), pr]);
+    }
+  }
+
   const kept: CleanupFinding[] = [];
   const dropped: CleanupFinding[] = [];
+  const prCovered: Array<{ finding: CleanupFinding; prs: PullRequestRef[] }> = [];
   // Also dedup within THIS batch: a finding identity already emitted in this
   // pass is dropped, so a single run cannot file two issues for one identity
   // (the in-batch half of the #1167 double-file).
@@ -567,9 +624,18 @@ export function dedupAgainstOpen(
       continue;
     }
     seenThisBatch.add(id);
+    // PR-path dedup (#1766) runs AFTER identity dedup so open-issue semantics
+    // are untouched. The identity is still recorded in seenThisBatch above so
+    // an in-batch duplicate of a PR-covered finding lands in `dropped`, never
+    // as a second prCovered entry.
+    const prs = prsByPath.get(finding.path.trim());
+    if (prs && prs.length > 0) {
+      prCovered.push({ finding, prs });
+      continue;
+    }
     kept.push(finding);
   }
-  return { kept, dropped };
+  return { kept, dropped, prCovered };
 }
 
 // ---------------------------------------------------------------------------

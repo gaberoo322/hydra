@@ -53,6 +53,7 @@ import {
   renderBatchBody,
   type CleanupFinding,
   type KnipReport,
+  type PullRequestRef,
 } from "../scripts/ci/hydra-cleanup-render.ts";
 
 const ISO = "2026-06-08";
@@ -602,5 +603,88 @@ describe("dedupAgainstOpen — recognises BOTH legacy titles and batch manifests
     const board = [{ title: "cleanup: remove unused export `InLegacy` (src/clean.ts)" }];
     const { kept } = dedupAgainstOpen(findings, board);
     assert.deepEqual(kept.map((f) => f.name), ["InBatch", "Fresh"]);
+  });
+});
+
+describe("dedupAgainstOpen — covering-PR path dedup (#1766)", () => {
+  const findings: CleanupFinding[] = [
+    { kind: "export", path: "src/redis/holdback.ts", name: "deadExport" },
+    { kind: "file", path: "src/aggregators/dead.ts", name: "" },
+    { kind: "export", path: "src/fresh.ts", name: "Fresh" },
+  ];
+
+  test("a finding whose path an open PR changed lands in prCovered (with its covering refs), not kept", () => {
+    const prs: PullRequestRef[] = [
+      { number: 1719, paths: ["src/redis/holdback.ts", "src/redis/retro.ts"] },
+    ];
+    const { kept, dropped, prCovered } = dedupAgainstOpen(findings, [], prs);
+    assert.deepEqual(
+      kept.map((f) => f.path),
+      ["src/aggregators/dead.ts", "src/fresh.ts"],
+      "uncovered findings survive",
+    );
+    assert.equal(dropped.length, 0, "PR coverage is NOT an identity dup — it has its own bucket");
+    assert.equal(prCovered.length, 1);
+    assert.equal(prCovered[0].finding.name, "deadExport");
+    assert.deepEqual(prCovered[0].prs.map((p) => p.number), [1719], "the covering PR is attributable");
+  });
+
+  test("a recently-merged PR ref (mergedAt set) covers the same way — the function is time-free", () => {
+    // Window filtering is the CALLER's job (filterPrsInDedupWindow in the emit
+    // runner); every ref handed to dedupAgainstOpen is treated as covering.
+    const prs: PullRequestRef[] = [
+      { number: 1743, paths: ["src/aggregators/dead.ts"], mergedAt: "2026-06-11T15:26:00Z" },
+    ];
+    const { kept, prCovered } = dedupAgainstOpen(findings, [], prs);
+    assert.deepEqual(kept.map((f) => f.name), ["deadExport", "Fresh"]);
+    assert.equal(prCovered.length, 1);
+    assert.equal(prCovered[0].finding.path, "src/aggregators/dead.ts", "file-kind findings are covered too");
+    assert.equal(prCovered[0].prs[0].mergedAt, "2026-06-11T15:26:00Z");
+  });
+
+  test("multiple PRs touching the same path are ALL cited on one prCovered entry", () => {
+    const prs: PullRequestRef[] = [
+      { number: 1719, paths: ["src/redis/holdback.ts"] },
+      { number: 1722, paths: ["src/redis/holdback.ts"], mergedAt: "2026-06-11T11:40:00Z" },
+    ];
+    const { prCovered } = dedupAgainstOpen(findings, [], prs);
+    assert.equal(prCovered.length, 1);
+    assert.deepEqual(prCovered[0].prs.map((p) => p.number), [1719, 1722]);
+  });
+
+  test("identity dedup wins over PR coverage — open-issue semantics unchanged", () => {
+    const board = ["cleanup: remove unused export `deadExport` (src/redis/holdback.ts)"];
+    const prs: PullRequestRef[] = [{ number: 1719, paths: ["src/redis/holdback.ts"] }];
+    const { kept, dropped, prCovered } = dedupAgainstOpen(findings, board, prs);
+    assert.ok(dropped.some((f) => f.name === "deadExport"), "the open-issue dup lands in dropped");
+    assert.equal(prCovered.length, 0, "never double-bucketed");
+    assert.deepEqual(kept.map((f) => f.path), ["src/aggregators/dead.ts", "src/fresh.ts"]);
+  });
+
+  test("an in-batch duplicate of a PR-covered finding lands in dropped, not a second prCovered entry", () => {
+    const twice: CleanupFinding[] = [
+      { kind: "export", path: "src/redis/holdback.ts", name: "deadExport" },
+      { kind: "export", path: "src/redis/holdback.ts", name: "deadExport" },
+    ];
+    const prs: PullRequestRef[] = [{ number: 1719, paths: ["src/redis/holdback.ts"] }];
+    const { kept, dropped, prCovered } = dedupAgainstOpen(twice, [], prs);
+    assert.equal(kept.length, 0);
+    assert.equal(prCovered.length, 1, "one prCovered entry for the identity");
+    assert.equal(dropped.length, 1, "the in-batch dup goes to dropped");
+  });
+
+  test("paths are trimmed on both sides; blank PR paths never match", () => {
+    const prs: PullRequestRef[] = [{ number: 1720, paths: ["  src/redis/holdback.ts  ", "  ", ""] }];
+    const finding: CleanupFinding = { kind: "export", path: " src/redis/holdback.ts ", name: "deadExport" };
+    const { kept, prCovered } = dedupAgainstOpen([finding], [], prs);
+    assert.equal(kept.length, 0);
+    assert.equal(prCovered.length, 1, "trimmed paths intersect");
+  });
+
+  test("BACKWARD COMPAT: the two-argument call is unchanged and prCovered is empty", () => {
+    const { kept, dropped, prCovered } = dedupAgainstOpen(findings, []);
+    assert.equal(kept.length, findings.length, "no PR refs → no suppression (pre-#1766 behavior)");
+    assert.equal(dropped.length, 0);
+    assert.deepEqual(prCovered, [], "the new bucket is empty, never undefined");
   });
 });

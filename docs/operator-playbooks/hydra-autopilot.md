@@ -37,11 +37,23 @@ Each tick:
 
 1. **Wake** on TaskNotification, Monitor board-change, or a 15-min heartbeat.
 2. **Collect** state + candidates + events into three JSON blobs.
-3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`.
+3. **`python3 scripts/autopilot/decide.py decide state.json candidates.json events.json`** — pure function call, returns `{actions, reasons, debug}`. The CLI bumps `state.turn` by one and persists it atomically BEFORE calling `decide()` — the bump is a `main()` side-effect; `decide()` itself stays pure.
 4. **`python3 scripts/autopilot/assert_invariants.py plan.json state.json`** — runtime guards.
 5. **Execute** each action in the plan via the right tool (table below).
 5a. **`python3 scripts/autopilot/heartbeat.py --last-action=<type>`** — write the per-turn heartbeat line. `<type>` is the `type` of the LAST action executed in step 5 (or `wait` / `(none)` if the plan was a no-op). MUST run on every iteration, even when the plan only contained a `wait` — file mtime is the operator's liveness signal (issue #435).
 6. **Re-enter step 1.** No inline reasoning between steps.
+
+> **`state.turn` is owned by the decide.py CLI (issue #1769).** One bump per
+> `decide` invocation, persisted atomically before `decide()` runs, so the
+> plan's `turn` stamp equals the persisted state.json `turn` by construction
+> and the heartbeat's strict plan-freshness equality (#1732/#1735) always
+> holds. The session MUST NOT write `turn` — neither an explicit increment
+> nor a whole-file rewrite of state.json from a stale snapshot (run 69442b4c
+> hit a session-improvised increment racing the heartbeat, which zeroed
+> turns 2–9's action ledgers run-wide). Session-side state updates (slots,
+> dispatches, tokens, signals) are targeted field edits only. A violation
+> surfaces loudly as a `plan-stale-skipped: ... exact off-by-one ...` reason
+> in the turn record.
 
 ## Class taxonomy (7 pipeline slots + 8 signal classes)
 
