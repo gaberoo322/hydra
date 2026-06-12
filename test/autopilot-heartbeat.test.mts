@@ -509,12 +509,12 @@ describe("scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #
     assert.match(stderr, /stale plan skipped/, "skip is logged loud to stderr");
   });
 
-  test("stale turn stamp (same run, ≥2 turns behind) → empty actions + plan-stale-skipped reason", async () => {
+  test("stale turn stamp (same run, 2 turns behind) → empty actions + plan-stale-skipped reason", async () => {
     const { requests } = await runWithPlan({
       actions: [{ type: "dispatch", class: "qa_orch" }],
       reasons: ["from turn 1"],
       run_id: RUN_ID,
-      turn: 1, // state.turn is 3 — two behind, beyond the #1769 tolerance
+      turn: 1, // state.turn is 3
     });
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].body.actions, [], "previous turn's plan must NOT be attributed");
@@ -525,56 +525,89 @@ describe("scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #
   });
 
   /**
-   * Issue #1769 — increment-then-heartbeat ordering tolerance.
+   * Issue #1769 — strict equality, single-writer turn counter.
    *
-   * The playbook loop leaves the state.turn increment to the model session
-   * and never pins whether it lands before or after the step-5a heartbeat.
-   * Run 69442b4c (2026-06-11) hit increment-then-heartbeat every turn, so
-   * the strict #1732 equality zeroed turns 2–9's action ledgers while real
-   * dispatches were in flight. A same-run plan exactly ONE turn behind is
-   * fresh: attribute its actions at turn_n = plan.turn (the turn the
-   * decisions were made for — posting at state.turn would shift every
-   * action onto the wrong record), and lean on the server's
-   * (run_id, turn_n) dedup to no-op the re-POST when the other ordering
-   * already recorded that turn.
+   * decide.py's CLI is the single writer of state.turn (one pre-decide
+   * bump, persisted atomically before the plan is stamped), so a fresh
+   * plan matches state.turn by construction. The guard keeps STRICT
+   * (run_id, turn) equality — the tolerance window PR #1777 tried was a
+   * rejected alternative (it reopened a same-run window of the #1732
+   * misattribution class). An exact one-behind lag can now only mean a
+   * second writer (e.g. a session-improvised increment) violated the
+   * single-writer contract, so the plan is zeroed loudly and the reason
+   * string names the cause for the retro bundle.
    */
-  test("off-by-one plan (same run, plan.turn = state.turn - 1) → attributed at turn_n = plan.turn (issue #1769)", async () => {
+  test("off-by-one plan (same run, plan.turn = state.turn - 1) is STALE — zeroed with a self-diagnosing reason (issue #1769)", async () => {
     const { requests, stderr } = await runWithPlan({
       actions: [{ type: "dispatch", class: "dev_orch" }],
       reasons: ["ready-for-agent present"],
       run_id: RUN_ID,
-      turn: 2, // state.turn is 3 — session incremented before the heartbeat
+      turn: 2, // state.turn is 3 — single-writer contract violated by a second writer
     });
-    assert.equal(requests.length, 1, "exactly one turn POST");
-    assert.equal(requests[0].body.turn_n, 2, "record posts at the PLAN's turn, not the incremented state turn");
+    assert.equal(requests.length, 1, "exactly one turn POST — the record itself is never dropped");
+    assert.equal(requests[0].body.turn_n, 3, "record posts at the state turn");
     assert.deepEqual(
       requests[0].body.actions,
-      [{ type: "dispatch", class: "dev_orch" }],
-      "off-by-one plan's actions ARE attributed (the run-wide-blindness fix)",
+      [],
+      "a one-behind plan must NOT be attributed — strict equality, no tolerance window",
     );
     const reasons = requests[0].body.reasons as string[];
-    assert.equal(reasons[0], "ready-for-agent present", "plan's own reasons pass through first");
+    assert.equal(reasons.length, 1);
     assert.match(
-      reasons[reasons.length - 1],
-      /^plan-turn-off-by-one: attributed to plan turn=2 \(state turn=3/,
-      "an explicit off-by-one note is appended for observability",
+      reasons[0],
+      /^plan-stale-skipped: plan turn=2 != state turn=3 \(exact off-by-one: state\.turn is only incremented by decide\.py — see #1769\)$/,
+      "the reason self-diagnoses the single-writer contract violation",
     );
-    assert.ok(!stderr.includes("stale plan"), "off-by-one is tolerated, not logged as stale");
+    assert.match(stderr, /stale plan skipped/, "violation is logged loud to stderr");
   });
 
-  test("future plan stamp (plan.turn = state.turn + 1) is still stale (issue #1769 tolerance is one-sided)", async () => {
+  test("future plan stamp (plan.turn = state.turn + 1) is stale, without the off-by-one diagnostic", async () => {
     const { requests } = await runWithPlan({
       actions: [{ type: "dispatch", class: "dev_target" }],
       reasons: ["from the future"],
       run_id: RUN_ID,
-      turn: 4, // state.turn is 3 — a future stamp can't be the increment race
+      turn: 4, // state.turn is 3 — a future stamp is not the off-by-one signature
     });
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].body.actions, [], "a future-stamped plan must NOT be attributed");
     assert.match(
       (requests[0].body.reasons as string[])[0],
-      /^plan-stale-skipped: plan turn=4 != state turn=3/,
+      /^plan-stale-skipped: plan turn=4 != state turn=3$/,
+      "no off-by-one note — that diagnostic is reserved for the exact one-behind signature",
     );
+  });
+
+  /**
+   * Issue #1769 retro evidence — idle-streak diagnosability. During the
+   * 2026-06-11 idle streak (5 runs, ~800k tokens, zero dispatches) every
+   * post-turn-1 record was plan-stale-zeroed, so the decide.py reasons that
+   * would explain WHY each turn idled were destroyed and the retro could
+   * not distinguish "no eligible work / grill-yield deadlock / signal bug".
+   * Pin: a fresh plan with EMPTY actions (an idle turn) still posts its
+   * reasons verbatim — the only durable diagnostic for idle streaks.
+   */
+  test("idle turn (fresh plan, empty actions) preserves the decide.py reasons verbatim (issue #1769)", async () => {
+    const { requests, stderr } = await runWithPlan({
+      actions: [],
+      reasons: [
+        "dev_orch: no ready-for-agent issues",
+        "dev_target: grill-yield — orch_pending_grill_anchor=issue-1766",
+      ],
+      run_id: RUN_ID,
+      turn: 3,
+    });
+    assert.equal(requests.length, 1, "idle turn still posts a record");
+    assert.equal(requests[0].body.turn_n, 3);
+    assert.deepEqual(requests[0].body.actions, [], "idle turn has no actions");
+    assert.deepEqual(
+      requests[0].body.reasons,
+      [
+        "dev_orch: no ready-for-agent issues",
+        "dev_target: grill-yield — orch_pending_grill_anchor=issue-1766",
+      ],
+      "decide reasons survive on the idle turn record — never zeroed by the freshness guard",
+    );
+    assert.ok(!stderr.includes("stale plan"), "an idle fresh plan is not stale");
   });
 
   test("unstamped plan (pre-#1732 shape) → empty actions + plan-stale-skipped reason", async () => {

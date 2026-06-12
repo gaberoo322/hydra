@@ -1822,11 +1822,11 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     # state it was decided against, so heartbeat.py can verify the plan file
     # it reads belongs to THIS run/turn before attributing its actions to a
     # turn record. Pure: derived solely from the input state.
-    # Issue #1769 — the playbook loop does NOT pin whether the session bumps
-    # state.turn before or after the heartbeat reads it, so heartbeat.py
-    # tolerates `plan.turn == state.turn - 1` (same run only) and attributes
-    # those actions at turn_n = plan.turn. This stamp stays a pure read of
-    # the input state — decide() must NOT bump the counter itself.
+    # Issue #1769 — main() bumps state.turn and persists it atomically BEFORE
+    # calling decide(), so this stamp equals the persisted state.json turn by
+    # construction (decide.py CLI is the SINGLE writer of the turn counter;
+    # the model session must never write it). The stamp itself stays a pure
+    # read of the input state — the bump is a main()-side CLI effect.
     run_id_raw = state.get("run_id")
     plan.run_id = str(run_id_raw) if run_id_raw else None
     plan.turn = int(state.get("turn", 0) or 0)
@@ -2822,8 +2822,10 @@ def _post_run_end_for_terminate(actions: list, state: dict) -> None:
     )
 
 
-def _persist_state_writeback(path: str, state: dict) -> None:
-    """Atomically write the post-decide state dict back to the state file.
+def _persist_state_writeback(
+    path: str, state: dict, what: str = "research_force_counter increment",
+) -> None:
+    """Atomically write the state dict back to the state file.
 
     Issue #1666: the daily force-research counter is incremented in-memory by
     `_research_force_stamp` at plan time, but the `decide` CLI historically
@@ -2832,6 +2834,10 @@ def _persist_state_writeback(path: str, state: dict) -> None:
     caller (main) invokes this ONLY when the counter actually changed this
     turn, so decide stays a pure JSON emitter on every other turn (the same
     conservatism as the env-gated XADD above).
+
+    Issue #1769: also reused for the pre-decide turn-counter bump (see
+    `main`), with `what` naming the mutation so the failure log stays
+    specific.
 
     Write is tmp-file + os.replace in the state file's own directory so a
     crash mid-write can never leave a torn state.json (bootstrap/reap.py
@@ -2852,7 +2858,7 @@ def _persist_state_writeback(path: str, state: dict) -> None:
     except OSError as exc:
         print(
             f"decide.py: state write-back to {path} failed ({exc}); "
-            "research_force_counter increment NOT persisted this turn",
+            f"{what} NOT persisted this turn",
             file=sys.stderr,
         )
     finally:
@@ -2879,6 +2885,21 @@ def main(argv: list[str]) -> int:
             print("decide.py decide: missing <state.json>", file=sys.stderr)
             return 2
         state = _load_json(argv[2])
+        # Issue #1769 — single-writer turn counter. The CLI (not the model
+        # session, not heartbeat.py) owns `state.turn`: one bump per decide
+        # invocation, persisted atomically BEFORE decide() runs so the bumped
+        # value is the ONLY mutation this write carries (decide() mutates the
+        # dict in-memory afterwards — slot_history, failure_log — and those
+        # must not ride along). The plan stamp at the end of decide() then
+        # reads the bumped value, so `plan.turn == state.json turn` holds by
+        # construction and heartbeat.py's strict freshness equality can never
+        # see a session-ordering off-by-one again (run 69442b4c zeroed turns
+        # 2-9's action ledgers that way). A failed persist degrades to ONE
+        # loud plan-stale-skipped turn record — never aborts the turn.
+        # decide() itself stays pure (ADR-0007); the bump is a sanctioned
+        # main() side-effect like _persist_state_writeback (#1666).
+        state["turn"] = int(state.get("turn", 0) or 0) + 1
+        _persist_state_writeback(argv[2], state, what="turn-counter bump (#1769)")
         candidates = _load_json(argv[3]) if len(argv) > 3 else None
         events = _load_json(argv[4]) if len(argv) > 4 else None
         # Issue #1666: snapshot the force-research counter so we can detect a
