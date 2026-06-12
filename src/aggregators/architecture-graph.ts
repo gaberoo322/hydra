@@ -1,5 +1,6 @@
 /**
- * Architecture-graph aggregator (issue #1411, epic #1410).
+ * Architecture-graph aggregator (issue #1411, epic #1410; taxonomy deepened
+ * in issue #1772).
  *
  * Extracted out of `src/api/architecture.ts` so the module-dependency
  * scanner is a pure function with injectable filesystem deps — testable
@@ -16,70 +17,97 @@
  *   contents, the returned nodes / edges / groups / layout are identical.
  *   `scannedAt` is the one non-deterministic field; tests can ignore it.
  * - **FS injection.** `deps.readdir` / `deps.readFile` default to
- *   `node:fs/promises`. Tests pass stubs that return a synthetic directory
- *   listing + file bodies so the scanner runs with no real I/O.
+ *   `node:fs/promises`. The default lister is RECURSIVE (`readdir(dir,
+ *   { recursive: true })`) and returns srcDir-relative posix paths; tests
+ *   pass stubs that return a synthetic recursive listing + file bodies so
+ *   the scanner runs with no real I/O.
  *
- * The group taxonomy (`GROUPS` / `GROUP_MAP`), the canvas layout constants,
- * and the per-group grid positions (`GROUP_POSITIONS`) are module-level
- * constants here — they were closure-scoped inside the route file before.
+ * # Group taxonomy — derived from the filesystem, not maintained by memory
+ *
+ * Before #1772 the taxonomy was a hard-coded `GROUPS` constant listing
+ * individual module names; it drifted as modules were added/retired (ghost
+ * entries like `context-builder` survived the #383 control-loop deletion).
+ * Group membership is now DERIVED from each module's path:
+ *
+ * - a module under `src/<dir>/` belongs to group `<dir>` (first path
+ *   segment under src/);
+ * - a flat top-level `src/<name>.ts` module belongs to the `root` group
+ *   ("Top-level") — its location, directly in src/, is the classifier.
+ *
+ * `GROUP_META` below is DISPLAY metadata only (label + color overrides for
+ * group ids whose titlecased directory name reads poorly). It never decides
+ * membership, and a `GROUP_META` key with no modules on disk emits no group
+ * — only observed, non-empty groups appear in the output. A brand-new
+ * `src/<dir>/` self-registers with a deterministic default label (titlecased
+ * dir name) and palette color, with ZERO edits to this file.
+ *
+ * Layout is computed dynamically (deterministic row-packing over the derived
+ * group list, sorted by group id) — the former fixed 7-slot
+ * `GROUP_POSITIONS` grid assumed a hand-maintained group count.
  */
 
 import { readdir as fsReaddir, readFile as fsReadFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
-// Group taxonomy — update these when major architectural boundaries shift.
+// Group display metadata — label/color overrides only; membership is derived
+// from module paths (see header). Keys with no modules on disk emit nothing.
 // ---------------------------------------------------------------------------
 
-// Group definitions updated in PR-3 (issue #383): the entire "agents" group
-// (codex-runner / executor-agent / planner-prompt / preflight) plus the
-// control-loop / pipeline-steps / verification / post-merge / holdback /
-// gate modules in the "core" and "quality" groups were deleted along with
-// the in-process codex control loop. Autopilot subagents own execution
-// now and are tracked outside this orchestrator-internal architecture
-// graph.
-export const GROUPS = [
-  { id: "core", label: "Core Loop", color: "emerald",
-    modules: ["index", "cycle"] },
-  { id: "agents", label: "Agents (legacy / stubs)", color: "blue",
-    modules: ["context-builder"] },
-  { id: "quality", label: "Quality & Verification", color: "amber",
-    modules: ["codebase-health"] },
-  { id: "knowledge", label: "Knowledge & Learning", color: "purple",
-    modules: ["knowledge-indexer", "learning", "reflections", "agent-memory", "pattern-detector", "prompt-evolution", "repo-map", "grounding", "ov-session"] },
-  { id: "state", label: "State & Data", color: "cyan",
-    modules: ["redis", "event-bus", "cycle-tracking", "metrics"] },
-  { id: "planning", label: "Planning & Research", color: "rose",
-    modules: ["research-loop", "project-goals", "anchor-candidates"] },
-  { id: "infra", label: "Infrastructure", color: "zinc",
-    modules: ["api", "notify", "digest", "cleanup", "instrument", "merge"] },
-];
+export const GROUP_META: Record<string, { label: string; color: string }> = {
+  root: { label: "Top-level", color: "emerald" },
+  api: { label: "API Routes", color: "blue" },
+  github: { label: "GitHub", color: "zinc" },
+  redis: { label: "Redis Adapters", color: "cyan" },
+  "knowledge-base": { label: "Knowledge Base", color: "purple" },
+};
 
-export const GROUP_MAP: Record<string, { id: string; label: string; color: string }> = {};
-for (const g of GROUPS) {
-  for (const m of g.modules) GROUP_MAP[m] = { id: g.id, label: g.label, color: g.color };
+/** Deterministic fallback palette for directories without a GROUP_META entry. */
+const COLOR_PALETTE = ["emerald", "blue", "amber", "purple", "cyan", "rose", "zinc"];
+
+function titleCase(name: string): string {
+  return name
+    .split("-")
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/**
+ * Display metadata for a derived group id: the GROUP_META override when one
+ * exists, else a deterministic default (titlecased dir name + palette color
+ * from a stable char-code hash) so unknown directories self-register.
+ */
+function groupMetaFor(groupId: string): { label: string; color: string } {
+  const meta = GROUP_META[groupId];
+  if (meta) return meta;
+  let hash = 0;
+  for (const ch of groupId) hash = (hash + ch.charCodeAt(0)) % COLOR_PALETTE.length;
+  return { label: titleCase(groupId), color: COLOR_PALETTE[hash] };
+}
+
+/**
+ * Group id for a module id (srcDir-relative path without `.ts`): the first
+ * path segment for subdirectory modules, `root` for flat top-level files.
+ */
+function deriveGroupId(moduleId: string): string {
+  const slash = moduleId.indexOf("/");
+  return slash === -1 ? "root" : moduleId.slice(0, slash);
 }
 
 // ---------------------------------------------------------------------------
-// Layout constants — canvas is ~1400px wide, groups arranged in rows.
+// Layout constants — deterministic row-packing on a ~1400px-wide canvas.
 // ---------------------------------------------------------------------------
-
-export const GROUP_POSITIONS: Record<string, { x: number; y: number }> = {
-  core:      { x: 0, y: 0 },
-  agents:    { x: 500, y: 0 },
-  quality:   { x: 0, y: 280 },
-  knowledge: { x: 500, y: 280 },
-  state:     { x: 0, y: 560 },
-  planning:  { x: 500, y: 560 },
-  infra:     { x: 1000, y: 0 },
-};
 
 const NODE_W = 150;
 const NODE_H = 36;
 const NODE_GAP_X = 16;
 const NODE_GAP_Y = 12;
 const GROUP_PAD = 20;
+const GROUP_LABEL_H = 28;
 const COLS_PER_GROUP = 3;
+const CANVAS_W = 1400;
+const GROUP_GAP = 40;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -129,9 +157,10 @@ export interface ArchitectureGraphDeps {
    */
   srcDir?: string;
   /**
-   * Directory lister — returns the entry names of `srcDir`. Defaults to
-   * `node:fs/promises` `readdir`. Tests inject a stub returning a synthetic
-   * file list.
+   * RECURSIVE directory lister — returns srcDir-relative posix paths of
+   * every entry beneath `srcDir` (e.g. `["index.ts", "redis/anchors.ts"]`).
+   * Defaults to `node:fs/promises` `readdir(dir, { recursive: true })`.
+   * Tests inject a stub returning a synthetic recursive listing.
    */
   readdir?: (dir: string) => Promise<string[]>;
   /**
@@ -151,8 +180,10 @@ export interface ArchitectureGraphDeps {
 // ---------------------------------------------------------------------------
 
 /**
- * Scan `srcDir` for `.ts` modules, parse their relative imports into an
- * edge list, and lay the nodes out on a grouped grid.
+ * Recursively scan `srcDir` for `.ts` modules, parse their relative imports
+ * (`./` and `../`, resolved against the importer's directory) into an edge
+ * list, derive group membership from each module's path, and lay the nodes
+ * out on a dynamically-packed grouped grid.
  *
  * Pure given the injected `readdir` / `readFile` — no cache, no Express.
  * The route caller owns response caching.
@@ -165,18 +196,21 @@ export async function scanArchitecture(
   // shared instance would let concurrent cache-miss scans interleave at the
   // await and corrupt each other's match position, silently producing wrong
   // edge sets. A fresh regex per invocation keeps each scan isolated.
-  const importRe = /from\s+["']\.\/([^"']+?)(?:\.ts)?["']/g;
+  const importRe = /from\s+["'](\.\.?\/[^"']+?)(?:\.ts)?["']/g;
 
   const srcDir = deps.srcDir ?? resolveDefaultSrcDir();
-  const readdir = deps.readdir ?? fsReaddir;
+  const readdir =
+    deps.readdir ??
+    ((dir: string) => fsReaddir(dir, { recursive: true }) as Promise<string[]>);
   // Default readFile pins utf-8 so the dep contract is `(path) => Promise<string>`
   // (the bare node:fs/promises readFile returns Buffer | string).
   const readFile = deps.readFile ?? ((path: string) => fsReadFile(path, "utf-8"));
   const now = deps.now ?? new Date();
 
-  const files = (await readdir(srcDir)).filter(
-    (f) => f.endsWith(".ts") && !f.endsWith(".d.ts")
-  );
+  // Sorted for determinism regardless of the lister's traversal order.
+  const files = (await readdir(srcDir))
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))
+    .sort();
 
   const moduleNames = files.map((f) => f.replace(/\.ts$/, ""));
   const moduleSet = new Set(moduleNames);
@@ -189,12 +223,16 @@ export async function scanArchitecture(
 
   for (const file of files) {
     const mod = file.replace(/\.ts$/, "");
+    const importerDir = posix.dirname(mod); // "." for flat top-level modules
     const content = await readFile(resolve(srcDir, file));
     let match: RegExpExecArray | null;
     const seen = new Set<string>();
     importRe.lastIndex = 0;
     while ((match = importRe.exec(content)) !== null) {
-      const target = match[1];
+      // Resolve the `./`/`../` specifier against the importer's directory so
+      // path-based ids match (e.g. `../event-bus` from api/foo → event-bus).
+      const target = posix.normalize(posix.join(importerDir, match[1]));
+      if (target.startsWith("..")) continue; // escapes srcDir — not a module
       if (moduleSet.has(target) && target !== mod && !seen.has(target)) {
         seen.add(target);
         edges.push({ from: mod, to: target });
@@ -204,57 +242,63 @@ export async function scanArchitecture(
     }
   }
 
-  const groupBounds: Record<string, { x: number; y: number; w: number; h: number }> = {};
+  const nodes: ArchitectureNode[] = moduleNames.map((mod) => ({
+    id: mod,
+    label: titleCase(posix.basename(mod)),
+    group: deriveGroupId(mod),
+    inDegree: inDegree[mod] || 0,
+    outDegree: outDegree[mod] || 0,
+    x: 0,
+    y: 0,
+  }));
 
-  const nodes: ArchitectureNode[] = moduleNames.map((mod) => {
-    const group = GROUP_MAP[mod] || { id: "other", label: "Other", color: "zinc" };
-    return {
-      id: mod,
-      label: mod.split("-").map((w) => w[0].toUpperCase() + w.slice(1)).join(" "),
-      group: group.id,
-      inDegree: inDegree[mod] || 0,
-      outDegree: outDegree[mod] || 0,
-      x: 0,
-      y: 0,
-    };
-  });
-
-  // Compute positions per group
+  // Bucket nodes by derived group — only observed groups exist.
   const byGroup: Record<string, ArchitectureNode[]> = {};
   for (const n of nodes) {
     (byGroup[n.group] ??= []).push(n);
   }
 
-  for (const [gid, members] of Object.entries(byGroup)) {
-    const base = GROUP_POSITIONS[gid] || { x: 1000, y: 560 };
+  // Deterministic dynamic layout: groups sorted by id, row-packed left to
+  // right; a group that would overflow the canvas wraps to a new row whose
+  // y-offset clears the tallest group of the previous row. Non-overlap holds
+  // for ANY derived group count by construction.
+  const sortedGroupIds = Object.keys(byGroup).sort();
+  const groupBounds: Record<string, { x: number; y: number; w: number; h: number }> = {};
+  let cursorX = 0;
+  let cursorY = 0;
+  let rowMaxH = 0;
+
+  for (const gid of sortedGroupIds) {
+    const members = byGroup[gid];
+    const cols = Math.min(members.length, COLS_PER_GROUP);
+    const rows = Math.ceil(members.length / COLS_PER_GROUP);
+    const w = GROUP_PAD * 2 + cols * NODE_W + (cols - 1) * NODE_GAP_X;
+    const h = GROUP_PAD * 2 + GROUP_LABEL_H + rows * NODE_H + (rows - 1) * NODE_GAP_Y;
+
+    if (cursorX > 0 && cursorX + w > CANVAS_W) {
+      cursorX = 0;
+      cursorY += rowMaxH + GROUP_GAP;
+      rowMaxH = 0;
+    }
+
     members.forEach((n, i) => {
       const col = i % COLS_PER_GROUP;
       const row = Math.floor(i / COLS_PER_GROUP);
-      n.x = base.x + GROUP_PAD + col * (NODE_W + NODE_GAP_X);
-      n.y = base.y + GROUP_PAD + 28 + row * (NODE_H + NODE_GAP_Y); // 28 for group label
+      n.x = cursorX + GROUP_PAD + col * (NODE_W + NODE_GAP_X);
+      n.y = cursorY + GROUP_PAD + GROUP_LABEL_H + row * (NODE_H + NODE_GAP_Y);
     });
-    const maxCol = Math.min(members.length, COLS_PER_GROUP);
-    const maxRow = Math.ceil(members.length / COLS_PER_GROUP);
-    groupBounds[gid] = {
-      x: base.x,
-      y: base.y,
-      w: GROUP_PAD * 2 + maxCol * NODE_W + (maxCol - 1) * NODE_GAP_X,
-      h: GROUP_PAD * 2 + 28 + maxRow * NODE_H + (maxRow - 1) * NODE_GAP_Y,
-    };
+
+    groupBounds[gid] = { x: cursorX, y: cursorY, w, h };
+    cursorX += w + GROUP_GAP;
+    rowMaxH = Math.max(rowMaxH, h);
   }
 
-  const groupsOut: ArchitectureGroup[] = GROUPS.map((g) => ({
-    ...g,
-    bounds: groupBounds[g.id] || { x: 0, y: 0, w: 0, h: 0 },
+  const groupsOut: ArchitectureGroup[] = sortedGroupIds.map((gid) => ({
+    id: gid,
+    ...groupMetaFor(gid),
+    modules: byGroup[gid].map((n) => n.id),
+    bounds: groupBounds[gid],
   }));
-
-  // Add "other" group if any modules don't fit
-  if (byGroup["other"]) {
-    groupsOut.push({
-      id: "other", label: "Other", color: "zinc", modules: byGroup["other"].map((n) => n.id),
-      bounds: groupBounds["other"] || { x: 1000, y: 560, w: 300, h: 200 },
-    });
-  }
 
   return {
     nodes,
