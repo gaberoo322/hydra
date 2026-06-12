@@ -328,13 +328,18 @@ describe("decide.py — research force-dispatch when no candidate >= 0.5", () =>
           `state file must carry counter=${i} after turn ${i}`,
         );
       }
-      // Turn 5: cap reached — suppressed, and the state file is untouched.
-      const before = readFileSync(t.state, "utf-8");
+      // Turn 5: cap reached — suppressed. The #1769 turn bump still
+      // persists (the CLI is the single writer of state.turn), but the
+      // force counter must NOT move past the cap.
+      const beforeJson = JSON.parse(readFileSync(t.state, "utf-8"));
       const plan5 = runDecideOnFiles(t);
       const dispatch5 = findAction(plan5, (a) => a.type === "dispatch" && a.slot === "research_target");
       assert.equal(dispatch5, undefined, "5th forced dispatch within one UTC day must be suppressed");
-      assert.equal(readFileSync(t.state, "utf-8"), before,
-        "a suppressed turn must not rewrite the state file");
+      const afterJson = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(afterJson.research_force_counter, beforeJson.research_force_counter,
+        "a suppressed turn must not advance the force counter");
+      assert.equal(afterJson.turn, beforeJson.turn + 1,
+        "the #1769 turn bump is the ONLY state mutation on a suppressed turn");
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }
@@ -365,22 +370,29 @@ describe("decide.py — research force-dispatch when no candidate >= 0.5", () =>
     }
   });
 
-  test("no forced dispatch -> decide CLI does not rewrite the state file (#1666)", () => {
+  test("no forced dispatch -> decide CLI persists only the #1769 turn bump (#1666)", () => {
     const t = makeTmp();
     try {
       writeFileSync(t.state, JSON.stringify(baseState()));
-      // Feed does NOT recommend research — no force, no stamp, no write-back.
+      // Feed does NOT recommend research — no force, no stamp. The only
+      // state-file mutation is the #1769 single-writer turn bump; in
+      // particular the in-memory mutations decide() makes (slot_history,
+      // failure_log) must NOT ride along.
       writeFileSync(t.cands, JSON.stringify({
         candidates: [{ issue: 8, anchorRef: "x", score: 0.4 }],
         research_recommended: false,
       }));
       writeFileSync(t.events, JSON.stringify([]));
-      const before = readFileSync(t.state, "utf-8");
+      const before = JSON.parse(readFileSync(t.state, "utf-8"));
       const plan = runDecideOnFiles(t);
       const dispatch = findAction(plan, (a) => a.type === "dispatch" && a.slot === "research_target");
       assert.equal(dispatch, undefined);
-      assert.equal(readFileSync(t.state, "utf-8"), before,
-        "decide must stay a pure JSON emitter when no force-stamp happened");
+      const after = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.deepEqual(
+        after,
+        { ...before, turn: before.turn + 1 },
+        "the persisted state must differ from the input by EXACTLY the turn bump",
+      );
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }
@@ -1999,20 +2011,24 @@ describe("decide.py — plan shape contract", () => {
    * heartbeat.py post_turn can refuse to attribute a stale default-path
    * plan (a previous run's dispatch actions were misattributed into the
    * turn records of runs ebcfebd2/b2422e61 on 2026-06-11).
+   *
+   * Issue #1769 — the CLI bumps state.turn BEFORE decide() runs, so the
+   * stamp carries the BUMPED value (input turn + 1) and always equals the
+   * persisted state.json turn.
    */
-  test("plan JSON is stamped with the state's run_id + turn (#1732)", () => {
+  test("plan JSON is stamped with the state's run_id + bumped turn (#1732/#1769)", () => {
     const state = baseState();
     (state as any).run_id = "stamp-run-1732";
     (state as any).turn = 4;
     const plan = runDecide(state, null);
     assert.equal(plan.run_id, "stamp-run-1732", "plan.run_id mirrors state.run_id");
-    assert.equal(plan.turn, 4, "plan.turn mirrors state.turn");
+    assert.equal(plan.turn, 5, "plan.turn mirrors the CLI-bumped state.turn (4 + 1)");
   });
 
-  test("plan stamp degrades to run_id=null + turn=0 when state has no run_id (#1732)", () => {
+  test("plan stamp degrades to run_id=null (turn still bumps) when state has no run_id (#1732)", () => {
     const plan = runDecide(baseState(), null); // baseState has no run_id, turn: 0
     assert.equal(plan.run_id, null, "no state.run_id → plan.run_id null");
-    assert.equal(plan.turn, 0, "state.turn 0 → plan.turn 0");
+    assert.equal(plan.turn, 1, "state.turn 0 → CLI bump → plan.turn 1");
   });
 
   test("every action carries the expected `type` literal", () => {
@@ -2057,6 +2073,96 @@ describe("decide.py — plan shape contract", () => {
     assert.equal(firstLine.action_types.length, 11, "exactly 11 action types (10 + route-prs-to-review per #744)");
     assert.ok(firstLine.action_types.includes("wait_or_reap"), "wait_or_reap must be in the catalog");
     assert.ok(firstLine.action_types.includes("route-prs-to-review"), "route-prs-to-review must be in the catalog (#744)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9b. Single-writer turn counter (issue #1769)
+//
+// The decide CLI is the SINGLE writer of state.turn: main() bumps it by one
+// and persists the bumped state atomically BEFORE calling decide(), so the
+// plan's turn stamp equals the persisted state.json turn by construction.
+// heartbeat.py's plan-stale guard keeps STRICT (run_id, turn) equality on
+// top of this — run 69442b4c (2026-06-11) zeroed turns 2-9's action ledgers
+// because a session-improvised increment raced the heartbeat; the rejected
+// alternative (a tolerance window in heartbeat.py, PR #1777) reopened the
+// #1732 misattribution class and was bounced by QA.
+// ---------------------------------------------------------------------------
+
+describe("decide.py — single-writer turn counter (#1769)", () => {
+  test("decide CLI bumps state.turn and persists it to the state file", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState(); // turn: 0
+      (state as any).run_id = "single-writer-run";
+      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      runDecideOnFiles(t);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.turn, 1, "state file must carry the bumped turn (0 → 1)");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("plan.turn equals the persisted state.json turn — equality by construction", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState();
+      (state as any).run_id = "single-writer-run";
+      (state as any).turn = 6;
+      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const plan = runDecideOnFiles(t);
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.turn, 7, "persisted turn is the bumped value");
+      assert.equal(
+        plan.turn,
+        persisted.turn,
+        "plan stamp and persisted state.turn must be equal by construction — " +
+          "this is the invariant heartbeat.py's strict freshness guard relies on",
+      );
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("consecutive CLI invocations yield turn 1 then 2 (monotonic, no session writer needed)", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState(); // turn: 0
+      (state as any).run_id = "single-writer-run";
+      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const plan1 = runDecideOnFiles(t);
+      assert.equal(plan1.turn, 1, "first invocation stamps turn 1");
+      const plan2 = runDecideOnFiles(t);
+      assert.equal(plan2.turn, 2, "second invocation reads the persisted bump and stamps turn 2");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.turn, 2, "state file ends at turn 2");
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("missing/null turn key is treated as 0 and bumps to 1", () => {
+    const t = makeTmp();
+    try {
+      const state = baseState();
+      delete (state as any).turn; // legacy state shape without the counter
+      writeFileSync(t.state, JSON.stringify(state));
+      writeFileSync(t.cands, JSON.stringify(null));
+      writeFileSync(t.events, JSON.stringify([]));
+      const plan = runDecideOnFiles(t);
+      assert.equal(plan.turn, 1, "absent turn coerces to 0 and bumps to 1");
+      const persisted = JSON.parse(readFileSync(t.state, "utf-8"));
+      assert.equal(persisted.turn, 1);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -2382,8 +2488,8 @@ describe("decide.py — worktreeBranch stamping (issue #527)", () => {
       "worktreeBranch must embed the slot for AgentStream filtering",
     );
     assert.ok(
-      dispatch.worktreeBranch.includes("t7"),
-      "worktreeBranch must embed the turn number",
+      dispatch.worktreeBranch.includes("t8"),
+      "worktreeBranch must embed the turn number (input turn 7 + CLI bump per #1769)",
     );
   });
 
@@ -2482,9 +2588,10 @@ describe("decide.py — worktreeBranch stamping (issue #527)", () => {
     const qa = findAction(plan, (a) => a.type === "dispatch" && a.slot === "qa_orch");
     assert.ok(qa);
     // Match the formula: worktree-agent-<runtoken>-t<turn>-<slot>
+    // (input turn 1 + the #1769 CLI bump → t2)
     assert.equal(
       qa.worktreeBranch,
-      "worktree-agent-deadbeef-t1-qa_orch",
+      "worktree-agent-deadbeef-t2-qa_orch",
       "worktreeBranch must match the deterministic synth formula",
     );
   });
