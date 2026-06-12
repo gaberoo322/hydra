@@ -1822,6 +1822,11 @@ def decide(state: dict, candidates: dict | None, events: Iterable[dict] | None =
     # state it was decided against, so heartbeat.py can verify the plan file
     # it reads belongs to THIS run/turn before attributing its actions to a
     # turn record. Pure: derived solely from the input state.
+    # Issue #1769 — the playbook loop does NOT pin whether the session bumps
+    # state.turn before or after the heartbeat reads it, so heartbeat.py
+    # tolerates `plan.turn == state.turn - 1` (same run only) and attributes
+    # those actions at turn_n = plan.turn. This stamp stays a pure read of
+    # the input state — decide() must NOT bump the counter itself.
     run_id_raw = state.get("run_id")
     plan.run_id = str(run_id_raw) if run_id_raw else None
     plan.turn = int(state.get("turn", 0) or 0)

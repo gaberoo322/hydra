@@ -205,7 +205,16 @@ def _plan_stale_reason(state: dict, plan: dict) -> str | None:
         POST proceeds with no actions, exactly as before #1732;
       - a non-empty plan must carry a `run_id` + `turn` stamp matching
         the live state (decide.py stamps both since #1732); an unstamped
-        or mismatched plan is stale.
+        or mismatched plan is stale;
+      - issue #1769: `plan.turn == state.turn - 1` is NOT stale. The
+        playbook loop leaves the state.turn increment to the model
+        session and never pins whether it lands before or after this
+        heartbeat, so increment-then-heartbeat ordering makes every plan
+        look exactly one turn behind (run 69442b4c zeroed 8/9 turn
+        records this way). Strict run_id equality still applies; only
+        the single-turn lag within the SAME run is tolerated —
+        `post_turn` attributes such a plan to `plan.turn`, not
+        `state.turn` (see `_plan_attribution_turn`).
     """
     if not plan:
         return None
@@ -221,9 +230,36 @@ def _plan_stale_reason(state: dict, plan: dict) -> str | None:
     except (TypeError, ValueError):
         return f"plan turn={plan_turn!r} is not an integer"
     state_turn = int(state.get("turn", 0) or 0)
-    if plan_turn_i != state_turn:
+    if plan_turn_i not in (state_turn, state_turn - 1):
         return f"plan turn={plan_turn_i} != state turn={state_turn}"
     return None
+
+
+def _plan_attribution_turn(state: dict, plan: dict, state_turn_n: int) -> int:
+    """Issue #1769 — which turn_n a fresh (non-stale) plan's actions belong to.
+
+    A plan that passed `_plan_stale_reason` either matches `state.turn`
+    exactly or lags it by exactly one (the session incremented the turn
+    counter before this heartbeat ran). In the off-by-one case the
+    decisions were made FOR `plan.turn`, so the turn record must be
+    posted at `turn_n = plan.turn` — posting at `state.turn` would shift
+    every action onto the wrong turn record, re-creating the
+    misattribution #1732 was built to stop. The server dedups on
+    (run_id, turn_n) (`recordTurn` in src/autopilot/runs.ts), so if a
+    heartbeat already posted this plan's turn under
+    heartbeat-then-increment ordering, the off-by-one re-POST is a
+    no-op rather than a double count.
+
+    Only consulted when `_plan_stale_reason` returned None and the plan
+    is non-empty; falls back to the state turn on any malformed stamp.
+    """
+    try:
+        plan_turn_i = int(plan.get("turn"))
+    except (TypeError, ValueError):
+        return state_turn_n
+    if plan_turn_i == state_turn_n - 1:
+        return plan_turn_i
+    return state_turn_n
 
 
 def post_turn(state: dict, plan: dict, now: int) -> None:
@@ -237,6 +273,13 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
     produces a turn record, but with empty `actions` and an explicit
     `plan-stale-skipped: ...` reason instead of another run's dispatches.
 
+    Issue #1769 — a same-run plan lagging the state turn by EXACTLY one is
+    fresh, not stale (the session incremented state.turn before this
+    heartbeat ran). Its actions are attributed at `turn_n = plan.turn`
+    with a `plan-turn-off-by-one: ...` reason appended; the server's
+    (run_id, turn_n) dedup makes the re-POST a no-op when that turn was
+    already recorded under the other ordering.
+
     NEVER raises — every failure path logs to stderr and returns. Heartbeat
     is best-effort observability (issue #435 contract), so an orchestrator
     outage cannot wedge the autopilot turn loop.
@@ -249,9 +292,22 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
         return
 
     stale_reason = _plan_stale_reason(state, plan)
+    post_turn_n = int(turn_n)
     if stale_reason is None:
         actions = plan.get("actions") or []
-        reasons = plan.get("reasons") or []
+        reasons = list(plan.get("reasons") or [])
+        if plan:
+            # Issue #1769 — attribute an off-by-one plan to ITS turn, not
+            # the (already-incremented) state turn. No-op when the stamps
+            # match exactly.
+            attributed = _plan_attribution_turn(state, plan, post_turn_n)
+            if attributed != post_turn_n:
+                reasons.append(
+                    f"plan-turn-off-by-one: attributed to plan turn={attributed} "
+                    f"(state turn={post_turn_n}; session incremented the turn counter "
+                    f"before this heartbeat — issue #1769)"
+                )
+                post_turn_n = attributed
     else:
         # Fail loud (observability contract): record the skip, never
         # attribute a stale plan's actions to this turn.
@@ -261,7 +317,7 @@ def post_turn(state: dict, plan: dict, now: int) -> None:
 
     body = {
         "run_id": run_id,
-        "turn_n": int(turn_n),
+        "turn_n": post_turn_n,
         "epoch": now,
         "actions": actions,
         "reasons": reasons,

@@ -509,18 +509,71 @@ describe("scripts/autopilot/heartbeat.py — stale-plan freshness check (issue #
     assert.match(stderr, /stale plan skipped/, "skip is logged loud to stderr");
   });
 
-  test("stale turn stamp (same run) → empty actions + plan-stale-skipped reason", async () => {
+  test("stale turn stamp (same run, ≥2 turns behind) → empty actions + plan-stale-skipped reason", async () => {
     const { requests } = await runWithPlan({
       actions: [{ type: "dispatch", class: "qa_orch" }],
       reasons: ["from turn 1"],
       run_id: RUN_ID,
-      turn: 1, // state.turn is 3
+      turn: 1, // state.turn is 3 — two behind, beyond the #1769 tolerance
     });
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].body.actions, [], "previous turn's plan must NOT be attributed");
     assert.match(
       (requests[0].body.reasons as string[])[0],
       /^plan-stale-skipped: plan turn=1 != state turn=3/,
+    );
+  });
+
+  /**
+   * Issue #1769 — increment-then-heartbeat ordering tolerance.
+   *
+   * The playbook loop leaves the state.turn increment to the model session
+   * and never pins whether it lands before or after the step-5a heartbeat.
+   * Run 69442b4c (2026-06-11) hit increment-then-heartbeat every turn, so
+   * the strict #1732 equality zeroed turns 2–9's action ledgers while real
+   * dispatches were in flight. A same-run plan exactly ONE turn behind is
+   * fresh: attribute its actions at turn_n = plan.turn (the turn the
+   * decisions were made for — posting at state.turn would shift every
+   * action onto the wrong record), and lean on the server's
+   * (run_id, turn_n) dedup to no-op the re-POST when the other ordering
+   * already recorded that turn.
+   */
+  test("off-by-one plan (same run, plan.turn = state.turn - 1) → attributed at turn_n = plan.turn (issue #1769)", async () => {
+    const { requests, stderr } = await runWithPlan({
+      actions: [{ type: "dispatch", class: "dev_orch" }],
+      reasons: ["ready-for-agent present"],
+      run_id: RUN_ID,
+      turn: 2, // state.turn is 3 — session incremented before the heartbeat
+    });
+    assert.equal(requests.length, 1, "exactly one turn POST");
+    assert.equal(requests[0].body.turn_n, 2, "record posts at the PLAN's turn, not the incremented state turn");
+    assert.deepEqual(
+      requests[0].body.actions,
+      [{ type: "dispatch", class: "dev_orch" }],
+      "off-by-one plan's actions ARE attributed (the run-wide-blindness fix)",
+    );
+    const reasons = requests[0].body.reasons as string[];
+    assert.equal(reasons[0], "ready-for-agent present", "plan's own reasons pass through first");
+    assert.match(
+      reasons[reasons.length - 1],
+      /^plan-turn-off-by-one: attributed to plan turn=2 \(state turn=3/,
+      "an explicit off-by-one note is appended for observability",
+    );
+    assert.ok(!stderr.includes("stale plan"), "off-by-one is tolerated, not logged as stale");
+  });
+
+  test("future plan stamp (plan.turn = state.turn + 1) is still stale (issue #1769 tolerance is one-sided)", async () => {
+    const { requests } = await runWithPlan({
+      actions: [{ type: "dispatch", class: "dev_target" }],
+      reasons: ["from the future"],
+      run_id: RUN_ID,
+      turn: 4, // state.turn is 3 — a future stamp can't be the increment race
+    });
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0].body.actions, [], "a future-stamped plan must NOT be attributed");
+    assert.match(
+      (requests[0].body.reasons as string[])[0],
+      /^plan-stale-skipped: plan turn=4 != state turn=3/,
     );
   });
 
