@@ -1,15 +1,23 @@
 /**
- * Regression tests for the architecture-graph aggregator (issue #1411).
+ * Regression tests for the architecture-graph aggregator (issue #1411;
+ * taxonomy deepened in issue #1772).
  *
  * Tests the pure scanner with full filesystem dependency injection — no
  * Express, no real `src/` tree, no module-global cache. The aggregator's
  * contract is:
  *
- *   - a synthetic directory listing + file bodies → one typed graph shape
+ *   - a synthetic RECURSIVE directory listing + file bodies → one typed
+ *     graph shape
  *   - `.ts` modules only (`.d.ts` filtered out)
- *   - relative `./mod` imports become edges; in/out degree counted once per
+ *   - relative `./` and `../` imports resolve against the importer's
+ *     directory and become edges; in/out degree counted once per
  *     (module, target) pair even on duplicate imports
- *   - GROUP_MAP / GROUP_POSITIONS drive grouping + layout, module-level
+ *   - group membership is DERIVED from the module path: `src/<dir>/x.ts` →
+ *     group `<dir>`, flat `src/x.ts` → group `root`. GROUP_META is display
+ *     metadata only — a key with no modules on disk emits no group, and an
+ *     unknown directory self-registers with a deterministic default.
+ *   - layout is a deterministic row-packing over the derived groups — no
+ *     fixed position table; group bounds never overlap.
  *
  * The scanner is deterministic given the same listing + contents; only
  * `scannedAt` varies (pinned here via the injected `now`).
@@ -20,26 +28,25 @@ import assert from "node:assert/strict";
 
 import {
   scanArchitecture,
-  GROUP_MAP,
-  GROUP_POSITIONS,
-  GROUPS,
+  GROUP_META,
 } from "../src/aggregators/architecture-graph.ts";
 
 const NOW = new Date("2026-06-08T12:00:00.000Z");
+const SRC = "/synthetic/src";
 
 /**
- * Build injectable readdir/readFile stubs over a `name -> body` map. The
- * scanner reads files as `resolve(srcDir, name)`, so the readFile stub keys
- * on the trailing basename to stay independent of the synthetic srcDir.
+ * Build injectable readdir/readFile stubs over a `relative-path -> body`
+ * map. The scanner reads files as `resolve(srcDir, relPath)`, so the
+ * readFile stub keys on the srcDir-relative remainder of the path.
  */
 function fsStub(files: Record<string, string>) {
   return {
-    srcDir: "/synthetic/src",
+    srcDir: SRC,
     now: NOW,
     readdir: async (_dir: string) => Object.keys(files),
     readFile: async (path: string) => {
-      const base = path.split("/").pop() ?? path;
-      const body = files[base];
+      const rel = path.startsWith(`${SRC}/`) ? path.slice(SRC.length + 1) : path;
+      const body = files[rel];
       if (body === undefined) throw new Error(`no stub for ${path}`);
       return body;
     },
@@ -73,6 +80,7 @@ describe("architecture-graph aggregator", () => {
         "index.ts": `export const a = 1;`,
         "types.d.ts": `export type T = number;`,
         "README.md": `# not a module`,
+        "redis/CONTEXT.md": `# glossary, not a module`,
       } as Record<string, string>),
     );
     assert.equal(graph.moduleCount, 1);
@@ -82,7 +90,7 @@ describe("architecture-graph aggregator", () => {
   test("ignores imports to non-existent modules and self-imports", async () => {
     const graph = await scanArchitecture(
       fsStub({
-        "index.ts": `import "./missing.ts"; import "./index.ts";`,
+        "index.ts": `import { a } from "./missing.ts";\nimport { b } from "./index.ts";`,
       }),
     );
     assert.equal(graph.edgeCount, 0);
@@ -101,59 +109,152 @@ describe("architecture-graph aggregator", () => {
     assert.equal(index.outDegree, 1);
   });
 
-  test("titlecases hyphenated module names into node labels", async () => {
-    const graph = await scanArchitecture(
-      fsStub({ "event-bus.ts": `export const x = 1;` }),
-    );
-    const node = graph.nodes[0];
-    assert.equal(node.id, "event-bus");
-    assert.equal(node.label, "Event Bus");
-  });
-
-  test("assigns known modules to their GROUP_MAP group, unknowns to 'other'", async () => {
+  test("titlecases the basename of hyphenated and nested module ids", async () => {
     const graph = await scanArchitecture(
       fsStub({
-        "index.ts": `export const a = 1;`, // core
-        "redis.ts": `export const b = 1;`, // state
-        "totally-unknown.ts": `export const c = 1;`, // other
+        "event-bus.ts": `export const x = 1;`,
+        "scheduler/heartbeat-loop.ts": `export const y = 1;`,
+      }),
+    );
+    const flat = graph.nodes.find((n) => n.id === "event-bus")!;
+    assert.equal(flat.label, "Event Bus");
+    const nested = graph.nodes.find((n) => n.id === "scheduler/heartbeat-loop")!;
+    assert.equal(nested.label, "Heartbeat Loop");
+  });
+
+  test("derives group membership from the module path, not a name list", async () => {
+    const graph = await scanArchitecture(
+      fsStub({
+        "index.ts": `export const a = 1;`, // flat → root
+        "redis/anchors.ts": `export const b = 1;`, // src/redis/ → redis
+        "redis/client.ts": `export const c = 1;`,
+        "schemas/backlog.ts": `export const d = 1;`, // src/schemas/ → schemas
       }),
     );
     const byId = Object.fromEntries(graph.nodes.map((n) => [n.id, n.group]));
-    assert.equal(byId["index"], "core");
-    assert.equal(byId["redis"], "state");
-    assert.equal(byId["totally-unknown"], "other");
+    assert.equal(byId["index"], "root");
+    assert.equal(byId["redis/anchors"], "redis");
+    assert.equal(byId["redis/client"], "redis");
+    assert.equal(byId["schemas/backlog"], "schemas");
   });
 
-  test("lays out nodes from GROUP_POSITIONS with group-relative offsets", async () => {
+  test("a brand-new directory self-registers with deterministic default meta", async () => {
+    // No GROUP_META entry exists for "newdomain" — it must still appear as a
+    // correctly-derived group with a titlecased label and a palette color.
+    assert.equal(GROUP_META["newdomain"], undefined);
+    const graph = await scanArchitecture(
+      fsStub({ "newdomain/thing-doer.ts": `export const a = 1;` }),
+    );
+    const group = graph.groups.find((g) => g.id === "newdomain");
+    assert.ok(group, "expected derived group 'newdomain'");
+    assert.equal(group!.label, "Newdomain");
+    assert.ok(group!.color.length > 0, "default color assigned");
+    assert.deepEqual(group!.modules, ["newdomain/thing-doer"]);
+  });
+
+  test("no ghost groups — GROUP_META keys with no modules emit nothing", async () => {
+    // GROUP_META carries display overrides for e.g. "api" and "redis"; a scan
+    // whose listing contains neither must not emit those groups.
+    assert.ok(GROUP_META["api"], "precondition: api has a display override");
     const graph = await scanArchitecture(
       fsStub({ "index.ts": `export const a = 1;` }),
     );
-    const index = graph.nodes.find((n) => n.id === "index")!;
-    // core group base is { x: 0, y: 0 }; first node sits at base + pad (20),
-    // y additionally offset by the 28px group-label band.
-    const base = GROUP_POSITIONS["core"];
-    assert.equal(index.x, base.x + 20);
-    assert.equal(index.y, base.y + 20 + 28);
+    assert.deepEqual(graph.groups.map((g) => g.id), ["root"]);
+    for (const g of graph.groups) {
+      assert.ok(g.modules.length >= 1, `group ${g.id} must have members`);
+    }
   });
 
-  test("emits an 'other' group entry when unmapped modules appear", async () => {
+  test("GROUP_META display overrides apply to derived groups", async () => {
     const graph = await scanArchitecture(
-      fsStub({ "totally-unknown.ts": `export const a = 1;` }),
+      fsStub({
+        "api/misc.ts": `export const a = 1;`,
+        "index.ts": `export const b = 1;`,
+      }),
     );
-    const other = graph.groups.find((g) => g.id === "other");
-    assert.ok(other, "expected an 'other' group");
-    assert.deepEqual(other!.modules, ["totally-unknown"]);
-    assert.ok(other!.bounds.w > 0);
+    const api = graph.groups.find((g) => g.id === "api")!;
+    assert.equal(api.label, GROUP_META["api"].label);
+    assert.equal(api.color, GROUP_META["api"].color);
+    const root = graph.groups.find((g) => g.id === "root")!;
+    assert.equal(root.label, "Top-level");
   });
 
-  test("always includes every taxonomy group, even when empty", async () => {
+  test("resolves ./ and ../ imports across directories into path-based edges", async () => {
     const graph = await scanArchitecture(
-      fsStub({ "index.ts": `export const a = 1;` }),
+      fsStub({
+        "event-bus.ts": `export const bus = 1;`,
+        "api/architecture.ts":
+          `import { bus } from "../event-bus.ts";\n` +
+          `import { scan } from "../aggregators/architecture-graph.ts";\n` +
+          `import { helper } from "./misc.ts";`,
+        "api/misc.ts": `export const helper = 1;`,
+        "aggregators/architecture-graph.ts": `export const scan = 1;`,
+      }),
     );
-    for (const g of GROUPS) {
+    const sorted = [...graph.edges].sort((a, b) =>
+      (a.from + a.to).localeCompare(b.from + b.to),
+    );
+    assert.deepEqual(sorted, [
+      { from: "api/architecture", to: "aggregators/architecture-graph" },
+      { from: "api/architecture", to: "api/misc" },
+      { from: "api/architecture", to: "event-bus" },
+    ]);
+    const importer = graph.nodes.find((n) => n.id === "api/architecture")!;
+    assert.equal(importer.outDegree, 3);
+  });
+
+  test("ignores relative imports that escape srcDir", async () => {
+    const graph = await scanArchitecture(
+      fsStub({
+        "index.ts": `import { x } from "../outside/module.ts";`,
+      }),
+    );
+    assert.equal(graph.edgeCount, 0);
+  });
+
+  test("deterministic — two scans over the same synthetic tree are identical", async () => {
+    const files = {
+      "index.ts": `import { a } from "./cycle.ts";`,
+      "cycle.ts": `export const a = 1;`,
+      "redis/anchors.ts": `import { a } from "../cycle.ts";`,
+      "schemas/backlog.ts": `export const s = 1;`,
+    };
+    const a = await scanArchitecture(fsStub(files));
+    const b = await scanArchitecture(fsStub(files));
+    assert.deepEqual(a, b);
+  });
+
+  test("derived group bounds never overlap, nodes sit inside their group", async () => {
+    // Enough groups to force at least one row wrap on the 1400px canvas.
+    const files: Record<string, string> = {};
+    for (const dir of ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]) {
+      for (let i = 0; i < 4; i++) files[`${dir}/mod-${i}.ts`] = `export const x = ${i};`;
+    }
+    files["index.ts"] = `export const root = 1;`;
+    const graph = await scanArchitecture(fsStub(files));
+
+    assert.equal(graph.groups.length, 7);
+    const overlaps = (
+      a: { x: number; y: number; w: number; h: number },
+      b: { x: number; y: number; w: number; h: number },
+    ) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+    for (let i = 0; i < graph.groups.length; i++) {
+      for (let j = i + 1; j < graph.groups.length; j++) {
+        assert.ok(
+          !overlaps(graph.groups[i].bounds, graph.groups[j].bounds),
+          `groups ${graph.groups[i].id} and ${graph.groups[j].id} overlap`,
+        );
+      }
+    }
+    for (const n of graph.nodes) {
+      const g = graph.groups.find((g) => g.id === n.group)!;
       assert.ok(
-        graph.groups.some((out) => out.id === g.id),
-        `expected group ${g.id} in output`,
+        n.x >= g.bounds.x && n.x < g.bounds.x + g.bounds.w,
+        `node ${n.id} x outside group ${g.id}`,
+      );
+      assert.ok(
+        n.y >= g.bounds.y && n.y < g.bounds.y + g.bounds.h,
+        `node ${n.id} y outside group ${g.id}`,
       );
     }
   });
@@ -178,27 +279,27 @@ describe("architecture-graph aggregator", () => {
     // scan A is parked at the await while scan B starts (and vice versa), the
     // exact window where a shared regex would corrupt.
     const files: Record<string, string> = {
-      "index.ts": `import { run } from "./cycle.ts";\nimport { x } from "./redis.ts";`,
-      "cycle.ts": `import { y } from "./redis.ts";`,
-      "redis.ts": `export const x = 1; export const y = 2;`,
+      "index.ts": `import { run } from "./cycle.ts";\nimport { x } from "./redis/client.ts";`,
+      "cycle.ts": `import { y } from "./redis/client.ts";`,
+      "redis/client.ts": `export const x = 1; export const y = 2;`,
     };
 
     let waiting = 0;
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     const interleavingStub = () => ({
-      srcDir: "/synthetic/src",
+      srcDir: SRC,
       now: NOW,
       readdir: async (_dir: string) => Object.keys(files),
       readFile: async (path: string) => {
-        const base = path.split("/").pop() ?? path;
+        const rel = path.startsWith(`${SRC}/`) ? path.slice(SRC.length + 1) : path;
         // Park on the first readFile of each scan until both have arrived,
         // then proceed concurrently from a shared await suspension point.
         if (++waiting <= 2) {
           if (waiting === 2) release();
           await gate;
         }
-        const body = files[base];
+        const body = files[rel];
         if (body === undefined) throw new Error(`no stub for ${path}`);
         return body;
       },
@@ -212,7 +313,7 @@ describe("architecture-graph aggregator", () => {
     const sortEdges = (es: typeof a.edges) =>
       [...es].sort((p, q) => (p.from + p.to).localeCompare(q.from + q.to));
 
-    // Expected edges: index->cycle, index->redis, cycle->redis (3 total).
+    // Expected edges: index->cycle, index->redis/client, cycle->redis/client.
     assert.equal(a.edgeCount, 3, "scan A must find all 3 edges");
     assert.equal(b.edgeCount, 3, "scan B must find all 3 edges");
     assert.deepEqual(
@@ -220,14 +321,5 @@ describe("architecture-graph aggregator", () => {
       sortEdges(b.edges),
       "interleaved scans must produce identical edge sets",
     );
-  });
-
-  test("GROUP_MAP and GROUP_POSITIONS are module-level constants", () => {
-    // GROUP_MAP is derived from GROUPS; spot-check a couple of mappings.
-    assert.equal(GROUP_MAP["index"].id, "core");
-    assert.equal(GROUP_MAP["api"].id, "infra");
-    // GROUP_POSITIONS keys every group except the dynamic 'other'.
-    assert.ok(GROUP_POSITIONS["core"]);
-    assert.ok(GROUP_POSITIONS["infra"]);
   });
 });
