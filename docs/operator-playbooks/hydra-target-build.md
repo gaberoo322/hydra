@@ -524,7 +524,10 @@ git checkout main && git pull --ff-only origin main
 git merge --no-ff "feature/$CYCLE_ID" -m "merge: claude cycle — <task title>" \
   -m "## Files in scope" -m "$SCOPE_IN_LIST" -m "$SCOPE_JUSTIFICATIONS"
 git push origin main
-git branch -d "feature/$CYCLE_ID"
+# Do NOT `git branch -d "feature/$CYCLE_ID"` here: the feature worktree
+# ($TARGET_WT) still has the branch checked out at this point, so the delete
+# fails with "branch ... used by worktree". The branch is deleted in Step 8.5,
+# after the worktree is removed.
 
 hydra raw POST /merge/unlock
 ```
@@ -617,11 +620,13 @@ informational only (75 on alarm, 0 otherwise); do NOT branch the cycle on it.
 
 ### 8.5. Worktree cleanup (issue #542)
 
-On success, remove the hydra-betting worktree we created in Step 0.6. On failure, `scripts/branch-prune.sh` will GC it on the next daily sweep — leaking is acceptable on crash but not on the happy path.
+On success, remove the hydra-betting worktree we created in Step 0.6, THEN delete the merged feature branch — in that order. `git branch -d` fails with "branch ... used by worktree" while the worktree still holds the branch checked out, which is why the delete lives here and not in Step 7 (friction cue: `worktree-held-branch-blocks-local-delete`). On failure, `scripts/branch-prune.sh` will GC both on the next daily sweep — leaking is acceptable on crash but not on the happy path.
 
 ```bash
 git -C ~/hydra-betting worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
+git -C ~/hydra-betting branch -d "feature/$CYCLE_ID" 2>&1 || \
+  echo "warn: branch delete failed for feature/$CYCLE_ID — branch-prune.sh will GC it later"
 ```
 
 ### 9. State sync (critical)
