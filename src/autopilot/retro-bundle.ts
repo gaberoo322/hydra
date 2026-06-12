@@ -328,6 +328,43 @@ function slotStr(slotObj: unknown, key: string): string | null {
 }
 
 /**
+ * Read the slot-snapshot entry's `started_epoch` as a string key component,
+ * tolerating number and string encodings (the snapshot serialises it as a
+ * number; a string round-trip must not break identity matching). `null` when
+ * absent/malformed.
+ */
+function slotEpoch(slotObj: unknown): string | null {
+  if (!slotObj || typeof slotObj !== "object") return null;
+  const v = (slotObj as Record<string, unknown>)["started_epoch"];
+  if (typeof v === "number" && Number.isFinite(v)) return String(v);
+  if (typeof v === "string" && v.length > 0) return v;
+  return null;
+}
+
+/**
+ * Fill a dispatch's null fields from a slot-snapshot entry. Existing values
+ * always win (action-join / earliest-turn canonical row), so this is
+ * enrich-only — used both for the same-turn `(turn, slot)` merge and for the
+ * cross-turn identity merge (issue #1776).
+ */
+function enrichFromSlot(
+  d: RetroDispatch,
+  slotSkill: string | null,
+  slotAnchor: string | null,
+  slotTaskId: string | null,
+): void {
+  if (!d.skill && slotSkill) d.skill = slotSkill;
+  if (!d.anchorReference && slotAnchor) d.anchorReference = slotAnchor;
+  if (!d.prNumber) {
+    const pr = prNumberFromAnchor(slotAnchor);
+    if (pr) d.prNumber = pr;
+  }
+  // Only fill a candidate cycleId when it is still empty — an action/outcome-
+  // carried cycleId always wins (clean-run identity).
+  if (!d.cycleId && slotTaskId) d.cycleId = slotTaskId;
+}
+
+/**
  * Project the run's turn timeline into the flat per-dispatch list. Pulls the
  * dispatch identity (cycleId / skill / anchor) off each `type === "dispatch"`
  * action and the joined `outcome` (attached by `fetchTurnsWithJoins`), then
@@ -348,6 +385,21 @@ function slotStr(slotObj: unknown, key: string): string | null {
  * exactly one RetroDispatch, so a clean run with action-carried identity is
  * byte-identical (action values win, no double-count).
  *
+ * CROSS-TURN dedup (issue #1776): the `(turn, slot)` merge alone duplicated a
+ * dispatch that occupied its slot for N turns — the dispatching turn emitted
+ * one row, and every later turn's `slots_snapshot` saw an occupied slot with
+ * no same-turn action and emitted a NEW row (run 69442b4c: 16 rows for ~9
+ * real dispatches). So the projection also keeps a cross-turn identity map
+ * keyed on the durable dispatch identity — the slot's `task_id` / the
+ * recorded `cycleId` (the same id, per #1352), with `slot@started_epoch` as a
+ * fallback when no task_id is present. The EARLIEST-turn row is canonical: a
+ * later turn's snapshot for an already-projected identity only enriches that
+ * row's null fields (e.g. a later snapshot may carry a PR-shaped anchor) and
+ * never emits a second row. A slot re-dispatched with a NEW identity (new
+ * task_id / started_epoch) still projects a new row, and an identity-less
+ * snapshot entry (neither task_id nor started_epoch) degrades to the
+ * pre-#1776 per-turn behaviour — there is nothing durable to match on.
+ *
  * A snapshot-only dispatch additionally seeds a CANDIDATE `cycleId` from the
  * slot's `task_id` (issue #1352) — the same id reap sends on its durable
  * `cycle-record` write, so it is the transcript handle for a dispatch that
@@ -363,6 +415,18 @@ export function projectDispatches(
   turns: Array<Record<string, unknown>>,
 ): RetroDispatch[] {
   const out: RetroDispatch[] = [];
+  // Cross-turn identity map (issue #1776): durable-identity key → the
+  // canonical (earliest-turn) RetroDispatch. Keys are namespaced so a task_id
+  // can never collide with a slot@epoch composite:
+  //   `id:<task_id|cycleId>`        — the durable dispatch identity
+  //   `epoch:<slot>@<started_epoch>` — fallback when no task_id is present
+  //                                    (same slot + same start instant is
+  //                                    definitionally the same occupancy)
+  const byIdentity = new Map<string, RetroDispatch>();
+  /** Register first-wins — the earliest-turn row stays canonical. */
+  const registerIdentity = (key: string | null, d: RetroDispatch): void => {
+    if (key && !byIdentity.has(key)) byIdentity.set(key, d);
+  };
   for (const turn of turns) {
     const turnN =
       typeof turn.turn_n === "number" && Number.isFinite(turn.turn_n)
@@ -421,9 +485,26 @@ export function projectDispatches(
         // backfill. Default to drillable here.
         undrillable: false,
       };
-      out.push(dispatch);
       const slot = slotOfAction(a);
+      // Cross-turn dedup (issue #1776): an identity already projected on an
+      // earlier turn never emits a second row — the action only enriches the
+      // canonical row's null fields. (In practice a dispatch action is
+      // recorded once, on the dispatching turn; this guard is defensive.)
+      const prior = cycleId ? byIdentity.get(`id:${cycleId}`) : undefined;
+      if (prior) {
+        if (!prior.skill && dispatch.skill) prior.skill = dispatch.skill;
+        if (!prior.anchorReference && anchorReference) prior.anchorReference = anchorReference;
+        if (!prior.prNumber && prNumber) prior.prNumber = prNumber;
+        if (prior.status === null && status !== null) {
+          prior.status = status;
+          prior.bucket = bucketOf(status);
+        }
+        if (slot && !bySlot.has(slot)) bySlot.set(slot, prior);
+        continue;
+      }
+      out.push(dispatch);
       if (slot && !bySlot.has(slot)) bySlot.set(slot, dispatch);
+      registerIdentity(cycleId ? `id:${cycleId}` : null, dispatch);
     }
 
     // Fold the slots_snapshot in: enrich an action-derived dispatch's null
@@ -443,17 +524,35 @@ export function projectDispatches(
       // exists, so an in-flight slot stays undrillable. See
       // `confirmDrillableCycleIds` in assembleRetroBundle.
       const slotTaskId = slotStr(slotObj, "task_id");
+      const epoch = slotEpoch(slotObj);
+      const epochKey = epoch ? `epoch:${slot}@${epoch}` : null;
       const existing = bySlot.get(slot);
       if (existing) {
-        if (!existing.skill && slotSkill) existing.skill = slotSkill;
-        if (!existing.anchorReference && slotAnchor) existing.anchorReference = slotAnchor;
-        if (!existing.prNumber) {
-          const pr = prNumberFromAnchor(slotAnchor);
-          if (pr) existing.prNumber = pr;
-        }
-        // Only fill a candidate cycleId when the action-join left it empty —
-        // an action/outcome-carried cycleId always wins (clean-run identity).
-        if (!existing.cycleId && slotTaskId) existing.cycleId = slotTaskId;
+        // Same-turn (turn, slot) merge: enrich the action-derived row's null
+        // fields — action values win. Then register the row's durable identity
+        // so later turns' snapshots of the SAME occupancy dedup onto it
+        // (issue #1776), even when the action's cycleId and the slot's task_id
+        // diverge (the epoch key covers that).
+        enrichFromSlot(existing, slotSkill, slotAnchor, slotTaskId);
+        registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, existing);
+        registerIdentity(existing.cycleId ? `id:${existing.cycleId}` : null, existing);
+        registerIdentity(epochKey, existing);
+        continue;
+      }
+      // Cross-turn dedup (issue #1776): this slot has no same-turn action, but
+      // the SAME dispatch (same task_id, or same slot+started_epoch) may have
+      // been projected on an earlier turn — a dispatch occupying its slot for
+      // N turns appears in N snapshots. Enrich the canonical earliest-turn row
+      // instead of emitting a duplicate.
+      const crossTurnPrior =
+        (slotTaskId ? byIdentity.get(`id:${slotTaskId}`) : undefined) ??
+        (epochKey ? byIdentity.get(epochKey) : undefined);
+      if (crossTurnPrior) {
+        enrichFromSlot(crossTurnPrior, slotSkill, slotAnchor, slotTaskId);
+        // Register any identity facet this snapshot revealed that the earlier
+        // turn's entry lacked (e.g. first turn had no started_epoch).
+        registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, crossTurnPrior);
+        registerIdentity(epochKey, crossTurnPrior);
         continue;
       }
       // A slot member with no matching action that carries NO usable identity
@@ -485,6 +584,8 @@ export function projectDispatches(
       };
       out.push(dispatch);
       bySlot.set(slot, dispatch);
+      registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, dispatch);
+      registerIdentity(epochKey, dispatch);
     }
   }
   return out;

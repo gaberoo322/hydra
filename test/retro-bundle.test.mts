@@ -337,6 +337,150 @@ describe("projectDispatches", () => {
     assert.equal(out[0].skill, "hydra-dev");
     assert.equal(out[0].anchorReference, "issue-1");
   });
+
+  // -------------------------------------------------------------------------
+  // issue #1776 — cross-turn dedup by durable dispatch identity. The
+  // (turn, slot) merge alone emitted one row PER TURN for a dispatch that
+  // occupied its slot for N turns (run 69442b4c: 16 rows for ~9 dispatches,
+  // e.g. grill task a4ddfcd1… appeared as 3 rows across turns 5–7).
+  // -------------------------------------------------------------------------
+
+  test("multi-turn slot occupancy (same task_id) projects exactly one RetroDispatch (#1776)", () => {
+    // The run-69442b4c evidence shape: a grill dispatch occupies its slot for
+    // three turns; every turn's slots_snapshot carries the identical
+    // task_id/started_epoch and no turn after the first has a dispatch action.
+    const slotEntry = {
+      skill: "hydra-grill",
+      anchor: "issue-1766",
+      task_id: "a4ddfcd1b57226e5a",
+      started_epoch: 1781210559,
+    };
+    const turns = [
+      { turn_n: 5, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
+      { turn_n: 6, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
+      { turn_n: 7, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 1, "one real dispatch → exactly one RetroDispatch");
+    assert.equal(out[0].cycleId, "a4ddfcd1b57226e5a");
+    assert.equal(out[0].turn_n, 5, "the earliest-turn row is canonical");
+    assert.equal(out[0].skill, "hydra-grill");
+    assert.equal(out[0].anchorReference, "issue-1766");
+  });
+
+  test("dispatching-turn action + later-turn snapshots merge to one row; action values win (#1776)", () => {
+    // Turn 5 records the dispatch action (with outcome); turns 6–7 only see
+    // the still-occupied slot in slots_snapshot. The action's cycleId is the
+    // same id as the slot's task_id (#1352), so the later snapshots must
+    // enrich the canonical action-derived row, never duplicate it.
+    const slotEntry = {
+      skill: "hydra-qa",
+      anchor: "PR#1760",
+      task_id: "a5d70ffc73ba13072",
+      started_epoch: 1781210600,
+    };
+    const turns = [
+      {
+        turn_n: 5,
+        actions: [
+          {
+            type: "dispatch",
+            slot: "qa_orch",
+            skill: "hydra-qa",
+            anchorReference: "PR#1760",
+            outcome: { cycleId: "a5d70ffc73ba13072", status: "merged", prNumber: "1760" },
+          },
+        ],
+        slots_snapshot: { qa_orch: slotEntry },
+      },
+      { turn_n: 6, actions: [], slots_snapshot: { qa_orch: slotEntry } },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 1, "action + later snapshots merge by task_id — no duplicate row");
+    assert.equal(out[0].turn_n, 5, "dispatching turn stays canonical");
+    assert.equal(out[0].status, "merged", "action/outcome values win");
+    assert.equal(out[0].prNumber, "1760");
+  });
+
+  test("a later snapshot enriches the canonical row's null fields (#1776)", () => {
+    // Turn 1's snapshot lacks the anchor; turn 2's snapshot for the same
+    // task_id carries a PR-shaped anchor. The canonical row gains the
+    // anchor + prNumber instead of a second row appearing.
+    const turns = [
+      {
+        turn_n: 1,
+        actions: [],
+        slots_snapshot: { qa_orch: { skill: "hydra-qa", task_id: "tid-enrich" } },
+      },
+      {
+        turn_n: 2,
+        actions: [],
+        slots_snapshot: {
+          qa_orch: { skill: "hydra-qa", anchor: "PR#1767", task_id: "tid-enrich" },
+        },
+      },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 1, "same task_id across turns — one row");
+    assert.equal(out[0].turn_n, 1, "earliest-turn row is canonical");
+    assert.equal(out[0].anchorReference, "PR#1767", "later snapshot fills the null anchor");
+    assert.equal(out[0].prNumber, "1767", "later snapshot's PR-shaped anchor yields prNumber");
+  });
+
+  test("a re-dispatched slot (new task_id) still projects a new row (#1776)", () => {
+    const turns = [
+      {
+        turn_n: 1,
+        actions: [],
+        slots_snapshot: {
+          dev_orch: { skill: "hydra-dev", anchor: "#100", task_id: "tid-first", started_epoch: 1000 },
+        },
+      },
+      {
+        turn_n: 2,
+        actions: [],
+        slots_snapshot: {
+          dev_orch: { skill: "hydra-dev", anchor: "#200", task_id: "tid-second", started_epoch: 2000 },
+        },
+      },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 2, "different identities in the same slot are different dispatches");
+    assert.deepEqual(out.map((d) => d.cycleId), ["tid-first", "tid-second"]);
+    assert.deepEqual(out.map((d) => d.anchorReference), ["#100", "#200"]);
+  });
+
+  test("task_id-less snapshots dedup via the slot@started_epoch fallback (#1776)", () => {
+    // No task_id, but the same slot + same started_epoch across turns is
+    // definitionally the same occupancy.
+    const turns = [
+      {
+        turn_n: 3,
+        actions: [],
+        slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#300", started_epoch: 1781210700 } },
+      },
+      {
+        turn_n: 4,
+        actions: [],
+        slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#300", started_epoch: 1781210700 } },
+      },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 1, "same slot@started_epoch — one row despite no task_id");
+    assert.equal(out[0].turn_n, 3);
+  });
+
+  test("identity-less snapshot entries (no task_id, no started_epoch) keep the per-turn behaviour", () => {
+    // Nothing durable to match on — degrading to the pre-#1776 shape is the
+    // conservative choice (never silently merge two possibly-distinct
+    // dispatches).
+    const turns = [
+      { turn_n: 1, actions: [], slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#400" } } },
+      { turn_n: 2, actions: [], slots_snapshot: { dev_orch: { skill: "hydra-dev", anchor: "#400" } } },
+    ];
+    const out = projectDispatches(turns);
+    assert.equal(out.length, 2, "no durable identity — no cross-turn merge");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -831,6 +975,44 @@ describe("assembleRetroBundle — composition", () => {
     assert.equal(dev.flagged, false, "a merged, regression-free dispatch is not flagged (happy path)");
     assert.equal(dev.undrillable, false, "a confirmed cycle record is not undrillable even when unflagged");
     assert.equal(dev.abandonReason, null, "no run-interrupted backfill once a terminal status is confirmed");
+  });
+
+  // -------------------------------------------------------------------------
+  // issue #1776 — end-to-end: an interrupted run whose dispatch occupied its
+  // slot for several turns must count that dispatch ONCE in the bundle (the
+  // run-69442b4c evidence had the same interrupted dispatch stamped
+  // run-interrupted once per turn it was in flight, inflating abandon stats
+  // and the flagDispatchesForDrill input).
+  // -------------------------------------------------------------------------
+  test("interrupted run: a multi-turn in-flight dispatch is one undrillable row, not one per turn (#1776)", async () => {
+    const slotEntry = {
+      skill: "hydra-grill",
+      anchor: "issue-1766",
+      task_id: "a4ddfcd1b57226e5a",
+      started_epoch: 1781210559,
+    };
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-1776", status: "ended", term_reason: "interrupted" },
+          turns: [
+            { turn_n: 5, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
+            { turn_n: 6, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
+            { turn_n: 7, actions: [], slots_snapshot: { design_concept_orch: slotEntry } },
+          ],
+        }) as any,
+      readCycleMetrics: async () => ({}), // still in flight — no terminal record
+      readCycleHash: async () => ({}),
+    });
+
+    const bundle = await assembleRetroBundle("run-1776", deps);
+    assert.equal(bundle.dispatches.length, 1, "one real dispatch → one bundle row across 3 turns");
+    const d = bundle.dispatches[0];
+    assert.equal(d.abandonReason, "run-interrupted", "interrupted backfill applied exactly once");
+    assert.equal(d.cycleId, "", "unconfirmed in-flight candidate dropped back to ''");
+    assert.equal(d.undrillable, true, "recorded undrillable once — not once per turn");
+    assert.equal(flagDispatchesForDrill(bundle.dispatches).length, 0, "no duplicate drill flags");
   });
 
   test("clean stop does NOT fabricate a failure status for a pending dispatch", async () => {
