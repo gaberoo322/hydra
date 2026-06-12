@@ -1,10 +1,16 @@
 /**
- * Regression tests for src/grounding.mjs.
+ * Regression tests for src/grounding.ts, src/grounding-cmd.ts, and
+ * src/grounding-parser.ts.
  *
  * Every test in this file corresponds to a real bug we shipped a patch for
  * during the 2026-04-07/08 debug session. If any of these fail, grounding
  * has regressed and the orchestrator will likely start reporting
  * "0 tests passing" in cycle logs again.
+ *
+ * Previously these tests accessed grounding internals via a `_testing`
+ * escape-hatch export. Now that the internals live in dedicated modules
+ * (grounding-cmd.ts for command execution/utilities, grounding-parser.ts
+ * for test-output parsing) they are imported directly — no escape hatch needed.
  */
 
 import { test, describe } from "node:test";
@@ -12,9 +18,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { _testing } from "../src/grounding.ts";
-
-const { stripAnsi, truncate, parseTestCounts, parseFailingTests, runCmd } = _testing;
+import { stripAnsi, truncate, runCmd } from "../src/grounding-cmd.ts";
+import { parseTestCounts, parseFailingTests } from "../src/grounding-parser.ts";
 
 /** Existence check for a list of PIDs — true if every PID is gone. */
 async function pidsDead(pids: number[]): Promise<boolean> {
