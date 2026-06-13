@@ -645,18 +645,19 @@ cd "$TARGET_WT"
 # the watcher then alarms only on DELTAS vs that baseline — services newly
 # not-ok, per-service worsening (degraded -> error), or overall severity-rank
 # worsening — so ambient pre-existing degradation never false-alarms.
-# --confirm-samples / --confirm-spacing-ms enable the issue #1817 DEBOUNCE:
-# several Target services (scanner, ingestion) derive status purely from data
-# freshness, whose window (e.g. the scanner's 180s) is far tighter than the
-# cron cadence (~30min), so the signal flaps ok<->degraded purely as a function
-# of WHEN the probe fires. A single re-sample ~3.3min later (> the 180s
-# freshness window) lets a fresh cron run land and clears a phantom
-# `scanner: ok -> degraded` regression; a real regression persists across both
-# samples and still alarms.
+# Issue #1817 FRESHNESS-FLAP SUPPRESSION (delta mode, no extra flags needed):
+# several Target services (scanner, ingestion, pinnacle/fairline) derive status
+# purely from data freshness, whose window (e.g. the scanner's 180s) is far
+# tighter than the cron cadence (~30min), so the signal flaps ok<->degraded
+# purely as a function of WHEN the probe fires. evaluateDelta now suppresses the
+# single ok->soft (degraded/stale) transition for these freshness-class services
+# (keyword allowlist, env-overridable via HYDRA_PMH_FRESHNESS_SERVICES) so a
+# phantom `scanner: ok -> degraded` no longer alarms. ANY move into error, any
+# worsening from an already-not-ok baseline, and ok->degraded on a hard-check
+# (non-freshness) service all still alarm — suppression is scoped, never global.
 npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
   --merge-sha "$COMMIT_SHA" --dispatch \
-  --baseline "$TARGET_WT/.hydra-gate/pmh-baseline.json" \
-  --confirm-samples 2 --confirm-spacing-ms 200000
+  --baseline "$TARGET_WT/.hydra-gate/pmh-baseline.json"
 ```
 
 Fail-soft: if the Target API is truly unreachable (service still restarting,
@@ -670,12 +671,14 @@ pre-merge), the watcher falls back to the absolute thresholds. Tune the noise
 floor via the `HYDRA_PMH_*` env vars documented at the top of
 `scripts/target/post-merge-health.ts` (overall-status alarm set, and the
 tolerated counts of degraded / execution-class / provider-class services —
-applied to delta counts when a baseline is supplied). Debounce
-(`HYDRA_PMH_CONFIRM_SAMPLES` / `HYDRA_PMH_CONFIRM_SPACING_MS`, or the
-`--confirm-samples` / `--confirm-spacing-ms` flags above) re-samples a
-regressing first reading and only alarms when every sample regresses, so a
-freshness-window flap (issue #1817) is suppressed while a real regression still
-fires. The exit code is informational only (75 on alarm, 0 otherwise); do NOT
+applied to delta counts when a baseline is supplied). Freshness-flap suppression
+(issue #1817): in delta mode the comparator suppresses the single ok->soft
+(degraded/stale) transition for freshness-class services (the
+`HYDRA_PMH_FRESHNESS_SERVICES` keyword allowlist — scanner, ingest, pinnacle,
+fairline, freshness by default), so a sampling-phase freshness-window flap no
+longer false-alarms while any error transition, any worsening from an
+already-not-ok baseline, and any hard-check (non-freshness) ok->degraded still
+fire. The exit code is informational only (75 on alarm, 0 otherwise); do NOT
 branch the cycle on it.
 
 ### 8.5. Worktree cleanup (issue #542)
