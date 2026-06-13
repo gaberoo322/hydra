@@ -61,6 +61,36 @@ services:
           cpus: "2"
           memory: 4G
 
+  # Local CPU Ollama on the hydra-server, serving ONLY the dense embedding
+  # model (nomic-embed-text, 768-dim). This removes OpenViking's hot search
+  # path from its hard dependency on the gaming PC (gabes-desktop-1): when the
+  # gaming PC is offline, embeddings (and therefore searchKnowledge / text
+  # indexing) stay up locally; only the VLM-dependent image/document indexing
+  # degrades. The heavy GPU-bound VLM (gemma4:e4b) intentionally stays on the
+  # gaming PC. See docs/reference.md "OpenViking embedding/VLM backend split"
+  # and issue #1795. The nomic-embed-text model is ~270MB and runs fine on the
+  # hydra-server's CPU (8 cores / 62GB, no GPU).
+  ollama-embed:
+    image: ollama/ollama:latest
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    volumes:
+      - ollama-embed-data:/root/.ollama
+      - ./docker/ollama-embed-entrypoint.sh:/entrypoint.sh:ro
+    healthcheck:
+      # Healthy only once the embedding model is actually pulled and loadable —
+      # /api/tags lists locally-available models; grep ensures the pull landed.
+      test: ["CMD-SHELL", "ollama list | grep -q nomic-embed-text || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6G
+
   openviking:
     init: true
     image: ghcr.io/volcengine/openviking:main
@@ -72,15 +102,23 @@ services:
       - /home/gabe/hydra/config:/config:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      # Local Ollama (gaming PC) over Tailnet — serves OV's embedding + vlm
-      # backends. Container has no MagicDNS, so map the Tailscale IP here and
-      # reference the hostname in docker/ov.conf. See ADR / hydra-doctor 2026-06-05.
+      # Local Ollama (gaming PC) over Tailnet — serves OV's VLM backend only
+      # now (embedding moved to the local ollama-embed service, issue #1795).
+      # Container has no MagicDNS, so map the Tailscale IP here and reference
+      # the hostname in docker/ov.conf. See ADR / hydra-doctor 2026-06-05.
       - "gabes-desktop-1:100.69.55.127"
     environment:
       - OPENVIKING_CONFIG_FILE=/app/ov.conf
     depends_on:
-      - redis
-      - vikingdb
+      redis:
+        condition: service_started
+      vikingdb:
+        condition: service_started
+      # Wait for the local embedding server to have pulled the model before OV
+      # starts trying to embed — avoids a cold-start window where the hot search
+      # path errors while the model is still downloading.
+      ollama-embed:
+        condition: service_healthy
     restart: unless-stopped
     deploy:
       resources:
@@ -96,4 +134,6 @@ volumes:
   openviking-data:
     driver: local
   vikingdb-data:
+    driver: local
+  ollama-embed-data:
     driver: local

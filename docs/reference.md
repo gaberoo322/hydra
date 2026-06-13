@@ -481,6 +481,33 @@ Conceptual definitions live in `CONTEXT.md` (**Pattern Memory**, **Reflections**
 - `acceptance-criterion-unmet` — true defect; threshold 3, auto-promotes to `to-planner.md` + escalates to a GitHub issue.
 - `acceptance-criterion-deferred` — only verifiable post-deploy/runtime/by-operator (metadata, not a defect); threshold 20+, does NOT write a rule to `to-planner.md`. Migrate pre-split entries with `bash scripts/cleanup/reclassify-deferred-acs.sh --apply`.
 
+## OpenViking embedding/VLM backend split (issue #1795)
+
+OpenViking has two model backends, deliberately served from **different**
+hosts so the hot search path survives a gaming-PC outage:
+
+| Backend | Model | Served by | Why |
+|---------|-------|-----------|-----|
+| `embedding.dense` | `nomic-embed-text` (768-dim) | **local CPU Ollama** on the hydra-server (compose service `ollama-embed`, addressed as `http://ollama-embed:11434/v1`) | tiny (~270MB), CPU-fine; on the *hot* search path — a query must be embedded before the vector lookup runs, so this can never depend on a remote host |
+| `vlm` | `gemma4:e4b` | gaming PC `gabes-desktop-1:11434` over Tailnet (mapped via `extra_hosts` in `docker-compose.yml`) | heavy, GPU-bound; only used for image/document understanding during indexing, **not** core text search |
+
+Before #1795 both backends pointed at `gabes-desktop-1`, so when the gaming PC
+was offline (~2 days, #1781) the **whole** search path broke. Now the gaming PC
+is a *soft* dependency: with it offline, `searchKnowledge()` / `trackedOvSearch`
+still embed + search locally; only VLM-dependent indexing degrades.
+
+The `ollama-embed` service pulls the model on first boot via
+`docker/ollama-embed-entrypoint.sh` and only reports healthy once
+`ollama list` shows `nomic-embed-text`; `openviking` `depends_on` it with
+`condition: service_healthy`, so OV never starts embedding against a
+not-yet-pulled model.
+
+> **Dimension is pinned at 768.** Changing the embedding model or its
+> `dimension` invalidates the existing vikingdb collection — a dim change
+> requires a collection **drop + OV restart** (see the
+> `reference_openviking_local_ollama` memory note). Keep `nomic-embed-text` /
+> `768` unless you intend to reindex from scratch.
+
 ## Config (`~/hydra/config/`) — git-tracked
 
 Operator edits these (or uses the dashboard):
