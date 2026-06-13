@@ -21,6 +21,48 @@ except: print('health=FAIL')"
 # failed services
 echo -n "failed_services="; systemctl --user list-units --type=service --state=failed --no-legend 2>/dev/null | grep -c hydra || echo 0
 
+# direction-doc drift (issue #1791)
+#
+# The orchestrator's COMMITTED copy of the Target direction docs lives at
+# `config/direction/{priorities,roadmap}.md`. These are the runtime source of
+# truth for the in-process readers — `readPriorities()` in
+# src/api/recommendations.ts and `getCurrentMilestoneProgress()` in
+# src/backlog/reads.ts both resolve them via HYDRA_CONFIG_PATH. The LIVE docs
+# that `/hydra-target-research` now writes live in the Target repo at
+# `$HYDRA_TARGET_REPO/direction/` (default ~/hydra-betting/direction/). Nothing
+# syncs the two, so the orch copy silently lags the research cycle (it was 3
+# milestones / 2 cycles stale on 2026-06-12 — issue #1791) and autopilot steers
+# from a world two research cycles old.
+#
+# This collector is READ-ONLY (see the header contract — no Redis/GitHub/file
+# writes). It does NOT mutate config/direction/ (that would dirty the deploy
+# tree, the #1739 hazard). It only DETECTS divergence and emits a boolean
+# signal so the autopilot turn can dispatch a refresh (the canonical refresh
+# command is documented in docs/operator-playbooks/hydra-target-build.md
+# "Direction docs" — copy the Target's direction/{priorities,roadmap}.md into
+# config/direction/ on a feature branch and open a PR). `direction_drift=true`
+# means the committed orch copy no longer matches the live Target docs;
+# `false` means they agree (or the Target docs are unreachable, in which case
+# there is nothing to sync against — fail closed to no-drift so a missing
+# Target checkout never spuriously triggers a refresh dispatch).
+echo -n "direction_drift="
+_dd_target_dir="${HYDRA_TARGET_REPO:-$HOME/hydra-betting}/direction"
+_dd_orch_dir="${HYDRA_CONFIG_PATH:-$HOME/hydra/config}/direction"
+_dd_drift=false
+for _dd_f in priorities.md roadmap.md; do
+  _dd_live="$_dd_target_dir/$_dd_f"
+  _dd_copy="$_dd_orch_dir/$_dd_f"
+  # Only a readable live doc + readable orch copy can drift. A missing live
+  # doc (Target not checked out) => nothing to sync against => no drift.
+  if [ -r "$_dd_live" ] && [ -r "$_dd_copy" ]; then
+    if ! cmp -s "$_dd_live" "$_dd_copy"; then
+      _dd_drift=true
+      break
+    fi
+  fi
+done
+echo "$_dd_drift"
+
 # orchestrator-side issue board (counts + stale lists)
 #
 # The `ready_for_agent` count is the source signal for `dev_orch` dispatch

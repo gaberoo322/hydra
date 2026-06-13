@@ -166,6 +166,27 @@ Load context (parallel):
 - `docker exec hydra-redis-1 redis-cli LRANGE "hydra:anchors:work-queue" 0 4`
 - `hydra memory planner` && `hydra memory executor`
 
+> **Direction docs are a mirror — refresh if stale (issue #1791).** The
+> `~/hydra/config/direction/{priorities,roadmap}.md` files loaded above are the
+> orchestrator's COMMITTED copy and the runtime source of truth for the
+> in-process readers (`readPriorities()` in `src/api/recommendations.ts`,
+> `getCurrentMilestoneProgress()` in `src/backlog/reads.ts`). The LIVE docs that
+> `/hydra-target-research` writes each cycle live in the Target repo at
+> `$HYDRA_TARGET_REPO/direction/` (default `~/hydra-betting/direction/`).
+> Nothing auto-syncs the two, so the orch copy can lag the research cycle by
+> milestones — it was 3 milestones / 2 cycles stale on 2026-06-12. The
+> `collect-state.sh` Phase-1 collector emits `direction_drift=true` when the
+> committed orch copy no longer matches the live Target docs. When you see that
+> signal (or notice the loaded `priorities.md` frontmatter `updated:` lagging
+> the Target's), refresh the committed copy on a feature branch and open a PR —
+> never write into `config/direction/` from a read-only collector or from the
+> deploy tree (the #1739 dirty-tree hazard):
+>
+> ```bash
+> cp "${HYDRA_TARGET_REPO:-$HOME/hydra-betting}"/direction/priorities.md ~/hydra/config/direction/priorities.md
+> cp "${HYDRA_TARGET_REPO:-$HOME/hydra-betting}"/direction/roadmap.md   ~/hydra/config/direction/roadmap.md
+> ```
+
 ### 2. Anchor (select task)
 
 If operator gave a task, use it. Otherwise priority order:

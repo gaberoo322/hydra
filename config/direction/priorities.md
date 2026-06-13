@@ -1,99 +1,119 @@
 ---
-updated: 2026-06-09
+updated: 2026-06-12
 refreshedBy: claude-research
-researchCycle: research-target-2026-06-09b
+researchCycle: research-target-2026-06-12a
 tags: [hydra, hydra/direction]
 ---
 # Current state
-Hydra is sports-first and execution-capable. Tests are green (5504 passing, 3 skipped — verified baseline 2026-06-09b). Active backlog is 63 queued items. Work queue is empty — fresh priorities set this cycle.
+Hydra is sports-first and execution-capable — and the funnel has never produced. Tests are green (5943 passing, 3 skipped — verified baseline 2026-06-12). Active backlog is 58 queued items. Work queue is empty — fresh priorities set this cycle.
 
-M8 is complete. All 7 milestone items shipped: `accumulateSportsTimeToSignal` calibration wiring (sports-time-to-signal route + sports-catalyst-response-cohorts route, ~PR #74), `buildWorldCupArbClusteringHeatmap` API route (#69), `buildSportExposureClusters` preflight guard (#68), `summarizeVenueOrderPnlPhasesByPolicy` PnL page (#67), circuit breaker SiteNav indicator (#66), WebSocket silent catch observability (bd11a263), `detectSettlementOrphans` reconciliation health wiring (c6eb5a7c). M9 starts now.
+M11 is complete. All 7 milestone items shipped: live Kalshi fee-rate splice into sports discovery pre-ranking (#90), `managePolymarketMakerOrder` GTD polling-cycle adapter (#91), `pricePolymarketNegativeRiskExit` in the NegRisk exit-plan resolver (#92), NBA/WC combinatorial scan candidates via `GET /api/scanner/combinatorial-candidates` (#94), `detectComboVsBasketCandidates` combo-basket scan path (#95), per-order projected sports maker rewards in builder revenue-share reconciliation (#96), sports-pair eligibility scan route (#97).
 
-Additional work merged beyond the M8 plan: Kalshi incentive-maker ranking wired into KXWC+KXNBA scanner (8a36ad23), settlement-criteria preflight wired into execute route (88ac675d), Kalshi 0DTE sports scanner API route live (#73), phase-aware Polymarket maker-reward EV in sports ranking (#72), fill-rate-discrepancy + slippage attribution in operator-health (#71), sequential dual-leg latency-SLA breaches surfaced (#70), sports-catalyst-response-cohorts calibration route (#74), Polymarket reward phase overrides sourced into run-cycle ranking (#75).
+Beyond the M11 plan, the machine-execution stack landed: approval-envelope-author (#99), adverse-selection blocking preflights (#102), machine-approval aggregate limits — daily notional cap, run-count cap, consecutive-failure trip (#108), and the auto-execution dispatcher behind a default-off promotion gate (#117). Also merged: individual wager list + per-wager lifecycle audit page (item-321), StatusLivePoller enrichment (#104), `/api/health/full` database-probe + migration-drift fix (#113), dead-code ratchet (#93), wiring-status ledger (#98).
 
-World Cup 2026 group stage is live (opened June 12). The system is at the threshold of first real-money dual-leg runs. Capital velocity tracking, settlement verification, and GTD maker order lifecycle management are the remaining readiness gaps.
+**The keystone fact for M12: the pipeline has never produced one opportunity end-to-end.** 1,378 of 1,378 scanner runs ended `zero_opportunities`. Root cause #1 was found and fixed on group-stage eve: World Cup normalization dropped all 72 odds-api WC events (`soccer_fifa_world_cup` missing from `supportedSportSet`; unhandled 1X2 draw leg) — fixed in #118, with normalization warning-sample persistence and a 100%-drop alert added in #119. WC 2026 group stage is live (opened June 12). M12 is **funnel production**: prove ingestion flows, prove the first opportunity (or explain zero per gate), prove the first paper execution through the M7–M11 stack, and get real samples into the calibration loop. No new module wiring until the funnel is proven.
 
-Per operator preference: selection quality over backlog volume, sports edge over everything else. Do not pad the backlog — it holds 63 items.
+Per operator preference: selection quality over backlog volume, sports edge over everything else. Do not pad the backlog — it holds 58 queued items.
 
-# Verified external venue state (2026-06-09, second cycle)
-- **Kalshi `GET /margin/fee_tiers`** — live per-market `maker_fee_rates`/`taker_fee_rates` map operational.
+# Verified external venue state (2026-06-12)
+All M10/M11 state carried forward:
+- **Kalshi `GET /margin/fee_tiers`** — live per-market `maker_fee_rates`/`taker_fee_rates` map operational, and now spliced into sports discovery pre-ranking via `applyKalshiLiveFeeRatesToDiscoveryMatches` (#90).
 - **Kalshi rate-limit tiers (Premier/Paragon/Prime)** — `kalshi-rate-limit-tier-headroom.ts` wired into `live-submit-preview-draft.ts`.
-- **Kalshi `post_only` / `PostOnlyCrossCancel`** — `isKalshiPostOnlyCrossCancel` wired in `kalshi-executor.ts` (#48, #49).
+- **Kalshi `post_only` / `PostOnlyCrossCancel`** — `isKalshiPostOnlyCrossCancel` wired in `kalshi-executor.ts`.
 - **Polymarket CLOB V2** — correctly wired (sdk-v2-compat, pUSD, keyset≤100, 200 req/s). No V3. No June-15 deadline. Do not re-verify.
-- **World Cup 2026** — group stage live June 12. `WORLD_CUP_2026_VERIFIED_PAIRS` seeded; settlement-timing wired; divergence-by-phase heatmap API live (#69).
-- **Opportunity half-life** — `GET /api/scanner/half-life-history` live (#65). Measured `halfLifeMs` per pair key readable by dashboard.
-- **Kalshi incentive maker ranking** — wired into KXWC + KXNBA scanner candidate ranking (8a36ad23).
-- **Settlement-criteria preflight** — wired into execute route; resolves settlement timing before authorization (88ac675d).
-- **Kalshi 0DTE sports scanner** — `GET /api/scanner/0dte-sports` live with live Kalshi snapshot (#73).
-- **Polymarket maker-reward EV** — phase-aware reward EV wired into sports candidate ranking (#72).
-- **Sports-catalyst-response-cohorts** — `POST /api/calibration/sports-catalyst-response-cohorts` live (#74).
+- **World Cup 2026** — group stage live since June 12. `WORLD_CUP_2026_VERIFIED_PAIRS` seeded; settlement-timing wired; divergence-by-phase heatmap API live. Tournament winner NegRisk live plan wired (#88) with exit pricing (#92); paper-default, env-gated.
+- **WC ingestion fix** — `soccer_fifa_world_cup` added to `supportedSportSet`, 1X2 draw leg skipped at normalization (#118); warning samples persisted + 100%-drop-per-sport alert (#119). Production flow NOT yet verified — that is M12 priority 1.
+- **Machine execution stack** — machine-built `liveDualLegApproval` envelopes (#99), adverse-selection blocking preflights (#102), aggregate limits (#108), scan-to-submit auto-execution dispatcher (#117). All behind default-off promotion gates; they stay off until the funnel is proven (M12 priorities 1–3).
+- **Combinatorial scan** — `GET /api/scanner/combinatorial-candidates` live (#94); Kalshi combo vs. Polymarket basket scan path live (#95).
+- **Maker reward accounting** — per-order projected sports maker rewards in builder revenue-share reconciliation (#96); maker-rebate fill classification (#84).
+- **Sports pair eligibility** — `markPolymarketSportsPairCandidatesScannerEligible` scan route live (#97).
+- **Opportunity half-life** — `GET /api/scanner/half-life-history` live. Measured `halfLifeMs` per pair key readable by dashboard.
+- **Kalshi incentive maker ranking** — wired into KXWC + KXNBA scanner candidate ranking.
+- **Settlement-criteria preflight** — wired into execute route.
+- **Kalshi 0DTE sports scanner** — `GET /api/scanner/0dte-sports` live.
+- **Polymarket maker-reward EV** — phase-aware reward EV wired into sports candidate ranking.
+- **Daily P&L accounting** — `mapOperatorDayAccounting` wired; `GET /api/pnl/daily-summary` live; `/wagers` page live with per-wager lifecycle audit (item-321).
+- **Execution lifecycle (M9/M10)** — fund distribution monitor, settlement velocity allocation, settlement verification polling, GTD maker order lifecycle (`evaluateMakerOrderLifecycle` + `managePolymarketMakerOrder` adapter #91), builder revenue share reconciler, venue maintenance deferral, route decision analytics (#83), fee details (#84), order ticket preview (#85), snapshot fill truth (#86), rate-cost proof (#87) — all wired.
+- **Health surface** — `/api/health/full` database probe repaired + migration drift surfaced (#113); ingestion warning samples + drop alerts (#119); StatusLivePoller enriched (#104).
 
 # Priority tasks
 
-## 1. Wire `operator-day-accounting.ts` into a daily P&L summary route and build the /wagers page (execution / close-the-learning-loop)
-`mapOperatorDayAccounting` in `lib/operator-day-accounting.ts` aggregates wager P&L and arbitrage-run realized P&L into a single daily total — zero non-test callers. A `/wagers` directory exists in the app but has no `page.tsx`. The daily accounting roll-up and the wager lifecycle audit are both pre-conditions for real-money operations: the operator needs to see daily net P&L and individual wager traces before authorizing live capital.
-- **Why now**: The system is at the threshold of first real-money runs. Daily accounting and wager traceability are pre-live readiness requirements.
-- **Done when**: `mapOperatorDayAccounting` is called from a `GET /api/pnl/daily-accounting` route or inline on the PnL page; the operator can see `wagerPnlDollars`, `arbitrageRunRealizedPnlDollars`, and `totalPnlDollars` for the current day; `/wagers` has a `page.tsx` that surfaces the individual wager lifecycle (status, P&L, resolution); tests cover the accounting roll-up with mixed wager/arbitrage inputs; TypeScript strict-mode clean.
+M12 is funnel production. The wiring surface is complete through M11; every priority below is about proving the existing stack produces real flow, not adding surface area.
 
-## 2. Wire `fund-distribution-monitor.ts` into the operator health dashboard (execution / improve-execution-discipline / protect-the-operation)
-`monitorFundDistribution` in `lib/execution/fund-distribution-monitor.ts` computes per-venue allocation drift, detects rebalance need, and surfaces recommendations — zero non-test callers. As real-money trading begins, capital imbalance between Kalshi and Polymarket is a live risk: too much capital on one venue means the other cannot execute its leg of a dual-leg arb.
-- **Why now**: First real-money dual-leg runs are imminent. Venue allocation drift that goes undetected before a live cycle can cause one leg to fail for lack of capital while the other executes — leaving a stranded position.
-- **Done when**: `monitorFundDistribution` is called from the operator health page or a dedicated route; the operator can see per-venue `currentAllocation`, `currentDriftFraction`, and any `recommendations` (rebalance-needed status); tests cover at least a two-venue drift scenario producing a `TARGET_DRIFT_EXCEEDED` recommendation; the panel is visible on the operator health dashboard.
+## 1. Verify WC ingestion is flowing in production post-#118 (compress-time-to-signal / protect-the-operation)
+PR #118 fixed the normalization that silently dropped all 72 odds-api World Cup events, and #119 added warning-sample persistence plus a 100%-drop-per-sport alert — but neither has been verified against live production flow with the group stage underway.
+- **Why now**: Every downstream M12 proof depends on WC events actually reaching the scanner. The group stage is live; each unverified day is lost signal during the highest-liquidity sports window of the year.
+- **Done when**: a production ingestion cycle persists non-zero `soccer_fifa_world_cup` events; the #119 100%-drop alert is quiet for soccer (or its firing is explained and fixed); normalization warning samples for WC payloads are reviewed and show no systematic drop class; the verified event count is recorded in the funnel evidence (backlog item-499 follow-through).
 
-## 3. Wire `settlement-velocity-allocation.ts` into the dual-leg sizing preflight (execution / improve-execution-discipline / deepen-structural-understanding)
-`allocateBySettlementVelocity` in `lib/execution/settlement-velocity-allocation.ts` allocates stake between venues weighted by settlement latency — preferring the faster-settling venue within per-leg size bounds — with a full audit trail. Zero non-test callers. Kalshi and Polymarket settle on different schedules; the current preflight uses aggregate exposure limits but does not account for settlement velocity when dividing notional between legs.
-- **Why now**: With real-money executions starting, capital held during settlement is dead capital. Weighting toward the faster-settling venue compounds returns at the margin while staying within existing exposure caps.
-- **Done when**: `allocateBySettlementVelocity` is called from the dual-leg sizing step in the execute preflight or in `live-submit-preview-draft.ts`; the `SettlementVelocityAllocationResult.audit.fastestVenue` is recorded in the run packet proof; tests cover a scenario where Kalshi settles faster and receives higher stake within its bounds; TypeScript strict-mode clean.
+## 2. Prove the first opportunity end-to-end — or explain zero per gate (backlog item-501) (sharpen-forecasts / deepen-structural-understanding)
+1,378 of 1,378 scanner runs ended `zero_opportunities`. With WC ingestion fixed, either the funnel produces its first persisted opportunity or the zero outcome must be decomposed per gate so the binding constraint is identified, not guessed.
+- **Why now**: This is the system's reason to exist. All ranking/fee/depth refinements shipped in M7–M11 are untested against real flow until one opportunity traverses the funnel.
+- **Done when**: at least one scanner opportunity is persisted from a production run, OR a per-gate funnel decomposition (ingestion → pair eligibility → event/market matching → edge threshold → depth/fee/half-life gates) reports candidate counts at each stage for at least one full scan cycle and names the binding gate with evidence.
 
-## 4. Wire `settlement-verification-polling.ts` into the reconciliation polling job (execution / close-the-learning-loop / protect-the-operation)
-`buildSettlementVerificationPollPlan` in `lib/execution/settlement-verification-polling.ts` produces a prioritized list of venue orders whose settlement status should be verified — distinguishing orders needing polling (`unsettled`, `recently_settled`) from orders to skip with a machine-readable reason. Zero non-test callers. `runSettlementVerificationDivergence` detects divergence between venue state and persisted state. The reconciliation health route checks orphans but does not run active settlement verification polling.
-- **Why now**: Real-money trades will accumulate settled and recently-settled orders that need active verification to close the settlement accounting loop. Missing this wiring means divergences compound silently.
-- **Done when**: `buildSettlementVerificationPollPlan` is called from the reconciliation scheduled job or `GET /api/reconciliation/settlement-verification`; any `divergent` finding causes the health check to surface it; tests cover at least one `recently_settled` order that would be polled and one `already_verified` skip; TypeScript strict-mode clean.
+## 3. Prove the first end-to-end PAPER execution through the M7–M11 stack (backlog item-502) (improve-execution-discipline / protect-the-operation)
+The full execution stack — approval envelope (#99), adverse-selection preflights (#102), aggregate limits (#108), dispatcher (#117), reconciliation, P&L attribution — has never processed a single real candidate. Promotion gates stay OFF; this is a paper proof.
+- **Why now**: First real-money runs cannot be authorized on an execution path that has never demonstrably worked end-to-end even on paper. The machine-execution stack merged in the last 48 hours needs its first live-shaped traversal.
+- **Done when**: one paper run packet traverses scan → rank → preflight (adverse-selection, exposure clusters, maintenance deferral, settlement criteria) → paper submit → reconciliation with proof artifacts persisted at each stage; the auto-execution dispatcher (#117) and live promotion gates remain default-off throughout; the run packet is reviewable from the dashboard.
 
-## 5. Wire `maker-order-lifecycle.ts` into the Polymarket GTD maker order management flow (execution / improve-execution-discipline)
-`evaluateMakerOrderLifecycle` in `lib/execution/maker-order-lifecycle.ts` decides whether a resting GTD maker order should be kept, cancelled, or refreshed based on expiration proximity and price drift — zero non-test callers. Polymarket maker orders are GTD (good-till-date); the current execution path submits them but has no lifecycle management for in-flight resting orders that drift from fair value.
-- **Why now**: GTD maker order lifecycle management is a prerequisite for Polymarket maker strategies (backlog: "Pilot Kalshi post-only sports maker quotes"). Orders submitted at a price that drifts from the market degrade fill quality and expose the operator to adverse selection.
-- **Done when**: `evaluateMakerOrderLifecycle` is called from the Polymarket reconciliation poller or a dedicated GTD-order management step; orders with `drift > maxPriceDrift` trigger a cancel or refresh action; tests cover expiry and drift scenarios; the lifecycle decision is recorded in structured venue order evidence.
-
-## 6. Wire `polymarket-builder-revenue-share-reconciler.ts` into a daily reconciliation job (execution / close-the-learning-loop / deepen-structural-understanding)
-`reconcilePolymarketBuilderRevenueShare` in `lib/execution/polymarket-builder-revenue-share-reconciler.ts` aggregates Polymarket `/builder-trades` records into daily/per-market/per-maker totals of `fee_credit_usdc` — zero non-test callers. The builder-attribution revenue is a real cash flow that offsets execution costs; not accounting for it means the P&L phase decomposition (PR #67) misses a favorable credit line.
-- **Why now**: Phase-decomposed P&L is live (PR #67). Builder revenue share credits reduce net fee drag — visible in the `feeDragPnlDollars` phase. Wiring the reconciler closes the accounting gap before real-money volume accumulates.
-- **Done when**: `reconcilePolymarketBuilderRevenueShare` is called from a scheduled job or `POST /api/reconciliation/polymarket-builder-revenue` that fetches `/builder-trades` from the Polymarket API and persists the daily aggregate; the PnL phase page or a dedicated panel surfaces `feeCreditUsdc` per day; tests cover deduplication by `tradeId` and `builderCode` filtering; TypeScript strict-mode clean.
-
-## 7. Wire `venue-maintenance-deferral.ts` into the execute route preflight (execution / protect-the-operation)
-`resolveVenueMaintenanceDeferral` in `lib/execution/venue-maintenance-deferral.ts` detects whether a Kalshi or Polymarket maintenance window is active and defers execution accordingly — zero non-test callers. The execute route preflight checks live account readiness but does not gate on venue maintenance windows. During a Kalshi or Polymarket maintenance window, order submission produces indeterminate results.
-- **Why now**: Live trading makes maintenance window deferral a real incident prevention mechanism. Orders submitted during a window can result in orphaned fills and stuck-state detection failures. Prevention is cheaper than recovery.
-- **Done when**: `resolveVenueMaintenanceDeferral` is called in the execute route preflight before order submission; if `allow: false`, the execute route returns `no_submit` with `reason: "venue_maintenance_deferral"` and the `resumeAt` timestamp; tests cover at least one Kalshi and one Polymarket maintenance-window scenario; the deferral reason is surfaced in the run packet proof.
+## 4. Get real samples into the calibration/learning loop (close-the-learning-loop / sharpen-forecasts)
+The calibration surfaces (time-to-signal, sports-catalyst-response-cohorts, CLV cohorts, opportunity half-life) are all wired but have only ever seen test fixtures. WC group-stage flow is the first chance to accumulate real samples.
+- **Why now**: The learning loop only compounds if it receives production data. Group-stage matches resolve daily — settlement and CLV ground truth arrives now or not at all for this tournament phase.
+- **Done when**: at least one calibration accumulator (`sports-time-to-signal`, `sports-catalyst-response-cohorts`, CLV cohort, or half-life history) shows non-zero accumulated samples sourced from production WC group-stage cycles; the sample counts are visible on the calibration dashboard; any accumulator still at zero after live flow is explained (no flow vs. broken wiring).
 
 # What's been completed (DO NOT re-propose)
-- Wire live Kalshi GET /margin/fee_tiers into per-market sports fee resolution — `kalshi-margin-fee-tiers.ts`, `kalshi-margin-fee-tier-map.ts`, wired into `resolveKalshiFeeRate` (#43, #44, #47 merged 2026-06-06/06-08).
-- Surface Kalshi earned rate-limit tier (grants array, Premier/Paragon/Prime) + token-budget headroom on the dual-leg submit preflight — `kalshi-rate-limit-tier-headroom.ts` merged 2026-06-08.
-- Fix web/src/lib/arbitrage/scanner.test.ts standalone @/-alias resolution — #42 merged 2026-06-06.
-- Persist fee-adjusted ranking evidence into durable candidate rows — #46 merged; persistence via prediction-market-cycle route (#65) merged 2026-06-09.
-- Rank executable depth and opportunity half-life ahead of raw edge — penalty terms wired; measured half-life surfaced via GET /api/scanner/half-life-history (#65 merged 2026-06-09).
-- Wire `summarizeSportsTimeToSignalBuckets` into calibration accumulator output (#61 merged 2026-06-08). Accumulator wiring completed via POST /api/calibration/sports-time-to-signal.
-- Verify Kalshi RFQ accepted-quote promotion carries post_only — `isKalshiPostOnlyCrossCancel` wired (#48, #49 merged 2026-06-08).
-- Build Kalshi 0DTE sports scanner for NBA Finals and World Cup live markets — GET /api/scanner/0dte-sports live (#73 merged).
-- Wire World Cup 2026 settlement-timing into scanner Opportunity output — #57 merged 2026-06-08.
-- Wire opportunity-half-life-and-depth summarizer into scan-history accumulation — #59 merged 2026-06-08.
-- Rename `PolymarketExecutionResult.executed` to `submitted` — #60 merged 2026-06-08.
-- Wire `buildNbaFinalsPairSeedCandidates` into verified-pair registry seeding — #62 merged 2026-06-09.
-- Per-sport and per-pair P&L attribution breakdown — #63 merged 2026-06-09.
-- Retire deprecated `pinnacle*` field aliases from `SportsbookPredictionEdgeSignal` — #64 merged 2026-06-09.
-- Surface circuit breaker status indicator on every dashboard page via SiteNav — #66 merged.
-- Wire `detectSettlementOrphans` into `GET /api/reconciliation/health` — c6eb5a7c merged.
-- Add error observability to WebSocket silent catch blocks (Kalshi + Polymarket) — bd11a263 merged.
-- Wire `summarizeVenueOrderPnlPhasesByPolicy` into PnL page — #67 merged.
-- Wire `buildSportExposureClusters` into preflight risk check — #68 merged.
-- Surface `buildWorldCupArbClusteringHeatmap` via GET /api/scanner/world-cup-heatmap — #69 merged.
-- Surface sequential dual-leg latency-SLA breaches in execution-timeline — #70 merged.
-- Wire fill-rate-discrepancy + slippage attribution into operator-health — #71 merged.
-- Wire phase-aware Polymarket maker-reward EV into sports candidate ranking — #72 merged.
-- Wire `accumulateSportsTimeToSignal` into POST /api/calibration/sports-time-to-signal — merged.
-- Wire Kalshi incentive-maker ranking into KXWC+KXNBA scanner candidate ranking — 8a36ad23 merged.
-- Wire settlement-criteria preflight into arbitrage execute route — 88ac675d merged.
-- Source Polymarket reward phase overrides into run-cycle ranking — #75 merged.
-- Sports-catalyst-response-cohorts calibration route — #74 merged.
+All M7, M8, M9, M10, M11 items — see full list below.
+- Wire `applyKalshiLiveFeeRatesToDiscoveryMatches` into sports discovery pre-ranking (#90).
+- Wire `managePolymarketMakerOrder` into the Polymarket GTD maker-order polling cycle (#91).
+- Wire `pricePolymarketNegativeRiskExit` into the NegRisk exit-plan resolver (#92).
+- Wire `buildAndRankNbaCombinatorialScanCandidates` into GET /api/scanner/combinatorial-candidates (#94).
+- Wire `detectComboVsBasketCandidates` into the combo-basket scan path (#95).
+- Account per-order projected sports maker rewards in builder revenue-share reconciliation (#96).
+- Wire `markPolymarketSportsPairCandidatesScannerEligible` into a sports-pair eligibility scan route (#97).
+- Machine-execution stack: approval-envelope-author (#99), adverse-selection gates (#102), machine-approval aggregate limits (#108), auto-execution dispatcher (default-off promotion gate) (#117).
+- Fix WC normalization dropping all 72 odds-api events (#118); persist warning samples + 100%-drop alert (#119); ingestion CONTEXT.md glossary (#120).
+- Individual wager list + per-wager lifecycle audit page (item-321).
+- Enrich StatusLivePoller with ingestion, alerts, arb-ops, circuit breaker, and wager counts (#104).
+- Repair always-failing database probe + surface migration drift on /api/health/full (#113).
+- Dead-code ratchet — knip + runtime reachability, CI-gated (#93); wiring-status ledger (#98).
+- In-session circuit-breaker threshold editor (#106); Recovery History primary nav (#105).
+- Wire live Kalshi GET /margin/fee_tiers into per-market sports fee resolution (#43, #44, #47).
+- Surface Kalshi earned rate-limit tier + token-budget headroom on the dual-leg submit preflight.
+- Persist fee-adjusted ranking evidence into durable candidate rows (#46, #65).
+- Rank executable depth and opportunity half-life ahead of raw edge (#65).
+- Wire `summarizeSportsTimeToSignalBuckets` into calibration accumulator output (#61).
+- Verify Kalshi RFQ accepted-quote promotion carries post_only (#48, #49).
+- Build Kalshi 0DTE sports scanner for NBA Finals and World Cup live markets (#73).
+- Wire World Cup 2026 settlement-timing into scanner Opportunity output (#57).
+- Wire opportunity-half-life-and-depth summarizer into scan-history accumulation (#59).
+- Wire `buildNbaFinalsPairSeedCandidates` into verified-pair registry seeding (#62).
+- Per-sport and per-pair P&L attribution breakdown (#63).
+- Retire deprecated `pinnacle*` field aliases from `SportsbookPredictionEdgeSignal` (#64).
+- Surface circuit breaker status indicator on every dashboard page via SiteNav (#66).
+- Wire `detectSettlementOrphans` into `GET /api/reconciliation/health` (c6eb5a7c).
+- Add error observability to WebSocket silent catch blocks (bd11a263).
+- Wire `summarizeVenueOrderPnlPhasesByPolicy` into PnL page (#67).
+- Wire `buildSportExposureClusters` into preflight risk check (#68).
+- Surface `buildWorldCupArbClusteringHeatmap` via GET /api/scanner/world-cup-heatmap (#69).
+- Surface sequential dual-leg latency-SLA breaches in execution-timeline (#70).
+- Wire fill-rate-discrepancy + slippage attribution into operator-health (#71).
+- Wire phase-aware Polymarket maker-reward EV into sports candidate ranking (#72).
+- Wire `accumulateSportsTimeToSignal` into POST /api/calibration/sports-time-to-signal (#74).
+- Wire Kalshi incentive-maker ranking into KXWC+KXNBA scanner candidate ranking (8a36ad23).
+- Wire settlement-criteria preflight into arbitrage execute route (88ac675d).
+- Source Polymarket reward phase overrides into run-cycle ranking (#75).
+- Wire `mapOperatorDayAccounting` into daily P&L summary route + /wagers page (#76).
+- Wire `monitorFundDistribution` into operator health dashboard.
+- Wire `allocateBySettlementVelocity` into dual-leg sizing preflight (#77).
+- Wire `resolveVenueMaintenanceDeferral` into execute route preflight (#78).
+- Wire `reconcilePolymarketBuilderRevenueShare` into daily reconciliation runner (#79).
+- Wire `evaluateMakerOrderLifecycle` into Polymarket GTD maker-order management (#80).
+- Wire `buildSettlementVerificationPollPlan` into reconciliation poll seam (#81).
+- Wire `aggregateRouteDecisionOutcomes` into GET /api/execution/route-decision-summary (#83).
+- Wire `classifyPolymarketFillMakerRebate` into Polymarket reconciliation fill processing (#84).
+- Wire `buildScannerOrderTicketPreview` into GET /api/scanner/order-ticket-preview (#85).
+- Wire `joinPolymarketSnapshotFillTruth` into Polymarket reconciliation poll seam (#86).
+- Wire `attachKalshiRateCostProofPacket` into live Kalshi submit-audit proof (#87).
+- Wire `resolvePolymarketNegativeRiskLivePlan` into NegRisk live execution plan (paper-default, env-gated) (#88).
 - Report CLV cohorts by source and lead-time bucket.
 - Normalize Kalshi `price_ranges` start/end fields at provider parse boundary.
 - Fix league-scoped CLV bucket matching to require exact league equality.
@@ -107,31 +127,28 @@ Per operator preference: selection quality over backlog volume, sports edge over
 - Kalshi and Polymarket execution and reconciliation foundations.
 - Verified KXNBA Kalshi-Polymarket pair registry seeded and consumed.
 - Paper LLM probability estimator and calibration dashboard.
-- Pinnacle fair-line ingestion and no-vig derivation; Pinnacle CLV slices for injury-adjusted candidates.
+- Pinnacle fair-line ingestion and no-vig derivation.
 - Negative-risk and sports combinatorial scan modules.
 - Promote Kalshi RFQ accepted quotes into submit-ready execution packets.
 - Expose sports forecast edge evidence on dashboard review flows.
-- Polymarket CLOB V2 client wiring AND verification (item-402 closed).
-- Adopt Kalshi `order_group_updates` WS account channel for live execution-state lead.
+- Polymarket CLOB V2 client wiring AND verification.
+- Adopt Kalshi `order_group_updates` WS account channel.
 - Migrate Kalshi off deprecated `/portfolio/orders` to V2 `/trade-api/v2/orders`.
 - Consume Kalshi `/markets/orderbooks` batch read and `/account/endpoint_costs`.
 - Extend SportsDataIO injury feed to MLB + MLS.
 - Add sharp-book lead-lag evidence to sports route ranking.
 - Add standalone `pair_key` indexes on scanner_opportunities + alert_states.
 - Enforce Polymarket CLOB 200 req/s server rate ceiling guard.
-- Rename `KalshiExecutionResult.executed` to `submitted` (2026-05-27).
+- Rename `KalshiExecutionResult.executed` to `submitted`; rename `PolymarketExecutionResult.executed` to `submitted` (#60).
 
 # What NOT to work on
-- Do NOT re-propose the pure module builds — all are built. The remaining work is wiring, not module creation.
-- Do NOT re-propose `opportunity-observation-accumulator` or `scanner/opportunity-half-life-history` builds — shipped in PR #59. The API route is live (#65).
-- Do NOT re-propose `resolveWorldCupGroupStageSettlementTiming` wiring — completed in PR #57.
+- Do NOT propose new module wiring or new module builds while the funnel is unproven. M7–M11 completed the wiring surface; M12 is production proof. A new wiring item is only valid if priority 2's per-gate decomposition names it as the binding gate.
+- Do NOT promote the machine-execution gates to live — the auto-execution dispatcher (#117) and live promotion gates stay default-off until M12 priorities 1–3 are proven.
+- Do NOT re-propose any M7, M8, M9, M10, or M11 items — all shipped (see "What's been completed").
 - Do NOT build a "Polymarket V3" client or treat a June-15 forced-liquidation deadline as real. FALSE premise. CLOB V2 is the real change, already wired.
-- Do not re-propose any M7 or M8 items — all shipped (see "What's been completed").
-- Do not re-propose Kalshi incentive-maker ranking, settlement-criteria preflight, or Polymarket reward phase override sourcing — all merged.
-- Do not re-propose `accumulateSportsTimeToSignal` calibration wiring, `buildWorldCupArbClusteringHeatmap` route, `buildSportExposureClusters` preflight, `summarizeVenueOrderPnlPhasesByPolicy` PnL page, circuit breaker SiteNav indicator, WebSocket observability, or `detectSettlementOrphans` health wiring — all merged.
 - Do not prioritize defensive hardening, fail-closed rewrites, generic preflights, guard rails, migration-drift gates, or broad executor refactors unless the operator explicitly asks.
 - Do not pull focus into politics, economics, culture, or crypto-adjacent markets while sports forecast and signal compounding work remains available.
 - Do not re-propose completed CLV cohort reporting, Kalshi price range normalization, exact league CLV matching, World Cup team normalization, zero-persistence diagnostics, injury-recency ranking, CLV-gated sizing integration, sharp-line sizing provenance, fee-adjusted ranking delta, or timestamp-locked nomination replay metrics.
 - Do not re-propose the abandoned generic sharp-line movement boost; future sharp-line work must be cohort-based, timestamp-locked, or tied to catalyst response measurement.
 - Do not propose the Hyperliquid HIP-4 monitor as a priority — secondary domain; monitor but do not prioritize.
-- Do not pad the backlog. It holds 63 queued items; adding low-edge items to hit a volume target is counterproductive (operator preference: maintainability/selection-quality over throughput).
+- Do not pad the backlog. It holds 58 queued items; adding low-edge items to hit a volume target is counterproductive (operator preference: maintainability/selection-quality over throughput).
