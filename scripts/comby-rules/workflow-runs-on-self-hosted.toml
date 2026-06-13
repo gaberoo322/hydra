@@ -1,0 +1,27 @@
+# comby rule — GitHub workflow runners must be self-hosted (issue #1798, tool-scout: code-search-infra).
+#
+# Hydra's CI runs on a pool of 4 self-hosted runners (reference_hydra_ci_runner_pool):
+# they share the host's local network (Redis on :6379, the orchestrator on :4000)
+# and burn no GitHub-hosted Actions minutes. A workflow that declares
+# `runs-on: ubuntu-latest` (or any GitHub-hosted label) would bill metered minutes
+# AND lose access to the local services the gates depend on. Every workflow under
+# .github/workflows/ today uses `runs-on: self-hosted`; this rule keeps it that way.
+#
+# WHY COMBY, NOT ast-grep OR a seam-check: this is a YAML invariant. ast-grep
+# (ast-grep-lint.yml) only has a TypeScript tree-sitter grammar wired here, and the
+# redis/schema/query seam ratchets are TS-source line-regex checks. Comby matches
+# the runner-label token with its .generic matcher so :[label] binds the balanced
+# expression structurally, without tripping on the substring "ubuntu-latest"
+# appearing in a comment or a string. This is comby's lane: the long tail of
+# config / YAML / shell that ast-grep does not cover here (boundary in CLAUDE.md).
+#
+# ADVISORY: comby-check.yml runs this as a reporting pass that exits 0 — it surfaces
+# a GitHub-Actions annotation for review, it does not block merge. To promote it to a
+# hard gate, make the workflow exit 1 on a non-empty match set (a conscious change).
+
+# Match a runs-on mapping whose value is the github-hosted ubuntu runner family.
+# :[label] is a comby hole — it matches the balanced runner-label expression
+# (ubuntu-latest, ubuntu-22.04, ubuntu-20.04, …) after the "ubuntu-" prefix.
+[runs-on-ubuntu-hosted]
+match = "runs-on: ubuntu-:[label]"
+rule = "where true"

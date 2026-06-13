@@ -1,0 +1,94 @@
+name: comby-check
+
+# Structural lint for the non-TypeScript long tail — config / YAML / shell
+# (issue #1798, tool-scout: code-search-infra).
+#
+# comby (https://comby.dev) parses code into a lightweight syntax tree and matches
+# template patterns where `:[hole]` matches a balanced expression. Unlike a `grep`
+# / `sed` line-regex it does not mis-fire on the pattern text appearing inside a
+# comment or a string literal. It is language-agnostic, which is exactly why it
+# owns a different lane from ast-grep-lint.yml: ast-grep here only has a TypeScript
+# tree-sitter grammar wired, so comby covers the YAML / shell / Markdown that
+# ast-grep does not. The lane boundary is documented in CLAUDE.md.
+#
+# This lives in its OWN workflow file — deliberately NOT inside ci.yml — because
+# ci.yml is part of the Verifier Core (ADR-0001 / ADR-0015: "the gate that gates
+# the gate", operator-only / Tier-4 exact-match). A new structural linter is a NEW
+# verification, not a change to the merge gate, so it lands as a normal Tier-3
+# sibling — the same pattern ast-grep-lint.yml, seam-checks.yml, lockfile-lint.yml,
+# and allow-scripts.yml already follow (operator memory
+# feedback_ci_gate_separate_workflow_avoids_tier0). Adding a rule later is one new
+# file under scripts/comby-rules/ — still T3, zero Tier-4 contact.
+#
+# ADVISORY by design: this job reports comby matches as GitHub-Actions annotations
+# and exits 0. It surfaces structural findings to reviewers WITHOUT blocking merge,
+# mirroring ast-grep-lint.yml's advisory contract. To promote a rule to a hard gate
+# later, make the matching step exit non-zero on a non-empty match set (a conscious,
+# reviewable change).
+#
+# comby runs from its OFFICIAL PINNED Docker image, NOT a downloaded standalone
+# binary: the pre-built `comby-<ver>-x86_64-linux` binary dynamic-links libev /
+# libpcre which the self-hosted runners do not ship (it fails with
+# "libev.so.4: cannot open shared object file"). The alpine image bundles the
+# runtime, so it is the reproducible path comby's own docs recommend. There is no
+# npm distribution either way, so this keeps comby off the ADR-0005 runtime-dep
+# allowlist and the lavamoat allow-scripts gate. Bump COMBY_IMAGE to update.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: comby-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned, version-tagged alpine image (carries comby + its libev/libpcre runtime).
+  COMBY_IMAGE: "comby/comby:alpine-3.14-1.8.1"
+
+jobs:
+  comby-check:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull pinned comby image
+        run: docker pull "$COMBY_IMAGE"
+
+      - name: comby structural scan (advisory; rules in scripts/comby-rules/)
+        run: |
+          set -uo pipefail
+          # Advisory: report matches as GitHub annotations, always exit 0.
+          # Apply every rule's match template from scripts/comby-rules/ over the
+          # GitHub workflow YAML. -match-only suppresses rewrite (these are
+          # match-only rules). comby has no dedicated YAML matcher (`comby -list`
+          # ships only .txt and .generic), so .generic is used — it matches the
+          # balanced :[hole] token structurally without tripping on the pattern
+          # text inside a comment or string, which is the false-positive class a
+          # line-regex grep can't avoid.
+          found=0
+          for rule in scripts/comby-rules/*.toml; do
+            [ -e "$rule" ] || continue
+            echo "::group::comby rule $rule"
+            out=$(docker run --rm -v "$PWD:/work:ro" -w /work "$COMBY_IMAGE" \
+                    -config "/work/$rule" -matcher .generic -match-only \
+                    -directory .github/workflows -extensions .yml,.yaml 2>/dev/null || true)
+            if [ -n "$out" ]; then
+              found=1
+              printf '%s\n' "$out"
+              # Emit a GitHub-Actions warning annotation so the finding surfaces in the PR.
+              echo "::warning title=comby-check::Structural match from rule $rule (advisory — see job log)"
+            else
+              echo "no matches for $rule"
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$found" = "0" ]; then
+            echo "comby-check: no structural matches across scripts/comby-rules/ (clean)"
+          fi
+          exit 0
