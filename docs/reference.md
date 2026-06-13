@@ -508,6 +508,26 @@ not-yet-pulled model.
 > `reference_openviking_local_ollama` memory note). Keep `nomic-embed-text` /
 > `768` unless you intend to reindex from scratch.
 
+**Graceful degradation when the embedding backend is unreachable (issue #1781).**
+The dense-embedding backend (`ollama-embed`) is **critical infra for the hot
+search path** — a query cannot be embedded without it, so when it is down
+`searchKnowledge()` / `trackedOvSearch` return **empty** `{resources:[],memories:[]}`
+and **never throw** (the never-throw-from-grounding rule). Agents simply run with
+no knowledge context until it recovers; cycles do not crash. The deep-health
+OV-search probe classifies this hop into four distinct `ovSearch.status` values
+so an operator gets an actionable signal rather than a generic failure:
+
+| `ovSearch.status` | Meaning | What to check |
+|-------------------|---------|---------------|
+| `running` | search 2xx'd | healthy (an `info` "OV search empty" fires only if the index is empty) |
+| `failed` | OV reachable, search 5xx'd (`ov-non-2xx`) / malformed body | OpenViking itself / its internal search handler |
+| `timeout` | search exceeded the deep-health window (`ov-timeout`) | slow-but-working; raise `OV_SEARCH_PROBE_TIMEOUT_MS` if persistent (`info`, not a fault) |
+| `backend-unreachable` | search transport never reached OV (`ov-service-down`) | the embedding backend host — `docker exec hydra-openviking-1 curl -m5 http://ollama-embed:11434/api/tags`; `/hydra-doctor` probes this automatically |
+
+The classifier (`classifyOvSearchProbe` in `src/health-diagnostics.ts`) is a pure,
+unit-tested function; the `backend-unreachable` warning is additive — no existing
+status was renamed or removed.
+
 ## Config (`~/hydra/config/`) — git-tracked
 
 Operator edits these (or uses the dashboard):

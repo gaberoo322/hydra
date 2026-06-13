@@ -37,13 +37,28 @@
 /**
  * The wire/snapshot status the OV-search deep-health probe can report.
  *  - `running` — `search/find` returned 200 (the true plane state).
- *  - `failed`  — OV reachable but search 5xx'd (`ov-non-2xx`), or the transport
- *                failed (`ov-service-down` / malformed JSON). A genuine fault.
+ *  - `failed`  — OV reachable but search 5xx'd (`ov-non-2xx`), or a 2xx body
+ *                failed to parse (`ov-malformed-json`). OV itself is up; its
+ *                search path is broken. A genuine fault.
  *  - `timeout` — the probe exhausted its window (`ov-timeout`); the plane is
  *                likely working-but-slow (real agent searches have no 3s cap),
  *                so this is reported distinctly and treated as informational.
+ *  - `backend-unreachable` — the search transport never completed a round-trip
+ *                (`ov-service-down`: DNS/ECONNREFUSED/network). Issue #1781: the
+ *                graceful-degradation signal distinct from `failed`. The
+ *                `search/find` path is the one that exercises the embedding
+ *                backend, so a transport failure on it — while the OV liveness
+ *                probe may report differently — points the operator at the
+ *                embedding/inference backend (the post-#1795 local
+ *                `ollama-embed` service, or the Tailnet VLM host for indexing),
+ *                NOT at an OV-internal 5xx. Collapsing it into `failed` was the
+ *                indistinguishability #1781 exists to fix.
  */
-export type OvSearchProbeStatus = "running" | "failed" | "timeout";
+export type OvSearchProbeStatus =
+  | "running"
+  | "failed"
+  | "timeout"
+  | "backend-unreachable";
 
 /**
  * OV-search deep-health probe `AbortSignal` ceiling (ms).
@@ -96,9 +111,19 @@ export function classifyOvSearchProbe(
     if (result.code === "ov-timeout") {
       return { status: "timeout", latencyMs, resultCount: 0 };
     }
-    // `ov-non-2xx` reached OV but search 5xx'd — a real fault; keep its latency.
-    // `ov-service-down` / `ov-malformed-json` never completed a round-trip, so
-    // `latencyMs` would be meaningless → null.
+    // Issue #1781: `ov-service-down` is a transport failure — the request never
+    // reached OV's search handler (DNS/ECONNREFUSED/network). Because the
+    // `search/find` path is the one that exercises the embedding backend, this
+    // is the distinct, operator-actionable "embedding backend unreachable"
+    // signal — NOT a generic OV-internal 5xx. Keep it separate from `failed` so
+    // the diagnostic can point the operator at the backend host rather than at
+    // OpenViking itself. No round-trip completed, so latency is meaningless → null.
+    if (result.code === "ov-service-down") {
+      return { status: "backend-unreachable", latencyMs: null, resultCount: 0 };
+    }
+    // `ov-non-2xx` reached OV but search 5xx'd — a real OV-internal fault; keep
+    // its latency. `ov-malformed-json` round-tripped a 2xx but the body was
+    // garbage, so `latencyMs` would be meaningless → null.
     return {
       status: "failed",
       latencyMs: result.code === "ov-non-2xx" ? latencyMs : null,
@@ -608,6 +633,25 @@ const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           impact: "Agents run cycles with empty knowledge context.",
           action: "Check OpenViking + its LLM/embedding backend (#980).",
           autoRecovery: false,
+        }
+      : null,
+  // Issue #1781: the search transport never reached OpenViking — distinct from a
+  // 5xx (`failed`) and from a slow plane (`timeout`). The `search/find` path is
+  // what exercises the embedding backend, so a transport failure here points at
+  // the dense-embedding service (post-#1795 the local `ollama-embed` container)
+  // or, for indexing, the Tailnet VLM host — NOT at OpenViking itself. Surface a
+  // distinct, actionable warning so the operator checks the right hop. searchKnowledge
+  // still returns empty (never throws), so this degrades quality, it does not crash cycles.
+  (s) =>
+    s.ovSearch.status === "backend-unreachable"
+      ? {
+          severity: "warning",
+          component: "intelligence",
+          what: "OV embedding backend unreachable",
+          why: "Knowledge-plane search transport never reached OpenViking (DNS/connection-refused/timeout on the embedding-exercising search path). OpenViking may be up while its embedding backend is unreachable.",
+          impact: "Search returns empty — agents run cycles with no knowledge context until the backend recovers.",
+          action: "Check the dense-embedding service: docker exec hydra-openviking-1 curl -m5 http://ollama-embed:11434/api/tags (and the Tailnet VLM host gabes-desktop-1:11434 if indexing). See OpenViking embedding/VLM backend split in docs/reference.md.",
+          autoRecovery: true,
         }
       : null,
   // Issue #1032: a probe TIMEOUT is NOT a fault — the Ollama-backed embedding
