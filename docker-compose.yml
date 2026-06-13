@@ -70,6 +70,17 @@ services:
   # gaming PC. See docs/reference.md "OpenViking embedding/VLM backend split"
   # and issue #1795. The nomic-embed-text model is ~270MB and runs fine on the
   # hydra-server's CPU (8 cores / 62GB, no GPU).
+  #
+  # BRING-UP CONTRACT (issue #1812): start the stack with a bare
+  # `docker compose up -d` (NO service argument). `openviking` declares
+  # `depends_on: ollama-embed (condition: service_healthy)` below, so a full
+  # bring-up always pulls this service in. A targeted `docker compose up -d
+  # openviking` ALSO honours that dependency — but a targeted bring-up of any
+  # OTHER service (e.g. `up -d postgres`) will NOT create ollama-embed, leaving
+  # OpenViking's hot embedding path with an unreachable backend and a failing
+  # health probe. `restart: unless-stopped` only re-honours an already-created
+  # container across host reboots; it does not create the container on first
+  # bring-up. /hydra-doctor detects a missing ollama-embed and re-creates it.
   ollama-embed:
     image: ollama/ollama:latest
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
