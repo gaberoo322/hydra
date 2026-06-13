@@ -1,0 +1,13 @@
+# ast-grep project config (issue #1797, tool-scout: code-search-infra).
+#
+# Tells `ast-grep scan` where the rule files live. ast-grep walks up from the
+# cwd to find this file, so `npx -p @ast-grep/cli ast-grep scan` from the repo
+# root picks up every rule under src/ast-grep-rules/. Keep rule files there
+# (one rule per file, kebab-case filename matching the rule `id` where practical).
+#
+# ast-grep is invoked via npx (pinned in scripts/ast-search.ts and
+# .github/workflows/ast-grep-lint.yml) and is deliberately NOT a package.json
+# dependency — see the header of scripts/ast-search.ts for the rationale
+# (ADR-0005 runtime-dep allowlist + lavamoat allow-scripts gate).
+ruleDirs:
+  - src/ast-grep-rules

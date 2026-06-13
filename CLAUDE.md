@@ -48,6 +48,7 @@ curl http://localhost:4000/api/scheduler/status
 - **HTTP request bodies validate through `src/schemas/<domain>.ts`** (zod `safeParse`; on failure return 400 `{code:"schema-validation-failed", issues}`). The schema is the source of truth for both the parser and the inferred type. See **Schemas** in `CONTEXT.md`.
 - **API routes in sub-routers** — `src/api.ts` is a thin mount point; handlers live in `src/api/<domain>.ts` (factory functions receiving `eventBus` if needed). `eventBus` is a parameter, never a module global.
 - **`grounding.ts` is read-only** — never mutate the workspace from inside grounding.
+- **Structural code search** — for call-site / AST questions ("find every caller of `moveItemToLane`", "every `new Redis(...)`") prefer `npm run ast-search -- --pattern '<ast-grep pattern>'` (`scripts/ast-search.ts`, tool-scout #1797) over text `grep`: it matches *syntax*, so it never false-matches a comment or string literal. Reusable AST-exact lint rules live as YAML under `src/ast-grep-rules/` and run in the advisory `ast-grep-lint` workflow (a Tier-3 sibling, NOT in `ci.yml`); add a sibling file to add a rule. ast-grep is invoked via `npx`, deliberately not a package.json dependency (keeps it off the ADR-0005 runtime-dep allowlist and the lavamoat allow-scripts gate).
 
 ## CI/CD & Deployment
 
