@@ -1,0 +1,77 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Hydra's first eval (tool-scout #1802, promptfoo). The eval CONTRACT lives in
+# docs/evals.md — read it before editing this file.
+#
+# DELIBERATELY OFFLINE — NO LIVE PROVIDER CALLS.
+# ====================================================================
+# This first landed eval uses promptfoo's built-in `echo` provider, which
+# returns the rendered prompt VERBATIM and makes ZERO network/LLM calls. It
+# needs no ANTHROPIC_API_KEY (no such secret exists in any CI workflow today —
+# adding one is an ADR-0005 operator escalation). The assertions test that the
+# prompt-rendering pipeline preserves the load-bearing invariants we inject —
+# a deterministic, free, reproducible signal that proves the harness itself
+# runs green end-to-end in CI.
+#
+# A LIVE-PROVIDER eval (golden-task replay scored against real Anthropic calls)
+# is a FOLLOW-UP, gated on the operator provisioning a scoped CI secret. When it
+# lands it must be cost-capped (HYDRA_-prefixed env cap + --sample/concurrency,
+# modelled on HYDRA_RECS_DAILY_CAP_USD) — never an uncapped fan-out. See
+# docs/evals.md § "Live-provider follow-up".
+
+description: >-
+  Hydra orchestrator golden eval — offline harness smoke + prompt-invariant
+  guard. Asserts that the prompt template renders the safety-critical contract
+  tokens a hydra-dev dispatch must always carry. echo provider = no LLM calls.
+
+prompts:
+  # The prompt under test stands in for the load-bearing preamble every
+  # code-writing dispatch carries. The {{...}} vars are filled per-test below.
+  - >-
+    You are dispatched to implement issue #{{issue}} in worktree {{worktree}}.
+    Branch policy: {{branch_policy}}.
+    Before opening the PR you MUST run: {{verify_cmd}}.
+    Operator-escalation is the closed ADR-0005 list only.
+
+providers:
+  # `echo` is a promptfoo built-in that returns the rendered prompt unchanged.
+  # No provider config, no API key, fully deterministic.
+  - id: echo
+
+# Pass when EVERY assertion across EVERY test passes. The advisory workflow
+# treats a non-zero exit as a finding to annotate, never a hard merge block
+# (see .github/workflows/eval-gate.yml).
+tests:
+  - description: dispatch preamble carries the worktree + branch invariants
+    vars:
+      issue: "1802"
+      worktree: "agent-xyz"
+      branch_policy: "never push directly to master; always a feature branch"
+      verify_cmd: "npm run typecheck:test && npm test"
+    assert:
+      # The rendered prompt must name the worktree it isolates to.
+      - type: contains
+        value: "worktree agent-xyz"
+      # It must carry the never-push-to-master branch invariant.
+      - type: contains
+        value: "never push directly to master"
+      # It must instruct the test-file typecheck variant, not the src-only one
+      # (operator memory feedback_dev_run_test_typecheck_before_pr).
+      - type: contains
+        value: "npm run typecheck:test"
+      # It must reference the closed ADR-0005 escalation list, not invent one.
+      - type: contains
+        value: "ADR-0005"
+
+  - description: a different issue number renders without leaking the prior one
+    vars:
+      issue: "9999"
+      worktree: "agent-abc"
+      branch_policy: "feature branch only"
+      verify_cmd: "npm test"
+    assert:
+      - type: contains
+        value: "issue #9999"
+      # Negative guard: the previous test's issue id must not bleed through.
+      - type: javascript
+        value: "!output.includes('1802')"

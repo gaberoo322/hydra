@@ -1,0 +1,76 @@
+name: eval-gate
+
+# Eval harness for agent/skill behavior (issue #1802, tool-scout: promptfoo).
+#
+# promptfoo (https://promptfoo.dev) runs a TestSuite — prompts × providers ×
+# assertions — and returns a stable JSON result object. It fills the gap
+# between unit tests (node:test, which test CODE behavior) and production
+# observation: it tests AGENT/PROMPT behavior. The eval configs live under
+# evals/ (one YAML per skill / agent class); the contract is docs/evals.md.
+#
+# This lives in its OWN workflow file — deliberately NOT inside ci.yml —
+# because ci.yml is part of the Verifier Core (ADR-0001 / ADR-0015: "the gate
+# that gates the gate", operator-only / Tier-4 exact-match). A new verification
+# is a NEW workflow, not a change to the merge gate, so it lands as a normal
+# Tier-3 sibling — the same pattern ast-grep-lint.yml, comby-check.yml,
+# seam-checks.yml, lockfile-lint.yml, and allow-scripts.yml all follow (operator
+# memory feedback_ci_gate_separate_workflow_avoids_tier0). Adding an eval later
+# is one new file under evals/ — still T3, zero Tier-4 contact.
+#
+# ADVISORY by design: this job runs the eval, prints the result, and exits 0
+# regardless of pass/fail, surfacing the outcome as a GitHub-Actions annotation.
+# It is NOT a required branch-protection check, so a non-deterministic eval can
+# never wedge the merge queue (operator memory reference_seam_checks_advisory_only:
+# only ci.yml contexts are required). To promote a specific eval to a hard gate
+# later, drop the trailing `|| true` / `exit 0` for that step — a conscious,
+# reviewable change.
+#
+# OFFLINE / NO LIVE PROVIDER: the first landed eval (evals/golden.yaml) uses
+# promptfoo's `echo` provider and makes ZERO LLM calls — there is NO
+# ANTHROPIC_API_KEY (or any provider secret) in any CI workflow today; the only
+# secret available is GITHUB_TOKEN. Provisioning a provider key into CI is an
+# ADR-0005 operator escalation (credentials are operator-only). A live-provider
+# eval is a follow-up gated on that secret + a HYDRA_-prefixed cost cap.
+#
+# promptfoo is invoked via `npx --yes -p promptfoo@<pinned>` rather than a
+# package.json dependency: that keeps it off the ADR-0005 runtime-dep allowlist
+# AND off the lavamoat allow-scripts gate (promptfoo pulls 40+ transitive deps
+# with install lifecycle scripts; the committed allowlist is empty,
+# `allowScripts: {}`). The pinned version MUST match the `eval` script in
+# package.json so local and CI runs use the same binary. Same tool-lane as
+# ast-grep and comby (see CLAUDE.md § Structural code search).
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: eval-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  eval-gate:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: promptfoo eval (advisory; offline echo provider — no API key)
+        run: |
+          set -uo pipefail
+          echo "::group::promptfoo eval (evals/golden.yaml)"
+          # No provider secrets are exported — the echo provider makes no LLM
+          # calls. PROMPTFOO_DISABLE_TELEMETRY/UPDATE keep CI hermetic & quiet.
+          if PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 \
+             npx --yes -p promptfoo@0.121.15 promptfoo eval -c evals/golden.yaml; then
+            echo "eval-gate: golden eval PASSED"
+          else
+            # Advisory: surface the failure as an annotation, do not block merge.
+            echo "::warning title=eval-gate::promptfoo golden eval reported a failure (advisory — see job log)"
+          fi
+          echo "::endgroup::"
+          exit 0
