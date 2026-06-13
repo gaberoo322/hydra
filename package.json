@@ -20,6 +20,7 @@
     "openviking-seam-check": "npx tsx scripts/ci/openviking-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts",
     "ast-search": "npx tsx scripts/ast-search.ts",
+    "probe-search": "npx tsx scripts/probe-search.ts",
     "ast-grep-scan": "npx --yes -p @ast-grep/cli@0.43.0 ast-grep scan",
     "eval": "npx --yes -p promptfoo@0.121.15 promptfoo eval -c evals/golden.yaml",
     "lockfile-lint": "lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity",
