@@ -399,12 +399,14 @@ export function renderBody(finding: CleanupFinding, isoDate: string): string {
   );
   lines.push("");
   lines.push("```bash");
+  lines.push("# Use grep -rnw, NOT rg -w: the host rg shim silently drops -w and matches");
+  lines.push("# substrings, mis-reporting a dead export as live (issue #1733).");
   lines.push("# 1. Still referenced ANYWHERE (src + test), ignoring its own definition site?");
-  lines.push(`rg -n --no-heading -w "${probeName}" src test | grep -v "${finding.path}"`);
+  lines.push(`grep -rnw "${probeName}" src test | grep -v "${finding.path}"`);
   lines.push("# 2. Is the flagged line a re-export (`export { x } from './y'` / `export *`) rather than the definition?");
-  lines.push(`rg -n "export .*\\b${probeName}\\b" "${finding.path}"`);
+  lines.push(`grep -rnE "export .*\\b${probeName}\\b" "${finding.path}"`);
   lines.push("# 3. Redis key generator? Are sibling generators referenced only by the same test assertions?");
-  lines.push(`rg -n "${probeName}" src/redis test/redis-keys.test.mts`);
+  lines.push(`grep -rn "${probeName}" src/redis test/redis-keys.test.mts`);
   lines.push("```");
   lines.push("");
   lines.push(
@@ -796,12 +798,14 @@ export function renderBatchBody(
   );
   lines.push("");
   lines.push("```bash");
+  lines.push("# Use grep -rnw, NOT rg -w: the host rg shim silently drops -w and matches");
+  lines.push("# substrings, mis-reporting a dead export as live (issue #1733).");
   lines.push("# 1. Still referenced ANYWHERE (src + test), ignoring its own definition site?");
-  lines.push('rg -n --no-heading -w "<name>" src test | grep -v "<path>"');
+  lines.push('grep -rnw "<name>" src test | grep -v "<path>"');
   lines.push("# 2. Is the flagged line a re-export (`export { x } from './y'` / `export *`) rather than the definition?");
-  lines.push('rg -n "export .*\\b<name>\\b" "<path>"');
+  lines.push('grep -rnE "export .*\\b<name>\\b" "<path>"');
   lines.push("# 3. Redis key generator? Are sibling generators referenced only by the same test assertions?");
-  lines.push('rg -n "<name>" src/redis test/redis-keys.test.mts');
+  lines.push('grep -rn "<name>" src/redis test/redis-keys.test.mts');
   lines.push("```");
   lines.push("");
   lines.push(
