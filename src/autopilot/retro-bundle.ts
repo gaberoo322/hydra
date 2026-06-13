@@ -591,6 +591,77 @@ export function projectDispatches(
   return out;
 }
 
+/**
+ * Final identity-keyed dedup over the already-enriched dispatch rows (issue
+ * #1823). The projection-time `byIdentity` map in {@link projectDispatches}
+ * dedups on the identity present ON THE ACTION at projection time. But for a
+ * multi-turn cycle whose durable `cycleId` only resolves from the cycle-metrics
+ * sidecar POST-HOC (the Target-build / sidecar-backfilled-cycleId path), the
+ * action-time identity is absent or per-turn, so each turn's action emits its
+ * own `RetroDispatch`. After {@link assembleRetroBundle}'s metrics-sidecar
+ * enrichment loop has stamped the canonical `cycleId` (and status/anchor/PR)
+ * onto every row, two rows that resolved to the SAME real cycle now share a
+ * non-empty `cycleId` — so a SECOND, post-enrichment dedup pass keyed on that
+ * backfilled identity collapses them into one row, where the action-time map
+ * could not (it never saw the backfilled id).
+ *
+ * Contract (mirrors the projection-time merge):
+ *   - Keyed on the non-empty `cycleId` (the durable transcript handle). An
+ *     EMPTY-cycleId row carries no durable identity to dedup on, so it is left
+ *     untouched (the undrillable / interrupted-run case stays per its #1184
+ *     treatment — two distinct empty-cycleId slots are not merged).
+ *   - EARLIEST-turn row is canonical (a `null` turn_n sorts last, so a
+ *     turn-bearing row wins over an unknown-turn duplicate). Later same-cycleId
+ *     rows are dropped after UNIONING their non-null fields onto the canonical
+ *     row — so a field only a later turn resolved (a PR-shaped anchor, a
+ *     backfilled abandonReason) is preserved while the row count drops to one.
+ *   - `regressionIntroduced` ORs across the merged rows (any turn that saw a
+ *     regression makes the merged dispatch a regression).
+ *   - Pure + order-stable: returns the surviving rows in first-seen order, so
+ *     the bundle's `dispatches[]` ordering is deterministic.
+ *
+ * Operates in place on the passed array's members for the union, but returns a
+ * NEW filtered array (the dropped duplicates are removed). The flagged /
+ * undrillable materialisation runs AFTER this pass, so each real cycle is
+ * flagged at most once — closing the #1823 double-count.
+ */
+export function dedupByCanonicalCycleId(dispatches: RetroDispatch[]): RetroDispatch[] {
+  const canonical = new Map<string, RetroDispatch>();
+  const survivors: RetroDispatch[] = [];
+  for (const d of dispatches) {
+    // Empty-cycleId rows have no durable identity — never merge them.
+    if (!d.cycleId) {
+      survivors.push(d);
+      continue;
+    }
+    const prior = canonical.get(d.cycleId);
+    if (!prior) {
+      canonical.set(d.cycleId, d);
+      survivors.push(d);
+      continue;
+    }
+    // A later same-cycleId row: pick the earliest-turn row as canonical (a
+    // null turn_n sorts last), then union the dropped row's non-null fields.
+    const priorTurn = prior.turn_n ?? Number.POSITIVE_INFINITY;
+    const dTurn = d.turn_n ?? Number.POSITIVE_INFINITY;
+    // The canonical row is always the one already in `survivors` (first-seen);
+    // we only adopt the earlier turn_n onto it so the canonical row reports the
+    // dispatching turn, never a later occupancy turn.
+    if (dTurn < priorTurn) prior.turn_n = d.turn_n;
+    if (!prior.skill && d.skill) prior.skill = d.skill;
+    if (!prior.anchorReference && d.anchorReference) prior.anchorReference = d.anchorReference;
+    if (!prior.prNumber && d.prNumber) prior.prNumber = d.prNumber;
+    if (prior.status === null && d.status !== null) {
+      prior.status = d.status;
+      prior.bucket = d.bucket;
+    }
+    if (!prior.abandonReason && d.abandonReason) prior.abandonReason = d.abandonReason;
+    if (d.regressionIntroduced) prior.regressionIntroduced = true;
+    // `d` is dropped (not pushed to survivors).
+  }
+  return survivors;
+}
+
 // ---------------------------------------------------------------------------
 // Public entrypoint
 // ---------------------------------------------------------------------------
@@ -639,8 +710,10 @@ export async function assembleRetroBundle(
     errors.push({ source: "run-record", detail: runResult.detail || runResult.code });
   }
 
-  // 2. Per-dispatch projection from the turn timeline.
-  const dispatches = projectDispatches(turns);
+  // 2. Per-dispatch projection from the turn timeline. `let`, because the
+  //    post-enrichment identity dedup (step 3c, issue #1823) returns a filtered
+  //    array once the canonical cycleId has been backfilled onto each row.
+  let dispatches = projectDispatches(turns);
 
   // 3. Enrich each dispatch from its cycle metrics sidecar (abandonReason,
   //    regressionIntroduced) — getRun's join already attached status/PR, but
@@ -732,6 +805,23 @@ export async function assembleRetroBundle(
       d.cycleId = "";
     }
   }
+
+  // 3c. Post-enrichment identity dedup (issue #1823). The projection-time
+  //     `byIdentity` map deduped on the identity present ON THE ACTION; a
+  //     multi-turn cycle whose durable `cycleId` only resolves from the
+  //     cycle-metrics sidecar POST-HOC (the Target-build / sidecar-backfilled
+  //     path) was therefore projected as one row PER TURN — each turn's action
+  //     carried no shared action-time identity, so the action-time map never
+  //     merged them. Now that the enrichment loop above has stamped the
+  //     canonical cycleId / status / anchor / abandonReason onto every row, two
+  //     rows that resolved to the SAME real cycle share a non-empty cycleId, so
+  //     this final identity-keyed pass collapses them into one (earliest-turn
+  //     canonical, non-null fields unioned). Runs BEFORE the flag/undrillable
+  //     materialisation so each real failed cycle is flagged exactly once
+  //     instead of being double-counted (the #1776-incomplete defect). An
+  //     empty-cycleId row (undrillable / interrupted-run case) has no durable
+  //     identity and is left untouched.
+  dispatches = dedupByCanonicalCycleId(dispatches);
 
   // 3b. Best-effort status derivation for a non-clean termination. When a run
   //     crashed (term_reason=crash) or was killed, its dispatches' terminal
