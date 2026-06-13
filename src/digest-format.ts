@@ -19,13 +19,52 @@
  */
 
 import { getTargetCommitUrl } from "./target-config.ts";
-import { ORCHESTRATOR_FLOOR } from "./capacity-floor.ts";
-import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
+import { ORCHESTRATOR_FLOOR, type CapacitySnapshot } from "./capacity-floor.ts";
+import {
+  getBuilderHealthScorecard,
+  type BuilderHealthScorecard,
+} from "./aggregators/builder-health.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
 
 const MAX_DIGEST_LENGTH = 4000; // Telegram's ~4096 char limit with margin
 
-export function buildDigestMessage(events, capacitySnapshot = null, builderHealth = null) {
+/**
+ * The event vocabulary the digest grammar reads (issue #1835).
+ *
+ * `buildDigestMessage` is fed accumulated events (`PendingEvent` in
+ * `digest.ts`, ultimately the loosely-typed `NotificationEvent` shapes from the
+ * bus). This type names exactly the fields the grammar touches via `e.type`,
+ * `e.timestamp`, and the `e.payload?.…` optional chains below — so a renamed
+ * payload field (e.g. `task.finalStatus` instead of `task.finalState`) becomes
+ * a compile error at the access site rather than a silent runtime miss.
+ *
+ * `payload` stays open (`Record<string, unknown> & {…}`) because the bus carries
+ * the full event vocabulary; the named fields are the subset this grammar
+ * narrows on. `type`/`timestamp` are required because the grammar reads them
+ * unconditionally (`events[0].timestamp.split(…)`).
+ */
+export interface DigestGrammarEvent {
+  type: string;
+  timestamp: string;
+  payload?: Record<string, unknown> & {
+    task?: { title?: string; finalState?: string };
+    commitSha?: string;
+    grounding?: {
+      before?: { passed?: number | string };
+      after?: { passed?: number | string };
+    };
+    opportunityCount?: number;
+    autoQueued?: number;
+    updatesApplied?: number;
+    regressedOutcomes?: unknown;
+  };
+}
+
+export function buildDigestMessage(
+  events: DigestGrammarEvent[],
+  capacitySnapshot: CapacitySnapshot | null = null,
+  builderHealth: BuilderHealthScorecard | null = null,
+): string {
   const lines = ["📊 *Hydra Digest*", ""];
 
   // Cycle summary
@@ -45,7 +84,7 @@ export function buildDigestMessage(events, capacitySnapshot = null, builderHealt
       for (const e of shown) {
         const task = e.payload?.task;
         const sha = e.payload?.commitSha?.slice(0, 7);
-        const link = sha ? getTargetCommitUrl(e.payload.commitSha) : "";
+        const link = sha ? getTargetCommitUrl(e.payload?.commitSha ?? "") : "";
         lines.push(`• ${task?.title || "?"}${sha ? ` (${link})` : ""}`);
       }
       if (merged.length > 10) lines.push(`• ... and ${merged.length - 10} more`);
@@ -144,7 +183,8 @@ export function buildDigestMessage(events, capacitySnapshot = null, builderHealt
     actionItems.push(`⚠️ ${holdbackReverts.length} Outcome Holdback auto-revert(s) — leading outcomes regressed after self-mod`);
     for (const e of holdbackReverts.slice(0, 3)) {
       const sha = (e.payload?.commitSha || "?").toString().slice(0, 7);
-      const outs = Array.isArray(e.payload?.regressedOutcomes) ? e.payload.regressedOutcomes.join(", ") : "?";
+      const regressed = e.payload?.regressedOutcomes;
+      const outs = Array.isArray(regressed) ? regressed.join(", ") : "?";
       actionItems.push(`  • ${sha} — ${outs}`);
     }
   }

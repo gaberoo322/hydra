@@ -59,10 +59,11 @@ describe("buildDigestMessage", () => {
 
   it("renders the capacity split when a snapshot is supplied", () => {
     const snapshot = {
-      orchestrator: { share: 0.3, count: 3, window: 10 },
+      orchestrator: { share: 0.3, count: 3, window: 10, floor: 0.25 },
       target: { share: 0.7, count: 7 },
       idle: { count: 0 },
       floorMet: true,
+      recent: [],
     };
     const msg = buildDigestMessage([], snapshot);
     assert.match(msg, /• Orchestrator: 30% \(3\/10\) ✅ floor 25%/);
