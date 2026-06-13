@@ -8,6 +8,38 @@
 
 // Issue #954: OV HTTP requests route through the OpenViking Request Adapter.
 import { ovPostJson, isOvFailure } from "./ov-request.ts";
+import type { OvErrorCode } from "./ov-request.ts";
+
+// Issue #1828: skill registration timed out systematically (~8-12x/hour) under
+// OpenViking indexing load — a fire-and-forget single attempt with a 60s budget
+// per skill, run ONCE at startup. When the `/api/v1/skills` endpoint is busy
+// indexing it doesn't answer in 60s, so the catalog stayed empty until the next
+// process restart. We now (a) raise the per-attempt budget to 120s (the endpoint
+// eventually succeeds — delayed registration beats none), and (b) retry the two
+// *transient* failure codes with exponential backoff so a load spike no longer
+// permanently loses the registration.
+
+/** Per-attempt timeout (#1828: raised from 60s — the endpoint succeeds eventually). */
+const SKILL_REGISTER_TIMEOUT_MS = 120_000;
+
+/** Max attempts per skill (1 initial + retries). */
+const SKILL_REGISTER_MAX_ATTEMPTS = 3;
+
+/** Base backoff between attempts; doubles each retry (1s, 2s, …). */
+const SKILL_REGISTER_BACKOFF_BASE_MS = 1_000;
+
+/**
+ * Only the transient transport/timeout codes are worth retrying. A `ov-non-2xx`
+ * (OV rejected the payload) or `ov-malformed-json` (OV answered garbage) will not
+ * heal on a retry — those are surfaced immediately so a real bug isn't masked by
+ * three identical failures.
+ */
+const RETRYABLE_OV_CODES: ReadonlySet<OvErrorCode> = new Set<OvErrorCode>([
+  "ov-timeout",
+  "ov-service-down",
+]);
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const OV_SKILLS = [
   {
@@ -32,18 +64,65 @@ const OV_SKILLS = [
   },
 ];
 
-export async function registerSkills() {
+/**
+ * POST one skill to `/api/v1/skills`, retrying the transient OV failure codes
+ * (`ov-timeout`, `ov-service-down`) with exponential backoff (#1828). The
+ * adapter owns the URL join + auth headers + timeout + non-2xx/transport
+ * classification; this helper layers the retry policy on top and keeps the
+ * "never throw, return a boolean" contract the caller's tally relies on.
+ *
+ * Returns `true` once OV accepts the skill, `false` after the attempt budget is
+ * exhausted (or on the first non-retryable failure). Non-retryable failures
+ * short-circuit so a genuine payload/parse bug isn't masked by N identical logs.
+ */
+/**
+ * Tunables for {@link registerSkills}. Production calls it argument-free (the
+ * constants above apply); tests pass a tiny `backoffBaseMs` so the retry path is
+ * exercised without real second-long sleeps.
+ */
+export interface RegisterSkillsOptions {
+  /** Base backoff in ms (doubles each retry). Defaults to {@link SKILL_REGISTER_BACKOFF_BASE_MS}. */
+  backoffBaseMs?: number;
+}
+
+async function registerOneSkill(
+  skill: (typeof OV_SKILLS)[number],
+  backoffBaseMs: number,
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= SKILL_REGISTER_MAX_ATTEMPTS; attempt++) {
+    const result = await ovPostJson(
+      "/api/v1/skills",
+      { data: skill },
+      { timeout: SKILL_REGISTER_TIMEOUT_MS },
+    );
+    if (!isOvFailure(result)) return true;
+
+    const lastAttempt = attempt === SKILL_REGISTER_MAX_ATTEMPTS;
+    const retryable = RETRYABLE_OV_CODES.has(result.code);
+    if (!retryable || lastAttempt) {
+      console.error(
+        `[Learning] Failed to register skill ${skill.name}: ${result.code}` +
+          (retryable ? ` (gave up after ${attempt} attempts)` : ""),
+      );
+      return false;
+    }
+
+    // Exponential backoff: base, 2×base, 4×base, … before the next attempt.
+    const backoff = backoffBaseMs * 2 ** (attempt - 1);
+    console.error(
+      `[Learning] Transient OV failure registering skill ${skill.name}: ${result.code} — ` +
+        `retrying in ${backoff}ms (attempt ${attempt}/${SKILL_REGISTER_MAX_ATTEMPTS})`,
+    );
+    await sleep(backoff);
+  }
+  return false;
+}
+
+export async function registerSkills(opts: RegisterSkillsOptions = {}) {
+  const backoffBaseMs = opts.backoffBaseMs ?? SKILL_REGISTER_BACKOFF_BASE_MS;
   let registered = 0;
   for (const skill of OV_SKILLS) {
-    // The adapter owns the URL join + auth headers + 60000ms timeout +
-    // non-2xx/transport classification (and logs the failing code/body). This
-    // loop keeps its fire-and-forget "log and continue" semantics.
-    const result = await ovPostJson("/api/v1/skills", { data: skill }, { timeout: 60000 });
-    if (!isOvFailure(result)) {
-      registered++;
-    } else {
-      console.error(`[Learning] Failed to register skill ${skill.name}: ${result.code}`);
-    }
+    if (await registerOneSkill(skill, backoffBaseMs)) registered++;
   }
   if (registered > 0) {
     console.log(`[Learning] Registered ${registered}/${OV_SKILLS.length} OV skills`);
