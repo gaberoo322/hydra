@@ -26,8 +26,7 @@ import {
   mergedTokensFromPr,
   mergedTokensFromGhJson,
   normalizeIdentity,
-  loadMergedAnchorRefsImpl,
-  __resetMergedScanCacheForTests,
+  makeMergedAnchorRefsLoader,
   harvestOrchIssueRefs,
   reconcileWorkQueue,
   type CandidateFeedDeps,
@@ -511,7 +510,7 @@ describe("getCandidateFeed — merged-by-cycle suppression (#882)", () => {
 // Production merged-refs reader (#882 QA remediation): swap-seam + TTL cache.
 // ---------------------------------------------------------------------------
 
-describe("loadMergedAnchorRefsImpl — swap seam + TTL cache (#882)", () => {
+describe("makeMergedAnchorRefsLoader — swap seam + TTL cache (#882, #1834)", () => {
   // A fake `gh` exec that records the repos it was asked to scan and returns a
   // canned merged-PR payload. Shaped like promisify(execFile)'s resolution.
   function fakeExec(payloadByRepo: Record<string, string>) {
@@ -525,8 +524,10 @@ describe("loadMergedAnchorRefsImpl — swap seam + TTL cache (#882)", () => {
     return { exec, calls };
   }
 
+  // Each test constructs a FRESH loader so the closure-local TTL cache starts
+  // cold — #1834 replaced the module-level cache + `__resetMergedScanCacheForTests`
+  // with this per-loader isolation.
   test("scans the orchestrator repo AND the swap-seam target repo (ADR-0013)", async () => {
-    __resetMergedScanCacheForTests();
     __resetTargetConfig();
     process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
     try {
@@ -534,7 +535,8 @@ describe("loadMergedAnchorRefsImpl — swap seam + TTL cache (#882)", () => {
         "gaberoo322/hydra": JSON.stringify([{ title: "fix (#100)", body: "" }]),
         "acme/widgets": JSON.stringify([{ title: "item-322 maker", body: "" }]),
       });
-      const refs = await loadMergedAnchorRefsImpl(exec, 1_000_000);
+      const loadMergedAnchorRefs = makeMergedAnchorRefsLoader(exec);
+      const refs = await loadMergedAnchorRefs(1_000_000);
       // Both the literal orchestrator repo and the CONFIGURED target repo were
       // scanned — NOT the hardcoded gaberoo322/hydra-betting.
       assert.deepEqual(calls.sort(), ["acme/widgets", "gaberoo322/hydra"]);
@@ -543,12 +545,10 @@ describe("loadMergedAnchorRefsImpl — swap seam + TTL cache (#882)", () => {
     } finally {
       delete process.env.HYDRA_TARGET_GITHUB_REPO;
       __resetTargetConfig();
-      __resetMergedScanCacheForTests();
     }
   });
 
   test("a fresh cache entry (<TTL) short-circuits the gh shell-out", async () => {
-    __resetMergedScanCacheForTests();
     __resetTargetConfig();
     process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
     try {
@@ -556,37 +556,57 @@ describe("loadMergedAnchorRefsImpl — swap seam + TTL cache (#882)", () => {
         "gaberoo322/hydra": JSON.stringify([{ title: "fix (#7)", body: "" }]),
         "acme/widgets": "[]",
       });
+      const loadMergedAnchorRefs = makeMergedAnchorRefsLoader(exec);
       const t0 = 5_000_000;
-      const first = await loadMergedAnchorRefsImpl(exec, t0);
+      const first = await loadMergedAnchorRefs(t0);
       assert.ok(first.has("7"));
       const callsAfterFirst = calls.length; // 2 (one per repo)
 
       // Second call 30s later — within the 60s TTL — must reuse the cache.
-      const second = await loadMergedAnchorRefsImpl(exec, t0 + 30_000);
+      const second = await loadMergedAnchorRefs(t0 + 30_000);
       assert.equal(calls.length, callsAfterFirst, "no new gh calls within TTL");
       assert.equal(second, first, "same cached Set instance returned");
 
       // After the TTL expires, the reader scans again.
-      const third = await loadMergedAnchorRefsImpl(exec, t0 + 61_000);
+      const third = await loadMergedAnchorRefs(t0 + 61_000);
       assert.ok(calls.length > callsAfterFirst, "gh re-scanned after TTL expiry");
       assert.ok(third.has("7"));
     } finally {
       delete process.env.HYDRA_TARGET_GITHUB_REPO;
       __resetTargetConfig();
-      __resetMergedScanCacheForTests();
     }
   });
 
   test("a gh failure degrades to an empty set and is cached (never throws)", async () => {
-    __resetMergedScanCacheForTests();
     __resetTargetConfig();
     try {
       const exec = (async () => { throw new Error("gh: command not found"); }) as any;
-      const refs = await loadMergedAnchorRefsImpl(exec, 9_000_000);
+      const loadMergedAnchorRefs = makeMergedAnchorRefsLoader(exec);
+      const refs = await loadMergedAnchorRefs(9_000_000);
       assert.equal(refs.size, 0, "total failure → empty set (suppress nothing)");
     } finally {
       __resetTargetConfig();
-      __resetMergedScanCacheForTests();
+    }
+  });
+
+  test("each loader instance owns an isolated cache (no module-level leak)", async () => {
+    __resetTargetConfig();
+    process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
+    try {
+      const a = fakeExec({ "gaberoo322/hydra": JSON.stringify([{ title: "fix (#1)", body: "" }]), "acme/widgets": "[]" });
+      const b = fakeExec({ "gaberoo322/hydra": JSON.stringify([{ title: "fix (#2)", body: "" }]), "acme/widgets": "[]" });
+      const loaderA = makeMergedAnchorRefsLoader(a.exec);
+      const loaderB = makeMergedAnchorRefsLoader(b.exec);
+      const t0 = 8_000_000;
+      const refsA = await loaderA(t0);
+      const refsB = await loaderB(t0);
+      // Loader B does its OWN scan rather than reading A's cache.
+      assert.ok(refsA.has("1") && !refsA.has("2"));
+      assert.ok(refsB.has("2") && !refsB.has("1"));
+      assert.ok(b.calls.length > 0, "loader B scanned despite loader A warming first");
+    } finally {
+      delete process.env.HYDRA_TARGET_GITHUB_REPO;
+      __resetTargetConfig();
     }
   });
 });
