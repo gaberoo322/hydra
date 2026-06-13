@@ -414,6 +414,103 @@ def _fire_reflection_record(
         _append_log(msg)
 
 
+def _classify_failure_pattern(cue: str) -> str:
+    """Map a free-form failure cue to a stable self-heal pattern ID (issue #1820).
+
+    Delegates to `self_heal.classify` so reap and self_heal agree on the
+    pattern taxonomy (the single source of truth lives in self_heal). The
+    import is LAZY + guarded so reap stays importable/usable even if self_heal
+    is unavailable (partial checkout / test harness) — on any failure we fall
+    back to the conservative `unknown` pattern, which `_fire_reflection_record`
+    still records (only `worktree-isolation-broken` is skipped).
+    """
+    try:
+        from self_heal import classify  # lazy: keep reap importable standalone
+        return classify(cue)
+    except Exception:  # noqa: BLE001 — best-effort; classification is not correctness
+        return "unknown"
+
+
+def _find_failure_log_entry(state: dict, task_id: str) -> dict | None:
+    """Return the most-recent failure_log row matching `task_id`, or None.
+
+    decide.py's `_rule_reap_subagent_stops` appends a failure_log row (carrying
+    `task_id`, `pattern`, `note`) when a `subagent_stop` arrives with a
+    failure/budget_exceeded status — that row is the live signal that THIS
+    completion was a non-merged failure rather than a clean success. reap reads
+    it here to decide whether a reflection-record fire is warranted (issue
+    #1820). Tolerates a missing/malformed failure_log (returns None).
+    """
+    if not task_id:
+        return None
+    flog = state.get("failure_log")
+    if not isinstance(flog, list):
+        return None
+    for entry in reversed(flog):
+        if isinstance(entry, dict) and entry.get("task_id") == task_id:
+            return entry
+    return None
+
+
+def _fire_reflection_for_completion(
+    state: dict,
+    anchor_ref: str | None,
+    task_id: str,
+    soft_cap_hit: bool,
+    *,
+    task_title: str | None = None,
+) -> None:
+    """Fire a per-anchor failure reflection from the reap-completion path (issue #1820).
+
+    This is the live-path WRITE producer that #1119 Slice 1 INTENDED but never
+    achieved: `self_heal.append_failure → _fire_reflection_record` was wired but
+    `append_failure` is never called on today's hook-driven reap path, so the
+    reflection store stayed empty and `reflectionMatchSource` was permanently
+    'none'. `run_completion` is the one subprocess that runs on every terminal
+    dispatch AND holds the anchor (recovered from the slot before it is nulled),
+    so it is the correct chokepoint.
+
+    Fires ONLY for a non-merged FAILURE — never a clean success (reflections are
+    prior-FAILURE narratives, not success logs). A completion is treated as a
+    failure when EITHER:
+      - the soft token cap was hit (a token-runaway terminal), OR
+      - decide.py recorded a `failure_log` row for this task_id (a subagent_stop
+        with failure/budget_exceeded status).
+
+    The pattern is classified from the failure cue (self_heal taxonomy); the
+    soft-cap case has no decide.py cue, so it is tagged `ratelimit`-adjacent via
+    its own synthetic cue. Everything is best-effort and non-fatal: no anchor,
+    no failure signal, or any downstream error degrades to a clean no-op — the
+    reap path is correctness, reflection writes are learning.
+    """
+    if not anchor_ref:
+        return
+    failure_entry = _find_failure_log_entry(state, task_id)
+    if not soft_cap_hit and failure_entry is None:
+        # Clean (or merge-pending) completion — nothing to reflect on.
+        return
+    if failure_entry is not None:
+        # Prefer the decide.py-recorded cue/pattern. The note is the subagent
+        # summary; the recorded pattern (e.g. "subagent_failure") feeds classify.
+        cue = (
+            failure_entry.get("note")
+            or failure_entry.get("pattern")
+            or "verification-failure"
+        )
+    else:
+        # Soft-cap runaway: no decide.py row. Synthesise a cue so the taxonomy
+        # buckets it (token runaways are a rate/limit-shaped terminal).
+        cue = "token budget hard limit exceeded — dispatch abandoned"
+    pattern = _classify_failure_pattern(cue)
+    _fire_reflection_record(
+        anchor_ref,
+        pattern,
+        cue,
+        task_id=task_id,
+        task_title=task_title,
+    )
+
+
 def _reap_stale_claims() -> None:
     """Best-effort POST to /api/backlog/stale-claims/reap (issue #721).
 
@@ -457,9 +554,12 @@ def run_hardcap() -> int:
         return 0
     hard = s["limits"]["subagent_hard_max_tokens"]
     soft = s["limits"]["subagent_max_tokens"]
-    # (class, skill, partial_tokens, task_id) — capture task_id before we
-    # null the slot so the cycle-record post can dedup on it (issue #430).
-    runaways: list[tuple[str, str, int, str]] = []
+    # (class, skill, partial_tokens, task_id, anchor) — capture task_id AND the
+    # anchor before we null the slot so the cycle-record post can dedup on the
+    # task_id (issue #430) and the failure reflection-record can key on the
+    # anchor (issue #1820). The anchor is the only per-cycle reference that
+    # survives to reap, and the slot is about to be cleared.
+    runaways: list[tuple[str, str, int, str, str | None]] = []
     for cls, slot in list(s["slots"].items()):
         if slot is None:
             continue
@@ -467,12 +567,13 @@ def run_hardcap() -> int:
         if partial >= hard:
             # Hard-cap trip: abandon slot, file diagnostic issue, mark class burned.
             task_id = slot.get("task_id") or f"hardcap-{cls}-{partial}"
-            runaways.append((cls, slot.get("skill", "?"), partial, task_id))
+            anchor_ref = slot.get("anchor")
+            runaways.append((cls, slot.get("skill", "?"), partial, task_id, anchor_ref))
             s["slots"][cls] = None
             if cls not in s.get("burned_classes", []):
                 s.setdefault("burned_classes", []).append(cls)
     _save_state(s)
-    for cls, skill, tokens, task_id in runaways:
+    for cls, skill, tokens, task_id, anchor_ref in runaways:
         title = f"Subagent token-runaway: {skill} burned {tokens} tokens"
         body = (
             f"Autopilot abandoned a `{cls}` slot running `{skill}` at "
@@ -494,6 +595,19 @@ def run_hardcap() -> int:
         # task_id was captured before the slot was cleared so dedup holds
         # across re-runs of the hard-cap pass.
         _fire_cycle_record(task_id, skill, "failed", tokens)
+        # Issue #1820: a hard-cap trip is an unambiguous non-merged failure —
+        # fire a reflection so the next attempt on this anchor reads why the
+        # prior one was abandoned. Best-effort, keyed on the anchor captured
+        # before the slot was cleared; a no-op when no anchor was stamped.
+        if anchor_ref:
+            cue = f"token hard cap exceeded — {skill} burned {tokens} tokens, slot abandoned"
+            _fire_reflection_record(
+                anchor_ref,
+                _classify_failure_pattern(cue),
+                cue,
+                task_id=task_id,
+                task_title=skill,
+            )
     return 0
 
 
@@ -580,6 +694,13 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     slots = s.get("slots") or {}
     slot = slots.get(cls)
     duration_ms = _compute_duration_ms(slot)
+    # Issue #1820: recover the anchor reference from the slot BEFORE it is
+    # nulled. The dispatcher stamps `slot["anchor"]` (e.g. "issue-1820") at
+    # dispatch time — it is the only place the per-cycle anchor survives to
+    # reap. Captured here so a failure reflection-record fire below can key on
+    # it (see `_fire_reflection_for_completion`). None when the slot is absent
+    # (signal class / already-cleared) or carries no anchor.
+    anchor_ref = slot.get("anchor") if isinstance(slot, dict) else None
     if slot is not None:
         slot["tokens"] = total_tokens
         s["slots"][cls] = None  # release the pipeline slot
@@ -609,6 +730,19 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     reflection_sources = _read_reflection_sources(task_id)
     _fire_cycle_record(
         task_id, skill, status, total_tokens, reflection_sources, duration_ms
+    )
+
+    # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
+    # (self_heal.append_failure → _fire_reflection_record) was dead on the live
+    # path — nothing calls append_failure, so every failed dispatch lost its
+    # prior-attempt narrative and `reflectionMatchSource` stayed locked to
+    # 'none'. reap.run_completion IS the single authoritative subprocess that
+    # runs on EVERY terminal dispatch, and it now holds the anchor (captured
+    # above). Fire the reflection here on a NON-MERGED failure so the next
+    # attempt on this anchor reads why the prior one failed (the #193 retry-
+    # correctness invariant). Fully best-effort — see the helper.
+    _fire_reflection_for_completion(
+        s, anchor_ref, task_id, soft_cap_hit, task_title=skill
     )
 
     # Issue #911: reclaim the just-freed worktree (and any other orphans) at
