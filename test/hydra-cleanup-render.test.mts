@@ -221,8 +221,10 @@ describe("renderTitle / renderBody — never emit a malformed title", () => {
 
     // The classification probe, with the finding's actual symbol substituted.
     assert.match(body, /Still referenced ANYWHERE \(src \+ test\)/);
-    assert.match(body, /rg -n --no-heading -w "_resetCapacityHistory" src test \| grep -v "src\/capacity-floor\.ts"/);
-    assert.match(body, /rg -n "_resetCapacityHistory" src\/redis test\/redis-keys\.test\.mts/);
+    assert.match(body, /grep -rnw "_resetCapacityHistory" src test \| grep -v "src\/capacity-floor\.ts"/);
+    assert.match(body, /grep -rn "_resetCapacityHistory" src\/redis test\/redis-keys\.test\.mts/);
+    // The buggy rg -w probe (issue #1733) must be gone — the host rg shim drops -w.
+    assert.ok(!/rg -n --no-heading -w/.test(body), "rg -w probe must be replaced by grep -rnw (issue #1733)");
 
     // All four sub-cases (a)–(d), each with its directive verb.
     assert.match(body, /\*\*\(a\) Truly dead\*\*.*\*\*delete\*\*/);
@@ -245,7 +247,7 @@ describe("renderTitle / renderBody — never emit a malformed title", () => {
     const body = renderBody({ kind: "file", path: "dashboard/src/components/Toast.jsx", name: "" }, ISO);
     assert.match(body, /classify before you delete/);
     // A file finding has no symbol, so the probe substitutes the path.
-    assert.match(body, /rg -n --no-heading -w "dashboard\/src\/components\/Toast\.jsx" src test/);
+    assert.match(body, /grep -rnw "dashboard\/src\/components\/Toast\.jsx" src test/);
     assert.match(body, /\*\*\(d\) Coupled Redis key generator\*\*/);
   });
 

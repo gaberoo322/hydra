@@ -111,15 +111,15 @@ Then drop a finding before it becomes an issue when ANY of:
 
 `knip` reports a symbol as an "unused export" without distinguishing a *truly dead* symbol from one whose only dead aspect is its `export` visibility, a re-export whose backing definition is still live, or a Redis key generator coupled to sibling generators and their test assertions. A naive **delete** on any of the last three breaks the build or orphans coupled code. The `hydra-dev` agent that picks up a `cleanup-scan` issue **MUST** classify the finding into one of the four cases below and apply the matching safe fix. This is durable guidance so the disambiguation is not re-derived per cycle (the recurring `dead-code-removal-leaves-orphan-redis-keys` / `knip-dead-export-still-internally-used` friction, cross-run recurrence 9).
 
-**Classification probe (run before writing the fix).** For the flagged symbol `<name>` in `<path>`, grep the whole repo for remaining references and inspect the flagged line:
+**Classification probe (run before writing the fix).** For the flagged symbol `<name>` in `<path>`, grep the whole repo for remaining references and inspect the flagged line. **Use `grep -rnw`, NOT `rg -w`, for the word-boundary probe (issue #1733).** The host's `rg` is a minimal compatibility shim that *silently ignores* unsupported flags including `-w`, so `rg -w "<name>"` matches substrings (e.g. `<name>` inside `<name>Extra`) and reports a dead export as "live" — a misclassification that wastes the demote-vs-delete analysis. GNU `grep` honours `-w` (and fails loud on a genuinely unknown flag), so it is the canonical liveness-probe tool here:
 
 ```bash
 # 1. Is the symbol still referenced ANYWHERE in the repo (src + test), ignoring its own definition site?
-rg -n --no-heading -w "<name>" src test | grep -v "<path>"
+grep -rnw "<name>" src test | grep -v "<path>"
 # 2. Is the flagged line a re-export (`export { x } from './y'` / `export * from`) rather than the definition?
-rg -n "export .*\b<name>\b" "<path>"
+grep -rnE "export .*\b<name>\b" "<path>"
 # 3. For a Redis key generator: are sibling generators in the same file referenced only by the same test assertions?
-rg -n "<name>" src/redis test/redis-keys.test.mts
+grep -rn "<name>" src/redis test/redis-keys.test.mts
 ```
 
 | Case | knip says | What's actually true | Safe fix | Evidence anchor |
@@ -169,13 +169,15 @@ Issue body schema — **legacy single-finding format**, used when a module group
 
 **`knip` reports an "unused export" without telling you *why* it is dead — classify before you delete.** A naive delete is correct only when the symbol is *truly* dead; if its only dead aspect is `export` visibility, a still-live re-export, or a coupled Redis key generator, a delete breaks the build or orphans coupled code. Run this classification probe first (for the flagged `<name>` in `<path>`):
 
+Use `grep -rnw`, NOT `rg -w`, for the word-boundary probe — the host `rg` shim silently drops `-w` and matches substrings, mis-reporting a dead export as live (issue #1733):
+
 ```bash
 # 1. Still referenced ANYWHERE (src + test), ignoring its own definition site?
-rg -n --no-heading -w "<name>" src test | grep -v "<path>"
+grep -rnw "<name>" src test | grep -v "<path>"
 # 2. Is the flagged line a re-export (`export { x } from './y'` / `export *`) rather than the definition?
-rg -n "export .*\b<name>\b" "<path>"
+grep -rnE "export .*\b<name>\b" "<path>"
 # 3. Redis key generator? Are sibling generators referenced only by the same test assertions?
-rg -n "<name>" src/redis test/redis-keys.test.mts
+grep -rn "<name>" src/redis test/redis-keys.test.mts
 ```
 
 Then apply the matching fix — **delete is the exception, not the default** (full table with evidence anchors lives in Step 2.5 of the hydra-cleanup playbook, `docs/operator-playbooks/hydra-cleanup.md`):
