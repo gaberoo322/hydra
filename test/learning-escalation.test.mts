@@ -378,6 +378,42 @@ describe("escalation to GitHub (issue #512)", () => {
     assert.equal(shouldEscalateAtHitCount(20, unmetThreshold), false);
   });
 
+  // -------------------------------------------------------------------------
+  // Issue #1789 — no-agent-spawn-tool-run-inline never escalates
+  // -------------------------------------------------------------------------
+  //
+  // The hydra-target-build Step-2 inline-mode contract (#1782) fires this cue
+  // by design on every autopilot-dispatched inline build, so a finite
+  // threshold would just defer noise and the escalator would reopen the closed
+  // issue forever. The cue is mapped to POSITIVE_INFINITY: the threshold
+  // resolves to Infinity and shouldEscalateAtHitCount is false at every finite
+  // hit count, while the default path for unrelated cues is unchanged.
+
+  test("escalationThresholdForCue: no-agent-spawn-tool-run-inline resolves to Infinity", () => {
+    assert.equal(
+      escalationThresholdForCue("no-agent-spawn-tool-run-inline", 3),
+      Number.POSITIVE_INFINITY,
+    );
+  });
+
+  test("no-agent-spawn-tool-run-inline never escalates at any finite hit count", () => {
+    const threshold = escalationThresholdForCue("no-agent-spawn-tool-run-inline", 3);
+    for (const h of [3, 4, 13, 23, 33, 1003]) {
+      assert.equal(
+        shouldEscalateAtHitCount(h, threshold),
+        false,
+        `hitCount=${h} should NOT escalate for the never-escalate cue`,
+      );
+    }
+  });
+
+  test("Infinity override does not regress the default path — an unrelated cue still escalates at 3", () => {
+    const threshold = escalationThresholdForCue("verification-failure", 3);
+    assert.equal(threshold, 3);
+    assert.equal(shouldEscalateAtHitCount(3, threshold), true);
+    assert.equal(shouldEscalateAtHitCount(13, threshold), true);
+  });
+
   test("uses meta(lesson) title for kind=lesson, meta(friction) for kind=friction", async () => {
     process.env.FAKE_GH_SCENARIO = "none";
     await escalatePatternToIssue({
