@@ -22,6 +22,8 @@ import { join } from "node:path";
 import {
   filterMoneyCriticalCandidates,
   classifyNoSignal,
+  buildScopedTestCommand,
+  classifyTimedOut,
 } from "../scripts/target/mutation-check.ts";
 import { runMutationTests, type MutationTestReport } from "../src/mutation.ts";
 
@@ -333,6 +335,195 @@ describe("classifyNoSignal — tier-less no-signal gate (issue #1132)", () => {
     );
     assert.ok(result);
     assert.strictEqual(result!.killRate, null);
+  });
+});
+
+describe("buildScopedTestCommand — focused per-mutant test command (issue #1821)", () => {
+  test("scopes to the money-critical files via `vitest related --run`", () => {
+    const cmd = buildScopedTestCommand([
+      "src/lib/execution/place-bet.ts",
+      "src/lib/staking/kelly.ts",
+    ]);
+    assert.equal(
+      cmd,
+      "npx vitest related --run --passWithNoTests src/lib/execution/place-bet.ts src/lib/staking/kelly.ts",
+    );
+  });
+
+  test("single money-critical file → single-path scoped command", () => {
+    const cmd = buildScopedTestCommand(["src/lib/bet-math/edge.ts"]);
+    assert.equal(
+      cmd,
+      "npx vitest related --run --passWithNoTests src/lib/bet-math/edge.ts",
+    );
+  });
+
+  test("is NOT the full `npm test` suite for a non-empty file list (the #1821 fix)", () => {
+    // The whole point of #1821: a money-critical diff must NOT run the full
+    // vitest suite per mutant.
+    const cmd = buildScopedTestCommand(["src/lib/providers/draftkings.ts"]);
+    assert.notEqual(cmd, "npm test");
+    assert.match(cmd, /vitest related/);
+  });
+
+  test("uses --run so each mutant runs a single non-watch pass", () => {
+    // Mutation runs must terminate — a watch-mode invocation would hang the
+    // per-mutant child process.
+    const cmd = buildScopedTestCommand(["src/lib/execution/order-router.ts"]);
+    assert.match(cmd, /--run\b/);
+  });
+
+  test("uses --passWithNoTests so an uncovered file does not error the runner", () => {
+    // A mutated file with no importing test must SURVIVE (the desired coverage
+    // signal), not crash the runner child with a non-zero 'no test files' exit.
+    const cmd = buildScopedTestCommand(["src/lib/staking/parlay.ts"]);
+    assert.match(cmd, /--passWithNoTests\b/);
+  });
+
+  test("empty input → falls back to the full `npm test` suite", () => {
+    // Defensive: the caller guards inspectable.length === 0 before the runner,
+    // but a scoped command with no file args would run the whole suite anyway,
+    // so the explicit fallback is clearer and preserves prior behaviour.
+    assert.equal(buildScopedTestCommand([]), "npm test");
+  });
+
+  test("trims whitespace and drops empty entries before composing the command", () => {
+    const cmd = buildScopedTestCommand([
+      "  src/lib/providers/pinnacle.ts  ",
+      "",
+      "\t",
+      "src/lib/bet-math/probability.ts",
+    ]);
+    assert.equal(
+      cmd,
+      "npx vitest related --run --passWithNoTests src/lib/providers/pinnacle.ts src/lib/bet-math/probability.ts",
+    );
+  });
+
+  test("a list that trims to empty → npm test fallback (no dangling args)", () => {
+    // All-whitespace input must not emit `vitest related` with zero file args
+    // (which would silently run the whole suite) — it falls back to npm test.
+    assert.equal(buildScopedTestCommand(["", "  ", "\t"]), "npm test");
+  });
+
+  test("composes the runner-expected argv shape (whitespace-split tokens)", () => {
+    // runMutationTests splits testCommand on /\s+/ and feeds tokens to /bin/sh.
+    // Each file path must be its own token so vitest receives them as separate
+    // positional args.
+    const cmd = buildScopedTestCommand([
+      "src/lib/execution/place-bet.ts",
+      "src/lib/bet-math/settlement.ts",
+    ]);
+    const tokens = cmd.split(/\s+/);
+    assert.deepEqual(tokens, [
+      "npx",
+      "vitest",
+      "related",
+      "--run",
+      "--passWithNoTests",
+      "src/lib/execution/place-bet.ts",
+      "src/lib/bet-math/settlement.ts",
+    ]);
+  });
+});
+
+describe("classifyTimedOut — timed-out gate is a distinct non-pass (issue #1821)", () => {
+  test("timedOut === true → warn (never pass), with a timed-out reason", () => {
+    const result = classifyTimedOut(
+      makeReport({
+        timedOut: true,
+        totalMutants: 4,
+        killed: 3,
+        survived: 1,
+        skipped: 0,
+        candidatesGenerated: 20,
+      }),
+    );
+    assert.ok(result, "a timed-out report must yield a classification");
+    assert.equal(result!.status, "warn");
+    assert.equal(result!.timedOut, true);
+    assert.match(result!.reason, /timed out/i);
+  });
+
+  test("surfaces the PARTIAL kill rate for context (informational, not a verdict)", () => {
+    // 4 testable (4 total - 0 skipped), 3 killed → 75% partial rate.
+    const result = classifyTimedOut(
+      makeReport({
+        timedOut: true,
+        totalMutants: 4,
+        killed: 3,
+        skipped: 0,
+        candidatesGenerated: 20,
+      }),
+    );
+    assert.ok(result);
+    assert.equal(result!.killRate, 75);
+    assert.match(result!.reason, /partial kill rate 75%/);
+  });
+
+  test("partial killRate is null when no mutant produced testable signal yet", () => {
+    // testable === 0 (all skipped, or none run) before the timeout → no rate.
+    const result = classifyTimedOut(
+      makeReport({
+        timedOut: true,
+        totalMutants: 2,
+        killed: 0,
+        skipped: 2,
+        candidatesGenerated: 10,
+      }),
+    );
+    assert.ok(result);
+    assert.equal(result!.killRate, null);
+    assert.match(result!.reason, /partial kill rate n\/a/);
+  });
+
+  test("timedOut === false → returns null (caller runs the normal kill-rate path)", () => {
+    const result = classifyTimedOut(
+      makeReport({
+        timedOut: false,
+        totalMutants: 10,
+        killed: 9,
+        skipped: 0,
+        candidatesGenerated: 10,
+      }),
+    );
+    assert.equal(result, null);
+  });
+
+  test("a timed-out run with a HIGH partial rate still warns — never a clean pass", () => {
+    // The exact friction (`mutation-gate-times-out-but-passes`): even a partial
+    // rate above any plausible floor must NOT present as pass, because the gate
+    // never evaluated the full mutant set.
+    const result = classifyTimedOut(
+      makeReport({
+        timedOut: true,
+        totalMutants: 5,
+        killed: 5,
+        skipped: 0,
+        candidatesGenerated: 50,
+      }),
+    );
+    assert.ok(result);
+    assert.equal(result!.status, "warn");
+    assert.equal(result!.killRate, 100);
+    assert.notEqual(result!.status as string, "pass");
+  });
+
+  test("reason names how many candidates were left unevaluated", () => {
+    // 3 of 30 candidates run before the budget ran out — the reason must make
+    // the incompleteness legible so an agent does not treat it as a verdict.
+    const result = classifyTimedOut(
+      makeReport({
+        timedOut: true,
+        totalMutants: 3,
+        killed: 2,
+        skipped: 0,
+        candidatesGenerated: 30,
+      }),
+    );
+    assert.ok(result);
+    assert.match(result!.reason, /3 of 30 candidate/);
+    assert.match(result!.reason, /non-blocking/);
   });
 });
 
