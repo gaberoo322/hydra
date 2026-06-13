@@ -25,8 +25,11 @@ name: eval-gate
 # later, drop the trailing `|| true` / `exit 0` for that step — a conscious,
 # reviewable change.
 #
-# OFFLINE / NO LIVE PROVIDER: the first landed eval (evals/golden.yaml) uses
-# promptfoo's `echo` provider and makes ZERO LLM calls — there is NO
+# OFFLINE / NO LIVE PROVIDER: every landed eval under evals/ (golden.yaml,
+# hydra-dev.yaml) uses promptfoo's `echo` provider and makes ZERO LLM calls —
+# including the agent-authored TypeScript scorer in hydra-dev.yaml, which runs
+# through promptfoo's own esbuild loader (no vitest, no devDependency; see
+# docs/evals.md § "TypeScript scorers"). There is NO
 # ANTHROPIC_API_KEY (or any provider secret) in any CI workflow today; the only
 # secret available is GITHUB_TOKEN. Provisioning a provider key into CI is an
 # ADR-0005 operator escalation (credentials are operator-only). A live-provider
@@ -59,18 +62,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: promptfoo eval (advisory; offline echo provider — no API key)
+      - name: promptfoo evals (advisory; offline echo provider — no API key)
         run: |
           set -uo pipefail
-          echo "::group::promptfoo eval (evals/golden.yaml)"
           # No provider secrets are exported — the echo provider makes no LLM
           # calls. PROMPTFOO_DISABLE_TELEMETRY/UPDATE keep CI hermetic & quiet.
-          if PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 \
-             npx --yes -p promptfoo@0.121.15 promptfoo eval -c evals/golden.yaml; then
-            echo "eval-gate: golden eval PASSED"
-          else
-            # Advisory: surface the failure as an annotation, do not block merge.
-            echo "::warning title=eval-gate::promptfoo golden eval reported a failure (advisory — see job log)"
-          fi
-          echo "::endgroup::"
+          # Run every config under evals/ (one per skill / agent class). Adding
+          # an eval = dropping a new evals/*.yaml; this loop picks it up with no
+          # workflow edit. golden.yaml = harness smoke + prompt-invariant guard;
+          # hydra-dev.yaml = agent-authored TypeScript scorer (issue #1803).
+          for cfg in evals/*.yaml; do
+            echo "::group::promptfoo eval (${cfg})"
+            if PROMPTFOO_DISABLE_TELEMETRY=1 PROMPTFOO_DISABLE_UPDATE=1 \
+               npx --yes -p promptfoo@0.121.15 promptfoo eval -c "${cfg}"; then
+              echo "eval-gate: ${cfg} PASSED"
+            else
+              # Advisory: surface the failure as an annotation, do not block merge.
+              echo "::warning title=eval-gate::promptfoo eval ${cfg} reported a failure (advisory — see job log)"
+            fi
+            echo "::endgroup::"
+          done
           exit 0

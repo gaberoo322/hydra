@@ -78,11 +78,73 @@ useful eval" — is a **follow-up**, gated on two operator actions:
 Until both land, keep new evals on offline / recorded / `file://` providers or
 static assertions against fixtures.
 
+## TypeScript scorers (the evalite niche, on the no-dep lane) — issue #1803
+
+When the assertion you want is a **numeric 0/1 scorer expressed as a
+type-checked TypeScript function** (e.g. "does this PR body close the right
+issue? score 0/1"), you do **not** need a second eval tool. promptfoo's
+`type: javascript` assertion takes a `value: file://<path>.ts`, imports the
+file through its own esbuild loader, and runs the default export as the scorer
+— no `vitest`, no build step, **no new dependency**.
+
+The seed scorer is **`evals/scorers/issue-ref.ts`**, wired into
+`evals/hydra-dev.yaml` (`npm run eval:ts`). The scorer contract:
+
+```ts
+import type { AssertionValueFunctionContext, GradingResult } from "promptfoo";
+export default function scorer(
+  output: string,                         // the provider output under test
+  context: AssertionValueFunctionContext, // context.vars = the test's `vars` block
+): GradingResult {
+  return { pass, score /* numeric 0..1 */, reason };
+}
+```
+
+The two-arg `(output, context)` signature is load-bearing: promptfoo passes the
+output value as the first positional arg to a default-exported function — it
+does **not** pass an `AssertionParams` object, so destructuring `{ output }`
+yields `undefined` (verified against promptfoo@0.121.15). Read the test `vars`
+off `context.vars`, not off arg-one. Use `type: not-javascript` to invert a
+scorer for a negative test (see the second case in `hydra-dev.yaml`).
+
+The scorer file lives under `evals/`, which is **outside** both typecheck
+scopes (`tsconfig.json` includes only `src/**`; `tsconfig.test.json` widens to
+`test/**` + `scripts/**`), exactly like the YAML configs — so the `promptfoo`
+type-only import never enters `npm run typecheck` / `typecheck:test`; promptfoo
+resolves its own types at eval-run time.
+
+### Why not evalite? (tool-scout #1803, declined)
+
+tool-scout #1803 proposed [evalite](https://github.com/mattpocock/evalite) for
+exactly this niche (agent-authored TypeScript scorers). It was **declined** —
+the niche is real but evalite cannot run in Hydra's eval lane:
+
+- evalite **hard-requires a resolvable `vitest`** package: `npx evalite run
+  <file>.eval.ts` dies with `Cannot find package 'vitest'` (verified
+  2026-06-13). It is not a standalone CLI like promptfoo's `echo` provider, so
+  the pinned-`npx`, never-a-dependency lane (above) does not apply to it.
+- Adopting it means adding `evalite` **and** `vitest` + their large transitive
+  trees as devDependencies, which trips the **allow-scripts** CI gate (the
+  committed lavamoat allowlist is empty, `allowScripts: {}`) and contradicts
+  ADR-0005 + this doc's no-dependency rule, reaffirmed one day earlier when
+  promptfoo (#1806) landed.
+- promptfoo **already** delivers the capability (the `file://*.ts` scorer
+  above) on the established lane, zero new packages. evalite would add a second
+  eval runner, a vitest project, and a bus-factor-of-one dependency for a niche
+  promptfoo already covers.
+
+If a future need genuinely requires evalite's Vitest-watch DX, re-open #1803
+with that concrete need; until then, write TypeScript scorers as promptfoo
+`file://*.ts` assertions.
+
 ## Adding an eval
 
-1. Add `evals/<skill-or-class>.yaml` (copy `golden.yaml`'s header).
+1. Add `evals/<skill-or-class>.yaml` (copy `golden.yaml`'s header). For a
+   TypeScript scorer, add `evals/scorers/<name>.ts` and reference it with a
+   `type: javascript` / `value: file://scorers/<name>.ts` assertion (see
+   `evals/hydra-dev.yaml`).
 2. Keep it offline (echo / file:// / static) unless the live-provider follow-up
    has landed.
-3. `npm run eval` locally to confirm it's green; the advisory workflow runs the
-   seed config (`evals/golden.yaml`) — extend the workflow loop to cover more
-   files when you add them.
+3. `npm run eval` (golden) / `npm run eval:ts` (TS scorer) locally to confirm
+   green. The advisory `eval-gate` workflow loops over **every** `evals/*.yaml`,
+   so a new config is picked up with no workflow edit.

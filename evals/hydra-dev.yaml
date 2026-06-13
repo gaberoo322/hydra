@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Hydra eval: agent-authored TypeScript scorer (tool-scout #1803).
+# The eval CONTRACT lives in docs/evals.md — read it before editing this file.
+#
+# WHY THIS FILE EXISTS (the #1803 resolution):
+# ====================================================================
+# tool-scout #1803 proposed `evalite` so agents could write a numeric 0/1
+# TypeScript scorer that becomes a CI gate. That niche is real, but evalite
+# can't run in Hydra's eval lane — it hard-requires a `vitest` devDependency,
+# which trips the allow-scripts gate (empty lavamoat allowlist) and breaks the
+# pinned-`npx`, never-a-dependency rule docs/evals.md reaffirmed when promptfoo
+# (#1806) landed. promptfoo ALREADY supports TypeScript scorers via a
+# `type: javascript` assertion whose `value` is `file://<path>.ts` — so the
+# #1803 capability ships here, on the existing no-dep lane, zero new packages.
+# The scorer is evals/scorers/issue-ref.ts (a default-exported, type-checked
+# (output, context) => GradingResult returning a numeric `score`).
+#
+# DELIBERATELY OFFLINE — NO LIVE PROVIDER CALLS (same contract as golden.yaml).
+# The `echo` provider returns the rendered prompt verbatim; zero LLM calls, no
+# ANTHROPIC_API_KEY (no such CI secret exists — adding one is an ADR-0005
+# operator escalation). A live-provider eval is the operator-gated follow-up in
+# docs/evals.md § "Live-provider follow-up".
+
+description: >-
+  Hydra TypeScript-scorer eval — demonstrates an agent-authored, type-checked
+  numeric (0/1) scorer wired through promptfoo's file:// javascript assertion
+  (the tool-scout #1803 niche, on the no-dependency lane). echo provider = no
+  LLM calls.
+
+prompts:
+  # Stands in for a hydra-dev PR body, which MUST carry `closes #<issue>`.
+  - "PR for issue #{{issue}}: closes #{{issue}}. {{body}}"
+
+providers:
+  # promptfoo built-in; returns the rendered prompt unchanged, no API key.
+  - id: echo
+
+tests:
+  - description: PR body that references the right issue scores 1
+    vars:
+      issue: "1803"
+      body: "adds an agent-authored TypeScript scorer to the eval harness"
+    assert:
+      # The TypeScript scorer (evals/scorers/issue-ref.ts) returns score 1 when
+      # the output references #<issue>. This is the #1803 0/1-scorer capability.
+      - type: javascript
+        value: file://scorers/issue-ref.ts
+
+  - description: a PR body missing the right issue reference scores 0
+    vars:
+      issue: "9999"
+      body: "this body deliberately omits the right reference"
+    # The prompt would render `#9999`; strip it so the scorer sees no reference.
+    # This proves the scorer returns 0 (fails) rather than rubber-stamping —
+    # `not-javascript` inverts that 0/fail into a green test verdict.
+    options:
+      transform: "String(output).replace(/#9999/g, '#0000')"
+    assert:
+      - type: not-javascript
+        value: file://scorers/issue-ref.ts
