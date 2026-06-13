@@ -66,8 +66,22 @@
  * guard BEFORE the runner ever runs). Money-handling code with zero
  * fault-detection signal is exactly the gap a warn must surface.
  *
+ * Per-mutant scoped test command (issue #1821): instead of running the FULL
+ * vitest suite once per mutant (the prior `testCommand: "npm test"`, which
+ * stalled dispatches into multi-minute waits and produced false-failed reaps),
+ * the gate derives a focused `vitest related --run` command from the
+ * money-critical files under mutation (`buildScopedTestCommand`). Each mutant
+ * re-runs only the specs that import the mutated file, not the whole repo.
+ *
+ * Timed-out gate is a distinct non-pass (issue #1821): when the runner exhausts
+ * its time budget the gate no longer computes a pass/fail from the partial
+ * mutant sample (which made a timed-out run indistinguishable from a complete
+ * one — the `mutation-gate-times-out-but-passes` friction). `classifyTimedOut`
+ * emits a distinct `status:"warn"` carrying the partial kill rate for context;
+ * the warn is non-blocking (exit 0) but never masquerades as a pass.
+ *
  * Exit codes:
- *   0 — pass (or skipped / neutral / warn no-signal — non-blocking)
+ *   0 — pass (or skipped / neutral / warn no-signal / warn timed-out — non-blocking)
  *   2 — mutation gate failed (block merge)
  *   1 — usage / unexpected error
  */
@@ -122,6 +136,48 @@ export function filterMoneyCriticalCandidates(changedFiles: string[]): string[] 
     // unaffected (idempotent). A lone `./` with no `web/` is left intact so the
     // strip stays a pure de-doubling, not a general normalizer.
     .map((f) => f.replace(/^(?:\.\/)?web\//, ""));
+}
+
+/**
+ * Build the per-mutant test command, scoped to the money-critical files under
+ * mutation (issue #1821).
+ *
+ * The pre-#1821 gate ran the FULL vitest suite (`testCommand: "npm test"`) once
+ * per mutant. On a money-critical diff touching 2+ files the per-mutant
+ * full-suite run is slow enough that the build agent stalls in a multi-minute
+ * wait loop on the gate — the recurrence-18× friction cluster
+ * (`target-mutation-per-mutant-npm-test-timeout` / `mutation-gate-npm-test-budget-cap`)
+ * that produced false-failed reaps (e.g. cycle `aab08248a62331a52` reaped
+ * `failed` while the same anchor's work merged as PR #127).
+ *
+ * `vitest related` runs ONLY the test files that (transitively) import the given
+ * source files, so each mutant re-runs the suite affected by the mutated file
+ * instead of every spec in the repo. `--run` forces a single non-watch pass
+ * (mutation runs must terminate); `--passWithNoTests` keeps a mutant whose file
+ * has no importing test from spuriously failing the runner's child process with
+ * a non-zero "no test files found" exit — that file's lack of coverage already
+ * surfaces as a SURVIVED mutant (the desired signal), not a runner error.
+ *
+ * The runner (`runMutationTests`) splits the command on whitespace and feeds it
+ * through `/bin/sh -c` in the Target's `web/` appDir, so each file path is
+ * appended as its own argv token. The files passed here are already
+ * `projectDir`-relative (`filterMoneyCriticalCandidates` stripped the leading
+ * `web/`), which is exactly what `vitest related` expects relative to the vitest
+ * root (the `web/` appDir).
+ *
+ * Empty input → fall back to the full `npm test` suite. The caller guards
+ * `inspectable.length === 0` BEFORE the runner, so this branch is defensive: a
+ * scoped command with no file arguments would run the whole suite anyway, so the
+ * explicit `npm test` fallback is clearer and preserves the prior behaviour.
+ *
+ * Pure — no env, no IO, no git. Test it by passing arbitrary file lists.
+ */
+export function buildScopedTestCommand(inspectableFiles: string[]): string {
+  const files = inspectableFiles
+    .map((f) => (typeof f === "string" ? f.trim() : ""))
+    .filter((f) => f.length > 0);
+  if (files.length === 0) return "npm test";
+  return `npx vitest related --run --passWithNoTests ${files.join(" ")}`;
 }
 
 /**
@@ -186,6 +242,68 @@ export function classifyNoSignal(
       : "all generated mutants were skipped (uncompilable) — no fault-detection signal";
 
   return { status: "warn", reason, killRate: null };
+}
+
+/**
+ * Result of the timed-out classification (issue #1821).
+ *
+ * `status` is always `"warn"` — a gate that exhausted its time budget reached
+ * NO verdict, so it must not present as a clean `pass`. `killRate` carries the
+ * partial kill rate computed from whatever mutants finished before the budget
+ * ran out (informational only, never compared against the floor) so the
+ * step-summary still shows progress; it is explicitly NOT a pass/fail signal.
+ * `warn` is non-blocking (the caller keeps exit 0) — a slow gate must not hard-
+ * block an otherwise-good money-critical diff, but it must stop masquerading as
+ * a pass (the `mutation-gate-times-out-but-passes` friction).
+ */
+export type TimedOutClassification = {
+  status: "warn";
+  reason: string;
+  timedOut: true;
+  killRate: number | null;
+};
+
+/**
+ * Classify a mutation report whose runner exhausted its time budget (issue
+ * #1821).
+ *
+ * The pre-#1821 gate computed `killRate` from whatever mutants finished before
+ * the 540s budget and emitted `pass`/`fail` from that partial sample, so a
+ * timed-out run looked identical to a complete one — agents repeatedly could
+ * not tell whether a timed-out gate was a failure (friction
+ * `mutation-gate-times-out-but-passes`). This helper is the pure, unit-testable
+ * seam that turns a timed-out report into a DISTINCT non-pass `warn` outcome
+ * with an explicit reason, instead of a partial-sample verdict.
+ *
+ * Returns `null` when the runner did NOT time out (`report.timedOut === false`)
+ * — the caller then runs the normal kill-rate comparison. Only `timedOut`
+ * yields a classification.
+ *
+ * The partial kill rate is surfaced for context (how far the gate got before
+ * the budget ran out) but is informational: a timed-out gate has, by
+ * definition, not evaluated the full mutant set, so a partial rate above the
+ * floor is not proof the diff clears it. `killRate` is `null` when no mutant
+ * produced testable signal before the timeout.
+ *
+ * Pure — no env, no IO, no git. Test it by passing arbitrary reports.
+ */
+export function classifyTimedOut(
+  report: MutationTestReport,
+): TimedOutClassification | null {
+  if (!report.timedOut) return null;
+
+  const testable = report.totalMutants - report.skipped;
+  const partialKillRate =
+    testable > 0 ? Math.round((report.killed / testable) * 100) : null;
+
+  const reason =
+    `mutation gate timed out before evaluating all mutants ` +
+    `(${report.totalMutants} of ${report.candidatesGenerated} candidate mutant(s) run; ` +
+    `partial kill rate ` +
+    (partialKillRate === null ? "n/a" : `${partialKillRate}%`) +
+    `) — no complete verdict, treat as inconclusive (non-blocking)`;
+
+  return { status: "warn", reason, timedOut: true, killRate: partialKillRate };
 }
 
 function readChangedFiles(): string[] {
@@ -263,18 +381,64 @@ async function main(): Promise<number> {
   const maxMutants = maxMutantsRaw ? parseInt(maxMutantsRaw, 10) : undefined;
   const projectDir = process.env.TARGET_PROJECT_DIR || process.cwd();
 
+  // Issue #1821: scope the per-mutant test command to the money-critical files
+  // under mutation instead of the full vitest suite. `vitest related` re-runs
+  // only the specs that import the mutated files, so a 2+-file money-critical
+  // diff no longer pays a full-suite run per mutant (the recurrence-18× gate
+  // stall that produced false-failed reaps). Pure-helper derived so the
+  // command shape is unit-testable without spawning a runner.
+  const testCommand = buildScopedTestCommand(inspectable);
+
   process.stderr.write(
     `target-mutation-gate: ${inspectable.length} money-critical file(s), ` +
-    `floor=${killFloor}%, budget=${timeBudgetMs}ms, projectDir=${projectDir}\n`,
+    `floor=${killFloor}%, budget=${timeBudgetMs}ms, projectDir=${projectDir}, ` +
+    `testCommand="${testCommand}"\n`,
   );
 
   const report = await runMutationTests(projectDir, inspectable, {
     timeBudgetMs,
-    testCommand: "npm test",
+    testCommand,
     maxMutants,
   });
 
   const testable = report.totalMutants - report.skipped;
+
+  // Timed-out case (issue #1821): the runner exhausted its time budget before
+  // evaluating every mutant. The pre-#1821 gate computed a kill rate from the
+  // partial sample and emitted pass/fail, so a timed-out run was
+  // indistinguishable from a complete one (the `mutation-gate-times-out-but-
+  // passes` friction — agents could not tell whether a timed-out gate was a
+  // failure). Classify via the pure `classifyTimedOut` seam: it emits a DISTINCT
+  // `warn` (NOT a pass, NOT compared against the floor) carrying the partial
+  // kill rate for context. Checked BEFORE the no-signal branch so a timeout is
+  // surfaced with its own actionable reason rather than masked as a generic
+  // no-signal warn. The warn is non-blocking (exit 0): a slow gate must not
+  // hard-block an otherwise-good money-critical diff, but it must stop
+  // masquerading as a pass.
+  const timedOut = classifyTimedOut(report);
+  if (timedOut) {
+    process.stdout.write(
+      JSON.stringify({
+        status: timedOut.status,
+        reason: timedOut.reason,
+        timedOut: true,
+        killRate: timedOut.killRate,
+        killFloor,
+        killed: report.killed,
+        survived: report.survived,
+        testable,
+        totalMutants: report.totalMutants,
+        skipped: report.skipped,
+        candidatesGenerated: report.candidatesGenerated,
+        durationMs: report.durationMs,
+        inspectable: inspectable.length,
+      }) + "\n",
+    );
+    process.stderr.write(
+      `target-mutation-gate: ${timedOut.reason} — status=${timedOut.status}.\n`,
+    );
+    return 0;
+  }
 
   // No-signal case (issue #1132, mirroring #1120): the changed money-critical
   // files produced ZERO testable mutants — the gate cannot conclude. The
