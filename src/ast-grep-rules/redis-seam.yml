@@ -1,0 +1,48 @@
+# ast-grep rule — WORKED EXAMPLE (issue #1797, tool-scout finding).
+#
+# This rule is the first ast-grep rule in the repo and exists to (a) demonstrate
+# the metavariable + AST-matching syntax for agents authoring future rules, and
+# (b) provide an AST-exact second opinion on the Redis seam: forbid a direct
+# `new Redis(...)` construction outside the sanctioned seam owner.
+#
+# Relationship to scripts/ci/redis-seam-check.ts:
+#   The authoritative Redis-seam ratchet is the text-regex check inside
+#   Verifier-Core ci.yml (redis-seam-check.ts) — that gate is NOT being
+#   replaced here (ci.yml is exact-match Tier-4; touching it is out of bounds
+#   for a tool-scout integration). This ast-grep rule is ADVISORY: it runs in
+#   the separate ast-grep-lint workflow (a normal Tier-3 sibling, the same
+#   pattern as seam-checks.yml / allow-scripts.yml) and matches SYNTAX, so it
+#   never mis-fires on a comment or a string literal containing "new Redis(".
+#   It complements — does not supersede — the import-level regex ratchet.
+#
+# Why `new Redis(...)` and not the imports: the import-regex is already well
+# served by redis-seam-check.ts; a constructor call is the canonical thing an
+# AST matcher catches that a line-regex catches with false positives (the same
+# text in a comment / docstring). It is the clearest one-rule teaching example.
+#
+# Metavariable cheat-sheet (for the next agent authoring a rule):
+#   $VAR    — matches exactly one AST node, capturable as getMatch('VAR')
+#   $$$ARGS — matches a (possibly empty) list of nodes, e.g. all call arguments
+#   pattern — a code snippet in the target grammar; ast-grep parses it and
+#             matches structurally, ignoring whitespace/comments.
+# Full reference: https://ast-grep.github.io/guide/rule-config.html
+
+id: no-direct-new-redis-outside-seam
+language: TypeScript
+severity: warning
+message: >-
+  Direct `new Redis(...)` outside the Redis seam. Construct the connection only
+  inside src/redis/ (the typed-accessor family, ADR-0009/ADR-0017). Route domain
+  access through src/redis/<domain>.ts, never a raw client. This is the AST-exact
+  advisory companion to scripts/ci/redis-seam-check.ts.
+note: >-
+  ast-grep worked example (issue #1797). Edit src/ast-grep-rules/redis-seam.yml
+  to tune; add sibling rule files for new AST-exact checks.
+rule:
+  pattern: new Redis($$$ARGS)
+# src/redis/ IS the seam — the only place a raw client may be constructed.
+# `files` is evaluated relative to the project root resolved from sgconfig.yml.
+files:
+  - "src/**/*.ts"
+ignores:
+  - "src/redis/**"
