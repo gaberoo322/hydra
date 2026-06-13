@@ -152,6 +152,32 @@ docker exec hydra-redis-1 redis-cli INFO memory 2>/dev/null | grep "used_memory_
 docker exec hydra-redis-1 redis-cli DBSIZE 2>/dev/null
 ```
 
+### OpenViking embedding backend reachability (issue #1781)
+```bash
+# The dense-embedding backend (post-#1795: local CPU Ollama, compose service
+# ollama-embed) is on OpenViking's HOT search path — a query must be embedded
+# before the vector lookup. The VLM backend (gabes-desktop-1 over Tailnet) is a
+# SOFT dependency used only for indexing. Both hostnames resolve ONLY inside the
+# OV container (compose network + extra_hosts), so probe from INSIDE the
+# container with docker exec — a host-side connect cannot reach them.
+echo -n "ollama-embed (dense, HOT path): "
+docker exec hydra-openviking-1 curl -m5 -s -o /dev/null -w "%{http_code}\n" \
+  http://ollama-embed:11434/api/tags 2>/dev/null || echo "UNREACHABLE"
+echo -n "gabes-desktop-1 (VLM, indexing only): "
+docker exec hydra-openviking-1 curl -m5 -s -o /dev/null -w "%{http_code}\n" \
+  http://gabes-desktop-1:11434/api/tags 2>/dev/null || echo "UNREACHABLE (soft — indexing degrades, search still works)"
+# Cross-check the orchestrator's own classification of this hop:
+curl -s http://localhost:4000/api/health/deep 2>/dev/null \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); print('  ovSearch.status =', d.get('intelligence',{}).get('ovSearch',{}).get('status'))" 2>/dev/null \
+  || echo "  (deep-health unreachable)"
+```
+An `ovSearch.status` of `backend-unreachable` (vs `failed`=OV-5xx, `timeout`=slow,
+`running`=ok) is the #1781 signal that the dense-embedding backend, not
+OpenViking itself, is the broken hop. `searchKnowledge()` degrades gracefully to
+empty results (never throws), so this is a quality-degradation warning, not a
+cycle-blocking fault — see the OpenViking embedding/VLM backend split section in
+docs/reference.md.
+
 ### Database Health (deep)
 ```bash
 cd ~/hydra && docker compose ps postgres --format '{{.Name}} {{.Status}}' 2>/dev/null

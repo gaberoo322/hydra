@@ -418,6 +418,41 @@ describe("assessHealth — per-rule firing", () => {
       "a slow probe must not contribute any warning/error intelligence diagnostic",
     );
   });
+
+  // Issue #1781: a transport failure on the search path surfaces as a DISTINCT
+  // "OV embedding backend unreachable" warning — not the generic "OV search
+  // failing" 5xx warning — so the operator is pointed at the embedding backend
+  // host rather than at OpenViking itself. This is the indistinguishability the
+  // issue exists to fix.
+  test("OV search backend-unreachable → distinct warning, NOT the 5xx failing warning", () => {
+    const a = assessHealth(
+      clone((s) => (s.ovSearch = { status: "backend-unreachable", latencyMs: null, resultCount: 0 })),
+    );
+    const unreachable = a.diagnostics.filter((x) => x.what === "OV embedding backend unreachable");
+    assert.equal(unreachable.length, 1, "exactly one backend-unreachable diagnostic");
+    const d = unreachable[0]!;
+    assert.equal(d.severity, "warning");
+    assert.equal(d.component, "intelligence");
+    // It must NOT collapse into the OV-5xx warning — distinguishing the two is the point of #1781.
+    assert.ok(
+      !a.diagnostics.some((x) => x.what === "OV search failing"),
+      "backend-unreachable must not fire the generic OV-search-failing 5xx warning",
+    );
+    // …nor the empty-index info rule (that keys off status === 'running')…
+    assert.ok(
+      !a.diagnostics.some((x) => x.what === "OV search empty"),
+      "backend-unreachable must not fire the empty-index info rule",
+    );
+    // …nor the slow/timeout info rule.
+    assert.ok(
+      !a.diagnostics.some((x) => x.what === "OV search slow"),
+      "backend-unreachable must not fire the timeout info rule",
+    );
+    // The action names a concrete reachability probe so the operator can check the right hop.
+    assert.ok(/ollama-embed|gabes-desktop-1/.test(d.action), "action names the backend host to probe");
+    // A lone warning folds the top-level status to degraded (not unhealthy/critical).
+    assert.equal(a.status, "degraded");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -454,10 +489,24 @@ describe("classifyOvSearchProbe", () => {
     assert.equal(out.resultCount, 0);
   });
 
-  test("a transport failure (ov-service-down) reports failed with null latency", () => {
+  // Issue #1781: a transport failure on the embedding-exercising search path is
+  // the distinct "embedding backend unreachable" signal — NOT a generic OV 5xx.
+  // It now reports `backend-unreachable` (was `failed` under #1032) so the
+  // diagnostic can point the operator at the backend host, not OpenViking.
+  test("a transport failure (ov-service-down) reports backend-unreachable with null latency", () => {
     const out = classifyOvSearchProbe({ ok: false, code: "ov-service-down" }, 25);
-    assert.equal(out.status, "failed");
+    assert.equal(out.status, "backend-unreachable");
     assert.equal(out.latencyMs, null, "no round-trip → meaningless latency → null");
+    assert.equal(out.resultCount, 0);
+  });
+
+  // Issue #1781: a malformed-JSON body DID round-trip OV (2xx) but the body was
+  // garbage — that is an OV-internal fault, not a backend-reachability problem,
+  // so it must stay `failed` and NOT leak into the new backend-unreachable state.
+  test("a malformed-JSON 2xx body (ov-malformed-json) still reports failed, not backend-unreachable", () => {
+    const out = classifyOvSearchProbe({ ok: false, code: "ov-malformed-json" }, 30);
+    assert.equal(out.status, "failed");
+    assert.equal(out.latencyMs, null, "malformed body → meaningless latency → null");
     assert.equal(out.resultCount, 0);
   });
 
