@@ -24,11 +24,21 @@
 #          Most authoritative skip; checked first.
 #        - .reasons.emergencyStop == true  → the 5-hour cap (>=90%) tripped.
 #          Pause fully; skip.
+#        - .reasons.weeklyEmergencyStop == true → the 7-day window is
+#          exhausted (#1790). Skip until the Weekly Reset Anchor passes —
+#          launching would only spawn runs that hard-stop in decide.py.
+#        - .allow == false (catch-all, #1790) → the composed verdict from
+#          projectEligibility() is negative for a reason none of the arms
+#          above named (including reasons added after this script). Skip and
+#          log the raw .reasons JSON. The reason-specific arms above exist
+#          for log legibility; this arm is the authoritative backstop.
 #        - .paceState == "ahead"           → total burn is above the Pacing
 #          Curve for this instant in the week. Pause; skip. The sawtooth
 #          relaunches the moment burn falls back to/below the curve.
-#        - otherwise ("on" / "behind", not emergency, not paused) → eligible.
-#          Launch: `systemctl --user start hydra-autopilot.service`.
+#          (ADDITIVE to .allow — an ahead snapshot still has allow=true, so
+#          this arm is a separate check, not subsumed by the catch-all.)
+#        - otherwise ("on" / "behind", allow=true, not emergency, not paused)
+#          → eligible. Launch: `systemctl --user start hydra-autopilot.service`.
 #
 #   3. Eligibility endpoint unreachable → FAIL SAFE: do NOT launch. Pacing is
 #      the governor; when we're blind to usage we must not burn quota. Log a
@@ -174,9 +184,35 @@ PAUSED=$(jq -r '.reasons.paused // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || 
 # without this the gate relaunches into an exhausted quota → repeat exit-1
 # deaths. `null`/absent => no block.
 SESSION_BLOCKED_UNTIL=$(jq -r '.reasons.sessionBlockedUntil // ""' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #1790: weekly window exhausted (percentLast7d >= the weekly cap). The
+# 7-day rolling window undershoots nothing — when it trips, every launched run
+# hard-stops in decide.py within seconds, so launching is pure churn until the
+# Weekly Reset Anchor passes.
+WEEKLY_EMERGENCY_STOP=$(jq -r '.reasons.weeklyEmergencyStop // false' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
+# Issue #1790: the composed verdict. projectEligibility() + the route's
+# overlays fold EVERY hard-stop reason (5h emergencyStop, weeklyEmergencyStop,
+# paused, future sessionBlockedUntil — and any future reason) into this single
+# boolean. The reason-specific arms below stay for operator log legibility;
+# the catch-all `.allow == false` arm guarantees the gate can never again
+# drift from the route's composition (the bug this issue fixes).
+#
+# CRITICAL: bare `.allow`, NOT `.allow // true` — jq's `//` operator treats
+# `false` itself as falsy, so `.allow // true` returns true when allow is
+# false and would silently invert the fix. Strict string matching below:
+# only the literal "true" proceeds; "false" skips; anything else (missing
+# field => "null", garbage, parse failure) fails safe.
+ALLOW=$(jq -r '.allow' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "parse-error")
 
-if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" ]]; then
+if [[ "$EMERGENCY_STOP" == "parse-error" || "$PACE_STATE" == "parse-error" || "$PAUSED" == "parse-error" || "$SESSION_BLOCKED_UNTIL" == "parse-error" || "$WEEKLY_EMERGENCY_STOP" == "parse-error" || "$ALLOW" == "parse-error" ]]; then
   log "WARN eligibility response unparseable — failing safe (not launching)"
+  exit 0
+fi
+
+# A missing or non-boolean .allow is treated as unparseable: the route has
+# served a boolean allow since its inception and shares a host with this gate,
+# so there is no version-skew window — extend the parse-error stance.
+if [[ "$ALLOW" != "true" && "$ALLOW" != "false" ]]; then
+  log "WARN eligibility .allow missing or non-boolean (got '$ALLOW') — failing safe (not launching)"
   exit 0
 fi
 
@@ -205,6 +241,27 @@ if [[ "$EMERGENCY_STOP" == "true" ]]; then
   exit 0
 fi
 
+# Issue #1790: weekly window exhausted. Reason-specific arm (log legibility)
+# in front of the authoritative catch-all below.
+if [[ "$WEEKLY_EMERGENCY_STOP" == "true" ]]; then
+  log "weekly emergencyStop (7-day window exhausted) — skip until weekly reset"
+  exit 0
+fi
+
+# Issue #1790 catch-all: the composed verdict is authoritative. Any reason —
+# including ones added to projectEligibility() after this script was written —
+# that folds allow=false blocks admission here, so the gate can never drift
+# from the route's composition again. Log the raw reasons so the operator can
+# see which (possibly future) reason produced the verdict.
+if [[ "$ALLOW" == "false" ]]; then
+  REASONS_JSON=$(jq -c '.reasons // {}' <<<"$ELIGIBILITY_JSON" 2>/dev/null || echo "{}")
+  log "eligibility allow=false — skip (reasons: $REASONS_JSON)"
+  exit 0
+fi
+
+# Pacing Curve verdict is ADDITIVE to .allow (src/cost/eligibility.ts): a
+# burn-ahead snapshot returns allow=true with paceState=ahead, so this arm
+# CANNOT be folded into the .allow check above.
 if [[ "$PACE_STATE" == "ahead" ]]; then
   log "ahead of pacing curve — pausing (skip)"
   exit 0
