@@ -80,17 +80,36 @@ const META_LESSON_LABEL = "meta-friction"; // share the label; titles distinguis
 // Any other cue uses the default threshold (`PROMOTION_THRESHOLD` = 3).
 const ACCEPTANCE_CRITERION_DEFERRED_CUE = "acceptance-criterion-deferred";
 
+// Expected-telemetry cue (issue #1789). The hydra-target-build Step-2
+// inline-mode contract (#1782) mandates a friction-log POST with this exact
+// cue on EVERY autopilot-dispatched inline build — by design — because the
+// dispatch session never grows an Agent/Task spawn tool. The hit count is
+// useful inline-mode frequency telemetry (kept visible on
+// /learning/friction-patterns), but it is NOT chronic friction to escalate:
+// any finite threshold just defers noise, then the escalator reopens the
+// closed #1789 forever. Mapped to POSITIVE_INFINITY so the cue never produces
+// an EscalationInput — the inline-mode decision record is the #1782 contract
+// itself, not a recurring GitHub issue.
+const NO_AGENT_SPAWN_TOOL_RUN_INLINE_CUE = "no-agent-spawn-tool-run-inline";
+
 /**
  * Per-cue escalation thresholds. Cues not listed fall back to the caller's
  * `defaultThreshold` (currently `PROMOTION_THRESHOLD = 3` for both the
  * memory and friction namespaces).
  *
- * `acceptance-criterion-deferred` is the only escalator-only override today —
- * 20+ hits across distinct skills before opening a GitHub issue, because the
- * cue is expected to fire on nearly every PR with operator-observable ACs.
+ * `acceptance-criterion-deferred` raises the bar to 20+ hits across distinct
+ * skills before opening a GitHub issue, because the cue is expected to fire on
+ * nearly every PR with operator-observable ACs.
+ *
+ * `no-agent-spawn-tool-run-inline` uses `Number.POSITIVE_INFINITY` — the
+ * never-escalate sentinel. `escalationThresholdForCue` accepts any override
+ * `> 0` (Infinity qualifies) and `shouldEscalateAtHitCount(n, Infinity)` is
+ * false for every finite hit count, so the cue never escalates while its hit
+ * count keeps accumulating as telemetry (issue #1789).
  */
 const CUE_ESCALATION_THRESHOLDS: Record<string, number> = {
   [ACCEPTANCE_CRITERION_DEFERRED_CUE]: 20,
+  [NO_AGENT_SPAWN_TOOL_RUN_INLINE_CUE]: Number.POSITIVE_INFINITY,
 };
 
 /**
