@@ -234,27 +234,59 @@ export interface HealthAssessment {
 // agree by name.
 //
 // Index 3 (cycle) is handler-only and not part of ProbeInputs.
+//
+// Issue #1833: every field below carries the shape its probe actually produces,
+// `| null` for the rejected-settle case (assembleProbeInputs' `val()` returns
+// null when a settle rejected). The field types are the SAME shapes parseProbes
+// already reasons about via its `|| default` reads and projectHealthDeepResponse
+// reads — they reuse the local HealthSnapshot sub-shapes so the pure seam stays
+// import-free (no coupling back to the I/O-layer producer modules), keeping the
+// dependency direction #840/#1771 established. A probe field renamed on the I/O
+// side (api/health.ts) is now a compile error at assembleProbeInputs rather than
+// a silent runtime miss caught only by a `|| default`.
+
+/**
+ * The two persisted-metrics fields parseProbes' `recent` pipeline reads off the
+ * index-6 metrics probe. Only `trend` is consumed (the per-cycle rollup rows);
+ * `stats` rides along from getAggregateStats but no rule reads it, so it stays
+ * loosely typed. Each trend row's numeric fields arrive as strings (Redis hash
+ * values) — parseProbes coerces with parseInt — so they're typed string|number.
+ */
+export interface ProbeMetricsInput {
+  trend?: Array<{
+    tasksMerged?: string | number;
+    tasksFailed?: string | number;
+    taskTitle?: string;
+    rolledBack?: string | boolean;
+    totalDurationMs?: string | number;
+  }>;
+  stats?: unknown;
+}
 
 export interface ProbeInputs {
-  basicHealth: any;
-  serviceProbes: any;
-  scheduler: any;
-  queueDepth: any;
-  backlogCounts: any;
-  metrics: any;
-  disk: any;
-  mem: any;
-  sysdOrchestrator: any;
-  sysdWatchdog: any;
-  sysdTargetWeb: any;
-  patterns: any;
-  reflections: any;
-  ovSearch: any;
-  redisInfo: any;
-  emergencyBrake: any;
-  // Indices 17/18: consumed by projectHealthDeepResponse for OV quality trends
-  ovSearchWindow: any;
-  knowledgeContext: any;
+  basicHealth: HealthSnapshot["health"] | null;
+  serviceProbes: HealthSnapshot["svcProbes"] | null;
+  scheduler: HealthSnapshot["sched"] | null;
+  queueDepth: number | null;
+  backlogCounts: HealthSnapshot["blCounts"] | null;
+  metrics: ProbeMetricsInput | null;
+  disk: HealthSnapshot["disk"] | null;
+  mem: HealthSnapshot["mem"] | null;
+  sysdOrchestrator: string | null;
+  sysdWatchdog: string | null;
+  sysdTargetWeb: string | null;
+  patterns: HealthSnapshot["patterns"] | null;
+  reflections: number | null;
+  ovSearch: HealthSnapshot["ovSearch"] | null;
+  redisInfo: HealthSnapshot["redisInfo"];
+  emergencyBrake: HealthSnapshot["emergencyBrake"] | null;
+  // Indices 17/18: consumed by projectHealthDeepResponse for OV quality trends.
+  // projectHealthDeepResponse passes both straight onto the wire as `unknown`
+  // (ovSearchTrend/knowledgeContext) — the persisted-rollup shapes live in the
+  // I/O-layer ov-search-metrics module, so they stay `unknown` here to avoid
+  // importing that producer type into the pure seam.
+  ovSearchWindow: unknown;
+  knowledgeContext: unknown;
 }
 
 // ---- parseProbes — owns the `recent` pipeline derivation ----------------
