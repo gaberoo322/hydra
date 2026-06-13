@@ -783,25 +783,44 @@ const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
 
 /**
  * Pure observability rollup over the run digests (issue #1352, acceptance
- * clause 3). Computes the **clean-termination rate** — the fraction of ENDED
- * runs that self-terminated via a clean `term_reason` ({@link CLEAN_TERM_REASONS})
- * rather than the `interrupted`/`crash` reap backstop. When this rate sits at
- * ~0 over a non-trivial sample of dispatch-bearing runs, the retro learning
- * loop is structurally starved (every run dies before its dispatches'
- * terminal cycle records materialise) — the alarm condition #1352 was filed on.
+ * clause 3; gating refined in #1815). Computes the **clean-termination rate** —
+ * the fraction of **dispatch-bearing** ENDED runs that self-terminated via a
+ * clean `term_reason` ({@link CLEAN_TERM_REASONS}) rather than the
+ * `interrupted`/`crash` reap backstop. When this rate sits at ~0 over a
+ * non-trivial sample of dispatch-bearing runs, the retro learning loop is
+ * structurally starved (every run dies before its dispatches' terminal cycle
+ * records materialise) — the alarm condition #1352 was filed on.
+ *
+ * **Why dispatch-gated (issue #1815):** the board is dominated by *trivial
+ * idle-at-startup* runs — the autopilot launches (pace-gate timer), finds no
+ * eligible work, and idles out in ~1-3min with `dispatches=0` and a clean
+ * `idle` term_reason. Counting those toward the clean numerator made
+ * `cleanRuns === 0` essentially never true, masking the exact starvation signal
+ * the alarm was built for (live: 0/11 dispatch-bearing runs terminated cleanly,
+ * yet the alarm read healthy because 26 trivial idle-drains inflated the rate to
+ * 0.33). The rate and the `starved` bit are therefore computed over
+ * `runs.filter(r => r.dispatches > 0)` only — trivial idle runs neither inflate
+ * the numerator nor mask the alarm.
  *
  * Read-only and total: takes already-fetched digests, returns counts + a
- * nullable rate (null when there are no ended runs to divide by, so a fresh
- * system reports "no data" rather than a misleading 0). `endedDispatchTotal`
- * lets a consumer gate the alarm on "non-trivial dispatch counts" — a rate of 0
- * over runs that did real work is the starvation signal; a rate of 0 over runs
- * that immediately ran out of work is not.
+ * nullable rate (null when there are no *dispatch-bearing* ended runs to divide
+ * by, so a fresh / work-starved-board system reports "no data" rather than a
+ * misleading 0).
  *
- * `starved` is the pre-derived alarm bit (issue #1352 acceptance clause 3):
- * true when a non-trivial sample of ended runs ({@link STARVATION_MIN_ENDED_RUNS})
- * that collectively did real dispatch work produced ZERO clean terminations.
- * Consumers (hydra-doctor, the dashboard) alarm on the boolean directly
- * instead of re-deriving thresholds.
+ * Returned fields:
+ * - `cleanTerminationRate` — dispatch-bearing clean runs / dispatch-bearing
+ *   ended runs (null when there are no dispatch-bearing ended runs).
+ * - `endedRuns` / `cleanRuns` — raw counts over ALL ended runs (un-gated;
+ *   retained for backward-compatible reporting and so a consumer can see how
+ *   many trivial idle-drains were filtered out: `endedRuns -
+ *   dispatchBearingRuns`).
+ * - `dispatchBearingRuns` / `dispatchBearingCleanRuns` — the gated counts the
+ *   rate and alarm are actually derived from.
+ * - `endedDispatchTotal` — total dispatches across ended runs (unchanged).
+ * - `starved` — the pre-derived alarm bit: true when a non-trivial sample of
+ *   **dispatch-bearing** ended runs ({@link STARVATION_MIN_ENDED_RUNS}) produced
+ *   ZERO clean terminations. Consumers (hydra-doctor, the dashboard) alarm on
+ *   the boolean directly instead of re-deriving thresholds.
  */
 const STARVATION_MIN_ENDED_RUNS = 5;
 
@@ -811,28 +830,43 @@ export function summarizeTerminationHealth(
   cleanTerminationRate: number | null;
   endedRuns: number;
   cleanRuns: number;
+  dispatchBearingRuns: number;
+  dispatchBearingCleanRuns: number;
   endedDispatchTotal: number;
   starved: boolean;
 } {
   let endedRuns = 0;
   let cleanRuns = 0;
+  let dispatchBearingRuns = 0;
+  let dispatchBearingCleanRuns = 0;
   let endedDispatchTotal = 0;
   for (const run of runs) {
     if (run.status !== "ended") continue;
     endedRuns += 1;
-    endedDispatchTotal += numberOrDefault(run.dispatches, 0);
+    const dispatches = numberOrDefault(run.dispatches, 0);
+    endedDispatchTotal += dispatches;
     const termReason = typeof run.term_reason === "string" ? run.term_reason : "";
-    if (CLEAN_TERM_REASONS.has(termReason)) cleanRuns += 1;
+    const isClean = CLEAN_TERM_REASONS.has(termReason);
+    if (isClean) cleanRuns += 1;
+    // Gate the rate + alarm on dispatch-bearing runs only (#1815): trivial
+    // idle-at-startup runs (dispatches=0) must not inflate the clean numerator
+    // and mask the starvation signal.
+    if (dispatches > 0) {
+      dispatchBearingRuns += 1;
+      if (isClean) dispatchBearingCleanRuns += 1;
+    }
   }
   return {
-    cleanTerminationRate: endedRuns > 0 ? cleanRuns / endedRuns : null,
+    cleanTerminationRate:
+      dispatchBearingRuns > 0 ? dispatchBearingCleanRuns / dispatchBearingRuns : null,
     endedRuns,
     cleanRuns,
+    dispatchBearingRuns,
+    dispatchBearingCleanRuns,
     endedDispatchTotal,
     starved:
-      endedRuns >= STARVATION_MIN_ENDED_RUNS &&
-      endedDispatchTotal > 0 &&
-      cleanRuns === 0,
+      dispatchBearingRuns >= STARVATION_MIN_ENDED_RUNS &&
+      dispatchBearingCleanRuns === 0,
   };
 }
 

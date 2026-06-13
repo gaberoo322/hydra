@@ -724,7 +724,7 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     }
   });
 
-  test("clean rate is the fraction of ended runs with a clean term_reason", () => {
+  test("clean rate is the fraction of dispatch-bearing ended runs with a clean term_reason", () => {
     const h = summarizeTerminationHealth([
       { status: "ended", term_reason: "idle", dispatches: 3 },
       { status: "ended", term_reason: "budget", dispatches: 5 },
@@ -733,6 +733,9 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     ]);
     assert.equal(h.endedRuns, 4);
     assert.equal(h.cleanRuns, 3);
+    // All four runs are dispatch-bearing, so the gated denominator == endedRuns.
+    assert.equal(h.dispatchBearingRuns, 4);
+    assert.equal(h.dispatchBearingCleanRuns, 3);
     assert.equal(h.cleanTerminationRate, 0.75);
     assert.equal(h.endedDispatchTotal, 17);
   });
@@ -746,21 +749,86 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     assert.equal(h.cleanTerminationRate, 0, "all interrupted → rate 0");
     assert.equal(h.cleanRuns, 0);
     assert.equal(h.endedRuns, 3);
+    assert.equal(h.dispatchBearingRuns, 3);
     assert.equal(h.endedDispatchTotal, 24, "non-trivial dispatch total gates the alarm");
     assert.equal(h.starved, false, "below the 5-run sample floor the alarm stays off");
   });
 
   test("starved flips true at >=5 dispatch-bearing ended runs with zero clean terminations", () => {
+    const runs = Array.from({ length: 5 }, () => ({
+      status: "ended", term_reason: "interrupted", dispatches: 3,
+    }));
+    const h = summarizeTerminationHealth(runs);
+    assert.equal(h.endedRuns, 5);
+    assert.equal(h.dispatchBearingRuns, 5);
+    assert.equal(h.cleanRuns, 0);
+    assert.equal(h.dispatchBearingCleanRuns, 0);
+    assert.equal(h.starved, true, "the #1352 starvation alarm");
+  });
+
+  // issue #1815: the sample floor counts DISPATCH-BEARING runs, not raw ended
+  // runs. A single dispatch-bearing run padded with four trivial disp=0
+  // idle-drains is below the floor → no alarm, no false-positive.
+  test("disp=0 idle-drains do NOT count toward the dispatch-bearing sample floor (#1815)", () => {
     const runs = Array.from({ length: 5 }, (_, i) => ({
       status: "ended", term_reason: "interrupted", dispatches: i === 0 ? 6 : 0,
     }));
     const h = summarizeTerminationHealth(runs);
     assert.equal(h.endedRuns, 5);
-    assert.equal(h.cleanRuns, 0);
-    assert.equal(h.starved, true, "the #1352 starvation alarm");
+    assert.equal(h.dispatchBearingRuns, 1, "only one run did any dispatch work");
+    assert.equal(h.starved, false, "one dispatch-bearing run is below the 5-run floor");
   });
 
-  test("a single clean termination clears the starvation alarm", () => {
+  // issue #1815 — the headline regression: a board dominated by trivial
+  // disp=0 idle-drains (clean `idle` term_reason) must NOT mask the starvation
+  // alarm. Pre-#1815, the 6 clean idle-drains made cleanRuns>0 so starved stayed
+  // false even though every dispatch-bearing run died interrupted.
+  test("trivial disp=0 idle-drains do not mask the alarm; dispatch-bearing runs still drive it (#1815)", () => {
+    const runs = [
+      // 6 trivial idle-at-startup runs: clean term_reason but zero dispatch work.
+      ...Array.from({ length: 6 }, () => ({
+        status: "ended", term_reason: "idle", dispatches: 0,
+      })),
+      // 5 dispatch-bearing runs, every one dies interrupted mid-loop.
+      ...Array.from({ length: 5 }, () => ({
+        status: "ended", term_reason: "interrupted", dispatches: 4,
+      })),
+    ];
+    const h = summarizeTerminationHealth(runs);
+    assert.equal(h.endedRuns, 11);
+    assert.equal(h.cleanRuns, 6, "raw clean count still includes the trivial idle-drains");
+    assert.equal(h.dispatchBearingRuns, 5, "only the dispatch-bearing runs gate the rate");
+    assert.equal(h.dispatchBearingCleanRuns, 0);
+    assert.equal(
+      h.cleanTerminationRate,
+      0,
+      "dispatch-gated rate is 0/5 — the trivial idle-drains no longer inflate it",
+    );
+    assert.equal(
+      h.starved,
+      true,
+      "alarm fires: 0 dispatch-bearing clean terminations over a non-trivial sample",
+    );
+  });
+
+  // issue #1815: a clean termination on a DISPATCH-BEARING run still clears the
+  // alarm — only trivial disp=0 idle-drains are filtered out.
+  test("a single dispatch-bearing clean termination clears the starvation alarm (#1815)", () => {
+    const runs = [
+      { status: "ended", term_reason: "idle", dispatches: 3 },
+      ...Array.from({ length: 5 }, () => ({
+        status: "ended", term_reason: "interrupted", dispatches: 3,
+      })),
+    ];
+    const h = summarizeTerminationHealth(runs);
+    assert.equal(h.dispatchBearingRuns, 6);
+    assert.equal(h.dispatchBearingCleanRuns, 1);
+    assert.equal(h.starved, false, "one dispatch-bearing clean run clears the alarm");
+  });
+
+  // issue #1815: an idle clean termination with disp=0 does NOT clear the alarm,
+  // because it is filtered out of the dispatch-bearing numerator entirely.
+  test("a disp=0 idle clean run does NOT clear the alarm (#1815)", () => {
     const runs = [
       { status: "ended", term_reason: "idle", dispatches: 0 },
       ...Array.from({ length: 5 }, () => ({
@@ -768,8 +836,9 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
       })),
     ];
     const h = summarizeTerminationHealth(runs);
-    assert.equal(h.cleanRuns, 1);
-    assert.equal(h.starved, false);
+    assert.equal(h.cleanRuns, 1, "raw clean count sees the idle-drain");
+    assert.equal(h.dispatchBearingCleanRuns, 0, "but it is not dispatch-bearing");
+    assert.equal(h.starved, true, "so it does not mask the alarm");
   });
 
   test("zero-dispatch all-interrupted runs do NOT alarm (ran-out-of-work, not starvation)", () => {
@@ -778,7 +847,9 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     }));
     const h = summarizeTerminationHealth(runs);
     assert.equal(h.endedRuns, 6);
+    assert.equal(h.dispatchBearingRuns, 0);
     assert.equal(h.endedDispatchTotal, 0);
+    assert.equal(h.cleanTerminationRate, null, "no dispatch-bearing runs → no-data, not 0");
     assert.equal(h.starved, false, "no dispatch work → rate 0 is not the starvation signal");
   });
 
@@ -789,6 +860,8 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
       { status: "ended", term_reason: "idle", dispatches: 1 },
     ]);
     assert.equal(h.cleanRuns, 1);
+    assert.equal(h.dispatchBearingRuns, 3);
+    assert.equal(h.dispatchBearingCleanRuns, 1);
     assert.equal(h.cleanTerminationRate, 1 / 3);
   });
 
@@ -809,6 +882,7 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     ]);
     assert.equal(h.cleanTerminationRate, null);
     assert.equal(h.endedRuns, 0);
+    assert.equal(h.dispatchBearingRuns, 0);
   });
 
   test("empty input → null rate, zero counts", () => {
@@ -817,6 +891,8 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
       cleanTerminationRate: null,
       endedRuns: 0,
       cleanRuns: 0,
+      dispatchBearingRuns: 0,
+      dispatchBearingCleanRuns: 0,
       endedDispatchTotal: 0,
       starved: false,
     });
