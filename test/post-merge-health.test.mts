@@ -18,6 +18,13 @@
  *      ambient degradation alone never alarms, only deltas do; a missing
  *      baseline falls back to the absolute thresholds.
  *
+ * Issue #1817 adds freshness-flap suppression in delta mode:
+ *   6. an ok->soft (degraded/stale) transition on a freshness-class service
+ *      (keyword allowlist) is suppressed as a sampling artifact, BUT any move
+ *      into error, any worsening from an already-not-ok baseline, and ok->soft
+ *      on a hard-check (non-freshness) service all still count — suppression is
+ *      scoped, never global.
+ *
  * The script's I/O (fetch, spawn) is injected so the tests run hermetically with
  * no network and no real `claude` process. Baseline files use a per-test
  * tmpdir — plain node:fs, mirroring the script's stdlib-only constraint.
@@ -35,7 +42,8 @@ const {
   evaluateRegression,
   severityRank,
   evaluateDelta,
-  evaluateSample,
+  isFreshnessClass,
+  deltaCounts,
   writeBaseline,
   readBaseline,
   buildIncidentContext,
@@ -64,28 +72,6 @@ function fakeFetchThrows(message: string): typeof fetch {
     throw new Error(message);
   }) as unknown as typeof fetch;
 }
-
-// A fake fetch that returns a SEQUENCE of bodies (one per call), so successive
-// debounce re-samples can differ. Each entry is either a JSON body (HTTP 200) or
-// the sentinel `THROW` to simulate an unreachable re-sample. Falls back to the
-// last body once the sequence is exhausted.
-const THROW = Symbol("throw");
-function fakeFetchSequence(bodies: Array<unknown | typeof THROW>): {
-  fetchImpl: typeof fetch;
-  callCount: () => number;
-} {
-  let i = 0;
-  const fetchImpl = (async () => {
-    const body = bodies[Math.min(i, bodies.length - 1)];
-    i += 1;
-    if (body === THROW) throw new Error("ECONNREFUSED");
-    return { ok: true, status: 200, json: async () => body };
-  }) as unknown as typeof fetch;
-  return { fetchImpl, callCount: () => i };
-}
-
-// An instant sleep so debounce-spacing waits cost no wall-clock time in tests.
-const instantSleep = (async () => {}) as unknown as (ms: number) => Promise<void>;
 
 describe("post-merge-health: config (issue #1054 — configurable noise floor)", () => {
   test("defaults are applied when env is empty", () => {
@@ -621,167 +607,245 @@ describe("post-merge-health: arg parsing", () => {
       baseline: "/tmp/b.json",
     });
   });
-
-  test("--confirm-samples and --confirm-spacing-ms (issue #1817)", () => {
-    assert.deepEqual(parseArgs(["--confirm-samples", "3", "--confirm-spacing-ms", "200000"]), {
-      confirmSamples: 3,
-      confirmSpacingMs: 200000,
-    });
-    // A non-numeric value is ignored (left undefined => env/default applies).
-    assert.deepEqual(parseArgs(["--confirm-samples", "notanumber"]), {});
-  });
 });
 
-describe("post-merge-health: debounce config (issue #1817)", () => {
-  test("defaults: confirmSamples=1 (no debounce), confirmSpacingMs=200000", () => {
+describe("post-merge-health: freshness-class config (issue #1817)", () => {
+  test("default freshness allowlist covers the #1817 data/freshness services", () => {
     const c = baseConfig();
-    assert.equal(c.confirmSamples, 1, "debounce is OFF by default — one-shot pre-#1817 behavior");
-    assert.equal(c.confirmSpacingMs, 200_000, "default spacing exceeds the 180s scanner freshness window");
+    assert.deepEqual(c.freshnessServices, ["scanner", "ingest", "pinnacle", "fairline", "freshness"]);
   });
 
-  test("env overrides confirmSamples and confirmSpacingMs", () => {
+  test("env overrides the freshness allowlist (csv, lowercased)", () => {
     const c = loadConfig({
-      HYDRA_PMH_CONFIRM_SAMPLES: "3",
-      HYDRA_PMH_CONFIRM_SPACING_MS: "250000",
+      HYDRA_PMH_FRESHNESS_SERVICES: "Scanner, FairLine , feed",
     } as unknown as NodeJS.ProcessEnv);
-    assert.equal(c.confirmSamples, 3);
-    assert.equal(c.confirmSpacingMs, 250_000);
+    assert.deepEqual(c.freshnessServices, ["scanner", "fairline", "feed"]);
   });
 
-  test("confirmSamples clamps to >= 1 (a 0/empty env never disables alarming)", () => {
-    assert.equal(loadConfig({ HYDRA_PMH_CONFIRM_SAMPLES: "0" } as unknown as NodeJS.ProcessEnv).confirmSamples, 1);
-    assert.equal(loadConfig({ HYDRA_PMH_CONFIRM_SAMPLES: "-5" } as unknown as NodeJS.ProcessEnv).confirmSamples, 1);
-  });
-});
-
-describe("post-merge-health: evaluateSample (issue #1817 — per-sample evaluator)", () => {
-  test("with a baseline => delta mode; without => absolute mode", () => {
-    const snap = parseHealthSnapshot({ status: "degraded", services: { scanner: { status: "error" } } });
-    const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
-
-    const withBaseline = evaluateSample(snap, baseConfig(), baseline);
-    assert.equal(withBaseline.mode, "delta");
-    assert.equal(withBaseline.verdict.regressed, true);
-
-    const absolute = evaluateSample(snap, baseConfig(), null);
-    assert.equal(absolute.mode, "absolute");
-    assert.equal(absolute.verdict.regressed, true);
+  test("an empty env value falls back to the default allowlist", () => {
+    const c = loadConfig({ HYDRA_PMH_FRESHNESS_SERVICES: "" } as unknown as NodeJS.ProcessEnv);
+    assert.deepEqual(c.freshnessServices, ["scanner", "ingest", "pinnacle", "fairline", "freshness"]);
   });
 });
 
-describe("post-merge-health: debounce — runWatch (issue #1817 freshness-window flapping)", () => {
-  // The exact false-positive: scanner reads ok in the baseline, the FIRST
-  // post-merge sample catches it mid-cron-gap (stale => execution-class delta),
-  // but a re-sample after the next scan run sees it back to ok. Debounce must
-  // suppress the alarm.
-  test("a freshness flap (regress then recover) is SUPPRESSED when confirmSamples>1", async () => {
+describe("post-merge-health: isFreshnessClass (issue #1817)", () => {
+  const fresh = baseConfig().freshnessServices;
+  test("matches a freshness-class service name by keyword substring", () => {
+    assert.equal(isFreshnessClass("scanner", fresh), true);
+    assert.equal(isFreshnessClass("sportsbookIngestion", fresh), true, "substring 'ingest' matches");
+    assert.equal(isFreshnessClass("pinnacleFairLine", fresh), true);
+  });
+  test("a hard-check service is NOT freshness-class", () => {
+    assert.equal(isFreshnessClass("database", fresh), false);
+    assert.equal(isFreshnessClass("migrationDrift", fresh), false);
+    assert.equal(isFreshnessClass("opticOdds", fresh), false);
+  });
+});
+
+describe("post-merge-health: deltaCounts — scoped freshness-flap suppression (issue #1817)", () => {
+  const fresh = baseConfig().freshnessServices;
+  // The 6 prototype cases from the approved design concept (hydra:design-concept:issue-1817).
+  test("scanner ok->stale is SUPPRESSED (freshness flap)", () => {
+    assert.equal(deltaCounts("scanner", "ok", "stale", fresh), false);
+  });
+  test("ingestion ok->degraded is SUPPRESSED (freshness flap)", () => {
+    assert.equal(deltaCounts("sportsbookIngestion", "ok", "degraded", fresh), false);
+  });
+  test("scanner ok->error still COUNTS (any move into error always alarms — invariant 4)", () => {
+    assert.equal(deltaCounts("scanner", "ok", "error", fresh), true);
+  });
+  test("scanner stale->error still COUNTS (worsening from already-not-ok)", () => {
+    assert.equal(deltaCounts("scanner", "stale", "error", fresh), true);
+  });
+  test("database ok->degraded still COUNTS (hard-check service — invariant 5, never global)", () => {
+    assert.equal(deltaCounts("database", "ok", "degraded", fresh), true);
+  });
+  test("opticOdds ok->error still COUNTS (non-freshness service into error)", () => {
+    assert.equal(deltaCounts("opticOdds", "ok", "error", fresh), true);
+  });
+
+  // Edge cases beyond the prototype set.
+  test("a freshness service ABSENT-in-baseline (=ok) -> stale is suppressed; -> error counts", () => {
+    assert.equal(deltaCounts("scanner", undefined, "stale", fresh), false, "absent ranks ok=0; ok->soft suppressed");
+    assert.equal(deltaCounts("scanner", undefined, "error", fresh), true, "absent->error always counts");
+  });
+  test("same-rank drift and improvements never count", () => {
+    assert.equal(deltaCounts("scanner", "stale", "degraded", fresh), false, "same rank (1->1)");
+    assert.equal(deltaCounts("scanner", "error", "ok", fresh), false, "improvement");
+    assert.equal(deltaCounts("database", "degraded", "ok", fresh), false, "improvement, hard-check");
+  });
+});
+
+describe("post-merge-health: evaluateDelta freshness-flap suppression (issue #1817)", () => {
+  // The exact #1817 false-positive: scanner ok in baseline, stale post-merge.
+  // The one-shot delta comparator USED to alarm (execution-class delta > floor 0);
+  // it must now be suppressed because scanner is freshness-class and the move is
+  // ok->soft.
+  test("scanner ok->stale alone does NOT alarm (the #1817 false positive)", () => {
     const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
-    const { fetchImpl, callCount } = fakeFetchSequence([
-      { status: "degraded", services: { scanner: { status: "stale" } } }, // sample 1: flap (stale)
-      { status: "ok", services: { scanner: { status: "ok" } } }, // sample 2: recovered
-    ]);
+    const current = parseHealthSnapshot({ status: "degraded", services: { scanner: { status: "stale" } } });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, false, "scanner ok->stale is a freshness flap, not a regression");
+    assert.deepEqual(v.reasons, []);
+  });
+
+  test("scanner ok->ERROR still alarms (invariant 4 — error always counts)", () => {
+    const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
+    const current = parseHealthSnapshot({ status: "error", services: { scanner: { status: "error" } } });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, true);
+    assert.ok(v.reasons.some((r: string) => r.includes("scanner: ok -> error")));
+  });
+
+  test("database ok->degraded (hard-check) still alarms — suppression is NOT global (invariant 5)", () => {
+    // database is not execution/provider-class, so it lands on the generic
+    // servicesNotOk floor (2); pad with two more non-freshness degradations to
+    // breach it and prove the database delta was COUNTED, not suppressed.
+    const baseline = parseHealthSnapshot({
+      status: "ok",
+      services: { database: { status: "ok" }, cacheLayer: { status: "ok" }, authService: { status: "ok" } },
+    });
+    const current = parseHealthSnapshot({
+      status: "degraded",
+      services: {
+        database: { status: "degraded" },
+        cacheLayer: { status: "degraded" },
+        authService: { status: "degraded" },
+      },
+    });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, true, "hard-check ok->degraded must still count toward the floor");
+    assert.ok(
+      v.reasons.some((r: string) => r.includes("database: ok -> degraded")),
+      "the database hard-check delta is named in the breach reason",
+    );
+  });
+
+  test("scanner ok->stale suppressed but a concurrent execution ok->error STILL alarms", () => {
+    // Mixed sample: the freshness flap on scanner is dropped, but a real
+    // execution-class error survives and breaches the zero-tolerance floor —
+    // the suppression must NOT swallow the genuine regression (invariant 5).
+    const baseline = parseHealthSnapshot({
+      status: "degraded", // ambient-degraded baseline, as in the real #1817 incident
+      services: { scanner: { status: "ok" }, orderRouter: { status: "ok" } },
+    });
+    const current = parseHealthSnapshot({
+      status: "degraded",
+      services: { scanner: { status: "stale" }, orderRouter: { status: "error" } },
+    });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, true, "the execution error must alarm even though the scanner flap is suppressed");
+    assert.ok(
+      v.reasons.some((r: string) => r.includes("orderRouter: ok -> error")),
+      "the surviving execution-class delta is named in the breach reason",
+    );
+    assert.ok(
+      !v.reasons.some((r: string) => r.includes("scanner")),
+      "the suppressed scanner flap must not appear in any breach reason",
+    );
+  });
+
+  test("scanner ok->stale alone with an already-degraded overall does NOT alarm (real #1817 shape)", () => {
+    // The actual incident: overall was degraded on BOTH sides (ambient stale
+    // feeds), the ONLY post-merge delta was scanner ok->stale. No alarm.
+    const baseline = parseHealthSnapshot({
+      status: "degraded",
+      services: { scanner: { status: "ok" }, ingestion: { status: "degraded" }, opticOdds: { status: "not_configured" } },
+    });
+    const current = parseHealthSnapshot({
+      status: "degraded",
+      services: { scanner: { status: "stale" }, ingestion: { status: "degraded" }, opticOdds: { status: "not_configured" } },
+    });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, false, "the lone scanner freshness flap must not alarm");
+    assert.deepEqual(v.reasons, []);
+  });
+
+  test("ingestion ok->degraded freshness flap is suppressed in delta mode", () => {
+    const baseline = parseHealthSnapshot({ status: "ok", services: { ingestion: { status: "ok" } } });
+    const current = parseHealthSnapshot({ status: "degraded", services: { ingestion: { status: "degraded" } } });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, false, "ingestion is freshness-class; ok->degraded is a flap");
+  });
+
+  // The overall status is DERIVED from the per-service set, so a lone freshness
+  // flap can drag overall ok->degraded. That derived worsening must ALSO be
+  // suppressed (else the suppression is defeated by the overall field), but ONLY
+  // when no per-service delta survived and the overall stays in soft rank.
+  test("overall ok->degraded driven solely by a suppressed flap does NOT alarm", () => {
+    const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
+    const current = parseHealthSnapshot({ status: "degraded", services: { scanner: { status: "stale" } } });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, false, "the overall worsening is itself a freshness-flap artifact");
+    assert.ok(
+      !v.reasons.some((r: string) => r.includes("overall health worsened")),
+      "the derived overall worsening must not surface as a breach reason",
+    );
+  });
+
+  test("overall ok->ERROR always alarms even if the only service delta is a suppressed flap (invariant 4)", () => {
+    // overall reported error (e.g. a non-service-level failure) while the only
+    // per-service change is a freshness flap. A worsening INTO error always
+    // counts — the overall-flap suppression is scoped to soft rank only.
+    const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
+    const current = parseHealthSnapshot({ status: "error", services: { scanner: { status: "stale" } } });
+    const v = evaluateDelta(baseline, current, baseConfig());
+    assert.equal(v.regressed, true, "overall -> error must always alarm");
+    assert.ok(v.reasons.some((r: string) => r.includes('overall health worsened vs pre-merge baseline: "ok" -> "error"')));
+  });
+});
+
+describe("post-merge-health: runWatch end-to-end freshness-flap (issue #1817)", () => {
+  // The full #1817 incident scenario, end-to-end through runWatch in delta mode:
+  // scanner ok in the baseline, stale post-merge => NO alarm, NO dispatch.
+  test("scanner ok->stale via baseline-delta => healthy, no dispatch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pmh-1817-flap-"));
+    const baselinePath = join(dir, "baseline.json");
+    const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
+    assert.equal(writeBaseline(baselinePath, baseline).ok, true);
+
     let spawned = false;
     const spawnSpy = (() => {
       spawned = true;
       return { unref() {}, on() {} };
     }) as unknown as typeof import("node:child_process").spawn;
 
-    // Inject the baseline via a tmp file so runWatch resolves delta mode.
-    const dir = mkdtempSync(join(tmpdir(), "pmh-debounce-flap-"));
-    const baselinePath = join(dir, "baseline.json");
-    assert.equal(writeBaseline(baselinePath, baseline).ok, true);
-
     const result = await runWatch(
-      { ...baseConfig(), dispatch: true, confirmSamples: 2, confirmSpacingMs: 1 },
-      { mergeSha: "flap123", baselinePath },
-      { fetchImpl, spawnImpl: spawnSpy, sleepImpl: instantSleep },
+      { ...baseConfig(), dispatch: true },
+      { mergeSha: "flap1817", baselinePath },
+      {
+        fetchImpl: fakeFetchOk({ status: "degraded", services: { scanner: { status: "stale" } } }),
+        spawnImpl: spawnSpy,
+      },
     );
-    assert.equal(result.kind, "healthy", "a recovered re-sample must clear the phantom regression");
-    assert.equal(spawned, false, "no hydra-incident dispatch on a transient flap");
-    assert.equal(callCount(), 2, "exactly two samples were taken (first + one confirmation)");
+    assert.equal(result.kind, "healthy", "the scanner freshness flap must not alarm");
+    if (result.kind === "healthy") assert.equal(result.mode, "delta");
+    assert.equal(spawned, false, "no hydra-incident dispatch on a freshness flap");
   });
 
-  // A REAL regression persists across every sample => still alarms.
-  test("a persistent regression alarms after all confirmSamples confirm it", async () => {
-    const baseline = parseHealthSnapshot({ status: "ok", services: { execution: { status: "ok" } } });
-    const regressed = { status: "degraded", services: { execution: { status: "error" } } };
-    const { fetchImpl, callCount } = fakeFetchSequence([regressed, regressed, regressed]);
+  // A REAL regression (scanner into error) still alarms + dispatches.
+  test("scanner ok->error via baseline-delta => alarm + dispatch (real regression)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pmh-1817-real-"));
+    const baselinePath = join(dir, "baseline.json");
+    const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
+    assert.equal(writeBaseline(baselinePath, baseline).ok, true);
+
     const calls: Array<{ cmd: string; args: string[] }> = [];
     const spawnSpy = ((cmd: string, args: string[]) => {
       calls.push({ cmd, args });
       return { unref() {}, on() {} };
     }) as unknown as typeof import("node:child_process").spawn;
 
-    const dir = mkdtempSync(join(tmpdir(), "pmh-debounce-real-"));
-    const baselinePath = join(dir, "baseline.json");
-    assert.equal(writeBaseline(baselinePath, baseline).ok, true);
-
     const result = await runWatch(
-      { ...baseConfig(), dispatch: true, confirmSamples: 3, confirmSpacingMs: 1 },
-      { mergeSha: "real123", baselinePath },
-      { fetchImpl, spawnImpl: spawnSpy, sleepImpl: instantSleep },
+      { ...baseConfig(), dispatch: true },
+      { mergeSha: "real1817", baselinePath },
+      {
+        fetchImpl: fakeFetchOk({ status: "error", services: { scanner: { status: "error" } } }),
+        spawnImpl: spawnSpy,
+      },
     );
-    assert.equal(result.kind, "alarm", "a regression on every sample is confirmed");
+    assert.equal(result.kind, "alarm", "scanner into error is a real regression");
     if (result.kind === "alarm") assert.equal(result.dispatched, true);
-    assert.equal(calls.length, 1, "exactly one hydra-incident dispatch after confirmation");
-    assert.equal(callCount(), 3, "all three samples were taken");
-  });
-
-  // confirmSamples=1 (default) preserves the exact one-shot behavior: no
-  // re-sampling, alarm immediately on a single regressing sample.
-  test("confirmSamples=1 => no re-sampling, alarms on the single sample (unchanged behavior)", async () => {
-    const { fetchImpl, callCount } = fakeFetchSequence([
-      { status: "error", services: { scanner: { status: "error" } } },
-    ]);
-    const calls: Array<{ cmd: string; args: string[] }> = [];
-    const spawnSpy = ((cmd: string, args: string[]) => {
-      calls.push({ cmd, args });
-      return { unref() {}, on() {} };
-    }) as unknown as typeof import("node:child_process").spawn;
-
-    const result = await runWatch(
-      { ...baseConfig(), dispatch: true, confirmSamples: 1 },
-      { mergeSha: "oneshot" },
-      { fetchImpl, spawnImpl: spawnSpy, sleepImpl: instantSleep },
-    );
-    assert.equal(result.kind, "alarm");
-    assert.equal(calls.length, 1);
-    assert.equal(callCount(), 1, "no debounce re-sample when confirmSamples=1");
-  });
-
-  // Fail-soft: an unreachable RE-SAMPLE cannot confirm the regression, so the
-  // alarm is suppressed (matches the unreachable-no-op convention).
-  test("an unreachable re-sample SUPPRESSES the alarm (cannot confirm => do not alarm)", async () => {
-    const { fetchImpl } = fakeFetchSequence([
-      { status: "error", services: { scanner: { status: "error" } } }, // sample 1: regresses
-      THROW, // sample 2: unreachable
-    ]);
-    let spawned = false;
-    const spawnSpy = (() => {
-      spawned = true;
-      return { unref() {}, on() {} };
-    }) as unknown as typeof import("node:child_process").spawn;
-
-    const result = await runWatch(
-      { ...baseConfig(), dispatch: true, confirmSamples: 2, confirmSpacingMs: 1 },
-      { mergeSha: "unreach" },
-      { fetchImpl, spawnImpl: spawnSpy, sleepImpl: instantSleep },
-    );
-    assert.equal(result.kind, "healthy", "an unreachable confirmation sample fails soft to non-alarm");
-    assert.equal(spawned, false);
-  });
-
-  // A FIRST sample that is healthy never enters the debounce loop at all.
-  test("a healthy first sample never re-samples regardless of confirmSamples", async () => {
-    const { fetchImpl, callCount } = fakeFetchSequence([
-      { status: "ok", services: { database: { status: "ok" } } },
-    ]);
-    const result = await runWatch(
-      { ...baseConfig(), dispatch: true, confirmSamples: 5, confirmSpacingMs: 1 },
-      {},
-      { fetchImpl, sleepImpl: instantSleep },
-    );
-    assert.equal(result.kind, "healthy");
-    assert.equal(callCount(), 1, "no re-sampling when the first sample is already healthy");
+    assert.equal(calls.length, 1, "exactly one hydra-incident dispatch");
   });
 });

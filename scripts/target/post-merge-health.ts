@@ -93,35 +93,46 @@
  *   - HYDRA_PMH_TIMEOUT_MS            per-request fetch timeout
  *   - HYDRA_PMH_DISPATCH              "1" to actually dispatch hydra-incident,
  *                                     anything else => dry-run (print only)
- *   - HYDRA_PMH_CONFIRM_SAMPLES       debounce: total samples that must ALL
- *                                     regress before alarming (default 1 = no
- *                                     debounce; see DEBOUNCE below)
- *   - HYDRA_PMH_CONFIRM_SPACING_MS    spacing between debounce re-samples (ms)
+ *   - HYDRA_PMH_FRESHNESS_SERVICES    csv keyword allowlist of freshness-class
+ *                                     service names whose ok->soft delta is
+ *                                     suppressed (see FRESHNESS-FLAP below)
  *
- * DEBOUNCE — freshness-window flapping (issue #1817)
- * --------------------------------------------------
+ * FRESHNESS-FLAP SUPPRESSION (issue #1817)
+ * ----------------------------------------
  * Several Target services derive their status purely from the *freshness* of the
  * latest persisted pipeline run: `state==="fresh"` (within a short freshness
  * window) => ok, else degraded/stale. When that freshness window (e.g. the
  * scanner's 180s) is far tighter than the underlying cron cadence (e.g. ~30min),
  * the signal FLAPS ok<->degraded purely as a function of WHEN the single health
  * probe fires relative to the cron — not because of any merge. A one-shot
- * comparator (absolute OR delta) that samples each side once therefore reports a
- * phantom `scanner: ok -> degraded` regression that is a pure sampling-phase
- * artifact (the 2026-06-13 false-positives on hydra-betting — issue #1817).
+ * delta comparator that happened to sample the baseline inside the fresh window
+ * and the post-merge probe outside it therefore reports a phantom
+ * `scanner: ok -> degraded` regression that is a pure sampling-phase artifact
+ * (the 2026-06-13 false-positives on hydra-betting — issue #1817).
  *
- * The debounce is the comparator-side fix: when the FIRST sample regresses,
- * re-sample the Target up to HYDRA_PMH_CONFIRM_SAMPLES-1 more times, spaced
- * HYDRA_PMH_CONFIRM_SPACING_MS apart (set this > the service's freshness window
- * so a fresh cron run can land between samples), re-evaluating each sample the
- * same way (delta vs the SAME baseline, or absolute). We alarm ONLY when EVERY
- * sample regresses. A transient freshness flap recovers within a cron cadence,
- * so a later sample sees the service back to ok and the alarm is suppressed; a
- * real regression persists across every sample and still alarms. With the
- * default HYDRA_PMH_CONFIRM_SAMPLES=1 there is no re-sampling and the behavior
- * is byte-for-byte the pre-#1817 one-shot comparator — debounce is strictly
- * opt-in. A sample that becomes unreachable mid-debounce is treated as a
- * non-regression (fail-soft: cannot confirm => do not alarm).
+ * The orchestrator comparator cannot observe the Target's cron cadence, so it
+ * cannot debounce by re-sampling (that would need 30min+ of probing and couple
+ * the comparator to the Target schedule — both rejected in the #1817 design
+ * concept). The orchestrator-only fix is a SCOPED suppression rule inside
+ * evaluateDelta: the SINGLE delta we suppress is the ok(rank 0) -> soft(rank 1,
+ * i.e. degraded/stale/unknown) transition, and ONLY for services whose name
+ * matches a freshness-class keyword allowlist (scanner, ingest, pinnacle,
+ * fairline, freshness — env-overridable via HYDRA_PMH_FRESHNESS_SERVICES).
+ * Everything else still counts as a regression:
+ *   - ANY transition INTO error (rank 2) on ANY service (a freshness flap never
+ *     produces an error; an error is unambiguous and always alarms);
+ *   - any worsening from an already-not-ok baseline (e.g. degraded -> error);
+ *   - ok -> degraded on a HARD-CHECK (non-freshness) service — e.g. a genuine
+ *     `database: ok -> degraded` still alarms; suppression is NEVER global.
+ * The overall status is derived from the per-service set, so a freshness flap on
+ * one service can drag overall ok -> degraded; that overall worsening is ALSO
+ * suppressed, but ONLY when every per-service delta was a freshness flap (no
+ * surviving delta) and the overall went into soft rank (not error). An overall
+ * worsening into error, or with any surviving per-service delta, still alarms.
+ * Recovered/improved services and same-rank drift stay ignored (unchanged). The
+ * absolute-threshold fallback evaluator is intentionally left alone: the flap is
+ * a baseline-relative sampling artifact, so the suppression only makes sense in
+ * delta mode (the paved hydra-target-build road always supplies a baseline).
  *
  * USAGE
  * -----
@@ -156,16 +167,12 @@ const DEFAULTS = {
   /** Per-request fetch timeout (ms). */
   timeoutMs: 5000,
   /**
-   * Debounce (issue #1817): total samples that must ALL regress before alarming.
-   * 1 (the default) means no debounce — the one-shot pre-#1817 behavior.
+   * Freshness-class keyword allowlist (issue #1817). A service whose name
+   * matches any of these fragments has its ok->soft (degraded/stale/unknown)
+   * delta suppressed as a freshness-window flap. Defaults to the data/freshness
+   * services named in #1817; env-overridable via HYDRA_PMH_FRESHNESS_SERVICES.
    */
-  confirmSamples: 1,
-  /**
-   * Debounce spacing between re-samples (ms). Set > the service's freshness
-   * window so a fresh cron run can land between samples. Default 200_000ms
-   * (~3.3min) exceeds the documented 180s scanner freshness window.
-   */
-  confirmSpacingMs: 200_000,
+  freshnessServices: ["scanner", "ingest", "pinnacle", "fairline", "freshness"] as string[],
 };
 
 /** Keyword fragments that classify a service name as execution-class. */
@@ -185,12 +192,10 @@ export interface PostMergeHealthConfig {
   maxProviderErrors: number;
   timeoutMs: number;
   /**
-   * Debounce (issue #1817): total samples that must ALL regress before alarming.
-   * 1 = no debounce (one-shot). Clamped to >= 1 in loadConfig.
+   * Freshness-class keyword allowlist (issue #1817): service names matching any
+   * of these fragments have their ok->soft delta suppressed as a freshness-flap.
    */
-  confirmSamples: number;
-  /** Debounce spacing between re-samples (ms). */
-  confirmSpacingMs: number;
+  freshnessServices: string[];
   /** When false, an alarm is logged + printed but hydra-incident is not spawned. */
   dispatch: boolean;
 }
@@ -273,10 +278,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PostMergeHealt
     maxExecutionErrors: parseIntEnv(env.HYDRA_PMH_MAX_EXECUTION_ERRORS, DEFAULTS.maxExecutionErrors),
     maxProviderErrors: parseIntEnv(env.HYDRA_PMH_MAX_PROVIDER_ERRORS, DEFAULTS.maxProviderErrors),
     timeoutMs: parseIntEnv(env.HYDRA_PMH_TIMEOUT_MS, DEFAULTS.timeoutMs),
-    // confirmSamples must be >= 1 (a 0-sample debounce is meaningless and would
-    // never alarm). parseIntEnv clamps to >= 0; Math.max lifts a 0 back to 1.
-    confirmSamples: Math.max(1, parseIntEnv(env.HYDRA_PMH_CONFIRM_SAMPLES, DEFAULTS.confirmSamples)),
-    confirmSpacingMs: parseIntEnv(env.HYDRA_PMH_CONFIRM_SPACING_MS, DEFAULTS.confirmSpacingMs),
+    freshnessServices: parseCsvEnv(env.HYDRA_PMH_FRESHNESS_SERVICES, DEFAULTS.freshnessServices),
     dispatch: env.HYDRA_PMH_DISPATCH === "1",
   };
 }
@@ -286,6 +288,44 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PostMergeHealt
 function classify(serviceName: string, keywords: string[]): boolean {
   const lower = serviceName.toLowerCase();
   return keywords.some((kw) => lower.includes(kw));
+}
+
+/**
+ * True when a service name matches the configured freshness-class keyword
+ * allowlist (issue #1817). A freshness-class service derives its status from
+ * data freshness, so its ok->soft (degraded/stale) transition can be a pure
+ * sampling-phase flap rather than a real regression — only THIS transition,
+ * and only for THESE services, is suppressed in evaluateDelta. Exported so the
+ * suppression rule is unit-testable in isolation.
+ */
+export function isFreshnessClass(serviceName: string, freshnessServices: string[]): boolean {
+  return classify(serviceName, freshnessServices);
+}
+
+/**
+ * Decide whether a single per-service delta counts as a regression (issue
+ * #1817). Pure. A delta counts iff the severity worsened AND it is not a scoped
+ * freshness-flap. The ONLY suppressed transition is ok(rank 0) -> soft(rank 1,
+ * i.e. degraded/stale/unknown) on a freshness-class service. ANY transition
+ * into error (rank 2), and ANY worsening from an already-not-ok baseline, still
+ * counts — so a genuine database ok->degraded (hard-check service) and any
+ * scanner ok->error / stale->error all still alarm.
+ */
+export function deltaCounts(
+  serviceName: string,
+  before: ServiceStatus | undefined,
+  after: ServiceStatus,
+  freshnessServices: string[],
+): boolean {
+  const beforeRank = before === undefined ? 0 : severityRank(before);
+  const afterRank = severityRank(after);
+  if (afterRank <= beforeRank) return false; // not a worsening
+  // Suppress ONLY ok(0) -> soft(1) on a freshness-class service. Any move into
+  // error (rank 2) and any non-freshness service still counts.
+  if (beforeRank === 0 && afterRank === 1 && isFreshnessClass(serviceName, freshnessServices)) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -389,12 +429,13 @@ export function evaluateDelta(
 
   // Per-service deltas: newly not-ok or severity-worsened vs the baseline.
   // A service absent from the baseline ranks as ok=0 so a brand-new failing
-  // service still counts as a delta.
+  // service still counts as a delta. deltaCounts (issue #1817) additionally
+  // suppresses the ok->soft freshness-flap for freshness-class services only —
+  // any move into error and any non-freshness service still counts.
   const deltas: Array<{ name: string; from: ServiceStatus | "(absent)"; to: ServiceStatus }> = [];
   for (const [name, status] of Object.entries(current.services)) {
     const before = baseline.services[name];
-    const beforeRank = before === undefined ? 0 : severityRank(before);
-    if (severityRank(status) > beforeRank) {
+    if (deltaCounts(name, before, status, config.freshnessServices)) {
       deltas.push({ name, from: before ?? "(absent)", to: status });
     }
   }
@@ -408,7 +449,20 @@ export function evaluateDelta(
   const describe = (names: Array<{ name: string; from: string; to: string }>): string =>
     names.map((d) => `${d.name}: ${d.from} -> ${d.to}`).join(", ");
 
-  if (severityRank(current.overall) > severityRank(baseline.overall)) {
+  // Overall severity-rank worsening. Freshness-flap suppression (issue #1817)
+  // also applies here: a freshness flap on a single service can drag the OVERALL
+  // status from ok -> degraded. If every per-service delta was suppressed as a
+  // freshness flap (deltas is empty) AND the overall only worsened INTO soft
+  // rank (degraded/stale/unknown, not error), the overall worsening is itself a
+  // flap artifact and must not alarm — otherwise the suppression would be
+  // defeated by the derived overall field. A worsening INTO error (rank 2)
+  // always alarms (invariant 4); any surviving per-service delta keeps the
+  // overall check armed (invariant 5 — a real hard-check ok->degraded yields a
+  // surviving delta, so this branch never masks it).
+  const overallWorsened = severityRank(current.overall) > severityRank(baseline.overall);
+  const overallIntoSoftOnly = severityRank(current.overall) === 1;
+  const overallIsFreshnessFlap = deltas.length === 0 && overallIntoSoftOnly;
+  if (overallWorsened && !overallIsFreshnessFlap) {
     reasons.push(
       `overall health worsened vs pre-merge baseline: "${baseline.overall}" -> "${current.overall}"`,
     );
@@ -599,92 +653,6 @@ export function dispatchIncident(
   }
 }
 
-// ── Sampling + evaluation helpers ─────────────────────────────────────────────
-
-/**
- * Promise-based sleep. Injectable so the debounce loop's spacing waits are
- * instant in tests (no real wall-clock delay). Pure wrapper over setTimeout.
- */
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Evaluate one already-fetched snapshot in the appropriate mode. Pure (no I/O):
- * delta vs the supplied baseline when one is present, otherwise absolute. The
- * baseline is resolved once by the caller so a single re-read serves every
- * debounce sample. Returns both the verdict and the mode it was computed in.
- */
-export function evaluateSample(
-  snapshot: TargetHealthSnapshot,
-  config: PostMergeHealthConfig,
-  baseline: TargetHealthSnapshot | null,
-): { verdict: RegressionVerdict; mode: EvaluationMode } {
-  if (baseline) {
-    return { verdict: evaluateDelta(baseline, snapshot, config), mode: "delta" };
-  }
-  return { verdict: evaluateRegression(snapshot, config), mode: "absolute" };
-}
-
-/**
- * Debounce confirmation loop (issue #1817). Called only when the first sample
- * already regressed AND `config.confirmSamples > 1`. Re-samples the Target up to
- * `confirmSamples - 1` more times, each spaced `config.confirmSpacingMs` apart,
- * re-evaluating against the SAME baseline/mode. Returns the FIRST non-regressing
- * verdict it encounters (which suppresses the alarm), or the last regressing
- * verdict if every sample confirmed the regression. Never throws.
- *
- * A re-sample that is unreachable is treated as a non-regression: we cannot
- * confirm, so we must not alarm (fail-soft, matching the unreachable no-op
- * elsewhere). The returned verdict in that case is a synthetic healthy verdict
- * carrying the most recent successful snapshot for logging.
- */
-async function confirmRegression(
-  config: PostMergeHealthConfig,
-  opts: { mergeSha?: string; baselinePath?: string },
-  baseline: TargetHealthSnapshot | null,
-  mode: EvaluationMode,
-  firstVerdict: RegressionVerdict,
-  deps: { fetchImpl: typeof fetch; sleepImpl: typeof sleep },
-): Promise<RegressionVerdict> {
-  let lastVerdict = firstVerdict;
-  for (let i = 1; i < config.confirmSamples; i++) {
-    console.error(
-      `[post-merge-health] debounce (issue #1817): first sample regressed; ` +
-        `re-sampling ${i + 1}/${config.confirmSamples} (mode=${mode}) after ` +
-        `${config.confirmSpacingMs}ms to rule out a freshness-window flap`,
-    );
-    await deps.sleepImpl(config.confirmSpacingMs);
-
-    const reFetched = await fetchTargetHealth(config, deps.fetchImpl);
-    if (reFetched.ok !== true) {
-      // Cannot confirm — fail-soft to non-regression so a flap that coincides
-      // with a brief outage never alarms. Keep the prior snapshot for logging.
-      console.error(
-        `[post-merge-health] debounce sample ${i + 1} unreachable (${reFetched.reason}) — ` +
-          `cannot confirm regression, suppressing alarm`,
-      );
-      return { regressed: false, reasons: [], snapshot: lastVerdict.snapshot };
-    }
-
-    const reSnapshot = parseHealthSnapshot(reFetched.body);
-    const { verdict: reVerdict } = evaluateSample(reSnapshot, config, baseline);
-    lastVerdict = reVerdict;
-    if (!reVerdict.regressed) {
-      console.error(
-        `[post-merge-health] debounce sample ${i + 1} did NOT regress — ` +
-          `suppressing alarm as a transient freshness-window flap (issue #1817)`,
-      );
-      return reVerdict;
-    }
-  }
-  console.error(
-    `[post-merge-health] debounce: regression persisted across all ` +
-      `${config.confirmSamples} samples — confirmed, proceeding to alarm`,
-  );
-  return lastVerdict;
-}
-
 // ── Orchestration ───────────────────────────────────────────────────────────────
 
 /**
@@ -695,24 +663,23 @@ async function confirmRegression(
  *     (issue #1699) so ambient degradation alone never alarms;
  *   - otherwise: evaluates against the absolute noise floor.
  *
- * DEBOUNCE (issue #1817): when the first post-merge sample regresses and
- * `config.confirmSamples > 1`, re-sample the Target up to confirmSamples-1 more
- * times (spaced `config.confirmSpacingMs` apart) and alarm ONLY if EVERY sample
- * regresses. A transient freshness-window flap recovers within a cron cadence,
- * so a later sample clears the alarm; a real regression persists. A re-sample
- * that becomes unreachable or recovers below the floor suppresses the alarm
- * (fail-soft: cannot confirm => do not alarm).
+ * FRESHNESS-FLAP SUPPRESSION (issue #1817): in delta mode, evaluateDelta no
+ * longer counts an ok->soft (degraded/stale) transition on a freshness-class
+ * service as a regression — that transition is a sampling-phase artifact of the
+ * service's freshness window being tighter than its cron cadence. Any move into
+ * error, any worsening from an already-not-ok baseline, and ok->degraded on a
+ * non-freshness (hard-check) service all still count. The suppression lives
+ * entirely in the pure evaluator; runWatch samples the Target exactly once.
  *
- * Only on a confirmed regression and only when `config.dispatch` is true does it
- * fire hydra-incident. Returns a WatchResult; never throws.
+ * Only on a regression and only when `config.dispatch` is true does it fire
+ * hydra-incident. Returns a WatchResult; never throws.
  */
 export async function runWatch(
   config: PostMergeHealthConfig,
   opts: { mergeSha?: string; snapshotOut?: string; baselinePath?: string } = {},
-  deps: { fetchImpl?: typeof fetch; spawnImpl?: typeof spawn; sleepImpl?: typeof sleep } = {},
+  deps: { fetchImpl?: typeof fetch; spawnImpl?: typeof spawn } = {},
 ): Promise<WatchResult> {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const sleepImpl = deps.sleepImpl ?? sleep;
 
   const fetched: FetchHealthResult = await fetchTargetHealth(config, fetchImpl);
   if (fetched.ok !== true) {
@@ -740,8 +707,10 @@ export async function runWatch(
     return { kind: "baseline-written", path: opts.snapshotOut, snapshot };
   }
 
-  // Resolve the baseline once (a single re-read serves every debounce sample).
-  // A baseline path that is unreadable falls back to absolute thresholds.
+  // Resolve the baseline. A baseline path that is unreadable falls back to the
+  // absolute-threshold evaluator. In delta mode evaluateDelta applies the
+  // issue-#1817 freshness-flap suppression; absolute mode (no baseline) keeps
+  // the pre-#1817 behavior.
   let baseline: TargetHealthSnapshot | null = null;
   if (opts.baselinePath) {
     const read = readBaseline(opts.baselinePath);
@@ -752,20 +721,10 @@ export async function runWatch(
     }
   }
 
-  const first = evaluateSample(snapshot, config, baseline);
-  const mode = first.mode;
-  let verdict = first.verdict;
-
-  // DEBOUNCE (issue #1817): a regressing first sample is only confirmed if every
-  // additional sample also regresses. Freshness-window flaps recover within a
-  // cron cadence; spacing the re-samples > the freshness window lets a fresh run
-  // land between them and clear a phantom regression.
-  if (verdict.regressed && config.confirmSamples > 1) {
-    verdict = await confirmRegression(config, opts, baseline, mode, verdict, {
-      fetchImpl,
-      sleepImpl,
-    });
-  }
+  const mode: EvaluationMode = baseline ? "delta" : "absolute";
+  const verdict = baseline
+    ? evaluateDelta(baseline, snapshot, config)
+    : evaluateRegression(snapshot, config);
 
   if (!verdict.regressed) {
     console.log(
@@ -804,10 +763,6 @@ interface CliArgs {
   snapshotOut?: string;
   /** Post-merge delta mode: compare against the baseline snapshot at this path. */
   baseline?: string;
-  /** Debounce (issue #1817): total samples that must all regress before alarming. */
-  confirmSamples?: number;
-  /** Debounce (issue #1817): spacing between re-samples (ms). */
-  confirmSpacingMs?: number;
 }
 
 /** Parse argv (everything after `node script.ts`). Pure for testability. */
@@ -825,12 +780,6 @@ export function parseArgs(argv: string[]): CliArgs {
       args.snapshotOut = argv[++i];
     } else if (a === "--baseline") {
       args.baseline = argv[++i];
-    } else if (a === "--confirm-samples") {
-      const n = Number.parseInt(argv[++i] ?? "", 10);
-      if (Number.isFinite(n)) args.confirmSamples = n;
-    } else if (a === "--confirm-spacing-ms") {
-      const n = Number.parseInt(argv[++i] ?? "", 10);
-      if (Number.isFinite(n)) args.confirmSpacingMs = n;
     }
   }
   return args;
@@ -842,11 +791,6 @@ async function main(): Promise<number> {
   // CLI flags override env: --dispatch forces dispatch, --dry-run forces off.
   if (args.dispatch) config.dispatch = true;
   if (args.dryRun) config.dispatch = false;
-  // Debounce flags override env (issue #1817); confirmSamples clamps to >= 1.
-  if (args.confirmSamples !== undefined) config.confirmSamples = Math.max(1, args.confirmSamples);
-  if (args.confirmSpacingMs !== undefined && args.confirmSpacingMs >= 0) {
-    config.confirmSpacingMs = args.confirmSpacingMs;
-  }
 
   const result = await runWatch(config, {
     mergeSha: args.mergeSha,
