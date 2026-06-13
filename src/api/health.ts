@@ -60,27 +60,35 @@ import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchP
 //   projectHealthDeepResponse, not part of ProbeInputs.
 type SettledLike = Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }>;
 export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
-  const val = (i: number): any =>
-    settled[i] && settled[i].status === "fulfilled" ? (settled[i] as any).value : null;
+  // Issue #1833: `val<T>(i)` coalesces a rejected settle to null and brands the
+  // fulfilled value as the field's declared type T. The settled array is
+  // heterogeneous + untyped (Promise.allSettled over 19 unrelated probes), so the
+  // fulfilled branch is an unavoidable assertion — but naming T at each call site
+  // hands the compiler the field's expected shape, so the object literal below is
+  // type-checked against ProbeInputs by NAME (a renamed/dropped field is now a
+  // build error here, the I/O owner, instead of a silent runtime miss in
+  // parseProbes' `|| default`).
+  const val = <T>(i: number): T | null =>
+    settled[i] && settled[i].status === "fulfilled" ? ((settled[i] as any).value as T) : null;
   return {
-    basicHealth: val(0),
-    serviceProbes: val(1),
-    scheduler: val(2),
-    queueDepth: val(4),
-    backlogCounts: val(5),
-    metrics: val(6),
-    disk: val(7),
-    mem: val(8),
-    sysdOrchestrator: val(9),
-    sysdWatchdog: val(10),
-    sysdTargetWeb: val(11),
-    patterns: val(12),
-    reflections: val(13),
-    ovSearch: val(14),
-    redisInfo: val(15),
-    emergencyBrake: val(16),
-    ovSearchWindow: val(17),
-    knowledgeContext: val(18),
+    basicHealth: val<ProbeInputs["basicHealth"]>(0),
+    serviceProbes: val<ProbeInputs["serviceProbes"]>(1),
+    scheduler: val<ProbeInputs["scheduler"]>(2),
+    queueDepth: val<ProbeInputs["queueDepth"]>(4),
+    backlogCounts: val<ProbeInputs["backlogCounts"]>(5),
+    metrics: val<ProbeInputs["metrics"]>(6),
+    disk: val<ProbeInputs["disk"]>(7),
+    mem: val<ProbeInputs["mem"]>(8),
+    sysdOrchestrator: val<ProbeInputs["sysdOrchestrator"]>(9),
+    sysdWatchdog: val<ProbeInputs["sysdWatchdog"]>(10),
+    sysdTargetWeb: val<ProbeInputs["sysdTargetWeb"]>(11),
+    patterns: val<ProbeInputs["patterns"]>(12),
+    reflections: val<ProbeInputs["reflections"]>(13),
+    ovSearch: val<ProbeInputs["ovSearch"]>(14),
+    redisInfo: val<ProbeInputs["redisInfo"]>(15),
+    emergencyBrake: val<ProbeInputs["emergencyBrake"]>(16),
+    ovSearchWindow: val<ProbeInputs["ovSearchWindow"]>(17),
+    knowledgeContext: val<ProbeInputs["knowledgeContext"]>(18),
   };
 }
 import { gitExec } from "../github/git.ts";
