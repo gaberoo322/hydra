@@ -41,3 +41,27 @@ secrets.json
 # Per-test TAP artifact from `npm run test:debug` (issue #1076) — regenerated
 # on every debug run, never committed.
 test-debug.tap
+
+# Generated config artifacts (issue #1739) — runtime output that keeps showing
+# up as untracked in the main ~/hydra tree, tripping the deploy.sh dirty-tree
+# guard (post-#551 contract) and giving agents grounding against ~/hydra phantom
+# diffs. Ignore ONLY the generated paths — config/ is otherwise git-tracked by
+# convention, and config/feedback/ is a Tier-1 prompt/lesson convention path
+# (CLAUDE.md), so we never blanket-ignore that directory.
+#
+# config/digests/ has never been tracked: hydra-digest writes daily/on-demand
+# summary .md files here and hydra-retro writes per-run retro JSON under retro/.
+# The whole directory is generated.
+config/digests/
+#
+# Under config/feedback/, ignore only the generated subpaths:
+#   - to-*.md          : the LIVE Pattern-Memory learning files (to-planner.md,
+#                        to-executor.md, to-skeptic.md) the promotion lifecycle
+#                        (src/pattern-memory/feedback-file.ts) writes on disk. The
+#                        tracked SOURCE moved to docs/historical/ when config/feedback/
+#                        was retired from the repo (#710); on-disk copies are runtime.
+#   - retro-artifacts/ : per-run retro JSON dumps written by hydra-retro.
+#   - *-iotest.md      : promotion-lifecycle integration-test artifacts (#1125).
+config/feedback/to-*.md
+config/feedback/retro-artifacts/
+config/feedback/*-iotest.md
