@@ -362,7 +362,7 @@ async function loadDesignConceptImpl(
 // ---------------------------------------------------------------------------
 
 // The production default routes the merged-PR scan through the GitHub CLI
-// Adapter seam (issue #899). The `exec` parameter on loadMergedAnchorRefsImpl
+// Adapter seam (issue #899). The `exec` parameter on makeMergedAnchorRefsLoader
 // remains the injectable test seam — this only changes the default.
 const execFile = execFileViaSeam;
 
@@ -468,78 +468,96 @@ interface MergedScanCacheEntry {
   refs: Set<string>;
   storedAt: number;
 }
-let mergedScanCache: MergedScanCacheEntry | null = null;
 
 /**
- * Test-only: clear the merged-scan TTL cache so each test observes a cold
- * fetch. Not for production use (the production path lets the TTL expire).
+ * A merged-refs loader: scans recent merged PRs and returns the suppression
+ * token set, TTL-caching the result. `nowMs` defaults to `Date.now()`; pass an
+ * explicit clock for deterministic tests.
  */
-export function __resetMergedScanCacheForTests(): void {
-  mergedScanCache = null;
-}
+export type MergedAnchorRefsLoader = (nowMs?: number) => Promise<Set<string>>;
 
 /**
- * Production merged-refs reader. Scans recent merged PRs on both the
- * orchestrator and target repos via `gh pr list --state merged`, harvesting
- * the normalized identity tokens each PR ships (`mergedTokensFromPr`). Never
- * throws — a `gh` failure on one repo logs and contributes nothing; total
- * failure yields an empty set (suppress nothing), exactly degrading to the
- * pre-#882 behaviour on a miss.
+ * Factory for the production merged-refs reader (issue #882 / #1834
+ * state-locality refactor). Builds a loader that scans recent merged PRs on
+ * both the orchestrator and target repos via `gh pr list --state merged`,
+ * harvesting the normalized identity tokens each PR ships
+ * (`mergedTokensFromPr`). Never throws — a `gh` failure on one repo logs and
+ * contributes nothing; total failure yields an empty set (suppress nothing),
+ * exactly degrading to the pre-#882 behaviour on a miss.
  *
- * TTL-bounded (issue #882 QA remediation): a fresh cache entry (younger than
- * `MERGED_SCAN_CACHE_TTL_MS`) short-circuits the `gh` shell-out so the hot
- * `/api/anchor/candidates` path doesn't fork `gh` on every request. Pass
- * `nowMs` for deterministic tests; defaults to `Date.now()`.
+ * The TTL cache lives in THIS closure, not in module scope (#1834). A fresh
+ * cache entry (younger than `MERGED_SCAN_CACHE_TTL_MS`) short-circuits the `gh`
+ * shell-out so the hot `/api/anchor/candidates` path doesn't fork `gh` on every
+ * request. Production wires one long-lived instance (`loadMergedAnchorRefsImpl`)
+ * as the default `loadMergedAnchorRefs` dep; each call to this factory yields a
+ * loader with its OWN cold cache, so tests get isolation by constructing a
+ * fresh loader instead of resetting shared module state.
  *
- * Exported (with the injectable `exec` + `nowMs` seam) so the TTL-cache
- * behaviour is unit-testable without forking a real `gh`.
+ * The `exec` parameter is the injectable seam so the TTL-cache behaviour is
+ * unit-testable without forking a real `gh`.
  */
-export async function loadMergedAnchorRefsImpl(
+export function makeMergedAnchorRefsLoader(
   exec: typeof execFile = execFile,
-  nowMs: number = Date.now(),
-): Promise<Set<string>> {
-  if (mergedScanCache && nowMs - mergedScanCache.storedAt < MERGED_SCAN_CACHE_TTL_MS) {
-    return mergedScanCache.refs;
-  }
+): MergedAnchorRefsLoader {
+  // Cache is closure-local: a burst of polls within the TTL reuses one scan,
+  // but no module-level state leaks across unrelated tests.
+  let cache: MergedScanCacheEntry | null = null;
 
-  const merged = new Set<string>();
-  // gh's --search uses GitHub's `merged:>=YYYY-MM-DD` qualifier.
-  const since = new Date(nowMs - MERGED_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
-  for (const repo of mergedScanRepos()) {
-    try {
-      const { stdout } = await exec(
-        "gh",
-        [
-          "pr",
-          "list",
-          "--repo",
-          repo,
-          "--state",
-          "merged",
-          "--search",
-          `merged:>=${since}`,
-          "--limit",
-          String(MERGED_PR_SCAN_LIMIT),
-          "--json",
-          "title,body",
-        ],
-        { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 },
-      );
-      for (const tok of mergedTokensFromGhJson(stdout)) merged.add(tok);
-    } catch (err: any) {
-      console.error(
-        `[CandidateFeed] merged-PR scan failed for ${repo}: ${err?.message || err}`,
-      );
+  return async function loadMergedAnchorRefs(
+    nowMs: number = Date.now(),
+  ): Promise<Set<string>> {
+    if (cache && nowMs - cache.storedAt < MERGED_SCAN_CACHE_TTL_MS) {
+      return cache.refs;
     }
-  }
-  // Cache even an empty/degraded result: a `gh` outage should not be retried
-  // on every hot-path request within the TTL window. The set self-heals on the
-  // next scan after the TTL expires.
-  mergedScanCache = { refs: merged, storedAt: nowMs };
-  return merged;
+
+    const merged = new Set<string>();
+    // gh's --search uses GitHub's `merged:>=YYYY-MM-DD` qualifier.
+    const since = new Date(nowMs - MERGED_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    for (const repo of mergedScanRepos()) {
+      try {
+        const { stdout } = await exec(
+          "gh",
+          [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "merged",
+            "--search",
+            `merged:>=${since}`,
+            "--limit",
+            String(MERGED_PR_SCAN_LIMIT),
+            "--json",
+            "title,body",
+          ],
+          { timeout: 15_000, maxBuffer: 8 * 1024 * 1024 },
+        );
+        for (const tok of mergedTokensFromGhJson(stdout)) merged.add(tok);
+      } catch (err: any) {
+        console.error(
+          `[CandidateFeed] merged-PR scan failed for ${repo}: ${err?.message || err}`,
+        );
+      }
+    }
+    // Cache even an empty/degraded result: a `gh` outage should not be retried
+    // on every hot-path request within the TTL window. The set self-heals on
+    // the next scan after the TTL expires.
+    cache = { refs: merged, storedAt: nowMs };
+    return merged;
+  };
 }
+
+/**
+ * Production merged-refs reader — the single long-lived default loader wired
+ * into `CandidateFeedDeps.loadMergedAnchorRefs` and `reconcileWorkQueue`. Its
+ * TTL cache is the module's only merged-scan cache, contained inside the
+ * factory closure above (no module-level mutable state, no test-reset hook).
+ */
+export const loadMergedAnchorRefsImpl: MergedAnchorRefsLoader =
+  makeMergedAnchorRefsLoader();
 
 /**
  * Pure helper — exported for tests. Parse a `gh pr list --json title,body`
@@ -666,6 +684,8 @@ export async function reconcileWorkQueue(
     removeWorkQueueItem: deps.removeWorkQueueItem ?? removeWorkQueueItem,
     loadMergedAnchorRefs: deps.loadMergedAnchorRefs ?? (() => loadMergedAnchorRefsImpl()),
     getIssueState: deps.getIssueState ?? getIssueStateImpl,
+    // NOTE: `() => loadMergedAnchorRefsImpl()` calls the shared production
+    // loader with no clock arg so the closure-local TTL cache uses Date.now().
   };
   const result: WorkQueueReconcileResult = { scanned: 0, removed: 0, details: [] };
 
