@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 
 import {
   assembleRetroBundle,
+  dedupByCanonicalCycleId,
   flagDispatchesForDrill,
   projectDispatches,
   type RetroBundleDeps,
@@ -480,6 +481,72 @@ describe("projectDispatches", () => {
     ];
     const out = projectDispatches(turns);
     assert.equal(out.length, 2, "no durable identity — no cross-turn merge");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dedupByCanonicalCycleId (pure) — issue #1823
+// ---------------------------------------------------------------------------
+
+describe("dedupByCanonicalCycleId", () => {
+  test("collapses two rows sharing a cycleId into one; earliest turn canonical, fields unioned (#1823)", () => {
+    // Mirrors the live #1823 shape: turn 3's snapshot row is first-seen, turn 2's
+    // enriched action row is the duplicate. After the merge there is one row, it
+    // reports the earliest turn, and a field only one row carried survives.
+    const turn3 = dispatch({
+      cycleId: "aab08248",
+      turn_n: 3,
+      status: "failed",
+      bucket: "failed",
+      anchorReference: "cleanup(target): wire-or-retire ingestion.ts",
+      prNumber: null,
+    });
+    const turn2 = dispatch({
+      cycleId: "aab08248",
+      turn_n: 2,
+      status: "failed",
+      bucket: "failed",
+      anchorReference: "cleanup(target): wire-or-retire ingestion.ts",
+      prNumber: "1830", // only the later-merged row resolved a PR number
+    });
+    const out = dedupByCanonicalCycleId([turn3, turn2]);
+    assert.equal(out.length, 1, "two rows, one cycleId → one row");
+    assert.equal(out[0].turn_n, 2, "earliest turn_n adopted onto the canonical row");
+    assert.equal(out[0].prNumber, "1830", "non-null field from the dropped row is unioned in");
+    assert.equal(out[0].status, "failed");
+  });
+
+  test("ORs regressionIntroduced across the merged rows (#1823)", () => {
+    const a = dispatch({ cycleId: "c", turn_n: 1, regressionIntroduced: false });
+    const b = dispatch({ cycleId: "c", turn_n: 2, regressionIntroduced: true });
+    const out = dedupByCanonicalCycleId([a, b]);
+    assert.equal(out.length, 1);
+    assert.equal(out[0].regressionIntroduced, true, "any merged row's regression makes the dispatch regressed");
+  });
+
+  test("does NOT merge distinct cycleIds", () => {
+    const a = dispatch({ cycleId: "c1", turn_n: 1 });
+    const b = dispatch({ cycleId: "c2", turn_n: 2 });
+    const out = dedupByCanonicalCycleId([a, b]);
+    assert.equal(out.length, 2, "different cycleIds stay separate");
+    assert.deepEqual(out.map((d) => d.cycleId), ["c1", "c2"]);
+  });
+
+  test("never merges empty-cycleId rows (no durable identity) (#1184/#1823)", () => {
+    // Two distinct undrillable dispatches both carry cycleId "" — they must NOT
+    // be collapsed into one (that would lose a real, distinct dispatch).
+    const a = dispatch({ cycleId: "", turn_n: 1, skill: "hydra-dev", anchorReference: "#1" });
+    const b = dispatch({ cycleId: "", turn_n: 2, skill: "hydra-qa", anchorReference: "PR#2" });
+    const out = dedupByCanonicalCycleId([a, b]);
+    assert.equal(out.length, 2, "empty-cycleId rows are never merged");
+  });
+
+  test("is order-stable: survivors keep first-seen order", () => {
+    const x = dispatch({ cycleId: "x", turn_n: 1 });
+    const y = dispatch({ cycleId: "y", turn_n: 1 });
+    const yDup = dispatch({ cycleId: "y", turn_n: 2 });
+    const out = dedupByCanonicalCycleId([x, y, yDup]);
+    assert.deepEqual(out.map((d) => d.cycleId), ["x", "y"]);
   });
 });
 
@@ -984,6 +1051,83 @@ describe("assembleRetroBundle — composition", () => {
   // run-interrupted once per turn it was in flight, inflating abandon stats
   // and the flagDispatchesForDrill input).
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // issue #1823 — the #1776 fix is INCOMPLETE for the Target-build /
+  // sidecar-backfilled-cycleId path. Reproduced from run
+  // 150fd8c4-…: a single failed `hydra-target-build` cycle
+  // (`aab08248a62331a52`) was projected as TWO `RetroDispatch` rows — turn 3's
+  // slots_snapshot (snapshot-only, seeds the cycleId from the slot task_id) and
+  // turn 2's dispatch action (which carries NO cycleId at record time, so the
+  // action-time `byIdentity` registers nothing; the slots_snapshot fold then
+  // enriches the empty-cycleId action row to the SAME task_id — but the
+  // already-registered cross-turn identity is first-wins, so the enrich is a
+  // no-op merge and the second row survives). Both rows end with the identical
+  // cycleId, both are `failed`, so `flagDispatchesForDrill` double-counts the
+  // one real failed cycle. The fix is a post-enrichment identity-keyed dedup.
+  // -------------------------------------------------------------------------
+  test("Target-build cycle: one failed cycle across action+snapshot turns is ONE flagged row, not two (#1823)", async () => {
+    const TASK_ID = "aab08248a62331a52";
+    const ANCHOR = "cleanup(target): wire-or-retire web/src/lib/markets/ingestion.ts";
+    const slotEntry = {
+      skill: "hydra-target-build",
+      anchor: ANCHOR,
+      task_id: TASK_ID,
+      started_epoch: 1781365530,
+    };
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-1823", status: "ended", term_reason: "budget" },
+          // listTurnsDesc order: turn 3 (snapshot-only) is processed before
+          // turn 2 (the empty-cycleId action), exactly as the live run did.
+          turns: [
+            {
+              turn_n: 3,
+              actions: [],
+              slots_snapshot: { dev_target: slotEntry },
+            },
+            {
+              turn_n: 2,
+              // The dispatch action carries NEITHER cycleId NOR outcome — the
+              // durable identity only resolves from the slot below. This is the
+              // record-time gap #1776's action-time dedup cannot bridge.
+              actions: [
+                { type: "dispatch", slot: "dev_target", skill: "hydra-target-build" },
+              ],
+              slots_snapshot: { dev_target: slotEntry },
+            },
+          ],
+        }) as any,
+      // The cycle is failed; the metrics/hash carry the terminal status keyed on
+      // the durable task_id (= reap's cycleId, #1352).
+      readCycleMetrics: async (cycleId: string) =>
+        cycleId === TASK_ID ? { anchorReference: ANCHOR } : {},
+      readCycleHash: async (cycleId: string) =>
+        cycleId === TASK_ID ? { status: "failed" } : {},
+    });
+
+    const bundle = await assembleRetroBundle("run-1823", deps);
+
+    // Exactly one row for the one real cycle (was TWO before the fix).
+    const targetRows = bundle.dispatches.filter((d) => d.cycleId === TASK_ID);
+    assert.equal(targetRows.length, 1, "one real cycle → exactly one RetroDispatch (#1823)");
+    const d = targetRows[0];
+    assert.equal(d.skill, "hydra-target-build");
+    assert.equal(d.anchorReference, ANCHOR, "anchor preserved through the merge");
+    assert.equal(d.status, "failed");
+    assert.equal(d.bucket, "failed");
+    assert.equal(d.turn_n, 2, "earliest-turn row is canonical");
+    assert.equal(d.flagged, true, "the one failed cycle is flagged once");
+
+    // The drill selector now sees the cycle exactly once — no double-count.
+    assert.equal(
+      flagDispatchesForDrill(bundle.dispatches).filter((x) => x.cycleId === TASK_ID).length,
+      1,
+      "the failed cycle is flagged for drill exactly once (#1823)",
+    );
+  });
+
   test("interrupted run: a multi-turn in-flight dispatch is one undrillable row, not one per turn (#1776)", async () => {
     const slotEntry = {
       skill: "hydra-grill",
