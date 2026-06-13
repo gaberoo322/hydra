@@ -93,6 +93,35 @@
  *   - HYDRA_PMH_TIMEOUT_MS            per-request fetch timeout
  *   - HYDRA_PMH_DISPATCH              "1" to actually dispatch hydra-incident,
  *                                     anything else => dry-run (print only)
+ *   - HYDRA_PMH_CONFIRM_SAMPLES       debounce: total samples that must ALL
+ *                                     regress before alarming (default 1 = no
+ *                                     debounce; see DEBOUNCE below)
+ *   - HYDRA_PMH_CONFIRM_SPACING_MS    spacing between debounce re-samples (ms)
+ *
+ * DEBOUNCE — freshness-window flapping (issue #1817)
+ * --------------------------------------------------
+ * Several Target services derive their status purely from the *freshness* of the
+ * latest persisted pipeline run: `state==="fresh"` (within a short freshness
+ * window) => ok, else degraded/stale. When that freshness window (e.g. the
+ * scanner's 180s) is far tighter than the underlying cron cadence (e.g. ~30min),
+ * the signal FLAPS ok<->degraded purely as a function of WHEN the single health
+ * probe fires relative to the cron — not because of any merge. A one-shot
+ * comparator (absolute OR delta) that samples each side once therefore reports a
+ * phantom `scanner: ok -> degraded` regression that is a pure sampling-phase
+ * artifact (the 2026-06-13 false-positives on hydra-betting — issue #1817).
+ *
+ * The debounce is the comparator-side fix: when the FIRST sample regresses,
+ * re-sample the Target up to HYDRA_PMH_CONFIRM_SAMPLES-1 more times, spaced
+ * HYDRA_PMH_CONFIRM_SPACING_MS apart (set this > the service's freshness window
+ * so a fresh cron run can land between samples), re-evaluating each sample the
+ * same way (delta vs the SAME baseline, or absolute). We alarm ONLY when EVERY
+ * sample regresses. A transient freshness flap recovers within a cron cadence,
+ * so a later sample sees the service back to ok and the alarm is suppressed; a
+ * real regression persists across every sample and still alarms. With the
+ * default HYDRA_PMH_CONFIRM_SAMPLES=1 there is no re-sampling and the behavior
+ * is byte-for-byte the pre-#1817 one-shot comparator — debounce is strictly
+ * opt-in. A sample that becomes unreachable mid-debounce is treated as a
+ * non-regression (fail-soft: cannot confirm => do not alarm).
  *
  * USAGE
  * -----
@@ -126,6 +155,17 @@ const DEFAULTS = {
   maxProviderErrors: 1,
   /** Per-request fetch timeout (ms). */
   timeoutMs: 5000,
+  /**
+   * Debounce (issue #1817): total samples that must ALL regress before alarming.
+   * 1 (the default) means no debounce — the one-shot pre-#1817 behavior.
+   */
+  confirmSamples: 1,
+  /**
+   * Debounce spacing between re-samples (ms). Set > the service's freshness
+   * window so a fresh cron run can land between samples. Default 200_000ms
+   * (~3.3min) exceeds the documented 180s scanner freshness window.
+   */
+  confirmSpacingMs: 200_000,
 };
 
 /** Keyword fragments that classify a service name as execution-class. */
@@ -144,6 +184,13 @@ export interface PostMergeHealthConfig {
   maxExecutionErrors: number;
   maxProviderErrors: number;
   timeoutMs: number;
+  /**
+   * Debounce (issue #1817): total samples that must ALL regress before alarming.
+   * 1 = no debounce (one-shot). Clamped to >= 1 in loadConfig.
+   */
+  confirmSamples: number;
+  /** Debounce spacing between re-samples (ms). */
+  confirmSpacingMs: number;
   /** When false, an alarm is logged + printed but hydra-incident is not spawned. */
   dispatch: boolean;
 }
@@ -226,6 +273,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PostMergeHealt
     maxExecutionErrors: parseIntEnv(env.HYDRA_PMH_MAX_EXECUTION_ERRORS, DEFAULTS.maxExecutionErrors),
     maxProviderErrors: parseIntEnv(env.HYDRA_PMH_MAX_PROVIDER_ERRORS, DEFAULTS.maxProviderErrors),
     timeoutMs: parseIntEnv(env.HYDRA_PMH_TIMEOUT_MS, DEFAULTS.timeoutMs),
+    // confirmSamples must be >= 1 (a 0-sample debounce is meaningless and would
+    // never alarm). parseIntEnv clamps to >= 0; Math.max lifts a 0 back to 1.
+    confirmSamples: Math.max(1, parseIntEnv(env.HYDRA_PMH_CONFIRM_SAMPLES, DEFAULTS.confirmSamples)),
+    confirmSpacingMs: parseIntEnv(env.HYDRA_PMH_CONFIRM_SPACING_MS, DEFAULTS.confirmSpacingMs),
     dispatch: env.HYDRA_PMH_DISPATCH === "1",
   };
 }
@@ -548,6 +599,92 @@ export function dispatchIncident(
   }
 }
 
+// ── Sampling + evaluation helpers ─────────────────────────────────────────────
+
+/**
+ * Promise-based sleep. Injectable so the debounce loop's spacing waits are
+ * instant in tests (no real wall-clock delay). Pure wrapper over setTimeout.
+ */
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Evaluate one already-fetched snapshot in the appropriate mode. Pure (no I/O):
+ * delta vs the supplied baseline when one is present, otherwise absolute. The
+ * baseline is resolved once by the caller so a single re-read serves every
+ * debounce sample. Returns both the verdict and the mode it was computed in.
+ */
+export function evaluateSample(
+  snapshot: TargetHealthSnapshot,
+  config: PostMergeHealthConfig,
+  baseline: TargetHealthSnapshot | null,
+): { verdict: RegressionVerdict; mode: EvaluationMode } {
+  if (baseline) {
+    return { verdict: evaluateDelta(baseline, snapshot, config), mode: "delta" };
+  }
+  return { verdict: evaluateRegression(snapshot, config), mode: "absolute" };
+}
+
+/**
+ * Debounce confirmation loop (issue #1817). Called only when the first sample
+ * already regressed AND `config.confirmSamples > 1`. Re-samples the Target up to
+ * `confirmSamples - 1` more times, each spaced `config.confirmSpacingMs` apart,
+ * re-evaluating against the SAME baseline/mode. Returns the FIRST non-regressing
+ * verdict it encounters (which suppresses the alarm), or the last regressing
+ * verdict if every sample confirmed the regression. Never throws.
+ *
+ * A re-sample that is unreachable is treated as a non-regression: we cannot
+ * confirm, so we must not alarm (fail-soft, matching the unreachable no-op
+ * elsewhere). The returned verdict in that case is a synthetic healthy verdict
+ * carrying the most recent successful snapshot for logging.
+ */
+async function confirmRegression(
+  config: PostMergeHealthConfig,
+  opts: { mergeSha?: string; baselinePath?: string },
+  baseline: TargetHealthSnapshot | null,
+  mode: EvaluationMode,
+  firstVerdict: RegressionVerdict,
+  deps: { fetchImpl: typeof fetch; sleepImpl: typeof sleep },
+): Promise<RegressionVerdict> {
+  let lastVerdict = firstVerdict;
+  for (let i = 1; i < config.confirmSamples; i++) {
+    console.error(
+      `[post-merge-health] debounce (issue #1817): first sample regressed; ` +
+        `re-sampling ${i + 1}/${config.confirmSamples} (mode=${mode}) after ` +
+        `${config.confirmSpacingMs}ms to rule out a freshness-window flap`,
+    );
+    await deps.sleepImpl(config.confirmSpacingMs);
+
+    const reFetched = await fetchTargetHealth(config, deps.fetchImpl);
+    if (reFetched.ok !== true) {
+      // Cannot confirm — fail-soft to non-regression so a flap that coincides
+      // with a brief outage never alarms. Keep the prior snapshot for logging.
+      console.error(
+        `[post-merge-health] debounce sample ${i + 1} unreachable (${reFetched.reason}) — ` +
+          `cannot confirm regression, suppressing alarm`,
+      );
+      return { regressed: false, reasons: [], snapshot: lastVerdict.snapshot };
+    }
+
+    const reSnapshot = parseHealthSnapshot(reFetched.body);
+    const { verdict: reVerdict } = evaluateSample(reSnapshot, config, baseline);
+    lastVerdict = reVerdict;
+    if (!reVerdict.regressed) {
+      console.error(
+        `[post-merge-health] debounce sample ${i + 1} did NOT regress — ` +
+          `suppressing alarm as a transient freshness-window flap (issue #1817)`,
+      );
+      return reVerdict;
+    }
+  }
+  console.error(
+    `[post-merge-health] debounce: regression persisted across all ` +
+      `${config.confirmSamples} samples — confirmed, proceeding to alarm`,
+  );
+  return lastVerdict;
+}
+
 // ── Orchestration ───────────────────────────────────────────────────────────────
 
 /**
@@ -557,15 +694,27 @@ export function dispatchIncident(
  *   - `opts.baselinePath` set and readable: evaluates DELTAS vs the baseline
  *     (issue #1699) so ambient degradation alone never alarms;
  *   - otherwise: evaluates against the absolute noise floor.
- * Only on a regression and only when `config.dispatch` is true does it fire
- * hydra-incident. Returns a WatchResult; never throws.
+ *
+ * DEBOUNCE (issue #1817): when the first post-merge sample regresses and
+ * `config.confirmSamples > 1`, re-sample the Target up to confirmSamples-1 more
+ * times (spaced `config.confirmSpacingMs` apart) and alarm ONLY if EVERY sample
+ * regresses. A transient freshness-window flap recovers within a cron cadence,
+ * so a later sample clears the alarm; a real regression persists. A re-sample
+ * that becomes unreachable or recovers below the floor suppresses the alarm
+ * (fail-soft: cannot confirm => do not alarm).
+ *
+ * Only on a confirmed regression and only when `config.dispatch` is true does it
+ * fire hydra-incident. Returns a WatchResult; never throws.
  */
 export async function runWatch(
   config: PostMergeHealthConfig,
   opts: { mergeSha?: string; snapshotOut?: string; baselinePath?: string } = {},
-  deps: { fetchImpl?: typeof fetch; spawnImpl?: typeof spawn } = {},
+  deps: { fetchImpl?: typeof fetch; spawnImpl?: typeof spawn; sleepImpl?: typeof sleep } = {},
 ): Promise<WatchResult> {
-  const fetched: FetchHealthResult = await fetchTargetHealth(config, deps.fetchImpl ?? fetch);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const sleepImpl = deps.sleepImpl ?? sleep;
+
+  const fetched: FetchHealthResult = await fetchTargetHealth(config, fetchImpl);
   if (fetched.ok !== true) {
     // Fail-soft: unreachable Target is a clean no-op (acceptance criterion).
     // In snapshot mode this means no baseline file is written, so the
@@ -591,21 +740,31 @@ export async function runWatch(
     return { kind: "baseline-written", path: opts.snapshotOut, snapshot };
   }
 
-  let mode: EvaluationMode = "absolute";
-  let verdict: RegressionVerdict;
+  // Resolve the baseline once (a single re-read serves every debounce sample).
+  // A baseline path that is unreadable falls back to absolute thresholds.
+  let baseline: TargetHealthSnapshot | null = null;
   if (opts.baselinePath) {
-    const baseline = readBaseline(opts.baselinePath);
-    if (baseline.ok === true) {
-      mode = "delta";
-      verdict = evaluateDelta(baseline.snapshot, snapshot, config);
+    const read = readBaseline(opts.baselinePath);
+    if (read.ok === true) {
+      baseline = read.snapshot;
     } else {
-      console.error(
-        `[post-merge-health] ${baseline.reason} — falling back to absolute thresholds`,
-      );
-      verdict = evaluateRegression(snapshot, config);
+      console.error(`[post-merge-health] ${read.reason} — falling back to absolute thresholds`);
     }
-  } else {
-    verdict = evaluateRegression(snapshot, config);
+  }
+
+  const first = evaluateSample(snapshot, config, baseline);
+  const mode = first.mode;
+  let verdict = first.verdict;
+
+  // DEBOUNCE (issue #1817): a regressing first sample is only confirmed if every
+  // additional sample also regresses. Freshness-window flaps recover within a
+  // cron cadence; spacing the re-samples > the freshness window lets a fresh run
+  // land between them and clear a phantom regression.
+  if (verdict.regressed && config.confirmSamples > 1) {
+    verdict = await confirmRegression(config, opts, baseline, mode, verdict, {
+      fetchImpl,
+      sleepImpl,
+    });
   }
 
   if (!verdict.regressed) {
@@ -645,6 +804,10 @@ interface CliArgs {
   snapshotOut?: string;
   /** Post-merge delta mode: compare against the baseline snapshot at this path. */
   baseline?: string;
+  /** Debounce (issue #1817): total samples that must all regress before alarming. */
+  confirmSamples?: number;
+  /** Debounce (issue #1817): spacing between re-samples (ms). */
+  confirmSpacingMs?: number;
 }
 
 /** Parse argv (everything after `node script.ts`). Pure for testability. */
@@ -662,6 +825,12 @@ export function parseArgs(argv: string[]): CliArgs {
       args.snapshotOut = argv[++i];
     } else if (a === "--baseline") {
       args.baseline = argv[++i];
+    } else if (a === "--confirm-samples") {
+      const n = Number.parseInt(argv[++i] ?? "", 10);
+      if (Number.isFinite(n)) args.confirmSamples = n;
+    } else if (a === "--confirm-spacing-ms") {
+      const n = Number.parseInt(argv[++i] ?? "", 10);
+      if (Number.isFinite(n)) args.confirmSpacingMs = n;
     }
   }
   return args;
@@ -673,6 +842,11 @@ async function main(): Promise<number> {
   // CLI flags override env: --dispatch forces dispatch, --dry-run forces off.
   if (args.dispatch) config.dispatch = true;
   if (args.dryRun) config.dispatch = false;
+  // Debounce flags override env (issue #1817); confirmSamples clamps to >= 1.
+  if (args.confirmSamples !== undefined) config.confirmSamples = Math.max(1, args.confirmSamples);
+  if (args.confirmSpacingMs !== undefined && args.confirmSpacingMs >= 0) {
+    config.confirmSpacingMs = args.confirmSpacingMs;
+  }
 
   const result = await runWatch(config, {
     mergeSha: args.mergeSha,

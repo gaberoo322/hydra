@@ -35,6 +35,7 @@ const {
   evaluateRegression,
   severityRank,
   evaluateDelta,
+  evaluateSample,
   writeBaseline,
   readBaseline,
   buildIncidentContext,
@@ -63,6 +64,28 @@ function fakeFetchThrows(message: string): typeof fetch {
     throw new Error(message);
   }) as unknown as typeof fetch;
 }
+
+// A fake fetch that returns a SEQUENCE of bodies (one per call), so successive
+// debounce re-samples can differ. Each entry is either a JSON body (HTTP 200) or
+// the sentinel `THROW` to simulate an unreachable re-sample. Falls back to the
+// last body once the sequence is exhausted.
+const THROW = Symbol("throw");
+function fakeFetchSequence(bodies: Array<unknown | typeof THROW>): {
+  fetchImpl: typeof fetch;
+  callCount: () => number;
+} {
+  let i = 0;
+  const fetchImpl = (async () => {
+    const body = bodies[Math.min(i, bodies.length - 1)];
+    i += 1;
+    if (body === THROW) throw new Error("ECONNREFUSED");
+    return { ok: true, status: 200, json: async () => body };
+  }) as unknown as typeof fetch;
+  return { fetchImpl, callCount: () => i };
+}
+
+// An instant sleep so debounce-spacing waits cost no wall-clock time in tests.
+const instantSleep = (async () => {}) as unknown as (ms: number) => Promise<void>;
 
 describe("post-merge-health: config (issue #1054 — configurable noise floor)", () => {
   test("defaults are applied when env is empty", () => {
@@ -597,5 +620,168 @@ describe("post-merge-health: arg parsing", () => {
       mergeSha: "abc",
       baseline: "/tmp/b.json",
     });
+  });
+
+  test("--confirm-samples and --confirm-spacing-ms (issue #1817)", () => {
+    assert.deepEqual(parseArgs(["--confirm-samples", "3", "--confirm-spacing-ms", "200000"]), {
+      confirmSamples: 3,
+      confirmSpacingMs: 200000,
+    });
+    // A non-numeric value is ignored (left undefined => env/default applies).
+    assert.deepEqual(parseArgs(["--confirm-samples", "notanumber"]), {});
+  });
+});
+
+describe("post-merge-health: debounce config (issue #1817)", () => {
+  test("defaults: confirmSamples=1 (no debounce), confirmSpacingMs=200000", () => {
+    const c = baseConfig();
+    assert.equal(c.confirmSamples, 1, "debounce is OFF by default — one-shot pre-#1817 behavior");
+    assert.equal(c.confirmSpacingMs, 200_000, "default spacing exceeds the 180s scanner freshness window");
+  });
+
+  test("env overrides confirmSamples and confirmSpacingMs", () => {
+    const c = loadConfig({
+      HYDRA_PMH_CONFIRM_SAMPLES: "3",
+      HYDRA_PMH_CONFIRM_SPACING_MS: "250000",
+    } as unknown as NodeJS.ProcessEnv);
+    assert.equal(c.confirmSamples, 3);
+    assert.equal(c.confirmSpacingMs, 250_000);
+  });
+
+  test("confirmSamples clamps to >= 1 (a 0/empty env never disables alarming)", () => {
+    assert.equal(loadConfig({ HYDRA_PMH_CONFIRM_SAMPLES: "0" } as unknown as NodeJS.ProcessEnv).confirmSamples, 1);
+    assert.equal(loadConfig({ HYDRA_PMH_CONFIRM_SAMPLES: "-5" } as unknown as NodeJS.ProcessEnv).confirmSamples, 1);
+  });
+});
+
+describe("post-merge-health: evaluateSample (issue #1817 — per-sample evaluator)", () => {
+  test("with a baseline => delta mode; without => absolute mode", () => {
+    const snap = parseHealthSnapshot({ status: "degraded", services: { scanner: { status: "error" } } });
+    const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
+
+    const withBaseline = evaluateSample(snap, baseConfig(), baseline);
+    assert.equal(withBaseline.mode, "delta");
+    assert.equal(withBaseline.verdict.regressed, true);
+
+    const absolute = evaluateSample(snap, baseConfig(), null);
+    assert.equal(absolute.mode, "absolute");
+    assert.equal(absolute.verdict.regressed, true);
+  });
+});
+
+describe("post-merge-health: debounce — runWatch (issue #1817 freshness-window flapping)", () => {
+  // The exact false-positive: scanner reads ok in the baseline, the FIRST
+  // post-merge sample catches it mid-cron-gap (stale => execution-class delta),
+  // but a re-sample after the next scan run sees it back to ok. Debounce must
+  // suppress the alarm.
+  test("a freshness flap (regress then recover) is SUPPRESSED when confirmSamples>1", async () => {
+    const baseline = parseHealthSnapshot({ status: "ok", services: { scanner: { status: "ok" } } });
+    const { fetchImpl, callCount } = fakeFetchSequence([
+      { status: "degraded", services: { scanner: { status: "stale" } } }, // sample 1: flap (stale)
+      { status: "ok", services: { scanner: { status: "ok" } } }, // sample 2: recovered
+    ]);
+    let spawned = false;
+    const spawnSpy = (() => {
+      spawned = true;
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    // Inject the baseline via a tmp file so runWatch resolves delta mode.
+    const dir = mkdtempSync(join(tmpdir(), "pmh-debounce-flap-"));
+    const baselinePath = join(dir, "baseline.json");
+    assert.equal(writeBaseline(baselinePath, baseline).ok, true);
+
+    const result = await runWatch(
+      { ...baseConfig(), dispatch: true, confirmSamples: 2, confirmSpacingMs: 1 },
+      { mergeSha: "flap123", baselinePath },
+      { fetchImpl, spawnImpl: spawnSpy, sleepImpl: instantSleep },
+    );
+    assert.equal(result.kind, "healthy", "a recovered re-sample must clear the phantom regression");
+    assert.equal(spawned, false, "no hydra-incident dispatch on a transient flap");
+    assert.equal(callCount(), 2, "exactly two samples were taken (first + one confirmation)");
+  });
+
+  // A REAL regression persists across every sample => still alarms.
+  test("a persistent regression alarms after all confirmSamples confirm it", async () => {
+    const baseline = parseHealthSnapshot({ status: "ok", services: { execution: { status: "ok" } } });
+    const regressed = { status: "degraded", services: { execution: { status: "error" } } };
+    const { fetchImpl, callCount } = fakeFetchSequence([regressed, regressed, regressed]);
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const spawnSpy = ((cmd: string, args: string[]) => {
+      calls.push({ cmd, args });
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    const dir = mkdtempSync(join(tmpdir(), "pmh-debounce-real-"));
+    const baselinePath = join(dir, "baseline.json");
+    assert.equal(writeBaseline(baselinePath, baseline).ok, true);
+
+    const result = await runWatch(
+      { ...baseConfig(), dispatch: true, confirmSamples: 3, confirmSpacingMs: 1 },
+      { mergeSha: "real123", baselinePath },
+      { fetchImpl, spawnImpl: spawnSpy, sleepImpl: instantSleep },
+    );
+    assert.equal(result.kind, "alarm", "a regression on every sample is confirmed");
+    if (result.kind === "alarm") assert.equal(result.dispatched, true);
+    assert.equal(calls.length, 1, "exactly one hydra-incident dispatch after confirmation");
+    assert.equal(callCount(), 3, "all three samples were taken");
+  });
+
+  // confirmSamples=1 (default) preserves the exact one-shot behavior: no
+  // re-sampling, alarm immediately on a single regressing sample.
+  test("confirmSamples=1 => no re-sampling, alarms on the single sample (unchanged behavior)", async () => {
+    const { fetchImpl, callCount } = fakeFetchSequence([
+      { status: "error", services: { scanner: { status: "error" } } },
+    ]);
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const spawnSpy = ((cmd: string, args: string[]) => {
+      calls.push({ cmd, args });
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    const result = await runWatch(
+      { ...baseConfig(), dispatch: true, confirmSamples: 1 },
+      { mergeSha: "oneshot" },
+      { fetchImpl, spawnImpl: spawnSpy, sleepImpl: instantSleep },
+    );
+    assert.equal(result.kind, "alarm");
+    assert.equal(calls.length, 1);
+    assert.equal(callCount(), 1, "no debounce re-sample when confirmSamples=1");
+  });
+
+  // Fail-soft: an unreachable RE-SAMPLE cannot confirm the regression, so the
+  // alarm is suppressed (matches the unreachable-no-op convention).
+  test("an unreachable re-sample SUPPRESSES the alarm (cannot confirm => do not alarm)", async () => {
+    const { fetchImpl } = fakeFetchSequence([
+      { status: "error", services: { scanner: { status: "error" } } }, // sample 1: regresses
+      THROW, // sample 2: unreachable
+    ]);
+    let spawned = false;
+    const spawnSpy = (() => {
+      spawned = true;
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    const result = await runWatch(
+      { ...baseConfig(), dispatch: true, confirmSamples: 2, confirmSpacingMs: 1 },
+      { mergeSha: "unreach" },
+      { fetchImpl, spawnImpl: spawnSpy, sleepImpl: instantSleep },
+    );
+    assert.equal(result.kind, "healthy", "an unreachable confirmation sample fails soft to non-alarm");
+    assert.equal(spawned, false);
+  });
+
+  // A FIRST sample that is healthy never enters the debounce loop at all.
+  test("a healthy first sample never re-samples regardless of confirmSamples", async () => {
+    const { fetchImpl, callCount } = fakeFetchSequence([
+      { status: "ok", services: { database: { status: "ok" } } },
+    ]);
+    const result = await runWatch(
+      { ...baseConfig(), dispatch: true, confirmSamples: 5, confirmSpacingMs: 1 },
+      {},
+      { fetchImpl, sleepImpl: instantSleep },
+    );
+    assert.equal(result.kind, "healthy");
+    assert.equal(callCount(), 1, "no re-sampling when the first sample is already healthy");
   });
 });
