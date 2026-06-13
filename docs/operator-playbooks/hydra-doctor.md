@@ -160,6 +160,19 @@ docker exec hydra-redis-1 redis-cli DBSIZE 2>/dev/null
 # SOFT dependency used only for indexing. Both hostnames resolve ONLY inside the
 # OV container (compose network + extra_hosts), so probe from INSIDE the
 # container with docker exec — a host-side connect cannot reach them.
+#
+# FIRST distinguish "backend down" from "container never created" (issue #1812):
+# a missing ollama-embed container (vs a running-but-unhealthy one) means the
+# stack was brought up targeting a subset of services and the depends_on chain
+# never pulled ollama-embed in. The fix differs — re-create it (Phase 3), don't
+# chase a model-pull / network fault. `docker compose ps` lists only created
+# services; an empty match == the #1812 missing-service failure mode.
+echo -n "ollama-embed container present: "
+if [ -n "$(cd ~/hydra && docker compose ps -q ollama-embed 2>/dev/null)" ]; then
+  cd ~/hydra && docker compose ps ollama-embed --format '{{.Name}} {{.Status}}' 2>/dev/null
+else
+  echo "MISSING (not created — issue #1812; re-create with 'docker compose up -d', see Phase 3)"
+fi
 echo -n "ollama-embed (dense, HOT path): "
 docker exec hydra-openviking-1 curl -m5 -s -o /dev/null -w "%{http_code}\n" \
   http://ollama-embed:11434/api/tags 2>/dev/null || echo "UNREACHABLE"
@@ -177,6 +190,16 @@ OpenViking itself, is the broken hop. `searchKnowledge()` degrades gracefully to
 empty results (never throws), so this is a quality-degradation warning, not a
 cycle-blocking fault — see the OpenViking embedding/VLM backend split section in
 docs/reference.md.
+
+If the `ollama-embed container present` line reports **MISSING** (issue #1812),
+the dense backend is unreachable because the service was never created — not
+because the model pull or the network failed. Re-create it with a full stack
+bring-up: `cd ~/hydra && docker compose up -d` (no service arg pulls the whole
+depends_on chain, including ollama-embed). It reports healthy once the model
+pull lands (~120s start-period grace; first boot downloads nomic-embed-text,
+~270MB). The persistent guard against re-recurrence is the bring-up contract
+comment in docker-compose.yml — always bring the stack up with a bare
+`docker compose up -d`, never targeting a single non-openviking service.
 
 ### Database Health (deep)
 ```bash
@@ -257,6 +280,10 @@ Quick wins to apply automatically:
 - Commit dirty working tree files (if they're Hydra executor changes)
 - Restart failed services (after diagnosing root cause)
 - Start postgres if missing: `cd ~/hydra && docker compose up -d postgres`
+- Re-create ollama-embed if missing (issue #1812 — OpenViking's dense-embedding
+  HOT path; a MISSING container means the depends_on chain was never pulled in):
+  `cd ~/hydra && docker compose up -d` (bare bring-up pulls the whole chain;
+  ollama-embed goes healthy after the ~270MB nomic-embed-text pull lands)
 - Kill stale test containers: `docker ps --format '{{.Names}}' | grep test | xargs -r docker kill`
 - Deduplicate agent memory rules
 - Delete duplicate backlog items: `hydra backlog rm <id>`
