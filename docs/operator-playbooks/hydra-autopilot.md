@@ -347,10 +347,23 @@ on Fable 5 (the frontier model, replacing Opus as of 2026-06-10).
 | `cleanup_target` | Haiku | Deterministic knip output + tested emit runner; LLM only drives the two commands |
 | `discover_orch` / `discover_target` | Haiku | Patrol/diagnostics, designed small/fast/cheap |
 
-Use the harness's model alias (`fable` / `sonnet` / `haiku`) for the `model`
-kwarg so the operator's plan resolves the concrete version. A class not in the
-map (e.g. a legacy/unknown `slot`) → omit `model` and inherit the parent
+Use the harness's model alias (`fable` / `sonnet` / `haiku` / `opus`) for the
+`model` kwarg so the operator's plan resolves the concrete version. A class not
+in the map (e.g. a legacy/unknown `slot`) → omit `model` and inherit the parent
 session, the conservative default.
+
+**Fallback when Fable 5 is unavailable.** The `fable` alias is not entitled in
+every environment — a background `Agent(model="fable", …)` dispatch can die in
+<1s with *"There's an issue with the selected model (claude-fable-5) … it may
+not exist or you may not have access to it"* (0 tokens, 0 tool uses). When a
+`fable`-routed dispatch terminates immediately this way (no tool uses + a
+model-access error), **re-dispatch the identical action with `model: "opus"`
+(Opus 4.8) — do not leave the class unrun.** Opus 4.8 is the frontier-capable
+fallback for the authoring/behaviour-reshaping classes (`dev_orch`,
+`dev_target`, `retro_orch`, `design_concept_orch`). Fable 5 stays the primary;
+the fallback fires only on the model-access failure, so each class
+auto-upgrades back to Fable once the alias is entitled again — no manual revert.
+The Sonnet/Haiku-routed classes resolve independently and are unaffected.
 
 ## Phases (one-line each — full prose lives in code)
 
