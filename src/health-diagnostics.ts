@@ -195,6 +195,44 @@ export interface HealthSnapshot {
   };
 }
 
+// ---- parseRedisInfoSnapshot — the redisInfo factory ----------------------
+//
+// Issue #1856: the regex parse of Redis INFO sections used to live inline in the
+// `GET /health/deep` probe-15 lambda in `src/api/health.ts` — on the wrong side
+// of the seam. `HealthSnapshot["redisInfo"]` declared the result SHAPE here in
+// the pure seam (#840), but the code that PRODUCED the shape from raw INFO output
+// sat in the I/O handler, unreachable by `test/health-diagnostics.test.mts`.
+//
+// The handler keeps only the three `redisInfo(section)` I/O calls and passes the
+// raw strings here; this pure function does the parse. Its return type is the
+// seam's declared `HealthSnapshot["redisInfo"]`, so a renamed/mis-typed field is
+// a compile error rather than a silent runtime `null` in parseProbes' safe-read.
+// A missing `used_memory_human` defaults to "unknown"; a missing/malformed
+// integer field coerces to 0 (parseInt of "" → NaN, guarded by the `|| "0"`).
+
+/**
+ * Parse the raw Redis `INFO memory`/`INFO clients`/`INFO server` section
+ * strings into the structured `redisInfo` snapshot shape. Pure: reads only its
+ * string arguments, performs no Redis I/O.
+ *
+ * @param memory  the raw `INFO memory` section (carries `used_memory_human`).
+ * @param clients the raw `INFO clients` section (carries `connected_clients`).
+ * @param server  the raw `INFO server` section (carries `uptime_in_seconds`).
+ * @returns the `{ memoryHuman, connectedClients, uptimeSeconds }` record. Missing
+ *          fields fall back to `"unknown"` (memoryHuman) / `0` (the integers).
+ */
+export function parseRedisInfoSnapshot(
+  memory: string,
+  clients: string,
+  server: string,
+): NonNullable<HealthSnapshot["redisInfo"]> {
+  return {
+    memoryHuman: memory.match(/used_memory_human:(\S+)/)?.[1] || "unknown",
+    connectedClients: parseInt(clients.match(/connected_clients:(\d+)/)?.[1] || "0"),
+    uptimeSeconds: parseInt(server.match(/uptime_in_seconds:(\d+)/)?.[1] || "0"),
+  };
+}
+
 // ---- Health Diagnostic — one finding -------------------------------------
 
 type HealthSeverity = "critical" | "error" | "warning" | "info";

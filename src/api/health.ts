@@ -38,7 +38,7 @@ import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-reque
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
-import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ProbeInputs } from "../health-diagnostics.ts";
+import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, parseRedisInfoSnapshot, OV_SEARCH_PROBE_TIMEOUT_MS, type ProbeInputs } from "../health-diagnostics.ts";
 
 // ---- assembleProbeInputs — maps the positional settled array to named ProbeInputs --
 //
@@ -336,10 +336,12 @@ export function createHealthRouter(eventBus: any) {
         const result = await ovPostJson<any>("/api/v1/search/find", { query: "system health", limit: 3 }, { timeout: OV_SEARCH_PROBE_TIMEOUT_MS });
         return classifyOvSearchProbe(result, Date.now() - start);
       })(),
-      /* 15 */ (async () => {
+      /* 15: I/O only — the raw INFO regex parse moved to the pure
+         parseRedisInfoSnapshot in health-diagnostics.ts (issue #1856). */
+      (async () => {
         try {
           const [info, clients, server] = await Promise.all([getRedisInfo("memory"), getRedisInfo("clients"), getRedisInfo("server")]);
-          return { memoryHuman: info.match(/used_memory_human:(\S+)/)?.[1] || "unknown", connectedClients: parseInt(clients.match(/connected_clients:(\d+)/)?.[1] || "0"), uptimeSeconds: parseInt(server.match(/uptime_in_seconds:(\d+)/)?.[1] || "0") };
+          return parseRedisInfoSnapshot(info, clients, server);
         } catch { return null; }
       })(),
       /* 16: emergency brake (issue #744) */ getEmergencyBrake(),
