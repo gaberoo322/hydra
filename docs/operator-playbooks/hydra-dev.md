@@ -109,6 +109,22 @@ ln -sfn /home/gabe/hydra/node_modules "$WT/node_modules"
 move. (Observed on hydra-dev-1676 2026-06-11; cross-run recurrence 3
 promoted this lesson via /hydra-retro.)
 
+**…but that symlink then leaks into the PR diff if you `git add -A` (cue:
+worktree-node-modules-symlink-stages-as-file).** `.gitignore`'s
+`node_modules/` pattern has a trailing slash, so it matches a *directory*,
+not the `node_modules` symlink-as-file the step above creates — `git add -A`
+(or `git add .`) stages the symlink as a tracked file and it ships in the PR.
+After staging, reset it before committing:
+
+```bash
+git reset -q -- node_modules   # un-stage the symlink the gitignore misses
+git status --porcelain node_modules   # MUST be empty before you commit
+```
+
+Prefer staging the files you touched by path over `git add -A` in a
+symlinked worktree. (Observed on hydra-dev-1834 2026-06-13; cross-run
+recurrence 9 promoted this lesson via /hydra-retro.)
+
 The child prompt MUST include the worktree-guard preamble (see below) AND the scope-respect block (see below). The child:
 1. Verifies it is in a worktree (NOT `/home/gabe/hydra`). Aborts if not.
 2. Reads CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs
