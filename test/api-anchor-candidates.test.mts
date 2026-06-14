@@ -21,18 +21,11 @@ import {
   getCandidateFeed,
   scoreCandidate,
   PRIORITY_TIER_BASE_SCORE,
-  isMergedWork,
-  candidateMergedTokens,
-  mergedTokensFromPr,
-  mergedTokensFromGhJson,
-  normalizeIdentity,
-  makeMergedAnchorRefsLoader,
   harvestOrchIssueRefs,
   reconcileWorkQueue,
   type CandidateFeedDeps,
   type CandidateDesignConcept,
 } from "../src/anchor-candidates.ts";
-import { __resetForTests as __resetTargetConfig } from "../src/target-config.ts";
 
 const ABSENT_DC: CandidateDesignConcept = {
   present: false,
@@ -320,106 +313,10 @@ describe("getCandidateFeed — eligibility", () => {
 // PR already MERGED (no lingering OPEN PR) must NOT resurface in the feed.
 // ---------------------------------------------------------------------------
 
-describe("merged-by-cycle pure helpers (#882)", () => {
-  test("normalizeIdentity lowercases, collapses whitespace, trims", () => {
-    assert.equal(normalizeIdentity("  Foo   BAR  "), "foo bar");
-    assert.equal(normalizeIdentity(undefined as any), "");
-  });
-
-  test("mergedTokensFromPr harvests #NNN, item-NNN, and the normalized title", () => {
-    const toks = mergedTokensFromPr(
-      "feat: Polymarket CLOB V2 maker order (#910)",
-      "Closes #322\n\nImplements item-322 maker stack.",
-    );
-    assert.ok(toks.includes("910"));
-    assert.ok(toks.includes("322"));
-    assert.ok(toks.includes("item-322"));
-    assert.ok(toks.includes("feat: polymarket clob v2 maker order (#910)"));
-  });
-
-  test("candidateMergedTokens emits the bare issue number for a kanban anchor", () => {
-    const toks = candidateMergedTokens({ issue: 882, title: "Some anchor", anchorRef: "Some anchor" });
-    assert.ok(toks.includes("882"));
-    assert.ok(toks.includes("some anchor"));
-  });
-
-  test("candidateMergedTokens extracts item-NNN from a target work-queue ref", () => {
-    const toks = candidateMergedTokens({
-      issue: "item-322",
-      title: "item-322 Polymarket CLOB V2 maker order placement",
-      anchorRef: "item-322 Polymarket CLOB V2 maker order placement",
-    });
-    assert.ok(toks.includes("item-322"));
-  });
-
-  test("isMergedWork: empty merged-set never suppresses", () => {
-    assert.equal(
-      isMergedWork({ issue: 1, title: "x", anchorRef: "x" }, new Set()),
-      false,
-    );
-  });
-
-  test("isMergedWork: item-NNN candidate matches a merged item-NNN token", () => {
-    const merged = new Set(["item-322"]);
-    assert.equal(
-      isMergedWork(
-        { issue: "item-322", title: "item-322 maker order", anchorRef: "item-322 maker order" },
-        merged,
-      ),
-      true,
-    );
-  });
-
-  test("isMergedWork: kanban issue number matches a merged #NNN token", () => {
-    const merged = new Set(["882"]);
-    assert.equal(isMergedWork({ issue: 882, title: "Anchor", anchorRef: "Anchor" }, merged), true);
-  });
-
-  test("item-NNN matching is whole-word: item-302 must NOT match merged item-3020 (boundary)", () => {
-    // QA-flagged boundary (#882): the `\bitem-(\d+)\b` regex must not treat
-    // item-302 and item-3020 as the same identity. A merged item-3020 should
-    // suppress ONLY item-3020 — item-302 stays live (and vice-versa).
-    const mergedLong = new Set(["item-3020"]);
-    assert.equal(
-      isMergedWork({ issue: "item-302", title: "item-302 short id", anchorRef: "item-302 short id" }, mergedLong),
-      false,
-      "item-302 must not be suppressed by a merged item-3020",
-    );
-    assert.equal(
-      isMergedWork({ issue: "item-3020", title: "item-3020 long id", anchorRef: "item-3020 long id" }, mergedLong),
-      true,
-      "item-3020 IS suppressed by the merged item-3020 token",
-    );
-
-    const mergedShort = new Set(["item-302"]);
-    assert.equal(
-      isMergedWork({ issue: "item-3020", title: "item-3020 long id", anchorRef: "item-3020 long id" }, mergedShort),
-      false,
-      "item-3020 must not be suppressed by a merged item-302 (prefix is not a match)",
-    );
-
-    // Token harvesting itself must normalize to the exact id, not a prefix.
-    // (Filter to the canonical `item-<digits>` token shape — the normalized
-    // title `item-3020 maker order` is also harvested but is not an id token.)
-    const idTok = /^item-\d+$/;
-    assert.deepEqual(candidateMergedTokens({ issue: "item-302", title: "item-302", anchorRef: "item-302" }).filter((t) => idTok.test(t)), ["item-302"]);
-    assert.deepEqual(mergedTokensFromPr("item-3020 maker order", "").filter((t) => idTok.test(t)), ["item-3020"]);
-  });
-
-  test("mergedTokensFromGhJson parses a gh pr list payload; bad input → []", () => {
-    const json = JSON.stringify([
-      { title: "fix: thing (#5)", body: "Closes #321" },
-      { title: "item-481 shipped", body: "" },
-    ]);
-    const toks = mergedTokensFromGhJson(json);
-    assert.ok(toks.includes("5"));
-    assert.ok(toks.includes("321"));
-    assert.ok(toks.includes("item-481"));
-    assert.deepEqual(mergedTokensFromGhJson("not json"), []);
-    assert.deepEqual(mergedTokensFromGhJson(""), []);
-    assert.deepEqual(mergedTokensFromGhJson("{}"), []);
-  });
-});
+// The MergedAnchorRefs pure-helper unit tests (normalizeIdentity,
+// mergedTokensFromPr, candidateMergedTokens, isMergedWork, mergedTokensFromGhJson)
+// moved to `test/backlog-merged-refs.test.mts` with the Seam itself (issue
+// #1880). The feed's USE of merged suppression stays below.
 
 describe("getCandidateFeed — merged-by-cycle suppression (#882)", () => {
   test("a target item whose work merged (no open PR) is suppressed", async () => {
@@ -566,110 +463,11 @@ describe("getCandidateFeed — terminal-marker skip + GC (#1853)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Production merged-refs reader (#882 QA remediation): swap-seam + TTL cache.
-// ---------------------------------------------------------------------------
-
-describe("makeMergedAnchorRefsLoader — swap seam + TTL cache (#882, #1834)", () => {
-  // A fake `gh` exec that records the repos it was asked to scan and returns a
-  // canned merged-PR payload. Shaped like promisify(execFile)'s resolution.
-  function fakeExec(payloadByRepo: Record<string, string>) {
-    const calls: string[] = [];
-    const exec = (async (_cmd: string, args: string[]) => {
-      const repoIdx = args.indexOf("--repo");
-      const repo = repoIdx >= 0 ? args[repoIdx + 1] : "";
-      calls.push(repo);
-      return { stdout: payloadByRepo[repo] ?? "[]", stderr: "" };
-    }) as any;
-    return { exec, calls };
-  }
-
-  // Each test constructs a FRESH loader so the closure-local TTL cache starts
-  // cold — #1834 replaced the module-level cache + `__resetMergedScanCacheForTests`
-  // with this per-loader isolation.
-  test("scans the orchestrator repo AND the swap-seam target repo (ADR-0013)", async () => {
-    __resetTargetConfig();
-    process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
-    try {
-      const { exec, calls } = fakeExec({
-        "gaberoo322/hydra": JSON.stringify([{ title: "fix (#100)", body: "" }]),
-        "acme/widgets": JSON.stringify([{ title: "item-322 maker", body: "" }]),
-      });
-      const loadMergedAnchorRefs = makeMergedAnchorRefsLoader(exec);
-      const refs = await loadMergedAnchorRefs(1_000_000);
-      // Both the literal orchestrator repo and the CONFIGURED target repo were
-      // scanned — NOT the hardcoded gaberoo322/hydra-betting.
-      assert.deepEqual(calls.sort(), ["acme/widgets", "gaberoo322/hydra"]);
-      assert.ok(refs.has("100"));
-      assert.ok(refs.has("item-322"));
-    } finally {
-      delete process.env.HYDRA_TARGET_GITHUB_REPO;
-      __resetTargetConfig();
-    }
-  });
-
-  test("a fresh cache entry (<TTL) short-circuits the gh shell-out", async () => {
-    __resetTargetConfig();
-    process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
-    try {
-      const { exec, calls } = fakeExec({
-        "gaberoo322/hydra": JSON.stringify([{ title: "fix (#7)", body: "" }]),
-        "acme/widgets": "[]",
-      });
-      const loadMergedAnchorRefs = makeMergedAnchorRefsLoader(exec);
-      const t0 = 5_000_000;
-      const first = await loadMergedAnchorRefs(t0);
-      assert.ok(first.has("7"));
-      const callsAfterFirst = calls.length; // 2 (one per repo)
-
-      // Second call 30s later — within the 60s TTL — must reuse the cache.
-      const second = await loadMergedAnchorRefs(t0 + 30_000);
-      assert.equal(calls.length, callsAfterFirst, "no new gh calls within TTL");
-      assert.equal(second, first, "same cached Set instance returned");
-
-      // After the TTL expires, the reader scans again.
-      const third = await loadMergedAnchorRefs(t0 + 61_000);
-      assert.ok(calls.length > callsAfterFirst, "gh re-scanned after TTL expiry");
-      assert.ok(third.has("7"));
-    } finally {
-      delete process.env.HYDRA_TARGET_GITHUB_REPO;
-      __resetTargetConfig();
-    }
-  });
-
-  test("a gh failure degrades to an empty set and is cached (never throws)", async () => {
-    __resetTargetConfig();
-    try {
-      const exec = (async () => { throw new Error("gh: command not found"); }) as any;
-      const loadMergedAnchorRefs = makeMergedAnchorRefsLoader(exec);
-      const refs = await loadMergedAnchorRefs(9_000_000);
-      assert.equal(refs.size, 0, "total failure → empty set (suppress nothing)");
-    } finally {
-      __resetTargetConfig();
-    }
-  });
-
-  test("each loader instance owns an isolated cache (no module-level leak)", async () => {
-    __resetTargetConfig();
-    process.env.HYDRA_TARGET_GITHUB_REPO = "acme/widgets";
-    try {
-      const a = fakeExec({ "gaberoo322/hydra": JSON.stringify([{ title: "fix (#1)", body: "" }]), "acme/widgets": "[]" });
-      const b = fakeExec({ "gaberoo322/hydra": JSON.stringify([{ title: "fix (#2)", body: "" }]), "acme/widgets": "[]" });
-      const loaderA = makeMergedAnchorRefsLoader(a.exec);
-      const loaderB = makeMergedAnchorRefsLoader(b.exec);
-      const t0 = 8_000_000;
-      const refsA = await loaderA(t0);
-      const refsB = await loaderB(t0);
-      // Loader B does its OWN scan rather than reading A's cache.
-      assert.ok(refsA.has("1") && !refsA.has("2"));
-      assert.ok(refsB.has("2") && !refsB.has("1"));
-      assert.ok(b.calls.length > 0, "loader B scanned despite loader A warming first");
-    } finally {
-      delete process.env.HYDRA_TARGET_GITHUB_REPO;
-      __resetTargetConfig();
-    }
-  });
-});
+// NOTE: the MergedAnchorRefs Seam — the pure token helpers + the swap-seam/
+// TTL-cache loader factory (`makeMergedAnchorRefsLoader`) — moved to
+// `src/backlog/merged-refs.ts` (issue #1880) and is tested in isolation by
+// `test/backlog-merged-refs.test.mts`. This file keeps the Candidate Feed's USE
+// of merged-refs (suppression + work-queue reap) below.
 
 describe("getCandidateFeed — design-concept annotation (#628)", () => {
   test("every candidate carries a designConcept block; absent → present:false", async () => {
