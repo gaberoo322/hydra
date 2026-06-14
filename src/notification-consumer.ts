@@ -148,6 +148,40 @@ export function formatAlertMessage(event: NotificationEvent): string {
 }
 
 /**
+ * Severity tiers a dashboard alert can carry. The third leg of the
+ * alert-build grammar alongside `ALERT_TYPES` (which events become alerts)
+ * and `formatAlertMessage` (what the alert says).
+ */
+export type AlertSeverity = "error" | "warning" | "info";
+
+/**
+ * Classify a notification event type into its dashboard-alert severity tier.
+ *
+ * The named, exported sibling of `formatAlertMessage` — extracted from the
+ * inline ternary that used to live in `handleNotificationEvent` (issue #1855).
+ * Each branch references a NOTIFICATION_EVENT_TYPES member (aliased `E`) — the
+ * typed vocabulary in event-bus.ts (issue #1182) — so a misspelled event type
+ * is a compile error, the same compile-time-safety win that motivated the
+ * member references in `ALERT_TYPES` / `formatAlertMessage`. Any event type
+ * without a dedicated `error`/`warning` mapping falls through to `"info"`,
+ * preserving the pre-extraction ternary's behaviour for every ALERT_TYPES
+ * member (verified row-by-row in test/notification-consumer.test.mts).
+ */
+export function classifyAlertSeverity(eventType: string): AlertSeverity {
+  switch (eventType) {
+    case E.CYCLE_FAILED:
+    case E.CYCLE_ROLLED_BACK:
+    case E.CONSUMER_DEAD:
+      return "error";
+    case E.CYCLE_STALLED:
+    case E.CYCLE_AUTO_KILLED:
+      return "warning";
+    default:
+      return "info";
+  }
+}
+
+/**
  * Handle a single event off the NOTIFICATIONS stream: record it for the
  * digest, stamp the capacity-floor side history on cycle:completed (best
  * effort — issue #245 / #315 contract preserved), and persist alert-worthy
@@ -191,9 +225,7 @@ async function handleNotificationEvent(event: NotificationEvent): Promise<void> 
       type: event.type,
       timestamp: event.timestamp || new Date().toISOString(),
       message: formatAlertMessage(event),
-      severity: event.type.includes("failed") || event.type.includes("dead") || event.type.includes("rolled_back") ? "error"
-        : event.type.includes("stalled") || event.type.includes("auto_killed") ? "warning"
-        : "info",
+      severity: classifyAlertSeverity(event.type),
       dismissed: false,
       payload: event.payload,
     };
