@@ -37,7 +37,7 @@
 
 import { getTargetGithubRepo } from "./target-config.ts";
 import { execFileViaSeam } from "./github/exec-file-compat.ts";
-import { getWorkQueueItems, removeWorkQueueItem } from "./redis/work-queue.ts";
+import { getWorkQueueItems, removeWorkQueueItem, isTerminalMarker } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/reflections.ts";
 import {
@@ -918,6 +918,20 @@ export async function getCandidateFeed(
       try { item = JSON.parse(r); } catch { /* intentional: skip corrupt work-queue entry */ continue; }
       const ref = item.reference || item.description;
       if (!ref) continue;
+      // Terminal-state markers (COMPLETED:/CLOSED:) are completion notes, not
+      // work (issue #1853). The write-side `pushToWorkQueue` now refuses them,
+      // but an entry written before that fix (or via another path) still
+      // lingers — skip it as a candidate AND reap it so it stops resurfacing.
+      // Independent of `excludeMerged`: a terminal marker is never actionable.
+      if (isTerminalMarker(ref)) {
+        try {
+          await d.removeWorkQueueItem(r);
+          console.log(`[CandidateFeed] Reaped terminal-marker work-queue entry: "${ref.slice(0, 80)}"`);
+        } catch (err: any) {
+          console.error(`[CandidateFeed] terminal-marker reap failed for "${ref.slice(0, 60)}": ${err.message}`);
+        }
+        continue;
+      }
       if (
         excludeMerged &&
         isMergedWork({ issue: ref, title: ref, anchorRef: ref }, mergedRefs)

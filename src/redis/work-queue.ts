@@ -13,6 +13,29 @@ import { redisKeys } from "./keys.ts";
 import { ovPostJson, ovPostForm, isOvFailure } from "../knowledge-base/ov-request.ts";
 import { getRedisConnection } from "./connection.ts";
 
+/**
+ * Terminal-state markers that must NEVER live in the candidate work-queue.
+ * `hydra queue add "COMPLETED: <ref>"` (or a `CLOSED:`-prefixed note) used to
+ * RPUSH the marker onto `hydra:anchors:work-queue`, where it resurfaced as a
+ * guaranteed no-op candidate that an operator had to LREM by hand (issue #1853).
+ * A reference whose first non-space token is one of these (case-insensitively)
+ * is a completion note, not work — `pushToWorkQueue` refuses it and the
+ * candidate reader skips + GCs any that slipped in via another path.
+ */
+const TERMINAL_MARKER_PREFIXES = ["COMPLETED:", "CLOSED:"] as const;
+
+/**
+ * True when a reference is a terminal-state marker (COMPLETED:/CLOSED: prefix,
+ * case-insensitive, leading whitespace tolerated) rather than actionable work.
+ * Pure + exported so the candidate reader (`src/anchor-candidates.ts`) and the
+ * startup GC (`cleanWorkQueue`) share one definition.
+ */
+export function isTerminalMarker(reference: unknown): boolean {
+  if (typeof reference !== "string") return false;
+  const head = reference.trimStart().toUpperCase();
+  return TERMINAL_MARKER_PREFIXES.some((p) => head.startsWith(p));
+}
+
 /** Get the length of the work queue. */
 export async function getWorkQueueLen(): Promise<number> {
   const r = getRedisConnection();
@@ -37,21 +60,43 @@ export async function removeWorkQueueItem(raw: string): Promise<number> {
   return r.lrem(redisKeys.anchorWorkQueue(), 0, raw);
 }
 
-/** Push an item to the work queue and index into OV for semantic dedup. */
-export async function pushToWorkQueue(json: string): Promise<void> {
+/**
+ * Push an item to the work queue and index into OV for semantic dedup.
+ *
+ * Returns `false` (a no-op) when the item's reference is a terminal-state
+ * marker (issue #1853): a `COMPLETED:`/`CLOSED:`-prefixed reference is a
+ * completion note, not actionable work, and RPUSHing it pollutes the candidate
+ * feed with a guaranteed no-op that resurfaces until someone LREMs it by hand.
+ * Refusing the write at the root keeps the marker out entirely. Returns `true`
+ * when the item was queued.
+ */
+export async function pushToWorkQueue(json: string): Promise<boolean> {
+  // Reject terminal-state markers before touching Redis (issue #1853).
+  let reference = "";
+  try {
+    reference = JSON.parse(json).reference || "";
+  } catch { /* intentional: a non-JSON payload can't be a terminal marker — fall through and queue it */ }
+  if (isTerminalMarker(reference)) {
+    console.log(
+      `[WorkQueue] Refused terminal-state marker (not queued): "${reference.slice(0, 80)}"`,
+    );
+    return false;
+  }
+
   const r = getRedisConnection();
   await r.rpush(redisKeys.anchorWorkQueue(), json);
 
   // Index reference into OV for future semantic dedup (fire-and-forget)
   try {
     const item = JSON.parse(json);
-    const reference = item.reference || "";
-    if (reference) {
-      indexWorkItem(reference, item.source || "queue").catch((err: any) => {
+    const ref = item.reference || "";
+    if (ref) {
+      indexWorkItem(ref, item.source || "queue").catch((err: any) => {
         console.error(`[WorkQueue] Background indexWorkItem failed: ${err.message}`);
       });
     }
   } catch { /* intentional: don't fail queue push on index error */ }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +269,7 @@ export async function indexWorkItem(reference: string, source: string = "queue")
 
 /**
  * Clean the work queue on startup:
- * - Remove items with "COMPLETED:" prefix in their reference
+ * - Remove items with a terminal-state marker (COMPLETED:/CLOSED:) reference
  * - Deduplicate remaining items (keep first occurrence)
  */
 export async function cleanWorkQueue(): Promise<{ removedCompleted: number; removedDuplicates: number }> {
@@ -245,8 +290,8 @@ export async function cleanWorkQueue(): Promise<{ removedCompleted: number; remo
       ref = raw;
     }
 
-    // Remove COMPLETED: items
-    if (ref.startsWith("COMPLETED:") || ref.startsWith("completed:")) {
+    // Remove terminal-state markers (COMPLETED:/CLOSED:) — issue #1853.
+    if (isTerminalMarker(ref)) {
       toRemove.push(raw);
       removedCompleted++;
       continue;
