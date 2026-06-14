@@ -190,7 +190,31 @@ completed:
 
 Prove the pipeline produces. The wiring surface is complete through M11, but the funnel has never produced one opportunity end-to-end (1,378/1,378 scanner runs ended zero_opportunities). With the WC ingestion fix (#118/#119) landed and the group stage live since June 12, M12 proves real flow through the existing stack instead of adding surface area. Machine-execution promotion gates stay default-off throughout.
 
+Beyond-plan items that landed since M12 started (2026-06-12 → 2026-06-13):
+- [x] Per-gate scanner funnel breakdown — explains zero_opportunities runs with gate-level candidate counts (#615fdb48, ef39df30)
+- [x] Wire real on-chain Polymarket NO-token ids for WC 2026 verified pairs (#130)
+- [x] Rank sports arbs by executable size and fill probability (#131)
+- [x] Disagreement-oracle pair-discovery scoring core (item-466, #132)
+- [x] Persistable replayable venue delta episode schema (item-464, #133–134)
+- [x] Prediction-market implied vs sharp no-vig probability comparison by granularity (item-461, #135)
+- [x] ForecastSource/Resolution union type consolidation (item-460, #136)
+- [x] ESM type:module fix (item-458, #137)
+- [x] Unified verified-pairs SiteNav surfacing (item-457, #138)
+
+Core M12 milestones (still open):
 - [ ] Verify WC ingestion flowing in production post-#118 — non-zero soccer_fifa_world_cup events persisted, #119 drop alert quiet (priorities #1)
-- [ ] Prove first opportunity end-to-end, or decompose zero_opportunities per gate with counts (item-501, priorities #2)
+- [ ] Prove first opportunity end-to-end, or decompose zero_opportunities per gate with funnel breakdown counts (item-501, priorities #2)
 - [ ] Prove first end-to-end PAPER execution through the M7–M11 stack — gates stay off (item-502, priorities #3)
 - [ ] Calibration/learning loop receiving real WC group-stage samples — non-zero accumulator counts (priorities #4)
+
+## M13: Signal Compounding (planned)
+status: planned
+
+Once M12 proves the funnel produces real flow and the calibration loop has real samples, M13 turns signal into compounding edge. Candidates (subject to per-gate funnel evidence from M12):
+- CLV tracking pipeline feeding the calibration loop with real production samples
+- Injury and lineup signals wired into sports candidate ranking (BallDontLie runner active)
+- Spread decay half-life per-pair as execution priority weight
+- Polymarket sports route timing classification (pre-game maker / live maker / live taker)
+- Kalshi post-only sports maker quote pilot (first paper test)
+- Resolution criteria mismatch classifier for automated verified-pair seeding
+- Polymarket maker rebate capture fully weighted in route decisions
