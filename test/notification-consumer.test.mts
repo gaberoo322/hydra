@@ -17,10 +17,12 @@ import assert from "node:assert/strict";
 
 import {
   formatAlertMessage,
+  classifyAlertSeverity,
   ALERT_TYPES,
   startConsumerWithRecovery,
   MAX_CONSUMER_RESTARTS,
   BACKOFF_BASE_MS,
+  type AlertSeverity,
   type NotificationEvent,
 } from "../src/notification-consumer.ts";
 
@@ -70,6 +72,54 @@ test("formatAlertMessage uses dedicated arms for known cycle events", () => {
   });
   assert.ok(dead.includes("notifications"));
   assert.ok(dead.includes("6"));
+});
+
+test("classifyAlertSeverity maps each tier from its canonical event type", () => {
+  // One row per severity tier — the boundary the inline ternary used to spell
+  // out (issue #1855). Error tier: failed / rolled-back / dead.
+  assert.equal(classifyAlertSeverity("cycle:failed"), "error");
+  assert.equal(classifyAlertSeverity("cycle:rolled_back"), "error");
+  assert.equal(classifyAlertSeverity("consumer:dead"), "error");
+  // Warning tier: stalled / auto-killed.
+  assert.equal(classifyAlertSeverity("cycle:stalled"), "warning");
+  assert.equal(classifyAlertSeverity("cycle:auto_killed"), "warning");
+  // Info tier: everything else.
+  assert.equal(classifyAlertSeverity("research:completed"), "info");
+  assert.equal(classifyAlertSeverity("scheduler:error"), "info");
+  assert.equal(classifyAlertSeverity("dlq:alert"), "info");
+  assert.equal(classifyAlertSeverity("pattern:low_merge_rate"), "info");
+});
+
+test("classifyAlertSeverity returns 'info' for unknown event types (default branch)", () => {
+  assert.equal(classifyAlertSeverity("totally:unknown_event"), "info");
+  assert.equal(classifyAlertSeverity(""), "info");
+});
+
+test("classifyAlertSeverity returns one of the three documented tiers for every ALERT_TYPES member", () => {
+  const tiers: AlertSeverity[] = ["error", "warning", "info"];
+  for (const type of ALERT_TYPES) {
+    const sev = classifyAlertSeverity(type);
+    assert.ok(tiers.includes(sev), `classifyAlertSeverity(${type}) = ${sev} is not a documented tier`);
+  }
+});
+
+test("classifyAlertSeverity is byte-identical to the pre-extraction inline ternary for ALERT_TYPES", () => {
+  // Pins behaviour preservation: the extracted function must agree with the
+  // exact substring ternary that lived inline in handleNotificationEvent for
+  // every event type that can reach it (issue #1855).
+  const legacy = (t: string): AlertSeverity =>
+    t.includes("failed") || t.includes("dead") || t.includes("rolled_back")
+      ? "error"
+      : t.includes("stalled") || t.includes("auto_killed")
+        ? "warning"
+        : "info";
+  for (const type of ALERT_TYPES) {
+    assert.equal(
+      classifyAlertSeverity(type),
+      legacy(type),
+      `severity drift for ${type}: extracted=${classifyAlertSeverity(type)} legacy=${legacy(type)}`,
+    );
+  }
 });
 
 test("startConsumerWithRecovery returns immediately when startFn succeeds (no restarts)", async () => {
