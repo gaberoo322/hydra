@@ -43,7 +43,18 @@ export function createQueueRouter() {
         ...(source ? { source } : {}),
         queuedAt: new Date().toISOString(),
       };
-      await pushToWorkQueue(JSON.stringify(item));
+      const pushed = await pushToWorkQueue(JSON.stringify(item));
+      if (!pushed) {
+        // Terminal-state marker refused at the write seam (issue #1853): a
+        // COMPLETED:/CLOSED:-prefixed reference is a completion note, not work,
+        // and must not enter the candidate work-queue. Report 422 so the caller
+        // sees the rejection instead of a misleading `queued: true`.
+        console.log(`[WorkQueue] Rejected terminal-state marker via POST /queue: "${reference.slice(0, 80)}"`);
+        return res.status(422).json({
+          error: "Terminal-state marker (COMPLETED:/CLOSED:) is not actionable work — not queued",
+          reference,
+        });
+      }
       const queueLen = await getWorkQueueLen();
       res.json({ queued: true, item, position: queueLen });
     } catch (err: any) {

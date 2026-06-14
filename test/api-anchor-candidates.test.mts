@@ -507,6 +507,66 @@ describe("getCandidateFeed — merged-by-cycle suppression (#882)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Terminal-state marker skip + GC (issue #1853).
+// ---------------------------------------------------------------------------
+
+describe("getCandidateFeed — terminal-marker skip + GC (#1853)", () => {
+  test("a COMPLETED:-prefixed work-queue entry is skipped and reaped", async () => {
+    const completedRaw = JSON.stringify({ reference: "COMPLETED: issue-1700 shipped", queuedAt: isoAgo(0) });
+    const reaped: string[] = [];
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        completedRaw,
+        JSON.stringify({ reference: "Real work", queuedAt: isoAgo(0) }),
+      ],
+      removeWorkQueueItem: async (raw) => { reaped.push(raw); return 1; },
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const refs = feed.candidates.map((c) => c.anchorRef);
+    assert.ok(!refs.some((r) => r.startsWith("COMPLETED:")), "COMPLETED marker must not surface as a candidate");
+    assert.ok(refs.includes("Real work"), "real work still surfaces");
+    assert.deepEqual(reaped, [completedRaw], "the terminal marker is LREM-reaped");
+  });
+
+  test("a CLOSED:-prefixed entry is skipped too (case-insensitive)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "closed: item-99 done", queuedAt: isoAgo(0) }),
+      ],
+      removeWorkQueueItem: async () => 1,
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 0, "CLOSED marker is not a candidate");
+  });
+
+  test("terminal-marker skip is independent of excludeMerged", async () => {
+    // Even with excludeMerged=false (the raw view), a terminal marker is never
+    // actionable work and must still be dropped.
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "COMPLETED: issue-1 shipped", queuedAt: isoAgo(0) }),
+      ],
+      removeWorkQueueItem: async () => 1,
+    });
+    const feed = await getCandidateFeed({ now: NOW, excludeMerged: false }, deps);
+    assert.equal(feed.candidates.length, 0);
+  });
+
+  test("a failing reap degrades to skip-only (never throws)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "COMPLETED: issue-1 shipped", queuedAt: isoAgo(0) }),
+      ],
+      removeWorkQueueItem: async () => { throw new Error("redis down"); },
+    });
+    await assert.doesNotReject(async () => {
+      const feed = await getCandidateFeed({ now: NOW }, deps);
+      assert.equal(feed.candidates.length, 0, "still skipped even when the reap fails");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Production merged-refs reader (#882 QA remediation): swap-seam + TTL cache.
 // ---------------------------------------------------------------------------
 
