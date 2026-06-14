@@ -3,6 +3,7 @@ import { getWorkQueueItems, pushToWorkQueue, getWorkQueueLen, findWorkQueueDupli
 import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
 import { QueuePostBodySchema } from "../schemas/queue.ts";
 import { reconcileWorkQueue } from "../anchor-candidates.ts";
+import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 export function createQueueRouter() {
   const router = Router();
@@ -77,14 +78,16 @@ export function createQueueRouter() {
   });
 
   // GET /queue — View queued work items
-  router.get("/queue", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via the aggregatorRouteNoQuery seam
+  // (route-helpers.ts, #909).
+  router.get(
+    "/queue",
+    aggregatorRouteNoQuery("api/queue", async () => {
       const items = await getWorkQueueItems();
-      res.json(items.map((i) => { try { return JSON.parse(i); } catch { return i; } }));
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return items.map((i) => { try { return JSON.parse(i); } catch { return i; } });
+    }),
+  );
 
   // GET /queue/snapshot — Human-readable summary of queue + backlog state
   router.get("/queue/snapshot", async (req, res) => {

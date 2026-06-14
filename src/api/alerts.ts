@@ -8,6 +8,7 @@ import {
 } from "../redis/alerts.ts";
 import { pushToWorkQueue } from "../redis/work-queue.ts";
 import { countQuerySchema } from "../schemas/common.ts";
+import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 /**
  * Alerts + Sentry webhook routes.
@@ -22,18 +23,23 @@ export function createAlertsRouter(_eventBus: any) {
   const ALERTS_MAX = 100;
 
   // GET /alerts — List recent alerts
-  router.get("/alerts", async (req, res) => {
-    try {
+  //
+  // Issue #1863: the never-throw-500 isolation now comes from the
+  // `aggregatorRouteNoQuery` seam (route-helpers.ts, #909) — the `[api/alerts]`
+  // 500 log and the catch live there once. `limit` keeps its soft-parse
+  // (default-on-garbage, NO behaviour-changing 400) INSIDE `produce`, per the
+  // common.ts guidance that lenient read routes own their `safeParse`.
+  router.get(
+    "/alerts",
+    aggregatorRouteNoQuery("api/alerts", async (req) => {
       // ADR-0022: read `limit` through the Schemas seam (safeParse on req.query).
       // countQuerySchema collapses bad/absent input to the default, preserving
       // the legacy `|| 50` semantics without a behaviour change.
       const limit = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const raw = await readRecentAlerts(limit + 1);
-      res.json(raw.map(s => JSON.parse(s)));
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return raw.map((s) => JSON.parse(s));
+    }),
+  );
 
   // POST /alerts/:id/dismiss — Dismiss an alert
   router.post("/alerts/:id/dismiss", async (req, res) => {

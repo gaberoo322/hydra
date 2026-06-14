@@ -6,6 +6,7 @@ import {
 } from "../reflections/reflections.ts";
 import { getTargetName } from "../target-config.ts";
 import { ReflectionsQuerySchema } from "../schemas/reflections.ts";
+import { aggregatorRoute } from "./route-helpers.ts";
 
 /**
  * Reflections + calibration proxy routes.
@@ -49,18 +50,19 @@ export function createReflectionsRouter() {
   // Response: { anchor, formatted, count, blocks: [{source, count}, ...] }
   // A miss (no prior reflections) returns `formatted: ""`, `count: 0` so the
   // skill can graceful-degrade to a no-op injection.
-  router.get("/reflections", async (req, res) => {
-    // ADR-0022: read `anchor`/`files` through the Schemas seam. `anchor` is
-    // required (#1454) — a missing/blank value rejects with 400.
-    const parsed = ReflectionsQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({ code: "schema-validation-failed", issues: parsed.error.issues });
-      return;
-    }
-    const anchor = parsed.data.anchor;
-
-    try {
-      const filesParam = parsed.data.files ?? "";
+  //
+  // Issue #1863: the validate-or-400 (`anchor` required, #1454) and the
+  // never-throw-500 isolation are now folded into the `aggregatorRoute` seam
+  // (route-helpers.ts, #909) — the `schema-validation-failed` envelope and the
+  // 500 log string live there once, and this route shrinks to "this schema,
+  // this aggregator, this body". Behaviour is identical: a bad/blank `anchor`
+  // 400s via the schema, a thrown reflection read 500s with a `[api/reflections]`
+  // log.
+  router.get(
+    "/reflections",
+    aggregatorRoute(ReflectionsQuerySchema, "api/reflections", async (data) => {
+      const anchor = data.anchor;
+      const filesParam = data.files ?? "";
       const scopeFiles = filesParam
         ? filesParam.split(",").map((s) => s.trim()).filter(Boolean)
         : undefined;
@@ -76,7 +78,7 @@ export function createReflectionsRouter() {
       const formatted = sections.join("\n\n");
       const count = perAnchor.count + byFile.count;
 
-      res.json({
+      return {
         anchor,
         formatted,
         count,
@@ -84,11 +86,9 @@ export function createReflectionsRouter() {
           { source: "per-anchor-reflections", count: perAnchor.count },
           { source: "by-file-reflections", count: byFile.count },
         ],
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      };
+    }),
+  );
 
   // GET /calibration/outcomes — Proxy to target project's calibration API
   router.get("/calibration/outcomes", async (req, res) => {
