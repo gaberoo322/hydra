@@ -12,15 +12,27 @@
  * the review-pickup test) keep importing from `./notify.ts` unchanged.
  */
 
-import { formatMessage } from "./notify-format.ts";
+import { formatMessage, type FormatMessageEvent } from "./notify-format.ts";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_TARGET = process.env.TELEGRAM_CHAT_ID || "8291726150";
 
 /**
+ * The Telegram transport signature (issue #1881).
+ *
+ * Names the contract `sendToTelegram` implements so callers that inject the
+ * sender as a dep (e.g. `DigestAccumulatorDeps.send` in `digest.ts`) derive
+ * their annotation from this canonical type instead of re-declaring it inline.
+ * A change to `sendToTelegram`'s signature (e.g. a future `parseMode` option)
+ * then propagates to every dep declaration as a compile error rather than
+ * silently diverging.
+ */
+export type TelegramSendFn = (message: string, target?: string) => Promise<void>;
+
+/**
  * Send a message to Telegram via the Bot API.
  */
-async function sendToTelegram(message, target = TELEGRAM_TARGET) {
+const sendToTelegram: TelegramSendFn = async function sendToTelegram(message, target = TELEGRAM_TARGET) {
   if (!TELEGRAM_BOT_TOKEN) {
     console.error("[Notify] TELEGRAM_BOT_TOKEN not set — skipping");
     return;
@@ -48,12 +60,17 @@ async function sendToTelegram(message, target = TELEGRAM_TARGET) {
   } catch (err) {
     console.error(`[Notify] Telegram send failed:`, err.message);
   }
-}
+};
 
 /**
  * Send a notification to Telegram.
+ *
+ * `event` is typed `FormatMessageEvent` (issue #1881) — the same vocabulary the
+ * pure formatter already narrows on (`notify-format.ts`, issue #1857) — so a
+ * caller passing a mis-shaped event is a compile error at the call site rather
+ * than a silent default-arm Telegram message at runtime.
  */
-async function sendNotification(event) {
+async function sendNotification(event: FormatMessageEvent): Promise<void> {
   const message = formatMessage(event);
 
   try {
