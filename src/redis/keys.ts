@@ -134,6 +134,11 @@ export const redisKeys = {
   memoryPatterns: (agent: string) => `hydra:memory:${agent}:patterns`,
   memoryRules: (agent: string) => `hydra:memory:${agent}:rules`,
   memoryLastConsolidation: () => "hydra:memory:last-consolidation",
+  // Issue #1876 — daily idempotency stamp for the stale-Redis-key sweep chore
+  // folded out of the cleanup.ts in-process timer into housekeeping. Mirrors
+  // memoryLastConsolidation: the hourly housekeeping invocation runs the sweep
+  // at most once per day, skipping the remaining 23 invocations.
+  cleanupLastDaily: () => "hydra:cleanup:last-daily",
   // Issue #512 — Friction patterns. Same shape as memoryPatterns but a
   // distinct namespace so soft-friction items captured from subagents don't
   // pollute the planner/executor learning sets that drive prompt promotion.

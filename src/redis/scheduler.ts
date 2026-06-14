@@ -310,6 +310,25 @@ export async function setMemoryLastConsolidation(value: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Cleanup daily-sweep timestamp (issue #1876)
+// ---------------------------------------------------------------------------
+//
+// The stale-Redis-key sweep was folded out of the cleanup.ts in-process 24h
+// setInterval into a housekeeping `Chore`. Housekeeping runs hourly, so the
+// chore carries a daily time-guard stamped here — the same shape as the
+// weekly-digest / memory-consolidation guards.
+
+export async function getCleanupLastDaily(): Promise<string | null> {
+  const r = getRedisConnection();
+  return r.get(redisKeys.cleanupLastDaily());
+}
+
+export async function setCleanupLastDaily(value: string): Promise<void> {
+  const r = getRedisConnection();
+  await r.set(redisKeys.cleanupLastDaily(), value);
+}
+
+// ---------------------------------------------------------------------------
 // Research floor (issue #84/#327) accessors removed in #706 (scheduler fold
 // PR-1/4) together with the research-decision plane that was their only
 // consumer. The research-force policy now lives in the autopilot brain

@@ -3,7 +3,6 @@ import { Sentry } from "./instrument.ts";
 
 import { EventBus } from "./event-bus.ts";
 import { createApi } from "./api.ts";
-import { startCleanupSchedule, stopCleanupSchedule } from "./cleanup.ts";
 import { stopKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
 import { startDigest, stopDigest } from "./digest.ts";
@@ -157,8 +156,10 @@ async function main() {
     console.log(`[Hydra] WebSocket: ws://localhost:${PORT}`);
   });
 
-  // Report cleanup (cycle-summaries 2d TTL, stale Redis keys, done items)
-  startCleanupSchedule();
+  // Stale-Redis-key sweep + stale-inProgress return + done-lane prune now run
+  // as housekeeping chores (issue #1876) — driven by the hourly
+  // `hydra-housekeeping.timer` POSTing to `/api/maintenance/housekeeping`,
+  // not a separate in-process 24h setInterval.
 
   // Auto-start scheduler
   const schedulerResult = await autoStartScheduler(eventBus);
@@ -186,10 +187,10 @@ async function main() {
       await eventBus.delConsumer(stream, group, consumer);
     }
     clearInterval(heartbeat);
-    // Issue #866: clear the two leaked polling intervals so neither the 30s
-    // knowledge-indexer Redis poll nor the 24h cleanup prune survives shutdown.
+    // Issue #866: clear the leaked 30s knowledge-indexer Redis poll so it does
+    // not survive shutdown. (The 24h cleanup-prune interval was removed in
+    // #1876 — its work runs as housekeeping chores now, no in-process timer.)
     stopKnowledgeIndexer();
-    stopCleanupSchedule();
     for (const ws of wss.clients) ws.close(1001, "server shutting down");
     wss.close();
     server.close();

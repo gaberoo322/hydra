@@ -131,6 +131,47 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
       body.ran.includes("design-concept-snapshot"),
       "design-concept-snapshot should run on a clean DB",
     );
+
+    // Issue #1876: the two cleanup chores folded out of cleanup.ts must be in
+    // the chore list and run on a clean DB.
+    assert.ok(
+      body.ran.includes("stale-key-prune"),
+      "stale-key-prune should run on a clean DB (daily guard unset)",
+    );
+    assert.ok(
+      body.ran.includes("stale-inprogress-return"),
+      "stale-inprogress-return should run (no guard — always runs)",
+    );
+  });
+
+  // Issue #1876: the daily-guarded stale-key sweep must skip on the second
+  // immediate call, exactly like memory-consolidation / weekly-summary.
+  test("stale-key-prune skips on a second immediate call (daily guard)", async () => {
+    const router = createMaintenanceRouter(mockEventBus());
+    const handler = findHandler(router, "POST", "/maintenance/housekeeping");
+
+    const res1 = mockRes();
+    await handler(mockReq(), res1);
+    assert.ok(
+      res1._body.ran.includes("stale-key-prune"),
+      "first call should run stale-key-prune",
+    );
+
+    const res2 = mockRes();
+    await handler(mockReq(), res2);
+    assert.ok(
+      res2._body.skipped.includes("stale-key-prune"),
+      "second call should skip stale-key-prune (daily guard set)",
+    );
+    assert.ok(
+      !res2._body.ran.includes("stale-key-prune"),
+      "second call must NOT re-run stale-key-prune",
+    );
+    // stale-inprogress-return has no guard, so it runs every time.
+    assert.ok(
+      res2._body.ran.includes("stale-inprogress-return"),
+      "stale-inprogress-return runs every call (no guard)",
+    );
   });
 
   test("second immediate call skips the time-guarded chores (idempotent)", async () => {
@@ -283,5 +324,114 @@ describe("runChore guarded-chore runner (issue #1864)", () => {
     assert.equal(workInvoked, false, "work must NOT run when the guard throws");
     assert.deepEqual(skipped, ["c-guard-throws"], "a throwing guard appends to skipped");
     assert.deepEqual(ran, [], "a throwing guard does not append to ran");
+  });
+});
+
+/**
+ * Unit coverage for the two cleanup chores folded out of the cleanup.ts
+ * in-process timer (issue #1876). The work functions are now exported from
+ * housekeeping.ts, so they are exercisable against real Redis without an HTTP
+ * server or a live setInterval — the testability benefit the issue called out.
+ *
+ * Uses a DEDICATED Redis client (`redis2`) on the same REDIS_URL — NOT the
+ * shared `redis` client above, whose `after` hook calls `redis.disconnect()`
+ * once the first describe block finishes (the work functions reach Redis via
+ * the production `getRedisConnection()` singleton, so DB targeting is the same).
+ */
+describe("cleanup chores folded into housekeeping (issue #1876)", () => {
+  let pruneStaleRedisKeys: any;
+  let returnStaleInProgressItems: any;
+  let redis2: any;
+
+  async function cleanKeys2() {
+    const keys = await redis2.keys("hydra:*");
+    if (keys.length > 0) await redis2.del(...keys);
+  }
+
+  beforeEach(async () => {
+    if (!redis2) {
+      redis2 = new Redis(REDIS_URL);
+    }
+    await cleanKeys2();
+    if (!pruneStaleRedisKeys) {
+      const mod = await import("../src/scheduler/housekeeping.ts");
+      pruneStaleRedisKeys = mod.pruneStaleRedisKeys;
+      returnStaleInProgressItems = mod.returnStaleInProgressItems;
+    }
+  });
+
+  after(async () => {
+    if (redis2) {
+      await cleanKeys2();
+      redis2.disconnect();
+    }
+  });
+
+  test("pruneStaleRedisKeys deletes a >7d no-TTL cycle key and keeps a fresh one", async () => {
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const oldDate = "2020-01-01"; // well past the 7-day cutoff
+    const staleKey = `hydra:cycle:cycle-${oldDate}-0000:tasks`;
+    const freshKey = `hydra:cycle:cycle-${today}-0000:tasks`;
+
+    await redis2.set(staleKey, "x"); // no TTL → eligible
+    await redis2.set(freshKey, "x"); // dated today → kept
+
+    await pruneStaleRedisKeys();
+
+    assert.equal(await redis2.exists(staleKey), 0, "stale dated key should be deleted");
+    assert.equal(await redis2.exists(freshKey), 1, "fresh dated key should be kept");
+  });
+
+  test("pruneStaleRedisKeys skips a key that already has a TTL", async () => {
+    const ttlKey = "hydra:cycle:cycle-2020-01-01-0000:agents";
+    await redis2.set(ttlKey, "x", "EX", 3600); // has a TTL → must be skipped
+
+    await pruneStaleRedisKeys();
+
+    assert.equal(await redis2.exists(ttlKey), 1, "a key with a TTL must not be pruned");
+  });
+
+  test("returnStaleInProgressItems moves a >24h inProgress item back to queued", async () => {
+    const id = "item-1876-stale";
+    const item = { id, title: "stale build", lane: "inProgress", meta: {} };
+    await redis2.hset("hydra:backlog:items", id, JSON.stringify(item));
+    // Score it 25h in the past so it crosses STALE_IN_PROGRESS_MS (24h).
+    const staleScore = Date.now() - 25 * 60 * 60 * 1000;
+    await redis2.zadd("hydra:backlog:lane:inProgress", staleScore, id);
+
+    await returnStaleInProgressItems();
+
+    assert.equal(
+      await redis2.zscore("hydra:backlog:lane:inProgress", id),
+      null,
+      "the stale item should be removed from the inProgress lane",
+    );
+    assert.ok(
+      await redis2.zscore("hydra:backlog:lane:queued", id),
+      "the stale item should be added to the queued lane",
+    );
+    const moved = JSON.parse(await redis2.hget("hydra:backlog:items", id));
+    assert.equal(moved.lane, "queued", "the item's lane field should be updated to queued");
+    assert.equal(moved.meta.returnedReason, "stale_in_progress", "an audit stamp should be set");
+  });
+
+  test("returnStaleInProgressItems leaves a fresh inProgress item alone", async () => {
+    const id = "item-1876-fresh";
+    const item = { id, title: "fresh build", lane: "inProgress", meta: {} };
+    await redis2.hset("hydra:backlog:items", id, JSON.stringify(item));
+    // Scored now → well within the 24h window.
+    await redis2.zadd("hydra:backlog:lane:inProgress", Date.now(), id);
+
+    await returnStaleInProgressItems();
+
+    assert.ok(
+      await redis2.zscore("hydra:backlog:lane:inProgress", id),
+      "a fresh item should stay in the inProgress lane",
+    );
+    assert.equal(
+      await redis2.zscore("hydra:backlog:lane:queued", id),
+      null,
+      "a fresh item should NOT be moved to queued",
+    );
   });
 });
