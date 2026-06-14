@@ -16,6 +16,7 @@ import {
   assessHealth,
   projectHealthDeepResponse,
   classifyOvSearchProbe,
+  parseRedisInfoSnapshot,
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type HealthSnapshot,
   type ProbeInputs,
@@ -524,6 +525,71 @@ describe("classifyOvSearchProbe", () => {
       OV_SEARCH_PROBE_TIMEOUT_MS >= 10_000,
       "OV search probe timeout must accommodate the Tailnet+Ollama embedding latency",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseRedisInfoSnapshot — pure Redis INFO regex parse (issue #1856)
+//
+// The parse moved off the I/O side of the seam (the GET /health/deep probe-15
+// lambda in src/api/health.ts) into the pure seam where HealthSnapshot["redisInfo"]
+// already declared its result shape. These tests reach it directly — no Express,
+// no Redis — which was impossible while the regex lived in the handler.
+// ---------------------------------------------------------------------------
+
+describe("parseRedisInfoSnapshot", () => {
+  test("extracts all three fields from well-formed INFO sections", () => {
+    const out = parseRedisInfoSnapshot(
+      "# Memory\r\nused_memory:1048576\r\nused_memory_human:1.00M\r\n",
+      "# Clients\r\nconnected_clients:42\r\nblocked_clients:0\r\n",
+      "# Server\r\nredis_version:7.2.0\r\nuptime_in_seconds:86400\r\n",
+    );
+    assert.equal(out.memoryHuman, "1.00M");
+    assert.equal(out.connectedClients, 42);
+    assert.equal(out.uptimeSeconds, 86400);
+  });
+
+  test("missing used_memory_human defaults to 'unknown'", () => {
+    const out = parseRedisInfoSnapshot(
+      "# Memory\r\nused_memory:1048576\r\n",
+      "connected_clients:7\r\n",
+      "uptime_in_seconds:100\r\n",
+    );
+    assert.equal(out.memoryHuman, "unknown");
+    assert.equal(out.connectedClients, 7);
+    assert.equal(out.uptimeSeconds, 100);
+  });
+
+  test("missing integer fields coerce to 0 (never NaN)", () => {
+    const out = parseRedisInfoSnapshot(
+      "used_memory_human:512.00K\r\n",
+      "# Clients (no connected_clients line)\r\n",
+      "# Server (no uptime line)\r\n",
+    );
+    assert.equal(out.memoryHuman, "512.00K");
+    assert.equal(out.connectedClients, 0, "absent connected_clients → 0, not NaN");
+    assert.equal(out.uptimeSeconds, 0, "absent uptime_in_seconds → 0, not NaN");
+    assert.ok(!Number.isNaN(out.connectedClients));
+    assert.ok(!Number.isNaN(out.uptimeSeconds));
+  });
+
+  test("fully empty input yields the all-default snapshot", () => {
+    const out = parseRedisInfoSnapshot("", "", "");
+    assert.deepEqual(out, { memoryHuman: "unknown", connectedClients: 0, uptimeSeconds: 0 });
+  });
+
+  test("integer regex requires digits — a non-numeric value falls through to 0", () => {
+    // The /connected_clients:(\d+)/ pattern only matches digit runs, so a
+    // garbage value (e.g. a partial/truncated INFO read) does not match and the
+    // safe default applies — never a NaN leaking onto the wire.
+    const out = parseRedisInfoSnapshot(
+      "used_memory_human:2.00G\r\n",
+      "connected_clients:notanumber\r\n",
+      "uptime_in_seconds:\r\n",
+    );
+    assert.equal(out.memoryHuman, "2.00G");
+    assert.equal(out.connectedClients, 0);
+    assert.equal(out.uptimeSeconds, 0);
   });
 });
 
