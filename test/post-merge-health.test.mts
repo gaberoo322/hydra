@@ -25,6 +25,14 @@
  *      on a hard-check (non-freshness) service all still count — suppression is
  *      scoped, never global.
  *
+ * The #1817 recurrence adds the absolute-mode non-blocking fallback:
+ *   7. with NO pre-merge baseline the absolute-threshold evaluator still runs,
+ *      but a breach is reported `inconclusive` (logged, hydra-incident NEVER
+ *      dispatched) rather than alarming — post-merge health is a regression
+ *      signal, meaningless without a baseline, and the Target's chronic-degraded
+ *      floor breaches the absolute floors on every merge. Opt back into legacy
+ *      absolute-mode alarming with HYDRA_PMH_ALARM_WITHOUT_BASELINE=1.
+ *
  * The script's I/O (fetch, spawn) is injected so the tests run hermetically with
  * no network and no real `claude` process. Baseline files use a per-test
  * tmpdir — plain node:fs, mirroring the script's stdlib-only constraint.
@@ -82,6 +90,16 @@ describe("post-merge-health: config (issue #1054 — configurable noise floor)",
     assert.equal(c.maxProviderErrors, 1);
     assert.equal(c.maxDegradedServices, 2);
     assert.equal(c.dispatch, false, "dispatch must default OFF (dry-run) so importing/CI never spawns claude");
+    assert.equal(
+      c.alarmWithoutBaseline,
+      false,
+      "absolute-mode alarming must default OFF (issue #1817 recurrence): no baseline => inconclusive, never alarm",
+    );
+  });
+
+  test("HYDRA_PMH_ALARM_WITHOUT_BASELINE=1 enables legacy absolute-mode alarming (issue #1817 recurrence opt-in)", () => {
+    const c = loadConfig({ HYDRA_PMH_ALARM_WITHOUT_BASELINE: "1" } as unknown as NodeJS.ProcessEnv);
+    assert.equal(c.alarmWithoutBaseline, true);
   });
 
   test("env overrides the noise floor and strips a trailing slash from the URL", () => {
@@ -428,6 +446,9 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
     assert.equal(spawned, false);
   });
 
+  // alarmWithoutBaseline: true keeps these two tests exercising the absolute-mode
+  // alarm/dispatch MECHANICS (argv, dry-run gating) post-#1817-recurrence; the
+  // default no-baseline behavior (inconclusive, no dispatch) is pinned separately.
   test("regression + dispatch=true => spawns hydra-incident exactly once (alarm-only)", async () => {
     const calls: Array<{ cmd: string; args: string[] }> = [];
     const spawnSpy = ((cmd: string, args: string[]) => {
@@ -436,7 +457,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
     }) as unknown as typeof import("node:child_process").spawn;
 
     const result = await runWatch(
-      { ...baseConfig(), dispatch: true },
+      { ...baseConfig(), dispatch: true, alarmWithoutBaseline: true },
       { mergeSha: "deadbeef" },
       {
         fetchImpl: fakeFetchOk({ status: "error", services: { scanner: { status: "error" } } }),
@@ -462,7 +483,7 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
     }) as unknown as typeof import("node:child_process").spawn;
 
     const result = await runWatch(
-      baseConfig(), // dispatch defaults false
+      { ...baseConfig(), alarmWithoutBaseline: true }, // dispatch defaults false
       {},
       {
         fetchImpl: fakeFetchOk({ status: "error", services: { scanner: { status: "error" } } }),
@@ -559,7 +580,10 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
     assert.ok(joined.includes("deadbeef"));
   });
 
-  test("--baseline pointing at a missing file => absolute-threshold fallback (mode: absolute)", async () => {
+  // Issue #1817 recurrence: a baseline-miss falls back to the absolute evaluator,
+  // but an absolute breach is now reported INCONCLUSIVE (never alarmed/dispatched)
+  // because post-merge health is meaningless without a baseline to diff against.
+  test("--baseline pointing at a missing file => inconclusive, never dispatches (issue #1817 recurrence)", async () => {
     let spawned = false;
     const spawnSpy = (() => {
       spawned = true;
@@ -567,17 +591,81 @@ describe("post-merge-health: runWatch end-to-end (injected I/O)", () => {
     }) as unknown as typeof import("node:child_process").spawn;
 
     const result = await runWatch(
-      baseConfig(), // dispatch defaults false (dry-run)
+      { ...baseConfig(), dispatch: true }, // even with dispatch on, absolute breach must NOT fire
       { baselinePath: join(tmpdir(), "pmh-missing-baseline", "nope.json") },
       {
         fetchImpl: fakeFetchOk({ status: "degraded", services: { scanner: { status: "error" } } }),
         spawnImpl: spawnSpy,
       },
     );
-    // Absolute semantics: one execution-class error breaches the zero floor.
-    assert.equal(result.kind, "alarm");
-    if (result.kind === "alarm") assert.equal(result.mode, "absolute");
-    assert.equal(spawned, false);
+    // The absolute evaluator still detects the breach (one execution-class error
+    // > floor 0), but the watcher reports it inconclusive instead of alarming.
+    assert.equal(result.kind, "inconclusive");
+    if (result.kind === "inconclusive") {
+      assert.equal(result.verdict.regressed, true, "the underlying absolute breach is still computed (for diagnostics)");
+      assert.ok(result.reason.includes("no pre-merge baseline"));
+    }
+    assert.equal(spawned, false, "absolute-mode breach must NEVER dispatch hydra-incident without a baseline");
+  });
+
+  test("HYDRA_PMH_ALARM_WITHOUT_BASELINE=1 restores legacy absolute-mode alarming", async () => {
+    const calls: Array<{ cmd: string; args: string[] }> = [];
+    const spawnSpy = ((cmd: string, args: string[]) => {
+      calls.push({ cmd, args });
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    const config = loadConfig({
+      HYDRA_PMH_ALARM_WITHOUT_BASELINE: "1",
+      HYDRA_PMH_DISPATCH: "1",
+    } as unknown as NodeJS.ProcessEnv);
+    const result = await runWatch(
+      config,
+      { mergeSha: "optin1817", baselinePath: join(tmpdir(), "pmh-missing-baseline", "nope.json") },
+      {
+        fetchImpl: fakeFetchOk({ status: "degraded", services: { scanner: { status: "error" } } }),
+        spawnImpl: spawnSpy,
+      },
+    );
+    assert.equal(result.kind, "alarm", "the opt-in env restores absolute-mode alarming");
+    if (result.kind === "alarm") {
+      assert.equal(result.mode, "absolute");
+      assert.equal(result.dispatched, true);
+    }
+    assert.equal(calls.length, 1, "exactly one hydra-incident dispatch when opted in");
+  });
+
+  // The exact #1817 recurrence: NO baseline (Step-7 snapshot skipped / Target was
+  // down pre-merge), so the watcher falls back to absolute mode and the Target's
+  // chronic-degraded floor (opticOdds not_configured + pinnacle 0-rows +
+  // freshness-stale ingestion/scanner) breaches every absolute floor — yet this
+  // is NOT a merge regression. Must be inconclusive, never dispatch.
+  test("chronic-degraded Target with no baseline => inconclusive, no dispatch (the #1817 absolute-mode recurrence)", async () => {
+    let spawned = false;
+    const spawnSpy = (() => {
+      spawned = true;
+      return { unref() {}, on() {} };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    const result = await runWatch(
+      { ...baseConfig(), dispatch: true },
+      { mergeSha: "d6f906b0" }, // no baselinePath at all => absolute mode
+      {
+        fetchImpl: fakeFetchOk({
+          status: "degraded",
+          services: {
+            database: { status: "ok" },
+            ingestion: { status: "degraded" },
+            scanner: { status: "stale" },
+            pinnacleFairLine: { status: "failed" },
+            opticOdds: { status: "not_configured" },
+          },
+        }),
+        spawnImpl: spawnSpy,
+      },
+    );
+    assert.equal(result.kind, "inconclusive", "the chronic-degraded floor is not a merge regression without a baseline");
+    assert.equal(spawned, false, "must never dispatch hydra-incident on the absolute-mode chronic floor");
   });
 
   test("--snapshot-out with an unreachable Target => clean no-op, no baseline file", async () => {
