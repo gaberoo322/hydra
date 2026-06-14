@@ -82,9 +82,11 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     // in Step 5. That direct-to-main-tree command is the bug. Make sure the
     // replacement language is present.
     assert.match(playbook, /Stay in that worktree — do NOT `cd ~\/hydra-betting`/);
+    // Heading widened to cover Read too and reference the recurrence issue #1861
+    // (the #542 fix kept recurring under six friction cues until #1861).
     assert.match(
       playbook,
-      /Path discipline for Edit\/Write tools \(issue #542\)/,
+      /Path discipline for Read\/Edit\/Write tools \(issues #542, #1861\)/,
     );
   });
 
