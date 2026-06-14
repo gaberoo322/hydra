@@ -811,9 +811,12 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     );
   });
 
-  // issue #1815: a clean termination on a DISPATCH-BEARING run still clears the
-  // alarm — only trivial disp=0 idle-drains are filtered out.
-  test("a single dispatch-bearing clean termination clears the starvation alarm (#1815)", () => {
+  // issue #1815/#1847: 1 clean of 6 dispatch-bearing runs = 0.167. Under the
+  // #1847 rate floor (0.15) this still CLEARS the alarm because 0.167 >= 0.15
+  // — the dispatch-bearing clean run keeps the rate above the floor. (Pre-#1847
+  // this cleared via `dispatchBearingCleanRuns === 0` being false; the
+  // assertion is unchanged but the mechanism is now the rate comparison.)
+  test("a single dispatch-bearing clean termination clears the starvation alarm (1/6=0.167 >= floor, #1815/#1847)", () => {
     const runs = [
       { status: "ended", term_reason: "idle", dispatches: 3 },
       ...Array.from({ length: 5 }, () => ({
@@ -823,7 +826,12 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     const h = summarizeTerminationHealth(runs);
     assert.equal(h.dispatchBearingRuns, 6);
     assert.equal(h.dispatchBearingCleanRuns, 1);
-    assert.equal(h.starved, false, "one dispatch-bearing clean run clears the alarm");
+    assert.equal(h.cleanTerminationRate, 1 / 6);
+    assert.equal(
+      h.starved,
+      false,
+      "1/6 = 0.167 is >= the 0.15 rate floor → alarm clears",
+    );
   });
 
   // issue #1815: an idle clean termination with disp=0 does NOT clear the alarm,
@@ -896,5 +904,74 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
       endedDispatchTotal: 0,
       starved: false,
     });
+  });
+
+  // issue #1847: the residual brittle-threshold gap on top of #1815. The live
+  // 2026-06-14 evidence — 2 clean of 33 dispatch-bearing runs (~6%) — read
+  // `starved: false` under the old `dispatchBearingCleanRuns === 0` boolean
+  // because the count was 2, not 0. Under the #1847 rate floor (0.15) a ~6%
+  // rate now TRIPS the alarm, surfacing the starved learning loop.
+  test("a live-style 2/33 = 6% clean rate trips the alarm (the #1847 residual gap)", () => {
+    const runs = [
+      ...Array.from({ length: 2 }, () => ({
+        status: "ended", term_reason: "budget", dispatches: 4,
+      })),
+      ...Array.from({ length: 31 }, () => ({
+        status: "ended", term_reason: "interrupted", dispatches: 4,
+      })),
+    ];
+    const h = summarizeTerminationHealth(runs);
+    assert.equal(h.dispatchBearingRuns, 33);
+    assert.equal(h.dispatchBearingCleanRuns, 2);
+    assert.equal(h.cleanTerminationRate, 2 / 33);
+    assert.ok(2 / 33 < 0.15, "2/33 ≈ 0.0606 is below the 0.15 floor");
+    assert.equal(
+      h.starved,
+      true,
+      "~6% clean rate trips the alarm — pre-#1847 the `=== 0` boolean masked it as false",
+    );
+  });
+
+  // issue #1847: boundary around the rate floor. 1 clean of 7 (≈0.143) is BELOW
+  // 0.15 → trips; 1 clean of 5 (0.20) is ABOVE → clears. This is the exact
+  // sharpening #1847 intends: one clean run no longer permanently silences the
+  // alarm as the dispatch-bearing sample N grows.
+  test("rate-floor boundary: 1/7 ≈ 0.143 trips, 1/5 = 0.20 clears (#1847)", () => {
+    const trips = summarizeTerminationHealth([
+      { status: "ended", term_reason: "idle", dispatches: 2 },
+      ...Array.from({ length: 6 }, () => ({
+        status: "ended", term_reason: "interrupted", dispatches: 3,
+      })),
+    ]);
+    assert.equal(trips.dispatchBearingRuns, 7);
+    assert.equal(trips.dispatchBearingCleanRuns, 1);
+    assert.equal(trips.cleanTerminationRate, 1 / 7);
+    assert.ok(1 / 7 < 0.15, "1/7 ≈ 0.143 is below the 0.15 floor");
+    assert.equal(trips.starved, true, "1/7 below the floor → alarm fires");
+
+    const clears = summarizeTerminationHealth([
+      { status: "ended", term_reason: "idle", dispatches: 2 },
+      ...Array.from({ length: 4 }, () => ({
+        status: "ended", term_reason: "interrupted", dispatches: 3,
+      })),
+    ]);
+    assert.equal(clears.dispatchBearingRuns, 5);
+    assert.equal(clears.dispatchBearingCleanRuns, 1);
+    assert.equal(clears.cleanTerminationRate, 0.2);
+    assert.ok(0.2 >= 0.15, "1/5 = 0.20 is at/above the 0.15 floor");
+    assert.equal(clears.starved, false, "1/5 above the floor → alarm clears");
+  });
+
+  // issue #1847: the 0/5 floor case still trips — the rate comparison preserves
+  // the pre-#1847 `=== 0` behavior at the minimum sample size (0/5 = 0 < 0.15).
+  test("0/5 still trips at the minimum sample floor (preserves pre-#1847 behavior)", () => {
+    const runs = Array.from({ length: 5 }, () => ({
+      status: "ended", term_reason: "interrupted", dispatches: 3,
+    }));
+    const h = summarizeTerminationHealth(runs);
+    assert.equal(h.dispatchBearingRuns, 5);
+    assert.equal(h.dispatchBearingCleanRuns, 0);
+    assert.equal(h.cleanTerminationRate, 0);
+    assert.equal(h.starved, true, "0/5 = 0 < 0.15 floor → alarm fires");
   });
 });

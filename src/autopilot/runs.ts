@@ -818,11 +818,32 @@ const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
  *   rate and alarm are actually derived from.
  * - `endedDispatchTotal` — total dispatches across ended runs (unchanged).
  * - `starved` — the pre-derived alarm bit: true when a non-trivial sample of
- *   **dispatch-bearing** ended runs ({@link STARVATION_MIN_ENDED_RUNS}) produced
- *   ZERO clean terminations. Consumers (hydra-doctor, the dashboard) alarm on
- *   the boolean directly instead of re-deriving thresholds.
+ *   **dispatch-bearing** ended runs ({@link STARVATION_MIN_ENDED_RUNS}) sustains
+ *   a clean-termination RATE below {@link STARVATION_CLEAN_RATE_FLOOR}. Consumers
+ *   (hydra-doctor, the dashboard) alarm on the boolean directly instead of
+ *   re-deriving thresholds.
+ *
+ * **Why a rate floor, not `=== 0` (issue #1847):** #1815 fixed the denominator
+ * (dispatch-bearing gating) but left the threshold a brittle boolean —
+ * `dispatchBearingCleanRuns === 0`. As soon as a SINGLE dispatch-bearing run
+ * terminated cleanly, the alarm silenced regardless of how low the real rate
+ * was, so a live 2/33 = ~6% clean rate read `starved: false`. The threshold is
+ * now a strict rate comparison: `cleanTerminationRate < STARVATION_CLEAN_RATE_FLOOR`
+ * (0.15) once the sample floor is met. At MIN=5 this preserves the old floor
+ * (0/5 still trips), while a sustained sub-15% rate at larger N now alarms
+ * instead of being masked by one clean run.
  */
 const STARVATION_MIN_ENDED_RUNS = 5;
+
+/**
+ * Minimum clean-termination RATE (over dispatch-bearing ended runs) below which
+ * the {@link summarizeTerminationHealth} `starved` alarm fires, once the
+ * {@link STARVATION_MIN_ENDED_RUNS} sample floor is met (issue #1847). A strict
+ * `<` comparison: at the 5-run floor, 0/5 = 0 trips (preserving the pre-#1847
+ * `=== 0` behavior) while 1/5 = 0.20 clears; a sustained sub-15% rate at any
+ * larger sample now alarms instead of being silenced by a single clean run.
+ */
+export const STARVATION_CLEAN_RATE_FLOOR = 0.15;
 
 export function summarizeTerminationHealth(
   runs: Array<Record<string, unknown>>,
@@ -856,17 +877,22 @@ export function summarizeTerminationHealth(
       if (isClean) dispatchBearingCleanRuns += 1;
     }
   }
+  const cleanTerminationRate =
+    dispatchBearingRuns > 0 ? dispatchBearingCleanRuns / dispatchBearingRuns : null;
   return {
-    cleanTerminationRate:
-      dispatchBearingRuns > 0 ? dispatchBearingCleanRuns / dispatchBearingRuns : null,
+    cleanTerminationRate,
     endedRuns,
     cleanRuns,
     dispatchBearingRuns,
     dispatchBearingCleanRuns,
     endedDispatchTotal,
+    // Issue #1847: strict rate comparison against the already-computed
+    // dispatch-gated rate (do NOT re-derive). One clean run no longer
+    // permanently silences the alarm — a sustained sub-floor rate trips it.
     starved:
       dispatchBearingRuns >= STARVATION_MIN_ENDED_RUNS &&
-      dispatchBearingCleanRuns === 0,
+      cleanTerminationRate !== null &&
+      cleanTerminationRate < STARVATION_CLEAN_RATE_FLOOR,
   };
 }
 
