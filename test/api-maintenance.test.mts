@@ -174,3 +174,114 @@ describe("Maintenance housekeeping endpoint (issue #723)", () => {
     );
   });
 });
+
+/**
+ * Unit coverage for the extracted guarded-chore runner (issue #1864).
+ *
+ * `runChore` encapsulates the guard → work → bookkeeping → error-log + Sentry
+ * pattern that was re-spelled inline for each of the 9 housekeeping chores.
+ * These tests inject thunks directly (no Redis, no HTTP endpoint) to pin the
+ * runner's routing of ran/skipped across the four outcomes: guard-skip,
+ * work-skip (work returns false), success, and failure.
+ */
+describe("runChore guarded-chore runner (issue #1864)", () => {
+  let runChore: any;
+
+  beforeEach(async () => {
+    if (!runChore) {
+      const mod = await import("../src/scheduler/housekeeping.ts");
+      runChore = mod.runChore;
+    }
+  });
+
+  test("a chore with no guard whose work succeeds is recorded as ran", async () => {
+    const ran: string[] = [];
+    const skipped: string[] = [];
+    let invoked = false;
+    await runChore(
+      { name: "c-success", work: async () => { invoked = true; } },
+      ran,
+      skipped,
+    );
+    assert.ok(invoked, "work should be invoked when there is no guard");
+    assert.deepEqual(ran, ["c-success"], "success should append to ran");
+    assert.deepEqual(skipped, [], "success should not append to skipped");
+  });
+
+  test("a guard returning false skips work and records skipped", async () => {
+    const ran: string[] = [];
+    const skipped: string[] = [];
+    let workInvoked = false;
+    await runChore(
+      {
+        name: "c-guarded",
+        guard: async () => false,
+        work: async () => { workInvoked = true; },
+      },
+      ran,
+      skipped,
+    );
+    assert.equal(workInvoked, false, "work must NOT run when the guard returns false");
+    assert.deepEqual(skipped, ["c-guarded"], "a guard miss appends to skipped");
+    assert.deepEqual(ran, [], "a guard miss does not append to ran");
+  });
+
+  test("work returning false routes to skipped (conditional no-op)", async () => {
+    const ran: string[] = [];
+    const skipped: string[] = [];
+    await runChore(
+      { name: "c-noop", work: async () => false },
+      ran,
+      skipped,
+    );
+    assert.deepEqual(skipped, ["c-noop"], "work returning false appends to skipped");
+    assert.deepEqual(ran, [], "work returning false does not append to ran");
+  });
+
+  test("a throwing chore is caught, recorded as skipped, and does not propagate", async () => {
+    const ran: string[] = [];
+    const skipped: string[] = [];
+    const originalError = console.error;
+    let logged = "";
+    console.error = (msg: any) => { logged = String(msg); };
+    try {
+      await runChore(
+        {
+          name: "c-throws",
+          work: async () => { throw new Error("boom"); },
+        },
+        ran,
+        skipped,
+      );
+    } finally {
+      console.error = originalError;
+    }
+    assert.deepEqual(skipped, ["c-throws"], "a throwing chore appends to skipped");
+    assert.deepEqual(ran, [], "a throwing chore does not append to ran");
+    assert.match(logged, /c-throws failed: boom/, "the error is logged with the chore name");
+  });
+
+  test("a guard that throws is caught and recorded as skipped", async () => {
+    const ran: string[] = [];
+    const skipped: string[] = [];
+    let workInvoked = false;
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      await runChore(
+        {
+          name: "c-guard-throws",
+          guard: async () => { throw new Error("guard-boom"); },
+          work: async () => { workInvoked = true; },
+        },
+        ran,
+        skipped,
+      );
+    } finally {
+      console.error = originalError;
+    }
+    assert.equal(workInvoked, false, "work must NOT run when the guard throws");
+    assert.deepEqual(skipped, ["c-guard-throws"], "a throwing guard appends to skipped");
+    assert.deepEqual(ran, [], "a throwing guard does not append to ran");
+  });
+});
