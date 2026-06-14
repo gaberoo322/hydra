@@ -61,6 +61,8 @@ export interface TargetRiskClassification {
  *   - staking (stake sizing / bankroll allocation),
  *   - bet-math (odds, edge, probability, settlement math),
  *   - arbitrage (EV scoring / opportunity ranking money math, issue #1841),
+ *   - markets (dislocation / fee-adjusted edge / candidate-ranking money math,
+ *     issue #1850),
  * plus the runner entrypoints that *drive* them:
  *   - bin (issue #1694 — scan-to-submit runners such as
  *     web/src/bin/arbitrage-auto-approval-runner.ts author and submit machine
@@ -82,6 +84,13 @@ export const MONEY_CRITICAL_TARGET_PATHS: readonly string[] = Object.freeze([
   // the mutation gate; a false positive merely buys stricter QA while a surface
   // gap silently defeats the keystone gate.
   "src/lib/arbitrage/",
+  // Markets — dislocation (sharp-book fair vs. venue price) and fee-adjusted
+  // edge / candidate-ranking money math (issue #1850, e.g.
+  // sports-candidate-ranking; sportsbook-prediction-edge EV scanners;
+  // kalshi-margin-fee-tier / fractional-sizing; pricing/no-vig). The whole
+  // directory is listed, not single files: a false positive merely buys
+  // stricter QA while a surface gap silently defeats the keystone gate.
+  "src/lib/markets/",
   // Bin runner entrypoints — drive scan-to-submit / trade-submitting loops
   // (issue #1694). The whole directory is listed, not single files, because a
   // false positive merely buys stricter QA while a surface gap silently

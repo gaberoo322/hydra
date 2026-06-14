@@ -59,6 +59,21 @@ describe("classifyTargetRisk — money-critical surfaces", () => {
     assert.equal(isMoneyCriticalPath("src/lib/arbitrage/ev.ts"), true);
   });
 
+  test("flags a path under markets/ (issue #1850)", () => {
+    // Regression pin for the gap that auto-skipped the mutation gate on
+    // markets/ dislocation + fee-adjusted edge / candidate-ranking money math
+    // (e.g. sports-candidate-ranking). src/lib/markets/ must classify as
+    // money-critical and surface in matchedPaths, both bare and web/-rooted.
+    const r = classifyTargetRisk([
+      "web/src/lib/markets/sports-candidate-ranking.ts",
+    ]);
+    assert.equal(r.moneyCritical, true);
+    assert.deepEqual(r.matchedPaths, [
+      "web/src/lib/markets/sports-candidate-ranking.ts",
+    ]);
+    assert.equal(isMoneyCriticalPath("src/lib/markets/x.ts"), true);
+  });
+
   test("flags the directory itself (no trailing slash)", () => {
     // The directory entry must match the bare directory path too, not only
     // children — mirrors the Verifier-Core matcher contract.
@@ -192,6 +207,9 @@ describe("classifyTargetRisk — safe surfaces", () => {
     // Same guard for the #1694 bin entry: bin-adjacent names are not bin/.
     assert.equal(isMoneyCriticalPath("src/bin-utils/helper.ts"), false);
     assert.equal(isMoneyCriticalPath("web/src/binding/x.ts"), false);
+    // Same guard for the #1850 markets entry: markets-adjacent names are not
+    // markets/ (the trailing-slash directory entry prevents the false positive).
+    assert.equal(isMoneyCriticalPath("src/lib/markets-readme.md"), false);
   });
 });
 
@@ -241,6 +259,8 @@ describe("MONEY_CRITICAL_TARGET_PATHS — declared set", () => {
       "src/lib/bet-math/",
       // Issue #1841 — arbitrage EV/ranking money math.
       "src/lib/arbitrage/",
+      // Issue #1850 — markets dislocation / fee-adjusted edge / candidate-ranking.
+      "src/lib/markets/",
       // Issue #1694 — runner entrypoints that drive trade submission.
       "src/bin/",
     ]);
