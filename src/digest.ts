@@ -33,7 +33,7 @@
  * (`interfaceImpact: none`).
  */
 
-import { sendToTelegram } from "./notify.ts";
+import { sendToTelegram, type TelegramSendFn } from "./notify.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
 import { getCapacitySnapshot, DEFAULT_WINDOW_CYCLES } from "./capacity-floor.ts";
 import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
@@ -90,7 +90,7 @@ export interface DigestAccumulatorDeps {
   /** Wall-clock source. Defaults to `() => new Date()`. */
   now?: () => Date;
   /** Telegram sender. Defaults to `sendToTelegram`. */
-  send?: (message: string) => Promise<void>;
+  send?: TelegramSendFn;
   /** Capacity-split snapshot reader. Defaults to `getCapacitySnapshot`. */
   getCapacity?: () => Promise<unknown>;
   /** Builder-health scorecard reader. Defaults to `getBuilderHealthScorecard`. */
@@ -110,7 +110,7 @@ export class DigestAccumulator {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   private readonly now: () => Date;
-  private readonly send: (message: string) => Promise<void>;
+  private readonly send: TelegramSendFn;
   private readonly getCapacity: () => Promise<unknown>;
   private readonly getBuilderHealth: () => Promise<unknown>;
 
