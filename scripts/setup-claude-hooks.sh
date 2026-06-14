@@ -30,8 +30,11 @@ command -v python3 >/dev/null || { echo "setup-claude-hooks: python3 required" >
 
 # The list of (hook-file, matcher) pairs we manage. Matcher is a regex per
 # Claude Code's PreToolUse matcher contract — multiple tool names piped.
+# Read is fenced too (issue #1861): the fence steers Reads of a main-tree copy
+# that has a worktree equivalent, so the agent never anchors on the path that
+# later ghost-writes.
 HOOKS=(
-  "worktree-write-fence.sh|Edit|Write|MultiEdit"
+  "worktree-write-fence.sh|Edit|Write|MultiEdit|Read"
 )
 
 install_hook() {

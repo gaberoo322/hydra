@@ -335,6 +335,35 @@ Do NOT fall back to running in `~/hydra`. Do NOT create a branch in the main tre
 
 If the harness exposes `EnterWorktree`/`ExitWorktree` tools, the child should call `EnterWorktree` only when its initial `pwd` check fails the worktree predicate — never assume "already isolated" without verifying via `git rev-parse --git-dir`.
 
+### Child-prompt path-anchoring contract (REQUIRED — issue #1861)
+
+Append the following block to every dispatched hydra-dev BG agent prompt, immediately after the worktree-guard preamble. It is the prompt-side half of the `worktree-write-fence.sh` PreToolUse hook — the hook denies the bad call, but anchoring paths correctly from the first turn avoids the wasted recovery turns the deny would otherwise cost. This is the single most recurring friction pattern (#1861: ~27 combined cross-run hits under six cues after #542 was closed-not-fixed).
+
+```
+## PATH ANCHORING — every file op stays inside the worktree (issue #1861)
+
+Your cwd is a git worktree, but Read/Edit/Write/MultiEdit resolve absolute
+paths against the raw filesystem, NOT the worktree namespace. A path like
+`/home/gabe/hydra/src/foo.ts` or `/home/gabe/hydra-betting/web/x.ts` points at
+the MAIN checkout, not your worktree copy. Reading or writing it ghost-writes
+into the main tree (leaving your PR diff empty) or gets denied by the
+worktree-write-fence (burning turns).
+
+RULES:
+1. Run `pwd` once and treat its output as your worktree root `$WT`.
+2. For EVERY Read/Edit/Write/MultiEdit `file_path`, use a path that is either
+   repo-relative (resolved against $WT) OR absolute and prefixed with `$WT/`.
+   NEVER construct a bare `/home/gabe/hydra/...` or `/home/gabe/hydra-betting/...`
+   path for a file you intend to read-for-editing or write — that is the main
+   checkout.
+3. If a Read/Edit/Write is DENIED by worktree-write-fence, the deny reason
+   names the corrected `$WT/...` path. Re-issue the call against THAT path; do
+   not try to recompute it or to `cd` out of the worktree.
+4. Reading a main-tree-only file with NO worktree copy (a shared config the
+   worktree never checked out, an adjacent project's file for reference) is
+   allowed and passes the fence — but never base an Edit on such a path.
+```
+
 ### Child-prompt scope-respect block (REQUIRED — issue #396)
 
 Append the following block to every dispatched hydra-dev BG agent prompt, immediately after the worktree-guard preamble. It is the subagent-side replacement for the deleted `reconcilePlanVsActual()` step (control-loop step 6.5, removed in PR #400):

@@ -38,10 +38,11 @@
  * it as a subprocess and feeding stdin.
  */
 
-import test, { describe } from "node:test";
+import test, { describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const HOOK = resolve(REPO_ROOT, "scripts/claude-hooks/worktree-write-fence.sh");
@@ -186,6 +187,90 @@ describe("worktree-write-fence — deny cases", () => {
       tool_input: { file_path: "/home/gabe/hydra/src/foo.ts" },
     });
     assert.equal(r.status, 2);
+  });
+});
+
+describe("worktree-write-fence — suggested-path surfacing (issue #1861)", () => {
+  test("write deny names the corrected worktree-anchored path", () => {
+    const r = runHook({
+      cwd: "/home/gabe/hydra/.claude/worktrees/agent-abc123",
+      tool_name: "Edit",
+      tool_input: { file_path: "/home/gabe/hydra/src/api/metrics.ts" },
+    });
+    assert.equal(r.status, 2);
+    // The agent must be told the exact worktree path to retry against, so it
+    // self-corrects in one turn rather than recomputing the mapping.
+    assert.match(
+      r.stderr,
+      /\/home\/gabe\/hydra\/\.claude\/worktrees\/agent-abc123\/src\/api\/metrics\.ts/,
+      "deny reason must surface the corrected worktree path",
+    );
+    assert.match(r.stderr, /#1861/, "deny reason references the recurrence issue");
+  });
+
+  test("hydra-betting write deny re-anchors under the worktree cwd", () => {
+    const r = runHook({
+      cwd: "/dev/shm/hydra-worktrees/issue-100-dev",
+      tool_name: "Write",
+      tool_input: { file_path: "/home/gabe/hydra-betting/web/src/x.ts" },
+    });
+    assert.equal(r.status, 2);
+    assert.match(
+      r.stderr,
+      /\/dev\/shm\/hydra-worktrees\/issue-100-dev\/web\/src\/x\.ts/,
+      "hydra-betting path must re-anchor under the worktree, dropping the main-tree root",
+    );
+  });
+});
+
+describe("worktree-write-fence — Read steering (issue #1861)", () => {
+  // The fence's Read arm checks the worktree copy's existence on disk, so these
+  // tests use the real filesystem. The fence keys off the cwd PREFIX (one of
+  // /home/gabe/hydra/.claude/worktrees/, /dev/shm/hydra-worktrees/,
+  // /home/gabe/hydra-worktrees/); we use the canonical /dev/shm namespace
+  // (writable in CI) for cwd and create the worktree copy there.
+  const wtCwd = join("/dev/shm/hydra-worktrees", `fence-read-${process.pid}`);
+  const wtFile = join(wtCwd, "web", "shared.ts");
+
+  before(() => {
+    mkdirSync(join(wtCwd, "web"), { recursive: true });
+    writeFileSync(wtFile, "// worktree copy\n");
+  });
+
+  after(() => {
+    rmSync(wtCwd, { recursive: true, force: true });
+  });
+
+  test("Read of a main-tree copy WITH a worktree equivalent is DENIED + steered", () => {
+    const r = runHook({
+      cwd: wtCwd,
+      tool_name: "Read",
+      tool_input: { file_path: "/home/gabe/hydra-betting/web/shared.ts" },
+    });
+    assert.equal(r.status, 2, `expected deny, got ${r.status}; stderr=${r.stderr}`);
+    assert.match(r.stderr, new RegExp(wtFile.replace(/\//g, "\\/")),
+      "Read deny must steer to the worktree copy that exists");
+    assert.match(r.stderr, /#1861/);
+  });
+
+  test("Read of a main-tree-only file (no worktree equivalent) is ALLOWED", () => {
+    const r = runHook({
+      cwd: wtCwd,
+      tool_name: "Read",
+      // No web/only-in-main.ts exists under wtCwd → legitimate cross-reference.
+      tool_input: { file_path: "/home/gabe/hydra-betting/web/only-in-main.ts" },
+    });
+    assert.equal(r.status, 0,
+      `cross-reference Read must pass through, got ${r.status}; stderr=${r.stderr}`);
+  });
+
+  test("Read of a path already inside the worktree is ALLOWED", () => {
+    const r = runHook({
+      cwd: wtCwd,
+      tool_name: "Read",
+      tool_input: { file_path: wtFile },
+    });
+    assert.equal(r.status, 0);
   });
 });
 
