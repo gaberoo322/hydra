@@ -32,6 +32,47 @@ const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(process.env.HOME, "
 const GOALS_FILE = join(CONFIG_PATH, "direction", "goals.md");
 
 /**
+ * Structured output shape of the project goals document parser.
+ *
+ * This interface NAMES the previously-inferred return shape of
+ * `parseProjectGoals` — it does not change any runtime value. Mirrors the
+ * sibling `ParseResult` pattern in `src/outcomes-yaml.ts`: the **Seam** output
+ * gets a named type so callers (`src/api/goals.ts`, future housekeeping chores)
+ * can destructure it with full autocomplete, and a renamed field becomes a
+ * compile error at every call site instead of a silent runtime miss.
+ */
+export interface ProjectGoalsDoc {
+  /** The frontmatter `name:` value (empty string when absent). */
+  name: string;
+  /** The unprocessed source markdown, echoed back verbatim. */
+  raw: string;
+  /**
+   * Parsed `## Success Metrics` table rows. Each row's keys are the lowercased
+   * table header columns — `Array<Record<string,string>>`, NOT a fixed shape,
+   * because goals.md tables carry arbitrary column names the parser derives at
+   * runtime.
+   */
+  metrics: Array<Record<string, string>>;
+  /** Parsed `## Focus Weights` entries, keyed by slugified category. */
+  weights: Record<string, number>;
+  /** `## Constraints` bullet list. */
+  constraints: string[];
+  /** `## Pain Points` bullet list (matched by substring). */
+  painPoints: string[];
+  /** All other `##` sections, keyed by lowercased heading, as raw text blocks. */
+  customSections: Record<string, string>;
+  /**
+   * Operator's north star, externally/aspirationally populated.
+   *
+   * NOTE: `parseProjectGoals` NEVER writes this field — it is read by
+   * `summarizeGoalsForPrompt` (below) but only populated by an external caller.
+   * Kept OPTIONAL so the existing read type-checks. Removing the read is a
+   * separate follow-up, out of scope for this type-safety pass.
+   */
+  userPriorities?: string;
+}
+
+/**
  * Parse the raw text of a project goals document into a structured
  * `GoalsDocument`.
  *
@@ -42,8 +83,8 @@ const GOALS_FILE = join(CONFIG_PATH, "direction", "goals.md");
  * pain points — be exercised directly in `test/project-goals.test.mts` instead of
  * only indirectly through the file-reading path. Never throws.
  */
-export function parseProjectGoals(raw) {
-  const goals = {
+export function parseProjectGoals(raw: string): ProjectGoalsDoc {
+  const goals: ProjectGoalsDoc = {
     name: "",
     raw,
     metrics: [],
@@ -63,8 +104,8 @@ export function parseProjectGoals(raw) {
   }
 
   // Split into sections by ## headings
-  const sections = {};
-  let currentSection = null;
+  const sections: Record<string, string[]> = {};
+  let currentSection: string | null = null;
   for (const line of raw.split("\n")) {
     const heading = line.match(/^##\s+(.+)/);
     if (heading) {
@@ -84,7 +125,7 @@ export function parseProjectGoals(raw) {
       for (const line of lines.slice(1)) {
         const cols = line.split("|").map(c => c.trim()).filter(Boolean);
         if (cols.length >= 2) {
-          const metric = {};
+          const metric: Record<string, string> = {};
           headerCols.forEach((h, i) => { metric[h] = cols[i] || ""; });
           goals.metrics.push(metric);
         }
@@ -137,8 +178,8 @@ export function parseProjectGoals(raw) {
  *
  * Thin file-loading wrapper around the pure `parseProjectGoals` Seam.
  */
-export async function loadProjectGoals() {
-  let raw;
+export async function loadProjectGoals(): Promise<ProjectGoalsDoc | null> {
+  let raw: string;
   try {
     raw = await readFile(GOALS_FILE, "utf-8");
   } catch {
@@ -152,7 +193,7 @@ export async function loadProjectGoals() {
 /**
  * Format goals for agent prompts — concise structured summary.
  */
-export function summarizeGoalsForPrompt(goals) {
+export function summarizeGoalsForPrompt(goals: ProjectGoalsDoc | null): string {
   if (!goals) return "No project goals document found. Operating without strategic context.";
 
   const parts = [];

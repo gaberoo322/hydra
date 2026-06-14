@@ -13,7 +13,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseProjectGoals } from "../src/project-goals.ts";
+import { parseProjectGoals, type ProjectGoalsDoc } from "../src/project-goals.ts";
 
 // ---------------------------------------------------------------------------
 // frontmatter (name)
@@ -247,5 +247,77 @@ free-form notes here
     assert.equal(g.customSections["success metrics"], undefined);
     assert.equal(g.customSections["focus weights"], undefined);
     assert.equal(g.customSections["constraints"], undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// typed return shape (issue #1874 — ProjectGoalsDoc interface)
+// ---------------------------------------------------------------------------
+
+describe("parseProjectGoals — typed ProjectGoalsDoc return shape", () => {
+  test("return value conforms to ProjectGoalsDoc and exposes every declared field", () => {
+    const raw = `---
+name: Typed Project
+---
+
+## Success Metrics
+| Metric | Target | Category | Source |
+| --- | --- | --- | --- |
+| CLV | 0.05 | profit | book |
+
+## Focus Weights
+- profit: 80
+- code health: 20
+
+## Constraints
+- local LLM only
+
+## Pain Points
+- flaky CI
+
+## Domain Notes
+free-form context
+`;
+    // Binding to the declared interface is the load-bearing assertion: if any
+    // field in parseProjectGoals were renamed, this annotation would fail at
+    // `npm run typecheck:test` rather than silently asserting against undefined.
+    const g: ProjectGoalsDoc = parseProjectGoals(raw);
+
+    assert.equal(g.name, "Typed Project");
+    assert.equal(g.raw, raw);
+
+    // metrics is Array<Record<string,string>> — header-derived dynamic keys.
+    assert.equal(g.metrics.length, 1);
+    const firstMetric: Record<string, string> = g.metrics[0];
+    assert.equal(firstMetric.metric, "CLV");
+    assert.equal(firstMetric.source, "book");
+
+    // weights is Record<string,number> — no per-test cast needed now that the
+    // return type is declared.
+    assert.equal(g.weights.profit, 80);
+    assert.equal(g.weights.code_health, 20);
+    assert.equal(typeof g.weights.profit, "number");
+
+    // constraints / painPoints are string[].
+    assert.deepEqual(g.constraints, ["local LLM only"]);
+    assert.deepEqual(g.painPoints, ["flaky CI"]);
+
+    // customSections is Record<string,string>.
+    assert.equal(g.customSections["domain notes"], "free-form context");
+
+    // userPriorities is OPTIONAL and never written by the parser → undefined.
+    assert.equal(g.userPriorities, undefined);
+  });
+
+  test("empty input still satisfies ProjectGoalsDoc with concrete defaults", () => {
+    const g: ProjectGoalsDoc = parseProjectGoals("");
+    assert.equal(g.name, "");
+    assert.equal(g.raw, "");
+    assert.deepEqual(g.metrics, []);
+    assert.deepEqual(g.weights, {});
+    assert.deepEqual(g.constraints, []);
+    assert.deepEqual(g.painPoints, []);
+    assert.deepEqual(g.customSections, {});
+    assert.equal(g.userPriorities, undefined);
   });
 });
