@@ -44,6 +44,21 @@ describe("classifyTargetRisk — money-critical surfaces", () => {
     assert.deepEqual(r.matchedPaths, ["src/lib/bet-math/edge.ts"]);
   });
 
+  test("flags a path under arbitrage/ (issue #1841)", () => {
+    // Regression pin for the gap that auto-skipped the mutation gate on
+    // arbitrage EV/ranking money math (e.g. the polymarket reward-adjusted
+    // ranking). src/lib/arbitrage/ must classify as money-critical and surface
+    // in matchedPaths, both bare and web/-rooted.
+    const r = classifyTargetRisk([
+      "web/src/lib/arbitrage/polymarket-reward-adjusted-ranking.ts",
+    ]);
+    assert.equal(r.moneyCritical, true);
+    assert.deepEqual(r.matchedPaths, [
+      "web/src/lib/arbitrage/polymarket-reward-adjusted-ranking.ts",
+    ]);
+    assert.equal(isMoneyCriticalPath("src/lib/arbitrage/ev.ts"), true);
+  });
+
   test("flags the directory itself (no trailing slash)", () => {
     // The directory entry must match the bare directory path too, not only
     // children — mirrors the Verifier-Core matcher contract.
@@ -224,6 +239,8 @@ describe("MONEY_CRITICAL_TARGET_PATHS — declared set", () => {
       "src/lib/execution/",
       "src/lib/staking/",
       "src/lib/bet-math/",
+      // Issue #1841 — arbitrage EV/ranking money math.
+      "src/lib/arbitrage/",
       // Issue #1694 — runner entrypoints that drive trade submission.
       "src/bin/",
     ]);
