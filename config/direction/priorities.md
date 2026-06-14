@@ -1,64 +1,79 @@
 ---
-updated: 2026-06-12
+updated: 2026-06-13
 refreshedBy: claude-research
-researchCycle: research-target-2026-06-12a
+researchCycle: research-target-2026-06-13a
 tags: [hydra, hydra/direction]
 ---
 # Current state
-Hydra is sports-first and execution-capable — and the funnel has never produced. Tests are green (5943 passing, 3 skipped — verified baseline 2026-06-12). Active backlog is 58 queued items. Work queue is empty — fresh priorities set this cycle.
+Hydra is sports-first and execution-capable — but the funnel still has not produced. Tests are green (6107 passing, 3 skipped — verified baseline 2026-06-13). Active backlog is 42 queued items (41 queued + 1 blocked).
 
-M11 is complete. All 7 milestone items shipped: live Kalshi fee-rate splice into sports discovery pre-ranking (#90), `managePolymarketMakerOrder` GTD polling-cycle adapter (#91), `pricePolymarketNegativeRiskExit` in the NegRisk exit-plan resolver (#92), NBA/WC combinatorial scan candidates via `GET /api/scanner/combinatorial-candidates` (#94), `detectComboVsBasketCandidates` combo-basket scan path (#95), per-order projected sports maker rewards in builder revenue-share reconciliation (#96), sports-pair eligibility scan route (#97).
+M11 is complete (all items shipped — see "What's been completed"). The machine-execution stack is wired and default-off. WC 2026 ingestion is confirmed flowing: `soccer_fifa_world_cup` persisted 68 events / 878 snapshots as of June 13 (the #118 fix held). But the scanner still reports `{"matched":0,"opportunities":0}` on every run — even with WC data now arriving.
 
-Beyond the M11 plan, the machine-execution stack landed: approval-envelope-author (#99), adverse-selection blocking preflights (#102), machine-approval aggregate limits — daily notional cap, run-count cap, consecutive-failure trip (#108), and the auto-execution dispatcher behind a default-off promotion gate (#117). Also merged: individual wager list + per-wager lifecycle audit page (item-321), StatusLivePoller enrichment (#104), `/api/health/full` database-probe + migration-drift fix (#113), dead-code ratchet (#93), wiring-status ledger (#98).
+**Root cause identified (2026-06-13 research cycle)**: The cross-venue scanner (`scanForArbitrage` in `arbitrage-scanner-runner.ts`) loads verified pairs exclusively from the `kalshi_polymarket_pair_registry` database table via `loadVerifiedKalshiPolymarketPairKeySet`. That table holds 13 rows — NBA/NFL/MLB/BTC pairs that are all expired or stale. **The WC 2026 pairs (`KXWCGAME-*`) defined as static constants in `web/src/lib/sports/world-cup-2026.ts` have never been seeded into the registry database**. Until current, active WC pairs exist in the DB, `matched:0` is structural and will continue regardless of how much ingestion data flows. Secondary: the funnel breakdown accounting module (`web/src/lib/markets/scanner-funnel-breakdown.ts`) was built to explain zero-opportunity runs but `scanner-alert-runner.ts` never passes a `funnelBreakdown` when calling `executeScannerCycle` — so the binding-gate evidence infrastructure is also inactive.
 
-**The keystone fact for M12: the pipeline has never produced one opportunity end-to-end.** 1,378 of 1,378 scanner runs ended `zero_opportunities`. Root cause #1 was found and fixed on group-stage eve: World Cup normalization dropped all 72 odds-api WC events (`soccer_fifa_world_cup` missing from `supportedSportSet`; unhandled 1X2 draw leg) — fixed in #118, with normalization warning-sample persistence and a 100%-drop alert added in #119. WC 2026 group stage is live (opened June 12). M12 is **funnel production**: prove ingestion flows, prove the first opportunity (or explain zero per gate), prove the first paper execution through the M7–M11 stack, and get real samples into the calibration loop. No new module wiring until the funnel is proven.
+M12 focus: seed WC 2026 pairs into the pair registry, wire funnel breakdown into the production scan path, then prove one opportunity end-to-end.
 
-Per operator preference: selection quality over backlog volume, sports edge over everything else. Do not pad the backlog — it holds 58 queued items.
+Per operator preference: selection quality over backlog volume, sports edge over everything else. Do not pad the backlog.
 
-# Verified external venue state (2026-06-12)
-All M10/M11 state carried forward:
-- **Kalshi `GET /margin/fee_tiers`** — live per-market `maker_fee_rates`/`taker_fee_rates` map operational, and now spliced into sports discovery pre-ranking via `applyKalshiLiveFeeRatesToDiscoveryMatches` (#90).
+# Verified external venue state (2026-06-13)
+All M10/M11 state carried forward, plus:
+- **Kalshi `GET /margin/fee_tiers`** — live per-market `maker_fee_rates`/`taker_fee_rates` map operational, spliced into sports discovery pre-ranking (#90).
 - **Kalshi rate-limit tiers (Premier/Paragon/Prime)** — `kalshi-rate-limit-tier-headroom.ts` wired into `live-submit-preview-draft.ts`.
 - **Kalshi `post_only` / `PostOnlyCrossCancel`** — `isKalshiPostOnlyCrossCancel` wired in `kalshi-executor.ts`.
 - **Polymarket CLOB V2** — correctly wired (sdk-v2-compat, pUSD, keyset≤100, 200 req/s). No V3. No June-15 deadline. Do not re-verify.
-- **World Cup 2026** — group stage live since June 12. `WORLD_CUP_2026_VERIFIED_PAIRS` seeded; settlement-timing wired; divergence-by-phase heatmap API live. Tournament winner NegRisk live plan wired (#88) with exit pricing (#92); paper-default, env-gated.
-- **WC ingestion fix** — `soccer_fifa_world_cup` added to `supportedSportSet`, 1X2 draw leg skipped at normalization (#118); warning samples persisted + 100%-drop-per-sport alert (#119). Production flow NOT yet verified — that is M12 priority 1.
-- **Machine execution stack** — machine-built `liveDualLegApproval` envelopes (#99), adverse-selection blocking preflights (#102), aggregate limits (#108), scan-to-submit auto-execution dispatcher (#117). All behind default-off promotion gates; they stay off until the funnel is proven (M12 priorities 1–3).
+- **World Cup 2026** — group stage live since June 12. WC ingestion CONFIRMED flowing: 68 events / 878 snapshots per June 13 ingest run. Tournament winner NegRisk live plan wired (#88) with exit pricing (#92); paper-default, env-gated. WC verified pairs (`KXWCGAME-*`) exist in static code but are NOT yet in `kalshi_polymarket_pair_registry` DB (root cause of matched:0).
+- **Machine execution stack** — machine-built `liveDualLegApproval` envelopes (#99), adverse-selection blocking preflights (#102), aggregate limits (#108), scan-to-submit auto-execution dispatcher (#117). All behind default-off promotion gates.
 - **Combinatorial scan** — `GET /api/scanner/combinatorial-candidates` live (#94); Kalshi combo vs. Polymarket basket scan path live (#95).
 - **Maker reward accounting** — per-order projected sports maker rewards in builder revenue-share reconciliation (#96); maker-rebate fill classification (#84).
 - **Sports pair eligibility** — `markPolymarketSportsPairCandidatesScannerEligible` scan route live (#97).
-- **Opportunity half-life** — `GET /api/scanner/half-life-history` live. Measured `halfLifeMs` per pair key readable by dashboard.
+- **Opportunity half-life** — `GET /api/scanner/half-life-history` live.
 - **Kalshi incentive maker ranking** — wired into KXWC + KXNBA scanner candidate ranking.
 - **Settlement-criteria preflight** — wired into execute route.
 - **Kalshi 0DTE sports scanner** — `GET /api/scanner/0dte-sports` live.
 - **Polymarket maker-reward EV** — phase-aware reward EV wired into sports candidate ranking.
 - **Daily P&L accounting** — `mapOperatorDayAccounting` wired; `GET /api/pnl/daily-summary` live; `/wagers` page live with per-wager lifecycle audit (item-321).
-- **Execution lifecycle (M9/M10)** — fund distribution monitor, settlement velocity allocation, settlement verification polling, GTD maker order lifecycle (`evaluateMakerOrderLifecycle` + `managePolymarketMakerOrder` adapter #91), builder revenue share reconciler, venue maintenance deferral, route decision analytics (#83), fee details (#84), order ticket preview (#85), snapshot fill truth (#86), rate-cost proof (#87) — all wired.
-- **Health surface** — `/api/health/full` database probe repaired + migration drift surfaced (#113); ingestion warning samples + drop alerts (#119); StatusLivePoller enriched (#104).
+- **Execution lifecycle (M9/M10)** — fund distribution monitor, settlement velocity allocation, settlement verification polling, GTD maker order lifecycle, builder revenue share reconciler, venue maintenance deferral, route decision analytics — all wired.
+- **Health surface** — `/api/health/full` database probe repaired (#113); ingestion warning samples + drop alerts (#119); StatusLivePoller enriched (#104).
+- **Scanner funnel breakdown** — `web/src/lib/markets/scanner-funnel-breakdown.ts` built and tested; `scanner-service.ts` accepts optional `funnelBreakdown` param; NOT yet passed through `scanner-alert-runner.ts` (unwired production path).
 
 # Priority tasks
 
-M12 is funnel production. The wiring surface is complete through M11; every priority below is about proving the existing stack produces real flow, not adding surface area.
+M12 is funnel production. The pair registry gap is the blocking constraint; every priority below addresses it or the downstream proof sequence.
 
-## 1. Verify WC ingestion is flowing in production post-#118 (compress-time-to-signal / protect-the-operation)
-PR #118 fixed the normalization that silently dropped all 72 odds-api World Cup events, and #119 added warning-sample persistence plus a 100%-drop-per-sport alert — but neither has been verified against live production flow with the group stage underway.
-- **Why now**: Every downstream M12 proof depends on WC events actually reaching the scanner. The group stage is live; each unverified day is lost signal during the highest-liquidity sports window of the year.
-- **Done when**: a production ingestion cycle persists non-zero `soccer_fifa_world_cup` events; the #119 100%-drop alert is quiet for soccer (or its firing is explained and fixed); normalization warning samples for WC payloads are reviewed and show no systematic drop class; the verified event count is recorded in the funnel evidence (backlog item-499 follow-through).
+## 1. Seed WC 2026 pairs into `kalshi_polymarket_pair_registry` (compress-time-to-signal / deepen-structural-understanding)
+The `WORLD_CUP_2026_VERIFIED_PAIRS` static constant in `web/src/lib/sports/world-cup-2026.ts` defines three initial WC group-stage pairs (`KXWCGAME-26JUN14GERCUR-GER`, `KXWCGAME-26JUN13BRAMAR-BRA`, `KXWCGAME-26JUN13QATCHE-CHE`). None are in `kalshi_polymarket_pair_registry`. The scanner loads pairs from DB only; static code constants are invisible to it. The `polymarket-us-sports-pair-seed-runner.ts` provides the seeding infrastructure pattern.
+- **Why now**: This is the structural `matched:0` cause. With WC ingestion flowing but no pairs registered, every scan run exits before reaching any gate. WC group stage is live now — each unregistered day is lost signal during the highest-liquidity sports window of the year. Round-of-16 matches begin June 29.
+- **Done when**: WC 2026 group-stage pair rows exist in `kalshi_polymarket_pair_registry` with `status: "verified"` for the current and upcoming matches; the scanner's `matched` count transitions from 0 to non-zero on the next scan run; pair seeding is repeatable for future WC matches.
 
-## 2. Prove the first opportunity end-to-end — or explain zero per gate (backlog item-501) (sharpen-forecasts / deepen-structural-understanding)
-1,378 of 1,378 scanner runs ended `zero_opportunities`. With WC ingestion fixed, either the funnel produces its first persisted opportunity or the zero outcome must be decomposed per gate so the binding constraint is identified, not guessed.
-- **Why now**: This is the system's reason to exist. All ranking/fee/depth refinements shipped in M7–M11 are untested against real flow until one opportunity traverses the funnel.
-- **Done when**: at least one scanner opportunity is persisted from a production run, OR a per-gate funnel decomposition (ingestion → pair eligibility → event/market matching → edge threshold → depth/fee/half-life gates) reports candidate counts at each stage for at least one full scan cycle and names the binding gate with evidence.
+## 2. Wire `ScannerFunnelBreakdown` into the production scan path (deepen-structural-understanding / close-the-learning-loop)
+`scanner-alert-runner.ts` calls `executeScannerCycle` without passing a `funnelBreakdown`. The `ScannerFunnelBreakdown` infrastructure in `scanner-funnel-breakdown.ts` and `scanner-service.ts` is complete and tested but never activated in the production scan-to-alert path. Zero-opportunity runs produce no gate-level accounting.
+- **Why now**: Once pairs are seeded (priority 1), some runs may still produce zero opportunities if edge thresholds, depth, or staleness gates eliminate all candidates. Without the funnel breakdown those outcomes remain unexplained. This is M12 item-501's missing half — the per-gate evidence collection that turns `zero_opportunities` into an actionable diagnosis.
+- **Done when**: `scanner-alert-runner.ts` creates a `ScannerFunnelBreakdown`, passes it through `executeScannerCycle`, and logs/persists `summarizeFunnelBreakdown` output (binding gate + counts) on every scan run; the binding gate is visible to the operator without reading raw logs.
 
-## 3. Prove the first end-to-end PAPER execution through the M7–M11 stack (backlog item-502) (improve-execution-discipline / protect-the-operation)
-The full execution stack — approval envelope (#99), adverse-selection preflights (#102), aggregate limits (#108), dispatcher (#117), reconciliation, P&L attribution — has never processed a single real candidate. Promotion gates stay OFF; this is a paper proof.
-- **Why now**: First real-money runs cannot be authorized on an execution path that has never demonstrably worked end-to-end even on paper. The machine-execution stack merged in the last 48 hours needs its first live-shaped traversal.
-- **Done when**: one paper run packet traverses scan → rank → preflight (adverse-selection, exposure clusters, maintenance deferral, settlement criteria) → paper submit → reconciliation with proof artifacts persisted at each stage; the auto-execution dispatcher (#117) and live promotion gates remain default-off throughout; the run packet is reviewable from the dashboard.
+## 3. Prove the first opportunity end-to-end (backlog item-501) (sharpen-forecasts / deepen-structural-understanding)
+With pairs seeded and funnel breakdown wired, the scanner should produce its first non-zero `matched` count. Either an opportunity is persisted or the breakdown names the next binding gate.
+- **Why now**: This is the system's reason to exist. All ranking/fee/depth refinements from M7–M11 are untested against real flow.
+- **Done when**: at least one scanner opportunity is persisted from a production run, OR the funnel breakdown (priority 2) explains exactly which gate is eliminating all candidates with counts for each stage.
 
-## 4. Get real samples into the calibration/learning loop (close-the-learning-loop / sharpen-forecasts)
-The calibration surfaces (time-to-signal, sports-catalyst-response-cohorts, CLV cohorts, opportunity half-life) are all wired but have only ever seen test fixtures. WC group-stage flow is the first chance to accumulate real samples.
-- **Why now**: The learning loop only compounds if it receives production data. Group-stage matches resolve daily — settlement and CLV ground truth arrives now or not at all for this tournament phase.
-- **Done when**: at least one calibration accumulator (`sports-time-to-signal`, `sports-catalyst-response-cohorts`, CLV cohort, or half-life history) shows non-zero accumulated samples sourced from production WC group-stage cycles; the sample counts are visible on the calibration dashboard; any accumulator still at zero after live flow is explained (no flow vs. broken wiring).
+## 4. Prove the first end-to-end PAPER execution through the M7–M11 stack (backlog item-502) (improve-execution-discipline / protect-the-operation)
+The full execution stack has never processed a single real candidate. Promotion gates stay OFF; this is a paper proof. Unblocked only after priority 3 produces a persisted opportunity.
+- **Why now**: First real-money runs cannot be authorized on an execution path that has never demonstrably worked end-to-end even on paper.
+- **Done when**: one paper run packet traverses scan → rank → preflight (adverse-selection, exposure clusters, maintenance deferral, settlement criteria) → paper submit → reconciliation with proof artifacts persisted at each stage; the dispatcher (#117) and live gates remain default-off throughout; the run packet is reviewable from the dashboard.
+
+## 5. Get real samples into the calibration/learning loop (close-the-learning-loop / sharpen-forecasts)
+The calibration surfaces (sports-time-to-signal, sports-catalyst-response-cohorts, CLV cohorts, opportunity half-life) are all wired but have only ever seen test fixtures. WC group-stage flow is the first chance to accumulate real samples. The BallDontLie injury runner (`ball-dont-lie-injury-runner.ts`) exists with no systemd timer.
+- **Why now**: The learning loop only compounds if it receives production data. Group-stage matches resolve daily — settlement and CLV ground truth arrives now or not at all for this phase.
+- **Done when**: at least one calibration accumulator shows non-zero samples sourced from production WC group-stage cycles; counts are visible on the calibration dashboard; any accumulator still at zero is explained.
+
+## 6. Expand WC 2026 verified pair coverage to upcoming matches (compress-time-to-signal / deepen-structural-understanding)
+The three initial WC pairs cover June 13-14 matches. Upcoming group-stage and round-of-16 matches need pair definitions seeded before their events go live on Kalshi/Polymarket. A repeatable seeding workflow (or automated discovery) is needed to cover the full WC 2026 schedule.
+- **Why now**: Round-of-16 begins June 29. Without a discovery path for new WC matches, pair coverage degrades back to zero after the three seed matches settle.
+- **Done when**: a workflow exists (even operator-run) to discover and seed upcoming WC match pairs into the registry; at least the next 3 upcoming WC matches have verified pair rows seeded before their markets open.
+
+## 7. Wire BallDontLie injury poller as a scheduled timer (close-the-learning-loop / compress-time-to-signal)
+`web/src/lib/markets/ball-dont-lie-injury-runner.ts` and `web/src/bin/ball-dont-lie-injury-runner.ts` exist with no systemd timer. No injury catalyst signals flow into the `sports-time-to-signal` calibration accumulator. The runner feeds the POST `/api/calibration/sports-time-to-signal` endpoint which is already wired.
+- **Why now**: WC group stage is live. Injury/lineup signals are the primary catalyst for pre-game price movements in soccer — a signal the system can't learn from without a live poller.
+- **Done when**: a `hydra-betting-ball-dont-lie.timer` systemd unit runs the injury runner on a cadence (e.g. 30 min); `acceptedSignalCount` is non-zero in at least one run log; the runner's output is visible in the calibration dashboard.
 
 # What's been completed (DO NOT re-propose)
 All M7, M8, M9, M10, M11 items — see full list below.
@@ -140,15 +155,22 @@ All M7, M8, M9, M10, M11 items — see full list below.
 - Add standalone `pair_key` indexes on scanner_opportunities + alert_states.
 - Enforce Polymarket CLOB 200 req/s server rate ceiling guard.
 - Rename `KalshiExecutionResult.executed` to `submitted`; rename `PolymarketExecutionResult.executed` to `submitted` (#60).
+- Structural half-life as execution-priority weight in sports route ranking (item-481).
+- Build resolution criteria mismatch classifier for automated verified pair seeding.
+- Wire Polymarket maker rebate capture into sports route ranking.
+- Classify Polymarket sports routes by pre-game maker, live maker, and live taker timing.
+- Pilot Kalshi post-only sports maker quote decision (item-420).
+- Surface Kalshi matching-engine timestamp on execution receipts (item-455).
+- WC 2026 ingestion confirmed flowing post-#118: soccer_fifa_world_cup 68 events / 878 snapshots (June 13 verified).
 
 # What NOT to work on
-- Do NOT propose new module wiring or new module builds while the funnel is unproven. M7–M11 completed the wiring surface; M12 is production proof. A new wiring item is only valid if priority 2's per-gate decomposition names it as the binding gate.
-- Do NOT promote the machine-execution gates to live — the auto-execution dispatcher (#117) and live promotion gates stay default-off until M12 priorities 1–3 are proven.
+- Do NOT propose new module wiring or new module builds while the funnel is unproven. M7–M11 completed the wiring surface; M12 is production proof. A new wiring item is only valid if priority 3's per-gate decomposition names it as the binding gate.
+- Do NOT promote the machine-execution gates to live — the auto-execution dispatcher (#117) and live promotion gates stay default-off until M12 priorities 1–4 are proven.
 - Do NOT re-propose any M7, M8, M9, M10, or M11 items — all shipped (see "What's been completed").
 - Do NOT build a "Polymarket V3" client or treat a June-15 forced-liquidation deadline as real. FALSE premise. CLOB V2 is the real change, already wired.
 - Do not prioritize defensive hardening, fail-closed rewrites, generic preflights, guard rails, migration-drift gates, or broad executor refactors unless the operator explicitly asks.
 - Do not pull focus into politics, economics, culture, or crypto-adjacent markets while sports forecast and signal compounding work remains available.
-- Do not re-propose completed CLV cohort reporting, Kalshi price range normalization, exact league CLV matching, World Cup team normalization, zero-persistence diagnostics, injury-recency ranking, CLV-gated sizing integration, sharp-line sizing provenance, fee-adjusted ranking delta, or timestamp-locked nomination replay metrics.
+- Do not re-propose completed CLV cohort reporting, Kalshi price range normalization, exact league CLV matching, World Cup team normalization, zero-persistence diagnostics, injury-recency ranking, CLV-gated sizing integration, sharp-line sizing provenance, fee-adjusted ranking delta, timestamp-locked nomination replay metrics, half-life execution-priority weighting, resolution criteria mismatch classifier, Polymarket maker rebate sports routing, or Polymarket route timing classification.
 - Do not re-propose the abandoned generic sharp-line movement boost; future sharp-line work must be cohort-based, timestamp-locked, or tied to catalyst response measurement.
 - Do not propose the Hyperliquid HIP-4 monitor as a priority — secondary domain; monitor but do not prioritize.
-- Do not pad the backlog. It holds 58 queued items; adding low-edge items to hit a volume target is counterproductive (operator preference: maintainability/selection-quality over throughput).
+- Do not pad the backlog. The 42 active items are well-targeted; adding low-edge items to hit a volume target is counterproductive (operator preference: maintainability/selection-quality over throughput).
