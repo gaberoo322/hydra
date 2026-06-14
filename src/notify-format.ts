@@ -22,13 +22,113 @@ import { getTargetCommitUrl } from "./target-config.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
 
 /**
+ * The event vocabulary the notification grammar reads (issue #1857).
+ *
+ * `formatMessage` is fed loosely-typed `NOTIFICATION_EVENT_TYPES` events from
+ * the bus (ultimately the same `NotificationEvent` shapes `notify.ts` and
+ * `notification-consumer.ts` carry). This type names exactly the fields the
+ * switch touches via `event.type` and the `event.payload?.…` paths below — so a
+ * renamed payload field (e.g. `task.finalStatus` instead of `task.finalState`,
+ * or `payload.cyclId` instead of `payload.cycleId`) becomes a compile error at
+ * the access site rather than a silent runtime miss in the Telegram body.
+ *
+ * This mirrors `DigestGrammarEvent` in `digest-format.ts` verbatim (issue
+ * #1835) — the sibling formatter that fixed the same class of gap:
+ *
+ * - `payload` stays OPEN (`Record<string, unknown> & {…}`) because the bus
+ *   carries the full event vocabulary; the named fields are only the subset
+ *   this grammar narrows on. A producer renaming a read field is caught; a
+ *   producer adding an *unread* field is not constrained.
+ * - `type` is OPTIONAL because the formatter defaults it (`event.type ||
+ *   "unknown"`) and the `default` arms are deliberately exercised with
+ *   type-less events (`formatMessage({})`). Keeping it optional preserves
+ *   assignment-compatibility for every existing caller — this is an
+ *   interface-EXTEND (narrowing an implicit `any`), not a breaking change.
+ * - `payload` is OPTIONAL because the formatter defaults it
+ *   (`event.payload || {}`).
+ *
+ * The named field set below is the exhaustive read set of the switch — every
+ * top-level `payload.<x>` and nested `payload.task?.…` / `payload.grounding?.…`
+ * / `payload.drift?.…` path an arm dereferences. On-wire output is unchanged;
+ * this concentrates the payload contract, not the format.
+ */
+export interface FormatMessageEvent {
+  type?: string;
+  payload?: Record<string, unknown> & {
+    // --- Cycle lifecycle ---
+    cycleId?: string;
+    task?: { finalState?: string; title?: string };
+    grounding?: {
+      before?: { passed?: number | string };
+      after?: { passed?: number | string };
+    };
+    commitSha?: string;
+    filesChanged?: unknown[];
+    rolledBack?: boolean;
+    rollbackRisk?: string;
+    durationMs?: number;
+    total?: number | string;
+    completed?: number | string;
+    failed?: number;
+    elapsed?: string;
+    inProgress?: number;
+    error?: string;
+    ttl?: string;
+    tasksTimedOut?: number;
+    message?: string;
+    // --- Task events ---
+    taskId?: string;
+    title?: string;
+    reason?: string;
+    failedSteps?: string[];
+    drift?: { reason?: string };
+    // --- Rollback ---
+    revertedCommit?: string;
+    testsBefore?: number | string;
+    testsAfter?: number | string;
+    // --- Scheduler ---
+    cyclesRun?: number;
+    suggestion?: string;
+    recentTitles?: string[];
+    // --- Research ---
+    projectName?: string;
+    opportunityCount?: number;
+    autoQueued?: number;
+    duration?: string;
+    cost?: string;
+    topOpportunities?: string[];
+    summary?: string;
+    researchCyclesReviewed?: number;
+    executionCyclesReviewed?: number;
+    updatesApplied?: number;
+    calibration?: string;
+    // --- DLQ ---
+    originalStream?: string;
+    eventType?: string;
+    deliveryCount?: number;
+    // --- Review pickup ---
+    count?: number;
+    firstTitle?: string;
+    firstUrl?: string;
+    // --- Operator blocked ---
+    unblockCommands?: string[];
+    blockedReason?: string;
+    reescalation?: boolean;
+    blockedDays?: number | string;
+  };
+}
+
+/**
  * Format a notification event into a readable Telegram message.
  *
  * Every `case` references a `NOTIFICATION_EVENT_TYPES` member (aliased `E`) —
  * the typed vocabulary in `event-bus.ts` (issue #1182) — so a misspelled event
  * type is a compile error, and adding a new type surfaces here as a missing arm.
+ * The `event` parameter is typed `FormatMessageEvent` (issue #1857) so the
+ * payload fields the switch reads are contract-checked too, not just the case
+ * labels.
  */
-export function formatMessage(event) {
+export function formatMessage(event: FormatMessageEvent): string {
   const type = event.type || "unknown";
   const payload = event.payload || {};
 
