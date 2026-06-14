@@ -62,6 +62,7 @@ import {
   LOG_TAIL_DEFAULT,
   LOG_TAIL_MAX,
 } from "../autopilot/log.ts";
+import { aggregatorRoute } from "./route-helpers.ts";
 
 /**
  * Re-exported for `src/api/agents.ts`, which consumes `fetchTurnsWithJoins`
@@ -394,17 +395,20 @@ export function createAutopilotRouter(eventBus?: any) {
   // — a Redis failure yields `[]`, never a throw — so this route always
   // answers 200 with the (possibly empty) list once the query validates. A bad
   // `limit` is a 400 via the schema seam.
+  //
+  // Issue #1863: folded onto the `aggregatorRoute` seam (#909) — the
+  // `schema-validation-failed` 400 envelope and the never-throw-500 isolation
+  // now come from route-helpers.ts. The accessor is already never-throw (a
+  // Redis failure yields `[]`), so the isolation is belt-and-braces; the
+  // validate-half is the substantive win (one home for the error envelope).
   // -------------------------------------------------------------------------
-  router.get("/autopilot/retros", async (req, res) => {
-    const parsed = RecentRetrosQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      return res
-        .status(400)
-        .json({ code: "schema-validation-failed", issues: parsed.error.issues });
-    }
-    const artifacts = await listRecentRetroArtifacts(parsed.data.limit);
-    return res.json({ artifacts });
-  });
+  router.get(
+    "/autopilot/retros",
+    aggregatorRoute(RecentRetrosQuerySchema, "api/autopilot/retros", async (data) => {
+      const artifacts = await listRecentRetroArtifacts(data.limit);
+      return { artifacts };
+    }),
+  );
 
   // -------------------------------------------------------------------------
   // GET /autopilot/runs/:runId — full detail.

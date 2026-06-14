@@ -12,6 +12,7 @@ import {
 } from "../redis/backlog.ts";
 import { z } from "zod";
 import { BacklogClaimBodySchema } from "../schemas/backlog.ts";
+import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 /**
  * Query schema for `GET /backlog/stale-claims?maxAgeMs=N` (ADR-0022).
@@ -37,26 +38,29 @@ export function createBacklogRouter() {
   const router = Router();
 
   // GET /backlog — Full Kanban backlog with all lanes
-  router.get("/backlog", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via the aggregatorRouteNoQuery seam
+  // (route-helpers.ts, #909).
+  router.get(
+    "/backlog",
+    aggregatorRouteNoQuery("api/backlog", async () => {
       const lanes = await loadBacklog();
       const counts = await getBacklogCounts();
-      res.json({ ...lanes, counts });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return { ...lanes, counts };
+    }),
+  );
 
   // GET /backlog/counts — Just the counts per lane (includes WIP limit status)
-  router.get("/backlog/counts", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/backlog/counts",
+    aggregatorRouteNoQuery("api/backlog/counts", async () => {
       const counts = await getBacklogCounts();
       const wip = await isWipLimitReached();
-      res.json({ ...counts, wip });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return { ...counts, wip };
+    }),
+  );
 
   // POST /backlog — Manually add an item to the backlog
   router.post("/backlog", async (req, res) => {
@@ -115,14 +119,15 @@ export function createBacklogRouter() {
   });
 
   // GET /backlog/:id/children — List child items for a parent
-  router.get("/backlog/:id/children", async (req, res) => {
-    try {
-      const children = await getItemsByParent(req.params.id);
-      res.json(children);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // The `:id` path param is read off `req`.
+  router.get(
+    "/backlog/:id/children",
+    aggregatorRouteNoQuery("api/backlog/children", (req) =>
+      getItemsByParent(req.params.id),
+    ),
+  );
 
   // DELETE /backlog/:id — Remove an item
   router.delete("/backlog/:id", async (req, res) => {
@@ -138,8 +143,13 @@ export function createBacklogRouter() {
   // GET /backlog/stale-claims — preview of inProgress items, with each claim's
   // current age, and which are over the configured `maxAgeMs` threshold (issue
   // #374). Optional `?maxAgeMs=N` overrides the default for diagnostic queries.
-  router.get("/backlog/stale-claims", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // `maxAgeMs` keeps its soft-parse (positive-int-or-undefined, no 400) inside
+  // `produce`, per the common.ts guidance for lenient read routes.
+  router.get(
+    "/backlog/stale-claims",
+    aggregatorRouteNoQuery("api/backlog/stale-claims", async (req) => {
       // ADR-0022: read `maxAgeMs` through the Schemas seam. The schema yields a
       // positive integer or undefined; undefined falls back to env/default.
       const rawMax = StaleClaimsQuerySchema.safeParse(req.query).data?.maxAgeMs;
@@ -150,7 +160,7 @@ export function createBacklogRouter() {
       const isoDate = new Date().toISOString().split("T")[0];
       const day = await getClaimsReapedDay(isoDate);
       const last = await getClaimsReapedLast();
-      res.json({
+      return {
         maxAgeMs: usedMax,
         inProgress: all,
         stale,
@@ -159,11 +169,9 @@ export function createBacklogRouter() {
           claimsReapedToday: day ? parseInt(day, 10) : 0,
           lastReapedAt: last,
         },
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      };
+    }),
+  );
 
   // POST /backlog/stale-claims/reap — operator-triggered reaper run.
   router.post("/backlog/stale-claims/reap", async (req, res) => {

@@ -11,6 +11,7 @@ import {
   todayDateString,
 } from "../cost/index.ts";
 import { countQuerySchema } from "../schemas/common.ts";
+import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 import { z } from "zod";
 
 /**
@@ -49,8 +50,13 @@ export function createMetricsRouter() {
   });
 
   // GET /metrics — Recent cycle metrics
-  router.get("/metrics", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via the aggregatorRouteNoQuery seam
+  // (route-helpers.ts, #909). `count` keeps its soft-parse (default-on-garbage,
+  // no 400) inside `produce`.
+  router.get(
+    "/metrics",
+    aggregatorRouteNoQuery("api/metrics", async (req) => {
       // ADR-0022: read `count` through the Schemas seam (safeParse on req.query).
       // countQuerySchema collapses bad/absent input to the default, so this
       // safeParse never fails — but it keeps the read on the one query pattern.
@@ -67,22 +73,20 @@ export function createMetricsRouter() {
       } catch (costErr: any) {
         console.error(`[api/metrics] costByClass projection failed: ${costErr?.message || costErr}`);
       }
-      res.json({ stats, trend, costByClass });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return { stats, trend, costByClass };
+    }),
+  );
 
   // GET /metrics/abandonment — Aggregated abandonment causes from recent cycles (issue #195)
-  router.get("/metrics/abandonment", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/abandonment",
+    aggregatorRouteNoQuery("api/metrics/abandonment", (req) => {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
-      const breakdown = await getAbandonmentBreakdown(count);
-      res.json(breakdown);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return getAbandonmentBreakdown(count);
+    }),
+  );
 
   // GET /metrics/quality-gates — Mutation kill-rate + JIT trend (issue #212)
   router.get("/metrics/quality-gates", async (req, res) => {
@@ -117,8 +121,13 @@ export function createMetricsRouter() {
   // by anchorType. The reframe / prior-failure lanes and their starvation
   // gauges were retired in ADR-0016 (no live writer), so this surface now
   // covers only the live priority lanes. Read-only and best-effort.
-  router.get("/metrics/anchor-distribution", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // The inner `.catch` on the trend read stays (it's a best-effort
+  // degrade-to-empty, not the route's failure isolation).
+  router.get(
+    "/metrics/anchor-distribution",
+    aggregatorRouteNoQuery("api/metrics/anchor-distribution", async (req) => {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
 
       const trend = await getMetricsTrend(count).catch((err: any) => {
@@ -169,17 +178,14 @@ export function createMetricsRouter() {
         },
       ];
 
-      res.json({
+      return {
         windowCycles: trend.length,
         distribution,
         // Raw served-bucket dict for clients that want a quick map.
         servedByAnchorType: served,
-      });
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/anchor-distribution failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
+      };
+    }),
+  );
 
   // GET /metrics/grounding-duration — p50/p95 + incremental vs full bucket
   //
@@ -193,8 +199,11 @@ export function createMetricsRouter() {
   // Until selectAffectedTests is wired into the verification path (env-gated:
   // HYDRA_INCREMENTAL_GROUNDING=true), all cycles will report mode="full" or
   // an empty mode field — bucket distribution makes that visible.
-  router.get("/metrics/grounding-duration", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/grounding-duration",
+    aggregatorRouteNoQuery("api/metrics/grounding-duration", async (req) => {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const trend = await getMetricsTrend(count);
 
@@ -241,16 +250,13 @@ export function createMetricsRouter() {
         unlabelled: bucket(""),
       };
 
-      res.json({
+      return {
         sampleSize: samples.length,
         buckets,
         recent: samples.slice(0, 20),
-      });
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/grounding-duration failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
+      };
+    }),
+  );
 
   // GET /metrics/cost — Daily token counter (issue #394, #704).
   //
@@ -261,19 +267,18 @@ export function createMetricsRouter() {
   // entirely (`HYDRA_TOKEN_USD_RATE` was structurally $0; no live dollar cap
   // existed). This endpoint now surfaces the per-day / per-skill token counts
   // populated by autopilot subagents (writers post to /metrics/tokens).
-  router.get("/metrics/cost", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/cost",
+    aggregatorRouteNoQuery("api/metrics/cost", (req) => {
       // ADR-0022 slice 1: read `date` through the Schemas seam. An absent or
       // empty value defers to today's date string.
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
       const date = parsedDate || todayDateString();
-      const snapshot = await getDailyTokenCounter(date);
-      res.json(snapshot);
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/cost failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return getDailyTokenCounter(date);
+    }),
+  );
 
   // GET /metrics/cost-by-class — Per-class token attribution (issue #1439).
   //
@@ -282,17 +287,16 @@ export function createMetricsRouter() {
   // so the operator can see "QA is now 25% of daily spend" or "research
   // spiked today". The per-skill data already carries the class signal via
   // the skill name — no new Redis write path. `?date=YYYY-MM-DD` optional.
-  router.get("/metrics/cost-by-class", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/cost-by-class",
+    aggregatorRouteNoQuery("api/metrics/cost-by-class", (req) => {
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
       const date = parsedDate || todayDateString();
-      const breakdown = await getCostByClass(date);
-      res.json(breakdown);
-    } catch (err: any) {
-      console.error(`[api/metrics] /metrics/cost-by-class failed: ${err.message}`);
-      res.status(500).json({ error: err.message });
-    }
-  });
+      return getCostByClass(date);
+    }),
+  );
 
   // POST /metrics/tokens — Autopilot reap-time write hook (issue #394).
   //

@@ -43,6 +43,7 @@ import {
   DesignConceptApproveBodySchema,
   ExemptLogEntryInputSchema,
 } from "../schemas/design-concept.ts";
+import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 /** Maximum number of audit entries the read endpoint will return. */
 const EXEMPT_LOG_DEFAULT_LIMIT = 50;
@@ -183,24 +184,30 @@ export function createDesignConceptsRouter() {
    * pending anchor to grill) is therefore neutral, not streak-breaking.
    * `consecutiveGreenDays` is retained for visibility but no longer gates.
    */
-  router.get("/design-concepts/snapshots", async (_req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via the aggregatorRouteNoQuery seam
+  // (route-helpers.ts, #909). No query to parse.
+  router.get(
+    "/design-concepts/snapshots",
+    aggregatorRouteNoQuery("api/design-concepts/snapshots", async () => {
       const snapshots = await readDailySnapshots();
       const indexSizeNow = await getDesignConceptIndexSize();
       const metrics = computeGreenLight(snapshots);
-      res.json({
+      return {
         snapshots,
         ...metrics,
         indexSizeNow,
-      });
-    } catch (err: any) {
-      console.error("[api/design-concepts] snapshots read failed", err);
-      res.status(500).json({ error: err?.message ?? "snapshots read failed" });
-    }
-  });
+      };
+    }),
+  );
 
-  router.get("/design-concepts/exempt-log", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via the aggregatorRouteNoQuery seam
+  // (route-helpers.ts, #909). `limit` keeps its soft-parse (default-on-garbage,
+  // no 400) inside `produce`.
+  router.get(
+    "/design-concepts/exempt-log",
+    aggregatorRouteNoQuery("api/design-concepts/exempt-log", async (req) => {
       // ADR-0022: read `limit` through the Schemas seam. Default-on-garbage to
       // EXEMPT_LOG_DEFAULT_LIMIT, clamped to EXEMPT_LOG_MAX_LIMIT.
       const limit = ExemptLogQuerySchema.safeParse(req.query).data?.limit ?? EXEMPT_LOG_DEFAULT_LIMIT;
@@ -226,12 +233,9 @@ export function createDesignConceptsRouter() {
           );
         }
       }
-      res.json({ items, count: items.length });
-    } catch (err: any) {
-      console.error("[api/design-concepts] exempt-log read failed", err);
-      res.status(500).json({ error: err?.message ?? "exempt-log read failed" });
-    }
-  });
+      return { items, count: items.length };
+    }),
+  );
 
   router.post("/design-concepts/exempt-log", async (req, res) => {
     try {
@@ -276,8 +280,13 @@ export function createDesignConceptsRouter() {
     }
   });
 
-  router.get("/design-concepts", async (req, res) => {
-    try {
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  // `scope`/`limit` keep their soft-parse (collapse-to-default, no 400) inside
+  // `produce`.
+  router.get(
+    "/design-concepts",
+    aggregatorRouteNoQuery("api/design-concepts", async (req) => {
       // ADR-0022: read `scope` + `limit` through the Schemas seam. `scope`
       // collapses any non-enum value to undefined; `limit` defaults to 50.
       const parsedQuery = DesignConceptListQuerySchema.safeParse(req.query);
@@ -285,12 +294,9 @@ export function createDesignConceptsRouter() {
       const limit = parsedQuery.data?.limit ?? 50;
 
       const items = await listDesignConcepts({ scope, limit });
-      res.json({ items, count: items.length });
-    } catch (err: any) {
-      console.error("[api/design-concepts] list failed", err);
-      res.status(500).json({ error: err?.message ?? "list failed" });
-    }
-  });
+      return { items, count: items.length };
+    }),
+  );
 
   /**
    * GET /api/design-concepts/:anchorRef/resolve — QA-time retrievability probe
