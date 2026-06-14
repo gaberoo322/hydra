@@ -543,8 +543,27 @@ from the worktree (synced into the gate dir by Step 0.6). Fail-soft: if the
 Target is unreachable, no baseline file is written and Step 8.6 falls back to
 absolute thresholds — do NOT branch the cycle on this step's outcome.
 
+**MANDATORY ON BOTH MERGE PATHS — direct-to-main AND auto-merge/PR (issue #1839).**
+Capturing this baseline is NOT optional and is NOT scoped to the direct-to-main
+flow below. The auto-merge/PR path (build opens a PR, lets CI + auto-merge land
+it) previously skipped this snapshot because the snapshot was mentally bundled
+with the inline `git merge` block that only the direct-to-main path runs. With
+no `pmh-baseline.json` written, Step 8.6 fell back to absolute thresholds and —
+against the ambiently-degraded betting Target — false-alarmed `hydra-incident`
+on EVERY auto-merge, even for type-only refactors and client-nav components that
+structurally cannot touch the alarming services (observed 6× in autopilot run
+`4d10ad1b`, friction cue `pmh-absolute-threshold-false-alarm-on-pr-automerge-path`).
+Run the snapshot command below **before the merge happens on whichever path this
+build uses** — for the auto-merge/PR path, capture it just before you enable
+auto-merge / push the branch that CI will merge, while the worktree mirror
+(Step 0.6) is still present, so Step 8.6 has a baseline to diff against and stays
+in delta mode. The file is consumed by Step 8.6 via `--baseline` regardless of
+how the merge landed.
+
 ```bash
-# Pre-merge health baseline (issue #1699) — consumed by Step 8.6 via --baseline.
+# Pre-merge health baseline (issue #1699, #1839) — consumed by Step 8.6 via
+# --baseline. REQUIRED on both the direct-to-main path (below) AND the
+# auto-merge/PR path. Run it before the merge lands on whichever path applies.
 npx tsx "$TARGET_WT/.hydra-gate/scripts/target/post-merge-health.ts" \
   --snapshot-out "$TARGET_WT/.hydra-gate/pmh-baseline.json"
 ```
@@ -645,6 +664,10 @@ cd "$TARGET_WT"
 # the watcher then alarms only on DELTAS vs that baseline — services newly
 # not-ok, per-service worsening (degraded -> error), or overall severity-rank
 # worsening — so ambient pre-existing degradation never false-alarms.
+# This baseline is captured on BOTH merge paths (issue #1839) — direct-to-main
+# AND auto-merge/PR — so delta mode is the normal case regardless of how the
+# merge landed; the absolute-threshold fallback below is for a genuine
+# baseline-miss (Target down pre-merge), NOT the steady-state auto-merge path.
 # Issue #1817 FRESHNESS-FLAP SUPPRESSION (delta mode, no extra flags needed):
 # several Target services (scanner, ingestion, pinnacle/fairline) derive status
 # purely from data freshness, whose window (e.g. the scanner's 180s) is far
@@ -667,7 +690,25 @@ Note (issue #1699): a non-2xx response that still carries a health JSON body
 IS a valid sample — `/api/health/full` answers 503 with a full body when the
 overall status is degraded/error — so a degraded baseline still yields signal.
 If the baseline file is missing (Step 7 snapshot skipped or Target was down
-pre-merge), the watcher falls back to the absolute thresholds. Tune the noise
+pre-merge), the watcher falls back to the absolute thresholds. **Absolute-mode
+ambient-alarm guard (issue #1839):** in this fallback the Target's ambient
+degraded services (ingestion, scanner, pinnacle/fairLine, opticOdds — stale
+feeds / missing provider creds) trip the absolute thresholds on every merge.
+Before honoring an absolute-mode alarm, cross-check it against this build's
+in-scope diff (`scopeBoundary.in`, already computed in Step 3.5): if EVERY
+alarming service is one of the known-ambient degraded services AND none of the
+changed paths has any plausible path to those services (e.g. type-only
+refactors, client-nav components, `package.json` config — the diff touches no
+ingestion/scanner/provider/odds code), treat it as a baseline-miss false
+positive — do NOT pass `--dispatch` for that run (omit it to keep the watcher in
+its print-only dry-run), and log the friction cue
+`pmh-absolute-threshold-false-alarm-on-pr-automerge-path` instead of spawning
+`hydra-incident`. Any alarming service OUTSIDE the ambient set, OR any changed
+path that could reach an alarming service, still dispatches normally — this
+guard only suppresses the provably-spurious ambient-only case, never a true
+regression. The clean fix remains capturing the Step-7 baseline on both merge
+paths (above); this guard is the defense-in-depth fallback for the genuine
+baseline-miss case (Target was down pre-merge). Tune the noise
 floor via the `HYDRA_PMH_*` env vars documented at the top of
 `scripts/target/post-merge-health.ts` (overall-status alarm set, and the
 tolerated counts of degraded / execution-class / provider-class services —
