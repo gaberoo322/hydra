@@ -186,13 +186,31 @@ export function classifyScope(
   }
 
   const scopeNormalised = inScope.map(normalisePath).filter((s) => s.length > 0);
-  const outNormalised = outOfScopeDeclared.map(normalisePath).filter((s) => s.length > 0);
+  const outDeclaredNormalised = outOfScopeDeclared.map(normalisePath).filter((s) => s.length > 0);
 
   const matches = (target: string, list: string[]): boolean => {
     if (list.length === 0) return false;
     if (list.includes(target)) return true;
     return list.some((s) => target.startsWith(s) || s.startsWith(target) || target.endsWith(s));
   };
+
+  // In-scope wins (issue #1872): drop from the declared out-of-scope set any
+  // entry that also matches the in-scope set under the same matcher. A file the
+  // author explicitly lists in "Files in scope" is in scope regardless of an
+  // incidental out-of-scope code-span (the arch-scan seam-target trap that bit
+  // PRs #1515/#1870/#1871). Genuine out-of-scope-only entries have no in-scope
+  // twin, so they survive and still hard-fail. This reconciliation lives in
+  // exactly one place — both the hardOutOfScope filter and any future consumer
+  // of outNormalised see the reconciled view.
+  //
+  // The overlap test is symmetric: the #1870/#1871 shape is an in-scope full
+  // path (`src/foo.ts`) versus a bare-basename out-of-scope code-span
+  // (`foo.ts`), so we check whether the out-of-scope entry matches an in-scope
+  // entry OR vice-versa under the same matcher (matches() only walks one
+  // direction's startsWith/endsWith, so a single call misses the suffix case).
+  const overlapsInScope = (o: string): boolean =>
+    matches(o, scopeNormalised) || scopeNormalised.some((s) => matches(s, [o]));
+  const outNormalised = outDeclaredNormalised.filter((o) => !overlapsInScope(o));
 
   const justifiedTouched = changed.filter((f) => matches(normalisePath(f), justified));
 

@@ -237,6 +237,46 @@ describe("classifyScope", () => {
     assert.equal(r.reason, "hard-out-of-scope");
   });
 
+  // ---- Issue #1872: in-scope wins over an incidental out-of-scope code-span ----
+
+  test("a file in BOTH in-scope and out-of-scope sets does not hard-fail (in-scope wins)", () => {
+    // Reproduces the #1870/#1871 (and #1515) arch-scan code-span trap: the
+    // seam-target file is legitimately in scope, but an out-of-scope prose
+    // code-span mentions its bare basename. In-scope must win.
+    const r = classifyScope(
+      ["src/foo.ts"],
+      ["src/foo.ts"],
+      { outOfScopeDeclared: ["foo.ts"] },
+    );
+    assert.equal(r.blocked, false);
+    assert.equal(r.reason, "pass");
+    assert.deepEqual(r.hardOutOfScope, []);
+  });
+
+  test("in-scope wins even when the out-of-scope entry is the exact in-scope path", () => {
+    const r = classifyScope(
+      ["src/foo.ts"],
+      ["src/foo.ts"],
+      { outOfScopeDeclared: ["src/foo.ts"] },
+    );
+    assert.equal(r.blocked, false);
+    assert.equal(r.reason, "pass");
+    assert.deepEqual(r.hardOutOfScope, []);
+  });
+
+  test("in-scope wins is per-entry — a genuine out-of-scope-only file still hard-fails", () => {
+    // bar.ts is ONLY out-of-scope (no in-scope twin) and must still block,
+    // even though src/foo.ts is reconciled to in-scope.
+    const r = classifyScope(
+      ["src/foo.ts", "src/bar.ts"],
+      ["src/foo.ts"],
+      { outOfScopeDeclared: ["foo.ts", "src/bar.ts"] },
+    );
+    assert.equal(r.blocked, true);
+    assert.equal(r.reason, "hard-out-of-scope");
+    assert.deepEqual(r.hardOutOfScope, ["src/bar.ts"]);
+  });
+
   test("scope-justification whitelists a hard-out-of-scope file", () => {
     const r = classifyScope(
       ["src/preflight.ts"],
