@@ -55,11 +55,12 @@ export interface TargetRiskClassification {
  * which hydra-betting paths handle real money. Easy to extend: add a path
  * here (trailing "/" for a directory, no trailing "/" for an exact file).
  *
- * Covers the four money-critical surfaces named in the issue:
+ * Covers the money-critical surfaces named across the issues:
  *   - provider integrations (sportsbook / exchange API clients),
  *   - execution (bet placement / order routing),
  *   - staking (stake sizing / bankroll allocation),
  *   - bet-math (odds, edge, probability, settlement math),
+ *   - arbitrage (EV scoring / opportunity ranking money math, issue #1841),
  * plus the runner entrypoints that *drive* them:
  *   - bin (issue #1694 — scan-to-submit runners such as
  *     web/src/bin/arbitrage-auto-approval-runner.ts author and submit machine
@@ -75,6 +76,12 @@ export const MONEY_CRITICAL_TARGET_PATHS: readonly string[] = Object.freeze([
   "src/lib/staking/",
   // Bet-math — odds, edge, probability, and settlement math.
   "src/lib/bet-math/",
+  // Arbitrage — EV scoring and opportunity ranking money math (issue #1841,
+  // e.g. polymarket-reward-adjusted-ranking; maker-reward vs taker-arbitrage
+  // strategy-lane ranking). Edits here are real money math that must not skip
+  // the mutation gate; a false positive merely buys stricter QA while a surface
+  // gap silently defeats the keystone gate.
+  "src/lib/arbitrage/",
   // Bin runner entrypoints — drive scan-to-submit / trade-submitting loops
   // (issue #1694). The whole directory is listed, not single files, because a
   // false positive merely buys stricter QA while a surface gap silently
