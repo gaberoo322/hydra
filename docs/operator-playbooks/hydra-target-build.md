@@ -690,8 +690,8 @@ Note (issue #1699): a non-2xx response that still carries a health JSON body
 IS a valid sample — `/api/health/full` answers 503 with a full body when the
 overall status is degraded/error — so a degraded baseline still yields signal.
 If the baseline file is missing (Step 7 snapshot skipped or Target was down
-pre-merge), the watcher falls back to the absolute thresholds. **Absolute-mode
-ambient-alarm guard (issue #1839):** in this fallback the Target's ambient
+pre-merge), the watcher falls back to the absolute thresholds.
+**Absolute-mode ambient-alarm guard (issue #1839):** in this fallback the Target's ambient
 degraded services (ingestion, scanner, pinnacle/fairLine, opticOdds — stale
 feeds / missing provider creds) trip the absolute thresholds on every merge.
 Before honoring an absolute-mode alarm, cross-check it against this build's
