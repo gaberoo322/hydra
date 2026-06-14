@@ -39,6 +39,7 @@ import {
   getBlockedLastEscalation, setBlockedLastEscalation,
   getDigestLastWeekly, setDigestLastWeekly,
   getMemoryLastConsolidation, setMemoryLastConsolidation,
+  getCleanupLastDaily, setCleanupLastDaily,
 } from "../redis/scheduler.ts";
 import {
   getReviewPickupNotified,
@@ -46,6 +47,23 @@ import {
   clearReviewPickupNotified,
 } from "../redis/review.ts";
 import { getReviewPickupSet } from "../review-pickup.ts";
+import {
+  pruneMetricsIndex,
+  getMetricsIndexSize,
+  trimMetricsIndex,
+} from "../redis/cycle-metrics.ts";
+import {
+  scanKeys,
+  getKeyTTL,
+  getKeyType,
+  hashGet,
+  deleteKeysBatch,
+} from "../redis/utility.ts";
+import {
+  getBacklogLaneWithScores,
+  getBacklogItem,
+  moveBacklogItem,
+} from "../redis/backlog.ts";
 
 // Generate actionable unblock commands based on the blocked reason.
 function generateUnblockCommands(blockedReason: string, title: string): string[] {
@@ -185,6 +203,152 @@ async function checkReviewPickupNotify(
   await setNotified();
   console.log(`[Housekeeping] Review pickup set non-empty (${count}) — sent notify`);
   return { fired: true, count, transitioned: true };
+}
+
+// ---------------------------------------------------------------------------
+// Stale-Redis-key sweep + stale-inProgress return (issue #1876)
+// ---------------------------------------------------------------------------
+//
+// Folded out of the cleanup.ts module-level 24h `setInterval` into two
+// housekeeping chores so all periodic maintenance lives behind the one
+// idempotent `POST /api/maintenance/housekeeping` Seam. The work bodies are
+// unchanged from cleanup.ts; only the dispatch path moved. `pruneStaleRedisKeys`
+// gets a daily Redis time-guard (`getCleanupLastDaily`/`setCleanupLastDaily`)
+// because housekeeping runs hourly; `returnStaleInProgressItems` is naturally
+// idempotent (it re-checks each item's age every call) so it has no guard.
+
+// Prefix shapes used by the stale-key sweep. Kept inline (rather than importing
+// from redis/keys.ts) because this is a housekeeping sweep, not a domain owner —
+// these strings describe what to scan for, not how to use the keys.
+const CYCLE_KEY_PREFIX = "hydra:cycle:";
+const TASK_KEY_PREFIX = "hydra:task:";
+const METRICS_KEY_PREFIX = "hydra:metrics:";
+const CYCLE_ACTIVE_KEY = "hydra:cycle:active";
+const CYCLE_LAST_KEY = "hydra:cycle:last";
+
+const STALE_KEY_RETENTION_DAYS = 7;
+const STALE_IN_PROGRESS_MS = 24 * 60 * 60 * 1000; // 24 hours
+const METRICS_INDEX_MAX_ENTRIES = 500;
+
+/**
+ * Prune stale cycle/task/metrics Redis keys older than 7 days with no TTL.
+ * Exported for unit coverage — the same body that ran on the cleanup.ts timer.
+ */
+async function pruneStaleRedisKeys(): Promise<void> {
+  const cutoffMs = Date.now() - STALE_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let totalPruned = 0;
+
+  // Prune old metrics from sorted index, then delete orphaned metric keys
+  try {
+    const removed = await pruneMetricsIndex(cutoffMs);
+    if (removed > 0) {
+      totalPruned += removed;
+      console.log(`[Housekeeping] Pruned ${removed} old metrics index entries`);
+    }
+    // Trim to max entries as a safety cap
+    const indexSize = await getMetricsIndexSize();
+    if (indexSize > METRICS_INDEX_MAX_ENTRIES) {
+      const excess = indexSize - METRICS_INDEX_MAX_ENTRIES;
+      await trimMetricsIndex(excess);
+      console.log(`[Housekeeping] Trimmed metrics index by ${excess} (cap: ${METRICS_INDEX_MAX_ENTRIES})`);
+    }
+  } catch (err: any) {
+    console.error(`[Housekeeping] Metrics index prune failed: ${err.message}`);
+  }
+
+  // Prune old cycle/task/metrics keys by scanning and checking timestamps.
+  // Keys come in two forms:
+  //   1. Parent hashes (hydra:cycle:cycle-2026-04-03-1447) — have startedAt field
+  //   2. Sub-keys (hydra:cycle:cycle-2026-04-03-1447:tasks, :agents, :costs) — set/list/hash without timestamp
+  //   3. Task evidence (hydra:task:task-cycle-2026-04-03-1447-1:evidence:merged) — string type
+  // For non-hash keys and hashes without a timestamp field, extract the date from
+  // the key name pattern (YYYY-MM-DD) and use that as the age indicator.
+  const dateInKeyPattern = /(\d{4}-\d{2}-\d{2})/;
+  for (const prefix of [CYCLE_KEY_PREFIX, TASK_KEY_PREFIX, METRICS_KEY_PREFIX]) {
+    try {
+      const keys = await scanKeys(`${prefix}*`);
+      const toDelete: string[] = [];
+
+      for (const key of keys) {
+        // Skip index/counter keys and active/last pointers
+        if (key.endsWith(":index") || key.endsWith(":counter") || key === CYCLE_ACTIVE_KEY || key === CYCLE_LAST_KEY) continue;
+        const ttl = await getKeyTTL(key);
+        if (ttl !== -1) continue; // Already has TTL, skip
+
+        let keyTime: number | null = null;
+
+        // Try hash timestamp fields first (original logic)
+        const type = await getKeyType(key);
+        if (type === "hash") {
+          const ts = await hashGet(key, "startedAt") || await hashGet(key, "createdAt") || await hashGet(key, "timestamp");
+          if (ts) {
+            const parsed = new Date(ts).getTime();
+            if (Number.isFinite(parsed)) keyTime = parsed;
+          }
+        }
+
+        // Fallback: extract date from key name (handles sub-keys, strings, sets, lists)
+        if (keyTime === null) {
+          const match = key.match(dateInKeyPattern);
+          if (match) {
+            const parsed = new Date(match[1] + "T00:00:00Z").getTime();
+            if (Number.isFinite(parsed)) keyTime = parsed;
+          }
+        }
+
+        if (keyTime !== null && keyTime < cutoffMs) {
+          toDelete.push(key);
+        }
+      }
+
+      if (toDelete.length > 0) {
+        await deleteKeysBatch(toDelete);
+        totalPruned += toDelete.length;
+        console.log(`[Housekeeping] Pruned ${toDelete.length} stale ${prefix}* keys`);
+      }
+    } catch (err: any) {
+      console.error(`[Housekeeping] ${prefix}* prune failed: ${err.message}`);
+    }
+  }
+
+  if (totalPruned > 0) {
+    console.log(`[Housekeeping] Total stale Redis keys pruned: ${totalPruned}`);
+  }
+}
+
+/**
+ * Return backlog items stuck in the `inProgress` lane for > 24h back to
+ * `queued`. Exported for unit coverage — the same body that ran on the
+ * cleanup.ts timer. Naturally idempotent: each invocation re-checks item age.
+ */
+async function returnStaleInProgressItems(): Promise<void> {
+  try {
+    const ids = await getBacklogLaneWithScores("inProgress");
+    const now = Date.now();
+    let returned = 0;
+
+    // ids is [id1, score1, id2, score2, ...]
+    for (let i = 0; i < ids.length; i += 2) {
+      const id = ids[i];
+      const score = Number(ids[i + 1]);
+      if (now - score > STALE_IN_PROGRESS_MS) {
+        const raw = await getBacklogItem(id);
+        if (!raw) continue;
+        const item = JSON.parse(raw);
+        item.lane = "queued";
+        item.meta = { ...item.meta, returnedReason: "stale_in_progress", returnedAt: new Date().toISOString() };
+        await moveBacklogItem(id, JSON.stringify(item), "inProgress", "queued");
+        returned++;
+        console.log(`[Housekeeping] Returned stale inProgress item ${id} ("${item.title?.slice(0, 60)}") to queued`);
+      }
+    }
+
+    if (returned > 0) {
+      console.log(`[Housekeeping] Returned ${returned} stale inProgress items to queued`);
+    }
+  } catch (err: any) {
+    console.error(`[Housekeeping] Stale inProgress check failed: ${err.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +636,34 @@ async function runHousekeeping(
         await publishBrier();
       },
     },
+
+    // Stale-Redis-key sweep (issue #1876) — folded out of the cleanup.ts 24h
+    // in-process setInterval. Daily idempotency: housekeeping runs hourly, so a
+    // Redis-stamped daily guard runs the sweep at most once per day (same shape
+    // as weekly-summary / memory-consolidation). The sweep itself is internally
+    // defensive (per-prefix try/catch), so "ran" means "the guard let it run".
+    {
+      name: "stale-key-prune",
+      guard: async () => {
+        const lastDaily = await getCleanupLastDaily();
+        return !lastDaily || Date.now() - parseInt(lastDaily) >= DAY_MS;
+      },
+      work: async () => {
+        await pruneStaleRedisKeys();
+        await setCleanupLastDaily(Date.now().toString());
+      },
+    },
+
+    // Stale-inProgress return (issue #1876) — folded out of the cleanup.ts 24h
+    // timer. Returns backlog items stuck in `inProgress` for > 24h to `queued`.
+    // No Redis time-guard: the work re-checks each item's age every invocation,
+    // so hourly calls are naturally idempotent (an item not yet 24h stale is
+    // left alone; once it crosses 24h the next call returns it exactly once,
+    // after which it is no longer in the inProgress lane).
+    {
+      name: "stale-inprogress-return",
+      work: () => returnStaleInProgressItems(),
+    },
   ];
 
   for (const chore of chores) {
@@ -491,5 +683,10 @@ export {
   // assert the uniform guard → work → bookkeeping → error-log + Sentry
   // pattern without standing up the maintenance endpoint or Redis.
   runChore,
+  // Issue #1876: the two cleanup chores folded out of the cleanup.ts in-process
+  // timer, exported so they are exercisable without an HTTP server or a live
+  // setInterval (the testability benefit called out in the issue).
+  pruneStaleRedisKeys,
+  returnStaleInProgressItems,
 };
 export type { Chore };
