@@ -63,9 +63,31 @@
  * The HYDRA_PMH_* floors keep their names and meanings; in delta mode they
  * apply to *delta* counts instead of absolute counts. When no --baseline is
  * supplied (legacy/manual callers, lost file), the watcher falls back to the
- * absolute-threshold semantics below. The baseline is a plain file (node:fs) —
- * never Redis / the orchestrator API — so the script stays stdlib-only and
- * leaf-level for sync-target-gate.sh mirroring (#1451).
+ * absolute-threshold evaluator but reports any breach as INCONCLUSIVE rather
+ * than alarming (see ABSOLUTE-MODE below). The baseline is a plain file
+ * (node:fs) — never Redis / the orchestrator API — so the script stays
+ * stdlib-only and leaf-level for sync-target-gate.sh mirroring (#1451).
+ *
+ * ABSOLUTE-MODE IS NON-BLOCKING (issue #1817 recurrence)
+ * ------------------------------------------------------
+ * Post-merge health is a *regression* signal — it attributes a fault to a merge
+ * only by diffing post-merge state against a pre-merge baseline. With NO
+ * baseline the comparator measures the Target's absolute state against fixed
+ * floors, and the Target's chronic-degraded floor structurally exceeds those
+ * floors on EVERY merge regardless of what changed: opticOdds is
+ * unconfigured-by-design (provider class), pinnacle has never had data
+ * (execution class), and freshness-class services are stale ~90-98% of the time
+ * because their freshness window (180s/300s) is far tighter than the cron
+ * cadence (~30min/~4h). So the freshness-flap suppression (issue #1817, delta
+ * mode) never runs on this path, and the absolute floors false-positive on
+ * every merge — the 2026-06-13 recurrences (#1817). The orchestrator-only fix
+ * is to make the absolute-threshold fallback NON-BLOCKING: an absolute breach is
+ * reported `inconclusive` (logged for diagnostics, hydra-incident NEVER
+ * dispatched) instead of alarming. The real fix that restores a signal is
+ * supplying a pre-merge --baseline (delta mode), which the paved
+ * hydra-target-build road now does on both merge paths (#1839). An operator who
+ * genuinely wants absolute-mode alarms opts back in with
+ * HYDRA_PMH_ALARM_WITHOUT_BASELINE=1.
  *
  * SIGNAL MODEL
  * ------------
@@ -96,6 +118,9 @@
  *   - HYDRA_PMH_FRESHNESS_SERVICES    csv keyword allowlist of freshness-class
  *                                     service names whose ok->soft delta is
  *                                     suppressed (see FRESHNESS-FLAP below)
+ *   - HYDRA_PMH_ALARM_WITHOUT_BASELINE "1" to alarm on an absolute-floor breach
+ *                                     even with NO baseline (legacy behavior);
+ *                                     default off — see ABSOLUTE-MODE below
  *
  * FRESHNESS-FLAP SUPPRESSION (issue #1817)
  * ----------------------------------------
@@ -196,6 +221,14 @@ export interface PostMergeHealthConfig {
    * of these fragments have their ok->soft delta suppressed as a freshness-flap.
    */
   freshnessServices: string[];
+  /**
+   * When true, an absolute-floor breach with NO pre-merge baseline still alarms
+   * + dispatches (the pre-#1817-recurrence behavior). Defaults to FALSE: without
+   * a baseline the comparator has no regression signal, so an absolute breach on
+   * the Target's chronic-degraded floor is reported `inconclusive`, never an
+   * alarm. Env-overridable via HYDRA_PMH_ALARM_WITHOUT_BASELINE=1.
+   */
+  alarmWithoutBaseline: boolean;
   /** When false, an alarm is logged + printed but hydra-incident is not spawned. */
   dispatch: boolean;
 }
@@ -236,7 +269,15 @@ export type WatchResult =
   | { kind: "baseline-written"; path: string; snapshot: TargetHealthSnapshot }
   | { kind: "baseline-write-failed"; reason: string }
   | { kind: "healthy"; verdict: RegressionVerdict; mode: EvaluationMode }
-  | { kind: "alarm"; verdict: RegressionVerdict; dispatched: boolean; mode: EvaluationMode };
+  | { kind: "alarm"; verdict: RegressionVerdict; dispatched: boolean; mode: EvaluationMode }
+  // No pre-merge baseline was available (issue #1817 recurrence). Post-merge
+  // health is a REGRESSION signal — meaningless without a baseline to diff
+  // against — so an absolute-floor breach is reported as inconclusive (logged,
+  // NEVER dispatched) rather than alarming on the Target's chronic-degraded
+  // floor. Opt back into the legacy absolute-alarm behavior with
+  // HYDRA_PMH_ALARM_WITHOUT_BASELINE=1. `verdict` carries the absolute-floor
+  // breach that WOULD have alarmed, for diagnostics.
+  | { kind: "inconclusive"; verdict: RegressionVerdict; reason: string };
 
 /**
  * Discriminated result of a Target health fetch. Never thrown — always
@@ -279,6 +320,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PostMergeHealt
     maxProviderErrors: parseIntEnv(env.HYDRA_PMH_MAX_PROVIDER_ERRORS, DEFAULTS.maxProviderErrors),
     timeoutMs: parseIntEnv(env.HYDRA_PMH_TIMEOUT_MS, DEFAULTS.timeoutMs),
     freshnessServices: parseCsvEnv(env.HYDRA_PMH_FRESHNESS_SERVICES, DEFAULTS.freshnessServices),
+    alarmWithoutBaseline: env.HYDRA_PMH_ALARM_WITHOUT_BASELINE === "1",
     dispatch: env.HYDRA_PMH_DISPATCH === "1",
   };
 }
@@ -733,6 +775,32 @@ export async function runWatch(
         `executionErrors=${snapshot.executionErrors} providerErrors=${snapshot.providerErrors}`,
     );
     return { kind: "healthy", verdict, mode };
+  }
+
+  // ABSOLUTE-MODE NON-BLOCKING FALLBACK (issue #1817 recurrence).
+  // Post-merge health is a *regression* signal: it can only attribute a fault to
+  // a merge by diffing against a pre-merge baseline. With no baseline the
+  // comparator is measuring the Target's *absolute* state against fixed floors —
+  // and the Target's chronic-degraded floor (opticOdds not_configured, pinnacle
+  // 0-rows, freshness-class services stale ~90-98% of the time because the cron
+  // cadence is far longer than the freshness window) structurally exceeds those
+  // floors on EVERY merge regardless of what changed. So an absolute-mode breach
+  // is reported `inconclusive` (logged, NEVER dispatched) rather than alarming
+  // on a phantom regression. Operators who genuinely want absolute-mode alarms
+  // opt back in with HYDRA_PMH_ALARM_WITHOUT_BASELINE=1. The fix that restores a
+  // real signal is supplying a pre-merge --baseline (delta mode), which is the
+  // paved hydra-target-build road on both merge paths (#1839).
+  if (mode === "absolute" && !config.alarmWithoutBaseline) {
+    const reason =
+      "no pre-merge baseline supplied — absolute-mode breach is not a merge-attributable regression " +
+      "(set HYDRA_PMH_ALARM_WITHOUT_BASELINE=1 to alarm anyway). Breached floors: " +
+      verdict.reasons.join("; ");
+    console.error(
+      `[post-merge-health] INCONCLUSIVE (mode=absolute, httpStatus=${fetched.httpStatus}): ${reason}\n` +
+        "NOT dispatching hydra-incident — post-merge health is meaningless without a baseline. " +
+        "Capture one pre-merge via --snapshot-out so the post-merge run can diff in delta mode.",
+    );
+    return { kind: "inconclusive", verdict, reason };
   }
 
   const context = buildIncidentContext(verdict, { mergeSha: opts.mergeSha, apiUrl: config.apiUrl, mode });
