@@ -64,9 +64,9 @@ Each candidate is a `{ name, slug, homepage, repo, npmName?, oneLineDescription 
 
 > **Discovery quota:** 5 candidates per category is enough. If the source pool is genuinely sparse, file what you have and note the gap in the issue body — don't pad with bad candidates.
 
-### 3. Filter pipeline (three AND-gated criteria)
+### 3. Filter pipeline (AND-gated criteria)
 
-Each surviving candidate is the *intersection* of three gates. Fail any → drop from the working set AND record the rejection in the seen-list with `decision: "rejected"` and the failing-gate reason.
+Each surviving candidate is the *intersection* of the gates below. Fail any → drop from the working set AND record the rejection in the seen-list with `decision: "rejected"` and the failing-gate reason. Gates 1–3 are the original leverage/maintenance/dedup screen; Gate 4 is the **lane-reconciliation screen** added after the 2026-06-13 scout wave filed issues that the implementer had to re-architect or decline downstream (see #1882). The leverage/maintenance/dedup screen is still strictly AND — Gate 4 does not relax it; it shapes HOW a surviving candidate is filed so the implementer doesn't burn a research+correction cycle.
 
 #### Gate 1: AI-leverage score ≥ 4
 
@@ -81,7 +81,9 @@ The tool must clear ALL of:
 - ≥ 500 GitHub stars OR ≥ 50k weekly npm downloads OR endorsed in ≥ 2 awesome-lists in the category.
 - A commit to the default branch within the last 90 days.
 - No unaddressed CVE in the last release.
-- License compatible with our stack (MIT, Apache-2.0, BSD, MPL — reject GPL/AGPL/SSPL/BSL).
+- License compatible with our stack (MIT, Apache-2.0, BSD, MPL, ISC — reject GPL/AGPL/SSPL/BSL).
+
+**Verify the license from the registry, not the README/landing page.** For an npm-distributed tool run `npm view <npmName> license` and stamp the *verified* SPDX value into the issue; for a non-npm tool read the `LICENSE` file in the repo's default branch. The README or marketing site is not authoritative — a 2026-06-13 scout filed Apache-2.0 for `@probelabs/probe` when `npm view` reported ISC, and the implementing dev burned a cycle reconciling it. Record HOW you checked (e.g. `npm view @probelabs/probe license` → `ISC`) in the Maintenance signals block so the dev can trust it without re-checking.
 
 The thresholds are tuned for Phase A — we expect the operator to revise them after the first smoke test in research question #2 (issue body).
 
@@ -94,6 +96,16 @@ Re-eval is eligible when ANY of:
 - `decision: "filed"` AND the linked GitHub issue is `closed` AND was closed with `wontfix` more than 90 days ago.
 - `reEvalAt` is set and the timestamp has passed (the operator can force an earlier re-eval — e.g. when a major version ships).
 - `decision: "filed"` AND the linked GitHub issue is still open (this is a stale heartbeat refresh — skip filing, refresh `lastChecked`).
+
+#### Gate 4: Lane reconciliation (file-shaping, not a leverage screen)
+
+A candidate that clears Gates 1–3 is worth filing, but the issue MUST land already reconciled against this repo's constraints so the implementing `hydra-dev` doesn't have to detect and fix the same three defect classes downstream. Before filing, reconcile each of:
+
+1. **No-dependency lane (ADR-0005 / allow-scripts).** Runtime deps are a closed operator-approved allowlist (`express`, `ioredis`, `ws`, `@sentry/node`, `zod`); dev deps that run install scripts trip the lavamoat allow-scripts gate. If the tool would require adding a runtime or dev dependency, **do not file an issue that proposes `npm install`** — instead propose the pinned-`npx` (or pinned pre-built binary) wrapper path up front, exactly as `ast-grep` / `comby` / `probe` / `promptfoo` are integrated (see CLAUDE.md "Structural code search"). If the tool *cannot* run via `npx`/standalone binary and *must* be a dependency, either (a) the issue is for the operator to approve the dep — say so explicitly and label accordingly — or (b) reject the candidate with reason `no-dep-lane-incompatible`. A 2026-06-13 scout proposed a plain dependency against this lane and the dev had to re-architect it as a pinned-`npx` wrapper; another (`evalite`) was rejected outright because it hard-requires a vitest devDep that trips allow-scripts. Never leave this to the implementer.
+
+2. **Superseded-premise check.** Reconcile the candidate against recently-merged tooling, not just the seen-list cooldown. Skim the last ~30 days of merged tool-scout PRs and the seen-list `decision: "filed"` entries: if a recently-merged tool already delivers this candidate's niche, the candidate is **superseded** — reject it with reason `premise-superseded-by-<slug>` (cite the merged PR/issue) rather than filing a duplicate the dev will decline. (`evalite` was superseded by `promptfoo` #1806, merged one day prior; the dev declined it and delivered the niche on the existing lane — a cycle the scout could have saved.) The seen-list dedup (Gate 3) only catches the *same* tool; this gate catches a *different* tool covering an *already-covered* niche.
+
+3. **Real CLI / API contract.** Run the tool once (or read its `--help` / API reference) and record the actual invocation contract — the real `--format`/`--json` flags, the scorer/callback signature, the output schema — in the issue's "Proposed integration" block. Do NOT leave the dev to reverse-engineer it empirically (the 2026-06-13 wave shipped issues that omitted probe's JSON schema and promptfoo's two-arg file-scorer signature, so the dev discovered them by trial). One verified command line in the issue saves a discovery loop.
 
 ### 4. File an issue per survivor
 
@@ -131,12 +143,24 @@ contract violations at PR time.">
 - Stars: <N>
 - Weekly downloads: <N>
 - Last commit: <ISO date>
-- License: <SPDX>
+- License: <SPDX> (verified via `npm view <npmName> license` → <value>, NOT the README claim)
 - CVE check: <link or "none in last release">
+
+## No-dependency-lane stance (ADR-0005)
+
+<REQUIRED. State exactly how this integrates without adding a runtime/dev dependency that trips the allow-scripts gate. One of:
+- "Runs via pinned-`npx <pkg>@<version>` — no package.json entry (same lane as ast-grep/comby/probe/promptfoo)."
+- "Pinned pre-built binary downloaded in CI — no npm distribution (same lane as comby)."
+- "Requires operator approval to add as a runtime dep — out of the autonomous lane; this issue is an operator decision."
+Do not leave this to the implementer — if you can't state a lane-compatible path, the candidate should have been rejected at Gate 4.>
+
+## Premise check (not superseded)
+
+<REQUIRED. Confirm no recently-merged tool already covers this niche. e.g. "Checked merged tool-scout PRs in the last 30 days + seen-list filed entries; nearest is <slug> (#NNNN) which covers <X> but not <this candidate's niche Y>.">
 
 ## Proposed integration
 
-<concrete, scoped — "add to `dashboard/` package.json", or "wrap as a new sub-router under `src/api/`". Not a design document; a starting point for the operator + a dev_orch follow-up.>
+<concrete, scoped, and including the REAL CLI/API contract — the verified invocation, e.g. `npx <pkg> --format json <args>`, the actual scorer/callback signature, the output schema. Run it once; don't make the dev reverse-engineer it. "wrap as a new sub-router under `src/api/`" or "add a `scripts/<name>.ts` npx wrapper + an `npm run <name>` script". Not a design document; a starting point for the operator + a dev_orch follow-up.>
 
 ## Risks / unknowns
 
@@ -193,7 +217,11 @@ This is the operator's accept/reject point. If the issue bodies look wrong, the 
 - **No autopilot dispatch in Phase A.** Manual invocation only.
 - **No category invention.** The taxonomy is closed; new categories require a PR to `docs/ai-leverage-categories.md`.
 - **Slug canonicalization happens in `src/scout/aliases.ts`** — never use the raw npm name or repo path as the seen-list key.
-- **Three-gate AND** — a tool must clear all three (leverage, maintenance, dedup). No 2-of-3 fallbacks.
+- **Three-gate AND** — a tool must clear all three (leverage, maintenance, dedup). No 2-of-3 fallbacks. Gate 4 (lane reconciliation) is additive — it never relaxes the AND.
+- **Verify the license from the registry, never the README.** Stamp the `npm view <pkg> license` (or repo `LICENSE` file) value into the issue and record how you checked. A README/landing-page license claim is not authoritative (#1882: Apache-2.0 claim vs ISC reality).
+- **Screen against the no-dependency lane (ADR-0005) before filing.** A surviving candidate's issue must propose the pinned-`npx`/standalone-binary path, OR be explicitly flagged as an operator dep-approval decision, OR be rejected `no-dep-lane-incompatible`. Never file an issue that silently assumes `npm install`.
+- **Reconcile the premise against recent merges.** If a tool merged in the last ~30 days already covers the candidate's niche, reject `premise-superseded-by-<slug>` — don't file a duplicate the dev will decline. Gate 3 dedups the same tool; this guards against a different tool covering an already-covered niche.
+- **Record the real CLI/API contract.** Run the tool once and stamp the verified invocation (flags, scorer signature, output schema) into "Proposed integration" — never leave the dev to reverse-engineer it.
 - **Issues land in `needs-triage`** — never auto-route to `ready-for-agent`. The operator is the accept point in Phase A.
 - **Seen-list is append-only conceptually.** Every consideration leaves a fingerprint, even cooldown-skipped ones (via `lastChecked` heartbeat).
 
@@ -209,7 +237,7 @@ Expected:
 
 - Discovery surfaces 3–5 candidates from the sources in §2.
 - The filter pipeline rejects ≥ 2 of them with a reason logged to the seen-list.
-- ≤ 2 issues filed, each matching the schema in §4.
+- ≤ 2 issues filed, each matching the schema in §4 — including a registry-verified License line, a No-dependency-lane stance block, a Premise check block, and a real CLI/API contract in Proposed integration.
 - Re-running `/hydra-tool-scout typed-schemas` immediately produces zero new issues — the dedup cooldown holds.
 - The operator either moves a filed issue to `ready-for-agent` (acceptance) or closes it with `wontfix` (which re-feeds the seen-list).
 
