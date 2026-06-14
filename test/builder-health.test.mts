@@ -19,11 +19,13 @@ import assert from "node:assert/strict";
 
 import {
   getBuilderHealthScorecard,
-  classifyAutonomy,
   percentile,
-  type GhPrView,
   type BuilderHealthDeps,
 } from "../src/aggregators/builder-health.ts";
+import {
+  classifyAutonomy,
+  type GhPrView,
+} from "../src/aggregators/autonomy-classifier.ts";
 import { utcDateKey } from "../src/redis/scope-violations.ts";
 import { formatBuilderHealthLines } from "../src/digest.ts";
 
