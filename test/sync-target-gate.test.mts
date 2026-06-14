@@ -118,6 +118,71 @@ describe("scripts/sync-target-gate.sh (issue #1451)", () => {
     }
   });
 
+  test("writes a package.json declaring type:module at the mirror root (issue #1883)", () => {
+    const { wt, cleanup } = makeFakeWorktree();
+    try {
+      assert.equal(runSync(wt).status, 0);
+      const pkgPath = join(wt, ".hydra-gate", "package.json");
+      assert.ok(
+        existsSync(pkgPath),
+        "mirror must contain a root package.json so node knows the module type",
+      );
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+      assert.equal(
+        pkg.type,
+        "module",
+        'mirror package.json must set "type":"module" (the .ts closure is ESM)',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("the mirrored gate runs WITHOUT the MODULE_TYPELESS warning (issue #1883)", () => {
+    const { wt, cleanup } = makeFakeWorktree();
+    try {
+      assert.equal(runSync(wt).status, 0);
+      // Run the mirrored mutation-check (fast skip path) and assert stderr is
+      // free of the type-reparse noise the mirror's package.json now silences.
+      const r = spawnSync(
+        "npx",
+        ["tsx", join(wt, ".hydra-gate", "scripts", "target", "mutation-check.ts")],
+        { cwd: wt, encoding: "utf-8", env: { ...process.env, CHANGED_FILES: "" } },
+      );
+      assert.equal(r.status, 0, `mirrored mutation-check failed: ${r.stderr}`);
+      assert.doesNotMatch(
+        r.stderr,
+        /MODULE_TYPELESS_PACKAGE_JSON|Reparsing/,
+        `gate stderr must be free of MODULE_TYPELESS/Reparsing noise:\n${r.stderr}`,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("the mirror package.json stays out of the PR diff (git-excluded, issue #1883)", () => {
+    const { wt, cleanup } = makeFakeWorktree();
+    try {
+      assert.equal(runSync(wt).status, 0);
+      assert.ok(
+        existsSync(join(wt, ".hydra-gate", "package.json")),
+        "mirror package.json must exist on disk",
+      );
+      const status = spawnSync(
+        "git",
+        ["-C", wt, "status", "--porcelain"],
+        { encoding: "utf-8" },
+      );
+      assert.equal(status.status, 0, `git status failed: ${status.stderr}`);
+      assert.ok(
+        !status.stdout.includes(".hydra-gate"),
+        `the whole .hydra-gate mirror (incl. package.json) must be git-excluded:\n${status.stdout}`,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   test("registers .hydra-gate/ in the worktree git-exclude so it stays out of the PR diff", () => {
     const { wt, cleanup } = makeFakeWorktree();
     try {

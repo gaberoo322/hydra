@@ -124,6 +124,19 @@ for f in "${GATE_FILES[@]}"; do
   copied=$((copied + 1))
 done
 
+# Declare the mirror as an ESM package (issue #1883). The mirrored gate scripts
+# and their src closure are authored as ES modules (import/export). Running them
+# from a betting worktree leaves node unable to determine the module type of
+# these .ts files from a package.json, so every gate invocation prints a
+# MODULE_TYPELESS_PACKAGE_JSON warning + "Reparsing" notice on stderr —
+# recurring noise that buries the real gate status line (agents grep it out by
+# hand, friction cue recurrence 7x). A minimal package.json with "type":"module"
+# at the mirror root makes node treat the whole .hydra-gate/ tree as ESM,
+# silencing the warning. It is git-excluded with the rest of the mirror (the
+# /$GATE_DIR_NAME/ exclude line below covers it), so it never pollutes the
+# Target PR diff.
+printf '%s\n' '{ "type": "module" }' > "$GATE_ROOT/package.json"
+
 # Exclude the mirror from the betting worktree's git so it never pollutes the
 # Target PR diff. `.git/info/exclude` is local to this worktree's checkout and
 # is not committed. Use the worktree-aware git-dir so the exclude lands in the
