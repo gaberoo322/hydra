@@ -559,6 +559,45 @@ if [ -f "${STATE_PATH}" ] && command -v jq >/dev/null 2>&1; then
   esac
 fi
 
+# Issue #1352 — seed in-flight pipeline slots across the pace-gate relaunch.
+#
+# The heredoc below clobbers state.json with all-null slots on EVERY bootstrap.
+# But a pace-gate relaunch starts a fresh session while the PRIOR session's
+# subagents may still be running (their SubagentStop hook has not fired yet).
+# With all-null slots the new session's first `decide.py decide` sees
+# `occupied == 0`, trips `_rule_idle_fallback`, and emits terminate(cause=idle)
+# — the print-mode session exits and the reap stamps `interrupted`. That is the
+# root of the 100%-interrupted / 0-drillable-dispatch starvation (#1352).
+#
+# The orchestrator owns the durable in-flight ledger (`hydra:dispatches:subagent:*`,
+# which survives the relaunch). GET /api/autopilot/inflight-slots projects it
+# onto the fixed pipeline-slot occupancy and returns `{ slots: { dev_orch: {…} } }`
+# for any class whose subagent is still live. We merge that seed onto the 7-null
+# base so `occupied > 0` and the new session emits `wait` (busy-wait nap) until
+# the SubagentStop event frees the slot or the orphaned-slot age cap drains it.
+#
+# Best-effort and fail-open: orchestrator-down, a missing jq, a curl timeout, or
+# an unparseable body all degrade to the all-null base (the pre-#1352 behaviour),
+# so this can never block a bootstrap. Isolated runs (tests) skip the fetch.
+SLOTS_BASE='{"dev_orch":null,"qa_orch":null,"research_orch":null,"dev_target":null,"qa_target":null,"research_target":null,"design_concept_orch":null}'
+SLOTS_JSON="${SLOTS_BASE}"
+if [ "${ISOLATED_RUN}" != "1" ] && command -v jq >/dev/null 2>&1; then
+  SLOTS_API_BASE="${HYDRA_API_BASE:-http://localhost:4000}"
+  SLOTS_SEED_RAW="$(curl -sf --max-time 5 "${SLOTS_API_BASE}/api/autopilot/inflight-slots" 2>/dev/null || echo "")"
+  if [ -n "${SLOTS_SEED_RAW}" ]; then
+    # Merge: 7-null base, overlaid with any seeded (non-null) slot objects. A
+    # malformed payload (.slots not an object) collapses the overlay to {} so the
+    # result is exactly the all-null base — never invalid JSON in the heredoc.
+    SLOTS_MERGED="$(printf '%s' "${SLOTS_SEED_RAW}" | jq -c --argjson base "${SLOTS_BASE}" '
+      ($base) + (if ((.slots // {}) | type) == "object" then .slots else {} end)
+    ' 2>/dev/null || echo "")"
+    case "${SLOTS_MERGED}" in
+      "{"*) SLOTS_JSON="${SLOTS_MERGED}" ;;
+      *) SLOTS_JSON="${SLOTS_BASE}" ;;
+    esac
+  fi
+fi
+
 # Initialize state file — limits are now first-class members.
 #
 # Schema migration (issue #426 decision brain rewrite + issue #466 Phase B):
@@ -619,15 +658,7 @@ cat > "${STATE_PATH}" <<EOF
   "reaped_task_ids": [],
   "failure_log": [],
   "research_force_counter": ${RESEARCH_FORCE_SEED},
-  "slots": {
-    "dev_orch": null,
-    "qa_orch": null,
-    "research_orch": null,
-    "dev_target": null,
-    "qa_target": null,
-    "research_target": null,
-    "design_concept_orch": null
-  },
+  "slots": ${SLOTS_JSON},
   "signal_last_fired": {
     "health": 0,
     "sweep_orch": 0,

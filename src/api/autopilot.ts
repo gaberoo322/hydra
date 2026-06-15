@@ -50,6 +50,7 @@ import {
   getRunRow,
   listRuns,
   summarizeTerminationHealth,
+  readInflightSlotSeed,
 } from "../autopilot/runs.ts";
 // Read projection — owned by `run-projections.ts` after the #1183 split.
 import { fetchTurnsWithJoins } from "../autopilot/run-projections.ts";
@@ -272,6 +273,24 @@ export function createAutopilotRouter(eventBus?: any) {
     // it. Pure + read-only over the digests already fetched — no extra reads.
     const terminationHealth = summarizeTerminationHealth(result.runs);
     return res.json({ runs: result.runs, terminationHealth });
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /autopilot/inflight-slots — in-flight pipeline-slot seed (issue #1352).
+  //
+  // `bootstrap.sh` curls this on every pace-gate relaunch to seed
+  // `state.json.slots` with the subagents the PRIOR session left running (the
+  // subagent dispatch ledger survives the relaunch; `state.json` does not).
+  // Without the seed, `decide.py:_rule_idle_fallback` sees `occupied == 0`
+  // while real subagents are still running and prematurely
+  // `terminate(cause=idle)`s the fresh run — the root of the 100%-interrupted /
+  // 0-drillable-dispatch starvation. Always 200 with a (possibly empty) seed;
+  // the helper never throws (a Redis failure degrades to `{}` so a bootstrap is
+  // never blocked by this read).
+  // -------------------------------------------------------------------------
+  router.get("/autopilot/inflight-slots", async (_req, res) => {
+    const slots = await readInflightSlotSeed();
+    return res.json({ slots });
   });
 
   // -------------------------------------------------------------------------

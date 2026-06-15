@@ -975,3 +975,86 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     assert.equal(h.starved, true, "0/5 = 0 < 0.15 floor → alarm fires");
   });
 });
+
+// ---------------------------------------------------------------------------
+// deriveInflightSlotSeed — cross-relaunch pipeline-slot seeding (#1352 Problem A)
+//
+// Pure map from the in-flight subagent dispatch ledger onto the fixed
+// pipeline-slot occupancy decide.py reasons about. The seed is what bootstrap.sh
+// injects into state.json.slots on a pace-gate relaunch so `_rule_idle_fallback`
+// sees occupied > 0 (→ wait) instead of terminate(idle) → interrupted. Pure →
+// no Redis.
+// ---------------------------------------------------------------------------
+describe("deriveInflightSlotSeed (issue #1352)", () => {
+  let deriveInflightSlotSeed: any;
+
+  beforeEach(async () => {
+    if (!deriveInflightSlotSeed) {
+      const mod = await import("../src/autopilot/runs.ts");
+      deriveInflightSlotSeed = mod.deriveInflightSlotSeed;
+    }
+  });
+
+  const sub = (over: Record<string, string>) => ({
+    sessionId: "sess",
+    skill: "hydra-dev",
+    dispatchId: "disp",
+    startedAt: "2026-06-14T00:00:00.000Z",
+    ...over,
+  });
+
+  test("maps a pipeline-skill subagent onto its slot class with a non-null seed object", () => {
+    const seed = deriveInflightSlotSeed([
+      sub({ sessionId: "s1", skill: "hydra-dev", dispatchId: "d1" }),
+    ]);
+    assert.deepEqual(Object.keys(seed), ["dev_orch"]);
+    assert.equal(seed.dev_orch.skill, "hydra-dev");
+    assert.equal(seed.dev_orch.task_id, "d1", "task_id prefers dispatchId");
+    assert.equal(seed.dev_orch._source, "inflight-seed");
+    assert.equal(
+      seed.dev_orch.started_epoch,
+      Math.floor(Date.parse("2026-06-14T00:00:00.000Z") / 1000),
+      "started_epoch derived from the dispatch startedAt (for orphaned-slot aging)",
+    );
+  });
+
+  test("maps every distinct pipeline skill to its own slot class", () => {
+    const seed = deriveInflightSlotSeed([
+      sub({ sessionId: "a", skill: "hydra-dev" }),
+      sub({ sessionId: "b", skill: "hydra-target-build" }),
+      sub({ sessionId: "c", skill: "hydra-qa" }),
+    ]);
+    assert.deepEqual(Object.keys(seed).sort(), ["dev_orch", "dev_target", "qa_orch"]);
+  });
+
+  test("skips signal-class and unknown skills — only pipeline slots are seeded", () => {
+    const seed = deriveInflightSlotSeed([
+      sub({ sessionId: "x", skill: "hydra-sweep" }), // signal class, no slot
+      sub({ sessionId: "y", skill: "hydra-cleanup" }), // signal class, no slot
+      sub({ sessionId: "z", skill: "totally-made-up" }), // unknown skill
+    ]);
+    assert.deepEqual(seed, {}, "no pipeline subagents → empty seed (all-null slots)");
+  });
+
+  test("newest-wins on the ≤1-per-slot invariant (ledger is newest-first)", () => {
+    // listActiveSubagentDispatches returns newest-first; the first row per slot
+    // wins so the freshest dispatch occupies the slot.
+    const seed = deriveInflightSlotSeed([
+      sub({ sessionId: "new", skill: "hydra-dev", dispatchId: "newest", startedAt: "2026-06-14T05:00:00.000Z" }),
+      sub({ sessionId: "old", skill: "hydra-dev", dispatchId: "older", startedAt: "2026-06-14T01:00:00.000Z" }),
+    ]);
+    assert.deepEqual(Object.keys(seed), ["dev_orch"]);
+    assert.equal(seed.dev_orch.task_id, "newest", "the first (newest) row per slot wins");
+  });
+
+  test("falls back to sessionId for task_id when dispatchId is empty", () => {
+    const seed = deriveInflightSlotSeed([
+      sub({ sessionId: "sess-id", skill: "hydra-dev", dispatchId: "" }),
+    ]);
+    assert.equal(seed.dev_orch.task_id, "sess-id");
+  });
+
+  test("empty input → empty seed (no in-flight subagents)", () => {
+    assert.deepEqual(deriveInflightSlotSeed([]), {});
+  });
+});
