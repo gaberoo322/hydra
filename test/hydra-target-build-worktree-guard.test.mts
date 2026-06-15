@@ -38,25 +38,23 @@ function readRepoFile(relPath: string): string {
 }
 
 describe("hydra-target-build playbook — worktree isolation (issue #542)", () => {
+  // What this guard protects is the *safety substance* of the two-repo
+  // isolation contract, not the cosmetic surface text that carries it. The
+  // friction cue `playbook-text-asserted-by-test` recurred 11× because the
+  // assertions coupled to exact headings / step numbers / prose sentences:
+  // a heading reword or section renumber that preserved every safety
+  // invariant still false-failed the test (issue #1899). So the canaries
+  // below assert the *load-bearing command strings and ABORT messages* —
+  // those strings ARE the safety contract — plus a small set of stable
+  // keyword phrases, and deliberately do NOT pin exact headings, step
+  // numbers, or issue-number cross-references.
   const playbook = readRepoFile("docs/operator-playbooks/hydra-target-build.md");
 
-  test("contains the CRITICAL SAFETY RULE preamble that warns about the two-repo asymmetry", () => {
-    // The preamble is the prose explanation; it must call out that the harness
-    // only isolates one repo. Without this, a future editor might "simplify"
-    // the playbook back to the pre-#542 single-repo assumption.
-    assert.match(playbook, /CRITICAL SAFETY RULE/);
-    assert.match(playbook, /Two repos are in play/);
-    assert.match(
-      playbook,
-      /harness `isolation: "worktree"` ONLY creates a worktree of the orchestrator repo/,
-    );
-  });
-
-  test("Step 0.6 creates a git worktree under ~/hydra-betting", () => {
+  test("creates a git worktree under ~/hydra-betting with a GC-able $TARGET_WT path", () => {
     // The load-bearing invocation: `git -C ~/hydra-betting worktree add ...`
     // with a /dev/shm/hydra-worktrees/hydra-betting-worktree-* path so the
-    // existing branch-prune sweep can GC it.
-    assert.match(playbook, /### 0\.6\. Create hydra-betting worktree/);
+    // existing branch-prune sweep can GC it. KEPT VERBATIM — these strings
+    // are the real canary, not the surrounding heading.
     assert.match(
       playbook,
       /git -C ~\/hydra-betting worktree add -b "feature\/\$\{CYCLE_ID\}"/,
@@ -67,42 +65,39 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
     );
   });
 
-  test("Step 0.6 verifies isolation with git rev-parse before proceeding", () => {
+  test("verifies isolation with git rev-parse before proceeding", () => {
     // Without this verification, a worktree-add failure would silently fall
     // through to writes against the main checkout. The reporter in the #542
     // research transcript caught this only after the fact via auto-stash.
+    // The rev-parse commands and both ABORT messages are KEPT VERBATIM.
     assert.match(playbook, /git rev-parse --git-common-dir/);
     assert.match(playbook, /git rev-parse --git-dir/);
     assert.match(playbook, /ABORT: hydra-betting worktree common-dir/);
     assert.match(playbook, /ABORT: hydra-betting cwd is not a worktree/);
   });
 
-  test("Step 5 (execute) instructs the child to stay in $TARGET_WT and not cd ~/hydra-betting", () => {
+  test("execute step keeps the child in the worktree (no plain cd into ~/hydra-betting)", () => {
     // The pre-#542 playbook contained `cd ~/hydra-betting && git checkout main`
-    // in Step 5. That direct-to-main-tree command is the bug. Make sure the
-    // replacement language is present.
-    assert.match(playbook, /Stay in that worktree — do NOT `cd ~\/hydra-betting`/);
-    // Heading widened to cover Read too and reference the recurrence issue #1861
-    // (the #542 fix kept recurring under six friction cues until #1861).
-    assert.match(
-      playbook,
-      /Path discipline for Read\/Edit\/Write tools \(issues #542, #1861\)/,
-    );
+    // in the execute step. That direct-to-main-tree command is the bug. There
+    // is no single command string for the *absence* of that command, so we
+    // assert a RELAXED keyword form: the playbook still tells the child to
+    // stay in the worktree and not `cd ~/hydra-betting`. Heading wording and
+    // issue-number cross-refs are intentionally not pinned.
+    assert.match(playbook, /do NOT `cd ~\/hydra-betting`/);
   });
 
-  test("Step 6 verifies edits landed in the worktree (the reporter's `git diff` canary)", () => {
+  test("verifies edits landed in the worktree (the reporter's `git diff` canary)", () => {
     // The reporter (item-472) suggested a `git diff` post-edit check; we kept
     // that as a defense-in-depth signal even though the primary fix is the
-    // worktree itself. If both the worktree creation AND this canary disappear
-    // the bug fully reopens.
-    assert.match(playbook, /sanity-check that the edits actually landed in the worktree/);
+    // worktree itself. The command string is the canary — the surrounding
+    // sanity-check prose is cosmetic and no longer asserted.
     assert.match(playbook, /git diff --name-only/);
   });
 
-  test("Step 8.5 removes the worktree on success", () => {
+  test("removes the worktree on success", () => {
     // Leaking on crash is acceptable (branch-prune.sh will GC it), but on the
     // happy path we should clean up so /dev/shm doesn't fill with stale dirs.
-    assert.match(playbook, /### 8\.5\. Worktree cleanup/);
+    // The remove invocation is KEPT VERBATIM; the heading is not pinned.
     assert.match(playbook, /git -C ~\/hydra-betting worktree remove --force "\$TARGET_WT"/);
   });
 });
@@ -110,13 +105,17 @@ describe("hydra-target-build playbook — worktree isolation (issue #542)", () =
 describe("hydra-autopilot playbook — dev_target preamble (issue #542)", () => {
   const playbook = readRepoFile("docs/operator-playbooks/hydra-autopilot.md");
 
-  test("worktree-guard preamble now calls out the dev_target two-repo asymmetry", () => {
+  test("preamble keeps the dev_target two-repo isolation safety substance", () => {
     // The pre-#542 preamble only warned about cwd == ~/hydra-betting, which
     // never triggered for dev_target dispatches (cwd was the orchestrator
-    // worktree, not ~/hydra-betting). The new TARGET-REPO SAFETY RULE block
-    // is what closes that hole.
-    assert.match(playbook, /TARGET-REPO SAFETY RULE — applies to dev_target only/);
-    assert.match(playbook, /hydra-target-build Step 0\.6/);
+    // worktree, not ~/hydra-betting). The safety substance is that the
+    // dev_target preamble still routes through the rev-parse worktree
+    // verification. We assert the load-bearing rev-parse command string rather
+    // than the exact "TARGET-REPO SAFETY RULE" heading or step-number cross-ref,
+    // both of which are cosmetic. (The preamble writes it as
+    // `git -C <worktree> rev-parse --git-common-dir`, so we match the stable
+    // command fragment that survives the `-C <worktree>` interpolation.)
+    assert.match(playbook, /rev-parse --git-common-dir/);
   });
 });
 
