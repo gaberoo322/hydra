@@ -2,7 +2,7 @@ import { Router } from "express";
 import { getWorkQueueItems, pushToWorkQueue, getWorkQueueLen, findWorkQueueDuplicate } from "../redis/work-queue.ts";
 import { getBacklogCounts, loadBacklog } from "../backlog/reads.ts";
 import { QueuePostBodySchema } from "../schemas/queue.ts";
-import { reconcileWorkQueue } from "../anchor-candidates.ts";
+import { reconcileWorkQueue } from "../backlog/work-queue-hygiene.ts";
 import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 export function createQueueRouter() {

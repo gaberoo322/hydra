@@ -588,7 +588,7 @@ async function runHousekeeping(
     {
       name: "work-queue-hygiene",
       work: async () => {
-        const { reconcileWorkQueue } = await import("../anchor-candidates.ts");
+        const { reconcileWorkQueue } = await import("../backlog/work-queue-hygiene.ts");
         const wq = await reconcileWorkQueue();
         if (wq.removed > 0) {
           console.log(
