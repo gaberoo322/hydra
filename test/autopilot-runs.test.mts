@@ -441,6 +441,41 @@ describe("autopilot runs API (issue #497)", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // AC13b (issue #1903) — run-end with cause "handoff" (the clean baton-pass:
+  //        a print-mode session that ended a turn with subagent slots still in
+  //        flight) records status=ended/handoff. `handoff` is a VALID, CLEAN
+  //        term_reason distinct from `interrupted` (the zero-slot bypass).
+  // ---------------------------------------------------------------------------
+  test("AC13b: run-end cause=handoff → status=ended, term_reason=handoff (#1903)", async () => {
+    await runStart(
+      mockReq({
+        run_id: "run-handoff",
+        started: "2026-06-15T10:00:00Z",
+        started_epoch: 1750068000,
+        pid: process.pid,
+        trigger: "morning-timer",
+        limits: {},
+      }),
+      mockRes(),
+    );
+
+    const res = mockRes();
+    await runEnd(
+      mockReq({ run_id: "run-handoff", cause: "handoff", ended_epoch: 1750071600, exit_code: 0 }),
+      res,
+    );
+    assert.equal(res._status, 200);
+    assert.equal(res._body.status, "ended");
+    assert.equal(res._body.term_reason, "handoff", "handoff is a valid term_reason, not normalized to unknown");
+
+    const row = await redis.hgetall("hydra:autopilot:run:run-handoff");
+    assert.equal(row.status, "ended");
+    assert.equal(row.term_reason, "handoff");
+    assert.equal(row.exit_code, "0");
+    assert.equal(row.crash_detail, undefined, "a clean handoff persists no crash_detail");
+  });
+
+  // ---------------------------------------------------------------------------
   // AC14 (issue #898) — sweeper of a dead-pid running row that carries a
   //        recorded clean exit (exit_code === "0") promotes to
   //        status=ended/interrupted, NOT killed/crash. This is the case where
@@ -973,6 +1008,43 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
     assert.equal(h.dispatchBearingCleanRuns, 0);
     assert.equal(h.cleanTerminationRate, 0);
     assert.equal(h.starved, true, "0/5 = 0 < 0.15 floor → alarm fires");
+  });
+
+  // issue #1903: `handoff` (the honest baton-pass — a clean exit with subagent
+  // slots still in flight) counts as a CLEAN terminator, so a board of
+  // baton-passes is no longer falsely starved.
+  test("handoff counts as a clean terminator (#1903)", () => {
+    const h = summarizeTerminationHealth([
+      { status: "ended", term_reason: "handoff", dispatches: 4 },
+      { status: "ended", term_reason: "handoff", dispatches: 6 },
+    ]);
+    assert.equal(h.dispatchBearingRuns, 2);
+    assert.equal(h.dispatchBearingCleanRuns, 2, "both handoff runs are clean");
+    assert.equal(h.cleanTerminationRate, 1, "all baton-passes are clean");
+    assert.equal(h.starved, false);
+  });
+
+  // issue #1903: the headline reclassification — a board that was 100%
+  // `interrupted` (rate 0, permanently starved) reads healthy once the honest
+  // baton-passes are stamped `handoff`. Genuine zero-slot `interrupted` exits
+  // stay non-clean, so the alarm still fires on REAL starvation.
+  test("handoff reclassification clears the all-baton-pass false starvation, real starvation still alarms (#1903)", () => {
+    const cleared = summarizeTerminationHealth(
+      Array.from({ length: 5 }, () => ({
+        status: "ended", term_reason: "handoff", dispatches: 4,
+      })),
+    );
+    assert.equal(cleared.dispatchBearingCleanRuns, 5);
+    assert.equal(cleared.cleanTerminationRate, 1);
+    assert.equal(cleared.starved, false, "baton-passes are clean → not starved");
+
+    const stillStarved = summarizeTerminationHealth(
+      Array.from({ length: 5 }, () => ({
+        status: "ended", term_reason: "interrupted", dispatches: 4,
+      })),
+    );
+    assert.equal(stillStarved.cleanTerminationRate, 0);
+    assert.equal(stillStarved.starved, true, "genuine zero-slot interrupted still alarms");
   });
 });
 

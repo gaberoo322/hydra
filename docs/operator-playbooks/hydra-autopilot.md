@@ -310,7 +310,7 @@ INV-008.
 | `queue-decision` | `Bash` → `./scripts/autopilot/queue-decision.sh ...` |
 | `reap` | `Bash` → `./scripts/autopilot/reap.py completion ...` (also fires `dispatch.sh cycle-record` for `hydra-dev` / `hydra-target-build`; see Phase 6) |
 | `terminate` | `Bash` → `./scripts/autopilot/drain.sh <merged_prs>` → Phase 7. The decide CLI has already POSTed the clean run-end for this cause (issue #1352) — drain + digest are all that remain. |
-| `wait` | sleep N; re-enter loop. Only emitted while slots are in flight (busy-wait nap / `wait_or_reap`) or after a non-dispatch housekeeping turn — a wait-only turn with zero occupied slots emits `terminate` (cause `idle`) instead, because a print-mode session exits on its final message and the wait would never be honoured (issue #1352). |
+| `wait` | sleep N; re-enter loop. Only emitted while slots are in flight (busy-wait nap / `wait_or_reap`) or after a non-dispatch housekeeping turn — a wait-only turn with zero occupied slots emits `terminate` (cause `idle`) instead, because a print-mode session exits on its final message and the wait would never be honoured (issue #1352). **Handoff baton-pass (issue #1903):** a `wait` while slots ARE occupied may be the LAST message of this print-mode turn — print mode physically exits when the model goes quiet across the nap, with subagents still mid-flight. When you end such a turn (slots in flight, no further dispatchable work this turn), POST `/api/autopilot/run-end` with `cause=handoff` BEFORE your final message — an honest baton-pass to the successor run, which re-seeds the slots from the surviving dispatch ledger (#1352). This is idempotent on `run_id` (same as the `terminate` path), and the ExecStopPost reap backstop derives `handoff` from `state.json.slots_occupied > 0` even if you miss the POST, so the baton-pass is never mis-stamped `interrupted`. |
 | `wait-for-api` | `curl --retry`; re-enter loop |
 
 ### Per-class model routing (issue #1093)
@@ -507,10 +507,31 @@ reap backstop would otherwise stamp `interrupted`. The POST is idempotent
 (first terminal cause wins) and skipped when state carries no `run_id` or
 `HYDRA_AUTOPILOT_RUN_END_POST=off`.
 
+**Handoff baton-pass (issue #1903).** The cases above all leave ZERO slots in
+flight at exit. The residual real-world exit is the OPPOSITE: the print-mode
+session reaches a natural final message while subagent slots ARE occupied (the
+plan was `wait`, but print mode has no event loop that survives the model going
+quiet across a multi-minute nap). This is not a truncation — it is an honest
+baton-pass: the in-flight subagents live in the durable dispatch ledger
+(`hydra:dispatches:subagent:*`) that the next pace-gate-launched run re-seeds
+(#1352). It is recorded with the clean `term_reason=handoff` (in
+`CLEAN_TERM_REASONS`, `src/autopilot/runs.ts`), via two layers: (1) the model
+POSTs `run-end(cause=handoff)` before its final message when it ends a turn with
+slots > 0 and no further dispatchable work (the `wait` action row above), and
+(2) the ExecStopPost reap backstop (`bootstrap.sh __reap_derive_cause`) derives
+`handoff` whenever a CLEAN exit (code 0/143/130) shows `state.json` slots
+occupied > 0 — so a missed in-loop POST still classifies the baton-pass
+honestly. `interrupted` is now reserved for a clean ZERO-slot exit that bypassed
+term-check (a genuine print-mode end with nothing pending).
+
 The clean-termination rate over recent runs is surfaced as
 `terminationHealth` (with a pre-derived `starved` alarm boolean) on
 `GET /api/autopilot/runs` — `starved: true` means ≥5 ended dispatch-bearing
-runs produced zero clean terminations, the #1352 retro-starvation condition.
+runs sustain a clean-termination rate below the floor (the #1352/#1847
+retro-starvation condition). Reclassifying baton-passes from `interrupted` to
+the clean `handoff` (issue #1903) makes this rate measure REAL starvation
+(crashes / zero-progress) instead of counting every honest baton-pass as
+non-clean.
 
 ## Worktree-guard preamble (REQUIRED for code-writing dispatches)
 

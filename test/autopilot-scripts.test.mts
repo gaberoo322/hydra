@@ -82,7 +82,7 @@ function runBootstrap(env: Record<string, string>, tmp: { state: string; heartbe
  * path shares — no state read, no run-end POST — so the mapping can be
  * pinned without touching a prod surface (issue #898 / AC2).
  */
-function deriveReapCause(exitCode: string, exitStatus: string): {
+function deriveReapCause(exitCode: string, exitStatus: string, slotsOccupied?: string): {
   status: number;
   cause: string;
   exitCodeNum: string;
@@ -93,6 +93,9 @@ function deriveReapCause(exitCode: string, exitStatus: string): {
       ...process.env,
       EXIT_CODE: exitCode,
       EXIT_STATUS: exitStatus,
+      // Issue #1903: the slots-occupied count the live --reap path derives from
+      // state.json, injected directly for the dry-run. Default unset → 0.
+      ...(slotsOccupied !== undefined ? { REAP_SLOTS_OCCUPIED: slotsOccupied } : {}),
       PATH: process.env.PATH ?? "",
     },
     encoding: "utf-8",
@@ -302,6 +305,36 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     const r = deriveReapCause("signal", "SEGV");
     assert.equal(r.cause, "crash", "SEGV is a genuine crash — must NOT be reclassified as interrupted");
     assert.equal(r.exitCodeNum, "1", "a non-numeric crash signal records the non-zero sentinel");
+  });
+
+  /**
+   * Issue #1903 — the honest baton-pass. A CLEAN exit (code 0/143/130) with
+   * subagent slots STILL occupied is a `handoff`, not `interrupted`: the
+   * print-mode session ended its turn while subagents are mid-flight, and the
+   * next pace-gate-launched run re-seeds the surviving dispatch ledger (#1352).
+   * `interrupted` stays reserved for a clean ZERO-slot exit.
+   */
+  test("clean exit with slots occupied → handoff (#1903)", () => {
+    for (const status of ["0", "143", "130"]) {
+      const r = deriveReapCause("exited", status, "2");
+      assert.equal(r.cause, "handoff",
+        `clean exit (status ${status}) with slots>0 is an honest baton-pass, not interrupted`);
+      assert.equal(r.exitCodeNum, "0", "a handoff records exit_code 0 (clean)");
+    }
+  });
+
+  test("clean exit with ZERO slots stays interrupted, not handoff (#1903)", () => {
+    const r = deriveReapCause("exited", "0", "0");
+    assert.equal(r.cause, "interrupted",
+      "a clean exit with no slots in flight is a genuine print-mode end — stays interrupted");
+    assert.equal(r.exitCodeNum, "0");
+  });
+
+  test("a crash with slots occupied stays crash, never handoff (#1903 INV-A)", () => {
+    const r = deriveReapCause("signal", "SEGV", "3");
+    assert.equal(r.cause, "crash",
+      "an abnormal exit is a crash regardless of slot occupancy — handoff requires a CLEAN exit code");
+    assert.equal(r.exitCodeNum, "1");
   });
 
   test("a non-zero exit status stays crash with the real code", () => {
