@@ -11,15 +11,9 @@ import {
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
   DEFAULT_OAUTH_USAGE_TTL_MS,
-  modelToFamily,
-  parseUsageLine,
-  parseObservedResetMs,
-  cacheHitRatio,
-  projectResetWindow,
   getWeeklyResetAnchorMs,
   getCacheReadWeight,
   DEFAULT_CACHE_READ_WEIGHT,
-  weightedTokens,
   getDriftReferencePercent,
   getDriftFactor,
   DEFAULT_DRIFT_FACTOR,
@@ -27,12 +21,25 @@ import {
   DEFAULT_WEEKLY_PACE_CEILING,
   sessionIdFromPath,
   UNATTRIBUTED_SKILL,
-  parseSessionLimitReset,
   type UsageSnapshot,
-  type TokenBreakdown,
   type SkillResolver,
   type OAuthUsageResult,
 } from "../src/cost/index.ts";
+// The pure token-math functions now live in their own leaf (issue #1909).
+// Import them directly from cost/token-math.ts to prove the seam is importable
+// without pulling in the JSONL-scan machinery — mirroring the eligibility.ts
+// import below. (They are also still re-exported through the index barrel above,
+// so external callers see no import-line change.)
+import {
+  modelToFamily,
+  parseUsageLine,
+  parseObservedResetMs,
+  cacheHitRatio,
+  projectResetWindow,
+  weightedTokens,
+  parseSessionLimitReset,
+  type TokenBreakdown,
+} from "../src/cost/token-math.ts";
 // The pure eligibility-projection fold now lives in its own module
 // (issue #1377). Import it directly from cost/eligibility.ts to prove the seam
 // is importable without pulling in the JSONL-scan machinery. The env-config

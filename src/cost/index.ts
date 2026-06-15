@@ -68,18 +68,29 @@ export {
 } from "./config.ts";
 
 // ---------------------------------------------------------------------------
-// Subscription Usage Tracker — Anthropic-quota projection (PR A #606, B-series)
+// Token math — the pure-leaf math cluster (issue #1909)
 // ---------------------------------------------------------------------------
+// The seven pure functions (model-family classifier, JSONL-line parser,
+// quota-weight / cache-hit formulas, weekly-reset / session-limit time math)
+// were extracted out of `usage-tracker.ts` into the stateless leaf
+// `./token-math.ts`. Re-exported here at the SAME names so the public surface
+// is unchanged.
 export {
-  getUsage,
   parseSessionLimitReset,
-  clearUsageCache,
   projectResetWindow,
   weightedTokens,
   modelToFamily,
   parseUsageLine,
   parseObservedResetMs,
   cacheHitRatio,
+} from "./token-math.ts";
+
+// ---------------------------------------------------------------------------
+// Subscription Usage Tracker — Anthropic-quota projection (PR A #606, B-series)
+// ---------------------------------------------------------------------------
+export {
+  getUsage,
+  clearUsageCache,
   sessionIdFromPath,
   UNATTRIBUTED_SKILL,
 } from "./usage-tracker.ts";
