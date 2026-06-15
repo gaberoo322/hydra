@@ -7,9 +7,9 @@
 //
 //   1. The Candidate Feed (`src/anchor-candidates.ts`) — its eligibility filter
 //      suppresses any candidate whose work already MERGED.
-//   2. The WorkQueueHygiene reconciler (`reconcileWorkQueue`, currently still in
-//      `anchor-candidates.ts`; slated for `src/backlog/work-queue-hygiene.ts`
-//      per #1844) — it REMOVES merged-work entries from the work queue.
+//   2. The Work-Queue Hygiene reconciler (`reconcileWorkQueue` in
+//      `src/backlog/work-queue-hygiene.ts`, issue #1844) — it REMOVES
+//      merged-work entries from the work queue.
 //
 // Because the MergedRefs concern is owned by neither consumer exclusively, its
 // neutral home is here, a sibling to `src/backlog/reconciler.ts`. Both consumers
