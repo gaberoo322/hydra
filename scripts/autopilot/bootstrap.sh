@@ -99,6 +99,11 @@ set -euo pipefail
 __reap_derive_cause() {
   REAP_EXIT_STATUS="${EXIT_STATUS:-0}"
   REAP_EXIT_CODE_KIND="${EXIT_CODE:-exited}"
+  # Issue #1903: count of pipeline slots still occupied at exit, derived from
+  # state.json by the live --reap path (default 0 when unknown / unset). A CLEAN
+  # exit with slots_occupied > 0 is an honest baton-pass (`handoff`), not the
+  # crash-adjacent `interrupted`. Injectable for the --reap-derive-cause dry-run.
+  REAP_SLOTS_OCCUPIED="${REAP_SLOTS_OCCUPIED:-0}"
   if [ "${REAP_EXIT_CODE_KIND}" = "exited" ] \
     && { [ -z "${REAP_EXIT_STATUS}" ] || [ "${REAP_EXIT_STATUS}" = "0" ] \
       || [ "${REAP_EXIT_STATUS}" = "143" ] || [ "${REAP_EXIT_STATUS}" = "130" ]; }; then
@@ -111,7 +116,20 @@ __reap_derive_cause() {
     # fell through to the catch-all `crash`. This mirrors the EXIT_CODE=signal
     # TERM/INT mapping below; both record exit_code 0 so `crash` stays a
     # meaningful health signal and the StartLimit lockout never arms.
-    REAP_CAUSE="interrupted"
+    #
+    # Issue #1903: a clean exit with subagent slots STILL occupied is a
+    # `handoff` baton-pass (the print-mode session ended its turn while
+    # subagents are mid-flight; the surviving dispatch ledger is re-seeded by
+    # the next pace-gate-launched run, #1352). This is the residual case
+    # #1352 left: slots > 0, plan was wait, but print mode physically exits on
+    # the final message. Reserve `interrupted` for a clean ZERO-slot bypass of
+    # term-check (a genuine print-mode end with nothing pending). `handoff` is
+    # in CLEAN_TERM_REASONS and retro-drillable; `interrupted` is not.
+    if [ "${REAP_SLOTS_OCCUPIED}" -gt 0 ] 2>/dev/null; then
+      REAP_CAUSE="handoff"
+    else
+      REAP_CAUSE="interrupted"
+    fi
     REAP_EXIT_NUM=0
   elif [ "${REAP_EXIT_CODE_KIND}" = "signal" ]; then
     case "${REAP_EXIT_STATUS}" in
@@ -224,6 +242,17 @@ if [ "${1:-}" = "--reap" ]; then
   # (e.g. SEGV/KILL/ABRT), or a missing/garbage code — stays `crash`
   # with the real exit status preserved. Shared with the --reap-derive-cause
   # dry-run so the test pins exactly this mapping.
+  #
+  # Issue #1903: derive slots_occupied from state.json so a CLEAN exit with
+  # subagents still in flight maps to `handoff` (honest baton-pass), not the
+  # crash-adjacent `interrupted`. `state.json.slots` is the same fixed
+  # pipeline-slot map decide.py reasons over (a slot is occupied when its value
+  # is non-null), seeded across relaunches by #1352. A missing/garbage slots
+  # object degrades to 0 (the pre-#1903 `interrupted` behaviour) — never blocks
+  # the reap.
+  REAP_SLOTS_OCCUPIED="$(jq -r '[.slots // {} | .[] | select(. != null)] | length' "${REAP_STATE_PATH}" 2>/dev/null || echo 0)"
+  case "${REAP_SLOTS_OCCUPIED}" in ''|*[!0-9]*) REAP_SLOTS_OCCUPIED=0 ;; esac
+  export REAP_SLOTS_OCCUPIED
   __reap_derive_cause
   REAP_ENDED_EPOCH="$(date -u +%s)"
 

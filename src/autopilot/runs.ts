@@ -115,11 +115,20 @@ export const RUN_TTL_SECONDS = 7 * 24 * 3600;
  * process exit that did NOT route through a term-check stop (print-mode end,
  * SIGTERM from `systemctl restart` / `RuntimeMaxSec`) — distinct from a genuine
  * `crash` (issue #898), which is an abnormal exit that also missed a run-end.
+ *
+ * `handoff` (issue #1903) is a CLEAN self-termination: the print-mode session
+ * deliberately ended a turn while subagent slots were STILL occupied
+ * (`slots_occupied > 0`), handing the in-flight work to the durable subagent
+ * dispatch ledger (`hydra:dispatches:subagent:*`) that the NEXT pace-gate-
+ * launched run re-seeds via #1352. It is an honest baton-pass, NOT the crash-
+ * adjacent `interrupted` — which now stays reserved for a clean ZERO-slot exit
+ * that bypassed term-check (a genuine print-mode end with nothing in flight).
  */
 const VALID_TERM_REASONS: ReadonlySet<string> = new Set([
   "budget",
   "wall_clock",
   "idle",
+  "handoff",
   "interrupted",
   "failure_backstop",
   "crash",
@@ -776,23 +785,34 @@ export async function getRunRow(runId: string): Promise<GetRunRowResult> {
  * rule and POSTed run-end, rather than the reap backstop catching a truncated
  * print-mode session. These are the numerator of the clean-termination rate.
  *
+ * `handoff` (issue #1903) is ALSO clean: a print-mode session that ended a turn
+ * with subagent slots still occupied is an honest baton-pass to the successor
+ * run's dispatch ledger (#1352), not a truncation. Counting it clean is the
+ * whole point of #1903 — today every dispatch-bearing run terminates
+ * `interrupted` (baton-pass mis-stamped), pinning `cleanTerminationRate` ≈ 0 and
+ * the #1815/#1847 starvation alarm permanently on. Reclassifying the baton-pass
+ * makes the rate measure REAL starvation (crashes / zero-progress) instead.
+ *
  * `interrupted` / `crash` / `failure_backstop` are NOT clean: `interrupted` is
  * the reap backstop's cause for a print-mode session that exited (code 0/143/
- * 130) before the loop reached a stop rule — the exact starvation mechanism in
- * issue #1352 (the session physically ends before it logically drains).
+ * 130) with ZERO slots in flight before the loop reached a stop rule — a
+ * genuine truncation with nothing pending, distinct from the `handoff`
+ * baton-pass (slots > 0).
  */
 const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
   "idle",
   "budget",
   "wall_clock",
+  "handoff",
 ]);
 
 /**
  * Pure observability rollup over the run digests (issue #1352, acceptance
  * clause 3; gating refined in #1815). Computes the **clean-termination rate** —
  * the fraction of **dispatch-bearing** ENDED runs that self-terminated via a
- * clean `term_reason` ({@link CLEAN_TERM_REASONS}) rather than the
- * `interrupted`/`crash` reap backstop. When this rate sits at ~0 over a
+ * clean `term_reason` ({@link CLEAN_TERM_REASONS} — including the #1903
+ * `handoff` baton-pass) rather than the `interrupted`/`crash` reap backstop.
+ * When this rate sits at ~0 over a
  * non-trivial sample of dispatch-bearing runs, the retro learning loop is
  * structurally starved (every run dies before its dispatches' terminal cycle
  * records materialise) — the alarm condition #1352 was filed on.

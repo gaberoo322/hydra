@@ -1010,6 +1010,82 @@ describe("assembleRetroBundle — composition", () => {
     );
   });
 
+  // -------------------------------------------------------------------------
+  // Issue #1903 — INV-E: a `handoff` run (the honest baton-pass) stays
+  // retro-drillable. A completed dispatch on a handoff run flags exactly like
+  // one on any clean run (its own confirmed terminal cycle record drives the
+  // flag, NOT the run term_reason). An in-flight slot at handoff has NO terminal
+  // record yet — its candidate cycleId is dropped to "" and it is carried to the
+  // successor run's ledger (#1352), so it is NEITHER flagged NOR backfilled with
+  // a `run-handoff` failure abandonReason (handoff is clean, not in
+  // CRASH_TERM_REASONS): it is simply still pending. This proves the
+  // clean-reclassification re-illuminates retro instead of blinding it — the
+  // gap the design-concept artifact handed off (qaTrace turn 8).
+  // -------------------------------------------------------------------------
+  test("handoff run: completed dispatch is drillable; in-flight slot stays pending (NOT run-handoff-backfilled) (#1903)", async () => {
+    const reflectionAnchors: string[] = [];
+    const deps = baseDeps({
+      readRun: async () =>
+        ({
+          ok: true,
+          run: { run_id: "run-handoff", status: "ended", term_reason: "handoff" },
+          turns: [
+            {
+              turn_n: 8,
+              actions: [], // print-mode session ended its turn with slots in flight
+              slots_snapshot: {
+                // Genuinely completed before the baton-pass: reap wrote a terminal record.
+                dev_orch: { skill: "hydra-dev", anchor: "issue-1340", task_id: "tid-completed" },
+                // Still in-flight at handoff: re-seeded into the successor run (#1352).
+                qa_orch: { skill: "hydra-qa", anchor: "PR#1341", task_id: "tid-inflight" },
+              },
+            },
+          ],
+        }) as any,
+      readCycleMetrics: async (cycleId: string) =>
+        cycleId === "tid-completed"
+          ? { abandonReason: "verification-failure", anchorReference: "issue-1340" }
+          : {},
+      readCycleHash: async (cycleId: string) =>
+        cycleId === "tid-completed" ? { status: "failed" } : {},
+      readAnchorReflections: async (anchor: string) => {
+        reflectionAnchors.push(anchor);
+        return { content: `## PRIOR ATTEMPTS for ${anchor}`, count: 1 };
+      },
+    });
+
+    const bundle = await assembleRetroBundle("run-handoff", deps);
+    assert.equal(bundle.dispatches.length, 2, "both occupied slots projected");
+
+    const dev = bundle.dispatches.find((d) => d.skill === "hydra-dev")!;
+    assert.equal(dev.cycleId, "tid-completed", "completed dispatch keeps its confirmed cycleId handle");
+    assert.equal(dev.flagged, true, "a completed failure on a handoff run is drillable — retro stays lit");
+    assert.equal(dev.undrillable, false);
+
+    const qa = bundle.dispatches.find((d) => d.skill === "hydra-qa")!;
+    assert.equal(qa.cycleId, "", "in-flight slot's unconfirmed candidate is dropped to ''");
+    assert.equal(
+      qa.abandonReason,
+      null,
+      "handoff is CLEAN (not in CRASH_TERM_REASONS) — an in-flight slot is NOT backfilled run-handoff; it is genuinely pending in the successor",
+    );
+    assert.equal(qa.flagged, false, "a pending in-flight slot is NOT flagged");
+    assert.equal(
+      qa.undrillable,
+      false,
+      "no failure signal + empty cycleId → pending, not undrillable (it drills in the successor)",
+    );
+
+    // The completed failure's transcript IS deep-read — retro is re-illuminated.
+    assert.deepEqual(reflectionAnchors, ["issue-1340"]);
+    assert.equal(bundle.reflections.length, 1);
+    assert.equal(
+      bundle.dispatches.filter((d) => d.flagged).length,
+      1,
+      "a handoff run flags its completed dispatches — cleanTerminationRate rises without blinding retro",
+    );
+  });
+
   test("interrupted run: a merged snapshot-only dispatch (task_id → confirmed) is drillable but not flagged (#1352)", async () => {
     // Q&A 7 of the design concept: a genuinely-completed dispatch that MERGED
     // is drillable (real cycleId) but the happy path needs no transcript drill,
