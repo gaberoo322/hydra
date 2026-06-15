@@ -18,6 +18,10 @@ import type { DesignConcept, DesignConceptInput } from "../src/design-concept.ts
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const dc = await import("../src/design-concept.ts");
+// The gate predicate (`gateCheck`/`isFresh`) and its freshness window
+// (`DESIGN_CONCEPT_MAX_AGE_MS`) were extracted to their domain home (issue
+// #1908); import gate-predicate symbols from there directly.
+const gate = await import("../src/design-concept-gate.ts");
 const dcSeam = await import("../src/redis/design-concept.ts");
 
 const TEST_NS = "hydra:design-concept:";
@@ -208,7 +212,7 @@ describe("design-concept Redis store + gate", () => {
 
   test("listDesignConcepts prunes stale (>7d) entries from the index", async () => {
     const now = Date.now();
-    const stale = now - dc.DESIGN_CONCEPT_MAX_AGE_MS - 60_000;
+    const stale = now - gate.DESIGN_CONCEPT_MAX_AGE_MS - 60_000;
     await dc.saveDesignConcept(
       buildComplete({ anchorRef: "test:stale" } as any),
       stale,
@@ -298,8 +302,8 @@ describe("design-concept Redis store + gate", () => {
     const now = 1_000_000_000_000;
     const fresh = { createdAt: now - 6 * 24 * 60 * 60 * 1000 } as DesignConcept;
     const stale = { createdAt: now - 8 * 24 * 60 * 60 * 1000 } as DesignConcept;
-    assert.equal(dc.isFresh(fresh, now), true);
-    assert.equal(dc.isFresh(stale, now), false);
+    assert.equal(gate.isFresh(fresh, now), true);
+    assert.equal(gate.isFresh(stale, now), false);
   });
 
   // -------------------------------------------------------------------------
@@ -311,7 +315,7 @@ describe("design-concept Redis store + gate", () => {
       buildComplete({ anchorRef: "test:gate-ok" } as any),
     );
     const approved = await dc.approveDesignConcept(saved.anchorRef, "auto-gate");
-    const verdict = dc.gateCheck(approved, Date.now());
+    const verdict = gate.gateCheck(approved, Date.now());
     assert.equal(verdict.ok, true, `reasons: ${verdict.reasons.join("; ")}`);
     assert.deepEqual(verdict.reasons, []);
   });
@@ -334,7 +338,7 @@ describe("design-concept Redis store + gate", () => {
   }
 
   test("gateCheck fails on non-empty glossaryGaps", () => {
-    const v = dc.gateCheck(
+    const v = gate.gateCheck(
       approvedFresh({ glossaryGaps: ["UnknownTerm"] }),
       Date.now(),
     );
@@ -343,13 +347,13 @@ describe("design-concept Redis store + gate", () => {
   });
 
   test("gateCheck fails on empty invariants", () => {
-    const v = dc.gateCheck(approvedFresh({ invariants: [] }), Date.now());
+    const v = gate.gateCheck(approvedFresh({ invariants: [] }), Date.now());
     assert.equal(v.ok, false);
     assert.ok(v.reasons.some((r) => r.includes("invariants")));
   });
 
   test("gateCheck fails on empty modulesTouched", () => {
-    const v = dc.gateCheck(approvedFresh({ modulesTouched: [] }), Date.now());
+    const v = gate.gateCheck(approvedFresh({ modulesTouched: [] }), Date.now());
     assert.equal(v.ok, false);
     assert.ok(v.reasons.some((r) => r.includes("modulesTouched")));
   });
@@ -357,7 +361,7 @@ describe("design-concept Redis store + gate", () => {
   test("gateCheck fails when 'breaking' impact lives on a tier-1 path", () => {
     // config/agents/ is Tier 1 per src/tier-classifier.ts — below the
     // tier-2 minimum the gate requires for a breaking change.
-    const v = dc.gateCheck(
+    const v = gate.gateCheck(
       approvedFresh({
         modulesTouched: [
           {
@@ -378,7 +382,7 @@ describe("design-concept Redis store + gate", () => {
 
   test("gateCheck PASSES tier check when 'breaking' impact is on a tier-2 path", () => {
     // .claude/skills/ is Tier 2 in TIER_2_PREFIXES.
-    const v = dc.gateCheck(
+    const v = gate.gateCheck(
       approvedFresh({
         modulesTouched: [
           {
@@ -395,7 +399,7 @@ describe("design-concept Redis store + gate", () => {
   });
 
   test("gateCheck fails on short qaTrace (<6 turns)", () => {
-    const v = dc.gateCheck(
+    const v = gate.gateCheck(
       approvedFresh({
         qaTrace: [
           { q: "1", a: "2" },
@@ -412,15 +416,15 @@ describe("design-concept Redis store + gate", () => {
     const now = Date.now();
     const stale: DesignConcept = {
       ...approvedFresh(),
-      createdAt: now - dc.DESIGN_CONCEPT_MAX_AGE_MS - 60_000,
+      createdAt: now - gate.DESIGN_CONCEPT_MAX_AGE_MS - 60_000,
     };
-    const v = dc.gateCheck(stale, now);
+    const v = gate.gateCheck(stale, now);
     assert.equal(v.ok, false);
     assert.ok(v.reasons.some((r) => r.includes("stale")));
   });
 
   test("gateCheck fails on draft status", () => {
-    const v = dc.gateCheck(
+    const v = gate.gateCheck(
       { ...approvedFresh(), status: "draft", approvedBy: "" } as DesignConcept,
       Date.now(),
     );

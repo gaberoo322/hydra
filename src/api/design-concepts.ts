@@ -28,11 +28,12 @@ import {
   getDesignConcept,
   listDesignConcepts,
   approveDesignConcept,
-  gateCheck,
   resolveDesignConceptForQa,
   computeGreenLight,
   type DesignConceptScope,
 } from "../design-concept.ts";
+// Gate predicate now lives in its domain home (issue #1908).
+import { gateCheck } from "../design-concept-gate.ts";
 import {
   appendExemptLogEntry,
   readRecentExemptLogEntries,
