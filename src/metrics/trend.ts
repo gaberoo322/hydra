@@ -12,27 +12,19 @@ import {
   getRecentMetricIds,
   getCycleMetrics,
 } from "../redis/cycle-metrics.ts";
+import { NUMERIC_FIELD_NAMES } from "./record.ts";
 
 /**
  * Numeric fields known to live on the cycle-metrics hash. Parsed back from
- * Redis strings at trend read time. Adding a new int-shaped field here is the
- * one-line change that makes it visible to every consumer.
+ * Redis strings at trend read time.
+ *
+ * Issue #1890: this list is no longer a hand-maintained copy — it is the same
+ * `NUMERIC_FIELD_NAMES` tuple the write side (`metrics/record.ts`) types
+ * `CycleMetricsInput`'s numeric keys against. Adding/renaming an int metric is
+ * a ONE-place edit in `record.ts` that surfaces here automatically, so the
+ * write schema and the read schema can no longer silently drift apart.
  */
-const NUMERIC_FIELDS = [
-  "tasksAttempted", "tasksVerified", "tasksMerged", "tasksFailed", "tasksAbandoned",
-  "noOpMerges", // issue #222: silent-rot guardrail counter
-  "driftPreFiltered", // issue #233: anchors rejected by pre-filter
-  "driftPreFilteredCost", // issue #233: estimated planner $ saved
-  "testsBefore", "testsAfter", "testsPassingBefore", "testsPassingAfter",
-  "filesChanged", "totalDurationMs", "groundingDurationMs", "verificationDurationMs",
-  "planningDurationMs", "executionDurationMs", "tokenCost",
-  "jitTestsGenerated", "jitTestsKept", "jitTestsCaughtBug",
-  "mutationKillRate", "mutationKilled", "mutationSurvived",
-  // Quality gate trend (issue #212)
-  "mutationsTested", "gateBlocked",
-  "fixerUsed", "fixerResolved", "scopeFilterCleaned",
-  "reflectionCount",
-];
+const NUMERIC_FIELDS = NUMERIC_FIELD_NAMES;
 
 /**
  * Issue #326: derive the categorical `reflectionMatchSource` from the raw
