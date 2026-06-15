@@ -24,40 +24,45 @@ import {
   getBuilderHealthScorecard,
   type BuilderHealthScorecard,
 } from "./aggregators/builder-health.ts";
-import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
+import {
+  NOTIFICATION_EVENT_TYPES as E,
+  type NotificationEventPayload,
+} from "./event-bus.ts";
 
 const MAX_DIGEST_LENGTH = 4000; // Telegram's ~4096 char limit with margin
 
 /**
- * The event vocabulary the digest grammar reads (issue #1835).
+ * The event vocabulary the digest grammar reads (issue #1835; shared
+ * source-of-truth derivation, issue #1915).
  *
  * `buildDigestMessage` is fed accumulated events (`PendingEvent` in
  * `digest.ts`, ultimately the loosely-typed `NotificationEvent` shapes from the
- * bus). This type names exactly the fields the grammar touches via `e.type`,
- * `e.timestamp`, and the `e.payload?.…` optional chains below — so a renamed
- * payload field (e.g. `task.finalStatus` instead of `task.finalState`) becomes
- * a compile error at the access site rather than a silent runtime miss.
+ * bus). The `payload` shape is DERIVED from the shared `NotificationEventPayload`
+ * vocabulary in `event-bus.ts` — this formatter `Pick`s exactly the fields the
+ * grammar touches via the `e.payload?.…` optional chains below — so a renamed
+ * payload field (e.g. `task.finalStatus` instead of `task.finalState`) is a
+ * one-file edit in the shared vocabulary that becomes a compile error here
+ * rather than a silent runtime miss.
  *
- * `payload` stays open (`Record<string, unknown> & {…}`) because the bus carries
- * the full event vocabulary; the named fields are the subset this grammar
- * narrows on. `type`/`timestamp` are required because the grammar reads them
- * unconditionally (`events[0].timestamp.split(…)`).
+ * `payload` stays open (`Record<string, unknown> & Pick<…>`) because the bus
+ * carries the full event vocabulary; the picked fields are the subset this
+ * grammar narrows on. `type`/`timestamp` are required because the grammar reads
+ * them unconditionally (`events[0].timestamp.split(…)`).
  */
 export interface DigestGrammarEvent {
   type: string;
   timestamp: string;
-  payload?: Record<string, unknown> & {
-    task?: { title?: string; finalState?: string };
-    commitSha?: string;
-    grounding?: {
-      before?: { passed?: number | string };
-      after?: { passed?: number | string };
-    };
-    opportunityCount?: number;
-    autoQueued?: number;
-    updatesApplied?: number;
-    regressedOutcomes?: unknown;
-  };
+  payload?: Record<string, unknown> &
+    Pick<
+      NotificationEventPayload,
+      | "task"
+      | "commitSha"
+      | "grounding"
+      | "opportunityCount"
+      | "autoQueued"
+      | "updatesApplied"
+      | "regressedOutcomes"
+    >;
 }
 
 export function buildDigestMessage(

@@ -19,103 +19,107 @@
  */
 
 import { getTargetCommitUrl } from "./target-config.ts";
-import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
+import {
+  NOTIFICATION_EVENT_TYPES as E,
+  type NotificationEventPayload,
+} from "./event-bus.ts";
 
 /**
- * The event vocabulary the notification grammar reads (issue #1857).
+ * The event vocabulary the notification grammar reads (issue #1857; shared
+ * source-of-truth derivation, issue #1915).
  *
  * `formatMessage` is fed loosely-typed `NOTIFICATION_EVENT_TYPES` events from
  * the bus (ultimately the same `NotificationEvent` shapes `notify.ts` and
- * `notification-consumer.ts` carry). This type names exactly the fields the
- * switch touches via `event.type` and the `event.payload?.…` paths below — so a
- * renamed payload field (e.g. `task.finalStatus` instead of `task.finalState`,
- * or `payload.cyclId` instead of `payload.cycleId`) becomes a compile error at
- * the access site rather than a silent runtime miss in the Telegram body.
+ * `notification-consumer.ts` carry). The `payload` shape is DERIVED from the
+ * shared `NotificationEventPayload` vocabulary in `event-bus.ts` — this
+ * formatter `Pick`s exactly the subset of fields its switch touches via
+ * `event.type` and the `event.payload?.…` paths below — so a renamed payload
+ * field (e.g. `task.finalStatus` instead of `task.finalState`, or
+ * `payload.cyclId` instead of `payload.cycleId`) is a one-file edit in the
+ * shared vocabulary that becomes a compile error here, rather than a silent
+ * runtime miss in the Telegram body.
  *
- * This mirrors `DigestGrammarEvent` in `digest-format.ts` verbatim (issue
- * #1835) — the sibling formatter that fixed the same class of gap:
+ * The shared vocabulary stays OPEN (`Record<string, unknown> & {…}`) at its
+ * source, and `Pick` preserves that index signature, so the bus's full event
+ * vocabulary still type-checks through; the picked fields are only the subset
+ * this grammar narrows on. A producer renaming a read field is caught; a
+ * producer adding an *unread* field is not constrained.
  *
- * - `payload` stays OPEN (`Record<string, unknown> & {…}`) because the bus
- *   carries the full event vocabulary; the named fields are only the subset
- *   this grammar narrows on. A producer renaming a read field is caught; a
- *   producer adding an *unread* field is not constrained.
  * - `type` is OPTIONAL because the formatter defaults it (`event.type ||
  *   "unknown"`) and the `default` arms are deliberately exercised with
  *   type-less events (`formatMessage({})`). Keeping it optional preserves
- *   assignment-compatibility for every existing caller — this is an
- *   interface-EXTEND (narrowing an implicit `any`), not a breaking change.
+ *   assignment-compatibility for every existing caller.
  * - `payload` is OPTIONAL because the formatter defaults it
  *   (`event.payload || {}`).
  *
- * The named field set below is the exhaustive read set of the switch — every
+ * The `Pick` list below is the exhaustive read set of the switch — every
  * top-level `payload.<x>` and nested `payload.task?.…` / `payload.grounding?.…`
  * / `payload.drift?.…` path an arm dereferences. On-wire output is unchanged;
- * this concentrates the payload contract, not the format.
+ * this concentrates the payload contract in the shared vocabulary, not the
+ * format.
  */
 export interface FormatMessageEvent {
   type?: string;
-  payload?: Record<string, unknown> & {
+  payload?: Record<string, unknown> & Pick<
+    NotificationEventPayload,
     // --- Cycle lifecycle ---
-    cycleId?: string;
-    task?: { finalState?: string; title?: string };
-    grounding?: {
-      before?: { passed?: number | string };
-      after?: { passed?: number | string };
-    };
-    commitSha?: string;
-    filesChanged?: unknown[];
-    rolledBack?: boolean;
-    rollbackRisk?: string;
-    durationMs?: number;
-    total?: number | string;
-    completed?: number | string;
-    failed?: number;
-    elapsed?: string;
-    inProgress?: number;
-    error?: string;
-    ttl?: string;
-    tasksTimedOut?: number;
-    message?: string;
+    | "cycleId"
+    | "task"
+    | "grounding"
+    | "commitSha"
+    | "filesChanged"
+    | "rolledBack"
+    | "rollbackRisk"
+    | "durationMs"
+    | "total"
+    | "completed"
+    | "failed"
+    | "elapsed"
+    | "inProgress"
+    | "error"
+    | "ttl"
+    | "tasksTimedOut"
+    | "message"
     // --- Task events ---
-    taskId?: string;
-    title?: string;
-    reason?: string;
-    failedSteps?: string[];
-    drift?: { reason?: string };
+    | "taskId"
+    | "title"
+    | "reason"
+    | "failedSteps"
+    | "drift"
     // --- Rollback ---
-    revertedCommit?: string;
-    testsBefore?: number | string;
-    testsAfter?: number | string;
+    | "revertedCommit"
+    | "testsBefore"
+    | "testsAfter"
     // --- Scheduler ---
-    cyclesRun?: number;
-    suggestion?: string;
-    recentTitles?: string[];
+    | "cyclesRun"
+    | "suggestion"
+    | "recentTitles"
     // --- Research ---
-    projectName?: string;
-    opportunityCount?: number;
-    autoQueued?: number;
-    duration?: string;
-    cost?: string;
-    topOpportunities?: string[];
-    summary?: string;
-    researchCyclesReviewed?: number;
-    executionCyclesReviewed?: number;
-    updatesApplied?: number;
-    calibration?: string;
+    | "projectName"
+    | "opportunityCount"
+    | "autoQueued"
+    | "duration"
+    | "cost"
+    | "topOpportunities"
+    | "summary"
+    | "researchCyclesReviewed"
+    | "executionCyclesReviewed"
+    | "updatesApplied"
+    | "calibration"
     // --- DLQ ---
-    originalStream?: string;
-    eventType?: string;
-    deliveryCount?: number;
+    | "originalStream"
+    | "eventType"
+    | "deliveryCount"
     // --- Review pickup ---
-    count?: number;
-    firstTitle?: string;
-    firstUrl?: string;
+    | "count"
+    | "firstTitle"
+    | "firstUrl"
     // --- Operator blocked ---
-    unblockCommands?: string[];
-    blockedReason?: string;
-    reescalation?: boolean;
-    blockedDays?: number | string;
-  };
+    | "unblockCommands"
+    | "blockedReason"
+    | "reescalation"
+    | "blockedDays"
+  >;
 }
 
 /**

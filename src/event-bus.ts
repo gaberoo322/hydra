@@ -129,6 +129,101 @@ const NOTIFICATION_EVENT_TYPES = {
 type NotificationEventType =
   (typeof NOTIFICATION_EVENT_TYPES)[keyof typeof NOTIFICATION_EVENT_TYPES];
 
+// ---------------------------------------------------------------------------
+// Notification event PAYLOAD vocabulary — the single source of truth for the
+// payload-field shapes that flow on the NOTIFICATIONS stream (issue #1915).
+//
+// `NOTIFICATION_EVENT_TYPES` above owns the event-type *strings*; this type
+// owns the *payload fields* those events carry. The three pure formatters
+// (`notify-format.ts` formatMessage, `digest-format.ts` buildDigestMessage,
+// `notification-consumer.ts` formatAlertMessage) each read an overlapping
+// subset of these fields. Issues #1857 / #1835 / #1889 each independently
+// declared a per-formatter typed interface to convert a runtime field-miss
+// into a compile error — the same fix applied three times to the same field
+// vocabulary. This type concentrates that vocabulary in one place: each
+// formatter now derives its event interface by `Pick`-ing the subset of
+// fields it reads from `NotificationEventPayload`, so a renamed payload field
+// is a one-file edit here and the formatters update without a three-file hunt.
+//
+// `payload` stays OPEN (`Record<string, unknown> & {…}`) because the bus
+// carries the full event vocabulary; the named fields are only the union of
+// the subsets the formatters narrow on. A producer renaming a READ field is
+// caught at every formatter that `Pick`s it; a producer adding an *unread*
+// field is not constrained. Every field is optional — each formatter gates on
+// the event type before dereferencing — so a per-formatter `Pick` over these
+// stays assignable from the loose bus-fed shape (preserving the
+// `NotificationEvent → AlertGrammarEvent` assignability the consumer relies on).
+//
+// On-wire payloads are UNCHANGED — this is a type-locality pass over the
+// existing field vocabulary, not a behaviour change.
+// ---------------------------------------------------------------------------
+type NotificationEventPayload = Record<string, unknown> & {
+  // --- Cycle lifecycle ---
+  cycleId?: string;
+  task?: { finalState?: string; title?: string };
+  grounding?: {
+    before?: { passed?: number | string };
+    after?: { passed?: number | string };
+  };
+  commitSha?: string;
+  filesChanged?: unknown[];
+  rolledBack?: boolean;
+  rollbackRisk?: string;
+  durationMs?: number;
+  total?: number | string;
+  completed?: number | string;
+  failed?: number;
+  elapsed?: string;
+  inProgress?: number;
+  error?: string;
+  ttl?: string;
+  tasksTimedOut?: number;
+  message?: string;
+  // --- Task events ---
+  taskId?: string;
+  taskTitle?: string;
+  title?: string;
+  reason?: string;
+  failedSteps?: string[];
+  drift?: { reason?: string };
+  // --- Rollback ---
+  revertedCommit?: string;
+  testsBefore?: number | string;
+  testsAfter?: number | string;
+  regressedOutcomes?: unknown;
+  // --- Scheduler ---
+  cyclesRun?: number;
+  suggestion?: string;
+  recentTitles?: string[];
+  consumer?: string;
+  restarts?: number;
+  // --- Research / Architect ---
+  projectName?: string;
+  opportunityCount?: number;
+  autoQueued?: number;
+  duration?: string;
+  cost?: string;
+  topOpportunities?: string[];
+  summary?: string;
+  researchCyclesReviewed?: number;
+  executionCyclesReviewed?: number;
+  updatesApplied?: number;
+  calibration?: string;
+  // --- DLQ ---
+  originalStream?: string;
+  eventType?: string;
+  deliveryCount?: number;
+  // --- Review pickup ---
+  count?: number;
+  firstTitle?: string;
+  firstUrl?: string;
+  // --- Operator blocked ---
+  unblockCommands?: string[];
+  blockedReason?: string;
+  reescalation?: boolean;
+  blockedDays?: number | string;
+};
+
 /**
  * What a producer passes to `publish()`. The bus wraps this into a fixed
  * `EventEnvelope` (below). `payload` is serialised to JSON on the wire.
@@ -617,3 +712,4 @@ class EventBus {
 }
 
 export { EventBus, STREAMS, RETAINED_STREAMS, CONSUMER_GROUPS, NOTIFICATION_EVENT_TYPES };
+export type { NotificationEventType, NotificationEventPayload };
