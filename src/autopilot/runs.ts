@@ -869,7 +869,7 @@ const STARVATION_MIN_ENDED_RUNS = 5;
  * `=== 0` behavior) while 1/5 = 0.20 clears; a sustained sub-15% rate at any
  * larger sample now alarms instead of being silenced by a single clean run.
  */
-export const STARVATION_CLEAN_RATE_FLOOR = 0.15;
+const STARVATION_CLEAN_RATE_FLOOR = 0.15;
 
 export function summarizeTerminationHealth(
   runs: Array<Record<string, unknown>>,
