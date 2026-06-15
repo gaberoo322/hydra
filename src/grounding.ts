@@ -4,13 +4,88 @@ import { CMD_TIMEOUT, runCmd } from "./grounding-cmd.ts";
 import { parseTestCounts, parseFailingTests } from "./grounding-parser.ts";
 
 /**
+ * Options accepted by {@link groundProject}.
+ *
+ * Names the (small) option vocabulary the function actually consumes, so a
+ * caller adding/renaming an option gets compile-time feedback instead of a
+ * typo silently falling through to the default (`testCmdd` → `opts.testCmd`
+ * miss → reverts to `"npm"` with no error).
+ */
+export interface GroundingOpts {
+  /** Test command to run. Default: `"npm"`. */
+  testCmd?: string;
+  /** Arguments passed to {@link GroundingOpts.testCmd}. Default: `["test"]`. */
+  testArgs?: string[];
+  /**
+   * Paths to focus the inspection on. Currently documented but UNREAD by the
+   * implementation — declared so a future caller is not misled into thinking
+   * it already does something.
+   */
+  focusPaths?: string[];
+}
+
+/** Classification of how the test output was parsed. See issue #456. */
+export type TestParseStatus = "ok" | "unrecognised" | "errored" | "not-run";
+
+/** Structured result of running the test command. */
+export interface GroundingTestReport {
+  ran: boolean;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  passed: number;
+  failed: number;
+  total: number;
+  parseStatus: TestParseStatus;
+  recognised: boolean;
+  durationMs: number;
+}
+
+/** Structured result of running the typecheck command. */
+export interface GroundingTypecheckReport {
+  ran: boolean;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}
+
+/**
+ * Structured evidence about the project produced by {@link groundProject}.
+ *
+ * A 1:1 transcription of the object the function returns — every field name
+ * and runtime type is preserved so the `GET /grounding/latest` wire-format is
+ * byte-identical.
+ */
+export interface GroundingReport {
+  branch: string;
+  headCommit: string;
+  recentCommits: string[];
+  dirtyFiles: string[];
+  fileTree: string;
+  fileCount: number;
+  testReport: GroundingTestReport;
+  typecheckReport: GroundingTypecheckReport;
+  failingTests: ReturnType<typeof parseFailingTests>;
+  recentDiffs: string;
+  todoMarkers: string[];
+  readme: string;
+  packageJson: string;
+  timestamp: number;
+  groundingDurationMs: number;
+}
+
+/**
  * Deep repo inspection. Returns structured evidence about the project.
  *
- * @param {string} projectDir - Path to the target project
- * @param {object} opts - { focusPaths?: string[], testCmd?: string }
- * @returns {GroundingReport}
+ * @param projectDir - Path to the target project
+ * @param opts - See {@link GroundingOpts}
+ * @returns A {@link GroundingReport}
  */
-export async function groundProject(projectDir: string, opts: Record<string, any> = {}) {
+export async function groundProject(
+  projectDir: string,
+  opts: GroundingOpts = {},
+): Promise<GroundingReport> {
   const timestamp = Date.now();
   const testCmd = opts.testCmd || "npm";
   const testArgs = opts.testArgs || ["test"];
