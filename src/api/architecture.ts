@@ -5,6 +5,7 @@ import {
   scanArchitecture,
   type ArchitectureGraph,
 } from "../aggregators/architecture-graph.ts";
+import type { PingableBus } from "./event-bus-types.ts";
 
 const CACHE_TTL = 60_000;
 
@@ -25,7 +26,7 @@ export interface ArchitectureRouterDeps {
 }
 
 export function createArchitectureRouter(
-  eventBus: any,
+  eventBus: PingableBus,
   deps: ArchitectureRouterDeps = {},
 ) {
   const router = Router();

@@ -2,13 +2,14 @@ import { Router } from "express";
 import { STREAMS, streamKey } from "../event-bus.ts";
 import { countQuerySchema } from "../schemas/common.ts";
 import { aggregatorRouteNoQuery } from "./route-helpers.ts";
+import type { EventReaderBus } from "./event-bus-types.ts";
 
 /**
  * Event bus stream routes.
  *
  * Extracted from api/misc.ts as part of issue #268.
  */
-export function createEventsRouter(eventBus: any) {
+export function createEventsRouter(eventBus: EventReaderBus) {
   const router = Router();
 
   // GET /events/:stream — Read recent events from a stream

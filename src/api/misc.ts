@@ -32,7 +32,7 @@ const TierQuerySchema = z.object({
  * New routes should prefer a domain-specific sub-router. Only land here if
  * the route is genuinely orphan-operational.
  */
-export function createMiscRouter(_eventBus: any) {
+export function createMiscRouter() {
   const router = Router();
 
   const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");

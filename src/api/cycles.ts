@@ -10,7 +10,7 @@ import {
 import { countQuerySchema } from "../schemas/common.ts";
 import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
-export function createCyclesRouter(_eventBus: any) {
+export function createCyclesRouter() {
   const router = Router();
 
   // GET /cycle/status — Current cycle state

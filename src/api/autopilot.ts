@@ -64,6 +64,7 @@ import {
   LOG_TAIL_MAX,
 } from "../autopilot/log.ts";
 import { aggregatorRoute } from "./route-helpers.ts";
+import type { PublishableBus } from "./event-bus-types.ts";
 
 /**
  * Re-exported for `src/api/agents.ts`, which consumes `fetchTurnsWithJoins`
@@ -102,7 +103,7 @@ const RunsLimitQuerySchema = z.object({
  *   without it (tests construct it bare) — a missing bus degrades to a no-op
  *   publish, never a throw.
  */
-export function createAutopilotRouter(eventBus?: any) {
+export function createAutopilotRouter(eventBus?: PublishableBus) {
   const router = Router();
 
   // Best-effort bus publish — never throws into a route handler. AC#5 wants a

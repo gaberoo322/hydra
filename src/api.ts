@@ -41,10 +41,16 @@ import { createOutcomesPageRouter } from "./api/outcomes-page.ts";
 import { createExplorePageRouter } from "./api/explore-page.ts";
 import { createDispatchesRouter } from "./api/dispatches.ts";
 import { createBuilderHealthRouter } from "./api/builder-health.ts";
+import type { EventBus } from "./event-bus.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 
-function createApi(eventBus) {
+// `eventBus` is the concrete in-process bus (src/event-bus.ts), constructed in
+// src/index.ts. It structurally satisfies every router seam in
+// src/api/event-bus-types.ts (PingableBus / PublishableBus / EventReaderBus),
+// so the typed mount points below need no cast. The four routers that never
+// touch the bus (research, cycles, misc, alerts) no longer take the parameter.
+function createApi(eventBus: EventBus) {
   const app = express();
   app.use(express.json());
 
@@ -63,14 +69,14 @@ function createApi(eventBus) {
   app.use("/api", api);
 
   // Mount domain sub-routers
-  api.use(createCyclesRouter(eventBus));
+  api.use(createCyclesRouter());
   api.use(createQueueRouter());
   api.use(createTasksRouter());
   api.use(createHealthRouter(eventBus));
   // Operator-action-items surface (issue #1322) — extracted out of the health
   // router; mounts prefix-less so /api/recommendations stays byte-identical.
   api.use(createRecommendationsRouter());
-  api.use(createResearchRouter(eventBus));
+  api.use(createResearchRouter());
   api.use(createBacklogRouter());
   api.use(createDesignConceptsRouter());
   api.use(createSchedulerRouter(eventBus));
@@ -83,7 +89,7 @@ function createApi(eventBus) {
   api.use(createGoalsRouter());
   api.use(createEventsRouter(eventBus));
   api.use(createConfigRouter());
-  api.use(createAlertsRouter(eventBus));
+  api.use(createAlertsRouter());
   api.use(createReflectionsRouter());
   api.use(createMergeLockRouter());
   api.use(createCapacityRouter());
@@ -119,7 +125,7 @@ function createApi(eventBus) {
   api.use(createOutcomesPageRouter());
   // Explore tabbed hub — slice 5 (issue #620).
   api.use(createExplorePageRouter());
-  api.use(createMiscRouter(eventBus));
+  api.use(createMiscRouter());
   // /api/checklist sub-router retired in slice 6 of the dashboard
   // simplification (issue #621). Only the deleted Checklist page consumed it.
   api.use(createOutcomesRouter());
