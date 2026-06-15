@@ -62,7 +62,7 @@ import {
   incrSchedulerCyclesMerged,
   incrSchedulerCyclesFailed,
 } from "../redis/scheduler.ts";
-import { recordCycleMetrics } from "../metrics/record.ts";
+import { recordCycleMetrics, type CycleMetricsInput } from "../metrics/record.ts";
 import { recordAnchorReflection } from "../reflections/reflections.ts";
 import type {
   CrashDetail,
@@ -325,7 +325,7 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
     }, CYCLE_TTL_SECONDS);
     await addCycleToIndex(cycleId, Date.now());
 
-    const metrics: Record<string, any> = {
+    const metrics: CycleMetricsInput = {
       source,
       anchorType: body.anchorType,
       anchorReference: body.anchorReference,
