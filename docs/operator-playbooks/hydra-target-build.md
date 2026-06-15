@@ -237,7 +237,16 @@ EOF
 
 CI's `scope-check` gate (`.github/workflows/ci.yml` in the orchestrator repo, mirrored in the target repo if present) reads these sections from the PR body. Skipping this step doesn't block the build today (no hard requirement on PR body shape for target-repo PRs), but it's how the orchestrator learns the subagent's intended blast radius — and it's the contract reviewers + `hydra-qa` use to spot scope creep.
 
-### 3.6. Inject per-anchor Reflections (issue #841)
+### 3.6. Inject per-anchor Reflections (issue #841) + deposit reflection-source telemetry (issue #1136/#1912)
+
+This step has TWO mandatory halves: (a) fetch + weave the reflection narrative,
+and (b) deposit the reflection-source telemetry file. Do BOTH every build. Half
+(b) — the "Reflection-source telemetry deposit" recipe lower in this section —
+is NOT optional reference prose: skipping it is the #1912 regression where
+`reflectionMatchSource` read `'none'` on 100% of cycles because no
+`hydra-refl-sources-<task_id>` file ever landed for reap.py to read. Always run
+the deposit block even when zero reflections were served (an empty result writes
+no file, which reap.py correctly buckets to `none`).
 
 A prior **failed** attempt on the same anchor (or, post-#326, a different
 anchor that touched the same files) leaves a per-anchor **Reflection** —
@@ -270,8 +279,13 @@ fi
 # a miss). Never fail the build over a reflections miss.
 ```
 
-**Reflection-source telemetry deposit (issue #1136 — at the SAME planning-time
-step):** so the `reflectionMatchSource` cycle metric reflects what was actually
+**Reflection-source telemetry deposit (issue #1136 / #1912 — MANDATORY, at the
+SAME planning-time step — run this every build, NOT optional reference prose):**
+you MUST run the recipe below on every build, right after the reflection fetch
+above and before handing the plan to the executor role. Omitting it is the exact
+#1912 regression where `reflectionMatchSource` read `'none'` on 100% of cycles
+because no `hydra-refl-sources-<task_id>` file ever landed for reap.py to read.
+So the `reflectionMatchSource` cycle metric reflects what was actually
 served (instead of reading `'none'` on every cycle), MAP the served block
 sources to the bucket tokens `deriveReflectionMatchSource` matches and DEPOSIT
 the comma-separated string to a task-scoped file. reap.py reads that file on its

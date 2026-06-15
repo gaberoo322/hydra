@@ -141,6 +141,7 @@ The child prompt MUST include the worktree-guard preamble (see below) AND the sc
 2. Reads CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs
 3. Extracts the `## Files in scope` + `## Files out of scope` lists from the issue body
 4. **Fetches per-anchor Reflections via the live API (see "Reflection injection — live API" below)** and, if any are returned, weaves the narrative into its implementation plan. Never skip — a retry of a prior-failure anchor depends on this.
+4a. **MANDATORY — deposits the reflection-source telemetry file (issue #1136/#1912).** Immediately after the step-4 fetch, run the "Reflection-source telemetry deposit" recipe in the "Reflection injection — live API" section below — it writes `${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>` so `reap.py` can stamp the `reflectionMatchSource` cycle metric. This is NOT optional and NOT conditional on whether reflections were served: ALWAYS run the deposit block (an empty result writes no file, which `reap.py` correctly buckets to `none`). Skipping it is the #1912 failure mode where the metric read `'none'` on 100% of cycles. The deposit is best-effort on I/O error (never blocks work) but the step itself is mandatory.
 5. Greps/reads the source for context
 6. Implements the issue — touching out-of-scope files only with a `scope-justification:` block in the PR body
 7. **Declares glossary/ADR impact** — per the `docs/agents/domain.md` WRITE contract, add a `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved or decision made (a `## Glossary delta` in the issue or referenced ADR names it). Do **not** edit `CONTEXT.md` in this code PR — the delta lands in a **separate `ubiquitous-language`-labelled PR**.
@@ -204,8 +205,13 @@ fi
 # on a miss). Never fail the dispatch over a reflections miss.
 ```
 
-**Reflection-source telemetry deposit (issue #1136 — at the SAME planning-time
-step):** so the `reflectionMatchSource` cycle metric reflects what was actually
+**Reflection-source telemetry deposit (issue #1136 / #1912 — MANDATORY, at the
+SAME planning-time step — this is child-step 4a above, NOT optional reference
+prose):** you MUST run the recipe below on every dispatch, right after the
+step-4 reflection fetch, before you start writing code. Omitting it is the
+exact #1912 regression where `reflectionMatchSource` read `'none'` on 100% of
+cycles because no `hydra-refl-sources-<task_id>` file ever landed for reap.py to
+read. So the `reflectionMatchSource` cycle metric reflects what was actually
 served (instead of reading `'none'` on every cycle), MAP the served block
 sources to the bucket tokens `deriveReflectionMatchSource` matches and DEPOSIT
 the comma-separated string to a task-scoped file. reap.py reads that file on its
