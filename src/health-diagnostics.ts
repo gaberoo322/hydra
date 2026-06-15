@@ -299,7 +299,7 @@ export interface HealthAssessment {
  * loosely typed. Each trend row's numeric fields arrive as strings (Redis hash
  * values) — parseProbes coerces with parseInt — so they're typed string|number.
  */
-export interface ProbeMetricsInput {
+interface ProbeMetricsInput {
   trend?: Array<{
     tasksMerged?: string | number;
     tasksFailed?: string | number;
