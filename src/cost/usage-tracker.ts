@@ -127,13 +127,10 @@ import {
   cacheHitRatio,
   projectResetWindow,
   parseObservedResetMs,
-  parseSessionLimitReset,
 } from "./token-math.ts";
 import type {
   TokenBreakdown,
   ModelFamily,
-  ParsedUsageLine,
-  ResetWindow,
 } from "./token-math.ts";
 // Env-config readers + their DEFAULT_* constants live in the pure leaf
 // `./config.ts` (issue #1896). The scan/snapshot logic below consumes them;
