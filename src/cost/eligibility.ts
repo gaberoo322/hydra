@@ -17,17 +17,26 @@
  *     session-limit hard-block ({@link overlayPauseEligibility} /
  *     {@link overlaySessionBlockEligibility}).
  *
- * Import direction is strictly one-way: this module imports only the snapshot
- * TYPES from `usage-tracker.ts` (type-only); `usage-tracker.ts` imports NOTHING
- * from here. The IO/snapshot owner (the JSONL walk, OAuth precedence, weekly
- * Reset-Anchor math, quota-weight accounting, and the `emergencyStop` /
- * `weeklyEmergencyStop` booleans this fold reads) stays in `usage-tracker.ts`;
- * this fold only READS the already-computed snapshot. Everything outside
+ * Import direction is strictly one-way w.r.t. the JSONL-scan machinery: this
+ * module imports only the snapshot TYPES from `usage-tracker.ts` (type-only);
+ * `usage-tracker.ts` imports NOTHING from here. The IO/snapshot owner (the
+ * JSONL walk, OAuth precedence, weekly Reset-Anchor math, quota-weight
+ * accounting, and the `emergencyStop` / `weeklyEmergencyStop` booleans this
+ * fold reads) stays in `usage-tracker.ts`; this fold only READS the
+ * already-computed snapshot. The Pacing-Ceiling env READER it consumes
+ * ({@link getWeeklyPaceCeiling}) now lives in the pure-leaf `./config.ts`
+ * (issue #1896) — importing a VALUE from that stateless, IO-free leaf does not
+ * reintroduce the coupling the one-way rule guards against (config.ts pulls in
+ * no scan/snapshot machinery and imports nothing back). Everything outside
  * `src/cost/` keeps importing via `src/cost/index.ts`, which re-exports every
  * symbol below at the same name — no external import line changes.
  */
 
 import type { UsageSnapshot } from "./usage-tracker.ts";
+// The **Pacing Ceiling** env reader moved to the pure-leaf config module
+// (issue #1896); we keep the Pacing-Curve math here and read the ceiling
+// fraction from there.
+import { getWeeklyPaceCeiling } from "./config.ts";
 
 /**
  * Length of the fixed weekly window in ms. Duplicated as a private const here
@@ -37,13 +46,6 @@ import type { UsageSnapshot } from "./usage-tracker.ts";
  * tracker keeps its own copy for the trailing-7d cutoff + Reset-Anchor math.
  */
 const WINDOW_7D_MS = 7 * 86_400_000;
-
-/**
- * Default **Pacing Ceiling** (issue #857, ADR-0021): the sub-100% fraction of
- * the weekly quota the **Pacing Curve** climbs to by the next **Weekly Reset
- * Anchor**. The ~8% gap below 1.0 is the **Operator Reserve** (CONTEXT.md).
- */
-export const DEFAULT_WEEKLY_PACE_CEILING = 0.92;
 
 /**
  * Tolerance band (in percentage points of weekly quota) around the **Pacing
@@ -68,29 +70,6 @@ export const PACE_STATE_TOLERANCE_PERCENT = 2;
  * This field is ADDITIVE and does NOT yet gate dispatch (that is #858).
  */
 type PaceState = "behind" | "on" | "ahead";
-
-/**
- * The operator-tunable **Pacing Ceiling** as a fraction in (0, 1], read from
- * `HYDRA_USAGE_WEEKLY_PACE_CEILING`. Unset/empty/unparseable/out-of-range
- * falls back to {@link DEFAULT_WEEKLY_PACE_CEILING} (a non-empty-but-bad value
- * is logged, fail-loud, since it signals a mis-configured env var). Values
- * above 1.0 are clamped to 1.0; values <= 0 fall back to the default. Pure +
- * env-only so the curve math stays unit-testable. (issue #857)
- */
-export function getWeeklyPaceCeiling(): number {
-  const raw = process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING;
-  if (raw === undefined || raw === "") return DEFAULT_WEEKLY_PACE_CEILING;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.error(
-      `[usage-tracker] HYDRA_USAGE_WEEKLY_PACE_CEILING is set but not a finite number in (0, 1] (${JSON.stringify(
-        raw,
-      )}); falling back to default ${DEFAULT_WEEKLY_PACE_CEILING}`,
-    );
-    return DEFAULT_WEEKLY_PACE_CEILING;
-  }
-  return Math.min(parsed, 1);
-}
 
 /**
  * Autopilot classes the orchestrator sheds when the **Subscription Usage
