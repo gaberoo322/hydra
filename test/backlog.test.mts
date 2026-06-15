@@ -621,4 +621,73 @@ describe("backlog state machine", () => {
       `the logged error must identify the claim-path parse failure (got: ${logged})`,
     );
   });
+
+  // --- moveItemToLane blocked-reason schedulability guard (issue #1920) ---
+
+  test("moveItemToLane refuses blocked transition when no blockedReason exists", async (t) => {
+    requireRedis(t);
+    const { id } = await admin.addToBacklog({ title: "Unexplained block 1920", category: "test" });
+
+    const result = await admin.moveItemToLane(id, "blocked");
+
+    assert.equal(result.ok, false, "a reasonless block move must be refused, not silently applied");
+    assert.equal(result.error, "missing-blocked-reason");
+
+    // The item must NOT have moved to the blocked lane.
+    const lanes = await admin.loadBacklog();
+    assert.ok(
+      !lanes.blocked.some((i: any) => i.title === "Unexplained block 1920"),
+      "the unschedulable item must stay out of the blocked lane",
+    );
+    assert.ok(
+      lanes.backlog.some((i: any) => i.title === "Unexplained block 1920"),
+      "the item must remain in its original lane",
+    );
+  });
+
+  test("moveItemToLane accepts a blocked transition when a reason is supplied via opts", async (t) => {
+    requireRedis(t);
+    const { id } = await admin.addToBacklog({ title: "Explained block 1920", category: "test" });
+
+    const result = await admin.moveItemToLane(id, "blocked", { reason: "waiting on operator key" });
+
+    assert.equal(result.ok, true);
+    const lanes = await admin.loadBacklog();
+    const blocked = lanes.blocked.find((i: any) => i.title === "Explained block 1920");
+    assert.ok(blocked, "an explained item must land in the blocked lane");
+    assert.equal(
+      blocked.meta?.blockedReason,
+      "waiting on operator key",
+      "the supplied reason must be stamped on meta.blockedReason for downstream actionability",
+    );
+  });
+
+  test("moveItemToLane accepts a blocked transition when the item already carries a blockedReason", async (t) => {
+    requireRedis(t);
+    // blockByTitle already stamps meta.blockedReason; once blocked, a later
+    // re-block (e.g. dashboard drag) must not be refused for missing reason.
+    await admin.addToBacklog({ title: "Pre-blocked 1920", category: "test" });
+    await admin.blockByTitle("Pre-blocked 1920", "original reason");
+    let lanes = await admin.loadBacklog();
+    const blockedId = lanes.blocked.find((i: any) => i.title === "Pre-blocked 1920").id;
+
+    // Move out and back without a reason — the pre-existing reason satisfies the guard.
+    await admin.moveItemToLane(blockedId, "queued");
+    const result = await admin.moveItemToLane(blockedId, "blocked");
+
+    assert.equal(result.ok, true, "an item that already has a blockedReason may re-enter blocked");
+    lanes = await admin.loadBacklog();
+    assert.ok(lanes.blocked.some((i: any) => i.id === blockedId));
+  });
+
+  test("moveItemToLane blocked-reason guard does not affect non-blocked transitions", async (t) => {
+    requireRedis(t);
+    const { id } = await admin.addToBacklog({ title: "Plain move 1920", category: "test" });
+
+    // Moving to a non-blocked lane never requires a reason.
+    const result = await admin.moveItemToLane(id, "queued");
+    assert.equal(result.ok, true);
+    const lanes = await admin.loadBacklog();
+    assert.ok(lanes.queued.some((i: any) => i.title === "Plain move 1920"));
+  });
 });

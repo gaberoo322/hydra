@@ -174,11 +174,23 @@ export async function returnToBacklog(title: string, reason: string) {
 
 /**
  * Move an item between lanes by ID (for dashboard drag-and-drop).
+ *
+ * Schedulability invariant (issue #1920): a kanban item may only enter the
+ * `blocked` lane if it carries a non-empty `meta.blockedReason` — either
+ * pre-existing on the item or supplied via `opts.reason` on this move. An
+ * unexplained blocked item is unschedulable and unactionable: the
+ * housekeeping unblock-command generator, the queue/notification surfaces,
+ * and the recently-unblocked anchor detector all key off `meta.blockedReason`
+ * and degrade to "unknown" / "no reason" without it. Guarding here keeps the
+ * invariant on the single id-based lane-mutation boundary; per the
+ * CLAUDE.md backlog-lane-mutations rule the guard returns a
+ * `{ ok: false, error: "missing-blocked-reason" }` result object and never
+ * throws. Non-blocked transitions are entirely unaffected.
  */
 export async function moveItemToLane(
   itemId: any,
   targetLane: string,
-  opts: { claimedBy?: string | null } = {},
+  opts: { claimedBy?: string | null; reason?: string | null } = {},
 ) {
   if (!LANES.includes(targetLane)) return { ok: false, error: `Invalid lane: ${targetLane}` };
   const item = await getItem(itemId);
@@ -191,8 +203,28 @@ export async function moveItemToLane(
     }
   }
 
+  // Schedulability guard: a blocked item must be explained (issue #1920).
+  const reason = typeof opts.reason === "string" ? opts.reason.trim() : "";
+  if (targetLane === "blocked") {
+    const existingReason = typeof item.meta?.blockedReason === "string"
+      ? item.meta.blockedReason.trim()
+      : "";
+    if (!reason && !existingReason) {
+      return { ok: false, error: "missing-blocked-reason" };
+    }
+  }
+
   for (const lane of LANES) {
     await removeFromBacklogLane(lane, itemId);
+  }
+
+  // Stamp the blocked reason so the item is operator-actionable downstream.
+  if (targetLane === "blocked" && reason) {
+    item.meta = {
+      ...item.meta,
+      blockedAt: new Date().toISOString().split("T")[0],
+      blockedReason: reason,
+    };
   }
 
   applyLaneTransition(item, targetLane, { claimedBy: opts.claimedBy ?? null });
