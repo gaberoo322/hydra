@@ -1,7 +1,13 @@
 import { Router } from "express";
 import { start as startScheduler, stop as stopScheduler, getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
+import type { PingableBus } from "./event-bus-types.ts";
 
-export function createSchedulerRouter(eventBus: any) {
+// The scheduler router only forwards the bus to `heartbeat.start()` (whose
+// `eventBus` param is still implicit-any); it never publishes itself. The seam
+// is therefore sized to what its tests construct — `{ publisher: redis }` —
+// i.e. PingableBus. Typing the deeper `start()` consumer is an out-of-scope
+// follow-up (issue #1897 design-concept: deferred src/scheduler/ seams).
+export function createSchedulerRouter(eventBus: PingableBus) {
   const router = Router();
 
   // POST /scheduler/start — Start automatic cycle scheduling

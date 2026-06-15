@@ -39,6 +39,7 @@ import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-reque
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
 import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, parseRedisInfoSnapshot, OV_SEARCH_PROBE_TIMEOUT_MS, type ProbeInputs } from "../health-diagnostics.ts";
+import type { PingableBus } from "./event-bus-types.ts";
 
 // ---- assembleProbeInputs — maps the positional settled array to named ProbeInputs --
 //
@@ -201,7 +202,7 @@ async function getDeployedSha(): Promise<string | null> {
   return sha;
 }
 
-export function createHealthRouter(eventBus: any) {
+export function createHealthRouter(eventBus: PingableBus) {
   const router = Router();
 
   // GET /health — Basic health check

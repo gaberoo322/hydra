@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { runHousekeeping } from "../scheduler/housekeeping.ts";
+import type { PublishableBus } from "./event-bus-types.ts";
 
 /**
  * Maintenance sub-router (issue #723 — scheduler fold PR-3/4).
@@ -14,7 +15,7 @@ import { runHousekeeping } from "../scheduler/housekeeping.ts";
  * own internal time-guard, so a second immediate call skips the guarded
  * chores. The `{ ran, skipped }` summary makes that observable.
  */
-export function createMaintenanceRouter(eventBus: any) {
+export function createMaintenanceRouter(eventBus: PublishableBus) {
   const router = Router();
 
   // POST /maintenance/housekeeping — run the housekeeping chores.

@@ -17,7 +17,7 @@ import { aggregatorRouteNoQuery } from "./route-helpers.ts";
  * list (`hydra:alerts`); Sentry webhook posts both queue an alert and enqueue
  * a work item.
  */
-export function createAlertsRouter(_eventBus: any) {
+export function createAlertsRouter() {
   const router = Router();
 
   const ALERTS_MAX = 100;

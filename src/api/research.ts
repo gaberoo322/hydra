@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { setResearchForceOnce } from "../redis/scheduler.ts";
 
-export function createResearchRouter(eventBus: any) {
+export function createResearchRouter() {
   const router = Router();
 
   // POST /research/start — Run a research cycle.
