@@ -36,7 +36,7 @@
     "@sentry/node": "^10.48.0",
     "express": "^5.2.1",
     "ioredis": "^5.10.1",
-    "ws": "^8.20.0",
+    "ws": "^8.21.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
