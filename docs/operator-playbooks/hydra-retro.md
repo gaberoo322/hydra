@@ -110,13 +110,13 @@ issue instead of filing a new one).
 
 For every cue OBSERVED this run (whether or not it survives), bump its
 cross-run recurrence count once, then snapshot both ledgers for the planner.
-Both go through the typed Redis seam `src/redis/retro.ts` — never raw Redis.
+Both go through the typed Redis seam `src/redis/retro-seen.ts` — never raw Redis.
 Use a tiny `tsx` shim:
 
 ```bash
 # Bump recurrence for each observed cue, then print {seenCues, recurrence}.
 npx tsx -e '
-  import { bumpRetroRecurrence, getRetroSeen, getRetroRecurrence } from "./src/redis/retro.ts";
+  import { bumpRetroRecurrence, getRetroSeen, getRetroRecurrence } from "./src/redis/retro-seen.ts";
   const cues = JSON.parse(process.env.CUES || "[]");
   for (const c of cues) await bumpRetroRecurrence(c);
   const seen = await getRetroSeen();
@@ -150,7 +150,7 @@ Under `--apply`:
 
 - For each `plan.issues[]`: `gh issue create --repo gaberoo322/hydra --label needs-triage --title <title> --body <evidence + cue + Source>`. Then record the cue in the seen-list:
 
-      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0);'
+      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro-seen.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0);'
 
 - For `plan.pr` (if non-null): open a feature branch, apply the prompt/doc fix
   (skill lesson / CLAUDE.md / CONTEXT.md note), run `npm run typecheck:test`
@@ -180,7 +180,8 @@ sole output. The dashboard surface for the artifact is retro-4 (#921).
 - `~/hydra/docs/adr/` — don't contradict existing ADRs
 - `src/autopilot/retro-bundle.ts` — the bundle shape this skill consumes (#918)
 - `scripts/ci/hydra-retro-emit.ts` — the pure caps/dedup/recurrence logic
-- `src/redis/retro.ts` — the seen-list + recurrence Redis seam
+- `src/redis/retro-seen.ts` — the seen-list + recurrence Redis seam
+- `src/redis/retro-artifacts.ts` — the persisted per-run retro-artifact Redis seam
 
 ## Slot lifecycle events — PostToolUse hook (issue #671)
 

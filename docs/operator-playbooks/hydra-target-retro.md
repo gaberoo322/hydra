@@ -142,7 +142,7 @@ seam:
 
 ```bash
 SEEN=$(npx tsx -e '
-  import { getRetroSeen } from "./src/redis/retro.ts";
+  import { getRetroSeen } from "./src/redis/retro-seen.ts";
   const seen = await getRetroSeen();
   process.stdout.write(JSON.stringify(Object.keys(seen)));
   process.exit(0);
@@ -179,9 +179,9 @@ Under `--apply`:
   seen-list. The seam's `decision` field is the Orchestrator-retro
   `RetroEmitKind` (`"issue" | "pr" | "artifact"`) — a prompt-shaped feedback
   edit maps onto `"artifact"` (the Target has no PR lane), so the existing
-  `src/redis/retro.ts` seam is reused unchanged (out of this issue's scope):
+  `src/redis/retro-seen.ts` seam is reused unchanged (out of this issue's scope):
 
-      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "artifact", runId: process.env.RUN_ID, ref: null, at: new Date().toISOString()}); process.exit(0);'
+      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro-seen.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "artifact", runId: process.env.RUN_ID, ref: null, at: new Date().toISOString()}); process.exit(0);'
 
 - For each `plan.backlog[]`: file a Redis Target-backlog item through the backlog
   module (it dedups by title automatically):
@@ -203,7 +203,7 @@ Under `--apply`:
   code-needing backlog item is the Target's issue-shaped lane), `ref` set to the
   returned backlog item id:
 
-      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0);'
+      npx tsx -e 'import {recordRetroSeen} from "./src/redis/retro-seen.ts"; await recordRetroSeen({cue: process.env.CUE, decision: "issue", runId: process.env.RUN_ID, ref: process.env.REF, at: new Date().toISOString()}); process.exit(0);'
 
 The shared cap means at most 2 proposals (in any feedback/backlog mix) ever
 leave a single Target retro run.
@@ -228,7 +228,7 @@ this is the sole output.
 - `~/hydra/docs/adr/` — don't contradict existing ADRs
 - `scripts/target/target-retro.ts` — the pure caps/dedup/routing core this skill consumes
 - `scripts/ci/hydra-retro-emit.ts` — the Orchestrator retro this one is the Target analogue of
-- `src/redis/retro.ts` — the seen-list seam (shared with the Orchestrator retro)
+- `src/redis/retro-seen.ts` — the seen-list seam (shared with the Orchestrator retro)
 - `src/redis/agent-memory.ts` — the friction-store read seam (`namespace="friction"`)
 - `src/backlog/items.ts` — the Target-backlog item writer (`addToBacklog`)
 - `docs/operator-playbooks/hydra-target-build.md` — the build loop whose failures this retro learns from

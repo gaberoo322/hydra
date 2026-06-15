@@ -14,7 +14,7 @@
  *   - Everything below the bar → artifact-only notes (no issue, no PR).
  *
  * And nothing already proposed may be re-proposed — findings dedup against a
- * persisted seen-list (`src/redis/retro.ts`) keyed by a stable kebab-case
+ * persisted seen-list (`src/redis/retro-seen.ts`) keyed by a stable kebab-case
  * `cue`, on top of the live open + 7-day-closed GitHub scan the skill runs.
  *
  * This module is the PURE, TESTABLE core of that routing. It takes the
@@ -78,7 +78,7 @@ export const PROMPT_FIX_MIN_CONFIDENCE = 0.8;
 
 /**
  * The cross-run ledgers, snapshotted by the skill from the Redis seam
- * (`src/redis/retro.ts`) before planning. Passed in (not read) so the planner
+ * (`src/redis/retro-seen.ts`) before planning. Passed in (not read) so the planner
  * stays pure and deterministic.
  */
 export interface RetroLedgers {

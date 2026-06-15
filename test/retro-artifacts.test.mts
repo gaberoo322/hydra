@@ -1,12 +1,17 @@
 /**
- * test/retro-artifact.test.mts — the persisted retro-artifact seam (issue
+ * test/retro-artifacts.test.mts — the persisted retro-artifact seam (issue
  * #921, retro-4 of epic #917).
  *
+ * Split out of the former `test/retro-artifact.test.mts` (issue #1914) when the
+ * combined `src/redis/retro.ts` was split into a slice-A module
+ * (`retro-seen.ts`) and this slice-B module (`retro-artifacts.ts`). This file
+ * imports from exactly one source module.
+ *
  * Covers:
- *   - `src/redis/retro.ts` accessors against an in-memory fake connection (the
- *     DI facade shape used across the Redis seam) — persist→read round-trip,
- *     newest-first index ordering, limit clamping, TTL stamping, and the
- *     never-throw contract when the connection rejects.
+ *   - `src/redis/retro-artifacts.ts` accessors against an in-memory fake
+ *     connection (the DI facade shape used across the Redis seam) — persist→read
+ *     round-trip, newest-first index ordering, limit clamping, TTL stamping, and
+ *     the never-throw contract when the connection rejects.
  *   - `src/schemas/retro.ts` — the artifact schema and the recent-retros query
  *     schema (coercion, defaults, bounds).
  *
@@ -24,18 +29,9 @@ import {
   retroArtifactKey,
   retroArtifactsIndexKey,
   RETRO_ARTIFACT_TTL_SECONDS,
-  // Slice-A seen-list + recurrence accessors. Imported here as the live
-  // /hydra-retro SKILL.md caller is markdown invisible to knip — this test
-  // is the static-analysis-visible reference that keeps them from being
-  // re-flagged dead and re-deleted (issue #1041; the #1007 regression).
-  bumpRetroRecurrence,
-  getRetroSeen,
-  getRetroRecurrence,
-  recordRetroSeen,
   type RetroArtifact,
   type RetroRedisLike,
-  type RetroSeenEntry,
-} from "../src/redis/retro.ts";
+} from "../src/redis/retro-artifacts.ts";
 import {
   RetroArtifactSchema,
   RecentRetrosQuerySchema,
@@ -111,7 +107,7 @@ function makeArtifact(overrides: Partial<RetroArtifact> = {}): RetroArtifact {
 // Redis seam — accessors
 // ---------------------------------------------------------------------------
 
-describe("redis/retro — persist + read", () => {
+describe("redis/retro-artifacts — persist + read", () => {
   test("persist→get round-trips the artifact and stamps the 14d TTL", async () => {
     const { redis, state } = makeFakeRedis();
     const artifact = makeArtifact();
@@ -155,7 +151,7 @@ describe("redis/retro — persist + read", () => {
   });
 });
 
-describe("redis/retro — listRecentRetroArtifacts", () => {
+describe("redis/retro-artifacts — listRecentRetroArtifacts", () => {
   test("returns artifacts newest-first by generatedAt", async () => {
     const { redis } = makeFakeRedis();
     await persistRetroArtifact(
@@ -211,7 +207,7 @@ describe("redis/retro — listRecentRetroArtifacts", () => {
   });
 });
 
-describe("redis/retro — never-throw contract", () => {
+describe("redis/retro-artifacts — never-throw contract", () => {
   function rejectingRedis(): RetroRedisLike {
     const boom = async () => {
       throw new Error("redis down");
@@ -298,52 +294,5 @@ describe("schemas/retro — RecentRetrosQuerySchema", () => {
       RecentRetrosQuerySchema.safeParse({ limit: "5", extra: "x" }).success,
       false,
     );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Slice-A seen-list + recurrence seam — existence/signature guard (issue #1041)
-// ---------------------------------------------------------------------------
-//
-// #1007 deleted bumpRetroRecurrence / getRetroSeen / getRetroRecurrence /
-// recordRetroSeen as knip-dead — but their only caller is the live
-// /hydra-retro SKILL.md (markdown, invisible to static analysis), so the
-// deletion broke retro_orch at runtime (getRetroSeen threw). These accessors
-// use the global Redis singleton (no DI seam), so this guard does not exercise
-// a live round-trip; it asserts the four symbols still exist as callable
-// accessors with their original signatures, which is the exact regression
-// #1041 protects against AND the static-analysis-visible reference that stops
-// knip from re-flagging and re-deleting them.
-describe("redis/retro — slice-A seen/recurrence accessors restored (#1041)", () => {
-  test("the four accessors are exported as functions", () => {
-    assert.equal(typeof getRetroSeen, "function");
-    assert.equal(typeof recordRetroSeen, "function");
-    assert.equal(typeof getRetroRecurrence, "function");
-    assert.equal(typeof bumpRetroRecurrence, "function");
-  });
-
-  test("accessors keep their original arity (the live SKILL.md call shape)", () => {
-    // getRetroSeen() / getRetroRecurrence() — no args (SKILL.md steps 6).
-    assert.equal(getRetroSeen.length, 0);
-    assert.equal(getRetroRecurrence.length, 0);
-    // recordRetroSeen(entry) — one required arg (SKILL.md step 8).
-    assert.equal(recordRetroSeen.length, 1);
-    // bumpRetroRecurrence(cue, delta = 1) — one required arg, `delta` defaulted
-    // so .length counts only the leading required params (SKILL.md step 6).
-    assert.equal(bumpRetroRecurrence.length, 1);
-  });
-
-  test("RetroSeenEntry shape stays usable by recordRetroSeen callers", () => {
-    // Type-level guard: a value the live SKILL.md builds must still satisfy the
-    // restored RetroSeenEntry type. A compile error here means the type drifted.
-    const entry: RetroSeenEntry = {
-      cue: "some-recurring-gotcha",
-      decision: "issue",
-      runId: "c59c13fc-e5b4-42ad-834d-c62c7ee23b74",
-      ref: "1041",
-      at: new Date(0).toISOString(),
-    };
-    assert.equal(entry.decision, "issue");
-    assert.equal(entry.ref, "1041");
   });
 });
