@@ -13,6 +13,22 @@
  *                                              learning context seam (#1455)
  *
  * Behavior preserved 1:1 from the previous learning.ts implementation.
+ *
+ * # Injectable counter seam (issue #1926)
+ *
+ * The in-process search-quality counters were three module-level mutable
+ * variables (`ovSearchMetrics`, `flushedSnapshot`, `lastFlushMs`) — a process
+ * singleton that any two callers of `trackedOvSearch` shared, and that tests
+ * had to scrub with `resetOvSearchMetrics()` before every assertion. That
+ * state is now encapsulated in {@link OvSearchMetricsCounter}: the live
+ * counters, the last-flushed snapshot, and the flush time-gate are private
+ * instance fields, mutated only through the class's own methods. A
+ * {@link defaultMetrics} singleton preserves production behavior 1:1 (mirroring
+ * `defaultAccumulator` in `digest.ts`, issue #1487), so the exported
+ * `getOvSearchMetrics` / `resetOvSearchMetrics` functions and `trackedOvSearch`
+ * stay thin delegators — zero call-site churn at `api/openviking.ts`. Tests can
+ * now construct a fresh `new OvSearchMetricsCounter()` per case instead of
+ * scrubbing a global. `computeFlushDelta` stays a pure exported function.
  */
 
 // OpenViking connection config — single source of truth in ov-config.ts (issue #231).
@@ -51,59 +67,25 @@ export interface OvSearchMetrics {
   errors: number;
 }
 
-const ovSearchMetrics: OvSearchMetrics = {
-  totalSearches: 0,
-  zeroResultCount: 0,
-  totalResults: 0,
-  totalLatencyMs: 0,
-  fallbackAttempts: 0,
-  fallbackSuccesses: 0,
-  errors: 0,
-};
+/** The derived (computed) fields the read surface appends to the raw counters. */
+export interface OvSearchMetricsDerived {
+  avgResultsPerQuery: number;
+  avgLatencyMs: number;
+  zeroResultRate: number;
+}
 
-export function getOvSearchMetrics(): OvSearchMetrics & { avgResultsPerQuery: number; avgLatencyMs: number; zeroResultRate: number } {
-  const avg = ovSearchMetrics.totalSearches > 0
-    ? ovSearchMetrics.totalResults / ovSearchMetrics.totalSearches
-    : 0;
-  const avgLatency = ovSearchMetrics.totalSearches > 0
-    ? ovSearchMetrics.totalLatencyMs / ovSearchMetrics.totalSearches
-    : 0;
-  const zeroRate = ovSearchMetrics.totalSearches > 0
-    ? ovSearchMetrics.zeroResultCount / ovSearchMetrics.totalSearches
-    : 0;
+/** A zeroed counter literal — the initial state of every fresh counter. */
+function zeroOvSearchMetrics(): OvSearchMetrics {
   return {
-    ...ovSearchMetrics,
-    avgResultsPerQuery: Math.round(avg * 100) / 100,
-    avgLatencyMs: Math.round(avgLatency * 100) / 100,
-    zeroResultRate: Math.round(zeroRate * 1000) / 1000,
+    totalSearches: 0,
+    zeroResultCount: 0,
+    totalResults: 0,
+    totalLatencyMs: 0,
+    fallbackAttempts: 0,
+    fallbackSuccesses: 0,
+    errors: 0,
   };
 }
-
-/** Reset metrics -- exposed for testing only. */
-export function resetOvSearchMetrics(): void {
-  ovSearchMetrics.totalSearches = 0;
-  ovSearchMetrics.zeroResultCount = 0;
-  ovSearchMetrics.totalResults = 0;
-  ovSearchMetrics.totalLatencyMs = 0;
-  ovSearchMetrics.fallbackAttempts = 0;
-  ovSearchMetrics.fallbackSuccesses = 0;
-  ovSearchMetrics.errors = 0;
-  flushedSnapshot = { ...ovSearchMetrics };
-  lastFlushMs = 0;
-}
-
-// ===========================================================================
-// Durable flush to Redis (issue #1440)
-// ===========================================================================
-
-/**
- * The last set of counter values we persisted to Redis. The delta between the
- * live `ovSearchMetrics` and this snapshot is what each flush rolls into the
- * current hour bucket — so flushes are additive and lose no counts, and a flush
- * with no new searches is a cheap no-op.
- */
-let flushedSnapshot: OvSearchMetrics = { ...ovSearchMetrics };
-let lastFlushMs = 0;
 
 /** Batch window: persist at most this often from the hot search path. */
 const OV_SEARCH_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
@@ -111,7 +93,7 @@ const OV_SEARCH_FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 /**
  * Compute the per-field delta between the live counters and the last-flushed
  * snapshot. Pure — exported for tests. Only positive deltas are emitted (the
- * counters are monotonic until `resetOvSearchMetrics`, which re-baselines the
+ * counters are monotonic until a counter is reset, which re-baselines the
  * snapshot so the next delta starts from zero rather than going negative).
  */
 export function computeFlushDelta(
@@ -126,34 +108,150 @@ export function computeFlushDelta(
   return delta;
 }
 
+// ===========================================================================
+// Injectable counter (issue #1926)
+// ===========================================================================
+
 /**
- * Persist the counter delta since the last flush into the current UTC-hour
- * Redis bucket. Best-effort and never-throws: a Redis outage logs once and
- * leaves the in-memory counters intact (the next flush retries the same delta,
- * since the snapshot only advances on a successful write).
- *
- * `force` bypasses the 5-min time gate (used by an explicit flush, e.g. on
- * shutdown or from a test). The hot search path calls this opportunistically
- * with `force=false`, so a burst of searches triggers at most one write per
- * flush window.
+ * Injectable dependencies for {@link OvSearchMetricsCounter}. Both optional —
+ * each defaults to the real implementation, so production constructs the
+ * counter with `new OvSearchMetricsCounter()` and tests can inject a
+ * deterministic clock + a capturing persist sink.
  */
-async function flushOvSearchMetrics(
-  force = false,
-  now: number = Date.now(),
-): Promise<void> {
-  if (!force && now - lastFlushMs < OV_SEARCH_FLUSH_INTERVAL_MS) return;
-  const delta = computeFlushDelta(ovSearchMetrics, flushedSnapshot);
-  // Advance the time gate even on an empty delta so we don't recompute every
-  // call within the window; only advance the snapshot after a real write.
-  lastFlushMs = now;
-  if (Object.keys(delta).length === 0) return;
-  try {
-    await recordOvSearchDelta(delta);
-    flushedSnapshot = { ...ovSearchMetrics };
-  } catch (err: any) {
-    // Fail-loud-but-non-fatal: observability must never break the search path.
-    console.error(`[OV Search] metrics flush failed (will retry next window): ${err?.message ?? err}`);
+export interface OvSearchMetricsCounterDeps {
+  /** Wall-clock source for the flush time-gate. Defaults to `Date.now`. */
+  now?: () => number;
+  /**
+   * Durable-persist sink for a flush delta. Defaults to `recordOvSearchDelta`.
+   * The return value is awaited but ignored, so any `Promise` resolution is
+   * accepted (`recordOvSearchDelta` resolves the bucket key string).
+   */
+  persist?: (delta: OvSearchMetricsDelta) => Promise<unknown>;
+}
+
+/**
+ * Owns the in-process search-quality counters and the durable-flush machinery
+ * that used to live as three module-level variables (`ovSearchMetrics`,
+ * `flushedSnapshot`, `lastFlushMs`). The live counters, the last-flushed
+ * snapshot, and the flush time-gate are private instance fields — there is no
+ * shared global, so a test constructs a fresh instance per case instead of
+ * scrubbing a singleton with {@link OvSearchMetricsCounter.reset}. Production
+ * uses the {@link defaultMetrics} singleton; behavior is preserved 1:1.
+ */
+export class OvSearchMetricsCounter {
+  /** Live counters (mutated by the search path). */
+  private readonly metrics: OvSearchMetrics = zeroOvSearchMetrics();
+  /**
+   * The last set of counter values we persisted to Redis. The delta between
+   * the live `metrics` and this snapshot is what each flush rolls into the
+   * current hour bucket — so flushes are additive and lose no counts, and a
+   * flush with no new searches is a cheap no-op.
+   */
+  private flushedSnapshot: OvSearchMetrics = zeroOvSearchMetrics();
+  private lastFlushMs = 0;
+
+  private readonly now: () => number;
+  private readonly persist: (delta: OvSearchMetricsDelta) => Promise<unknown>;
+
+  constructor(deps: OvSearchMetricsCounterDeps = {}) {
+    this.now = deps.now ?? Date.now;
+    // recordOvSearchDelta accepts an optional `now` arg we don't pass here;
+    // the call site supplies only the delta, so the wider signature is safe.
+    this.persist = deps.persist ?? recordOvSearchDelta;
   }
+
+  /** Record one search result outcome (latency + result count). */
+  recordSearch(latencyMs: number, resultCount: number): void {
+    this.metrics.totalSearches++;
+    this.metrics.totalResults += resultCount;
+    this.metrics.totalLatencyMs += latencyMs;
+    if (resultCount === 0) this.metrics.zeroResultCount++;
+  }
+
+  /** Record a search that failed (OV failure or thrown error). */
+  recordError(latencyMs: number): void {
+    this.metrics.totalSearches++;
+    this.metrics.errors++;
+    this.metrics.totalLatencyMs += latencyMs;
+  }
+
+  /** Record that a zero-result fallback query was attempted. */
+  recordFallbackAttempt(): void {
+    this.metrics.fallbackAttempts++;
+  }
+
+  /** Record that a fallback query returned results. */
+  recordFallbackSuccess(): void {
+    this.metrics.fallbackSuccesses++;
+  }
+
+  /** Read the live counters plus the derived (avg/rate) fields. */
+  snapshot(): OvSearchMetrics & OvSearchMetricsDerived {
+    const avg = this.metrics.totalSearches > 0
+      ? this.metrics.totalResults / this.metrics.totalSearches
+      : 0;
+    const avgLatency = this.metrics.totalSearches > 0
+      ? this.metrics.totalLatencyMs / this.metrics.totalSearches
+      : 0;
+    const zeroRate = this.metrics.totalSearches > 0
+      ? this.metrics.zeroResultCount / this.metrics.totalSearches
+      : 0;
+    return {
+      ...this.metrics,
+      avgResultsPerQuery: Math.round(avg * 100) / 100,
+      avgLatencyMs: Math.round(avgLatency * 100) / 100,
+      zeroResultRate: Math.round(zeroRate * 1000) / 1000,
+    };
+  }
+
+  /** Reset all counters to zero and re-baseline the flush snapshot. */
+  reset(): void {
+    for (const field of OV_SEARCH_METRIC_FIELDS) this.metrics[field] = 0;
+    this.flushedSnapshot = { ...this.metrics };
+    this.lastFlushMs = 0;
+  }
+
+  /**
+   * Persist the counter delta since the last flush into the current UTC-hour
+   * Redis bucket. Best-effort and never-throws: a persist outage logs once and
+   * leaves the in-memory counters intact (the next flush retries the same
+   * delta, since the snapshot only advances on a successful write).
+   *
+   * `force` bypasses the 5-min time gate (used by an explicit flush, e.g. on
+   * shutdown or from a test). The hot search path calls this opportunistically
+   * with `force=false`, so a burst of searches triggers at most one write per
+   * flush window.
+   */
+  async flush(force = false, now: number = this.now()): Promise<void> {
+    if (!force && now - this.lastFlushMs < OV_SEARCH_FLUSH_INTERVAL_MS) return;
+    const delta = computeFlushDelta(this.metrics, this.flushedSnapshot);
+    // Advance the time gate even on an empty delta so we don't recompute every
+    // call within the window; only advance the snapshot after a real write.
+    this.lastFlushMs = now;
+    if (Object.keys(delta).length === 0) return;
+    try {
+      await this.persist(delta);
+      this.flushedSnapshot = { ...this.metrics };
+    } catch (err: any) {
+      // Fail-loud-but-non-fatal: observability must never break the search path.
+      console.error(`[OV Search] metrics flush failed (will retry next window): ${err?.message ?? err}`);
+    }
+  }
+}
+
+/**
+ * The process-wide default counter. Preserves the pre-#1926 singleton behavior
+ * 1:1 so `api/openviking.ts` and the search path need no call-site change.
+ */
+const defaultMetrics = new OvSearchMetricsCounter();
+
+export function getOvSearchMetrics(): OvSearchMetrics & OvSearchMetricsDerived {
+  return defaultMetrics.snapshot();
+}
+
+/** Reset metrics -- exposed for testing only. */
+export function resetOvSearchMetrics(): void {
+  defaultMetrics.reset();
 }
 
 // ===========================================================================
@@ -197,11 +295,17 @@ export function buildFallbackQuery(originalQuery: string): string {
 /**
  * Tracked OV search -- wraps a fetch to /api/v1/search/find with metrics + logging + fallback.
  * Returns { resources, memories } arrays.
+ *
+ * `counter` is the injectable metrics sink (issue #1926); it defaults to the
+ * process-wide {@link defaultMetrics} singleton so production callers and
+ * `api/openviking.ts` are unchanged. A test passes a fresh
+ * `new OvSearchMetricsCounter()` to isolate counts per case.
  */
 export async function trackedOvSearch(
   query: string,
   limit = 5,
   sessionId?: string | null,
+  counter: OvSearchMetricsCounter = defaultMetrics,
 ): Promise<{ resources: any[]; memories: any[] }> {
   const startMs = Date.now();
   let resources: any[] = [];
@@ -216,9 +320,7 @@ export async function trackedOvSearch(
     const latencyMs = Date.now() - startMs;
 
     if (isOvFailure(result)) {
-      ovSearchMetrics.totalSearches++;
-      ovSearchMetrics.errors++;
-      ovSearchMetrics.totalLatencyMs += latencyMs;
+      counter.recordError(latencyMs);
       console.log(`[OV Search] query="${query.slice(0, 80)}" status=${result.code} latency=${latencyMs}ms ERROR`);
       return { resources: [], memories: [] };
     }
@@ -228,17 +330,14 @@ export async function trackedOvSearch(
     memories = data?.result?.memories || [];
     const resultCount = resources.length + memories.length;
 
-    ovSearchMetrics.totalSearches++;
-    ovSearchMetrics.totalResults += resultCount;
-    ovSearchMetrics.totalLatencyMs += latencyMs;
+    counter.recordSearch(latencyMs, resultCount);
 
     if (resultCount === 0) {
-      ovSearchMetrics.zeroResultCount++;
       console.log(`[OV Search] query="${query.slice(0, 80)}" results=0 latency=${latencyMs}ms -- attempting fallback`);
 
       // Fallback: simplified query
       const fallbackQuery = buildFallbackQuery(query);
-      ovSearchMetrics.fallbackAttempts++;
+      counter.recordFallbackAttempt();
 
       const fbStartMs = Date.now();
       try {
@@ -256,7 +355,7 @@ export async function trackedOvSearch(
           const fbCount = fbResources.length + fbMemories.length;
 
           if (fbCount > 0) {
-            ovSearchMetrics.fallbackSuccesses++;
+            counter.recordFallbackSuccess();
             resources = fbResources;
             memories = fbMemories;
             console.log(`[OV Search] fallback query="${fallbackQuery.slice(0, 80)}" results=${fbCount} latency=${fbLatencyMs}ms SUCCESS`);
@@ -272,9 +371,7 @@ export async function trackedOvSearch(
     }
   } catch (err: any) {
     const latencyMs = Date.now() - startMs;
-    ovSearchMetrics.totalSearches++;
-    ovSearchMetrics.errors++;
-    ovSearchMetrics.totalLatencyMs += latencyMs;
+    counter.recordError(latencyMs);
     console.error(`[OV Search] query="${query.slice(0, 80)}" error="${err.message}" latency=${latencyMs}ms`);
   }
 
@@ -282,7 +379,7 @@ export async function trackedOvSearch(
   // delta into the hour-bucketed Redis window. At most one write per flush
   // window regardless of search volume; awaited but self-contained so a Redis
   // hiccup degrades to a logged warning, not a failed search.
-  await flushOvSearchMetrics(false);
+  await counter.flush(false);
 
   return { resources, memories };
 }
