@@ -336,12 +336,55 @@ export interface ProbeInputs {
   knowledgeContext: unknown;
 }
 
-// ---- parseProbes — owns the `recent` pipeline derivation ----------------
+// ---- derivePipelineMetrics — the pure `recent` derivation ---------------
+//
+// Issue #1936: the `recent` pipeline derivation used to be inlined in
+// parseProbes, so a test covering mergedN/noTaskN/revertN/rates/avgDuration
+// had to construct a full ProbeInputs and call parseProbes — even though the
+// 15-field marshalling is irrelevant to the derivation. Extracted here as a
+// pure function whose interface is exactly its concern: a raw trend-row array
+// (from ProbeMetricsInput) in, a HealthSnapshot["recent"] out. parseProbes now
+// calls it with `mData.trend || []`. No behaviour change — the body is the
+// byte-for-byte derivation that lived inline.
+
+export function derivePipelineMetrics(
+  trend: NonNullable<ProbeMetricsInput["trend"]>,
+): HealthSnapshot["recent"] {
+  const mergedN = trend.filter((m: any) => parseInt(m.tasksMerged || 0) > 0).length;
+  const noTaskN = trend.filter(
+    (m: any) =>
+      m.taskTitle === "Planner produced no task" || (m.taskTitle || "").startsWith("Skipped:"),
+  ).length;
+  const revertN = trend.filter((m: any) => m.rolledBack === "true" || m.rolledBack === true).length;
+  const durs = trend.map((m: any) => parseInt(m.totalDurationMs || 0)).filter((d: number) => d > 0);
+  const avgDur =
+    durs.length > 0 ? Math.round(durs.reduce((a: number, b: number) => a + b, 0) / durs.length) : 0;
+  return {
+    cycleCount: trend.length,
+    mergeRate: trend.length > 0 ? Math.round((mergedN / trend.length) * 100) : 0,
+    failedRate:
+      trend.length > 0
+        ? Math.round(
+            (trend.filter((m: any) => parseInt(m.tasksFailed || 0) > 0).length / trend.length) * 100,
+          )
+        : 0,
+    noTaskRate: trend.length > 0 ? Math.round((noTaskN / trend.length) * 100) : 0,
+    revertRate: mergedN > 0 ? Math.round((revertN / mergedN) * 100) : 0,
+    mergedN,
+    noTaskN,
+    revertN,
+    avgDurationMs: avgDur,
+    avgDurationHuman: avgDur > 60000 ? `${Math.round(avgDur / 60000)}m` : `${Math.round(avgDur / 1000)}s`,
+  };
+}
+
+// ---- parseProbes — marshals ProbeInputs into a HealthSnapshot ------------
 //
 // Maps the ProbeInputs named record into a HealthSnapshot. Each field is
 // named after the probe it carries — no integer subscripts, no shared-secret
 // index table. A null field means the probe failed (rejected settle); safe
-// defaults apply identically to the prior implementation.
+// defaults apply identically to the prior implementation. The `recent`
+// pipeline derivation is delegated to derivePipelineMetrics (issue #1936).
 
 export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   const health = probes.basicHealth || { status: "failed", redis: false, cycle: "unknown", uptime: 0 };
@@ -385,34 +428,8 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     sysdWatch = probes.sysdWatchdog || "unknown",
     sysdWeb = probes.sysdTargetWeb || "unknown";
 
-  // Pipeline metrics
-  const trend = mData.trend || [];
-  const mergedN = trend.filter((m: any) => parseInt(m.tasksMerged || 0) > 0).length;
-  const noTaskN = trend.filter(
-    (m: any) =>
-      m.taskTitle === "Planner produced no task" || (m.taskTitle || "").startsWith("Skipped:"),
-  ).length;
-  const revertN = trend.filter((m: any) => m.rolledBack === "true" || m.rolledBack === true).length;
-  const durs = trend.map((m: any) => parseInt(m.totalDurationMs || 0)).filter((d: number) => d > 0);
-  const avgDur =
-    durs.length > 0 ? Math.round(durs.reduce((a: number, b: number) => a + b, 0) / durs.length) : 0;
-  const recent = {
-    cycleCount: trend.length,
-    mergeRate: trend.length > 0 ? Math.round((mergedN / trend.length) * 100) : 0,
-    failedRate:
-      trend.length > 0
-        ? Math.round(
-            (trend.filter((m: any) => parseInt(m.tasksFailed || 0) > 0).length / trend.length) * 100,
-          )
-        : 0,
-    noTaskRate: trend.length > 0 ? Math.round((noTaskN / trend.length) * 100) : 0,
-    revertRate: mergedN > 0 ? Math.round((revertN / mergedN) * 100) : 0,
-    mergedN,
-    noTaskN,
-    revertN,
-    avgDurationMs: avgDur,
-    avgDurationHuman: avgDur > 60000 ? `${Math.round(avgDur / 60000)}m` : `${Math.round(avgDur / 1000)}s`,
-  };
+  // Pipeline metrics (issue #1936: derivation extracted to derivePipelineMetrics)
+  const recent = derivePipelineMetrics(mData.trend || []);
 
   return {
     health,

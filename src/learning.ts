@@ -28,8 +28,8 @@ import {
   migrateRulesToPatterns,
   backfillPromotionMetadata,
   loadAgentMemory,
-  formatMemoryForPrompt,
 } from "./pattern-memory/agent-memory.ts";
+import { formatMemoryForPrompt } from "./pattern-memory/prompt-format.ts";
 import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
 import {
   loadAnchorReflections,

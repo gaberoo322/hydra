@@ -13,6 +13,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseProbes,
+  derivePipelineMetrics,
   assessHealth,
   projectHealthDeepResponse,
   classifyOvSearchProbe,
@@ -842,6 +843,90 @@ describe("parseProbes", () => {
     assert.equal(snap.ovSearch.resultCount, 4);
     assert.equal(snap.redisInfo?.memoryHuman, "512M");
     assert.equal(snap.emergencyBrake.engaged, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// derivePipelineMetrics — the pure `recent` derivation (issue #1936)
+//
+// Exercised directly with canned trend-row arrays — no ProbeInputs fixture
+// required. The interface is exactly the concern: a trend-row array in, a
+// HealthSnapshot["recent"] out.
+// ---------------------------------------------------------------------------
+
+describe("derivePipelineMetrics", () => {
+  test("derives counts, rates, and avg duration from a mixed trend", () => {
+    const trend = [
+      { tasksMerged: "1", totalDurationMs: "60000" },
+      { tasksMerged: "1", totalDurationMs: "120000" },
+      { tasksMerged: "0", taskTitle: "Planner produced no task" },
+      { tasksMerged: "0", rolledBack: "true", tasksFailed: "1" },
+      { tasksMerged: "0", taskTitle: "Skipped: low value" },
+    ];
+    const r = derivePipelineMetrics(trend);
+    assert.equal(r.cycleCount, 5);
+    assert.equal(r.mergedN, 2);
+    assert.equal(r.noTaskN, 2); // "Planner produced no task" + "Skipped:"
+    assert.equal(r.revertN, 1);
+    assert.equal(r.mergeRate, 40); // 2/5
+    assert.equal(r.noTaskRate, 40); // 2/5
+    assert.equal(r.failedRate, 20); // 1/5
+    assert.equal(r.revertRate, 50); // 1/2 mergedN
+    assert.equal(r.avgDurationMs, 90000); // (60000+120000)/2
+    assert.equal(r.avgDurationHuman, "2m"); // > 60000
+  });
+
+  test("empty trend -> zero rates, no divide-by-zero", () => {
+    const r = derivePipelineMetrics([]);
+    assert.equal(r.cycleCount, 0);
+    assert.equal(r.mergedN, 0);
+    assert.equal(r.noTaskN, 0);
+    assert.equal(r.revertN, 0);
+    assert.equal(r.mergeRate, 0);
+    assert.equal(r.failedRate, 0);
+    assert.equal(r.noTaskRate, 0);
+    assert.equal(r.revertRate, 0); // mergedN=0 guard
+    assert.equal(r.avgDurationMs, 0);
+    assert.equal(r.avgDurationHuman, "0s");
+  });
+
+  test("revertRate divides by mergedN, not cycleCount", () => {
+    // 4 merged, 2 of them rolled back -> 50% revert rate over MERGES.
+    const trend = [
+      { tasksMerged: "1", rolledBack: "true" },
+      { tasksMerged: "1", rolledBack: true },
+      { tasksMerged: "1" },
+      { tasksMerged: "1" },
+      { tasksMerged: "0", taskTitle: "Planner produced no task" },
+    ];
+    const r = derivePipelineMetrics(trend);
+    assert.equal(r.mergedN, 4);
+    assert.equal(r.revertN, 2);
+    assert.equal(r.revertRate, 50); // 2/4 mergedN, not 2/5 cycleCount
+    assert.equal(r.noTaskN, 1);
+  });
+
+  test("avgDuration ignores zero/missing durations and renders sub-minute as seconds", () => {
+    const trend = [
+      { tasksMerged: "0", totalDurationMs: "10000" },
+      { tasksMerged: "0", totalDurationMs: "0" }, // filtered out (d>0 guard)
+      { tasksMerged: "0" }, // no duration -> parseInt(0) -> filtered out
+      { tasksMerged: "0", totalDurationMs: "20000" },
+    ];
+    const r = derivePipelineMetrics(trend);
+    assert.equal(r.avgDurationMs, 15000); // (10000+20000)/2, zeros excluded
+    assert.equal(r.avgDurationHuman, "15s"); // <= 60000 -> seconds
+  });
+
+  test("accepts numeric (not just string) trend fields", () => {
+    const trend = [
+      { tasksMerged: 1, totalDurationMs: 30000 },
+      { tasksMerged: 0, tasksFailed: 1 },
+    ];
+    const r = derivePipelineMetrics(trend);
+    assert.equal(r.mergedN, 1);
+    assert.equal(r.failedRate, 50); // 1/2
+    assert.equal(r.avgDurationMs, 30000);
   });
 });
 
