@@ -15,7 +15,12 @@
 // same restart/backoff sequence.
 // ---------------------------------------------------------------------------
 
-import { EventBus, STREAMS, NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
+import {
+  EventBus,
+  STREAMS,
+  NOTIFICATION_EVENT_TYPES as E,
+  type NotificationEventPayload,
+} from "./event-bus.ts";
 import { sendNotification } from "./notify.ts";
 import { recordEvent } from "./digest.ts";
 import { pushAlert } from "./redis/alerts.ts";
@@ -38,26 +43,28 @@ export interface NotificationEvent {
   id?: string;
   timestamp?: string;
   correlationId?: string;
-  payload?: Record<string, unknown> & {
-    taskTitle?: string;
-    cycleId?: string;
-    reason?: string;
-    elapsed?: string;
-    inProgress?: number;
-    eventType?: string;
-    deliveryCount?: number;
-    error?: string;
-    consumer?: string;
-    restarts?: number;
-    opportunityCount?: number;
-    message?: string;
-    title?: string;
-    blockedReason?: string;
-    task?: { finalState?: string };
-    filesChanged?: unknown;
-    rolledBack?: boolean;
-    commitSha?: string;
-  };
+  payload?: Record<string, unknown> &
+    Pick<
+      NotificationEventPayload,
+      | "taskTitle"
+      | "cycleId"
+      | "reason"
+      | "elapsed"
+      | "inProgress"
+      | "eventType"
+      | "deliveryCount"
+      | "error"
+      | "consumer"
+      | "restarts"
+      | "opportunityCount"
+      | "message"
+      | "title"
+      | "blockedReason"
+      | "task"
+      | "filesChanged"
+      | "rolledBack"
+      | "commitSha"
+    >;
 }
 
 /**
@@ -166,41 +173,46 @@ export function formatAlertMessage(event: AlertGrammarEvent): string {
  *
  * This mirrors `FormatMessageEvent` (`notify-format.ts`, issue #1857) and
  * `DigestGrammarEvent` (`digest-format.ts`, issue #1835) — the two sibling
- * formatters that fixed the same class of gap. The three formatters now share
- * one structural pattern:
+ * formatters that fixed the same class of gap. All three now DERIVE their
+ * payload shape from the single shared `NotificationEventPayload` vocabulary in
+ * `event-bus.ts` (issue #1915) via `Pick`, so the payload contract lives in one
+ * place. The three formatters now share one structural pattern:
  *
- * - `payload` stays OPEN (`Record<string, unknown> & {…}`) because the bus
- *   carries the full event vocabulary; the named fields are only the subset
+ * - `payload` stays OPEN (`Record<string, unknown> & Pick<…>`) because the bus
+ *   carries the full event vocabulary; the picked fields are only the subset
  *   the alert grammar narrows on. A producer renaming a read field is caught;
  *   a producer adding an *unread* field is not constrained.
  * - `type` is REQUIRED because `formatAlertMessage` switches on it
  *   unconditionally and `handleNotificationEvent` only reaches it after an
  *   `ALERT_TYPES.has(event.type)` gate.
  *
- * The named field set below is the exhaustive read set of the
- * `formatAlertMessage` switch — every `p.<x>` an arm dereferences. On-wire
- * alert messages are unchanged; this concentrates the payload contract, not
- * the format. `AlertGrammarEvent` is structurally a subset of `NotificationEvent`,
- * so the bus-fed events `handleNotificationEvent` carries remain assignable.
+ * The `Pick` list below is the exhaustive read set of the `formatAlertMessage`
+ * switch — every `p.<x>` an arm dereferences. On-wire alert messages are
+ * unchanged; this concentrates the payload contract in the shared vocabulary,
+ * not the format. `AlertGrammarEvent` is structurally a subset of
+ * `NotificationEvent`, so the bus-fed events `handleNotificationEvent` carries
+ * remain assignable.
  */
 export interface AlertGrammarEvent {
   type: string;
-  payload?: Record<string, unknown> & {
-    taskTitle?: string;
-    cycleId?: string;
-    reason?: string;
-    elapsed?: string;
-    inProgress?: number;
-    eventType?: string;
-    deliveryCount?: number;
-    error?: string;
-    consumer?: string;
-    restarts?: number;
-    opportunityCount?: number;
-    message?: string;
-    title?: string;
-    blockedReason?: string;
-  };
+  payload?: Record<string, unknown> &
+    Pick<
+      NotificationEventPayload,
+      | "taskTitle"
+      | "cycleId"
+      | "reason"
+      | "elapsed"
+      | "inProgress"
+      | "eventType"
+      | "deliveryCount"
+      | "error"
+      | "consumer"
+      | "restarts"
+      | "opportunityCount"
+      | "message"
+      | "title"
+      | "blockedReason"
+    >;
 }
 
 /**
@@ -255,7 +267,12 @@ async function handleNotificationEvent(event: NotificationEvent): Promise<void> 
   if (event.type === "cycle:completed") {
     const p = event.payload || {};
     const finalState = p.task?.finalState;
-    const files: string[] = Array.isArray(p.filesChanged) ? p.filesChanged : [];
+    // `filesChanged` is typed `unknown[]` in the shared vocabulary
+    // (`NotificationEventPayload`, #1915); keep the string paths the
+    // capacity-floor side classifier expects and drop any non-string entry.
+    const files: string[] = Array.isArray(p.filesChanged)
+      ? p.filesChanged.filter((f): f is string => typeof f === "string")
+      : [];
     const isMerged = (finalState === "merged") && !p.rolledBack;
     const side = isMerged ? classifySide(files, { workspaceHint: "target" }) : "idle";
     await recordCycleSide(p.cycleId || event.correlationId || `evt-${Date.now()}`, side, {
