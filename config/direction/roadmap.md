@@ -188,15 +188,25 @@ status: active
 started: 2026-06-12
 completed:
 
-Prove the pipeline produces. The wiring surface is complete through M11, but the funnel has never produced one opportunity end-to-end (1,378/1,378 scanner runs ended zero_opportunities). With the WC ingestion fix (#118/#119) landed and the group stage live since June 12, M12 proves real flow through the existing stack instead of adding surface area. Machine-execution promotion gates stay default-off throughout.
+Prove the pipeline produces. The wiring surface is complete through M11, but the funnel has never produced one opportunity end-to-end (1,400+ scanner runs ended zero_opportunities). With the WC ingestion fix (#118/#119) landed and the group stage live since June 12, M12 proves real flow through the existing stack instead of adding surface area. Machine-execution promotion gates stay default-off throughout.
 
-Root cause identified 2026-06-13: `kalshi_polymarket_pair_registry` DB holds only stale NBA/NFL/MLB/BTC pairs — WC 2026 pairs (`KXWCGAME-*`) defined in `web/src/lib/sports/world-cup-2026.ts` were never seeded. Scanner sees 0 matched pairs on every run. WC ingestion is confirmed flowing (68 events / 878 snapshots, June 13).
+Root cause (confirmed 2026-06-15): `seedVerifiedPairRegistryFromWorldCup2026StaticPairs()` function was built and committed (0121549a) but has NO production caller — `kalshi_polymarket_pair_registry` still holds only 13 stale rows, all May 13. Funnel binding gate confirmed `softBookNotReady` with `registryPairs: 0` via live API. BallDontLie timer files committed but timer not installed in production.
 
-- [x] Verify WC ingestion flowing in production post-#118 — CONFIRMED: soccer_fifa_world_cup 68 events / 878 snapshots persisted as of June 13 (priorities #1 ✓)
-- [ ] Seed WC 2026 group-stage pairs into kalshi_polymarket_pair_registry — KXWCGAME-* from world-cup-2026.ts (priorities #1, new sub-item, blocking matched>0)
-- [ ] Wire ScannerFunnelBreakdown through scanner-alert-runner → executeScannerCycle (priorities #2, unwired production path)
+- [x] Verify WC ingestion flowing in production post-#118 — CONFIRMED: soccer_fifa_world_cup 68 events / 878 snapshots persisted as of June 13
+- [x] Wire ScannerFunnelBreakdown through scanner-alert-runner → executeScannerCycle — CONFIRMED LIVE (GET /api/scanner/latest returns funnelBreakdown; binding gate `softBookNotReady`, entered 14402, registryPairs 0)
+- [x] Expose funnel breakdown counts on GET /api/scanner/latest (item-507) — CONFIRMED LIVE
+- [x] Add pair-resolution stage to funnel breakdown
+- [x] WC 2026 knockout-stage pair discovery workflow (item-505) — pure builder built
+- [x] WC pair settlement-eligibility predicate (item-508) — skips settled pairs
+- [x] Passive fill-probability estimate from orderbook snapshots — pure module built
+- [x] Run-packet replay scorer (item-409) + batch scorer (item-411) + per-strategy summaries
+- [x] CLV scan-time bucketing pipeline (sport/source/lead-time) + Pinnacle CLV bridge wired
+- [x] Sports strategy benchmark packet (item-454)
+- [x] Derive injuryImpactSignal from BallDontLie runner output in verified-pair ranking
+- [ ] Build production bin runner for seedVerifiedPairRegistryFromWorldCup2026StaticPairs and execute against live DB (priorities #1, blocking matched>0)
+- [ ] Install hydra-betting-ball-dont-lie.timer in production (priorities #2, systemd unit committed but not deployed)
 - [ ] Prove first opportunity end-to-end, or decompose zero_opportunities per gate with counts (item-501, priorities #3)
 - [ ] Prove first end-to-end PAPER execution through the M7–M11 stack — gates stay off (item-502, priorities #4)
-- [ ] Calibration/learning loop receiving real WC group-stage samples — non-zero accumulator counts (priorities #5)
-- [ ] Wire BallDontLie injury poller as systemd timer for sports-time-to-signal calibration (priorities #7)
-- [ ] Expand WC 2026 verified pair coverage to round-of-16+ matches (priorities #6, round-of-16 June 29)
+- [ ] Wire passive fill-probability into live sports candidate ranking path (priorities #5, unblocked after first opportunity)
+- [ ] Calibration/learning loop receiving real WC group-stage samples — non-zero accumulator counts (priorities #6)
+- [ ] Expand WC 2026 verified pair coverage to round-of-16+ matches via knockout discovery route (priorities #7, round-of-16 June 29)
