@@ -40,10 +40,14 @@ import { loadBacklog } from "./backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/reflections.ts";
 import {
   getDesignConcept,
-  gateCheck,
-  isFresh as isDesignConceptFresh,
   type DesignConcept,
 } from "./design-concept.ts";
+// Gate predicate + freshness helper now live in their domain home (issue #1908);
+// the persistence module above no longer owns them.
+import {
+  gateCheck,
+  isFresh as isDesignConceptFresh,
+} from "./design-concept-gate.ts";
 // MergedAnchorRefs — shared merged-by-cycle suppression Seam (issue #1880,
 // extracted from this module). The Candidate Feed below imports the suppression
 // predicate (`isMergedWork`) + production loader (`loadMergedAnchorRefsImpl`);
