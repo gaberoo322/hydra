@@ -11,6 +11,17 @@ claude_only: true
 
 Autonomous implementation of GitHub issues against the Hydra orchestrator (`~/hydra`). Delegates to a worktree subagent for isolation.
 
+## Am I the parent or the child? — read FIRST (issue #1900)
+
+This playbook is written from the **parent dispatcher's** point of view (Pre-flight selection, `### 5. Spawn worktree agent`, post-agent reaping). But `hydra-autopilot` dispatches `hydra-dev` as a **background worktree subagent with no spawn tool** (inline mode, per the issue #1782 contract). In that environment **you ARE the child** — the spawn instructions do not apply to you. Mirror the inline-mode disambiguation `hydra-target-build` already uses.
+
+**Mode detection (mandatory, before any work):** decide which role you are playing in THIS session:
+
+- **You are the CHILD** if you were dispatched into a fresh worktree (cwd under `/dev/shm/hydra-worktrees/`, `/home/gabe/hydra-worktrees/`, or `/home/gabe/hydra/.claude/worktrees/`, with `git rev-parse --git-dir` under `.git/worktrees/`) and you have NO `Agent`/`Task` spawn tool. This is the autopilot inline-dispatch case. **Skip the parent Pre-flight (selection / size check / mark-in-progress) and the entire `### 5. Spawn worktree agent` step — they were already done for you by the dispatcher.** The dispatch prompt already named your issue, prepended the worktree-guard + path-anchoring + scope-respect preambles, and placed you in the worktree. Go straight to the **child execution contract** (the numbered child steps under "The child:" in Step 5 — verify isolation, read CONTEXT/ADRs, extract scope, fetch reflections + design-concept + tier via the live APIs, implement, run `npm test` / `npm run typecheck` / `npm run build`, open the PR with `closes #N`, emit the `## Friction Report`). Do NOT spawn another agent; do NOT re-select or re-label the issue from the parent's pre-flight.
+- **You are the PARENT** if you have an `Agent`/`Task` spawn tool available (or are being run interactively by the operator to dispatch work). Run the full playbook top to bottom: Pre-flight → Spawn worktree agent → Post-agent reaping.
+
+If unsure whether a spawn tool exists, make exactly ONE `ToolSearch` query (e.g. `+agent spawn task`) against the deferred-tool list, then commit to a mode — do not retry, and do not assume availability either way. The dispatch environment never grows the tool mid-session, so an absent spawn tool means: you are the child, proceed inline. Never abort merely because the spawn tool is absent, and never silently run the child steps without first recognising you are the child.
+
 ## Critical safety rules
 
 1. **NEVER run `git stash`/`checkout`/`reset`/`clean` on the main `~/hydra` working tree.** Operator may have uncommitted work.
