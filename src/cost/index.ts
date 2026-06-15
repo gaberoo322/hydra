@@ -42,25 +42,40 @@ export {
 } from "./surrogate.ts";
 
 // ---------------------------------------------------------------------------
-// Subscription Usage Tracker — Anthropic-quota projection (PR A #606, B-series)
+// Env-config readers — the pure-leaf config cluster (issue #1896)
 // ---------------------------------------------------------------------------
+// The `getXxx()` env readers + their DEFAULT_* constants were extracted out of
+// `usage-tracker.ts` (and `getWeeklyPaceCeiling` out of `eligibility.ts`) into
+// the stateless leaf `./config.ts`. Re-exported here at the SAME names so the
+// public surface is unchanged.
 export {
-  getUsage,
-  parseSessionLimitReset,
-  clearUsageCache,
   getWeeklyQuotaTokens,
   getFiveHourQuotaTokens,
   getOAuthUsageTtlMs,
   getOAuthUsageMaxStaleMs,
   DEFAULT_OAUTH_USAGE_TTL_MS,
   getWeeklyResetAnchorMs,
-  projectResetWindow,
   getCacheReadWeight,
   DEFAULT_CACHE_READ_WEIGHT,
-  weightedTokens,
   getDriftReferencePercent,
   getDriftFactor,
   DEFAULT_DRIFT_FACTOR,
+  getQuotaWeightOpus,
+  getQuotaWeightSonnet,
+  getQuotaWeightHaiku,
+  getWeeklyPaceCeiling,
+  DEFAULT_WEEKLY_PACE_CEILING,
+} from "./config.ts";
+
+// ---------------------------------------------------------------------------
+// Subscription Usage Tracker — Anthropic-quota projection (PR A #606, B-series)
+// ---------------------------------------------------------------------------
+export {
+  getUsage,
+  parseSessionLimitReset,
+  clearUsageCache,
+  projectResetWindow,
+  weightedTokens,
   modelToFamily,
   parseUsageLine,
   parseObservedResetMs,

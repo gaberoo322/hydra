@@ -23,6 +23,8 @@ import {
   getDriftReferencePercent,
   getDriftFactor,
   DEFAULT_DRIFT_FACTOR,
+  getWeeklyPaceCeiling,
+  DEFAULT_WEEKLY_PACE_CEILING,
   sessionIdFromPath,
   UNATTRIBUTED_SKILL,
   parseSessionLimitReset,
@@ -33,11 +35,11 @@ import {
 } from "../src/cost/index.ts";
 // The pure eligibility-projection fold now lives in its own module
 // (issue #1377). Import it directly from cost/eligibility.ts to prove the seam
-// is importable without pulling in the JSONL-scan machinery.
+// is importable without pulling in the JSONL-scan machinery. The env-config
+// readers (incl. getWeeklyPaceCeiling, moved to cost/config.ts in #1896) come
+// in via the index re-export above.
 import {
   projectEligibility,
-  getWeeklyPaceCeiling,
-  DEFAULT_WEEKLY_PACE_CEILING,
   PACE_STATE_TOLERANCE_PERCENT,
   PACING_SHEDDABLE_CLASSES,
   fiveHourThrottleShed,

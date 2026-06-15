@@ -1,0 +1,253 @@
+/**
+ * src/cost/config.ts — the env-config reader cluster for the **Subscription
+ * Usage Tracker** (issue #1896).
+ *
+ * Extracted out of `usage-tracker.ts` (the 1,564-line JSONL-scan / OAuth-cache
+ * / snapshot-assembly module) so the env-reader boilerplate lives apart from
+ * the domain scan logic it configures. This module is a PURE LEAF: it reads
+ * `process.env`, parses, and falls back — no IO, no Redis, no module state, and
+ * it imports NOTHING from `usage-tracker.ts` or `eligibility.ts` (the import
+ * graph stays acyclic). `usage-tracker.ts` imports the readers it consumes
+ * internally from here; `eligibility.ts` imports `getWeeklyPaceCeiling` from
+ * here for its Pacing-Curve verdict. Everything outside `src/cost/` keeps
+ * importing via `src/cost/index.ts`, which re-exports every symbol below at the
+ * same name — no external import line changes.
+ *
+ * Each reader's parse/fallback/fail-loud semantics are moved VERBATIM from
+ * `usage-tracker.ts` (and, for `getWeeklyPaceCeiling`, from `eligibility.ts`):
+ * unset/empty → default; non-empty-but-bad → `console.error` + default; the
+ * quota/weight family is all-or-nothing (0 unless explicitly set positive). The
+ * env-var meanings are documented at length in the `usage-tracker.ts` header.
+ */
+
+/**
+ * Default OAuth-meter cache TTL (issue #1090): how long a successful OAuth
+ * meter read is reused before the next external GET is attempted. DECOUPLED
+ * from the 60s transcript-scan cache (`CACHE_TTL_MS` in `usage-tracker.ts`) so
+ * the OAuth read cadence is NOT pinned to the scan cadence. At 5 minutes the
+ * service makes ≤12 OAuth GETs/hour, comfortably under the endpoint's
+ * rolling-window rate limit (it 429s at ~tens/hour), instead of the ~60/hr the
+ * snapshot-coupled read produced. Overridable via `HYDRA_OAUTH_USAGE_TTL_MS`.
+ */
+export const DEFAULT_OAUTH_USAGE_TTL_MS = 300_000;
+
+/**
+ * Default per-token-type cache-read weight (issue #873): 1.0 = identity =
+ * the pre-#873 full-weight behaviour. Keeping the default at identity makes an
+ * unset `HYDRA_USAGE_CACHE_READ_WEIGHT` a pure no-op so the change is purely
+ * calibration-gated (the principled ~0.1 production value lives in host config,
+ * not a hardcoded constant fit to one week).
+ */
+export const DEFAULT_CACHE_READ_WEIGHT = 1.0;
+
+/**
+ * Default factor by which the tracker's `percentSinceReset` may diverge from
+ * the operator-seeded reference reading before the once-per-scan drift warning
+ * fires (issue #873). 2x in either direction — a coarse "calibration has
+ * clearly rotted" signal, not a precise alarm.
+ */
+export const DEFAULT_DRIFT_FACTOR = 2;
+
+/**
+ * Default **Pacing Ceiling** (issue #857, ADR-0021): the sub-100% fraction of
+ * the weekly quota the **Pacing Curve** climbs to by the next **Weekly Reset
+ * Anchor**. The ~8% gap below 1.0 is the **Operator Reserve** (CONTEXT.md).
+ *
+ * Lives here as the `DEFAULT_*` constant of its sole reader
+ * {@link getWeeklyPaceCeiling} (issue #1896): keeping it in `eligibility.ts`
+ * while the reader moved here would force `config.ts` to import it back, which
+ * would break this module's pure-leaf (acyclic) invariant. The pacing-curve
+ * math that consumes the *ceiling fraction* (`projectPacingCurve`,
+ * `PACE_STATE_TOLERANCE_PERCENT`) stays in `eligibility.ts` — only this reader
+ * and its fallback constant moved.
+ */
+export const DEFAULT_WEEKLY_PACE_CEILING = 0.92;
+
+export function getWeeklyQuotaTokens(): number {
+  return parseQuotaEnv(process.env.HYDRA_USAGE_WEEKLY_QUOTA_TOKENS);
+}
+
+export function getFiveHourQuotaTokens(): number {
+  return parseQuotaEnv(process.env.HYDRA_USAGE_5H_QUOTA_TOKENS);
+}
+
+function parseQuotaEnv(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return 0;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return parsed;
+}
+
+/**
+ * The OAuth-meter cache TTL in ms (issue #1090), from `HYDRA_OAUTH_USAGE_TTL_MS`,
+ * falling back to {@link DEFAULT_OAUTH_USAGE_TTL_MS}. While a cached successful
+ * read is younger than this, no external GET is made (the value is served as
+ * fresh `usageSource:"oauth"`). A non-empty-but-invalid value (non-finite or
+ * <= 0) is logged (fail-loud) and falls back to the default, mirroring the
+ * other env readers. Pure + env-only so the cache math stays unit-testable.
+ */
+export function getOAuthUsageTtlMs(): number {
+  const raw = process.env.HYDRA_OAUTH_USAGE_TTL_MS;
+  if (raw === undefined || raw === "") return DEFAULT_OAUTH_USAGE_TTL_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_OAUTH_USAGE_TTL_MS is set but not a positive finite ` +
+        `number (${JSON.stringify(raw)}); falling back to default ${DEFAULT_OAUTH_USAGE_TTL_MS}`,
+    );
+    return DEFAULT_OAUTH_USAGE_TTL_MS;
+  }
+  return parsed;
+}
+
+/**
+ * How long PAST the TTL a stale last-good OAuth value may still be served on a
+ * failed read before the headline falls through to the transcript estimate
+ * (issue #1090), from `HYDRA_OAUTH_USAGE_MAX_STALE_MS`, defaulting to the
+ * effective TTL. So the lifecycle of one successful read is:
+ *   - age < TTL                  → served fresh, no GET attempted (oauth)
+ *   - TTL ≤ age < TTL+maxStale    → GET attempted; on failure served STALE (oauth+stale)
+ *   - age ≥ TTL + maxStale        → too stale; falls through to the estimate
+ * This realises AC2 ("a 429 keeps usageSource:oauth using last-good while a
+ * recent value exists") AND AC3 ("after the OAuth TTL with no successful read,
+ * falls to estimate"). A non-empty-but-invalid value is logged and falls back
+ * to the effective TTL. Pure + env-only.
+ */
+export function getOAuthUsageMaxStaleMs(): number {
+  const raw = process.env.HYDRA_OAUTH_USAGE_MAX_STALE_MS;
+  if (raw === undefined || raw === "") return getOAuthUsageTtlMs();
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_OAUTH_USAGE_MAX_STALE_MS is set but not a positive ` +
+        `finite number (${JSON.stringify(raw)}); falling back to the OAuth TTL`,
+    );
+    return getOAuthUsageTtlMs();
+  }
+  return parsed;
+}
+
+/**
+ * The operator-seeded **Weekly Reset Anchor** as epoch-ms, or `null` when
+ * `HYDRA_USAGE_WEEKLY_RESET_ANCHOR` is unset/empty/unparseable. A bad value
+ * is treated as unset (returns null) rather than throwing — the since-reset
+ * fields stay neutral, mirroring the uncalibrated-quota discipline. A
+ * non-empty-but-unparseable value is logged (fail-loud) since it signals a
+ * mis-configured env var the operator should fix.
+ */
+export function getWeeklyResetAnchorMs(): number | null {
+  const raw = process.env.HYDRA_USAGE_WEEKLY_RESET_ANCHOR;
+  if (raw === undefined || raw === "") return null;
+  const parsed = Date.parse(raw);
+  if (!Number.isFinite(parsed)) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_WEEKLY_RESET_ANCHOR is set but not a valid ISO-8601 instant (${JSON.stringify(
+        raw,
+      )}); treating Weekly Reset Anchor as unset`,
+    );
+    return null;
+  }
+  return parsed;
+}
+
+/**
+ * The operator-tunable per-token-type cache-read weight `w_cache` from
+ * `HYDRA_USAGE_CACHE_READ_WEIGHT`. Unset/empty falls back to
+ * {@link DEFAULT_CACHE_READ_WEIGHT} (identity). A non-empty-but-bad value
+ * (non-finite or <= 0) is logged (fail-loud) and also falls back to the
+ * default, since it signals a mis-configured env var the operator should fix.
+ * Pure + env-only so the weighted-unit math stays unit-testable. (issue #873)
+ */
+export function getCacheReadWeight(): number {
+  const raw = process.env.HYDRA_USAGE_CACHE_READ_WEIGHT;
+  if (raw === undefined || raw === "") return DEFAULT_CACHE_READ_WEIGHT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_CACHE_READ_WEIGHT is set but not a positive ` +
+        `finite number (${JSON.stringify(raw)}); falling back to default ` +
+        `${DEFAULT_CACHE_READ_WEIGHT}`,
+    );
+    return DEFAULT_CACHE_READ_WEIGHT;
+  }
+  return parsed;
+}
+
+/**
+ * Operator-seeded reference `percentSinceReset` for drift detection, or `null`
+ * when `HYDRA_USAGE_DRIFT_REFERENCE_PERCENT` is unset/empty/non-positive. A
+ * non-empty-but-bad value is logged (fail-loud). Unset => drift detection is
+ * inert (no false alarms). (issue #873)
+ */
+export function getDriftReferencePercent(): number | null {
+  const raw = process.env.HYDRA_USAGE_DRIFT_REFERENCE_PERCENT;
+  if (raw === undefined || raw === "") return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_DRIFT_REFERENCE_PERCENT is set but not a ` +
+        `positive finite number (${JSON.stringify(raw)}); drift detection inert`,
+    );
+    return null;
+  }
+  return parsed;
+}
+
+/**
+ * The drift-warning divergence factor from `HYDRA_USAGE_DRIFT_FACTOR`, falling
+ * back to {@link DEFAULT_DRIFT_FACTOR}. Must be > 1 to be meaningful; a value
+ * <= 1 (or non-finite) is logged and falls back to the default. (issue #873)
+ */
+export function getDriftFactor(): number {
+  const raw = process.env.HYDRA_USAGE_DRIFT_FACTOR;
+  if (raw === undefined || raw === "") return DEFAULT_DRIFT_FACTOR;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 1) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_DRIFT_FACTOR is set but not a finite number ` +
+        `> 1 (${JSON.stringify(raw)}); falling back to default ${DEFAULT_DRIFT_FACTOR}`,
+    );
+    return DEFAULT_DRIFT_FACTOR;
+  }
+  return parsed;
+}
+
+export function getQuotaWeightOpus(): number {
+  return parseQuotaEnv(process.env.HYDRA_QUOTA_WEIGHT_OPUS);
+}
+
+export function getQuotaWeightSonnet(): number {
+  return parseQuotaEnv(process.env.HYDRA_QUOTA_WEIGHT_SONNET);
+}
+
+export function getQuotaWeightHaiku(): number {
+  return parseQuotaEnv(process.env.HYDRA_QUOTA_WEIGHT_HAIKU);
+}
+
+/**
+ * The operator-tunable **Pacing Ceiling** as a fraction in (0, 1], read from
+ * `HYDRA_USAGE_WEEKLY_PACE_CEILING`. Unset/empty/unparseable/out-of-range
+ * falls back to {@link DEFAULT_WEEKLY_PACE_CEILING} (a non-empty-but-bad value
+ * is logged, fail-loud, since it signals a mis-configured env var). Values
+ * above 1.0 are clamped to 1.0; values <= 0 fall back to the default. Pure +
+ * env-only so the curve math stays unit-testable. (issue #857)
+ *
+ * Moved here from `eligibility.ts` (issue #1896) to consolidate all env-config
+ * readers in one leaf: `eligibility.ts` now imports this value from `config.ts`
+ * instead of defining it, while keeping the Pacing-Curve math that consumes the
+ * fraction.
+ */
+export function getWeeklyPaceCeiling(): number {
+  const raw = process.env.HYDRA_USAGE_WEEKLY_PACE_CEILING;
+  if (raw === undefined || raw === "") return DEFAULT_WEEKLY_PACE_CEILING;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(
+      `[usage-tracker] HYDRA_USAGE_WEEKLY_PACE_CEILING is set but not a finite number in (0, 1] (${JSON.stringify(
+        raw,
+      )}); falling back to default ${DEFAULT_WEEKLY_PACE_CEILING}`,
+    );
+    return DEFAULT_WEEKLY_PACE_CEILING;
+  }
+  return Math.min(parsed, 1);
+}
