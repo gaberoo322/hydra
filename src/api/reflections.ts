@@ -1,9 +1,9 @@
 import { Router } from "express";
+import { loadAnchorReflections } from "../reflections/per-anchor.ts";
 import {
-  loadAnchorReflections,
   loadAnchorReflectionsByFile,
   extractFilesFromAnchor,
-} from "../reflections/reflections.ts";
+} from "../reflections/by-file.ts";
 import { getTargetName } from "../target-config.ts";
 import { ReflectionsQuerySchema } from "../schemas/reflections.ts";
 import { aggregatorRoute } from "./route-helpers.ts";

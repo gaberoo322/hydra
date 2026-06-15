@@ -63,7 +63,7 @@ import {
   incrSchedulerCyclesFailed,
 } from "../redis/scheduler.ts";
 import { recordCycleMetrics, type CycleMetricsInput } from "../metrics/record.ts";
-import { recordAnchorReflection } from "../reflections/reflections.ts";
+import { recordAnchorReflection } from "../reflections/per-anchor.ts";
 import { classBySkill } from "../taxonomy/classes.ts";
 import {
   listActiveSubagentDispatches,

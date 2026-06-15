@@ -52,7 +52,13 @@ describe("issue #326: reflection by-file index", () => {
         console.error("Redis unavailable at localhost:6379/1, skipping by-file reflection tests");
         return;
       }
-      reflections = await import("../src/reflections/reflections.ts");
+      // Issue #1938: the reflections catch-all was split into sibling concern
+      // modules (per-anchor.ts + by-file.ts) with no back-compat barrel. This
+      // suite exercises symbols from both, so merge their namespaces.
+      reflections = {
+        ...(await import("../src/reflections/per-anchor.ts")),
+        ...(await import("../src/reflections/by-file.ts")),
+      };
       learning = await import("../src/learning.ts");
       metrics = await import("../src/metrics/trend.ts");
     }
@@ -223,14 +229,15 @@ describe("issue #326: reflection by-file index", () => {
     await redis.del("hydra:reflections:by-file:src/legacy/thing.ts");
 
     const indexed = await reflections.backfillByFileIndex(anchorRef);
-    assert.equal(indexed, 1);
+    assert.equal(indexed.length, 1, "returns the list of indexed files (issue #1938)");
+    assert.deepEqual(indexed, ["src/legacy/thing.ts"]);
 
     const members = await redis.smembers("hydra:reflections:by-file:src/legacy/thing.ts");
     assert.equal(members.length, 1);
 
     // Idempotent: a second call should not duplicate.
     const indexedAgain = await reflections.backfillByFileIndex(anchorRef);
-    assert.equal(indexedAgain, 1);
+    assert.equal(indexedAgain.length, 1);
     const membersAgain = await redis.smembers("hydra:reflections:by-file:src/legacy/thing.ts");
     assert.equal(membersAgain.length, 1);
   });

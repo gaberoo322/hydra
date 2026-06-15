@@ -11,7 +11,7 @@
  *     `redis/cycle-metrics.getCycleMetrics` sidecar (abandonReason,
  *     regressionIntroduced, anchorReference, prNumber live there)
  *   - **QA verdicts / failure narratives** — the per-anchor reflection blocks
- *     (`reflections/reflections.loadAnchorReflections`), the live record of
+ *     (`reflections/per-anchor.loadAnchorReflections`), the live record of
  *     "what was attempted, why it failed" a retry consumes (there is no
  *     separate QA-verdict store; QA posts verdicts as PR comments and the
  *     fixable signal is the reflection narrative)
@@ -42,7 +42,7 @@ import {
 import { getCycleHash } from "../redis/cycle-tracking.ts";
 import { getCycleMetrics } from "../redis/cycle-metrics.ts";
 import { getAllRecommendations } from "../redis/recommendations.ts";
-import { loadAnchorReflections } from "../reflections/reflections.ts";
+import { loadAnchorReflections } from "../reflections/per-anchor.ts";
 import { listFrictionPatterns } from "../pattern-memory/agent-memory.ts";
 import { getAutopilotHealth } from "../aggregators/autopilot-health.ts";
 import type { StuckSignal } from "../schemas/now-page.ts";
