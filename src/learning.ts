@@ -31,12 +31,12 @@ import {
   formatMemoryForPrompt,
 } from "./pattern-memory/agent-memory.ts";
 import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
+import { loadAnchorReflections } from "./reflections/per-anchor.ts";
 import {
-  loadAnchorReflections,
   loadAnchorReflectionsByFile,
   backfillByFileIndex,
   extractFilesFromAnchor,
-} from "./reflections/reflections.ts";
+} from "./reflections/by-file.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
 import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
 // Issue #1440: per-cycle knowledge-context-availability tracking. The planner
