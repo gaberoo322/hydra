@@ -37,7 +37,7 @@
 
 import { getWorkQueueItems, removeWorkQueueItem, isTerminalMarker } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
-import { loadAnchorReflectionsRaw } from "./reflections/reflections.ts";
+import { loadAnchorReflectionsRaw } from "./reflections/per-anchor.ts";
 import {
   getDesignConcept,
   type DesignConcept,

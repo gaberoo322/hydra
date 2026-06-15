@@ -185,7 +185,7 @@ describe("POST /api/autopilot/reflection-record (issue #1119)", () => {
     assert.equal(res._body.outcome, "verification-failure");
 
     // The CONSUMER side — the exact reader anchor-scoring + the #841 API use.
-    const { loadAnchorReflectionsRaw } = await import("../src/reflections/reflections.ts");
+    const { loadAnchorReflectionsRaw } = await import("../src/reflections/per-anchor.ts");
     const reflections = await loadAnchorReflectionsRaw(anchorRef);
     assert.equal(reflections.length, 1, "the live consumer must read the just-written reflection");
     const r = reflections[0];
@@ -206,7 +206,7 @@ describe("POST /api/autopilot/reflection-record (issue #1119)", () => {
     );
     assert.equal(res._status, 200);
 
-    const { loadAnchorReflections } = await import("../src/reflections/reflections.ts");
+    const { loadAnchorReflections } = await import("../src/reflections/per-anchor.ts");
     const block = await loadAnchorReflections(anchorRef);
     assert.ok(block.count > 0, "injection block count must be > 0 after a write");
     assert.match(block.content, /PRIOR ATTEMPTS/, "formatted block carries the PRIOR ATTEMPTS header");
@@ -230,7 +230,7 @@ describe("POST /api/autopilot/reflection-record (issue #1119)", () => {
     await handler(mockReq(body), res2);
     assert.equal(res2._status, 200);
 
-    const { loadAnchorReflectionsRaw } = await import("../src/reflections/reflections.ts");
+    const { loadAnchorReflectionsRaw } = await import("../src/reflections/per-anchor.ts");
     const reflections = await loadAnchorReflectionsRaw(anchorRef);
     assert.equal(
       reflections.length,

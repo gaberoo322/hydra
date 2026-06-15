@@ -22,7 +22,7 @@ import Redis from "ioredis";
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const { createReflectionsRouter } = await import("../src/api/reflections.ts");
-const reflections = await import("../src/reflections/reflections.ts");
+const reflections = await import("../src/reflections/per-anchor.ts");
 
 let testRedis: any;
 let redisAvailable = false;
