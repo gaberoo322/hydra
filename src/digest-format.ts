@@ -478,7 +478,7 @@ export async function buildWeeklySummary(deps: WeeklySummaryDeps = {}): Promise<
     deps.getFixFeatureRatio ?? (await import("./metrics/aggregate.ts")).getFixFeatureRatio;
   const getCurrentMilestoneProgress =
     deps.getCurrentMilestoneProgress ??
-    (await import("./backlog/reads.ts")).getCurrentMilestoneProgress;
+    (await import("./config/roadmap.ts")).getCurrentMilestoneProgress;
   const getBacklogCounts =
     deps.getBacklogCounts ?? (await import("./backlog/reads.ts")).getBacklogCounts;
 
