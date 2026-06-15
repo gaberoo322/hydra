@@ -24,6 +24,7 @@ import {
   BACKOFF_BASE_MS,
   type AlertSeverity,
   type NotificationEvent,
+  type AlertGrammarEvent,
 } from "../src/notification-consumer.ts";
 
 test("ALERT_TYPES is an exported, non-empty Set of event-type strings", () => {
@@ -72,6 +73,34 @@ test("formatAlertMessage uses dedicated arms for known cycle events", () => {
   });
   assert.ok(dead.includes("notifications"));
   assert.ok(dead.includes("6"));
+});
+
+test("formatAlertMessage accepts a typed AlertGrammarEvent (issue #1889)", () => {
+  // The typed event interface names exactly the payload fields the alert
+  // grammar dereferences — mirroring FormatMessageEvent (notify-format.ts) and
+  // DigestGrammarEvent (digest-format.ts). A field declared here is contract-
+  // checked at the access site, so a renamed read field is a compile error.
+  const event: AlertGrammarEvent = {
+    type: "cycle:operator_blocked",
+    payload: { title: "ship the thing", blockedReason: "needs creds" },
+  };
+  const msg = formatAlertMessage(event);
+  assert.ok(msg.includes("ship the thing"));
+  assert.ok(msg.includes("needs creds"));
+});
+
+test("AlertGrammarEvent is a structural subset of NotificationEvent (assignable both ways at the call site)", () => {
+  // handleNotificationEvent carries NotificationEvent and passes it to
+  // formatAlertMessage(AlertGrammarEvent); this pins that the bus-fed shape
+  // stays assignable to the narrower grammar type.
+  const busEvent: NotificationEvent = {
+    type: "dlq:alert",
+    payload: { eventType: "cycle:failed", deliveryCount: 3, error: "boom" },
+  };
+  const narrowed: AlertGrammarEvent = busEvent;
+  const msg = formatAlertMessage(narrowed);
+  assert.ok(msg.includes("cycle:failed"));
+  assert.ok(msg.includes("3"));
 });
 
 test("classifyAlertSeverity maps each tier from its canonical event type", () => {

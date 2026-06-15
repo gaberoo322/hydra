@@ -130,8 +130,14 @@ export const ALERT_TYPES: ReadonlySet<string> = new Set<string>([
  * typed vocabulary in event-bus.ts (issue #1182) — so a misspelled event type
  * is a compile error, kept in lock-step with the ALERT_TYPES set above. The
  * default branch handles any ALERT_TYPES member without a dedicated case.
+ *
+ * The `event` parameter is typed `AlertGrammarEvent` (issue #1889) so the
+ * payload fields the switch reads are contract-checked too, not just the case
+ * labels — mirroring `formatMessage(FormatMessageEvent)` in `notify-format.ts`
+ * (#1857) and `buildDigestMessage(DigestGrammarEvent[])` in `digest-format.ts`
+ * (#1835). A renamed read field is a compile error here, not a silent miss.
  */
-export function formatAlertMessage(event: NotificationEvent): string {
+export function formatAlertMessage(event: AlertGrammarEvent): string {
   const p = event.payload || {};
   switch (event.type) {
     case E.CYCLE_FAILED: return `Cycle failed: ${p.taskTitle || p.cycleId || "unknown"} — ${p.reason || "verification failed"}`;
@@ -145,6 +151,56 @@ export function formatAlertMessage(event: NotificationEvent): string {
     case E.CYCLE_OPERATOR_BLOCKED: return `BLOCKED — needs your action: "${p.title}" — ${p.blockedReason}`;
     default: return `${event.type}: ${JSON.stringify(p).slice(0, 200)}`;
   }
+}
+
+/**
+ * The event vocabulary the alert grammar reads (issue #1889).
+ *
+ * `formatAlertMessage` is fed loosely-typed `NOTIFICATION_EVENT_TYPES` events
+ * from the bus (ultimately the same `NotificationEvent` shapes this Module
+ * carries). This type names exactly the payload fields the `formatAlertMessage`
+ * switch dereferences via the `p = event.payload || {}` accessor — so a renamed
+ * payload field (e.g. `taskTitle` → `title`, or `cycleId` → `id`) becomes a
+ * compile error at the access site rather than a silent runtime miss in the
+ * dashboard-alert body.
+ *
+ * This mirrors `FormatMessageEvent` (`notify-format.ts`, issue #1857) and
+ * `DigestGrammarEvent` (`digest-format.ts`, issue #1835) — the two sibling
+ * formatters that fixed the same class of gap. The three formatters now share
+ * one structural pattern:
+ *
+ * - `payload` stays OPEN (`Record<string, unknown> & {…}`) because the bus
+ *   carries the full event vocabulary; the named fields are only the subset
+ *   the alert grammar narrows on. A producer renaming a read field is caught;
+ *   a producer adding an *unread* field is not constrained.
+ * - `type` is REQUIRED because `formatAlertMessage` switches on it
+ *   unconditionally and `handleNotificationEvent` only reaches it after an
+ *   `ALERT_TYPES.has(event.type)` gate.
+ *
+ * The named field set below is the exhaustive read set of the
+ * `formatAlertMessage` switch — every `p.<x>` an arm dereferences. On-wire
+ * alert messages are unchanged; this concentrates the payload contract, not
+ * the format. `AlertGrammarEvent` is structurally a subset of `NotificationEvent`,
+ * so the bus-fed events `handleNotificationEvent` carries remain assignable.
+ */
+export interface AlertGrammarEvent {
+  type: string;
+  payload?: Record<string, unknown> & {
+    taskTitle?: string;
+    cycleId?: string;
+    reason?: string;
+    elapsed?: string;
+    inProgress?: number;
+    eventType?: string;
+    deliveryCount?: number;
+    error?: string;
+    consumer?: string;
+    restarts?: number;
+    opportunityCount?: number;
+    message?: string;
+    title?: string;
+    blockedReason?: string;
+  };
 }
 
 /**
