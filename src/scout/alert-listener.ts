@@ -557,29 +557,6 @@ export async function recordDispatch(
 }
 
 /**
- * Record a calendar-driven dispatch in the audit stream. Used by Phase B's
- * calendar walk caller so the audit trail covers BOTH triggers from one
- * source. Doesn't touch the dedup/cooldown keys — calendar walk owns its
- * own stamps via `stampClassWalk` / `stampCategoryWalk`.
- */
-export async function recordCalendarDispatch(
-  category: string,
-  outcome: "filed" | "dropped" | "error",
-  detail: string,
-  now: Date = new Date(),
-  cost: number | null = null,
-): Promise<void> {
-  await xaddDispatchAudit({
-    triggeredBy: "calendar",
-    category,
-    dispatchedAt: now.toISOString(),
-    cost,
-    outcome,
-    detail,
-  });
-}
-
-/**
  * Advance the alert cursor to `iso`. Caller (typically the autopilot) does
  * this once at the end of the planning tick, AFTER all dispatches have
  * been recorded — so a crash mid-tick re-processes the same alerts on the

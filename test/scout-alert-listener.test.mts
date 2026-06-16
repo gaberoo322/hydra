@@ -38,7 +38,6 @@ const {
   classifyAlert,
   planAlertDispatches,
   recordDispatch,
-  recordCalendarDispatch,
   listDispatchAudits,
   advanceAlertCursor,
   getAlertCursor,
@@ -518,20 +517,18 @@ describe("recordDispatch (Redis-backed)", () => {
     assert.equal(audits[0].outcome, "error");
   });
 
-  test("recordCalendarDispatch writes audit with triggeredBy=calendar", async () => {
-    await recordCalendarDispatch("typed-schemas", "filed", "issue #777", new Date("2026-05-19T12:00:00Z"));
-    const audits = await listDispatchAudits(10);
-    assert.equal(audits.length, 1);
-    assert.equal(audits[0].triggeredBy, "calendar");
-    assert.equal(audits[0].category, "typed-schemas");
-  });
-
   test("audit stream survives many writes (MAXLEN trim)", async () => {
     // Spot-check: MAXLEN ~ 1000 — write a few and verify newest-first order.
     const now = new Date("2026-05-19T12:00:00Z");
     for (let i = 0; i < 5; i++) {
-      await recordCalendarDispatch(
-        `cat-${i}`,
+      await recordDispatch(
+        {
+          pattern: `pat-${i}`,
+          category: `cat-${i}`,
+          alertId: `alert-${i}`,
+          alertTimestamp: "2026-05-19T11:00:00Z",
+          reason: `entry-${i}`,
+        },
         "filed",
         `entry-${i}`,
         new Date(now.getTime() + i),
