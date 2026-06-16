@@ -24,6 +24,7 @@
 
 import { RUN_TTL_SECONDS } from "./runs.ts";
 import * as defaultRedis from "../redis/recommendations.ts";
+import { anthropicMessages, isAnthropicFailure } from "../anthropic/request.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -520,112 +521,78 @@ export function createRecommendationEngine(deps: EngineDeps): RecommendationEngi
 }
 
 // ---------------------------------------------------------------------------
-// Production LLM client — stdlib fetch against the Anthropic Messages API
+// Production LLM client — thin wrapper over the Anthropic Request Adapter
 // ---------------------------------------------------------------------------
 
 const HAIKU_MODEL = "claude-haiku-4-5";
-const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_VERSION = "2023-06-01";
 
 /** Per-million-token cost estimates for the engine's accounting. */
 const HAIKU_INPUT_PER_MTOK_USD = 1.0;
 const HAIKU_OUTPUT_PER_MTOK_USD = 5.0;
 
 /**
- * Build the production LLM client. When `ANTHROPIC_API_KEY` is not set in
- * the environment, every call returns `null` so the engine becomes inert
- * — the operator opts in by setting the key. The HTTP request uses stdlib
- * `fetch` (Node >= 18) to keep us inside the operator-approved dep set
- * (no `@anthropic-ai/sdk` import — see ADR-0005).
+ * Build the production LLM client. This is now a THIN wrapper over the
+ * **Anthropic Request Adapter** (`src/anthropic/request.ts`, issue #1959): the
+ * URL, `anthropic-version` header, `ANTHROPIC_API_KEY` resolution, the
+ * `AbortSignal.timeout()` discipline, non-2xx / malformed-JSON / network
+ * classification, token-usage extraction, and the per-call USD cost derivation
+ * all live behind the adapter primitive. The engine's only job here is to build
+ * the prompt, call the adapter, and map its discriminated `AnthropicResult` onto
+ * the engine's `LlmResult`.
  *
- * The `runId`/`turn_n` from the prompt input is stamped into the parsed
- * recommendations.
+ * Failure contract preserved 1:1 from the old inline client: when no
+ * `ANTHROPIC_API_KEY` is set the adapter returns `anthropic-no-api-key`, which
+ * we map to `null` (the engine treats null as an inert no-op). Every other
+ * adapter failure code also maps to `null` — a transient transport/non-2xx
+ * failure must not pause the engine (only the daily cap pauses it).
+ *
+ * Staying off `@anthropic-ai/sdk` (ADR-0005) is now the adapter's invariant; the
+ * engine no longer constructs a raw `fetch` at all.
  */
 function defaultLlmClient(opts: {
   fetchImpl?: typeof fetch;
   apiKey?: string;
 } = {}): LlmClient {
-  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-  const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
-
   return {
     async generate(input: EnginePromptInput): Promise<LlmResult | null> {
-      if (!apiKey) return null;
-      if (!fetchImpl) {
-        console.error("[recs-engine] no fetch available; engine inert");
-        return null;
-      }
-
       const prompt = buildPrompt(input);
-      const body = JSON.stringify({
-        model: HAIKU_MODEL,
-        max_tokens: 512,
-        messages: [{ role: "user", content: prompt }],
-      });
 
-      let res: Response;
-      try {
-        res = await fetchImpl(ANTHROPIC_MESSAGES_URL, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": ANTHROPIC_VERSION,
+      const result = await anthropicMessages(
+        {
+          model: HAIKU_MODEL,
+          max_tokens: 512,
+          messages: [{ role: "user", content: prompt }],
+        },
+        {
+          apiKey: opts.apiKey,
+          fetchImpl: opts.fetchImpl,
+          costRates: {
+            input_per_mtok_usd: HAIKU_INPUT_PER_MTOK_USD,
+            output_per_mtok_usd: HAIKU_OUTPUT_PER_MTOK_USD,
           },
-          body,
-        });
-      } catch (err: any) {
-        console.error(
-          `[recs-engine] Anthropic fetch threw: ${err?.message || err}`,
-        );
+        },
+      );
+
+      if (isAnthropicFailure(result)) {
+        // anthropic-no-api-key → engine stays inert (operator hasn't opted in).
+        // Any other code (non-2xx / malformed-json / timeout / network-error)
+        // is a transient boundary failure: log already happened in the adapter;
+        // map to null so the engine skips this turn without pausing.
         return null;
       }
-
-      if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        console.error(
-          `[recs-engine] Anthropic non-2xx ${res.status}: ${detail.slice(0, 200)}`,
-        );
-        return null;
-      }
-
-      let payload: any;
-      try {
-        payload = await res.json();
-      } catch (err: any) {
-        console.error(`[recs-engine] Anthropic JSON parse: ${err?.message || err}`);
-        return null;
-      }
-
-      const text = extractFirstTextBlock(payload);
-      const usageInput = Number(payload?.usage?.input_tokens || 0);
-      const usageOutput = Number(payload?.usage?.output_tokens || 0);
-      const costUsd =
-        (usageInput / 1_000_000) * HAIKU_INPUT_PER_MTOK_USD +
-        (usageOutput / 1_000_000) * HAIKU_OUTPUT_PER_MTOK_USD;
 
       const nowEpoch = Math.floor(Date.now() / 1000);
       const recs = parseLlmResponse({
-        rawJsonText: text,
+        rawJsonText: result.text,
         runId: input.turn_end.run_id,
         evidenceId: `turn:${input.turn_end.turn_n}`,
         nowIso: new Date(nowEpoch * 1000).toISOString(),
         turnN: input.turn_end.turn_n,
       });
 
-      return { recommendations: recs, cost_usd: costUsd, prompt };
+      return { recommendations: recs, cost_usd: result.cost_usd, prompt };
     },
   };
-}
-
-function extractFirstTextBlock(payload: any): string {
-  if (!payload || !Array.isArray(payload.content)) return "";
-  for (const block of payload.content) {
-    if (block && block.type === "text" && typeof block.text === "string") {
-      return block.text;
-    }
-  }
-  return "";
 }
 
 // ---------------------------------------------------------------------------

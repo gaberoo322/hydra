@@ -101,7 +101,22 @@ export type HydraErrorCode =
   | "oauth-usage-non-2xx" // the endpoint answered with a non-2xx status other than 401/403
   | "oauth-usage-parse" // a 2xx body failed JSON.parse OR was missing a usable window
   | "oauth-usage-timeout" // the request exceeded its AbortSignal timeout and was aborted
-  | "oauth-usage-network"; // transport failed (DNS/ECONNREFUSED/offline)
+  | "oauth-usage-network" // transport failed (DNS/ECONNREFUSED/offline)
+  // Anthropic Request Adapter (src/anthropic/request.ts) result-object codes
+  // (issue #1959). The sixth boundary Seam — sibling to the OpenViking Request
+  // Adapter and the OAuth Usage Adapter, also over fetch(), owning the Anthropic
+  // Messages API request boundary (URL, anthropic-version header, ANTHROPIC_API_KEY
+  // resolution, AbortSignal timeout discipline — the gap the old inline
+  // defaultLlmClient had — error classification, token-usage + USD cost
+  // derivation). Same never-throw discipline: these literals appear only on the
+  // failure arm of the AnthropicResult `{ ok:false; code }`, so the recommendation
+  // engine maps a failure to an inert no-op instead of regexing fetch error prose.
+  // No thrown subclass — the adapter returns, never raises.
+  | "anthropic-no-api-key" // no ANTHROPIC_API_KEY configured (engine stays inert)
+  | "anthropic-non-2xx" // the API answered with a non-2xx status (!res.ok)
+  | "anthropic-malformed-json" // a 2xx body failed to JSON.parse
+  | "anthropic-timeout" // the request exceeded its AbortSignal timeout and was aborted
+  | "anthropic-network-error"; // transport failed (DNS/ECONNREFUSED/offline)
 
 /**
  * Base class for all Hydra typed errors. Carries a stable `code` and sets

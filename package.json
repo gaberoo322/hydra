@@ -19,6 +19,7 @@
     "host-probe-seam-check": "npx tsx scripts/ci/host-probe-seam-check.ts",
     "journal-seam-check": "npx tsx scripts/ci/journal-seam-check.ts",
     "openviking-seam-check": "npx tsx scripts/ci/openviking-seam-check.ts",
+    "anthropic-seam-check": "npx tsx scripts/ci/anthropic-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts",
     "ast-search": "npx tsx scripts/ast-search.ts",
     "probe-search": "npx tsx scripts/probe-search.ts",

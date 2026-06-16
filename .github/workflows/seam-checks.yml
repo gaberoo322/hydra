@@ -40,6 +40,9 @@ name: seam-checks
 #   openviking-seam — #954: the OpenViking Request Adapter
 #                     (src/knowledge-base/ov-request.ts) owns the OV fetch()
 #                     boundary.
+#   anthropic-seam  — #1959: the Anthropic Request Adapter
+#                     (src/anthropic/request.ts) owns the Anthropic Messages
+#                     API fetch() boundary.
 
 on:
   pull_request:
@@ -77,3 +80,6 @@ jobs:
 
       - name: OpenViking-seam check (OpenViking Request Adapter closure ratchet, #954)
         run: npx tsx scripts/ci/openviking-seam-check.ts
+
+      - name: Anthropic-seam check (Anthropic Request Adapter closure ratchet, #1959)
+        run: npx tsx scripts/ci/anthropic-seam-check.ts
