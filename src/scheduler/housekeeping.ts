@@ -689,4 +689,3 @@ export {
   pruneStaleRedisKeys,
   returnStaleInProgressItems,
 };
-export type { Chore };
