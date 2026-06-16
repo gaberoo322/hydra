@@ -379,7 +379,11 @@ export async function initLearning(): Promise<void> {
     console.error(`[Learning] Promotion-metadata backfill failed: ${err.message}`);
   }
 
-  // 2. Register OV skills (non-blocking)
+  // 2. Register OV skills (non-blocking). registerSkills() records the outcome
+  //    in a queryable in-process skill-catalog state (issue #1968) — query it
+  //    via getSkillCatalogState() / GET /api/health/skills to detect the silent
+  //    empty-catalog failure (all skills lost to OpenViking timeouts under load)
+  //    that this fire-and-forget call used to hide behind a lone console.error.
   registerSkills().catch((err: any) => console.error(`[Learning] Skill registration failed: ${err.message}`));
 
   // 3. Start knowledge indexer

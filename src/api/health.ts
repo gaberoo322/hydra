@@ -38,7 +38,11 @@ import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-reque
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
-import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, parseRedisInfoSnapshot, OV_SEARCH_PROBE_TIMEOUT_MS, type ProbeInputs } from "../health-diagnostics.ts";
+import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, parseRedisInfoSnapshot, assessSkillCatalog, OV_SEARCH_PROBE_TIMEOUT_MS, type ProbeInputs } from "../health-diagnostics.ts";
+// Issue #1968: the in-process OV skill-catalog state, so /api/health/skills can
+// surface the silent empty-catalog failure (startup skill registration losing
+// all four skills to OpenViking timeouts) that no health surface reflected.
+import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 import type { PingableBus } from "./event-bus-types.ts";
 
 // ---- assembleProbeInputs — maps the positional settled array to named ProbeInputs --
@@ -278,6 +282,28 @@ export function createHealthRouter(eventBus: PingableBus) {
     ]);
 
     res.json({ vikingdb, openviking });
+  });
+
+  // GET /health/skills — OV skill-catalog registration state (issue #1968)
+  //
+  // Surfaces the previously-silent failure mode where startup skill
+  // registration loses all four skills to OpenViking timeouts/5xx under load,
+  // leaving the catalog empty while the service reports a clean startup. Reads
+  // the in-process state (no Redis/OV round-trip) and folds it through the pure
+  // `assessSkillCatalog` gate so the operator can tell `ok` from `degraded`
+  // (some missing) from `empty` (the silent knowledge-plane failure).
+  router.get("/health/skills", (_req, res) => {
+    const state = getSkillCatalogState();
+    const assessment = assessSkillCatalog(state);
+    res.json({
+      status: assessment.status,
+      registered: state.registered,
+      total: state.total,
+      completed: state.completed,
+      lastAttemptAt: state.lastAttemptAt,
+      skills: state.skills,
+      diagnostic: assessment.diagnostic,
+    });
   });
 
   // GET /health/deep — Comprehensive health with diagnostic reasoning

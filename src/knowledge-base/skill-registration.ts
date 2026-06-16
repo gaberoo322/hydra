@@ -41,6 +41,78 @@ const RETRYABLE_OV_CODES: ReadonlySet<OvErrorCode> = new Set<OvErrorCode>([
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+// ---------------------------------------------------------------------------
+// Skill-catalog registration state (issue #1968)
+//
+// Before #1968 `registerSkills` was a fire-and-forget tally logged once to the
+// console: when OpenViking timed out or 5xx'd under indexing load, ALL four
+// skill registrations could silently fail and the OV skill catalog stayed empty
+// — but the service reported a clean startup and no health surface reflected it.
+// Planners then ran without skill context, degrading forecast quality with no
+// visible alarm.
+//
+// We now record an in-process, queryable **skill-catalog state**: which skills
+// registered, the last failure code per skill, when the registration pass
+// completed, and how many of the OV_SKILLS succeeded. `getSkillCatalogState()`
+// exposes it so a health surface can gate on "is the catalog populated?" instead
+// of trusting the silent console.error path. State is in-process (resets on
+// restart) by design — it mirrors the OV liveness probe's "live snapshot"
+// semantics and needs no Redis round-trip on the /health hot path.
+// ---------------------------------------------------------------------------
+
+/** Per-skill registration outcome in the in-process catalog state. */
+export interface SkillRegistrationEntry {
+  /** The skill name (planner/executor/skeptic/director). */
+  name: string;
+  /** true once OV has accepted this skill at least once this process lifetime. */
+  registered: boolean;
+  /** The last OV failure code seen for this skill, or null if it ever succeeded. */
+  lastError: OvErrorCode | null;
+  /** Epoch ms of the last successful registration, or null if never. */
+  lastSuccessAt: number | null;
+}
+
+/** Queryable in-process state of the OV skill catalog. */
+export interface SkillCatalogState {
+  /** One entry per OV_SKILLS member, populated as `registerSkills` runs. */
+  skills: SkillRegistrationEntry[];
+  /** Count of skills currently registered. */
+  registered: number;
+  /** Total skills the catalog expects (OV_SKILLS.length). */
+  total: number;
+  /** true once a `registerSkills` pass has finished (success OR failure). */
+  completed: boolean;
+  /** Epoch ms the last `registerSkills` pass finished, or null if it never has. */
+  lastAttemptAt: number | null;
+}
+
+// Seeded so a query before the first pass reports the expected total with every
+// skill un-registered — distinguishable from a pass that ran and left them empty
+// (`completed:true`). The entry order matches OV_SKILLS.
+const skillCatalogState: SkillCatalogState = {
+  skills: [],
+  registered: 0,
+  total: 0,
+  completed: false,
+  lastAttemptAt: null,
+};
+
+/**
+ * Return a defensive copy of the current in-process skill-catalog state. Pure
+ * read — never throws, never touches Redis or OV. A health surface (or
+ * `/api/health/skills`) calls this to tell "catalog populated" from the
+ * silent-empty-catalog failure mode (#1968).
+ */
+export function getSkillCatalogState(): SkillCatalogState {
+  return {
+    skills: skillCatalogState.skills.map((s) => ({ ...s })),
+    registered: skillCatalogState.registered,
+    total: skillCatalogState.total,
+    completed: skillCatalogState.completed,
+    lastAttemptAt: skillCatalogState.lastAttemptAt,
+  };
+}
+
 const OV_SKILLS = [
   {
     name: "planner",
@@ -85,17 +157,22 @@ export interface RegisterSkillsOptions {
   backoffBaseMs?: number;
 }
 
+/** Outcome of one skill's registration: success, or the last failure code. */
+type RegisterOutcome = { ok: true } | { ok: false; code: OvErrorCode };
+
 async function registerOneSkill(
   skill: (typeof OV_SKILLS)[number],
   backoffBaseMs: number,
-): Promise<boolean> {
+): Promise<RegisterOutcome> {
+  let lastCode: OvErrorCode = "ov-service-down";
   for (let attempt = 1; attempt <= SKILL_REGISTER_MAX_ATTEMPTS; attempt++) {
     const result = await ovPostJson(
       "/api/v1/skills",
       { data: skill },
       { timeout: SKILL_REGISTER_TIMEOUT_MS },
     );
-    if (!isOvFailure(result)) return true;
+    if (!isOvFailure(result)) return { ok: true };
+    lastCode = result.code;
 
     const lastAttempt = attempt === SKILL_REGISTER_MAX_ATTEMPTS;
     const retryable = RETRYABLE_OV_CODES.has(result.code);
@@ -104,7 +181,7 @@ async function registerOneSkill(
         `[Learning] Failed to register skill ${skill.name}: ${result.code}` +
           (retryable ? ` (gave up after ${attempt} attempts)` : ""),
       );
-      return false;
+      return { ok: false, code: result.code };
     }
 
     // Exponential backoff: base, 2×base, 4×base, … before the next attempt.
@@ -115,16 +192,51 @@ async function registerOneSkill(
     );
     await sleep(backoff);
   }
-  return false;
+  return { ok: false, code: lastCode };
 }
 
 export async function registerSkills(opts: RegisterSkillsOptions = {}) {
   const backoffBaseMs = opts.backoffBaseMs ?? SKILL_REGISTER_BACKOFF_BASE_MS;
+  // Reset the in-process catalog state for this pass: every skill starts
+  // un-registered and is updated as the loop resolves each one (issue #1968).
+  const entries: SkillRegistrationEntry[] = OV_SKILLS.map((s) => ({
+    name: s.name,
+    registered: false,
+    lastError: null,
+    lastSuccessAt: null,
+  }));
   let registered = 0;
-  for (const skill of OV_SKILLS) {
-    if (await registerOneSkill(skill, backoffBaseMs)) registered++;
+  for (let i = 0; i < OV_SKILLS.length; i++) {
+    const outcome = await registerOneSkill(OV_SKILLS[i], backoffBaseMs);
+    if (outcome.ok === true) {
+      entries[i].registered = true;
+      entries[i].lastError = null;
+      entries[i].lastSuccessAt = Date.now();
+      registered++;
+    } else {
+      entries[i].registered = false;
+      entries[i].lastError = outcome.code;
+    }
   }
+
+  // Publish the completed pass to the queryable state so a health surface can
+  // detect the silent empty-catalog failure (#1968) instead of trusting the
+  // console.error log path nobody watches.
+  skillCatalogState.skills = entries;
+  skillCatalogState.registered = registered;
+  skillCatalogState.total = OV_SKILLS.length;
+  skillCatalogState.completed = true;
+  skillCatalogState.lastAttemptAt = Date.now();
+
   if (registered > 0) {
     console.log(`[Learning] Registered ${registered}/${OV_SKILLS.length} OV skills`);
+  } else {
+    // Fail loud (repo convention): a fully-empty catalog is the #1968 failure
+    // mode — surface it distinctly from the per-skill failures above so the
+    // operator (and /api/health/skills) sees "catalog empty", not just N logs.
+    console.error(
+      `[Learning] OV skill catalog EMPTY — all ${OV_SKILLS.length} skill registrations failed. ` +
+        `Planners will run without skill context (see issue #1968); check OpenViking load (#1924/#1831).`,
+    );
   }
 }
