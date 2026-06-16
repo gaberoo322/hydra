@@ -60,9 +60,6 @@ export {
   getDriftReferencePercent,
   getDriftFactor,
   DEFAULT_DRIFT_FACTOR,
-  getQuotaWeightOpus,
-  getQuotaWeightSonnet,
-  getQuotaWeightHaiku,
   getWeeklyPaceCeiling,
   DEFAULT_WEEKLY_PACE_CEILING,
 } from "./config.ts";
@@ -77,12 +74,6 @@ export {
 // is unchanged.
 export {
   parseSessionLimitReset,
-  projectResetWindow,
-  weightedTokens,
-  modelToFamily,
-  parseUsageLine,
-  parseObservedResetMs,
-  cacheHitRatio,
 } from "./token-math.ts";
 
 // ---------------------------------------------------------------------------
@@ -97,7 +88,6 @@ export {
 
 export type {
   UsageSnapshot,
-  TokenBreakdown,
   SkillResolver,
 } from "./usage-tracker.ts";
 
