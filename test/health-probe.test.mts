@@ -1,12 +1,14 @@
 /**
- * Unit tests for the extracted service-probe seam (issue #1324).
+ * Unit tests for the ServiceProbe Adapter Seam (issue #1324, extracted to its
+ * own module in issue #1980).
  *
  * The plain-HTTP service probe and the OpenViking liveness probe used to be
  * duplicated as inline closures inside both GET /health/services and the GET
  * /health/deep fan-out — exercisable only by standing up the full Express route
- * + a real network. Hoisted to module-level probeService()/probeOv() in
- * src/api/health.ts with an injectable fetch/adapter impl, they are now testable
- * directly: stub the dependency, assert the {status, latencyMs} fold.
+ * + a real network. #1324 hoisted them to module-level probeService()/probeOv()
+ * with an injectable fetch/adapter impl; #1980 moved them out of the route file
+ * into the focused src/health-probe.ts seam. They are testable directly: stub
+ * the dependency, assert the {status, latencyMs} fold.
  *
  * These assert the failed/running/timeout classification and the acceptAny
  * branch WITHOUT Express, without a real fetch, and without a network — the
@@ -15,7 +17,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { probeService, probeOv, type ServiceProbeResult } from "../src/api/health.ts";
+import { probeService, probeOv, type ServiceProbeResult } from "../src/health-probe.ts";
 import type { OvResult } from "../src/knowledge-base/ov-request.ts";
 
 // ---------------------------------------------------------------------------
