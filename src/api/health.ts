@@ -34,7 +34,18 @@ import { getTargetServiceName } from "../target-config.ts";
 // probes via the Host-Probe Adapter. The OV liveness GET and the OV /search/find
 // probe are both adapter request shapes; vikingdb stays a plain inline probe
 // (it is not an OpenViking boundary).
-import { ovHealthGet, ovPostJson, isOvFailure } from "../knowledge-base/ov-request.ts";
+// Issue #1980: the OV liveness GET (ovHealthGet) + isOvFailure now reach this
+// file only through the ServiceProbe Adapter Seam (src/health-probe.ts), which
+// owns probeOv(); this route file keeps only the direct ovPostJson use (the OV
+// /search/find quality probe in /health/deep index 14).
+import { ovPostJson } from "../knowledge-base/ov-request.ts";
+// Issue #1980: probeService/probeOv and the ServiceProbeResult wire shape moved
+// out of this route file into the focused ServiceProbe Adapter Seam
+// (src/health-probe.ts). createHealthRouter now imports + delegates — the
+// {status, latencyMs} fold and running/failed classification live in one named
+// home, importable by non-route callers (e.g. aggregators/service-strip.ts)
+// without coupling to src/api/. Behaviour-neutral: same probes, same wire shape.
+import { probeService, probeOv } from "../health-probe.ts";
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
@@ -116,73 +127,17 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 let deployedShaCache: { sha: string | null; at: number } = { sha: null, at: 0 };
 const DEPLOYED_SHA_TTL_MS = 60_000;
 
-// Issue #1324: the plain-HTTP service probe and the OpenViking liveness probe
-// used to be duplicated as inline closures inside both GET /health/services and
-// the GET /health/deep fan-out (index 1). Hoisted here to module level so the
-// failed/running classification lives in ONE place and is unit-testable without
-// standing up Express (see test/health-probe.test.mts). These stay at the I/O
-// layer in api/health.ts — NOT in src/health-diagnostics.ts, which is the
-// deliberately pure (I/O-free) Health Assessment seam (#840). vikingdb is a
-// plain inline probe (not an OpenViking boundary), so it does NOT route through
-// the OpenViking Request Adapter; only probeOv() does.
-
-/** The wire shape every service probe folds to: `{status, latencyMs}`. */
-export type ServiceProbeResult = {
-  status: "running" | "failed";
-  latencyMs: number | null;
-};
-
-/** The probe timeout for the plain-HTTP service probe (preserved 1:1 across both former call sites). */
-const SERVICE_PROBE_TIMEOUT_MS = 3000;
-
-/**
- * Probe a plain-HTTP service endpoint, folding the outcome to the
- * `{status, latencyMs}` wire shape both /health/services and /health/deep emit.
- *
- * NEVER throws — a transport failure or timeout folds to
- * `{status:"failed", latencyMs:null}`, the sentinel shape parseProbes/assessHealth
- * downstream depend on. A non-2xx response is `failed` unless `acceptAny` is set
- * (the probe only cares that the port answered). Unified on
- * `AbortSignal.timeout(3000)` (the modern primitive — no manual timer bookkeeping).
- *
- * `fetchImpl` is an injectable dependency (default `globalThis.fetch`) so the
- * test can stub success/non-2xx/throw/timeout without a real network.
- */
-export async function probeService(
-  url: string,
-  {
-    acceptAny = false,
-    fetchImpl = globalThis.fetch,
-  }: { acceptAny?: boolean; fetchImpl?: typeof globalThis.fetch } = {},
-): Promise<ServiceProbeResult> {
-  try {
-    const start = Date.now();
-    const r = await fetchImpl(url, { signal: AbortSignal.timeout(SERVICE_PROBE_TIMEOUT_MS) });
-    return { status: r.ok || acceptAny ? "running" : "failed", latencyMs: Date.now() - start };
-  } catch {
-    // Fail-loud convention: this sentinel is the documented I/O-boundary fold,
-    // not a silent swallow — both routes rely on a probe failure becoming
-    // {status:"failed", latencyMs:null}.
-    return { status: "failed", latencyMs: null };
-  }
-}
-
-/**
- * Probe OpenViking liveness via the OpenViking Request Adapter (resolves
- * OPENVIKING_URL, 3000ms timeout) and fold it to the same `{status, latencyMs}`
- * wire shape. The adapter (`ovHealthGet`) never throws; we map its discriminated
- * result to running/failed. `ovHealthGetImpl` is injectable for the test.
- */
-export async function probeOv(
-  { ovHealthGetImpl = ovHealthGet }: { ovHealthGetImpl?: typeof ovHealthGet } = {},
-): Promise<ServiceProbeResult> {
-  const start = Date.now();
-  const result = await ovHealthGetImpl("/health", { timeout: SERVICE_PROBE_TIMEOUT_MS });
-  return {
-    status: isOvFailure(result) ? "failed" : "running",
-    latencyMs: isOvFailure(result) ? null : Date.now() - start,
-  };
-}
+// Issue #1324 + #1980: the plain-HTTP service probe and the OpenViking liveness
+// probe used to be duplicated as inline closures inside both GET /health/services
+// and the GET /health/deep fan-out (index 1). #1324 hoisted them to module level
+// here; #1980 moved them into the focused ServiceProbe Adapter Seam
+// (src/health-probe.ts) so the failed/running classification lives in ONE named
+// home, unit-testable without Express (see test/health-probe.test.mts) and
+// importable by non-route callers. They stay at the I/O layer (NOT in
+// src/health-diagnostics.ts, the deliberately pure I/O-free Health Assessment
+// seam, #840). vikingdb is a plain inline probeService call (not an OpenViking
+// boundary), so it does NOT route through the OpenViking Request Adapter; only
+// probeOv() does. createHealthRouter imports probeService/probeOv from the seam.
 
 async function getDeployedSha(): Promise<string | null> {
   const now = Date.now();
