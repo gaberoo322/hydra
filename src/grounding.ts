@@ -25,10 +25,10 @@ export interface GroundingOpts {
 }
 
 /** Classification of how the test output was parsed. See issue #456. */
-export type TestParseStatus = "ok" | "unrecognised" | "errored" | "not-run";
+type TestParseStatus = "ok" | "unrecognised" | "errored" | "not-run";
 
 /** Structured result of running the test command. */
-export interface GroundingTestReport {
+interface GroundingTestReport {
   ran: boolean;
   exitCode: number;
   stdout: string;
@@ -42,7 +42,7 @@ export interface GroundingTestReport {
 }
 
 /** Structured result of running the typecheck command. */
-export interface GroundingTypecheckReport {
+interface GroundingTypecheckReport {
   ran: boolean;
   exitCode: number;
   stdout: string;
