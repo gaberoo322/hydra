@@ -24,6 +24,7 @@ import {
   CONSUMER_GROUPS,
   streamKey,
 } from "../src/event-bus.ts";
+import { makeWsBroadcastRegistry } from "../src/ws-broadcast-registry.ts";
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -59,7 +60,11 @@ function makeBus(publisher: unknown) {
   const bus = Object.create(EventBus.prototype) as EventBus;
   // @ts-expect-error — assigning a fake into the typed publisher seam for the test.
   bus.publisher = publisher;
-  bus._wsClients = new Set();
+  // The WS broadcast registry (issue #1965) is composed in the real ctor,
+  // which we skip via Object.create — install a real one here. Individual
+  // tests override `bus.wsRegistry` to capture broadcasts.
+  // @ts-expect-error — assigning into the readonly wsRegistry seam for the test.
+  bus.wsRegistry = makeWsBroadcastRegistry();
   bus._consuming = false;
   return bus;
 }
@@ -160,7 +165,7 @@ test("publish: broadcasts the parsed (not stringified) payload to WS clients", a
   const bus = makeBus(publisher);
 
   const broadcasts: BroadcastCall[] = [];
-  bus._broadcastToClients = (stream: string, event: object) => {
+  bus.wsRegistry.broadcast = (stream: string, event: object) => {
     broadcasts.push({ stream, event: event as Record<string, unknown> });
   };
 
@@ -206,7 +211,7 @@ test("publishRaw: omits MAXLEN when no cap is given and broadcasts the flat obje
   const bus = makeBus(publisher);
 
   const broadcasts: BroadcastCall[] = [];
-  bus._broadcastToClients = (stream: string, event: object) => {
+  bus.wsRegistry.broadcast = (stream: string, event: object) => {
     broadcasts.push({ stream, event: event as Record<string, unknown> });
   };
 

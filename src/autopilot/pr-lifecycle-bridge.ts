@@ -83,8 +83,9 @@ const STREAM_MAXLEN = 1000;
  * Lazy module-singleton Event Bus used when the caller does not inject one.
  * The bridge routes its XADD through `eventBus.publishRaw` (ADR-0017 Category
  * B) instead of the raw connection. In production `src/index.ts` injects the
- * service-wide bus (so `_broadcastToClients` reaches the live WS clients); the
- * lazy fallback exists for tests and any direct `emitPrLifecycleEvent` caller.
+ * service-wide bus (so `publishRaw`'s WS-registry broadcast reaches the live
+ * WS clients); the lazy fallback exists for tests and any direct
+ * `emitPrLifecycleEvent` caller.
  */
 let _defaultEventBus: EventBus | null = null;
 function getDefaultEventBus(): EventBus {

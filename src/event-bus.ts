@@ -4,6 +4,7 @@ import type Redis from "ioredis";
 import type { WebSocket } from "ws";
 
 import { getRedisConnection, getRedisSubscriber, closeRedisConnections } from "./redis/connection.ts";
+import { makeWsBroadcastRegistry, type WsBroadcastRegistry } from "./ws-broadcast-registry.ts";
 
 // ---------------------------------------------------------------------------
 // Stream topology — the Event Bus alphabet (CONTEXT.md).
@@ -307,40 +308,30 @@ const CONSUMER_GROUPS: Record<StreamKey, string[]> = {
 class EventBus {
   publisher: Redis;
   subscriber: Redis;
-  _wsClients: Set<WebSocket>;
+  /**
+   * The in-process WebSocket client registry (issue #1965). `EventBus` owns
+   * the Redis *stream* alphabet; WS broadcast is a distinct transport concern,
+   * so it lives behind this composed Module rather than as inline class state.
+   * Read-only: callers register clients via `addWsClient` (a one-line
+   * delegator that keeps `src/index.ts` zero-diff) and the broadcast path
+   * delegates to `this.wsRegistry.broadcast(...)`.
+   */
+  readonly wsRegistry: WsBroadcastRegistry;
   _consuming: boolean;
   constructor() {
     this.publisher = getRedisConnection();
     this.subscriber = getRedisSubscriber();
-    this._wsClients = new Set();
+    this.wsRegistry = makeWsBroadcastRegistry();
     this._consuming = false;
   }
 
   /**
-   * Register a WebSocket client for event broadcasting.
+   * Register a WebSocket client for event broadcasting. One-line delegator to
+   * the composed `wsRegistry` so the WS-upgrade handler in `src/index.ts`
+   * stays zero-diff (it calls `eventBus.addWsClient(ws)`).
    */
   addWsClient(ws: WebSocket): void {
-    this._wsClients.add(ws);
-    ws.on("close", () => this._wsClients.delete(ws));
-    ws.on("error", () => this._wsClients.delete(ws));
-  }
-
-  /**
-   * Broadcast an event to all connected WebSocket clients.
-   * Clients can subscribe to specific streams via { type: "subscribe", streams: [...] }.
-   *
-   * `event` is any object — it is JSON-serialised verbatim under the stream
-   * frame, so callers (e.g. the slot-events bridge) may pass a concrete
-   * envelope interface without an index signature.
-   */
-  _broadcastToClients(stream: string, event: object): void {
-    if (this._wsClients.size === 0) return;
-    const message = JSON.stringify({ stream, ...event });
-    for (const ws of this._wsClients) {
-      if (ws.readyState === 1) { // WebSocket.OPEN
-        ws.send(message);
-      }
-    }
+    this.wsRegistry.add(ws);
   }
 
   async init(): Promise<this> {
@@ -461,8 +452,8 @@ class EventBus {
    * so a TypeScript producer can write the identical shape without the
    * envelope that `publish()` wraps around every event.
    *
-   * Still calls `_broadcastToClients` so dashboard WS subscribers receive the
-   * frame live, exactly as `publish()` does.
+   * Still fans out via `this.wsRegistry.broadcast` so dashboard WS subscribers
+   * receive the frame live, exactly as `publish()` does.
    *
    * @param stream - Stream key.
    * @param fields - Flat [k0, v0, k1, v1, ...] field list.
@@ -485,7 +476,7 @@ class EventBus {
     // key/value object so subscribers can pattern-match on the discriminator.
     const obj: Record<string, string> = {};
     for (let i = 0; i < fields.length; i += 2) obj[fields[i]] = fields[i + 1];
-    this._broadcastToClients(stream, obj);
+    this.wsRegistry.broadcast(stream, obj);
 
     return msgId;
   }
@@ -515,7 +506,7 @@ class EventBus {
     );
 
     // Broadcast to connected WebSocket clients with the parsed payload.
-    this._broadcastToClients(stream, { ...envelope, payload: event.payload || {} });
+    this.wsRegistry.broadcast(stream, { ...envelope, payload: event.payload || {} });
 
     return msgId;
   }
