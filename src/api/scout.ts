@@ -5,10 +5,8 @@ import {
   SCOUT_METRICS,
 } from "../scout/stats.ts";
 import { getScoutLastCalendarWalk } from "../redis/scout.ts";
-import {
-  listDispatchAudits,
-  planAlertDispatches,
-} from "../scout/alert-listener.ts";
+import { planAlertDispatches } from "../scout/alert-listener.ts";
+import { listDispatchAudits } from "../scout/dispatch-audit.ts";
 import {
   ScoutDispatchesQuerySchema,
   ScoutStatsQuerySchema,
