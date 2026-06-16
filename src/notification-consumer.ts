@@ -5,12 +5,17 @@
 //
 // The alert-routing grammar (which events become dashboard alerts, how each
 // maps to a message, what severity it carries) was extracted into its own
-// focused Seam at src/notification/alert-grammar.ts (issue #1979). This Module
-// now owns ONLY two concerns: the generic consumer restart/backoff policy
-// (`startConsumerWithRecovery`) and the consumer-registration index
-// (`startConsumers`, `handleNotificationEvent`) — it imports the grammar and
-// delegates. Process lifecycle (port guard, eventBus.init, SIGTERM) stays in
-// index.ts.
+// focused Seam at src/notification/alert-grammar.ts (issue #1979). The
+// `cycle:completed` domain reaction (classify the merged files, stamp the
+// capacity-floor side history, publish the orchestrator-share metric) was
+// extracted into a sibling focused Seam at
+// src/notification/cycle-completed-reactor.ts (issue #1983) for the same
+// reason. This Module now owns ONLY two concerns: the generic consumer
+// restart/backoff policy (`startConsumerWithRecovery`) and the
+// consumer-registration index (`startConsumers`, `handleNotificationEvent`) —
+// it imports both Seams and delegates. Its remaining imports all belong to the
+// notification-routing domain. Process lifecycle (port guard, eventBus.init,
+// SIGTERM) stays in index.ts.
 //
 // The five lifted grammar symbols (ALERT_TYPES, formatAlertMessage,
 // classifyAlertSeverity, AlertGrammarEvent, AlertSeverity) are RE-EXPORTED
@@ -32,8 +37,7 @@ import {
 import { sendNotification } from "./notify.ts";
 import { recordEvent } from "./digest.ts";
 import { pushAlert } from "./redis/alerts.ts";
-import { recordCycleSide, classifySide } from "./capacity-floor.ts";
-import { publishOrchestratorShareMetric } from "./metrics/publish.ts";
+import { reactToCycleCompleted } from "./notification/cycle-completed-reactor.ts";
 import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
 import { startRecommendationConsumer } from "./autopilot/recommendation-engine.ts";
 import {
@@ -150,37 +154,13 @@ export async function startConsumerWithRecovery(
 async function handleNotificationEvent(event: NotificationEvent): Promise<void> {
   recordEvent(event);
 
-  // Issue #245: stamp each completed cycle's "side" in the capacity-floor
-  // history so autopilot can enforce the 25% orchestrator self-improvement
-  // floor. Codex cycles only ever merge against the target workspace, but
-  // we still run classifySide() so the call site stays honest if that
-  // ever changes (e.g. mixed-repo cycles). Best-effort — recordCycleSide
-  // swallows its own errors so digest/alerting can never break a cycle.
+  // React to a completed cycle (classify the merged files, stamp the
+  // capacity-floor side history, publish the orchestrator-share metric). That
+  // domain reaction lives in its own focused Seam (issue #1983); this router
+  // just delegates. Best-effort — the reactor's writers swallow their own
+  // errors so digest/alerting can never break a cycle.
   if (event.type === "cycle:completed") {
-    const p = event.payload || {};
-    const finalState = p.task?.finalState;
-    // `filesChanged` is typed `unknown[]` in the shared vocabulary
-    // (`NotificationEventPayload`, #1915); keep the string paths the
-    // capacity-floor side classifier expects and drop any non-string entry.
-    const files: string[] = Array.isArray(p.filesChanged)
-      ? p.filesChanged.filter((f): f is string => typeof f === "string")
-      : [];
-    const isMerged = (finalState === "merged") && !p.rolledBack;
-    const side = isMerged ? classifySide(files, { workspaceHint: "target" }) : "idle";
-    await recordCycleSide(p.cycleId || event.correlationId || `evt-${Date.now()}`, side, {
-      commitSha: p.commitSha || undefined,
-      filesChanged: files.length > 0 ? files.slice(0, 50) : undefined,
-      source: "cycle-completed-listener",
-    });
-
-    // Issue #315: publish the current self-improvement share to disk so
-    // the outcomes file adapter (config/direction/outcomes.yaml ->
-    // metrics/orchestrator-share.txt) has a real value to read. Without
-    // this, the only seeded Target Outcome is permanently unobservable.
-    // (The stuckness detector + 25% capacity floor that originally
-    // consumed this signal were retired in ADR-0010.) Best-effort —
-    // publisher logs and never throws.
-    await publishOrchestratorShareMetric();
+    await reactToCycleCompleted(event);
   }
 
   // Persist important events as dashboard alerts
