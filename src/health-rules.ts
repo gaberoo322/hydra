@@ -14,6 +14,14 @@
 // order. Thresholds stay inline in each rule — co-located = locality.
 
 import type { HealthSnapshot, HealthDiagnostic } from "./health-diagnostics.ts";
+import { assessSkillCatalog } from "./health-diagnostics.ts";
+// Issue #1968: the OV skill-catalog state is in-process module state populated by
+// startup `registerSkills` (resets on restart), NOT a deep-health probe — so it
+// is read directly here rather than carried on the HealthSnapshot. The skill-rule
+// below ignores its `s` argument and reads `getSkillCatalogState()`; that read is
+// a pure, never-throw copy of an in-memory singleton (no Redis/OV I/O), so the
+// rule stays side-effect-free even though it doesn't source from the snapshot.
+import { getSkillCatalogState } from "./knowledge-base/skill-registration.ts";
 
 export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   (s) =>
@@ -324,6 +332,17 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: true,
         }
       : null,
+  // Issue #1968: surface the silent empty/partial OV skill catalog through the
+  // deep-health Health Assessment fold so an operator watching /api/health/deep
+  // (or hydra-doctor) sees it — the standalone /api/health/skills endpoint is a
+  // supplementary detail view, but only this rule folds the failure into the
+  // top-level `status` and `diagnostics` array. The `_s` snapshot argument is
+  // unused: skill-catalog state is in-process module state, not a deep-health
+  // probe, so it's read directly via getSkillCatalogState() (a pure, never-throw
+  // in-memory read). assessSkillCatalog already maps empty → severity:"error",
+  // partial → severity:"warning", and ok/in-flight → diagnostic:null, so this
+  // rule is a thin pass-through of that gate's diagnostic.
+  (_s) => assessSkillCatalog(getSkillCatalogState()).diagnostic,
 ];
 
 // ---- fmtUp — uptime humanizer shared by assessHealth + the wire projection -

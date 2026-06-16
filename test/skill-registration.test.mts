@@ -15,7 +15,9 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-const { registerSkills } = await import("../src/knowledge-base/skill-registration.ts");
+const { registerSkills, getSkillCatalogState } = await import(
+  "../src/knowledge-base/skill-registration.ts"
+);
 
 const realFetch = globalThis.fetch;
 const realErr = console.error;
@@ -108,5 +110,78 @@ describe("registerSkills: raised per-attempt timeout (#1828)", () => {
 
     await registerSkills({ backoffBaseMs: 0 });
     assert.equal(sawSignal, true, "fetch must receive an AbortSignal with a live timeout budget");
+  });
+});
+
+describe("registerSkills: queryable catalog state (#1968)", () => {
+  test("all-success populates a full, completed catalog", async () => {
+    muteConsole();
+    globalThis.fetch = (async () => okResponse()) as any;
+
+    await registerSkills({ backoffBaseMs: 0 });
+
+    const state = getSkillCatalogState();
+    assert.equal(state.completed, true, "a finished pass must mark completed");
+    assert.equal(state.total, 4, "all four OV skills are expected");
+    assert.equal(state.registered, 4, "all four must register on a clean OV");
+    assert.equal(state.skills.length, 4);
+    assert.ok(state.skills.every((s) => s.registered && s.lastError === null && s.lastSuccessAt));
+    assert.ok(typeof state.lastAttemptAt === "number");
+  });
+
+  test("all-failure leaves an EMPTY catalog with per-skill error codes", async () => {
+    muteConsole();
+    globalThis.fetch = (async () => {
+      timeoutThrow();
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0 });
+
+    const state = getSkillCatalogState();
+    assert.equal(state.completed, true);
+    assert.equal(state.registered, 0, "an all-timeout pass registers zero skills");
+    assert.equal(state.total, 4);
+    assert.ok(
+      state.skills.every((s) => !s.registered && s.lastError === "ov-timeout"),
+      "each un-registered skill records its last failure code",
+    );
+  });
+
+  test("partial failure records which skills registered and which failed", async () => {
+    muteConsole();
+    // First skill times out on every attempt; the rest succeed first try.
+    let firstSkillCalls = 0;
+    globalThis.fetch = (async () => {
+      // The first skill burns its 3 attempts before any other skill is reached.
+      if (firstSkillCalls < 3) {
+        firstSkillCalls++;
+        timeoutThrow();
+      }
+      return okResponse();
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0 });
+
+    const state = getSkillCatalogState();
+    assert.equal(state.registered, 3, "3 of 4 skills register; the first fails out");
+    assert.equal(state.skills[0].registered, false);
+    assert.equal(state.skills[0].lastError, "ov-timeout");
+    assert.ok(state.skills.slice(1).every((s) => s.registered && s.lastError === null));
+  });
+});
+
+describe("getSkillCatalogState: defensive copy", () => {
+  test("mutating the returned object does not corrupt the live state", async () => {
+    muteConsole();
+    globalThis.fetch = (async () => okResponse()) as any;
+    await registerSkills({ backoffBaseMs: 0 });
+
+    const a = getSkillCatalogState();
+    a.registered = -999;
+    a.skills[0].registered = false;
+
+    const b = getSkillCatalogState();
+    assert.equal(b.registered, 4, "the returned object must be a copy, not the live state");
+    assert.equal(b.skills[0].registered, true, "skill entries must be copied too");
   });
 });
