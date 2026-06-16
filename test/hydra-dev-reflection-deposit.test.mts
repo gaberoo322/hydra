@@ -67,6 +67,36 @@ for (const [name, playbook] of Object.entries(playbooks)) {
       );
     });
 
+    // Issue #1945: the env vars alone are the WRONG key inside a worktree
+    // subagent — HYDRA_AUTOPILOT_TASK_ID is unset and CLAUDE_CODE_SESSION_ID is
+    // the child's session UUID, neither of which equals the harness task id reap
+    // reads. The harness embeds its task id in the `agent-<HASH>` worktree dir,
+    // so the deposit MUST derive the key from cwd as the primary source.
+    test("derives the deposit key from the agent-<HASH> worktree cwd (issue #1945)", () => {
+      assert.ok(
+        /agent-/.test(playbook) && /\$PWD|basename/.test(playbook),
+        `${name} must derive the harness task_id from the agent-<HASH> worktree cwd (the key reap actually reads), not solely from env vars (issue #1945)`,
+      );
+    });
+
+    test("warns that env-var-only keys are wrong inside the worktree (issue #1945)", () => {
+      assert.ok(
+        /#1945/.test(playbook),
+        `${name} must cite issue #1945 explaining the env-var-only deposit landed under the wrong key`,
+      );
+    });
+
+    // The #1945 fix replaces the silent `|| true` swallow with a loud stderr
+    // warning when the deposit cannot determine a key or the write fails, per
+    // the repo "fail loud" convention.
+    test("fails loud (stderr WARN) on a missing key or write error (issue #1945)", () => {
+      assert.ok(
+        /refl-deposit-no-task-id/.test(playbook) &&
+          /refl-deposit-write-failed/.test(playbook),
+        `${name} must surface a loud WARN (cues refl-deposit-no-task-id / refl-deposit-write-failed) instead of silently swallowing a deposit miss (issue #1945)`,
+      );
+    });
+
     test("maps API block sources to the bare bucket tokens deriveReflectionMatchSource matches", () => {
       // The API emits per-anchor-reflections / by-file-reflections, but
       // deriveReflectionMatchSource matches the BARE tokens per-anchor / by-file.
