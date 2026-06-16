@@ -460,3 +460,173 @@ export function deriveLifecycleState(
     ended_epoch: resolvedEnded,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Termination-health rollup (issue #1352 / #1815 / #1847)
+//
+// Moved here from `runs.ts` (issue #1964) to complete the #1183 split:
+// `summarizeTerminationHealth` is a pure analytical projection over an
+// already-fetched run-digest array (no Redis, no clock, no await), so its home
+// is this read-only projection Module, not the write-side lifecycle Module.
+// `runs.ts` re-exports it for back-compat (`from "../autopilot/runs.ts"`).
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure coercion helper — local copy of the same-named write-side helper in
+ * `runs.ts` (issue #1964). It is COPIED rather than imported so this module
+ * stays the lower, projection-only Module: importing it from `runs.ts` would
+ * invert the `runs.ts` → `run-projections.ts` dependency direction. The
+ * `runs.ts` copy (with its 18 write-side digest-reader call sites) is unrelated
+ * to this move and stays put.
+ */
+function numberOrDefault(v: unknown, fallback: number): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.length > 0) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return fallback;
+}
+
+/**
+ * `term_reason` values that mark a CLEAN self-termination — the run's own
+ * decision loop (`term-check.py` / `decide._check_termination`) reached a stop
+ * rule and POSTed run-end, rather than the reap backstop catching a truncated
+ * print-mode session. These are the numerator of the clean-termination rate.
+ *
+ * `handoff` (issue #1903) is ALSO clean: a print-mode session that ended a turn
+ * with subagent slots still occupied is an honest baton-pass to the successor
+ * run's dispatch ledger (#1352), not a truncation. Counting it clean is the
+ * whole point of #1903 — today every dispatch-bearing run terminates
+ * `interrupted` (baton-pass mis-stamped), pinning `cleanTerminationRate` ≈ 0 and
+ * the #1815/#1847 starvation alarm permanently on. Reclassifying the baton-pass
+ * makes the rate measure REAL starvation (crashes / zero-progress) instead.
+ *
+ * `interrupted` / `crash` / `failure_backstop` are NOT clean: `interrupted` is
+ * the reap backstop's cause for a print-mode session that exited (code 0/143/
+ * 130) with ZERO slots in flight before the loop reached a stop rule — a
+ * genuine truncation with nothing pending, distinct from the `handoff`
+ * baton-pass (slots > 0).
+ */
+const CLEAN_TERM_REASONS: ReadonlySet<string> = new Set([
+  "idle",
+  "budget",
+  "wall_clock",
+  "handoff",
+]);
+
+/**
+ * Pure observability rollup over the run digests (issue #1352, acceptance
+ * clause 3; gating refined in #1815). Computes the **clean-termination rate** —
+ * the fraction of **dispatch-bearing** ENDED runs that self-terminated via a
+ * clean `term_reason` ({@link CLEAN_TERM_REASONS} — including the #1903
+ * `handoff` baton-pass) rather than the `interrupted`/`crash` reap backstop.
+ * When this rate sits at ~0 over a
+ * non-trivial sample of dispatch-bearing runs, the retro learning loop is
+ * structurally starved (every run dies before its dispatches' terminal cycle
+ * records materialise) — the alarm condition #1352 was filed on.
+ *
+ * **Why dispatch-gated (issue #1815):** the board is dominated by *trivial
+ * idle-at-startup* runs — the autopilot launches (pace-gate timer), finds no
+ * eligible work, and idles out in ~1-3min with `dispatches=0` and a clean
+ * `idle` term_reason. Counting those toward the clean numerator made
+ * `cleanRuns === 0` essentially never true, masking the exact starvation signal
+ * the alarm was built for (live: 0/11 dispatch-bearing runs terminated cleanly,
+ * yet the alarm read healthy because 26 trivial idle-drains inflated the rate to
+ * 0.33). The rate and the `starved` bit are therefore computed over
+ * `runs.filter(r => r.dispatches > 0)` only — trivial idle runs neither inflate
+ * the numerator nor mask the alarm.
+ *
+ * Read-only and total: takes already-fetched digests, returns counts + a
+ * nullable rate (null when there are no *dispatch-bearing* ended runs to divide
+ * by, so a fresh / work-starved-board system reports "no data" rather than a
+ * misleading 0).
+ *
+ * Returned fields:
+ * - `cleanTerminationRate` — dispatch-bearing clean runs / dispatch-bearing
+ *   ended runs (null when there are no dispatch-bearing ended runs).
+ * - `endedRuns` / `cleanRuns` — raw counts over ALL ended runs (un-gated;
+ *   retained for backward-compatible reporting and so a consumer can see how
+ *   many trivial idle-drains were filtered out: `endedRuns -
+ *   dispatchBearingRuns`).
+ * - `dispatchBearingRuns` / `dispatchBearingCleanRuns` — the gated counts the
+ *   rate and alarm are actually derived from.
+ * - `endedDispatchTotal` — total dispatches across ended runs (unchanged).
+ * - `starved` — the pre-derived alarm bit: true when a non-trivial sample of
+ *   **dispatch-bearing** ended runs ({@link STARVATION_MIN_ENDED_RUNS}) sustains
+ *   a clean-termination RATE below {@link STARVATION_CLEAN_RATE_FLOOR}. Consumers
+ *   (hydra-doctor, the dashboard) alarm on the boolean directly instead of
+ *   re-deriving thresholds.
+ *
+ * **Why a rate floor, not `=== 0` (issue #1847):** #1815 fixed the denominator
+ * (dispatch-bearing gating) but left the threshold a brittle boolean —
+ * `dispatchBearingCleanRuns === 0`. As soon as a SINGLE dispatch-bearing run
+ * terminated cleanly, the alarm silenced regardless of how low the real rate
+ * was, so a live 2/33 = ~6% clean rate read `starved: false`. The threshold is
+ * now a strict rate comparison: `cleanTerminationRate < STARVATION_CLEAN_RATE_FLOOR`
+ * (0.15) once the sample floor is met. At MIN=5 this preserves the old floor
+ * (0/5 still trips), while a sustained sub-15% rate at larger N now alarms
+ * instead of being masked by one clean run.
+ */
+const STARVATION_MIN_ENDED_RUNS = 5;
+
+/**
+ * Minimum clean-termination RATE (over dispatch-bearing ended runs) below which
+ * the {@link summarizeTerminationHealth} `starved` alarm fires, once the
+ * {@link STARVATION_MIN_ENDED_RUNS} sample floor is met (issue #1847). A strict
+ * `<` comparison: at the 5-run floor, 0/5 = 0 trips (preserving the pre-#1847
+ * `=== 0` behavior) while 1/5 = 0.20 clears; a sustained sub-15% rate at any
+ * larger sample now alarms instead of being silenced by a single clean run.
+ */
+const STARVATION_CLEAN_RATE_FLOOR = 0.15;
+
+export function summarizeTerminationHealth(
+  runs: Array<Record<string, unknown>>,
+): {
+  cleanTerminationRate: number | null;
+  endedRuns: number;
+  cleanRuns: number;
+  dispatchBearingRuns: number;
+  dispatchBearingCleanRuns: number;
+  endedDispatchTotal: number;
+  starved: boolean;
+} {
+  let endedRuns = 0;
+  let cleanRuns = 0;
+  let dispatchBearingRuns = 0;
+  let dispatchBearingCleanRuns = 0;
+  let endedDispatchTotal = 0;
+  for (const run of runs) {
+    if (run.status !== "ended") continue;
+    endedRuns += 1;
+    const dispatches = numberOrDefault(run.dispatches, 0);
+    endedDispatchTotal += dispatches;
+    const termReason = typeof run.term_reason === "string" ? run.term_reason : "";
+    const isClean = CLEAN_TERM_REASONS.has(termReason);
+    if (isClean) cleanRuns += 1;
+    // Gate the rate + alarm on dispatch-bearing runs only (#1815): trivial
+    // idle-at-startup runs (dispatches=0) must not inflate the clean numerator
+    // and mask the starvation signal.
+    if (dispatches > 0) {
+      dispatchBearingRuns += 1;
+      if (isClean) dispatchBearingCleanRuns += 1;
+    }
+  }
+  const cleanTerminationRate =
+    dispatchBearingRuns > 0 ? dispatchBearingCleanRuns / dispatchBearingRuns : null;
+  return {
+    cleanTerminationRate,
+    endedRuns,
+    cleanRuns,
+    dispatchBearingRuns,
+    dispatchBearingCleanRuns,
+    endedDispatchTotal,
+    // Issue #1847: strict rate comparison against the already-computed
+    // dispatch-gated rate (do NOT re-derive). One clean run no longer
+    // permanently silences the alarm — a sustained sub-floor rate trips it.
+    starved:
+      dispatchBearingRuns >= STARVATION_MIN_ENDED_RUNS &&
+      cleanTerminationRate !== null &&
+      cleanTerminationRate < STARVATION_CLEAN_RATE_FLOOR,
+  };
+}
