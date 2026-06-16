@@ -51,28 +51,11 @@ import {
 // MergedAnchorRefs — shared merged-by-cycle suppression Seam (issue #1880,
 // extracted from this module). The Candidate Feed below imports the suppression
 // predicate (`isMergedWork`) + production loader (`loadMergedAnchorRefsImpl`);
-// the pure token helpers are re-exported for back-compat (see the re-export
-// block below) so existing importers keep working.
+// the canonical definitions live in `src/backlog/merged-refs.ts`, this module
+// is one consumer.
 import {
   isMergedWork,
   loadMergedAnchorRefsImpl,
-  type MergedAnchorRefsLoader,
-} from "./backlog/merged-refs.ts";
-
-// Re-export the MergedAnchorRefs cluster from its new home so callers that
-// historically imported these from `anchor-candidates.ts` (notably the
-// `test/api-anchor-candidates.test.mts` Candidate Feed suite and any future
-// importer) keep resolving. The canonical definitions live in
-// `src/backlog/merged-refs.ts` (issue #1880); this module is one consumer.
-export {
-  mergedTokensFromPr,
-  normalizeIdentity,
-  candidateMergedTokens,
-  isMergedWork,
-  makeMergedAnchorRefsLoader,
-  loadMergedAnchorRefsImpl,
-  mergedTokensFromGhJson,
-  type MergedAnchorRefsLoader,
 } from "./backlog/merged-refs.ts";
 
 // ---------------------------------------------------------------------------
