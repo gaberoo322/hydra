@@ -32,12 +32,20 @@
  * (failed QA, stalled, churned, or errored) so transcripts are read only for
  * the dispatches that went wrong — the signals-first / drill-on-flag input
  * strategy that bounds the retrospective's token cost (epic #917).
+ *
+ * The pure projection surface ({@link projectDispatches},
+ * {@link dedupByCanonicalCycleId}, {@link flagDispatchesForDrill}, the
+ * {@link RetroDispatch} type, and the supporting pure helpers) was split into
+ * the sibling `retro-projections.ts` (issue #1952), mirroring the
+ * `runs.ts` / `run-projections.ts` split (issue #1183). This file re-exports
+ * every moved symbol, so existing import paths (`from
+ * "../autopilot/retro-bundle.ts"`) keep resolving unchanged; the side-effectful
+ * assembler {@link assembleRetroBundle} (the only thing that touches Redis)
+ * stays here.
  */
 
 import {
   getRun,
-  MERGED_STATUSES,
-  FAILED_STATUSES,
 } from "./runs.ts";
 import { getCycleHash } from "../redis/cycle-tracking.ts";
 import { getCycleMetrics } from "../redis/cycle-metrics.ts";
@@ -47,6 +55,21 @@ import { listFrictionPatterns } from "../pattern-memory/agent-memory.ts";
 import { getAutopilotHealth } from "../aggregators/autopilot-health.ts";
 import type { StuckSignal } from "../schemas/now-page.ts";
 import type { MemoryPattern } from "../pattern-memory/agent-memory.ts";
+// Pure projection surface — moved to `retro-projections.ts` (issue #1952). The
+// assembler below uses these; the re-export keeps old import paths resolving.
+import {
+  bucketOf,
+  projectDispatches,
+  dedupByCanonicalCycleId,
+  flagDispatchesForDrill,
+} from "./retro-projections.ts";
+import type { RetroDispatch } from "./retro-projections.ts";
+export {
+  projectDispatches,
+  dedupByCanonicalCycleId,
+  flagDispatchesForDrill,
+} from "./retro-projections.ts";
+export type { RetroDispatch } from "./retro-projections.ts";
 
 // ---------------------------------------------------------------------------
 // Bundle shape
@@ -58,71 +81,6 @@ interface RetroBundleError {
   source: string;
   /** The error message (best-effort string coercion). */
   detail: string;
-}
-
-/**
- * One code-writing dispatch's outcome, projected from the run's turn timeline
- * joined to its cycle record + metrics sidecar. The unit
- * {@link flagDispatchesForDrill} operates on.
- */
-export interface RetroDispatch {
-  /**
-   * The cycle id (transcript handle) this dispatch resolved to, or `""` when
-   * none exists. An action/outcome-joined dispatch carries the recorded
-   * `outcome.cycleId`. A snapshot-only dispatch (the crashed/interrupted-run
-   * case) RECOVERS a candidate from the slot's `task_id` — the same id reap
-   * sends on its durable `cycle-record` write — and {@link assembleRetroBundle}
-   * keeps it ONLY if a terminal cycle record is confirmed to exist (issue
-   * #1352, the genuinely-completed-but-interrupted dispatch); an unconfirmed
-   * candidate (a slot still in-flight when the run was interrupted) is reset to
-   * `""` so it stays {@link undrillable}. INVARIANT: `cycleId !== ""` is the
-   * drillability gate — a flagged dispatch always has a non-empty cycleId.
-   */
-  cycleId: string;
-  /** Autopilot turn this dispatch was launched on, when known. */
-  turn_n: number | null;
-  /** Dispatched skill (`hydra-dev`, ...), when the action carried it. */
-  skill: string | null;
-  /** The dispatched anchor reference (`issue-918`, ...), when known. */
-  anchorReference: string | null;
-  /** PR number opened by the dispatch, when known. */
-  prNumber: string | null;
-  /** Cycle status (`merged`, `failed`, `abandoned`, ...) or `null` if pending. */
-  status: string | null;
-  /** Coarse bucket derived from `status`. `null` == still pending. */
-  bucket: "merged" | "failed" | null;
-  /** Abandon reason recorded on the cycle metrics sidecar, when present. */
-  abandonReason: string | null;
-  /** Whether the cycle introduced a regression (from the metrics sidecar). */
-  regressionIntroduced: boolean;
-  /**
-   * Whether {@link flagDispatchesForDrill} selected this dispatch for a
-   * transcript drill (failed / churned / errored / crashed-stall). Materialised
-   * onto the served bundle by {@link assembleRetroBundle} AFTER the crash
-   * abandonReason backfill, so a consumer reading the JSON (which cannot call
-   * the pure TS selector) sees the flag directly. `projectDispatches` leaves it
-   * `false`; the assemble loop is the sole writer (issue #1094).
-   *
-   * INVARIANT (issue #1184): `flagged === true` ⟹ `cycleId !== ""`. A flagged
-   * dispatch always has a transcript handle to drill — an empty-cycleId
-   * dispatch is recorded {@link undrillable} instead of flagged.
-   */
-  flagged: boolean;
-  /**
-   * `true` when this dispatch carries a failure/abort signal but has NO
-   * transcript handle to drill — i.e. `cycleId === ""` (issue #1184). The
-   * empty-cycleId slots-snapshot-fallback population (the interrupted-run case:
-   * the slots snapshot carries no cycleId, and the metrics/transcript
-   * enrichment loop skips it via `if (!d.cycleId) continue;`) gets the #1168
-   * `run-interrupted` abandonReason backfill for visibility, but cannot be
-   * drilled — there is no transcript to read. So we record it `undrillable` and
-   * EXCLUDE it from the flagged/drill subset rather than flagging an undrillable
-   * dispatch (#1168 went from "flags zero" to "flags N undrillable"; this closes
-   * the chain). The retro skill can then honestly report "recorded N
-   * undrillable, flagged-for-drill 0" instead of reading zero transcripts on N
-   * flags. A drillable (cycleId-bearing) dispatch is always `undrillable: false`.
-   */
-  undrillable: boolean;
 }
 
 /** A per-anchor reflection narrative attached to a flagged dispatch. */
@@ -217,45 +175,6 @@ const CRASH_TERM_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
-// Drill-flag selector (pure)
-// ---------------------------------------------------------------------------
-
-/**
- * Pure selector — names the subset of dispatches whose full transcript a
- * downstream consumer should deep-read. A dispatch is flagged when it shows a
- * failure/stall/churn/error signal:
- *
- *   - `bucket === "failed"` — abandoned / aborted / timed-out / PR closed
- *     unmerged (the QA-fail and stall outcomes)
- *   - `regressionIntroduced` — merged but auto-reverted on regression (churn)
- *   - it carries an `abandonReason` — an explicit error/abort the cycle filed
- *
- * A merged, regression-free dispatch is NOT flagged — the happy path needs no
- * transcript drill. Pending dispatches (`status === null`) are not flagged:
- * nothing went wrong *yet*. Returns the flagged subset in input order so the
- * selection is deterministic.
- *
- * UNDRILLABLE EXCLUSION (issue #1184): a dispatch with an empty `cycleId` has no
- * transcript handle — the metrics/transcript enrichment loop skips it
- * (`if (!d.cycleId) continue;`), so flagging it produces a flag with nothing to
- * drill. Such a dispatch (the interrupted-run slots-snapshot-fallback case that
- * the #1168 backfill stamps with `run-interrupted`) is recorded
- * {@link RetroDispatch.undrillable} = true and EXCLUDED here, enforcing the
- * invariant `flagged === true` ⟹ `cycleId !== ""`. Visibility from #1168 is
- * preserved (the abandonReason stays on the dispatch); only the empty flag is
- * dropped.
- */
-export function flagDispatchesForDrill(dispatches: RetroDispatch[]): RetroDispatch[] {
-  return dispatches.filter(
-    (d) =>
-      d.cycleId !== "" &&
-      (d.bucket === "failed" ||
-        d.regressionIntroduced === true ||
-        (typeof d.abandonReason === "string" && d.abandonReason.length > 0)),
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -285,381 +204,6 @@ async function safeSource<T>(
     errors.push({ source, detail });
     return fallback;
   }
-}
-
-function bucketOf(status: string | null): "merged" | "failed" | null {
-  if (!status) return null;
-  const s = status.toLowerCase();
-  if (MERGED_STATUSES.has(s)) return "merged";
-  if (FAILED_STATUSES.has(s)) return "failed";
-  return null;
-}
-
-/**
- * Extract a bare PR number from an anchor string. The slot snapshot's `anchor`
- * carries the dispatched reference verbatim (e.g. a `qa_orch` slot reads
- * `PR#970`, a `dev_orch` slot reads `#961`); a PR-shaped anchor yields the
- * digits for `prNumber`, an issue-shaped one yields `null` (its number is the
- * issue ref, not a PR). Returns `null` when no PR-shaped token is present.
- * Used only as a slots_snapshot fallback — an action/outcome `prNumber`
- * always wins.
- */
-function prNumberFromAnchor(anchor: string | null): string | null {
-  if (!anchor) return null;
-  // Only PR-shaped anchors carry a PR number: `PR#970` / `pr#970` / `PR970`.
-  const m = /\bpr\s*#?\s*(\d+)\b/i.exec(anchor);
-  return m ? m[1] : null;
-}
-
-/** Read the dispatched slot key off a dispatch action, when it carries one. */
-function slotOfAction(a: any): string | null {
-  return typeof a?.slot === "string" && a.slot.length > 0 ? a.slot : null;
-}
-
-/**
- * Read a string field off a slot-snapshot entry, tolerating non-object /
- * non-string members (a malformed slot map must never throw — it yields the
- * prior action-derived dispatch, per the never-throw / read-only invariant).
- */
-function slotStr(slotObj: unknown, key: string): string | null {
-  if (!slotObj || typeof slotObj !== "object") return null;
-  const v = (slotObj as Record<string, unknown>)[key];
-  return typeof v === "string" && v.length > 0 ? v : null;
-}
-
-/**
- * Read the slot-snapshot entry's `started_epoch` as a string key component,
- * tolerating number and string encodings (the snapshot serialises it as a
- * number; a string round-trip must not break identity matching). `null` when
- * absent/malformed.
- */
-function slotEpoch(slotObj: unknown): string | null {
-  if (!slotObj || typeof slotObj !== "object") return null;
-  const v = (slotObj as Record<string, unknown>)["started_epoch"];
-  if (typeof v === "number" && Number.isFinite(v)) return String(v);
-  if (typeof v === "string" && v.length > 0) return v;
-  return null;
-}
-
-/**
- * Fill a dispatch's null fields from a slot-snapshot entry. Existing values
- * always win (action-join / earliest-turn canonical row), so this is
- * enrich-only — used both for the same-turn `(turn, slot)` merge and for the
- * cross-turn identity merge (issue #1776).
- */
-function enrichFromSlot(
-  d: RetroDispatch,
-  slotSkill: string | null,
-  slotAnchor: string | null,
-  slotTaskId: string | null,
-): void {
-  if (!d.skill && slotSkill) d.skill = slotSkill;
-  if (!d.anchorReference && slotAnchor) d.anchorReference = slotAnchor;
-  if (!d.prNumber) {
-    const pr = prNumberFromAnchor(slotAnchor);
-    if (pr) d.prNumber = pr;
-  }
-  // Only fill a candidate cycleId when it is still empty — an action/outcome-
-  // carried cycleId always wins (clean-run identity).
-  if (!d.cycleId && slotTaskId) d.cycleId = slotTaskId;
-}
-
-/**
- * Project the run's turn timeline into the flat per-dispatch list. Pulls the
- * dispatch identity (cycleId / skill / anchor) off each `type === "dispatch"`
- * action and the joined `outcome` (attached by `fetchTurnsWithJoins`), then
- * reconciles each turn's `slots_snapshot` (slot key → `{skill, anchor,
- * task_id, ...}`) as a FALLBACK that only fills fields the action left null.
- *
- * The real dispatch action carries the anchor nested under
- * `prompt_args.anchor` (not the top-level `anchorReference` the legacy join
- * read) and carries no `cycleId`, while the resolvable identity lives in
- * `slots_snapshot`; without this reconciliation `anchorReference` / `skill` /
- * `prNumber` came back null and `flagDispatchesForDrill` flagged nothing
- * (issue #975).
- *
- * Merge is keyed by `(turn, slot)`, NOT concatenated: a slot already
- * represented by an action enriches that RetroDispatch's null fields; a slot
- * present ONLY in `slots_snapshot` (the crashed-run case, where the dispatch
- * action was never recorded) becomes a NEW RetroDispatch. One real dispatch →
- * exactly one RetroDispatch, so a clean run with action-carried identity is
- * byte-identical (action values win, no double-count).
- *
- * CROSS-TURN dedup (issue #1776): the `(turn, slot)` merge alone duplicated a
- * dispatch that occupied its slot for N turns — the dispatching turn emitted
- * one row, and every later turn's `slots_snapshot` saw an occupied slot with
- * no same-turn action and emitted a NEW row (run 69442b4c: 16 rows for ~9
- * real dispatches). So the projection also keeps a cross-turn identity map
- * keyed on the durable dispatch identity — the slot's `task_id` / the
- * recorded `cycleId` (the same id, per #1352), with `slot@started_epoch` as a
- * fallback when no task_id is present. The EARLIEST-turn row is canonical: a
- * later turn's snapshot for an already-projected identity only enriches that
- * row's null fields (e.g. a later snapshot may carry a PR-shaped anchor) and
- * never emits a second row. A slot re-dispatched with a NEW identity (new
- * task_id / started_epoch) still projects a new row, and an identity-less
- * snapshot entry (neither task_id nor started_epoch) degrades to the
- * pre-#1776 per-turn behaviour — there is nothing durable to match on.
- *
- * A snapshot-only dispatch additionally seeds a CANDIDATE `cycleId` from the
- * slot's `task_id` (issue #1352) — the same id reap sends on its durable
- * `cycle-record` write, so it is the transcript handle for a dispatch that
- * genuinely completed before the run was interrupted. The candidate is
- * PROVISIONAL: {@link assembleRetroBundle} confirms a terminal cycle record
- * exists for it and resets it back to `""` (undrillable) if not. This
- * projection only recovers the candidate; it does not read Redis.
- *
- * Pure over the already-fetched turns — `slots_snapshot` is already on each
- * turn member, so there is no Redis round-trip here.
- */
-export function projectDispatches(
-  turns: Array<Record<string, unknown>>,
-): RetroDispatch[] {
-  const out: RetroDispatch[] = [];
-  // Cross-turn identity map (issue #1776): durable-identity key → the
-  // canonical (earliest-turn) RetroDispatch. Keys are namespaced so a task_id
-  // can never collide with a slot@epoch composite:
-  //   `id:<task_id|cycleId>`        — the durable dispatch identity
-  //   `epoch:<slot>@<started_epoch>` — fallback when no task_id is present
-  //                                    (same slot + same start instant is
-  //                                    definitionally the same occupancy)
-  const byIdentity = new Map<string, RetroDispatch>();
-  /** Register first-wins — the earliest-turn row stays canonical. */
-  const registerIdentity = (key: string | null, d: RetroDispatch): void => {
-    if (key && !byIdentity.has(key)) byIdentity.set(key, d);
-  };
-  for (const turn of turns) {
-    const turnN =
-      typeof turn.turn_n === "number" && Number.isFinite(turn.turn_n)
-        ? (turn.turn_n as number)
-        : null;
-    const actions: any[] = Array.isArray(turn.actions) ? (turn.actions as any[]) : [];
-    const slotsSnapshot =
-      turn.slots_snapshot && typeof turn.slots_snapshot === "object"
-        ? (turn.slots_snapshot as Record<string, unknown>)
-        : {};
-
-    // Track which slot keys an action already projected, so the slots_snapshot
-    // fold enriches those in place rather than emitting a duplicate.
-    const bySlot = new Map<string, RetroDispatch>();
-
-    for (const a of actions) {
-      if (!a || a.type !== "dispatch") continue;
-      const outcome = a.outcome && typeof a.outcome === "object" ? a.outcome : null;
-      const cycleId =
-        (outcome && typeof outcome.cycleId === "string" && outcome.cycleId) ||
-        (typeof a.cycleId === "string" && a.cycleId) ||
-        (typeof a.autopilotTurnId === "string" && a.autopilotTurnId) ||
-        "";
-      const status =
-        outcome && typeof outcome.status === "string" ? (outcome.status as string) : null;
-      const prNumber =
-        outcome && outcome.prNumber != null ? String(outcome.prNumber) : null;
-      // Anchor priority: top-level anchorReference/anchor/issueRef (legacy join
-      // shape) then the real action's nested prompt_args.anchor.
-      const anchorReference =
-        (typeof a.anchorReference === "string" && a.anchorReference) ||
-        (typeof a.anchor === "string" && a.anchor) ||
-        (typeof a.issueRef === "string" && a.issueRef) ||
-        (a.prompt_args &&
-          typeof a.prompt_args === "object" &&
-          typeof (a.prompt_args as any).anchor === "string" &&
-          (a.prompt_args as any).anchor) ||
-        null;
-      const dispatch: RetroDispatch = {
-        cycleId,
-        turn_n: turnN,
-        skill: typeof a.skill === "string" ? a.skill : null,
-        anchorReference,
-        prNumber,
-        status,
-        bucket: bucketOf(status),
-        // abandonReason / regression are enriched from the metrics sidecar
-        // join in the assemble loop; default to the no-signal values here.
-        abandonReason: null,
-        regressionIntroduced: false,
-        // flagged is materialised in the assemble loop after the crash
-        // abandonReason backfill — projection cannot know the final signal yet.
-        flagged: false,
-        // undrillable is materialised in the assemble loop (issue #1184) — it
-        // depends on the final cycleId, which the metrics-sidecar enrichment can
-        // backfill. Default to drillable here.
-        undrillable: false,
-      };
-      const slot = slotOfAction(a);
-      // Cross-turn dedup (issue #1776): an identity already projected on an
-      // earlier turn never emits a second row — the action only enriches the
-      // canonical row's null fields. (In practice a dispatch action is
-      // recorded once, on the dispatching turn; this guard is defensive.)
-      const prior = cycleId ? byIdentity.get(`id:${cycleId}`) : undefined;
-      if (prior) {
-        if (!prior.skill && dispatch.skill) prior.skill = dispatch.skill;
-        if (!prior.anchorReference && anchorReference) prior.anchorReference = anchorReference;
-        if (!prior.prNumber && prNumber) prior.prNumber = prNumber;
-        if (prior.status === null && status !== null) {
-          prior.status = status;
-          prior.bucket = bucketOf(status);
-        }
-        if (slot && !bySlot.has(slot)) bySlot.set(slot, prior);
-        continue;
-      }
-      out.push(dispatch);
-      if (slot && !bySlot.has(slot)) bySlot.set(slot, dispatch);
-      registerIdentity(cycleId ? `id:${cycleId}` : null, dispatch);
-    }
-
-    // Fold the slots_snapshot in: enrich an action-derived dispatch's null
-    // fields, or emit a new dispatch for a slot the actions never recorded
-    // (the crashed-run case). Action-join wins when present, so this only fills
-    // nulls — clean-run behaviour is byte-identical.
-    for (const [slot, slotObj] of Object.entries(slotsSnapshot)) {
-      if (slotObj == null) continue; // empty slot — nothing dispatched here.
-      const slotSkill = slotStr(slotObj, "skill");
-      const slotAnchor = slotStr(slotObj, "anchor");
-      // The slot carries the dispatch's `task_id` — the SAME id `reap.py` sends
-      // as the `cycleId` on its durable `cycle-record` write (issue #1352). It
-      // is a *candidate* transcript handle, not yet a confirmed one: a slot
-      // still occupied when the session was interrupted has a task_id but no
-      // terminal cycle record. The assemble loop confirms it by reading the
-      // cycle metrics/hash and DROPS it back to "" if no terminal record
-      // exists, so an in-flight slot stays undrillable. See
-      // `confirmDrillableCycleIds` in assembleRetroBundle.
-      const slotTaskId = slotStr(slotObj, "task_id");
-      const epoch = slotEpoch(slotObj);
-      const epochKey = epoch ? `epoch:${slot}@${epoch}` : null;
-      const existing = bySlot.get(slot);
-      if (existing) {
-        // Same-turn (turn, slot) merge: enrich the action-derived row's null
-        // fields — action values win. Then register the row's durable identity
-        // so later turns' snapshots of the SAME occupancy dedup onto it
-        // (issue #1776), even when the action's cycleId and the slot's task_id
-        // diverge (the epoch key covers that).
-        enrichFromSlot(existing, slotSkill, slotAnchor, slotTaskId);
-        registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, existing);
-        registerIdentity(existing.cycleId ? `id:${existing.cycleId}` : null, existing);
-        registerIdentity(epochKey, existing);
-        continue;
-      }
-      // Cross-turn dedup (issue #1776): this slot has no same-turn action, but
-      // the SAME dispatch (same task_id, or same slot+started_epoch) may have
-      // been projected on an earlier turn — a dispatch occupying its slot for
-      // N turns appears in N snapshots. Enrich the canonical earliest-turn row
-      // instead of emitting a duplicate.
-      const crossTurnPrior =
-        (slotTaskId ? byIdentity.get(`id:${slotTaskId}`) : undefined) ??
-        (epochKey ? byIdentity.get(epochKey) : undefined);
-      if (crossTurnPrior) {
-        enrichFromSlot(crossTurnPrior, slotSkill, slotAnchor, slotTaskId);
-        // Register any identity facet this snapshot revealed that the earlier
-        // turn's entry lacked (e.g. first turn had no started_epoch).
-        registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, crossTurnPrior);
-        registerIdentity(epochKey, crossTurnPrior);
-        continue;
-      }
-      // A slot member with no matching action that carries NO usable identity
-      // (a malformed string/number/array, or an object with neither skill nor
-      // anchor) is skipped rather than synthesised as an all-null phantom
-      // dispatch (never-throw / read-only invariant: a garbage slot map yields
-      // the prior action-derived dispatches, not a junk row).
-      if (!slotSkill && !slotAnchor) continue;
-      // Slot present only in the snapshot — the dispatch action was never
-      // recorded (a crash/interrupt truncated the turn). Synthesise a
-      // RetroDispatch so the dispatch is still attributable. Seed the candidate
-      // cycleId from the slot's task_id (issue #1352): if a terminal cycle
-      // record exists for it (the genuinely-completed dispatch on an
-      // interrupted run), the assemble loop keeps it and the dispatch becomes
-      // drillable; if not (still in-flight), the loop resets it to "" and it
-      // stays undrillable.
-      const dispatch: RetroDispatch = {
-        cycleId: slotTaskId ?? "",
-        turn_n: turnN,
-        skill: slotSkill,
-        anchorReference: slotAnchor,
-        prNumber: prNumberFromAnchor(slotAnchor),
-        status: null,
-        bucket: null,
-        abandonReason: null,
-        regressionIntroduced: false,
-        flagged: false,
-        undrillable: false,
-      };
-      out.push(dispatch);
-      bySlot.set(slot, dispatch);
-      registerIdentity(slotTaskId ? `id:${slotTaskId}` : null, dispatch);
-      registerIdentity(epochKey, dispatch);
-    }
-  }
-  return out;
-}
-
-/**
- * Final identity-keyed dedup over the already-enriched dispatch rows (issue
- * #1823). The projection-time `byIdentity` map in {@link projectDispatches}
- * dedups on the identity present ON THE ACTION at projection time. But for a
- * multi-turn cycle whose durable `cycleId` only resolves from the cycle-metrics
- * sidecar POST-HOC (the Target-build / sidecar-backfilled-cycleId path), the
- * action-time identity is absent or per-turn, so each turn's action emits its
- * own `RetroDispatch`. After {@link assembleRetroBundle}'s metrics-sidecar
- * enrichment loop has stamped the canonical `cycleId` (and status/anchor/PR)
- * onto every row, two rows that resolved to the SAME real cycle now share a
- * non-empty `cycleId` — so a SECOND, post-enrichment dedup pass keyed on that
- * backfilled identity collapses them into one row, where the action-time map
- * could not (it never saw the backfilled id).
- *
- * Contract (mirrors the projection-time merge):
- *   - Keyed on the non-empty `cycleId` (the durable transcript handle). An
- *     EMPTY-cycleId row carries no durable identity to dedup on, so it is left
- *     untouched (the undrillable / interrupted-run case stays per its #1184
- *     treatment — two distinct empty-cycleId slots are not merged).
- *   - EARLIEST-turn row is canonical (a `null` turn_n sorts last, so a
- *     turn-bearing row wins over an unknown-turn duplicate). Later same-cycleId
- *     rows are dropped after UNIONING their non-null fields onto the canonical
- *     row — so a field only a later turn resolved (a PR-shaped anchor, a
- *     backfilled abandonReason) is preserved while the row count drops to one.
- *   - `regressionIntroduced` ORs across the merged rows (any turn that saw a
- *     regression makes the merged dispatch a regression).
- *   - Pure + order-stable: returns the surviving rows in first-seen order, so
- *     the bundle's `dispatches[]` ordering is deterministic.
- *
- * Operates in place on the passed array's members for the union, but returns a
- * NEW filtered array (the dropped duplicates are removed). The flagged /
- * undrillable materialisation runs AFTER this pass, so each real cycle is
- * flagged at most once — closing the #1823 double-count.
- */
-export function dedupByCanonicalCycleId(dispatches: RetroDispatch[]): RetroDispatch[] {
-  const canonical = new Map<string, RetroDispatch>();
-  const survivors: RetroDispatch[] = [];
-  for (const d of dispatches) {
-    // Empty-cycleId rows have no durable identity — never merge them.
-    if (!d.cycleId) {
-      survivors.push(d);
-      continue;
-    }
-    const prior = canonical.get(d.cycleId);
-    if (!prior) {
-      canonical.set(d.cycleId, d);
-      survivors.push(d);
-      continue;
-    }
-    // A later same-cycleId row: pick the earliest-turn row as canonical (a
-    // null turn_n sorts last), then union the dropped row's non-null fields.
-    const priorTurn = prior.turn_n ?? Number.POSITIVE_INFINITY;
-    const dTurn = d.turn_n ?? Number.POSITIVE_INFINITY;
-    // The canonical row is always the one already in `survivors` (first-seen);
-    // we only adopt the earlier turn_n onto it so the canonical row reports the
-    // dispatching turn, never a later occupancy turn.
-    if (dTurn < priorTurn) prior.turn_n = d.turn_n;
-    if (!prior.skill && d.skill) prior.skill = d.skill;
-    if (!prior.anchorReference && d.anchorReference) prior.anchorReference = d.anchorReference;
-    if (!prior.prNumber && d.prNumber) prior.prNumber = d.prNumber;
-    if (prior.status === null && d.status !== null) {
-      prior.status = d.status;
-      prior.bucket = d.bucket;
-    }
-    if (!prior.abandonReason && d.abandonReason) prior.abandonReason = d.abandonReason;
-    if (d.regressionIntroduced) prior.regressionIntroduced = true;
-    // `d` is dropped (not pushed to survivors).
-  }
-  return survivors;
 }
 
 // ---------------------------------------------------------------------------
