@@ -72,11 +72,19 @@ import {
   getScoutCategoryLastWalked,
   getScoutPatternLastFired,
   setScoutAlertCursor,
-  setScoutCategoryLastWalked,
-  setScoutPatternLastFired,
-  xaddScoutDispatch,
-  xrevrangeScoutDispatches,
 } from "../redis/scout.ts";
+
+// The dispatch audit stream surface (recordDispatch, listDispatchAudits,
+// DispatchAuditEntry, SCOUT_DISPATCHES_MAXLEN) was extracted into a focused
+// ScoutDispatchAudit module (issue #1972). Re-exported below so existing
+// importers keep resolving through alert-listener.ts; drop the bridge once all
+// importers point at ./dispatch-audit.ts directly.
+export {
+  recordDispatch,
+  listDispatchAudits,
+  SCOUT_DISPATCHES_MAXLEN,
+} from "./dispatch-audit.ts";
+export type { DispatchAuditEntry } from "./dispatch-audit.ts";
 
 // ---------------------------------------------------------------------------
 // Pattern → category map (starter, per issue body)
@@ -155,14 +163,8 @@ export const PATTERN_CATEGORY_MAP: Readonly<Record<string, readonly string[]>> =
 export const ALERT_PER_PATTERN_COOLDOWN_HOURS = 24;
 export const ALERT_PER_CATEGORY_COOLDOWN_HOURS = 24;
 
-/** TTL on per-pattern dedup keys — twice the cooldown so forgotten patterns self-clean. */
-const ALERT_PATTERN_KEY_TTL_SECONDS = 2 * 24 * 60 * 60;
-
 /** Bound on the alerts-list scan so we don't iterate the whole list every tick. */
 const ALERT_SCAN_BATCH = 100;
-
-/** Bound the audit stream — keep last 1000 dispatches. */
-export const SCOUT_DISPATCHES_MAXLEN = 1000;
 
 const MS_PER_HOUR = 60 * 60 * 1000;
 
@@ -221,18 +223,6 @@ export interface AlertPlan {
   newestTimestamp: string | null;
   /** Wall-clock the plan was computed at. */
   computedAt: string;
-}
-
-/** Audit-trail entry written to `hydra:scout:dispatches`. */
-export interface DispatchAuditEntry {
-  triggeredBy: "calendar" | `alert:${string}`;
-  category: string;
-  dispatchedAt: string;
-  /** Cost in fractional dollars; null if not measured by caller. */
-  cost: number | null;
-  outcome: "filed" | "dropped" | "error";
-  /** Optional free-form details — alert.id, error message, issueNum, etc. */
-  detail: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -511,50 +501,9 @@ export async function planAlertDispatches(
 // Redis-touching: post-dispatch bookkeeping
 // ---------------------------------------------------------------------------
 
-/**
- * After the caller successfully dispatches a scout for an
- * `AlertDispatchTarget`, call this to:
- *
- *   1. XADD an audit entry to `hydra:scout:dispatches`.
- *   2. Stamp the per-pattern dedup key (24h debounce).
- *   3. Stamp the per-category cooldown (shares the calendar-walk key —
- *      one cooldown surface for both triggers).
- *
- * Idempotent w.r.t. stamping (Redis SET overwrites) — but XADD always
- * appends, so a re-call will leave two audit entries. Don't call twice
- * for the same dispatch.
- */
-export async function recordDispatch(
-  target: AlertDispatchTarget,
-  outcome: "filed" | "dropped" | "error",
-  detail: string,
-  now: Date = new Date(),
-  cost: number | null = null,
-): Promise<void> {
-  const nowIso = now.toISOString();
-
-  // 1. Audit stream.
-  await xaddDispatchAudit({
-    triggeredBy: `alert:${target.pattern}`,
-    category: target.category,
-    dispatchedAt: nowIso,
-    cost,
-    outcome,
-    detail: detail || target.alertId,
-  });
-
-  // Only stamp dedup on filed/dropped — errors should be re-tried, not
-  // suppressed. The pattern is still "we tried", but the operator may
-  // want another shot after fixing the infra error.
-  if (outcome === "error") return;
-
-  // 2. Per-pattern dedup, 48h TTL (twice the cooldown — see ALERT_PATTERN_KEY_TTL_SECONDS).
-  await setScoutPatternLastFired(target.pattern, nowIso, ALERT_PATTERN_KEY_TTL_SECONDS);
-
-  // 3. Per-category cooldown — shares the calendar walk's key so both
-  // triggers honor each other.
-  await setScoutCategoryLastWalked(target.category, nowIso);
-}
+// NOTE: the post-dispatch audit write (`recordDispatch`) was extracted into the
+// ScoutDispatchAudit module (`./dispatch-audit.ts`, issue #1972). It is
+// re-exported at the top of this file so existing call sites keep resolving.
 
 /**
  * Advance the alert cursor to `iso`. Caller (typically the autopilot) does
@@ -572,60 +521,4 @@ export async function advanceAlertCursor(iso: string): Promise<void> {
 /** Read the current cursor. Diagnostic helper. */
 export async function getAlertCursor(): Promise<string | null> {
   return getScoutAlertCursor();
-}
-
-// ---------------------------------------------------------------------------
-// Audit stream readers (for /api/scout/dispatches)
-// ---------------------------------------------------------------------------
-
-/**
- * Read the last `limit` dispatch audit entries newest-first. Defaults to 50,
- * clamped to [1, 1000].
- */
-export async function listDispatchAudits(limit: number = 50): Promise<DispatchAuditEntry[]> {
-  const n = Math.max(1, Math.min(1000, Math.floor(limit) || 50));
-  // XREVRANGE returns newest-first.
-  const entries = await xrevrangeScoutDispatches(n);
-  const out: DispatchAuditEntry[] = [];
-  for (const [, fields] of entries) {
-    out.push(parseAuditFields(fields));
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-async function xaddDispatchAudit(entry: DispatchAuditEntry): Promise<void> {
-  const fields: string[] = [
-    "triggeredBy", entry.triggeredBy,
-    "category", entry.category,
-    "dispatchedAt", entry.dispatchedAt,
-    "cost", entry.cost == null ? "" : String(entry.cost),
-    "outcome", entry.outcome,
-    "detail", entry.detail,
-  ];
-  // MAXLEN ~ N keeps the stream bounded; ~ is approximate (faster trim).
-  await xaddScoutDispatch(SCOUT_DISPATCHES_MAXLEN, fields);
-}
-
-function parseAuditFields(fields: string[]): DispatchAuditEntry {
-  // ioredis returns ["k","v","k","v",...]; pair them up.
-  const map: Record<string, string> = {};
-  for (let i = 0; i + 1 < fields.length; i += 2) {
-    map[fields[i]] = fields[i + 1];
-  }
-  const costRaw = map.cost ?? "";
-  const cost = costRaw === "" ? null : Number.parseFloat(costRaw);
-  const triggeredBy = (map.triggeredBy ?? "calendar") as DispatchAuditEntry["triggeredBy"];
-  const outcome = (map.outcome ?? "error") as DispatchAuditEntry["outcome"];
-  return {
-    triggeredBy,
-    category: map.category ?? "",
-    dispatchedAt: map.dispatchedAt ?? "",
-    cost: Number.isFinite(cost as number) ? (cost as number) : null,
-    outcome,
-    detail: map.detail ?? "",
-  };
 }
