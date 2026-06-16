@@ -53,15 +53,11 @@ import {
 // The gate predicate (`gateCheck`/`isFresh`) and its freshness window were
 // extracted to `src/design-concept-gate.ts` (issue #1908) — the gate is the
 // only concern that coupled this persistence module to the tier-classifier
-// boundary. We import the freshness constant back for internal index pruning
-// and re-export the gate surface below for back-compat (callers historically
-// import `gateCheck`/`isFresh`/`DESIGN_CONCEPT_MAX_AGE_MS` from this module).
+// boundary. We import the freshness constant back for internal index pruning;
+// the back-compat re-export of `gateCheck`/`isFresh`/`DESIGN_CONCEPT_MAX_AGE_MS`
+// was dropped (issue #1977 — no caller imports them via this module; they all
+// import directly from `./design-concept-gate.ts`).
 import { DESIGN_CONCEPT_MAX_AGE_MS } from "./design-concept-gate.ts";
-export {
-  DESIGN_CONCEPT_MAX_AGE_MS,
-  isFresh,
-  gateCheck,
-} from "./design-concept-gate.ts";
 
 // `DesignConceptInput` is owned by `src/schemas/design-concept.ts` per
 // ADR-0011 (single source of truth: the schema is also the type). The
