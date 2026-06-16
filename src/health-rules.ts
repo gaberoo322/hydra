@@ -14,7 +14,7 @@
 // order. Thresholds stay inline in each rule — co-located = locality.
 
 import type { HealthSnapshot, HealthDiagnostic } from "./health-diagnostics.ts";
-import { assessSkillCatalog } from "./health-diagnostics.ts";
+import { assessSkillCatalog } from "./health-skill-catalog.ts";
 // Issue #1968: the OV skill-catalog state is in-process module state populated by
 // startup `registerSkills` (resets on restart), NOT a deep-health probe — so it
 // is read directly here rather than carried on the HealthSnapshot. The skill-rule
