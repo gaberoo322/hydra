@@ -270,63 +270,17 @@ export async function clearSchedulerDeliberateStop(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Blocked-issue escalation cooldown (per-item timestamp hash)
-// ---------------------------------------------------------------------------
-
-/** Read the last-escalation timestamp for a blocked item, or null when absent. */
-export async function getBlockedLastEscalation(itemId: string): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.hget(redisKeys.blockedLastEscalation(), itemId);
-}
-
-/** Record the last-escalation timestamp for a blocked item. */
-export async function setBlockedLastEscalation(itemId: string, value: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.hset(redisKeys.blockedLastEscalation(), itemId, value);
-}
-
-// ---------------------------------------------------------------------------
-// Weekly digest + memory consolidation timestamps
-// ---------------------------------------------------------------------------
-
-export async function getDigestLastWeekly(): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.digestLastWeekly());
-}
-
-export async function setDigestLastWeekly(value: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.digestLastWeekly(), value);
-}
-
-export async function getMemoryLastConsolidation(): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.memoryLastConsolidation());
-}
-
-export async function setMemoryLastConsolidation(value: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.memoryLastConsolidation(), value);
-}
-
-// ---------------------------------------------------------------------------
-// Cleanup daily-sweep timestamp (issue #1876)
+// Housekeeping Redis ops moved to src/redis/housekeeping.ts (issue #1956)
 // ---------------------------------------------------------------------------
 //
-// The stale-Redis-key sweep was folded out of the cleanup.ts in-process 24h
-// setInterval into a housekeeping `Chore`. Housekeeping runs hourly, so the
-// chore carries a daily time-guard stamped here — the same shape as the
-// weekly-digest / memory-consolidation guards.
-
-export async function getCleanupLastDaily(): Promise<string | null> {
-  const r = getRedisConnection();
-  return r.get(redisKeys.cleanupLastDaily());
-}
-
-export async function setCleanupLastDaily(value: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(redisKeys.cleanupLastDaily(), value);
-}
+// The 8 Housekeeping-domain time-guard accessors (getBlockedLastEscalation,
+// setBlockedLastEscalation, getDigestLastWeekly, setDigestLastWeekly,
+// getMemoryLastConsolidation, setMemoryLastConsolidation, getCleanupLastDaily,
+// setCleanupLastDaily) that previously lived here have been relocated to
+// src/redis/housekeeping.ts. They carried non-scheduler key namespaces
+// (hydra:blocked:*, hydra:digest:*, hydra:memory:*, hydra:cleanup:*) and
+// were consumed only by src/scheduler/housekeeping.ts. The key strings on
+// disk are UNCHANGED — this was a source-location move, not a key migration.
 
 // ---------------------------------------------------------------------------
 // Research floor (issue #84/#327) accessors removed in #706 (scheduler fold
