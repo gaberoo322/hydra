@@ -40,7 +40,7 @@ import {
   getDigestLastWeekly, setDigestLastWeekly,
   getMemoryLastConsolidation, setMemoryLastConsolidation,
   getCleanupLastDaily, setCleanupLastDaily,
-} from "../redis/scheduler.ts";
+} from "../redis/housekeeping.ts";
 import {
   getReviewPickupNotified,
   setReviewPickupNotified,
