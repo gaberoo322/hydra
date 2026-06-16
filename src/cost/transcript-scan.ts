@@ -171,7 +171,7 @@ export interface CachedOAuthRead {
  * last-good. Pure of `Date.now()` (caller passes `nowMs`); the module cache is
  * the only side effect, mirroring the snapshot `cache`.
  */
-export async function readOAuthCached(
+async function readOAuthCached(
   readUsage: () => Promise<OAuthUsageResult>,
   nowMs: number,
 ): Promise<CachedOAuthRead> {
@@ -484,4 +484,4 @@ export function makeReadOAuth(opts: {
 }
 
 /** Re-export the production defaults the coordinator wires in. */
-export { projectsRoot, readOAuthUsage, isOAuthUsageOk };
+export { projectsRoot, readOAuthUsage };
