@@ -298,6 +298,20 @@ CRITICAL mapping: the API emits `blocks[].source` = `per-anchor-reflections` /
 `per-anchor` / `by-file`. Emit the mapped tokens, never the raw API strings
 (raw strings mis-bucket to `mixed`/`none`).
 
+CRITICAL task_id source (issue #1945 — the deposit was landing under the WRONG
+key on 100% of cycles). reap reads the deposit at `hydra-refl-sources-<task_id>`
+where `<task_id>` is the **harness task id** — the 17-hex-char hash the Claude
+Agent tool embeds in your worktree path (`.../worktrees/agent-<HASH>`) and
+branch (`worktree-agent-<HASH>`). That hash flows into the slot's `task_id` and
+is the only key reap ever reads. The two env vars the old recipe used are both
+WRONG in this child build: `HYDRA_AUTOPILOT_TASK_ID` is **unset** inside the
+worktree subagent (the harness does not export it), and `CLAUDE_CODE_SESSION_ID`
+is the child's session UUID (e.g. `337671f0-…`) — a DIFFERENT id from the
+harness hash, so a deposit keyed on it is never found and the metric stays
+`'none'`. Derive the hash from your own cwd (`pwd` → `agent-<HASH>`), which is
+authoritative and always present; only fall back to the env vars if the cwd is
+somehow not an `agent-<HASH>` worktree (e.g. a `/dev/shm` layout).
+
 ```bash
 # Map each served block (count>0) to its bucket token, comma-join.
 REFL_SOURCES=$(printf '%s' "$REFL_JSON" | jq -r '
@@ -309,18 +323,47 @@ REFL_SOURCES=$(printf '%s' "$REFL_JSON" | jq -r '
       elif test("global") then "global"
       else empty end ]
   | unique | join(",")')
-# Deposit keyed on THIS dispatch's task_id so reap (which holds the same id)
-# can read it. The autopilot envelope surfaces it as HYDRA_AUTOPILOT_TASK_ID;
-# fall back to CLAUDE_CODE_SESSION_ID (reap's `.session_id` fallback id).
-REFL_TASK_ID="${HYDRA_AUTOPILOT_TASK_ID:-$CLAUDE_CODE_SESSION_ID}"
-if [ -n "$REFL_SOURCES" ] && [ -n "$REFL_TASK_ID" ]; then
-  printf '%s' "$REFL_SOURCES" \
-    > "${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-${REFL_TASK_ID}" 2>/dev/null \
-    || true   # best-effort: a deposit miss only loses telemetry, never blocks work
+# Derive the harness task_id reap keys on. PRIMARY source: the `agent-<HASH>`
+# worktree dir basename (the harness embeds its task id there); the same HASH
+# is the branch suffix `worktree-agent-<HASH>` and the slot `task_id` reap reads.
+# Match a 12+ hex-char suffix so we don't pick up the synthesized
+# `worktree-agent-<run>-t<turn>-<slot>` dispatchId (which is NOT the read key).
+REFL_TASK_ID=""
+case "$(basename "$PWD")" in
+  agent-*)
+    CAND="${PWD##*/agent-}"
+    case "$CAND" in
+      *[!0-9a-f]*) ;;                       # not pure hex → not the harness hash
+      ?????????????*) REFL_TASK_ID="$CAND" ;; # 12+ hex chars → harness task id
+    esac
+    ;;
+esac
+# Fallbacks only if cwd was not an agent-<HASH> worktree (non-standard layout).
+REFL_TASK_ID="${REFL_TASK_ID:-${HYDRA_AUTOPILOT_TASK_ID:-$CLAUDE_CODE_SESSION_ID}}"
+
+if [ -n "$REFL_SOURCES" ]; then
+  if [ -z "$REFL_TASK_ID" ]; then
+    # FAIL LOUD (repo "fail loud" convention): reflections WERE served but we
+    # cannot determine the key reap reads, so the telemetry would silently
+    # vanish. Surface it on stderr AND in the Friction Report
+    # (cue: refl-deposit-no-task-id) so the silent-'none' regression is visible.
+    printf '[hydra-target-build] WARN refl-deposit-no-task-id: served %s but no harness task_id derivable from cwd=%s — reflectionMatchSource will read none\n' \
+      "$REFL_SOURCES" "$PWD" >&2
+  else
+    REFL_DEPOSIT_PATH="${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-${REFL_TASK_ID}"
+    if printf '%s' "$REFL_SOURCES" > "$REFL_DEPOSIT_PATH" 2>/dev/null; then
+      printf '[hydra-target-build] refl-deposit ok: %s -> %s\n' "$REFL_SOURCES" "$REFL_DEPOSIT_PATH" >&2
+    else
+      # FAIL LOUD on I/O error — best-effort for the build (never blocks work)
+      # but the failure must be visible, not swallowed by `|| true`.
+      printf '[hydra-target-build] WARN refl-deposit-write-failed: could not write %s (cue: refl-deposit-write-failed)\n' \
+        "$REFL_DEPOSIT_PATH" >&2
+    fi
+  fi
 fi
 # Empty REFL_SOURCES (served nothing) → no deposit → reap omits the field →
 # the cycle truthfully buckets to 'none'. This distinguishes "served nothing"
-# from the pre-#1136 "served but unstamped" false 'none'.
+# from the #1945 "served but deposited under the wrong key" false 'none'.
 ```
 
 To verify reflections actually reach a retry, query this `/api/reflections`
