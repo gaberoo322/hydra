@@ -75,16 +75,10 @@ import {
 } from "../redis/scout.ts";
 
 // The dispatch audit stream surface (recordDispatch, listDispatchAudits,
-// DispatchAuditEntry, SCOUT_DISPATCHES_MAXLEN) was extracted into a focused
-// ScoutDispatchAudit module (issue #1972). Re-exported below so existing
-// importers keep resolving through alert-listener.ts; drop the bridge once all
-// importers point at ./dispatch-audit.ts directly.
-export {
-  recordDispatch,
-  listDispatchAudits,
-  SCOUT_DISPATCHES_MAXLEN,
-} from "./dispatch-audit.ts";
-export type { DispatchAuditEntry } from "./dispatch-audit.ts";
+// DispatchAuditEntry, SCOUT_DISPATCHES_MAXLEN) lives in the ScoutDispatchAudit
+// module (./dispatch-audit.ts, issue #1972). All importers now resolve those
+// symbols directly from there, so the compatibility re-export bridge that used
+// to live here has been dropped (issue #2002).
 
 // ---------------------------------------------------------------------------
 // Pattern → category map (starter, per issue body)
@@ -501,9 +495,9 @@ export async function planAlertDispatches(
 // Redis-touching: post-dispatch bookkeeping
 // ---------------------------------------------------------------------------
 
-// NOTE: the post-dispatch audit write (`recordDispatch`) was extracted into the
-// ScoutDispatchAudit module (`./dispatch-audit.ts`, issue #1972). It is
-// re-exported at the top of this file so existing call sites keep resolving.
+// NOTE: the post-dispatch audit write (`recordDispatch`) lives in the
+// ScoutDispatchAudit module (`./dispatch-audit.ts`, issue #1972). Call sites
+// import it from there directly.
 
 /**
  * Advance the alert cursor to `iso`. Caller (typically the autopilot) does
