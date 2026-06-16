@@ -18,11 +18,9 @@ import {
   projectHealthDeepResponse,
   classifyOvSearchProbe,
   parseRedisInfoSnapshot,
-  assessSkillCatalog,
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type HealthSnapshot,
   type ProbeInputs,
-  type SkillCatalogSnapshot,
 } from "../src/health-diagnostics.ts";
 // assembleProbeInputs lives in src/api/health.ts (the I/O owner per #840 seam purity),
 // exported for unit testing the positional index mapping in isolation.
@@ -1123,69 +1121,5 @@ describe("projectHealthDeepResponse", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// assessSkillCatalog — the #1968 skill-catalog health gate
-// ---------------------------------------------------------------------------
-describe("assessSkillCatalog (#1968)", () => {
-  const skill = (name: string, registered: boolean, lastError: string | null = null) => ({
-    name,
-    registered,
-    lastError,
-  });
-
-  test("no pass completed yet is ok/in-flight with no diagnostic", () => {
-    const snap: SkillCatalogSnapshot = { registered: 0, total: 4, completed: false, skills: [] };
-    const a = assessSkillCatalog(snap);
-    assert.equal(a.status, "ok");
-    assert.equal(a.diagnostic, null);
-  });
-
-  test("all skills registered is ok with no diagnostic", () => {
-    const snap: SkillCatalogSnapshot = {
-      registered: 4,
-      total: 4,
-      completed: true,
-      skills: ["planner", "executor", "skeptic", "director"].map((n) => skill(n, true)),
-    };
-    const a = assessSkillCatalog(snap);
-    assert.equal(a.status, "ok");
-    assert.equal(a.diagnostic, null);
-  });
-
-  test("zero registered after a completed pass is EMPTY with an error diagnostic", () => {
-    const snap: SkillCatalogSnapshot = {
-      registered: 0,
-      total: 4,
-      completed: true,
-      skills: ["planner", "executor", "skeptic", "director"].map((n) =>
-        skill(n, false, "ov-timeout"),
-      ),
-    };
-    const a = assessSkillCatalog(snap);
-    assert.equal(a.status, "empty");
-    assert.equal(a.diagnostic?.severity, "error");
-    assert.equal(a.diagnostic?.component, "intelligence");
-    assert.match(a.diagnostic!.what, /empty/i);
-    // The per-skill failure codes are surfaced in the action detail.
-    assert.match(a.diagnostic!.action, /ov-timeout/);
-  });
-
-  test("partial registration is DEGRADED with a warning naming the missing skills", () => {
-    const snap: SkillCatalogSnapshot = {
-      registered: 3,
-      total: 4,
-      completed: true,
-      skills: [
-        skill("planner", true),
-        skill("executor", true),
-        skill("skeptic", true),
-        skill("director", false, "ov-non-2xx"),
-      ],
-    };
-    const a = assessSkillCatalog(snap);
-    assert.equal(a.status, "degraded");
-    assert.equal(a.diagnostic?.severity, "warning");
-    assert.match(a.diagnostic!.what, /3\/4/);
-    assert.match(a.diagnostic!.action, /director \(ov-non-2xx\)/);
-  });
-});
+// assessSkillCatalog tests moved to test/health-skill-catalog.test.mts with the
+// Skill-Catalog Health Seam extraction (issue #1992).

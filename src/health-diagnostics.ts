@@ -148,96 +148,10 @@ export function classifyOvSearchProbe(
   };
 }
 
-// ---- Skill-catalog health gate (issue #1968) -----------------------------
-//
-// When OpenViking times out / 5xx's under indexing load during startup skill
-// registration, all four OV skills can fail to register and the catalog stays
-// empty — yet the service reports a clean startup and no health surface reflects
-// it, so planners run without skill context (silent knowledge-plane failure).
-//
-// `assessSkillCatalog` is the pure verdict over the in-process skill-catalog
-// state produced by `registerSkills` (src/knowledge-base/skill-registration.ts).
-// Kept here in the pure seam — and decoupled from the producer's concrete type
-// via a structural input shape — so it is unit-testable without standing up
-// OpenViking, and so the health-diagnostics seam keeps its import-free, no-I/O
-// discipline (#840). The I/O handler (api/health.ts) reads the live state and
-// passes it in; this function never touches the registry module.
-
-/** The structural shape `assessSkillCatalog` reads off the catalog state. */
-export interface SkillCatalogSnapshot {
-  /** Skills currently registered with OpenViking. */
-  registered: number;
-  /** Total skills the catalog expects. */
-  total: number;
-  /** true once a registration pass has finished (success OR failure). */
-  completed: boolean;
-  /** Last failure code per un-registered skill, for the diagnostic detail. */
-  skills: Array<{ name: string; registered: boolean; lastError: string | null }>;
-}
-
-/** Folded verdict on the skill catalog: a status plus an optional diagnostic. */
-export interface SkillCatalogAssessment {
-  /** `ok` = all registered; `degraded` = some missing; `empty` = none registered. */
-  status: "ok" | "degraded" | "empty";
-  diagnostic: HealthDiagnostic | null;
-}
-
-/**
- * Pure health gate over the skill-catalog state (#1968). Distinguishes the
- * three operator-meaningful states:
- *  - `ok`       — every expected skill is registered (or no pass has run yet,
- *                 which is the pre-startup no-op: no alarm, registration is
- *                 still in flight).
- *  - `degraded` — a pass completed but some skills failed to register.
- *  - `empty`    — a pass completed and ZERO skills registered: the silent
- *                 knowledge-plane failure this issue exists to surface. Planners
- *                 run without skill context, degrading forecast quality.
- *
- * Never throws; reads only its argument.
- */
-export function assessSkillCatalog(snap: SkillCatalogSnapshot): SkillCatalogAssessment {
-  // No pass has completed yet (fresh process, registration still in flight) —
-  // treat as ok/in-flight so a slow startup isn't a false alarm.
-  if (!snap.completed) {
-    return { status: "ok", diagnostic: null };
-  }
-  if (snap.registered >= snap.total && snap.total > 0) {
-    return { status: "ok", diagnostic: null };
-  }
-
-  const missing = snap.skills.filter((s) => !s.registered);
-  const missingDetail = missing
-    .map((s) => `${s.name}${s.lastError ? ` (${s.lastError})` : ""}`)
-    .join(", ");
-
-  if (snap.registered === 0) {
-    return {
-      status: "empty",
-      diagnostic: {
-        severity: "error",
-        component: "intelligence",
-        what: "OV skill catalog empty",
-        why: "Every skill registration failed (typically OpenViking timing out / 5xx-ing under indexing load, #1924/#1831). The service started clean but the catalog is unpopulated.",
-        impact: "Planners run without skill context — degraded forecast quality and contributes to the no-task rate (#1832).",
-        action: `Check OpenViking load and restart the orchestrator once it recovers. Failed: ${missingDetail || "all skills"}.`,
-        autoRecovery: false,
-      },
-    };
-  }
-
-  return {
-    status: "degraded",
-    diagnostic: {
-      severity: "warning",
-      component: "intelligence",
-      what: `OV skill catalog partial (${snap.registered}/${snap.total})`,
-      why: "Some skill registrations failed (transient OpenViking timeout / 5xx under load, #1924/#1831).",
-      impact: "Planners relying on the missing skills run without their context.",
-      action: `Restart the orchestrator once OpenViking recovers. Missing: ${missingDetail}.`,
-      autoRecovery: false,
-    },
-  };
-}
+// Skill-catalog health gate moved to src/health-skill-catalog.ts (issue #1992).
+// It described a separate concern — the Knowledge Base's in-process skill
+// registration state — not a probe-marshalling input, so it now lives in its
+// own focused module that type-imports `HealthDiagnostic` from here.
 
 // ---- Health Snapshot — the normalized internal model ---------------------
 
