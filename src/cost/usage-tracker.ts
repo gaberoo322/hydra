@@ -104,42 +104,30 @@
  *     estimate (never silently 0). Only a SUCCESSFUL read overwrites the cache.
  */
 
-import { readFile, stat } from "node:fs/promises";
-import type { Stats } from "node:fs";
 import { getSubagentDispatch } from "../redis/dispatches.ts";
-import {
-  projectsRoot,
-  listTranscriptFiles,
-  sessionIdFromPath as transcriptSessionIdFromPath,
-} from "../transcript-store.ts";
-import { readOAuthUsage, isOAuthUsageOk } from "./oauth-usage.ts";
-import type { OAuthUsageResult, OAuthUsageData } from "./oauth-usage.ts";
+import { isOAuthUsageOk } from "./oauth-usage.ts";
+import type { OAuthUsageResult } from "./oauth-usage.ts";
 // Pure math leaf (issue #1909): the model-family classifier, JSONL-line parser,
 // quota-weight / cache-hit formulas, and weekly-reset / session-limit time math
-// were extracted into `./token-math.ts`. The scan/snapshot logic below consumes
-// them; `index.ts` re-exports them so the public surface is unchanged. One-way
-// import: this module imports FROM token-math.ts; token-math.ts imports nothing
-// from src/cost/.
+// were extracted into `./token-math.ts`. The snapshot-assembly logic below
+// consumes them; `index.ts` re-exports them so the public surface is unchanged.
+// One-way import: this module imports FROM token-math.ts; token-math.ts imports
+// nothing from src/cost/.
 import {
-  modelToFamily,
-  parseUsageLine,
   weightedTokens,
   cacheHitRatio,
   projectResetWindow,
-  parseObservedResetMs,
 } from "./token-math.ts";
 import type {
   TokenBreakdown,
   ModelFamily,
 } from "./token-math.ts";
 // Env-config readers + their DEFAULT_* constants live in the pure leaf
-// `./config.ts` (issue #1896). The scan/snapshot logic below consumes them;
+// `./config.ts` (issue #1896). The snapshot-assembly logic below consumes them;
 // `index.ts` re-exports them so the public surface is unchanged.
 import {
   getWeeklyQuotaTokens,
   getFiveHourQuotaTokens,
-  getOAuthUsageTtlMs,
-  getOAuthUsageMaxStaleMs,
   getWeeklyResetAnchorMs,
   getCacheReadWeight,
   getDriftReferencePercent,
@@ -148,24 +136,30 @@ import {
   getQuotaWeightSonnet,
   getQuotaWeightHaiku,
 } from "./config.ts";
+// TranscriptScan seam (issue #1971): the JSONL transcript walk + the
+// independent-TTL OAuth cached meter read. `usage-tracker.ts` is now the pure
+// coordinator/assembler over the `ScanResult` this module returns. The
+// `ScanResult` boundary type stays INTERNAL — never re-exported from index.ts.
+import {
+  transcriptScan,
+  makeReadOAuth,
+  clearOAuthCache,
+  projectsRoot,
+  readOAuthUsage,
+  emptyByModel,
+  addBreakdown,
+  EMPTY_BREAKDOWN,
+  UNATTRIBUTED_SKILL,
+  sessionIdFromPath as transcriptScanSessionIdFromPath,
+} from "./transcript-scan.ts";
+import type { ScanResult, SkillResolver } from "./transcript-scan.ts";
 
-/**
- * Bucket key for sessions that have no `hydra:dispatches:subagent:{sessionId}`
- * registry entry (legacy transcripts, or an operator-launched session whose
- * prompt carried no hydra-dispatch sentinel). Tokens are still counted — they
- * bucket here — so `bySkillByModel` stays reconcilable to `byModel` and to the
- * per-skill counters in `src/redis/cost.ts`; nothing is dropped. (issue #693)
- */
-export const UNATTRIBUTED_SKILL = "unattributed";
-
-/**
- * Resolves a transcript's `sessionId` to the dispatching skill, or null when
- * the session has no registry entry. The default reads the subagent-dispatch
- * registry (`getSubagentDispatch`, a pure READ — the tracker keeps its
- * no-Redis-WRITE posture). Injectable so tests can pin the cross-tab without
- * standing up Redis. (issue #693)
- */
-export type SkillResolver = (sessionId: string) => Promise<string | null>;
+// `UNATTRIBUTED_SKILL`, `SkillResolver`, and `sessionIdFromPath` now live in the
+// TranscriptScan seam (issue #1971). Re-exported here at the SAME names so the
+// `index.ts` barrel and existing `from "./usage-tracker.ts"` imports keep
+// resolving unchanged.
+export { UNATTRIBUTED_SKILL };
+export type { SkillResolver };
 
 const defaultSkillResolver: SkillResolver = async (sessionId) => {
   try {
@@ -182,11 +176,6 @@ const defaultSkillResolver: SkillResolver = async (sessionId) => {
   }
 };
 
-const MS_PER_HOUR = 3_600_000;
-const MS_PER_DAY = 86_400_000;
-const WINDOW_5H_MS = 5 * MS_PER_HOUR;
-const WINDOW_24H_MS = MS_PER_DAY;
-const WINDOW_7D_MS = 7 * MS_PER_DAY;
 const CACHE_TTL_MS = 60_000;
 
 // `TokenBreakdown`, `ModelFamily`, `ParsedUsageLine`, and `ResetWindow` now live
@@ -381,13 +370,9 @@ export interface UsageSnapshot {
   weeklyResetAnchor: string | null;
 }
 
-const EMPTY_BREAKDOWN: TokenBreakdown = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheCreation: 0,
-  total: 0,
-};
+// `EMPTY_BREAKDOWN` + `emptyByModel` + `addBreakdown` now live in the
+// TranscriptScan seam (issue #1971) and are imported at the top of this file —
+// the assembler below shares them with the scan.
 
 interface CacheEntry {
   snapshot: UsageSnapshot;
@@ -396,20 +381,10 @@ interface CacheEntry {
 
 let cache: CacheEntry | null = null;
 
-/**
- * Last SUCCESSFUL OAuth meter read, cached independently of the snapshot cache
- * (issue #1090). `storedAt` is the epoch-ms of the successful GET. This is the
- * "last-good" value served while the meter is rate-limited (429) or otherwise
- * transiently failing, so the headline stays on ground truth rather than
- * flipping to the transcript estimate the moment the endpoint hiccups. Only a
- * SUCCESSFUL read is cached here — a failure never overwrites the last-good.
- */
-interface OAuthCacheEntry {
-  data: OAuthUsageData;
-  storedAt: number;
-}
-
-let oauthCache: OAuthCacheEntry | null = null;
+// The OAuth last-good cache (`oauthCache` + `OAuthCacheEntry`) moved to the
+// TranscriptScan seam with `readOAuthCached` (issue #1090, #1971); the snapshot
+// cache above stays here. `clearUsageCache()` below nulls BOTH via the seam's
+// exported `clearOAuthCache()`.
 
 /**
  * Hard-stop threshold (in % of quota) shared by the 5-hour `emergencyStop` and
@@ -476,93 +451,17 @@ function weightedQuotaBurn(
   );
 }
 
-function emptyByModel(): Record<ModelFamily, TokenBreakdown> {
-  return {
-    opus: { ...EMPTY_BREAKDOWN },
-    sonnet: { ...EMPTY_BREAKDOWN },
-    haiku: { ...EMPTY_BREAKDOWN },
-    unknown: { ...EMPTY_BREAKDOWN },
-  };
-}
+// `emptyByModel` + the OAuth-cache machinery (`CachedOAuthRead`,
+// `readOAuthCached`, the `oauthCache` singleton) moved to the TranscriptScan
+// seam (issue #1971); `emptyByModel` + `CachedOAuthRead` are imported at the top
+// of this file for the assembler below.
 
 export function clearUsageCache(): void {
   cache = null;
-  oauthCache = null;
-}
-
-/**
- * The OAuth read fed into one `scanUsage`, after the independent-TTL + last-good
- * cache layer (issue #1090). Distinct from the raw {@link OAuthUsageResult}: it
- * also tells the scan whether the value it carries is a STALE last-good (`stale`)
- * and how old it is (`ageMs`), so the snapshot can surface those observability
- * fields. `result.ok === true` covers BOTH a fresh read AND a served-stale
- * last-good — in either case the headline rebases onto OAuth ground truth; only
- * `result.ok === false` falls through to the transcript estimate.
- */
-interface CachedOAuthRead {
-  result: OAuthUsageResult;
-  /** True when `result` is a last-good value served because a fresh read failed. */
-  stale: boolean;
-  /** Age in ms of the served OAuth value, or `null` when none was served (failure). */
-  ageMs: number | null;
-}
-
-/**
- * Decouple the OAuth-read cadence from the 60s transcript-scan cadence and
- * serve a last-good value through transient meter failures (issue #1090).
- *
- * Lifecycle of the module-level `oauthCache` (a SUCCESSFUL read only):
- *   - cache fresh (age < TTL)        → serve cached, NO external GET (fresh oauth)
- *   - cache stale-but-servable       → attempt GET; on success refresh + serve fresh;
- *       (TTL ≤ age < TTL + maxStale)    on FAILURE serve the cached value as STALE oauth
- *   - cache absent OR too stale       → attempt GET; on failure pass the failure
- *       (age ≥ TTL + maxStale)          through (caller falls to the estimate)
- *
- * Only a SUCCESSFUL read overwrites the cache — a 429/timeout never evicts the
- * last-good. Pure of `Date.now()` (caller passes `nowMs`); the module cache is
- * the only side effect, mirroring the snapshot `cache`.
- */
-async function readOAuthCached(
-  readUsage: () => Promise<OAuthUsageResult>,
-  nowMs: number,
-): Promise<CachedOAuthRead> {
-  const ttlMs = getOAuthUsageTtlMs();
-
-  // Fresh cache hit: serve without an external GET. This is the cadence
-  // decoupling — within the TTL the snapshot scan reuses the cached OAuth value
-  // instead of GETting on every 60s refresh.
-  if (oauthCache !== null && nowMs - oauthCache.storedAt < ttlMs) {
-    return {
-      result: { ok: true, data: oauthCache.data },
-      stale: false,
-      ageMs: nowMs - oauthCache.storedAt,
-    };
-  }
-
-  // TTL expired (or no cache): attempt a fresh read.
-  const result = await readUsage();
-  if (isOAuthUsageOk(result)) {
-    oauthCache = { data: result.data, storedAt: nowMs };
-    return { result, stale: false, ageMs: 0 };
-  }
-
-  // Read failed. Serve the last-good value (now stale) instead of flipping to
-  // the estimate — UNLESS it is older than TTL + maxStale, in which case it is
-  // too stale to trust and we let the failure fall through to the estimate.
-  if (oauthCache !== null) {
-    const ageMs = nowMs - oauthCache.storedAt;
-    if (ageMs < ttlMs + getOAuthUsageMaxStaleMs()) {
-      return { result: { ok: true, data: oauthCache.data }, stale: true, ageMs };
-    }
-    // Too stale: evict so a future success starts a clean age clock, and fall
-    // through to the failure (estimate). Logged so a sustained outage is visible.
-    console.error(
-      `[usage-tracker] OAuth last-good value is too stale (age ${ageMs}ms ≥ ` +
-        `TTL+maxStale); falling through to the transcript estimate (last read: ${result.code})`,
-    );
-    oauthCache = null;
-  }
-  return { result, stale: false, ageMs: null };
+  // The OAuth last-good cache lives in the TranscriptScan seam now (issue
+  // #1971); clearing it through the seam's reset fn keeps this the single reset
+  // entry point that nulls BOTH caches (the #1090 invariant 17 test sites rely on).
+  clearOAuthCache();
 }
 
 /**
@@ -634,23 +533,23 @@ export async function getUsage(opts: {
       ? async (): Promise<OAuthUsageResult> => ({ ok: false, code: "oauth-usage-no-credentials" })
       : readOAuthUsage);
 
-  // OAuth-read cadence layer (issue #1090). On the pure production path
-  // (no injected reader, no fixture root) the read goes through the
-  // independent-TTL `oauthCache` so it is decoupled from the snapshot scan and
-  // serves a last-good value through transient 429s. When tests inject a reader
-  // or point at a fixture root, bypass the module cache so each call exercises
-  // the injected reader deterministically (preserving the #1083 test contract)
-  // — unless `useOAuthCache` is explicitly set, which the #1090 tests use to
-  // drive the cache with a pinned reader.
+  // OAuth-read cadence layer (issue #1090, seam'd in #1971). On the pure
+  // production path (no injected reader, no fixture root) the read goes through
+  // the seam's independent-TTL `oauthCache` so it is decoupled from the snapshot
+  // scan and serves a last-good value through transient 429s. When tests inject
+  // a reader or point at a fixture root, bypass the module cache so each call
+  // exercises the injected reader deterministically (preserving the #1083 test
+  // contract) — unless `useOAuthCache` is explicitly set, which the #1090 tests
+  // use to drive the cache with a pinned reader.
   const bypassOAuthCache = (overrideMeter || overrideRoot) && opts.useOAuthCache !== true;
-  const readOAuth: () => Promise<CachedOAuthRead> = bypassOAuthCache
-    ? async () => {
-        const result = await readUsage();
-        return { result, stale: false, ageMs: isOAuthUsageOk(result) ? 0 : null };
-      }
-    : () => readOAuthCached(readUsage, nowMs);
+  const readOAuth = makeReadOAuth({ readUsage, nowMs, bypassOAuthCache });
 
-  const snapshot = await scanUsage(root, now, resolveSkill, readOAuth);
+  // Coordinate the two halves (issue #1971): the TranscriptScan seam owns the
+  // JSONL walk + OAuth read and returns the raw accumulation; the pure
+  // assembler below turns that into the final UsageSnapshot. No behavioural
+  // delta from the former single `scanUsage()` — the boundary is the ScanResult.
+  const scan = await transcriptScan(root, now, resolveSkill, readOAuth);
+  const snapshot = assembleSnapshot(scan, now);
 
   if (!overrideRoot && !overrideResolver && !overrideMeter) {
     cache = { snapshot, storedAt: nowMs };
@@ -665,31 +564,42 @@ export async function getUsage(opts: {
  * Resolving once per file (not per line) keeps attribution O(files), honouring
  * the design invariant. (issue #693)
  *
- * Re-exported from the **Transcript Store** Seam (`src/transcript-store.ts`,
- * issue #951) — the single owner of the `<sessionId>.jsonl` filename grammar —
- * kept on this surface for existing callers (`src/cost/index.ts`, tests).
+ * Re-exported from the TranscriptScan seam (`./transcript-scan.ts`, issue
+ * #1971), which itself re-exports it from the **Transcript Store** Seam
+ * (`src/transcript-store.ts`, issue #951 — the single owner of the
+ * `<sessionId>.jsonl` filename grammar). Kept on this surface for existing
+ * callers (`src/cost/index.ts`, tests).
  */
-export const sessionIdFromPath = transcriptSessionIdFromPath;
+export const sessionIdFromPath = transcriptScanSessionIdFromPath;
 
-async function scanUsage(
-  root: string,
-  now: Date,
-  resolveSkill: SkillResolver,
-  readOAuth: () => Promise<CachedOAuthRead>,
-): Promise<UsageSnapshot> {
+/**
+ * The pure snapshot-assembly phase (issue #1971): given the raw {@link
+ * ScanResult} from the TranscriptScan seam and the anchor `now`, compute the
+ * quota math (weighted burn numerators, estimate percents, pacingState, OAuth
+ * rebase, drift detection, since-reset derivation) and build the final
+ * {@link UsageSnapshot}. NO I/O — every input is in `scan` or read from the
+ * pure env-config leaf. Behaviour-neutral with the former inline tail of
+ * `scanUsage()`; the emitted snapshot is identical field-for-field for any
+ * given scan input.
+ */
+function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
   const nowMs = now.getTime();
-  const cutoff7d = nowMs - WINDOW_7D_MS;
-  const cutoff24h = nowMs - WINDOW_24H_MS;
-  const cutoff5h = nowMs - WINDOW_5H_MS;
-
-  // Authoritative OAuth meter read (issue #1083), through the independent-TTL +
-  // last-good cache layer (issue #1090). Fired CONCURRENTLY with the transcript
-  // file scan below so the external GET (when one is even made — see
-  // `readOAuthCached`) adds no serial latency to the scan. Resolved after the
-  // estimate is computed; on success (fresh OR served-stale last-good) it
-  // REBASES the headline percents + 5h emergencyStop onto ground truth, on
-  // failure the estimate stands (never silently 0). Never throws.
-  const oauthPromise = readOAuth();
+  const {
+    acc5h,
+    acc7d,
+    byModel5h,
+    byModel7d,
+    byModel24h,
+    bySkillByModel,
+    tokens24h,
+    mostRecentObservedResetMs,
+    sinceResetEntries,
+    filesScanned,
+    filesSkippedByMtime,
+    linesParsed,
+    linesWithUsage,
+    parseErrors,
+  } = scan;
 
   const weeklyQuota = getWeeklyQuotaTokens();
   const fiveHourQuota = getFiveHourQuotaTokens();
@@ -702,156 +612,10 @@ async function scanUsage(
   };
   const quotaWeightCalibrated = weights.opus > 0 && weights.sonnet > 0 && weights.haiku > 0;
 
-  const acc5h: TokenBreakdown = { ...EMPTY_BREAKDOWN };
-  const acc7d: TokenBreakdown = { ...EMPTY_BREAKDOWN };
-  // Per-family 5h/7d accumulators. `byModel` (the snapshot field) reports the
-  // 7d window; the 5h split is internal, used only for the 5h Quota Weight.
-  const byModel5h = emptyByModel();
-  const byModel7d = emptyByModel();
-  // Per-family 24h accumulator. The scalar `tokens24h` (raw .total) is kept for
-  // the unchanged `tokensLast24h` snapshot field; this per-family split feeds
-  // the WEIGHTED `projectedWeeklyPercent` numerator so the projection composes
-  // both weighting axes exactly like the 7d path. (issue #873)
-  const byModel24h = emptyByModel();
-  // Per-skill × per-family 7d accumulator (the `bySkillByModel` snapshot
-  // field). Skills are added lazily as transcripts resolve to them.
-  const bySkillByModel: Record<string, Record<ModelFamily, TokenBreakdown>> = {};
-  let tokens24h = 0;
-
-  // Weekly Reset Anchor (issue #856). The since-reset boundary can be moved
-  // FORWARD by an observed rate-limit reset, which we only learn mid-scan — so
-  // buffer the in-7d-window (tsMs, tokens) entries and sum them once the
-  // effective boundary is known. The set buffered is exactly the lines already
-  // iterated for the rolling 7d window, bounded by the 7d cutoff. Only buffered
-  // when the env Anchor is set, so the unset case adds zero overhead/memory.
+  // Weekly Reset Anchor env (issue #856): needed by the since-reset math below.
+  // The scan already buffered `sinceResetEntries` only when this was set; here
+  // we re-read it to gate the since-reset assembly (zero work when unset).
   const anchorEnvMs = getWeeklyResetAnchorMs();
-  const sinceResetEntries: { tsMs: number; tokens: TokenBreakdown; family: ModelFamily }[] = [];
-  let mostRecentObservedResetMs: number | null = null;
-
-  // Dedup unknown-model warnings to AT MOST one per scan (never per-line).
-  const unknownModelsSeen = new Set<string>();
-  // Memoise sessionId → skill within a scan so a session with many transcript
-  // shards resolves once, not once-per-shard. (Distinct files usually carry
-  // distinct sessionIds, but a resumed session can append a new shard.)
-  const skillCache = new Map<string, string | null>();
-
-  let filesScanned = 0;
-  let filesSkippedByMtime = 0;
-  let linesParsed = 0;
-  let linesWithUsage = 0;
-  let parseErrors = 0;
-
-  const files = await listTranscriptFiles(root);
-  for (const file of files) {
-    let st: Stats;
-    try {
-      st = await stat(file);
-    } catch {
-      /* intentional: file deleted/rotated between listing and stat — skip it */
-      continue;
-    }
-    // mtime is the last append; if the file hasn't been touched in 7
-    // days, none of its lines can fall inside the window.
-    if (st.mtimeMs < cutoff7d) {
-      filesSkippedByMtime++;
-      continue;
-    }
-    filesScanned++;
-
-    let content: string;
-    try {
-      content = await readFile(file, "utf-8");
-    } catch (err: any) {
-      console.error(`[usage-tracker] read failed for ${file}: ${err?.message || err}`);
-      continue;
-    }
-
-    // Accumulate this file's in-window 7d tokens per family locally, then fold
-    // into the global per-family AND per-skill tables once the file is parsed.
-    // Resolving the skill per FILE (not per line) keeps attribution O(files).
-    const fileByFamily7d = emptyByModel();
-    let fileHadInWindow7d = false;
-
-    const lines = content.split("\n");
-    for (const line of lines) {
-      // Fast reject: most lines are JSON objects; skip blanks instantly.
-      if (!line || line[0] !== "{") continue;
-      linesParsed++;
-
-      // Observed rate-limit reset (issue #856). A reset notice has no usage
-      // block (so parseUsageLine would "skip" it), so probe it FIRST and only
-      // when an env Anchor exists — that's the only mode that consumes the
-      // observed reset. Track the most recent one; the effective boundary is
-      // resolved post-scan.
-      if (anchorEnvMs !== null) {
-        const observed = parseObservedResetMs(line);
-        if (observed !== null && (mostRecentObservedResetMs === null || observed > mostRecentObservedResetMs)) {
-          mostRecentObservedResetMs = observed;
-        }
-      }
-
-      const parsed = parseUsageLine(line);
-      if (parsed === null) {
-        parseErrors++;
-        continue;
-      }
-      if (parsed === "skip") continue;
-      linesWithUsage++;
-
-      const tsMs = parsed.tsMs;
-      if (tsMs < cutoff7d) continue;
-
-      const family = modelToFamily(parsed.model);
-      if (family === "unknown" && !unknownModelsSeen.has(parsed.model)) {
-        unknownModelsSeen.add(parsed.model);
-      }
-
-      fileHadInWindow7d = true;
-      addBreakdown(acc7d, parsed.tokens);
-      addBreakdown(byModel7d[family], parsed.tokens);
-      addBreakdown(fileByFamily7d[family], parsed.tokens);
-      if (tsMs >= cutoff24h) {
-        tokens24h += parsed.tokens.total;
-        addBreakdown(byModel24h[family], parsed.tokens);
-      }
-      if (tsMs >= cutoff5h) {
-        addBreakdown(acc5h, parsed.tokens);
-        addBreakdown(byModel5h[family], parsed.tokens);
-      }
-      // Buffer for the fixed since-reset window (issue #856). Only when an env
-      // Anchor is set — keeps the unset path zero-overhead.
-      if (anchorEnvMs !== null) {
-        sinceResetEntries.push({ tsMs, tokens: parsed.tokens, family });
-      }
-    }
-
-    // Bucket this file's 7d tokens into the per-skill cross-tab. Skip files
-    // with no in-window tokens so we don't conjure empty skill rows. Exactly
-    // one skill resolution per contributing file (memoised by sessionId).
-    if (fileHadInWindow7d) {
-      const sessionId = sessionIdFromPath(file);
-      let skill = skillCache.get(sessionId);
-      if (skill === undefined) {
-        skill = await resolveSkill(sessionId);
-        skillCache.set(sessionId, skill);
-      }
-      const bucket = skill ?? UNATTRIBUTED_SKILL;
-      const row = (bySkillByModel[bucket] ??= emptyByModel());
-      for (const f of MODEL_FAMILIES) addBreakdown(row[f], fileByFamily7d[f]);
-    }
-  }
-
-  if (unknownModelsSeen.size > 0) {
-    // Once per scan, not per line. An above-zero unknown bucket means the
-    // family prefix table (modelToFamily) needs a new entry.
-    console.warn(
-      `[usage-tracker] ${unknownModelsSeen.size} unrecognised model string(s) bucketed to 'unknown' (implicit quota-weight 1.0): ${[
-        ...unknownModelsSeen,
-      ]
-        .map((m) => (m === "" ? "<missing>" : m))
-        .join(", ")}`,
-    );
-  }
 
   // Quota-burn numerator weighting (issue #873). The burn PERCENTAGES are
   // computed on the WEIGHTED unit `input + output + cacheCreation +
@@ -893,7 +657,10 @@ async function scanUsage(
   // session-limit enforcement (#1089) + the operator. The ADR-0021 since-reset /
   // Pace-Gate PACING machinery (percentSinceReset, projectPacingCurve) is
   // byte-for-byte untouched — only the two hard-stops + rolling headline move.
-  const cachedOAuth = await oauthPromise;
+  // The OAuth read was fired + awaited inside the TranscriptScan seam (issue
+  // #1971) and arrives here already resolved on `scan.oauth` — same
+  // fire-then-await-after-walk ordering, just owned by the I/O module now.
+  const cachedOAuth = scan.oauth;
   const oauth = cachedOAuth.result;
   let percentLast5h: number;
   let percentLast7d: number;
@@ -1078,13 +845,7 @@ async function scanUsage(
 
 // `parseUsageLine`, `parseObservedResetMs` (+ its `coerceInstantMs` helper),
 // `parseSessionLimitReset` (+ its `SESSION_LIMIT_RE` / `resolveWallClockInZone`
-// helpers), and `cacheHitRatio` moved to `./token-math.ts` (issue #1909) and are
-// imported at the top of this file.
-
-function addBreakdown(target: TokenBreakdown, src: TokenBreakdown): void {
-  target.input += src.input;
-  target.output += src.output;
-  target.cacheRead += src.cacheRead;
-  target.cacheCreation += src.cacheCreation;
-  target.total += src.total;
-}
+// helpers), and `cacheHitRatio` moved to `./token-math.ts` (issue #1909).
+// `addBreakdown` + `emptyByModel` + `EMPTY_BREAKDOWN` moved to the TranscriptScan
+// seam `./transcript-scan.ts` (issue #1971). All are imported at the top of this
+// file.
