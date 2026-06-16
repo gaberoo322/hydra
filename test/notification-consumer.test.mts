@@ -1,7 +1,17 @@
 /**
  * test/notification-consumer.test.mts — covers the alert-routing grammar and
- * consumer-recovery policy extracted from src/index.ts into the
- * notification-consumer Module (issue #1376).
+ * consumer-recovery policy. The grammar was extracted into its own focused
+ * Seam at src/notification/alert-grammar.ts (issue #1979); the
+ * consumer-recovery lifecycle stays in src/notification-consumer.ts.
+ *
+ * Imports are now split by owner so the test label matches the thing being
+ * tested (the deletion-test locality win): the grammar symbols
+ * (formatAlertMessage, classifyAlertSeverity, ALERT_TYPES, AlertSeverity,
+ * AlertGrammarEvent) come from alert-grammar.ts; the recovery-lifecycle
+ * symbols (startConsumerWithRecovery, MAX_CONSUMER_RESTARTS, BACKOFF_BASE_MS,
+ * NotificationEvent) come from notification-consumer.ts. notification-consumer
+ * re-exports the grammar symbols too, so importing them from there still
+ * resolves — this split is the locality preference, not a hard requirement.
  *
  * Three contracts are pinned here:
  *   1. formatAlertMessage maps every ALERT_TYPES event to a non-empty string,
@@ -19,12 +29,14 @@ import {
   formatAlertMessage,
   classifyAlertSeverity,
   ALERT_TYPES,
+  type AlertSeverity,
+  type AlertGrammarEvent,
+} from "../src/notification/alert-grammar.ts";
+import {
   startConsumerWithRecovery,
   MAX_CONSUMER_RESTARTS,
   BACKOFF_BASE_MS,
-  type AlertSeverity,
   type NotificationEvent,
-  type AlertGrammarEvent,
 } from "../src/notification-consumer.ts";
 
 test("ALERT_TYPES is an exported, non-empty Set of event-type strings", () => {
