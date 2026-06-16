@@ -15,7 +15,7 @@ import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { DigestAccumulator } from "../src/digest.ts";
-import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 
 // A clock pinned to a daytime hour (noon) on a fixed date, so isQuietHours()
 // is deterministic regardless of when the suite runs. `at(hour)` builds a

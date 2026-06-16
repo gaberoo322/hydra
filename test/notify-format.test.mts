@@ -14,7 +14,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { formatMessage } from "../src/notify-format.ts";
-import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 
 describe("formatMessage — cycle lifecycle", () => {
   test("cycle:start renders the cycle id", () => {

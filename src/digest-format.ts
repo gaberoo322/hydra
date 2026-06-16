@@ -27,7 +27,7 @@ import {
 import {
   NOTIFICATION_EVENT_TYPES as E,
   type NotificationEventPayload,
-} from "./event-bus.ts";
+} from "./event-bus-vocabulary.ts";
 
 const MAX_DIGEST_LENGTH = 4000; // Telegram's ~4096 char limit with margin
 

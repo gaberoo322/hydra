@@ -10,8 +10,9 @@
 // context in scope.
 //
 // Import direction is one-way: this module imports the NOTIFICATION_EVENT_TYPES
-// vocabulary from event-bus.ts; notification-consumer.ts imports the grammar
-// from here (and re-exports it for the existing test import surface). No cycle.
+// vocabulary from event-bus-vocabulary.ts (issue #1985 — the zero-Redis-side-
+// effect Seam); notification-consumer.ts imports the grammar from here (and
+// re-exports it for the existing test import surface). No cycle.
 //
 // The extraction is behaviour-neutral — the same events produce the same Redis
 // alerts with the same message bodies and the same severity tiers; on-wire
@@ -21,7 +22,7 @@
 import {
   NOTIFICATION_EVENT_TYPES as E,
   type NotificationEventPayload,
-} from "../event-bus.ts";
+} from "../event-bus-vocabulary.ts";
 
 /**
  * The set of event types that get persisted as dashboard alerts. Kept as an

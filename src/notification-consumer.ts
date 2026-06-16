@@ -28,12 +28,11 @@
 // same restart/backoff sequence.
 // ---------------------------------------------------------------------------
 
+import { EventBus, STREAMS } from "./event-bus.ts";
 import {
-  EventBus,
-  STREAMS,
   NOTIFICATION_EVENT_TYPES as E,
   type NotificationEventPayload,
-} from "./event-bus.ts";
+} from "./event-bus-vocabulary.ts";
 import { sendNotification } from "./notify.ts";
 import { recordEvent } from "./digest.ts";
 import { pushAlert } from "./redis/alerts.ts";
