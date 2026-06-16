@@ -64,6 +64,17 @@ export type HydraErrorCode =
   | "host-probe-timeout" // the probe exceeded its timeout and was killed
   | "host-probe-empty" // the probe exited 0 but produced no parseable output
   | "host-probe-failed" // the host binary exited non-zero for any other reason
+  // Journal Adapter (src/journal/) result-object codes (issue #1958). The
+  // fourth process Seam — sibling to the GitHub CLI Adapter and Host-Probe
+  // Adapter, over the `journalctl` boundary. Same never-throw discipline: these
+  // literals appear only on the failure arm of the JournalResult
+  // `{ ok:false; code }`. A truncated/timed-out run is NOT a failure (the slice
+  // accessor returns the captured partial text on the success arm) — these
+  // codes only fire when the spawn itself fails. No thrown subclass — the
+  // adapter returns, never raises.
+  | "journal-spawn-failed" // journalctl could not be spawned (ENOENT / synchronous throw / error event)
+  | "journal-timeout" // the spawn exceeded its timeout and was killed
+  | "journal-truncated" // the spawn hit the 1 MB output cap and was killed
   // OpenViking Request Adapter (src/knowledge-base/ov-request.ts) result-object
   // codes (issue #954). The fourth boundary Seam — sibling to the GitHub CLI
   // Adapter and Host-Probe Adapter, but over fetch() not child_process. Same

@@ -67,23 +67,31 @@ const HOST_PROBE_DIR_PREFIX = "src/host-probe/";
 /**
  * Files outside `src/host-probe/*` whose `node:child_process` import is OWNED by
  * a different exec concern and so is NOT a host-probe-seam violation. These are
- * the three acknowledged non-host exec callers plus the entire GitHub CLI
- * Adapter family — each is policed by its own discipline (github-seam-check for
- * the family, prose carve-out for the three). The point of the two scanners
- * together: every `node:child_process` in `src/` is owned by exactly one Seam,
- * or one of these exceptions.
+ * the two acknowledged non-host exec callers plus the entire GitHub CLI Adapter
+ * and Journal Adapter families — each is policed by its own discipline
+ * (github-seam-check / journal-seam-check for the families, prose carve-out for
+ * the two). The point of the scanners together: every `node:child_process` in
+ * `src/` is owned by exactly one Seam, or one of these exceptions.
  *   - src/exec-with-timeout.ts — process-group-aware test-runner primitive.
- *   - src/autopilot/log.ts     — spawns `journalctl`.
  *   - src/index.ts             — dynamic execFile import for a non-host use.
+ * (Since issue #1958, `src/autopilot/log.ts`'s inline `journalctl` spawn moved
+ * behind the **Journal Adapter** (`src/journal/*`), so `log.ts` no longer imports
+ * `node:child_process` and is no longer listed; the family is carved out via
+ * {@link JOURNAL_DIR_PREFIX}.)
  */
 const NON_HOST_PROBE_SPAWNERS = new Set<string>([
   "src/exec-with-timeout.ts",
-  "src/autopilot/log.ts",
   "src/index.ts",
 ]);
 
 /** The GitHub CLI Adapter family prefix — owns the gh/git spawn, a separate Seam. */
 const GITHUB_DIR_PREFIX = "src/github/";
+
+/**
+ * The Journal Adapter family prefix — owns the `journalctl` spawn, a separate
+ * Seam (issue #1958). Exempt here and policed by `journal-seam-check`.
+ */
+const JOURNAL_DIR_PREFIX = "src/journal/";
 
 /**
  * Pure predicate: does `body` (the file contents at repo-relative `relPath`)
@@ -92,12 +100,13 @@ const GITHUB_DIR_PREFIX = "src/github/";
  * git. `relPath` decides the carve-outs; pass a `src/...` path.
  *
  * Files INSIDE `src/host-probe/` are the Seam itself (exempt). The GitHub CLI
- * Adapter family and the three acknowledged non-host spawners are owned
- * elsewhere (also exempt).
+ * Adapter family, the Journal Adapter family, and the two acknowledged non-host
+ * spawners are owned elsewhere (also exempt).
  */
 export function fileViolatesHostProbeSeam(relPath: string, body: string): boolean {
   if (relPath.startsWith(HOST_PROBE_DIR_PREFIX)) return false;
   if (relPath.startsWith(GITHUB_DIR_PREFIX)) return false;
+  if (relPath.startsWith(JOURNAL_DIR_PREFIX)) return false;
   if (NON_HOST_PROBE_SPAWNERS.has(relPath)) return false;
   for (const re of CHILD_PROCESS_PATTERNS) {
     if (re.test(body)) return true;

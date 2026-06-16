@@ -4,9 +4,12 @@
  *
  * The CI gate at scripts/ci/github-seam-check.ts forbids a raw
  * `node:child_process` import from any file outside `src/github/`, with a
- * carve-out for the non-gh/git spawners (exec-with-timeout.ts, autopilot/log.ts).
+ * carve-out for the non-gh/git spawner (exec-with-timeout.ts), the Host-Probe
+ * Adapter family, and the Journal Adapter family (src/journal/*, issue #1958).
  * The index.ts carve-out was removed in issue #1960 once its startup git calls
- * moved behind gitExec. This mirrors the redis-seam-check / schema-seam-check ratchet.
+ * moved behind gitExec; the autopilot/log.ts carve-out was removed in issue
+ * #1958 once its journalctl spawn moved behind the Journal Adapter. This mirrors
+ * the redis-seam-check / schema-seam-check ratchet.
  */
 
 import { test, describe } from "node:test";
@@ -75,11 +78,33 @@ describe("github-seam-check: non-gh/git spawner carve-out", () => {
     );
   });
 
-  test("exempts autopilot/log.ts (spawns journalctl, not gh/git)", () => {
+  test("no longer exempts autopilot/log.ts — its journalctl spawn moved to the Journal Adapter (#1958)", () => {
+    // After #1958 log.ts has no node:child_process import; were one to reappear
+    // there it must route through src/journal/*, so it is NOT silently exempt.
     assert.equal(
       fileViolatesGithubSeam(
         "src/autopilot/log.ts",
         `import { spawn } from "node:child_process";`,
+      ),
+      true,
+    );
+  });
+
+  test("exempts the Journal Adapter family (src/journal/*) — sibling Seam, issue #1958", () => {
+    // src/journal/exec.ts owns the journalctl spawn as a separate Seam, NOT a
+    // gh/git caller. It is carved out of this scan and policed by
+    // journal-seam-check instead.
+    assert.equal(
+      fileViolatesGithubSeam(
+        "src/journal/exec.ts",
+        `import { spawn } from "node:child_process";`,
+      ),
+      false,
+    );
+    assert.equal(
+      fileViolatesGithubSeam(
+        "src/journal/read.ts",
+        `import { runJournal } from "./exec.ts";`,
       ),
       false,
     );
