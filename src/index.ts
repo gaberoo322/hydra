@@ -9,6 +9,8 @@ import { startDigest, stopDigest } from "./digest.ts";
 import { initLearning } from "./learning.ts";
 import { cleanWorkQueue } from "./redis/work-queue.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
+import { gitExec } from "./github/git.ts";
+import { isGhFailure, isGhOk } from "./github/exec.ts";
 import { startConsumers } from "./notification-consumer.ts";
 import { slotEventsBridgeConsumer } from "./autopilot/slot-events-bridge.ts";
 import { recsEngineConsumer } from "./autopilot/recommendation-engine.ts";
@@ -78,19 +80,36 @@ async function main() {
   console.log("[Hydra] Starting orchestrator...");
   console.log(`[Hydra] Target: ${getTargetName()} (workspace: ${getTargetWorkspace()})`);
 
-  // Startup cleanup: delete stale feature branches in the target project
+  // Startup cleanup: delete stale feature branches in the target project.
+  // Routes every `git` call through the GitHub CLI Adapter seam
+  // (src/github/git.ts::gitExec, issue #1960) — no raw node:child_process here.
+  // gitExec never throws; it returns a GhResult, so the prior best-effort
+  // `.catch()` swallows become explicit `if (!ok)` skips.
   const PROJECT_WORKSPACE = getTargetWorkspace();
   try {
-    const { execFile: ef } = await import("node:child_process");
-    const { promisify: p } = await import("node:util");
-    const run = p(ef);
-    await run("git", ["checkout", "main"], { cwd: PROJECT_WORKSPACE, timeout: 5000 }).catch(() => { /* intentional: checkout may fail if already on main or dirty state */ });
-    const { stdout } = await run("git", ["branch", "--list", "feature/*"], { cwd: PROJECT_WORKSPACE, timeout: 5000 });
-    const stale = stdout.trim().split("\n").map(b => b.trim()).filter(Boolean);
-    for (const branch of stale) {
-      await run("git", ["branch", "-D", branch], { cwd: PROJECT_WORKSPACE, timeout: 5000 }).catch(() => { /* intentional: best-effort stale branch cleanup */ });
+    const gitOpts = { cwd: PROJECT_WORKSPACE, timeout: 5000 };
+    // Best-effort: checkout may fail if already on main or in a dirty state.
+    // isGhFailure/isGhOk guards are required: tsconfig runs strict:false, so a
+    // plain `if (!result.ok)` does NOT narrow the GhResult union (see the note
+    // on these guards in src/github/exec.ts).
+    const checkout = await gitExec(["checkout", "main"], gitOpts);
+    if (isGhFailure(checkout)) {
+      console.error(`[Hydra] Startup cleanup: 'git checkout main' skipped (${checkout.code})`);
     }
-    if (stale.length > 0) console.log(`[Hydra] Startup cleanup: deleted ${stale.length} stale feature branches`);
+    const listed = await gitExec(["branch", "--list", "feature/*"], gitOpts);
+    if (isGhOk(listed)) {
+      const stale = listed.data.stdout.trim().split("\n").map(b => b.trim()).filter(Boolean);
+      for (const branch of stale) {
+        // Best-effort per-branch delete; a failure here is non-fatal.
+        const deleted = await gitExec(["branch", "-D", branch], gitOpts);
+        if (isGhFailure(deleted)) {
+          console.error(`[Hydra] Startup cleanup: 'git branch -D ${branch}' skipped (${deleted.code})`);
+        }
+      }
+      if (stale.length > 0) console.log(`[Hydra] Startup cleanup: deleted ${stale.length} stale feature branches`);
+    } else {
+      console.error(`[Hydra] Startup cleanup: 'git branch --list' failed (${listed.code}) — skipping stale-branch sweep`);
+    }
   } catch (err: any) { console.error(`[Hydra] Startup branch cleanup failed: ${err.message}`); }
 
   // Initialize event bus

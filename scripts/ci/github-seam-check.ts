@@ -62,7 +62,10 @@ const GITHUB_DIR_PREFIX = "src/github/";
  *   - src/exec-with-timeout.ts — process-group-aware test-runner subprocess
  *     primitive (CONTEXT.md GitHub CLI Adapter entry exempts it explicitly).
  *   - src/autopilot/log.ts     — spawns `journalctl`, not `gh`/`git`.
- *   - src/index.ts             — dynamic execFile import for a non-gh/git use.
+ * Issue #1960 removed the `src/index.ts` carve-out: its startup branch-cleanup
+ * block used `git checkout`/`git branch`, exactly the gh/git boundary this seam
+ * owns, and now routes through `gitExec`. With that import gone, `src/index.ts`
+ * is an ordinary seam-policed file again.
  * Since issue #939, `src/api/health.ts`'s host-info probes (`df`/`free`/
  * `systemctl`) moved behind the **Host-Probe Adapter** (`src/host-probe/*`), so
  * `health.ts` no longer imports `node:child_process` and drops off the baseline
@@ -74,7 +77,6 @@ const GITHUB_DIR_PREFIX = "src/github/";
 const NON_GITHUB_SPAWNERS = new Set<string>([
   "src/exec-with-timeout.ts",
   "src/autopilot/log.ts",
-  "src/index.ts",
 ]);
 
 /**
