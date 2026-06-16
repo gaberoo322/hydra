@@ -154,7 +154,7 @@ export function bucketOf(status: string | null): "merged" | "failed" | null {
  * Used only as a slots_snapshot fallback — an action/outcome `prNumber`
  * always wins.
  */
-export function prNumberFromAnchor(anchor: string | null): string | null {
+function prNumberFromAnchor(anchor: string | null): string | null {
   if (!anchor) return null;
   // Only PR-shaped anchors carry a PR number: `PR#970` / `pr#970` / `PR970`.
   const m = /\bpr\s*#?\s*(\d+)\b/i.exec(anchor);
@@ -162,7 +162,7 @@ export function prNumberFromAnchor(anchor: string | null): string | null {
 }
 
 /** Read the dispatched slot key off a dispatch action, when it carries one. */
-export function slotOfAction(a: any): string | null {
+function slotOfAction(a: any): string | null {
   return typeof a?.slot === "string" && a.slot.length > 0 ? a.slot : null;
 }
 
@@ -171,7 +171,7 @@ export function slotOfAction(a: any): string | null {
  * non-string members (a malformed slot map must never throw — it yields the
  * prior action-derived dispatch, per the never-throw / read-only invariant).
  */
-export function slotStr(slotObj: unknown, key: string): string | null {
+function slotStr(slotObj: unknown, key: string): string | null {
   if (!slotObj || typeof slotObj !== "object") return null;
   const v = (slotObj as Record<string, unknown>)[key];
   return typeof v === "string" && v.length > 0 ? v : null;
@@ -183,7 +183,7 @@ export function slotStr(slotObj: unknown, key: string): string | null {
  * number; a string round-trip must not break identity matching). `null` when
  * absent/malformed.
  */
-export function slotEpoch(slotObj: unknown): string | null {
+function slotEpoch(slotObj: unknown): string | null {
   if (!slotObj || typeof slotObj !== "object") return null;
   const v = (slotObj as Record<string, unknown>)["started_epoch"];
   if (typeof v === "number" && Number.isFinite(v)) return String(v);
@@ -197,7 +197,7 @@ export function slotEpoch(slotObj: unknown): string | null {
  * enrich-only — used both for the same-turn `(turn, slot)` merge and for the
  * cross-turn identity merge (issue #1776).
  */
-export function enrichFromSlot(
+function enrichFromSlot(
   d: RetroDispatch,
   slotSkill: string | null,
   slotAnchor: string | null,
