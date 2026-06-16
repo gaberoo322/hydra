@@ -4,8 +4,9 @@
  *
  * The CI gate at scripts/ci/github-seam-check.ts forbids a raw
  * `node:child_process` import from any file outside `src/github/`, with a
- * carve-out for the non-gh/git spawners (exec-with-timeout.ts, autopilot/log.ts,
- * index.ts). This mirrors the redis-seam-check / schema-seam-check ratchet.
+ * carve-out for the non-gh/git spawners (exec-with-timeout.ts, autopilot/log.ts).
+ * The index.ts carve-out was removed in issue #1960 once its startup git calls
+ * moved behind gitExec. This mirrors the redis-seam-check / schema-seam-check ratchet.
  */
 
 import { test, describe } from "node:test";
@@ -84,13 +85,16 @@ describe("github-seam-check: non-gh/git spawner carve-out", () => {
     );
   });
 
-  test("exempts index.ts (non-gh/git execFile use)", () => {
+  test("flags src/index.ts IF it re-introduces a child_process import (carve-out removed, issue #1960)", () => {
+    // Issue #1960 routed index.ts's startup branch-cleanup git calls through the
+    // gitExec seam and removed its NON_GITHUB_SPAWNERS carve-out, so index.ts is
+    // an ordinary policed file again — re-importing child_process must be flagged.
     assert.equal(
       fileViolatesGithubSeam(
         "src/index.ts",
         `const { execFile: ef } = await import("node:child_process");`,
       ),
-      false,
+      true,
     );
   });
 
