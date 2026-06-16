@@ -70,7 +70,7 @@ export const NUMERIC_FIELD_NAMES = [
 ] as const;
 
 /** Union of the numeric field name literals (`"tasksMerged" | "tasksFailed" | …`). */
-export type NumericFieldName = (typeof NUMERIC_FIELD_NAMES)[number];
+type NumericFieldName = (typeof NUMERIC_FIELD_NAMES)[number];
 
 /** The numeric half of the metrics shape: every `NUMERIC_FIELD_NAMES` key, optional, `number`. */
 type NumericMetrics = { [K in NumericFieldName]?: number };
