@@ -5,10 +5,10 @@
  * The CI gate at scripts/ci/host-probe-seam-check.ts forbids a raw
  * `node:child_process` import that shells out to a host-info binary from any
  * file outside `src/host-probe/`, with carve-outs for the GitHub CLI Adapter
- * family (owns its own gh/git spawn) and the three acknowledged non-host
- * spawners (exec-with-timeout.ts, autopilot/log.ts, index.ts). Sibling to
- * github-seam-check; the two together ensure every node:child_process in src/
- * is owned by exactly one Seam.
+ * family (owns its own gh/git spawn), the Journal Adapter family (owns its own
+ * journalctl spawn, issue #1958), and the two acknowledged non-host spawners
+ * (exec-with-timeout.ts, index.ts). Sibling to github-seam-check; together they
+ * ensure every node:child_process in src/ is owned by exactly one Seam.
  */
 
 import { test, describe } from "node:test";
@@ -84,13 +84,36 @@ describe("host-probe-seam-check: carve-outs", () => {
     );
   });
 
-  test("exempts the three acknowledged non-host spawners", () => {
-    for (const f of ["src/exec-with-timeout.ts", "src/autopilot/log.ts", "src/index.ts"]) {
+  test("exempts the Journal Adapter family (src/journal/* owns journalctl spawn, #1958)", () => {
+    assert.equal(
+      fileViolatesHostProbeSeam(
+        "src/journal/exec.ts",
+        `import { spawn } from "node:child_process";`,
+      ),
+      false,
+    );
+  });
+
+  test("exempts the two acknowledged non-host spawners", () => {
+    for (const f of ["src/exec-with-timeout.ts", "src/index.ts"]) {
       assert.equal(
         fileViolatesHostProbeSeam(f, `import { spawn } from "node:child_process";`),
         false,
         `${f} should be exempt`,
       );
     }
+  });
+
+  test("no longer exempts src/autopilot/log.ts — its journalctl spawn moved to the Journal Adapter (#1958)", () => {
+    // After #1958 log.ts has no node:child_process import at all, so this is a
+    // hypothetical: were a child_process import to reappear there, it would NOT
+    // be silently tolerated — it must route through src/journal/*.
+    assert.equal(
+      fileViolatesHostProbeSeam(
+        "src/autopilot/log.ts",
+        `import { spawn } from "node:child_process";`,
+      ),
+      true,
+    );
   });
 });

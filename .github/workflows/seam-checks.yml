@@ -2,11 +2,12 @@ name: seam-checks
 
 # Consolidated seam-ratchet workflow (issue #1654; accepted proposal
 # .thermonuclear/proposals/consolidate-seam-check-workflows.md). One job runs
-# all five non-Redis seam checks as sequential steps — each is a thin Adapter
+# all six non-Redis seam checks as sequential steps — each is a thin Adapter
 # over the shared scripts/ci/seam-check-lib.ts engine (#950), needs no npm ci,
 # and runs in ~1s. This replaces the four sibling workflows (schema-seam.yml,
 # github-seam.yml, host-probe-seam.yml, openviking-seam.yml), collapsing five
-# runner-slot schedulings + five checkouts per PR event into one of each.
+# runner-slot schedulings + five checkouts per PR event into one of each. The
+# journal-seam step (#1958) was added directly here, never as a sibling file.
 #
 # Shared doctrine (formerly repeated in each sibling's header): every seam
 # ratchet lives in a sibling workflow — deliberately NOT inside ci.yml —
@@ -34,6 +35,8 @@ name: seam-checks
 #                     gh/git node:child_process boundary.
 #   host-probe-seam — #939: the Host-Probe Adapter (src/host-probe/*) owns the
 #                     df/free/systemctl host-info spawn boundary.
+#   journal-seam    — #1958: the Journal Adapter (src/journal/*) owns the
+#                     journalctl spawn boundary.
 #   openviking-seam — #954: the OpenViking Request Adapter
 #                     (src/knowledge-base/ov-request.ts) owns the OV fetch()
 #                     boundary.
@@ -68,6 +71,9 @@ jobs:
 
       - name: Host-probe-seam check (Host-Probe Adapter closure ratchet, #939)
         run: npx tsx scripts/ci/host-probe-seam-check.ts
+
+      - name: Journal-seam check (Journal Adapter closure ratchet, #1958)
+        run: npx tsx scripts/ci/journal-seam-check.ts
 
       - name: OpenViking-seam check (OpenViking Request Adapter closure ratchet, #954)
         run: npx tsx scripts/ci/openviking-seam-check.ts

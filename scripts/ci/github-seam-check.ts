@@ -61,7 +61,6 @@ const GITHUB_DIR_PREFIX = "src/github/";
  * flagged or baselined:
  *   - src/exec-with-timeout.ts — process-group-aware test-runner subprocess
  *     primitive (CONTEXT.md GitHub CLI Adapter entry exempts it explicitly).
- *   - src/autopilot/log.ts     — spawns `journalctl`, not `gh`/`git`.
  * Issue #1960 removed the `src/index.ts` carve-out: its startup branch-cleanup
  * block used `git checkout`/`git branch`, exactly the gh/git boundary this seam
  * owns, and now routes through `gitExec`. With that import gone, `src/index.ts`
@@ -72,11 +71,15 @@ const GITHUB_DIR_PREFIX = "src/github/";
  * (which closes to zero). The Host-Probe Adapter family is itself carved out
  * here: it OWNS the host-info `node:child_process` spawn (its own sibling Seam,
  * NOT the gh/git boundary), policed instead by the dedicated
- * `host-probe-seam-check` ratchet. See {@link HOST_PROBE_DIR_PREFIX}.
+ * `host-probe-seam-check` ratchet. See {@link HOST_PROBE_DIR_PREFIX}. Since
+ * issue #1958, `src/autopilot/log.ts`'s inline `journalctl` spawn moved behind
+ * the **Journal Adapter** (`src/journal/*`), so `log.ts` no longer imports
+ * `node:child_process` and is no longer listed here; the Journal Adapter family
+ * is carved out via {@link JOURNAL_DIR_PREFIX} and policed by its own
+ * `journal-seam-check` ratchet.
  */
 const NON_GITHUB_SPAWNERS = new Set<string>([
   "src/exec-with-timeout.ts",
-  "src/autopilot/log.ts",
 ]);
 
 /**
@@ -90,12 +93,22 @@ const NON_GITHUB_SPAWNERS = new Set<string>([
 const HOST_PROBE_DIR_PREFIX = "src/host-probe/";
 
 /**
+ * The Journal Adapter family prefix. Files under `src/journal/` own the
+ * `journalctl` external-process boundary on their own private spawn primitive —
+ * a sibling Seam to the GitHub CLI Adapter, NOT a gh/git caller. They are exempt
+ * from THIS scan and policed by their own `journal-seam-check` ratchet (issue
+ * #1958). Trailing slash so it matches the family directory, not an incidental
+ * `src/journal-foo.ts`.
+ */
+const JOURNAL_DIR_PREFIX = "src/journal/";
+
+/**
  * Pure predicate: does `body` (the file contents at repo-relative `relPath`)
  * import `node:child_process`? Exported so the regression test can pin the
  * grammar without shelling out to git. `relPath` decides the
- * non-GitHub-spawner carve-out, the Host-Probe-family carve-out, and (issue
- * #950) the `src/github/*` family carve-out folded in from the old loop-level
- * dir-skip; pass a `src/...` path.
+ * non-GitHub-spawner carve-out, the Host-Probe-family carve-out, the
+ * Journal-family carve-out, and (issue #950) the `src/github/*` family carve-out
+ * folded in from the old loop-level dir-skip; pass a `src/...` path.
  */
 export function fileViolatesGithubSeam(relPath: string, body: string): boolean {
   // The GitHub CLI Adapter family itself is the seam — never a violation
@@ -105,6 +118,9 @@ export function fileViolatesGithubSeam(relPath: string, body: string): boolean {
   // Issue #939: the Host-Probe Adapter family owns its own host-info spawn —
   // a sibling Seam, not a gh/git caller — so it is carved out of this scan.
   if (relPath.startsWith(HOST_PROBE_DIR_PREFIX)) return false;
+  // Issue #1958: the Journal Adapter family owns its own `journalctl` spawn —
+  // a sibling Seam, not a gh/git caller — so it is carved out of this scan.
+  if (relPath.startsWith(JOURNAL_DIR_PREFIX)) return false;
   for (const re of CHILD_PROCESS_PATTERNS) {
     if (re.test(body)) return true;
   }

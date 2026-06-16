@@ -59,10 +59,12 @@ import { RetroBundleParamsSchema, RecentRetrosQuerySchema } from "../schemas/ret
 import { listRecentRetroArtifacts } from "../redis/retro-artifacts.ts";
 import {
   readLogTail,
-  readJournalSlice,
   LOG_TAIL_DEFAULT,
   LOG_TAIL_MAX,
 } from "../autopilot/log.ts";
+// Journal Adapter seam (issue #1958): the journalctl slice moved out of
+// autopilot/log.ts behind its own private spawn primitive + typed accessor.
+import { readJournalSlice, isJournalSliceFailure } from "../journal/read.ts";
 import { aggregatorRoute } from "./route-helpers.ts";
 import type { PublishableBus } from "./event-bus-types.ts";
 
@@ -372,14 +374,19 @@ export function createAutopilotRouter(eventBus?: PublishableBus) {
 
     try {
       const journalResult = await readJournalSlice({ row: runRowResult.row });
-      if (!journalResult.ok) {
-        return res.status(500).json({ error: "run hash missing valid started timestamp" });
+      if (isJournalSliceFailure(journalResult)) {
+        const detail =
+          journalResult.code === "invalid-row"
+            ? "run hash missing valid started timestamp"
+            : `journalctl read failed: ${journalResult.code}`;
+        return res.status(500).json({ error: detail });
       }
+      const slice = journalResult.data;
       res.setHeader("content-type", "text/plain; charset=utf-8");
-      res.setHeader("x-autopilot-journal-unit", journalResult.unit);
-      if (journalResult.truncated) res.setHeader("x-autopilot-journal-truncated", "true");
-      if (journalResult.timedOut) res.setHeader("x-autopilot-journal-timed-out", "true");
-      return res.status(200).send(journalResult.text);
+      res.setHeader("x-autopilot-journal-unit", slice.unit);
+      if (slice.truncated) res.setHeader("x-autopilot-journal-truncated", "true");
+      if (slice.timedOut) res.setHeader("x-autopilot-journal-timed-out", "true");
+      return res.status(200).send(slice.text);
     } catch (err: any) {
       console.error(`[autopilot] runs/:runId/journal failed: ${err?.message || err}`);
       return res.status(500).json({ error: err?.message || String(err) });

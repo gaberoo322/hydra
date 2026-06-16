@@ -324,21 +324,15 @@ describe("autopilot logs API (issue #499, slice 3)", () => {
     const original = process.env.HYDRA_AUTOPILOT_JOURNAL_CMD;
     process.env.HYDRA_AUTOPILOT_JOURNAL_CMD = bigShim;
     try {
-      // Reimport to pick up the new env var — but our module reads the env
-      // once at module-load. So instead, call the helper directly with the
-      // shim path via re-imported runJournalctl, which closes over the env
-      // at call time? No — JOURNAL_CMD_OVERRIDE is captured at top-of-file.
-      // To keep this hermetic, we call runJournalctl directly with no env
-      // change after restoring; instead we drive it via a fresh import by
-      // mutating env and re-importing with cache bust.
-      // runJournalctl is defined in src/autopilot/log.ts; import it from there
-      // directly (the src/api/autopilot.ts re-export was dead per knip — these
-      // AC9/AC10 assertions were its sole consumers — issue #1425). Re-imported
-      // with a cache-bust query so each case gets a fresh module instance; the
-      // env knobs (HYDRA_AUTOPILOT_JOURNAL_CMD / _TIMEOUT_MS) are read at
-      // call-time inside runJournalctl, so the mutated env is picked up.
-      const fresh = await import(`../src/autopilot/log.ts?ts=${Date.now()}`);
-      const r = await fresh.runJournalctl("hydra-autopilot.service", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
+      // The spawn primitive moved to the Journal Adapter seam
+      // (src/journal/exec.ts, issue #1958): `runJournal` reads the env knobs
+      // (HYDRA_AUTOPILOT_JOURNAL_CMD / _TIMEOUT_MS) at call time, so a plain
+      // static import picks up the env we mutate just above — no cache-busted
+      // dynamic import needed. (The dedicated injectable-deps path lives on
+      // readJournalSlice; here we drive the low-level primitive directly to
+      // pin its output-cap behavior against a real >1MB shim.)
+      const { runJournal } = await import("../src/journal/exec.ts");
+      const r = await runJournal("hydra-autopilot.service", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
       assert.equal(r.truncated, true, "output >1MB must set truncated=true");
       assert.ok(r.text.length <= 1024 * 1024 + 500, `text should be ~capped, got ${r.text.length}`);
       assert.match(r.text, /output truncated at 1048576 bytes/);
@@ -366,9 +360,11 @@ describe("autopilot logs API (issue #499, slice 3)", () => {
     process.env.HYDRA_AUTOPILOT_JOURNAL_CMD = slowShim;
     process.env.HYDRA_AUTOPILOT_JOURNAL_TIMEOUT_MS = "300";
     try {
-      const fresh = await import(`../src/autopilot/log.ts?ts=${Date.now()}-slow`);
+      // Journal Adapter seam (issue #1958): runJournal reads the timeout env at
+      // call time, so a static import suffices (no cache-bust query needed).
+      const { runJournal } = await import("../src/journal/exec.ts");
       const start = Date.now();
-      const r = await fresh.runJournalctl("hydra-autopilot.service", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
+      const r = await runJournal("hydra-autopilot.service", "2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z");
       const elapsed = Date.now() - start;
       assert.equal(r.timedOut, true, "slow journal must set timedOut=true");
       assert.match(r.text, /timed out after 300ms/);
@@ -387,14 +383,12 @@ describe("autopilot logs API (issue #499, slice 3)", () => {
   // AC11 — sanitizeIso rejects junk (defense-in-depth)
   // ---------------------------------------------------------------------------
   test("AC11: sanitizeIso accepts valid ISO and rejects junk", async () => {
-    // sanitizeIso is defined in src/autopilot/log.ts; import it from there
-    // directly (the src/api/autopilot.ts re-export was dead per knip, with this
-    // assertion block its sole consumer — issue #1426). Imported lazily inside
-    // the test (not at module top-level) because log.ts binds env-derived path
-    // constants at module-eval time, and the suite's `before()` hook sets those
-    // env vars; a top-level static import would freeze the defaults and break
-    // the AC1/AC2/AC6 log-path fixtures.
-    const { sanitizeIso } = await import("../src/autopilot/log.ts");
+    // sanitizeIso moved to the Journal Adapter seam (src/journal/read.ts, issue
+    // #1958) alongside the journal-slice accessor it guards. Imported lazily
+    // inside the test for symmetry with the other Journal-seam imports; read.ts
+    // has no env-derived module-eval constants, so a static import would also be
+    // safe here.
+    const { sanitizeIso } = await import("../src/journal/read.ts");
     assert.equal(sanitizeIso("2026-05-19T10:00:00Z"), "2026-05-19T10:00:00Z");
     assert.equal(sanitizeIso("2026-05-19T10:00:00.123Z"), "2026-05-19T10:00:00.123Z");
     assert.equal(sanitizeIso("2026-05-19T10:00:00+02:00"), "2026-05-19T10:00:00+02:00");
