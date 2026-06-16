@@ -29,6 +29,11 @@ import {
   listAutopilotRunTurnsDesc,
 } from "../redis/autopilot-runs.ts";
 import { osHeartbeatAgeS, isOsHeartbeatStale } from "./os-heartbeat.ts";
+import { classBySkill } from "../taxonomy/classes.ts";
+import {
+  epochFromIsoOrNow,
+  type SubagentDispatch,
+} from "../redis/dispatches.ts";
 
 // ---------------------------------------------------------------------------
 // Constants (read-side)
@@ -629,4 +634,80 @@ export function summarizeTerminationHealth(
       cleanTerminationRate !== null &&
       cleanTerminationRate < STARVATION_CLEAN_RATE_FLOOR,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Inflight-slot seed (issue #1352 Problem A) — pure read-side derivation
+//
+// Moved here from `runs.ts` (issue #1993) to complete the #1183 split:
+// `deriveInflightSlotSeed` is a pure function over the in-flight subagent
+// dispatch ledger (no Redis, no clock, no await — the async `readInflightSlotSeed`
+// wrapper in `runs.ts` does the Redis read), so its home is this read-only
+// projection Module, not the write-side lifecycle Module. `runs.ts` re-exports
+// both symbols for back-compat (`from "../autopilot/runs.ts"`).
+// ---------------------------------------------------------------------------
+
+/**
+ * One seeded pipeline-slot object — the shape `decide.py` reads when it tests
+ * `occupied = sum(1 for v in slots.values() if v is not None)` in
+ * `_rule_idle_fallback`, and when `_rule_orphaned_slots` ages the slot against
+ * the subagent wall-clock cap. We carry the real `started_epoch` so a genuinely
+ * over-age in-flight subagent is correctly drained via `wait_or_reap` rather
+ * than held forever; `task_id` is the subagent's dispatchId (best-effort — the
+ * slot-event reap path frees the slot by class name, not by task_id match);
+ * `_source` marks the row as a cross-run seed for debugging.
+ */
+export interface InflightSlotSeed {
+  skill: string;
+  task_id: string;
+  started: string;
+  started_epoch: number;
+  _source: "inflight-seed";
+}
+
+/**
+ * Issue #1352 (Problem A — premature idle-terminate). Pure helper: map the
+ * in-flight **subagent dispatch ledger** (`hydra:dispatches:subagent:*`, which
+ * survives a pace-gate relaunch) onto the fixed pipeline-slot occupancy
+ * `decide.py` reasons about, so a freshly-bootstrapped run can SEED
+ * `state.json.slots` with the subagents the prior session left running.
+ *
+ * Without this seed, `bootstrap.sh` clobbers `state.json` with all-null slots
+ * on every relaunch; the new session's first `decide.py decide` call then sees
+ * `occupied == 0` while a real subagent is still running (its `SubagentStop`
+ * hook event has not arrived yet) and trips `_rule_idle_fallback` into a
+ * `terminate(cause=idle)` — which the print-mode session honours by exiting,
+ * and the ExecStopPost reap backstop stamps `interrupted`. Result: 100%
+ * interrupted runs, 0 drillable retro dispatches. Seeding `occupied > 0` makes
+ * the rule emit `wait` (busy-wait nap) instead, so the run survives until the
+ * subagent's `SubagentStop` event frees the slot or the orphaned-slot age cap
+ * drains it.
+ *
+ * Read-only and total over its inputs (no IO — the async wrapper does the
+ * Redis read). Skips dispatches whose `skill` maps to a non-pipeline class
+ * (signal classes have no slot semantics) or to no class at all. At most one
+ * seed per pipeline slot — the newest dispatch (the ledger lists newest-first)
+ * wins, matching the "≤1 subagent per slot" invariant.
+ */
+export function deriveInflightSlotSeed(
+  dispatches: readonly SubagentDispatch[],
+): Record<string, InflightSlotSeed> {
+  const slots: Record<string, InflightSlotSeed> = {};
+  for (const d of dispatches) {
+    if (!d.skill) continue;
+    const cls = classBySkill(d.skill);
+    if (!cls || cls.kind !== "pipeline") continue;
+    // listActiveSubagentDispatches is newest-first; keep the first seen per
+    // slot so the freshest dispatch wins the ≤1-per-slot pipeline invariant.
+    if (slots[cls.name]) continue;
+    const startedEpoch = epochFromIsoOrNow(d.startedAt);
+    slots[cls.name] = {
+      skill: d.skill,
+      task_id: d.dispatchId || d.sessionId,
+      started: d.startedAt,
+      started_epoch: startedEpoch,
+      _source: "inflight-seed",
+    };
+  }
+  return slots;
 }
