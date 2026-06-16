@@ -17,11 +17,13 @@
 // notification-routing domain. Process lifecycle (port guard, eventBus.init,
 // SIGTERM) stays in index.ts.
 //
-// The five lifted grammar symbols (ALERT_TYPES, formatAlertMessage,
-// classifyAlertSeverity, AlertGrammarEvent, AlertSeverity) are RE-EXPORTED
-// below so the existing test import surface (and any future importer) resolves
-// them unchanged — the same re-export precedent as notify.ts (formatMessage)
-// and digest.ts (its formatters).
+// The three grammar symbols this Module still consumes internally
+// (ALERT_TYPES, formatAlertMessage, classifyAlertSeverity) are imported
+// directly from that Seam for use inside handleNotificationEvent. The
+// compatibility re-export bridge that briefly forwarded the lifted grammar
+// symbols (issue #1979) has been dropped — every importer (including
+// test/notification-consumer.test.mts) now resolves the grammar from its
+// single owner src/notification/alert-grammar.ts directly (issue #2000).
 //
 // Runtime behaviour is unchanged from the pre-extraction module: same events
 // produce the same Redis alerts, the same capacity-floor side records, and the
@@ -43,22 +45,7 @@ import {
   ALERT_TYPES,
   formatAlertMessage,
   classifyAlertSeverity,
-  type AlertGrammarEvent,
-  type AlertSeverity,
 } from "./notification/alert-grammar.ts";
-
-// Re-export the alert-routing grammar so callers that import it from this
-// Module (e.g. test/notification-consumer.test.mts) keep resolving the same
-// symbols after the extraction (issue #1979). The grammar's single owner is
-// src/notification/alert-grammar.ts; this forward keeps the public surface
-// behaviour-neutral — the notify.ts / digest.ts re-export precedent.
-export {
-  ALERT_TYPES,
-  formatAlertMessage,
-  classifyAlertSeverity,
-  type AlertGrammarEvent,
-  type AlertSeverity,
-};
 
 export const MAX_CONSUMER_RESTARTS = 5;
 export const BACKOFF_BASE_MS = 5000;
