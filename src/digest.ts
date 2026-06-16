@@ -34,7 +34,7 @@
  */
 
 import { sendToTelegram, type TelegramSendFn } from "./notify.ts";
-import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus.ts";
+import { NOTIFICATION_EVENT_TYPES as E } from "./event-bus-vocabulary.ts";
 import { getCapacitySnapshot, DEFAULT_WINDOW_CYCLES } from "./capacity-floor.ts";
 import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
 import {

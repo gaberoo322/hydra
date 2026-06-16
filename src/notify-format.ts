@@ -22,7 +22,7 @@ import { getTargetCommitUrl } from "./target-config.ts";
 import {
   NOTIFICATION_EVENT_TYPES as E,
   type NotificationEventPayload,
-} from "./event-bus.ts";
+} from "./event-bus-vocabulary.ts";
 
 /**
  * The event vocabulary the notification grammar reads (issue #1857; shared

@@ -17,16 +17,16 @@
 // imports all belong to the notification-routing domain.
 //
 // Import direction is one-way: this module imports the shared
-// NotificationEventPayload vocabulary from event-bus.ts plus the two domain
-// modules; notification-consumer.ts imports `reactToCycleCompleted` from here.
-// No cycle.
+// NotificationEventPayload vocabulary from event-bus-vocabulary.ts (issue #1985
+// — the zero-Redis-side-effect Seam) plus the two domain modules;
+// notification-consumer.ts imports `reactToCycleCompleted` from here. No cycle.
 //
 // The extraction is behaviour-neutral — the same `cycle:completed` event
 // produces the same capacity-floor side record and the same on-disk share
 // metric as the pre-extraction inline arm.
 // ---------------------------------------------------------------------------
 
-import { type NotificationEventPayload } from "../event-bus.ts";
+import { type NotificationEventPayload } from "../event-bus-vocabulary.ts";
 import { recordCycleSide, classifySide } from "../capacity-floor.ts";
 import { publishOrchestratorShareMetric } from "../metrics/publish.ts";
 
