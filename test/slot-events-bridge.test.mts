@@ -15,11 +15,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { bridgeBroadcast } from "../src/autopilot/slot-events-bridge.ts";
 
+// A recording WsBroadcastRegistry stub (issue #1965): bridgeBroadcast now
+// targets the named registry surface (`.broadcast`) instead of reaching the
+// bus's former private `_broadcastToClients`. The destructured field stays
+// named `bus` so the per-test call sites are unchanged.
 function makeMockBus() {
   const calls: Array<{ stream: string; event: unknown }> = [];
   return {
     bus: {
-      _broadcastToClients: (stream: string, event: unknown) => {
+      broadcast: (stream: string, event: unknown) => {
         calls.push({ stream, event });
       },
     },

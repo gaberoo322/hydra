@@ -358,8 +358,11 @@ describe("pr-lifecycle-bridge: slot-events round-trip", () => {
   test("a pr_lifecycle event survives slot-events-bridge translation verbatim", async () => {
     const { bridgeBroadcast } = await import("../src/autopilot/slot-events-bridge.ts");
     const calls: Array<{ stream: string; event: any }> = [];
+    // A recording WsBroadcastRegistry stub (issue #1965): bridgeBroadcast now
+    // targets the named `.broadcast` surface, not the bus's former private
+    // `_broadcastToClients` method.
     const mockBus = {
-      _broadcastToClients: (stream: string, event: any) => calls.push({ stream, event }),
+      broadcast: (stream: string, event: any) => calls.push({ stream, event }),
     };
     const env = bridgeBroadcast(mockBus as any, {
       event: "pr_lifecycle",

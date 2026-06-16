@@ -22,14 +22,15 @@
  *   reconnects on its own; `startConsumerWithRecovery` in src/index.ts
  *   wraps any throw with restart-with-backoff.
  * - **Best-effort broadcast.** A WebSocket `send` failure on any single
- *   client doesn't block the bridge — `_broadcastToClients` iterates and
- *   logs per-client.
+ *   client doesn't block the bridge — the WS registry's `broadcast` iterates
+ *   over OPEN clients.
  * - **Pure shape translation.** No business logic. The bridge does not
  *   classify, filter, or enrich; it just forwards the Redis-stream fields
  *   verbatim under a clean envelope shape.
  */
 
 import type { EventBus } from "../event-bus.ts";
+import type { WsBroadcastRegistry } from "../ws-broadcast-registry.ts";
 
 const SLOT_EVENTS_STREAM = "hydra:autopilot:slot-events";
 const CONSUMER_GROUP = "now-pixel-bridge";
@@ -83,7 +84,7 @@ export async function startSlotEventsBridge(
     CONSUMER_GROUP,
     consumerName,
     async (event: any) => {
-      bridgeBroadcast(eventBus, event);
+      bridgeBroadcast(eventBus.wsRegistry, event);
     },
     // reapStale: this group is `$`-anchored (no backlog replay) and only
     // animates NEW events, so dropping a dead zombie's PEL is correct (#1221).
@@ -93,13 +94,21 @@ export async function startSlotEventsBridge(
 
 /**
  * Pure helper — translate a raw stream event into the WS envelope and
- * push it through the eventBus broadcaster. Exported for tests.
+ * push it through the WS broadcast registry. Exported for tests.
+ *
+ * Takes the `WsBroadcastRegistry` (the named broadcast surface) rather than
+ * the full `EventBus` — the bridge needs only to fan out to WS clients, not
+ * the Redis stream seam (issue #1965). `startSlotEventsBridge` passes
+ * `eventBus.wsRegistry`.
  *
  * The stream events emitted by the bash hooks store every field as a
  * string (Redis XADD field/value pairs). We forward them verbatim under
  * `payload` and let the dashboard be the one to interpret the wire shape.
  */
-export function bridgeBroadcast(eventBus: EventBus, event: any): SlotEventEnvelope {
+export function bridgeBroadcast(
+  wsRegistry: WsBroadcastRegistry,
+  event: any,
+): SlotEventEnvelope {
   const fields = event && typeof event === "object" ? event : {};
   const id: string = fields.id || fields.msgId || "";
   // The `event` field on slot-events is the discriminator (subagent_stop,
@@ -111,7 +120,7 @@ export function bridgeBroadcast(eventBus: EventBus, event: any): SlotEventEnvelo
     timestamp: new Date().toISOString(),
     payload: extractPayload(fields),
   };
-  eventBus._broadcastToClients(WS_STREAM_NAME, envelope);
+  wsRegistry.broadcast(WS_STREAM_NAME, envelope);
   return envelope;
 }
 

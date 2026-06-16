@@ -761,7 +761,11 @@ export async function startRecommendationConsumer(eventBus: {
     group: string,
     startId?: string,
   ) => Promise<void>;
-  _broadcastToClients?: (stream: string, event: unknown) => void;
+  // The named WS broadcast surface (issue #1965): the recs engine fans its
+  // `oak_resting` badge out through the registry rather than reaching the
+  // bus's former private `_broadcastToClients` method. Optional so a
+  // Redis-only test stub need not stand up a WS registry.
+  wsRegistry?: { broadcast: (stream: string, event: unknown) => void };
 }): Promise<void> {
   // Stream (x*) ops are ADR-0017 Category B — the Event Bus is the sanctioned
   // raw-connection owner. Route the consumer-group CREATE through
@@ -779,7 +783,7 @@ export async function startRecommendationConsumer(eventBus: {
     readRecentPermissionWaits: defaultReadRecentPermissionWaits,
     broadcastResting: (runId, spend, cap) => {
       try {
-        eventBus._broadcastToClients?.(TURN_END_BROADCAST_STREAM, {
+        eventBus.wsRegistry?.broadcast(TURN_END_BROADCAST_STREAM, {
           type: "oak_resting",
           timestamp: new Date().toISOString(),
           payload: {
