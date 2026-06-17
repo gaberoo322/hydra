@@ -292,6 +292,34 @@ fi
 # from the #1945 "served but deposited under the wrong key" false 'none'.
 ```
 
+**Reading the deposit-presence diagnostic at reap time (issue #2020).** A
+`reflectionMatchSource` of `'none'` is ambiguous on its own — it can be an
+HONEST none (the dispatch served no reflections, so it correctly wrote no
+deposit) or a FALSE none (a deposit existed but the read dropped, the
+#1945-shaped hazard). To tell them apart WITHOUT manually scanning the fs /
+Redis, `reap.py completion` stamps a `refl_presence=<token>` field onto the
+`slot_complete` line it writes to the run log
+(`/tmp/hydra-autopilot-nightly.log`):
+
+- `deposit-absent` — no deposit file (the common honest-none case).
+- `deposit-empty` — deposit file present but empty/whitespace (still honest
+  none; the dispatch ran the deposit step with nothing to write).
+- `deposit-present` — deposit file present with a non-empty bucket string (a
+  genuinely non-'none' cycle).
+- `read-error` — deposit file present but unreadable (a false-none candidate
+  worth an operator's eye).
+- `no-task-id` — reap had no task_id to key on.
+
+So a window of `100 none` cycles that all read `refl_presence=deposit-absent`
+is the expected steady state when `failedRate:0` (no failures → nothing to
+learn from → nothing served → nothing deposited). A `read-error` (or a
+`deposit-present` that still buckets to 'none') is the signal that the deposit
+plumbing — not the empty store — is at fault. The dead legacy global buffer
+(`hydra:reflections:buffer`, retired in ADR-0023) is NOT this store and never
+feeds the metric; prune its residual runtime key with
+`bash scripts/cleanup/retire-reflection-buffer.sh` so it stops looking
+populated during a diagnosis.
+
 **Verify reflections-reach-retry with this endpoint, NOT
 `/api/learning/context-trace`.** The context-trace endpoint reports
 `getContext()`'s *composition* (a prompt no subagent receives on today's
