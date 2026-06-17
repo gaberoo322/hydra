@@ -16,9 +16,7 @@ import {
   derivePipelineMetrics,
   assessHealth,
   projectHealthDeepResponse,
-  classifyOvSearchProbe,
   parseRedisInfoSnapshot,
-  OV_SEARCH_PROBE_TIMEOUT_MS,
   type HealthSnapshot,
   type ProbeInputs,
 } from "../src/health-diagnostics.ts";
@@ -485,77 +483,9 @@ describe("assessHealth — per-rule firing", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// classifyOvSearchProbe — pure timeout-vs-failure mapping (issue #1032)
-// ---------------------------------------------------------------------------
-
-describe("classifyOvSearchProbe", () => {
-  test("a slow-but-successful probe within the window reports running with latency", () => {
-    // Simulate the Ollama-backed path returning 200 after a long-but-bounded
-    // latency (> the old 3000ms cap, < the new ceiling).
-    const lat = OV_SEARCH_PROBE_TIMEOUT_MS - 800;
-    const out = classifyOvSearchProbe(
-      { ok: true, data: { result: { memories: [1, 2], resources: [3], skills: [] } } },
-      lat,
-    );
-    assert.equal(out.status, "running");
-    assert.equal(out.latencyMs, lat);
-    assert.equal(out.resultCount, 3);
-  });
-
-  test("a probe timeout reports 'timeout' (NOT 'failed') and KEEPS its latency", () => {
-    // ov-timeout is the regression #1032 fixes: previously this collapsed to
-    // { status:"failed", latencyMs:null }.
-    const out = classifyOvSearchProbe({ ok: false, code: "ov-timeout" }, 15000);
-    assert.equal(out.status, "timeout");
-    assert.equal(out.latencyMs, 15000, "timeout must carry the measured latency, not null");
-    assert.equal(out.resultCount, 0);
-  });
-
-  test("a real 5xx (ov-non-2xx) still reports failed, with latency", () => {
-    const out = classifyOvSearchProbe({ ok: false, code: "ov-non-2xx" }, 1471);
-    assert.equal(out.status, "failed");
-    assert.equal(out.latencyMs, 1471);
-    assert.equal(out.resultCount, 0);
-  });
-
-  // Issue #1781: a transport failure on the embedding-exercising search path is
-  // the distinct "embedding backend unreachable" signal — NOT a generic OV 5xx.
-  // It now reports `backend-unreachable` (was `failed` under #1032) so the
-  // diagnostic can point the operator at the backend host, not OpenViking.
-  test("a transport failure (ov-service-down) reports backend-unreachable with null latency", () => {
-    const out = classifyOvSearchProbe({ ok: false, code: "ov-service-down" }, 25);
-    assert.equal(out.status, "backend-unreachable");
-    assert.equal(out.latencyMs, null, "no round-trip → meaningless latency → null");
-    assert.equal(out.resultCount, 0);
-  });
-
-  // Issue #1781: a malformed-JSON body DID round-trip OV (2xx) but the body was
-  // garbage — that is an OV-internal fault, not a backend-reachability problem,
-  // so it must stay `failed` and NOT leak into the new backend-unreachable state.
-  test("a malformed-JSON 2xx body (ov-malformed-json) still reports failed, not backend-unreachable", () => {
-    const out = classifyOvSearchProbe({ ok: false, code: "ov-malformed-json" }, 30);
-    assert.equal(out.status, "failed");
-    assert.equal(out.latencyMs, null, "malformed body → meaningless latency → null");
-    assert.equal(out.resultCount, 0);
-  });
-
-  test("a 200 with a missing result body counts zero hits but stays running", () => {
-    const out = classifyOvSearchProbe({ ok: true, data: {} }, 4200);
-    assert.equal(out.status, "running");
-    assert.equal(out.resultCount, 0);
-    assert.equal(out.latencyMs, 4200);
-  });
-
-  test("the probe ceiling is generous enough for the Ollama embedding path", () => {
-    // Guard the constant against an accidental tightening back toward the old
-    // 3000ms that caused #1032. The real agent search path uses 5000ms.
-    assert.ok(
-      OV_SEARCH_PROBE_TIMEOUT_MS >= 10_000,
-      "OV search probe timeout must accommodate the Tailnet+Ollama embedding latency",
-    );
-  });
-});
+// Issue #2023: the `classifyOvSearchProbe` describe block moved to
+// test/health-probe.test.mts, tracking the classifier's move into the
+// ServiceProbe Adapter Seam (src/health-probe.ts).
 
 // ---------------------------------------------------------------------------
 // parseRedisInfoSnapshot — pure Redis INFO regex parse (issue #1856)
