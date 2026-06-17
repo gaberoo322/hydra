@@ -30,7 +30,6 @@ import {
   computeMaterialChangeSignature,
   summariseSlotStatus,
   shouldFire,
-  type ShouldFireDecision,
 } from "./recommendation-materiality.ts";
 
 // Back-compat re-export (issue #1986): the materiality gate moved to its own
@@ -41,7 +40,6 @@ export {
   computeMaterialChangeSignature,
   summariseSlotStatus,
   shouldFire,
-  type ShouldFireDecision,
 };
 
 // ---------------------------------------------------------------------------
