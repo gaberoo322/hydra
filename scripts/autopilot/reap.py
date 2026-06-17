@@ -244,6 +244,8 @@ def _fire_cycle_record(
     total_tokens: int,
     reflection_sources: str = "",
     duration_ms: int = 0,
+    task_title: str = "",
+    anchor_ref: str = "",
 ) -> None:
     """Best-effort POST to /api/autopilot/cycle-record (issue #430).
 
@@ -268,6 +270,16 @@ def _fire_cycle_record(
     non-zero for target/betting cycles too — not just orchestrator cycles that
     happened to get a model-fired auto-merge follow-up. 0 (the default) keeps
     the prior truthful "unknown" behaviour when no start stamp is available.
+
+    `task_title` / `anchor_ref` (issue #2012): the per-cycle anchor reference
+    recovered from the slot before it was nulled (e.g. "issue-2012"). reap is
+    the SOLE cycle-record writer, but it previously hardcoded both to "" — so
+    a successful hydra-dev / hydra-grill merge stored `taskTitle == null`,
+    which naive no-task counters (the #1832 hydra-discover false alarm)
+    mistook for a no-op cycle. Forwarding the resolvable anchor as `task_title`
+    (positional 5) and `anchor_ref` (positional 6) closes that metadata gap.
+    Both default to "" — dispatch.sh omits an empty field, so a genuinely
+    task-less dispatch stays null (the correct truthful behaviour).
     """
     if not skill or skill not in CYCLE_RECORD_SKILLS:
         return
@@ -284,8 +296,8 @@ def _fire_cycle_record(
                 skill,
                 "",  # pr_number — not known at reap time; capacity-writeback
                      # carries the PR number on the merged path.
-                "",  # task_title
-                "",  # anchor_ref
+                task_title or "",  # issue #2012: resolvable anchor as task title
+                anchor_ref or "",  # issue #2012: per-cycle anchor reference
                 str(duration_ms or 0),  # issue #1591: wall-clock cycle span (ms)
                 reflection_sources or "",  # issue #1136: served reflection buckets
             ],
@@ -710,7 +722,7 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     line = (
         f"slot_complete class={cls} skill={skill or '?'} task_id={task_id} "
         f"tokens={total_tokens} cumulative={s['cumulative_tokens']} "
-        f"duration_ms={duration_ms}"
+        f"duration_ms={duration_ms} task_title={anchor_ref or ''}"
     )
     print(f"[autopilot] {line}")
     _append_log(line)
@@ -728,8 +740,21 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # records what was actually injected (instead of always 'none'). Missing
     # deposit (the common case) → "" → field omitted downstream.
     reflection_sources = _read_reflection_sources(task_id)
+    # Issue #2012: forward the anchor reference recovered from the slot (e.g.
+    # "issue-2012") as the cycle's task_title + anchor_ref. Before this, reap
+    # hardcoded both to "" on every merge, so successful named-issue cycles
+    # stored taskTitle == null and naive no-task counters (the #1832 false
+    # alarm) mistook them for no-op cycles. None / signal-class dispatches with
+    # no slot anchor stay "" → dispatch.sh omits the field → truthful null.
     _fire_cycle_record(
-        task_id, skill, status, total_tokens, reflection_sources, duration_ms
+        task_id,
+        skill,
+        status,
+        total_tokens,
+        reflection_sources,
+        duration_ms,
+        task_title=anchor_ref or "",
+        anchor_ref=anchor_ref or "",
     )
 
     # Issue #1820: the reflection-record WRITE producer wired in #1119 Slice 1
