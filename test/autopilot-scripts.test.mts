@@ -111,6 +111,27 @@ function deriveReapCause(exitCode: string, exitStatus: string, slotsOccupied?: s
 }
 
 /**
+ * Invoke `bootstrap.sh --reap-count-slots <state>` (issue #2030) and return the
+ * integer slots-occupied count it derives from a crafted state.json. This dry-run
+ * runs ONLY `__reap_count_slots_occupied` (pipeline slots + background classes
+ * fired this run) so the background-only handoff case can be pinned without a
+ * live run-end POST. Writes `state` into a tempdir and cleans it up.
+ */
+function reapCountSlots(stateObj: Record<string, unknown>): number {
+  const tmp = makeTempState();
+  try {
+    writeFileSync(tmp.state, JSON.stringify(stateObj));
+    const result = spawnSync(join(SCRIPTS, "bootstrap.sh"), ["--reap-count-slots", tmp.state], {
+      env: { ...process.env, PATH: process.env.PATH ?? "" },
+      encoding: "utf-8",
+    });
+    return Number.parseInt((result.stdout ?? "").trim(), 10);
+  } finally {
+    rmSync(tmp.dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Invoke `bootstrap.sh --reap-session-decision` (issue #1130) with a simulated
  * exit environment + an injected session-limit line, returning the cause-gated
  * arming decision (`cause=… post=yes|no`). This pins the guard that stops a
@@ -335,6 +356,99 @@ describe("scripts/autopilot/bootstrap.sh", () => {
     assert.equal(r.cause, "crash",
       "an abnormal exit is a crash regardless of slot occupancy — handoff requires a CLEAN exit code");
     assert.equal(r.exitCodeNum, "1");
+  });
+
+  /**
+   * Issue #2030 — the slots-occupied count the live --reap path derives must
+   * also see background/signal classes (sweep_orch / retro_orch / …) fired
+   * DURING this run. Those never enter `state.json.slots`, so #1903's
+   * slots-only count read 0 for a background-only run and mis-stamped it
+   * `interrupted`. `__reap_count_slots_occupied` (exercised via the
+   * --reap-count-slots dry-run) sums pipeline slots + this-run background fires.
+   */
+  const RUN_START = 1_700_000_000;
+  const stateWithSignals = (
+    slots: Record<string, unknown>,
+    signals: Record<string, number>,
+    startedEpoch = RUN_START,
+  ): Record<string, unknown> => ({
+    started_epoch: startedEpoch,
+    slots,
+    signal_last_fired: signals,
+  });
+
+  test("background-only run (sweep_orch+retro_orch fired this run) counts >0 → handoff (#2030)", () => {
+    // All pipeline slots null, but two background classes fired AT/AFTER
+    // started_epoch — the exact proof case from the issue (run d7bca162).
+    const count = reapCountSlots(stateWithSignals(
+      { dev_orch: null, qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null,
+        design_concept_orch: null },
+      { health: 0, sweep_orch: RUN_START + 5, sweep_target: 0,
+        discover_orch: 0, discover_target: 0, retro_orch: RUN_START + 7 },
+    ));
+    assert.equal(count, 2, "two background classes fired this run must count as 2 occupied");
+    // …and that count drives the clean-exit derivation to handoff, not interrupted.
+    const r = deriveReapCause("exited", "0", String(count));
+    assert.equal(r.cause, "handoff",
+      "a clean-exit background-only run is an honest baton-pass, not interrupted (#2030)");
+  });
+
+  test("background signal fired BEFORE this run (stale) does not count (#2030)", () => {
+    // A retro_orch that fired in a PRIOR run (timestamp < started_epoch) is not
+    // in flight for THIS run — it must not inflate the count.
+    const count = reapCountSlots(stateWithSignals(
+      { dev_orch: null, qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null },
+      { health: 0, sweep_orch: RUN_START - 3600, retro_orch: RUN_START - 100 },
+    ));
+    assert.equal(count, 0, "a signal fired before started_epoch is stale, not in-flight");
+    const r = deriveReapCause("exited", "0", String(count));
+    assert.equal(r.cause, "interrupted",
+      "a clean exit with only STALE background fires is a genuine nothing-pending end");
+  });
+
+  test("pipeline slots and this-run background fires sum together (#2030)", () => {
+    const count = reapCountSlots(stateWithSignals(
+      { dev_orch: { skill: "hydra-dev", started: "now" }, qa_orch: null,
+        research_orch: null, dev_target: null, qa_target: null, research_target: null },
+      { sweep_orch: RUN_START + 1 },
+    ));
+    assert.equal(count, 2, "1 pipeline slot + 1 this-run background fire = 2");
+  });
+
+  test("background-only run still derives crash on an abnormal exit (#2030 INV-A)", () => {
+    // Even with background work in flight, a non-clean exit code is a crash —
+    // the slots count is consulted ONLY on a clean exit (INV-A preserved).
+    const count = reapCountSlots(stateWithSignals(
+      { dev_orch: null, qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null },
+      { sweep_orch: RUN_START + 2, retro_orch: RUN_START + 3 },
+    ));
+    assert.equal(count, 2, "background fires are counted");
+    const r = deriveReapCause("signal", "SEGV", String(count));
+    assert.equal(r.cause, "crash",
+      "an abnormal exit is a crash regardless of in-flight background work (#2030 INV-A)");
+    assert.equal(r.exitCodeNum, "1");
+  });
+
+  test("a missing/garbage state file degrades to 0 (never blocks the reap) (#2030)", () => {
+    const result = spawnSync(join(SCRIPTS, "bootstrap.sh"),
+      ["--reap-count-slots", "/nonexistent/state.json"],
+      { env: { ...process.env, PATH: process.env.PATH ?? "" }, encoding: "utf-8" });
+    assert.equal(result.status, 0, "the dry-run never errors on a missing file");
+    assert.equal((result.stdout ?? "").trim(), "0", "a missing state file degrades to 0");
+  });
+
+  test("missing started_epoch treats every non-zero signal as this-run (conservative) (#2030)", () => {
+    // No started_epoch → start defaults to 0 → any non-zero signal counts.
+    // The conservative direction: prefer handoff over a false interrupted.
+    const count = reapCountSlots({
+      slots: { dev_orch: null, qa_orch: null, research_orch: null,
+        dev_target: null, qa_target: null, research_target: null },
+      signal_last_fired: { health: 0, sweep_orch: 1_650_000_000 },
+    });
+    assert.equal(count, 1, "with no started_epoch, a non-zero signal counts as in-flight");
   });
 
   test("a non-zero exit status stays crash with the real code", () => {
@@ -753,6 +867,59 @@ describe("scripts/autopilot/term-check.py", () => {
       const r = runTermCheck(tmp.state);
       assert.equal(r.status, 0);
       assert.match(r.stdout, /^OK state-missing$/);
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Issue #2030 — the idle-drain gate (`slots_occupied == 0`) must also count
+  // background/signal classes fired this run, or a background-only run trips
+  // TERM:idle prematurely (the same gap #2030 fixes in the reap baton-pass).
+  test("does NOT trip idle when a background class fired this run (#2030)", () => {
+    const tmp = makeTempState();
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      writeState(tmp.state, {
+        idle_turns: 5,           // would trip idle if slots_occupied were 0
+        started_epoch: now - 10,
+        slots: {                 // all pipeline slots empty
+          dev_orch: null, qa_orch: null, research_orch: null,
+          dev_target: null, qa_target: null, research_target: null,
+        },
+        signal_last_fired: {     // but sweep_orch fired AFTER started_epoch
+          health: 0, sweep_orch: now - 2, sweep_target: 0,
+          discover_orch: 0, discover_target: 0,
+        },
+      });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^OK /,
+        "a background class in flight this run keeps the run busy — no premature TERM:idle");
+    } finally {
+      rmSync(tmp.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("STILL trips idle when the only background fires are stale (prior run) (#2030)", () => {
+    const tmp = makeTempState();
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      writeState(tmp.state, {
+        idle_turns: 5,
+        started_epoch: now - 10,
+        slots: {
+          dev_orch: null, qa_orch: null, research_orch: null,
+          dev_target: null, qa_target: null, research_target: null,
+        },
+        signal_last_fired: {     // fired BEFORE this run started → not in flight
+          health: 0, sweep_orch: now - 3600, sweep_target: 0,
+          discover_orch: 0, discover_target: 0,
+        },
+      });
+      const r = runTermCheck(tmp.state);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^TERM:idle /,
+        "stale background fires from a prior run must not keep the run alive");
     } finally {
       rmSync(tmp.dir, { recursive: true, force: true });
     }
