@@ -17,7 +17,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { probeService, probeOv, type ServiceProbeResult } from "../src/health-probe.ts";
+import { probeService, probeOv, probeEmbedBackend, type ServiceProbeResult } from "../src/health-probe.ts";
 import type { OvResult } from "../src/knowledge-base/ov-request.ts";
 
 // ---------------------------------------------------------------------------
@@ -106,5 +106,60 @@ describe("probeOv", () => {
     assert.equal(okR.status, "running");
     assert.equal(failR.status, "failed");
     assert.equal(failR.latencyMs, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// probeEmbedBackend — OV dense-embedding backend, via the embedding-exercising
+// search/find transport through the OV Request Adapter (issue #2013)
+// ---------------------------------------------------------------------------
+
+describe("probeEmbedBackend", () => {
+  test("adapter ok (OV + embed backend answered) → running with numeric latency", async () => {
+    const ovPostJsonImpl = (async () => ({ ok: true, data: { results: [] } }) as OvResult<any>);
+    const r = await probeEmbedBackend({ ovPostJsonImpl });
+    assert.equal(r.status, "running");
+    assert.equal(typeof r.latencyMs, "number");
+    assert.ok(r.latencyMs! >= 0);
+  });
+
+  test("ov-service-down (embed transport never reached the backend) → {failed, latencyMs:null}", async () => {
+    // This is the #1921 stale-embed condition: OV's app /health may be 200 while
+    // the dense-embedding backend (ollama-embed) is unreachable, so the
+    // embedding-exercising search transport fails to reach it.
+    const ovPostJsonImpl = (async () => ({ ok: false, code: "ov-service-down" }) as OvResult<any>);
+    const r = await probeEmbedBackend({ ovPostJsonImpl });
+    assert.equal(r.status, "failed");
+    assert.equal(r.latencyMs, null);
+  });
+
+  test("ov-timeout (embed backend too slow to answer) → {failed, latencyMs:null}", async () => {
+    const ovPostJsonImpl = (async () => ({ ok: false, code: "ov-timeout" }) as OvResult<any>);
+    const r = await probeEmbedBackend({ ovPostJsonImpl });
+    assert.equal(r.status, "failed");
+    assert.equal(r.latencyMs, null);
+  });
+
+  test("ov-non-2xx (OV answered with an app error — backend WAS reachable) → running", async () => {
+    // A non-2xx means OV (and the backend behind it) responded; that is an
+    // app-level error, not an embed-backend liveness failure. The distinct
+    // embed-backend probe only flips to failed when the transport never reached
+    // the backend (service-down/timeout).
+    const ovPostJsonImpl = (async () => ({ ok: false, code: "ov-non-2xx", body: "bad request" }) as OvResult<any>);
+    const r = await probeEmbedBackend({ ovPostJsonImpl });
+    assert.equal(r.status, "running");
+    assert.equal(typeof r.latencyMs, "number");
+  });
+
+  test("never re-throws — both arms map exhaustively", async () => {
+    let r: ServiceProbeResult;
+    await assert.doesNotReject(async () => {
+      r = await probeEmbedBackend({
+        ovPostJsonImpl: async () => ({ ok: false, code: "ov-malformed-json" }) as OvResult<any>,
+      });
+    });
+    // malformed-json means OV answered (2xx) but the body did not parse — the
+    // backend was reachable, so this is NOT an embed-backend liveness failure.
+    assert.equal(r!.status, "running");
   });
 });

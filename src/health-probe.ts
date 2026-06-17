@@ -20,7 +20,8 @@
 // seam consumed by route code, and a non-route caller (e.g.
 // src/aggregators/service-strip.ts) composing the canonical probes should not
 // import from src/api/.
-import { ovHealthGet, isOvFailure } from "./knowledge-base/ov-request.ts";
+import { ovHealthGet, ovPostJson, isOvFailure, type OvResult } from "./knowledge-base/ov-request.ts";
+import { OV_SEARCH_PROBE_TIMEOUT_MS } from "./health-diagnostics.ts";
 
 /** The wire shape every service probe folds to: `{status, latencyMs}`. */
 export type ServiceProbeResult = {
@@ -77,5 +78,55 @@ export async function probeOv(
   return {
     status: isOvFailure(result) ? "failed" : "running",
     latencyMs: isOvFailure(result) ? null : Date.now() - start,
+  };
+}
+
+/**
+ * Probe the OpenViking dense-embedding backend specifically (issue #2013).
+ *
+ * Why a DISTINCT probe (not the openviking liveness key, not the index-14
+ * ovSearch quality field):
+ *  - `probeOv()` (the `openviking` key) only hits OV's `GET /health`, which is a
+ *    shallow app-liveness check (`{status:"ok"}`) — it reports OV-the-app is up
+ *    even while its dense-embedding backend (`ollama-embed:11434`, reachable only
+ *    INSIDE the OV container) is stale/unreachable. That blind spot is exactly
+ *    what made #1921 invisible: OV looked healthy, search hung ~23s.
+ *  - The index-14 ovSearch probe DOES exercise the embedding path, but it measures
+ *    end-to-end search QUALITY (result count / fallback) — folding embed-backend
+ *    liveness into a search-quality field conflates "OV searchable" with "the
+ *    dense-embedding backend is live" (#2013 wants the latter attributable).
+ *
+ * The orchestrator has no direct network path to `ollama-embed` (OV owns that
+ * hop via `extra_hosts`), so the honest embed-backend signal it CAN obtain is the
+ * embedding-exercising `search/find` transport, routed through the existing
+ * OpenViking Request Adapter (`ovPostJson` → resolves OPENVIKING_URL + auth — no
+ * new hardcoded URL, no inline X-Api-Key). A transport failure that never reached
+ * the backend (`ov-service-down`/`ov-timeout`) folds to `failed`; OV answering at
+ * all (2xx, or even a non-2xx app error — the backend responded) folds to
+ * `running`. This is the same `{status, latencyMs}` ServiceProbe shape every
+ * other probe emits.
+ *
+ * NEVER throws — the adapter is contractually never-throwing; both arms map
+ * exhaustively. `ovPostJsonImpl` is injectable for the test.
+ */
+export async function probeEmbedBackend(
+  { ovPostJsonImpl = ovPostJson }: { ovPostJsonImpl?: typeof ovPostJson } = {},
+): Promise<ServiceProbeResult> {
+  const start = Date.now();
+  const result: OvResult<any> = await ovPostJsonImpl(
+    "/api/v1/search/find",
+    { query: "embedding backend health", limit: 1 },
+    { timeout: OV_SEARCH_PROBE_TIMEOUT_MS },
+  );
+  // A transport-level failure (DNS/ECONNREFUSED) or timeout means the
+  // embedding-exercising path never reached the backend → embed backend down.
+  // OV answering at all (success, or even an app-level non-2xx / malformed JSON)
+  // means the backend was reachable enough to respond → running. Discriminate on
+  // the machine-readable `code`, never on prose.
+  const unreachable =
+    isOvFailure(result) && (result.code === "ov-service-down" || result.code === "ov-timeout");
+  return {
+    status: unreachable ? "failed" : "running",
+    latencyMs: unreachable ? null : Date.now() - start,
   };
 }
