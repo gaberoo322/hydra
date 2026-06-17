@@ -274,6 +274,34 @@ describe("assessHealth — per-rule firing", () => {
     assert.equal(d!.what, "VikingDB unreachable");
   });
 
+  // Issue #2013: the generic "external service not running" rule covers a new
+  // monitored service (embed-backend) with no per-service rule code.
+  test("embed-backend failed → generic 'external service not running' warning (no bespoke rule)", () => {
+    const d = find(
+      clone((s) => (s.svcProbes["embed-backend"] = { status: "failed" })),
+      "embed-backend",
+      "warning",
+    );
+    assert.ok(d);
+    assert.equal(d!.what, 'External service "embed-backend" not running');
+  });
+
+  test("embed-backend running → generic rule does NOT fire", () => {
+    const d = find(
+      clone((s) => (s.svcProbes["embed-backend"] = { status: "running" })),
+      "embed-backend",
+    );
+    assert.equal(d, undefined);
+  });
+
+  test("openviking failed is reported by its bespoke rule only — the generic rule does not double-report it", () => {
+    const diags = assessHealth(
+      clone((s) => (s.svcProbes.openviking = { status: "failed" })),
+    ).diagnostics.filter((x) => x.component === "openviking");
+    assert.equal(diags.length, 1);
+    assert.equal(diags[0].what, "OpenViking unreachable");
+  });
+
   test("empty pipeline → warning pipeline", () => {
     const d = assessHealth(
       clone((s) => {

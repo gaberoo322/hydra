@@ -45,7 +45,7 @@ import { ovPostJson } from "../knowledge-base/ov-request.ts";
 // {status, latencyMs} fold and running/failed classification live in one named
 // home, importable by non-route callers (e.g. aggregators/service-strip.ts)
 // without coupling to src/api/. Behaviour-neutral: same probes, same wire shape.
-import { probeService, probeOv } from "../health-probe.ts";
+import { probeService, probeOv, probeEmbedBackend } from "../health-probe.ts";
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
@@ -232,12 +232,17 @@ export function createHealthRouter(eventBus: PingableBus) {
     // unit-tested in test/health-probe.test.mts). vikingdb stays a plain inline
     // probe (not an OpenViking boundary); openviking routes through the OV
     // Request Adapter inside probeOv().
-    const [vikingdb, openviking] = await Promise.all([
+    // Issue #2013: the embed-backend probe samples OV's dense-embedding backend
+    // specifically (the surface that was stale-but-invisible during #1921) —
+    // distinct from the openviking app-liveness key above. Routes through the
+    // same OV Request Adapter (no new URL/auth).
+    const [vikingdb, openviking, embedBackend] = await Promise.all([
       probeService("http://localhost:5000/health"),
       probeOv(),
+      probeEmbedBackend(),
     ]);
 
-    res.json({ vikingdb, openviking });
+    res.json({ vikingdb, openviking, "embed-backend": embedBackend });
   });
 
   // GET /health/skills — OV skill-catalog registration state (issue #1968)
@@ -280,8 +285,18 @@ export function createHealthRouter(eventBus: PingableBus) {
         // (not an OpenViking boundary); openviking routes through the OV Request
         // Adapter (#954, resolves OPENVIKING_URL — no hardcoded localhost:1933).
         // openai-proxy diagnostic removed in PR-3 (issue #383).
-        const [vikingdb, ov] = await Promise.all([probeService("http://localhost:5000/health"), probeOv()]);
-        return { vikingdb, openviking: ov };
+        // Issue #2013: add a DISTINCT embed-backend key sampling OV's
+        // dense-embedding backend (ollama-embed) via the embedding-exercising
+        // search/find transport through the OV Request Adapter. This is the
+        // surface that was stale during #1921 while OV's app-liveness key
+        // ("openviking") still read healthy. The svcProbes map is keyed
+        // (post-#1869), so this is an ADDED key — vikingdb/openviking unchanged.
+        const [vikingdb, ov, embedBackend] = await Promise.all([
+          probeService("http://localhost:5000/health"),
+          probeOv(),
+          probeEmbedBackend(),
+        ]);
+        return { vikingdb, openviking: ov, "embed-backend": embedBackend };
       })(),
       /* 2 */ getSchedulerStatus(),
       /* 3 */ Promise.resolve({ status: "idle" }),

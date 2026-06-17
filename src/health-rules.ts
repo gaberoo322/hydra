@@ -23,6 +23,14 @@ import { assessSkillCatalog } from "./health-skill-catalog.ts";
 // rule stays side-effect-free even though it doesn't source from the snapshot.
 import { getSkillCatalogState } from "./knowledge-base/skill-registration.ts";
 
+// Issue #2013: service-probe keys that already have a bespoke diagnostic rule
+// (with a tailored why/impact/action) earlier in RULES. The generic
+// "external service not running" iterator rule skips these so a degraded service
+// is reported exactly once — by its bespoke rule — never doubled. Any monitored
+// service NOT listed here (e.g. the #2013 "embed-backend" key) is covered by the
+// generic rule with zero per-service code.
+const SVC_PROBES_WITH_BESPOKE_RULES = new Set(["openviking", "vikingdb"]);
+
 export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   (s) =>
     s.health.status === "killed"
@@ -181,6 +189,33 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           autoRecovery: true,
         }
       : null,
+  // Issue #2013: a SINGLE generic "external service not running" rule that
+  // iterates the keyed ServiceProbeMap (#1869) and fires for any monitored
+  // service in a non-running state that does NOT already have a bespoke rule
+  // above. This is the point of the #1869 map iterator: adding a new monitored
+  // service (e.g. the #2013 "embed-backend" entry) needs ZERO new rule code —
+  // it is covered automatically here, with no per-service duplication. The two
+  // services with tailored action strings (openviking, vikingdb) keep their
+  // bespoke rules and are excluded here so a service is never double-reported.
+  // A status of "running" (or a missing key, which optional chaining leaves
+  // undefined) does not fire.
+  (s) => {
+    for (const [name, probe] of Object.entries(s.svcProbes)) {
+      if (SVC_PROBES_WITH_BESPOKE_RULES.has(name)) continue;
+      if (probe?.status && probe.status !== "running") {
+        return {
+          severity: "warning",
+          component: name,
+          what: `External service "${name}" not running`,
+          why: `The ${name} probe reported status "${probe.status}" instead of "running".`,
+          impact: "A dependency the orchestrator monitors is degraded or unreachable.",
+          action: `Check the ${name} service and its backing host/container.`,
+          autoRecovery: true,
+        };
+      }
+    }
+    return null;
+  },
   (s) =>
     s.queueDepth === 0 && s.blCounts.total === 0 && s.health.cycle !== "running"
       ? {

@@ -436,6 +436,10 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   const svcProbes: ServiceProbeMap = probes.serviceProbes || {
     vikingdb: { status: "failed" },
     openviking: { status: "failed" },
+    // Issue #2013: the embed-backend probe is part of the index-1 fan-out, so a
+    // rejected settle defaults it to "failed" alongside the two wire services —
+    // honest-none (the whole fan-out failed), not a phantom "running".
+    "embed-backend": { status: "failed" },
   };
   const sched = probes.scheduler || {
     running: false,
@@ -579,6 +583,12 @@ export interface HealthDeepResponse {
     // projection reads them out of the svcProbes map by key.
     vikingdb: ServiceProbe;
     openviking: ServiceProbe;
+    // Issue #2013: the OpenViking dense-embedding backend, sampled distinctly
+    // from the `openviking` app-liveness key (the surface that was stale-but-
+    // invisible during #1921). An ADDED field — never a rename/removal of the
+    // two above. The probe is a normal svcProbes entry (keyed "embed-backend");
+    // a missing key coalesces to "failed" so the wire field is always present.
+    "embed-backend": ServiceProbe;
   };
   activeCycle: unknown;
   pipeline: {
@@ -640,6 +650,9 @@ export function projectHealthDeepResponse(
       // probe failure that produced an empty map) coalesces to "failed" so the
       // wire field is always present, preserving the envelope contract.
       vikingdb: svcProbes.vikingdb ?? { status: "failed" }, openviking: svcProbes.openviking ?? { status: "failed" },
+      // Issue #2013: the distinct embed-backend entry. Same keyed-read +
+      // coalesce-to-"failed" contract as the two services above.
+      "embed-backend": svcProbes["embed-backend"] ?? { status: "failed" },
     },
     activeCycle,
     // Issue #744: emergency-brake state alongside the kill switch — both are
