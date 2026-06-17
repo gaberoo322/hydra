@@ -103,6 +103,44 @@ def post_run_end(run_id: str, cause: str, ended_epoch: int) -> bool:
     return False
 
 
+def count_slots_occupied(s: dict) -> int:
+    """Count "work in flight" for the idle-drain gate (issue #2030).
+
+    Sums two sources, mirroring `bootstrap.sh:__reap_count_slots_occupied`:
+
+      1. Pipeline slots (`s["slots"]`) — a slot is occupied when non-null
+         (the 7 long-lived dev/qa/research/design slots).
+      2. Background/signal classes fired DURING this run — every
+         `s["signal_last_fired"][<class>]` whose timestamp is
+         `>= s["started_epoch"]`. These (`sweep_orch` / `retro_orch` /
+         `discover_*` / `scout_orch` / `architecture_orch` / `cleanup_*`)
+         never enter `slots`, so the prior slots-only count saw 0 for a
+         background-only run and prematurely tripped `TERM:idle` — the same
+         gap #2030 fixes in the reap baton-pass derivation.
+
+    Pure and total over its input: a missing/garbage `slots`,
+    `signal_last_fired`, or `started_epoch` degrades that source to 0 (the
+    conservative direction: prefer "busy" over a false idle-terminate).
+    """
+    slots = s.get("slots") or {}
+    pipeline = sum(1 for v in slots.values() if v is not None) if isinstance(slots, dict) else 0
+    try:
+        start = int(s.get("started_epoch") or 0)
+    except (TypeError, ValueError):
+        start = 0
+    fired = s.get("signal_last_fired") or {}
+    background = 0
+    if isinstance(fired, dict):
+        for ts in fired.values():
+            try:
+                ts_int = int(ts)
+            except (TypeError, ValueError):
+                continue
+            if ts_int > 0 and ts_int >= start:
+                background += 1
+    return pipeline + background
+
+
 def main() -> int:
     if not STATE_PATH.exists():
         # If Phase 0 hasn't run, treat as OK to avoid spurious termination.
@@ -113,7 +151,7 @@ def main() -> int:
     now = int(time.time())
     elapsed = now - s["started_epoch"]
     tokens = s["cumulative_tokens"]
-    slots_occupied = sum(1 for v in s["slots"].values() if v is not None)
+    slots_occupied = count_slots_occupied(s)
     run_id = s.get("run_id", "")
 
     cause: str | None = None

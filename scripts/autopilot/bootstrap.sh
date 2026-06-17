@@ -157,6 +157,60 @@ __reap_derive_cause() {
   fi
 }
 
+# Issue #2030: count "work in flight at exit" for the handoff/interrupted
+# baton-pass decision, reading from a state.json path. Two sources are summed:
+#
+#   1. Pipeline slots (`state.json.slots`) — the 7 long-lived dev/qa/research/
+#      design slots #1903 already counted (a slot is occupied when its value is
+#      non-null), seeded across relaunches by #1352.
+#   2. Background/signal classes fired DURING this run — every
+#      `state.json.signal_last_fired[<class>]` whose timestamp is
+#      `>= started_epoch`. These are the `sweep_orch` / `retro_orch` /
+#      `discover_*` / `scout_orch` / `architecture_orch` / `cleanup_*` classes
+#      that never enter `slots` (they hold only a last-fired timestamp, not a
+#      slot), so #1903's slots-only count missed them: a clean exit whose ONLY
+#      in-flight dispatches were background classes reaped with
+#      slots_occupied == 0 and was mis-stamped `interrupted` — re-pinning the
+#      exact failure mode #1903/#1815/#1352 retired, for this run class.
+#
+# A class fired this run means the dispatcher stamped its `signal_last_fired`
+# entry on the turn it dispatched (the dispatcher owns the stamp; see
+# reap.py "stamped by the dispatcher, not here"). The print-mode session then
+# physically exits on its final message with that background subagent still
+# mid-flight — an honest baton-pass the successor run continues, not a
+# nothing-pending bypass.
+#
+# Echoes the integer count on stdout. A missing/garbage state file, slots
+# object, or signal map degrades each source to 0 (the pre-fix `interrupted`
+# behaviour) — never blocks the reap. INV-A is preserved by the caller:
+# __reap_derive_cause only consults this count on a CLEAN exit code, so an
+# abnormal exit still derives `crash` regardless of in-flight work.
+__reap_count_slots_occupied() {
+  __rcso_state_path="${1:-}"
+  if [ -z "${__rcso_state_path}" ] || [ ! -f "${__rcso_state_path}" ] \
+    || ! command -v jq >/dev/null 2>&1; then
+    echo 0
+    return 0
+  fi
+  # jq computes both sources in one pass so the started_epoch comparison and
+  # the slot null-filter share a single read. `.started_epoch // 0` degrades a
+  # missing epoch to 0, which makes EVERY non-zero signal timestamp count as
+  # "fired this run" — the conservative direction (prefer handoff over a false
+  # interrupted) and harmless because a real run always has a started_epoch.
+  __rcso_count="$(jq -r '
+    ((.started_epoch // 0) | tonumber? // 0) as $start
+    | ([ (.slots // {}) | .[] | select(. != null) ] | length)
+      + ([ (.signal_last_fired // {})
+           | to_entries[]
+           | (.value | tonumber? // 0)
+           | select(. >= $start and . > 0) ] | length)
+  ' "${__rcso_state_path}" 2>/dev/null || echo 0)"
+  case "${__rcso_count}" in
+    ''|*[!0-9]*) echo 0 ;;
+    *) echo "${__rcso_count}" ;;
+  esac
+}
+
 # Issue #1130: decide whether the just-exited run may arm a session-limit
 # block. ONLY a genuine session-limit exit qualifies: the Claude CLI prints
 # `You've hit your session limit · resets <t>` and exits code=1, which
@@ -185,6 +239,16 @@ fi
 # $EXIT_CODE/$EXIT_STATUS + injected $HYDRA_AUTOPILOT_REAP_SESSION_LINE. No
 # journal scan, no POST — purely the cause-gate under test. Output shape:
 # `cause=<c> post=<yes|no>`.
+# Dry-run (issue #2030): echo the slots-occupied count `__reap_count_slots_occupied`
+# derives from a given state.json path (pipeline slots + background classes
+# fired this run). No POST, no journal scan — purely the count under test, so a
+# crafted state file can pin the background-only handoff case. Output shape: a
+# bare integer on stdout.
+if [ "${1:-}" = "--reap-count-slots" ]; then
+  __reap_count_slots_occupied "${2:-}"
+  exit 0
+fi
+
 if [ "${1:-}" = "--reap-session-decision" ]; then
   __reap_derive_cause
   REAP_SESSION_LINE="${HYDRA_AUTOPILOT_REAP_SESSION_LINE:-}"
@@ -243,14 +307,16 @@ if [ "${1:-}" = "--reap" ]; then
   # with the real exit status preserved. Shared with the --reap-derive-cause
   # dry-run so the test pins exactly this mapping.
   #
-  # Issue #1903: derive slots_occupied from state.json so a CLEAN exit with
-  # subagents still in flight maps to `handoff` (honest baton-pass), not the
-  # crash-adjacent `interrupted`. `state.json.slots` is the same fixed
-  # pipeline-slot map decide.py reasons over (a slot is occupied when its value
-  # is non-null), seeded across relaunches by #1352. A missing/garbage slots
-  # object degrades to 0 (the pre-#1903 `interrupted` behaviour) — never blocks
-  # the reap.
-  REAP_SLOTS_OCCUPIED="$(jq -r '[.slots // {} | .[] | select(. != null)] | length' "${REAP_STATE_PATH}" 2>/dev/null || echo 0)"
+  # Issue #1903 + #2030: derive slots_occupied from state.json so a CLEAN exit
+  # with work still in flight maps to `handoff` (honest baton-pass), not the
+  # crash-adjacent `interrupted`. The count spans BOTH the fixed pipeline-slot
+  # map decide.py reasons over (#1903) AND background/signal classes
+  # (`sweep_orch` / `retro_orch` / …) fired during this run (#2030) — the latter
+  # never enter `slots`, so #1903's slots-only count mis-stamped a
+  # background-only run `interrupted`. See `__reap_count_slots_occupied` for the
+  # full derivation; a missing/garbage state degrades to 0 (the pre-fix
+  # `interrupted` behaviour) — never blocks the reap.
+  REAP_SLOTS_OCCUPIED="$(__reap_count_slots_occupied "${REAP_STATE_PATH}")"
   case "${REAP_SLOTS_OCCUPIED}" in ''|*[!0-9]*) REAP_SLOTS_OCCUPIED=0 ;; esac
   export REAP_SLOTS_OCCUPIED
   __reap_derive_cause
