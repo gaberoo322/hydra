@@ -45,11 +45,13 @@ import { ovPostJson } from "../knowledge-base/ov-request.ts";
 // {status, latencyMs} fold and running/failed classification live in one named
 // home, importable by non-route callers (e.g. aggregators/service-strip.ts)
 // without coupling to src/api/. Behaviour-neutral: same probes, same wire shape.
-import { probeService, probeOv, probeEmbedBackend } from "../health-probe.ts";
+// Issue #2023: the OV-search probe classifier + timeout ceiling moved into the
+// ServiceProbe Adapter Seam alongside the other probes (was health-diagnostics.ts).
+import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "../health-probe.ts";
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
-import { parseProbes, assessHealth, projectHealthDeepResponse, classifyOvSearchProbe, parseRedisInfoSnapshot, OV_SEARCH_PROBE_TIMEOUT_MS, type ProbeInputs } from "../health-diagnostics.ts";
+import { parseProbes, assessHealth, projectHealthDeepResponse, parseRedisInfoSnapshot, type ProbeInputs } from "../health-diagnostics.ts";
 import { assessSkillCatalog } from "../health-skill-catalog.ts";
 // Issue #1968: the in-process OV skill-catalog state, so /api/health/skills can
 // surface the silent empty-catalog failure (startup skill registration losing
