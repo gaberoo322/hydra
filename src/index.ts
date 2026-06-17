@@ -13,7 +13,7 @@ import { gitExec } from "./github/git.ts";
 import { isGhFailure, isGhOk } from "./github/exec.ts";
 import { startConsumers } from "./notification-consumer.ts";
 import { slotEventsBridgeConsumer } from "./autopilot/slot-events-bridge.ts";
-import { recsEngineConsumer } from "./autopilot/recommendation-engine.ts";
+import { recsEngineConsumer } from "./autopilot/recommendation-consumer.ts";
 import {
   startPrLifecycleBridge,
   type PrLifecycleBridge,

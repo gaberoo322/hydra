@@ -24,7 +24,6 @@ import {
   computeMaterialChangeSignature,
   summariseSlotStatus,
   parseLlmResponse,
-  parseTurnEndStreamEvent,
   shouldFire,
   createRecommendationEngine,
   type EngineDeps,
@@ -33,6 +32,10 @@ import {
   type RecsRedisFacade,
   type TurnEndPayload,
 } from "../src/autopilot/recommendation-engine.ts";
+// parseTurnEndStreamEvent moved to the recommendation-consumer Seam (issue
+// #2024) — its dedicated test lives in test/recommendation-consumer.test.mts.
+// The engine still re-exports it for back-compat, but the test exercises the
+// symbol from its new owning module.
 
 // ---------------------------------------------------------------------------
 // In-memory Redis facade — production parity for the engine's writes
@@ -156,7 +159,7 @@ function makeTurnEnd(overrides: Partial<TurnEndPayload> = {}): TurnEndPayload {
 }
 
 // ---------------------------------------------------------------------------
-// Pure helpers — buildPrompt, parseLlmResponse, parseTurnEndStreamEvent
+// Pure helpers — buildPrompt, parseLlmResponse
 // ---------------------------------------------------------------------------
 
 test("buildPrompt stays under the 4KB prompt-size budget for a saturated input", () => {
@@ -256,39 +259,6 @@ test("parseLlmResponse rejects malformed json and unknown severities", () => {
   });
   assert.equal(recs.length, 1);
   assert.equal(recs[0].message, "keep");
-});
-
-test("parseTurnEndStreamEvent handles flat and payload-wrapped shapes", () => {
-  const flat = parseTurnEndStreamEvent({
-    event: "turn_end",
-    run_id: "run-A",
-    turn_n: "3",
-    dispatches: "1",
-    skipped: "0",
-    idle: "0",
-    tokens_after: "42",
-    ts_epoch: "1779907573",
-  });
-  assert.ok(flat);
-  assert.equal(flat?.turn_n, 3);
-  assert.equal(flat?.dispatches, 1);
-
-  const wrapped = parseTurnEndStreamEvent({
-    payload: {
-      event: "turn_end",
-      run_id: "run-B",
-      turn_n: "5",
-      dispatches: "2",
-      ts_epoch: "1779907600",
-    },
-  });
-  assert.ok(wrapped);
-  assert.equal(wrapped?.run_id, "run-B");
-  assert.equal(wrapped?.turn_n, 5);
-
-  assert.equal(parseTurnEndStreamEvent({ event: "subagent_stop" }), null);
-  assert.equal(parseTurnEndStreamEvent({ event: "turn_end" }), null);
-  assert.equal(parseTurnEndStreamEvent(null), null);
 });
 
 test("summariseSlotStatus is deterministic regardless of input key order", () => {

@@ -40,7 +40,7 @@ import { recordEvent } from "./digest.ts";
 import { pushAlert } from "./redis/alerts.ts";
 import { reactToCycleCompleted } from "./notification/cycle-completed-reactor.ts";
 import { startSlotEventsBridge } from "./autopilot/slot-events-bridge.ts";
-import { startRecommendationConsumer } from "./autopilot/recommendation-engine.ts";
+import { startRecommendationConsumer } from "./autopilot/recommendation-consumer.ts";
 import {
   ALERT_TYPES,
   formatAlertMessage,
