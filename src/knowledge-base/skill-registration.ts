@@ -61,7 +61,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 // ---------------------------------------------------------------------------
 
 /** Per-skill registration outcome in the in-process catalog state. */
-export interface SkillRegistrationEntry {
+interface SkillRegistrationEntry {
   /** The skill name (planner/executor/skeptic/director). */
   name: string;
   /** true once OV has accepted this skill at least once this process lifetime. */
