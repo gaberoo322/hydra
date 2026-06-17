@@ -153,6 +153,40 @@ export function classifyOvSearchProbe(
 // registration state — not a probe-marshalling input, so it now lives in its
 // own focused module that type-imports `HealthDiagnostic` from here.
 
+// ---- Service Probe Map — the extensible external-service health record ----
+//
+// Issue #1869: `HealthSnapshot["svcProbes"]` used to be a hard-coded two-field
+// struct (`{ vikingdb, openviking }`). Adding a third monitored service (e.g.
+// the local Ollama embedding backend) meant edits in four places — the type,
+// parseProbes' default, the wire projection, and the api/health.ts fan-out —
+// plus a fifth in service-strip.ts. The field name named an implementation
+// detail (a two-slot struct), not the domain concept: "the health of the
+// external services the orchestrator depends on", a SET that can grow.
+//
+// Replacing the named duet with a string-keyed map concentrates the
+// "what services exist" enumeration in the api/health.ts fan-out. The named
+// keys (`"vikingdb"`, `"openviking"`) become map entries; diagnostic rules read
+// `s.svcProbes["vikingdb"]?.status` via a keyed lookup that does NOT require a
+// struct-field edit to add a new service. The on-wire field names in
+// `/health/deep` are preserved for backward compatibility (out of scope per the
+// issue): the projection reads the map by key.
+
+/** One external-service probe result: liveness status + optional latency. */
+export interface ServiceProbe {
+  status: string;
+  latencyMs?: number | null;
+}
+
+/**
+ * The health of the external services the orchestrator depends on — an
+ * extensible map keyed by service name (`"vikingdb"`, `"openviking"`, …) rather
+ * than a fixed struct. Adding a new monitored service is a one-entry edit to the
+ * api/health.ts probe fan-out (push a key + result), with no type, default, or
+ * rule-set struct-field edits. A missing key reads `undefined` — rules guard
+ * with optional chaining, so an absent probe is treated as "not failed".
+ */
+export type ServiceProbeMap = Record<string, ServiceProbe>;
+
 // ---- Health Snapshot — the normalized internal model ---------------------
 
 export interface HealthSnapshot {
@@ -169,10 +203,10 @@ export interface HealthSnapshot {
     intervalHuman?: string;
     research?: { lastResearchAt?: string | null };
   };
-  svcProbes: {
-    vikingdb: { status: string; latencyMs?: number | null };
-    openviking: { status: string; latencyMs?: number | null };
-  };
+  // Issue #1869: extensible keyed map, not a fixed `{ vikingdb, openviking }`
+  // struct — a new monitored service is a one-entry edit to the api/health.ts
+  // fan-out, not a four-file struct-field change.
+  svcProbes: ServiceProbeMap;
   queueDepth: number;
   blCounts: {
     triage: number;
@@ -393,7 +427,13 @@ export function derivePipelineMetrics(
 
 export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   const health = probes.basicHealth || { status: "failed", redis: false, cycle: "unknown", uptime: 0 };
-  const svcProbes = probes.serviceProbes || {
+  // Issue #1869: svcProbes is now a ServiceProbeMap. On a rejected probe settle
+  // (probes.serviceProbes === null) fall back to a map carrying the two wire
+  // services as "failed" — byte-for-byte the prior default, so the /health/deep
+  // `services.vikingdb`/`.openviking` envelope and the vikingdb/openviking
+  // diagnostic rules see the identical values. New services added to the fan-out
+  // need no entry here: the rules guard absent keys with optional chaining.
+  const svcProbes: ServiceProbeMap = probes.serviceProbes || {
     vikingdb: { status: "failed" },
     openviking: { status: "failed" },
   };
@@ -534,8 +574,11 @@ export interface HealthDeepResponse {
       lastCycleAt: string | null | undefined;
       research: { lastResearchAt: string | null };
     };
-    vikingdb: HealthSnapshot["svcProbes"]["vikingdb"];
-    openviking: HealthSnapshot["svcProbes"]["openviking"];
+    // Issue #1869: the wire contract still names these two services explicitly
+    // (backward compatibility — out of scope to change the envelope shape). The
+    // projection reads them out of the svcProbes map by key.
+    vikingdb: ServiceProbe;
+    openviking: ServiceProbe;
   };
   activeCycle: unknown;
   pipeline: {
@@ -593,7 +636,10 @@ export function projectHealthDeepResponse(
       orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
       redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },
       scheduler: { status: sched.running ? "running" : (sched.consecutiveErrors >= 5 ? "failed" : "idle"), intervalHuman: sched.intervalHuman, cyclesRun: sched.cyclesRun, cyclesMerged: sched.cyclesMerged || 0, cyclesFailed: sched.cyclesFailed || 0, mergeRate: sched.mergeRate || 0, consecutiveErrors: sched.consecutiveErrors, lastError: sched.lastError, lastCycleAt: sched.lastCycleAt, research: { lastResearchAt: sched.research?.lastResearchAt || null } },
-      vikingdb: svcProbes.vikingdb, openviking: svcProbes.openviking,
+      // Issue #1869: keyed reads off the ServiceProbeMap. A missing key (e.g. a
+      // probe failure that produced an empty map) coalesces to "failed" so the
+      // wire field is always present, preserving the envelope contract.
+      vikingdb: svcProbes.vikingdb ?? { status: "failed" }, openviking: svcProbes.openviking ?? { status: "failed" },
     },
     activeCycle,
     // Issue #744: emergency-brake state alongside the kill switch — both are

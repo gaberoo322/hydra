@@ -158,7 +158,7 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
         }
       : null,
   (s) =>
-    s.svcProbes.openviking.status === "failed"
+    s.svcProbes["openviking"]?.status === "failed"
       ? {
           severity: "warning",
           component: "openviking",
@@ -170,7 +170,7 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
         }
       : null,
   (s) =>
-    s.svcProbes.vikingdb.status === "failed"
+    s.svcProbes["vikingdb"]?.status === "failed"
       ? {
           severity: "warning",
           component: "vikingdb",
