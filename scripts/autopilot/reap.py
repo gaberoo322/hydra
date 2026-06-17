@@ -153,7 +153,35 @@ def _bound_reaped(ids: list[str]) -> list[str]:
     return ids
 
 
-def _read_reflection_sources(task_id: str) -> str:
+# Issue #2020: a reflection-deposit presence diagnostic. `_read_reflection_sources`
+# returns one of these alongside the (possibly empty) bucket string so the reap
+# log can distinguish an HONEST 'none' (the dispatch served no reflections, so it
+# correctly wrote no deposit) from a FALSE 'none' (a deposit was attempted but is
+# unreadable / landed empty / under the wrong key). Without this signal both
+# collapse to the same empty string, and an operator cannot tell "nothing to
+# learn from" apart from "the deposit dropped" (the #1945-shaped hazard the issue
+# names) without manually reproducing the Redis/fs scan.
+#
+#   no-task-id     — no task_id to key on; cannot even look (degrades to 'none').
+#   deposit-absent — no deposit file exists. The COMMON honest case: most
+#                    dispatches serve no reflections so they write nothing, and
+#                    the cycle truthfully buckets to 'none'.
+#   deposit-empty  — the deposit file exists but is empty/whitespace. Ambiguous:
+#                    the dispatch ran the deposit step but had nothing to write
+#                    (still honest 'none'); surfaced distinctly so a future
+#                    false-empty deposit bug is visible rather than silent.
+#   deposit-present — the deposit file exists and carries a non-empty bucket
+#                    string (a genuinely non-'none' cycle).
+#   read-error     — the deposit file exists but could not be read (a FALSE
+#                    'none' candidate worth an operator's eye).
+REFL_PRESENCE_NO_TASK_ID = "no-task-id"
+REFL_PRESENCE_ABSENT = "deposit-absent"
+REFL_PRESENCE_EMPTY = "deposit-empty"
+REFL_PRESENCE_PRESENT = "deposit-present"
+REFL_PRESENCE_READ_ERROR = "read-error"
+
+
+def _read_reflection_sources(task_id: str) -> tuple[str, str]:
     """Read the planning-time reflection-bucket deposit for `task_id` (issue #1136).
 
     The code-writing dispatch (hydra-dev / hydra-target-build) is the ONLY actor
@@ -168,17 +196,27 @@ def _read_reflection_sources(task_id: str) -> str:
     Best-effort and fully non-fatal: a missing file (the common case — most
     dispatches serve no reflections), an empty file, or any read error all
     yield "" so the cycle truthfully buckets to 'none'. Never blocks the reap.
+
+    Issue #2020: returns `(sources, presence)`. `sources` is the bucket string
+    (unchanged contract — empty on miss, so the cycle-record POST body shape and
+    its truthful-'none' behaviour are preserved). `presence` is one of the
+    `REFL_PRESENCE_*` diagnostic tokens above so the caller can log an
+    honest-none-vs-false-none signal WITHOUT changing what is forwarded to
+    cycle-record.
     """
     if not task_id:
-        return ""
+        return "", REFL_PRESENCE_NO_TASK_ID
     try:
         path = REFL_SOURCES_DIR / f"hydra-refl-sources-{task_id}"
         if not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8").strip()
+            return "", REFL_PRESENCE_ABSENT
+        sources = path.read_text(encoding="utf-8").strip()
+        if not sources:
+            return "", REFL_PRESENCE_EMPTY
+        return sources, REFL_PRESENCE_PRESENT
     except OSError as exc:
         _append_log(f"refl_sources_read_skipped task_id={task_id} err={exc}")
-        return ""
+        return "", REFL_PRESENCE_READ_ERROR
 
 
 def _slot_started_epoch(slot: dict | None) -> int | None:
@@ -719,10 +757,25 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
 
     _save_state(s)
 
+    # Issue #1136 (Slice 2 of #1119): forward the planning-time reflection
+    # buckets the dispatch deposited for this task_id so the cycle metric
+    # records what was actually injected (instead of always 'none'). Missing
+    # deposit (the common case) → "" → field omitted downstream.
+    #
+    # Issue #2020: read it BEFORE the slot_complete log line so the deposit
+    # PRESENCE diagnostic can be stamped into that line. `reflection_presence`
+    # distinguishes an honest 'none' (deposit-absent / deposit-empty — the
+    # dispatch served nothing, so it correctly wrote nothing) from a false
+    # 'none' (read-error — a deposit existed but could not be read). The
+    # forwarded `reflection_sources` string is unchanged, so the cycle-record
+    # POST body and its truthful-'none' behaviour are untouched.
+    reflection_sources, reflection_presence = _read_reflection_sources(task_id)
+
     line = (
         f"slot_complete class={cls} skill={skill or '?'} task_id={task_id} "
         f"tokens={total_tokens} cumulative={s['cumulative_tokens']} "
-        f"duration_ms={duration_ms} task_title={anchor_ref or ''}"
+        f"duration_ms={duration_ms} task_title={anchor_ref or ''} "
+        f"refl_sources={reflection_sources or ''} refl_presence={reflection_presence}"
     )
     print(f"[autopilot] {line}")
     _append_log(line)
@@ -735,11 +788,6 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # we tag the cycle as "failed" so the cycles-failed counter ticks.
     soft_cap_hit = soft is not None and total_tokens >= soft
     status = "failed" if soft_cap_hit else "completed"
-    # Issue #1136 (Slice 2 of #1119): forward the planning-time reflection
-    # buckets the dispatch deposited for this task_id so the cycle metric
-    # records what was actually injected (instead of always 'none'). Missing
-    # deposit (the common case) → "" → field omitted downstream.
-    reflection_sources = _read_reflection_sources(task_id)
     # Issue #2012: forward the anchor reference recovered from the slot (e.g.
     # "issue-2012") as the cycle's task_title + anchor_ref. Before this, reap
     # hardcoded both to "" on every merge, so successful named-issue cycles
