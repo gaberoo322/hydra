@@ -51,7 +51,12 @@ import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEA
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
 // all live behind this seam. The handler keeps only I/O + wire projection.
-import { parseProbes, assessHealth, projectHealthDeepResponse, parseRedisInfoSnapshot, type ProbeInputs } from "../health-diagnostics.ts";
+// Issue #2039: the wire projection (projectHealthDeepResponse) split out to the
+// sibling src/health-wire.ts (the data-OUT leg) so the data-IN parse pipeline
+// is testable in isolation; parseProbes/assessHealth/parseRedisInfoSnapshot
+// stay on the parse seam.
+import { parseProbes, assessHealth, parseRedisInfoSnapshot, type ProbeInputs } from "../health-diagnostics.ts";
+import { projectHealthDeepResponse } from "../health-wire.ts";
 import { assessSkillCatalog } from "../health-skill-catalog.ts";
 // Issue #1968: the in-process OV skill-catalog state, so /api/health/skills can
 // surface the silent empty-catalog failure (startup skill registration losing
@@ -381,8 +386,9 @@ export function createHealthRouter(eventBus: PingableBus) {
 
     // Issue #1513: the wire-projection half (the former inline res.json block)
     // is now the pure, unit-tested projectHealthDeepResponse in
-    // src/health-diagnostics.ts — the third leg of the Snapshot pipeline
-    // alongside parseProbes/assessHealth (#840). The handler owns only the
+    // src/health-wire.ts (issue #2039: split out of health-diagnostics.ts as the
+    // data-OUT leg) — the third leg of the Snapshot pipeline alongside
+    // parseProbes/assessHealth (#840). The handler owns only the
     // Promise.allSettled fan-out (I/O) and the activeCycle derivation; settled
     // is passed through for indices 17/18 (ovSearchTrend/knowledgeContext),
     // which parseProbes does not consume.

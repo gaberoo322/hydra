@@ -9,8 +9,9 @@
 // Why a separate file (issue #1992): the skill-catalog health concern is the
 // health of the Knowledge Base's in-process skill registration state — a
 // structural view of `registerSkills`'s outcome, NOT a probe-marshalling input.
-// `health-diagnostics.ts` is the `parseProbes` → `assessHealth` →
-// `projectHealthDeepResponse` pipeline seam, deliberately import-free / no-I/O
+// `health-diagnostics.ts` is the `parseProbes` → `assessHealth` parse-pipeline
+// seam (the data-OUT `projectHealthDeepResponse` leg split to health-wire.ts in
+// #2039), deliberately import-free / no-I/O
 // (#840). Its two callers for THIS concern (`health-rules.ts` and
 // `api/health.ts`) now import from the module named after the concern rather
 // than navigating the ~700-line pipeline module to find it.
