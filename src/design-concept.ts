@@ -55,7 +55,6 @@ import {
   type DesignConcept,
   type DesignConceptScope,
   type DesignConceptHandle,
-  type GreenLightMetrics,
   type ModuleTouched,
   type RejectedAlternative,
   type QaTurn,
@@ -94,8 +93,6 @@ export type { DesignConceptInput } from "./schemas/design-concept.ts";
 export type {
   DesignConcept,
   DesignConceptScope,
-  DesignConceptHandle,
-  GreenLightMetrics,
 };
 export {
   computeArtifactHash,
@@ -406,7 +403,9 @@ export async function approveDesignConcept(
   return { ...existing, status: "approved", approvedBy };
 }
 
-/* The green-light criterion (`computeGreenLight` + `GreenLightMetrics` +
+/* The green-light criterion (`computeGreenLight` +
  * `GREEN_LIGHT_WINDOW_DAYS`/`GREEN_LIGHT_REQUIRED_DAYS`) moved to
  * `./design-concept-identity.ts` (issue #2033) — it is pure (no Redis IO) and
- * is imported + re-exported above for back-compat. */
+ * is imported + re-exported above for back-compat. The `GreenLightMetrics`
+ * type lives at its domain home and is imported directly from there by callers
+ * that need it (issue #2052 dropped the unused barrel re-export). */
