@@ -1,7 +1,7 @@
 /**
  * Log-tail helper for the autopilot data plane.
  *
- * Extracted from src/api/autopilot.ts so the route layer can be a thin
+ * Extracted from src/api/autopilot-log.ts so the route layer can be a thin
  * adapter. The route handler now reduces to: validate inputs → call
  * `readLogTail()` → write the HTTP response.
  *

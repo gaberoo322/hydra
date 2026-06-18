@@ -141,8 +141,8 @@ describe("autopilot logs API (issue #499, slice 3)", () => {
     process.env.HYDRA_AUTOPILOT_JOURNAL_CMD = journalShimPath;
     process.env.HYDRA_AUTOPILOT_JOURNAL_UNIT = "hydra-autopilot.service";
 
-    const mod = await import("../src/api/autopilot.ts");
-    createAutopilotRouter = mod.createAutopilotRouter;
+    const mod = await import("../src/api/autopilot-log.ts");
+    createAutopilotRouter = mod.createAutopilotLogRouter;
     helpers = mod;
     const router = createAutopilotRouter();
     logHandler = findHandler(router, "GET", "/autopilot/runs/:runId/log");

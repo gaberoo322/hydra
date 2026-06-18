@@ -10,7 +10,7 @@
  * outcome instability, suspected CI compromise) — never a steady-state mode.
  *
  * Operator-only by construction: the SOLE write path is the API route in
- * `src/api/autopilot.ts` (`set`/`clear` below). `decide.py` and
+ * `src/api/autopilot-control.ts` (`set`/`clear` below). `decide.py` and
  * `collect-state.sh` only READ the flag; there is no engage/disengage action
  * type in `VALID_ACTION_TYPES`, so the autopilot has no code path that can
  * SET or CLEAR it. The guarantee is structural, not a runtime check.

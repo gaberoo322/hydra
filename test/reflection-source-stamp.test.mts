@@ -108,8 +108,8 @@ describe("reflectionMatchSource telemetry stamp (issue #1136)", () => {
       getMetricsTrend = trend.getMetricsTrend;
     }
     if (!createAutopilotRouter) {
-      const mod = await import("../src/api/autopilot.ts");
-      createAutopilotRouter = mod.createAutopilotRouter;
+      const mod = await import("../src/api/autopilot-lifecycle.ts");
+      createAutopilotRouter = mod.createAutopilotLifecycleRouter;
     }
     const router = createAutopilotRouter();
     handler = findHandler(router, "POST", "/autopilot/cycle-record");

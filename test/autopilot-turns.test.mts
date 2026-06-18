@@ -88,8 +88,21 @@ describe("autopilot turn API (issue #498, slice 2)", () => {
     }
     await cleanKeys();
     if (!createAutopilotRouter) {
-      const mod = await import("../src/api/autopilot.ts");
-      createAutopilotRouter = mod.createAutopilotRouter;
+      // #2034: the run/turn lifecycle WRITES (run-start, turn) live in
+      // autopilot-lifecycle.ts; the runs/current READ projection lives in
+      // autopilot-runs.ts. This suite exercises both, so it concatenates the
+      // two sub-routers' route layers into one flat router (findHandler walks
+      // the top-level stack only, not nested `.use()` mounts).
+      const [lifecycle, runs] = await Promise.all([
+        import("../src/api/autopilot-lifecycle.ts"),
+        import("../src/api/autopilot-runs.ts"),
+      ]);
+      createAutopilotRouter = () => {
+        const lifecycleRouter = lifecycle.createAutopilotLifecycleRouter();
+        const runsRouter = runs.createAutopilotRunsRouter();
+        lifecycleRouter.stack.push(...runsRouter.stack);
+        return lifecycleRouter;
+      };
     }
     const router = createAutopilotRouter();
     runStart = findHandler(router, "POST", "/autopilot/run-start");

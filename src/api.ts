@@ -28,7 +28,10 @@ import { createCapacityRouter } from "./api/capacity.ts";
 import { createObservabilityRouter } from "./api/observability.ts";
 import { createLearningRouter } from "./api/learning.ts";
 import { createAnchorRouter } from "./api/anchor.ts";
-import { createAutopilotRouter } from "./api/autopilot.ts";
+import { createAutopilotLifecycleRouter } from "./api/autopilot-lifecycle.ts";
+import { createAutopilotRunsRouter } from "./api/autopilot-runs.ts";
+import { createAutopilotLogRouter } from "./api/autopilot-log.ts";
+import { createAutopilotControlRouter } from "./api/autopilot-control.ts";
 import { createAgentsRouter } from "./api/agents.ts";
 import { createScoutRouter } from "./api/scout.ts";
 import { createUsageRouter } from "./api/usage.ts";
@@ -96,7 +99,14 @@ function createApi(eventBus: EventBus) {
   api.use(createObservabilityRouter());
   api.use(createLearningRouter());
   api.use(createAnchorRouter());
-  api.use(createAutopilotRouter(eventBus));
+  // Autopilot HTTP surface — split by domain concern (#2034) into four focused
+  // sub-routers, each a thin adapter over its own domain Module: lifecycle
+  // WRITES (run/turn/cycle), run-projection READS, log/journal serving, and
+  // operator control flags. The HTTP URL surface is unchanged.
+  api.use(createAutopilotLifecycleRouter());
+  api.use(createAutopilotRunsRouter());
+  api.use(createAutopilotLogRouter());
+  api.use(createAutopilotControlRouter(eventBus));
   api.use(createAgentsRouter());
   api.use(createScoutRouter());
   api.use(createUsageRouter());

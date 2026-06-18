@@ -67,7 +67,7 @@ describe("journal-seam-check: journalctl spawn grammar", () => {
   test("does NOT flag a file that routes through the journal accessor", () => {
     assert.equal(
       fileViolatesJournalSeam(
-        "src/api/autopilot.ts",
+        "src/api/autopilot-log.ts",
         `import { readJournalSlice } from "../journal/read.ts";`,
       ),
       false,
