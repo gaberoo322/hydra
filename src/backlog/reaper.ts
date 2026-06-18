@@ -16,12 +16,21 @@ import {
   setClaimsReapedLast,
 } from "../redis/backlog.ts";
 import { pushAlert } from "../redis/alerts.ts";
-import { getTargetGithubRepo } from "../target-config.ts";
-import { ghJson } from "../github/gh.ts";
-import { isGhFailure } from "../github/exec.ts";
 import {
   applyLaneTransition, getItem, saveItem, getLaneItems,
 } from "./internal.ts";
+import {
+  type MergedRef,
+  fetchOpenTargetPrRefs,
+  fetchMergedTargetPrRefs,
+  itemMatchesOpenPr,
+} from "./target-pr-feed.ts";
+
+// Re-exported for back-compat: `test/backlog.test.mts` and the reconciler reach
+// the matcher through `reaper.ts`. Its canonical home is now `target-pr-feed.ts`
+// (issue #2084); this static re-export keeps existing import sites green and
+// statically traceable for knip/dead-code.
+export { itemMatchesOpenPr };
 
 const CLAIM_MAX_AGE_MS_DEFAULT = 2 * 60 * 60 * 1000;
 const CLAIM_REAP_ESCALATE_AFTER = parseInt(process.env.HYDRA_CLAIM_REAP_ESCALATE_AFTER) || 3;
@@ -67,108 +76,6 @@ export async function getStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<
 }
 
 /**
- * Fetch the set of open PRs in the target repo and return their title+body
- * blobs. Used by reapStaleClaims to skip reaping items whose implementing PR
- * is already open (issue #490).
- *
- * Returns `null` on any failure (gh missing, network down, JSON malformed) so
- * the caller treats it as "no information" rather than "no open PRs". The
- * reaper falls back to time-only behaviour in that case — better to over-reap
- * once than wedge a WIP slot because gh is unavailable.
- */
-async function fetchOpenTargetPrBlobs(): Promise<string[] | null> {
-  const repo = getTargetGithubRepo();
-  // Routes through the GitHub CLI Adapter seam (issue #899). The seam never
-  // throws and owns the JSON parse + the four error modes; any failure arm
-  // (gh missing, network down, malformed/empty JSON) returns null so the caller
-  // treats it as "no information" and falls back to time-only reaping —
-  // preserving the pre-seam contract.
-  const result = await ghJson<unknown>(
-    [
-      "pr", "list",
-      "--repo", repo,
-      "--state", "open",
-      "--limit", "100",
-      "--json", "title,body,number",
-    ],
-    { timeout: 10000 },
-  );
-  if (isGhFailure(result)) {
-    console.error(
-      `[Backlog] fetchOpenTargetPrBlobs failed for ${repo} (${result.code}): ${result.stderr.slice(0, 200)}`,
-    );
-    return null;
-  }
-  const prs = result.data;
-  if (!Array.isArray(prs)) return null;
-  return prs.map((pr: any) => `${pr.title ?? ""}\n${pr.body ?? ""}`);
-}
-
-/**
- * Fetch the set of recently MERGED PRs in the target repo and return their
- * title+body blobs. Used by reapStaleClaims to detect items whose implementing
- * PR already merged but whose claimant died before moving the item to done
- * (issue #1714 — the item-490 phantom-requeue incident, 2026-06-10).
- *
- * Same fail-open contract as fetchOpenTargetPrBlobs: returns `null` on any
- * failure so the caller treats it as "no information" and falls back to
- * time-only reaping rather than wedging a slot.
- */
-async function fetchMergedTargetPrBlobs(): Promise<string[] | null> {
-  const repo = getTargetGithubRepo();
-  // Routes through the GitHub CLI Adapter seam (issue #899) — see
-  // fetchOpenTargetPrBlobs above for the error-mode contract.
-  const result = await ghJson<unknown>(
-    [
-      "pr", "list",
-      "--repo", repo,
-      "--state", "merged",
-      "--limit", "50",
-      "--json", "title,body,number",
-    ],
-    { timeout: 10000 },
-  );
-  if (isGhFailure(result)) {
-    console.error(
-      `[Backlog] fetchMergedTargetPrBlobs failed for ${repo} (${result.code}): ${result.stderr.slice(0, 200)}`,
-    );
-    return null;
-  }
-  const prs = result.data;
-  if (!Array.isArray(prs)) return null;
-  return prs.map((pr: any) => `${pr.title ?? ""}\n${pr.body ?? ""}`);
-}
-
-/**
- * Decide whether an in-progress backlog item is already covered by a PR
- * in the target repo (the same matcher serves both the open-PR guard, #490,
- * and the merged-PR guard, #1714 — only the blob feed differs). Match is on
- * the item ID as a whole word — this is the
- * convention autopilot subagents use when opening PRs (e.g. PR title
- * "feat(scanner): item-302 add run history page" or body line "closes
- * item-302"). Falls back to substring title match for the rare case where the
- * subagent embedded the item title verbatim.
- *
- * Exported so tests can exercise the matcher without invoking `gh` — the
- * open-PR-guard regression suite imports it directly (statically) rather than
- * reaching it through the dynamic-import `admin` namespace, so the export stays
- * statically traceable.
- */
-export function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs: string[]): boolean {
-  if (!Array.isArray(prBlobs) || prBlobs.length === 0) return false;
-  const id = String(item.id || "");
-  if (!id) return false;
-  // Whole-word match for the item ID. `item-302` should not match `item-3020`.
-  const idPattern = new RegExp(`(?:^|[^A-Za-z0-9_-])${id.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}(?:[^A-Za-z0-9_-]|$)`);
-  const title = (item.title || "").trim();
-  for (const blob of prBlobs) {
-    if (idPattern.test(blob)) return true;
-    if (title.length >= 12 && blob.includes(title)) return true;
-  }
-  return false;
-}
-
-/**
  * Reap stale claims: move inProgress items whose `claimedAt` is older than
  * `maxAgeMs` back to `queued` (or to `blocked` if they've been reaped
  * `CLAIM_REAP_ESCALATE_AFTER` times — likely a crash-loop, operator needs to
@@ -183,7 +90,7 @@ export function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs:
  * which cost 76k tokens in a duplicate dev_target dispatch on 2026-05-17. The
  * check is best-effort: a `gh` outage falls back to time-only reaping
  * (over-reap once rather than wedge a slot). Tests inject the PR feed via
- * `opts.fetchOpenPrBlobs` so they don't shell out.
+ * `opts.fetchOpenPrRefs` so they don't shell out.
  *
  * **Merged-PR guard (issue #1714).** After the open-PR check, a stale item
  * whose ID (or exact title) appears in a recently MERGED target PR is moved
@@ -194,7 +101,13 @@ export function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs:
  * checks: open-PR skip first (work in flight), then merged-PR → done, then
  * default re-queue. Same fail-open posture: a `gh` outage on the merged
  * fetch falls back to time-only reaping. Tests inject via
- * `opts.fetchMergedPrBlobs`.
+ * `opts.fetchMergedPrRefs`.
+ *
+ * Both feeds now share the `MergedRef` shape and one injection contract with
+ * the reconciler (issue #2084): the feeds live in `target-pr-feed.ts` and the
+ * matcher reads each ref's `.blob`. The reaper does not use the `.ref` audit
+ * handle — it only needs the searchable text — but unifying on `MergedRef`
+ * collapses the two historical feed contracts into one.
  *
  * Returns `{ reaped, reapedToDone, skippedOpenPr }`. `skippedOpenPr` lists
  * items the open-PR guard preserved and `reapedToDone` lists items the
@@ -205,8 +118,8 @@ export function itemMatchesOpenPr(item: { id: string; title?: string }, prBlobs:
  */
 export async function reapStaleClaims(opts: {
   maxAgeMs?: number;
-  fetchOpenPrBlobs?: () => Promise<string[] | null>;
-  fetchMergedPrBlobs?: () => Promise<string[] | null>;
+  fetchOpenPrRefs?: () => Promise<MergedRef[] | null>;
+  fetchMergedPrRefs?: () => Promise<MergedRef[] | null>;
 } = {}): Promise<{
   reaped: Array<{ id: string; title: string; ageMs: number; escalated: boolean }>;
   reapedToDone: Array<{ id: string; title: string; ageMs: number }>;
@@ -220,10 +133,14 @@ export async function reapStaleClaims(opts: {
   const reapedToDone: Array<{ id: string; title: string; ageMs: number }> = [];
   const skippedOpenPr: Array<{ id: string; title: string; ageMs: number }> = [];
 
-  const prFetcher = opts.fetchOpenPrBlobs ?? fetchOpenTargetPrBlobs;
-  const prBlobs = await prFetcher();
-  const mergedFetcher = opts.fetchMergedPrBlobs ?? fetchMergedTargetPrBlobs;
-  const mergedPrBlobs = await mergedFetcher();
+  const prFetcher = opts.fetchOpenPrRefs ?? fetchOpenTargetPrRefs;
+  const openPrRefs = await prFetcher();
+  const mergedFetcher = opts.fetchMergedPrRefs ?? fetchMergedTargetPrRefs;
+  const mergedPrRefs = await mergedFetcher();
+  // The matcher reads searchable text; map each ref to its `.blob`. `null`
+  // (feed unavailable) stays `null` so the fail-open guards below skip the check.
+  const prBlobs = openPrRefs?.map((r) => r.blob) ?? null;
+  const mergedPrBlobs = mergedPrRefs?.map((r) => r.blob) ?? null;
 
   for (const id of ids) {
     const item = await getItem(id);

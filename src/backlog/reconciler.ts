@@ -55,21 +55,18 @@ import {
   addToBacklogLane, removeFromBacklogLane, getBacklogLaneIds,
 } from "../redis/backlog.ts";
 import { pushAlert } from "../redis/alerts.ts";
-import { getTargetGithubRepo } from "../target-config.ts";
-import { ghJson } from "../github/gh.ts";
-import { isGhFailure } from "../github/exec.ts";
 import { applyLaneTransition, getItem, saveItem } from "./internal.ts";
-import { itemMatchesOpenPr } from "./reaper.ts";
+import {
+  type MergedRef,
+  fetchMergedTargetPrRefs,
+  fetchTargetMergeCommitRefs,
+  itemMatchesOpenPr,
+} from "./target-pr-feed.ts";
 
-/**
- * One merged artifact the reconciler can attribute a closure to: `ref` is the
- * audit handle stamped into `meta.reconciledFrom` (`pr-109` /
- * `commit-f61e9ed`), `blob` is the text searched for item references.
- */
-export interface MergedRef {
-  ref: string;
-  blob: string;
-}
+// `MergedRef` moved to `target-pr-feed.ts` (issue #2084); re-export it for
+// back-compat so unrelated import sites that referenced `reconciler.MergedRef`
+// do not churn.
+export type { MergedRef };
 
 /**
  * Lanes the reconciler sweeps. `blocked` is deliberately EXCLUDED (design-concept
@@ -79,9 +76,6 @@ export interface MergedRef {
  * items instead. `done` is excluded for idempotency.
  */
 const RECONCILE_LANES = ["inProgress", "queued", "backlog"] as const;
-
-const MERGED_PR_LIMIT = 50;
-const MERGE_COMMIT_LIMIT = 50;
 
 /**
  * Stale-claim escalation tunables (issue #2031).
@@ -103,72 +97,6 @@ const RETIRED_CLAIMANTS: string[] = (process.env.HYDRA_RETIRED_CLAIMANTS ?? "cod
   .split(",")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
-
-/**
- * Fetch recently MERGED PRs in the target repo as attributable refs.
- *
- * Returns `null` on any failure (gh missing, network down, malformed JSON) so
- * the caller treats it as "no information" — never "nothing merged". Routes
- * through the GitHub CLI Adapter seam (issue #899), which owns the JSON parse
- * and the error modes.
- */
-async function fetchMergedTargetPrRefs(): Promise<MergedRef[] | null> {
-  const repo = getTargetGithubRepo();
-  const result = await ghJson<unknown>(
-    [
-      "pr", "list",
-      "--repo", repo,
-      "--state", "merged",
-      "--limit", String(MERGED_PR_LIMIT),
-      "--json", "title,body,number",
-    ],
-    { timeout: 10000 },
-  );
-  if (isGhFailure(result)) {
-    console.error(
-      `[Backlog] fetchMergedTargetPrRefs failed for ${repo} (${result.code}): ${result.stderr.slice(0, 200)}`,
-    );
-    return null;
-  }
-  const prs = result.data;
-  if (!Array.isArray(prs)) return null;
-  return prs
-    .filter((pr: any) => pr && pr.number != null)
-    .map((pr: any) => ({
-      ref: `pr-${pr.number}`,
-      blob: `${pr.title ?? ""}\n${pr.body ?? ""}`,
-    }));
-}
-
-/**
- * Fetch recent commits on the target repo's default branch as attributable
- * refs — catches cycle merges that land without a PR (e.g. commit subject
- * "merge: claude cycle — ... (item-485)").
- *
- * Same fail-open contract as fetchMergedTargetPrRefs: `null` means "no
- * information", never "no commits".
- */
-async function fetchTargetMergeCommitRefs(): Promise<MergedRef[] | null> {
-  const repo = getTargetGithubRepo();
-  const result = await ghJson<unknown>(
-    ["api", `repos/${repo}/commits?per_page=${MERGE_COMMIT_LIMIT}`],
-    { timeout: 10000 },
-  );
-  if (isGhFailure(result)) {
-    console.error(
-      `[Backlog] fetchTargetMergeCommitRefs failed for ${repo} (${result.code}): ${result.stderr.slice(0, 200)}`,
-    );
-    return null;
-  }
-  const commits = result.data;
-  if (!Array.isArray(commits)) return null;
-  return commits
-    .filter((c: any) => c && typeof c.sha === "string" && c.sha.length > 0)
-    .map((c: any) => ({
-      ref: `commit-${c.sha.slice(0, 7)}`,
-      blob: String(c.commit?.message ?? ""),
-    }));
-}
 
 /**
  * Best-effort age (ms) of an item, oldest-known timestamp first. Reads the same

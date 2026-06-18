@@ -105,7 +105,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     await backdateClaim(staleId, 3 * 60 * 60 * 1000);
 
     // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrRefs: async () => null, fetchMergedPrRefs: async () => null });
 
     assert.equal(result.reaped.length, 1, "exactly one item reaped");
     assert.equal(result.reaped[0].id, staleId);
@@ -139,7 +139,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     await backdateClaim(id, 30 * 60 * 1000);
 
     // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrRefs: async () => null, fetchMergedPrRefs: async () => null });
     assert.equal(result.reaped.length, 0);
 
     const counts = await admin.getBacklogCounts();
@@ -157,7 +157,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     const lifetimeBefore = await redis.get("hydra:metrics:claims-reaped");
     assert.equal(lifetimeBefore, null, "metric should start unset");
 
-    await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
+    await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrRefs: async () => null, fetchMergedPrRefs: async () => null });
 
     const lifetimeAfter = await redis.get("hydra:metrics:claims-reaped");
     assert.equal(parseInt(lifetimeAfter, 10), 1, "lifetime counter incremented by 1");
@@ -196,7 +196,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     await backdateClaim(id, 3 * 60 * 60 * 1000);
 
     // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrRefs: async () => null, fetchMergedPrRefs: async () => null });
     assert.equal(result.reaped.length, 1);
     assert.equal(result.reaped[0].escalated, true);
 
@@ -239,7 +239,7 @@ describe("backlog stale-claim reaper (issue #374)", () => {
   test("reapStaleClaims is safe to call when inProgress is empty", async (t) => {
     requireRedis(t);
     // Inject a null PR fetcher so tests don't shell out to `gh` (issue #490).
-    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrBlobs: async () => null, fetchMergedPrBlobs: async () => null });
+    const result = await admin.reapStaleClaims({ maxAgeMs: 2 * 60 * 60 * 1000, fetchOpenPrRefs: async () => null, fetchMergedPrRefs: async () => null });
     assert.deepEqual(result.reaped, []);
   });
 
@@ -257,9 +257,9 @@ describe("backlog stale-claim reaper (issue #374)", () => {
 
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs: async () => [],
-      fetchMergedPrBlobs: async () => [
-        `cleanup(target): demote stuff\ncloses ${id} — verified complete`,
+      fetchOpenPrRefs: async () => [],
+      fetchMergedPrRefs: async () => [
+        { ref: "pr-1", blob: `cleanup(target): demote stuff\ncloses ${id} — verified complete` },
       ],
     });
 
@@ -314,8 +314,8 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     // open-skip first, then merged → done, then re-queue.
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs: async () => [`fix: ${id} follow-up`],
-      fetchMergedPrBlobs: async () => [`feat: ${id} first pass`],
+      fetchOpenPrRefs: async () => [{ ref: "pr-2", blob: `fix: ${id} follow-up` }],
+      fetchMergedPrRefs: async () => [{ ref: "pr-3", blob: `feat: ${id} first pass` }],
     });
 
     assert.equal(result.reaped.length, 0);
@@ -336,8 +336,8 @@ describe("backlog stale-claim reaper (issue #374)", () => {
 
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs: async () => null,
-      fetchMergedPrBlobs: async () => null,
+      fetchOpenPrRefs: async () => null,
+      fetchMergedPrRefs: async () => null,
     });
 
     assert.equal(result.reapedToDone.length, 0);
@@ -358,9 +358,9 @@ describe("backlog stale-claim reaper (issue #374)", () => {
 
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs: async () => [],
+      fetchOpenPrRefs: async () => [],
       // item-3020 must not whole-word-match e.g. item-302 (and vice versa).
-      fetchMergedPrBlobs: async () => [`feat: ${id}0 something else entirely`],
+      fetchMergedPrRefs: async () => [{ ref: "pr-4", blob: `feat: ${id}0 something else entirely` }],
     });
 
     assert.equal(result.reapedToDone.length, 0);
