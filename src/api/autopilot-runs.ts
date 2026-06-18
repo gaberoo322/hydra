@@ -25,19 +25,10 @@ import {
   summarizeTerminationHealth,
   readInflightSlotSeed,
 } from "../autopilot/runs.ts";
-// Read projection — owned by `run-projections.ts` after the #1183 split.
-import { fetchTurnsWithJoins } from "../autopilot/run-projections.ts";
 import { assembleRetroBundle } from "../autopilot/retro-bundle.ts";
 import { RetroBundleParamsSchema, RecentRetrosQuerySchema } from "../schemas/retro.ts";
 import { listRecentRetroArtifacts } from "../redis/retro-artifacts.ts";
 import { aggregatorRoute } from "./route-helpers.ts";
-
-/**
- * Re-exported for `src/api/agents.ts`, which consumes `fetchTurnsWithJoins`
- * to attach turn detail to agent runs. New code should import from
- * `src/autopilot/run-projections.ts` directly.
- */
-export { fetchTurnsWithJoins };
 
 /**
  * Query schema for `GET /autopilot/runs?limit=N` (ADR-0022). Coerces the wire
