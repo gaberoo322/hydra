@@ -573,14 +573,10 @@ function envDailyCap(): number {
 // policy, the prompt schema, the material-change gate, and the cost-gate
 // accounting (HYDRA_RECS_DAILY_CAP_USD) — with NO Redis-stream imports.
 //
-// Back-compat re-export (mirroring the #1986 materiality re-export above):
-// existing import paths keep resolving these three symbols from the engine.
+// `recsEngineConsumer` / `parseTurnEndStreamEvent` / `startRecommendationConsumer`
+// are imported directly from `./recommendation-consumer.ts` at every call site
+// (src/index.ts, src/notification-consumer.ts, the consumer's own test), so the
+// back-compat re-export they once had here is dead and was removed (issue #2048).
 // `defaultLlmClient` is exported above so the consumer can wire it into the
 // engine it constructs.
 // ---------------------------------------------------------------------------
-
-export {
-  recsEngineConsumer,
-  parseTurnEndStreamEvent,
-  startRecommendationConsumer,
-} from "./recommendation-consumer.ts";
