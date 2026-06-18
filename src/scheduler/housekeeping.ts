@@ -16,19 +16,32 @@
  * contradicted by chore code sharing the same file.
  *
  * The set is the six chores moved off the 5-minute tick in #723, plus the
- * forecast-calibration-brier producer added in #1657:
+ * forecast-calibration-brier producer added in #1657, plus the two cleanup
+ * chores folded out of cleanup.ts (#1876) and the lane-index reconciler (#2056):
  *   - blocked-item re-escalation (+ its operator unblock-command builder),
  *   - the `/hydra-review` pickup-set edge-triggered phone-notify,
  *   - done-lane pruning,
  *   - the weekly Telegram digest,
  *   - daily memory consolidation,
  *   - the daily design-concept snapshot,
- *   - the forecast-calibration-brier leading-outcome producer (#1657).
+ *   - work-queue hygiene,
+ *   - the merge→done reconciler,
+ *   - the forecast-calibration-brier leading-outcome producer (#1657),
+ *   - the stale-Redis-key sweep + stale-inProgress return (#1876),
+ *   - the lane-index reconciler (#2056).
  *
  * Each chore carries its own Redis time-guard (per-item / daily / weekly), so
  * an hourly invocation is idempotent — a chore whose window has not elapsed is
  * skipped. The Module's Interface is the `{ ran, skipped }` summary: a single
  * Seam reporting which chores did work this invocation.
+ *
+ * Issue #2067: each chore is now a *named exported function* accepting only its
+ * own deps subset (the external touchpoints it reaches — Redis accessors,
+ * sibling modules, the event bus), each defaulting to the real implementation.
+ * `runHousekeeping` stays the composition owner: it sequences the chores in the
+ * same order, applies the same Redis time-guards, and reports `{ ran, skipped }`
+ * — behaviour-neutral. Testing one chore no longer requires constructing a deps
+ * object for all of them; a unit test stubs only that chore's deps.
  */
 
 import * as Sentry from "@sentry/node";
@@ -64,6 +77,7 @@ import {
   getBacklogItem,
   moveBacklogItem,
 } from "../redis/backlog.ts";
+import type { PublishableBus } from "../api/event-bus-types.ts";
 
 // Generate actionable unblock commands based on the blocked reason.
 function generateUnblockCommands(blockedReason: string, title: string): string[] {
@@ -81,17 +95,44 @@ function generateUnblockCommands(blockedReason: string, title: string): string[]
   return commands;
 }
 
-// Check for blocked items that need re-escalation (every 12h per item).
+// ---------------------------------------------------------------------------
+// Blocked-item re-escalation (every 12h per item)
+// ---------------------------------------------------------------------------
+
 const BLOCKED_REESCALATE_MS = 12 * 60 * 60 * 1000;
 
-async function checkBlockedEscalation(eventBus) {
+/**
+ * External touchpoints of the blocked-escalation chore. Each defaults to the
+ * real implementation, so callers (incl. `runHousekeeping`) need only pass the
+ * `eventBus`; a unit test stubs just these to exercise the chore in isolation.
+ */
+export interface BlockedItemEscalationDeps {
+  loadBacklog?: typeof loadBacklog;
+  getLastEscalation?: typeof getBlockedLastEscalation;
+  setLastEscalation?: typeof setBlockedLastEscalation;
+  now?: () => number;
+}
+
+/**
+ * Check for blocked items that need re-escalation. The per-item 12h guard lives
+ * inside this body (`BLOCKED_REESCALATE_MS`), so it is safe to call hourly:
+ * it iterates the blocked lane and applies its own per-item guard internally.
+ */
+export async function runBlockedItemEscalation(
+  eventBus: PublishableBus,
+  deps: BlockedItemEscalationDeps = {},
+): Promise<void> {
+  const loadBacklogFn = deps.loadBacklog ?? loadBacklog;
+  const getLastEscalation = deps.getLastEscalation ?? getBlockedLastEscalation;
+  const setLastEscalation = deps.setLastEscalation ?? setBlockedLastEscalation;
+  const nowFn = deps.now ?? Date.now;
   try {
-    const lanes = await loadBacklog();
+    const lanes = await loadBacklogFn();
     // AC5 (issue #140): freeze snapshot so iteration doesn't see mutations
     const blocked = [...(lanes.blocked || [])];
     if (blocked.length === 0) return;
 
-    const now = Date.now();
+    const now = nowFn();
 
     for (const item of blocked) {
       const blockedAt = item.meta?.blockedAt ? new Date(item.meta.blockedAt).getTime() : 0;
@@ -99,10 +140,10 @@ async function checkBlockedEscalation(eventBus) {
       const age = now - blockedAt;
       if (age < BLOCKED_REESCALATE_MS) continue;
 
-      const lastEsc = await getBlockedLastEscalation(item.id);
+      const lastEsc = await getLastEscalation(item.id);
       if (lastEsc && now - parseInt(lastEsc) < BLOCKED_REESCALATE_MS) continue;
 
-      await setBlockedLastEscalation(item.id, now.toString());
+      await setLastEscalation(item.id, now.toString());
       const ageDays = Math.round(age / (24 * 60 * 60 * 1000));
 
       const { STREAMS } = await import("../event-bus.ts");
@@ -143,23 +184,27 @@ async function checkBlockedEscalation(eventBus) {
 // next tick re-evaluates. Better a missed alert than a spurious one.
 
 /**
+ * External touchpoints of the review-pickup-notify chore. `deps` is injectable
+ * so the test suite can stub the pickup-set fetch and the armed-state accessors
+ * without a live Redis / `gh`.
+ */
+export interface ReviewPickupNotifyDeps {
+  getPickupSet?: typeof getReviewPickupSet;
+  getNotified?: typeof getReviewPickupNotified;
+  setNotified?: typeof setReviewPickupNotified;
+  clearNotified?: typeof clearReviewPickupNotified;
+}
+
+/**
  * Sample the pickup set and fire/suppress the edge-triggered notification.
  *
  * Returns a small summary `{ fired, count, transitioned }` so the housekeeping
  * caller and tests can see what happened. `transitioned` is true on either
  * edge (empty->non-empty fires; non-empty->empty re-arms).
- *
- * `deps` is injectable so the test suite can stub the pickup-set fetch and the
- * armed-state accessors without a live Redis / `gh`.
  */
-async function checkReviewPickupNotify(
-  eventBus,
-  deps: {
-    getPickupSet?: typeof getReviewPickupSet;
-    getNotified?: typeof getReviewPickupNotified;
-    setNotified?: typeof setReviewPickupNotified;
-    clearNotified?: typeof clearReviewPickupNotified;
-  } = {},
+export async function runReviewPickupNotify(
+  eventBus: PublishableBus,
+  deps: ReviewPickupNotifyDeps = {},
 ): Promise<{ fired: boolean; count: number; transitioned: boolean }> {
   const getPickupSet = deps.getPickupSet ?? getReviewPickupSet;
   const getNotified = deps.getNotified ?? getReviewPickupNotified;
@@ -205,6 +250,201 @@ async function checkReviewPickupNotify(
   return { fired: true, count, transitioned: true };
 }
 
+// Issue #745 / #938: legacy name kept as an alias so any out-of-tree caller or
+// older test that imported `checkReviewPickupNotify` keeps working. #2067
+// renamed it `runReviewPickupNotify` for naming symmetry across the chore set.
+export const checkReviewPickupNotify = runReviewPickupNotify;
+
+// ---------------------------------------------------------------------------
+// Done-lane pruning
+// ---------------------------------------------------------------------------
+
+/** External touchpoints of the done-lane prune chore. */
+export interface DoneLanePruneDeps {
+  pruneOldDoneItems?: typeof pruneOldDoneItems;
+}
+
+/**
+ * Prune old done-lane items from the backlog. Lives at the tick level rather
+ * than wedged inside `maybeRunResearch` so it still runs when the research path
+ * early-exits on any of its skip gates.
+ */
+export async function runDoneLanePrune(deps: DoneLanePruneDeps = {}): Promise<void> {
+  const pruneFn = deps.pruneOldDoneItems ?? pruneOldDoneItems;
+  await pruneFn();
+}
+
+// ---------------------------------------------------------------------------
+// Weekly Telegram digest
+// ---------------------------------------------------------------------------
+
+/** External touchpoints of the weekly-digest chore. */
+export interface WeeklyDigestDeps {
+  buildWeeklySummary?: () => Promise<string | null>;
+  sendToTelegram?: (message: string) => Promise<void> | void;
+  setLastWeekly?: typeof setDigestLastWeekly;
+}
+
+/**
+ * Build and send the weekly Telegram summary, stamping the weekly guard key on
+ * success. The weekly cadence guard is applied by `runHousekeeping` before this
+ * runs; this body sends at most one summary per call.
+ */
+export async function runWeeklyDigest(deps: WeeklyDigestDeps = {}): Promise<void> {
+  const buildWeeklySummary =
+    deps.buildWeeklySummary ?? (await import("../digest.ts")).buildWeeklySummary;
+  const setLastWeekly = deps.setLastWeekly ?? setDigestLastWeekly;
+  const summary = await buildWeeklySummary();
+  if (summary) {
+    const sendToTelegram =
+      deps.sendToTelegram ?? (await import("../notify.ts")).sendToTelegram;
+    await sendToTelegram(summary);
+    await setLastWeekly(Date.now().toString());
+    console.log("[Housekeeping] Sent weekly summary");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Daily memory consolidation
+// ---------------------------------------------------------------------------
+
+/** External touchpoints of the memory-consolidation chore. */
+export interface MemoryConsolidationDeps {
+  consolidate?: () => Promise<unknown>;
+  setLastConsolidation?: typeof setMemoryLastConsolidation;
+}
+
+/**
+ * Daily memory consolidation — prune stale patterns, then stamp the daily
+ * guard key. The daily cadence guard is applied by `runHousekeeping`.
+ */
+export async function runMemoryConsolidation(deps: MemoryConsolidationDeps = {}): Promise<void> {
+  const consolidate =
+    deps.consolidate ?? (await import("../learning-lifecycle.ts")).consolidate;
+  const setLastConsolidation = deps.setLastConsolidation ?? setMemoryLastConsolidation;
+  await consolidate();
+  await setLastConsolidation(Date.now().toString());
+}
+
+// ---------------------------------------------------------------------------
+// Daily design-concept snapshot (issue #628; metric revised in #736)
+// ---------------------------------------------------------------------------
+
+interface DesignConceptSnapshotModule {
+  getDesignConceptProductionCountForDate: (date: string) => Promise<number>;
+  writeDailySnapshot: (date: string, count: number) => Promise<unknown>;
+  readDailySnapshots: () => Promise<Array<{ date: string; count: number }>>;
+}
+
+/** External touchpoints of the design-concept-snapshot chore. */
+export interface DesignConceptSnapshotDeps {
+  module?: DesignConceptSnapshotModule;
+  today?: () => string;
+}
+
+/**
+ * Daily design-concept snapshot (issue #628; metric revised in #736) — record
+ * today's *production count* (how many concepts were created today) so the
+ * green-light criterion measures the gate WORKING rather than "an artifact
+ * happens to be alive".
+ *
+ * Idempotent + monotone (the #736 invariant): a same-day re-run only WRITES
+ * when the freshly-sampled production count is higher than what's already
+ * stored for today. A no-change re-run returns `false` so the runner records it
+ * as "skipped", keeping hourly housekeeping idempotent.
+ */
+export async function runDesignConceptSnapshot(
+  deps: DesignConceptSnapshotDeps = {},
+): Promise<boolean> {
+  const mod = deps.module ?? (await import("../redis/design-concept.ts"));
+  const today = (deps.today ?? (() => new Date().toISOString().slice(0, 10)))();
+  const count = await mod.getDesignConceptProductionCountForDate(today);
+  const existing = await mod.readDailySnapshots();
+  const stored = existing.find((s) => s.date === today)?.count;
+  if (stored === undefined || count > stored) {
+    await mod.writeDailySnapshot(today, count);
+    return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Work-queue hygiene (issue #1690)
+// ---------------------------------------------------------------------------
+
+/** External touchpoints of the work-queue-hygiene chore. */
+export interface WorkQueueHygieneDeps {
+  reconcileWorkQueue?: () => Promise<{ removed: number; scanned: number }>;
+}
+
+/**
+ * Work-queue hygiene (issue #1690) — reconcile `hydra:anchors:work-queue`
+ * entries against resolved state. The engine is fail-open + idempotent (a
+ * second run finds nothing to remove) and its `gh` cost is bounded by an
+ * internal per-run cap, so no Redis time-guard is needed.
+ */
+export async function runWorkQueueHygiene(deps: WorkQueueHygieneDeps = {}): Promise<void> {
+  const reconcileWorkQueue =
+    deps.reconcileWorkQueue ?? (await import("../backlog/work-queue-hygiene.ts")).reconcileWorkQueue;
+  const wq = await reconcileWorkQueue();
+  if (wq.removed > 0) {
+    console.log(
+      `[Housekeeping] Work-queue hygiene: removed ${wq.removed} resolved entr${wq.removed === 1 ? "y" : "ies"} (scanned ${wq.scanned})`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Merge→done reconciler (issue #1715)
+// ---------------------------------------------------------------------------
+
+/** External touchpoints of the merged-item-reconciler chore. */
+export interface MergedItemReconcilerDeps {
+  reconcileMergedItems?: () => Promise<{ reconciled: Array<{ id: string; ref: string }>; scanned: number }>;
+}
+
+/**
+ * Merge→done reconciler (issue #1715) — sweeps recently merged target PRs and
+ * default-branch merge commits for `item-NNN` references and moves any
+ * referenced item still in a non-done lane to `done` with audit stamps.
+ * Fail-closed + idempotent, so no Redis time-guard is needed.
+ */
+export async function runMergedItemReconciler(deps: MergedItemReconcilerDeps = {}): Promise<void> {
+  const reconcileMergedItems =
+    deps.reconcileMergedItems ?? (await import("../backlog/reconciler.ts")).reconcileMergedItems;
+  const rec = await reconcileMergedItems();
+  if (rec.reconciled.length > 0) {
+    console.log(
+      `[Housekeeping] Merge→done reconciler: closed ${rec.reconciled.length} item${rec.reconciled.length === 1 ? "" : "s"} (scanned ${rec.scanned}): ${rec.reconciled.map((r) => `${r.id}←${r.ref}`).join(", ")}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Forecast-calibration-brier leading-outcome producer (issue #1657)
+// ---------------------------------------------------------------------------
+
+/** External touchpoints of the forecast-calibration-brier chore. */
+export interface ForecastCalibrationBrierDeps {
+  publishBrierMetric?: () => Promise<{ ok: boolean }>;
+}
+
+/**
+ * Forecast-calibration-brier leading-outcome producer (issue #1657) — samples
+ * the target's aggregate Brier score and publishes it to
+ * metrics/forecast-calibration-brier.txt for the outcomes file adapter. The
+ * producer itself never throws and never writes on failure, so "ran" here means
+ * "sampled", not necessarily "wrote". Hourly re-publish of the same current
+ * value is idempotent, so no Redis time-guard is needed.
+ */
+export async function runForecastCalibrationBrier(
+  deps: ForecastCalibrationBrierDeps = {},
+): Promise<void> {
+  const publishBrier =
+    deps.publishBrierMetric ?? (await import("../metrics/publish.ts")).publishForecastCalibrationBrierMetric;
+  await publishBrier();
+}
+
 // ---------------------------------------------------------------------------
 // Stale-Redis-key sweep + stale-inProgress return (issue #1876)
 // ---------------------------------------------------------------------------
@@ -230,26 +470,50 @@ const STALE_KEY_RETENTION_DAYS = 7;
 const STALE_IN_PROGRESS_MS = 24 * 60 * 60 * 1000; // 24 hours
 const METRICS_INDEX_MAX_ENTRIES = 500;
 
+/** External touchpoints of the stale-Redis-key sweep chore. */
+export interface PruneStaleRedisKeysDeps {
+  pruneMetricsIndex?: typeof pruneMetricsIndex;
+  getMetricsIndexSize?: typeof getMetricsIndexSize;
+  trimMetricsIndex?: typeof trimMetricsIndex;
+  scanKeys?: typeof scanKeys;
+  getKeyTTL?: typeof getKeyTTL;
+  getKeyType?: typeof getKeyType;
+  hashGet?: typeof hashGet;
+  deleteKeysBatch?: typeof deleteKeysBatch;
+  now?: () => number;
+}
+
 /**
  * Prune stale cycle/task/metrics Redis keys older than 7 days with no TTL.
- * Exported for unit coverage — the same body that ran on the cleanup.ts timer.
+ * The same body that ran on the cleanup.ts timer; deps are injectable so it is
+ * exercisable without standing up real Redis.
  */
-async function pruneStaleRedisKeys(): Promise<void> {
-  const cutoffMs = Date.now() - STALE_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+export async function pruneStaleRedisKeys(deps: PruneStaleRedisKeysDeps = {}): Promise<void> {
+  const pruneMetricsIndexFn = deps.pruneMetricsIndex ?? pruneMetricsIndex;
+  const getMetricsIndexSizeFn = deps.getMetricsIndexSize ?? getMetricsIndexSize;
+  const trimMetricsIndexFn = deps.trimMetricsIndex ?? trimMetricsIndex;
+  const scanKeysFn = deps.scanKeys ?? scanKeys;
+  const getKeyTTLFn = deps.getKeyTTL ?? getKeyTTL;
+  const getKeyTypeFn = deps.getKeyType ?? getKeyType;
+  const hashGetFn = deps.hashGet ?? hashGet;
+  const deleteKeysBatchFn = deps.deleteKeysBatch ?? deleteKeysBatch;
+  const nowFn = deps.now ?? Date.now;
+
+  const cutoffMs = nowFn() - STALE_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let totalPruned = 0;
 
   // Prune old metrics from sorted index, then delete orphaned metric keys
   try {
-    const removed = await pruneMetricsIndex(cutoffMs);
+    const removed = await pruneMetricsIndexFn(cutoffMs);
     if (removed > 0) {
       totalPruned += removed;
       console.log(`[Housekeeping] Pruned ${removed} old metrics index entries`);
     }
     // Trim to max entries as a safety cap
-    const indexSize = await getMetricsIndexSize();
+    const indexSize = await getMetricsIndexSizeFn();
     if (indexSize > METRICS_INDEX_MAX_ENTRIES) {
       const excess = indexSize - METRICS_INDEX_MAX_ENTRIES;
-      await trimMetricsIndex(excess);
+      await trimMetricsIndexFn(excess);
       console.log(`[Housekeeping] Trimmed metrics index by ${excess} (cap: ${METRICS_INDEX_MAX_ENTRIES})`);
     }
   } catch (err: any) {
@@ -266,21 +530,21 @@ async function pruneStaleRedisKeys(): Promise<void> {
   const dateInKeyPattern = /(\d{4}-\d{2}-\d{2})/;
   for (const prefix of [CYCLE_KEY_PREFIX, TASK_KEY_PREFIX, METRICS_KEY_PREFIX]) {
     try {
-      const keys = await scanKeys(`${prefix}*`);
+      const keys = await scanKeysFn(`${prefix}*`);
       const toDelete: string[] = [];
 
       for (const key of keys) {
         // Skip index/counter keys and active/last pointers
         if (key.endsWith(":index") || key.endsWith(":counter") || key === CYCLE_ACTIVE_KEY || key === CYCLE_LAST_KEY) continue;
-        const ttl = await getKeyTTL(key);
+        const ttl = await getKeyTTLFn(key);
         if (ttl !== -1) continue; // Already has TTL, skip
 
         let keyTime: number | null = null;
 
         // Try hash timestamp fields first (original logic)
-        const type = await getKeyType(key);
+        const type = await getKeyTypeFn(key);
         if (type === "hash") {
-          const ts = await hashGet(key, "startedAt") || await hashGet(key, "createdAt") || await hashGet(key, "timestamp");
+          const ts = await hashGetFn(key, "startedAt") || await hashGetFn(key, "createdAt") || await hashGetFn(key, "timestamp");
           if (ts) {
             const parsed = new Date(ts).getTime();
             if (Number.isFinite(parsed)) keyTime = parsed;
@@ -302,7 +566,7 @@ async function pruneStaleRedisKeys(): Promise<void> {
       }
 
       if (toDelete.length > 0) {
-        await deleteKeysBatch(toDelete);
+        await deleteKeysBatchFn(toDelete);
         totalPruned += toDelete.length;
         console.log(`[Housekeeping] Pruned ${toDelete.length} stale ${prefix}* keys`);
       }
@@ -316,15 +580,29 @@ async function pruneStaleRedisKeys(): Promise<void> {
   }
 }
 
+/** External touchpoints of the stale-inProgress return chore. */
+export interface ReturnStaleInProgressItemsDeps {
+  getBacklogLaneWithScores?: typeof getBacklogLaneWithScores;
+  getBacklogItem?: typeof getBacklogItem;
+  moveBacklogItem?: typeof moveBacklogItem;
+  now?: () => number;
+}
+
 /**
  * Return backlog items stuck in the `inProgress` lane for > 24h back to
- * `queued`. Exported for unit coverage — the same body that ran on the
- * cleanup.ts timer. Naturally idempotent: each invocation re-checks item age.
+ * `queued`. The same body that ran on the cleanup.ts timer. Naturally
+ * idempotent: each invocation re-checks item age.
  */
-async function returnStaleInProgressItems(): Promise<void> {
+export async function returnStaleInProgressItems(
+  deps: ReturnStaleInProgressItemsDeps = {},
+): Promise<void> {
+  const getBacklogLaneWithScoresFn = deps.getBacklogLaneWithScores ?? getBacklogLaneWithScores;
+  const getBacklogItemFn = deps.getBacklogItem ?? getBacklogItem;
+  const moveBacklogItemFn = deps.moveBacklogItem ?? moveBacklogItem;
+  const nowFn = deps.now ?? Date.now;
   try {
-    const ids = await getBacklogLaneWithScores("inProgress");
-    const now = Date.now();
+    const ids = await getBacklogLaneWithScoresFn("inProgress");
+    const now = nowFn();
     let returned = 0;
 
     // ids is [id1, score1, id2, score2, ...]
@@ -332,12 +610,12 @@ async function returnStaleInProgressItems(): Promise<void> {
       const id = ids[i];
       const score = Number(ids[i + 1]);
       if (now - score > STALE_IN_PROGRESS_MS) {
-        const raw = await getBacklogItem(id);
+        const raw = await getBacklogItemFn(id);
         if (!raw) continue;
         const item = JSON.parse(raw);
         item.lane = "queued";
         item.meta = { ...item.meta, returnedReason: "stale_in_progress", returnedAt: new Date().toISOString() };
-        await moveBacklogItem(id, JSON.stringify(item), "inProgress", "queued");
+        await moveBacklogItemFn(id, JSON.stringify(item), "inProgress", "queued");
         returned++;
         console.log(`[Housekeeping] Returned stale inProgress item ${id} ("${item.title?.slice(0, 60)}") to queued`);
       }
@@ -349,6 +627,27 @@ async function returnStaleInProgressItems(): Promise<void> {
   } catch (err: any) {
     console.error(`[Housekeeping] Stale inProgress check failed: ${err.message}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Lane-index reconciler (issue #2056)
+// ---------------------------------------------------------------------------
+
+/** External touchpoints of the lane-index-reconcile chore. */
+export interface LaneIndexReconcileDeps {
+  reconcileLaneIndices?: () => Promise<unknown>;
+}
+
+/**
+ * Lane-index reconciler (issue #2056) — repairs the lane sorted-set indices
+ * FROM the canonical items hash. Self-heals the #1990 restart desync. No Redis
+ * time-guard: it is intrinsically idempotent (a healthy board is a guaranteed
+ * no-op).
+ */
+export async function runLaneIndexReconcile(deps: LaneIndexReconcileDeps = {}): Promise<void> {
+  const reconcileLaneIndices =
+    deps.reconcileLaneIndices ?? (await import("../backlog/index-reconciler.ts")).reconcileLaneIndices;
+  await reconcileLaneIndices();
 }
 
 // ---------------------------------------------------------------------------
@@ -441,16 +740,17 @@ async function runChore(
  * `heartbeat.ts` into this dedicated **Housekeeping** Module so the
  * **Observability Heartbeat** stays genuinely observability-only.
  *
- * Issue #1864: the 9 bespoke try/catch blocks were collapsed to 9 `Chore`
+ * Issue #1864: the bespoke try/catch blocks were collapsed to `Chore`
  * declarations driven by `runChore`, so the guard → work → bookkeeping →
- * error-log + Sentry-breadcrumb pattern lives in exactly one place. Sentry
- * breadcrumb coverage is now uniform (blocked-escalation and
- * review-pickup-notify gained it). Each chore KEEPS its own internal
- * time-guard semantics (weekly/daily/per-day/per-item idempotency), now
- * expressed as a `guard` thunk (or, for the conditional design-concept
- * snapshot, a `work` thunk that returns `false` when no write is needed), so
- * hourly invocation stays safe — a second immediate call skips the guarded
- * chores.
+ * error-log + Sentry-breadcrumb pattern lives in exactly one place.
+ *
+ * Issue #2067: each chore's *work* is now a named exported function accepting
+ * only its own deps subset (see the `run*` exports above). `runHousekeeping`
+ * stays the composition owner — it sequences the chores in the same order,
+ * applies the same Redis time-guards (still read here at the composition
+ * level), and wraps each through `runChore`. Behaviour is unchanged; the chore
+ * bodies are now independently injectable + unit-testable without standing up a
+ * deps object covering all of them.
  *
  * Returns a `{ ran, skipped }` summary so callers (the endpoint, tests) can
  * see which chores did work this invocation vs. which were skipped by their
@@ -458,7 +758,7 @@ async function runChore(
  * `runChore`, which try/catches so one failure doesn't abort the rest.
  */
 async function runHousekeeping(
-  eventBus,
+  eventBus: PublishableBus,
   deps: {
     /**
      * Injectable forecast-calibration-brier producer (issue #1657) so the
@@ -474,174 +774,67 @@ async function runHousekeeping(
   const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
   const DAY_MS = 24 * 60 * 60 * 1000;
 
-  // The 9 chores as declarations. Each carries an optional `guard` (the
-  // cadence window) and a `work` thunk; `runChore` applies the uniform
-  // guard → work → bookkeeping → error-log + Sentry-breadcrumb pattern. A
-  // chore whose `work` returns `false` is routed to `skipped` (the
-  // design-concept snapshot's conditional-write case). Order is preserved
-  // verbatim from the pre-#1864 sequential blocks.
+  // The chores as declarations. Each carries an optional `guard` (the cadence
+  // window, read at the composition level) and a `work` thunk that delegates to
+  // the chore's named exported runner. `runChore` applies the uniform guard →
+  // work → bookkeeping → error-log + Sentry-breadcrumb pattern. Order is
+  // preserved verbatim from the pre-#2067 sequence.
   const chores: Chore[] = [
-    // Check blocked items for re-escalation. The per-item 12h guard lives
-    // inside checkBlockedEscalation (BLOCKED_REESCALATE_MS), so this is safe to
-    // call hourly. Always counted as "ran" — it iterates the blocked lane and
-    // applies its own per-item guard internally.
     {
       name: "blocked-escalation",
-      work: () => checkBlockedEscalation(eventBus),
+      work: () => runBlockedItemEscalation(eventBus),
     },
 
-    // Issue #745: /hydra-review pickup-set phone-notify hook. The edge-trigger
-    // armed-state (Redis `hydra:review:pickup-armed`) is the idempotency guard —
-    // it only FIRES on an empty -> non-empty transition, so calling this hourly
-    // is safe (a steady non-empty set is suppressed). Counts as "ran" when it
-    // either sampled cleanly or fired; "skipped" only on an unexpected throw.
     {
       name: "review-pickup-notify",
       work: async () => {
-        await checkReviewPickupNotify(eventBus);
+        await runReviewPickupNotify(eventBus);
       },
     },
 
-    // Prune old done-lane items from the backlog. Lives at the tick level
-    // rather than wedged inside `maybeRunResearch` so it still runs when the
-    // research path early-exits on any of its skip gates.
     {
       name: "prune-done",
-      work: () => pruneOldDoneItems(),
+      work: () => runDoneLanePrune(),
     },
 
-    // Weekly summary — send once per week
     {
       name: "weekly-summary",
       guard: async () => {
         const lastWeekly = await getDigestLastWeekly();
         return !lastWeekly || Date.now() - parseInt(lastWeekly) >= WEEK_MS;
       },
-      work: async () => {
-        const { buildWeeklySummary } = await import("../digest.ts");
-        const summary = await buildWeeklySummary();
-        if (summary) {
-          const { sendToTelegram } = await import("../notify.ts");
-          await sendToTelegram(summary);
-          await setDigestLastWeekly(Date.now().toString());
-          console.log("[Housekeeping] Sent weekly summary");
-        }
-      },
+      work: () => runWeeklyDigest(),
     },
 
-    // Daily memory consolidation — prune stale patterns
     {
       name: "memory-consolidation",
       guard: async () => {
         const lastConsolidation = await getMemoryLastConsolidation();
         return !lastConsolidation || Date.now() - parseInt(lastConsolidation) >= DAY_MS;
       },
-      work: async () => {
-        const { consolidate } = await import("../learning-lifecycle.ts");
-        await consolidate();
-        await setMemoryLastConsolidation(Date.now().toString());
-      },
+      work: () => runMemoryConsolidation(),
     },
 
-    // Daily design-concept snapshot (issue #628; metric revised in #736) —
-    // record today's *production count* (how many concepts were created
-    // today) so the green-light criterion measures the gate WORKING rather
-    // than "an artifact happens to be alive". PR #567 retired the
-    // heavyweight B-4 telemetry endpoint; this is the lightweight
-    // replacement (one hash field per day, 14-day bounded). Pre-#736 this
-    // wrote `ZCARD` of the TTL-decaying index, so a quiet day reset the
-    // streak — that is the bug being fixed.
-    //
-    // Idempotent + monotone (the #736 invariant): a same-day re-run only
-    // WRITES when the freshly-sampled production count is higher than what's
-    // already stored for today (a concept produced later today). A no-change
-    // re-run returns `false` so the runner records it as "skipped", keeping
-    // hourly housekeeping idempotent.
     {
       name: "design-concept-snapshot",
-      work: async () => {
-        const {
-          getDesignConceptProductionCountForDate,
-          writeDailySnapshot,
-          readDailySnapshots,
-        } = await import("../redis/design-concept.ts");
-        const today = new Date().toISOString().slice(0, 10);
-        const count = await getDesignConceptProductionCountForDate(today);
-        const existing = await readDailySnapshots();
-        const stored = existing.find((s) => s.date === today)?.count;
-        if (stored === undefined || count > stored) {
-          await writeDailySnapshot(today, count);
-          return true;
-        }
-        return false;
-      },
+      work: () => runDesignConceptSnapshot(),
     },
 
-    // Work-queue hygiene (issue #1690) — reconcile `hydra:anchors:work-queue`
-    // entries against resolved state: entries that are merged work (the #882
-    // token scan) or reference orchestrator issues that are ALL closed get
-    // LREM'd, so anchors resolved out-of-band stop resurfacing at work-queue
-    // tier and burning dev_target dispatches on no-op verify+LREM. The engine
-    // is fail-open + idempotent (a second run finds nothing to remove) and its
-    // `gh` cost is bounded by an internal per-run cap, so no Redis time-guard is
-    // needed; "skipped" only on an unexpected throw.
     {
       name: "work-queue-hygiene",
-      work: async () => {
-        const { reconcileWorkQueue } = await import("../backlog/work-queue-hygiene.ts");
-        const wq = await reconcileWorkQueue();
-        if (wq.removed > 0) {
-          console.log(
-            `[Housekeeping] Work-queue hygiene: removed ${wq.removed} resolved entr${wq.removed === 1 ? "y" : "ies"} (scanned ${wq.scanned})`,
-          );
-        }
-      },
+      work: () => runWorkQueueHygiene(),
     },
 
-    // Merge→done reconciler (issue #1715) — sweeps recently merged target PRs
-    // and default-branch merge commits for `item-NNN` references and moves any
-    // referenced item still in a non-done lane to `done` with audit stamps
-    // (`reconciledAt`/`reconciledFrom`). Generalises the reaper's merged-PR
-    // guard (#1714), which only covers stale inProgress claims. Fail-closed +
-    // idempotent (done items aren't scanned; a `gh` outage is a guaranteed
-    // no-op) and its `gh` cost is two bounded list calls, so no Redis
-    // time-guard is needed; "skipped" only on an unexpected throw.
     {
       name: "merged-item-reconciler",
-      work: async () => {
-        const { reconcileMergedItems } = await import("../backlog/reconciler.ts");
-        const rec = await reconcileMergedItems();
-        if (rec.reconciled.length > 0) {
-          console.log(
-            `[Housekeeping] Merge→done reconciler: closed ${rec.reconciled.length} item${rec.reconciled.length === 1 ? "" : "s"} (scanned ${rec.scanned}): ${rec.reconciled.map((r) => `${r.id}←${r.ref}`).join(", ")}`,
-          );
-        }
-      },
+      work: () => runMergedItemReconciler(),
     },
 
-    // Forecast-calibration-brier leading-outcome producer (issue #1657) —
-    // samples the target's aggregate Brier score (hydra-betting
-    // GET /api/calibration/forecast-metrics) and publishes it to
-    // metrics/forecast-calibration-brier.txt for the outcomes file adapter.
-    // The producer itself never throws and never writes on failure (target
-    // unreachable / malformed / null brierScore — stale mtime is the staleness
-    // signal), so "ran" here means "sampled", not necessarily "wrote". Hourly
-    // re-publish of the same current value is idempotent, so no Redis
-    // time-guard is needed; "skipped" only on an unexpected throw.
     {
       name: "forecast-calibration-brier",
-      work: async () => {
-        const publishBrier = deps.publishBrierMetric
-          ?? (await import("../metrics/publish.ts")).publishForecastCalibrationBrierMetric;
-        await publishBrier();
-      },
+      work: () => runForecastCalibrationBrier({ publishBrierMetric: deps.publishBrierMetric }),
     },
 
-    // Stale-Redis-key sweep (issue #1876) — folded out of the cleanup.ts 24h
-    // in-process setInterval. Daily idempotency: housekeeping runs hourly, so a
-    // Redis-stamped daily guard runs the sweep at most once per day (same shape
-    // as weekly-summary / memory-consolidation). The sweep itself is internally
-    // defensive (per-prefix try/catch), so "ran" means "the guard let it run".
     {
       name: "stale-key-prune",
       guard: async () => {
@@ -654,30 +847,14 @@ async function runHousekeeping(
       },
     },
 
-    // Stale-inProgress return (issue #1876) — folded out of the cleanup.ts 24h
-    // timer. Returns backlog items stuck in `inProgress` for > 24h to `queued`.
-    // No Redis time-guard: the work re-checks each item's age every invocation,
-    // so hourly calls are naturally idempotent (an item not yet 24h stale is
-    // left alone; once it crosses 24h the next call returns it exactly once,
-    // after which it is no longer in the inProgress lane).
     {
       name: "stale-inprogress-return",
       work: () => returnStaleInProgressItems(),
     },
 
-    // Lane-index reconciler (issue #2056) — repairs the lane sorted-set indices
-    // FROM the canonical items hash: re-adds hash items missing from their lane
-    // zset, removes orphan zset members with no surviving hash entry. Self-heals
-    // the #1990 restart desync (HSET written first, ZADD lost on a crash). No
-    // Redis time-guard: it is intrinsically idempotent (a healthy board is a
-    // guaranteed no-op), so it follows `returnStaleInProgressItems` as a
-    // guardless chore. Never throws; "skipped" only on an unexpected throw.
     {
       name: "lane-index-reconcile",
-      work: async () => {
-        const { reconcileLaneIndices } = await import("../backlog/index-reconciler.ts");
-        await reconcileLaneIndices();
-      },
+      work: () => runLaneIndexReconcile(),
     },
   ];
 
@@ -690,17 +867,9 @@ async function runHousekeeping(
 
 export {
   runHousekeeping,
-  // Issue #745: edge-triggered /hydra-review pickup-set notify hook, exported
-  // for test coverage (injectable pickup-set + armed-state deps).
-  checkReviewPickupNotify,
   // Issue #1864: the extracted guarded-chore runner, exported so a unit test
   // can inject a failing / guard-skipping / work-skipping chore thunk and
   // assert the uniform guard → work → bookkeeping → error-log + Sentry
   // pattern without standing up the maintenance endpoint or Redis.
   runChore,
-  // Issue #1876: the two cleanup chores folded out of the cleanup.ts in-process
-  // timer, exported so they are exercisable without an HTTP server or a live
-  // setInterval (the testability benefit called out in the issue).
-  pruneStaleRedisKeys,
-  returnStaleInProgressItems,
 };
