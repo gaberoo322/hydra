@@ -75,6 +75,19 @@ import {
   type ScoreSignals,
   type ScoreResult,
 } from "./backlog/candidate-scoring.ts";
+// Eligibility predicates — the two genuinely-private predicates (`isInFlightPR`,
+// `isBlockerJustCleared`) and their freshness-window policy now live in their own
+// sibling Module (`src/backlog/candidate-eligibility.ts`, issue #2066), mirroring
+// the #2040 (candidate-scoring), #1880 (merged-refs), and #1844 (work-queue-hygiene)
+// extractions from this same file. `getCandidateFeed` (enumeration + eligibility
+// composition) stays here and imports the predicates. The moved symbols are
+// re-exported below so the Candidate Feed public surface is unchanged.
+import {
+  isInFlightPR,
+  isBlockerJustCleared,
+  IN_FLIGHT_PR_FRESHNESS_MS,
+  RECENT_UNBLOCK_THRESHOLD_MS,
+} from "./backlog/candidate-eligibility.ts";
 
 // Re-export the relocated scoring policy so existing importers of these symbols
 // from `anchor-candidates.ts` keep working (behaviour-neutral; the canonical
@@ -87,20 +100,26 @@ export {
   type ScoreResult,
 };
 
+// Re-export the relocated eligibility policy so existing importers of these
+// symbols from `anchor-candidates.ts` keep working (behaviour-neutral; the
+// canonical home is `src/backlog/candidate-eligibility.ts`).
+export {
+  isInFlightPR,
+  isBlockerJustCleared,
+  IN_FLIGHT_PR_FRESHNESS_MS,
+  RECENT_UNBLOCK_THRESHOLD_MS,
+};
+
 // ---------------------------------------------------------------------------
 // Eligibility / feed thresholds — the stateful half that stays here.
 // ---------------------------------------------------------------------------
 
 const RESEARCH_THRESHOLD = 0.5; // top score below this → recommend research
-const RECENT_UNBLOCK_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24h
 
-// In-flight PR freshness window (issue #640). When an inProgress backlog item
-// carries a `claimedBy = "pr-<number>"` marker claimed within this window, the
-// candidate is hidden from the feed by default so decide.py doesn't re-dispatch
-// onto an anchor whose PR is still awaiting CI + merge. 30 min covers the
-// typical CI + operator-merge window while still surfacing genuinely stuck
-// items (a PR left open overnight resurfaces the next day, ready to retry).
-const IN_FLIGHT_PR_FRESHNESS_MS = 30 * 60 * 1000; // 30 min
+// The eligibility predicates (`isInFlightPR`, `isBlockerJustCleared`) and their
+// freshness-window policy (RECENT_UNBLOCK_THRESHOLD_MS, IN_FLIGHT_PR_FRESHNESS_MS)
+// now live in `src/backlog/candidate-eligibility.ts` (issue #2066) — imported and
+// re-exported above. This module composes them inside the enumeration loop below.
 
 // Merged-by-cycle suppression (issue #882) is the Candidate Feed's second
 // eligibility filter: a claude dev-cycle that merges its work leaves NO
@@ -285,41 +304,6 @@ function resolveDeps(deps?: Partial<CandidateFeedDeps>): CandidateFeedDeps {
     loadMergedAnchorRefs: deps?.loadMergedAnchorRefs ?? (() => loadMergedAnchorRefsImpl()),
     removeWorkQueueItem: deps?.removeWorkQueueItem ?? removeWorkQueueItem,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Eligibility helpers.
-// ---------------------------------------------------------------------------
-
-/**
- * Detect an in-flight PR claim on a backlog item (issue #640). The convention:
- * when a code-writing skill opens a PR for a kanban anchor it marks the item
- * `claimedBy = "pr-<number>"` so the next decide.py tick doesn't re-dispatch.
- * "Fresh" is bounded by IN_FLIGHT_PR_FRESHNESS_MS so a long-open PR eventually
- * resurfaces.
- */
-function isInFlightPR(item: any, now: number): boolean {
-  if (!item?.claimedBy) return false;
-  if (typeof item.claimedBy !== "string") return false;
-  if (!item.claimedBy.startsWith("pr-")) return false;
-  if (!item.claimedAt) return false;
-  const claimedAt = new Date(item.claimedAt).getTime();
-  if (!Number.isFinite(claimedAt)) return false;
-  return (now - claimedAt) < IN_FLIGHT_PR_FRESHNESS_MS;
-}
-
-/**
- * Detect a recently-cleared blocker: meta still carries a `blockedReason`
- * (it WAS blocked) but the current lane is no longer "blocked", AND the most
- * recent lane transition (movedAt) is within the last 24h.
- */
-function isBlockerJustCleared(item: any, now: number): boolean {
-  if (!item?.meta?.blockedReason) return false;
-  if (item.lane === "blocked") return false;
-  if (!item.movedAt) return false;
-  const movedAt = new Date(item.movedAt).getTime();
-  if (!Number.isFinite(movedAt)) return false;
-  return (now - movedAt) < RECENT_UNBLOCK_THRESHOLD_MS;
 }
 
 // ---------------------------------------------------------------------------
