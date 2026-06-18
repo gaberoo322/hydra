@@ -37,9 +37,11 @@ import {
 import {
   enrollHoldback,
   checkHoldback,
+  decideHoldback,
   reportRevertFailed,
   type HoldbackEventBus,
 } from "../src/holdback.ts";
+import type { HoldbackBaseline } from "../src/redis/holdback.ts";
 import {
   loadBaseline,
   getRevertCount,
@@ -141,6 +143,94 @@ describe("detectRegressions — matches by name, skips no-data", () => {
   test("missing-from-current is skipped (no-data)", () => {
     const baseline = [{ name: "a", direction: "up" as const, noiseEpsilon: 0, value: 0.5 }];
     assert.deepEqual(detectRegressions(baseline, []), []);
+  });
+});
+
+describe("decideHoldback — pure regression decision (no bus, no Redis)", () => {
+  // A baseline helper: every field the pure decision reads, no I/O. The
+  // window is 1 cycle and cycleDurationMs defaults to 1h, so enrolledAt = now
+  // is "still watching" and enrolledAt = now - 2h is "window elapsed".
+  function baseline(leading: HoldbackBaseline["leading"], enrolledAtMs: number): HoldbackBaseline {
+    return {
+      commitSha: "puresha01",
+      prNumber: 7,
+      tier: 2,
+      enrolledAt: enrolledAtMs,
+      windowCycles: 1,
+      leading,
+    };
+  }
+  const upMetric = [{ name: "m", direction: "up" as const, noiseEpsilon: 0.01, value: 0.5 }];
+
+  test("regression below cap → revert (carries prNumber + regressedOutcomes)", () => {
+    const nowMs = 1_000_000_000_000;
+    const d = decideHoldback({
+      baseline: baseline(upMetric, nowMs),
+      current: [{ name: "m", value: 0.2 }], // regressed (up, dropped beyond epsilon)
+      revertCount: 0,
+      nowMs,
+    });
+    assert.equal(d.decision, "revert");
+    assert.equal((d as any).commitSha, "puresha01");
+    assert.equal((d as any).prNumber, 7);
+    assert.deepEqual((d as any).regressedOutcomes, ["m"]);
+  });
+
+  test("regression at-or-past the per-day cap → cap-reached (no prNumber)", () => {
+    const nowMs = 1_000_000_000_000;
+    const d = decideHoldback({
+      baseline: baseline(upMetric, nowMs),
+      current: [{ name: "m", value: 0.2 }],
+      revertCount: 3, // HOLDBACK_MAX_REVERTS_PER_DAY default
+      nowMs,
+    });
+    assert.equal(d.decision, "cap-reached");
+    assert.deepEqual((d as any).regressedOutcomes, ["m"]);
+    assert.equal((d as any).prNumber, undefined, "cap-reached omits prNumber");
+  });
+
+  test("no regression, window still open → watching", () => {
+    const nowMs = 1_000_000_000_000;
+    const d = decideHoldback({
+      baseline: baseline(upMetric, nowMs), // enrolled at now → 0 elapsed < 1h window
+      current: [{ name: "m", value: 0.5 }], // unchanged
+      revertCount: 0,
+      nowMs,
+    });
+    assert.equal(d.decision, "watching");
+    assert.equal((d as any).commitSha, "puresha01");
+  });
+
+  test("no regression, window elapsed → passed", () => {
+    const nowMs = 1_000_000_000_000;
+    const d = decideHoldback({
+      baseline: baseline(upMetric, nowMs - 2 * 60 * 60 * 1000), // enrolled 2h ago > 1h window
+      current: [{ name: "m", value: 0.5 }],
+      revertCount: 0,
+      nowMs,
+    });
+    assert.equal(d.decision, "passed");
+    assert.equal((d as any).commitSha, "puresha01");
+  });
+
+  test("favorable move is not a regression → watching (window open)", () => {
+    const nowMs = 1_000_000_000_000;
+    const d = decideHoldback({
+      baseline: baseline(upMetric, nowMs),
+      current: [{ name: "m", value: 0.9 }], // up metric rose → favorable
+      revertCount: 0,
+      nowMs,
+    });
+    assert.equal(d.decision, "watching");
+  });
+
+  test("nowMs defaults to Date.now when omitted (regression still decides revert)", () => {
+    const d = decideHoldback({
+      baseline: baseline(upMetric, Date.now()),
+      current: [{ name: "m", value: 0.2 }],
+      revertCount: 0,
+    });
+    assert.equal(d.decision, "revert");
   });
 });
 

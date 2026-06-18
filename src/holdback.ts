@@ -173,7 +173,7 @@ export interface CheckInput {
   now?: Date;
 }
 
-type CheckDecision =
+export type CheckDecision =
   /** No enrollment found (expired/never recorded) — nothing to watch. */
   | { decision: "no-enrollment" }
   /** Window completed clean — baseline cleared, no revert. */
@@ -190,6 +190,84 @@ export type CheckResult =
   | { ok: false; error: string };
 
 /**
+ * Inputs to the pure {@link decideHoldback} regression decision.
+ *
+ * Everything {@link checkHoldback} reads from Redis / the clock / the outcome
+ * adapter is hoisted into this struct so the decision is a deterministic
+ * function of plain in-memory values — no bus, no Redis, no filesystem.
+ */
+export interface DecideHoldbackInput {
+  /** The persisted pre-merge baseline being evaluated. */
+  baseline: HoldbackBaseline;
+  /**
+   * Freshly sampled leading-outcome values to compare against the baseline.
+   * Only `{ name, value }` is consulted (by {@link detectRegressions}); the
+   * direction/epsilon come from the enrolled baseline, so the full
+   * {@link LeadingOutcomeSample} (which `snapshotLeadingOutcomes` returns) is
+   * accepted but only its `name`/`value` matter.
+   */
+  current: Array<{ name: string; value: number | null }>;
+  /** Today's revert count (against the per-day cap), read before deciding. */
+  revertCount: number;
+  /** Epoch millis "now" — defaults to {@link Date.now}; injectable for tests. */
+  nowMs?: number;
+}
+
+/**
+ * The pure Outcome Holdback regression decision (issue #2096).
+ *
+ * Given an enrolled baseline, a fresh outcome snapshot, and today's revert
+ * count, decide what should happen — with NO side effects: no event-bus
+ * publish, no Redis write, no clock read beyond the injectable `nowMs`. The
+ * returned {@link CheckDecision} discriminant is the single source of truth for
+ * which side effects {@link checkHoldback} then applies:
+ *
+ *   - `revert`      → caller increments the day's revert count, clears the
+ *                     baseline, and publishes `holdback.reverted`.
+ *   - `cap-reached` → caller publishes `holdback.cap-reached` (revert
+ *                     suppressed; baseline left intact for the next sample).
+ *   - `passed`      → caller clears the baseline (probation complete).
+ *   - `watching`    → caller does nothing (keep watching).
+ *
+ * Tests for the branching logic ("cap reached", "window elapsed", "regression
+ * but not yet capped") pass plain arguments — they no longer need a stubbed
+ * `HoldbackEventBus` or a Redis fixture. The `no-enrollment` decision is NOT
+ * produced here: a missing baseline is handled by the orchestrator before it
+ * has anything to decide over.
+ */
+export function decideHoldback(input: DecideHoldbackInput): CheckDecision {
+  const { baseline, current, revertCount } = input;
+  const nowMs = input.nowMs ?? Date.now();
+
+  const regressions = detectRegressions(baseline.leading, current);
+
+  if (regressions.length === 0) {
+    // No regression. If the window has elapsed, the merge passed probation.
+    const windowMs = baseline.windowCycles * cycleDurationMs();
+    const elapsed = nowMs - baseline.enrolledAt >= windowMs;
+    if (elapsed) {
+      return { decision: "passed", commitSha: baseline.commitSha };
+    }
+    return { decision: "watching", commitSha: baseline.commitSha };
+  }
+
+  const regressedOutcomes = regressions.map((r) => r.name);
+
+  // Enforce the per-day cap BEFORE reverting (ADR-0004 step 4).
+  if (revertCount >= HOLDBACK_MAX_REVERTS_PER_DAY) {
+    return { decision: "cap-reached", commitSha: baseline.commitSha, regressedOutcomes };
+  }
+
+  // Revert warranted.
+  return {
+    decision: "revert",
+    commitSha: baseline.commitSha,
+    prNumber: baseline.prNumber,
+    regressedOutcomes,
+  };
+}
+
+/**
  * Evaluate an enrolled commit's window once.
  *
  * Re-samples the leading outcomes, compares against the persisted baseline, and:
@@ -204,6 +282,12 @@ export type CheckResult =
  * The caller (the playbook, via the API) performs the actual `git revert` only
  * on a `revert` decision; on failure it reports back so the producer emits
  * `holdback.revert_failed` via {@link reportRevertFailed}.
+ *
+ * This is the **thin orchestrator** half of the producer (issue #2096): it
+ * performs the Redis reads (`loadBaseline`, `getRevertCount`), delegates the
+ * branching logic to the pure {@link decideHoldback}, then applies the side
+ * effects (Redis writes + event-bus publish) keyed on the returned decision.
+ * The decision itself is bus-free and Redis-free — see {@link decideHoldback}.
  */
 export async function checkHoldback(
   eventBus: HoldbackEventBus,
@@ -227,55 +311,49 @@ export async function checkHoldback(
     return { ok: false, error: msg };
   }
 
-  const regressions = detectRegressions(baseline.leading, current);
-
-  if (regressions.length === 0) {
-    // No regression. If the window has elapsed, the merge passed probation.
-    const windowMs = baseline.windowCycles * cycleDurationMs();
-    const elapsed = Date.now() - baseline.enrolledAt >= windowMs;
-    if (elapsed) {
-      await clearBaseline(baseline.commitSha);
-      return { ok: true, result: { decision: "passed", commitSha: baseline.commitSha } };
-    }
-    return { ok: true, result: { decision: "watching", commitSha: baseline.commitSha } };
-  }
-
-  const regressedOutcomes = regressions.map((r) => r.name);
   const now = input.now ?? new Date();
   const day = utcDateKey(now);
+  const revertCount = await getRevertCount(day);
 
-  // Enforce the per-day cap BEFORE reverting (ADR-0004 step 4).
-  const countBefore = await getRevertCount(day);
-  if (countBefore >= HOLDBACK_MAX_REVERTS_PER_DAY) {
-    await publishSafe(eventBus, "holdback.cap-reached", {
-      commitSha: baseline.commitSha,
-      prNumber: baseline.prNumber,
-      regressedOutcomes,
-    });
-    return {
-      ok: true,
-      result: { decision: "cap-reached", commitSha: baseline.commitSha, regressedOutcomes },
-    };
+  // Pure decision — no side effects. The discriminant below drives which
+  // notifications + Redis mutations fire.
+  const decision = decideHoldback({
+    baseline,
+    current,
+    revertCount,
+    nowMs: now.getTime(),
+  });
+
+  switch (decision.decision) {
+    case "passed":
+      // Window elapsed clean — leave probation.
+      await clearBaseline(baseline.commitSha);
+      break;
+    case "cap-reached":
+      // Regression present but the per-day cap is reached — revert suppressed.
+      await publishSafe(eventBus, "holdback.cap-reached", {
+        commitSha: baseline.commitSha,
+        prNumber: baseline.prNumber,
+        regressedOutcomes: decision.regressedOutcomes,
+      });
+      break;
+    case "revert":
+      // Revert warranted. Count this revert against today's cap, clear the
+      // baseline (the merge is leaving probation either way), and emit.
+      await incrRevertCount(day);
+      await clearBaseline(baseline.commitSha);
+      await publishSafe(eventBus, "holdback.reverted", {
+        commitSha: baseline.commitSha,
+        prNumber: baseline.prNumber,
+        regressedOutcomes: decision.regressedOutcomes,
+      });
+      break;
+    case "watching":
+      // No regression yet, window still open — no side effects.
+      break;
   }
 
-  // Revert warranted. Count this revert against today's cap, emit the event,
-  // and clear the baseline (the merge is leaving probation either way).
-  await incrRevertCount(day);
-  await clearBaseline(baseline.commitSha);
-  await publishSafe(eventBus, "holdback.reverted", {
-    commitSha: baseline.commitSha,
-    prNumber: baseline.prNumber,
-    regressedOutcomes,
-  });
-  return {
-    ok: true,
-    result: {
-      decision: "revert",
-      commitSha: baseline.commitSha,
-      prNumber: baseline.prNumber,
-      regressedOutcomes,
-    },
-  };
+  return { ok: true, result: decision };
 }
 
 /**
