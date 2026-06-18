@@ -5,6 +5,7 @@ import { moveItemToLane, deleteItem } from "../backlog/lanes.ts";
 import { isWipLimitReached } from "../backlog/wip.ts";
 import { claimNextQueuedItem } from "../backlog/claims.ts";
 import { getStaleClaims, reapStaleClaims } from "../backlog/reaper.ts";
+import { auditLaneIndices } from "../backlog/index-reconciler.ts";
 import {
   getClaimsReapedLifetime,
   getClaimsReapedDay,
@@ -185,6 +186,18 @@ export function createBacklogRouter() {
       res.status(500).json({ error: err.message });
     }
   });
+
+  // GET /backlog/audit — Read-only diagnostic of the items hash vs. the lane
+  // sorted-set indices (issue #2056). Surfaces exactly the divergences the
+  // startup/housekeeping reconciler would repair — hash items missing from
+  // their lane zset, orphan zset members, and un-laned items — WITHOUT mutating
+  // anything. Backed by the same `getAllBacklogItems()` hash-scan accessor.
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/backlog/audit",
+    aggregatorRouteNoQuery("api/backlog/audit", () => auditLaneIndices()),
+  );
 
   // POST /backlog/claim — Atomic claim of a queued backlog item.
   //
