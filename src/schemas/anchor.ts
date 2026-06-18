@@ -34,4 +34,11 @@ export const AnchorCandidatesQuerySchema = z.object({
   ...countQuerySchema(DEFAULT_LIMIT).shape,
   excludeInFlight: booleanFlag(true),
   excludeMerged: booleanFlag(true),
+  // `inlineMode` (issue #2075) defaults FALSE: a spawn-capable dispatch (and the
+  // raw operator view) sees every candidate. An inline-mode caller passes
+  // `?inlineMode=true` to suppress anchors flagged `dispatch-spawn-capable`
+  // (not inline-buildable). Uses `booleanFlag(false)` so absent → false and the
+  // canonical opt-in value `"true"` → true, the mirror of the two exclusion
+  // flags' default-true opt-out shape.
+  inlineMode: booleanFlag(false),
 });

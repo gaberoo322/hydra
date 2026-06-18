@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   isInFlightPR,
   isBlockerJustCleared,
+  requiresSpawnCapableDispatch,
   IN_FLIGHT_PR_FRESHNESS_MS,
   RECENT_UNBLOCK_THRESHOLD_MS,
 } from "../src/backlog/candidate-eligibility.ts";
@@ -138,6 +139,55 @@ test("isBlockerJustCleared: unparseable movedAt → not just-cleared (degrade, n
 test("isBlockerJustCleared: null/undefined item → not just-cleared", () => {
   assert.equal(isBlockerJustCleared(null, NOW), false);
   assert.equal(isBlockerJustCleared(undefined, NOW), false);
+});
+
+// --- requiresSpawnCapableDispatch (issue #2075) ----------------------------
+
+test("requiresSpawnCapableDispatch: top-level dispatchSpawnCapable=true requires spawn", () => {
+  assert.equal(requiresSpawnCapableDispatch({ dispatchSpawnCapable: true }), true);
+});
+
+test("requiresSpawnCapableDispatch: meta.dispatchSpawnCapable=true requires spawn", () => {
+  assert.equal(
+    requiresSpawnCapableDispatch({ meta: { dispatchSpawnCapable: true } }),
+    true,
+  );
+});
+
+test("requiresSpawnCapableDispatch: dispatch-spawn-capable label requires spawn", () => {
+  assert.equal(
+    requiresSpawnCapableDispatch({ labels: ["ready-for-agent", "dispatch-spawn-capable"] }),
+    true,
+  );
+});
+
+test("requiresSpawnCapableDispatch: absent flag → inline-buildable (false)", () => {
+  assert.equal(requiresSpawnCapableDispatch({}), false);
+  assert.equal(requiresSpawnCapableDispatch({ meta: {} }), false);
+  assert.equal(requiresSpawnCapableDispatch({ labels: ["ready-for-agent"] }), false);
+});
+
+test("requiresSpawnCapableDispatch: non-true flag values do not require spawn", () => {
+  // Only a strict boolean `true` flips the gate — a truthy string never does,
+  // so a stray "true"-as-string can't accidentally hide an inline-buildable
+  // anchor.
+  assert.equal(requiresSpawnCapableDispatch({ dispatchSpawnCapable: "true" as any }), false);
+  assert.equal(requiresSpawnCapableDispatch({ dispatchSpawnCapable: 1 as any }), false);
+  assert.equal(requiresSpawnCapableDispatch({ meta: { dispatchSpawnCapable: "yes" as any } }), false);
+});
+
+test("requiresSpawnCapableDispatch: non-object / null / undefined → false (degrade, never throw)", () => {
+  assert.equal(requiresSpawnCapableDispatch(null), false);
+  assert.equal(requiresSpawnCapableDispatch(undefined), false);
+  assert.equal(requiresSpawnCapableDispatch("issue-2075" as any), false);
+  assert.equal(requiresSpawnCapableDispatch(42 as any), false);
+});
+
+test("requiresSpawnCapableDispatch: non-array labels are ignored", () => {
+  assert.equal(
+    requiresSpawnCapableDispatch({ labels: "dispatch-spawn-capable" as any }),
+    false,
+  );
 });
 
 // --- policy constants ------------------------------------------------------

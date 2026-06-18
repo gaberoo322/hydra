@@ -311,6 +311,75 @@ describe("getCandidateFeed — eligibility", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Inline-buildability gate (issue #2075) — an inline-mode caller (no spawn
+// tool, #1782) must NOT be served a `dispatch-spawn-capable` anchor that
+// exceeds the >5-file complexity cap, so the work-queue stops re-serving a
+// large atomic migration to a session that can only revert + requeue it.
+// ---------------------------------------------------------------------------
+
+describe("getCandidateFeed — inline-buildability gate (#2075)", () => {
+  test("inlineMode suppresses a kanban anchor flagged dispatch-spawn-capable", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [
+          { id: 1, title: "13-file rename remainder", movedAt: isoAgo(0), meta: { dispatchSpawnCapable: true } },
+          { id: 2, title: "Bounded one-file fix", movedAt: isoAgo(0) },
+        ],
+        backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW, inlineMode: true }, deps);
+    const titles = feed.candidates.map((c) => c.title);
+    assert.ok(!titles.includes("13-file rename remainder"), "spawn-capable anchor hidden from inline caller");
+    assert.ok(titles.includes("Bounded one-file fix"), "inline-buildable anchor still surfaces");
+    assert.equal(feed.spawn_suppressed, 1);
+  });
+
+  test("default (non-inline) caller still sees a dispatch-spawn-capable anchor", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: 1, title: "13-file rename remainder", movedAt: isoAgo(0), meta: { dispatchSpawnCapable: true } }],
+        backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.ok(feed.candidates.map((c) => c.title).includes("13-file rename remainder"));
+    assert.equal(feed.spawn_suppressed, 0);
+  });
+
+  test("inlineMode suppresses a work-queue entry flagged dispatch-spawn-capable (top-level flag)", async () => {
+    const removed: string[] = [];
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "openAiCredentialReadiness rename remainder", queuedAt: isoAgo(0), source: "hydra-retro", dispatchSpawnCapable: true }),
+        JSON.stringify({ reference: "small standard task", queuedAt: isoAgo(0), source: "operator" }),
+      ],
+      removeWorkQueueItem: async (raw: string) => { removed.push(raw); return 1; },
+    });
+    const feed = await getCandidateFeed({ now: NOW, inlineMode: true }, deps);
+    const refs = feed.candidates.map((c) => c.anchorRef);
+    assert.ok(!refs.some((r) => r.includes("openAiCredentialReadiness")), "spawn-capable work-queue entry hidden from inline caller");
+    assert.ok(refs.some((r) => r.includes("small standard task")), "standard work-queue entry still surfaces");
+    assert.equal(feed.spawn_suppressed, 1);
+    // The entry stays valid for a spawn-capable dispatch — it must NOT be reaped.
+    assert.equal(removed.length, 0, "spawn-capable suppression does not delete the work-queue entry");
+  });
+
+  test("inlineMode honours the dispatch-spawn-capable label form on a work-queue entry", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "labelled complex anchor", queuedAt: isoAgo(0), labels: ["dispatch-spawn-capable"] }),
+      ],
+    });
+    const feed = await getCandidateFeed({ now: NOW, inlineMode: true }, deps);
+    assert.equal(feed.candidates.length, 0);
+    assert.equal(feed.spawn_suppressed, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Merged-by-cycle suppression (issue #882) — the core fix: shipped work whose
 // PR already MERGED (no lingering OPEN PR) must NOT resurface in the feed.
 // ---------------------------------------------------------------------------
