@@ -27,6 +27,20 @@ export async function getBacklogItem(id: string): Promise<string | null> {
 }
 
 /**
+ * Get the entire backlog items hash as an `id → raw JSON string` map (issue
+ * #2056). HGETALL over `hydra:backlog:items` — the typed hash-scan accessor the
+ * lane-index reconciler uses to read the canonical item set behind the Redis
+ * seam (ADR-0017 Category A: shared domain state, so the scan MUST live here,
+ * not as a raw `getRedisConnection()` HSCAN inside the reconciler). The items
+ * hash is the source of truth; the lane sorted sets are a rebuildable index, so
+ * the reconciler walks this map to repair the index FROM the hash.
+ */
+export async function getAllBacklogItems(): Promise<Record<string, string>> {
+  const r = getRedisConnection();
+  return r.hgetall(redisKeys.backlogItems());
+}
+
+/**
  * Update a backlog item and move it between lanes atomically.
  */
 export async function moveBacklogItem(

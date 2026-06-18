@@ -664,6 +664,21 @@ async function runHousekeeping(
       name: "stale-inprogress-return",
       work: () => returnStaleInProgressItems(),
     },
+
+    // Lane-index reconciler (issue #2056) — repairs the lane sorted-set indices
+    // FROM the canonical items hash: re-adds hash items missing from their lane
+    // zset, removes orphan zset members with no surviving hash entry. Self-heals
+    // the #1990 restart desync (HSET written first, ZADD lost on a crash). No
+    // Redis time-guard: it is intrinsically idempotent (a healthy board is a
+    // guaranteed no-op), so it follows `returnStaleInProgressItems` as a
+    // guardless chore. Never throws; "skipped" only on an unexpected throw.
+    {
+      name: "lane-index-reconcile",
+      work: async () => {
+        const { reconcileLaneIndices } = await import("../backlog/index-reconciler.ts");
+        await reconcileLaneIndices();
+      },
+    },
   ];
 
   for (const chore of chores) {
