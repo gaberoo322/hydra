@@ -373,7 +373,7 @@ export async function runDesignConceptSnapshot(
 // ---------------------------------------------------------------------------
 
 /** External touchpoints of the work-queue-hygiene chore. */
-export interface WorkQueueHygieneDeps {
+interface WorkQueueHygieneDeps {
   reconcileWorkQueue?: () => Promise<{ removed: number; scanned: number }>;
 }
 
@@ -383,7 +383,7 @@ export interface WorkQueueHygieneDeps {
  * second run finds nothing to remove) and its `gh` cost is bounded by an
  * internal per-run cap, so no Redis time-guard is needed.
  */
-export async function runWorkQueueHygiene(deps: WorkQueueHygieneDeps = {}): Promise<void> {
+async function runWorkQueueHygiene(deps: WorkQueueHygieneDeps = {}): Promise<void> {
   const reconcileWorkQueue =
     deps.reconcileWorkQueue ?? (await import("../backlog/work-queue-hygiene.ts")).reconcileWorkQueue;
   const wq = await reconcileWorkQueue();
@@ -399,7 +399,7 @@ export async function runWorkQueueHygiene(deps: WorkQueueHygieneDeps = {}): Prom
 // ---------------------------------------------------------------------------
 
 /** External touchpoints of the merged-item-reconciler chore. */
-export interface MergedItemReconcilerDeps {
+interface MergedItemReconcilerDeps {
   reconcileMergedItems?: () => Promise<{ reconciled: Array<{ id: string; ref: string }>; scanned: number }>;
 }
 
@@ -409,7 +409,7 @@ export interface MergedItemReconcilerDeps {
  * referenced item still in a non-done lane to `done` with audit stamps.
  * Fail-closed + idempotent, so no Redis time-guard is needed.
  */
-export async function runMergedItemReconciler(deps: MergedItemReconcilerDeps = {}): Promise<void> {
+async function runMergedItemReconciler(deps: MergedItemReconcilerDeps = {}): Promise<void> {
   const reconcileMergedItems =
     deps.reconcileMergedItems ?? (await import("../backlog/reconciler.ts")).reconcileMergedItems;
   const rec = await reconcileMergedItems();
@@ -634,7 +634,7 @@ export async function returnStaleInProgressItems(
 // ---------------------------------------------------------------------------
 
 /** External touchpoints of the lane-index-reconcile chore. */
-export interface LaneIndexReconcileDeps {
+interface LaneIndexReconcileDeps {
   reconcileLaneIndices?: () => Promise<unknown>;
 }
 
@@ -644,7 +644,7 @@ export interface LaneIndexReconcileDeps {
  * time-guard: it is intrinsically idempotent (a healthy board is a guaranteed
  * no-op).
  */
-export async function runLaneIndexReconcile(deps: LaneIndexReconcileDeps = {}): Promise<void> {
+async function runLaneIndexReconcile(deps: LaneIndexReconcileDeps = {}): Promise<void> {
   const reconcileLaneIndices =
     deps.reconcileLaneIndices ?? (await import("../backlog/index-reconciler.ts")).reconcileLaneIndices;
   await reconcileLaneIndices();
