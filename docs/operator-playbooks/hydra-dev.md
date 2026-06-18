@@ -303,12 +303,13 @@ fi
 # REFL_TASK_ID as the reflection-source deposit above. reap reads it via
 # `_read_anchor_deposit`. ALWAYS deposit (unconditional on REFL_SOURCES — a
 # failed dispatch that served NO reflections still needs its anchor recoverable
-# so reap can write the FIRST reflection for this anchor).
-REFL_ANCHOR_REF="issue-2112"   # the anchor.reference for this dispatch (issue being worked)
-if [ -n "$REFL_TASK_ID" ] && [ -n "$REFL_ANCHOR_REF" ]; then
+# so reap can write the FIRST reflection for this anchor). $ANCHOR_REF is the
+# same anchor.reference (e.g. "issue-841") established at the step-4 reflection
+# fetch above — reuse it, never hardcode a literal issue ref.
+if [ -n "$REFL_TASK_ID" ] && [ -n "$ANCHOR_REF" ]; then
   REFL_ANCHOR_PATH="${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-${REFL_TASK_ID}"
-  if printf '%s' "$REFL_ANCHOR_REF" > "$REFL_ANCHOR_PATH" 2>/dev/null; then
-    printf '[hydra-dev] refl-anchor-deposit ok: %s -> %s\n' "$REFL_ANCHOR_REF" "$REFL_ANCHOR_PATH" >&2
+  if printf '%s' "$ANCHOR_REF" > "$REFL_ANCHOR_PATH" 2>/dev/null; then
+    printf '[hydra-dev] refl-anchor-deposit ok: %s -> %s\n' "$ANCHOR_REF" "$REFL_ANCHOR_PATH" >&2
   else
     # FAIL LOUD on I/O error (cue: refl-anchor-deposit-write-failed) — best-effort
     # for the build but never silently swallowed.
