@@ -16,29 +16,27 @@
  * them — nothing else. Callers that want a single cluster's API should
  * import from that cluster directly, not from here.
  *
+ * Issue #2035: the startup + daily-maintenance lifecycle (initLearning,
+ * consolidate) was split out into the sibling src/learning-lifecycle.ts.
+ * This module now owns ONLY the dispatch-time composition seam and imports
+ * NOTHING from learning-lifecycle.ts (one-way dependency), so reading the
+ * composition contract no longer pulls in the knowledge-indexer file-watcher
+ * or the OV skill-registration init ping.
+ *
  * Public API:
  *   getContext()      — load Pattern Memory + Reflections for an agent prompt as a structured trace
- *   consolidate()     — prune stale patterns + auto-promoted rules (daily)
- *   initLearning()    — start knowledge indexer, register OV skills, migrate rules
  */
 
 import {
-  consolidateAgentPatterns,
-  consolidateStalePromotedRules,
-  migrateRulesToPatterns,
-  backfillPromotionMetadata,
   loadAgentMemory,
 } from "./pattern-memory/agent-memory.ts";
 import { formatMemoryForPrompt } from "./pattern-memory/prompt-format.ts";
-import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
 import { loadAnchorReflections } from "./reflections/per-anchor.ts";
 import {
   loadAnchorReflectionsByFile,
   backfillByFileIndex,
   extractFilesFromAnchor,
 } from "./reflections/by-file.ts";
-import { registerSkills } from "./knowledge-base/skill-registration.ts";
-import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
 // Issue #1440: per-cycle knowledge-context-availability tracking. The planner
 // enrichment block below records whether the dispatch-time OV search produced
 // non-empty context, so the health surface can trend it. Behind a best-effort
@@ -319,74 +317,5 @@ export async function getContext(
     blocks.push(await loadBlock(descriptor));
   }
   return buildContext(blocks);
-}
-
-// ===========================================================================
-// Public API — consolidate
-// ===========================================================================
-
-/**
- * Run daily consolidation: prune stale agent patterns + sweep stale
- * auto-promoted feedback rules. Called by the scheduler once per day.
- */
-export async function consolidate(): Promise<void> {
-  // Issue #1454 — the daily reflection-buffer consolidation step was removed
-  // with the dead global reflection buffer subsystem. The reap-side writer it
-  // used to drain had already been severed (no live producer), so the bridge
-  // had nothing to flush. Per-anchor reflections are written directly by
-  // recordAnchorReflection on the live #841 path.
-  await consolidateAgentPatterns();
-
-  // Detect and process stale auto-promoted rules in feedback files
-  try {
-    await consolidateStalePromotedRules();
-  } catch (err: any) {
-    console.error(`[Learning] Stale rule consolidation failed: ${err.message}`);
-  }
-
-  // Issue #365 — auto-demote rules whose post-promotion firing rate proves
-  // the promotion never closed the loop. Best-effort; never throws.
-  try {
-    await consolidatePromotedRuleEffectiveness();
-  } catch (err: any) {
-    console.error(`[Learning] Promoted-rule effectiveness consolidation failed: ${err.message}`);
-  }
-}
-
-// ===========================================================================
-// Public API — initLearning
-// ===========================================================================
-
-/**
- * Initialize the learning system on startup:
- *   1. Migrate old rules to patterns (one-time)
- *   2. Register OV skills (non-blocking)
- *   3. Start knowledge indexer background process
- */
-export async function initLearning(): Promise<void> {
-  // 1. Migrate old rules → patterns
-  try {
-    await migrateRulesToPatterns();
-  } catch (err: any) {
-    console.error(`[Learning] Memory migration failed: ${err.message}`);
-  }
-
-  // 1b. Backfill promotion metadata for patterns promoted before issue #289
-  //     instrumentation (idempotent, guarded by Redis flag — issue #302).
-  try {
-    await backfillPromotionMetadata();
-  } catch (err: any) {
-    console.error(`[Learning] Promotion-metadata backfill failed: ${err.message}`);
-  }
-
-  // 2. Register OV skills (non-blocking). registerSkills() records the outcome
-  //    in a queryable in-process skill-catalog state (issue #1968) — query it
-  //    via getSkillCatalogState() / GET /api/health/skills to detect the silent
-  //    empty-catalog failure (all skills lost to OpenViking timeouts under load)
-  //    that this fire-and-forget call used to hide behind a lone console.error.
-  registerSkills().catch((err: any) => console.error(`[Learning] Skill registration failed: ${err.message}`));
-
-  // 3. Start knowledge indexer
-  startKnowledgeIndexer();
 }
 
