@@ -107,6 +107,14 @@
 import { getSubagentDispatch } from "../redis/dispatches.ts";
 import { isOAuthUsageOk } from "./oauth-usage.ts";
 import type { OAuthUsageResult } from "./oauth-usage.ts";
+// Pure hard-stop threshold predicate (issue #2041): the two-line fold that says
+// "≥90% OAuth utilization is a hard stop" lives with the dispatch-gating policy
+// in `./eligibility.ts`, not inline in this snapshot-assembly IO. This is the
+// one deliberate VALUE import from eligibility.ts (it otherwise only imports
+// TYPES from here); `deriveHardStop` is an IO-free scalar leaf called inside the
+// assembly function below, so the value+type edge cannot initialise a cycle.
+// See the eligibility.ts header for the full one-way-rule exception rationale.
+import { deriveHardStop, EMERGENCY_STOP_PERCENT } from "./eligibility.ts";
 // Pure math leaf (issue #1909): the model-family classifier, JSONL-line parser,
 // quota-weight / cache-hit formulas, and weekly-reset / session-limit time math
 // were extracted into `./token-math.ts`. The snapshot-assembly logic below
@@ -386,15 +394,13 @@ let cache: CacheEntry | null = null;
 // cache above stays here. `clearUsageCache()` below nulls BOTH via the seam's
 // exported `clearOAuthCache()`.
 
-/**
- * Hard-stop threshold (in % of quota) shared by the 5-hour `emergencyStop` and
- * the weekly `weeklyEmergencyStop`. At or above this percentage the
- * corresponding window is considered exhausted enough to block ALL autopilot
- * dispatch (via `projectEligibility` → allow=false), leaving the ~10% headroom
- * as **Operator Reserve** for whatever the operator dispatches by hand. Both
- * windows share the one constant so the two caps stay symmetric.
- */
-export const EMERGENCY_STOP_PERCENT = 90;
+// The hard-stop threshold constant `EMERGENCY_STOP_PERCENT` and the two-line
+// `deriveHardStop` predicate it parameterises moved to `./eligibility.ts`
+// (issue #2041) so the threshold POLICY lives with the dispatch-gating fold and
+// is independently unit-testable. Both are imported at the top of this file;
+// `EMERGENCY_STOP_PERCENT` is re-exported here at the same name so any existing
+// `from "./usage-tracker.ts"` import path resolves unchanged.
+export { EMERGENCY_STOP_PERCENT };
 
 // `projectResetWindow` and `modelToFamily` moved to `./token-math.ts` (issue
 // #1909) and are imported at the top of this file.
@@ -707,18 +713,28 @@ function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
     oauthAgeMs = null;
   }
 
-  // emergencyStop is driven EXCLUSIVELY by the real OAuth meter (issue #1124).
-  // On the OAuth path the meter is a real 0–100 utilization (a served-stale
-  // last-good is `usageSource === "oauth"` too — stale-but-real still stops),
-  // so the >=90 gate fires on ground truth. On the estimate fallback path the
-  // headline is the transcript+calibration guess (~half-of-real, #1083), which
-  // caused FALSE stops during OAuth outages — so the estimate NEVER triggers
-  // emergencyStop regardless of percentLast5h. During a prolonged OAuth outage
-  // autopilot does not self-stop on usage; it fails open and defers to Claude's
-  // own session-limit enforcement (the #1089 pace-gate block) plus the operator.
-  // The estimate is still surfaced as the displayed headline (#1090) — only the
-  // STOP decision is decoupled from it.
-  const emergencyStop = usageSource === "oauth" && percentLast5h >= EMERGENCY_STOP_PERCENT;
+  // Both hard-stops (the 5h `emergencyStop` and the weekly `weeklyEmergencyStop`)
+  // are derived by the pure `deriveHardStop` threshold predicate (issue #2041),
+  // folding over the three scalars now in hand. They are driven EXCLUSIVELY by
+  // the real OAuth meter (issue #1124): on the OAuth path the meter is a real
+  // 0–100 utilization (a served-stale last-good is `usageSource === "oauth"` too
+  // — stale-but-real still stops), so the >=90 gate fires on ground truth. On the
+  // estimate fallback path the headline is the transcript+calibration guess
+  // (~half-of-real, #1083), which caused FALSE stops during OAuth outages — so
+  // the estimate NEVER triggers either stop regardless of percent. During a
+  // prolonged OAuth outage autopilot does not self-stop on usage; it fails open
+  // and defers to Claude's own session-limit enforcement (the #1089 pace-gate
+  // block) plus the operator. The estimate is still surfaced as the displayed
+  // headline (#1090) — only the STOP decision is decoupled from it. The weekly
+  // analogue previously rode `percentSinceReset` (the ADR-0021 since-reset
+  // CALIBRATION estimate) before #1124 moved it onto the real `percentLast7d`
+  // meter; the ADR-0021 since-reset machinery (Pacing Curve) is untouched and
+  // remains the pacing signal.
+  const { emergencyStop, weeklyEmergencyStop } = deriveHardStop({
+    percentLast5h,
+    percentLast7d,
+    usageSource,
+  });
 
   const weightedTotal = (acc: Record<ModelFamily, TokenBreakdown>): number =>
     MODEL_FAMILIES.reduce((sum, f) => sum + acc[f].total * familyWeight(f, weights), 0);
@@ -790,20 +806,8 @@ function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
     }
   }
 
-  // Weekly hard-stop (the reset-aligned analogue of the 5h `emergencyStop`).
-  // Driven EXCLUSIVELY by the real OAuth meter (issue #1124): it rides the
-  // OAuth-backed rolling 7-day utilization (`percentLast7d` when
-  // `usageSource === "oauth"`, incl. a served-stale last-good — stale-but-real
-  // still stops). It previously rode `percentSinceReset`, the ADR-0021
-  // since-reset CALIBRATION estimate, which is never OAuth-derived — letting a
-  // ~half-of-real transcript guess (#1083) trigger a full autopilot stop during
-  // an OAuth outage (the false-stop #1124 fixes). On the estimate fallback path
-  // (`usageSource === "estimate"`) the stop is suppressed: autopilot fails open
-  // and defers to Claude's own session-limit enforcement (#1089) + the operator.
-  // The ADR-0021 since-reset machinery (`percentSinceReset`, the Pacing Curve)
-  // is untouched — it remains the pacing signal; only this hard-stop moves onto
-  // the real meter.
-  const weeklyEmergencyStop = usageSource === "oauth" && percentLast7d >= EMERGENCY_STOP_PERCENT;
+  // (weeklyEmergencyStop was computed alongside emergencyStop above via the
+  // shared `deriveHardStop` predicate — issue #2041.)
 
   return {
     tokensLast5h: acc5h,

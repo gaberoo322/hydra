@@ -47,6 +47,8 @@ import {
 // in via the index re-export above.
 import {
   projectEligibility,
+  deriveHardStop,
+  EMERGENCY_STOP_PERCENT,
   PACE_STATE_TOLERANCE_PERCENT,
   PACING_SHEDDABLE_CLASSES,
   fiveHourThrottleShed,
@@ -2775,5 +2777,80 @@ describe("usage-tracker", () => {
       overlaySessionBlockEligibility(base, nowMs + 1000, nowMs);
       assert.equal(JSON.stringify(base), snapshot);
     });
+  });
+});
+
+// Issue #2041: the hard-stop derivation moved out of usage-tracker.ts's
+// snapshot-assembly function into the pure `deriveHardStop` predicate in
+// eligibility.ts. These tests exercise the threshold POLICY with plain scalar
+// literals — no ScanResult fixture, no OAuth mock, no quota-weight config, no
+// weekly-reset-anchor math — which was the whole point of the extraction.
+describe("deriveHardStop (pure threshold predicate, issue #2041)", () => {
+  test("EMERGENCY_STOP_PERCENT is the single shared 90% threshold", () => {
+    assert.equal(EMERGENCY_STOP_PERCENT, 90);
+  });
+
+  test("at 91% 5h OAuth usage the 5h stop is true (the issue's acceptance core)", () => {
+    const { emergencyStop, weeklyEmergencyStop } = deriveHardStop({
+      percentLast5h: 91,
+      percentLast7d: 10,
+      usageSource: "oauth",
+    });
+    assert.equal(emergencyStop, true);
+    assert.equal(weeklyEmergencyStop, false);
+  });
+
+  test("exactly at the 90% threshold both windows stop (>= boundary, OAuth)", () => {
+    const r = deriveHardStop({
+      percentLast5h: EMERGENCY_STOP_PERCENT,
+      percentLast7d: EMERGENCY_STOP_PERCENT,
+      usageSource: "oauth",
+    });
+    assert.equal(r.emergencyStop, true);
+    assert.equal(r.weeklyEmergencyStop, true);
+  });
+
+  test("just under 90% (89.9%) neither window stops", () => {
+    const r = deriveHardStop({
+      percentLast5h: 89.9,
+      percentLast7d: 89.9,
+      usageSource: "oauth",
+    });
+    assert.equal(r.emergencyStop, false);
+    assert.equal(r.weeklyEmergencyStop, false);
+  });
+
+  test("the weekly window stops independently of the 5h window", () => {
+    const r = deriveHardStop({
+      percentLast5h: 10,
+      percentLast7d: 95,
+      usageSource: "oauth",
+    });
+    assert.equal(r.emergencyStop, false);
+    assert.equal(r.weeklyEmergencyStop, true);
+  });
+
+  test("the estimate source NEVER triggers either stop, even at 100% (#1124 fail-open)", () => {
+    const r = deriveHardStop({
+      percentLast5h: 100,
+      percentLast7d: 100,
+      usageSource: "estimate",
+    });
+    assert.equal(r.emergencyStop, false);
+    assert.equal(r.weeklyEmergencyStop, false);
+  });
+
+  test("is a pure fold — same scalars in, same booleans out, no side effects", () => {
+    const input = {
+      percentLast5h: 91,
+      percentLast7d: 50,
+      usageSource: "oauth" as const,
+    };
+    const frozen = JSON.stringify(input);
+    const a = deriveHardStop(input);
+    const b = deriveHardStop(input);
+    assert.deepEqual(a, b);
+    // input untouched
+    assert.equal(JSON.stringify(input), frozen);
   });
 });

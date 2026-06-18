@@ -17,12 +17,21 @@
  *     session-limit hard-block ({@link overlayPauseEligibility} /
  *     {@link overlaySessionBlockEligibility}).
  *
- * Import direction is strictly one-way w.r.t. the JSONL-scan machinery: this
- * module imports only the snapshot TYPES from `usage-tracker.ts` (type-only);
- * `usage-tracker.ts` imports NOTHING from here. The IO/snapshot owner (the
- * JSONL walk, OAuth precedence, weekly Reset-Anchor math, quota-weight
- * accounting, and the `emergencyStop` / `weeklyEmergencyStop` booleans this
- * fold reads) stays in `usage-tracker.ts`; this fold only READS the
+ * Import direction is one-way w.r.t. the JSONL-scan machinery in spirit: this
+ * module imports only the snapshot TYPES from `usage-tracker.ts` (type-only).
+ * The one DELIBERATE value-import exception runs the other way — `usage-tracker.ts`
+ * imports the PURE, IO-free hard-stop predicate {@link deriveHardStop} (and the
+ * {@link EMERGENCY_STOP_PERCENT} threshold it folds over) from here, because the
+ * threshold POLICY that says "≥90% OAuth utilization is a hard stop" belongs with
+ * the dispatch-gating fold, not buried inline in the snapshot-assembly IO (issue
+ * #2041). That value import is safe: `deriveHardStop` is a leaf scalar fold (no
+ * IO, no `Date.now()`, no snapshot type), it is called from INSIDE the tracker's
+ * assembly function (never at module-init), and it consumes nothing from
+ * `usage-tracker.ts` — so the value+type edge between the two modules cannot
+ * initialise a cycle. The JSONL walk, OAuth precedence, weekly Reset-Anchor math,
+ * and quota-weight accounting still live in `usage-tracker.ts`; only the
+ * two-line threshold fold (which scalar percentages clear the cap) moved here.
+ * This fold ({@link projectEligibility} and friends) only READS the
  * already-computed snapshot. The Pacing-Ceiling env READER it consumes
  * ({@link getWeeklyPaceCeiling}) now lives in the pure-leaf `./config.ts`
  * (issue #1896) — importing a VALUE from that stateless, IO-free leaf does not
@@ -46,6 +55,49 @@ import { getWeeklyPaceCeiling } from "./config.ts";
  * tracker keeps its own copy for the trailing-7d cutoff + Reset-Anchor math.
  */
 const WINDOW_7D_MS = 7 * 86_400_000;
+
+/**
+ * Hard-stop threshold (in % of quota) shared by the 5-hour `emergencyStop` and
+ * the weekly `weeklyEmergencyStop` (issue #2041; relocated from
+ * `usage-tracker.ts`). At or above this percentage the corresponding window is
+ * considered exhausted enough to block ALL autopilot dispatch (via
+ * {@link projectEligibility} → allow=false), leaving the ~10% headroom as
+ * **Operator Reserve** for whatever the operator dispatches by hand. Both
+ * windows share the one constant so the two caps stay symmetric — it is the
+ * threshold half of the {@link deriveHardStop} predicate's interface.
+ */
+export const EMERGENCY_STOP_PERCENT = 90;
+
+/**
+ * The two hard-stop booleans, derived as a PURE scalar fold (issue #2041).
+ *
+ * Extracted out of `usage-tracker.ts`'s snapshot-assembly function so the
+ * threshold policy is independently testable: asserting "at 91% 5h OAuth usage
+ * the 5h stop is true" no longer requires driving the full snapshot assembly
+ * (ScanResult fixture, OAuth mock, quota-weight config, weekly-reset-anchor
+ * math) just to reach the comparison. The fold is over already-computed
+ * scalars — NOT a {@link UsageSnapshot} — because `usage-tracker.ts` computes
+ * these stops DURING assembly, before a snapshot object exists.
+ *
+ * Behaviour is byte-for-byte the inline derivation it replaces:
+ *   - `emergencyStop`       === (usageSource === "oauth" && percentLast5h ≥ 90)
+ *   - `weeklyEmergencyStop` === (usageSource === "oauth" && percentLast7d ≥ 90)
+ *
+ * The `usageSource === "oauth"` guard preserves the #1124 fail-open invariant:
+ * the transcript `estimate` (a ~half-of-real guess) NEVER triggers a stop, so a
+ * prolonged OAuth outage cannot self-stop autopilot on a fabricated number.
+ */
+export function deriveHardStop(input: {
+  percentLast5h: number;
+  percentLast7d: number;
+  usageSource: "oauth" | "estimate";
+}): { emergencyStop: boolean; weeklyEmergencyStop: boolean } {
+  const onOAuth = input.usageSource === "oauth";
+  return {
+    emergencyStop: onOAuth && input.percentLast5h >= EMERGENCY_STOP_PERCENT,
+    weeklyEmergencyStop: onOAuth && input.percentLast7d >= EMERGENCY_STOP_PERCENT,
+  };
+}
 
 /**
  * Tolerance band (in percentage points of weekly quota) around the **Pacing
