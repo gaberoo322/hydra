@@ -23,9 +23,11 @@ import {
 // data-OUT leg). The parse-pipeline tests above import only from the parse seam;
 // this projection-specific suite imports the projection from its new home.
 import { projectHealthDeepResponse } from "../src/health-wire.ts";
-// assembleProbeInputs lives in src/api/health.ts (the I/O owner per #840 seam purity),
-// exported for unit testing the positional index mapping in isolation.
-import { assembleProbeInputs } from "../src/api/health.ts";
+// assembleProbeInputs moved to the Health Probe Fan-out Module
+// (src/health-fan-out.ts, issue #2089) — the new home of the probe enumeration
+// and its positional-to-named mapping. Still exported for unit testing the
+// positional index mapping in isolation.
+import { assembleProbeInputs } from "../src/health-fan-out.ts";
 
 // ---------------------------------------------------------------------------
 // A baseline all-healthy snapshot. Each test clones it and perturbs ONE field
