@@ -6,7 +6,7 @@ import { createApi } from "./api.ts";
 import { stopKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
 import { startDigest, stopDigest } from "./digest.ts";
-import { initLearning } from "./learning.ts";
+import { initLearning } from "./learning-lifecycle.ts";
 import { cleanWorkQueue } from "./redis/work-queue.ts";
 import { getTargetName, getTargetWorkspace } from "./target-config.ts";
 import { gitExec } from "./github/git.ts";

@@ -537,7 +537,7 @@ async function runHousekeeping(
         return !lastConsolidation || Date.now() - parseInt(lastConsolidation) >= DAY_MS;
       },
       work: async () => {
-        const { consolidate } = await import("../learning.ts");
+        const { consolidate } = await import("../learning-lifecycle.ts");
         await consolidate();
         await setMemoryLastConsolidation(Date.now().toString());
       },
