@@ -84,6 +84,7 @@ import {
 import {
   isInFlightPR,
   isBlockerJustCleared,
+  requiresSpawnCapableDispatch,
 } from "./backlog/candidate-eligibility.ts";
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,13 @@ export interface CandidateFeed {
    * only covers anchors with a fresh open-PR claim.
    */
   merged_suppressed: number;
+  /**
+   * Count of candidates suppressed because the caller is in inline mode and the
+   * anchor is flagged `dispatch-spawn-capable` (not inline-buildable, issue
+   * #2075). Always 0 when `inlineMode` is false (the default) — a spawn-capable
+   * dispatch sees every candidate.
+   */
+  spawn_suppressed: number;
 }
 
 export interface GetCandidateFeedOpts {
@@ -168,6 +176,16 @@ export interface GetCandidateFeedOpts {
    * Defaults to true. Callers that need the raw view pass excludeMerged=false.
    */
   excludeMerged?: boolean;
+  /**
+   * Caller runs in INLINE mode — a session with no agent-spawn tool (the #1782
+   * inline contract) that is structurally capped at the >5-file complexity cap.
+   * When true, the feed suppresses anchors flagged `dispatch-spawn-capable`
+   * (not inline-buildable, issue #2075) so the work-queue stops re-serving a
+   * large atomic contract migration to a session that can only revert + requeue
+   * it. Defaults to FALSE — a spawn-capable dispatch (and the raw operator view)
+   * sees every candidate, so this gate only ever subtracts for inline callers.
+   */
+  inlineMode?: boolean;
   /** Override of "now" for deterministic tests. Defaults to Date.now(). */
   now?: number;
 }
@@ -305,6 +323,7 @@ export async function getCandidateFeed(
     : DEFAULT_LIMIT;
   const excludeInFlight = opts.excludeInFlight !== false; // defaults to true
   const excludeMerged = opts.excludeMerged !== false; // defaults to true
+  const inlineMode = opts.inlineMode === true; // defaults to false (spawn-capable view)
 
   // Load the merged-work token set once up front (issue #882). A failing /
   // unreachable reader degrades to an empty set — suppress nothing, exactly the
@@ -322,6 +341,7 @@ export async function getCandidateFeed(
   const candidates: CandidateBase[] = [];
   let inFlightSuppressed = 0;
   let mergedSuppressed = 0;
+  let spawnSuppressed = 0;
 
   // -------------------------------------------------------------------------
   // Lane 1: Kanban backlog/queued/inProgress lanes.
@@ -339,6 +359,14 @@ export async function getCandidateFeed(
       for (const item of items) {
         if (excludeInFlight && isInFlightPR(item, now)) {
           inFlightSuppressed++;
+          continue;
+        }
+        // Inline-buildability gate (issue #2075): an inline-mode caller cannot
+        // complete a `dispatch-spawn-capable` anchor (exceeds the >5-file cap),
+        // so hide it rather than re-serve it to a session that will only revert
+        // + requeue. No-op for spawn-capable callers (inlineMode false default).
+        if (inlineMode && requiresSpawnCapableDispatch(item)) {
+          spawnSuppressed++;
           continue;
         }
         if (
@@ -388,6 +416,16 @@ export async function getCandidateFeed(
         } catch (err: any) {
           console.error(`[CandidateFeed] terminal-marker reap failed for "${ref.slice(0, 60)}": ${err.message}`);
         }
+        continue;
+      }
+      // Inline-buildability gate (issue #2075): a `dispatch-spawn-capable`
+      // work-queue entry is not inline-buildable. For an inline-mode caller,
+      // hide it so the work-queue stops re-serving the 13-file atomic migration
+      // to a session that can only revert + requeue (the friction this fixes).
+      // The entry is NOT reaped — it remains valid work for a spawn-capable
+      // dispatch; it is only filtered from THIS inline caller's view.
+      if (inlineMode && requiresSpawnCapableDispatch(item)) {
+        spawnSuppressed++;
         continue;
       }
       if (
@@ -488,5 +526,6 @@ export async function getCandidateFeed(
     total_evaluated: scored.length,
     in_flight_suppressed: inFlightSuppressed,
     merged_suppressed: mergedSuppressed,
+    spawn_suppressed: spawnSuppressed,
   };
 }

@@ -18,18 +18,20 @@ import { AnchorCandidatesQuerySchema } from "../schemas/anchor.ts";
 export function createAnchorRouter() {
   const router = Router();
 
-  // GET /api/anchor/candidates?limit=N&excludeInFlight=true|false&excludeMerged=true|false
+  // GET /api/anchor/candidates?limit=N&excludeInFlight=true|false&excludeMerged=true|false&inlineMode=true|false
   router.get("/anchor/candidates", async (req, res) => {
     try {
       // ADR-0022: read query params through the Schemas seam. `limit` collapses
       // to DEFAULT_LIMIT (10, clamped 1..50) on absent/garbage input — the same
       // window getCandidateFeed applies. The two exclusion flags default true
       // (issues #640 / #882: exclude in-flight + already-merged candidates;
-      // callers pass `=false` for the raw view).
-      const { count: limit, excludeInFlight, excludeMerged } =
+      // callers pass `=false` for the raw view). `inlineMode` defaults FALSE
+      // (issue #2075): an inline-mode caller passes `=true` to hide anchors
+      // flagged dispatch-spawn-capable (not inline-buildable).
+      const { count: limit, excludeInFlight, excludeMerged, inlineMode } =
         AnchorCandidatesQuerySchema.parse(req.query);
 
-      const feed = await getCandidateFeed({ limit, excludeInFlight, excludeMerged });
+      const feed = await getCandidateFeed({ limit, excludeInFlight, excludeMerged, inlineMode });
 
       res.json({
         ...feed,

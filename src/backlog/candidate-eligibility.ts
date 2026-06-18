@@ -17,6 +17,13 @@
 //   - `isBlockerJustCleared(item, now)` — the 24h recent-unblock detection: a
 //                                        dependency that just cleared deserves an
 //                                        upscore.
+//   - `requiresSpawnCapableDispatch(item)` — the inline-buildability gate (issue
+//                                        #2075): an anchor flagged
+//                                        `dispatch-spawn-capable` exceeds the
+//                                        inline-mode >5-file complexity cap and is
+//                                        only completable by a spawn-capable
+//                                        dispatch, so the feed must hide it from
+//                                        inline (non-spawn) sessions.
 //
 // Both are PURE and deterministic given an injected `now` — no Redis, no I/O.
 // They read fields off the candidate item and compare against `now`, exactly as
@@ -91,4 +98,40 @@ export function isBlockerJustCleared(item: any, now: number): boolean {
   const movedAt = new Date(item.movedAt).getTime();
   if (!Number.isFinite(movedAt)) return false;
   return (now - movedAt) < RECENT_UNBLOCK_THRESHOLD_MS;
+}
+
+/**
+ * Detect that an anchor requires a **spawn-capable** dispatch and therefore is
+ * NOT inline-buildable (issue #2075). An inline-mode session (no agent-spawn
+ * tool, per the #1782 contract) is structurally capped at ~5 changed files; an
+ * anchor that is a large atomic contract migration (e.g. the 13-file
+ * `openAiCredentialReadiness` rename) cannot be completed inline — the inline
+ * session grounds, attempts, reverts, and re-queues, burning the dispatch and
+ * leaving the anchor to trip the next inline session identically. Flagging such
+ * an anchor `dispatch-spawn-capable` lets the Candidate Feed hide it from
+ * inline-mode callers so the work-queue stops re-serving it.
+ *
+ * Pure and side-effect-free: reads a boolean signal off the candidate item.
+ * The flag is accepted in any of three carrier shapes so producers across the
+ * two live lanes (free-form work-queue JSON, kanban-item meta) can stamp it
+ * without a schema change:
+ *   - a top-level `dispatchSpawnCapable: true` (work-queue JSON entries)
+ *   - a `meta.dispatchSpawnCapable: true` (kanban backlog items carry `meta`)
+ *   - a `dispatch-spawn-capable` entry in a `labels` array (the GitHub-issue
+ *     label form the friction note records, mirrored onto the candidate)
+ * Any non-true / absent value degrades to `false` (inline-buildable) so an
+ * un-flagged anchor is never hidden — this gate only ever SUBTRACTS the
+ * known-too-complex anchors, never the default population.
+ */
+export function requiresSpawnCapableDispatch(item: any): boolean {
+  if (!item || typeof item !== "object") return false;
+  if (item.dispatchSpawnCapable === true) return true;
+  if (item.meta && typeof item.meta === "object" && item.meta.dispatchSpawnCapable === true) {
+    return true;
+  }
+  const labels = item.labels;
+  if (Array.isArray(labels) && labels.some((l: any) => l === "dispatch-spawn-capable")) {
+    return true;
+  }
+  return false;
 }
