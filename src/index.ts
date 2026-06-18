@@ -98,7 +98,10 @@ async function main() {
     }
     const listed = await gitExec(["branch", "--list", "feature/*"], gitOpts);
     if (isGhOk(listed)) {
-      const stale = listed.data.stdout.trim().split("\n").map(b => b.trim()).filter(Boolean);
+      // `git branch` marks the currently checked-out branch with a leading `+`
+      // (worktree) or `*` (HEAD); strip it before passing to `git branch -D`,
+      // else the delete fails with "branch '+ feature/...' not found".
+      const stale = listed.data.stdout.trim().split("\n").map(b => b.trim().replace(/^[+*]\s+/, "")).filter(Boolean);
       for (const branch of stale) {
         // Best-effort per-branch delete; a failure here is non-fatal.
         const deleted = await gitExec(["branch", "-D", branch], gitOpts);
