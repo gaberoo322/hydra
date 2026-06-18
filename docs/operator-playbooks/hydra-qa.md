@@ -615,46 +615,31 @@ logic lives behind the orchestrator service (`src/holdback.ts` +
 strictly AFTER a merge; a merge is never blocked or delayed. The only action a
 holdback can take is to open a revert PR.
 
-### A. Enroll at merge time (carries up the ladder — T2/T3/T4)
+### A. Enroll at merge time — owned by the autopilot, NOT hydra-qa (issue #2055)
 
-Immediately after a **PASS** merge (section 10) of an **enrolled** PR, snapshot
-the pre-merge baseline of the leading Target Outcomes. Outcome Holdback
-**carries up** the monotonic tier ladder (#741, ADR-0015): every tier deeper
-than T1 inherits the post-merge watch, so **T2, T3, and T4 merges all enroll**.
-**T1 (prompt-shaped) is always exempt** — too low signal-to-noise for a
-leading-outcome watch to attribute regressions (ADR-0004 reasoning). The watch
-**window length is tier-aware** — deeper blast radius watches at least as long
-(`window(T4) >= window(T3) >= window(T2)`) — and is derived server-side from
-the `tier` you pass; you do not compute the window in the playbook.
+**Enrollment does not happen here.** `hydra-qa` runs strictly **pre-merge** —
+it computes a verdict, posts it as a comment, and **never merges** (CI required
+checks are the merge gate; ADR-0006/0012, `feedback_qa_fail_cannot_block_automerge`).
+So a "snapshot the baseline immediately after a PASS merge" step in this skill
+could **never fire** — by the time a PR squash-merges, the `hydra-qa` subagent
+has already exited (single-pass exit, section "PASS-pending-CI"). The orphaned
+enroll-at-merge block that used to live here was dead code; #2055 removed it.
 
-```bash
-# $merge_sha = the squash-merge commit SHA on master (gh pr merge prints it,
-# or: gh pr view $pr_number --json mergeCommit --jq .mergeCommit.oid).
-# $pr_tier   = the tier from the PR's `Tier:` line / the live classifier.
-# Enroll T2/T3/T4; skip T1 (prompt-shaped) entirely. The window is tier-aware
-# and resolved server-side from `tier` — do NOT pass windowCycles here.
-case "$pr_tier" in
-  2|3|4)
-    curl -fsS -X POST http://localhost:4000/api/holdback/enroll \
-      -H 'content-type: application/json' \
-      -d "$(jq -n --arg sha "$merge_sha" --argjson pr "$pr_number" --argjson tier "$pr_tier" \
-            '{commitSha:$sha, prNumber:$pr, tier:$tier}')" || \
-      echo "WARN: holdback enroll failed for ${merge_sha} (non-fatal — merge already landed)"
-    ;;
-  *)
-    : # T1 / unknown — exempt; no enrollment.
-    ;;
-esac
-```
+The **only** point that runs AFTER a confirmed merge with the `prNumber` + `tier`
+in hand is the autopilot's `auto-merge` action handler, so enrollment lives
+there now — see **"Phase 6 holdback enrollment on auto-merge"** in
+`docs/operator-playbooks/hydra-autopilot.md`. It POSTs the merge SHA + tier to
+`/api/holdback/enroll` unconditionally; the server (`enrollHoldback` in
+`src/holdback.ts`) enforces the carry-up exemption — Outcome Holdback **carries
+up** the monotonic tier ladder (#741, ADR-0015), so **T2/T3/T4 merges enroll**
+while **T1 (prompt-shaped) and unknown-tier merges are exempt** (a no-op
+`{enrolled:false}`). A merge whose leading-outcome adapters return no data at
+merge time also sits as "no signal" rather than a false holdback.
 
-`enroll` is a no-op (returns `{enrolled:false}`) when the tier is T1/unknown
-(carry-up exemption, enforced server-side regardless of this guard) OR when no
-leading outcome adapter returned data at merge time — recording an all-null
-baseline would make every future regression unknowable, so such a merge sits as
-"no signal" rather than a false holdback. The **check** mechanism (section B),
-the regression threshold, the per-day cap, and the event names are **identical
-across all enrolled tiers** — #741 broadens *which* merges enroll and *how long*
-each is watched, never *how* the regression check works.
+The **check** mechanism below (section B) DOES legitimately stay in `hydra-qa` /
+the autopilot poll loop — it watches each already-enrolled merge SHA on every
+tick. Only the *enroll-at-merge* step moved out, because that is the one step
+that needs the confirmed merge SHA + tier the auto-merge handler alone holds.
 
 ### B. Check enrolled merges each poll (the watch)
 

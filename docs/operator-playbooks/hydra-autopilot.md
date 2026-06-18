@@ -405,6 +405,62 @@ surfaces atomically server-side:
 - `hydra:scheduler:cycles-{run,merged,failed}` lifetime counters →
   `/api/scheduler/status.mergeRateLifetime`
 
+### Phase 6 holdback enrollment on auto-merge (issue #2055)
+
+The **`auto-merge` action handler is the only point in the system that runs
+AFTER a confirmed merge with the merged `prNumber` + `tier` in hand** — the same
+post-merge follow-up block that already fires `cycle-record` (above) and the
+token-surrogate write (below). So it owns one more best-effort write: enrolling
+the just-merged commit into the **Outcome Holdback** (ADR-0004 step 4, #786).
+Outcome Holdback **carries up** the monotonic tier ladder (#741, ADR-0015) —
+every tier deeper than T1 inherits the post-merge watch, so **T2, T3, and T4
+merges all enroll** while **T1 (prompt-shaped) and unknown-tier merges are
+exempt**. Before #2055 this was a manual operator step (CLAUDE.md memory note
+"Autopilot owns T2 holdback enrollment"); no automatic caller existed, so most
+enrollable merges silently went unwatched.
+
+After `gh pr merge --auto --squash` succeeds for an `auto-merge` action, capture
+the squash-merge commit SHA and POST it to `/api/holdback/enroll` with the PR
+number and the integer `tier` from the action payload (`state.actions[].tier`,
+1–4 per ADR-0015):
+
+```bash
+# Runs in the SAME post-merge follow-up block as cycle-record, immediately after
+# the merge resolves. $pr_number is the merged PR; $pr_tier is the integer tier
+# from the auto-merge action payload (state.actions[].tier).
+#
+# Capture the squash-merge commit SHA so the baseline pins the post-merge commit.
+merge_sha=$(gh pr view "$pr_number" --repo gaberoo322/hydra \
+  --json mergeCommit --jq '.mergeCommit.oid' 2>/dev/null)
+
+if [ -n "$merge_sha" ]; then
+  # POST UNCONDITIONALLY — do NOT add a client-side `if tier in {2,3,4}` guard.
+  # enrollHoldback (src/holdback.ts) enforces the carry-up exemption server-side
+  # (T1/unknown return {enrolled:false}), so the single source of truth for the
+  # carry-up invariant stays on the server (Redis-seam rule: the playbook shells
+  # curl, never calls enrollHoldback in-process). windowCycles is omitted so the
+  # server derives the tier-aware watch window via windowCyclesForTier.
+  curl -fsS -X POST http://localhost:4000/api/holdback/enroll \
+    -H 'content-type: application/json' \
+    -d "$(jq -n --arg sha "$merge_sha" --argjson pr "$pr_number" \
+          --argjson tier "${pr_tier:-null}" \
+          '{commitSha:$sha, prNumber:$pr, tier:$tier}')" \
+    || echo "[autopilot] holdback enroll failed for ${merge_sha} (non-fatal — merge already landed)" >&2
+else
+  echo "[autopilot] holdback enroll skipped: no merge SHA for PR #${pr_number} (non-fatal)" >&2
+fi
+```
+
+This is **best-effort and strictly post-merge** (same posture as cycle-record): a
+non-2xx or unreachable `/api/holdback/enroll` is logged and the autopilot cycle
+proceeds — enrollment NEVER blocks or delays a merge. It fires exactly once per
+merged PR, immediately after merge and before any check window elapses
+(idempotent on `commitSha`; a re-POST harmlessly overwrites the not-yet-sampled
+baseline). The **check** mechanism that watches each enrolled merge each poll
+tick lives in the `hydra-qa` Post-merge Regression Check section B — only the
+*enroll-at-merge* step moved here, because that is the one step that needs the
+confirmed merge SHA + tier the auto-merge handler holds.
+
 ### Phase 6 token-surrogate write (issue #394)
 
 After PR-3 (#383) deleted `codex-runner.ts`, the legacy `recordSpend` writer
