@@ -312,6 +312,16 @@ export const redisKeys = {
   alerts: () => "hydra:alerts",
 
   // ---------------------------------------------------------------------------
+  // Merge→done reconciler health (issue #2057)
+  // Last-run snapshot of the merged-item reconciler so the scheduler-status
+  // endpoint can surface feed liveness + batch metrics without re-running the
+  // sweep. Single JSON blob, overwritten each hourly run; 2-day TTL so a
+  // stopped scheduler leaves a visibly stale (then absent) record rather than
+  // a permanently-fresh-looking one.
+  // ---------------------------------------------------------------------------
+  reconcilerHealth: () => "hydra:backlog:reconciler:health",
+
+  // ---------------------------------------------------------------------------
   // Stale-claim reaper (issue #374)
   // Lifetime + per-day (UTC isoDate, 7-day TTL) counters of claims released
   // because their claimedAt age exceeded HYDRA_CLAIM_MAX_AGE_MS.

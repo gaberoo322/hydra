@@ -42,6 +42,7 @@ import {
   getSchedulerDeliberateStop, setSchedulerDeliberateStop, clearSchedulerDeliberateStop,
 } from "../redis/scheduler.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
+import { getReconcilerHealth } from "../redis/reconciler.ts";
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes (issue #725: slowed from 2min; watchdog staleness threshold is 15min = 3x margin)
 const MIN_INTERVAL_MS = 30 * 1000; // 30 seconds minimum
 
@@ -434,7 +435,22 @@ async function getStatus() {
     console.error(`[Heartbeat] getStatus autopilot-pause read failed: ${err?.message ?? err}`);
   }
 
+  // Issue #2057: surface merge→done reconciler liveness on the status page so a
+  // stalled/blind reconciler (both gh feeds down) is operator-visible without
+  // grepping the journal. Advisory only — a missing record (no run yet, or the
+  // 2-day TTL aged out a long-stopped scheduler's record) reports `null`, and a
+  // Redis read failure degrades to `null` rather than failing the status call.
+  let reconciler: import("../redis/reconciler.ts").ReconcilerHealthRecord | null = null;
+  try {
+    reconciler = await getReconcilerHealth();
+  } catch (err: any) {
+    console.error(`[Heartbeat] getStatus reconciler-health read failed: ${err?.message ?? err}`);
+  }
+
   return {
+    // Issue #2057: merge→done reconciler last-run health (feed liveness + batch
+    // metrics). `null` when no run is recorded yet or the record aged out.
+    reconciler,
     running: state.running,
     // Issue #988: autopilot-pause state. `{paused:false}` by default;
     // `{paused:true, since}` while the operator has paused autopilot. A

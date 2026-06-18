@@ -78,6 +78,53 @@ export type { MergedRef };
 const RECONCILE_LANES = ["inProgress", "queued", "backlog"] as const;
 
 /**
+ * Alert code raised when BOTH feeds are unavailable in a single run (issue
+ * #2057). Pushed to `hydra:alerts` so the operator can distinguish "the
+ * reconciler ran and found nothing merged" from "the reconciler has been
+ * blind for hours because gh is down". A single-feed failure is only
+ * WARN-logged (the other feed still gives partial coverage).
+ */
+export const RECONCILER_BOTH_FEEDS_DOWN_ALERT = "reconciler:both-feeds-down";
+
+/**
+ * One feed's outcome for a run: how many artifacts it examined and, on
+ * failure, the (truncated) reason. `examined` is 0 on failure (we examined
+ * nothing) and on a genuine empty feed alike — `failed` is the discriminator.
+ */
+interface FeedOutcome {
+  refs: MergedRef[];
+  examined: number;
+  failed?: string;
+}
+
+/**
+ * Normalize a `() => MergedRef[] | null` fetcher into a `FeedOutcome`. A `null`
+ * return is the fetcher's "no information / gh outage" signal (its own
+ * `console.error` already named the cause); we surface a generic reason here so
+ * the health record / alert has something to show. A non-null array — even
+ * empty — means the feed answered: `examined` is the array length, `failed` absent.
+ */
+async function runFeed(
+  fetcher: () => Promise<MergedRef[] | null>,
+  label: string,
+): Promise<FeedOutcome> {
+  let refs: MergedRef[] | null;
+  try {
+    refs = await fetcher();
+  } catch (err: any) {
+    // A fetcher should return null rather than throw, but never let a feed
+    // exception abort the sweep (CLAUDE.md: never throw from these paths).
+    const reason = `${label} feed threw: ${(err?.message ?? String(err)).slice(0, 160)}`;
+    console.error(`[Backlog] reconcileMergedItems ${reason}`);
+    return { refs: [], examined: 0, failed: reason };
+  }
+  if (refs === null) {
+    return { refs: [], examined: 0, failed: `${label} feed unavailable (gh outage or malformed response)` };
+  }
+  return { refs, examined: refs.length };
+}
+
+/**
  * Stale-claim escalation tunables (issue #2031).
  *
  * `STALE_ESCALATE_AFTER_MS` — an item in a reconcilable lane older than this
@@ -180,6 +227,14 @@ export function staleEscalationVerdict(
  *     the merged→done sweep is a guaranteed no-op in that case, but the
  *     staleness escalation pass STILL runs (it reads only local item age /
  *     claimant and routes to the safe operator-attention `blocked` lane).
+ *   - `feed` (issue #2057) — per-feed liveness: how many PRs/commits were
+ *     examined and, on failure, the reason. Distinguishes "0 merged" from
+ *     "fetcher broken".
+ *   - `metrics` (issue #2057) — batch metrics: references matched, items that
+ *     failed to move, and total `durationMs`.
+ *   - `alert` (issue #2057) — present only on a critical failure (both feeds
+ *     down). Also pushed to `hydra:alerts` so the operator is notified, not
+ *     left to grep the journal.
  */
 export async function reconcileMergedItems(opts: {
   fetchMergedPrRefs?: () => Promise<MergedRef[] | null>;
@@ -190,25 +245,68 @@ export async function reconcileMergedItems(opts: {
   escalated: Array<{ id: string; title: string; fromLane: string; reason: string }>;
   scanned: number;
   feedsAvailable: boolean;
+  feed: {
+    prs: { examined: number; failed?: string };
+    commits: { examined: number; failed?: string };
+  };
+  metrics: { referencesFound: number; movesFailed: number; durationMs: number };
+  alert?: { code: string; message: string };
 }> {
+  const startedAt = opts.now ?? Date.now();
   const reconciled: Array<{ id: string; title: string; fromLane: string; ref: string }> = [];
   const escalated: Array<{ id: string; title: string; fromLane: string; reason: string }> = [];
   let scanned = 0;
+  let referencesFound = 0;
+  let movesFailed = 0;
   const now = opts.now ?? Date.now();
 
   const prFetcher = opts.fetchMergedPrRefs ?? fetchMergedTargetPrRefs;
   const commitFetcher = opts.fetchMergeCommitRefs ?? fetchTargetMergeCommitRefs;
-  const prRefs = await prFetcher();
-  const commitRefs = await commitFetcher();
-  const feedsAvailable = prRefs !== null || commitRefs !== null;
+  const prOutcome = await runFeed(prFetcher, "merged-PR");
+  const commitOutcome = await runFeed(commitFetcher, "merge-commit");
+  const feed = {
+    prs: { examined: prOutcome.examined, ...(prOutcome.failed ? { failed: prOutcome.failed } : {}) },
+    commits: { examined: commitOutcome.examined, ...(commitOutcome.failed ? { failed: commitOutcome.failed } : {}) },
+  };
+  const feedsAvailable = !prOutcome.failed || !commitOutcome.failed;
+
+  // Observability (issue #2057): a single-feed failure is WARN-logged (partial
+  // coverage remains); a both-feeds-down failure is a critical alert pushed to
+  // hydra:alerts so the operator is notified, not left to grep the journal.
+  let alert: { code: string; message: string } | undefined;
+  if (prOutcome.failed && commitOutcome.failed) {
+    const message = `Both reconciler feeds unavailable — merge→done sweep is blind. PRs: ${prOutcome.failed}; commits: ${commitOutcome.failed}`;
+    alert = { code: RECONCILER_BOTH_FEEDS_DOWN_ALERT, message };
+    console.error(`[Backlog] reconcileMergedItems CRITICAL: ${message}`);
+    try {
+      await pushAlert(
+        JSON.stringify({ type: RECONCILER_BOTH_FEEDS_DOWN_ALERT, ts: new Date().toISOString(), payload: { message } }),
+        100,
+      );
+    } catch (err: any) {
+      console.error(`[Backlog] reconcileMergedItems both-feeds-down alert publish failed: ${err.message}`);
+    }
+  } else if (prOutcome.failed) {
+    console.warn(`[Backlog] reconcileMergedItems single-feed failure (merged-PR feed): ${prOutcome.failed}`);
+  } else if (commitOutcome.failed) {
+    console.warn(`[Backlog] reconcileMergedItems single-feed failure (merge-commit feed): ${commitOutcome.failed}`);
+  }
 
   // Fail closed on the merged→done path: no feed information → never move
   // anything to done. The staleness escalation pass below is independent of the
   // feeds (it routes only to the safe `blocked` lane) and still runs.
-  const refs: MergedRef[] = [...(prRefs ?? []), ...(commitRefs ?? [])];
+  const refs: MergedRef[] = [...prOutcome.refs, ...commitOutcome.refs];
   if (refs.length === 0) {
     const esc = await escalateStaleItems(now);
-    return { reconciled, escalated: esc.escalated, scanned: esc.scanned, feedsAvailable };
+    return {
+      reconciled,
+      escalated: esc.escalated,
+      scanned: esc.scanned,
+      feedsAvailable,
+      feed,
+      metrics: { referencesFound: 0, movesFailed: 0, durationMs: Date.now() - startedAt },
+      ...(alert ? { alert } : {}),
+    };
   }
 
   for (const lane of RECONCILE_LANES) {
@@ -219,7 +317,15 @@ export async function reconcileMergedItems(opts: {
       // Unreadable board → stop sweeping; report what was done so far rather
       // than guessing at lane membership.
       console.error(`[Backlog] reconcileMergedItems could not read lane ${lane}: ${err.message}`);
-      return { reconciled, escalated, scanned, feedsAvailable };
+      return {
+        reconciled,
+        escalated,
+        scanned,
+        feedsAvailable,
+        feed,
+        metrics: { referencesFound, movesFailed, durationMs: Date.now() - startedAt },
+        ...(alert ? { alert } : {}),
+      };
     }
 
     for (const id of ids) {
@@ -232,6 +338,7 @@ export async function reconcileMergedItems(opts: {
         // attributable: the FIRST matching ref is stamped as reconciledFrom.
         const match = refs.find((r) => itemMatchesOpenPr(item, [r.blob]));
         if (!match) continue;
+        referencesFound++;
 
         await removeFromBacklogLane(lane, id);
         item.checked = true;
@@ -270,6 +377,11 @@ export async function reconcileMergedItems(opts: {
 
         reconciled.push({ id, title: item.title, fromLane: lane, ref: match.ref });
       } catch (err: any) {
+        // The item matched a merged ref (referencesFound already counted it)
+        // but the move failed mid-way — surface it in the batch metrics rather
+        // than only the journal, so a recurring permissions/Redis fault is
+        // visible on the status page.
+        movesFailed++;
         console.error(`[Backlog] reconcileMergedItems failed on item ${id}: ${err.message}`);
       }
     }
@@ -281,7 +393,15 @@ export async function reconcileMergedItems(opts: {
   const esc = await escalateStaleItems(now);
   scanned += esc.scanned;
 
-  return { reconciled, escalated: esc.escalated, scanned, feedsAvailable };
+  return {
+    reconciled,
+    escalated: esc.escalated,
+    scanned,
+    feedsAvailable,
+    feed,
+    metrics: { referencesFound, movesFailed, durationMs: Date.now() - startedAt },
+    ...(alert ? { alert } : {}),
+  };
 }
 
 /**
