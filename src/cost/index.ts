@@ -98,11 +98,6 @@ export {
   projectEligibility,
   overlayPauseEligibility,
   overlaySessionBlockEligibility,
-  // The hard-stop threshold predicate + its shared 90% constant moved here from
-  // usage-tracker.ts (issue #2041) so the threshold POLICY is independently
-  // unit-testable. Re-exported additively; no existing export changed.
-  deriveHardStop,
-  EMERGENCY_STOP_PERCENT,
 } from "./eligibility.ts";
 
 // ---------------------------------------------------------------------------
