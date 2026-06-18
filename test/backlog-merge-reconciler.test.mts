@@ -810,4 +810,55 @@ describe("backlog stale-claim escalation (issue #2031)", () => {
     assert.equal(lanes.done.length, 0);
     assert.equal(lanes.blocked.length, 1);
   });
+
+  test("#2110: token-match + subject-match in one run keep the #2057 metric invariant (referencesFound counts subject closures)", async (t) => {
+    requireEscRedis(t);
+
+    // Item A ships under a TOKEN ref (counted by the token scan); item B ships
+    // under a RENAMED subject with no token (counted only by the escalation-pass
+    // subject gate). Both reconcile to done in the same run. The #2057 invariant
+    // `reconciled.length === referencesFound - movesFailed` must hold across BOTH
+    // closure paths — before the fix, referencesFound omitted the subject closure
+    // and undercounted (1 vs reconciled.length 2), misreporting production health.
+    const { id: tokenId } = await escAdmin.addToBacklog({
+      title: "Wire arbitrage scanner output feed",
+      category: "test",
+      lane: "queued",
+    });
+    const { id: subjectId } = await escAdmin.addToBacklog({
+      title: "Extract scheduler housekeeping cooldown helper",
+      category: "test",
+      lane: "queued",
+    });
+
+    const result = await escAdmin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => [
+        { ref: "pr-3100", blob: `feat(scanner): wire output feed (${tokenId})\ncloses ${tokenId}` },
+        {
+          ref: "pr-3101",
+          blob:
+            "refactor(scheduler): extract cooldown helper from housekeeping module\n\n" +
+            "Pulls the per-class cooldown logic into a pure helper for testability.",
+        },
+      ],
+      fetchMergeCommitRefs: async () => [],
+      now: Date.now() + 20 * DAY,
+    });
+
+    assert.equal(result.reconciled.length, 2, "both the token-match and subject-match items reconcile");
+    assert.equal(result.metrics.movesFailed, 0, "no failed moves in this scenario");
+    assert.equal(
+      result.metrics.referencesFound,
+      result.reconciled.length,
+      "referencesFound must count subject closures too (#2057 invariant across both paths)",
+    );
+    assert.equal(
+      result.reconciled.length,
+      result.metrics.referencesFound - result.metrics.movesFailed,
+      "#2057 invariant: reconciled.length === referencesFound - movesFailed",
+    );
+
+    const ids = result.reconciled.map((r: { id: string }) => r.id).sort();
+    assert.deepEqual(ids, [tokenId, subjectId].sort(), "both items present in the unified reconciled list");
+  });
 });

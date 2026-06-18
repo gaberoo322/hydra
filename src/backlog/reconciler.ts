@@ -414,6 +414,11 @@ export async function reconcileMergedItems(opts: {
   // pass; surface those closures in the top-level `reconciled` array so the
   // caller / status page sees one unified merged→done list.
   for (const r of esc.reconciled) reconciled.push(r);
+  // Subject-matched closures are successful merged→done reconciliations, so they
+  // must count toward `referencesFound` to preserve the #2057 invariant
+  // (`reconciled.length === referencesFound - movesFailed`); the escalation pass
+  // only returns items it actually moved to done, so none of these are failures.
+  referencesFound += esc.reconciled.length;
 
   return {
     reconciled,
