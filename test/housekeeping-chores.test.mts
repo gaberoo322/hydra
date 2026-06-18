@@ -27,6 +27,7 @@ import {
   runForecastCalibrationBrier,
   returnStaleInProgressItems,
   pruneStaleRedisKeys,
+  runMergedItemReconciler,
 } from "../src/scheduler/housekeeping.ts";
 
 interface PublishedEvent {
@@ -312,5 +313,73 @@ describe("pruneStaleRedisKeys — isolated (issue #2067)", () => {
       },
     });
     assert.equal(deleted, 0, "a key with a TTL is never pruned");
+  });
+});
+
+describe("runMergedItemReconciler — health snapshot persistence (issue #2057)", () => {
+  test("persists feed liveness + batch metrics from a clean run", async () => {
+    let saved: any = null;
+    await runMergedItemReconciler({
+      reconcileMergedItems: async () => ({
+        reconciled: [{ id: "item-1", ref: "pr-9" }],
+        escalated: [],
+        scanned: 4,
+        feed: { prs: { examined: 3 }, commits: { examined: 2 } },
+        metrics: { referencesFound: 1, movesFailed: 0, durationMs: 42 },
+      }),
+      setReconcilerHealth: async (record) => { saved = record; },
+    });
+
+    assert.ok(saved, "a health snapshot must be persisted every run");
+    assert.ok(saved.ranAt, "ranAt timestamp stamped");
+    assert.equal(saved.feed.prs.examined, 3);
+    assert.equal(saved.feed.commits.examined, 2);
+    assert.equal(saved.metrics.referencesFound, 1);
+    assert.equal(saved.metrics.movesFailed, 0);
+    assert.equal(saved.metrics.itemsReconciled, 1);
+    assert.equal(saved.metrics.itemsEscalated, 0);
+    assert.equal(saved.metrics.scanned, 4);
+    assert.equal(saved.metrics.durationMs, 42);
+    assert.equal(saved.alert, undefined, "no alert on a clean run");
+  });
+
+  test("persists the both-feeds-down alert into the health snapshot", async () => {
+    let saved: any = null;
+    await runMergedItemReconciler({
+      reconcileMergedItems: async () => ({
+        reconciled: [],
+        escalated: [],
+        scanned: 0,
+        feed: {
+          prs: { examined: 0, failed: "merged-PR feed unavailable" },
+          commits: { examined: 0, failed: "merge-commit feed unavailable" },
+        },
+        metrics: { referencesFound: 0, movesFailed: 0, durationMs: 5 },
+        alert: { code: "reconciler:both-feeds-down", message: "both feeds blind" },
+      }),
+      setReconcilerHealth: async (record) => { saved = record; },
+    });
+
+    assert.ok(saved.alert, "the critical alert must reach the health snapshot");
+    assert.equal(saved.alert.code, "reconciler:both-feeds-down");
+    assert.ok(saved.feed.prs.failed, "down feed reason persisted");
+    assert.ok(saved.feed.commits.failed, "down feed reason persisted");
+  });
+
+  test("a health-persist failure does not abort the chore (fail-soft)", async () => {
+    // The reconciler already ran (and fired any alert) — a Redis write failure
+    // for the observability snapshot must never throw out of the chore.
+    await runMergedItemReconciler({
+      reconcileMergedItems: async () => ({
+        reconciled: [],
+        escalated: [],
+        scanned: 0,
+        feed: { prs: { examined: 1 }, commits: { examined: 1 } },
+        metrics: { referencesFound: 0, movesFailed: 0, durationMs: 1 },
+      }),
+      setReconcilerHealth: async () => { throw new Error("redis down"); },
+    });
+    // Reaching here without throwing is the assertion.
+    assert.ok(true);
   });
 });

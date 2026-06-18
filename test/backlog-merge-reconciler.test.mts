@@ -313,6 +313,108 @@ describe("backlog merge→done reconciler (issue #1715)", () => {
     const lanes = await admin.loadBacklog();
     assert.equal(lanes.queued.length, 1);
   });
+
+  // -------------------------------------------------------------------------
+  // Observability: feed liveness + batch metrics + alerting (issue #2057)
+  // -------------------------------------------------------------------------
+
+  test("result carries per-feed examined counts + batch metrics (issue #2057)", async (t) => {
+    requireRedis(t);
+
+    const { id } = await admin.addToBacklog({ title: "Metric coverage", category: "test", lane: "queued" });
+
+    const result = await admin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => [
+        { ref: "pr-501", blob: `feat: lands it (${id})` },
+        { ref: "pr-502", blob: "feat: unrelated other PR" },
+      ],
+      fetchMergeCommitRefs: async () => [
+        { ref: "commit-aaa1111", blob: "merge: unrelated cycle" },
+      ],
+    });
+
+    // Feed liveness: both feeds answered, examined counts reflect the arrays.
+    assert.equal(result.feed.prs.examined, 2);
+    assert.equal(result.feed.prs.failed, undefined, "a healthy feed has no failed reason");
+    assert.equal(result.feed.commits.examined, 1);
+    assert.equal(result.feed.commits.failed, undefined);
+
+    // Batch metrics: one reference matched, no move failed, duration present.
+    assert.equal(result.metrics.referencesFound, 1);
+    assert.equal(result.metrics.movesFailed, 0);
+    assert.equal(typeof result.metrics.durationMs, "number");
+    assert.ok(result.metrics.durationMs >= 0);
+    assert.equal(result.alert, undefined, "a healthy run raises no alert");
+  });
+
+  test("single-feed failure is reported in feed state but still does NOT alert (issue #2057)", async (t) => {
+    requireRedis(t);
+
+    const { id } = await admin.addToBacklog({ title: "Partial coverage", category: "test", lane: "queued" });
+
+    const result = await admin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => null, // PR feed down
+      fetchMergeCommitRefs: async () => [
+        { ref: "commit-bbb2222", blob: `merge: claude cycle — partial coverage (${id})` },
+      ],
+    });
+
+    assert.equal(result.feedsAvailable, true, "one live feed keeps feedsAvailable true");
+    assert.ok(result.feed.prs.failed, "the down feed must carry a failed reason");
+    assert.equal(result.feed.prs.examined, 0);
+    assert.equal(result.feed.commits.examined, 1);
+    assert.equal(result.feed.commits.failed, undefined);
+    assert.equal(result.alert, undefined, "a single-feed failure is WARN-only, not a critical alert");
+    // The live feed still reconciled the matching item.
+    assert.equal(result.reconciled.length, 1);
+  });
+
+  test("both feeds down raises a reconciler:both-feeds-down alert + pushes it (issue #2057)", async (t) => {
+    requireRedis(t);
+
+    await admin.addToBacklog({ title: "Blind reconciler", category: "test", lane: "queued" });
+
+    const result = await admin.reconcileMergedItems(OUTAGE_FEEDS);
+
+    assert.equal(result.feedsAvailable, false);
+    assert.ok(result.alert, "both feeds down must surface a critical alert object");
+    assert.equal(result.alert.code, "reconciler:both-feeds-down");
+    assert.ok(result.feed.prs.failed, "PR feed failure reason present");
+    assert.ok(result.feed.commits.failed, "commit feed failure reason present");
+
+    // The alert is also pushed to hydra:alerts so the operator is notified.
+    const alerts = await redis.lrange("hydra:alerts", 0, -1);
+    const matching = alerts
+      .map((a: string) => JSON.parse(a))
+      .filter((a: any) => a.type === "reconciler:both-feeds-down");
+    assert.equal(matching.length, 1, "exactly one both-feeds-down alert pushed");
+    assert.ok(matching[0].payload.message, "alert carries a human-readable message");
+    assert.ok(matching[0].ts, "alert carries a timestamp");
+
+    // No item moved — the merged→done sweep stays fail-closed on a total outage.
+    const lanes = await admin.loadBacklog();
+    assert.equal(lanes.done.length, 0);
+  });
+
+  test("metrics.referencesFound equals reconciled count on a clean run (issue #2057)", async (t) => {
+    requireRedis(t);
+
+    const a = await admin.addToBacklog({ title: "First match", category: "test", lane: "queued" });
+    const b = await admin.addToBacklog({ title: "Second match", category: "test", lane: "backlog" });
+
+    const result = await admin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => [
+        { ref: "pr-601", blob: `feat: a (${a.id})` },
+        { ref: "pr-602", blob: `feat: b (${b.id})` },
+      ],
+      fetchMergeCommitRefs: async () => [],
+    });
+
+    assert.equal(result.metrics.referencesFound, 2);
+    assert.equal(result.metrics.movesFailed, 0);
+    // On a clean run referencesFound - movesFailed == items reconciled.
+    assert.equal(result.reconciled.length, result.metrics.referencesFound - result.metrics.movesFailed);
+  });
 });
 
 /**
