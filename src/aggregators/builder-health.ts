@@ -47,26 +47,37 @@
  *   render "no data yet" rather than error.
  * - **Per-metric native windows.** Each metric echoes its own `window` +
  *   provenance; there is no false-precision single global window.
- * - **Pure classifier.** `classifyAutonomy`, `percentile`, and the
- *   composition helpers are pure functions exported for tests; the GitHub
- *   and Redis readers are overridable via `deps`.
+ * - **Pure classifier.** `classifyAutonomy` (autonomy-classifier.ts) and
+ *   `percentile` (autonomy-rate.ts, re-exported here for back-compat) are pure
+ *   functions exported for tests; the GitHub and Redis readers are overridable
+ *   via `deps`.
+ * - **Autonomy Rate fan-out lives in its own module.** `computeAutonomyRate`
+ *   (autonomy-rate.ts, issue #2068) owns the dispatch->PR link + GitHub fan-out
+ *   that produces the autonomy-rate + time-to-merge slices; this file composes
+ *   it alongside the other six metrics.
  */
 
-import { viewPr } from "../github/issues.ts";
-
+import { type GhPrView } from "./autonomy-classifier.ts";
 import {
-  classifyAutonomy,
-  type GhPrView,
-  type AutonomyDecision,
-} from "./autonomy-classifier.ts";
+  computeAutonomyRate,
+  percentile,
+  type AutonomyRateMetric,
+  type TimeToMergeMetric,
+} from "./autonomy-rate.ts";
 import { getCapacitySnapshot, ORCHESTRATOR_FLOOR, DEFAULT_WINDOW_CYCLES } from "../capacity-floor.ts";
 import { getAggregateStats } from "../metrics/aggregate.ts";
 import { getMetricsTrend } from "../metrics/trend.ts";
 import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
-import { listAutopilotPrLinksSince } from "../redis/autopilot-runs.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
 import { settledOrNull } from "./settle.ts";
 import { dayKey, type TrendPoint } from "./trend-series.ts";
+
+// Re-exported for back-compat: `percentile` and the autonomy/time-to-merge
+// metric types historically lived here. The fan-out moved to autonomy-rate.ts
+// (issue #2068); these re-exports keep the builder-health public surface and
+// existing test imports unchanged.
+export { percentile };
+export type { AutonomyRateMetric, TimeToMergeMetric };
 
 // Heartbeat merge-rate window (env-overridable, matches the rolling merge
 // rate's native window). Used for the rework metric's "of N cycles" framing.
@@ -87,25 +98,9 @@ interface SelfImprovementShareMetric {
   window: number;
 }
 
-interface AutonomyRateMetric {
-  rate: number;
-  autonomous: number;
-  total: number;
-  window: number;
-  /** Per-dispatch breakdown so the dashboard can show why a PR was non-autonomous. */
-  breakdown: AutonomyDecision[];
-}
-
 interface ReworkRateMetric {
   regressionRate: number;
   noOpMergeRate: number;
-  window: number;
-}
-
-interface TimeToMergeMetric {
-  medianMinutes: number | null;
-  p90Minutes: number | null;
-  samples: number;
   window: number;
 }
 
@@ -188,7 +183,7 @@ export async function getBuilderHealthScorecard(
   ] = await Promise.allSettled([
     computeSelfImprovementShare(deps),
     computeReworkRate(deps),
-    computeAutonomyAndLatency(prWindow, deps),
+    computeAutonomyRate(prWindow, deps),
     computeMutationTrend(deps),
     computeScopeViolations(windowDays, now, deps),
     computeLearningThroughput(windowDays, now, deps),
@@ -327,101 +322,6 @@ async function computeLearningThroughput(
 async function defaultDcCount(date: string): Promise<number> {
   const { getDesignConceptProductionCountForDate } = await import("../redis/design-concept.ts");
   return getDesignConceptProductionCountForDate(date);
-}
-
-// ---------------------------------------------------------------------------
-// Metric: Autonomy rate + time-to-merge (new — dispatch->PR link + GitHub)
-// ---------------------------------------------------------------------------
-
-async function computeAutonomyAndLatency(
-  prWindow: number,
-  deps: BuilderHealthDeps,
-): Promise<{ autonomy: AutonomyRateMetric; timeToMerge: TimeToMergeMetric }> {
-  const now = deps.now ?? new Date();
-  // Look back over the day-window's worth of PR links; cap at prWindow newest.
-  const sinceMs = now.getTime() - 30 * 24 * 60 * 60 * 1000;
-  const linkReader = deps.listPrLinksSince ?? listAutopilotPrLinksSince;
-  const links = (await linkReader(sinceMs)).slice(0, prWindow);
-
-  const decisions: AutonomyDecision[] = [];
-  const latencies: number[] = [];
-
-  for (const link of links) {
-    const prNumber = Number(link.prNumber);
-    if (!Number.isInteger(prNumber) || prNumber <= 0) continue;
-    const view = await (deps.fetchPrView ?? makeDefaultFetchPrView(deps))(prNumber);
-    if (!view) {
-      // No view — count as non-autonomous-unknown rather than dropping, so
-      // the rate doesn't silently inflate on transient GitHub failures.
-      decisions.push({ prNumber, autonomous: false, reason: "pr-view-unavailable" });
-      continue;
-    }
-    // Only merged PRs count toward the rate (a dispatch "reaches merged").
-    if (!view.mergedAt) continue;
-    const decision = classifyAutonomy(view);
-    decisions.push({ prNumber, autonomous: decision.autonomous, reason: decision.reason });
-
-    const openedMs = Number(link.openedAtMs);
-    const mergedMs = Date.parse(view.mergedAt);
-    if (Number.isFinite(openedMs) && Number.isFinite(mergedMs) && mergedMs >= openedMs) {
-      latencies.push((mergedMs - openedMs) / 60000); // minutes
-    }
-  }
-
-  const total = decisions.length;
-  const autonomous = decisions.filter((d) => d.autonomous).length;
-  return {
-    autonomy: {
-      rate: total > 0 ? autonomous / total : 0,
-      autonomous,
-      total,
-      window: prWindow,
-      breakdown: decisions,
-    },
-    timeToMerge: {
-      medianMinutes: latencies.length > 0 ? percentile(latencies, 50) : null,
-      p90Minutes: latencies.length > 0 ? percentile(latencies, 90) : null,
-      samples: latencies.length,
-      window: prWindow,
-    },
-  };
-}
-
-function makeDefaultFetchPrView(
-  deps: BuilderHealthDeps,
-): (prNumber: number) => Promise<GhPrView | null> {
-  return (prNumber: number) =>
-    // viewPr reads through the Issue/PR Read seam (issue #908/#915): it owns
-    // the `gh pr view` argv + repo handle and returns the raw parsed object
-    // (typed `GhPrView` here, the caller's responsibility) or null on any
-    // failure (never throws).
-    viewPr<GhPrView>(prNumber, "number,mergedAt,mergedBy,labels,reviews,commits", {
-      repo: deps.githubRepo,
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Pure helpers — exported for tests
-// ---------------------------------------------------------------------------
-
-/**
- * Pure helper — exported for tests. Linear-interpolated percentile (p in
- * 0..100) over a numeric sample. Returns 0 for empty input.
- */
-export function percentile(values: number[], p: number): number {
-  const xs = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-  if (xs.length === 0) return 0;
-  if (xs.length === 1) return round1(xs[0]);
-  const rank = (p / 100) * (xs.length - 1);
-  const lo = Math.floor(rank);
-  const hi = Math.ceil(rank);
-  if (lo === hi) return round1(xs[lo]);
-  const frac = rank - lo;
-  return round1(xs[lo] + (xs[hi] - xs[lo]) * frac);
-}
-
-function round1(n: number): number {
-  return Math.round(n * 10) / 10;
 }
 
 // The UTC date-only key is the shared trend-series grammar (issue #956).
