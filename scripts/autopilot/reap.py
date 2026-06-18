@@ -219,6 +219,46 @@ def _read_reflection_sources(task_id: str) -> tuple[str, str]:
         return "", REFL_PRESENCE_READ_ERROR
 
 
+def _read_anchor_deposit(task_id: str) -> str | None:
+    """Read the planning-time anchor deposit for `task_id` (issue #2112).
+
+    The reflection PRODUCER (`_fire_reflection_for_completion` →
+    `recordAnchorReflection`) keys every per-anchor reflection on the cycle's
+    anchor reference (e.g. "issue-2112"). reap previously recovered that anchor
+    ONLY from `slot["anchor"]`, but the dispatch harness never stamps an
+    `anchor` field on the slot (the live slot carries only
+    `task_id`/`skill`/`started_epoch`/`branch`), and for `dev_orch` the dispatch
+    action carries no anchor in `prompt_args` at all (the #458 contract). So
+    `slot.get("anchor")` was `None` on 100% of cycles, `_fire_reflection_for_completion`
+    early-returned on its `if not anchor_ref` guard, and the per-anchor
+    reflection store stayed structurally empty — the dead-producer bug #2112
+    names (the #1119 fix wired the chain but left this final link severed).
+
+    The code-writing dispatch (hydra-dev / hydra-target-build) is the only actor
+    that reliably knows the per-cycle anchor, so — exactly like the
+    reflection-source deposit (`_read_reflection_sources`) — it deposits the
+    anchor reference to a task-scoped file at planning time and reap reads it
+    here. Same directory + task_id keying as the reflection-source deposit, so
+    the two travel together.
+
+    Deterministic path: ${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-<task_id>.
+    Best-effort and fully non-fatal: a missing file, an empty file, or any read
+    error all yield None so the caller falls back to `slot.get("anchor")` and,
+    failing that, degrades to the prior no-op. Never blocks the reap.
+    """
+    if not task_id:
+        return None
+    try:
+        path = REFL_SOURCES_DIR / f"hydra-refl-anchor-{task_id}"
+        if not path.exists():
+            return None
+        anchor = path.read_text(encoding="utf-8").strip()
+        return anchor or None
+    except OSError as exc:
+        _append_log(f"refl_anchor_read_skipped task_id={task_id} err={exc}")
+        return None
+
+
 def _slot_started_epoch(slot: dict | None) -> int | None:
     """Best-effort dispatch-start epoch (seconds) for an occupied pipeline slot.
 
@@ -617,7 +657,10 @@ def run_hardcap() -> int:
         if partial >= hard:
             # Hard-cap trip: abandon slot, file diagnostic issue, mark class burned.
             task_id = slot.get("task_id") or f"hardcap-{cls}-{partial}"
-            anchor_ref = slot.get("anchor")
+            # Issue #2112: slots never carry an `anchor` field — recover it from
+            # the planning-time deposit (keyed on task_id) so the hard-cap
+            # reflection fire below is not a guaranteed no-op.
+            anchor_ref = slot.get("anchor") or _read_anchor_deposit(task_id)
             runaways.append((cls, slot.get("skill", "?"), partial, task_id, anchor_ref))
             s["slots"][cls] = None
             if cls not in s.get("burned_classes", []):
@@ -750,7 +793,17 @@ def run_completion(cls: str, task_id: str, total_tokens: int, skill: str | None)
     # reap. Captured here so a failure reflection-record fire below can key on
     # it (see `_fire_reflection_for_completion`). None when the slot is absent
     # (signal class / already-cleared) or carries no anchor.
+    #
+    # Issue #2112: the dispatch harness never stamps `slot["anchor"]` (the live
+    # slot carries only task_id/skill/started_epoch/branch) and dev_orch passes
+    # no prompt_args anchor (#458), so `slot.get("anchor")` was always None and
+    # the reflection producer below was a permanent no-op. Recover the anchor
+    # from the planning-time deposit the code-writing dispatch leaves (keyed on
+    # the same task_id as the reflection-source deposit). The deposit is the
+    # authoritative source; the slot field is a (never-populated today) fallback.
     anchor_ref = slot.get("anchor") if isinstance(slot, dict) else None
+    if not anchor_ref:
+        anchor_ref = _read_anchor_deposit(task_id)
     if slot is not None:
         slot["tokens"] = total_tokens
         s["slots"][cls] = None  # release the pipeline slot

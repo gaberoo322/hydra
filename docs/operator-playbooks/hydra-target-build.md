@@ -364,6 +364,28 @@ fi
 # Empty REFL_SOURCES (served nothing) → no deposit → reap omits the field →
 # the cycle truthfully buckets to 'none'. This distinguishes "served nothing"
 # from the #1945 "served but deposited under the wrong key" false 'none'.
+
+# Issue #2112: ALSO deposit the per-cycle ANCHOR reference so reap can fire the
+# per-anchor reflection PRODUCER on a non-merged failure. The dispatch harness
+# never stamps `slot["anchor"]`, so reap's `slot.get("anchor")` was always None
+# and recordAnchorReflection was NEVER called — the per-anchor reflection store
+# stayed empty and `reflectionMatchSource` was permanently 'none'. The subagent
+# knows the anchor ($ANCHOR_REF, anchor.reference), so deposit it to a
+# task-scoped file keyed on the SAME REFL_TASK_ID as the reflection-source
+# deposit above; reap reads it via `_read_anchor_deposit`. ALWAYS deposit
+# (unconditional on REFL_SOURCES) so a first-failure anchor is recoverable.
+if [ -n "$REFL_TASK_ID" ] && [ -n "$ANCHOR_REF" ]; then
+  REFL_ANCHOR_PATH="${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-${REFL_TASK_ID}"
+  if printf '%s' "$ANCHOR_REF" > "$REFL_ANCHOR_PATH" 2>/dev/null; then
+    printf '[hydra-target-build] refl-anchor-deposit ok: %s -> %s\n' "$ANCHOR_REF" "$REFL_ANCHOR_PATH" >&2
+  else
+    printf '[hydra-target-build] WARN refl-anchor-deposit-write-failed: could not write %s (cue: refl-anchor-deposit-write-failed)\n' \
+      "$REFL_ANCHOR_PATH" >&2
+  fi
+elif [ -z "$REFL_TASK_ID" ]; then
+  printf '[hydra-target-build] WARN refl-anchor-deposit-no-task-id: no harness task_id derivable from cwd=%s — reflection producer cannot key on this anchor\n' \
+    "$PWD" >&2
+fi
 ```
 
 To verify reflections actually reach a retry, query this `/api/reflections`

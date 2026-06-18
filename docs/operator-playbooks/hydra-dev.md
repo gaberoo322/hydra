@@ -141,7 +141,7 @@ The child prompt MUST include the worktree-guard preamble (see below) AND the sc
 2. Reads CLAUDE.md / AGENTS.md, CONTEXT.md, relevant ADRs
 3. Extracts the `## Files in scope` + `## Files out of scope` lists from the issue body
 4. **Fetches per-anchor Reflections via the live API (see "Reflection injection — live API" below)** and, if any are returned, weaves the narrative into its implementation plan. Never skip — a retry of a prior-failure anchor depends on this.
-4a. **MANDATORY — deposits the reflection-source telemetry file (issue #1136/#1912).** Immediately after the step-4 fetch, run the "Reflection-source telemetry deposit" recipe in the "Reflection injection — live API" section below — it writes `${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>` so `reap.py` can stamp the `reflectionMatchSource` cycle metric. This is NOT optional and NOT conditional on whether reflections were served: ALWAYS run the deposit block (an empty result writes no file, which `reap.py` correctly buckets to `none`). Skipping it is the #1912 failure mode where the metric read `'none'` on 100% of cycles. The deposit is best-effort on I/O error (never blocks work) but the step itself is mandatory.
+4a. **MANDATORY — deposits the reflection-source telemetry file AND the anchor deposit (issue #1136/#1912/#2112).** Immediately after the step-4 fetch, run the "Reflection-source telemetry deposit" recipe in the "Reflection injection — live API" section below — it writes `${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-sources-<task_id>` so `reap.py` can stamp the `reflectionMatchSource` cycle metric, AND `${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-<task_id>` (the anchor `issue-<N>`) so `reap.py` can fire the per-anchor reflection PRODUCER on a non-merged failure (issue #2112 — without this deposit reap's `slot.get("anchor")` is always None and `recordAnchorReflection` is never called, the dead-producer bug). This is NOT optional and NOT conditional on whether reflections were served: ALWAYS run the deposit block (an empty reflection-source result writes no sources file, which `reap.py` correctly buckets to `none`; the anchor deposit is ALWAYS written so a first-failure anchor is recoverable). Skipping it is the #1912/#2112 failure mode where the metric read `'none'` and the reflection store stayed empty on 100% of cycles. The deposit is best-effort on I/O error (never blocks work) but the step itself is mandatory.
 5. Greps/reads the source for context
 6. Implements the issue — touching out-of-scope files only with a `scope-justification:` block in the PR body
 7. **Declares glossary/ADR impact** — per the `docs/agents/domain.md` WRITE contract, add a `Glossary impact:` / `ADR impact:` line to the PR body for any term resolved or decision made (a `## Glossary delta` in the issue or referenced ADR names it). Do **not** edit `CONTEXT.md` in this code PR — the delta lands in a **separate `ubiquitous-language`-labelled PR**.
@@ -290,6 +290,35 @@ fi
 # Empty REFL_SOURCES (served nothing) → no deposit → reap omits the field →
 # the cycle truthfully buckets to 'none'. This distinguishes "served nothing"
 # from the #1945 "served but deposited under the wrong key" false 'none'.
+
+# Issue #2112: ALSO deposit the per-cycle ANCHOR reference so reap can fire the
+# per-anchor reflection PRODUCER on a non-merged failure. The dispatch harness
+# never stamps `slot["anchor"]` (the live slot carries only
+# task_id/skill/started_epoch/branch) and dev_orch passes no prompt_args anchor
+# (#458), so reap's `slot.get("anchor")` was always None and
+# recordAnchorReflection was NEVER called — the per-anchor reflection store
+# stayed empty and `reflectionMatchSource` was permanently 'none'. The subagent
+# is the only actor that reliably knows the anchor (it is `issue-<N>` for the
+# issue being worked), so deposit it to a task-scoped file keyed on the SAME
+# REFL_TASK_ID as the reflection-source deposit above. reap reads it via
+# `_read_anchor_deposit`. ALWAYS deposit (unconditional on REFL_SOURCES — a
+# failed dispatch that served NO reflections still needs its anchor recoverable
+# so reap can write the FIRST reflection for this anchor).
+REFL_ANCHOR_REF="issue-2112"   # the anchor.reference for this dispatch (issue being worked)
+if [ -n "$REFL_TASK_ID" ] && [ -n "$REFL_ANCHOR_REF" ]; then
+  REFL_ANCHOR_PATH="${HYDRA_AUTOPILOT_REFL_DIR:-/tmp}/hydra-refl-anchor-${REFL_TASK_ID}"
+  if printf '%s' "$REFL_ANCHOR_REF" > "$REFL_ANCHOR_PATH" 2>/dev/null; then
+    printf '[hydra-dev] refl-anchor-deposit ok: %s -> %s\n' "$REFL_ANCHOR_REF" "$REFL_ANCHOR_PATH" >&2
+  else
+    # FAIL LOUD on I/O error (cue: refl-anchor-deposit-write-failed) — best-effort
+    # for the build but never silently swallowed.
+    printf '[hydra-dev] WARN refl-anchor-deposit-write-failed: could not write %s (cue: refl-anchor-deposit-write-failed)\n' \
+      "$REFL_ANCHOR_PATH" >&2
+  fi
+elif [ -z "$REFL_TASK_ID" ]; then
+  printf '[hydra-dev] WARN refl-anchor-deposit-no-task-id: no harness task_id derivable from cwd=%s — reflection producer cannot key on this anchor\n' \
+    "$PWD" >&2
+fi
 ```
 
 **Reading the deposit-presence diagnostic at reap time (issue #2020).** A
