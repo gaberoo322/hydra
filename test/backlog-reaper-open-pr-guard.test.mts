@@ -178,17 +178,17 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     await backdateClaim(id, 3 * 60 * 60 * 1000);
 
     // Simulate the production failure: an open target-repo PR references this item.
-    const fetchOpenPrBlobs = async () => [
-      `feat(scanner): ${id} add run history page\nCloses ${id}.\nImplements suppression rate trends.`,
+    const fetchOpenPrRefs = async () => [
+      { ref: "pr-1", blob: `feat(scanner): ${id} add run history page\nCloses ${id}.\nImplements suppression rate trends.` },
     ];
 
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs,
+      fetchOpenPrRefs,
       // issue #1714: inject a null merged-PR feed so these tests stay
       // hermetic — without it the new merged-PR guard's default fetcher
       // would shell out to `gh` (and real merged PRs could match test IDs).
-      fetchMergedPrBlobs: async () => null,
+      fetchMergedPrRefs: async () => null,
     });
 
     assert.equal(result.reaped.length, 0, "no items reaped — open PR guard protected the item");
@@ -225,15 +225,15 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     await backdateClaim(unprotectedId, 3 * 60 * 60 * 1000);
 
     // Only the protected item has an open PR.
-    const fetchOpenPrBlobs = async () => [`feat: ${protectedId} ship it`];
+    const fetchOpenPrRefs = async () => [{ ref: "pr-2", blob: `feat: ${protectedId} ship it` }];
 
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs,
+      fetchOpenPrRefs,
       // issue #1714: inject a null merged-PR feed so these tests stay
       // hermetic — without it the new merged-PR guard's default fetcher
       // would shell out to `gh` (and real merged PRs could match test IDs).
-      fetchMergedPrBlobs: async () => null,
+      fetchMergedPrRefs: async () => null,
     });
 
     assert.equal(result.reaped.length, 1, "exactly one item reaped (the unprotected one)");
@@ -257,15 +257,15 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
 
     // Null = "couldn't check". The reaper must NOT wedge the slot — it falls
     // back to the original time-only behaviour. Over-reap once > wedge forever.
-    const fetchOpenPrBlobs = async () => null;
+    const fetchOpenPrRefs = async () => null;
 
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs,
+      fetchOpenPrRefs,
       // issue #1714: inject a null merged-PR feed so these tests stay
       // hermetic — without it the new merged-PR guard's default fetcher
       // would shell out to `gh` (and real merged PRs could match test IDs).
-      fetchMergedPrBlobs: async () => null,
+      fetchMergedPrRefs: async () => null,
     });
 
     assert.equal(result.reaped.length, 1, "item reaped when PR feed is unavailable");
@@ -281,17 +281,17 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     await backdateClaim(targetId, 3 * 60 * 60 * 1000);
 
     // PR talks about a different item entirely.
-    const fetchOpenPrBlobs = async () => [
-      "feat: item-999 unrelated work\nNothing about the item we're testing.",
+    const fetchOpenPrRefs = async () => [
+      { ref: "pr-3", blob: "feat: item-999 unrelated work\nNothing about the item we're testing." },
     ];
 
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs,
+      fetchOpenPrRefs,
       // issue #1714: inject a null merged-PR feed so these tests stay
       // hermetic — without it the new merged-PR guard's default fetcher
       // would shell out to `gh` (and real merged PRs could match test IDs).
-      fetchMergedPrBlobs: async () => null,
+      fetchMergedPrRefs: async () => null,
     });
 
     assert.equal(result.reaped.length, 1, "unrelated open PR does not protect the item");
@@ -307,17 +307,17 @@ describe("backlog reaper open-PR guard (issue #490)", () => {
     await backdateClaim(id, 3 * 60 * 60 * 1000);
 
     // PR uses a different ID scheme (or no ID), but quotes the title verbatim.
-    const fetchOpenPrBlobs = async () => [
-      `feat(scanner): history page\nFrom the backlog: "${title}"`,
+    const fetchOpenPrRefs = async () => [
+      { ref: "pr-4", blob: `feat(scanner): history page\nFrom the backlog: "${title}"` },
     ];
 
     const result = await admin.reapStaleClaims({
       maxAgeMs: 2 * 60 * 60 * 1000,
-      fetchOpenPrBlobs,
+      fetchOpenPrRefs,
       // issue #1714: inject a null merged-PR feed so these tests stay
       // hermetic — without it the new merged-PR guard's default fetcher
       // would shell out to `gh` (and real merged PRs could match test IDs).
-      fetchMergedPrBlobs: async () => null,
+      fetchMergedPrRefs: async () => null,
     });
 
     assert.equal(result.reaped.length, 0);
