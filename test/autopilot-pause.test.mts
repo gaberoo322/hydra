@@ -39,7 +39,7 @@ import { redisKeys } from "../src/redis/keys.ts";
 import { overlayPauseEligibility, projectEligibility } from "../src/cost/eligibility.ts";
 import { type UsageSnapshot } from "../src/cost/index.ts";
 import { AutopilotPauseBodySchema } from "../src/autopilot/schemas.ts";
-import { createAutopilotRouter } from "../src/api/autopilot.ts";
+import { createAutopilotControlRouter as createAutopilotRouter } from "../src/api/autopilot-control.ts";
 
 const PACE_GATE = join(
   dirname(fileURLToPath(import.meta.url)),

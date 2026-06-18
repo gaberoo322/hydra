@@ -32,7 +32,7 @@
 // not write `hydra:autopilot:*` and does not depend on any new top-level
 // fields on the run hash (slice-2 AC10 / slice-3 AC12 / slice-4 AC9
 // invariant preserved). It reuses `fetchTurnsWithJoins` from
-// `src/api/autopilot.ts` for the dispatch→cycle join.
+// `src/autopilot/run-projections.ts` for the dispatch→cycle join.
 
 import { Router } from "express";
 import { z } from "zod";
@@ -40,7 +40,7 @@ import {
   getAutopilotRun,
   listRecentAutopilotRunIds,
 } from "../redis/autopilot-runs.ts";
-import { fetchTurnsWithJoins } from "./autopilot.ts";
+import { fetchTurnsWithJoins } from "../autopilot/run-projections.ts";
 
 /**
  * Query schema for `GET /agents/stream?agent=<worktreeBranch>` (ADR-0022).

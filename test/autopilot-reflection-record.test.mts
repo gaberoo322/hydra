@@ -11,7 +11,7 @@
  *
  * Fix (Slice 1): a reap-side reflection PRODUCER —
  *   - `ReflectionRecordBodySchema` (src/autopilot/schemas.ts),
- *   - `POST /autopilot/reflection-record` (src/api/autopilot.ts),
+ *   - `POST /autopilot/reflection-record` (src/api/autopilot-lifecycle.ts),
  *   - `recordReflectionOutcome()` never-throws wrapper (src/autopilot/runs.ts),
  *   - `scripts/autopilot/reap.py::_fire_reflection_record` best-effort POST,
  *     fired from `self_heal.append_failure` on a NON-MERGED outcome.
@@ -137,8 +137,8 @@ describe("POST /api/autopilot/reflection-record (issue #1119)", () => {
       redis = new Redis(REDIS_URL);
     }
     await cleanReflections();
-    const mod = await import("../src/api/autopilot.ts");
-    const router = mod.createAutopilotRouter();
+    const mod = await import("../src/api/autopilot-lifecycle.ts");
+    const router = mod.createAutopilotLifecycleRouter();
     handler = findHandler(router, "POST", "/autopilot/reflection-record");
     assert.ok(handler, "POST /autopilot/reflection-record handler should exist");
   });

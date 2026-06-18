@@ -139,8 +139,8 @@ describe("autopilot history API (issue #500)", () => {
     }
     await cleanKeys();
     if (!createAutopilotRouter) {
-      const mod = await import("../src/api/autopilot.ts");
-      createAutopilotRouter = mod.createAutopilotRouter;
+      const mod = await import("../src/api/autopilot-runs.ts");
+      createAutopilotRouter = mod.createAutopilotRunsRouter;
     }
     const router = createAutopilotRouter();
     runsList = findHandler(router, "GET", "/autopilot/runs");

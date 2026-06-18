@@ -198,7 +198,7 @@ export const redisKeys = {
   // 60s-TTL merge-lock) that, while engaged, forces ALL auto-merge to pause
   // regardless of tier/depth verdict and routes every open PR to the
   // /hydra-review pickup set. The SOLE write path is the operator-facing API
-  // route (src/api/autopilot.ts); decide.py and collect-state.sh only READ
+  // route (src/api/autopilot-control.ts); decide.py and collect-state.sh only READ
   // it. Stored as a JSON blob `{engaged, since, engagedBy}` so /health can
   // surface "since when / by whom" for incident audit. Absent => disengaged
   // (default-off).
@@ -210,7 +210,7 @@ export const redisKeys = {
   // spawning a new run and the brain (decide.py) emits no new dispatches,
   // while in-flight subagents finish their atomic unit. INDEPENDENT of and
   // composes with the emergency-brake (which is merge-only). The SOLE write
-  // path is the operator-facing API route (src/api/autopilot.ts); decide.py
+  // path is the operator-facing API route (src/api/autopilot-control.ts); decide.py
   // and collect-state.sh only READ it (folded into /api/usage/eligibility).
   // Stored as a JSON blob `{paused, since}` (no attribution). Absent =>
   // not paused (default-off, fail-safe to running).

@@ -87,8 +87,8 @@ describe("POST /api/autopilot/cycle-record (issue #430)", () => {
     }
     await cleanKeys();
     if (!createAutopilotRouter) {
-      const mod = await import("../src/api/autopilot.ts");
-      createAutopilotRouter = mod.createAutopilotRouter;
+      const mod = await import("../src/api/autopilot-lifecycle.ts");
+      createAutopilotRouter = mod.createAutopilotLifecycleRouter;
     }
     const router = createAutopilotRouter();
     handler = findHandler(router, "POST", "/autopilot/cycle-record");
@@ -190,7 +190,7 @@ describe("POST /api/autopilot/cycle-record (issue #430)", () => {
 
     // "abandoned" maps to the FAILED_STATUSES bucket — it's a failure
     // bucket from the lifetime-counter perspective. (See bucketing table
-    // in src/api/autopilot.ts.)
+    // in src/api/autopilot-lifecycle.ts.)
     assert.equal(res._body.bucketed, "failed");
     assert.equal(await redis.get("hydra:scheduler:cycles-run"), "1");
     assert.equal(await redis.get("hydra:scheduler:cycles-failed"), "1");
