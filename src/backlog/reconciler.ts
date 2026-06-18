@@ -49,6 +49,19 @@
  * merged ref or explicit operator action; staleness → blocked"). It deliberately
  * re-uses the reaper's escalate-to-blocked posture (`CLAIM_REAP_ESCALATE_AFTER`)
  * rather than inventing a new lane.
+ *
+ * Subject fuzzy-match gate (issue #2110). The `item-NNN`/`#NNN` token scan
+ * missed a large class of genuinely-SHIPPED items: dev cycles routinely ship an
+ * item's work under a renamed title or a sibling item id (squash "claude cycle"
+ * merges, item-412 shipping under item-455), carrying no matching token. A
+ * 2026-06-18 operator triage found 24/26 stale escalations had actually shipped
+ * (92% false-positive), burying the one truly-blocked item. So before escalating,
+ * `escalateStaleItems` now checks whether any merged blob's subject COVERS the
+ * item title via an ASYMMETRIC containment helper (`subjectCoveredBy`,
+ * `merged-refs.ts`) — a hit IS a concrete merged ref, so the item reconciles to
+ * `done` (reconciledFrom stamp) instead of escalating. The gate only suppresses
+ * a would-be escalation; a near-miss still escalates, and an empty merged-ref
+ * set makes the gate a no-op (feeds-down fail-closed contract preserved).
  */
 
 import {
@@ -62,6 +75,7 @@ import {
   fetchTargetMergeCommitRefs,
   itemMatchesOpenPr,
 } from "./target-pr-feed.ts";
+import { subjectCoveredBy } from "./merged-refs.ts";
 
 // `MergedRef` moved to `target-pr-feed.ts` (issue #2084); re-export it for
 // back-compat so unrelated import sites that referenced `reconciler.MergedRef`
@@ -297,7 +311,7 @@ export async function reconcileMergedItems(opts: {
   // feeds (it routes only to the safe `blocked` lane) and still runs.
   const refs: MergedRef[] = [...prOutcome.refs, ...commitOutcome.refs];
   if (refs.length === 0) {
-    const esc = await escalateStaleItems(now);
+    const esc = await escalateStaleItems(now, refs);
     return {
       reconciled,
       escalated: esc.escalated,
@@ -389,9 +403,17 @@ export async function reconcileMergedItems(opts: {
 
   // Staleness escalation runs AFTER the merged→done sweep so any item that had
   // a concrete merged ref has already left the lane — escalation only ever
-  // considers the unconfirmable remainder.
-  const esc = await escalateStaleItems(now);
+  // considers the unconfirmable remainder. `refs` is threaded in so the
+  // escalation pass can apply the subject fuzzy-match gate (issue #2110): an
+  // item whose TITLE is covered by a merged blob shipped under a renamed/sibling
+  // title and reconciles to done instead of escalating.
+  const esc = await escalateStaleItems(now, refs);
   scanned += esc.scanned;
+
+  // A subject-matched item is reconciled to done from inside the escalation
+  // pass; surface those closures in the top-level `reconciled` array so the
+  // caller / status page sees one unified merged→done list.
+  for (const r of esc.reconciled) reconciled.push(r);
 
   return {
     reconciled,
@@ -422,12 +444,27 @@ export async function reconcileMergedItems(opts: {
  * Separated from the merged loop (rather than inlined) so the merged→done path
  * keeps its fail-closed-on-outage contract while escalation runs unconditionally
  * on local age/claimant data.
+ *
+ * Subject fuzzy-match gate (issue #2110). `refs` is the same merged-ref set the
+ * merged→done sweep used. Before escalating a stale item, we check whether any
+ * merged blob's subject COVERS the item title (asymmetric `subjectCoveredBy`).
+ * A renamed/sibling-id shipment carries no `item-NNN` token (so the token scan
+ * missed it) but its title words are still covered by the merged subject — that
+ * is a concrete merged ref, so the item reconciles to `done` (with a
+ * `reconciledFrom` audit stamp) instead of escalating to `blocked`. The gate
+ * ONLY suppresses a would-be escalation: a near-miss (coverage below threshold)
+ * still escalates, and an item with neither a token nor a subject match still
+ * escalates (no regression to the genuine-stale path — item-502 surfaces). When
+ * `refs` is empty (feeds down/quiet) the gate is a no-op, preserving the
+ * feeds-down fail-closed contract.
  */
-async function escalateStaleItems(now: number): Promise<{
+async function escalateStaleItems(now: number, refs: MergedRef[] = []): Promise<{
   escalated: Array<{ id: string; title: string; fromLane: string; reason: string }>;
+  reconciled: Array<{ id: string; title: string; fromLane: string; ref: string }>;
   scanned: number;
 }> {
   const escalated: Array<{ id: string; title: string; fromLane: string; reason: string }> = [];
+  const reconciled: Array<{ id: string; title: string; fromLane: string; ref: string }> = [];
   let scanned = 0;
 
   for (const lane of RECONCILE_LANES) {
@@ -436,7 +473,7 @@ async function escalateStaleItems(now: number): Promise<{
       ids = await getBacklogLaneIds(lane);
     } catch (err: any) {
       console.error(`[Backlog] escalateStaleItems could not read lane ${lane}: ${err.message}`);
-      return { escalated, scanned };
+      return { escalated, reconciled, scanned };
     }
 
     for (const id of ids) {
@@ -447,6 +484,54 @@ async function escalateStaleItems(now: number): Promise<{
 
         const verdict = staleEscalationVerdict(item, now);
         if (!verdict.escalate) continue;
+
+        // Subject fuzzy-match gate (issue #2110): before escalating, see if a
+        // merged blob's subject covers this item's title — i.e. the work
+        // shipped under a renamed/sibling title with no matching item-NNN token.
+        // A hit is a concrete merged ref, so reconcile to done instead.
+        const title = typeof item.title === "string" ? item.title : "";
+        const subjectMatch = refs.find((r) => subjectCoveredBy(title, r.blob));
+        if (subjectMatch) {
+          await removeFromBacklogLane(lane, id);
+          item.checked = true;
+          item.meta = {
+            ...item.meta,
+            reconciledAt: new Date().toISOString(),
+            reconciledFrom: subjectMatch.ref,
+            reconciledBy: "subject-match",
+            completedAt: new Date().toISOString().split("T")[0],
+            outcome: "merged",
+          };
+          applyLaneTransition(item, "done");
+          await saveItem(item);
+          await addToBacklogLane("done", -Date.now(), id);
+
+          console.warn(
+            `[Backlog] Reconciled ${id} ("${title.slice(0, 60)}") ${lane} → done — merged ${subjectMatch.ref} subject-matches this item's title (issue #2110)`,
+          );
+
+          try {
+            await pushAlert(
+              JSON.stringify({
+                type: "merged-item-reconciled",
+                ts: new Date().toISOString(),
+                payload: {
+                  itemId: id,
+                  title: item.title,
+                  fromLane: lane,
+                  reconciledFrom: subjectMatch.ref,
+                  reconciledBy: "subject-match",
+                },
+              }),
+              100,
+            );
+          } catch (err: any) {
+            console.error(`[Backlog] escalateStaleItems subject-match alert publish failed for ${id}: ${err.message}`);
+          }
+
+          reconciled.push({ id, title: item.title, fromLane: lane, ref: subjectMatch.ref });
+          continue;
+        }
 
         await removeFromBacklogLane(lane, id);
         item.meta = {
@@ -489,5 +574,5 @@ async function escalateStaleItems(now: number): Promise<{
     }
   }
 
-  return { escalated, scanned };
+  return { escalated, reconciled, scanned };
 }

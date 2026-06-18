@@ -25,6 +25,10 @@ import {
   mergedTokensFromGhJson,
   normalizeIdentity,
   makeMergedAnchorRefsLoader,
+  subjectCoverageScore,
+  subjectCoveredBy,
+  titleSimilarity,
+  SUBJECT_MATCH_THRESHOLD,
 } from "../src/backlog/merged-refs.ts";
 import { __resetForTests as __resetTargetConfig } from "../src/target-config.ts";
 
@@ -227,5 +231,68 @@ describe("makeMergedAnchorRefsLoader — swap seam + TTL cache (#882, #1834)", (
       delete process.env.HYDRA_TARGET_GITHUB_REPO;
       __resetTargetConfig();
     }
+  });
+});
+
+describe("subject fuzzy-match — asymmetric containment (#2110)", () => {
+  test("a renamed shipment scores 1.00: every item word is covered by the (longer) blob", () => {
+    const itemTitle = "Extract scheduler housekeeping cooldown helper";
+    const blob =
+      "refactor(scheduler): extract cooldown helper from housekeeping module\n\n" +
+      "Pulls the per-class cooldown logic into a pure helper for testability.";
+    // Every significant item word (extract/scheduler/housekeeping/cooldown/helper)
+    // appears in the blob → full coverage, despite the blob's extra body words.
+    assert.equal(subjectCoverageScore(itemTitle, blob), 1);
+    assert.equal(subjectCoveredBy(itemTitle, blob), true);
+  });
+
+  test("the symmetric titleSimilarity would MISS the same renamed shipment (denominator inflation)", () => {
+    const itemTitle = "Extract scheduler housekeeping cooldown helper";
+    const blob =
+      "refactor(scheduler): extract cooldown helper from housekeeping module\n\n" +
+      "Pulls the per-class cooldown logic into a pure helper for testability.";
+    // The whole point of #2110: the symmetric helper divides by the LARGER set
+    // (the blob), so a genuine rename scores below threshold — proving the new
+    // asymmetric helper is required, not a reuse of titleSimilarity.
+    assert.ok(
+      titleSimilarity(itemTitle, blob) < SUBJECT_MATCH_THRESHOLD,
+      "symmetric similarity falls below 0.70 on a real renamed shipment",
+    );
+  });
+
+  test("unrelated work scores 0.00 and does not match", () => {
+    const itemTitle = "Implement portfolio risk dashboard widget";
+    const blob = "chore(deps): bump ioredis and update connection pooling timeouts";
+    assert.equal(subjectCoverageScore(itemTitle, blob), 0);
+    assert.equal(subjectCoveredBy(itemTitle, blob), false);
+  });
+
+  test("short/generic titles (< 4 significant words) never subject-match", () => {
+    // Only 1 significant word (>3 chars): "tests". Guard returns 0 even if the
+    // blob trivially contains it, so generic titles cannot spuriously reconcile.
+    assert.equal(subjectCoverageScore("fix the tests", "fix the tests and more words here"), 0);
+    assert.equal(subjectCoveredBy("fix the tests", "fix the tests and more words here"), false);
+  });
+
+  test("partial coverage below threshold does not match (near-miss still escalates upstream)", () => {
+    // 2 of 4 item words covered → 0.50 < 0.70.
+    const itemTitle = "alpha beta gamma delta";
+    const blob = "alpha beta epsilon zeta theta";
+    assert.equal(subjectCoverageScore(itemTitle, blob), 0.5);
+    assert.equal(subjectCoveredBy(itemTitle, blob), false);
+  });
+
+  test("coverage at exactly the threshold matches (>=, not >)", () => {
+    // 7 of 10 item words covered → 0.70 == threshold.
+    const itemTitle = "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj";
+    const blob = "aaaa bbbb cccc dddd eeee ffff gggg unrelated other words";
+    assert.equal(subjectCoverageScore(itemTitle, blob), 0.7);
+    assert.equal(subjectCoveredBy(itemTitle, blob), true);
+  });
+
+  test("non-string inputs degrade to 0 (never throws)", () => {
+    assert.equal(subjectCoverageScore(undefined as any, "x"), 0);
+    assert.equal(subjectCoverageScore("x", null as any), 0);
+    assert.equal(subjectCoveredBy(123 as any, "x"), false);
   });
 });
