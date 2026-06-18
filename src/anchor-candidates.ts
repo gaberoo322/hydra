@@ -24,7 +24,7 @@
 //      values only: `kanban-queued`, `work-queue`. The pure scoring ARITHMETIC
 //      (tier ladder, penalty/bonus weights, clamp) lives in its own sibling
 //      Module `src/backlog/candidate-scoring.ts` (issue #2040); this module
-//      imports `scoreCandidate` from there and re-exports it. The split keeps
+//      imports `scoreCandidate` from there. The split keeps
 //      pure arithmetic out of the stateful guards below while preserving
 //      ADR-0016 Locality (scoring has exactly one home).
 //
@@ -66,49 +66,25 @@ import {
 // in its own sibling Module (`src/backlog/candidate-scoring.ts`, issue #2040),
 // mirroring the #1880 (merged-refs) and #1844 (work-queue-hygiene) extractions
 // from this same file. `getCandidateFeed` (enumeration + the three stateful
-// eligibility guards) stays here and imports the scorer. The moved symbols are
-// re-exported below so the Candidate Feed public surface is unchanged.
+// eligibility guards) stays here and imports the scorer; consumers import the
+// scoring symbols directly from the canonical home (the back-compat re-exports
+// were retired in issue #2077).
 import {
   scoreCandidate,
-  PRIORITY_TIER_BASE_SCORE,
   type PriorityTier,
-  type ScoreSignals,
-  type ScoreResult,
 } from "./backlog/candidate-scoring.ts";
 // Eligibility predicates — the two genuinely-private predicates (`isInFlightPR`,
 // `isBlockerJustCleared`) and their freshness-window policy now live in their own
 // sibling Module (`src/backlog/candidate-eligibility.ts`, issue #2066), mirroring
 // the #2040 (candidate-scoring), #1880 (merged-refs), and #1844 (work-queue-hygiene)
 // extractions from this same file. `getCandidateFeed` (enumeration + eligibility
-// composition) stays here and imports the predicates. The moved symbols are
-// re-exported below so the Candidate Feed public surface is unchanged.
+// composition) stays here and imports the predicates; consumers import the
+// eligibility symbols directly from the canonical home (the back-compat
+// re-exports were retired in issue #2077).
 import {
   isInFlightPR,
   isBlockerJustCleared,
-  IN_FLIGHT_PR_FRESHNESS_MS,
-  RECENT_UNBLOCK_THRESHOLD_MS,
 } from "./backlog/candidate-eligibility.ts";
-
-// Re-export the relocated scoring policy so existing importers of these symbols
-// from `anchor-candidates.ts` keep working (behaviour-neutral; the canonical
-// home is `src/backlog/candidate-scoring.ts`).
-export {
-  scoreCandidate,
-  PRIORITY_TIER_BASE_SCORE,
-  type PriorityTier,
-  type ScoreSignals,
-  type ScoreResult,
-};
-
-// Re-export the relocated eligibility policy so existing importers of these
-// symbols from `anchor-candidates.ts` keep working (behaviour-neutral; the
-// canonical home is `src/backlog/candidate-eligibility.ts`).
-export {
-  isInFlightPR,
-  isBlockerJustCleared,
-  IN_FLIGHT_PR_FRESHNESS_MS,
-  RECENT_UNBLOCK_THRESHOLD_MS,
-};
 
 // ---------------------------------------------------------------------------
 // Eligibility / feed thresholds — the stateful half that stays here.
@@ -118,8 +94,8 @@ const RESEARCH_THRESHOLD = 0.5; // top score below this → recommend research
 
 // The eligibility predicates (`isInFlightPR`, `isBlockerJustCleared`) and their
 // freshness-window policy (RECENT_UNBLOCK_THRESHOLD_MS, IN_FLIGHT_PR_FRESHNESS_MS)
-// now live in `src/backlog/candidate-eligibility.ts` (issue #2066) — imported and
-// re-exported above. This module composes them inside the enumeration loop below.
+// now live in `src/backlog/candidate-eligibility.ts` (issue #2066) — imported
+// above. This module composes them inside the enumeration loop below.
 
 // Merged-by-cycle suppression (issue #882) is the Candidate Feed's second
 // eligibility filter: a claude dev-cycle that merges its work leaves NO
