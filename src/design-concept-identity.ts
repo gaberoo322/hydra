@@ -43,9 +43,11 @@ export type DesignConceptScope = "orch" | "target";
 
 export type DesignConceptStatus = "draft" | "approved" | "stale";
 
-export type InterfaceImpact = "none" | "extend" | "breaking";
+// File-private — used only by `ModuleTouched` below. Not exported (no external
+// consumer; knip flagged the prior `export` as dead surface, issue #2051).
+type InterfaceImpact = "none" | "extend" | "breaking";
 
-export type DepthClassification = "deep" | "shallow" | "unknown";
+type DepthClassification = "deep" | "shallow" | "unknown";
 
 export type ModuleTouched = {
   path: string;
