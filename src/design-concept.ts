@@ -30,8 +30,6 @@
  * stale entries on every read.
  */
 
-import { createHash } from "node:crypto";
-
 import {
   getDesignConceptHash,
   listAllDesignConceptRefs,
@@ -47,6 +45,28 @@ import {
 // layer no longer calls it to derive Redis keys.
 import { normalizeAnchorRef } from "./redis/design-concept.ts";
 export { normalizeAnchorRef } from "./redis/design-concept.ts";
+// Pure artifact-identity + green-light policy logic now lives in its own
+// Module (issue #2033) so it is unit-testable without dragging the full
+// persistence layer. This persistence Module imports the types + pure
+// functions it needs and re-exports them below for back-compat — existing
+// callers (`src/api/design-concepts.ts`, `src/anchor-candidates.ts`, and the
+// #1875/#736 tests) keep importing them from `./design-concept.ts` unchanged.
+import {
+  type DesignConcept,
+  type DesignConceptScope,
+  type DesignConceptHandle,
+  type GreenLightMetrics,
+  type ModuleTouched,
+  type RejectedAlternative,
+  type QaTurn,
+  type Prototype,
+  type DesignConceptStatus,
+  computeArtifactHash,
+  designConceptHandle,
+  computeGreenLight,
+  GREEN_LIGHT_WINDOW_DAYS,
+  GREEN_LIGHT_REQUIRED_DAYS,
+} from "./design-concept-identity.ts";
 import {
   type DesignConceptInput as DesignConceptInputType,
 } from "./schemas/design-concept.ts";
@@ -64,6 +84,27 @@ import { DESIGN_CONCEPT_MAX_AGE_MS } from "./design-concept-gate.ts";
 // re-export below keeps the historical import path working.
 export type { DesignConceptInput } from "./schemas/design-concept.ts";
 
+// Back-compat re-exports for the identity Module (issue #2033). These symbols
+// were defined inline here until the pure logic moved to
+// `./design-concept-identity.ts`; existing callers import them from this
+// module, so re-export the locally-imported bindings (above) so no import site
+// changes. Re-exporting the local bindings (rather than a second
+// `export ... from`) avoids a duplicate-identifier clash with the internal-use
+// imports.
+export type {
+  DesignConcept,
+  DesignConceptScope,
+  DesignConceptHandle,
+  GreenLightMetrics,
+};
+export {
+  computeArtifactHash,
+  designConceptHandle,
+  computeGreenLight,
+  GREEN_LIGHT_WINDOW_DAYS,
+  GREEN_LIGHT_REQUIRED_DAYS,
+};
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -75,99 +116,12 @@ const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
 // Types
 // ---------------------------------------------------------------------------
 
-export type DesignConceptScope = "orch" | "target";
-
-type DesignConceptStatus = "draft" | "approved" | "stale";
-
-type InterfaceImpact = "none" | "extend" | "breaking";
-
-type DepthClassification = "deep" | "shallow" | "unknown";
-
-type ModuleTouched = {
-  path: string;
-  interfaceImpact: InterfaceImpact;
-  depthClassification: DepthClassification;
-};
-
-type RejectedAlternative = { alt: string; why: string };
-
-type QaTurn = { q: string; a: string };
-
-type Prototype = {
-  question: string;
-  branch: "logic" | "ui";
-  snippet: string;
-  answer: string;
-  workTreePath: string;
-};
-
-export type DesignConcept = {
-  anchorRef: string;
-  scope: DesignConceptScope;
-  createdAt: number;
-  artifactHash: string;
-  glossaryTerms: string[];
-  glossaryGaps: string[];
-  modulesTouched: ModuleTouched[];
-  invariants: string[];
-  rejectedAlternatives: RejectedAlternative[];
-  qaTrace: QaTurn[];
-  prototypes: Prototype[];
-  status: DesignConceptStatus;
-  approvedBy: "auto-gate" | `operator:${string}` | "";
-};
-
-/* `DesignConceptInput` is now defined (and re-exported above) by
+/* The domain value types (`DesignConcept`, `DesignConceptScope`,
+ * `ModuleTouched`, etc.) and the pure artifact-identity functions
+ * (`computeArtifactHash` + its `canonicalJson` helper) now live in
+ * `./design-concept-identity.ts` (issue #2033) and are imported above +
+ * re-exported for back-compat. `DesignConceptInput` is owned by
  * `src/schemas/design-concept.ts` — see ADR-0011. */
-
-// ---------------------------------------------------------------------------
-// Canonical JSON + artifact hash
-// ---------------------------------------------------------------------------
-
-/**
- * Canonical-JSON encode an arbitrary value: object keys are emitted in
- * sorted order, no whitespace, primitives encoded as `JSON.stringify`
- * does. Used as the input to `sha256` for `artifactHash`, so two
- * artifacts with the same body always produce the same hash.
- */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return "[" + value.map(canonicalJson).join(",") + "]";
-  }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
-  const parts: string[] = [];
-  for (const k of keys) {
-    const v = obj[k];
-    if (v === undefined) continue;
-    parts.push(JSON.stringify(k) + ":" + canonicalJson(v));
-  }
-  return "{" + parts.join(",") + "}";
-}
-
-/**
- * Compute the `artifactHash` for a design concept. Hashes all body fields
- * EXCLUDING `artifactHash`, `createdAt`, `status`, and `approvedBy` — so
- * approving an artifact (or persisting it at a different timestamp) does
- * not change its content identity.
- */
-export function computeArtifactHash(d: Omit<DesignConcept, "artifactHash">): string {
-  const body = {
-    anchorRef: d.anchorRef,
-    scope: d.scope,
-    glossaryTerms: d.glossaryTerms,
-    glossaryGaps: d.glossaryGaps,
-    modulesTouched: d.modulesTouched,
-    invariants: d.invariants,
-    rejectedAlternatives: d.rejectedAlternatives,
-    qaTrace: d.qaTrace,
-    prototypes: d.prototypes,
-  };
-  return createHash("sha256").update(canonicalJson(body)).digest("hex");
-}
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -293,42 +247,10 @@ export async function getDesignConcept(
 // QA-time retrievability (issue #1450)
 // ---------------------------------------------------------------------------
 
-/**
- * The stable retrieval handle for a design-concept artifact.
- *
- * `redisKey` is the canonical Redis hash key the artifact lives under for the
- * lifetime of the anchor (7-day TTL); `apiPath` is the HTTP route QA fetches
- * it through. Both are derived from the SAME canonical `anchorRef`
- * (`normalizeAnchorRef`), so the handle a producer (grill) persists under and
- * the handle a consumer (QA) reads from can never disagree — the wedge that
- * orphaned artifacts in #736.
- *
- * The handle is meaningful even when the artifact is absent: it tells QA
- * (and the operator) EXACTLY where the artifact was looked for, so a miss is
- * loud and diagnosable rather than a silent "not reachable".
- */
-export type DesignConceptHandle = {
-  /** The canonical anchorRef the handle resolves to (e.g. `issue-1450`). */
-  anchorRef: string;
-  /** Canonical Redis hash key — `hydra:design-concept:<canonical-anchorRef>`. */
-  redisKey: string;
-  /** HTTP route QA reads the artifact through. */
-  apiPath: string;
-};
-
-/**
- * Compute the stable retrieval handle for `anchorRef` without touching Redis.
- * Pure — used both by the resolver below and exposed so callers can render the
- * handle in logs/comments even before (or after) the artifact exists.
- */
-export function designConceptHandle(anchorRef: string): DesignConceptHandle {
-  const canonical = normalizeAnchorRef(anchorRef);
-  return {
-    anchorRef: canonical,
-    redisKey: `hydra:design-concept:${canonical}`,
-    apiPath: `/api/design-concepts/${canonical}`,
-  };
-}
+/* The `DesignConceptHandle` type and the pure `designConceptHandle` derivation
+ * moved to `./design-concept-identity.ts` (issue #2033) — imported above +
+ * re-exported for back-compat. The QA-time resolver below stays here because
+ * it performs Redis IO (`getDesignConcept`). */
 
 /**
  * Result of resolving an artifact at QA time.
@@ -484,69 +406,7 @@ export async function approveDesignConcept(
   return { ...existing, status: "approved", approvedBy };
 }
 
-// ---------------------------------------------------------------------------
-// Green-light criterion (issue #736)
-// ---------------------------------------------------------------------------
-
-/**
- * The promotion clock is idle-tolerant (issue #736): Phase C of #437 may
- * flip when at least `GREEN_LIGHT_REQUIRED_DAYS` of the most-recent
- * `GREEN_LIGHT_WINDOW_DAYS` snapshot days produced ≥1 design concept.
- *
- * Chosen form: "N of last M days" rather than a pure consecutive run.
- * Rationale (the open design choice the design-concept artifact deferred
- * to implementation): a strict `consecutiveGreenDays >= 7` punishes
- * legitimately-quiet orch days (no `ready-for-agent` issue lacking a fresh
- * artifact ⇒ nothing to grill), which is exactly the failure the issue
- * reports. "7 of last 10" tolerates up to 3 quiet days inside the window
- * while still demanding sustained production. Both the threshold and the
- * window stay well inside MAX_SNAPSHOT_DAYS (14) so the HASH always holds
- * enough history to evaluate.
- *
- * (Extracted from `src/api/design-concepts.ts` to its domain home so the
- * pure function is directly unit-testable and the policy constants are
- * importable without HTTP overhead — issue #1875.)
- */
-export const GREEN_LIGHT_WINDOW_DAYS = 10;
-export const GREEN_LIGHT_REQUIRED_DAYS = 7;
-
-export type GreenLightMetrics = {
-  /** Legacy field: green days counted consecutively from the newest. */
-  consecutiveGreenDays: number;
-  /** Green (production > 0) days within the trailing window. */
-  greenDaysInWindow: number;
-  windowDays: number;
-  requiredGreenDays: number;
-  greenLightReady: boolean;
-};
-
-/**
- * Compute the green-light metrics from a newest-first snapshot list. Pure
- * — no Redis IO — so it is unit-testable. A "green" day is one whose
- * production count is > 0.
- */
-export function computeGreenLight(
-  snapshots: Array<{ date: string; count: number }>,
-  windowDays: number = GREEN_LIGHT_WINDOW_DAYS,
-  requiredGreenDays: number = GREEN_LIGHT_REQUIRED_DAYS,
-): GreenLightMetrics {
-  // `consecutiveGreenDays`: walk from newest until the first zero day.
-  let consecutiveGreenDays = 0;
-  for (const s of snapshots) {
-    if (s.count > 0) consecutiveGreenDays += 1;
-    else break;
-  }
-  // `greenDaysInWindow`: count green days among the newest `windowDays`.
-  const window = snapshots.slice(0, windowDays);
-  const greenDaysInWindow = window.reduce(
-    (n, s) => (s.count > 0 ? n + 1 : n),
-    0,
-  );
-  return {
-    consecutiveGreenDays,
-    greenDaysInWindow,
-    windowDays,
-    requiredGreenDays,
-    greenLightReady: greenDaysInWindow >= requiredGreenDays,
-  };
-}
+/* The green-light criterion (`computeGreenLight` + `GreenLightMetrics` +
+ * `GREEN_LIGHT_WINDOW_DAYS`/`GREEN_LIGHT_REQUIRED_DAYS`) moved to
+ * `./design-concept-identity.ts` (issue #2033) — it is pure (no Redis IO) and
+ * is imported + re-exported above for back-compat. */
