@@ -72,12 +72,13 @@ import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
 import { settledOrNull } from "./settle.ts";
 import { dayKey, type TrendPoint } from "./trend-series.ts";
 
-// Re-exported for back-compat: `percentile` and the autonomy/time-to-merge
-// metric types historically lived here. The fan-out moved to autonomy-rate.ts
-// (issue #2068); these re-exports keep the builder-health public surface and
-// existing test imports unchanged.
+// Re-exported for back-compat: `percentile` historically lived here. The
+// fan-out moved to autonomy-rate.ts (issue #2068); this re-export keeps the
+// builder-health public surface and existing test imports unchanged. The
+// `AutonomyRateMetric` / `TimeToMergeMetric` type re-exports were dropped
+// (issue #2101) — no module imported them from here; consumers import the
+// types from autonomy-rate.ts directly.
 export { percentile };
-export type { AutonomyRateMetric, TimeToMergeMetric };
 
 // Heartbeat merge-rate window (env-overridable, matches the rolling merge
 // rate's native window). Used for the rework metric's "of N cycles" framing.
