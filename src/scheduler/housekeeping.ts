@@ -67,29 +67,22 @@ import { runLaneIndexReconcile } from "./chores/lane-index-reconcile.ts";
 // ---------------------------------------------------------------------------
 // Re-exports (issue #2090): keep the pre-split public surface stable so
 // existing importers (tests, sibling modules) need no change. The chore
-// runners + their deps interfaces now live in `./chores/<name>.ts`; this file
-// re-exports them so `from "../scheduler/housekeeping.ts"` keeps resolving.
+// runners now live in `./chores/<name>.ts`; this file re-exports the runners
+// so `from "../scheduler/housekeeping.ts"` keeps resolving. The per-chore
+// `*Deps` interfaces are NOT re-exported here — no module imports them from
+// housekeeping.ts; each chore's deps type is consumed only inside its own
+// `./chores/<name>.ts` source (stale re-exports removed, issue #2105).
 // ---------------------------------------------------------------------------
 export { runBlockedItemEscalation } from "./chores/blocked-escalation.ts";
-export type { BlockedItemEscalationDeps } from "./chores/blocked-escalation.ts";
 export { runReviewPickupNotify, checkReviewPickupNotify } from "./chores/review-pickup-notify.ts";
-export type { ReviewPickupNotifyDeps } from "./chores/review-pickup-notify.ts";
 export { runDoneLanePrune } from "./chores/done-lane-prune.ts";
-export type { DoneLanePruneDeps } from "./chores/done-lane-prune.ts";
 export { runWeeklyDigest } from "./chores/weekly-digest.ts";
-export type { WeeklyDigestDeps } from "./chores/weekly-digest.ts";
 export { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
-export type { MemoryConsolidationDeps } from "./chores/memory-consolidation.ts";
 export { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
-export type { DesignConceptSnapshotDeps } from "./chores/design-concept-snapshot.ts";
 export { runWorkQueueHygiene } from "./chores/work-queue-hygiene.ts";
-export type { WorkQueueHygieneDeps } from "./chores/work-queue-hygiene.ts";
 export { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
-export type { ForecastCalibrationBrierDeps } from "./chores/forecast-calibration-brier.ts";
 export { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
-export type { PruneStaleRedisKeysDeps } from "./chores/stale-key-prune.ts";
 export { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
-export type { ReturnStaleInProgressItemsDeps } from "./chores/stale-inprogress-return.ts";
 
 // ---------------------------------------------------------------------------
 // Chore runner (issue #1864)
