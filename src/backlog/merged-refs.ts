@@ -250,6 +250,106 @@ export function makeMergedAnchorRefsLoader(
 export const loadMergedAnchorRefsImpl: MergedAnchorRefsLoader =
   makeMergedAnchorRefsLoader();
 
+// ---------------------------------------------------------------------------
+// Subject fuzzy-match (issue #2110) — asymmetric containment.
+// ---------------------------------------------------------------------------
+//
+// The stale-escalation pass in `src/backlog/reconciler.ts` (#2031) escalates a
+// stale item to `blocked` ("unconfirmable-shipped") whenever NO merged
+// `item-NNN`/`#NNN` token references it. But Hydra dev cycles routinely ship an
+// item's work under a DIFFERENT title or sibling item id (squash "claude cycle"
+// merges, item-412 shipping under item-455), carrying no matching token — so a
+// 2026-06-18 operator triage found 24/26 escalations were actually-shipped
+// (92% false-positive). This helper adds a subject fuzzy-match fallback so a
+// stale item whose TITLE is covered by a recently-merged PR/commit subject is
+// recognised as shipped and reconciled to `done` instead of escalated.
+//
+// Why a NEW helper and not the existing symmetric `titleSimilarity`
+// (`src/backlog/items.ts`, `overlap / max(sizeA, sizeB)`): the `MergedRef.blob`
+// is the PR title+body (or full commit message), which carries far MORE
+// significant words than the bare item title, so the `max()` denominator
+// inflates and genuine renamed shipments score 0.46–0.63 < 0.70 — the symmetric
+// helper would MISS the very false-positives it targets (prototype-disproven,
+// design-concept invariant). The fix is ASYMMETRIC containment: divide the
+// overlap by the ITEM's word count only ("how much of the item title is covered
+// by the blob"), so a blob that contains all of the item's significant words
+// scores 1.00 regardless of how much extra body text surrounds them. Prototype:
+// 3 real renamed shipments scored 1.00, 2 unrelated pairs scored 0.00 — clean
+// separation at 0.70.
+
+/**
+ * SYMMETRIC word-overlap similarity (`overlap / max(sizeA, sizeB)`), extracted
+ * from `src/backlog/items.ts` (issue #2110) so its symmetric form lives next to
+ * the asymmetric `subjectCoveredBy` below and the contrast is visible in one
+ * place. This is the helper backlog-CREATION dedup uses (two bare titles of
+ * comparable length); it is deliberately NOT used for the merged-subject gate —
+ * see the block comment below for why the `max()` denominator fails there. The
+ * 4-significant-word guard mirrors `subjectCoverageScore`.
+ */
+export function titleSimilarity(a: string, b: string): number {
+  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
+  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter((w) => w.length > 3));
+  // Need at least 4 significant words in each title for fuzzy matching to be reliable.
+  if (wordsA.size < 4 || wordsB.size < 4) return 0;
+  const overlap = [...wordsA].filter((w) => wordsB.has(w)).length;
+  return overlap / Math.max(wordsA.size, wordsB.size);
+}
+
+/**
+ * Subject-match threshold — fraction of the item's significant words that must
+ * appear in the merged-ref blob for the item to count as "shipped under a
+ * renamed title". Mirrors the 0.70 `FUZZY_DEDUP_THRESHOLD` used for
+ * backlog-creation dedup (`src/backlog/items.ts`); kept as a distinct constant
+ * because this is a different consumer (escalation gating, not dedup) and the
+ * two thresholds should be tunable independently.
+ */
+export const SUBJECT_MATCH_THRESHOLD = 0.7;
+
+/**
+ * Minimum number of significant words (length > 3) an item title must have for
+ * a subject fuzzy-match to be considered (design-concept invariant). Short or
+ * generic titles ("fix tests", "update docs") could spuriously hit an unrelated
+ * blob and silently reconcile real open work, so they never subject-match.
+ */
+const SUBJECT_MATCH_MIN_WORDS = 4;
+
+/**
+ * Pure helper — exported for tests. ASYMMETRIC containment score of an item
+ * title against a merged-ref blob: the fraction of the item's significant
+ * words (length > 3) that also appear in the blob.
+ *
+ *   score = |itemWords ∩ blobWords| / |itemWords|
+ *
+ * Returns 0 (never matches) when the item has fewer than
+ * `SUBJECT_MATCH_MIN_WORDS` significant words — the short/generic-title guard.
+ * Asymmetry is deliberate (see the block comment above): dividing by the item
+ * word count, NOT `max(item, blob)`, keeps a renamed shipment at 1.00 even
+ * though the blob (PR title+body / full commit message) dwarfs the item title.
+ */
+export function subjectCoverageScore(itemTitle: string, blob: string): number {
+  if (typeof itemTitle !== "string" || typeof blob !== "string") return 0;
+  const itemWords = new Set(
+    itemTitle.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3),
+  );
+  if (itemWords.size < SUBJECT_MATCH_MIN_WORDS) return 0;
+  const blobWords = new Set(
+    blob.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3),
+  );
+  const overlap = [...itemWords].filter((w) => blobWords.has(w)).length;
+  return overlap / itemWords.size;
+}
+
+/**
+ * Pure helper — exported for tests. True when the item title is covered by the
+ * merged-ref blob at or above `SUBJECT_MATCH_THRESHOLD`. This is the boolean
+ * gate the reconciler's escalation pass consults: a true result means the item
+ * demonstrably shipped under a renamed/sibling title, so it reconciles to
+ * `done` rather than escalating to `blocked`.
+ */
+export function subjectCoveredBy(itemTitle: string, blob: string): boolean {
+  return subjectCoverageScore(itemTitle, blob) >= SUBJECT_MATCH_THRESHOLD;
+}
+
 /**
  * Pure helper — exported for tests. Parse a `gh pr list --json title,body`
  * payload into the union of merged-identity tokens. Returns [] on any

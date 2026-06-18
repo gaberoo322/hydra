@@ -7,17 +7,12 @@ import {
   LANES, applyLaneTransition, getItem, saveItem, nextId,
 } from "./internal.ts";
 import { loadBacklog } from "./reads.ts";
+// `titleSimilarity` was extracted to the neutral merged-refs home (issue #2110)
+// so the symmetric dedup helper sits beside the asymmetric `subjectCoveredBy`
+// the reconciler uses; this dedup surface keeps the identical symmetric scoring.
+import { titleSimilarity } from "./merged-refs.ts";
 
 const FUZZY_DEDUP_THRESHOLD = 0.7; // 70% word overlap = duplicate
-
-function titleSimilarity(a: string, b: string): number {
-  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(w => w.length > 3));
-  // Need at least 4 significant words in each title for fuzzy matching to be reliable
-  if (wordsA.size < 4 || wordsB.size < 4) return 0;
-  const overlap = [...wordsA].filter(w => wordsB.has(w)).length;
-  return overlap / Math.max(wordsA.size, wordsB.size);
-}
 
 /**
  * Add a new item to the backlog with title-based dedup (exact + fuzzy).

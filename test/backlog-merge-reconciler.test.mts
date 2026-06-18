@@ -679,4 +679,186 @@ describe("backlog stale-claim escalation (issue #2031)", () => {
     assert.match(matching[0].payload.blockedReason, /unconfirmable-shipped/);
     assert.ok(matching[0].ts, "alert carries a timestamp");
   });
+
+  // -------------------------------------------------------------------------
+  // Subject fuzzy-match gate (issue #2110). A stale item whose work shipped
+  // under a RENAMED title (no item-NNN token) must reconcile to done via the
+  // subject-coverage gate, not escalate as a false-positive "unconfirmable".
+  // -------------------------------------------------------------------------
+
+  test("#2110: stale item whose title is subject-covered by a merged blob (no item-NNN) is reconciled, not escalated", async (t) => {
+    requireEscRedis(t);
+
+    // The item title shares all its significant words with the merged blob, but
+    // the blob carries NO `item-NNN`/`#NNN` token — the token scan misses it,
+    // and only the new subject gate can recognise the shipment.
+    const { id } = await escAdmin.addToBacklog({
+      title: "Extract scheduler housekeeping cooldown helper",
+      category: "test",
+      lane: "queued",
+    });
+
+    const result = await escAdmin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => [
+        {
+          ref: "pr-2200",
+          // Renamed PR title + extra body text, no item id at all.
+          blob:
+            "refactor(scheduler): extract cooldown helper from housekeeping module\n\n" +
+            "Pulls the per-class cooldown logic into a pure helper for testability.",
+        },
+      ],
+      fetchMergeCommitRefs: async () => [],
+      now: Date.now() + 20 * DAY,
+    });
+
+    assert.equal(result.escalated.length, 0, "subject match suppresses the false-positive escalation");
+    assert.equal(result.reconciled.length, 1, "the shipped-under-rename item is reconciled to done");
+    assert.equal(result.reconciled[0].id, id);
+    assert.equal(result.reconciled[0].ref, "pr-2200");
+
+    const lanes = await escAdmin.loadBacklog();
+    assert.equal(lanes.queued.length, 0, "item leaves queued");
+    assert.equal(lanes.blocked.length, 0, "NOT escalated to blocked");
+    assert.equal(lanes.done.length, 1, "reconciled to done");
+    assert.equal(lanes.done[0].id, id);
+    assert.equal(lanes.done[0].meta.reconciledFrom, "pr-2200");
+    assert.equal(lanes.done[0].meta.reconciledBy, "subject-match");
+    assert.equal(lanes.done[0].meta.outcome, "merged");
+  });
+
+  test("#2110: a subject match emits a merged-item-reconciled alert stamped reconciledBy=subject-match", async (t) => {
+    requireEscRedis(t);
+
+    const { id } = await escAdmin.addToBacklog({
+      title: "Consolidate backlog reconciler escalation helpers",
+      category: "test",
+      lane: "queued",
+    });
+
+    await escAdmin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => [
+        {
+          ref: "pr-2201",
+          blob: "fix(reconciler): consolidate the escalation helpers for the backlog sweep",
+        },
+      ],
+      fetchMergeCommitRefs: async () => [],
+      now: Date.now() + 20 * DAY,
+    });
+
+    const alerts = await escRedis.lrange("hydra:alerts", 0, -1);
+    const matching = alerts
+      .map((a: string) => JSON.parse(a))
+      .filter((a: any) => a.type === "merged-item-reconciled" && a.payload.reconciledBy === "subject-match");
+    assert.equal(matching.length, 1, "subject-match reconciliation is auditable");
+    assert.equal(matching[0].payload.itemId, id);
+    assert.equal(matching[0].payload.reconciledFrom, "pr-2201");
+  });
+
+  test("#2110: an unrelated merged blob does NOT subject-match — genuinely stale item still escalates", async (t) => {
+    requireEscRedis(t);
+
+    const { id } = await escAdmin.addToBacklog({
+      title: "Implement portfolio risk dashboard widget",
+      category: "test",
+      lane: "queued",
+    });
+
+    const result = await escAdmin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => [
+        // Totally unrelated subject — must not spuriously cover the item title.
+        { ref: "pr-2202", blob: "chore(deps): bump ioredis and update connection pooling timeouts" },
+      ],
+      fetchMergeCommitRefs: async () => [],
+      now: Date.now() + 20 * DAY,
+    });
+
+    assert.equal(result.reconciled.length, 0, "no false subject match on unrelated work");
+    assert.equal(result.escalated.length, 1, "genuinely-stale item still escalates (no regression)");
+    assert.equal(result.escalated[0].id, id);
+
+    const lanes = await escAdmin.loadBacklog();
+    assert.equal(lanes.done.length, 0);
+    assert.equal(lanes.blocked.length, 1);
+  });
+
+  test("#2110: empty merged-ref set makes the subject gate a no-op (feeds-down → still escalates)", async (t) => {
+    requireEscRedis(t);
+
+    // Feeds DOWN (null) → refs is empty → subject gate cannot fire → the stale
+    // item escalates exactly as before. Preserves the feeds-down fail-closed
+    // contract: a quiet/blind feed never silently reconciles work to done.
+    const { id } = await escAdmin.addToBacklog({
+      title: "Extract scheduler housekeeping cooldown helper",
+      category: "test",
+      lane: "queued",
+    });
+
+    const result = await escAdmin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => null,
+      fetchMergeCommitRefs: async () => null,
+      now: Date.now() + 20 * DAY,
+    });
+
+    assert.equal(result.feedsAvailable, false);
+    assert.equal(result.reconciled.length, 0, "no subject reconciliation when feeds are down");
+    assert.equal(result.escalated.length, 1, "item escalates via the local-age signal");
+    assert.equal(result.escalated[0].id, id);
+
+    const lanes = await escAdmin.loadBacklog();
+    assert.equal(lanes.done.length, 0);
+    assert.equal(lanes.blocked.length, 1);
+  });
+
+  test("#2110: token-match + subject-match in one run keep the #2057 metric invariant (referencesFound counts subject closures)", async (t) => {
+    requireEscRedis(t);
+
+    // Item A ships under a TOKEN ref (counted by the token scan); item B ships
+    // under a RENAMED subject with no token (counted only by the escalation-pass
+    // subject gate). Both reconcile to done in the same run. The #2057 invariant
+    // `reconciled.length === referencesFound - movesFailed` must hold across BOTH
+    // closure paths — before the fix, referencesFound omitted the subject closure
+    // and undercounted (1 vs reconciled.length 2), misreporting production health.
+    const { id: tokenId } = await escAdmin.addToBacklog({
+      title: "Wire arbitrage scanner output feed",
+      category: "test",
+      lane: "queued",
+    });
+    const { id: subjectId } = await escAdmin.addToBacklog({
+      title: "Extract scheduler housekeeping cooldown helper",
+      category: "test",
+      lane: "queued",
+    });
+
+    const result = await escAdmin.reconcileMergedItems({
+      fetchMergedPrRefs: async () => [
+        { ref: "pr-3100", blob: `feat(scanner): wire output feed (${tokenId})\ncloses ${tokenId}` },
+        {
+          ref: "pr-3101",
+          blob:
+            "refactor(scheduler): extract cooldown helper from housekeeping module\n\n" +
+            "Pulls the per-class cooldown logic into a pure helper for testability.",
+        },
+      ],
+      fetchMergeCommitRefs: async () => [],
+      now: Date.now() + 20 * DAY,
+    });
+
+    assert.equal(result.reconciled.length, 2, "both the token-match and subject-match items reconcile");
+    assert.equal(result.metrics.movesFailed, 0, "no failed moves in this scenario");
+    assert.equal(
+      result.metrics.referencesFound,
+      result.reconciled.length,
+      "referencesFound must count subject closures too (#2057 invariant across both paths)",
+    );
+    assert.equal(
+      result.reconciled.length,
+      result.metrics.referencesFound - result.metrics.movesFailed,
+      "#2057 invariant: reconciled.length === referencesFound - movesFailed",
+    );
+
+    const ids = result.reconciled.map((r: { id: string }) => r.id).sort();
+    assert.deepEqual(ids, [tokenId, subjectId].sort(), "both items present in the unified reconciled list");
+  });
 });
