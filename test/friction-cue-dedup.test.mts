@@ -33,6 +33,12 @@ import { test, describe, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Redis from "ioredis";
 
+// Issue #2108 — the pure cue-matcher algorithm moved out of agent-memory.ts
+// into its own Module; the unit-level surface (cueSimilarity/findPatternForCue)
+// imports directly from there. recordPattern (the write-side store integration
+// exercised below) still comes from agent-memory.ts via the dynamic import.
+import { cueSimilarity, findPatternForCue } from "../src/pattern-memory/cue-matcher.ts";
+
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379/1";
 process.env.REDIS_URL = REDIS_URL;
 process.env.HYDRA_ESCALATION_DISABLED = "1"; // never spawn real gh during tests
@@ -87,7 +93,7 @@ describe("fuzzy cue dedup (issue #1667)", () => {
   test("knip fragment set: every respelling scores >= 0.6 vs the oldest spelling", () => {
     const [oldest, ...rest] = KNIP_SPELLINGS;
     for (const variant of rest) {
-      const score = agentMemory.cueSimilarity(oldest, variant);
+      const score = cueSimilarity(oldest, variant);
       assert.ok(
         score >= 0.6,
         `expected ${oldest} ~ ${variant} >= 0.6, got ${score}`,
@@ -98,7 +104,7 @@ describe("fuzzy cue dedup (issue #1667)", () => {
   test("sentry-vercel-edge fragment set: every respelling scores >= 0.6 vs the oldest spelling", () => {
     const [oldest, ...rest] = SENTRY_SPELLINGS;
     for (const variant of rest) {
-      const score = agentMemory.cueSimilarity(oldest, variant);
+      const score = cueSimilarity(oldest, variant);
       assert.ok(
         score >= 0.6,
         `expected ${oldest} ~ ${variant} >= 0.6, got ${score}`,
@@ -117,16 +123,16 @@ describe("fuzzy cue dedup (issue #1667)", () => {
       ["verification-failure", "verification-timeout"],
     ];
     for (const [a, b] of pairs) {
-      const score = agentMemory.cueSimilarity(a, b);
+      const score = cueSimilarity(a, b);
       assert.ok(score < 0.6, `expected ${a} ~ ${b} < 0.6, got ${score}`);
     }
   });
 
   test("single-token cues match exact spelling only (degenerate-metric guard)", () => {
-    assert.equal(agentMemory.cueSimilarity("rollback", "rollback-loop"), 0);
-    assert.equal(agentMemory.cueSimilarity("rollback", "rollback"), 1);
+    assert.equal(cueSimilarity("rollback", "rollback-loop"), 0);
+    assert.equal(cueSimilarity("rollback", "rollback"), 1);
     // Two-token cues use the normal metric — sharing only "no" stays below threshold.
-    assert.ok(agentMemory.cueSimilarity("no-diff", "no-op") < 0.6);
+    assert.ok(cueSimilarity("no-diff", "no-op") < 0.6);
   });
 
   // -------------------------------------------------------------------------
@@ -152,16 +158,16 @@ describe("fuzzy cue dedup (issue #1667)", () => {
       mkPattern(KNIP_SPELLINGS[0], "2026-06-01"),
       mkPattern(KNIP_SPELLINGS[1], "2026-06-05"),
     ];
-    const hit = agentMemory.findPatternForCue(patterns, KNIP_SPELLINGS[1]);
+    const hit = findPatternForCue(patterns, KNIP_SPELLINGS[1]);
     assert.equal(hit?.category, KNIP_SPELLINGS[1]);
   });
 
   test("fuzzy match resolves to a pattern above threshold; no match returns undefined", () => {
     const patterns = [mkPattern(KNIP_SPELLINGS[0], "2026-06-01")];
-    const hit = agentMemory.findPatternForCue(patterns, KNIP_SPELLINGS[2]);
+    const hit = findPatternForCue(patterns, KNIP_SPELLINGS[2]);
     assert.equal(hit?.category, KNIP_SPELLINGS[0]);
     assert.equal(
-      agentMemory.findPatternForCue(patterns, "scope-check-codespan-trap"),
+      findPatternForCue(patterns, "scope-check-codespan-trap"),
       undefined,
     );
   });
@@ -171,7 +177,7 @@ describe("fuzzy cue dedup (issue #1667)", () => {
     const younger = mkPattern("worktree-npm-ci-missing-sentry", "2026-06-08");
     const older = mkPattern("npm-ci-worktree-missing-sentry", "2026-06-02");
     const probe = "sentry-missing-worktree-npm-ci";
-    const hit = agentMemory.findPatternForCue([younger, older], probe);
+    const hit = findPatternForCue([younger, older], probe);
     assert.equal(hit?.category, "npm-ci-worktree-missing-sentry");
   });
 
@@ -347,7 +353,7 @@ describe("fuzzy cue dedup (issue #1667)", () => {
     // Precondition: the pair really is above the merge threshold — the only
     // thing keeping them apart must be the friction-only guard.
     assert.ok(
-      agentMemory.cueSimilarity(METADATA_CUE_A, METADATA_CUE_B) >= 0.6,
+      cueSimilarity(METADATA_CUE_A, METADATA_CUE_B) >= 0.6,
       "test premise: the #524 pair must score >= CUE_MERGE_THRESHOLD",
     );
 
