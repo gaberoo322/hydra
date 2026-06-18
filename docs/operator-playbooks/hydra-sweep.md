@@ -96,7 +96,7 @@ For each `ready-for-agent` issue N, count how many `blocked` issues reference `#
 
 Before applying `ready-for-agent` to ANY issue `#N` — whether from the `needs-triage` auto-triage lane, the `blocked`-cleared lane, or the `in-progress` stale-relabel lane — check whether an **OPEN** PR already references it. If one does, do NOT promote: an open PR means a build is already in flight, and promoting would let the autopilot dispatch a duplicate `dev_orch` build (the 2026-05-30 #750→#754/#770 incident).
 
-The routing decision is implemented as a pure predicate so it is unit-tested rather than re-derived in prose each sweep: **`evaluateReadyForAgentPromotion(issueNumber, openPrs)` in `src/sweep-promotion-gate.ts`** (regression test: `test/sweep-promotion-gate.test.mts`). Run the live query once per sweep, then apply its decision at every promotion edge:
+The routing decision is a pure predicate over the issue number and the live open-PR list — apply it at every promotion edge. Run the live query once per sweep, then apply this decision at every promotion edge:
 
 ```bash
 # One query per sweep is enough — reuse this list across all promotion edges.
