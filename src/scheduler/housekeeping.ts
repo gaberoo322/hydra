@@ -400,7 +400,11 @@ async function runWorkQueueHygiene(deps: WorkQueueHygieneDeps = {}): Promise<voi
 
 /** External touchpoints of the merged-item-reconciler chore. */
 interface MergedItemReconcilerDeps {
-  reconcileMergedItems?: () => Promise<{ reconciled: Array<{ id: string; ref: string }>; scanned: number }>;
+  reconcileMergedItems?: () => Promise<{
+    reconciled: Array<{ id: string; ref: string }>;
+    escalated?: Array<{ id: string; reason: string }>;
+    scanned: number;
+  }>;
 }
 
 /**
@@ -408,6 +412,11 @@ interface MergedItemReconcilerDeps {
  * default-branch merge commits for `item-NNN` references and moves any
  * referenced item still in a non-done lane to `done` with audit stamps.
  * Fail-closed + idempotent, so no Redis time-guard is needed.
+ *
+ * Also runs the stale-claim escalation pass (issue #2031): items that are
+ * unconfirmable-but-probably-shipped (far past a generous age, or claimed by a
+ * retired claimant) are routed to `blocked` (operator-visible) — never silently
+ * to `done` — so the claim path stops re-serving shipped/obsolete work.
  */
 async function runMergedItemReconciler(deps: MergedItemReconcilerDeps = {}): Promise<void> {
   const reconcileMergedItems =
@@ -416,6 +425,12 @@ async function runMergedItemReconciler(deps: MergedItemReconcilerDeps = {}): Pro
   if (rec.reconciled.length > 0) {
     console.log(
       `[Housekeeping] Merge→done reconciler: closed ${rec.reconciled.length} item${rec.reconciled.length === 1 ? "" : "s"} (scanned ${rec.scanned}): ${rec.reconciled.map((r) => `${r.id}←${r.ref}`).join(", ")}`,
+    );
+  }
+  const esc = rec.escalated ?? [];
+  if (esc.length > 0) {
+    console.log(
+      `[Housekeeping] Stale-claim escalation: routed ${esc.length} unconfirmable item${esc.length === 1 ? "" : "s"} to blocked (operator-attention): ${esc.map((e) => e.id).join(", ")}`,
     );
   }
 }
