@@ -15,11 +15,14 @@ import {
   parseProbes,
   derivePipelineMetrics,
   assessHealth,
-  projectHealthDeepResponse,
   parseRedisInfoSnapshot,
   type HealthSnapshot,
   type ProbeInputs,
 } from "../src/health-diagnostics.ts";
+// Issue #2039: the wire projection split out to src/health-wire.ts (the
+// data-OUT leg). The parse-pipeline tests above import only from the parse seam;
+// this projection-specific suite imports the projection from its new home.
+import { projectHealthDeepResponse } from "../src/health-wire.ts";
 // assembleProbeInputs lives in src/api/health.ts (the I/O owner per #840 seam purity),
 // exported for unit testing the positional index mapping in isolation.
 import { assembleProbeInputs } from "../src/api/health.ts";
