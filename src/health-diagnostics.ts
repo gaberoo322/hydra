@@ -76,7 +76,7 @@ export interface ServiceProbe {
  * rule-set struct-field edits. A missing key reads `undefined` — rules guard
  * with optional chaining, so an absent probe is treated as "not failed".
  */
-export type ServiceProbeMap = Record<string, ServiceProbe>;
+type ServiceProbeMap = Record<string, ServiceProbe>;
 
 // ---- Health Snapshot — the normalized internal model ---------------------
 
