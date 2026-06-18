@@ -64,14 +64,21 @@ export interface ReconcileResult {
  * Pick the score (sort position) to re-index a recovered item at. Prefer the
  * item's own timing metadata so queue ordering survives the repair; fall back
  * to `Date.now()` (puts it at the tail) when no usable timestamp exists.
+ *
+ * The done lane sorts on a NEGATED timestamp (`moveToDone` / `moveItemToLane`
+ * both `ZADD` done items at `-Date.now()`, so an ascending `ZRANGE` lists the
+ * most-recently-done first). A re-indexed done item must follow that same
+ * convention or it lands at the absolute tail (oldest), corrupting order — so
+ * `lane` is threaded in and the score negated for `"done"`.
  */
-function reindexScore(item: any): number {
+function reindexScore(item: any, lane: string): number {
+  let magnitude: number = Date.now();
   const candidate = item?.movedAt ?? item?.claimedAt ?? item?.meta?.addedAt;
   if (candidate) {
     const parsed = new Date(candidate).getTime();
-    if (Number.isFinite(parsed)) return parsed;
+    if (Number.isFinite(parsed)) magnitude = parsed;
   }
-  return Date.now();
+  return lane === "done" ? -magnitude : magnitude;
 }
 
 /**
@@ -140,7 +147,7 @@ export async function reconcileLaneIndices(): Promise<ReconcileResult> {
     try {
       const present = await membersOf(lane);
       if (!present.has(id)) {
-        await addToBacklogLane(lane, reindexScore(item), id);
+        await addToBacklogLane(lane, reindexScore(item, lane), id);
         present.add(id);
         result.reindexed++;
         console.log(`[IndexReconciler] Re-indexed ${id} into lane "${lane}"`);
@@ -219,7 +226,8 @@ export async function auditLaneIndices(): Promise<BacklogAuditResult> {
     let item: any;
     try {
       item = JSON.parse(raw);
-    } catch {
+    } catch (err: any) {
+      console.error(`[IndexReconciler] Skipping unparseable audit item ${id}: ${err.message}`);
       audit.unLaned.push(id);
       continue;
     }

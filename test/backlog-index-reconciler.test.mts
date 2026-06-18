@@ -71,6 +71,23 @@ describe("lane-index reconciler", () => {
     assert.equal(await redis.zscore(laneKey("queued"), "item-1"), "1000");
   });
 
+  test("re-indexes a done item at a NEGATED score (done-lane ordering convention)", async (t) => {
+    requireRedis(t);
+    // The done lane sorts on -timestamp (moveToDone / moveItemToLane ZADD done
+    // items at -Date.now()), so an ascending ZRANGE lists most-recently-done
+    // first. A re-indexed done item must follow that convention — a positive
+    // score would bury a recently-done item at the absolute tail (oldest).
+    await putItem({ id: "item-done", lane: "done", movedAt: new Date(1000).toISOString() });
+    assert.equal(await redis.zcard(laneKey("done")), 0);
+
+    const res = await reconcileLaneIndices();
+
+    assert.equal(res.reindexed, 1);
+    assert.equal(await redis.zcard(laneKey("done")), 1);
+    // Score is negated for the done lane (-1000), NOT the raw positive timestamp.
+    assert.equal(await redis.zscore(laneKey("done"), "item-done"), "-1000");
+  });
+
   test("removes an orphan zset member with no surviving hash entry", async (t) => {
     requireRedis(t);
     // A zset member whose hash item was deleted (half-completed removal).
