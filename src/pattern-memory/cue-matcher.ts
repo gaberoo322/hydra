@@ -16,7 +16,11 @@
  * Public surface (also unit-tested directly in test/friction-cue-dedup.test.mts):
  *   cueSimilarity         — string × string → number in [0, 1]
  *   findPatternForCue     — pattern[] × string → pattern | undefined
- *   CUE_MERGE_THRESHOLD   — exported constant
+ *
+ * Module-private threshold constant:
+ *   CUE_MERGE_THRESHOLD   — the overlap-coefficient merge cutoff used by
+ *                           findPatternForCue; no external importer remains, so
+ *                           it stays unexported (knip-demote, issue #2166).
  */
 
 /**
@@ -28,7 +32,7 @@
  * sibling, while unrelated cues sharing a prefix token (e.g. two distinct
  * scope-check gotchas) stay below it.
  */
-export const CUE_MERGE_THRESHOLD = 0.6;
+const CUE_MERGE_THRESHOLD = 0.6;
 
 /**
  * Light suffix stem so trivial inflection differences ("missing"/"misses",
