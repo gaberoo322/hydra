@@ -166,13 +166,73 @@ Drop anything matching "What's been completed" or recently merged.
 
 ## Phase 4: Write outputs
 
+The two direction docs live at `~/hydra-betting/direction/priorities.md` and
+`~/hydra-betting/direction/roadmap.md`. They are **git-tracked** files in the
+betting repo with an established `research(direction):` PR history (#90 / #89 /
+#82 / #45) — write them there, never to a scratch location, and never gitignore
+them.
+
 ### 1. `priorities.md`
-Full replacement, frontmatter `updated`, `refreshedBy: claude-research`, `tags`. Include current state summary, top 7, "What's been completed" (carry forward + add new), "What NOT to work on", regulatory awareness if relevant.
+Full replacement of `~/hydra-betting/direction/priorities.md`, frontmatter `updated`, `refreshedBy: claude-research`, `tags`. Include current state summary, top 7, "What's been completed" (carry forward + add new), "What NOT to work on", regulatory awareness if relevant.
 
 ### 2. `roadmap.md`
-Update existing — check off completed epics, add new ones, add milestones.
+Update existing `~/hydra-betting/direction/roadmap.md` — check off completed epics, add new ones, add milestones.
 
-### 3. Queue items
+### 3. Commit the direction docs — branch + PR, NEVER leave them uncommitted (issue #1913)
+
+The betting service **builds and deploys from the `~/hydra-betting` main
+checkout** (`npx next build`), and the deploy path fast-forward-merges
+`main → origin/main` against that same checkout. If a research cycle writes
+`direction/{priorities,roadmap}.md` and **stops without committing**, the main
+checkout is left dirty and the ff-merge **aborts on the dirty tree** — forcing a
+manual `stash → ff-merge → pop → restart` dance every cycle (observed 3× across
+2 cycles in run `f5741adf`).
+
+So this step is **mandatory and not optional**: the research cycle owns
+committing its own output. Land the edits on a dedicated feature branch and open
+a `research(direction):` PR — the SAME branch → PR → CI → emulated-merge-gate
+path every other betting change uses. **Never push direct to `main`**, and
+**never gitignore the docs** (they are tracked operator-facing artifacts the
+orchestrator reads as live state, with a deliberate commit history).
+
+```bash
+cd ~/hydra-betting
+# Only proceed if a direction doc actually changed this cycle.
+if [ -n "$(git status --porcelain -- direction/priorities.md direction/roadmap.md)" ]; then
+  DATE_TAG=$(date +%Y-%m-%d)
+  BRANCH="research/direction-${DATE_TAG}-$(date +%s)"
+  git checkout -b "$BRANCH"
+  git add direction/priorities.md direction/roadmap.md
+  git commit -m "research(direction): refresh priorities + roadmap (${DATE_TAG})"
+  git push -u origin "$BRANCH"
+  # Open the PR (emulated auto-merge: poll-to-green then merge per the betting
+  # merge-on-green setup — do NOT --auto bypass CI on the free-private repo).
+  gh pr create --repo gaberoo322/hydra-betting \
+    --title "research(direction): refresh priorities + roadmap (${DATE_TAG})" \
+    --body-file /dev/stdin <<'PRBODY'
+Automated `/hydra-target-research` direction-doc refresh.
+
+Updates `direction/priorities.md` and `direction/roadmap.md` with this cycle's
+re-prioritised top-7 + roadmap milestones.
+
+Committing on a branch + PR (not leaving the docs uncommitted in the main
+deploy checkout) so the deploy fast-forward merge never aborts on a dirty
+tree — fixes the recurring stash-pop hazard (orchestrator issue #1913).
+PRBODY
+  git checkout main   # return the deploy checkout to a clean main
+else
+  echo "No direction-doc changes this cycle — nothing to commit."
+fi
+```
+
+After this step, `git -C ~/hydra-betting status --porcelain -- direction/` MUST
+be empty. The deploy path then sees a clean tree and the ff-merge succeeds with
+no manual stash dance. Leaving `direction/{priorities,roadmap}.md` uncommitted
+in the main checkout is the exact regression this step exists to prevent — do
+not skip it, and do not "fix" a dirty tree later by gitignoring or stashing the
+docs (that orphans their tracked history / silently discards a cycle's output).
+
+### 4. Queue items
 
 High-priority (5–8):
 ```bash
