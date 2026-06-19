@@ -164,6 +164,144 @@ function errRedis(err: any): Err {
 }
 
 // ---------------------------------------------------------------------------
+// Injectable lifecycle-write deps (issue #2158)
+//
+// The run-lifecycle writers (`startRun`/`endRun`/`recordCycle`/`recordTurn`/
+// `sweepRunIfDead`) each touch the Redis Adapters seam (and, for recordCycle,
+// the metrics writer). That made the lifecycle write POLICY — idempotency
+// keying, the #2063 enrichment-vs-dedup gate, the #1919 three-bucket counter
+// identity, and the dead-pid running→killed/crash sweep — only exercisable with
+// a live Redis (every test in autopilot-runs / autopilot-cycle-records stands up
+// `new Redis(REDIS_URL)` in a `beforeEach`). This seam wraps those writes in an
+// injectable deps bag so the SAME policy is testable on in-memory fixtures,
+// exactly the precedent the read-side `ProjectionDeps` (run-projections.ts,
+// #1183) set for the projections.
+//
+// Shape decisions (per the approved design concept for #2158):
+//   - GROUPED named sub-facades (`runs`/`cycle`/`scheduler`/`metrics`), not a
+//     flat ~12-field bag, following the `RecsRedisFacade` precedent in
+//     recommendation-engine.ts — a test stubs only the group a writer exercises.
+//   - The facade fields are the TYPED redis/<domain>.ts accessors (never a raw
+//     Redis client), so a test double honours the same typed contract and the
+//     Redis Adapters seam is never bypassed in production.
+//   - A SINGLE `now()` epoch-ms clock (the `EngineDeps` precedent): both the
+//     `*_epoch` seconds fields (`Math.floor(now()/1000)`) and the ISO strings
+//     (`new Date(now()).toISOString()`) derive from it — one source of truth.
+//   - `isPidAlive` is RE-DECLARED here (same field name as `ProjectionDeps`, by
+//     convention not interface inheritance) so the sweeper's dead-pid branch is
+//     reachable on a synthetic `running` row without faking a real dead PID.
+//
+// Default deps route through the exact same accessors + clock as before, so
+// omitting the `deps` arg is byte-for-byte the current production behaviour and
+// every existing call site in src/api/autopilot-lifecycle.ts is unchanged.
+// ---------------------------------------------------------------------------
+
+/** Run-hash + index + turn accessors the run/turn writers touch. */
+export interface AutopilotRunsRunFacade {
+  getAutopilotRun(runId: string): Promise<Record<string, string>>;
+  initAutopilotRun(
+    runId: string,
+    fields: Record<string, string>,
+    ttlSeconds: number,
+  ): Promise<void>;
+  updateAutopilotRunFields(
+    runId: string,
+    fields: Record<string, string>,
+    ttlSeconds: number,
+  ): Promise<void>;
+  setAutopilotRunField(runId: string, field: string, value: string): Promise<void>;
+  incrAutopilotRunField(runId: string, field: string, by: number): Promise<void>;
+  refreshAutopilotRunTTL(runId: string, ttlSeconds: number): Promise<void>;
+  addAutopilotRunToIndex(
+    runId: string,
+    scoreEpochSeconds: number,
+    ttlSeconds: number,
+  ): Promise<void>;
+  addAutopilotRunTurn(
+    runId: string,
+    turnN: number,
+    member: string,
+    ttlSeconds: number,
+  ): Promise<void>;
+  hasAutopilotRunTurnAt(runId: string, turnN: number): Promise<boolean>;
+}
+
+/** Cycle-hash + index accessors `recordCycle` touches. */
+export interface AutopilotRunsCycleFacade {
+  getCycleHash(cycleId: string): Promise<Record<string, string>>;
+  initCycleHash(
+    cycleId: string,
+    fields: Record<string, string>,
+    ttlSeconds: number,
+  ): Promise<void>;
+  addCycleToIndex(cycleId: string, score: number): Promise<void>;
+}
+
+/** Lifetime scheduler counters `recordCycle` bumps (the #1919 buckets). */
+export interface AutopilotRunsSchedulerFacade {
+  incrSchedulerCyclesRun(): Promise<number>;
+  incrSchedulerCyclesMerged(): Promise<number>;
+  incrSchedulerCyclesFailed(): Promise<number>;
+  incrSchedulerCyclesUnaccounted(): Promise<number>;
+}
+
+/** The per-cycle metrics writer `recordCycle` feeds. */
+export interface AutopilotRunsMetricsFacade {
+  recordCycleMetrics(cycleId: string, metrics: CycleMetricsInput): Promise<void>;
+}
+
+export interface AutopilotRunsDeps {
+  runs: AutopilotRunsRunFacade;
+  cycle: AutopilotRunsCycleFacade;
+  scheduler: AutopilotRunsSchedulerFacade;
+  metrics: AutopilotRunsMetricsFacade;
+  /**
+   * Liveness probe used by the dead-pid sweeper. Same field name as
+   * `ProjectionDeps.isPidAlive` (by convention, not inheritance) and defaults
+   * to the same `isPidAlive` imported from run-projections.ts. Injecting it
+   * makes the sweeper's `running`→`killed`/`crash` branch reachable on a
+   * synthetic row without spawning/killing a real PID.
+   */
+  isPidAlive: (pid: number) => boolean;
+  /**
+   * Epoch-MS clock. A single source of truth: `*_epoch` seconds fields derive
+   * via `Math.floor(now()/1000)` and ISO strings via `new Date(now())`.
+   * Defaults to `Date.now`.
+   */
+  now: () => number;
+}
+
+export const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
+  runs: {
+    getAutopilotRun,
+    initAutopilotRun,
+    updateAutopilotRunFields,
+    setAutopilotRunField,
+    incrAutopilotRunField,
+    refreshAutopilotRunTTL,
+    addAutopilotRunToIndex,
+    addAutopilotRunTurn,
+    hasAutopilotRunTurnAt,
+  },
+  cycle: {
+    getCycleHash,
+    initCycleHash,
+    addCycleToIndex,
+  },
+  scheduler: {
+    incrSchedulerCyclesRun,
+    incrSchedulerCyclesMerged,
+    incrSchedulerCyclesFailed,
+    incrSchedulerCyclesUnaccounted,
+  },
+  metrics: {
+    recordCycleMetrics,
+  },
+  isPidAlive,
+  now: Date.now,
+};
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -258,15 +396,16 @@ function sanitizeCrashDetail(detail: CrashDetail | undefined): Record<string, un
 export async function sweepRunIfDead(
   runId: string,
   row: Record<string, string>,
+  deps: AutopilotRunsDeps = defaultAutopilotRunsDeps,
 ): Promise<{ row: Record<string, string>; swept: boolean }> {
   if (row.status !== "running") return { row, swept: false };
   const pid = Number(row.pid || "0");
-  if (isPidAlive(pid)) return { row, swept: false };
+  if (deps.isPidAlive(pid)) return { row, swept: false };
 
   const endedEpoch =
     Number(row.last_heartbeat_epoch || "0") ||
     Number(row.started_epoch || "0") ||
-    Math.floor(Date.now() / 1000);
+    Math.floor(deps.now() / 1000);
 
   // A recorded clean exit (exit_code === 0) means the process ended
   // normally even though the terminal run-end POST didn't land — treat
@@ -294,7 +433,7 @@ export async function sweepRunIfDead(
     });
   }
 
-  await updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
+  await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
 
   const mutated = {
     ...row,
@@ -340,7 +479,10 @@ export type CycleRecordResult = Ok<{
  * stable identifier (autopilot turn id, worktree branch) so retries
  * collapse cleanly.
  */
-export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordResult> {
+export async function recordCycle(
+  body: CycleRecordBody,
+  deps: AutopilotRunsDeps = defaultAutopilotRunsDeps,
+): Promise<CycleRecordResult> {
   try {
     const cycleId = body.cycleId.trim();
     const status =
@@ -356,7 +498,7 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
     // prNumber, if it newly arrived) instead of discarding it as a pure dedup.
     // A plain duplicate post carrying no new data stays a true no-op
     // (enriched:false), preserving AC4/AC9's "re-post does not double-count".
-    const existing = await getCycleHash(cycleId);
+    const existing = await deps.cycle.getCycleHash(cycleId);
     if (existing && existing.status) {
       const enrichFiles = filesChangedCount(body.filesChanged);
       const enrichPr = body.prNumber !== undefined ? String(body.prNumber) : undefined;
@@ -368,7 +510,7 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
       if (Object.keys(enrichment).length > 0) {
         // recordCycleMetrics does an additive HSET, so this updates only the
         // enriched fields on the existing metrics hash — counters untouched.
-        await recordCycleMetrics(cycleId, enrichment);
+        await deps.metrics.recordCycleMetrics(cycleId, enrichment);
         enriched = true;
       }
       return {
@@ -383,15 +525,16 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
 
     const source =
       typeof body.source === "string" && body.source.length > 0 ? body.source : "claude";
-    const startedAt = body.startedAt || new Date().toISOString();
-    const completedAt = body.completedAt || new Date().toISOString();
+    const nowIso = new Date(deps.now()).toISOString();
+    const startedAt = body.startedAt || nowIso;
+    const completedAt = body.completedAt || nowIso;
 
     const total = numberOrDefault(body.total, 1);
     const completed = numberOrDefault(body.completed ?? body.tasksMerged, 0);
     const failed = numberOrDefault(body.failed ?? body.tasksFailed, 0);
     const abandoned = numberOrDefault(body.abandoned ?? body.tasksAbandoned, 0);
 
-    await initCycleHash(cycleId, {
+    await deps.cycle.initCycleHash(cycleId, {
       status,
       startedAt,
       completedAt,
@@ -401,7 +544,7 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
       failed: String(failed),
       abandoned: String(abandoned),
     }, CYCLE_TTL_SECONDS);
-    await addCycleToIndex(cycleId, Date.now());
+    await deps.cycle.addCycleToIndex(cycleId, deps.now());
 
     const metrics: CycleMetricsInput = {
       source,
@@ -439,16 +582,16 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
     for (const k of Object.keys(metrics)) {
       if (metrics[k] === undefined) delete metrics[k];
     }
-    await recordCycleMetrics(cycleId, metrics);
+    await deps.metrics.recordCycleMetrics(cycleId, metrics);
 
-    await incrSchedulerCyclesRun();
+    await deps.scheduler.incrSchedulerCyclesRun();
     const lowerStatus = status.toLowerCase();
     let bucketed: "merged" | "failed" | "unaccounted" = "unaccounted";
     if (MERGED_STATUSES.has(lowerStatus)) {
-      await incrSchedulerCyclesMerged();
+      await deps.scheduler.incrSchedulerCyclesMerged();
       bucketed = "merged";
     } else if (FAILED_STATUSES.has(lowerStatus)) {
-      await incrSchedulerCyclesFailed();
+      await deps.scheduler.incrSchedulerCyclesFailed();
       bucketed = "failed";
     } else {
       // Issue #1919: status in NEITHER set (no-op / idle-drain / dry-run /
@@ -457,7 +600,7 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
       // exactly one terminal bucket. Observability-only: MERGED/FAILED_STATUSES
       // membership is unchanged, so mergeRate / the rolling window / the
       // circuit breaker read identical values.
-      await incrSchedulerCyclesUnaccounted();
+      await deps.scheduler.incrSchedulerCyclesUnaccounted();
       bucketed = "unaccounted";
     }
 
@@ -579,23 +722,26 @@ export async function recordDispatchPr(
 
 export type RunStartResult = Ok<{ run_id: string; deduped: boolean }> | Err;
 
-export async function startRun(body: RunStartBody): Promise<RunStartResult> {
+export async function startRun(
+  body: RunStartBody,
+  deps: AutopilotRunsDeps = defaultAutopilotRunsDeps,
+): Promise<RunStartResult> {
   try {
     const runId = body.run_id.trim();
-    const started = body.started || new Date().toISOString();
-    const startedEpoch = numberOrDefault(body.started_epoch, Math.floor(Date.now() / 1000));
+    const started = body.started || new Date(deps.now()).toISOString();
+    const startedEpoch = numberOrDefault(body.started_epoch, Math.floor(deps.now() / 1000));
     const pid = numberOrDefault(body.pid, 0);
     const trigger =
       typeof body.trigger === "string" && body.trigger.length > 0 ? body.trigger : "manual";
     const limits = body.limits && typeof body.limits === "object" ? body.limits : {};
 
     // Idempotency: a row with `started` filled means run-start already fired.
-    const existing = await getAutopilotRun(runId);
+    const existing = await deps.runs.getAutopilotRun(runId);
     if (existing && existing.started) {
       return { ok: true, run_id: runId, deduped: true };
     }
 
-    await initAutopilotRun(runId, {
+    await deps.runs.initAutopilotRun(runId, {
       run_id: runId,
       started,
       started_epoch: String(startedEpoch),
@@ -609,7 +755,7 @@ export async function startRun(body: RunStartBody): Promise<RunStartResult> {
       idle_turns: "0",
       last_heartbeat_epoch: String(startedEpoch),
     }, RUN_TTL_SECONDS);
-    await addAutopilotRunToIndex(runId, startedEpoch, RUN_TTL_SECONDS);
+    await deps.runs.addAutopilotRunToIndex(runId, startedEpoch, RUN_TTL_SECONDS);
 
     return { ok: true, run_id: runId, deduped: false };
   } catch (err: any) {
@@ -625,10 +771,13 @@ export type RunEndResult =
   | Ok<{ run_id: string; status: string; term_reason: string; deduped: boolean }>
   | Err;
 
-export async function endRun(body: RunEndBody): Promise<RunEndResult> {
+export async function endRun(
+  body: RunEndBody,
+  deps: AutopilotRunsDeps = defaultAutopilotRunsDeps,
+): Promise<RunEndResult> {
   try {
     const runId = body.run_id.trim();
-    const existing = await getAutopilotRun(runId);
+    const existing = await deps.runs.getAutopilotRun(runId);
     if (!existing || !existing.started) {
       return { ok: false, code: "not-found", detail: `unknown run_id: ${runId}` };
     }
@@ -646,7 +795,7 @@ export async function endRun(body: RunEndBody): Promise<RunEndResult> {
 
     const cause = typeof body.cause === "string" ? body.cause : "";
     const termReason = VALID_TERM_REASONS.has(cause) ? cause : "unknown";
-    const endedEpoch = numberOrDefault(body.ended_epoch, Math.floor(Date.now() / 1000));
+    const endedEpoch = numberOrDefault(body.ended_epoch, Math.floor(deps.now() / 1000));
     const exitCode = body.exit_code !== undefined ? numberOrDefault(body.exit_code, 0) : 0;
 
     const fields: Record<string, string> = {
@@ -666,7 +815,7 @@ export async function endRun(body: RunEndBody): Promise<RunEndResult> {
       if (detail) fields.crash_detail = JSON.stringify(detail);
     }
 
-    await updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
+    await deps.runs.updateAutopilotRunFields(runId, fields, RUN_TTL_SECONDS);
 
     return {
       ok: true,
@@ -688,18 +837,21 @@ export type RecordTurnResult =
   | Ok<{ run_id: string; turn_n: number; deduped: boolean; dispatch_count: number }>
   | Err;
 
-export async function recordTurn(body: TurnBody): Promise<RecordTurnResult> {
+export async function recordTurn(
+  body: TurnBody,
+  deps: AutopilotRunsDeps = defaultAutopilotRunsDeps,
+): Promise<RecordTurnResult> {
   try {
     const runId = body.run_id.trim();
     const turnN = body.turn_n;
-    const epoch = numberOrDefault(body.epoch, Math.floor(Date.now() / 1000));
+    const epoch = numberOrDefault(body.epoch, Math.floor(deps.now() / 1000));
 
-    const runRow = await getAutopilotRun(runId);
+    const runRow = await deps.runs.getAutopilotRun(runId);
     if (!runRow || !runRow.started) {
       return { ok: false, code: "not-found", detail: `unknown run_id: ${runId}` };
     }
 
-    if (await hasAutopilotRunTurnAt(runId, turnN)) {
+    if (await deps.runs.hasAutopilotRunTurnAt(runId, turnN)) {
       return { ok: true, run_id: runId, turn_n: turnN, deduped: true, dispatch_count: 0 };
     }
 
@@ -731,20 +883,20 @@ export async function recordTurn(body: TurnBody): Promise<RecordTurnResult> {
     });
 
     // 1. Immutable turn row.
-    await addAutopilotRunTurn(runId, turnN, turnMember, RUN_TTL_SECONDS);
+    await deps.runs.addAutopilotRunTurn(runId, turnN, turnMember, RUN_TTL_SECONDS);
 
     // 2. Counter updates — single-field writes so slice-1 fields stay intact.
     const currentTurns = Number(runRow.turns || "0");
     if (turnN > currentTurns) {
-      await setAutopilotRunField(runId, "turns", String(turnN));
+      await deps.runs.setAutopilotRunField(runId, "turns", String(turnN));
     }
     if (dispatchCount > 0) {
-      await incrAutopilotRunField(runId, "dispatches", dispatchCount);
+      await deps.runs.incrAutopilotRunField(runId, "dispatches", dispatchCount);
     }
-    await setAutopilotRunField(runId, "cumulative_tokens", String(tokensAfter));
-    await setAutopilotRunField(runId, "idle_turns", String(idleTurns));
-    await setAutopilotRunField(runId, "last_heartbeat_epoch", String(epoch));
-    await refreshAutopilotRunTTL(runId, RUN_TTL_SECONDS);
+    await deps.runs.setAutopilotRunField(runId, "cumulative_tokens", String(tokensAfter));
+    await deps.runs.setAutopilotRunField(runId, "idle_turns", String(idleTurns));
+    await deps.runs.setAutopilotRunField(runId, "last_heartbeat_epoch", String(epoch));
+    await deps.runs.refreshAutopilotRunTTL(runId, RUN_TTL_SECONDS);
 
     return { ok: true, run_id: runId, turn_n: turnN, deduped: false, dispatch_count: dispatchCount };
   } catch (err: any) {
