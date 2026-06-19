@@ -119,6 +119,24 @@ prune_repo() {
     echo "branch-prune: [$LABEL] git fetch origin --prune"
     git fetch origin --prune 2>&1 | sed "s/^/  [$LABEL] /" || true
 
+    # Early prune (issue #2115): reconcile worktree metadata BEFORE any
+    # branch-delete pass. A dispatch worktree under /dev/shm (tmpfs) can vanish
+    # on reboot while git's `.git/worktrees/<name>` metadata persists — git then
+    # still believes the branch is "used by worktree at /dev/shm/..." and a
+    # later `git branch -D` fails with that exact error, even though the dir is
+    # long gone. `git worktree prune` is git's own sanctioned metadata
+    # reconciliation: it drops administrative entries whose worktree dir no
+    # longer exists, releasing the branch->worktree binding so the subsequent
+    # delete passes succeed. It is a safe no-op when there is no stale metadata,
+    # and never makes any pass less conservative (it only frees branches git
+    # itself agrees are no longer in use). We deliberately do NOT `rm -rf` the
+    # /dev/shm dir — metadata reconciliation, not directory deletion, is the
+    # fix (the established 6h age floor from #1773 still guards live cycles).
+    # The end-of-pass prune below stays — it cleans metadata for worktree dirs
+    # removed DURING this run.
+    echo "branch-prune: [$LABEL] git worktree prune (pre-delete metadata reconcile)"
+    git worktree prune 2>&1 | sed "s/^/  [$LABEL] /" || true
+
     # Collect inputs for the classifier:
     #   1. `git branch -vv` for [gone] detection + current-branch marker
     #   2. `git worktree list --porcelain` for attached-worktree lookup
