@@ -36,7 +36,6 @@ describe("redisKeys naming convention", () => {
     ["blockedLastEscalation", redisKeys.blockedLastEscalation],
     ["digestLastWeekly", redisKeys.digestLastWeekly],
     ["regressionHuntLast", redisKeys.regressionHuntLast],
-    ["streamCycle", redisKeys.streamCycle],
     ["streamNotifications", redisKeys.streamNotifications],
     ["streamDlq", redisKeys.streamDlq],
     ["streamAgentStream", redisKeys.streamAgentStream],

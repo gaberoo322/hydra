@@ -353,7 +353,6 @@ export const redisKeys = {
   // ---------------------------------------------------------------------------
   // Event Streams
   // ---------------------------------------------------------------------------
-  streamCycle: () => "hydra:cycle",
   streamNotifications: () => "hydra:notifications",
   streamDlq: () => "hydra:dlq",
   streamAgentStream: () => "hydra:agent-stream",
