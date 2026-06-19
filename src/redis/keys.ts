@@ -178,6 +178,11 @@ export const redisKeys = {
   schedulerCyclesRun: () => "hydra:scheduler:cycles-run",
   schedulerCyclesMerged: () => "hydra:scheduler:cycles-merged",
   schedulerCyclesFailed: () => "hydra:scheduler:cycles-failed",
+  // Issue #1919: cycles whose recorded status fell in NEITHER MERGED_STATUSES
+  // nor FAILED_STATUSES (recordCycle's bucketed===null else-branch). Makes the
+  // run = merged + failed + unaccounted identity a first-class, queryable
+  // counter instead of an inferred subtraction.
+  schedulerCyclesUnaccounted: () => "hydra:scheduler:cycles-unaccounted",
   schedulerStateVersion: () => "hydra:scheduler:state-version",
   // Issue #388: deliberate-stop marker. Set when the operator calls
   // POST /scheduler/stop so the watchdog can distinguish operator stops

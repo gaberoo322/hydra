@@ -36,6 +36,7 @@ import {
   getSchedulerCyclesRun,
   getSchedulerCyclesMerged,
   getSchedulerCyclesFailed,
+  getSchedulerCyclesUnaccounted,
   getLastResearchAtMs,
   getSchedulerStateVersion,
   getSchedulerStateRaw,
@@ -116,6 +117,13 @@ let state = {
   cyclesRun: 0,
   cyclesMerged: 0,
   cyclesFailed: 0,
+  // Issue #1919: cycles whose recorded status was in NEITHER MERGED_STATUSES
+  // nor FAILED_STATUSES (recordCycle's unaccounted bucket). Surfaced read-only
+  // in getStatus so the run = merged + failed + unaccounted identity is
+  // operator-visible rather than an inferred subtraction. The heartbeat NEVER
+  // increments this (ADR-0012) — recordCycle in src/autopilot/runs.ts is the
+  // sole writer; this field is rehydrated from the atomic counter on startup.
+  cyclesUnaccounted: 0,
   // Issue #397: heartbeat for the scheduler's housekeeping loop. Updated on
   // every `runScheduledCycle` entry so the watchdog can tell "scheduler is
   // alive" from "scheduler is wedged". This is the field external liveness
@@ -199,6 +207,28 @@ async function loadSchedulerState() {
     if (atomicCyclesMerged > 0) state.cyclesMerged = atomicCyclesMerged;
     const atomicCyclesFailed = await getSchedulerCyclesFailed();
     if (atomicCyclesFailed > 0) state.cyclesFailed = atomicCyclesFailed;
+
+    // Issue #1919: rehydrate the unaccounted-cycles counter (read-only) so the
+    // run = merged + failed + unaccounted identity is restart-stable on the
+    // status page. recordCycle is the SOLE writer (ADR-0012); the heartbeat
+    // only reads. Then emit a one-time lost-cycle diagnostic: if the live
+    // counters do NOT satisfy the identity, a gap exists that the unaccounted
+    // counter has not (yet) absorbed — e.g. the frozen 600-cycle historical
+    // backfill that predates this counter. Log it so the residual is visible
+    // without manual subtraction; this is the diagnostic half of the fix.
+    const atomicCyclesUnaccounted = await getSchedulerCyclesUnaccounted();
+    if (atomicCyclesUnaccounted > 0) state.cyclesUnaccounted = atomicCyclesUnaccounted;
+    const accountedGap =
+      state.cyclesRun - (state.cyclesMerged + state.cyclesFailed + state.cyclesUnaccounted);
+    if (accountedGap !== 0) {
+      console.warn(
+        `[Heartbeat] Cycle-accounting gap on startup: cyclesRun=${state.cyclesRun} ` +
+          `!= merged(${state.cyclesMerged}) + failed(${state.cyclesFailed}) + ` +
+          `unaccounted(${state.cyclesUnaccounted}); residual gap=${accountedGap}. ` +
+          `Go-forward cycles are bucketed (issue #1919); a non-zero residual is a ` +
+          `frozen historical artifact predating the unaccounted counter, not a live leak.`,
+      );
+    }
 
     // Load atomic lastResearchAt (issue #140 — AC2)
     const lastResearchMs = await getLastResearchAtMs();
@@ -467,6 +497,12 @@ async function getStatus() {
     cyclesRun: state.cyclesRun,
     cyclesMerged: state.cyclesMerged,
     cyclesFailed: state.cyclesFailed,
+    // Issue #1919: cycles whose status was in NEITHER MERGED_STATUSES nor
+    // FAILED_STATUSES (no-op / idle-drain / dry-run / unknown). Read-only here
+    // (recordCycle is the sole writer per ADR-0012). Makes the
+    // cyclesRun == cyclesMerged + cyclesFailed + cyclesUnaccounted identity
+    // queryable instead of an inferred (run - merged - failed) subtraction.
+    cyclesUnaccounted: state.cyclesUnaccounted,
     // Rolling N-cycle merge rate (default 50) — same source as
     // `hydra metrics --count N`. Operator-visible primary metric.
     mergeRate,

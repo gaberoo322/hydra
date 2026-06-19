@@ -264,4 +264,82 @@ describe("POST /api/autopilot/cycle-record (issue #430)", () => {
     assert.equal(await redis.get("hydra:scheduler:cycles-merged"), "1");
     assert.equal(await redis.get("hydra:scheduler:cycles-failed"), "2");
   });
+
+  // ---------------------------------------------------------------------------
+  // AC7 (issue #1919) — a status in NEITHER MERGED_STATUSES nor FAILED_STATUSES
+  // bumps cycles-run AND the new cycles-unaccounted counter, and reports
+  // bucketed:"unaccounted". Previously such a status bumped cycles-run only,
+  // silently inflating the (run - merged - failed) gap that produced the 600
+  // unaccounted cycles.
+  // ---------------------------------------------------------------------------
+  test("AC7: neutral status bumps cycles-unaccounted and reports bucketed:unaccounted", async () => {
+    for (const status of ["no-op", "skipped", "dry-run"]) {
+      const res = mockRes();
+      await handler(
+        mockReq({ cycleId: `autopilot-turn-neutral-${status}`, status, source: "claude" }),
+        res,
+      );
+      assert.equal(res._body.ok, true);
+      assert.equal(res._body.bucketed, "unaccounted", `${status} should bucket as unaccounted`);
+    }
+    assert.equal(await redis.get("hydra:scheduler:cycles-run"), "3");
+    assert.equal(await redis.get("hydra:scheduler:cycles-unaccounted"), "3");
+    // Neutral statuses must NOT pollute the merged/failed buckets (invariant #3:
+    // MERGED/FAILED classification semantics unchanged).
+    assert.equal(await redis.get("hydra:scheduler:cycles-merged"), null);
+    assert.equal(await redis.get("hydra:scheduler:cycles-failed"), null);
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC8 (issue #1919) — the counter identity holds for a mixed batch:
+  // cyclesRun == cyclesMerged + cyclesFailed + cyclesUnaccounted. This is the
+  // checkable invariant that turns the implicit subtraction gap into a
+  // first-class property.
+  // ---------------------------------------------------------------------------
+  test("AC8: cyclesRun == merged + failed + unaccounted for a mixed batch", async () => {
+    const statuses = [
+      "merged", "completed", "succeeded", // 3 merged
+      "failed", "abandoned", "aborted", "timeout", // 4 failed
+      "no-op", "idle", // 2 unaccounted
+    ];
+    for (let i = 0; i < statuses.length; i++) {
+      const res = mockRes();
+      await handler(
+        mockReq({ cycleId: `autopilot-turn-mixed-${i}`, status: statuses[i], source: "claude" }),
+        res,
+      );
+      assert.equal(res._body.ok, true);
+    }
+    const run = parseInt((await redis.get("hydra:scheduler:cycles-run")) || "0", 10);
+    const merged = parseInt((await redis.get("hydra:scheduler:cycles-merged")) || "0", 10);
+    const failed = parseInt((await redis.get("hydra:scheduler:cycles-failed")) || "0", 10);
+    const unaccounted = parseInt((await redis.get("hydra:scheduler:cycles-unaccounted")) || "0", 10);
+
+    assert.equal(run, statuses.length);
+    assert.equal(merged, 3);
+    assert.equal(failed, 4);
+    assert.equal(unaccounted, 2);
+    // The identity #1919 makes queryable.
+    assert.equal(run, merged + failed + unaccounted);
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC9 (issue #1919) — dedup early-return touches NO counter (not even
+  // unaccounted). bucketed:null is reserved for the deduped path.
+  // ---------------------------------------------------------------------------
+  test("AC9: re-posting a neutral cycleId is a no-op on cycles-unaccounted", async () => {
+    const body = { cycleId: "autopilot-turn-neutral-dedup", status: "no-op", source: "claude" };
+
+    const res1 = mockRes();
+    await handler(mockReq(body), res1);
+    assert.equal(res1._body.bucketed, "unaccounted");
+    assert.equal(res1._body.deduped, false);
+    assert.equal(await redis.get("hydra:scheduler:cycles-unaccounted"), "1");
+
+    const res2 = mockRes();
+    await handler(mockReq(body), res2);
+    assert.equal(res2._body.deduped, true);
+    assert.equal(res2._body.bucketed, null); // null == dedup, distinct from "unaccounted"
+    assert.equal(await redis.get("hydra:scheduler:cycles-unaccounted"), "1");
+  });
 });
