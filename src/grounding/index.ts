@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CMD_TIMEOUT, runCmd } from "./grounding-cmd.ts";
-import { parseTestCounts, parseFailingTests } from "./grounding-parser.ts";
+import { CMD_TIMEOUT, runCmd } from "./cmd.ts";
+import { parseTestCounts, parseFailingTests } from "./parser.ts";
 
 /**
  * Options accepted by {@link groundProject}.

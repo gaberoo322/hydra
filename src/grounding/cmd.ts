@@ -1,5 +1,5 @@
 /**
- * Command-execution seam for grounding.ts.
+ * Command-execution seam for the grounding Module (grounding/index.ts).
  *
  * Owns the three concerns that require spawning a child process or operating
  * on raw output bytes:
@@ -8,7 +8,7 @@
  *   - `runCmd`        — spawn a command via execWithGroupCleanup, returning
  *                       { exitCode, stdout, stderr, durationMs }. Never throws.
  *
- * Keeping these three helpers here (rather than inlined in grounding.ts) lets
+ * Keeping these three helpers here (rather than inlined in grounding/index.ts) lets
  * tests reach them directly — without the `_testing` escape hatch — and lets
  * callers that need only command execution import a slim surface.
  *
@@ -17,7 +17,7 @@
  * so a large-but-clean run is never misread as a success.
  */
 
-import { execWithGroupCleanup } from "./exec-with-timeout.ts";
+import { execWithGroupCleanup } from "../exec-with-timeout.ts";
 
 export const CMD_TIMEOUT = 120_000; // 2 min per command (parallel tests complete in ~40s)
 const OUTPUT_LIMIT = 10_000; // truncate stdout/stderr to 10KB

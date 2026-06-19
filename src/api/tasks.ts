@@ -21,7 +21,7 @@ export function createTasksRouter() {
   // metrics treated that as ground truth.
   router.get("/grounding/latest", async (req, res) => {
     try {
-      const { groundProject } = await import("../grounding.ts");
+      const { groundProject } = await import("../grounding/index.ts");
       const projectDir = getTargetWorkspace();
       const report = await groundProject(projectDir);
       const testParseStatus = report?.testReport?.parseStatus ?? null;
