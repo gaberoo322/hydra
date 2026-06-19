@@ -132,6 +132,88 @@ describe("getContext returns a structured LearningContext", () => {
     assert.equal(ctx.blocks.length, 4);
   });
 
+  // Issue #2141: getContext now accepts an optional `deps` bag of the four
+  // primitive source-loaders. Injecting stubs drives a realistic HIT scenario
+  // (non-empty agent-memory + non-empty per-anchor-reflections) WITHOUT a live
+  // Redis connection — exercising the production composition logic (the
+  // formatMemoryForPrompt adaptation in the agent-memory thunk, the count===0
+  // gate + backfill-then-read ordering in the per-anchor thunk) on stubs. These
+  // are NESTED in this describe block deliberately: a sibling top-level block
+  // would run after this block's after()-style closeRedisConnections() teardown
+  // and fail with "Connection is closed".
+  test("injected stubs drive a Redis-free hit scenario through the composition seam", async () => {
+    const ctx = await learning.getContext(
+      "planner",
+      { type: "codebase-health", reference: "issue-2141-stub", files: ["src/learning.ts"] },
+      {
+        // Non-empty raw memory → formatMemoryForPrompt's line-fallback yields a
+        // real agent-memory HIT (itemCount = number of "- " lines kept).
+        loadAgentMemory: async () => "- prefer the deps-bag idiom\n- never inject the whole thunk",
+        // per-anchor HIT: non-empty content, count 1.
+        loadAnchorReflections: async () => ({ content: "PRIOR ATTEMPT: stubbed reflection", count: 1 }),
+        // knowledge-base + by-file both MISS (empty content). The KB stub also
+        // proves the dynamic OV import is skipped — no Redis/OV touched.
+        loadKnowledgeBaseForPrompt: async () => ({ content: "", itemCount: 0 }),
+        loadAnchorReflectionsByFile: async () => ({ content: "", count: 0 }),
+      },
+    );
+
+    const bySource = new Map(ctx.blocks.map((b: any) => [b.source, b]));
+
+    const agentMemory = bySource.get("agent-memory");
+    assert.equal(agentMemory.status, "hit", "injected non-empty agent-memory → hit");
+    assert.ok(agentMemory.content.includes("prefer the deps-bag idiom"),
+      "agent-memory block carries the injected memory, formatted for the prompt");
+    assert.equal(agentMemory.itemCount, 2, "two memory lines → itemCount 2 (count-from-data)");
+
+    const perAnchor = bySource.get("per-anchor-reflections");
+    assert.equal(perAnchor.status, "hit", "injected per-anchor reflection → hit");
+    assert.equal(perAnchor.content, "PRIOR ATTEMPT: stubbed reflection");
+    assert.equal(perAnchor.itemCount, 1, "per-anchor itemCount carried from the read's count");
+
+    assert.equal(bySource.get("knowledge-base").status, "miss", "empty KB stub → miss");
+    assert.equal(bySource.get("by-file-reflections").status, "miss", "empty by-file stub → miss");
+
+    // toPrompt() joins exactly the two HIT contents with "\n\n", in block order.
+    assert.equal(
+      ctx.toPrompt(),
+      `${agentMemory.content}\n\nPRIOR ATTEMPT: stubbed reflection`,
+      "toPrompt() concatenates only the two hit blocks with \\n\\n",
+    );
+
+    // The frozen drop-order contract is unchanged: per-anchor stays last-dropped.
+    const maxDrop = Math.max(...ctx.blocks.map((b: any) => b.dropPriority));
+    assert.equal(perAnchor.dropPriority, maxDrop,
+      "per-anchor reflections remain the highest dropPriority (last dropped)");
+  });
+
+  // Issue #2141: a partial deps bag overrides only the named field; the rest
+  // default to the real implementations. With no Redis the defaulted loaders
+  // miss/error rather than throwing out of getContext, but the INJECTED
+  // agent-memory loader still drives a deterministic HIT — proving the
+  // `deps?.field ?? realImpl` default is per-field, not all-or-nothing.
+  test("partial deps bag overrides one loader and defaults the rest", async (t) => {
+    let ctx;
+    try {
+      ctx = await learning.getContext(
+        "planner",
+        { type: "codebase-health", reference: "issue-2141-partial — should never match a real anchor" },
+        { loadAgentMemory: async () => "- only this loader is injected" },
+      );
+    } catch (err: any) {
+      if (err?.code === "ECONNREFUSED") {
+        t.skip("Redis unavailable on REDIS_URL — skipping");
+        return;
+      }
+      throw err;
+    }
+
+    assert.equal(ctx.blocks.length, 4, "still four blocks regardless of partial deps");
+    const agentMemory = ctx.blocks.find((b: any) => b.source === "agent-memory");
+    assert.equal(agentMemory.status, "hit", "injected loader produces a hit");
+    assert.ok(agentMemory.content.includes("only this loader is injected"));
+  });
+
   test("after() — close Redis connections", () => {
     closeRedisConnections();
   });

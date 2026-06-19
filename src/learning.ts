@@ -31,7 +31,7 @@ import {
   loadAgentMemory,
 } from "./pattern-memory/agent-memory.ts";
 import { formatMemoryForPrompt } from "./pattern-memory/prompt-format.ts";
-import { loadAnchorReflections } from "./reflections/per-anchor.ts";
+import { loadAnchorReflections, type ReflectionBlock } from "./reflections/per-anchor.ts";
 import {
   loadAnchorReflectionsByFile,
   backfillByFileIndex,
@@ -223,6 +223,38 @@ async function recordContextAvailability(hadContext: boolean): Promise<void> {
 }
 
 /**
+ * Issue #2141 — the injectable dependency surface for `getContext`. The four
+ * fields are the PRIMITIVE source-loaders the descriptor thunks call, NOT the
+ * thunks themselves: injecting the primitives keeps the production composition
+ * logic (formatMemoryForPrompt adaptation, the per-anchor backfill-then-read
+ * ordering, the extractFilesFromAnchor gate, the #1440 availability record)
+ * under test while the Redis / OpenViking boundary drops out behind a stub.
+ *
+ * Every field is OPTIONAL; each defaults to the real implementation at the top
+ * of `getContext` via `deps?.field ?? realImpl` — the same optional-deps-bag
+ * idiom as `AutonomyRateDeps` (src/aggregators/autonomy-rate.ts) and
+ * `CollectProbeDeps` (src/health/fan-out.ts). Production callers
+ * (src/api/learning.ts) pass no `deps` and observe byte-identical behaviour.
+ *
+ * Field types mirror the loaders' real signatures so a stub is type-checked:
+ *   - loadAgentMemory(agent): Promise<string>            — Pattern Memory raw read
+ *   - loadKnowledgeBaseForPrompt(agent): Promise<SourceRead> — KB/OpenViking read
+ *     (injecting it lets a test pass a plain stub WITHOUT triggering the dynamic
+ *     `import('./knowledge-base/ov-search.ts')` the default path keeps)
+ *   - loadAnchorReflections(anchorRef): Promise<ReflectionBlock> — per-anchor read
+ *   - loadAnchorReflectionsByFile(files, excludeAnchorRef?): Promise<ReflectionBlock>
+ */
+export interface GetContextDeps {
+  loadAgentMemory?: (agent: string) => Promise<string>;
+  loadKnowledgeBaseForPrompt?: (agent: string) => Promise<SourceRead>;
+  loadAnchorReflections?: (anchorRef: string) => Promise<ReflectionBlock>;
+  loadAnchorReflectionsByFile?: (
+    files: string[],
+    excludeAnchorRef?: string,
+  ) => Promise<ReflectionBlock>;
+}
+
+/**
  * Load Pattern Memory + Reflections context for an agent + anchor.
  * Returns a structured trace: each source contributes a block with a
  * status ("hit" / "miss" / "error"). Never throws — sources degrade
@@ -257,12 +289,32 @@ async function recordContextAvailability(hadContext: boolean): Promise<void> {
 export async function getContext(
   agent: string,
   anchor: { type: string; reference: string; files?: string[] },
+  deps?: GetContextDeps,
 ): Promise<LearningContext> {
+  // Issue #2141: resolve each primitive source-loader from the optional deps
+  // bag, defaulting to the real implementation (`deps?.field ?? realImpl`). The
+  // descriptor thunks below call these resolved *Fn variables, so the
+  // production composition logic stays intact while a test can drop in stubs
+  // that need no Redis / OpenViking connection. For the knowledge-base loader a
+  // provided stub also lets us SKIP the dynamic `import('./knowledge-base/…')`
+  // entirely — the default path keeps the lazy import so the OV cluster boundary
+  // stays visible (module header / issue #804).
+  const loadAgentMemoryFn = deps?.loadAgentMemory ?? loadAgentMemory;
+  const loadAnchorReflectionsFn = deps?.loadAnchorReflections ?? loadAnchorReflections;
+  const loadAnchorReflectionsByFileFn =
+    deps?.loadAnchorReflectionsByFile ?? loadAnchorReflectionsByFile;
+  const loadKnowledgeBaseForPromptFn =
+    deps?.loadKnowledgeBaseForPrompt ??
+    (async (a: string): Promise<SourceRead> => {
+      const { loadKnowledgeBaseForPrompt } = await import("./knowledge-base/ov-search.ts");
+      return loadKnowledgeBaseForPrompt(a);
+    });
+
   const descriptors: SourceDescriptor[] = [
     {
       source: "agent-memory",
       load: async () => {
-        const memory = await loadAgentMemory(agent);
+        const memory = await loadAgentMemoryFn(agent);
         // formatMemoryForPrompt reports the rendered pattern-group count from
         // the structured blocks it assembles — the count-from-data source.
         return formatMemoryForPrompt(memory, agent);
@@ -271,8 +323,7 @@ export async function getContext(
     {
       source: "knowledge-base",
       load: async () => {
-        const { loadKnowledgeBaseForPrompt } = await import("./knowledge-base/ov-search.ts");
-        const read = await loadKnowledgeBaseForPrompt(agent);
+        const read = await loadKnowledgeBaseForPromptFn(agent);
         // Issue #1440: record per-cycle knowledge-context availability so the
         // operator can trend "what fraction of planned cycles saw non-empty
         // knowledge context". itemCount > 0 ⇔ the block had content. Best-effort
@@ -284,7 +335,7 @@ export async function getContext(
     {
       source: "per-anchor-reflections",
       load: async () => {
-        const reflections = await loadAnchorReflections(anchor.reference);
+        const reflections = await loadAnchorReflectionsFn(anchor.reference);
         if (reflections.count === 0) return { content: "", itemCount: 0 };
         // Backfill on read: when an old reflection is hit by the legacy path,
         // opportunistically index it under by-file:. Side effect is intentional
@@ -302,7 +353,7 @@ export async function getContext(
       load: async () => {
         const files = extractFilesFromAnchor(anchor.reference, anchor.files);
         if (files.length === 0) return { content: "", itemCount: 0 };
-        const byFile = await loadAnchorReflectionsByFile(files, anchor.reference);
+        const byFile = await loadAnchorReflectionsByFileFn(files, anchor.reference);
         return { content: byFile.content, itemCount: byFile.count };
       },
     },
