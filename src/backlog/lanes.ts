@@ -4,15 +4,30 @@
  * Every public function in this file mutates lane membership through
  * applyLaneTransition() from ./internal.ts so the timing + claim metadata
  * invariants stay in one place.
+ *
+ * The write-commit step of a transition — {ZREM old-lane(s), HSET item, ZADD
+ * new-lane} — goes through applyAtomicLaneTransition (issue #1990) so the three
+ * ops run as a single atomic Lua step. A crash / Redis restart can no longer
+ * observe a half-write where item.lane (hash, canonical) disagrees with zset
+ * membership (the 166 "phantom done" items). The decision logic (find-by-title,
+ * WIP cap, blocked-reason guard) stays in JS; only the commit is atomic. The
+ * done lane keeps its NEGATED score (-now) so an ascending ZRANGE lists
+ * most-recently-done first.
  */
 
 import {
-  addToBacklogLane, removeFromBacklogLane, getBacklogLaneIds, getBacklogLaneCount,
+  removeFromBacklogLane, getBacklogLaneIds, getBacklogLaneCount,
+  applyAtomicLaneTransition,
 } from "../redis/backlog.ts";
 import {
   LANES, DONE_RETENTION_DAYS, WIP_LIMIT,
-  applyLaneTransition, getItem, saveItem, removeItem, sortByQueuePriority,
+  applyLaneTransition, getItem, removeItem, sortByQueuePriority,
 } from "./internal.ts";
+
+/** Score for a to-lane ZADD: done is negated (-now) so ascending ZRANGE lists most-recently-done first. */
+function laneScore(lane: string, now: number): number {
+  return lane === "done" ? -now : now;
+}
 
 /**
  * Move the top N backlog items to the Queued lane, sorted by priority.
@@ -34,11 +49,9 @@ export async function promoteToQueued(count = 1, now: number = Date.now()) {
   const dateOnly = new Date(now).toISOString().split("T")[0];
 
   for (const item of toPromote) {
-    await removeFromBacklogLane("backlog", item.id);
     item.meta = { ...item.meta, queuedAt: dateOnly };
     applyLaneTransition(item, "queued", {}, now);
-    await saveItem(item);
-    await addToBacklogLane("queued", now, item.id);
+    await applyAtomicLaneTransition(item.id, JSON.stringify(item), ["backlog"], "queued", laneScore("queued", now));
     moved.push(item);
   }
 
@@ -77,11 +90,9 @@ export async function moveToInProgress(
     for (const id of ids) {
       const item = await getItem(id);
       if (item && item.title === title) {
-        await removeFromBacklogLane(sourceLane, id);
         item.meta = { ...item.meta, startedAt: new Date(now).toISOString().split("T")[0] };
         applyLaneTransition(item, "inProgress", { claimedBy }, now);
-        await saveItem(item);
-        await addToBacklogLane("inProgress", now, id);
+        await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "inProgress", laneScore("inProgress", now));
         if (structured) return { ok: true, item };
         return true;
       }
@@ -101,7 +112,6 @@ export async function moveToDone(title: string, outcome = "merged", now: number 
     for (const id of ids) {
       const item = await getItem(id);
       if (item && item.title === title) {
-        await removeFromBacklogLane(sourceLane, id);
         item.checked = outcome === "merged";
         item.meta = {
           ...item.meta,
@@ -109,8 +119,7 @@ export async function moveToDone(title: string, outcome = "merged", now: number 
           outcome,
         };
         applyLaneTransition(item, "done", {}, now);
-        await saveItem(item);
-        await addToBacklogLane("done", -now, id);
+        await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "done", laneScore("done", now));
         return true;
       }
     }
@@ -133,15 +142,13 @@ export async function blockByTitle(title: string, reason: string, now: number = 
     for (const id of ids) {
       const item = await getItem(id);
       if (item && item.title === title) {
-        await removeFromBacklogLane(sourceLane, id);
         item.meta = {
           ...item.meta,
           blockedAt: new Date(now).toISOString().split("T")[0],
           blockedReason: reason,
         };
         applyLaneTransition(item, "blocked", {}, now);
-        await saveItem(item);
-        await addToBacklogLane("blocked", now, id);
+        await applyAtomicLaneTransition(id, JSON.stringify(item), [sourceLane], "blocked", laneScore("blocked", now));
         console.log(`[Backlog] Moved "${title}" to Blocked: ${reason}`);
         return true;
       }
@@ -159,15 +166,13 @@ export async function returnToBacklog(title: string, reason: string, now: number
   for (const id of ids) {
     const item = await getItem(id);
     if (item && item.title === title) {
-      await removeFromBacklogLane("inProgress", id);
       item.meta = {
         ...item.meta,
         returnedAt: new Date(now).toISOString().split("T")[0],
         returnReason: reason,
       };
       applyLaneTransition(item, "backlog", {}, now);
-      await saveItem(item);
-      await addToBacklogLane("backlog", now, id);
+      await applyAtomicLaneTransition(id, JSON.stringify(item), ["inProgress"], "backlog", laneScore("backlog", now));
       return true;
     }
   }
@@ -217,10 +222,6 @@ export async function moveItemToLane(
     }
   }
 
-  for (const lane of LANES) {
-    await removeFromBacklogLane(lane, itemId);
-  }
-
   // Stamp the blocked reason so the item is operator-actionable downstream.
   if (targetLane === "blocked" && reason) {
     item.meta = {
@@ -231,9 +232,9 @@ export async function moveItemToLane(
   }
 
   applyLaneTransition(item, targetLane, { claimedBy: opts.claimedBy ?? null }, now);
-  await saveItem(item);
-  const score = targetLane === "done" ? -now : now;
-  await addToBacklogLane(targetLane, score, itemId);
+  // Defensively ZREM every lane (the dashboard drag-and-drop boundary doesn't
+  // track the source lane) before HSET + ZADD into the target — all atomic.
+  await applyAtomicLaneTransition(itemId, JSON.stringify(item), LANES, targetLane, laneScore(targetLane, now));
   return { ok: true };
 }
 
