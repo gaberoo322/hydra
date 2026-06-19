@@ -30,11 +30,16 @@
 import {
   listIssuesByLabelOrEmpty,
   listIssuesBySearchOrEmpty,
-  type IssueRow,
 } from "../github/issues.ts";
 
 import type { DecisionItemSource } from "./types.ts";
 import { settledOrEmpty } from "./settle.ts";
+import {
+  datedTitle,
+  digestRefsFromRows,
+  labeledItemsFromRows,
+  type RawDigestInput,
+} from "./digest-issue.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -105,13 +110,11 @@ export async function getDecisionQueue(
 // Pure helper: merge + dedupe + sort
 // ---------------------------------------------------------------------------
 
-interface RawDecisionInput {
-  number: number;
-  title: string;
-  url: string;
-  createdAt: string;
-  labels: string[];
-}
+/**
+ * The pre-merge row shape, owned by the digest-issue seam. Aliased locally so
+ * the merge/fetch code reads in decision-queue terms.
+ */
+type RawDecisionInput = RawDigestInput;
 
 /**
  * Pure merge function — exported for tests. Takes a record keyed by source
@@ -196,56 +199,6 @@ async function fetchOperatorDigestItems(
   return items;
 }
 
-/**
- * Pure helper — exported for tests. From the seam's {@link IssueRow} rows of a
- * digest-title search, finds the exact-title match, then extracts every `#N`
- * reference from its body. For each referenced number, returns a raw decision
- * input. The url/createdAt/labels are inherited from the digest issue itself so
- * the dashboard has something to render even if the referenced sub-issue lookup
- * later fails (sub-issues are fetched separately by the labeled-issue sources).
- */
-export function digestRefsFromRows(
-  rows: readonly IssueRow[],
-  expectedTitle: string,
-): RawDecisionInput[] {
-  for (const row of rows) {
-    if (row.title !== expectedTitle) continue;
-    const refs = extractIssueRefs(row.body);
-    return refs.map((number) => ({
-      number,
-      title: `Referenced from ${expectedTitle} (#${number})`,
-      url: `https://github.com/gaberoo322/hydra/issues/${number}`,
-      createdAt: row.createdAt || new Date(0).toISOString(),
-      labels: [...row.labels],
-    }));
-  }
-  return [];
-}
-
-/**
- * Pure helper — exported for tests. Pulls every `#N` reference out of a
- * markdown body, dedupes, and returns the numbers in order of first
- * appearance. Skips inline code spans (anything inside backticks) so URLs
- * or commit hashes in code don't poison the queue.
- */
-export function extractIssueRefs(body: string): number[] {
-  if (!body) return [];
-  // Strip backtick code spans first — `#1234` inside `code` is not a ref.
-  const stripped = body.replace(/`[^`]*`/g, "");
-  const seen = new Set<number>();
-  const out: number[] = [];
-  const re = /(?<![\w/])#(\d+)\b/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(stripped)) !== null) {
-    const n = Number(m[1]);
-    if (!Number.isFinite(n) || n <= 0) continue;
-    if (seen.has(n)) continue;
-    seen.add(n);
-    out.push(n);
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // Sub-source: labeled-issue lists (ready-for-human, needs-info)
 // ---------------------------------------------------------------------------
@@ -262,32 +215,10 @@ async function fetchLabeledItems(
   return labeledItemsFromRows(rows);
 }
 
-/**
- * Pure helper — exported for tests. Maps the seam's {@link IssueRow} rows of a
- * labeled query to the raw decision-input shape. The seam already synthesizes
- * title/url fallbacks and drops invalid rows; here we only re-home `createdAt`
- * to the epoch sentinel when the seam returned `""`.
- */
-export function labeledItemsFromRows(rows: readonly IssueRow[]): RawDecisionInput[] {
-  return rows.map((row) => ({
-    number: row.number,
-    title: row.title,
-    url: row.url,
-    createdAt: row.createdAt || new Date(0).toISOString(),
-    labels: [...row.labels],
-  }));
-}
-
 // ---------------------------------------------------------------------------
-// Small date helpers — pure, exported for tests
+// Small date helper — pure, local (the dated-title format itself lives in the
+// digest-issue seam).
 // ---------------------------------------------------------------------------
-
-export function datedTitle(d: Date): string {
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  return `Operator decision queue ${yyyy}-${mm}-${dd}`;
-}
 
 function addDays(d: Date, n: number): Date {
   const out = new Date(d.getTime());
