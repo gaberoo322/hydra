@@ -168,6 +168,34 @@ export async function getCostByClass(dateOverride?: string): Promise<CostByClass
 }
 
 /**
+ * Pure projection: the rolling merge-rate of a metrics-trend window, as a
+ * rounded percentage (`Math.round((mergedCount / total) * 100)`).
+ *
+ * A cycle counts as "merged" when its persisted `tasksMerged` field is > 0.
+ * The predicate is null-safe (`(m?.tasksMerged ?? 0) > 0`) — identical to the
+ * bare `m.tasksMerged > 0` on real data (`undefined > 0 === false`) and
+ * strictly safer on null/undefined entries.
+ *
+ * Returns `null` on an empty trend (not `0`): callers must treat "no data" as
+ * distinct from "0% merged" so a healthy fresh start is never misreported as a
+ * stall (issue #232 — the heartbeat false-stall guard depends on this null).
+ *
+ * Single source of truth for the `tasksMerged>0 → rounded percentage`
+ * arithmetic, consumed by `projectAggregateStats` (the `/metrics` `mergedRate`)
+ * and `scheduler/heartbeat.ts::computeRollingMergeRate` (the `/api/scheduler/status`
+ * rolling merge-rate). The two out-of-scope `parseInt`-coercing sites
+ * (`digest-format.ts`, `health/diagnostics.ts`) deliberately do NOT delegate
+ * here — folding them would change string-coercion semantics (issue #2169).
+ */
+export function computeRollingMergeRateFromTrend(
+  trend: Array<Record<string, any>>,
+): number | null {
+  if (trend.length === 0) return null;
+  const merged = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
+  return Math.round((merged / trend.length) * 100);
+}
+
+/**
  * Pure projection: fold an already-fetched metrics-trend array into the
  * aggregate-stats shape (`mergedRate` / `regressionRate` / `noOpMergeRate` /
  * the duration averages / the anchor distribution).
@@ -211,7 +239,10 @@ export function projectAggregateStats(trend: Array<Record<string, any>>) {
 
   return {
     cycles: total,
-    mergedRate: Math.round((merged / total) * 100),
+    // Delegate the rolling merge-rate arithmetic to the shared pure helper so
+    // it lives in exactly one place (issue #2169). The trend.length===0 guard
+    // above means total>0 here, so the helper returns a number, never null.
+    mergedRate: computeRollingMergeRateFromTrend(trend),
     failedRate: Math.round((failed / total) * 100),
     abandonedRate: Math.round((abandoned / total) * 100),
     regressionRate: Math.round((regressions / total) * 100),
