@@ -3,8 +3,8 @@
  *
  * Watches three time-series for deviations from their rolling baseline:
  *
- *   1. cost-per-hour              — daily token-spend surrogate divided by
- *                                    the elapsed hours of the day.
+ *   1. token-burn-rate           — daily token spend divided by the
+ *                                    elapsed hours of the day.
  *   2. abandonment-rate           — abandoned-cycle count / dispatch count
  *                                    per day.
  *   3. dispatch-class-failure-rate — per-class failed-dispatch count divided
@@ -45,7 +45,7 @@ interface Anomaly {
   metric: AnomalyMetric;
   /** Sub-key — for `dispatch-class-failure-rate`, the autopilot class. Null otherwise. */
   subKey: string | null;
-  /** Latest sample value (e.g. cost-per-hour USD, rate in [0,1]). */
+  /** Latest sample value (e.g. token-burn-rate tokens/hr, rate in [0,1]). */
   latest: number;
   /** Baseline mean across the preceding window. */
   baselineMean: number;
@@ -250,7 +250,7 @@ function evaluateSeries(
  * integration smoke test in `test/aggregator-anomaly-detector.test.mts`).
  */
 async function defaultReadSeries(): Promise<SeriesInput[]> {
-  // The first cut focuses on cost-per-hour because we have daily snapshots
+  // The first cut focuses on token-burn-rate because we have daily snapshots
   // on hand. abandonment-rate and dispatch-class-failure-rate will be
   // wired in once their daily-counter schemas land (issue #620 ships the
   // detector + UI; subsequent passes populate more series).
@@ -270,19 +270,19 @@ async function defaultReadSeries(): Promise<SeriesInput[]> {
       if (raw === null) continue;
       const tokens = Number(raw);
       if (!Number.isFinite(tokens)) continue;
-      // Surrogate USD per million tokens — same coefficient used elsewhere.
-      // The detector cares about variance, not absolute calibration.
-      const usd = tokens / 1_000_000;
+      // Tokens per million (subscription model; no dollar meaning) — the
+      // detector cares about variance, not absolute calibration.
+      const tokenBurnRate = tokens / 1_000_000;
       const hours = i === 0
         ? Math.max(1, (now.getTime() - new Date(dateStr + "T00:00:00.000Z").getTime()) / 3_600_000)
         : 24;
-      samples.push({ at: day.toISOString(), value: usd / hours });
+      samples.push({ at: day.toISOString(), value: tokenBurnRate / hours });
     }
     if (samples.length >= 2) {
-      out.push({ metric: "cost-per-hour", subKey: null, samples });
+      out.push({ metric: "token-burn-rate", subKey: null, samples });
     }
   } catch (err: any) {
-    console.error(`[anomaly-detector] cost-per-hour reader failed: ${err?.message || err}`);
+    console.error(`[anomaly-detector] token-burn-rate reader failed: ${err?.message || err}`);
   }
   return out;
 }

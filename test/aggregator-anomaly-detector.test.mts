@@ -132,12 +132,12 @@ describe("getAnomalies — happy path", () => {
       { at: "2026-05-26T00:00:00Z", value: 100 }, // latest — way out
     ];
     const readSeries = async (): Promise<SeriesInput[]> => [
-      { metric: "cost-per-hour", subKey: null, samples },
+      { metric: "token-burn-rate", subKey: null, samples },
     ];
     const result = await getAnomalies({ now: NOW, readSeries });
     assert.equal(result.anomalies.length, 1);
     const a = result.anomalies[0];
-    assert.equal(a.metric, "cost-per-hour");
+    assert.equal(a.metric, "token-burn-rate");
     assert.equal(a.direction, "high");
     assert.ok(a.zScore > 2, `expected z > 2, got ${a.zScore}`);
   });
@@ -167,7 +167,7 @@ describe("getAnomalies — happy path", () => {
       { at: "2026-05-26T00:00:00Z", value: 15 },
     ];
     const readSeries = async (): Promise<SeriesInput[]> => [
-      { metric: "cost-per-hour", subKey: null, samples },
+      { metric: "token-burn-rate", subKey: null, samples },
     ];
     const strict = await getAnomalies({ now: NOW, readSeries, zThreshold: 2 });
     const loose = await getAnomalies({ now: NOW, readSeries, zThreshold: 1 });
@@ -205,7 +205,7 @@ describe("getAnomalies — happy path", () => {
         .concat([{ at: "2026-05-26T00:00:00Z", value: last }]);
 
     const readSeries = async (): Promise<SeriesInput[]> => [
-      { metric: "cost-per-hour", subKey: null, samples: tight(10, 25) },
+      { metric: "token-burn-rate", subKey: null, samples: tight(10, 25) },
       // Failure-rate series: baseline around 0.1, latest 0.9 — also far above.
       { metric: "dispatch-class-failure-rate", subKey: "dev_orch", samples: tight(0.1, 0.9) },
     ];
@@ -219,7 +219,7 @@ describe("getAnomalies — happy path", () => {
 
   test("series with fewer than 2 samples is ignored", async () => {
     const readSeries = async (): Promise<SeriesInput[]> => [
-      { metric: "cost-per-hour", subKey: null, samples: [{ at: "x", value: 1 }] },
+      { metric: "token-burn-rate", subKey: null, samples: [{ at: "x", value: 1 }] },
     ];
     const result = await getAnomalies({ now: NOW, readSeries });
     assert.deepEqual(result.anomalies, []);

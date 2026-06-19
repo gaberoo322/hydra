@@ -31,7 +31,7 @@ const AutopilotRunOutcomeSchema = z.enum([
 ]);
 
 const AnomalyMetricSchema = z.enum([
-  "cost-per-hour",
+  "token-burn-rate",
   "abandonment-rate",
   "dispatch-class-failure-rate",
 ]);
