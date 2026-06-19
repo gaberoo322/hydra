@@ -1,5 +1,6 @@
 /**
- * Regression tests for the targeted backlog claim (issue #1682).
+ * Regression tests for the targeted backlog claim (issue #1682) and the
+ * shipped-item filter (issue #1969).
  *
  * POST /backlog/claim used to read only `claimedBy` and silently discard any
  * `itemId` the caller sent, always popping the queue head (run 60a0624c
@@ -12,6 +13,14 @@
  *     to 404/409 — HTTP mapping is route-only, not tested here).
  *   - WIP limit applies identically to targeted claims.
  *   - The body schema is strict: typo'd keys (itemID) fail loudly.
+ *
+ * Issue #1969 shipped-item filter contract:
+ *   - Pop-head: a stale shipped item is reconciled to `done`, skipped, and
+ *     the next unshipped item is claimed.
+ *   - Pop-head all-shipped: when every queued item is shipped, returns
+ *     {claimed:false, reason:"empty"} (does not loop forever).
+ *   - Targeted: a shipped targeted item returns {claimed:false, reason:"already-shipped"}.
+ *   - Empty merged-refs set: claim proceeds as if no shipped-item check was done.
  *
  * Claim-path tests require Redis on localhost:6379 (DB 1, cleaned between
  * tests) and skip when unavailable — matching test/backlog.test.mts. Schema
@@ -198,5 +207,163 @@ describe("BacklogClaimBodySchema (issue #1682)", () => {
   test("rejects a non-string itemId", () => {
     const result = BacklogClaimBodySchema.safeParse({ itemId: 318 });
     assert.equal(result.success, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shipped-item filter tests (issue #1969)
+// ---------------------------------------------------------------------------
+//
+// These tests use the injectable `deps.loadMergedAnchorRefs` seam to avoid
+// forking a real `gh` process. They require Redis — same skip semantics as the
+// claim tests above.
+// ---------------------------------------------------------------------------
+
+describe("claimNextQueuedItem — shipped-item filter (issue #1969)", () => {
+  // This describe block runs after the sibling suite's `after()` has disconnected
+  // both the test-level `redis` handle and the module-level singleton. Re-open
+  // both before each test so assertions + seeded items can reach the DB.
+  let shippedFilterRedis: any = null;
+
+  beforeEach(async () => {
+    // Always start with a fresh connection — cheaper than status checking.
+    if (shippedFilterRedis) {
+      try { shippedFilterRedis.disconnect(); } catch { /* already closed */ }
+    }
+    shippedFilterRedis = new Redis(process.env.REDIS_URL!);
+    try {
+      await shippedFilterRedis.ping();
+      redisAvailable = true;
+    } catch {
+      console.error("Redis unavailable at localhost:6379/1, skipping backlog-claim shipped-filter tests");
+      return;
+    }
+    // Reassign the module-level `redis` var used by `cleanBacklogKeys()` and
+    // direct assertions. The module-level singleton (src/redis/connection.ts)
+    // lazy-creates on next use, so it's already reconnected.
+    redis = shippedFilterRedis;
+    await cleanBacklogKeys();
+  });
+
+  after(async () => {
+    if (shippedFilterRedis) {
+      try { await cleanBacklogKeys(); } catch { /* best-effort */ }
+      shippedFilterRedis.disconnect();
+      shippedFilterRedis = null;
+    }
+    const { closeRedisConnections } = await import("../src/redis/connection.ts");
+    closeRedisConnections();
+  });
+
+  test("pop-head: shipped item is reconciled to done, next unshipped item is claimed", async (t) => {
+    requireRedis(t);
+    // Seed two queued items. First will be "shipped", second is unshipped.
+    const shippedId = await seed("Shipped item closes #1969 filter alpha", "queued");
+    const freshId = await seed("Fresh unshipped item filter bravo", "queued");
+
+    // `candidateMergedTokens({ issue: "item-1", title, anchorRef })` generates
+    // "item-1" (via the item-NNN regex on the issue field) — NOT just "1". Put
+    // the full item-NNN string into the merged refs set so `isMergedWork` fires.
+    const mergedRefs = new Set([shippedId]);
+    const loadMergedAnchorRefs = async () => mergedRefs;
+
+    const result = await claimNextQueuedItem("claude", undefined, {
+      loadMergedAnchorRefs,
+      maxShippedSkips: 5,
+    });
+
+    assert.equal(result.claimed, true, "must claim the unshipped item after skipping the shipped one");
+    assert.equal(result.item.id, freshId, "must claim the second (unshipped) item");
+    assert.equal(result.item.lane, "inProgress");
+
+    // The shipped item must now be in `done`, NOT in `inProgress` or `queued`.
+    const inProgressIds = await redis.zrange("hydra:backlog:lane:inProgress", 0, -1);
+    assert.ok(!inProgressIds.includes(shippedId), "shipped item must NOT be in inProgress");
+    const doneIds = await redis.zrange("hydra:backlog:lane:done", 0, -1);
+    assert.ok(doneIds.includes(shippedId), "shipped item must be reconciled to done");
+    const queuedIds = await redis.zrange("hydra:backlog:lane:queued", 0, -1);
+    assert.deepEqual(queuedIds, [], "queue must be drained after the two items are processed");
+  });
+
+  test("pop-head: all queued items shipped → returns {claimed:false, reason:'empty'}", async (t) => {
+    requireRedis(t);
+    const idA = await seed("Refactor backlog hydration seam november 1969", "queued");
+    const idB = await seed("Extract dispatcher context injector oscar 1969", "queued");
+
+    // Use full item-NNN tokens (see comment in first test above).
+    const mergedRefs = new Set([idA, idB]);
+    const loadMergedAnchorRefs = async () => mergedRefs;
+
+    const result = await claimNextQueuedItem("claude", undefined, {
+      loadMergedAnchorRefs,
+      maxShippedSkips: 5,
+    });
+
+    assert.equal(result.claimed, false);
+    assert.equal(result.reason, "empty", "exhausted queue of shipped items must return reason:empty");
+
+    // Both items end up in done.
+    const doneIds = await redis.zrange("hydra:backlog:lane:done", 0, -1);
+    assert.ok(doneIds.includes(idA), "first shipped item must be in done");
+    assert.ok(doneIds.includes(idB), "second shipped item must be in done");
+  });
+
+  test("targeted claim of a shipped item → {claimed:false, reason:'already-shipped'}", async (t) => {
+    requireRedis(t);
+    const shippedId = await seed("Shipped targeted item filter charlie", "queued");
+
+    // Use full item-NNN token (see comment in first test above).
+    const mergedRefs = new Set([shippedId]);
+    const loadMergedAnchorRefs = async () => mergedRefs;
+
+    const result = await claimNextQueuedItem("claude", shippedId, {
+      loadMergedAnchorRefs,
+      maxShippedSkips: 5,
+    });
+
+    assert.equal(result.claimed, false);
+    assert.equal(result.reason, "already-shipped", "targeted claim of a shipped item must report already-shipped");
+
+    // Item must be reconciled to done (not left in inProgress).
+    const doneIds = await redis.zrange("hydra:backlog:lane:done", 0, -1);
+    assert.ok(doneIds.includes(shippedId), "shipped targeted item must be reconciled to done");
+    const inProgressIds = await redis.zrange("hydra:backlog:lane:inProgress", 0, -1);
+    assert.deepEqual(inProgressIds, [], "shipped targeted item must NOT be left in inProgress");
+  });
+
+  test("empty merged-refs set: claim proceeds normally without shipped-item check", async (t) => {
+    requireRedis(t);
+    const itemId = await seed("Unshipped item empty merged-refs delta", "queued");
+
+    // Empty merged refs — no suppression.
+    const loadMergedAnchorRefs = async () => new Set<string>();
+
+    const result = await claimNextQueuedItem("claude", undefined, {
+      loadMergedAnchorRefs,
+      maxShippedSkips: 5,
+    });
+
+    assert.equal(result.claimed, true, "empty merged-refs must not suppress any item");
+    assert.equal(result.item.id, itemId);
+  });
+
+  test("maxShippedSkips cap: returns empty after hitting skip limit", async (t) => {
+    requireRedis(t);
+    // Seed 3 shipped items; maxShippedSkips = 2 → should stop at 2 and return empty.
+    const idA = await seed("Audit redis seam accessor boundary papa 1969", "queued");
+    const idB = await seed("Migrate scheduler heartbeat metrics quebec 1969", "queued");
+    const idC = await seed("Consolidate webhook ingestion pipeline romeo 1969", "queued");
+
+    // Use full item-NNN tokens (see comment in first test above).
+    const mergedRefs = new Set([idA, idB, idC]);
+    const loadMergedAnchorRefs = async () => mergedRefs;
+
+    const result = await claimNextQueuedItem("claude", undefined, {
+      loadMergedAnchorRefs,
+      maxShippedSkips: 2,
+    });
+
+    assert.equal(result.claimed, false);
+    assert.equal(result.reason, "empty", "must return empty after hitting maxShippedSkips");
   });
 });
