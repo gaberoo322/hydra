@@ -104,6 +104,45 @@ describe("scheduler mergeRate persistence (issue #208)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // AC2b (issue #1919) — atomic cyclesUnaccounted increment + read, stored
+  // independently of merged/failed so the run = merged + failed + unaccounted
+  // identity is restart-stable.
+  // -------------------------------------------------------------------------
+
+  describe("AC2b — incrSchedulerCyclesUnaccounted is atomic and independent (#1919)", () => {
+    test("incrSchedulerCyclesUnaccounted returns monotonically increasing values", async () => {
+      const v1 = await adapter.incrSchedulerCyclesUnaccounted();
+      const v2 = await adapter.incrSchedulerCyclesUnaccounted();
+      assert.equal(v1, 1);
+      assert.equal(v2, 2);
+    });
+
+    test("getSchedulerCyclesUnaccounted returns 0 when no counter exists", async () => {
+      const v = await adapter.getSchedulerCyclesUnaccounted();
+      assert.equal(v, 0);
+    });
+
+    test("unaccounted counter is independent of merged/failed and the identity holds", async () => {
+      for (let i = 0; i < 10; i++) await adapter.incrSchedulerCyclesRun();
+      for (let i = 0; i < 6; i++) await adapter.incrSchedulerCyclesMerged();
+      for (let i = 0; i < 3; i++) await adapter.incrSchedulerCyclesFailed();
+      await adapter.incrSchedulerCyclesUnaccounted(); // 1
+
+      const run = await adapter.getSchedulerCyclesRun();
+      const merged = await adapter.getSchedulerCyclesMerged();
+      const failed = await adapter.getSchedulerCyclesFailed();
+      const unaccounted = await adapter.getSchedulerCyclesUnaccounted();
+
+      assert.equal(unaccounted, 1);
+      assert.equal(
+        run,
+        merged + failed + unaccounted,
+        "run == merged + failed + unaccounted should hold across restart",
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // AC3 — primary regression scenario from issue body:
   // "simulating two consecutive cycles, restarting state, and reading the
   //  counter returns 2"

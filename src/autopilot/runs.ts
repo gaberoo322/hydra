@@ -61,6 +61,7 @@ import {
   incrSchedulerCyclesRun,
   incrSchedulerCyclesMerged,
   incrSchedulerCyclesFailed,
+  incrSchedulerCyclesUnaccounted,
 } from "../redis/scheduler.ts";
 import { recordCycleMetrics, type CycleMetricsInput } from "../metrics/record.ts";
 import { recordAnchorReflection } from "../reflections/per-anchor.ts";
@@ -284,7 +285,12 @@ export async function sweepRunIfDead(
 export type CycleRecordResult = Ok<{
   cycleId: string;
   status: string;
-  bucketed: "merged" | "failed" | null;
+  // Issue #1919: "unaccounted" is the third terminal bucket — a status in
+  // NEITHER MERGED_STATUSES nor FAILED_STATUSES (e.g. no-op / idle-drain /
+  // dry-run / unknown). It still bumps cyclesRun + cyclesUnaccounted so the
+  // run = merged + failed + unaccounted identity always holds. `null` is now
+  // reserved for the dedup early-return (no counters touched at all).
+  bucketed: "merged" | "failed" | "unaccounted" | null;
   deduped: boolean;
 }> | Err;
 
@@ -293,7 +299,10 @@ export type CycleRecordResult = Ok<{
  * complementary writes:
  *   1. `hydra:cycle:<id>` hash + ZADD to `hydra:cycle:index`
  *   2. `recordCycleMetrics(...)` — feeds /api/metrics + scheduler's mergeRateWindow
- *   3. Lifetime counters on `hydra:scheduler:cycles-{run,merged,failed}`
+ *   3. Lifetime counters on `hydra:scheduler:cycles-{run,merged,failed,unaccounted}`
+ *      — issue #1919: every cyclesRun bump increments exactly one of
+ *      {merged, failed, unaccounted}, so the run = merged + failed +
+ *      unaccounted identity is queryable instead of an inferred subtraction.
  *
  * Idempotent on `cycleId`: if the hash already has a `status`, the
  * call is a no-op and returns `deduped: true`. Callers key by a
@@ -368,13 +377,22 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
 
     await incrSchedulerCyclesRun();
     const lowerStatus = status.toLowerCase();
-    let bucketed: "merged" | "failed" | null = null;
+    let bucketed: "merged" | "failed" | "unaccounted" = "unaccounted";
     if (MERGED_STATUSES.has(lowerStatus)) {
       await incrSchedulerCyclesMerged();
       bucketed = "merged";
     } else if (FAILED_STATUSES.has(lowerStatus)) {
       await incrSchedulerCyclesFailed();
       bucketed = "failed";
+    } else {
+      // Issue #1919: status in NEITHER set (no-op / idle-drain / dry-run /
+      // unknown). Bump the third bucket so the run = merged + failed +
+      // unaccounted identity always holds — every cyclesRun increment maps to
+      // exactly one terminal bucket. Observability-only: MERGED/FAILED_STATUSES
+      // membership is unchanged, so mergeRate / the rolling window / the
+      // circuit breaker read identical values.
+      await incrSchedulerCyclesUnaccounted();
+      bucketed = "unaccounted";
     }
 
     return { ok: true, cycleId, status, bucketed, deduped: false };

@@ -122,6 +122,27 @@ export async function getSchedulerCyclesFailed(): Promise<number> {
   return val ? parseInt(val, 10) : 0;
 }
 
+/**
+ * Atomically increment the scheduler cycles-unaccounted counter (issue #1919).
+ * Returns new value. Bumped on the exact recordCycle else-branch where a
+ * cycle's status fell in NEITHER MERGED_STATUSES nor FAILED_STATUSES, so the
+ * run = merged + failed + unaccounted identity holds as a first-class counter
+ * rather than an inferred (run - merged - failed) subtraction. Persisted
+ * alongside cyclesMerged/cyclesFailed (issue #208 pattern) so the full
+ * accounting is restart-stable.
+ */
+export async function incrSchedulerCyclesUnaccounted(): Promise<number> {
+  const r = getRedisConnection();
+  return r.incr(redisKeys.schedulerCyclesUnaccounted());
+}
+
+/** Get the current scheduler cycles-unaccounted counter value. */
+export async function getSchedulerCyclesUnaccounted(): Promise<number> {
+  const r = getRedisConnection();
+  const val = await r.get(redisKeys.schedulerCyclesUnaccounted());
+  return val ? parseInt(val, 10) : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Atomic research claim (Lua-scripted check-then-set)
 // ---------------------------------------------------------------------------
