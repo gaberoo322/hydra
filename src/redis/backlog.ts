@@ -108,6 +108,77 @@ export async function removeFromBacklogLane(lane: string, id: string): Promise<v
 }
 
 // ---------------------------------------------------------------------------
+// Atomic lane transition (issue #1990) — close the {ZREM old, HSET item,
+// ZADD new} half-write race.
+//
+// Every lane transition in src/backlog/lanes.ts used to run as THREE separate
+// Redis round-trips (removeFromBacklogLane → saveItem HSET → addToBacklogLane
+// ZADD). A crash / Redis restart between the HSET and the ZADD lost the zset
+// entry while the hash item survived, yielding item.lane=done with the done
+// zset short by that id — the 166 "phantom done" items. This accessor runs the
+// three ops in ONE atomic server-side step (Lua `eval`), so no observer can
+// ever see a half-write. Mirrors `claimNextQueuedBacklogItem`: the script body
+// is owned here (the keys it touches are owned by this seam, ADR-0017).
+//
+// The from-lanes are passed as a list (not a single lane) so the id-based
+// `moveItemToLane` — which defensively ZREMs every lane before re-adding — can
+// share the same atomic primitive as the title-based single-source moves. The
+// caller computes the score (the done lane uses a NEGATED score, -now, so an
+// ascending ZRANGE lists most-recently-done first — that invariant lives with
+// the caller, this accessor just ZADDs whatever score it is handed).
+// ---------------------------------------------------------------------------
+
+const LUA_APPLY_LANE_TRANSITION = `
+-- KEYS[1]   = hydra:backlog:items
+-- KEYS[2]   = hydra:backlog:lane:{toLane}
+-- KEYS[3..] = hydra:backlog:lane:{fromLane} (one or more lanes to ZREM)
+-- ARGV[1]   = item id
+-- ARGV[2]   = item JSON (already lane-stamped by applyLaneTransition)
+-- ARGV[3]   = score for the to-lane ZADD (negated by caller for done)
+local id = ARGV[1]
+for i = 3, #KEYS do
+  redis.call('ZREM', KEYS[i], id)
+end
+redis.call('HSET', KEYS[1], id, ARGV[2])
+redis.call('ZADD', KEYS[2], ARGV[3], id)
+return 'OK'
+`;
+
+/**
+ * Atomically move a backlog item between lanes (issue #1990): ZREM the id from
+ * every `fromLanes` zset, HSET the (already lane-stamped) item JSON into the
+ * canonical items hash, and ZADD the id into the `toLane` zset at `score` — all
+ * in a single Lua `eval` so a crash can never observe a half-write where
+ * `item.lane` disagrees with zset membership.
+ *
+ * The caller owns the decision logic (find-by-title, WIP cap, blocked-reason
+ * guard) and stamps the item via `applyLaneTransition` before passing
+ * `itemJson` in; this accessor is the write-commit step only. `score` is
+ * supplied by the caller because the done lane ZADDs at a negated score
+ * (`-now`) — see src/backlog/lanes.ts.
+ */
+export async function applyAtomicLaneTransition(
+  id: string,
+  itemJson: string,
+  fromLanes: string[],
+  toLane: string,
+  score: number,
+): Promise<void> {
+  const r = getRedisConnection();
+  const fromLaneKeys = fromLanes.map((lane) => redisKeys.backlogLane(lane));
+  await r.eval(
+    LUA_APPLY_LANE_TRANSITION,
+    2 + fromLaneKeys.length,
+    redisKeys.backlogItems(),
+    redisKeys.backlogLane(toLane),
+    ...fromLaneKeys,
+    id,
+    itemJson,
+    score,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Claim-next-queued Lua claim — script body owned by caller (domain logic),
 // the three backlog keys it needs are owned here.
 // ---------------------------------------------------------------------------
