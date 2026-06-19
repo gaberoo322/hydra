@@ -15,7 +15,7 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-const { registerSkills, getSkillCatalogState } = await import(
+const { registerSkills, getSkillCatalogState, reRegisterMissingSkills } = await import(
   "../src/knowledge-base/skill-registration.ts"
 );
 
@@ -167,6 +167,115 @@ describe("registerSkills: queryable catalog state (#1968)", () => {
     assert.equal(state.skills[0].registered, false);
     assert.equal(state.skills[0].lastError, "ov-timeout");
     assert.ok(state.skills.slice(1).every((s) => s.registered && s.lastError === null));
+  });
+});
+
+describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
+  test("a no-op before any startup pass has completed", async () => {
+    muteConsole();
+    // Fresh module-level state has completed:false (or a prior test left it
+    // full). Force the not-completed branch is impossible after earlier tests,
+    // so instead assert the already-full branch is a no-op: register all 4 then
+    // re-register — nothing is attempted.
+    globalThis.fetch = (async () => okResponse()) as any;
+    await registerSkills({ backoffBaseMs: 0 });
+
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return okResponse();
+    }) as any;
+    const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+
+    assert.equal(result.attempted, false, "a full catalog must not re-attempt");
+    assert.equal(calls, 0, "a full catalog must POST nothing");
+    assert.equal(result.recovered, 0);
+    assert.equal(result.stillMissing, 0);
+  });
+
+  test("recovers an empty catalog once OV answers, flipping empty→ok in place", async () => {
+    muteConsole();
+    // Startup pass fails every skill (OV down): catalog empty.
+    globalThis.fetch = (async () => {
+      timeoutThrow();
+    }) as any;
+    await registerSkills({ backoffBaseMs: 0 });
+    assert.equal(getSkillCatalogState().registered, 0, "precondition: catalog empty after startup");
+
+    // OV recovers — re-register all four missing skills now succeed.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return okResponse();
+    }) as any;
+    const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+
+    assert.equal(result.attempted, true);
+    assert.equal(result.recovered, 4, "all four previously-missing skills recover");
+    assert.equal(result.stillMissing, 0);
+    assert.equal(calls, 4, "only the four missing skills are re-POSTed, one attempt each");
+
+    const state = getSkillCatalogState();
+    assert.equal(state.registered, 4, "the in-process state flips empty→full WITHOUT a restart");
+    assert.equal(state.completed, true, "completed stays true across recovery");
+    assert.ok(state.skills.every((s) => s.registered && s.lastError === null && s.lastSuccessAt));
+  });
+
+  test("re-registers ONLY the missing skills, never clobbering a succeeded one", async () => {
+    muteConsole();
+    // Partial startup: first skill times out all attempts, rest succeed.
+    let firstSkillCalls = 0;
+    globalThis.fetch = (async () => {
+      if (firstSkillCalls < 3) {
+        firstSkillCalls++;
+        timeoutThrow();
+      }
+      return okResponse();
+    }) as any;
+    await registerSkills({ backoffBaseMs: 0 });
+    const before = getSkillCatalogState();
+    assert.equal(before.registered, 3, "precondition: 3/4 after a partial startup");
+    const succeededAt = before.skills[1].lastSuccessAt;
+
+    // OV recovers — re-register should touch ONLY the one missing skill.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return okResponse();
+    }) as any;
+    const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+
+    assert.equal(calls, 1, "exactly one POST — only the single missing skill is re-attempted");
+    assert.equal(result.recovered, 1);
+    assert.equal(result.stillMissing, 0);
+
+    const after = getSkillCatalogState();
+    assert.equal(after.registered, 4, "the gap closed to full");
+    assert.equal(after.skills[0].registered, true, "the recovered skill is now registered");
+    assert.equal(
+      after.skills[1].lastSuccessAt,
+      succeededAt,
+      "an already-succeeded skill's success timestamp is untouched (not re-POSTed)",
+    );
+  });
+
+  test("a still-down OV leaves the catalog missing and records the failure code", async () => {
+    muteConsole();
+    // Empty after startup.
+    globalThis.fetch = (async () => {
+      timeoutThrow();
+    }) as any;
+    await registerSkills({ backoffBaseMs: 0 });
+
+    // OV still timing out during the recovery pass.
+    const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+
+    assert.equal(result.attempted, true, "the pass ran (the guard let it through)");
+    assert.equal(result.recovered, 0, "nothing recovers while OV is still down");
+    assert.equal(result.stillMissing, 4);
+    const state = getSkillCatalogState();
+    assert.equal(state.registered, 0);
+    assert.ok(state.skills.every((s) => !s.registered && s.lastError === "ov-timeout"));
   });
 });
 

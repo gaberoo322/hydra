@@ -63,6 +63,7 @@ import { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier
 import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
 import { runLaneIndexReconcile } from "./chores/lane-index-reconcile.ts";
+import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 
 // ---------------------------------------------------------------------------
 // Re-exports (issue #2090): keep the pre-split public surface stable so
@@ -83,6 +84,7 @@ export { runWorkQueueHygiene } from "./chores/work-queue-hygiene.ts";
 export { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
 export { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 export { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
+export { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
 
 // ---------------------------------------------------------------------------
 // Chore runner (issue #1864)
@@ -290,6 +292,15 @@ async function runHousekeeping(
     {
       name: "lane-index-reconcile",
       work: () => runLaneIndexReconcile(),
+    },
+
+    {
+      // Issue #2148: post-startup recovery for the OV skill catalog. No Redis
+      // time-guard — the chore's own work is intrinsically idempotent (it skips
+      // unless the catalog is genuinely short AND OpenViking is live again), so
+      // an hourly tick against a healthy catalog is a guaranteed no-op.
+      name: "skill-catalog-reregister",
+      work: () => runSkillCatalogReregister(),
     },
   ];
 
