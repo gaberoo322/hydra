@@ -20,6 +20,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   parseLockPid,
   parseBranchLine,
@@ -982,5 +984,90 @@ describe("renderDeadBranchReport — deterministic output", () => {
     const buckets = { deleteBranch: [], skip: [], cappedOut: true };
     const out = renderDeadBranchReport(buckets, false);
     assert.match(out, /hard cap/);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Driver-ordering guard (issue #2115)
+//
+// The classifier is pure shell-glue can't be unit-tested through it, so this
+// guard reads scripts/branch-prune.sh as text and asserts the destructive-op
+// ORDERING invariant the fix establishes: `git worktree prune` must run at the
+// START of each repo pass — after `git fetch origin --prune`, before the first
+// `git branch -D` — so a branch git still believes is bound to a vanished
+// /dev/shm worktree has its metadata released before any delete attempt.
+//
+// Today's bug: the only `git worktree prune` ran LAST (end-of-pass), so the
+// branch-delete passes hit `git branch -D ... used by worktree at /dev/shm/...`
+// before the stale binding was ever pruned. The early prune fixes that.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("branch-prune.sh — prune-before-delete ordering (issue #2115)", () => {
+  const driverPath = fileURLToPath(
+    new URL("../scripts/branch-prune.sh", import.meta.url),
+  );
+  const driver = readFileSync(driverPath, "utf8");
+
+  // Match only the executable git invocations, never the explanatory comments
+  // (which legitimately mention `git branch -D` / `git worktree prune` in
+  // prose). A real call line is indented code where `git ` is the command —
+  // either at the start of the line (`git worktree prune ...`, `git fetch ...`)
+  // or guarded by an `if ! ` test (`if ! git branch -D "$br" ...`). Comment
+  // lines begin with `#`, so anchoring on `git ` after optional `if ! `
+  // excludes prose.
+  const codeLines = driver
+    .split("\n")
+    .map((l, i) => ({ i, text: l }))
+    .filter(({ text }) => /^\s+(if\s+!\s+)?git\s/.test(text));
+
+  const firstPruneIdx = codeLines.findIndex(({ text }) =>
+    /git worktree prune\b/.test(text),
+  );
+  const firstFetchIdx = codeLines.findIndex(({ text }) =>
+    /git fetch origin --prune\b/.test(text),
+  );
+  const firstBranchDeleteIdx = codeLines.findIndex(({ text }) =>
+    /git branch -D\b/.test(text),
+  );
+
+  test("an early `git worktree prune` exists (not only the end-of-pass one)", () => {
+    const pruneCount = codeLines.filter(({ text }) =>
+      /git worktree prune\b/.test(text),
+    ).length;
+    // Original driver had exactly one (end-of-pass); the fix adds the early
+    // one, so the executable count must be at least two.
+    assert.ok(
+      pruneCount >= 2,
+      `expected ≥2 \`git worktree prune\` call lines (early + end-of-pass), found ${pruneCount}`,
+    );
+  });
+
+  test("the first `git worktree prune` runs AFTER `git fetch origin --prune`", () => {
+    assert.ok(firstFetchIdx >= 0, "no `git fetch origin --prune` call line found");
+    assert.ok(firstPruneIdx >= 0, "no `git worktree prune` call line found");
+    assert.ok(
+      firstPruneIdx > firstFetchIdx,
+      "the early `git worktree prune` must run after `git fetch origin --prune`",
+    );
+  });
+
+  test("the first `git worktree prune` runs BEFORE the first `git branch -D`", () => {
+    assert.ok(firstBranchDeleteIdx >= 0, "no `git branch -D` call line found");
+    assert.ok(firstPruneIdx >= 0, "no `git worktree prune` call line found");
+    assert.ok(
+      firstPruneIdx < firstBranchDeleteIdx,
+      "`git worktree prune` must release stale worktree metadata BEFORE any `git branch -D` runs (issue #2115)",
+    );
+  });
+
+  test("the fix does NOT introduce a raw `rm -rf` of a /dev/shm worktree dir", () => {
+    // HARD CONSTRAINT from the grill: stale-metadata reclamation goes through
+    // `git worktree prune`, never directory deletion. Guard against a future
+    // regression that reaches for `rm -rf /dev/shm/...`.
+    assert.doesNotMatch(
+      driver,
+      /rm\s+-rf?[^\n]*\/dev\/shm/,
+      "branch-prune.sh must never `rm -rf` a /dev/shm worktree dir — use `git worktree prune`",
+    );
   });
 });
