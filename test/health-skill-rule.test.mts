@@ -5,7 +5,7 @@
  * skill catalog, but QA flagged that the FAILURE never folded into the deep-health
  * Health Assessment: an operator watching /api/health/deep (or hydra-doctor, which
  * reads that fold) saw a clean `status` even when startup skill registration lost
- * every skill to OpenViking timeouts. The fix added a rule to src/health-rules.ts
+ * every skill to OpenViking timeouts. The fix added a rule to src/health/rules.ts
  * that reads the in-process skill-catalog state via getSkillCatalogState() and
  * folds assessSkillCatalog()'s verdict into assessHealth's diagnostics + status.
  *
@@ -20,7 +20,7 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { assessHealth, type HealthSnapshot } from "../src/health-diagnostics.ts";
+import { assessHealth, type HealthSnapshot } from "../src/health/diagnostics.ts";
 import { registerSkills } from "../src/knowledge-base/skill-registration.ts";
 
 const realFetch = globalThis.fetch;

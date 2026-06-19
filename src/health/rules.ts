@@ -1,27 +1,27 @@
 // Health Diagnostic Rules (issue #1867)
 //
-// The diagnostic rule set extracted from `src/health-diagnostics.ts` so the
+// The diagnostic rule set extracted from `src/health/diagnostics.ts` so the
 // rule-authoring surface is one focused file: open this module, append a
 // function literal to the `RULES` array. Each rule reads a Health Snapshot and
 // returns a Health Diagnostic when it fires, else null. The parse pipeline,
 // wire projection, and the structured-type definitions stay in
-// `health-diagnostics.ts`; this module only consumes the `HealthSnapshot` /
+// `diagnostics.ts`; this module only consumes the `HealthSnapshot` /
 // `HealthDiagnostic` types from that seam.
 //
-// `assessHealth` (still in `health-diagnostics.ts`) imports `RULES` and runs
+// `assessHealth` (still in `diagnostics.ts`) imports `RULES` and runs
 // each rule in array order — see the runner there. Ordering is load-bearing:
 // `summary` quotes `diagnostics[0].what`, so RULES order is the diagnostics
 // order. Thresholds stay inline in each rule — co-located = locality.
 
-import type { HealthSnapshot, HealthDiagnostic } from "./health-diagnostics.ts";
-import { assessSkillCatalog } from "./health-skill-catalog.ts";
+import type { HealthSnapshot, HealthDiagnostic } from "./diagnostics.ts";
+import { assessSkillCatalog } from "./skill-catalog.ts";
 // Issue #1968: the OV skill-catalog state is in-process module state populated by
 // startup `registerSkills` (resets on restart), NOT a deep-health probe — so it
 // is read directly here rather than carried on the HealthSnapshot. The skill-rule
 // below ignores its `s` argument and reads `getSkillCatalogState()`; that read is
 // a pure, never-throw copy of an in-memory singleton (no Redis/OV I/O), so the
 // rule stays side-effect-free even though it doesn't source from the snapshot.
-import { getSkillCatalogState } from "./knowledge-base/skill-registration.ts";
+import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 
 // Issue #2013: service-probe keys that already have a bespoke diagnostic rule
 // (with a tailored why/impact/action) earlier in RULES. The generic
@@ -383,7 +383,7 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
 // ---- fmtUp — uptime humanizer shared by assessHealth + the wire projection -
 //
 // Pure seconds → "Hh Mm" / "Mm" formatter. Lives here alongside RULES (the
-// rule-authoring surface) and is imported back by `health-diagnostics.ts`,
+// rule-authoring surface) and is imported back by `diagnostics.ts`,
 // where both `assessHealth`'s healthy-summary banner and
 // `projectHealthDeepResponse`'s `uptimeHuman` field consume it.
 export function fmtUp(s: number): string {

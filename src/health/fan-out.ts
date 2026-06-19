@@ -31,27 +31,27 @@
 // for direct unit testing.
 //
 // This module deliberately lives at src/ top-level (NOT src/api/), mirroring the
-// pure Health Assessment seam (src/health-diagnostics.ts) and the ServiceProbe
-// Adapter Seam (src/health-probe.ts): the fan-out is a domain concern consumed by
+// pure Health Assessment seam (src/health/diagnostics.ts) and the ServiceProbe
+// Adapter Seam (src/health/probe.ts): the fan-out is a domain concern consumed by
 // route code, importable by a non-route caller without coupling to src/api/.
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { getMetricsTrend } from "./metrics/trend.ts";
-import { getAggregateStats } from "./metrics/aggregate.ts";
-import { getStatus as getSchedulerStatus } from "./scheduler/heartbeat.ts";
-import { getBacklogCounts } from "./backlog/reads.ts";
-import { getMemoryPatterns } from "./redis/agent-memory.ts";
-import { redisInfo as getRedisInfo } from "./redis/utility.ts";
-import { getWorkQueueLen } from "./redis/work-queue.ts";
-import { countReflectionKeys } from "./redis/reflections.ts";
-import { getEmergencyBrake } from "./redis/emergency-brake.ts";
-import { getOvSearchWindow, getKnowledgeContextAvailability } from "./redis/ov-search-metrics.ts";
-import { getTargetServiceName } from "./target-config.ts";
-import { ovPostJson } from "./knowledge-base/ov-request.ts";
-import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./health-probe.ts";
-import { parseRedisInfoSnapshot, type ProbeInputs } from "./health-diagnostics.ts";
-import { readDisk, readMem, readServiceStatus, isProbeFailure } from "./host-probe/probe.ts";
+import { getMetricsTrend } from "../metrics/trend.ts";
+import { getAggregateStats } from "../metrics/aggregate.ts";
+import { getStatus as getSchedulerStatus } from "../scheduler/heartbeat.ts";
+import { getBacklogCounts } from "../backlog/reads.ts";
+import { getMemoryPatterns } from "../redis/agent-memory.ts";
+import { redisInfo as getRedisInfo } from "../redis/utility.ts";
+import { getWorkQueueLen } from "../redis/work-queue.ts";
+import { countReflectionKeys } from "../redis/reflections.ts";
+import { getEmergencyBrake } from "../redis/emergency-brake.ts";
+import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
+import { getTargetServiceName } from "../target-config.ts";
+import { ovPostJson } from "../knowledge-base/ov-request.ts";
+import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./probe.ts";
+import { parseRedisInfoSnapshot, type ProbeInputs } from "./diagnostics.ts";
+import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -62,7 +62,7 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 // Promise.allSettled results — that positional identity is internal to the
 // fan-out and should not cross a module boundary. assembleProbeInputs() maps the
 // array immediately after the fan-out so parseProbes() (in the pure seam
-// src/health-diagnostics.ts) receives field names, not integer subscripts. The
+// src/health/diagnostics.ts) receives field names, not integer subscripts. The
 // ProbeInputs type is the only thing that crosses the seam; the SettledLike shape
 // and all integer index knowledge live here, in the fan-out owner (#840/#2089).
 //
@@ -228,7 +228,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
       return classifyOvSearchProbe(result, Date.now() - start);
     })(),
     /* 15: I/O only — the raw INFO regex parse lives in the pure
-       parseRedisInfoSnapshot in health-diagnostics.ts (issue #1856). */
+       parseRedisInfoSnapshot in diagnostics.ts (issue #1856). */
     (async () => {
       try {
         const [info, clients, server] = await Promise.all([redisInfoImpl("memory"), redisInfoImpl("clients"), redisInfoImpl("server")]);

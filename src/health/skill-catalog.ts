@@ -3,16 +3,16 @@
 //
 // The pure verdict over the in-process skill-catalog state produced by
 // `registerSkills` (src/knowledge-base/skill-registration.ts). Extracted out of
-// the Health Assessment pipeline (`src/health-diagnostics.ts`) into a focused
+// the Health Assessment pipeline (`src/health/diagnostics.ts`) into a focused
 // module that owns ONE concern: "what defines a healthy skill catalog".
 //
 // Why a separate file (issue #1992): the skill-catalog health concern is the
 // health of the Knowledge Base's in-process skill registration state — a
 // structural view of `registerSkills`'s outcome, NOT a probe-marshalling input.
-// `health-diagnostics.ts` is the `parseProbes` → `assessHealth` parse-pipeline
-// seam (the data-OUT `projectHealthDeepResponse` leg split to health-wire.ts in
+// `diagnostics.ts` is the `parseProbes` → `assessHealth` parse-pipeline
+// seam (the data-OUT `projectHealthDeepResponse` leg split to wire.ts in
 // #2039), deliberately import-free / no-I/O
-// (#840). Its two callers for THIS concern (`health-rules.ts` and
+// (#840). Its two callers for THIS concern (`rules.ts` and
 // `api/health.ts`) now import from the module named after the concern rather
 // than navigating the ~700-line pipeline module to find it.
 //
@@ -24,7 +24,7 @@
 // the registry module — the I/O handler (api/health.ts) reads the live state
 // and passes it in.
 
-import type { HealthDiagnostic } from "./health-diagnostics.ts";
+import type { HealthDiagnostic } from "./diagnostics.ts";
 
 /** The structural shape `assessSkillCatalog` reads off the catalog state. */
 export interface SkillCatalogSnapshot {

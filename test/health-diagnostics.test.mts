@@ -5,7 +5,7 @@
  * derivation, and the status/summary fold used to live inline in the
  * `/api/health/deep` route handler — exercisable only by standing up the full
  * probe fan-out against real Redis (test/api-health.test.mts covers ZERO
- * rules). Extracted into src/health-diagnostics.ts, they are now testable
+ * rules). Extracted into src/health/diagnostics.ts, they are now testable
  * directly: build a HealthSnapshot, run a rule, assert the Diagnostic.
  */
 
@@ -18,16 +18,16 @@ import {
   parseRedisInfoSnapshot,
   type HealthSnapshot,
   type ProbeInputs,
-} from "../src/health-diagnostics.ts";
-// Issue #2039: the wire projection split out to src/health-wire.ts (the
+} from "../src/health/diagnostics.ts";
+// Issue #2039: the wire projection split out to src/health/wire.ts (the
 // data-OUT leg). The parse-pipeline tests above import only from the parse seam;
 // this projection-specific suite imports the projection from its new home.
-import { projectHealthDeepResponse } from "../src/health-wire.ts";
+import { projectHealthDeepResponse } from "../src/health/wire.ts";
 // assembleProbeInputs moved to the Health Probe Fan-out Module
-// (src/health-fan-out.ts, issue #2089) — the new home of the probe enumeration
+// (src/health/fan-out.ts, issue #2089) — the new home of the probe enumeration
 // and its positional-to-named mapping. Still exported for unit testing the
 // positional index mapping in isolation.
-import { assembleProbeInputs } from "../src/health-fan-out.ts";
+import { assembleProbeInputs } from "../src/health/fan-out.ts";
 
 // ---------------------------------------------------------------------------
 // A baseline all-healthy snapshot. Each test clones it and perturbs ONE field
@@ -490,7 +490,7 @@ describe("assessHealth — per-rule firing", () => {
 
 // Issue #2023: the `classifyOvSearchProbe` describe block moved to
 // test/health-probe.test.mts, tracking the classifier's move into the
-// ServiceProbe Adapter Seam (src/health-probe.ts).
+// ServiceProbe Adapter Seam (src/health/probe.ts).
 
 // ---------------------------------------------------------------------------
 // parseRedisInfoSnapshot — pure Redis INFO regex parse (issue #1856)
