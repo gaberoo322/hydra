@@ -3,7 +3,7 @@
  *
  * `computeGreenLight` + its policy constants were extracted from the HTTP
  * router (`src/api/design-concepts.ts`) to their domain home
- * (`src/design-concept.ts`) so the pure function can be exercised WITHOUT
+ * (`src/design-concept-identity.ts`) so the pure function can be exercised WITHOUT
  * Redis or an Express server. These tests assert the green-light criterion
  * (issue #736: ≥7 of the trailing 10 snapshot days produced a concept) at
  * the function boundary — the edge cases the HTTP-only test
@@ -24,11 +24,14 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
+// `computeGreenLight` + its policy constants are pure identity/policy logic and
+// live in the identity Module (issue #2033); issue #2124 retired the
+// persistence Module's back-compat re-export, so import them from their home.
 import {
   computeGreenLight,
   GREEN_LIGHT_WINDOW_DAYS,
   GREEN_LIGHT_REQUIRED_DAYS,
-} from "../src/design-concept.ts";
+} from "../src/design-concept-identity.ts";
 
 /** Build a newest-first snapshot list from a count array (index 0 = newest). */
 function snaps(counts: number[]): Array<{ date: string; count: number }> {

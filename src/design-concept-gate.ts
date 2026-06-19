@@ -16,12 +16,14 @@
  * with plain object literals — the module has ZERO runtime Redis access (only
  * the type-level `DesignConcept` shape is borrowed from the persistence module).
  *
- * The `DesignConcept` type is imported one-way (type-only) from the persistence
- * module; the persistence module no longer imports the tier-classifier. See
- * ADR-0008 for the gate semantics this predicate implements.
+ * The `DesignConcept` type is imported one-way (type-only) from the identity
+ * Module (its canonical home, issue #2033); the gate does not import the
+ * persistence module, and the persistence module no longer imports the
+ * tier-classifier. See ADR-0008 for the gate semantics this predicate
+ * implements.
  */
 
-import type { DesignConcept } from "./design-concept.ts";
+import type { DesignConcept } from "./design-concept-identity.ts";
 import { classifyChange } from "./tier-classifier.ts";
 import { permitsBreakingChange } from "./tier-policy.ts";
 

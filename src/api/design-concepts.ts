@@ -29,10 +29,14 @@ import {
   listDesignConcepts,
   approveDesignConcept,
   resolveDesignConceptForQa,
+} from "../design-concept.ts";
+// Pure identity/policy symbols (`computeGreenLight`, `DesignConceptScope`) live
+// in the identity Module (issue #2124 retired the persistence Module's relay
+// re-export). Gate predicate lives in its domain home (issue #1908).
+import {
   computeGreenLight,
   type DesignConceptScope,
-} from "../design-concept.ts";
-// Gate predicate now lives in its domain home (issue #1908).
+} from "../design-concept-identity.ts";
 import { gateCheck } from "../design-concept-gate.ts";
 import {
   appendExemptLogEntry,

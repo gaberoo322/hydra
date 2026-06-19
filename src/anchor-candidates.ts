@@ -43,10 +43,11 @@
 import { getWorkQueueItems, removeWorkQueueItem, isTerminalMarker } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/per-anchor.ts";
-import {
-  getDesignConcept,
-  type DesignConcept,
-} from "./design-concept.ts";
+// Persistence reader lives in the focused persistence Module; the
+// `DesignConcept` value type lives in the identity Module (issue #2124 retired
+// the persistence Module's back-compat type re-export).
+import { getDesignConcept } from "./design-concept.ts";
+import { type DesignConcept } from "./design-concept-identity.ts";
 // Gate predicate + freshness helper now live in their domain home (issue #1908);
 // the persistence module above no longer owns them.
 import {

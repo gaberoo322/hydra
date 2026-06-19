@@ -11,8 +11,17 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 // `dc` is a runtime value namespace (dynamic import below); it cannot be used in
 // type position. Pull the type aliases in directly via `import type` so the
-// test type-checks under tsconfig.test.json (issue #750).
-import type { DesignConcept, DesignConceptInput } from "../src/design-concept.ts";
+// test type-checks under tsconfig.test.json (issue #750). Each type comes from
+// its owning Module: the `DesignConcept` value type from the identity Module,
+// the `DesignConceptInput` schema type from the schema Module (issue #2124
+// retired the persistence Module's back-compat re-export relay).
+import type { DesignConcept } from "../src/design-concept-identity.ts";
+import type { DesignConceptInput } from "../src/schemas/design-concept.ts";
+// The pure identity helpers the persistence Module used to re-export
+// (`normalizeAnchorRef`, `computeArtifactHash`) are now imported from their
+// canonical homes — the storage seam and the identity Module respectively.
+import { normalizeAnchorRef } from "../src/redis/design-concept.ts";
+import { computeArtifactHash } from "../src/design-concept-identity.ts";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
@@ -101,16 +110,16 @@ describe("design-concept Redis store + gate", () => {
   // -------------------------------------------------------------------------
 
   test("#736 normalizeAnchorRef canonicalizes to issue-<N>", () => {
-    assert.equal(dc.normalizeAnchorRef("736"), "issue-736");
-    assert.equal(dc.normalizeAnchorRef("#736"), "issue-736");
-    assert.equal(dc.normalizeAnchorRef("issue #736"), "issue-736");
-    assert.equal(dc.normalizeAnchorRef("issue-736"), "issue-736", "idempotent");
-    assert.equal(dc.normalizeAnchorRef("ISSUE-736"), "issue-736", "prefix case-insensitive");
-    assert.equal(dc.normalizeAnchorRef("  736  "), "issue-736", "trims");
+    assert.equal(normalizeAnchorRef("736"), "issue-736");
+    assert.equal(normalizeAnchorRef("#736"), "issue-736");
+    assert.equal(normalizeAnchorRef("issue #736"), "issue-736");
+    assert.equal(normalizeAnchorRef("issue-736"), "issue-736", "idempotent");
+    assert.equal(normalizeAnchorRef("ISSUE-736"), "issue-736", "prefix case-insensitive");
+    assert.equal(normalizeAnchorRef("  736  "), "issue-736", "trims");
     // Non-issue refs pass through unchanged.
-    assert.equal(dc.normalizeAnchorRef("test:rt"), "test:rt");
-    assert.equal(dc.normalizeAnchorRef("PR-4: fold scheduler"), "PR-4: fold scheduler");
-    assert.equal(dc.normalizeAnchorRef("Some issue title 736 here"), "Some issue title 736 here");
+    assert.equal(normalizeAnchorRef("test:rt"), "test:rt");
+    assert.equal(normalizeAnchorRef("PR-4: fold scheduler"), "PR-4: fold scheduler");
+    assert.equal(normalizeAnchorRef("Some issue title 736 here"), "Some issue title 736 here");
   });
 
   test("#736 write under bare number → read by the dispatched issue-<N> string", async () => {
@@ -271,7 +280,7 @@ describe("design-concept Redis store + gate", () => {
       scope: "orch",
       anchorRef: "test:hash",
     };
-    assert.equal(dc.computeArtifactHash(a), dc.computeArtifactHash(b));
+    assert.equal(computeArtifactHash(a), computeArtifactHash(b));
   });
 
   test("artifactHash changes when body content changes", () => {
@@ -289,8 +298,8 @@ describe("design-concept Redis store + gate", () => {
       qaTrace: [],
       prototypes: [],
     };
-    const h1 = dc.computeArtifactHash(base);
-    const h2 = dc.computeArtifactHash({ ...base, invariants: ["y"] });
+    const h1 = computeArtifactHash(base);
+    const h2 = computeArtifactHash({ ...base, invariants: ["y"] });
     assert.notEqual(h1, h2);
   });
 
