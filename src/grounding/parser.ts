@@ -1,5 +1,5 @@
 /**
- * Test-output parser seam for grounding.ts.
+ * Test-output parser seam for the grounding Module (grounding/index.ts).
  *
  * Pure functions over strings — no spawning, no filesystem I/O. Owns:
  *   - `parseTestCounts`   — extract pass/fail/total from vitest or jest output
@@ -8,13 +8,13 @@
  * Keeping these functions in a dedicated module lets callers import them
  * directly (e.g. a future CI-quality aggregator wanting `parseTestCounts`
  * without a full `groundProject` run) and lets tests reach them without the
- * `_testing` escape hatch on `grounding.ts`.
+ * `_testing` escape hatch on `grounding/index.ts`.
  *
- * Both functions depend on `stripAnsi` from grounding-cmd.ts because ANSI
+ * Both functions depend on `stripAnsi` from grounding/cmd.ts because ANSI
  * codes appear in the output of vitest running under npm with FORCE_COLOR=1.
  */
 
-import { stripAnsi } from "./grounding-cmd.ts";
+import { stripAnsi } from "./cmd.ts";
 
 /**
  * Parse vitest/jest output for pass/fail/total counts.
@@ -30,7 +30,7 @@ export function parseTestCounts(
   stdout: string | null | undefined,
   stderr: string | null | undefined,
 ): { passed: number; failed: number; total: number; recognised: boolean } {
-  // Strip ANSI codes first — see stripAnsi() docs in grounding-cmd.ts.
+  // Strip ANSI codes first — see stripAnsi() docs in grounding/cmd.ts.
   const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   let passed = 0, failed = 0, total = 0;
   let recognised = false;
@@ -88,7 +88,7 @@ export function parseFailingTests(
   stdout: string | null | undefined,
   stderr: string | null | undefined,
 ): string[] {
-  // Strip ANSI codes first — see stripAnsi() docs in grounding-cmd.ts.
+  // Strip ANSI codes first — see stripAnsi() docs in grounding/cmd.ts.
   const combined = stripAnsi((stdout || "") + "\n" + (stderr || ""));
   const failures: string[] = [];
 

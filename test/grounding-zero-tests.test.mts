@@ -14,13 +14,13 @@
  * instead of being silently coerced to "0 tests passed".
  *
  * Previously these tests accessed parseTestCounts via the `_testing`
- * escape-hatch export on grounding.ts. Now that it lives in grounding-parser.ts
+ * escape-hatch export on grounding.ts. Now that it lives in grounding/parser.ts
  * it is imported directly — no escape hatch needed.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { parseTestCounts } from "../src/grounding-parser.ts";
+import { parseTestCounts } from "../src/grounding/parser.ts";
 
 describe("parseTestCounts.recognised flag (issue #456)", () => {
   test("vitest output with summary → recognised: true, passed: 42", () => {
