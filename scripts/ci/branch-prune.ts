@@ -1033,3 +1033,293 @@ export function renderDeadBranchReport(buckets: DeadBranchBuckets, auditOnly: bo
 
   return lines.join("\n");
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Merged-remote GC (issue #2029)
+//
+// The dominant standing accumulation source the first three passes ALL miss:
+// a dispatch branch whose PR was squash-merged (or closed) WITHOUT deleting
+// the remote branch. A snapshot on 2026-06-19 found ~160 such local branches
+// in /home/gabe/hydra — `git fetch --prune` finds the `origin/<name>` ref
+// STILL ALIVE (the squash-merge didn't `--delete-branch`), so the upstream
+// never goes `[gone]`:
+//
+//   - pass 1 (classifyBranch) sees a healthy upstream         → skip-not-gone
+//   - pass 3 (classifyDeadBranch) sees hasUpstream === true   → skip-has-upstream
+//
+// These predate auto-merge `--delete-branch` (enabled 2026-05-28) or merged
+// without it. Auto-merge fixes the case FORWARD; this pass reclaims the
+// accumulated local refs. The merge signal is the PR state, not the upstream
+// marker: a branch whose `gh pr list --state all --head <name>` resolves to a
+// MERGED or CLOSED PR is a dead LOCAL ref.
+//
+// Local-only invariant (ADR-0005): this pass deletes the LOCAL branch only.
+// The zombie `origin/<name>` ref is an external-account mutation
+// (`git push origin --delete`) and stays an operator-gated step — never done
+// here, by default or otherwise. Forward auto-merge `--delete-branch` is the
+// systemic fix for the remote side.
+//
+// classifyMergedRemote closes the gap on the same never-touch-first rails as
+// the other passes: dispatch-shaped name, not current, not a live-PID
+// worktree, not an attached worktree (the orphan GC owns those), the PR is
+// resolved (merged/closed), and past the shared age floor.
+// ───────────────────────────────────────────────────────────────────────────
+
+export type MergedRemoteAction =
+  | "delete-branch-merged-remote"
+  | "skip-no-upstream"
+  | "skip-gone"
+  | "skip-not-dispatch-branch"
+  | "skip-current-branch"
+  | "skip-live-agent"
+  | "skip-attached-worktree"
+  | "skip-pr-unresolved"
+  | "skip-too-young"
+  | "skip-cap";
+
+export interface MergedRemoteResult {
+  action: MergedRemoteAction;
+  reason: string;
+}
+
+export interface MergedRemoteContext {
+  /** Branch the orchestrator is currently sitting on — never deleted. */
+  currentBranch: string;
+  /** Worktrees parsed from `git worktree list --porcelain` (with lock PIDs). */
+  worktrees: readonly WorktreeRow[];
+  /** Live-PID predicate — true iff the given PID is currently running. */
+  isLivePid: LivePidCheck;
+  /**
+   * Set of branch names whose PR is MERGED or CLOSED — i.e. resolved, so the
+   * local ref is dead even though `origin/<name>` still exists. Built by the
+   * caller from `gh pr list --state all --json headRefName,state` (keeping
+   * only headRefNames whose state is MERGED/CLOSED, and NOT in the open set).
+   * A missing/unauthenticated `gh` degrades to an EMPTY set → every branch
+   * classifies `skip-pr-unresolved` → this pass deletes NOTHING. That is the
+   * safe direction: the merged-remote pass only ever acts on a positive merge
+   * signal, never on its absence.
+   */
+  mergedOrClosedPrHeads: ReadonlySet<string>;
+  /**
+   * Set of branch names that head an OPEN PR. A branch in this set is never a
+   * merged-remote candidate (its PR is still in-flight) — defended explicitly
+   * even though a well-formed caller keeps the two sets disjoint.
+   */
+  openPrHeads: ReadonlySet<string>;
+  /**
+   * Minimum branch age (seconds) before deletion — the same shared floor as
+   * the other passes (caller passes {@link DEFAULT_WORKTREE_MIN_AGE_SECONDS}).
+   * Age = seconds since the ref was last updated (reflog tail / tip committer
+   * date), caller-computed. Unknown age = conservative skip.
+   */
+  minAgeSeconds: number;
+  /** Optional injected counter — shares the per-run hard cap with the other passes. */
+  deletionCount?: () => number;
+}
+
+/**
+ * Classify a single branch row for the merged-remote GC. Pure — no I/O.
+ *
+ * Decision order (highest priority first), never-touch-first like the other
+ * three passes:
+ *
+ *  1. Branch has NO upstream                          → skip-no-upstream
+ *     (the dead-branch GC owns never-pushed branches)
+ *  2. Branch upstream is `[gone]`                      → skip-gone
+ *     (pass 1 owns gone-upstream branches)
+ *  3. Branch is the current branch                     → skip-current-branch
+ *  4. Name is not dispatch-shaped                      → skip-not-dispatch-branch
+ *  5. We already hit the per-run hard cap              → skip-cap
+ *  6. Attached worktree held by a live PID             → skip-live-agent
+ *  7. Branch heads an OPEN PR                          → skip-pr-unresolved
+ *  8. PR is NOT in the merged/closed set               → skip-pr-unresolved
+ *     (no positive merge signal — never delete on absence)
+ *  9. Attached worktree (dead/no PID)                  → skip-attached-worktree
+ *     (the worktree-orphan GC deletes worktree + branch together)
+ * 10. Branch younger than the age floor / unknown age  → skip-too-young
+ * 11. Otherwise                                        → delete-branch-merged-remote
+ *
+ * The merge signal (steps 7–8) is checked BEFORE the attached-worktree and age
+ * rails so a branch whose PR is still open/unknown surfaces as the precise
+ * `skip-pr-unresolved`, not a downstream skip.
+ */
+export function classifyMergedRemote(row: BranchRow, ctx: MergedRemoteContext): MergedRemoteResult {
+  if (!row.hasUpstream) {
+    return {
+      action: "skip-no-upstream",
+      reason: `${row.name} has no upstream — the dead-branch GC owns never-pushed branches.`,
+    };
+  }
+
+  if (row.upstreamGone) {
+    return {
+      action: "skip-gone",
+      reason: `${row.name} upstream is [gone] — the [gone] pass owns it.`,
+    };
+  }
+
+  if (row.isCurrent || row.name === ctx.currentBranch) {
+    return {
+      action: "skip-current-branch",
+      reason: `${row.name} is the current branch — refusing to delete.`,
+    };
+  }
+
+  if (!isDispatchBranchName(row.name)) {
+    return {
+      action: "skip-not-dispatch-branch",
+      reason: `${row.name} does not match a dispatch-generated name pattern — never auto-delete operator branches.`,
+    };
+  }
+
+  if (ctx.deletionCount && ctx.deletionCount() >= HARD_CAP_DELETIONS_PER_RUN) {
+    return {
+      action: "skip-cap",
+      reason: `Per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}) reached — refusing to delete more.`,
+    };
+  }
+
+  const wt = ctx.worktrees.find((w) => w.branch === row.name) ?? null;
+
+  if (wt && wt.lockedByPid !== null && ctx.isLivePid(wt.lockedByPid)) {
+    return {
+      action: "skip-live-agent",
+      reason: `${row.name} is checked out in worktree ${wt.path} held by live PID ${wt.lockedByPid} — leave for next run.`,
+    };
+  }
+
+  if (ctx.openPrHeads.has(row.name)) {
+    return {
+      action: "skip-pr-unresolved",
+      reason: `${row.name} heads an OPEN PR — preserve until the PR resolves.`,
+    };
+  }
+
+  if (!ctx.mergedOrClosedPrHeads.has(row.name)) {
+    return {
+      action: "skip-pr-unresolved",
+      reason: `${row.name} has a live upstream but no MERGED/CLOSED PR signal (gh lookup absent or PR still open) — never delete without a positive merge signal.`,
+    };
+  }
+
+  if (wt) {
+    return {
+      action: "skip-attached-worktree",
+      reason: `${row.name} is checked out in worktree ${wt.path} — the worktree-orphan GC owns attached worktrees (it deletes worktree and branch together).`,
+    };
+  }
+
+  // Age floor — the LAST gate, mirroring the other passes. Unknown age is
+  // treated conservatively as too-young: never delete a ref we know nothing
+  // about.
+  if (row.ageSeconds === null || row.ageSeconds === undefined || row.ageSeconds < ctx.minAgeSeconds) {
+    const ageNote =
+      row.ageSeconds === null || row.ageSeconds === undefined ? "unknown age" : `${row.ageSeconds}s old`;
+    return {
+      action: "skip-too-young",
+      reason: `${row.name} PR is merged/closed but the ref is ${ageNote}, under the ${ctx.minAgeSeconds}s floor — defer in case it is an in-flight cycle.`,
+    };
+  }
+
+  return {
+    action: "delete-branch-merged-remote",
+    reason: `${row.name} PR is merged/closed but its remote branch was never deleted (zombie origin ref); no attached worktree, ${row.ageSeconds}s old — delete LOCAL branch only (remote ref is an operator step).`,
+  };
+}
+
+export interface MergedRemoteBuckets {
+  /** Local branches to delete (`git branch -D`). The remote ref is left alone. */
+  deleteBranch: BranchRow[];
+  /**
+   * Skipped candidates with their reasons. `skip-no-upstream` and `skip-gone`
+   * rows are dropped silently — passes 1 and 3 already report them, so
+   * repeating them here would double the noise.
+   */
+  skip: Array<{ row: BranchRow; action: MergedRemoteAction; reason: string }>;
+  /** True iff any candidate was deferred because the hard cap was reached. */
+  cappedOut: boolean;
+}
+
+/**
+ * Classify a batch of branch rows for the merged-remote GC. Maintains a running
+ * deletion counter seeded with `priorDeletions` (the other passes' deletion
+ * counts) so the 250-deletion hard cap spans ALL passes in a single run.
+ * Input order is preserved within each bucket.
+ */
+export function classifyMergedRemotes(
+  rows: readonly BranchRow[],
+  ctx: Omit<MergedRemoteContext, "deletionCount"> & { priorDeletions?: number },
+): MergedRemoteBuckets {
+  const buckets: MergedRemoteBuckets = {
+    deleteBranch: [],
+    skip: [],
+    cappedOut: false,
+  };
+
+  let localDeletions = 0;
+  const prior = ctx.priorDeletions ?? 0;
+  const ctxWithCounter: MergedRemoteContext = {
+    ...ctx,
+    deletionCount: () => prior + localDeletions,
+  };
+
+  for (const row of rows) {
+    const r = classifyMergedRemote(row, ctxWithCounter);
+    switch (r.action) {
+      case "delete-branch-merged-remote":
+        buckets.deleteBranch.push(row);
+        localDeletions++;
+        break;
+      case "skip-no-upstream":
+      case "skip-gone":
+        /* intentional: passes 1 and 3 already report these rows */
+        break;
+      case "skip-cap":
+        buckets.cappedOut = true;
+        buckets.skip.push({ row, action: r.action, reason: r.reason });
+        break;
+      default:
+        buckets.skip.push({ row, action: r.action, reason: r.reason });
+        break;
+    }
+  }
+
+  return buckets;
+}
+
+/**
+ * Render the merged-remote GC section of the report. Pure — deterministic.
+ * Appended below the dead-branch section so a single run shows all four passes.
+ */
+export function renderMergedRemoteReport(buckets: MergedRemoteBuckets, auditOnly: boolean): string {
+  const verb = auditOnly ? "Would delete" : "Deleted";
+  const lines: string[] = [];
+  lines.push("### Merged-remote GC (issue #2029)");
+  lines.push("");
+
+  lines.push(`#### ${verb} (local refs of merged/closed PRs whose remote branch survived)`);
+  if (buckets.deleteBranch.length === 0) {
+    lines.push("- _none_");
+  } else {
+    for (const r of buckets.deleteBranch) {
+      lines.push(`- ${r.name}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("#### Skipped — merged-remote GC");
+  if (buckets.skip.length === 0) {
+    lines.push("- _none_");
+  } else {
+    for (const s of buckets.skip) {
+      lines.push(`- ${s.row.name}: ${s.reason}`);
+    }
+  }
+
+  if (buckets.cappedOut) {
+    lines.push("");
+    lines.push(`> Hit per-run hard cap (${HARD_CAP_DELETIONS_PER_RUN}). Remaining candidates will be picked up on the next run.`);
+  }
+
+  return lines.join("\n");
+}
