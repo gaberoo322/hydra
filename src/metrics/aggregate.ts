@@ -168,10 +168,19 @@ export async function getCostByClass(dateOverride?: string): Promise<CostByClass
 }
 
 /**
- * Compute aggregate stats from metrics trend.
+ * Pure projection: fold an already-fetched metrics-trend array into the
+ * aggregate-stats shape (`mergedRate` / `regressionRate` / `noOpMergeRate` /
+ * the duration averages / the anchor distribution).
+ *
+ * Extracted verbatim from the inline body of `getAggregateStats` (issue #2143)
+ * so the rate arithmetic is unit-testable on a synthetic trend array without a
+ * live Redis fetch — matching the discipline of `projectCostByClass`,
+ * `projectAnchorDistribution`, and `projectGroundingDuration`. The empty-trend
+ * guard (`return { cycles: 0 }`) moves here verbatim so no rate divides by
+ * total=0. The async `getAggregateStats` wrapper keeps the `count` knob and the
+ * Redis fetch; this function only does arithmetic.
  */
-export async function getAggregateStats(count = 20) {
-  const trend = await getMetricsTrend(count);
+export function projectAggregateStats(trend: Array<Record<string, any>>) {
   if (trend.length === 0) return { cycles: 0 };
 
   const total = trend.length;
@@ -194,7 +203,7 @@ export async function getAggregateStats(count = 20) {
   const verificationDurations = trend.map((m) => m.verificationDurationMs).filter(Boolean);
   const groundingDurations = trend.map((m) => m.groundingDurationMs).filter(Boolean);
 
-  const anchorDist = {};
+  const anchorDist: Record<string, number> = {};
   for (const m of trend) {
     const at = m.anchorType || "unknown";
     anchorDist[at] = (anchorDist[at] || 0) + 1;
@@ -224,12 +233,25 @@ export async function getAggregateStats(count = 20) {
 }
 
 /**
- * Get a cumulative summary of what's been accomplished across recent cycles.
- * Used by the planner to avoid re-proposing completed work.
+ * Compute aggregate stats from metrics trend.
+ *
+ * Thin wrapper: fetch the rolling trend window from Redis (the `count` knob),
+ * then delegate the arithmetic to the pure `projectAggregateStats`.
  */
-export async function getCumulativeAccomplishments(count = 15) {
+export async function getAggregateStats(count = 20) {
   const trend = await getMetricsTrend(count);
-  const accomplished = trend
+  return projectAggregateStats(trend);
+}
+
+/**
+ * Pure projection: filter + map an already-fetched metrics-trend array into the
+ * cumulative-accomplishments list (merged cycles with a title). Extracted from
+ * `getCumulativeAccomplishments` (issue #2143) so the merged-and-titled filter
+ * is unit-testable on synthetic fixtures without a live Redis. An empty trend
+ * yields `[]` (a `.filter().map()` over `[]`), so no guard is needed.
+ */
+export function projectCumulativeAccomplishments(trend: Array<Record<string, any>>) {
+  return trend
     .filter((m) => m.tasksMerged > 0 && m.taskTitle)
     .map((m) => ({
       cycle: m.cycleId,
@@ -237,7 +259,18 @@ export async function getCumulativeAccomplishments(count = 15) {
       anchor: m.anchorType,
       tests: `${m.testsBefore}→${m.testsAfter}`,
     }));
-  return accomplished;
+}
+
+/**
+ * Get a cumulative summary of what's been accomplished across recent cycles.
+ * Used by the planner to avoid re-proposing completed work.
+ *
+ * Thin wrapper: fetch the trend (the `count` knob), then delegate to the pure
+ * `projectCumulativeAccomplishments`.
+ */
+export async function getCumulativeAccomplishments(count = 15) {
+  const trend = await getMetricsTrend(count);
+  return projectCumulativeAccomplishments(trend);
 }
 
 // ---------------------------------------------------------------------------
