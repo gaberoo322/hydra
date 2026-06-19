@@ -14,9 +14,10 @@
  * readers that wire the engine to live autopilot state.
  *
  * Cost-gate boundary (CONTEXT.md L203 / ADR-0005): no USD accounting lives
- * here. The consumer only WIRES the engine's `broadcastResting` fan-out to the
- * WS registry; the daily cap, the per-Mtok rates, and `incrDailySpendUsd` all
- * stay engine-side. The split moves wiring, not policy.
+ * here. The consumer only constructs the cap enforcer
+ * (recommendation-cap.ts, issue #2119) and WIRES its `oak_resting` fan-out to
+ * the WS registry; the daily cap, the spend read/charge, and the once-per-day
+ * latch all live behind the enforcer. The split moves wiring, not policy.
  *
  * Stream invariants preserved 1:1 from the pre-split engine:
  *   - consumer-group name `recs-engine` on stream `hydra:autopilot:slot-events`
@@ -39,6 +40,7 @@ import {
   type SignalsSnapshot,
   type PermissionWaitEvent,
 } from "./recommendation-engine.ts";
+import { createCapEnforcer } from "./recommendation-cap.ts";
 
 // ---------------------------------------------------------------------------
 // Stream consumer wiring — bound to the `hydra:autopilot:slot-events`
@@ -201,12 +203,12 @@ export async function startRecommendationConsumer(eventBus: {
   // Bus already swallows BUSYGROUP internally, so the manual try/catch is gone.
   await eventBus.ensureConsumerGroup(SLOT_EVENTS_STREAM, RECS_CONSUMER_GROUP, "$");
 
-  const engine = createRecommendationEngine({
-    llm: defaultLlmClient(),
-    readRecentTurns: defaultReadRecentTurns,
-    readSlotSnapshot: defaultReadSlotSnapshot,
-    readSignalsSnapshot: defaultReadSignalsSnapshot,
-    readRecentPermissionWaits: defaultReadRecentPermissionWaits,
+  // The billing ledger (issue #2119) — the cap amount, spend read/charge, and
+  // the oak_resting latch now live in the recommendation-cap Module. The
+  // consumer's only job is to wire its `oak_resting` fan-out to the WS
+  // registry; the daily cap, the per-Mtok rates, and `incrDailySpendUsd` all
+  // stay behind the enforcer. The split moves wiring, not policy.
+  const capEnforcer = createCapEnforcer({
     broadcastResting: (runId, spend, cap) => {
       try {
         eventBus.wsRegistry?.broadcast(TURN_END_BROADCAST_STREAM, {
@@ -224,6 +226,15 @@ export async function startRecommendationConsumer(eventBus: {
         );
       }
     },
+  });
+
+  const engine = createRecommendationEngine({
+    llm: defaultLlmClient(),
+    readRecentTurns: defaultReadRecentTurns,
+    readSlotSnapshot: defaultReadSlotSnapshot,
+    readSignalsSnapshot: defaultReadSignalsSnapshot,
+    readRecentPermissionWaits: defaultReadRecentPermissionWaits,
+    capEnforcer,
   });
 
   const consumerName = defaultRecsConsumerName();
