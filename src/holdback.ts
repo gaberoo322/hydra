@@ -41,7 +41,7 @@ import {
   snapshotLeadingOutcomes,
   detectRegressions,
   type LeadingOutcomeSample,
-} from "./outcomes.ts";
+} from "./outcomes-regression.ts";
 import {
   recordBaseline,
   loadBaseline,

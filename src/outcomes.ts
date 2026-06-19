@@ -30,7 +30,12 @@ import { parseOutcomesYaml, type YamlScalar } from "./outcomes-yaml.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
-const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.yaml");
+/**
+ * Default path to `config/direction/outcomes.yaml`. Exported so the sibling
+ * Outcome Regression Policy module (`src/outcomes-regression.ts`, #2095) can
+ * reuse the same default when sampling leading outcomes through this loader.
+ */
+export const DEFAULT_OUTCOMES_FILE = join(CONFIG_PATH, "direction", "outcomes.yaml");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -294,122 +299,12 @@ export async function getOutcomeValue(outcome: Outcome): Promise<OutcomeReading 
 }
 
 // ---------------------------------------------------------------------------
-// Outcome Holdback helpers (issue #786, ADR-0004 step 4)
-//
-// Additive read-only helpers consumed by the Post-merge Regression Check (the
-// Outcome Holdback producer). They live here, next to the loader + adapters,
-// so the producer reads leading outcomes through the same seam every other
-// consumer uses — never re-parsing outcomes.yaml itself.
-//
-// Invariant: only `kind: leading` outcomes ever drive a holdback decision.
-// Terminal outcomes are too slow for any watch window (outcomes.yaml schema
-// comment + CONTEXT.md) and are filtered out here so a caller cannot
-// accidentally watch one.
+// Outcome Holdback regression policy (issue #786, ADR-0004 step 4) was extracted
+// from this loader into the sibling `src/outcomes-regression.ts` Module (#2095).
+// `snapshotLeadingOutcomes`, `detectRegressions`, `isOutcomeRegressed`, and the
+// `LeadingOutcomeSample` / `OutcomeRegression` types now live there, imported by
+// the sole production caller `src/holdback.ts`. They read leading outcomes back
+// through THIS loader (`loadOutcomes` + `getOutcomeValue`), so the producer
+// still goes through the same seam every other consumer uses — it just no longer
+// shares a file with the YAML parser and source-adapter machinery.
 // ---------------------------------------------------------------------------
-
-/** One leading-outcome sample: the outcome's contract fields + current value. */
-export interface LeadingOutcomeSample {
-  name: string;
-  direction: OutcomeDirection;
-  /** Absolute change below this is treated as no-move. */
-  noiseEpsilon: number;
-  /** Current value, or null if the adapter returned no data (no-data, not 0). */
-  value: number | null;
-}
-
-/**
- * Snapshot the current value of every `kind: leading` outcome.
- *
- * Returns one sample per leading outcome (terminal outcomes are excluded).
- * Adapter outages surface as `value: null` — never as a synthetic 0 — so the
- * regression detector can treat them as no-data rather than a false regression.
- * Never throws: a failed load yields an empty array (logged by `loadOutcomes`).
- */
-export async function snapshotLeadingOutcomes(
-  filePath: string = DEFAULT_OUTCOMES_FILE,
-): Promise<LeadingOutcomeSample[]> {
-  const result = await loadOutcomes(filePath);
-  if (result.ok === false) return [];
-  const leading = result.outcomes.filter((o) => o.kind === "leading");
-  return Promise.all(
-    leading.map(async (o) => {
-      const reading = await getOutcomeValue(o);
-      return {
-        name: o.name,
-        direction: o.direction,
-        noiseEpsilon: o.noise_epsilon,
-        value: reading?.value ?? null,
-      };
-    }),
-  );
-}
-
-/**
- * Decide whether a single leading outcome has regressed vs its baseline.
- *
- * A regression is a move in the UNFAVORABLE direction (opposite `direction`)
- * whose magnitude EXCEEDS `noiseEpsilon`. A favorable move, a no-move (delta
- * ≤ epsilon), or missing data on either side is NOT a regression.
- *
- *   direction: "up"   → regressed when current < baseline by more than epsilon
- *   direction: "down" → regressed when current > baseline by more than epsilon
- *
- * Returns `false` (no regression) when either value is null — adapter outages
- * are no-data, never a synthetic regression (matches the historical watcher's
- * "no false revert" posture, docs/reference.md).
- */
-export function isOutcomeRegressed(
-  baselineValue: number | null,
-  currentValue: number | null,
-  direction: OutcomeDirection,
-  noiseEpsilon: number,
-): boolean {
-  if (baselineValue == null || currentValue == null) return false;
-  if (!Number.isFinite(baselineValue) || !Number.isFinite(currentValue)) return false;
-  const eps = Number.isFinite(noiseEpsilon) ? Math.abs(noiseEpsilon) : 0;
-  // Favorable delta is positive when moving the favorable way.
-  const favorableDelta = direction === "up"
-    ? currentValue - baselineValue
-    : baselineValue - currentValue;
-  // Regressed = moved unfavorably by MORE than epsilon.
-  return favorableDelta < -eps;
-}
-
-/** A leading outcome that regressed past its noise epsilon vs baseline. */
-export interface OutcomeRegression {
-  name: string;
-  baseline: number;
-  current: number;
-  direction: OutcomeDirection;
-  noiseEpsilon: number;
-}
-
-/**
- * Compare a baseline snapshot against a current snapshot and return the leading
- * outcomes that regressed past their noise epsilon. The two arrays are matched
- * by outcome `name`; an outcome present in one but not the other, or with null
- * data on either side, is skipped (no-data, not a regression).
- *
- * Pure function — no I/O — so the producer (and its tests) can reason about the
- * revert decision deterministically.
- */
-export function detectRegressions(
-  baseline: Array<{ name: string; direction: OutcomeDirection; noiseEpsilon: number; value: number | null }>,
-  current: Array<{ name: string; value: number | null }>,
-): OutcomeRegression[] {
-  const currentByName = new Map(current.map((c) => [c.name, c.value]));
-  const regressions: OutcomeRegression[] = [];
-  for (const b of baseline) {
-    const cur = currentByName.has(b.name) ? currentByName.get(b.name)! : null;
-    if (isOutcomeRegressed(b.value, cur, b.direction, b.noiseEpsilon)) {
-      regressions.push({
-        name: b.name,
-        baseline: b.value as number,
-        current: cur as number,
-        direction: b.direction,
-        noiseEpsilon: b.noiseEpsilon,
-      });
-    }
-  }
-  return regressions;
-}
