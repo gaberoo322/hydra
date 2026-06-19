@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 
 import {
   getRecentMerges,
+  listRecentMergeCommits,
+  extractMergeCommitsFromGitLog,
   extractPrNumbersFromGitLog,
   tierFromLabels,
   clampLimit,
@@ -78,6 +80,110 @@ describe("extractPrNumbersFromGitLog — pure helper", () => {
   test("respects the limit", () => {
     const stdout = ["(#1)", "(#2)", "(#3)", "(#4)"].join("\n");
     assert.deepEqual(extractPrNumbersFromGitLog(stdout, 2), [1, 2]);
+  });
+});
+
+describe("extractMergeCommitsFromGitLog — pure helper (issue #2177)", () => {
+  test("returns [] on empty input", () => {
+    assert.deepEqual(extractMergeCommitsFromGitLog("", 10), []);
+  });
+
+  test("parses %cI|%s lines into {prNumber, mergedAt} pairs", () => {
+    const stdout = [
+      "2026-06-19T10:00:00+00:00|feat(scheduler): add knob (#622)",
+      "2026-06-18T09:30:00+00:00|refactor(cost): consolidate (#611)",
+      "2026-06-17T00:00:00+00:00|operator: stuff with no PR",
+      "2026-06-16T08:00:00+00:00|Merge pull request #599 from x/y",
+    ].join("\n");
+    assert.deepEqual(extractMergeCommitsFromGitLog(stdout, 10), [
+      { prNumber: 622, mergedAt: "2026-06-19T10:00:00+00:00" },
+      { prNumber: 611, mergedAt: "2026-06-18T09:30:00+00:00" },
+      { prNumber: 599, mergedAt: "2026-06-16T08:00:00+00:00" },
+    ]);
+  });
+
+  test("tolerates subject-only lines (no date field) → empty mergedAt", () => {
+    // Legacy `%s`-only format / test stub: no `|` separator → bare subject,
+    // PR number still recovered, mergedAt empty.
+    const stdout = ["feat: a (#100)", "fix: b (#101)"].join("\n");
+    assert.deepEqual(extractMergeCommitsFromGitLog(stdout, 10), [
+      { prNumber: 100, mergedAt: "" },
+      { prNumber: 101, mergedAt: "" },
+    ]);
+  });
+
+  test("keeps a subject that itself contains a pipe intact", () => {
+    // The leading field only counts as a date when it parses as one; a subject
+    // with an embedded pipe and no leading date field stays whole.
+    const stdout = ["feat: a | b refactor (#100)"].join("\n");
+    assert.deepEqual(extractMergeCommitsFromGitLog(stdout, 10), [
+      { prNumber: 100, mergedAt: "" },
+    ]);
+  });
+
+  test("splits on the first separator so a dated subject with a pipe survives", () => {
+    const stdout = ["2026-06-19T10:00:00+00:00|feat: a | b (#100)"].join("\n");
+    assert.deepEqual(extractMergeCommitsFromGitLog(stdout, 10), [
+      { prNumber: 100, mergedAt: "2026-06-19T10:00:00+00:00" },
+    ]);
+  });
+
+  test("dedupes repeated PR numbers", () => {
+    const stdout = [
+      "2026-06-19T10:00:00+00:00|feat: x (#10)",
+      "2026-06-19T09:00:00+00:00|Revert (#10)",
+      "2026-06-19T08:00:00+00:00|feat: y (#11)",
+    ].join("\n");
+    assert.deepEqual(extractMergeCommitsFromGitLog(stdout, 10).map((c) => c.prNumber), [10, 11]);
+  });
+
+  test("respects the limit", () => {
+    const stdout = ["a (#1)", "b (#2)", "c (#3)", "d (#4)"].join("\n");
+    assert.equal(extractMergeCommitsFromGitLog(stdout, 2).length, 2);
+  });
+});
+
+describe("listRecentMergeCommits — cheap git-log primitive (issue #2177)", () => {
+  test("returns {prNumber, mergedAt} from git-log alone, NO gh fan-out", async () => {
+    const gitLog = [
+      "2026-06-19T10:00:00+00:00|feat: a (#100)",
+      "2026-06-18T10:00:00+00:00|fix: b (#101)",
+    ].join("\n");
+    const exec = makeExecStub({
+      "git fetch origin master": { stdout: "" },
+      "git log origin/master": { stdout: gitLog },
+    });
+    // Passing a fetchPrMeta that throws proves the primitive never calls it.
+    const commits = await listRecentMergeCommits(10, {
+      execFileAsync: exec,
+      fetchPrMeta: async () => {
+        throw new Error("listRecentMergeCommits must not call fetchPrMeta");
+      },
+    });
+    assert.deepEqual(commits, [
+      { prNumber: 100, mergedAt: "2026-06-19T10:00:00+00:00" },
+      { prNumber: 101, mergedAt: "2026-06-18T10:00:00+00:00" },
+    ]);
+  });
+
+  test("reads origin/master, not local master (#1757)", async () => {
+    const exec = makeExecStub({
+      "git fetch origin master": { stdout: "" },
+      "git log origin/master": { stdout: "2026-06-19T10:00:00+00:00|fix: wave (#200)" },
+      "git log master": { stdout: "2026-06-01T00:00:00+00:00|feat: stale (#100)" },
+    });
+    const commits = await listRecentMergeCommits(10, { execFileAsync: exec });
+    assert.deepEqual(commits.map((c) => c.prNumber), [200]);
+  });
+
+  test("git log throws on both refs → [] (fail-open, never rejects)", async () => {
+    const exec = async (cmd: string, args: readonly string[]) => {
+      const key = `${cmd} ${args.join(" ")}`;
+      if (key.includes("fetch")) return { stdout: "", stderr: "" };
+      throw new Error("git log boom");
+    };
+    const commits = await listRecentMergeCommits(10, { execFileAsync: exec });
+    assert.deepEqual(commits, []);
   });
 });
 

@@ -211,15 +211,20 @@ async function defaultReadRecentRuns(limit: number): Promise<RunDigest[]> {
  */
 async function defaultReadWindowMergeCount(sinceEpochS: number): Promise<number> {
   try {
-    const { getRecentMerges } = await import("./recent-merges.ts");
-    // The aggregator caps at 50; that comfortably covers a healthy ~14-run
-    // window (the issue's incident saw 10 merges in 14 runs) and is the most
-    // recent slice of master — exactly where window merges live.
-    const merges = await getRecentMerges(50);
+    const { listRecentMergeCommits } = await import("./recent-merges.ts");
+    // Use the cheap git-log primitive (issue #2177), NOT getRecentMerges: this
+    // count caller only needs {prNumber, mergedAt} pairs and the since-epoch
+    // filter, so it must not pay the N-parallel `gh pr view` fan-out for the
+    // titles/labels it discards. The committer date from git-log IS the merge
+    // time for Hydra's squash-merge mode (issue #2177). The aggregator caps at
+    // 50; that comfortably covers a healthy ~14-run window (the issue's
+    // incident saw 10 merges in 14 runs) and is the most recent slice of
+    // master — exactly where window merges live.
+    const commits = await listRecentMergeCommits(50);
     const sinceMs = sinceEpochS * 1000;
     let count = 0;
-    for (const m of merges) {
-      const mergedMs = Date.parse(m.mergedAt);
+    for (const c of commits) {
+      const mergedMs = Date.parse(c.mergedAt);
       if (Number.isFinite(mergedMs) && mergedMs >= sinceMs) count += 1;
     }
     return count;
