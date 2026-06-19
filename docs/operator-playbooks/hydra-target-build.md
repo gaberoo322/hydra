@@ -843,10 +843,7 @@ fi
 
 The `pr-<n>` claimedBy marker is what the candidates API's `excludeInFlight` filter (default true, 30-min freshness window) looks for. Without it, decide.py will re-dispatch dev_target onto the same anchor every tick until the PR merges — burning 50-150k tokens per duplicate dispatch (the original failure mode in run `ab97a2d5`). The marker is cleared automatically when the next `applyLaneTransition` runs (e.g. when the item moves to `done` post-merge).
 
-Record completion:
-```bash
-hydra queue add "COMPLETED: <task title>" -d "Merged by Claude build"
-```
+Do **not** record completion by pushing a `COMPLETED:`/`CLOSED:` marker onto the work-queue (the old `hydra queue add "COMPLETED: <task title>"` idiom). That marker is a terminal-state note, not actionable work — it pollutes `hydra:anchors:work-queue` and resurfaces as a no-op dev_target candidate. As of #1854 the four queue-write layers (`pushToWorkQueue`, `POST /queue`, anchor-candidates read-reap, startup GC) refuse such markers, so the call is now a guaranteed 422 no-op; emitting it only re-fires the meta-friction cue. Completion is recorded by the metrics record and the `cycle:completed` event below — no work-queue write is needed.
 
 Record metrics (shared with Codex):
 ```bash
