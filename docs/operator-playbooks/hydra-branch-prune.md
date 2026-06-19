@@ -8,29 +8,32 @@ claude_only: true
 
 # Hydra Branch Prune
 
-Sister skill to `hydra-pr-rebase` (open-PR side). This one handles the *post-merge* janitorial side: branches whose upstream is gone after a squash-merge, plus the worktrees that were attached to them — AND, since issue #911, the **local-only orphan worktrees** the `[gone]` signal can never reclaim — AND, since issue #1784, the **never-pushed dead-dispatch branches** (no upstream, no PR, worktree already reaped) that escape both of those passes.
+Sister skill to `hydra-pr-rebase` (open-PR side). This one handles the *post-merge* janitorial side: branches whose upstream is gone after a squash-merge, plus the worktrees that were attached to them — AND, since issue #911, the **local-only orphan worktrees** the `[gone]` signal can never reclaim — AND, since issue #1784, the **never-pushed dead-dispatch branches** (no upstream, no PR, worktree already reaped) that escape both of those passes — AND, since issue #2029, the **merged-remote zombie branches** (PR merged/closed but the `origin/<name>` remote ref still exists, so the upstream never goes `[gone]`).
 
 After the codex-removal cut-over (ADR-0006) every code-writing dispatch runs inside a `git worktree` under `~/hydra/.claude/worktrees/agent-*` or `/dev/shm/hydra-worktrees/`. When the agent finishes (or crashes, or is force-quit) the worktree often leaks — `git branch -vv` accumulates `[gone]` upstreams and the worktree dirs stay around indefinitely. A single manual sweep on 2026-05-15 cleaned **167 branches and 71 worktrees** in one pass; the orchestrator should not need a human for that.
 
 The skill is one pass over the local repo, then exit. The scheduling cadence is owned by `scripts/systemd/hydra-branch-prune.timer` (see "Scheduling" below) — the skill itself is on-demand.
 
-## Three reclamation passes (root causes — issues #911 and #1784)
+## Four reclamation passes (root causes — issues #911, #1784, #2029)
 
-The original skill only ever acted on `[gone]` upstreams. A snapshot on **2026-06-02, taken immediately after a full `--apply` run**, exposed the structural gap:
+The original skill only ever acted on `[gone]` upstreams. A snapshot on **2026-06-02, taken immediately after a full `--apply` run**, exposed the first structural gap:
 
 - **549 local branches / 120 worktrees** still present after the sweep.
 - Of those, only **4 branches were `[gone]`**; **338 were local-only with no upstream at all**; 211 had a live upstream (open PRs).
 - Of the 123 worktrees, only **4 were held by a live PID** — **98 carried a lock file whose PID was dead**, and 21 had no lock.
 
-**Root cause:** the dominant accumulation source is **local-only worktrees** — QA worktrees (`agent-qa-NNN`, `pr-NNN-qa`), abandoned/crashed dev attempts, and worktrees leaked by the run-termination bug (#898). These are created locally for a single dispatch and **never pushed**, so they never acquire an upstream → never become `[gone]` → the `[gone]`-keyed pass skips them **forever**. Nothing tore them down at dispatch-reap time either.
+**Root cause (pass 2/3):** the dominant accumulation source there was **local-only worktrees** — QA worktrees (`agent-qa-NNN`, `pr-NNN-qa`), abandoned/crashed dev attempts, and worktrees leaked by the run-termination bug (#898). These are created locally for a single dispatch and **never pushed**, so they never acquire an upstream → never become `[gone]` → the `[gone]`-keyed pass skips them **forever**. Nothing tore them down at dispatch-reap time either.
 
-The fix adds a second pass that closes the gap:
+A second snapshot on **2026-06-19** exposed the remaining gap (issue #2029): **~160 local branches with a LIVE (non-gone) `origin/*` upstream and 0 open PRs.** Their PRs were squash-merged or closed **without deleting the remote branch**, so `git fetch --prune` finds the upstream alive → never `[gone]` → pass 1 classifies them `skip-not-gone`, pass 3 classifies them `skip-has-upstream`. Auto-merge `--delete-branch` (enabled 2026-05-28) fixes the case **forward**; these predate it or merged without it.
+
+The passes, in classification order:
 
 1. **Branch pass (`[gone]`)** — reclaims branches whose upstream is gone after a squash-merge, plus their attached worktrees. Since issue #1773 the worktree-deletion arm is age-gated (see `skip-too-young` below): auto-merge with `--delete-branch` flips the upstream to `[gone]` the instant a PR merges, while the dispatching cycle may still be running post-merge steps inside its worktree — and a manually-created worktree (e.g. a target-build cycle's `/dev/shm` dir) carries no lock file, so the live-PID rail alone cannot protect it.
 2. **Worktree-orphan GC** (issue #911) — keyed on the *worktree*, not the branch. Reclaims a worktree **regardless of upstream state** when every liveness rail holds (see below).
 3. **Dead-branch GC** (issue #1784) — keyed on the *branch* again, but for the case the first two passes structurally miss: a dispatch that died **without ever opening a PR** leaves a branch with **no upstream at all** (never `[gone]`, so pass 1 classifies it `skip-not-gone` forever), and once its worktree is reaped there is nothing for pass 2 to key on either. Run f00da325 hit exactly this: two stale `issue-1676` branches (no PR, no upstream, ~4h idle) that a later dispatch had to liveness-check by hand, plus the sibling cue `pr-branch-held-by-stale-worktree` where a stale branch blocked a later checkout outright (cross-run recurrence 4 for cue `dead-prior-dispatch-branches-no-pr`). This pass deletes a local branch only when **all** of: no upstream, dispatch-shaped name (`issue-*`, `worktree-agent-*`, `agent-*`, `pr-<N>*` — operator branches are never eligible), not the current branch, not checked out in any worktree, not the head of an open PR, and past the same age floor.
+4. **Merged-remote GC** (issue #2029) — keyed on the *branch* for the squash-merge-with-zombie-remote case: a branch with a **live (non-gone) upstream** whose PR is **MERGED or CLOSED**. The positive merge signal is the PR state (`gh pr list --state all`, filtered to MERGED/CLOSED head-refs), *not* the upstream marker — the whole point is the upstream is NOT `[gone]`. This pass deletes the **LOCAL** ref only when **all** of: has an upstream (else pass 3 owns it), upstream not `[gone]` (else pass 1 owns it), dispatch-shaped name, not the current branch, not a live-PID worktree, not the head of an open PR, has a MERGED/CLOSED PR signal, no attached worktree (else the orphan GC owns it), and past the same age floor. **Local-only invariant:** the zombie `origin/<name>` ref is left untouched — `git push origin --delete` is an external-account mutation (ADR-0005 escalation) and stays an operator step (see "Clearing the standing zombie remotes" below). Deleting the local ref alone is the safe, autonomous half.
 
-All three passes share the same 250-deletion hard cap in a single run (each later pass is seeded with the earlier passes' deletion counts), and all refuse to touch a live-PID worktree or the current branch.
+All four passes share the same 250-deletion hard cap in a single run (each later pass is seeded with the earlier passes' deletion counts), and all refuse to touch a live-PID worktree or the current branch.
 
 ## When NOT to run this
 
@@ -99,6 +102,28 @@ The extra signal this pass introduced:
 - **Dispatch-name rail** — a no-upstream branch is the *natural state* of any operator-made local branch (`git branch scratch`), so the pass only ever deletes names matching `DEAD_DISPATCH_BRANCH_PATTERNS` (`issue-<N>*`, `worktree-agent-*`, `agent-*`, `pr-<N>*`). Everything else surfaces in the report as `skip-not-dispatch-branch` so the operator can extend the list deliberately.
 - Note the open-PR-head rail degrades to an empty set when `gh` is missing/unauthenticated — for THIS pass that is the less-safe direction (unlike the orphan GC, where the upstream signal backstops it), but the dispatch-name + age + attached-worktree rails still hold, and only *local* refs are ever deleted: the PR's remote branch is untouched, so the worst case is re-fetching the branch, not data loss.
 
+### Merged-remote GC actions (issue #2029)
+
+The fourth pass classifies each *branch with a live (non-gone) upstream* into one of:
+
+| Action                       | Condition                                                                                                       | What the driver does |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `delete-branch-merged-remote`| Live upstream; dispatch-shaped name; not current; PR is MERGED/CLOSED; no live/attached worktree; not an open-PR head; past the age floor | `git branch -D` (LOCAL only — the remote ref is left for the operator) |
+| `skip-no-upstream`           | Branch has no upstream — pass 3's domain                                                                        | Nothing (dropped from this pass's report; pass 3 already covers it) |
+| `skip-gone`                  | Upstream is `[gone]` — pass 1's domain                                                                          | Nothing (dropped; pass 1 already covers it) |
+| `skip-not-dispatch-branch`   | Name doesn't match a dispatch-generated pattern                                                                 | Never auto-delete operator branches |
+| `skip-current-branch`        | Branch IS the currently-checked-out branch                                                                      | Refuse |
+| `skip-live-agent`            | Checked out in a worktree held by a live PID                                                                    | Defer — checked BEFORE the merge signal, so a fresh live agent is safe |
+| `skip-pr-unresolved`         | Heads an OPEN PR, OR has no MERGED/CLOSED PR signal (gh absent / PR still open)                                 | Defer — never delete without a positive merge signal |
+| `skip-attached-worktree`     | Has an attached worktree (dead/no PID)                                                                          | Defer — the worktree-orphan GC owns attached worktrees and deletes worktree + branch together |
+| `skip-too-young`             | Ref age under the floor, OR age unknown                                                                         | Defer — protects an in-flight cycle |
+| `skip-cap`                   | The shared 250-deletion hard cap is already reached this run                                                    | Defer to the next run |
+
+The extra signal this pass introduced:
+
+- **Merged/closed-PR head set** — `gh pr list --state all --json headRefName,state`, filtered to head-refs whose state is `MERGED` or `CLOSED`. This is the *positive* merge signal that replaces the `[gone]` marker for this case (the upstream is deliberately NOT `[gone]` here). A missing/unauthenticated `gh` degrades to an **empty** set → every branch classifies `skip-pr-unresolved` → the pass deletes **nothing**. Unlike the dead-branch GC's open-PR rail, this set is the pass's *sole* delete trigger, so an empty `gh` makes it a total no-op — the safe direction.
+- **Local-only invariant** — this pass deletes the LOCAL `refs/heads/<name>` only. The zombie `origin/<name>` ref is an external-account mutation (`git push origin --delete`) and stays an operator-gated step (ADR-0005); the driver is text-guarded against ever pushing a remote-branch deletion. Deleting the local ref reclaims `git branch -vv` clutter and frees the local name for reuse; the forward fix for the remote side is auto-merge `--delete-branch`.
+
 ### Why these signals (and not the obvious ones)
 
 - **Don't trust `git branch --merged origin/master`.** Squash-merges produce a different commit hash than the source branch ever had, so the local branch's tip is never an ancestor of master and `--merged` misses it. The `[gone]`-upstream signal (which `git fetch --prune` refreshes) catches squash-merges correctly.
@@ -155,6 +180,9 @@ git branch -D "$br"
 
 # delete-branch-no-upstream entries (dead-dispatch leftovers, issue #1784)
 git branch -D "$br"
+
+# delete-branch-merged-remote entries (merged/closed PR, zombie remote, issue #2029)
+git branch -D "$br"   # LOCAL only — the origin/<name> ref is an operator step
 
 # final pass to clean up metadata for hand-removed worktree dirs
 git worktree prune
@@ -251,6 +279,7 @@ The daily timer bounds the *steady-state* population, but a worktree leaked at 0
 - **`stat` fails for a worktree dir**: that worktree's age is reported as unknown, which the classifier treats as `skip-too-young` — it is never reclaimed on an unknown age.
 - **Ref age unavailable (dead-branch GC)**: a branch with no reflog entry AND no readable tip committer date is omitted from the `branchAges` map → unknown age → `skip-too-young`, never deleted.
 - **`gh` missing / unauthenticated (dead-branch GC)**: the open-PR-head rail degrades to empty — see the note in "Dead-branch GC actions" above; the remaining rails hold and only local refs are deleted, so an open PR's remote branch is never at risk.
+- **`gh` missing / unauthenticated (merged-remote GC)**: the merged/closed-PR set degrades to empty. Because that set is this pass's *sole* delete trigger, the pass becomes a total no-op — it can never delete a branch without a positive MERGED/CLOSED signal. The safe direction.
 
 ## Worktree-orphan GC acceptance criteria (issue #911)
 
@@ -266,6 +295,31 @@ The daily timer bounds the *steady-state* population, but a worktree leaked at 0
 - [x] Branches with no upstream that ARE checked out in a live-PID worktree classify as `skip-live-agent`; open-PR heads as `skip-open-pr-head`; under-floor/unknown-age as `skip-too-young`. Covered by `test/hydra-branch-prune.test.mts`.
 - [x] Operator-made branches are never eligible — the dispatch-name rail (`skip-not-dispatch-branch`) restricts deletion to `issue-*` / `worktree-agent-*` / `agent-*` / `pr-<N>*` names.
 - [x] `npm test` and `npm run typecheck:test` pass.
+
+## Merged-remote GC acceptance criteria (issue #2029)
+
+- [x] A new `delete-branch-merged-remote` action reclaims local branches with a LIVE (non-gone) upstream whose PR is MERGED/CLOSED — the squash-merge-with-zombie-remote case that passes 1 (`skip-not-gone`) and 3 (`skip-has-upstream`) both miss — `classifyMergedRemote` / `classifyMergedRemotes` in `scripts/ci/branch-prune.ts`, driven by `scripts/branch-prune.sh`.
+- [x] **Local-only invariant preserved**: the pass deletes the LOCAL ref only; the driver is text-guarded against `git push --delete` / colon-refspec remote deletion. Reclaiming the zombie `origin/*` ref is an operator step (see below). Covered by `test/hydra-branch-prune.test.mts`.
+- [x] No positive merge signal → no deletion: an empty merged/closed set (gh absent/unauthenticated, or PR still open) classifies every branch `skip-pr-unresolved` → the pass is a no-op. Covered by `test/hydra-branch-prune.test.mts`.
+- [x] Operator branches never eligible (dispatch-name rail); live-PID worktrees, open-PR heads, attached worktrees, and under-floor/unknown-age branches all skip with their precise reasons. Covered by `test/hydra-branch-prune.test.mts`.
+- [x] The shared 250-deletion hard cap spans this pass too (seeded with the prior three passes' counts). Covered by `test/hydra-branch-prune.test.mts`.
+- [x] `npm test` and `npm run typecheck:test` pass.
+
+### Clearing the standing zombie remotes (operator step)
+
+The merged-remote pass clears the **local** half autonomously. The standing **remote** half — the ~160 surviving `origin/<name>` refs whose PRs are merged/closed — is an external-account mutation (ADR-0005) and is **not** done by this skill or any dev dispatch. To clear them, the operator runs a one-off remote-delete sweep, after which the local refs go `[gone]` and the existing pass 1 reaps them on the next run:
+
+```bash
+# Audit first — list merged/closed PR head branches whose remote ref survives:
+gh pr list --state all --limit 1000 --json headRefName,state \
+  --jq '.[] | select(.state == "MERGED" or .state == "CLOSED") | .headRefName' \
+  | while read -r b; do git ls-remote --exit-code --heads origin "$b" >/dev/null 2>&1 && echo "$b"; done
+
+# Then delete the remote refs (operator-gated — review the list first):
+#   gh api -X DELETE "repos/{owner}/{repo}/git/refs/heads/$b"   # or: git push origin --delete "$b"
+```
+
+Going forward, auto-merge `--delete-branch` (enabled 2026-05-28) prevents new zombie remotes; this step is a one-time cleanup of the accumulated backlog the issue calls out.
 
 ## Acceptance criteria (issue #443)
 

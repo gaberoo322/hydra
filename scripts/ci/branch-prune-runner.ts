@@ -23,12 +23,16 @@
  *     minAgeSeconds?: number,                    // override the 6h age floor
  *     // Dead-branch GC input (issue #1784) — optional; absent = every
  *     // no-upstream branch has unknown age → conservative skip.
- *     branchAges?: { [branchName: string]: number } // ref age in seconds
+ *     branchAges?: { [branchName: string]: number }, // ref age in seconds
+ *     // Merged-remote GC input (issue #2029) — optional; absent/empty = the
+ *     // pass deletes nothing (no positive merge signal). Branch names whose PR
+ *     // is MERGED/CLOSED but whose `origin/<name>` remote ref still exists.
+ *     mergedOrClosedPrHeads?: string[]
  *   }
  *
  * Output JSON shape:
  *   {
- *     report: string,           // human-readable report (all three passes)
+ *     report: string,           // human-readable report (all four passes)
  *     plan: {
  *       deleteWorktreeAndBranch: Array<{ branch: string, worktreePath: string }>,
  *       deleteBranchOnly: string[],
@@ -36,6 +40,9 @@
  *       deleteOrphanWorktree: Array<{ worktreePath: string, branch: string | null }>,
  *       // Dead-branch GC plan (issue #1784) — never-pushed dead-dispatch branches:
  *       deleteBranchNoUpstream: string[],
+ *       // Merged-remote GC plan (issue #2029) — local refs of merged/closed
+ *       // PRs whose remote branch survived; LOCAL delete only:
+ *       deleteBranchMergedRemote: string[],
  *     }
  *   }
  *
@@ -54,6 +61,8 @@ import {
   renderWorktreeOrphanReport,
   classifyDeadBranches,
   renderDeadBranchReport,
+  classifyMergedRemotes,
+  renderMergedRemoteReport,
   DEFAULT_WORKTREE_MIN_AGE_SECONDS,
   type WorktreeRow,
 } from "./branch-prune.ts";
@@ -72,6 +81,10 @@ interface RunnerInput {
   // Dead-branch GC input (issue #1784): branch-name → seconds since the ref
   // was last updated. Absent entries = unknown age = conservative skip.
   branchAges?: Record<string, number>;
+  // Merged-remote GC input (issue #2029): branch names whose PR is MERGED or
+  // CLOSED but whose `origin/<name>` remote ref still exists (squash-merge
+  // without --delete-branch). Absent/empty → the pass deletes nothing.
+  mergedOrClosedPrHeads?: string[];
 }
 
 function readStdin(): string {
@@ -187,7 +200,28 @@ const deadBranchBuckets = classifyDeadBranches(branches, {
 });
 
 const deadBranchReport = renderDeadBranchReport(deadBranchBuckets, audit);
-const fullReport = `${report}\n\n${orphanReport}\n\n${deadBranchReport}`;
+
+// ── Merged-remote GC pass (issue #2029) ────────────────────────────────────
+// Squash-merge-with-zombie-remote: a dispatch branch whose PR is MERGED or
+// CLOSED but whose `origin/<name>` ref still exists, so the upstream never
+// goes `[gone]` — pass 1 sees a healthy upstream (skip-not-gone), pass 3 sees
+// hasUpstream (skip-has-upstream). The merged/closed-PR set is the positive
+// merge signal; an absent set (no `gh`) → the pass deletes nothing. Hard cap
+// seeded with all three prior passes so the 250 ceiling spans the whole run.
+// Deletes the LOCAL ref ONLY (the remote zombie ref is an operator step).
+const mergedRemoteBuckets = classifyMergedRemotes(branches, {
+  currentBranch,
+  worktrees,
+  isLivePid,
+  mergedOrClosedPrHeads: new Set(input.mergedOrClosedPrHeads || []),
+  openPrHeads: new Set(input.openPrHeads || []),
+  minAgeSeconds,
+  priorDeletions:
+    priorDeletions + orphanBuckets.deleteOrphan.length + deadBranchBuckets.deleteBranch.length,
+});
+
+const mergedRemoteReport = renderMergedRemoteReport(mergedRemoteBuckets, audit);
+const fullReport = `${report}\n\n${orphanReport}\n\n${deadBranchReport}\n\n${mergedRemoteReport}`;
 
 const plan = {
   deleteWorktreeAndBranch: buckets.deleteWorktreeAndBranch.map((e) => ({
@@ -200,6 +234,7 @@ const plan = {
     branch: e.branch,
   })),
   deleteBranchNoUpstream: deadBranchBuckets.deleteBranch.map((b) => b.name),
+  deleteBranchMergedRemote: mergedRemoteBuckets.deleteBranch.map((b) => b.name),
 };
 
 process.stdout.write(JSON.stringify({ report: fullReport, plan }));

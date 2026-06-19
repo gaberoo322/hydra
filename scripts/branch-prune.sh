@@ -233,6 +233,28 @@ prune_repo() {
     fi
     [ -z "$OPEN_PR_HEADS_JSON" ] && OPEN_PR_HEADS_JSON='[]'
 
+    # Merged/closed-PR head branches (issue #2029) — the positive merge signal
+    # for the merged-remote GC pass. A squash-merge that did NOT --delete-branch
+    # leaves `origin/<name>` alive, so the local upstream never goes [gone] and
+    # the first three passes never reclaim it. `gh pr list --state all` returns
+    # OPEN+CLOSED+MERGED; we keep only the headRefNames whose state is
+    # MERGED or CLOSED (the dead ones). A missing/unauthenticated `gh` degrades
+    # to an EMPTY set → the merged-remote pass deletes NOTHING (it only ever
+    # acts on a positive merge signal, never on its absence). We use the same
+    # 1000 limit as the open query; standing accumulation that exceeds it is
+    # reclaimed across successive daily runs (the cap is per-pass, not a
+    # one-shot requirement).
+    local MERGED_CLOSED_PR_HEADS_JSON
+    if command -v gh >/dev/null 2>&1; then
+      MERGED_CLOSED_PR_HEADS_JSON=$(gh pr list --state all --limit 1000 \
+        --json headRefName,state \
+        --jq '[.[] | select(.state == "MERGED" or .state == "CLOSED") | .headRefName]' \
+        2>/dev/null || echo '[]')
+    else
+      MERGED_CLOSED_PR_HEADS_JSON='[]'
+    fi
+    [ -z "$MERGED_CLOSED_PR_HEADS_JSON" ] && MERGED_CLOSED_PR_HEADS_JSON='[]'
+
     local CURRENT_BRANCH MAIN_WT
     CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")
     # The main working tree is the first stanza of `git worktree list` — it is
@@ -256,11 +278,12 @@ prune_repo() {
       --argjson ag "$AGES_JSON" \
       --argjson ba "$BRANCH_AGES_JSON" \
       --argjson ph "$OPEN_PR_HEADS_JSON" \
+      --argjson mc "$MERGED_CLOSED_PR_HEADS_JSON" \
       --argjson mn "$MIN_AGE_JSON" \
       --argjson a "$AUDIT_JSON" \
       '{branchesRaw: $b, worktreesRaw: $w, currentBranch: $c, mainWorktreePath: $m,
         locks: $l, worktreeAges: $ag, branchAges: $ba, openPrHeads: $ph,
-        minAgeSeconds: $mn, audit: $a}')
+        mergedOrClosedPrHeads: $mc, minAgeSeconds: $mn, audit: $a}')
 
     PLAN=$(printf '%s' "$INPUT_JSON" | npx -y tsx "$REPO_ROOT/scripts/ci/branch-prune-runner.ts")
     if [ -z "$PLAN" ]; then
@@ -356,6 +379,23 @@ prune_repo() {
         ERRORS=$((ERRORS+1))
       fi
     done < <(printf '%s' "$PLAN" | jq -r '.plan.deleteBranchNoUpstream // [] | .[]')
+
+    # Merged-remote GC (issue #2029): local refs of MERGED/CLOSED PRs whose
+    # remote branch was never deleted (zombie origin ref → upstream never
+    # [gone], so passes 1 and 3 both skip them). The classifier guarantees a
+    # positive merge signal, a dispatch-shaped name, not the current branch,
+    # no live/attached worktree, and past the age floor — so a plain LOCAL
+    # `git branch -D` is all that's left. We deliberately do NOT touch the
+    # remote ref: `git push origin --delete` is an external-account action
+    # (ADR-0005) and stays an operator step. `// []` tolerates an older runner.
+    while IFS= read -r br; do
+      [ -z "$br" ] && continue
+      echo "branch-prune: [$LABEL] deleting merged-remote local branch $br (PR merged/closed, zombie remote ref left for operator)"
+      if ! git branch -D "$br" 2>&1 | sed "s/^/  [$LABEL] /"; then
+        echo "  branch-prune: [$LABEL] branch -D failed for merged-remote $br" >&2
+        ERRORS=$((ERRORS+1))
+      fi
+    done < <(printf '%s' "$PLAN" | jq -r '.plan.deleteBranchMergedRemote // [] | .[]')
 
     # Final pass: prune metadata for manually-deleted worktree dirs.
     echo "branch-prune: [$LABEL] git worktree prune"
