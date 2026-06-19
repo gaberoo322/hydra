@@ -41,14 +41,14 @@ async function cleanBacklogKeys() {
 /**
  * Minimal Express-like mock objects for exercising router handlers directly.
  */
-function makeRes() {
-  const res: any = { _status: 200, _body: null };
+function makeRes(): { _status: number; _body: any; status: (c: number) => any; json: (b: any) => any } {
+  const res = { _status: 200 as number, _body: null as any, status: null as any, json: null as any };
   res.status = (code: number) => { res._status = code; return res; };
   res.json = (body: any) => { res._body = body; return res; };
   return res;
 }
 
-function makeReq(params: Record<string, string>, body: any) {
+function makeReq(params: Record<string, string | number>, body: any) {
   return {
     method: "PATCH",
     params,
