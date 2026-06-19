@@ -22,9 +22,9 @@ import {
   getCurrentRun,
   getRun,
   listRuns,
-  summarizeTerminationHealth,
   readInflightSlotSeed,
 } from "../autopilot/runs.ts";
+import { summarizeTerminationHealth } from "../autopilot/run-projections.ts";
 import { assembleRetroBundle } from "../autopilot/retro-bundle.ts";
 import { RetroBundleParamsSchema, RecentRetrosQuerySchema } from "../schemas/retro.ts";
 import { listRecentRetroArtifacts } from "../redis/retro-artifacts.ts";

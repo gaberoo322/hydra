@@ -23,7 +23,7 @@
  * the import boundary, not merely documented.
  */
 
-import { MERGED_STATUSES, FAILED_STATUSES } from "./runs.ts";
+import { MERGED_STATUSES, FAILED_STATUSES } from "./run-projections.ts";
 
 // ---------------------------------------------------------------------------
 // Dispatch projection shape
