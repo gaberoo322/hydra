@@ -20,7 +20,13 @@
 // seam consumed by route code, and a non-route caller (e.g.
 // src/aggregators/service-strip.ts) composing the canonical probes should not
 // import from src/api/.
-import { ovHealthGet, ovPostJson, isOvFailure, type OvResult } from "../knowledge-base/ov-request.ts";
+import {
+  ovHealthGet,
+  ovPostJson,
+  ovRequest,
+  isOvFailure,
+  type OvResult,
+} from "../knowledge-base/ov-request.ts";
 
 /** The wire shape every service probe folds to: `{status, latencyMs}`. */
 export type ServiceProbeResult = {
@@ -171,6 +177,41 @@ export function classifyOvSearchProbe(
 const SERVICE_PROBE_TIMEOUT_MS = 3000;
 
 /**
+ * The skills-endpoint liveness probe `AbortSignal` ceiling (ms) — issue #2163.
+ *
+ * Deliberately SHORT (the SERVICE_PROBE_TIMEOUT_MS family, 3s) and NOT the 120s
+ * SKILL_REGISTER_TIMEOUT_MS the real registration uses. The probe only asks "is
+ * the `/api/v1/skills` POST handler answering RIGHT NOW?" — not "can a full
+ * 120s registration complete?". When OpenViking is load-gated (#1831) the
+ * handler does not answer inside this window and the probe folds to `ov-timeout`
+ * → `failed`, which is exactly the gate signal the chore needs: do NOT launch a
+ * doomed 4×120s registration pass against a handler that cannot even answer a
+ * cheap validation reject in 3s.
+ */
+const SKILLS_PROBE_TIMEOUT_MS = 3000;
+
+/**
+ * The deliberately-invalid payload the skills liveness probe POSTs (issue #2163).
+ *
+ * The chore exercises `POST /api/v1/skills`, but there is NO read verb on that
+ * resource — OpenViking answers GET/HEAD with a router-level `405 Method Not
+ * Allowed` (`allow: POST`) BEFORE the request ever reaches the load-gated
+ * registration handler. A GET/HEAD probe would therefore measure the wrong
+ * resource: it would report `running` off an instant 405 even while the POST
+ * handler is timing out under indexing load — the exact shallow-probe decoupling
+ * (`probeOv`'s GET /health) this issue fixes.
+ *
+ * So the honest "is the skills POST handler responsive?" signal is a POST that
+ * the handler rejects FAST on an obviously-invalid payload. An empty body makes
+ * OV's skill validator reject with an instant app-error ("Skill data cannot be
+ * None") BEFORE any indexing/embedding/catalog write happens — so it is
+ * read-only in effect (INV2: it mutates NO catalog entry) yet it still routes
+ * through the SAME load-gated handler the chore depends on. Under load that
+ * handler cannot answer in 3s and the probe folds to `failed`.
+ */
+const SKILLS_PROBE_INVALID_BODY = { data: null } as const;
+
+/**
  * Probe a plain-HTTP service endpoint, folding the outcome to the
  * `{status, latencyMs}` wire shape both /health/services and /health/deep emit.
  *
@@ -261,6 +302,64 @@ export async function probeEmbedBackend(
   // OV answering at all (success, or even an app-level non-2xx / malformed JSON)
   // means the backend was reachable enough to respond → running. Discriminate on
   // the machine-readable `code`, never on prose.
+  const unreachable =
+    isOvFailure(result) && (result.code === "ov-service-down" || result.code === "ov-timeout");
+  return {
+    status: unreachable ? "failed" : "running",
+    latencyMs: unreachable ? null : Date.now() - start,
+  };
+}
+
+/**
+ * Probe the OpenViking SKILLS endpoint specifically (issue #2163) — the resource
+ * the skill-catalog-reregister chore actually writes to.
+ *
+ * Why a DISTINCT probe (not `probeOv`, not `probeEmbedBackend`):
+ *  - `probeOv()` only hits OV's `GET /health` — shallow app-liveness. It reports
+ *    `running` while `POST /api/v1/skills` is timing out under indexing load
+ *    (#1831). Gating the chore on it green-lit a guaranteed-doomed registration
+ *    pass EVERY hour: OV-the-app answered /health in <100ms, the gate passed,
+ *    and the chore then hammered the down POST handler for up to ~24min/hour
+ *    (4 skills × 3 attempts × 120s). That decoupling is this issue's root cause.
+ *  - `probeEmbedBackend()` exercises the search/embedding path, not the
+ *    skills-registration path — a healthy search would still green-light a doomed
+ *    skills POST. The gate must probe the resource the chore depends on.
+ *
+ * Verb (the issue's OPEN GAP, resolved here): OpenViking exposes NO read verb on
+ * `/api/v1/skills` — GET and HEAD both return a router-level `405 Method Not
+ * Allowed` (`allow: POST`) before reaching the load-gated handler, so a GET/HEAD
+ * probe would measure the wrong (router) layer and lie. The honest, side-effect-
+ * free signal is a SHORT-timeout POST of a deliberately-invalid payload
+ * ({@link SKILLS_PROBE_INVALID_BODY}): it routes through the SAME load-gated POST
+ * handler, which validation-rejects it (instant app-error) WITHOUT mutating the
+ * catalog (INV2 — read-only in effect). Under load the handler cannot answer in
+ * {@link SKILLS_PROBE_TIMEOUT_MS} and the adapter returns `ov-timeout` →
+ * `failed`, which is the chore's correct "do not launch a doomed pass" gate.
+ *
+ * Classification: a transport failure (`ov-service-down`) or a timeout
+ * (`ov-timeout`) means the handler could not be reached / could not answer in
+ * the short window → `failed`. ANY answer from the handler — a 2xx, or the
+ * EXPECTED validation `ov-non-2xx` / `ov-malformed-json` — proves it is
+ * responsive → `running`. We discriminate on the machine-readable `code`, never
+ * on prose. Same `{status, latencyMs}` ServiceProbe shape every other probe
+ * emits.
+ *
+ * NEVER throws — the OV Request Adapter is contractually never-throwing and both
+ * arms map exhaustively. `ovRequestImpl` is injectable for the test.
+ */
+export async function probeSkillsEndpoint(
+  { ovRequestImpl = ovRequest }: { ovRequestImpl?: typeof ovRequest } = {},
+): Promise<ServiceProbeResult> {
+  const start = Date.now();
+  const result: OvResult<any> = await ovRequestImpl(
+    "/api/v1/skills",
+    { method: "POST", body: JSON.stringify(SKILLS_PROBE_INVALID_BODY) },
+    { timeout: SKILLS_PROBE_TIMEOUT_MS },
+  );
+  // The handler is responsive UNLESS the request never reached it (transport
+  // down) or it could not answer inside the short window (timeout). An app-level
+  // non-2xx / malformed-json means the handler DID answer (it rejected our
+  // deliberately-invalid payload) → the resource is live → running.
   const unreachable =
     isOvFailure(result) && (result.code === "ov-service-down" || result.code === "ov-timeout");
   return {

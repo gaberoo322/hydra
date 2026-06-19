@@ -322,11 +322,25 @@ export async function reRegisterMissingSkills(
   skillCatalogState.lastAttemptAt = Date.now();
 
   const stillMissing = skillCatalogState.total - skillCatalogState.registered;
+  // Issue #2163: ALWAYS log an executed recovery pass (attempted=true), not only
+  // when recovered>0. Before this, a pass that ran but recovered 0 skills (OV
+  // answered the liveness gate but the registrations still failed) emitted
+  // NOTHING — the operator could not tell "ran-and-failed" from "skipped",
+  // exactly the invisibility that masked this bug. Fail-loud convention: a
+  // 0-recovery pass logs at error level (work happened but did not heal the
+  // catalog), a recovering pass logs at info level.
   if (recovered > 0) {
     console.log(
       `[Learning] OV skill catalog recovery: re-registered ${recovered} skill(s), ` +
         `now ${skillCatalogState.registered}/${skillCatalogState.total}` +
         (stillMissing > 0 ? ` (${stillMissing} still missing)` : ""),
+    );
+  } else {
+    console.error(
+      `[Learning] OV skill catalog recovery pass ran but recovered 0 skill(s) — ` +
+        `still ${skillCatalogState.registered}/${skillCatalogState.total} ` +
+        `(${stillMissing} missing). OV answered the liveness gate but the skill ` +
+        `registrations still failed this pass (see per-skill logs above; #2163).`,
     );
   }
   return { attempted: true, recovered, stillMissing };
