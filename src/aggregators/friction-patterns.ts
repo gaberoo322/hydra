@@ -34,7 +34,7 @@
  *   separately.
  */
 
-import { PROMOTION_THRESHOLD } from "../pattern-memory/agent-memory.ts";
+import { PROMOTION_THRESHOLD } from "../pattern-memory/constants.ts";
 import {
   readFrictionPatterns,
   readMetaFrictionIssues,
