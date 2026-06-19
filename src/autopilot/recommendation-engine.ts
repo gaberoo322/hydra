@@ -31,6 +31,10 @@ import {
   summariseSlotStatus,
   shouldFire,
 } from "./recommendation-materiality.ts";
+import {
+  createCapEnforcer,
+  type CapEnforcer,
+} from "./recommendation-cap.ts";
 
 // Back-compat re-export (issue #1986): the materiality gate moved to its own
 // Module, but existing import paths (tests + any caller) keep resolving these
@@ -136,7 +140,6 @@ export interface LlmResult {
 }
 
 /** Constants */
-const DEFAULT_DAILY_CAP_USD = 1.0;
 export const PROMPT_SIZE_BUDGET_BYTES = 4 * 1024;
 const MAX_RECS_PER_CALL = 3;
 
@@ -171,14 +174,17 @@ export interface EngineDeps {
   readSignalsSnapshot: (runId: string) => Promise<SignalsSnapshot>;
   /** Reader for recent permission-wait events. */
   readRecentPermissionWaits: (runId: string, limit: number) => Promise<PermissionWaitEvent[]>;
-  /** Broadcaster for the one-shot `oak_resting` WS event. */
-  broadcastResting?: (runId: string, daily_spend_usd: number, cap_usd: number) => void;
+  /**
+   * The billing ledger (issue #2119) — owns the daily cost cap, the spend
+   * read/charge, and the once-per-UTC-day `oak_resting` broadcast latch.
+   * Defaulted (like `redis`) so the engine builds a production enforcer from
+   * its env/clock when none is injected; the consumer wires the WS broadcaster
+   * in. The cap-vs-interval ordering stays in `shouldFire`, NOT here — this
+   * enforcer only FEEDS daily_spend_usd + daily_cap_usd into that decision.
+   */
+  capEnforcer?: CapEnforcer;
   /** Clock — defaults to `() => Math.floor(Date.now() / 1000)`. */
   now?: () => number;
-  /** Date stamper — defaults to UTC YYYY-MM-DD. */
-  today?: () => string;
-  /** Daily cap in USD — defaults to env or 1.0. */
-  dailyCapUsd?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,42 +341,21 @@ export interface RecommendationEngine {
 export function createRecommendationEngine(deps: EngineDeps): RecommendationEngine {
   const redis = deps.redis ?? (defaultRedis as RecsRedisFacade);
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
-  const today = deps.today ?? (() => utcDateStamp(new Date(now() * 1000)));
-  const dailyCapUsd = Number.isFinite(deps.dailyCapUsd as number)
-    ? (deps.dailyCapUsd as number)
-    : envDailyCap();
-
-  // Tracks whether we've already broadcast the `oak_resting` pause event
-  // for this UTC day. Reset on date rollover.
-  const pauseDayState = { date: "", emitted: false };
-
-  function maybeEmitResting(spendUsd: number): boolean {
-    const date = today();
-    if (pauseDayState.date !== date) {
-      pauseDayState.date = date;
-      pauseDayState.emitted = false;
-    }
-    if (pauseDayState.emitted) return false;
-    pauseDayState.emitted = true;
-    try {
-      deps.broadcastResting?.("__system__", spendUsd, dailyCapUsd);
-    } catch (err: any) {
-      console.error(
-        `[recs-engine] oak_resting broadcaster threw: ${err?.message || err}`,
-      );
-    }
-    return true;
-  }
+  // The billing ledger (issue #2119). Default-construct a production enforcer
+  // from the engine's clock when none is injected — mirrors the `redis`
+  // default. The enforcer owns the cap amount, the spend read/charge, and the
+  // oak_resting latch; the engine just feeds its outputs into `shouldFire`.
+  const cap = deps.capEnforcer ?? createCapEnforcer({ now });
 
   return {
-    getDailyCapUsd: () => dailyCapUsd,
+    getDailyCapUsd: () => cap.getDailyCapUsd(),
 
     async onTurnEnd(payload: TurnEndPayload): Promise<OnTurnEndResult> {
       const runId = payload.run_id;
       if (!runId) return { fired: false, reason: "no-change" };
 
-      const date = today();
-      const dailySpend = await redis.getDailySpendUsd(date);
+      const date = cap.today();
+      const dailySpend = await cap.readDailySpend(date);
 
       // Build the candidate inputs in parallel — none of these mutate state.
       const [recentTurns, slotSnap, signalsSnap, perms, lastCall, lastSig] =
@@ -398,12 +383,12 @@ export function createRecommendationEngine(deps: EngineDeps): RecommendationEngi
         current_signature: signature,
         last_signature: lastSig,
         daily_spend_usd: dailySpend,
-        daily_cap_usd: dailyCapUsd,
+        daily_cap_usd: cap.getDailyCapUsd(),
       });
 
       if (decision.proceed === false) {
         if (decision.skip_reason === "cap") {
-          const emitted = maybeEmitResting(dailySpend);
+          const emitted = cap.maybeEmitResting(dailySpend);
           return { fired: false, reason: "cap", pause_emitted: emitted };
         }
         return { fired: false, reason: decision.skip_reason };
@@ -439,9 +424,7 @@ export function createRecommendationEngine(deps: EngineDeps): RecommendationEngi
       // recommendations — if Redis is wedged after this point, the missed
       // write is recoverable (the engine will simply re-fire next turn,
       // and idempotent rec ids collapse duplicate writes on the hash).
-      if (llmResult.cost_usd > 0) {
-        await redis.incrDailySpendUsd(date, llmResult.cost_usd);
-      }
+      await cap.chargeIfPositive(date, llmResult.cost_usd);
       const callEpoch = now();
       await redis.setLastCallEpoch(runId, callEpoch, RUN_TTL_SECONDS);
       await redis.setLastSignature(runId, signature, RUN_TTL_SECONDS);
@@ -544,25 +527,6 @@ export function defaultLlmClient(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
-
-function utcDateStamp(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function envDailyCap(): number {
-  const raw = process.env.HYDRA_RECS_DAILY_CAP_USD;
-  if (!raw) return DEFAULT_DAILY_CAP_USD;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n < 0) return DEFAULT_DAILY_CAP_USD;
-  return n;
-}
-
-// ---------------------------------------------------------------------------
 // Stream consumer lifecycle — extracted to its own Seam (issue #2024).
 //
 // The XREADGROUP polling loop, consumer-group registration, ACK path, the
@@ -570,8 +534,10 @@ function envDailyCap(): number {
 // Redis-backed prompt readers now live in `./recommendation-consumer.ts`,
 // mirroring the notification-consumer (#1376) / slot-events-bridge siblings.
 // This file stays a pure function of injected `EngineDeps` — it owns the LLM
-// policy, the prompt schema, the material-change gate, and the cost-gate
-// accounting (HYDRA_RECS_DAILY_CAP_USD) — with NO Redis-stream imports.
+// policy, the prompt schema, and the material-change gate, and DELEGATES the
+// cost-gate accounting (HYDRA_RECS_DAILY_CAP_USD) to the injected
+// `capEnforcer` (recommendation-cap.ts, issue #2119) — with NO Redis-stream
+// imports.
 //
 // `recsEngineConsumer` / `parseTurnEndStreamEvent` / `startRecommendationConsumer`
 // are imported directly from `./recommendation-consumer.ts` at every call site

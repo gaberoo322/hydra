@@ -32,6 +32,7 @@ import {
   type RecsRedisFacade,
   type TurnEndPayload,
 } from "../src/autopilot/recommendation-engine.ts";
+import { createCapEnforcer } from "../src/autopilot/recommendation-cap.ts";
 // parseTurnEndStreamEvent moved to the recommendation-consumer Seam (issue
 // #2024) — its dedicated test lives in test/recommendation-consumer.test.mts.
 // The engine still re-exports it for back-compat, but the test exercises the
@@ -126,10 +127,35 @@ function makeFakeLlm(opts: {
 // Boilerplate factories
 // ---------------------------------------------------------------------------
 
-function defaultEngineDeps(overrides: Partial<EngineDeps> = {}): EngineDeps {
-  const { redis } = makeFakeRedis();
+/**
+ * Build engine deps for a test. The billing ledger moved to
+ * recommendation-cap.ts (issue #2119), so the cap policy is now injected as a
+ * `capEnforcer`. To keep the existing test wiring ergonomic, this factory
+ * accepts the pre-extraction cap knobs (`broadcastResting`, `dailyCapUsd`,
+ * `today`) and folds them into a default enforcer built over the SAME fake
+ * redis the engine uses — so the spend asserts (state.spend) still observe the
+ * charges. A caller can still override `capEnforcer` directly.
+ */
+function defaultEngineDeps(
+  overrides: Partial<EngineDeps> & {
+    broadcastResting?: (runId: string, spend: number, cap: number) => void;
+    dailyCapUsd?: number;
+    today?: () => string;
+  } = {},
+): EngineDeps {
+  const { broadcastResting, dailyCapUsd, today, ...engineOverrides } = overrides;
+  const redis = engineOverrides.redis ?? makeFakeRedis().redis;
   const { llm } = makeFakeLlm();
-  let nowEpoch = 1_000_000;
+  const nowEpoch = 1_000_000;
+  const capEnforcer =
+    engineOverrides.capEnforcer ??
+    createCapEnforcer({
+      redis,
+      now: engineOverrides.now ?? (() => nowEpoch),
+      today: today ?? (() => "2026-05-28"),
+      dailyCapUsd: dailyCapUsd ?? 1.0,
+      broadcastResting,
+    });
   return {
     redis,
     llm,
@@ -138,9 +164,8 @@ function defaultEngineDeps(overrides: Partial<EngineDeps> = {}): EngineDeps {
     readSignalsSnapshot: async () => ({}),
     readRecentPermissionWaits: async () => [],
     now: () => nowEpoch,
-    today: () => "2026-05-28",
-    dailyCapUsd: 1.0,
-    ...overrides,
+    ...engineOverrides,
+    capEnforcer,
   };
 }
 
