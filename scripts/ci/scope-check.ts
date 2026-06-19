@@ -136,6 +136,27 @@ function extractSection(body: string, headerRe: RegExp): string[] {
   return Array.from(new Set([...codeSpans, ...bulletPaths]));
 }
 
+/**
+ * Issue #2175: a path that belongs to the **Target** repo (`hydra-betting`),
+ * not this orchestrator repo. A scope section that lists Target-repo siblings
+ * (the cross-repo seam case) must NOT contribute them to the in-scope /
+ * out-of-scope sets — the CHANGED_FILES of an orchestrator PR can never match a
+ * `hydra-betting/…` path, so unioning it as in-scope is harmless noise, but
+ * unioning it as out-of-scope would hard-fail nothing yet still pollute the
+ * report. Filtering them out at extraction keeps the gate honest for legacy
+ * issues whose bodies still leak Target paths (the render-side fix in
+ * scripts/ci/hydra-prd-render.ts prevents NEW leakage).
+ *
+ * Boundary-anchored on the `hydra-betting` path segment (mirrors
+ * `isTargetRepoPath` in scripts/ci/hydra-prd-render.ts) so an orchestrator file
+ * like `src/hydra-betting-adapter.ts` is not mis-classified.
+ */
+export function isTargetRepoPath(path: string): boolean {
+  const p = (path || "").trim();
+  if (!p) return false;
+  return /(^|\/)(gaberoo322\/)?hydra-betting(\/|$)/.test(p);
+}
+
 function looksLikePath(s: string): boolean {
   // Heuristic: contains a slash or a recognised extension, no spaces.
   if (/\s/.test(s)) return false;
@@ -323,14 +344,20 @@ function main(): number {
     return 0;
   }
 
+  // Issue #2175: drop Target-repo (hydra-betting) paths from BOTH sets. A
+  // cross-repo seam issue can leak `hydra-betting/…` siblings into its
+  // `## Files in scope`; an orchestrator PR's CHANGED_FILES can never match
+  // them, so they only ever add noise (and an out-of-scope leak could mislead
+  // the report). Filtering here is the gate-side backstop for already-filed
+  // issues; hydra-prd-render.ts now partitions them at generation time.
   const inScope = Array.from(new Set([
     ...extractScopeFromBody(prBody),
     ...extractScopeFromBody(issueBody),
-  ]));
+  ])).filter((p) => !isTargetRepoPath(p));
   const outOfScopeDeclared = Array.from(new Set([
     ...extractOutOfScopeFromBody(prBody),
     ...extractOutOfScopeFromBody(issueBody),
-  ]));
+  ])).filter((p) => !isTargetRepoPath(p));
   // Justifications only count if they're in the PR body — issues don't get
   // to pre-authorise scope violations.
   const justified = extractScopeJustifications(prBody);

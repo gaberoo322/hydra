@@ -13,6 +13,7 @@ import {
   extractOutOfScopeFromBody,
   extractScopeJustifications,
   classifyScope,
+  isTargetRepoPath,
 } from "../scripts/ci/scope-check.ts";
 
 describe("extractScopeFromBody", () => {
@@ -386,5 +387,32 @@ describe("extractScopeJustifications (issue #396)", () => {
 
   test("returns empty when no marker is present", () => {
     assert.deepEqual(extractScopeJustifications("just a body\n"), []);
+  });
+});
+
+// Issue #2175: a cross-repo seam issue can leak Target-repo (hydra-betting)
+// sibling paths into `## Files in scope`. An orchestrator PR's CHANGED_FILES
+// can never match those, so they only add noise / could mislead the report.
+// `isTargetRepoPath` is the boundary-anchored classifier the gate uses to
+// filter them out of both scope sets.
+describe("isTargetRepoPath (#2175)", () => {
+  test("matches conventional Target-repo path forms", () => {
+    assert.equal(isTargetRepoPath("hydra-betting/web/src/foo.ts"), true);
+    assert.equal(isTargetRepoPath("gaberoo322/hydra-betting/web/x.ts"), true);
+    assert.equal(isTargetRepoPath("/home/gabe/hydra-betting/web/y.ts"), true);
+    assert.equal(isTargetRepoPath("hydra-betting"), true);
+  });
+
+  test("does NOT match orchestrator paths that merely mention the Target", () => {
+    // Boundary-anchored: `hydra-betting` must be a full path segment, so an
+    // orchestrator file whose name embeds the token is not mis-classified.
+    assert.equal(isTargetRepoPath("src/hydra-betting-adapter.ts"), false);
+    assert.equal(isTargetRepoPath("scripts/ci/hydra-target-cleanup-emit.ts"), false);
+    assert.equal(isTargetRepoPath("src/foo.ts"), false);
+  });
+
+  test("treats empty / whitespace input as not-Target", () => {
+    assert.equal(isTargetRepoPath(""), false);
+    assert.equal(isTargetRepoPath("   "), false);
   });
 });
