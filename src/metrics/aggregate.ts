@@ -240,6 +240,90 @@ export async function getCumulativeAccomplishments(count = 15) {
   return accomplished;
 }
 
+// ---------------------------------------------------------------------------
+// Anchor-distribution aggregation (issue #377, extracted in #2126)
+// ---------------------------------------------------------------------------
+
+/** One live priority lane's served-count rollup. */
+export interface AnchorDistributionEntry {
+  priority: string;
+  served: number;
+  candidatesAvailable: number | null;
+  suppressedReason: string | null;
+}
+
+/** The `{windowCycles, distribution, servedByAnchorType}` shape on the wire. */
+export interface AnchorDistributionResult {
+  windowCycles: number;
+  distribution: AnchorDistributionEntry[];
+  /** Raw served-bucket dict for clients that want a quick map. */
+  servedByAnchorType: Record<string, number>;
+}
+
+/**
+ * Pure projection: bucket a metrics-trend array by `anchorType` and roll the
+ * counts up into the live priority lanes (issue #377). Extracted verbatim from
+ * the inline body of `GET /metrics/anchor-distribution` (#2126) so the
+ * priority-bucketing + hard-coded fallback logic is unit-testable on a
+ * synthetic trend array without standing up the Express router or stubbing
+ * Redis — matching the discipline of every other `src/metrics/` aggregator.
+ *
+ * Counts cycles only (no cost; the USD attribution plane was retired in #1651).
+ * The reframe / prior-failure lanes and their starvation gauges were retired in
+ * ADR-0016 (no live writer), so this covers only the live priority lanes.
+ */
+export function projectAnchorDistribution(
+  trend: Array<Record<string, any>>,
+): AnchorDistributionResult {
+  // Bucket cycles by anchorType.
+  const served: Record<string, number> = {};
+  for (const m of trend) {
+    const type = (m.anchorType && String(m.anchorType).trim()) || "unknown";
+    served[type] = (served[type] || 0) + 1;
+  }
+
+  // Per-priority rollup over the live lanes only. `served` is the count from
+  // the rolling window.
+  const distribution: AnchorDistributionEntry[] = [
+    {
+      priority: "kanban",
+      served: served["kanban"] || 0,
+      candidatesAvailable: null,
+      suppressedReason: null,
+    },
+    {
+      priority: "failing-test",
+      served: served["failing-test"] || 0,
+      candidatesAvailable: null,
+      suppressedReason: null,
+    },
+    {
+      priority: "work-queue",
+      served: served["work-queue"] || served["research"] || served["user-request"] || 0,
+      candidatesAvailable: null,
+      suppressedReason: null,
+    },
+    {
+      priority: "codebase-health",
+      served: served["health"] || served["codebase-health"] || 0,
+      candidatesAvailable: null,
+      suppressedReason: null,
+    },
+    {
+      priority: "priorities-doc",
+      served: served["doc"] || served["priorities-doc"] || 0,
+      candidatesAvailable: null,
+      suppressedReason: null,
+    },
+  ];
+
+  return {
+    windowCycles: trend.length,
+    distribution,
+    servedByAnchorType: served,
+  };
+}
+
 /**
  * Compute fix:feature ratio from recent cycles.
  * Fixes = prior-failure or failing-test anchors. Features = everything else that merged.

@@ -1,6 +1,11 @@
 import { Router } from "express";
-import { getMetricsTrend } from "../metrics/trend.ts";
-import { getAggregateStats, getCumulativeAccomplishments, getCostByClass } from "../metrics/aggregate.ts";
+import { getMetricsTrend, projectGroundingDuration } from "../metrics/trend.ts";
+import {
+  getAggregateStats,
+  getCumulativeAccomplishments,
+  getCostByClass,
+  projectAnchorDistribution,
+} from "../metrics/aggregate.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
 import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
@@ -135,55 +140,9 @@ export function createMetricsRouter() {
         return [];
       });
 
-      // Bucket cycles by anchorType — counts cycles only (no cost; the USD
-      // attribution plane was retired in #1651).
-      const served: Record<string, number> = {};
-      for (const m of trend) {
-        const type = (m.anchorType && String(m.anchorType).trim()) || "unknown";
-        served[type] = (served[type] || 0) + 1;
-      }
-
-      // Per-priority rollup over the live lanes only. `served` is the count
-      // from the rolling window.
-      const distribution = [
-        {
-          priority: "kanban",
-          served: served["kanban"] || 0,
-          candidatesAvailable: null,
-          suppressedReason: null,
-        },
-        {
-          priority: "failing-test",
-          served: served["failing-test"] || 0,
-          candidatesAvailable: null,
-          suppressedReason: null,
-        },
-        {
-          priority: "work-queue",
-          served: served["work-queue"] || served["research"] || served["user-request"] || 0,
-          candidatesAvailable: null,
-          suppressedReason: null,
-        },
-        {
-          priority: "codebase-health",
-          served: served["health"] || served["codebase-health"] || 0,
-          candidatesAvailable: null,
-          suppressedReason: null,
-        },
-        {
-          priority: "priorities-doc",
-          served: served["doc"] || served["priorities-doc"] || 0,
-          candidatesAvailable: null,
-          suppressedReason: null,
-        },
-      ];
-
-      return {
-        windowCycles: trend.length,
-        distribution,
-        // Raw served-bucket dict for clients that want a quick map.
-        servedByAnchorType: served,
-      };
+      // Aggregation lives in src/metrics/aggregate.ts; this route is a thin
+      // delegate (issue #2126).
+      return projectAnchorDistribution(trend);
     }),
   );
 
@@ -207,54 +166,9 @@ export function createMetricsRouter() {
       const count = countQuerySchema(50).safeParse(req.query).data?.count ?? 50;
       const trend = await getMetricsTrend(count);
 
-      const samples = trend.map((m: any) => ({
-        cycleId: m.cycleId,
-        groundingMode: typeof m.groundingMode === "string" ? m.groundingMode : "",
-        groundingDurationMs: typeof m.groundingDurationMs === "number" ? m.groundingDurationMs : 0,
-        verificationDurationMs: typeof m.verificationDurationMs === "number" ? m.verificationDurationMs : 0,
-        // testsSelected: how many tests the incremental selector actually ran
-        // (undefined for full-suite runs). Surfaced for rollout-vs-baseline
-        // comparison without forcing callers to do bucket math.
-        testsSelected: typeof m.incrementalTestsSelected === "number" ? m.incrementalTestsSelected : null,
-      }));
-
-      const percentile = (arr: number[], p: number): number | null => {
-        if (arr.length === 0) return null;
-        const sorted = [...arr].sort((a, b) => a - b);
-        const idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p));
-        return sorted[idx];
-      };
-
-      const bucket = (mode: string) => {
-        const subset = samples.filter((s) => s.groundingMode === mode);
-        const ground = subset.map((s) => s.groundingDurationMs).filter((x) => x > 0);
-        const verify = subset.map((s) => s.verificationDurationMs).filter((x) => x > 0);
-        return {
-          cycles: subset.length,
-          grounding: {
-            p50: percentile(ground, 0.5),
-            p95: percentile(ground, 0.95),
-            mean: ground.length > 0 ? Math.round(ground.reduce((a, b) => a + b, 0) / ground.length) : null,
-          },
-          verification: {
-            p50: percentile(verify, 0.5),
-            p95: percentile(verify, 0.95),
-            mean: verify.length > 0 ? Math.round(verify.reduce((a, b) => a + b, 0) / verify.length) : null,
-          },
-        };
-      };
-
-      const buckets = {
-        incremental: bucket("incremental"),
-        full: bucket("full"),
-        unlabelled: bucket(""),
-      };
-
-      return {
-        sampleSize: samples.length,
-        buckets,
-        recent: samples.slice(0, 20),
-      };
+      // Percentile + bucketing math lives in src/metrics/trend.ts; this route
+      // is a thin delegate (issue #2126).
+      return projectGroundingDuration(trend);
     }),
   );
 

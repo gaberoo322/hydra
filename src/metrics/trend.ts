@@ -47,6 +47,114 @@ export function deriveReflectionMatchSource(rawSources: unknown): string {
   return "mixed";
 }
 
+// ---------------------------------------------------------------------------
+// Grounding-duration aggregation (issue #341, extracted in #2126)
+// ---------------------------------------------------------------------------
+
+/** One projected grounding/verification sample from a cycle metrics record. */
+export interface GroundingDurationSample {
+  cycleId: any;
+  groundingMode: string;
+  groundingDurationMs: number;
+  verificationDurationMs: number;
+  testsSelected: number | null;
+}
+
+/** p50/p95/mean rollup over one mode's grounding (or verification) samples. */
+export interface GroundingDurationStat {
+  p50: number | null;
+  p95: number | null;
+  mean: number | null;
+}
+
+/** Per-mode bucket: cycle count + grounding & verification duration stats. */
+export interface GroundingDurationBucket {
+  cycles: number;
+  grounding: GroundingDurationStat;
+  verification: GroundingDurationStat;
+}
+
+/** The `{sampleSize, buckets, recent}` shape on the wire. */
+export interface GroundingDurationResult {
+  sampleSize: number;
+  buckets: {
+    incremental: GroundingDurationBucket;
+    full: GroundingDurationBucket;
+    unlabelled: GroundingDurationBucket;
+  };
+  recent: GroundingDurationSample[];
+}
+
+/**
+ * Pure percentile over a numeric array (nearest-rank, clamped to the last
+ * index). Returns null for an empty array. Exported so the test suite can pin
+ * the bucket math directly. Extracted verbatim from the inline
+ * `GET /metrics/grounding-duration` route (#341, extracted in #2126).
+ */
+export function percentile(arr: number[], p: number): number | null {
+  if (arr.length === 0) return null;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p));
+  return sorted[idx];
+}
+
+/**
+ * Pure projection: bucket a metrics-trend array by `groundingMode`
+ * ("incremental" | "full" | "") and roll up p50/p95/mean grounding &
+ * verification durations per bucket (issue #341). Extracted verbatim from the
+ * inline body of `GET /metrics/grounding-duration` (#2126) so the percentile
+ * + bucketing math is unit-testable on a synthetic trend array without
+ * standing up the Express router or stubbing Redis.
+ *
+ * Takes an already-fetched trend array; no Redis, no Express, no module-level
+ * state.
+ */
+export function projectGroundingDuration(
+  trend: Array<Record<string, any>>,
+): GroundingDurationResult {
+  const samples: GroundingDurationSample[] = trend.map((m: any) => ({
+    cycleId: m.cycleId,
+    groundingMode: typeof m.groundingMode === "string" ? m.groundingMode : "",
+    groundingDurationMs: typeof m.groundingDurationMs === "number" ? m.groundingDurationMs : 0,
+    verificationDurationMs: typeof m.verificationDurationMs === "number" ? m.verificationDurationMs : 0,
+    // testsSelected: how many tests the incremental selector actually ran
+    // (undefined for full-suite runs). Surfaced for rollout-vs-baseline
+    // comparison without forcing callers to do bucket math.
+    testsSelected: typeof m.incrementalTestsSelected === "number" ? m.incrementalTestsSelected : null,
+  }));
+
+  const bucket = (mode: string): GroundingDurationBucket => {
+    const subset = samples.filter((s) => s.groundingMode === mode);
+    const ground = subset.map((s) => s.groundingDurationMs).filter((x) => x > 0);
+    const verify = subset.map((s) => s.verificationDurationMs).filter((x) => x > 0);
+    return {
+      cycles: subset.length,
+      grounding: {
+        p50: percentile(ground, 0.5),
+        p95: percentile(ground, 0.95),
+        mean: ground.length > 0 ? Math.round(ground.reduce((a, b) => a + b, 0) / ground.length) : null,
+      },
+      verification: {
+        p50: percentile(verify, 0.5),
+        p95: percentile(verify, 0.95),
+        mean: verify.length > 0 ? Math.round(verify.reduce((a, b) => a + b, 0) / verify.length) : null,
+      },
+    };
+  };
+
+  const buckets = {
+    incremental: bucket("incremental"),
+    full: bucket("full"),
+    unlabelled: bucket(""),
+  };
+
+  return {
+    sampleSize: samples.length,
+    buckets,
+    recent: samples.slice(0, 20),
+  };
+}
+
 /**
  * Get metrics for the N most recent cycles, with all known numeric fields
  * parsed back from their Redis string form.
