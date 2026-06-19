@@ -48,13 +48,13 @@ export type AutopilotRunOutcome =
  * is the discriminator the dashboard uses to badge each item.
  */
 export type AnomalyMetric =
-  | "cost-per-hour"
+  | "token-burn-rate"
   | "abandonment-rate"
   | "dispatch-class-failure-rate";
 
 /**
  * Direction of an anomaly relative to the baseline. `high` = the latest
- * sample is far ABOVE the mean (e.g. cost-per-hour spiked), `low` = far
+ * sample is far ABOVE the mean (e.g. token-burn-rate spiked), `low` = far
  * BELOW (e.g. abandonment-rate suddenly collapsed). Both are anomalies
  * but the dashboard renders them differently.
  */

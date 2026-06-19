@@ -2,7 +2,7 @@ import { useApi } from "../../../hooks/useApi.js";
 import { TabShell } from "./TabShell.jsx";
 
 const METRIC_LABEL = {
-  "cost-per-hour": "Cost / hour",
+  "token-burn-rate": "Token burn / hr",
   "abandonment-rate": "Abandonment rate",
   "dispatch-class-failure-rate": "Class failure rate",
 };
