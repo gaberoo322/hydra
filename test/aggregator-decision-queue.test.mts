@@ -16,11 +16,15 @@ import assert from "node:assert/strict";
 import {
   getDecisionQueue,
   mergeDecisionItems,
+} from "../src/aggregators/decision-queue.ts";
+// The digest-body parsing primitives moved to their own seam (issue #2130);
+// the test surface for them follows — the seam IS the thing being tested.
+import {
   extractIssueRefs,
   digestRefsFromRows,
   labeledItemsFromRows,
   datedTitle,
-} from "../src/aggregators/decision-queue.ts";
+} from "../src/aggregators/digest-issue.ts";
 import type { IssueRow } from "../src/github/issues.ts";
 
 const NOW = new Date("2026-05-26T12:00:00.000Z");

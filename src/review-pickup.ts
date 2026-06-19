@@ -35,7 +35,7 @@ import {
   digestRefsFromRows,
   labeledItemsFromRows,
   datedTitle,
-} from "./aggregators/decision-queue.ts";
+} from "./aggregators/digest-issue.ts";
 import {
   listIssuesByLabelOrEmpty,
   listIssuesBySearch,
@@ -177,8 +177,9 @@ export function mergePickupItems(
 }
 
 // ---------------------------------------------------------------------------
-// Sub-source: dated operator-decision-queue digest issue (buckets reused from
-// decision-queue.ts to keep one parser for the digest body).
+// Sub-source: dated operator-decision-queue digest issue (parsing primitives
+// shared with decision-queue.ts via the digest-issue seam — one parser for the
+// dated digest body).
 // ---------------------------------------------------------------------------
 
 async function fetchOperatorDigestItems(
