@@ -18,7 +18,7 @@ import {
  * Move the top N backlog items to the Queued lane, sorted by priority.
  * Priority 1 (urgent) first, 0 (none/unset) last. Ties broken by score then age.
  */
-export async function promoteToQueued(count = 1) {
+export async function promoteToQueued(count = 1, now: number = Date.now()) {
   const ids = await getBacklogLaneIds("backlog");
   if (ids.length === 0) return [];
 
@@ -31,13 +31,14 @@ export async function promoteToQueued(count = 1) {
 
   const toPromote = items.slice(0, count);
   const moved = [];
+  const dateOnly = new Date(now).toISOString().split("T")[0];
 
   for (const item of toPromote) {
     await removeFromBacklogLane("backlog", item.id);
-    item.meta = { ...item.meta, queuedAt: new Date().toISOString().split("T")[0] };
-    applyLaneTransition(item, "queued");
+    item.meta = { ...item.meta, queuedAt: dateOnly };
+    applyLaneTransition(item, "queued", {}, now);
     await saveItem(item);
-    await addToBacklogLane("queued", Date.now(), item.id);
+    await addToBacklogLane("queued", now, item.id);
     moved.push(item);
   }
 
@@ -57,6 +58,7 @@ export async function promoteToQueued(count = 1) {
 export async function moveToInProgress(
   title: string,
   opts: { claimedBy?: string | null } | string | null = null,
+  now: number = Date.now(),
 ): Promise<any> {
   const structured = opts !== null && opts !== undefined;
   const claimedBy = typeof opts === "string"
@@ -76,10 +78,10 @@ export async function moveToInProgress(
       const item = await getItem(id);
       if (item && item.title === title) {
         await removeFromBacklogLane(sourceLane, id);
-        item.meta = { ...item.meta, startedAt: new Date().toISOString().split("T")[0] };
-        applyLaneTransition(item, "inProgress", { claimedBy });
+        item.meta = { ...item.meta, startedAt: new Date(now).toISOString().split("T")[0] };
+        applyLaneTransition(item, "inProgress", { claimedBy }, now);
         await saveItem(item);
-        await addToBacklogLane("inProgress", Date.now(), id);
+        await addToBacklogLane("inProgress", now, id);
         if (structured) return { ok: true, item };
         return true;
       }
@@ -93,7 +95,7 @@ export async function moveToInProgress(
  * Move an item to Done. Searches all non-done lanes so items in blocked
  * or queued can also be completed (e.g. merged while blocked).
  */
-export async function moveToDone(title: string, outcome = "merged") {
+export async function moveToDone(title: string, outcome = "merged", now: number = Date.now()) {
   for (const sourceLane of ["inProgress", "blocked", "queued", "backlog"]) {
     const ids = await getBacklogLaneIds(sourceLane);
     for (const id of ids) {
@@ -103,12 +105,12 @@ export async function moveToDone(title: string, outcome = "merged") {
         item.checked = outcome === "merged";
         item.meta = {
           ...item.meta,
-          completedAt: new Date().toISOString().split("T")[0],
+          completedAt: new Date(now).toISOString().split("T")[0],
           outcome,
         };
-        applyLaneTransition(item, "done");
+        applyLaneTransition(item, "done", {}, now);
         await saveItem(item);
-        await addToBacklogLane("done", -Date.now(), id);
+        await addToBacklogLane("done", -now, id);
         return true;
       }
     }
@@ -125,7 +127,7 @@ export async function moveToDone(title: string, outcome = "merged") {
  * the return value rather than wrapping the call in a try/catch (the function
  * does not throw for not-found).
  */
-export async function blockByTitle(title: string, reason: string) {
+export async function blockByTitle(title: string, reason: string, now: number = Date.now()) {
   for (const sourceLane of ["inProgress", "queued", "backlog"]) {
     const ids = await getBacklogLaneIds(sourceLane);
     for (const id of ids) {
@@ -134,12 +136,12 @@ export async function blockByTitle(title: string, reason: string) {
         await removeFromBacklogLane(sourceLane, id);
         item.meta = {
           ...item.meta,
-          blockedAt: new Date().toISOString().split("T")[0],
+          blockedAt: new Date(now).toISOString().split("T")[0],
           blockedReason: reason,
         };
-        applyLaneTransition(item, "blocked");
+        applyLaneTransition(item, "blocked", {}, now);
         await saveItem(item);
-        await addToBacklogLane("blocked", Date.now(), id);
+        await addToBacklogLane("blocked", now, id);
         console.log(`[Backlog] Moved "${title}" to Blocked: ${reason}`);
         return true;
       }
@@ -151,7 +153,7 @@ export async function blockByTitle(title: string, reason: string) {
 /**
  * Remove a failed/abandoned item from In Progress back to Backlog.
  */
-export async function returnToBacklog(title: string, reason: string) {
+export async function returnToBacklog(title: string, reason: string, now: number = Date.now()) {
   const ids = await getBacklogLaneIds("inProgress");
 
   for (const id of ids) {
@@ -160,12 +162,12 @@ export async function returnToBacklog(title: string, reason: string) {
       await removeFromBacklogLane("inProgress", id);
       item.meta = {
         ...item.meta,
-        returnedAt: new Date().toISOString().split("T")[0],
+        returnedAt: new Date(now).toISOString().split("T")[0],
         returnReason: reason,
       };
-      applyLaneTransition(item, "backlog");
+      applyLaneTransition(item, "backlog", {}, now);
       await saveItem(item);
-      await addToBacklogLane("backlog", Date.now(), id);
+      await addToBacklogLane("backlog", now, id);
       return true;
     }
   }
@@ -191,6 +193,7 @@ export async function moveItemToLane(
   itemId: any,
   targetLane: string,
   opts: { claimedBy?: string | null; reason?: string | null } = {},
+  now: number = Date.now(),
 ) {
   if (!LANES.includes(targetLane)) return { ok: false, error: `Invalid lane: ${targetLane}` };
   const item = await getItem(itemId);
@@ -222,14 +225,14 @@ export async function moveItemToLane(
   if (targetLane === "blocked" && reason) {
     item.meta = {
       ...item.meta,
-      blockedAt: new Date().toISOString().split("T")[0],
+      blockedAt: new Date(now).toISOString().split("T")[0],
       blockedReason: reason,
     };
   }
 
-  applyLaneTransition(item, targetLane, { claimedBy: opts.claimedBy ?? null });
+  applyLaneTransition(item, targetLane, { claimedBy: opts.claimedBy ?? null }, now);
   await saveItem(item);
-  const score = targetLane === "done" ? -Date.now() : Date.now();
+  const score = targetLane === "done" ? -now : now;
   await addToBacklogLane(targetLane, score, itemId);
   return { ok: true };
 }
@@ -247,9 +250,9 @@ export async function deleteItem(itemId: any) {
 /**
  * Prune done items older than DONE_RETENTION_DAYS.
  */
-export async function pruneOldDoneItems() {
+export async function pruneOldDoneItems(now: number = Date.now()) {
   const ids = await getBacklogLaneIds("done");
-  const cutoff = Date.now() - DONE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const cutoff = now - DONE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let pruned = 0;
 
   for (const id of ids) {

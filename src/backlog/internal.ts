@@ -34,13 +34,21 @@ export const WIP_LIMIT = parseInt(process.env.HYDRA_WIP_LIMIT) || 3;
  *
  * Mutates `item` and returns the timestamp written. Callers persist via
  * saveItem().
+ *
+ * `now` is an optional trailing clock seam (ms since epoch, default
+ * `Date.now()`) mirroring the backlog-module idiom in stale-escalation.ts
+ * (`itemAgeMs(item, now)`) and candidate-eligibility.ts (`isInFlightPR(item,
+ * now)`): tests pin a fixed instant to assert exact movedAt/claimedAt without
+ * clock tolerance. Callers that omit it get `new Date().toISOString()` exactly
+ * as before — purely extending, never breaking.
  */
 export function applyLaneTransition(
   item: any,
   targetLane: string,
   opts: { claimedBy?: string | null } = {},
+  now: number = Date.now(),
 ): { movedAt: string } {
-  const movedAt = new Date().toISOString();
+  const movedAt = new Date(now).toISOString();
   item.lane = targetLane;
   item.movedAt = movedAt;
   if (targetLane === "inProgress") {
