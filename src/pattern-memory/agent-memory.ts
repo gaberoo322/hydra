@@ -34,12 +34,15 @@ import {
 } from "../redis/agent-memory.ts";
 import {
   escalateIfNeeded,
-  escalationThresholdForCue,
-  isMetadataCue,
-  shouldEscalateAtHitCount,
   type EscalationInput,
   type EscalationResult,
 } from "./escalation.ts";
+// Issue #2178 — the promotion/escalation decision spine extracted from this
+// file's `recordPattern` orchestration. `decideRecordActions` is a pure
+// predicate: given a pattern's post-hit state it answers "promote? write the
+// feedback file? escalate?", so the "when to call the seams" choice is named
+// and testable on its own instead of inlined across `recordPattern`'s branches.
+import { decideRecordActions } from "./decision.ts";
 import {
   consolidateStalePromotedRules,
   detectStalePromotedRules,
@@ -265,21 +268,23 @@ async function sweepStalePromotions(agentName: string) {
   let changed = false;
 
   for (const p of patterns) {
-    if (p.hitCount >= PROMOTION_THRESHOLD && !p.promoted) {
+    // Issue #2178 — the retroactive-promotion decision shares the same pure
+    // predicate as `recordPattern`. This sweep is memory-namespace only
+    // (loadPatterns defaults to "memory"), so `decision.writeFeedbackFile`
+    // folds in the #524 metadata-cue skip exactly as the inline check did.
+    const decision = decideRecordActions(p, "memory", PROMOTION_THRESHOLD);
+    if (decision.promote) {
       try {
-        // Issue #524 — metadata cues skip the feedback-file write but still
-        // get the `promoted` stamp so we don't re-enter this branch.
-        const metadataOnly = isMetadataCue(p.category);
-        if (!metadataOnly) {
+        if (decision.writeFeedbackFile) {
           await promoteToFeedback(agentName, p);
         }
         p.promoted = true;
         p.promotedAt = new Date().toISOString().split("T")[0];
         p.hitsAtPromotion = p.hitCount;
         changed = true;
-        const target = metadataOnly
-          ? "(metadata-only — feedback-file write skipped)"
-          : `to-${agentName}.md`;
+        const target = decision.writeFeedbackFile
+          ? `to-${agentName}.md`
+          : "(metadata-only — feedback-file write skipped)";
         console.log(`[Learning] Retroactive promotion: "${p.category}" to ${target} (${p.hitCount} hits)`);
       } catch (err: any) {
         console.error(`[Learning] Retroactive promotion failed for "${p.category}": ${err.message}`);
@@ -461,24 +466,25 @@ export async function recordPattern(
     existing.examples = [details.example, ...existing.examples].slice(0, MAX_EXAMPLES);
     if (details.source) existing.source = details.source;
 
-    if (existing.hitCount >= PROMOTION_THRESHOLD && !existing.promoted) {
-      // Issue #524 — metadata cues (acceptance-criterion-deferred) record
-      // hits and stamp `promoted: true` so we don't re-evaluate, but skip
-      // the feedback-file write because they aren't defects.
-      // Issue #1667 — judged on the CANONICAL spelling (existing.category),
-      // not the raw input, so a fuzzy-merged variant can't dodge or trigger
-      // the metadata classification.
-      const metadataOnly = isMetadataCue(existing.category);
-      if (namespace === "memory" && !metadataOnly) {
+    // Issue #2178 — the promotion decision moves to the named pure predicate.
+    // `decision.promote` answers "crossed threshold, not yet promoted?" and
+    // `decision.writeFeedbackFile` folds in the #524 metadata-cue skip and the
+    // namespace gate. Judged on the CANONICAL category (issue #1667) so a
+    // fuzzy-merged variant can't dodge or trigger the metadata classification.
+    const decision = decideRecordActions(existing, namespace, PROMOTION_THRESHOLD);
+    if (decision.promote) {
+      if (decision.writeFeedbackFile) {
         await promoteToFeedback(agentName, existing);
       }
       existing.promoted = true;
       existing.promotedAt = today;
       existing.hitsAtPromotion = existing.hitCount;
       crossedThreshold = true;
-      const target = metadataOnly
-        ? `(metadata-only — feedback-file write skipped)`
-        : namespace === "memory" ? `to-${agentName}.md` : `friction:${agentName}`;
+      const target = decision.writeFeedbackFile
+        ? `to-${agentName}.md`
+        : namespace === "memory"
+          ? `(metadata-only — feedback-file write skipped)`
+          : `friction:${agentName}`;
       console.log(`[Learning] Promoted "${existing.category}" to ${target} (${existing.hitCount} hits)`);
     }
     pattern = existing;
@@ -502,17 +508,17 @@ export async function recordPattern(
 
   // Issue #512 — decide whether this hit merits a GitHub-issue escalation.
   // Threshold-cross plus every multiple of 10 thereafter (hitCount =
-  // threshold, threshold+10, threshold+20, ...). The decision and input
-  // shaping live here.
+  // threshold, threshold+10, threshold+20, ...). Only the INPUT shaping lives
+  // here now — issue #2178 moved the "should it fire?" predicate into
+  // `decideRecordActions` (which folds in the #524 per-cue threshold override
+  // and the #1789 never-escalate sentinel). Computed over the finalized
+  // `pattern` so it covers both the existing-hit and new-pattern branches.
   //
-  // Issue #524 — per-cue threshold override. `acceptance-criterion-deferred`
-  // uses a much higher threshold (20+) so it doesn't fire on every PR with
-  // operator-observable ACs; everything else keeps the legacy 3-hit threshold.
   // Issue #1667 — escalation decisions key on the CANONICAL category
   // (pattern.category), so hits arriving under merged alias spellings count
   // toward — and are reported under — one cue.
-  const threshold = escalationThresholdForCue(pattern.category, PROMOTION_THRESHOLD);
-  const escalation: EscalationInput | null = shouldEscalateAtHitCount(pattern.hitCount, threshold)
+  const escalationDecision = decideRecordActions(pattern, namespace, PROMOTION_THRESHOLD);
+  const escalation: EscalationInput | null = escalationDecision.escalate
     ? {
         kind: namespace === "friction" ? "friction" : "lesson",
         cue: pattern.category,
