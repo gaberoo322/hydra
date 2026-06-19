@@ -349,6 +349,118 @@ describe("backlog stale-claim reaper (issue #374)", () => {
     assert.equal(lanes.queued[0].meta.reapReason, "stale-claim");
   });
 
+  // ---------------------------------------------------------------------
+  // Clock seam (issue #2157) — the stale-age predicate's reference clock is an
+  // injectable `opts.now`, so the age threshold can be exercised against a
+  // freshly-stamped (NOT backdated) claim purely by advancing the synthetic
+  // clock. This decouples the reaper-logic test from the Redis claimedAt
+  // storage format, which is the whole point of the seam.
+  // ---------------------------------------------------------------------
+
+  test("reapStaleClaims uses opts.now (not Date.now) for the stale-age predicate", async (t) => {
+    requireRedis(t);
+
+    // A claim stamped at real wall-clock — NOT backdated. We never touch its
+    // claimedAt in Redis; the synthetic clock alone decides staleness.
+    const { id } = await admin.addToBacklog({ title: "Clock-seam victim", category: "test" });
+    await admin.moveToInProgress("Clock-seam victim", { claimedBy: "codex" });
+
+    const raw = await redis.hget("hydra:backlog:items", id);
+    const claimedAtMs = new Date(JSON.parse(raw).claimedAt).getTime();
+    const maxAgeMs = 2 * 60 * 60 * 1000;
+
+    // 1) now just before the threshold → item is fresh, nothing reaped.
+    const fresh = await admin.reapStaleClaims({
+      maxAgeMs,
+      now: claimedAtMs + maxAgeMs - 1000,
+      fetchOpenPrRefs: async () => null,
+      fetchMergedPrRefs: async () => null,
+    });
+    assert.equal(fresh.reaped.length, 0, "under-threshold synthetic now leaves the claim alone");
+    const stillInProgress = await admin.getBacklogCounts();
+    assert.equal(stillInProgress.inProgress, 1, "fresh claim stays inProgress");
+
+    // 2) now well past the threshold → the SAME un-backdated item is now stale.
+    const stale = await admin.reapStaleClaims({
+      maxAgeMs,
+      now: claimedAtMs + maxAgeMs + 60 * 1000,
+      fetchOpenPrRefs: async () => null,
+      fetchMergedPrRefs: async () => null,
+    });
+    assert.equal(stale.reaped.length, 1, "over-threshold synthetic now reaps the claim");
+    assert.equal(stale.reaped[0].id, id);
+    // ageMs is derived from the injected clock, so it equals exactly the offset.
+    assert.equal(stale.reaped[0].ageMs, maxAgeMs + 60 * 1000);
+
+    const lanes = await admin.loadBacklog();
+    assert.equal(lanes.inProgress.length, 0);
+    assert.equal(lanes.queued.length, 1);
+    assert.equal(lanes.queued[0].id, id);
+  });
+
+  test("record-stamping wall-clock (reapedAt) is NOT taken from opts.now", async (t) => {
+    requireRedis(t);
+
+    const { id } = await admin.addToBacklog({ title: "Stamp victim", category: "test" });
+    await admin.moveToInProgress("Stamp victim", { claimedBy: "codex" });
+
+    const raw = await redis.hget("hydra:backlog:items", id);
+    const claimedAtMs = new Date(JSON.parse(raw).claimedAt).getTime();
+    const maxAgeMs = 2 * 60 * 60 * 1000;
+
+    // A synthetic `now` far in the past relative to real wall-clock. It must
+    // only drive the stale predicate (we offset past the threshold so the item
+    // reaps), and must NOT leak into the reapedAt audit stamp.
+    const syntheticNow = claimedAtMs + maxAgeMs + 1;
+    const before = Date.now();
+    const result = await admin.reapStaleClaims({
+      maxAgeMs,
+      now: syntheticNow,
+      fetchOpenPrRefs: async () => null,
+      fetchMergedPrRefs: async () => null,
+    });
+    const afterT = Date.now();
+    assert.equal(result.reaped.length, 1);
+
+    const lanes = await admin.loadBacklog();
+    const reapedAtMs = new Date(lanes.queued[0].meta.reapedAt).getTime();
+    // reapedAt is a true wall-clock stamp taken during the call, not syntheticNow.
+    assert.ok(
+      reapedAtMs >= before && reapedAtMs <= afterT,
+      `reapedAt (${reapedAtMs}) must be real wall-clock in [${before}, ${afterT}], not syntheticNow (${syntheticNow})`,
+    );
+    assert.notEqual(reapedAtMs, syntheticNow, "reapedAt must not equal the injected clock");
+  });
+
+  test("getStaleClaims uses opts.now for the age annotation and stale filter", async (t) => {
+    requireRedis(t);
+
+    // Fresh wall-clock claim, never backdated.
+    const { id } = await admin.addToBacklog({ title: "Preview victim", category: "test" });
+    await admin.moveToInProgress("Preview victim", { claimedBy: "claude" });
+
+    const raw = await redis.hget("hydra:backlog:items", id);
+    const claimedAtMs = new Date(JSON.parse(raw).claimedAt).getTime();
+    const maxAgeMs = 2 * 60 * 60 * 1000;
+
+    // Under-threshold synthetic now: annotated but not stale.
+    const youngView = await admin.getStaleClaims({ maxAgeMs, now: claimedAtMs + 1000 });
+    assert.equal(youngView.all.length, 1);
+    assert.equal(youngView.all[0].claimedAgeMs, 1000, "age derived from injected clock");
+    assert.equal(youngView.stale.length, 0);
+
+    // Over-threshold synthetic now: same item, now flagged stale, no mutation.
+    const oldView = await admin.getStaleClaims({ maxAgeMs, now: claimedAtMs + maxAgeMs + 5000 });
+    assert.equal(oldView.stale.length, 1);
+    assert.equal(oldView.stale[0].id, id);
+    assert.equal(oldView.stale[0].claimedAgeMs, maxAgeMs + 5000);
+
+    // getStaleClaims never mutates — item is still inProgress after both views.
+    const counts = await admin.getBacklogCounts();
+    assert.equal(counts.inProgress, 1);
+    assert.equal(counts.queued, 0);
+  });
+
   test("merged-PR guard ignores merged PRs that mention a different item ID", async (t) => {
     requireRedis(t);
 

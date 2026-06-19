@@ -50,13 +50,17 @@ export interface StaleClaim {
  * mutate any state. Used by `/api/backlog/stale-claims` so the operator and
  * dashboard can preview what the reaper would touch.
  */
-export async function getStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<{
+export async function getStaleClaims(opts: { maxAgeMs?: number; now?: number } = {}): Promise<{
   all: StaleClaim[];
   stale: StaleClaim[];
   maxAgeMs: number;
 }> {
   const maxAgeMs = opts.maxAgeMs ?? CLAIM_MAX_AGE_MS_DEFAULT;
-  const now = Date.now();
+  // Clock seam (issue #2157): only the stale-age predicate's reference clock is
+  // injectable, so the age-threshold logic can be unit-tested without backdating
+  // real Redis claimedAt state. Record-stamping wall-clock (reapedAt/blockedAt/
+  // completedAt/metric-day-key/alert ts) stays real `new Date()`/`Date.now()`.
+  const now = opts.now ?? Date.now();
   const items = await getLaneItems("inProgress");
   const all: StaleClaim[] = items.map((item: any) => {
     const claimedAtIso = item.claimedAt ?? null;
@@ -118,6 +122,7 @@ export async function getStaleClaims(opts: { maxAgeMs?: number } = {}): Promise<
  */
 export async function reapStaleClaims(opts: {
   maxAgeMs?: number;
+  now?: number;
   fetchOpenPrRefs?: () => Promise<MergedRef[] | null>;
   fetchMergedPrRefs?: () => Promise<MergedRef[] | null>;
 } = {}): Promise<{
@@ -127,7 +132,12 @@ export async function reapStaleClaims(opts: {
   maxAgeMs: number;
 }> {
   const maxAgeMs = opts.maxAgeMs ?? CLAIM_MAX_AGE_MS_DEFAULT;
-  const now = Date.now();
+  // Clock seam (issue #2157): injects ONLY the stale-predicate comparison clock
+  // (ageMs = now - claimedAtMs; ageMs <= maxAgeMs). Every record-stamping
+  // wall-clock below — reapedAt, blockedAt, completedAt, the per-day metric key,
+  // setClaimsReapedLast, and the alert ts — deliberately stays real-time so the
+  // audit trail records true wall-clock even under an injected `now`.
+  const now = opts.now ?? Date.now();
   const ids = await getBacklogLaneIds("inProgress");
   const reaped: Array<{ id: string; title: string; ageMs: number; escalated: boolean }> = [];
   const reapedToDone: Array<{ id: string; title: string; ageMs: number }> = [];
