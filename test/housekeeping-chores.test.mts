@@ -28,6 +28,7 @@ import {
   returnStaleInProgressItems,
   pruneStaleRedisKeys,
   runMergedItemReconciler,
+  runSkillCatalogReregister,
 } from "../src/scheduler/housekeeping.ts";
 
 interface PublishedEvent {
@@ -381,5 +382,85 @@ describe("runMergedItemReconciler — health snapshot persistence (issue #2057)"
     });
     // Reaching here without throwing is the assertion.
     assert.ok(true);
+  });
+});
+
+describe("runSkillCatalogReregister — isolated (issue #2148)", () => {
+  const fullState = () => ({
+    skills: [
+      { name: "planner", registered: true, lastError: null, lastSuccessAt: 1 },
+      { name: "executor", registered: true, lastError: null, lastSuccessAt: 1 },
+    ],
+    registered: 2,
+    total: 2,
+    completed: true,
+    lastAttemptAt: 1,
+  });
+  const emptyCompletedState = () => ({
+    skills: [
+      { name: "planner", registered: false, lastError: "ov-timeout" as const, lastSuccessAt: null },
+      { name: "executor", registered: false, lastError: "ov-timeout" as const, lastSuccessAt: null },
+    ],
+    registered: 0,
+    total: 2,
+    completed: true,
+    lastAttemptAt: 1,
+  });
+  const ovUp = async () => ({ status: "running" as const, latencyMs: 5 });
+  const ovDown = async () => ({ status: "failed" as const, latencyMs: null });
+
+  test("skips (no probe, no re-register) before the startup pass completes", async () => {
+    let probed = false;
+    let reRan = false;
+    const result = await runSkillCatalogReregister({
+      getState: () => ({ ...emptyCompletedState(), completed: false }),
+      probeOvImpl: async () => { probed = true; return { status: "running", latencyMs: 1 }; },
+      reRegister: async () => { reRan = true; return { attempted: true, recovered: 0, stillMissing: 2 }; },
+    });
+    assert.equal(result, false, "an in-flight startup pass must route to skipped");
+    assert.equal(probed, false, "must not probe OV before a pass has completed");
+    assert.equal(reRan, false, "must not re-register before a pass has completed");
+  });
+
+  test("skips a full catalog WITHOUT probing OV (cheap in-process guard first)", async () => {
+    let probed = false;
+    const result = await runSkillCatalogReregister({
+      getState: fullState,
+      probeOvImpl: async () => { probed = true; return { status: "running", latencyMs: 1 }; },
+      reRegister: async () => { throw new Error("must not be called on a full catalog"); },
+    });
+    assert.equal(result, false, "a full catalog is a no-op skip");
+    assert.equal(probed, false, "a full catalog must not even probe OV");
+  });
+
+  test("skips when the catalog is short but OpenViking is still down", async () => {
+    let reRan = false;
+    const result = await runSkillCatalogReregister({
+      getState: emptyCompletedState,
+      probeOvImpl: ovDown,
+      reRegister: async () => { reRan = true; return { attempted: true, recovered: 0, stillMissing: 2 }; },
+    });
+    assert.equal(result, false, "must not re-attempt while OV is down");
+    assert.equal(reRan, false, "the OV-liveness gate must block the re-register call");
+  });
+
+  test("runs the re-register once OV is live and the catalog is short", async () => {
+    let reRan = false;
+    const result = await runSkillCatalogReregister({
+      getState: emptyCompletedState,
+      probeOvImpl: ovUp,
+      reRegister: async () => { reRan = true; return { attempted: true, recovered: 2, stillMissing: 0 }; },
+    });
+    assert.equal(result, true, "a recovery pass that ran counts as ran");
+    assert.equal(reRan, true, "the re-register entry point is invoked once OV is live");
+  });
+
+  test("routes an attempted:false re-register result to skipped", async () => {
+    const result = await runSkillCatalogReregister({
+      getState: emptyCompletedState,
+      probeOvImpl: ovUp,
+      reRegister: async () => ({ attempted: false, recovered: 0, stillMissing: 2 }),
+    });
+    assert.equal(result, false, "a guard-short-circuited re-register routes to skipped");
   });
 });

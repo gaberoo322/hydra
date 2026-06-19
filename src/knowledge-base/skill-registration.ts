@@ -240,3 +240,94 @@ export async function registerSkills(opts: RegisterSkillsOptions = {}) {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// Post-startup re-registration (issue #2148)
+//
+// `registerSkills()` runs EXACTLY ONCE at startup (learning-lifecycle.ts,
+// fire-and-forget). Under a sustained OpenViking indexing-load window the
+// bounded #1828 retries (3 attempts, 120s budget) all exhaust, the catalog
+// stays empty/partial, and NOTHING re-attempts until a manual process restart —
+// the `autoRecovery:false` gap the health surface (#1992) advertises.
+//
+// `reRegisterMissingSkills()` is the additive recovery entry point an hourly
+// Housekeeping chore calls once OpenViking has recovered. It re-POSTs ONLY the
+// still-un-registered skills (registered===false) and MERGES each per-skill
+// outcome back into the SAME in-process `skillCatalogState` that
+// `getSkillCatalogState()` / `GET /api/health/skills` read — so a successful
+// recovery flips empty→ok WITHOUT a restart, and a skill that already succeeded
+// at startup is never clobbered or re-POSTed. Startup-path semantics are
+// unchanged: `registerSkills()` still owns the once-at-startup full pass.
+// ---------------------------------------------------------------------------
+
+/** Result of a {@link reRegisterMissingSkills} pass: what it attempted and how it went. */
+export interface ReRegisterResult {
+  /** false when the guard short-circuited (no pass yet, or catalog already full). */
+  attempted: boolean;
+  /** Number of previously-missing skills this pass newly registered. */
+  recovered: number;
+  /** Number of skills still un-registered after this pass. */
+  stillMissing: number;
+}
+
+/**
+ * Re-register only the skills still marked `registered:false` in the in-process
+ * catalog state, merging outcomes back into the existing entries (#2148).
+ *
+ * Guarded so it is a no-op (`attempted:false`) when there is nothing to do:
+ *  - the startup pass has not completed yet (`completed:false`) — registration
+ *    is still in flight; let it finish, don't race it.
+ *  - the catalog is already full (`registered >= total`) — idempotent no-op.
+ *
+ * The caller (the Housekeeping chore) additionally gates on OpenViking liveness,
+ * so this function assumes OV is reachable and simply re-attempts the gap. It
+ * preserves the #1828 retry policy (it reuses `registerOneSkill`) and the
+ * never-throw contract — it returns a result object and never raises.
+ */
+export async function reRegisterMissingSkills(
+  opts: RegisterSkillsOptions = {},
+): Promise<ReRegisterResult> {
+  const backoffBaseMs = opts.backoffBaseMs ?? SKILL_REGISTER_BACKOFF_BASE_MS;
+
+  // Guard: nothing to do before the startup pass finishes, or once the catalog
+  // is already full. Matches the {ran, skipped} chore contract — a guard miss
+  // is a skip, not work.
+  if (!skillCatalogState.completed || skillCatalogState.registered >= skillCatalogState.total) {
+    return { attempted: false, recovered: 0, stillMissing: skillCatalogState.total - skillCatalogState.registered };
+  }
+
+  // Re-POST only the still-missing skills, by name, against the live OV_SKILLS
+  // definitions. Merge each outcome into the existing entry in place so a skill
+  // that already succeeded is never reset.
+  let recovered = 0;
+  for (let i = 0; i < skillCatalogState.skills.length; i++) {
+    const entry = skillCatalogState.skills[i];
+    if (entry.registered) continue;
+    const def = OV_SKILLS.find((s) => s.name === entry.name);
+    if (!def) continue; // defensive: state is seeded from OV_SKILLS, so always found
+    const outcome = await registerOneSkill(def, backoffBaseMs);
+    if (outcome.ok === true) {
+      entry.registered = true;
+      entry.lastError = null;
+      entry.lastSuccessAt = Date.now();
+      recovered++;
+    } else {
+      entry.lastError = outcome.code;
+    }
+  }
+
+  // Recompute the rollup so getSkillCatalogState()/health see the recovery
+  // immediately. `completed` stays true; bump lastAttemptAt to this pass.
+  skillCatalogState.registered = skillCatalogState.skills.filter((s) => s.registered).length;
+  skillCatalogState.lastAttemptAt = Date.now();
+
+  const stillMissing = skillCatalogState.total - skillCatalogState.registered;
+  if (recovered > 0) {
+    console.log(
+      `[Learning] OV skill catalog recovery: re-registered ${recovered} skill(s), ` +
+        `now ${skillCatalogState.registered}/${skillCatalogState.total}` +
+        (stillMissing > 0 ? ` (${stillMissing} still missing)` : ""),
+    );
+  }
+  return { attempted: true, recovered, stillMissing };
+}
