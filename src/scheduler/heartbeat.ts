@@ -32,6 +32,7 @@
  */
 
 import { getMetricsTrend } from "../metrics/trend.ts";
+import { computeRollingMergeRateFromTrend } from "../metrics/aggregate.ts";
 import {
   getSchedulerCyclesRun,
   getSchedulerCyclesMerged,
@@ -91,7 +92,10 @@ const ROLLING_MERGE_RATE_WINDOW = parseInt(process.env.HYDRA_ROLLING_MERGE_RATE_
  * "no data" rather than 0%, which would falsely flag a healthy fresh start
  * as a stall).
  *
- * Pure-ish: only side effect is a Redis read via getMetricsTrend.
+ * Pure-ish: only side effect is a Redis read via getMetricsTrend. The rate
+ * arithmetic itself is delegated to the shared pure
+ * `computeRollingMergeRateFromTrend` (metrics pure-core; issue #2169) so this
+ * wrapper only does the Redis fetch + composes the status shape.
  */
 async function computeRollingMergeRate(window: number = ROLLING_MERGE_RATE_WINDOW): Promise<{ mergeRate: number | null; cyclesInWindow: number }> {
   try {
@@ -99,9 +103,8 @@ async function computeRollingMergeRate(window: number = ROLLING_MERGE_RATE_WINDO
     if (!Array.isArray(trend) || trend.length === 0) {
       return { mergeRate: null, cyclesInWindow: 0 };
     }
-    const merged = trend.filter((m) => (m?.tasksMerged ?? 0) > 0).length;
     return {
-      mergeRate: Math.round((merged / trend.length) * 100),
+      mergeRate: computeRollingMergeRateFromTrend(trend),
       cyclesInWindow: trend.length,
     };
   } catch (err: any) {
