@@ -43,6 +43,8 @@ import {
   childLabels,
   parentLabels,
   parseArgs,
+  isTargetRepoPath,
+  partitionScopeByRepo,
   type PrdInput,
   type PrdSlice,
 } from "../scripts/ci/hydra-prd-render.ts";
@@ -295,6 +297,86 @@ describe("renderChildBody", () => {
 
   test("throws on out-of-range sliceIndex", () => {
     assert.throws(() => renderChildBody(validInput(), 99, 42));
+  });
+});
+
+// Issue #2175: a cross-repo seam slice can list Target-repo (hydra-betting)
+// siblings in filesInScope. Those must NOT land under `## Files in scope`,
+// where scope-check would union them as in-scope and force the orchestrator
+// dev PR to scope-justify files that cannot exist in this repo.
+describe("isTargetRepoPath / partitionScopeByRepo (#2175)", () => {
+  test("isTargetRepoPath matches conventional Target path forms", () => {
+    assert.equal(isTargetRepoPath("hydra-betting/web/src/foo.ts"), true);
+    assert.equal(isTargetRepoPath("gaberoo322/hydra-betting/web/x.ts"), true);
+    assert.equal(isTargetRepoPath("/home/gabe/hydra-betting/web/y.ts"), true);
+  });
+
+  test("isTargetRepoPath leaves orchestrator paths (even ones naming the Target) alone", () => {
+    assert.equal(isTargetRepoPath("src/foo.ts"), false);
+    assert.equal(isTargetRepoPath("src/hydra-betting-adapter.ts"), false);
+  });
+
+  test("partitionScopeByRepo splits this-repo from Target-repo, preserving order", () => {
+    const { thisRepo, targetRepo } = partitionScopeByRepo([
+      "src/a.ts",
+      "hydra-betting/web/b.ts",
+      "src/c.ts",
+      "gaberoo322/hydra-betting/d.ts",
+    ]);
+    assert.deepEqual(thisRepo, ["src/a.ts", "src/c.ts"]);
+    assert.deepEqual(targetRepo, ["hydra-betting/web/b.ts", "gaberoo322/hydra-betting/d.ts"]);
+  });
+});
+
+describe("renderChildBody — cross-repo scope partition (#2175)", () => {
+  test("Target-repo siblings never appear under ## Files in scope", () => {
+    const input = validInput({
+      slices: [
+        {
+          ...slice("seam"),
+          filesInScope: ["src/scope.ts", "hydra-betting/web/src/scope.ts"],
+        },
+        slice("b"),
+        slice("c"),
+      ],
+    });
+    const body = renderChildBody(input, 1, 42);
+
+    // The orchestrator path is in scope; the Target path is not.
+    const inScopeSection = body
+      .split("## Files in scope")[1]
+      .split("## ")[0];
+    assert.match(inScopeSection, /- `src\/scope\.ts`/);
+    assert.doesNotMatch(inScopeSection, /hydra-betting/);
+
+    // The Target sibling is surfaced under a distinct related section that
+    // scope-check (which parses only Files in/out of scope) never reads.
+    assert.match(body, /## Related \(Target repo\)/);
+    const relatedSection = body
+      .split("## Related (Target repo)")[1]
+      .split("## ")[0];
+    assert.match(relatedSection, /- `hydra-betting\/web\/src\/scope\.ts`/);
+  });
+
+  test("no Related section when the slice has no Target-repo paths", () => {
+    const body = renderChildBody(validInput(), 1, 42, new Map(), 3);
+    assert.doesNotMatch(body, /## Related \(Target repo\)/);
+    // Existing in-scope rendering is unchanged for the all-orchestrator case.
+    assert.match(body, /## Files in scope\n\n- `src\/alpha\.ts`/);
+  });
+
+  test("an all-Target slice renders an explicit none-in-this-repo placeholder", () => {
+    const input = validInput({
+      slices: [
+        { ...slice("a"), filesInScope: ["hydra-betting/web/only.ts"] },
+        slice("b"),
+        slice("c"),
+      ],
+    });
+    const body = renderChildBody(input, 1, 42);
+    assert.match(body, /## Files in scope\n\n- _\(none in this repo/);
+    assert.match(body, /## Related \(Target repo\)/);
+    assert.match(body, /- `hydra-betting\/web\/only\.ts`/);
   });
 });
 

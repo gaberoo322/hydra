@@ -162,6 +162,55 @@ export function validatePrdInput(input: PrdInput): PrdValidationError[] {
 }
 
 /**
+ * Issue #2175: a path that belongs to the **Target** repo (`hydra-betting`),
+ * not this orchestrator repo (`gaberoo322/hydra`).
+ *
+ * When a research finding describes a seam with siblings in both repos, a
+ * slice's `filesInScope` can list Target paths alongside orchestrator paths.
+ * Rendering those Target paths under `## Files in scope` is the friction the
+ * issue reports: `scripts/ci/scope-check.ts` unions every path in that section
+ * as in-scope, and an orchestrator dev PR (which correctly only touches the
+ * orchestrator file) then has to scope-justify files that cannot exist in this
+ * repo — pure friction, no safety value.
+ *
+ * A path is Target-repo-shaped when it carries the `hydra-betting` marker in
+ * any of its conventional forms: a `hydra-betting/…` relative path, the
+ * `gaberoo322/hydra-betting` org-qualified form, or the absolute Target root
+ * `/home/gabe/hydra-betting/…` (the canonical root, see
+ * scripts/ci/hydra-target-wire-or-retire-emit.ts `TARGET_ROOT`). Matching the
+ * marker as a path segment (boundary-anchored) avoids mis-flagging an
+ * orchestrator file that merely mentions the Target in its name.
+ */
+export function isTargetRepoPath(path: string): boolean {
+  const p = (path || "").trim();
+  if (!p) return false;
+  // Boundary-anchored: `hydra-betting` must be a path segment, not a substring
+  // of some other identifier (e.g. it must be `a/hydra-betting/b`, the start
+  // `hydra-betting/…`, or the bare `hydra-betting`), so an orchestrator file
+  // like `src/hydra-betting-adapter.ts` is NOT mis-classified as Target.
+  return /(^|\/)(gaberoo322\/)?hydra-betting(\/|$)/.test(p);
+}
+
+/**
+ * Issue #2175: partition a slice's declared in-scope files by repo. Returns
+ * `{ thisRepo, targetRepo }` so renderers can keep ONLY this-repo paths under
+ * `## Files in scope` and surface Target-repo siblings under a clearly-labelled
+ * related-but-not-in-scope note. Order within each bucket is preserved.
+ */
+export function partitionScopeByRepo(files: string[]): {
+  thisRepo: string[];
+  targetRepo: string[];
+} {
+  const thisRepo: string[] = [];
+  const targetRepo: string[] = [];
+  for (const f of files ?? []) {
+    if (isTargetRepoPath(f)) targetRepo.push(f);
+    else thisRepo.push(f);
+  }
+  return { thisRepo, targetRepo };
+}
+
+/**
  * Run a glossary vocabulary check against the parent's combined narrative
  * (problem + rationale). Returns the subset of `expectedGlossaryTerms` that
  * are missing — case-insensitive, whole-word match. Missing terms are a
@@ -274,12 +323,46 @@ export function renderChildBody(
     lines.push(`- [ ] ${ac.trim()}`);
   }
   lines.push("");
+  // Issue #2175: partition by repo so Target-repo (hydra-betting) siblings
+  // never land under `## Files in scope`, where scope-check would union them
+  // as in-scope and force the orchestrator dev PR to scope-justify files that
+  // cannot exist in this repo. This-repo paths stay in `## Files in scope`;
+  // Target-repo paths move to a clearly-labelled `## Related (Target repo)`
+  // note below, which scope-check never reads.
+  const { thisRepo: inScopeThisRepo, targetRepo: relatedTargetRepo } =
+    partitionScopeByRepo(slice.filesInScope);
   lines.push("## Files in scope");
   lines.push("");
-  for (const f of slice.filesInScope) {
-    lines.push(`- \`${f}\``);
+  if (inScopeThisRepo.length > 0) {
+    for (const f of inScopeThisRepo) {
+      lines.push(`- \`${f}\``);
+    }
+  } else {
+    // Every Target-repo path was partitioned out and the slice declared no
+    // orchestrator-repo file. Surface this loudly rather than emit an empty
+    // section the issue-label-validation workflow (#396) would reject — a
+    // cross-repo slice with NO orchestrator file probably belongs in the
+    // Target backlog, not on gaberoo322/hydra.
+    lines.push("- _(none in this repo — see Related (Target repo) below)_");
   }
   lines.push("");
+  if (relatedTargetRepo.length > 0) {
+    // NOT `## Files in scope` / `## Files out of scope` — scope-check
+    // (scripts/ci/scope-check.ts) parses only those two headings, so a
+    // distinct heading keeps these Target paths out of the scope set entirely.
+    lines.push("## Related (Target repo)");
+    lines.push("");
+    lines.push(
+      "These sibling paths live in the Target repo (`hydra-betting`), not this repo. " +
+        "They are listed for context only and are intentionally outside this issue's scope — " +
+        "do not touch them in an orchestrator PR.",
+    );
+    lines.push("");
+    for (const f of relatedTargetRepo) {
+      lines.push(`- \`${f}\``);
+    }
+    lines.push("");
+  }
   lines.push("## Files out of scope");
   lines.push("");
   if (slice.filesOutOfScope && slice.filesOutOfScope.length > 0) {
