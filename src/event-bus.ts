@@ -5,6 +5,16 @@ import type { WebSocket } from "ws";
 
 import { getRedisConnection, getRedisSubscriber, closeRedisConnections } from "./redis/connection.ts";
 import { makeWsBroadcastRegistry, type WsBroadcastRegistry } from "./ws-broadcast-registry.ts";
+// Consumer-group lifecycle (XGROUP/XINFO setup, teardown, zombie reaping) was
+// extracted into a sibling Module (this issue; mirrors the #1965 WS-registry
+// split). The bus keeps thin delegator methods that forward into these so every
+// caller stays zero-diff while the implementation boundary sharpens.
+import {
+  ensureConsumerGroup as lifecycleEnsureConsumerGroup,
+  reapStaleConsumers as lifecycleReapStaleConsumers,
+  delConsumer as lifecycleDelConsumer,
+  initConsumerGroups as lifecycleInitConsumerGroups,
+} from "./event-bus-lifecycle.ts";
 // The notification event vocabulary lives in its own zero-Redis-side-effect Seam
 // (issue #1985) so pure formatters can derive their event interfaces without
 // pulling the Redis connection into scope. event-bus.ts imports the symbols BACK:
@@ -174,70 +184,32 @@ class EventBus {
     this.wsRegistry.add(ws);
   }
 
+  /**
+   * Create every declared consumer group at startup. One-line delegator to the
+   * lifecycle Module — group setup is an operational bootstrap concern, not part
+   * of the bus's hot stream-transport path.
+   */
   async init(): Promise<this> {
-    for (const [stream, groups] of Object.entries(CONSUMER_GROUPS)) {
-      for (const group of groups) {
-        await this.ensureConsumerGroup(stream, group, "0");
-      }
-    }
+    await lifecycleInitConsumerGroups(this.publisher, CONSUMER_GROUPS);
     return this;
   }
 
   /**
-   * Idempotently create a consumer group on a stream (with MKSTREAM so the
-   * stream is created if it does not yet exist). Swallows ONLY the BUSYGROUP
-   * error (group already exists) — every other error is rethrown.
-   *
-   * `startId` controls where a freshly-created group begins reading:
-   *   - "0"  → from the start of the stream (replay backlog; init() default).
-   *   - "$"  → only new messages after creation (skip backlog).
-   * Callers that need skip-backlog semantics (slot-events-bridge) MUST pass
-   * "$" explicitly so the behaviour is not silently flipped.
-   *
-   * @param stream  - Stream key.
-   * @param group   - Consumer group name.
-   * @param startId - Group start position ("0" default | "$").
+   * Idempotently create a consumer group on a stream. One-line delegator to the
+   * lifecycle Module's `ensureConsumerGroup`; kept on the class so callers
+   * (slot-events bridge, recs consumer) stay zero-diff. See that function for
+   * the BUSYGROUP / startId semantics.
    */
   async ensureConsumerGroup(stream: string, group: string, startId: string = "0"): Promise<void> {
-    try {
-      await this.publisher.xgroup("CREATE", stream, group, startId, "MKSTREAM");
-    } catch (err: any) {
-      // BUSYGROUP = group already exists, which is fine.
-      if (!err?.message?.includes("BUSYGROUP")) throw err;
-    }
+    await lifecycleEnsureConsumerGroup(this.publisher, stream, group, startId);
   }
 
   /**
-   * Reap STALE (zombie) consumers from a consumer group via XINFO CONSUMERS +
-   * DELCONSUMER (issue #1221). Each new process picks a fresh consumer name
-   * (`<role>-${pid}`), so an ungraceful death (SIGKILL/crash) leaves the old
-   * name registered forever; XAUTOCLAIM then re-scans a backlog that grows by
-   * one zombie per restart, spamming reclaim loops. This sweep removes the
-   * dead names so XAUTOCLAIM sees ~1 consumer, not hundreds.
-   *
-   * A consumer is reapable ONLY when BOTH hold:
-   *   - `idle > idleMs` (default 5min) — far above the 5s blockMs poll. A live
-   *     consumer blocked in XREADGROUP resets its idle clock to ~0 every 5s,
-   *     so it can never cross a 5-min floor. This is the safeguard against
-   *     reaping a live consumer mid-work; DO NOT lower it toward blockMs.
-   *   - `name !== ourConsumerName` — never reap the consumer we just created
-   *     (its idle clock can briefly read high before the first XREADGROUP).
-   *
-   * DELCONSUMER DROPS (does not transfer) the consumer's pending entries, so
-   * this is only safe to call on groups that tolerate PEL loss — the
-   * `$`-anchored slot-events groups (now-pixel-bridge, recs-engine) carrying
-   * advisory/animation events. NEVER call it on the at-least-once
-   * notifications / DLQ groups, whose PELs must survive a restart.
-   *
-   * Best-effort and never throws (fail-loud convention): a reaping failure
-   * must not block consumer startup. Returns the names actually reaped (for
-   * tests / logging).
-   *
-   * @param stream           - Stream key.
-   * @param group            - Consumer group name.
-   * @param ourConsumerName  - This instance's consumer name (never reaped).
-   * @param idleMs           - Idle floor in ms (default 300_000 = 5min).
-   * @returns Names of the consumers that were reaped.
+   * Reap STALE (zombie) consumers from a consumer group (issue #1221). One-line
+   * delegator to the lifecycle Module's `reapStaleConsumers`, passing the bus's
+   * own `_parseFields` to fold the XINFO rows. Kept on the class so `consume()`
+   * (and the tests) call it unchanged. See that function for the full
+   * reap-safety contract.
    */
   async reapStaleConsumers(
     stream: string,
@@ -245,43 +217,14 @@ class EventBus {
     ourConsumerName: string,
     idleMs: number = 300_000,
   ): Promise<string[]> {
-    const reaped: string[] = [];
-    try {
-      // XINFO CONSUMERS reply: one array per consumer, a flat field/value
-      // list including `name` (string) and `idle` (ms since last interaction).
-      const consumers = (await this.publisher.xinfo(
-        "CONSUMERS", stream, group,
-      )) as unknown[];
-      if (!Array.isArray(consumers)) return reaped;
-
-      for (const entry of consumers) {
-        const info = this._parseFields(entry as string[]);
-        const name = typeof info.name === "string" ? info.name : null;
-        const idle = Number(info.idle);
-        if (!name || !Number.isFinite(idle)) continue;
-        if (name === ourConsumerName) continue; // never reap ourselves
-        if (idle <= idleMs) continue; // live (or recently active) — leave it
-
-        try {
-          await this.publisher.xgroup("DELCONSUMER", stream, group, name);
-          reaped.push(name);
-          console.log(
-            `[EventBus] Reaped stale consumer ${name} on ${stream}/${group} (idle ${idle}ms)`,
-          );
-        } catch (err: any) {
-          console.error(
-            `[EventBus] DELCONSUMER ${name} on ${stream}/${group} failed:`,
-            err?.message || err,
-          );
-        }
-      }
-    } catch (err: any) {
-      console.error(
-        `[EventBus] reapStaleConsumers failed on ${stream}/${group}:`,
-        err?.message || err,
-      );
-    }
-    return reaped;
+    return lifecycleReapStaleConsumers(
+      this.publisher,
+      (fields) => this._parseFields(fields),
+      stream,
+      group,
+      ourConsumerName,
+      idleMs,
+    );
   }
 
   /**
@@ -445,27 +388,13 @@ class EventBus {
   }
 
   /**
-   * Best-effort DELCONSUMER of a single named consumer (issue #1221). Used by
-   * the SIGTERM shutdown path to unregister this instance's own consumer name
-   * on a graceful exit, so it never becomes a zombie the next process must
-   * reap. Never throws — a shutdown reap failure must not block exit, and the
-   * stateless startup `reapStaleConsumers()` sweep is the SIGKILL-safe backstop
-   * if this best-effort cleanup is skipped. Keeps the raw Redis verb inside the
-   * bus seam (CONTEXT.md: the bus owns consumer-group lifecycle).
-   *
-   * @param stream   - Stream key.
-   * @param group    - Consumer group name.
-   * @param consumer - Consumer name to remove.
+   * Best-effort DELCONSUMER of a single named consumer on graceful shutdown
+   * (issue #1221). One-line delegator to the lifecycle Module's `delConsumer`;
+   * kept on the class so the SIGTERM path in `src/index.ts` stays zero-diff.
+   * See that function for the never-throw / SIGKILL-backstop contract.
    */
   async delConsumer(stream: string, group: string, consumer: string): Promise<void> {
-    try {
-      await this.publisher.xgroup("DELCONSUMER", stream, group, consumer);
-    } catch (err: any) {
-      console.error(
-        `[EventBus] DELCONSUMER ${consumer} on ${stream}/${group} (shutdown) failed:`,
-        err?.message || err,
-      );
-    }
+    await lifecycleDelConsumer(this.publisher, stream, group, consumer);
   }
 
   async _handleFailure(
