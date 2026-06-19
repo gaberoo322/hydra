@@ -13,7 +13,7 @@
  * `loadPatterns`/`savePatterns` internal storage helpers with that sibling.
  *
  * Public API used outside this module:
- *   PROMOTION_THRESHOLD            — exported constant
+ *   PROMOTION_THRESHOLD            — re-exported from ./constants.ts (#2117)
  *   recordPattern                  — POST /api/memory/:agent/pattern
  *   loadAgentMemory                — used by getContext()
  *   consolidateAgentPatterns       — daily prune driven by consolidate()
@@ -55,6 +55,15 @@ import {
 // `findPatternForCue` from here.
 import { findPatternForCue } from "./cue-matcher.ts";
 
+// Issue #2117 — the promotion-policy constant `PROMOTION_THRESHOLD` (a public
+// contract of the pattern-memory domain, not store implementation detail) now
+// lives in the leaf `constants.ts` Module. It is re-exported below so existing
+// import sites (the four display-tier aggregators and the tests) keep resolving
+// against `agent-memory.ts` unchanged, while the canonical definition has one
+// home that does not require importing this 778-line store to read a number.
+import { PROMOTION_THRESHOLD } from "./constants.ts";
+export { PROMOTION_THRESHOLD };
+
 // Issue #940 — the Feedback File markdown grammar (path resolution, the
 // `## Auto-Promoted Rules` / `## Stale Rules` section layout, the
 // `### <category> (...)` block format, and the three block operations) is now
@@ -75,7 +84,6 @@ export {
 // ===========================================================================
 
 const MAX_PATTERNS = 15;
-export const PROMOTION_THRESHOLD = 3;
 const MAX_EXAMPLES = 3;
 /** Issue #1667 — cap on merged-spelling aliases retained per pattern. */
 const MAX_ALIASES = 5;
