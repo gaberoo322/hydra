@@ -26,6 +26,9 @@ import * as lanes from "../src/backlog/lanes.ts";
 import * as claims from "../src/backlog/claims.ts";
 import * as wip from "../src/backlog/wip.ts";
 import * as reaper from "../src/backlog/reaper.ts";
+// applyLaneTransition is a Module-internal helper (issue #2142 clock seam) — the
+// pure-function tests call it directly rather than through the lane wrappers.
+import { applyLaneTransition as applyLaneTransitionDirect } from "../src/backlog/internal.ts";
 
 const admin: any = { ...reads, ...items, ...lanes, ...claims, ...wip, ...reaper };
 let redis: any;
@@ -689,5 +692,151 @@ describe("backlog state machine", () => {
     assert.equal(result.ok, true);
     const lanes = await admin.loadBacklog();
     assert.ok(lanes.queued.some((i: any) => i.title === "Plain move 1920"));
+  });
+
+  // Issue #2142 — clock seam: each public lanes.ts transition (and the shared
+  // applyLaneTransition helper) takes an optional trailing `now: number =
+  // Date.now()`, so a test can pin a fixed instant and assert EXACT
+  // movedAt/claimedAt/date-only meta with zero clock tolerance. Production
+  // callers that pass no `now` must behave byte-identically (default-path
+  // identity). The pattern mirrors stale-escalation.ts (itemAgeMs(item, now)).
+  // Nested inside the parent suite so it shares the parent's beforeEach (Redis
+  // clean) and after (closeRedisConnections) lifecycle — a sibling top-level
+  // describe would run after the parent's `after` closed the shared connection.
+
+  // A fixed instant well in the past so derivations are unambiguous and stable.
+  const PINNED = Date.UTC(2026, 0, 2, 3, 4, 5); // 2026-01-02T03:04:05.000Z
+  const PINNED_ISO = "2026-01-02T03:04:05.000Z";
+  const PINNED_DATE = "2026-01-02";
+
+  async function laneItemByTitle(lane: string, title: string) {
+    const lanes = await admin.loadBacklog();
+    return (lanes[lane] || []).find((i: any) => i.title === title);
+  }
+
+  test("applyLaneTransition derives movedAt from the injected now (queued)", (t) => {
+    const item: any = { id: 1, title: "pin", lane: "backlog" };
+    const { movedAt } = applyLaneTransitionDirect(item, "queued", {}, PINNED);
+    assert.equal(movedAt, PINNED_ISO, "movedAt must come from the injected now, not the wall clock");
+    assert.equal(item.movedAt, PINNED_ISO);
+    assert.equal(item.claimedAt, null, "non-inProgress transition clears claimedAt");
+    assert.equal(item.claimedBy, null);
+  });
+
+  test("applyLaneTransition pins claimedAt=movedAt on inProgress entry", (t) => {
+    const item: any = { id: 1, title: "pin", lane: "queued" };
+    applyLaneTransitionDirect(item, "inProgress", { claimedBy: "agent-x" }, PINNED);
+    assert.equal(item.movedAt, PINNED_ISO);
+    assert.equal(item.claimedAt, PINNED_ISO, "inProgress entry sets claimedAt = movedAt from the same now");
+    assert.equal(item.claimedBy, "agent-x");
+  });
+
+  test("applyLaneTransition default-path identity: omitting now uses the wall clock", (t) => {
+    const before = Date.now();
+    const item: any = { id: 1, title: "now-default", lane: "backlog" };
+    const { movedAt } = applyLaneTransitionDirect(item, "queued");
+    const after = Date.now();
+    const ts = new Date(movedAt).getTime();
+    assert.ok(ts >= before && ts <= after, "default movedAt must be a current wall-clock timestamp");
+  });
+
+  test("promoteToQueued stamps queuedAt + movedAt from the injected now", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "promote-pin", category: "test" });
+    await admin.promoteToQueued(1, PINNED);
+    const item = await laneItemByTitle("queued", "promote-pin");
+    assert.ok(item, "item must be in queued lane");
+    assert.equal(item.movedAt, PINNED_ISO, "movedAt pinned to injected now");
+    assert.equal(item.meta.queuedAt, PINNED_DATE, "queuedAt date-only pinned to injected now");
+  });
+
+  test("moveToInProgress pins startedAt, movedAt, and claimedAt from one now", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "inprog-pin", category: "test" });
+    await admin.moveToInProgress("inprog-pin", { claimedBy: "agent-y" }, PINNED);
+    const item = await laneItemByTitle("inProgress", "inprog-pin");
+    assert.ok(item, "item must be in inProgress lane");
+    assert.equal(item.meta.startedAt, PINNED_DATE, "startedAt date-only pinned");
+    assert.equal(item.movedAt, PINNED_ISO, "movedAt pinned");
+    assert.equal(item.claimedAt, PINNED_ISO, "claimedAt pinned to the same now");
+    assert.equal(item.claimedBy, "agent-y");
+  });
+
+  test("moveToDone pins completedAt + movedAt from the injected now", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "done-pin", category: "test" });
+    await admin.moveToInProgress("done-pin");
+    await admin.moveToDone("done-pin", "merged", PINNED);
+    const item = await laneItemByTitle("done", "done-pin");
+    assert.ok(item, "item must be in done lane");
+    assert.equal(item.meta.completedAt, PINNED_DATE, "completedAt date-only pinned");
+    assert.equal(item.movedAt, PINNED_ISO, "movedAt pinned");
+  });
+
+  test("blockByTitle pins blockedAt + movedAt from the injected now", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "block-pin", category: "test" });
+    await admin.blockByTitle("block-pin", "waiting", PINNED);
+    const item = await laneItemByTitle("blocked", "block-pin");
+    assert.ok(item, "item must be in blocked lane");
+    assert.equal(item.meta.blockedAt, PINNED_DATE, "blockedAt date-only pinned");
+    assert.equal(item.meta.blockedReason, "waiting");
+    assert.equal(item.movedAt, PINNED_ISO, "movedAt pinned");
+  });
+
+  test("returnToBacklog pins returnedAt + movedAt from the injected now", async (t) => {
+    requireRedis(t);
+    await admin.addToBacklog({ title: "return-pin", category: "test" });
+    await admin.moveToInProgress("return-pin");
+    await admin.returnToBacklog("return-pin", "abandoned", PINNED);
+    const item = await laneItemByTitle("backlog", "return-pin");
+    assert.ok(item, "item must be back in backlog lane");
+    assert.equal(item.meta.returnedAt, PINNED_DATE, "returnedAt date-only pinned");
+    assert.equal(item.meta.returnReason, "abandoned");
+    assert.equal(item.movedAt, PINNED_ISO, "movedAt pinned");
+  });
+
+  test("moveItemToLane (blocked path / moveToBlocked alias) pins blockedAt + movedAt", async (t) => {
+    requireRedis(t);
+    const { id } = await admin.addToBacklog({ title: "movelane-block-pin", category: "test" });
+    const result = await admin.moveItemToLane(id, "blocked", { reason: "needs key" }, PINNED);
+    assert.equal(result.ok, true);
+    const item = await laneItemByTitle("blocked", "movelane-block-pin");
+    assert.ok(item, "item must be in blocked lane");
+    assert.equal(item.meta.blockedAt, PINNED_DATE, "blockedAt date-only pinned");
+    assert.equal(item.meta.blockedReason, "needs key");
+    assert.equal(item.movedAt, PINNED_ISO, "movedAt pinned");
+  });
+
+  test("moveItemToLane inProgress path pins claimedAt from the injected now", async (t) => {
+    requireRedis(t);
+    const { id } = await admin.addToBacklog({ title: "movelane-inprog-pin", category: "test" });
+    const result = await admin.moveItemToLane(id, "inProgress", { claimedBy: "agent-z" }, PINNED);
+    assert.equal(result.ok, true);
+    const item = await laneItemByTitle("inProgress", "movelane-inprog-pin");
+    assert.ok(item, "item must be in inProgress lane");
+    assert.equal(item.movedAt, PINNED_ISO, "movedAt pinned");
+    assert.equal(item.claimedAt, PINNED_ISO, "claimedAt pinned to the same now");
+    assert.equal(item.claimedBy, "agent-z");
+  });
+
+  test("pruneOldDoneItems honors the injected now for its retention cutoff", async (t) => {
+    requireRedis(t);
+    // An item completed at PINNED is 'old' relative to a now 30 days later,
+    // but 'fresh' relative to a now equal to PINNED. DONE_RETENTION_DAYS = 7.
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    await admin.addToBacklog({ title: "prune-pin", category: "test" });
+    await admin.moveToInProgress("prune-pin");
+    await admin.moveToDone("prune-pin", "merged", PINNED);
+
+    // now == PINNED: completedAt is not yet past the 7-day cutoff → not pruned.
+    await admin.pruneOldDoneItems(PINNED);
+    let item = await laneItemByTitle("done", "prune-pin");
+    assert.ok(item, "item completed 'now' must survive pruning at now == completedAt");
+
+    // now == PINNED + 30 days: completedAt is well past the cutoff → pruned.
+    await admin.pruneOldDoneItems(PINNED + 30 * DAY_MS);
+    item = await laneItemByTitle("done", "prune-pin");
+    assert.equal(item, undefined, "item completed 30 days before now must be pruned");
   });
 });
