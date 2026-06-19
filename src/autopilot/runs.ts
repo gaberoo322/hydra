@@ -177,6 +177,31 @@ function numberOrDefault(v: unknown, fallback: number): number {
 }
 
 /**
+ * Coerce a `filesChanged` body value (number | numeric-string | absent) into a
+ * non-negative integer COUNT, or `undefined` when the field is absent/garbage
+ * (issue #2063). Returning `undefined` — never 0 — for an absent field is what
+ * preserves the "unknown / never-written" vs "measured zero" distinction the
+ * 95.6%-empty-rate alert needs: an absent field is stripped from the metrics
+ * object and never written, while an explicit 0 records a truthful zero-file
+ * cycle. Negative / non-finite inputs clamp to `undefined` (treated as unknown)
+ * so a malformed positional can never write a nonsense count.
+ */
+function filesChangedCount(v: unknown): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v) || v < 0) return undefined;
+    return Math.floor(v);
+  }
+  if (typeof v === "string") {
+    if (v.length === 0) return undefined;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return undefined;
+    return Math.floor(n);
+  }
+  return undefined;
+}
+
+/**
  * Normalise a `crash_detail` snapshot into the bounded, persistable shape
  * (issue #1079). Drops empty fields, coerces `exit_code` to a finite number,
  * and re-truncates `log_tail` server-side as a defensive cap (the writer is
@@ -292,6 +317,12 @@ export type CycleRecordResult = Ok<{
   // reserved for the dedup early-return (no counters touched at all).
   bucketed: "merged" | "failed" | "unaccounted" | null;
   deduped: boolean;
+  // Issue #2063: true when a duplicate (already-recorded cycleId) post carried
+  // NEW filesChanged/prNumber data that was written onto the existing metrics
+  // hash. The count/bucket surface still no-ops (deduped:true, bucketed:null) —
+  // enrichment updates the metrics record WITHOUT re-firing any lifetime
+  // counter. A plain duplicate post with no new data stays `enriched:false`.
+  enriched: boolean;
 }> | Err;
 
 /**
@@ -315,10 +346,39 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
     const status =
       typeof body.status === "string" && body.status.length > 0 ? body.status : "completed";
 
-    // Idempotency: if a status already exists, treat as already-filed.
+    // Idempotency + enrichment (issue #2063): if a status already exists the
+    // count/bucket surface is already filed, so we NEVER re-fire a lifetime
+    // counter or re-bucket — that invariant (counters fire exactly once per
+    // cycleId) is preserved. BUT the reap-time write that filed this record had
+    // no PR number (reap.py hardcodes pr_number=""), so it could not carry
+    // filesChanged. The later merged/auto-merge follow-up write IS PR-aware, so
+    // we let it ENRICH the already-recorded metrics hash with filesChanged (and
+    // prNumber, if it newly arrived) instead of discarding it as a pure dedup.
+    // A plain duplicate post carrying no new data stays a true no-op
+    // (enriched:false), preserving AC4/AC9's "re-post does not double-count".
     const existing = await getCycleHash(cycleId);
     if (existing && existing.status) {
-      return { ok: true, cycleId, status: existing.status, bucketed: null, deduped: true };
+      const enrichFiles = filesChangedCount(body.filesChanged);
+      const enrichPr = body.prNumber !== undefined ? String(body.prNumber) : undefined;
+      const enrichment: CycleMetricsInput = {};
+      if (enrichFiles !== undefined) enrichment.filesChanged = enrichFiles;
+      if (enrichPr !== undefined && enrichPr.length > 0) enrichment.prNumber = enrichPr;
+
+      let enriched = false;
+      if (Object.keys(enrichment).length > 0) {
+        // recordCycleMetrics does an additive HSET, so this updates only the
+        // enriched fields on the existing metrics hash — counters untouched.
+        await recordCycleMetrics(cycleId, enrichment);
+        enriched = true;
+      }
+      return {
+        ok: true,
+        cycleId,
+        status: existing.status,
+        bucketed: null,
+        deduped: true,
+        enriched,
+      };
     }
 
     const source =
@@ -354,6 +414,12 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
       tasksAbandoned: numberOrDefault(body.tasksAbandoned ?? body.abandoned, abandoned),
       totalDurationMs: numberOrDefault(body.totalDurationMs, 0),
       prNumber: body.prNumber !== undefined ? String(body.prNumber) : undefined,
+      // Issue #2063: the integer file-change COUNT, when the writer knew it
+      // (the merged/auto-merge follow-up write). undefined → stripped below →
+      // the field stays absent (truthful "unknown/never-written"); an explicit
+      // 0 records a measured zero-file cycle. This is what makes the metrics
+      // hash carry filesChanged instead of staying null on 95.6% of cycles.
+      filesChanged: filesChangedCount(body.filesChanged),
       abandonReason: body.abandonReason,
       regressionIntroduced: body.regressionIntroduced === true ? true : undefined,
       autopilotTurnId: body.autopilotTurnId,
@@ -395,7 +461,7 @@ export async function recordCycle(body: CycleRecordBody): Promise<CycleRecordRes
       bucketed = "unaccounted";
     }
 
-    return { ok: true, cycleId, status, bucketed, deduped: false };
+    return { ok: true, cycleId, status, bucketed, deduped: false, enriched: false };
   } catch (err: any) {
     return errRedis(err);
   }

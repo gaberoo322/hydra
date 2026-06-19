@@ -62,6 +62,9 @@ export function createAutopilotLifecycleRouter() {
       status: result.status,
       bucketed: result.bucketed,
       deduped: result.deduped,
+      // Issue #2063: surface whether a duplicate post enriched the existing
+      // record with filesChanged/prNumber (the merged-path follow-up write).
+      enriched: result.enriched,
     });
   });
 
