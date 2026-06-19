@@ -4,7 +4,7 @@
  *
  * `assessSkillCatalog` is the pure verdict over the in-process skill-catalog
  * state produced by startup `registerSkills`. It was extracted out of the
- * Health Assessment pipeline (`src/health-diagnostics.ts`) into its own focused
+ * Health Assessment pipeline (`src/health/diagnostics.ts`) into its own focused
  * module — the test now imports from that module, so the test's intent is
  * legible without the ~700-line pipeline seam as context. The verdict is pure
  * (plain `SkillCatalogSnapshot` literals in, assessment out): no Redis, no OV,
@@ -14,7 +14,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { assessSkillCatalog, type SkillCatalogSnapshot } from "../src/health-skill-catalog.ts";
+import { assessSkillCatalog, type SkillCatalogSnapshot } from "../src/health/skill-catalog.ts";
 
 describe("assessSkillCatalog (#1968)", () => {
   const skill = (name: string, registered: boolean, lastError: string | null = null) => ({

@@ -7,7 +7,7 @@
  * /health/deep fan-out — exercisable only by standing up the full Express route
  * + a real network. #1324 hoisted them to module-level probeService()/probeOv()
  * with an injectable fetch/adapter impl; #1980 moved them out of the route file
- * into the focused src/health-probe.ts seam. They are testable directly: stub
+ * into the focused src/health/probe.ts seam. They are testable directly: stub
  * the dependency, assert the {status, latencyMs} fold.
  *
  * These assert the failed/running/timeout classification and the acceptAny
@@ -24,7 +24,7 @@ import {
   classifyOvSearchProbe,
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type ServiceProbeResult,
-} from "../src/health-probe.ts";
+} from "../src/health/probe.ts";
 import type { OvResult } from "../src/knowledge-base/ov-request.ts";
 
 // ---------------------------------------------------------------------------

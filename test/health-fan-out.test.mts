@@ -14,7 +14,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { collectProbeInputs, type CollectProbeDeps } from "../src/health-fan-out.ts";
+import { collectProbeInputs, type CollectProbeDeps } from "../src/health/fan-out.ts";
 
 // A fully-stubbed dep set: every probe resolves to a recognizable value so the
 // test can assert the positional-to-named mapping end-to-end. Callers override

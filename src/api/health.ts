@@ -4,28 +4,39 @@ import { resolve } from "node:path";
 
 import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getAutopilotPaused } from "../redis/autopilot-pause.ts";
+// Issue #2123: the six health-* modules were collected into the src/health/
+// subdirectory (probe fan-out → parse → rule-assess → project response). This
+// route — the single external consumer — imports their public surface through
+// the src/health/index.ts barrel (`../health`).
+//
 // Issue #840: the pure Health Assessment ruleset — disk/mem parsing, the
 // `recent` derivation, the ~27 diagnostic rules, and the status/summary fold
-// all live behind this seam. The handler keeps only I/O + wire projection.
+// all live behind the parse seam (src/health/diagnostics.ts). The handler keeps
+// only I/O + wire projection.
 // Issue #2039: the wire projection (projectHealthDeepResponse) split out to the
-// sibling src/health-wire.ts (the data-OUT leg) so the data-IN parse pipeline
+// sibling src/health/wire.ts (the data-OUT leg) so the data-IN parse pipeline
 // is testable in isolation; parseProbes/assessHealth stay on the parse seam.
-import { parseProbes, assessHealth } from "../health-diagnostics.ts";
-import { projectHealthDeepResponse } from "../health-wire.ts";
 // Issue #2089: the GET /health/deep probe fan-out (the 19-probe
 // `Promise.allSettled([...])` enumeration + the integer-subscript legend + the
 // positional-to-named `assembleProbeInputs` mapping) was extracted to the Health
-// Probe Fan-out Module (src/health-fan-out.ts). createHealthRouter now calls
+// Probe Fan-out Module (src/health/fan-out.ts). createHealthRouter now calls
 // `collectProbeInputs(deps)` and receives a named ProbeInputs record — no integer
 // subscript crosses into this route file. Adding a probe is a one-file edit in
 // the fan-out module. The /health and /health/services routes keep their own
 // inline probes; only the deep fan-out delegated.
-import { collectProbeInputs } from "../health-fan-out.ts";
 // Issue #1980: probeService/probeOv and the ServiceProbeResult wire shape live in
-// the focused ServiceProbe Adapter Seam (src/health-probe.ts). The /health/services
+// the focused ServiceProbe Adapter Seam (src/health/probe.ts). The /health/services
 // route below still composes the three canonical probes inline.
-import { probeService, probeOv, probeEmbedBackend } from "../health-probe.ts";
-import { assessSkillCatalog } from "../health-skill-catalog.ts";
+import {
+  parseProbes,
+  assessHealth,
+  projectHealthDeepResponse,
+  collectProbeInputs,
+  probeService,
+  probeOv,
+  probeEmbedBackend,
+  assessSkillCatalog,
+} from "../health/index.ts";
 // Issue #1968: the in-process OV skill-catalog state, so /api/health/skills can
 // surface the silent empty-catalog failure (startup skill registration losing
 // all four skills to OpenViking timeouts) that no health surface reflected.
@@ -49,12 +60,12 @@ let deployedShaCache: { sha: string | null; at: number } = { sha: null, at: 0 };
 const DEPLOYED_SHA_TTL_MS = 60_000;
 
 // Issue #1324 + #1980: the plain-HTTP service probe and the OpenViking liveness
-// probe live in the focused ServiceProbe Adapter Seam (src/health-probe.ts) so
+// probe live in the focused ServiceProbe Adapter Seam (src/health/probe.ts) so
 // the failed/running classification lives in ONE named home, unit-testable
 // without Express (see test/health-probe.test.mts) and importable by non-route
 // callers. The /health/services route below composes the three canonical probes
 // inline; the /health/deep fan-out is owned by the Health Probe Fan-out Module
-// (src/health-fan-out.ts, issue #2089).
+// (src/health/fan-out.ts, issue #2089).
 
 async function getDeployedSha(): Promise<string | null> {
   const now = Date.now();
@@ -187,7 +198,7 @@ export function createHealthRouter(eventBus: PingableBus) {
   router.get("/health/deep", async (req, res) => {
     const checkedAt = new Date().toISOString();
     // Issue #2089: the 19-probe fan-out + the positional-to-named assembly is
-    // owned by the Health Probe Fan-out Module (src/health-fan-out.ts). The
+    // owned by the Health Probe Fan-out Module (src/health/fan-out.ts). The
     // handler hands it the eventBus ping (the only request-scoped dep) and
     // receives a named ProbeInputs record — no Promise.allSettled positional
     // array or integer subscript crosses into this route file.
@@ -202,7 +213,7 @@ export function createHealthRouter(eventBus: PingableBus) {
     // only I/O coordination (the fan-out call above) and the wire-envelope
     // projection below; disk/mem parsing, the `recent` derivation, every
     // diagnostic rule, and the status/summary fold live in
-    // src/health-diagnostics.ts.
+    // src/health/diagnostics.ts.
     const snapshot = parseProbes(probeInputs);
     const { diagnostics, status, summary } = assessHealth(snapshot);
 
@@ -214,10 +225,10 @@ export function createHealthRouter(eventBus: PingableBus) {
 
     // Issue #1513: the wire-projection half (the former inline res.json block)
     // is now the pure, unit-tested projectHealthDeepResponse in
-    // src/health-wire.ts (issue #2039: split out of health-diagnostics.ts as the
+    // src/health/wire.ts (issue #2039: split out of health/diagnostics.ts as the
     // data-OUT leg) — the third leg of the Snapshot pipeline alongside
     // parseProbes/assessHealth (#840). Issue #2089: the handler no longer owns
-    // the fan-out (moved to src/health-fan-out.ts); it forwards the named
+    // the fan-out (moved to src/health/fan-out.ts); it forwards the named
     // probeInputs record, from which the projection reads ovSearchWindow/
     // knowledgeContext (indices 17/18) that parseProbes does not consume.
     res.json(projectHealthDeepResponse(snapshot, diagnostics, status, summary, activeCycle, checkedAt, probeInputs));

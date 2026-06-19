@@ -19,7 +19,7 @@
 // and pure classifier (classifyOvSearchProbe) used to live here. They are
 // execution-side probe policy — mapping the OpenViking Request Adapter's
 // discriminated result codes onto a probe-status — so #2023 moved them into the
-// ServiceProbe Adapter Seam (src/health-probe.ts), next to
+// ServiceProbe Adapter Seam (src/health/probe.ts), next to
 // probeService/probeOv/probeEmbedBackend. That eliminated the inverted edge
 // where the adapter seam imported the timeout *value* from this IO-free assess
 // seam. This module keeps ONLY a type-only import of OvSearchProbeStatus below
@@ -27,19 +27,19 @@
 // HealthSnapshot.ovSearch.status still names that probe's result vocabulary.
 
 // Issue #1867: the diagnostic rule set (`RULES`) and the `fmtUp` uptime
-// humanizer were extracted into the sibling `health-rules.ts` so rule authoring
+// humanizer were extracted into the sibling `rules.ts` so rule authoring
 // is a one-file edit. `assessHealth` below is now a thin runner over the
 // imported `RULES`; `fmtUp` is consumed here by both `assessHealth`'s summary
 // banner and `projectHealthDeepResponse`'s `uptimeHuman` field. The structured
 // types, parse pipeline, and wire projection all stay in this module.
-import { RULES, fmtUp } from "./health-rules.ts";
+import { RULES, fmtUp } from "./rules.ts";
 // Issue #2023: type-only import — HealthSnapshot.ovSearch.status names the
 // OV-search probe's result vocabulary, owned by the ServiceProbe Adapter Seam.
 // `import type` is erased at compile time, so this is zero runtime coupling and
 // does NOT re-create the value-import inversion the move removed.
-import type { OvSearchProbeStatus } from "./health-probe.ts";
+import type { OvSearchProbeStatus } from "./probe.ts";
 
-// Skill-catalog health gate moved to src/health-skill-catalog.ts (issue #1992).
+// Skill-catalog health gate moved to src/health/skill-catalog.ts (issue #1992).
 // It described a separate concern — the Knowledge Base's in-process skill
 // registration state — not a probe-marshalling input, so it now lives in its
 // own focused module that type-imports `HealthDiagnostic` from here.
@@ -200,7 +200,7 @@ export interface HealthAssessment {
 // Promise.allSettled([]) positional array, then passed the raw settled array to
 // parseProbes(), which extracted values by integer subscript (settled[0]...[16]).
 // The integer subscripts were a shared secret between api/health.ts and
-// health-diagnostics.ts documented only in comments.
+// diagnostics.ts documented only in comments.
 //
 // Fix: the handler's assembleProbeInputs() (in api/health.ts, the I/O owner)
 // maps the settled results into this named record immediately after the fan-out,
@@ -427,17 +427,17 @@ export function assessHealth(snapshot: HealthSnapshot): HealthAssessment {
 // ---- projectHealthDeepResponse — RELOCATED (issue #2039) -----------------
 //
 // The pure wire-projection (the data-OUT leg: HealthSnapshot + HealthAssessment
-// → the `/health/deep` envelope) moved to the sibling `src/health-wire.ts` so
+// → the `/health/deep` envelope) moved to the sibling `src/health/wire.ts` so
 // this module's data-IN pipeline (`parseProbes`: ProbeInputs → HealthSnapshot)
 // is independently testable without importing the wire projection or its
 // `HealthDeepResponse` type. `parseProbes` (data-in) and projectHealthDeepResponse
 // (data-out) have opposite data-flow directions — #2039 splits them along that
-// internal boundary, mirroring the #1867 health-rules.ts extraction.
+// internal boundary, mirroring the #1867 rules.ts extraction.
 //
 // The canonical type vocabulary (HealthSnapshot, ProbeInputs, ServiceProbe,
-// HealthAssessment, HealthDiagnostic) stays HERE in one place; health-wire.ts
+// HealthAssessment, HealthDiagnostic) stays HERE in one place; wire.ts
 // type-imports it. The dependency direction is acyclic: this parse module imports
-// nothing from health-wire.ts; health-wire.ts type-only-imports the vocabulary
+// nothing from wire.ts; wire.ts type-only-imports the vocabulary
 // from here. src/api/health.ts now imports projectHealthDeepResponse +
-// HealthDeepResponse from health-wire.ts and parseProbes/assessHealth/
+// HealthDeepResponse from wire.ts and parseProbes/assessHealth/
 // parseRedisInfoSnapshot from here.

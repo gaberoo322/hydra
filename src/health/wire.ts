@@ -1,36 +1,36 @@
 // Health Wire-Projection Module (issue #2039)
 //
 // The data-OUT leg of the Health Snapshot pipeline, lifted out of
-// `src/health-diagnostics.ts` so the data-IN pipeline (`parseProbes`:
+// `src/health/diagnostics.ts` so the data-IN pipeline (`parseProbes`:
 // `ProbeInputs` → `HealthSnapshot`) is independently testable without importing
 // the wire projection or its `HealthDeepResponse` type. `parseProbes` (data-in)
 // and `projectHealthDeepResponse` (data-out) have opposite data-flow directions;
 // #2039 splits them along that internal boundary, mirroring the prior
-// `health-rules.ts` / `health-diagnostics.ts` (issue #1867) and
+// `rules.ts` / `diagnostics.ts` (issue #1867) and
 // `eligibility.ts` / `usage-tracker.ts` extractions.
 //
 // Seam discipline (issue #840/#1771): the canonical type vocabulary
 // (`HealthSnapshot`, `ProbeInputs`, `ServiceProbe`, `HealthAssessment`,
-// `HealthDiagnostic`) stays in exactly ONE module — `health-diagnostics.ts`,
+// `HealthDiagnostic`) stays in exactly ONE module — `diagnostics.ts`,
 // the pure parse seam. This module **type-imports** that vocabulary (erased at
 // compile time, zero runtime coupling) and does NOT redeclare or fork any shape.
 // The dependency direction stays acyclic: the parse module imports nothing from
 // here; this module type-only-imports the parse module's vocabulary plus the
-// `fmtUp` uptime humanizer from `health-rules.ts`. No new value-import edge is
+// `fmtUp` uptime humanizer from `rules.ts`. No new value-import edge is
 // created back into the I/O layer (`src/api/`).
 //
 // The single value-consumer is `src/api/health.ts`, which imports
 // `projectHealthDeepResponse` from here while continuing to import
 // `parseProbes`/`assessHealth`/`parseRedisInfoSnapshot` from
-// `health-diagnostics.ts`.
-import { fmtUp } from "./health-rules.ts";
+// `diagnostics.ts`.
+import { fmtUp } from "./rules.ts";
 import type {
   HealthSnapshot,
   HealthAssessment,
   HealthDiagnostic,
   ServiceProbe,
   ProbeInputs,
-} from "./health-diagnostics.ts";
+} from "./diagnostics.ts";
 
 // ---- projectHealthDeepResponse — the pure wire-projection ----------------
 //
@@ -44,7 +44,7 @@ import type {
 // `ovSeachTrend`, settled[17] vs [18]) are unit-testable without standing up
 // Redis/OpenViking.
 //
-// Issue #2039: relocated from health-diagnostics.ts to this dedicated
+// Issue #2039: relocated from diagnostics.ts to this dedicated
 // wire-projection module, but otherwise unchanged — the body is moved verbatim.
 //
 // The handler keeps ONLY the I/O fan-out and the `activeCycle` derivation from

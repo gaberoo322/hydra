@@ -16,11 +16,11 @@
 // (src/host-probe/*) — it stays a single file with no seam-check ratchet.
 //
 // It deliberately lives at src/ top-level (NOT src/api/), mirroring the
-// src/health-diagnostics.ts pure Health Assessment seam: the probes are a domain
+// src/health/diagnostics.ts pure Health Assessment seam: the probes are a domain
 // seam consumed by route code, and a non-route caller (e.g.
 // src/aggregators/service-strip.ts) composing the canonical probes should not
 // import from src/api/.
-import { ovHealthGet, ovPostJson, isOvFailure, type OvResult } from "./knowledge-base/ov-request.ts";
+import { ovHealthGet, ovPostJson, isOvFailure, type OvResult } from "../knowledge-base/ov-request.ts";
 
 /** The wire shape every service probe folds to: `{status, latencyMs}`. */
 export type ServiceProbeResult = {
@@ -32,7 +32,7 @@ export type ServiceProbeResult = {
 //
 // Issue #2023: the OV-search probe's classification policy (the status union,
 // the timeout ceiling, and the pure classifier) was lifted here from the pure
-// Health Assessment seam (src/health-diagnostics.ts). It is execution-side
+// Health Assessment seam (src/health/diagnostics.ts). It is execution-side
 // probe policy — it maps the OpenViking Request Adapter's discriminated result
 // codes onto a probe-status — so it belongs in this ServiceProbe Adapter Seam
 // next to probeService/probeOv/probeEmbedBackend, not in the IO-free assess

@@ -524,7 +524,7 @@ so an operator gets an actionable signal rather than a generic failure:
 | `timeout` | search exceeded the deep-health window (`ov-timeout`) | slow-but-working; raise `OV_SEARCH_PROBE_TIMEOUT_MS` if persistent (`info`, not a fault) |
 | `backend-unreachable` | search transport never reached OV (`ov-service-down`) | the embedding backend host — `docker exec hydra-openviking-1 curl -m5 http://ollama-embed:11434/api/tags`; `/hydra-doctor` probes this automatically |
 
-The classifier (`classifyOvSearchProbe` in `src/health-diagnostics.ts`) is a pure,
+The classifier (`classifyOvSearchProbe` in `src/health/diagnostics.ts`) is a pure,
 unit-tested function; the `backend-unreachable` warning is additive — no existing
 status was renamed or removed.
 
