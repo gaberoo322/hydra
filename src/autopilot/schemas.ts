@@ -46,6 +46,19 @@ export const CycleRecordBodySchema = z
     regressionIntroduced: z.boolean().optional(),
     autopilotTurnId: z.string().optional(),
     worktreeBranch: z.string().optional(),
+    // Issue #2063: the integer COUNT of files the merged PR changed
+    // (`gh pr view --json files --jq '.files | length'`). OPTIONAL on purpose:
+    // it is only knowable on the merged/auto-merge follow-up write (the PR
+    // number is unknown at reap time — reap.py hardcodes pr_number=""), so the
+    // reap-time write omits it and the later PR-aware write enriches the
+    // already-recorded cycle. recordCycle maps it onto the metrics hash, where
+    // it is a NUMERIC field (aggregate.ts reduces `m.filesChanged || 0`,
+    // run-projections.ts reads `hash.filesChanged || null`). This is NOT the
+    // string[] path list the capacity-floor reactor consumes — it is a
+    // non-negative integer count. Accepts number|string for the same
+    // loose-script-payload tolerance as the other count fields above; a genuine
+    // zero-file cycle records 0 truthfully (distinguishable from never-written).
+    filesChanged: z.union([z.number(), z.string()]).optional(),
     // Issue #1136 (Slice 2 of #1119): the comma-separated reflection bucket
     // tokens (`per-anchor` / `by-file` / ...) the code-writing dispatch was
     // SERVED at planning time by `GET /api/reflections`, reported back so

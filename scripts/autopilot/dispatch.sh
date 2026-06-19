@@ -62,7 +62,7 @@ print(json.dumps({
     # data. Idempotent on cycleId — re-running with the same cycleId is a
     # no-op on the server, so retries don't double-count.
     #
-    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources]
+    # Usage: dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed]
     #
     # Issue #1136 (Slice 2 of #1119): the optional 8th positional arg
     # `reflection_sources` is the comma-separated reflection bucket tokens
@@ -71,6 +71,17 @@ print(json.dumps({
     # it here so the cycle metric records what was actually injected, instead of
     # `deriveReflectionMatchSource` reading 'none' on every cycle. Empty/absent
     # → the field is omitted from the POST body (truthful 'none').
+    #
+    # Issue #2063: the optional 9th positional arg `files_changed` is the INTEGER
+    # COUNT of files the merged PR changed. It is only knowable on the merged/
+    # auto-merge follow-up write (the PR number is unknown at reap time, so the
+    # reap-time write omits it). The auto-merge follow-up fetches it with
+    # `gh pr view <pr> --json files --jq '.files | length'` and forwards it here;
+    # recordCycle ENRICHES the already-recorded cycle's metrics hash with it
+    # WITHOUT re-firing any lifetime counter. Empty/absent → omitted from the
+    # POST body (truthful "unknown/never-written"); an explicit 0 records a
+    # measured zero-file cycle. This is the integer count the metrics trend
+    # consumes — NOT the string[] path list capacity-writeback sends.
     cycle_id="${1:-}"
     status="${2:-}"
     skill="${3:-}"
@@ -79,8 +90,9 @@ print(json.dumps({
     anchor_ref="${6:-}"
     duration_ms="${7:-0}"
     reflection_sources="${8:-}"
+    files_changed="${9:-}"
     if [ -z "$cycle_id" ] || [ -z "$status" ] || [ -z "$skill" ]; then
-      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources]" >&2
+      echo "dispatch.sh: cycle-record requires <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed]" >&2
       exit 2
     fi
     # Anchor type is derived from the skill: dev_orch / dev_target subagents
@@ -103,7 +115,7 @@ print(json.dumps({
     esac
     payload=$(python3 -c "
 import json, sys
-cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources = sys.argv[1:13]
+cycle_id, status, skill, pr_number, task_title, anchor_ref, duration_ms, anchor_type, tm, tf, ta, reflection_sources, files_changed = sys.argv[1:14]
 body = {
     'cycleId': cycle_id,
     'status': status,
@@ -125,8 +137,19 @@ if anchor_ref:
 # non-empty served-bucket string; absent → field omitted → truthful 'none'.
 if reflection_sources:
     body['reflectionSources'] = reflection_sources
+# Issue #2063: only emit filesChanged when the caller passed a non-empty,
+# parseable non-negative integer count (the merged-path follow-up write that
+# knows the PR). Empty/absent → omitted (truthful 'unknown'); an explicit '0'
+# DOES emit (a measured zero-file cycle, distinct from never-written).
+if files_changed != '':
+    try:
+        fc = int(files_changed)
+        if fc >= 0:
+            body['filesChanged'] = fc
+    except (TypeError, ValueError):
+        pass
 print(json.dumps(body))
-" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources")
+" "$cycle_id" "$status" "$skill" "$pr_number" "$task_title" "$anchor_ref" "$duration_ms" "$anchor_type" "$tasks_merged" "$tasks_failed" "$tasks_abandoned" "$reflection_sources" "$files_changed")
     if command -v hydra >/dev/null 2>&1; then
       hydra raw POST /autopilot/cycle-record --json "$payload" >/dev/null 2>&1 || {
         echo "[autopilot] dispatch: cycle-record post failed for cycle=$cycle_id (non-fatal)" >&2
@@ -145,7 +168,7 @@ print(json.dumps(body))
 Usage:
   dispatch.sh log <class> <skill> [ts]
   dispatch.sh capacity-writeback <pr_number> <commit_sha> <skill> <files_json>
-  dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources]
+  dispatch.sh cycle-record <cycle_id> <status> <skill> [pr_number] [task_title] [anchor_ref] [duration_ms] [reflection_sources] [files_changed]
 
 Environment:
   HYDRA_AUTOPILOT_LOG   Path to the nightly run log

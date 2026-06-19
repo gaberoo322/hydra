@@ -391,18 +391,44 @@ Two callers fire the write:
    is the `cycleId`, which gives natural dedup across retries.
 2. **`auto-merge` action** — after `gh pr merge --auto --squash` succeeds,
    the model SHOULD fire a follow-up `dispatch.sh cycle-record <task_id>
-   merged <skill> <pr_number> "<title>" "<anchor>" <duration_ms>` so the
-   `cycles-merged` lifetime counter and `/api/metrics` reflect the merge.
-   Idempotent on cycleId — a duplicate post is a no-op.
+   merged <skill> <pr_number> "<title>" "<anchor>" <duration_ms>
+   "<reflection_sources>" <files_changed>` so the `cycles-merged` lifetime
+   counter and `/api/metrics` reflect the merge. The reap-time write (caller 1)
+   already filed this `cycleId` with `status=completed` and NO PR/files data
+   (reap.py has no PR number at reap time), so this follow-up post is treated as
+   an ENRICHMENT, not a discarded duplicate (issue #2063): it updates
+   `filesChanged`/`prNumber` on the already-recorded metrics hash WITHOUT
+   re-firing any lifetime counter. A plain follow-up that carries no new
+   `filesChanged`/`prNumber` stays a true no-op (`deduped:true, enriched:false`).
+
+`filesChanged` is the INTEGER COUNT of files the merged PR touched — the
+auto-merge follow-up block is the only point that knows the PR, so it fetches
+the count and forwards it as the 9th positional:
+
+```bash
+# Runs in the SAME post-merge follow-up block as cycle-record/holdback. The PR
+# is merged, so the files list is final. `gh pr view --json files` returns every
+# changed file; `| length` is the integer count the metrics trend consumes (NOT
+# the string[] path list capacity-writeback sends — a different observability
+# plane). Best-effort: an empty/unreachable result forwards "" → the field is
+# omitted server-side → the cycle truthfully buckets to 'unknown/never-written'.
+files_changed=$(gh pr view "$pr_number" --repo gaberoo322/hydra \
+  --json files --jq '.files | length' 2>/dev/null)
+./scripts/autopilot/dispatch.sh cycle-record "$task_id" merged "$skill" \
+  "$pr_number" "$title" "$anchor" "$duration_ms" "$reflection_sources" "${files_changed:-}"
+```
 
 `dispatch.sh cycle-record` is best-effort: a 5xx or unreachable API is logged
-to the nightly run log and the autopilot proceeds. The write covers three
+to the nightly run log and the autopilot proceeds. Fetching the files count
+NEVER blocks or delays a merge — it runs strictly after the merge resolves, and
+a missing count records nothing rather than failing. The write covers three
 surfaces atomically server-side:
 
 - `hydra:cycle:<id>` hash + `hydra:cycle:index` ZSET → `/api/cycle/history`
 - `hydra:metrics:<id>` via `recordCycleMetrics(source: "claude")` →
-  `/api/metrics` and `/api/scheduler/status.mergeRateWindow`
-- `hydra:scheduler:cycles-{run,merged,failed}` lifetime counters →
+  `/api/metrics` and `/api/scheduler/status.mergeRateWindow` (carries the
+  enriched `filesChanged` count once the auto-merge follow-up posts it)
+- `hydra:scheduler:cycles-{run,merged,failed,unaccounted}` lifetime counters →
   `/api/scheduler/status.mergeRateLifetime`
 
 ### Phase 6 holdback enrollment on auto-merge (issue #2055)

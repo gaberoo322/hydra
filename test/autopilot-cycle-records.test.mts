@@ -342,4 +342,145 @@ describe("POST /api/autopilot/cycle-record (issue #430)", () => {
     assert.equal(res2._body.bucketed, null); // null == dedup, distinct from "unaccounted"
     assert.equal(await redis.get("hydra:scheduler:cycles-unaccounted"), "1");
   });
+
+  // ---------------------------------------------------------------------------
+  // AC10 (issue #2063) — a fresh record carrying filesChanged writes the
+  // integer count onto the metrics hash. This is the field that was null on
+  // 95.6% of merged cycles because recordCycle never mapped it.
+  // ---------------------------------------------------------------------------
+  test("AC10: filesChanged on a fresh record writes the integer count to the metrics hash", async () => {
+    const res = mockRes();
+    await handler(
+      mockReq({
+        cycleId: "autopilot-turn-2063-a",
+        status: "merged",
+        source: "claude",
+        prNumber: 2059,
+        filesChanged: 6,
+      }),
+      res,
+    );
+    assert.equal(res._body.ok, true);
+    assert.equal(res._body.enriched, false); // fresh write, not an enrichment
+
+    const metric = await redis.hgetall("hydra:metrics:autopilot-turn-2063-a");
+    assert.equal(metric.filesChanged, "6");
+    assert.equal(metric.prNumber, "2059");
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC11 (issue #2063) — the reap→auto-merge two-phase write. The reap-time
+  // write has NO PR/files; the later merged follow-up ENRICHES filesChanged/
+  // prNumber onto the existing record WITHOUT re-firing any lifetime counter.
+  // ---------------------------------------------------------------------------
+  test("AC11: a duplicate post enriches filesChanged/prNumber without double-counting", async () => {
+    // Phase 1 — reap-time write: status=completed, no PR, no files.
+    const res1 = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-2063-b", status: "completed", source: "claude" }),
+      res1,
+    );
+    assert.equal(res1._body.deduped, false);
+    assert.equal(res1._body.enriched, false);
+    assert.equal(await redis.get("hydra:scheduler:cycles-run"), "1");
+    assert.equal(await redis.get("hydra:scheduler:cycles-merged"), "1");
+    let metric = await redis.hgetall("hydra:metrics:autopilot-turn-2063-b");
+    assert.equal(metric.filesChanged, undefined); // never-written, not 0
+
+    // Phase 2 — auto-merge follow-up: same cycleId, now PR-aware with files.
+    const res2 = mockRes();
+    await handler(
+      mockReq({
+        cycleId: "autopilot-turn-2063-b",
+        status: "merged",
+        source: "claude",
+        prNumber: 2099,
+        filesChanged: 4,
+      }),
+      res2,
+    );
+    assert.equal(res2._body.deduped, true); // count/bucket surface still no-ops
+    assert.equal(res2._body.bucketed, null);
+    assert.equal(res2._body.enriched, true); // but the metrics hash was enriched
+
+    // Counters did NOT advance (fire-exactly-once invariant preserved).
+    assert.equal(await redis.get("hydra:scheduler:cycles-run"), "1");
+    assert.equal(await redis.get("hydra:scheduler:cycles-merged"), "1");
+    // Index still has exactly one entry.
+    assert.equal(await redis.zcard("hydra:cycle:index"), 1);
+
+    // filesChanged + prNumber now present on the existing metrics hash.
+    metric = await redis.hgetall("hydra:metrics:autopilot-turn-2063-b");
+    assert.equal(metric.filesChanged, "4");
+    assert.equal(metric.prNumber, "2099");
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC12 (issue #2063) — a plain duplicate post with NO new filesChanged/
+  // prNumber stays a true no-op (enriched:false). Distinguishes "re-post with
+  // data" (enrich) from "re-post with nothing" (the AC4/AC9 dedup contract).
+  // ---------------------------------------------------------------------------
+  test("AC12: a duplicate post carrying no new data does not enrich", async () => {
+    const body = { cycleId: "autopilot-turn-2063-c", status: "merged", source: "claude" };
+    const res1 = mockRes();
+    await handler(mockReq(body), res1);
+    assert.equal(res1._body.enriched, false);
+
+    const res2 = mockRes();
+    await handler(mockReq(body), res2);
+    assert.equal(res2._body.deduped, true);
+    assert.equal(res2._body.enriched, false); // no new data → no enrichment
+
+    const metric = await redis.hgetall("hydra:metrics:autopilot-turn-2063-c");
+    assert.equal(metric.filesChanged, undefined);
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC13 (issue #2063) — a genuine zero-file cycle records filesChanged=0
+  // truthfully (a MEASURED zero), distinct from the never-written/absent case
+  // which writes nothing. This is what stops the 95.6%-empty-rate alert from
+  // false-positiving on real zero-file cycles.
+  // ---------------------------------------------------------------------------
+  test("AC13: an explicit filesChanged=0 records a measured zero, absent records nothing", async () => {
+    // Measured zero.
+    const resZero = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-2063-zero", status: "merged", filesChanged: 0 }),
+      resZero,
+    );
+    const metricZero = await redis.hgetall("hydra:metrics:autopilot-turn-2063-zero");
+    assert.equal(metricZero.filesChanged, "0"); // measured zero is persisted
+
+    // Absent → never written (the "unknown" case the trend distinguishes).
+    const resAbsent = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-2063-absent", status: "merged" }),
+      resAbsent,
+    );
+    const metricAbsent = await redis.hgetall("hydra:metrics:autopilot-turn-2063-absent");
+    assert.equal(metricAbsent.filesChanged, undefined);
+  });
+
+  // ---------------------------------------------------------------------------
+  // AC14 (issue #2063) — a numeric-string filesChanged (the dispatch.sh shell
+  // path forwards a string positional) coerces to the integer count, and a
+  // negative/garbage value clamps to unknown (written as nothing).
+  // ---------------------------------------------------------------------------
+  test("AC14: numeric-string filesChanged coerces; negative/garbage records nothing", async () => {
+    const resStr = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-2063-str", status: "merged", filesChanged: "12" }),
+      resStr,
+    );
+    const metricStr = await redis.hgetall("hydra:metrics:autopilot-turn-2063-str");
+    assert.equal(metricStr.filesChanged, "12");
+
+    const resBad = mockRes();
+    await handler(
+      mockReq({ cycleId: "autopilot-turn-2063-bad", status: "merged", filesChanged: -3 }),
+      resBad,
+    );
+    const metricBad = await redis.hgetall("hydra:metrics:autopilot-turn-2063-bad");
+    assert.equal(metricBad.filesChanged, undefined); // negative clamps to unknown
+  });
 });
