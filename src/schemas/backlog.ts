@@ -1,5 +1,5 @@
 /**
- * Schema for POST /backlog/claim request bodies (issue #1682).
+ * Schema for POST /backlog/claim and PATCH /backlog/:id/move request bodies.
  *
  * Why this exists: the claim route used to read only `claimedBy` from the raw
  * body and silently discarded everything else — including the `itemId` hint
@@ -9,8 +9,35 @@
  * now parses through zod with `.strict()` (mirroring `schemas/queue.ts`,
  * #562/#1140): legitimate fields are enumerated, and a typo'd key such as
  * `itemID` fails loudly with a 400 instead of degrading to a pop-head claim.
+ *
+ * Issue #2164: BacklogMoveBodySchema added — the PATCH /backlog/:id/move
+ * handler previously dropped the `reason` field, making it impossible to
+ * move an item to the blocked lane over HTTP (moveItemToLane requires a
+ * reason for unexplained blocked moves and returns {ok:false,
+ * error:"missing-blocked-reason"} without one).
  */
 import { z } from "zod";
+
+/**
+ * Body accepted by `PATCH /backlog/:id/move` (issue #2164).
+ *
+ * - `lane` is required — the target lane name.
+ * - `claimedBy` is optional consumer identity tag (forwarded to moveItemToLane).
+ * - `reason` is required by moveItemToLane when moving to the `blocked` lane
+ *   and the item has no pre-existing `meta.blockedReason`. Omitting it from
+ *   the HTTP boundary caused silent {ok:false} on blocked-lane moves (#2164).
+ * - Not `.strict()` — unknown fields are ignored so the endpoint degrades
+ *   gracefully if a caller sends extra context keys.
+ */
+export const BacklogMoveBodySchema = z.object({
+  lane: z.string().min(1, { message: "lane must be a non-empty string" }),
+  claimedBy: z
+    .string({ message: "claimedBy must be a string" })
+    .optional(),
+  reason: z
+    .string({ message: "reason must be a string" })
+    .optional(),
+});
 
 /**
  * Body accepted by `POST /backlog/claim`.

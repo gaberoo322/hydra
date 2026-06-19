@@ -12,7 +12,7 @@ import {
   getClaimsReapedLast,
 } from "../redis/backlog.ts";
 import { z } from "zod";
-import { BacklogClaimBodySchema } from "../schemas/backlog.ts";
+import { BacklogClaimBodySchema, BacklogMoveBodySchema } from "../schemas/backlog.ts";
 import { aggregatorRouteNoQuery } from "./route-helpers.ts";
 
 /**
@@ -95,11 +95,25 @@ export function createBacklogRouter() {
   // tag a kanban item with a PR-number marker (e.g. `pr-27`) at PR-open
   // time. The candidates API uses this marker to hide the just-shipped
   // anchor from decide.py until the PR merges.
+  //
+  // Issue #2164: also forwards the optional `reason` field, which
+  // moveItemToLane requires when moving an item to the `blocked` lane that
+  // has no pre-existing `meta.blockedReason`. Previously the field was never
+  // read from the body, so no HTTP caller could ever move an item to the
+  // blocked lane with a fresh reason.
   router.patch("/backlog/:id/move", async (req, res) => {
     try {
-      const { lane, claimedBy } = req.body || {};
-      if (!lane) return res.status(400).json({ error: "Missing 'lane'" });
-      const opts = claimedBy !== undefined ? { claimedBy } : {};
+      const parsed = BacklogMoveBodySchema.safeParse(req.body || {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          code: "schema-validation-failed",
+          issues: parsed.error.issues,
+        });
+      }
+      const { lane, claimedBy, reason } = parsed.data;
+      const opts: { claimedBy?: string; reason?: string } = {};
+      if (claimedBy !== undefined) opts.claimedBy = claimedBy;
+      if (reason !== undefined) opts.reason = reason;
       const result = await moveItemToLane(req.params.id, lane, opts);
       if (!result.ok) return res.status(404).json(result);
       res.json(result);
