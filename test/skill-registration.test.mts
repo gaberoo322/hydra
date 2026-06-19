@@ -279,6 +279,63 @@ describe("reRegisterMissingSkills: post-startup recovery (#2148)", () => {
   });
 });
 
+describe("reRegisterMissingSkills: always logs an executed pass (#2163, INV3)", () => {
+  test("a 0-recovery attempted pass emits exactly one log line (not silent)", async () => {
+    // Empty catalog after a failing startup.
+    console.error = () => {};
+    console.log = () => {};
+    globalThis.fetch = (async () => {
+      timeoutThrow();
+    }) as any;
+    await registerSkills({ backoffBaseMs: 0 });
+
+    // Capture only the recovery-pass output: count [Learning] recovery lines
+    // across BOTH console.error and console.log. The per-skill [Learning] logs
+    // from registerOneSkill are present too, so we match the recovery-pass
+    // marker phrase specifically.
+    const lines: string[] = [];
+    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+
+    // OV still down during recovery → attempted:true, recovered:0.
+    const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+    assert.equal(result.attempted, true);
+    assert.equal(result.recovered, 0);
+
+    const recoveryLines = lines.filter((l) => l.includes("OV skill catalog recovery"));
+    assert.equal(
+      recoveryLines.length,
+      1,
+      "an executed pass must emit EXACTLY one recovery log line, even with 0 recovered",
+    );
+    assert.ok(
+      recoveryLines[0].includes("recovered 0 skill(s)"),
+      "the 0-recovery line must state recovered/still-missing so ran-but-failed is visible",
+    );
+  });
+
+  test("a recovering pass logs the recovery line (info path unchanged)", async () => {
+    console.error = () => {};
+    console.log = () => {};
+    globalThis.fetch = (async () => {
+      timeoutThrow();
+    }) as any;
+    await registerSkills({ backoffBaseMs: 0 });
+
+    const lines: string[] = [];
+    console.error = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+
+    globalThis.fetch = (async () => okResponse()) as any;
+    const result = await reRegisterMissingSkills({ backoffBaseMs: 0 });
+    assert.equal(result.recovered, 4);
+
+    const recoveryLines = lines.filter((l) => l.includes("OV skill catalog recovery"));
+    assert.equal(recoveryLines.length, 1, "a recovering pass also logs exactly one recovery line");
+    assert.ok(recoveryLines[0].includes("re-registered 4 skill(s)"));
+  });
+});
+
 describe("getSkillCatalogState: defensive copy", () => {
   test("mutating the returned object does not corrupt the live state", async () => {
     muteConsole();

@@ -406,61 +406,79 @@ describe("runSkillCatalogReregister — isolated (issue #2148)", () => {
     completed: true,
     lastAttemptAt: 1,
   });
-  const ovUp = async () => ({ status: "running" as const, latencyMs: 5 });
-  const ovDown = async () => ({ status: "failed" as const, latencyMs: null });
+  // Issue #2163: the chore now gates on the SKILLS-endpoint probe
+  // (`probeSkillsImpl`), not the shallow `probeOv` GET /health. `skillsUp`/
+  // `skillsDown` model that resource's liveness.
+  const skillsUp = async () => ({ status: "running" as const, latencyMs: 5 });
+  const skillsDown = async () => ({ status: "failed" as const, latencyMs: null });
 
   test("skips (no probe, no re-register) before the startup pass completes", async () => {
     let probed = false;
     let reRan = false;
     const result = await runSkillCatalogReregister({
       getState: () => ({ ...emptyCompletedState(), completed: false }),
-      probeOvImpl: async () => { probed = true; return { status: "running", latencyMs: 1 }; },
+      probeSkillsImpl: async () => { probed = true; return { status: "running", latencyMs: 1 }; },
       reRegister: async () => { reRan = true; return { attempted: true, recovered: 0, stillMissing: 2 }; },
     });
     assert.equal(result, false, "an in-flight startup pass must route to skipped");
-    assert.equal(probed, false, "must not probe OV before a pass has completed");
+    assert.equal(probed, false, "must not probe the skills endpoint before a pass has completed");
     assert.equal(reRan, false, "must not re-register before a pass has completed");
   });
 
-  test("skips a full catalog WITHOUT probing OV (cheap in-process guard first)", async () => {
+  test("skips a full catalog WITHOUT probing the skills endpoint (cheap in-process guard first)", async () => {
     let probed = false;
     const result = await runSkillCatalogReregister({
       getState: fullState,
-      probeOvImpl: async () => { probed = true; return { status: "running", latencyMs: 1 }; },
+      probeSkillsImpl: async () => { probed = true; return { status: "running", latencyMs: 1 }; },
       reRegister: async () => { throw new Error("must not be called on a full catalog"); },
     });
     assert.equal(result, false, "a full catalog is a no-op skip");
-    assert.equal(probed, false, "a full catalog must not even probe OV");
+    assert.equal(probed, false, "a full catalog must not even probe the skills endpoint");
   });
 
-  test("skips when the catalog is short but OpenViking is still down", async () => {
+  test("skips when the catalog is short but the SKILLS endpoint is still down (issue #2163)", async () => {
     let reRan = false;
     const result = await runSkillCatalogReregister({
       getState: emptyCompletedState,
-      probeOvImpl: ovDown,
+      probeSkillsImpl: skillsDown,
       reRegister: async () => { reRan = true; return { attempted: true, recovered: 0, stillMissing: 2 }; },
     });
-    assert.equal(result, false, "must not re-attempt while OV is down");
-    assert.equal(reRan, false, "the OV-liveness gate must block the re-register call");
+    assert.equal(result, false, "must not re-attempt while the skills endpoint is down");
+    assert.equal(reRan, false, "the skills-endpoint liveness gate must block the re-register call");
   });
 
-  test("runs the re-register once OV is live and the catalog is short", async () => {
+  test("runs the re-register once the SKILLS endpoint is live and the catalog is short", async () => {
     let reRan = false;
     const result = await runSkillCatalogReregister({
       getState: emptyCompletedState,
-      probeOvImpl: ovUp,
+      probeSkillsImpl: skillsUp,
       reRegister: async () => { reRan = true; return { attempted: true, recovered: 2, stillMissing: 0 }; },
     });
     assert.equal(result, true, "a recovery pass that ran counts as ran");
-    assert.equal(reRan, true, "the re-register entry point is invoked once OV is live");
+    assert.equal(reRan, true, "the re-register entry point is invoked once the skills endpoint is live");
   });
 
   test("routes an attempted:false re-register result to skipped", async () => {
     const result = await runSkillCatalogReregister({
       getState: emptyCompletedState,
-      probeOvImpl: ovUp,
+      probeSkillsImpl: skillsUp,
       reRegister: async () => ({ attempted: false, recovered: 0, stillMissing: 2 }),
     });
     assert.equal(result, false, "a guard-short-circuited re-register routes to skipped");
+  });
+
+  test("gates on the SKILLS endpoint, not OV-the-app liveness (issue #2163 regression guard)", async () => {
+    // The bug: OV's GET /health (probeOv) answered <100ms while POST
+    // /api/v1/skills was timing out under load, so the old gate green-lit a
+    // doomed pass every hour. The chore must NOT re-attempt when the SKILLS
+    // resource specifically is down — regardless of whether OV-the-app is up.
+    let reRan = false;
+    const result = await runSkillCatalogReregister({
+      getState: emptyCompletedState,
+      probeSkillsImpl: skillsDown, // the resource the chore writes to is down…
+      reRegister: async () => { reRan = true; return { attempted: true, recovered: 0, stillMissing: 2 }; },
+    });
+    assert.equal(result, false, "a down skills endpoint must block the doomed pass");
+    assert.equal(reRan, false, "no doomed registration pass when the skills POST handler is down");
   });
 });

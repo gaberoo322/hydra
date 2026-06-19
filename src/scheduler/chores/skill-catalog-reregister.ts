@@ -15,9 +15,13 @@
  *   2. SKIPS unless a startup pass has completed AND skills are still missing
  *      (an already-full catalog is an idempotent no-op — the {ran,skipped}
  *      contract routes that to `skipped`),
- *   3. gates on OpenViking liveness (`probeOv` status==="running") so it does
- *      NOT hammer a still-overloaded OV — it only re-attempts once OV recovers,
- *      the exact condition the health diagnostic tells the operator to wait for,
+ *   3. gates on the SKILLS-endpoint liveness (`probeSkillsEndpoint`
+ *      status==="running") — the resource it writes to (`POST /api/v1/skills`),
+ *      NOT OV-the-app's shallow `GET /health`. Issue #2163: a `probeOv` gate
+ *      answered <100ms even while the skills POST handler was timing out under
+ *      indexing load (#1831), green-lighting a guaranteed-doomed pass every hour
+ *      that then hammered the down handler for up to ~24min. Probing the actual
+ *      resource means it only re-attempts once that resource is responsive,
  *   4. re-registers ONLY the still-missing skills, merging outcomes into the
  *      same in-process state the health surface reads — so a recovery flips
  *      empty→ok WITHOUT a restart.
@@ -31,14 +35,19 @@
  */
 
 import { getSkillCatalogState, reRegisterMissingSkills } from "../../knowledge-base/skill-registration.ts";
-import { probeOv } from "../../health/probe.ts";
+import { probeSkillsEndpoint } from "../../health/probe.ts";
 
 /** External touchpoints of the skill-catalog-reregister chore (injectable for tests). */
 export interface SkillCatalogReregisterDeps {
   /** Read the live in-process skill-catalog state. Defaults to the real getter. */
   getState?: typeof getSkillCatalogState;
-  /** Probe OpenViking liveness. Defaults to the real `probeOv`. */
-  probeOvImpl?: typeof probeOv;
+  /**
+   * Probe the OpenViking SKILLS endpoint — the resource this chore writes to.
+   * Defaults to the real `probeSkillsEndpoint` (issue #2163: the old `probeOv`
+   * GET /health gate was decoupled from `POST /api/v1/skills`, green-lighting a
+   * doomed pass every hour). Gate on the resource the chore actually exercises.
+   */
+  probeSkillsImpl?: typeof probeSkillsEndpoint;
   /** Re-register the still-missing skills. Defaults to the real entry point. */
   reRegister?: typeof reRegisterMissingSkills;
 }
@@ -55,7 +64,7 @@ export async function runSkillCatalogReregister(
   deps: SkillCatalogReregisterDeps = {},
 ): Promise<boolean> {
   const getState = deps.getState ?? getSkillCatalogState;
-  const probe = deps.probeOvImpl ?? probeOv;
+  const probe = deps.probeSkillsImpl ?? probeSkillsEndpoint;
   const reRegister = deps.reRegister ?? reRegisterMissingSkills;
 
   const state = getState();
@@ -67,10 +76,15 @@ export async function runSkillCatalogReregister(
     return false;
   }
 
-  // Gate on OpenViking liveness — only re-attempt once OV has recovered, so a
-  // still-overloaded OV is not hammered every hour.
-  const ov = await probe();
-  if (ov.status !== "running") {
+  // Gate on the SKILLS-endpoint liveness (issue #2163) — probe the resource this
+  // chore actually writes to (`POST /api/v1/skills`), NOT OV-the-app's shallow
+  // GET /health. The old probeOv gate answered <100ms even while the skills POST
+  // handler was timing out under indexing load (#1831), green-lighting a
+  // guaranteed-doomed pass every hour. probeSkillsEndpoint folds to `failed`
+  // when the skills handler cannot answer in its short window, so we only
+  // re-attempt once the resource the chore depends on is genuinely responsive.
+  const skills = await probe();
+  if (skills.status !== "running") {
     return false;
   }
 

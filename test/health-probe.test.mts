@@ -21,6 +21,7 @@ import {
   probeService,
   probeOv,
   probeEmbedBackend,
+  probeSkillsEndpoint,
   classifyOvSearchProbe,
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type ServiceProbeResult,
@@ -168,6 +169,89 @@ describe("probeEmbedBackend", () => {
     // malformed-json means OV answered (2xx) but the body did not parse — the
     // backend was reachable, so this is NOT an embed-backend liveness failure.
     assert.equal(r!.status, "running");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// probeSkillsEndpoint — OV skills-registration resource liveness (issue #2163).
+// Gates the skill-catalog-reregister chore on the resource it actually writes
+// to (POST /api/v1/skills) instead of OV-the-app's shallow GET /health.
+// ---------------------------------------------------------------------------
+
+describe("probeSkillsEndpoint", () => {
+  test("POSTs a read-only invalid payload to /api/v1/skills (no catalog mutation — INV2)", async () => {
+    // The probe must hit the SKILLS resource, via POST (the only verb OV
+    // exposes there — GET/HEAD 405 at the router), with a deliberately-invalid
+    // body so the handler validation-rejects it WITHOUT writing the catalog.
+    let calledPath: string | undefined;
+    let calledMethod: string | undefined;
+    let calledBody: string | undefined;
+    const ovRequestImpl = (async (path: string, init: any) => {
+      calledPath = path;
+      calledMethod = init?.method;
+      calledBody = init?.body;
+      // OV's validator rejecting the invalid payload — an app-level non-2xx,
+      // which means the handler DID answer → running.
+      return { ok: false, code: "ov-non-2xx", body: "Skill data cannot be None" } as OvResult<any>;
+    }) as any;
+    const r = await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(calledPath, "/api/v1/skills", "must probe the skills resource the chore writes to");
+    assert.equal(calledMethod, "POST", "OV exposes only POST on /api/v1/skills (GET/HEAD 405)");
+    // The body must be a deliberately-invalid payload (no real skill `data`), so
+    // the handler rejects it before any catalog write — read-only in effect.
+    const parsed = JSON.parse(calledBody!);
+    assert.equal(parsed.data, null, "the probe payload must be invalid so OV writes nothing");
+    assert.equal(r.status, "running", "an app-level reject means the handler answered → running");
+  });
+
+  test("2xx (handler answered) → running with a numeric latency", async () => {
+    const ovRequestImpl = (async () => ({ ok: true, data: {} }) as OvResult<any>) as any;
+    const r = await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(r.status, "running");
+    assert.equal(typeof r.latencyMs, "number");
+    assert.ok(r.latencyMs! >= 0);
+  });
+
+  test("ov-non-2xx (validation reject — handler responsive) → running", async () => {
+    // The EXPECTED happy-path signal: the handler rejected our invalid payload,
+    // proving the load-gated POST handler is answering → the resource is live.
+    const ovRequestImpl = (async () => ({ ok: false, code: "ov-non-2xx", body: "'name'" }) as OvResult<any>) as any;
+    const r = await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(r.status, "running");
+    assert.equal(typeof r.latencyMs, "number");
+  });
+
+  test("ov-malformed-json (2xx body parse fail — handler still answered) → running", async () => {
+    const ovRequestImpl = (async () => ({ ok: false, code: "ov-malformed-json" }) as OvResult<any>) as any;
+    const r = await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(r.status, "running", "a 2xx that failed to parse still proves the handler answered");
+  });
+
+  test("ov-timeout (handler did not answer in the short window — load-gated) → {failed, latencyMs:null}", async () => {
+    // THE bug this issue fixes: under indexing load (#1831) the POST handler
+    // does not answer inside the short probe window, so the gate must fold to
+    // failed and the chore must NOT launch a doomed pass.
+    const ovRequestImpl = (async () => ({ ok: false, code: "ov-timeout" }) as OvResult<any>) as any;
+    const r = await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(r.status, "failed");
+    assert.equal(r.latencyMs, null);
+  });
+
+  test("ov-service-down (transport never reached the handler) → {failed, latencyMs:null}", async () => {
+    const ovRequestImpl = (async () => ({ ok: false, code: "ov-service-down" }) as OvResult<any>) as any;
+    const r = await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(r.status, "failed");
+    assert.equal(r.latencyMs, null);
+  });
+
+  test("never re-throws — both arms map exhaustively", async () => {
+    let r: ServiceProbeResult;
+    await assert.doesNotReject(async () => {
+      r = await probeSkillsEndpoint({
+        ovRequestImpl: (async () => ({ ok: false, code: "ov-timeout" }) as OvResult<any>) as any,
+      });
+    });
+    assert.equal(r!.status, "failed");
   });
 });
 
