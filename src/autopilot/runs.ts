@@ -4,11 +4,11 @@
  * readers that power `GET /api/autopilot/runs(/...)`.
  *
  * The read-only **projections** were split into the sibling
- * `run-projections.ts` (issue #1183). A few are still re-exported here so
- * existing `from "../autopilot/runs.ts"` import paths keep resolving; the
- * ones with no external consumer of the old path are now imported only for
- * the high-level readers below, which compose Redis reads + the dead-pid
- * sweeper with those projections.
+ * `run-projections.ts` (issue #1183), which is their canonical home. The
+ * back-compat re-export relay was retired (issue #2125), so callers import
+ * projection symbols from `run-projections.ts` directly; this Module imports
+ * them only for the high-level readers below, which compose Redis reads + the
+ * dead-pid sweeper with those projections.
  *
  * Concepts (see `CONTEXT.md`):
  *   - **Autopilot Run** — one invocation of `/hydra-autopilot`,
@@ -76,7 +76,10 @@ import type {
   ReflectionRecordBody,
 } from "./schemas.ts";
 // Read-projection surface — moved to `run-projections.ts` (issue #1183). The
-// readers below use these; the re-export keeps old import paths resolving.
+// Redis-touching readers below compose these pure projections; they are
+// imported here for that internal use only. The back-compat re-export relay
+// was retired (issue #2125): `run-projections.ts` is the canonical home for
+// every projection symbol, so callers import them from there directly.
 import {
   RUN_TURNS_MAX_FETCH,
   MERGED_STATUSES,
@@ -89,24 +92,6 @@ import {
   deriveInflightSlotSeed,
 } from "./run-projections.ts";
 import type { AutopilotLifecycle, InflightSlotSeed } from "./run-projections.ts";
-export {
-  MERGED_STATUSES,
-  FAILED_STATUSES,
-  projectRunView,
-  deriveLifecycleState,
-};
-export { WEDGE_AGE_THRESHOLD_S } from "./run-projections.ts";
-// `summarizeTerminationHealth` moved to `run-projections.ts` (issue #1964,
-// completing the #1183 split — it is a pure analytical projection). Re-exported
-// here so `from "../autopilot/runs.ts"` import paths keep resolving.
-export { summarizeTerminationHealth } from "./run-projections.ts";
-// `InflightSlotSeed` + `deriveInflightSlotSeed` moved to `run-projections.ts`
-// (issue #1993, completing the #1183 split — the seed is a pure read-side
-// derivation over the subagent dispatch ledger, no Redis/clock). The async
-// `readInflightSlotSeed` wrapper (the only Redis-touching caller) stays here.
-// Re-exported so `from "../autopilot/runs.ts"` import paths keep resolving.
-export { deriveInflightSlotSeed } from "./run-projections.ts";
-export type { InflightSlotSeed } from "./run-projections.ts";
 
 // ---------------------------------------------------------------------------
 // Constants

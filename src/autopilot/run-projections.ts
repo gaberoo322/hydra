@@ -18,8 +18,9 @@
  * typed accessors). Everything else here is pure — no Redis, no clock beyond
  * `Date.now()` which the caller can normalise.
  *
- * `runs.ts` re-exports every symbol moved here, so existing import paths
- * (`from "../autopilot/runs.ts"`) keep resolving unchanged.
+ * This Module is the canonical home for every read-projection symbol. The
+ * back-compat re-export relay that once forwarded them through `runs.ts` was
+ * retired (issue #2125), so callers import from here directly.
  */
 
 import {
@@ -473,7 +474,7 @@ export function deriveLifecycleState(
 // `summarizeTerminationHealth` is a pure analytical projection over an
 // already-fetched run-digest array (no Redis, no clock, no await), so its home
 // is this read-only projection Module, not the write-side lifecycle Module.
-// `runs.ts` re-exports it for back-compat (`from "../autopilot/runs.ts"`).
+// Callers import it from here directly (the runs.ts relay was retired, #2125).
 // ---------------------------------------------------------------------------
 
 /**
@@ -643,8 +644,8 @@ export function summarizeTerminationHealth(
 // `deriveInflightSlotSeed` is a pure function over the in-flight subagent
 // dispatch ledger (no Redis, no clock, no await — the async `readInflightSlotSeed`
 // wrapper in `runs.ts` does the Redis read), so its home is this read-only
-// projection Module, not the write-side lifecycle Module. `runs.ts` re-exports
-// both symbols for back-compat (`from "../autopilot/runs.ts"`).
+// projection Module, not the write-side lifecycle Module. Callers import both
+// symbols from here directly (the runs.ts relay was retired, #2125).
 // ---------------------------------------------------------------------------
 
 /**

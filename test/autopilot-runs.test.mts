@@ -711,7 +711,7 @@ describe("projectRunView wedge cross-check (issue #1091)", () => {
 
   beforeEach(async () => {
     if (!projectRunView) {
-      const mod = await import("../src/autopilot/runs.ts");
+      const mod = await import("../src/autopilot/run-projections.ts");
       projectRunView = mod.projectRunView;
       WEDGE_AGE_THRESHOLD_S = mod.WEDGE_AGE_THRESHOLD_S;
     }
@@ -767,7 +767,7 @@ describe("summarizeTerminationHealth (issue #1352)", () => {
 
   beforeEach(async () => {
     if (!summarizeTerminationHealth) {
-      const mod = await import("../src/autopilot/runs.ts");
+      const mod = await import("../src/autopilot/run-projections.ts");
       summarizeTerminationHealth = mod.summarizeTerminationHealth;
     }
   });
@@ -1075,7 +1075,7 @@ describe("deriveInflightSlotSeed (issue #1352)", () => {
 
   beforeEach(async () => {
     if (!deriveInflightSlotSeed) {
-      const mod = await import("../src/autopilot/runs.ts");
+      const mod = await import("../src/autopilot/run-projections.ts");
       deriveInflightSlotSeed = mod.deriveInflightSlotSeed;
     }
   });
