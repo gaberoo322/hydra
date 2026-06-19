@@ -28,6 +28,9 @@ import { projectHealthDeepResponse } from "../src/health/wire.ts";
 // and its positional-to-named mapping. Still exported for unit testing the
 // positional index mapping in isolation.
 import { assembleProbeInputs } from "../src/health/fan-out.ts";
+// Issue #2131: the ServiceProbe Adapter Seam — drive the embed-backend probe
+// end-to-end (probe → rule fold) via its injected `ovPostJsonImpl` seam, no network.
+import { probeEmbedBackend } from "../src/health/probe.ts";
 
 // ---------------------------------------------------------------------------
 // A baseline all-healthy snapshot. Each test clones it and perturbs ONE field
@@ -277,24 +280,107 @@ describe("assessHealth — per-rule firing", () => {
     assert.equal(d!.what, "VikingDB unreachable");
   });
 
-  // Issue #2013: the generic "external service not running" rule covers a new
-  // monitored service (embed-backend) with no per-service rule code.
-  test("embed-backend failed → generic 'external service not running' warning (no bespoke rule)", () => {
+  // Issue #2131: the embed-backend failed state now fires a BESPOKE warning that
+  // names the offline embedding/VLM backend and points at the Wake-on-LAN
+  // recovery path (#1794) — promoted from the generic #2013 "external service
+  // not running" message so the 2026-06-18 silent-info gap escalates loudly.
+  test("embed-backend failed → bespoke 'Embedding/VLM backend unreachable' warning naming the backend + recovery path", () => {
     const d = find(
       clone((s) => (s.svcProbes["embed-backend"] = { status: "failed" })),
       "embed-backend",
       "warning",
     );
     assert.ok(d);
-    assert.equal(d!.what, 'External service "embed-backend" not running');
+    assert.equal(d!.what, "Embedding/VLM backend unreachable");
+    // Names the offline backend (gaming-PC Ollama over Tailscale) …
+    assert.match(d!.why, /gaming-PC Ollama|gabes-desktop-1/);
+    // … and points at the #1794 Wake-on-LAN recovery path.
+    assert.match(d!.action, /1794|Wake-on-LAN/);
   });
 
-  test("embed-backend running → generic rule does NOT fire", () => {
+  test("embed-backend running → bespoke rule does NOT fire (slow-but-reachable stays quiet)", () => {
     const d = find(
       clone((s) => (s.svcProbes["embed-backend"] = { status: "running" })),
       "embed-backend",
     );
     assert.equal(d, undefined);
+  });
+
+  test("embed-backend failed is reported by its bespoke rule only — the generic iterator does not double-report it", () => {
+    const diags = assessHealth(
+      clone((s) => (s.svcProbes["embed-backend"] = { status: "failed" })),
+    ).diagnostics.filter((x) => x.component === "embed-backend");
+    assert.equal(diags.length, 1);
+    assert.equal(diags[0].what, "Embedding/VLM backend unreachable");
+  });
+
+  // Issue #2131 acceptance: drive the embed-backend probe end-to-end via the
+  // injected `probeEmbedBackend({ ovPostJsonImpl })` seam (no real network) and
+  // assert the rule fold — proving an UNREACHABLE backend escalates to an
+  // operator-visible warning while a SLOW-but-reachable plane stays the benign
+  // `info` "OV search slow". This closes the 2026-06-18 silent-info gap: the
+  // same root condition (offline gaming-PC Ollama) must not read as informational.
+  describe("embed-backend probe → rule, driven via the injected ovPostJson seam (#2131)", () => {
+    // The two branches: ov-service-down/ov-timeout on the embedding-exercising
+    // search transport fold the probe to "failed"; OV answering (2xx) → "running".
+    async function snapshotFromProbe(
+      ovPostJsonImpl: (...a: any[]) => Promise<any>,
+      ovSearch?: HealthSnapshot["ovSearch"],
+    ): Promise<HealthSnapshot> {
+      const embedBackend = await probeEmbedBackend({ ovPostJsonImpl: ovPostJsonImpl as any });
+      return clone((s) => {
+        s.svcProbes["embed-backend"] = embedBackend;
+        if (ovSearch) s.ovSearch = ovSearch;
+      });
+    }
+
+    test("UNREACHABLE backend (ov-service-down) → operator-visible warning, NOT info", async () => {
+      const snap = await snapshotFromProbe(
+        async () => ({ ok: false, code: "ov-service-down" }),
+        // The offline backend also drives the through-OV search to timeout →
+        // "timeout" (the historical false-info path). The bespoke warning must
+        // still escalate despite that info rule also firing.
+        { status: "timeout", latencyMs: 14200, resultCount: 0 },
+      );
+      const a = assessHealth(snap);
+      const alert = a.diagnostics.find((d) => d.component === "embed-backend");
+      assert.ok(alert, "embed-backend must fire a diagnostic when unreachable");
+      assert.equal(alert!.severity, "warning");
+      assert.equal(alert!.what, "Embedding/VLM backend unreachable");
+      // It is a NON-info, operator-visible signal — the top-level fold is at
+      // least `degraded` (a warning is never `healthy`/info-only).
+      assert.notEqual(a.status, "healthy");
+      // The probe folded to failed (the seam, exercised without a network).
+      assert.equal(snap.svcProbes["embed-backend"].status, "failed");
+    });
+
+    test("UNREACHABLE backend (ov-timeout on the embed transport) → warning", async () => {
+      const snap = await snapshotFromProbe(async () => ({ ok: false, code: "ov-timeout" }));
+      const alert = assessHealth(snap).diagnostics.find((d) => d.component === "embed-backend");
+      assert.ok(alert);
+      assert.equal(alert!.severity, "warning");
+    });
+
+    test("REACHABLE-but-slow plane (OV answers 2xx) → embed-backend stays quiet; only the existing info 'OV search slow' fires", async () => {
+      const snap = await snapshotFromProbe(
+        // OV answered (2xx) → probe reads "running"; the embedding path is slow,
+        // which the SEPARATE ovSearch probe reports as "timeout" → info.
+        async () => ({ ok: true, data: { result: { memories: [], resources: [], skills: [] } } }),
+        { status: "timeout", latencyMs: 14200, resultCount: 0 },
+      );
+      const a = assessHealth(snap);
+      // No embed-backend alert — a slow-but-reachable backend is not down.
+      assert.equal(
+        a.diagnostics.some((d) => d.component === "embed-backend"),
+        false,
+        "a reachable (slow) backend must NOT raise the embed-backend alert",
+      );
+      assert.equal(snap.svcProbes["embed-backend"].status, "running");
+      // The benign slow-plane info signal is unchanged.
+      const slow = a.diagnostics.find((d) => d.what === "OV search slow");
+      assert.ok(slow, "the slow plane still surfaces the existing info signal");
+      assert.equal(slow!.severity, "info");
+    });
   });
 
   test("openviking failed is reported by its bespoke rule only — the generic rule does not double-report it", () => {

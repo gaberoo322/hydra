@@ -29,7 +29,7 @@ import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
 // is reported exactly once — by its bespoke rule — never doubled. Any monitored
 // service NOT listed here (e.g. the #2013 "embed-backend" key) is covered by the
 // generic rule with zero per-service code.
-const SVC_PROBES_WITH_BESPOKE_RULES = new Set(["openviking", "vikingdb"]);
+const SVC_PROBES_WITH_BESPOKE_RULES = new Set(["openviking", "vikingdb", "embed-backend"]);
 
 export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   (s) =>
@@ -186,6 +186,36 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
           why: "Embeddings storage down. Indexing and search fail.",
           impact: "Knowledge inoperative.",
           action: "docker ps | grep viking",
+          autoRecovery: true,
+        }
+      : null,
+  // Issue #2131: a BESPOKE rule for the OpenViking dense-embedding + VLM backend
+  // (the gaming-PC Ollama endpoint reached over Tailscale, #980/#1795). The
+  // #2013 `embed-backend` probe (probeEmbedBackend → folds an ov-service-down /
+  // ov-timeout on the embedding-exercising `search/find` transport to "failed")
+  // already lands a keyed svcProbes["embed-backend"] entry. The generic
+  // "external service not running" iterator below WOULD cover it, but with a
+  // generic message that neither names the offline backend nor points at the
+  // recovery path. The 2026-06-18 outage (#2104/#2064/#1831) showed the cost: a
+  // fully-offline backend surfaced only as the benign `info` "OV search slow"
+  // (the ovSearch ov-timeout → "timeout" rule below), so nothing operator-facing
+  // escalated. This bespoke `warning` is the loud, actionable signal that gap
+  // needs — it names the offline embedding/VLM backend and points at the
+  // Wake-on-LAN recovery path (#1794). It is excluded from the generic iterator
+  // (SVC_PROBES_WITH_BESPOKE_RULES) so the degraded backend is reported exactly
+  // once. The slow-but-reachable case is untouched: a slow OV search still folds
+  // the ovSearch probe to "timeout" → `info` "OV search slow" (the embed-backend
+  // probe only fails on a transport-level ov-service-down / ov-timeout — OV
+  // answering at all, even slowly, reads "running"), so no false alert fires.
+  (s) =>
+    s.svcProbes["embed-backend"]?.status === "failed"
+      ? {
+          severity: "warning",
+          component: "embed-backend",
+          what: "Embedding/VLM backend unreachable",
+          why: "The OpenViking dense-embedding + VLM backend (the gaming-PC Ollama endpoint, gabes-desktop-1:11434, reached over Tailscale — #980/#1795) did not answer the embedding-exercising search probe. OpenViking itself may be up while this backend is offline.",
+          impact: "Knowledge-plane search degrades to empty and the learning indexer stalls — agents run cycles with reduced context until the backend recovers.",
+          action: "Wake/check the gaming PC (Wake-on-LAN recovery: #1794). Verify the backend: curl -m5 http://gabes-desktop-1:11434/api/tags. See OpenViking embedding/VLM backend split in docs/reference.md.",
           autoRecovery: true,
         }
       : null,
