@@ -30,6 +30,19 @@
  * stale entries on every read.
  */
 
+// This Module owns ONE concern: Redis persistence for design-concept
+// artifacts — `saveDesignConcept`, `getDesignConcept`, `listDesignConcepts`,
+// `approveDesignConcept`, and the QA-time `resolveDesignConceptForQa` resolver.
+// It imports — but no longer RE-EXPORTS — the symbols its body needs from the
+// three sibling Modules that each own a focused concern (issue #2124, which
+// retired the back-compat re-export relay this header used to carry):
+//
+//   - identity/policy  → `./design-concept-identity.ts` (pure, no Redis)
+//   - gate predicates  → `./design-concept-gate.ts`     (freshness + gateCheck)
+//   - keying + storage → `./redis/design-concept.ts`    (the storage seam)
+//   - Zod input schema → `./schemas/design-concept.ts`  (ADR-0011 type home)
+//
+// Callers import each symbol from the Module that owns it; there is no relay.
 import {
   getDesignConceptHash,
   listAllDesignConceptRefs,
@@ -37,20 +50,8 @@ import {
   removeDesignConceptFromIndex,
   saveDesignConceptHash,
   setDesignConceptField,
+  normalizeAnchorRef,
 } from "./redis/design-concept.ts";
-// `normalizeAnchorRef` is a keying concern that now lives in the persistence
-// seam (ADR-0018 / issue #797). Re-exported here for back-compat — callers
-// and the existing #736 test import it as `dc.normalizeAnchorRef`. The seam
-// normalizes every key-shaped `anchorRef` at function entry, so the domain
-// layer no longer calls it to derive Redis keys.
-import { normalizeAnchorRef } from "./redis/design-concept.ts";
-export { normalizeAnchorRef } from "./redis/design-concept.ts";
-// Pure artifact-identity + green-light policy logic now lives in its own
-// Module (issue #2033) so it is unit-testable without dragging the full
-// persistence layer. This persistence Module imports the types + pure
-// functions it needs and re-exports them below for back-compat — existing
-// callers (`src/api/design-concepts.ts`, `src/anchor-candidates.ts`, and the
-// #1875/#736 tests) keep importing them from `./design-concept.ts` unchanged.
 import {
   type DesignConcept,
   type DesignConceptScope,
@@ -62,45 +63,14 @@ import {
   type DesignConceptStatus,
   computeArtifactHash,
   designConceptHandle,
-  computeGreenLight,
-  GREEN_LIGHT_WINDOW_DAYS,
-  GREEN_LIGHT_REQUIRED_DAYS,
 } from "./design-concept-identity.ts";
 import {
   type DesignConceptInput as DesignConceptInputType,
 } from "./schemas/design-concept.ts";
-// The gate predicate (`gateCheck`/`isFresh`) and its freshness window were
-// extracted to `src/design-concept-gate.ts` (issue #1908) — the gate is the
-// only concern that coupled this persistence module to the tier-classifier
-// boundary. We import the freshness constant back for internal index pruning;
-// the back-compat re-export of `gateCheck`/`isFresh`/`DESIGN_CONCEPT_MAX_AGE_MS`
-// was dropped (issue #1977 — no caller imports them via this module; they all
-// import directly from `./design-concept-gate.ts`).
+// The freshness constant is imported for internal index pruning only; the gate
+// predicates (`gateCheck`/`isFresh`) live in `./design-concept-gate.ts` and
+// callers import them from there directly.
 import { DESIGN_CONCEPT_MAX_AGE_MS } from "./design-concept-gate.ts";
-
-// `DesignConceptInput` is owned by `src/schemas/design-concept.ts` per
-// ADR-0011 (single source of truth: the schema is also the type). The
-// re-export below keeps the historical import path working.
-export type { DesignConceptInput } from "./schemas/design-concept.ts";
-
-// Back-compat re-exports for the identity Module (issue #2033). These symbols
-// were defined inline here until the pure logic moved to
-// `./design-concept-identity.ts`; existing callers import them from this
-// module, so re-export the locally-imported bindings (above) so no import site
-// changes. Re-exporting the local bindings (rather than a second
-// `export ... from`) avoids a duplicate-identifier clash with the internal-use
-// imports.
-export type {
-  DesignConcept,
-  DesignConceptScope,
-};
-export {
-  computeArtifactHash,
-  designConceptHandle,
-  computeGreenLight,
-  GREEN_LIGHT_WINDOW_DAYS,
-  GREEN_LIGHT_REQUIRED_DAYS,
-};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -115,10 +85,11 @@ const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /* The domain value types (`DesignConcept`, `DesignConceptScope`,
  * `ModuleTouched`, etc.) and the pure artifact-identity functions
- * (`computeArtifactHash` + its `canonicalJson` helper) now live in
- * `./design-concept-identity.ts` (issue #2033) and are imported above +
- * re-exported for back-compat. `DesignConceptInput` is owned by
- * `src/schemas/design-concept.ts` — see ADR-0011. */
+ * (`computeArtifactHash` + its `canonicalJson` helper) live in
+ * `./design-concept-identity.ts` (issue #2033) and are imported above for
+ * internal use. `DesignConceptInput` is owned by
+ * `src/schemas/design-concept.ts` — see ADR-0011. Callers import these
+ * symbols from their owning Module directly (issue #2124 retired the relay). */
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -245,9 +216,9 @@ export async function getDesignConcept(
 // ---------------------------------------------------------------------------
 
 /* The `DesignConceptHandle` type and the pure `designConceptHandle` derivation
- * moved to `./design-concept-identity.ts` (issue #2033) — imported above +
- * re-exported for back-compat. The QA-time resolver below stays here because
- * it performs Redis IO (`getDesignConcept`). */
+ * live in `./design-concept-identity.ts` (issue #2033) — imported above for
+ * internal use. The QA-time resolver below stays here because it performs Redis
+ * IO (`getDesignConcept`). */
 
 /**
  * Result of resolving an artifact at QA time.
@@ -404,8 +375,9 @@ export async function approveDesignConcept(
 }
 
 /* The green-light criterion (`computeGreenLight` +
- * `GREEN_LIGHT_WINDOW_DAYS`/`GREEN_LIGHT_REQUIRED_DAYS`) moved to
+ * `GREEN_LIGHT_WINDOW_DAYS`/`GREEN_LIGHT_REQUIRED_DAYS`) lives in
  * `./design-concept-identity.ts` (issue #2033) — it is pure (no Redis IO) and
- * is imported + re-exported above for back-compat. The `GreenLightMetrics`
- * type lives at its domain home and is imported directly from there by callers
- * that need it (issue #2052 dropped the unused barrel re-export). */
+ * this persistence Module does not use it; callers import it from the identity
+ * Module directly (issue #2124 retired the relay re-export). The
+ * `GreenLightMetrics` type lives at its domain home too (issue #2052 dropped
+ * the unused barrel re-export). */

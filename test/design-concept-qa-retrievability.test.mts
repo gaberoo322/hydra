@@ -26,6 +26,11 @@ import assert from "node:assert/strict";
 import express from "express";
 import type { AddressInfo } from "node:net";
 import Redis from "ioredis";
+// `designConceptHandle` is pure identity derivation; it lives in the identity
+// Module (issue #2033). Issue #2124 retired the persistence Module's back-compat
+// re-export, so import it from its canonical home rather than via the `dc`
+// namespace.
+import { designConceptHandle } from "../src/design-concept-identity.ts";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
@@ -104,8 +109,8 @@ describe("design-concept QA retrievability (#1450)", () => {
 
   describe("designConceptHandle", () => {
     test("derives the canonical Redis key + API path from either anchorRef form", () => {
-      const fromBare = dc.designConceptHandle("1450");
-      const fromCanonical = dc.designConceptHandle("issue-1450");
+      const fromBare = designConceptHandle("1450");
+      const fromCanonical = designConceptHandle("issue-1450");
       // Producer (bare) and consumer (canonical) resolve to the SAME handle.
       assert.deepEqual(fromBare, fromCanonical);
       assert.equal(fromBare.anchorRef, "issue-1450");
@@ -114,7 +119,7 @@ describe("design-concept QA retrievability (#1450)", () => {
     });
 
     test("passes non-issue refs through unchanged", () => {
-      const h = dc.designConceptHandle("test:complete");
+      const h = designConceptHandle("test:complete");
       assert.equal(h.anchorRef, "test:complete");
       assert.equal(h.redisKey, "hydra:design-concept:test:complete");
     });
