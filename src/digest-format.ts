@@ -19,7 +19,7 @@
  */
 
 import { getTargetCommitUrl } from "./target-config.ts";
-import { ORCHESTRATOR_FLOOR, type CapacitySnapshot } from "./capacity-floor.ts";
+import { ORCHESTRATOR_FLOOR, type CapacitySnapshot } from "./capacity-floor-classifier.ts";
 import {
   getBuilderHealthScorecard,
   type BuilderHealthScorecard,

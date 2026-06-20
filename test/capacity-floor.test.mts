@@ -18,7 +18,7 @@ import {
   computeShare,
   ORCHESTRATOR_FLOOR,
   type CycleSideEntry,
-} from "../src/capacity-floor.ts";
+} from "../src/capacity-floor-classifier.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
