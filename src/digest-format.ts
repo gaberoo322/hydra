@@ -229,7 +229,9 @@ export function buildDigestMessage(
  * is empty. Mirrors the Capacity-split block's always-render contract so the
  * operator can see the scorecard is being tracked even when quiet.
  */
-export function formatBuilderHealthLines(builderHealth) {
+export function formatBuilderHealthLines(
+  builderHealth: BuilderHealthScorecard | null,
+): string[] {
   const lines = ["*Builder health:*"];
   const bh = builderHealth;
   const auto = bh?.autonomyRate;
@@ -280,12 +282,42 @@ export function formatBuilderHealthLines(builderHealth) {
   return lines;
 }
 
-function formatMinutes(mins) {
+function formatMinutes(mins: number | string | null | undefined): string {
   const m = Number(mins);
   if (!Number.isFinite(m)) return "—";
   if (m < 60) return `${Math.round(m)}m`;
   if (m < 24 * 60) return `${(m / 60).toFixed(1)}h`;
   return `${(m / (24 * 60)).toFixed(1)}d`;
+}
+
+/**
+ * The payload shape the critical-alert switch narrows on (issue #2229).
+ *
+ * Each field is the subset a `case` below reads off `event.payload`; all are
+ * optional because the bus carries the full notification vocabulary and any
+ * given alert type populates only its own slice. The trailing index signature
+ * keeps the type a structural supertype of the bus's loosely-typed
+ * `Record<string, unknown>` payloads (so the `DigestEvent` call site in
+ * `digest.ts` stays assignable) and lets the `default` case `JSON.stringify`
+ * an arbitrary unknown payload. Typing the read fields means a renamed payload
+ * key (e.g. `cyclesRun` → `cycleCount`) becomes a compile error here rather
+ * than a silent `undefined` in the rendered alert.
+ */
+export interface CriticalAlertPayload {
+  title?: string;
+  commitSha?: string;
+  error?: string;
+  reason?: string;
+  cyclesRun?: number;
+  recentTitles?: string[];
+  suggestion?: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
+export interface CriticalAlertEvent {
+  type?: string;
+  payload?: CriticalAlertPayload;
 }
 
 /**
@@ -297,9 +329,9 @@ function formatMinutes(mins) {
  * against the source-of-truth map — so a misspelled event type is a compile
  * error, and adding a new type surfaces here as a non-exhaustive switch.
  */
-export function formatCriticalAlert(event) {
+export function formatCriticalAlert(event: CriticalAlertEvent): string {
   const type = event.type || "unknown";
-  const payload = event.payload || {};
+  const payload: CriticalAlertPayload = event.payload || {};
 
   switch (type) {
     case E.CYCLE_ROLLBACK_FAILED:
