@@ -22,7 +22,11 @@
  *
  * The remaining side-effecting surface — event batching, critical-event
  * bypass, quiet-hours skip, and timer lifecycle — is encapsulated in the
- * `DigestAccumulator` class below. Its constructor takes injected deps
+ * `DigestAccumulator` class below. The flush-threshold *policy* itself (the
+ * "should we send a digest now?" decision) is lifted out of the class into the
+ * pure `shouldSendDigest` predicate + the `CRITICAL_EVENT_TYPES` constant
+ * (issue #2212), so the accumulator owns only mutable timer/ring state while the
+ * policy is independently testable. Its constructor takes injected deps
  * (`now`, `send`, `getCapacity`, `getBuilderHealth`) that default to the real
  * `new Date()` clock / `sendToTelegram` / capacity + builder-health readers,
  * so a unit test can construct a *fresh* accumulator per case with an injected
@@ -54,6 +58,66 @@ export { formatBuilderHealthLines, buildWeeklySummary };
 const DIGEST_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const QUIET_START_HOUR = 22; // 10pm
 const QUIET_END_HOUR = 7; // 7am
+
+/**
+ * Event types that bypass the batched digest and send immediately (issue #2212).
+ *
+ * Exported as a named policy surface so a test can assert "this event type
+ * bypasses the digest" without constructing a {@link DigestAccumulator}. Members
+ * reference the typed {@link NOTIFICATION_EVENT_TYPES} vocabulary (issue #1182)
+ * so a misspelled event type here is a compile error.
+ *
+ * Kept as a module constant (not a `digest-format.ts` export) because it is a
+ * *policy* of the accumulator's batching behavior, not part of the pure
+ * assembly grammar that `digest-format.ts` owns.
+ */
+export const CRITICAL_EVENT_TYPES: readonly string[] = [
+  E.CYCLE_ROLLBACK_FAILED,
+  E.SCHEDULER_STOPPED,
+  E.SCHEDULER_PAUSED_REPETITION,
+  E.SCHEDULER_BACKLOG_EMPTY,
+];
+
+/**
+ * The verdict of the flush-threshold policy (issue #2212). `send` is the
+ * decision; `reason` is a machine-readable tag explaining why — `"send"` when
+ * a digest should fire, otherwise the gate that suppressed it.
+ */
+export interface DigestFlushVerdict {
+  send: boolean;
+  reason: "send" | "quiet-hours" | "no-events";
+}
+
+/**
+ * The flush-threshold policy for the batched digest (issue #2212): given the
+ * number of accumulated events and the current local hour, decide whether a
+ * digest should fire now.
+ *
+ * This is a **pure predicate** — no clock, no module state, no side effects —
+ * so the "when does a digest fire?" decision has a single named home and is
+ * testable in isolation: `shouldSendDigest(5, 23)` returns
+ * `{ send: false, reason: "quiet-hours" }` with no timer setup, no captured
+ * sender, and no full {@link DigestAccumulator} instance.
+ *
+ * Gate order matches the original inline guards in `sendDigest()`: quiet hours
+ * is checked before the empty-batch gate, so a quiet-hours skip reports
+ * `"quiet-hours"` even when there are no pending events.
+ *
+ * Adding a third gate (e.g. "never send when autopilot is paused") is a one-line
+ * change here, not an audit of `sendDigest()`'s body.
+ */
+export function shouldSendDigest(
+  pendingCount: number,
+  nowHour: number,
+): DigestFlushVerdict {
+  if (nowHour >= QUIET_START_HOUR || nowHour < QUIET_END_HOUR) {
+    return { send: false, reason: "quiet-hours" };
+  }
+  if (pendingCount === 0) {
+    return { send: false, reason: "no-events" };
+  }
+  return { send: true, reason: "send" };
+}
 
 // Daily heartbeat: a guaranteed once-per-day proof-of-life push. Unlike the
 // event-gated 4h alert digest above (which stays SILENT when nothing has gone
@@ -123,8 +187,11 @@ export class DigestAccumulator {
   }
 
   private isQuietHours(): boolean {
-    const hour = this.now().getHours();
-    return hour >= QUIET_START_HOUR || hour < QUIET_END_HOUR;
+    // Reuse the flush policy's quiet-hours gate so the "what counts as quiet?"
+    // rule has one home (issue #2212). With zero pending events the predicate
+    // reports "quiet-hours" iff the hour is quiet; otherwise it reports
+    // "no-events" — which is exactly !isQuietHours.
+    return shouldSendDigest(0, this.now().getHours()).reason === "quiet-hours";
   }
 
   /**
@@ -134,16 +201,9 @@ export class DigestAccumulator {
   recordEvent(event: DigestEvent): void {
     const type = event.type || "unknown";
 
-    // Critical events bypass digest and send immediately. Members reference the
-    // typed NOTIFICATION_EVENT_TYPES vocabulary (issue #1182) so a misspelled
-    // event type here is a compile error.
-    const critical: string[] = [
-      E.CYCLE_ROLLBACK_FAILED,
-      E.SCHEDULER_STOPPED,
-      E.SCHEDULER_PAUSED_REPETITION,
-      E.SCHEDULER_BACKLOG_EMPTY,
-    ];
-    if (critical.includes(type)) {
+    // Critical events bypass digest and send immediately. The bypass set is the
+    // named CRITICAL_EVENT_TYPES policy (issue #2212).
+    if (CRITICAL_EVENT_TYPES.includes(type)) {
       void this.sendImmediate(formatCriticalAlert(event));
       return;
     }
@@ -160,13 +220,18 @@ export class DigestAccumulator {
    * pending events.
    */
   async sendDigest(): Promise<void> {
-    if (this.isQuietHours()) {
-      console.log("[Digest] Quiet hours — skipping digest");
-      return;
-    }
-
-    if (this.pendingEvents.length === 0) {
-      console.log("[Digest] No events since last digest — skipping");
+    // The flush-threshold policy (issue #2212): one named predicate decides
+    // whether a digest fires; this method is a thin caller over its verdict.
+    const verdict = shouldSendDigest(
+      this.pendingEvents.length,
+      this.now().getHours(),
+    );
+    if (!verdict.send) {
+      if (verdict.reason === "quiet-hours") {
+        console.log("[Digest] Quiet hours — skipping digest");
+      } else {
+        console.log("[Digest] No events since last digest — skipping");
+      }
       return;
     }
 

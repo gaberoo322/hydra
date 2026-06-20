@@ -14,7 +14,11 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { DigestAccumulator } from "../src/digest.ts";
+import {
+  DigestAccumulator,
+  shouldSendDigest,
+  CRITICAL_EVENT_TYPES,
+} from "../src/digest.ts";
 import { NOTIFICATION_EVENT_TYPES as E } from "../src/event-bus-vocabulary.ts";
 
 // A clock pinned to a daytime hour (noon) on a fixed date, so isQuietHours()
@@ -136,6 +140,65 @@ describe("DigestAccumulator — quiet-hours skip", () => {
     await acc.sendDailyHeartbeat();
     assert.equal(sent.length, 1);
     assert.match(sent[0], /💓 \*Hydra Daily Heartbeat\*/);
+  });
+});
+
+describe("shouldSendDigest — flush-threshold policy (issue #2212)", () => {
+  it("fires a digest when daytime and events are pending", () => {
+    assert.deepEqual(shouldSendDigest(5, 12), { send: true, reason: "send" });
+  });
+
+  it("suppresses during quiet hours even with pending events", () => {
+    assert.deepEqual(shouldSendDigest(5, 23), {
+      send: false,
+      reason: "quiet-hours",
+    });
+  });
+
+  it("suppresses at the quiet-start boundary (22:00 is quiet)", () => {
+    assert.deepEqual(shouldSendDigest(5, 22), {
+      send: false,
+      reason: "quiet-hours",
+    });
+  });
+
+  it("fires at the quiet-end boundary (07:00 is daytime)", () => {
+    assert.deepEqual(shouldSendDigest(5, 7), { send: true, reason: "send" });
+  });
+
+  it("suppresses an empty batch during daytime", () => {
+    assert.deepEqual(shouldSendDigest(0, 12), {
+      send: false,
+      reason: "no-events",
+    });
+  });
+
+  it("reports quiet-hours before no-events when both gates apply", () => {
+    // Quiet-hours is checked first, matching the original inline guard order.
+    assert.deepEqual(shouldSendDigest(0, 23), {
+      send: false,
+      reason: "quiet-hours",
+    });
+  });
+});
+
+describe("CRITICAL_EVENT_TYPES — named bypass set (issue #2212)", () => {
+  it("includes every critical event type that bypasses the digest", () => {
+    for (const type of [
+      E.CYCLE_ROLLBACK_FAILED,
+      E.SCHEDULER_STOPPED,
+      E.SCHEDULER_PAUSED_REPETITION,
+      E.SCHEDULER_BACKLOG_EMPTY,
+    ]) {
+      assert.ok(
+        CRITICAL_EVENT_TYPES.includes(type),
+        `expected ${type} in CRITICAL_EVENT_TYPES`,
+      );
+    }
+  });
+
+  it("does not include a routine batched event type", () => {
+    assert.equal(CRITICAL_EVENT_TYPES.includes(E.CYCLE_COMPLETED), false);
   });
 });
 
