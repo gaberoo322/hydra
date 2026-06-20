@@ -39,6 +39,7 @@ import {
   weightedTokens,
   parseSessionLimitReset,
   type TokenBreakdown,
+  type ModelFamily,
 } from "../src/cost/token-math.ts";
 // The pure eligibility-projection fold now lives in its own module
 // (issue #1377). Import it directly from cost/eligibility.ts to prove the seam
@@ -60,6 +61,21 @@ import {
   overlaySessionBlockEligibility,
   type UsageEligibility,
 } from "../src/cost/eligibility.ts";
+// The pure snapshot-assembly helpers extracted in issue #2188. They are exported
+// from cost/usage-tracker.ts (for direct unit test) but deliberately NOT added
+// to the cost/index.ts public barrel — same module-internal visibility as
+// eligibility.ts's deriveHardStop. Import them straight from the source module
+// so the scalar-input seam is asserted without driving the full snapshot build.
+import {
+  derivePacingState,
+  rebaseOnOAuth,
+  deriveSinceReset,
+  detectCalibrationDrift,
+} from "../src/cost/usage-tracker.ts";
+// `rebaseOnOAuth` consumes the already-resolved OAuth read (`ScanResult["oauth"]`,
+// = CachedOAuthRead). Alias it here so the fixtures below name the shape the
+// helper expects without importing the whole ScanResult boundary type.
+import type { CachedOAuthRead as ScanResultOAuth } from "../src/cost/transcript-scan.ts";
 
 function breakdown(p: Partial<TokenBreakdown> = {}): TokenBreakdown {
   const input = p.input ?? 0;
@@ -2852,5 +2868,260 @@ describe("deriveHardStop (pure threshold predicate, issue #2041)", () => {
     assert.deepEqual(a, b);
     // input untouched
     assert.equal(JSON.stringify(input), frozen);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #2188: the four pure snapshot-assembly helpers extracted out of
+// assembleSnapshot. Each takes already-computed scalars/sub-accumulators and
+// returns its slice — testable without a ScanResult fixture or the full build.
+// ---------------------------------------------------------------------------
+
+describe("derivePacingState (pure fold, issue #2188)", () => {
+  test("uncalibrated is always 'under', regardless of projection", () => {
+    assert.equal(derivePacingState(false, 9999), "under");
+    assert.equal(derivePacingState(false, 0), "under");
+  });
+
+  test("'over' when projection exceeds 100% (calibrated)", () => {
+    assert.equal(derivePacingState(true, 100.01), "over");
+    assert.equal(derivePacingState(true, 250), "over");
+  });
+
+  test("'on' in the 80–100% informational band (inclusive of 80, of 100)", () => {
+    assert.equal(derivePacingState(true, 80), "on");
+    assert.equal(derivePacingState(true, 90), "on");
+    assert.equal(derivePacingState(true, 100), "on");
+  });
+
+  test("'under' below 80% (calibrated)", () => {
+    assert.equal(derivePacingState(true, 79.99), "under");
+    assert.equal(derivePacingState(true, 0), "under");
+  });
+
+  test("byte-for-byte the inline branch: 100 is 'on', 100.0001 is 'over'", () => {
+    assert.equal(derivePacingState(true, 100), "on");
+    assert.equal(derivePacingState(true, 100.0001), "over");
+  });
+});
+
+describe("rebaseOnOAuth (pure headline-rebase helper, issue #2188)", () => {
+  const freshOk = (fiveHourPct: number, sevenDayPct: number): ScanResultOAuth => ({
+    result: {
+      ok: true,
+      data: {
+        fiveHour: { utilization: fiveHourPct, resetsAt: "2026-06-19T12:00:00.000Z" },
+        sevenDay: { utilization: sevenDayPct, resetsAt: "2026-06-25T12:00:00.000Z" },
+      },
+    },
+    stale: false,
+    ageMs: 0,
+  });
+
+  test("a FRESH OAuth read rebases the headline onto real utilization", () => {
+    const r = rebaseOnOAuth(freshOk(42, 71), 5, 6);
+    assert.equal(r.percentLast5h, 42);
+    assert.equal(r.percentLast7d, 71);
+    assert.equal(r.usageSource, "oauth");
+    assert.equal(r.oauthError, null);
+    assert.equal(r.oauthStale, false);
+    assert.equal(r.oauthAgeMs, 0);
+    assert.equal(r.oauthFiveHourResetsAt, "2026-06-19T12:00:00.000Z");
+    assert.equal(r.oauthSevenDayResetsAt, "2026-06-25T12:00:00.000Z");
+  });
+
+  test("a STALE last-good (#1090) stays usageSource:'oauth' but flags stale", () => {
+    const stale: ScanResultOAuth = {
+      result: {
+        ok: true,
+        data: {
+          fiveHour: { utilization: 30, resetsAt: null },
+          sevenDay: { utilization: 55, resetsAt: null },
+        },
+      },
+      stale: true,
+      ageMs: 123_456,
+    };
+    const r = rebaseOnOAuth(stale, 9, 9);
+    assert.equal(r.usageSource, "oauth"); // stale-but-real still backs the headline
+    assert.equal(r.percentLast5h, 30);
+    assert.equal(r.percentLast7d, 55);
+    assert.equal(r.oauthError, "oauth-usage-stale");
+    assert.equal(r.oauthStale, true);
+    assert.equal(r.oauthAgeMs, 123_456);
+  });
+
+  test("a FAILED read NEVER reads 0 — falls back to the estimate (#1083 never-silently-0)", () => {
+    const failed: ScanResultOAuth = {
+      result: { ok: false, code: "oauth-usage-token-expired" },
+      stale: false,
+      ageMs: null,
+    };
+    const r = rebaseOnOAuth(failed, 17, 23);
+    assert.equal(r.usageSource, "estimate");
+    assert.equal(r.percentLast5h, 17); // the estimate stands, NOT 0
+    assert.equal(r.percentLast7d, 23);
+    assert.equal(r.oauthError, "oauth-usage-token-expired");
+    assert.equal(r.oauthStale, false);
+    assert.equal(r.oauthAgeMs, null);
+    assert.equal(r.oauthFiveHourResetsAt, null);
+    assert.equal(r.oauthSevenDayResetsAt, null);
+  });
+
+  test("does not mutate its inputs (pure)", () => {
+    const oauth = freshOk(10, 20);
+    const frozen = JSON.stringify(oauth);
+    rebaseOnOAuth(oauth, 1, 2);
+    assert.equal(JSON.stringify(oauth), frozen);
+  });
+});
+
+describe("deriveSinceReset (pure fixed-window helper, issue #2188)", () => {
+  const NOW = Date.UTC(2026, 5, 19, 12, 0, 0); // 2026-06-19T12:00Z
+  const baseInput = {
+    mostRecentObservedResetMs: null as number | null,
+    nowMs: NOW,
+    sinceResetEntries: [] as { tsMs: number; tokens: TokenBreakdown; family: ModelFamily }[],
+    cacheReadWeight: 1,
+    burnWeights: { opus: 1, sonnet: 1, haiku: 1 },
+    calibrated: true,
+    weeklyQuota: 1000,
+  };
+
+  test("Anchor unset (null) returns the neutral all-zero slice", () => {
+    const r = deriveSinceReset({ ...baseInput, anchorEnvMs: null });
+    assert.equal(r.percentSinceReset, 0);
+    assert.equal(r.weeklyResetAnchor, null);
+    assert.equal(r.tokensSinceReset.total, 0);
+  });
+
+  // Anchor 10 days before now: k = floor(10/7) = 1, so the projected current
+  // boundary is anchor + 7d = 3 days before now (NOT 7 — the 7d*k floor lands
+  // on the most recent boundary at-or-before now, which is why a 14d anchor
+  // would put the boundary exactly on now).
+  const ANCHOR_10D = NOW - 10 * 86_400_000;
+  const BOUNDARY_3D = ANCHOR_10D + 7 * 86_400_000; // NOW - 3d
+
+  test("sums only entries at/after the projected current-window boundary", () => {
+    // Tokens carried as `input` so the weighted burn numerator (which folds over
+    // the token-TYPE fields, not the raw `.total`) is non-zero with all weights
+    // at identity 1.0 — `percentSinceReset` then reduces to total/quota*100.
+    const r = deriveSinceReset({
+      ...baseInput,
+      anchorEnvMs: ANCHOR_10D,
+      sinceResetEntries: [
+        { tsMs: BOUNDARY_3D - 1000, tokens: breakdown({ input: 100 }), family: "opus" }, // before boundary => excluded
+        { tsMs: BOUNDARY_3D + 1000, tokens: breakdown({ input: 200 }), family: "opus" }, // after boundary => included
+        { tsMs: NOW - 1000, tokens: breakdown({ input: 300 }), family: "sonnet" }, // included
+      ],
+    });
+    assert.equal(r.tokensSinceReset.total, 500); // 200 + 300
+    assert.equal(r.percentSinceReset, 50); // weighted burn 500 / 1000 * 100 (identity weights)
+    assert.equal(r.weeklyResetAnchor, new Date(BOUNDARY_3D).toISOString());
+  });
+
+  test("an observed reset more recent than the env boundary (and <= now) auto-corrects the boundary", () => {
+    const observed = NOW - 2 * 86_400_000; // newer than BOUNDARY_3D (NOW-3d), before now
+    const r = deriveSinceReset({
+      ...baseInput,
+      anchorEnvMs: ANCHOR_10D,
+      mostRecentObservedResetMs: observed,
+      sinceResetEntries: [
+        { tsMs: BOUNDARY_3D + 1000, tokens: breakdown({ total: 999 }), family: "opus" }, // before observed => now excluded
+        { tsMs: observed + 1000, tokens: breakdown({ total: 400 }), family: "opus" }, // after observed => included
+      ],
+    });
+    assert.equal(r.weeklyResetAnchor, new Date(observed).toISOString());
+    assert.equal(r.tokensSinceReset.total, 400);
+  });
+
+  test("an observed reset in the FUTURE (> now) is ignored — env boundary stands", () => {
+    const r = deriveSinceReset({
+      ...baseInput,
+      anchorEnvMs: ANCHOR_10D,
+      mostRecentObservedResetMs: NOW + 86_400_000, // in the future => ignored
+    });
+    assert.equal(r.weeklyResetAnchor, new Date(BOUNDARY_3D).toISOString());
+  });
+
+  test("uncalibrated => percentSinceReset 0 but raw tokensSinceReset still summed", () => {
+    const r = deriveSinceReset({
+      ...baseInput,
+      calibrated: false,
+      anchorEnvMs: ANCHOR_10D,
+      sinceResetEntries: [
+        { tsMs: BOUNDARY_3D + 1000, tokens: breakdown({ total: 250 }), family: "opus" },
+      ],
+    });
+    assert.equal(r.percentSinceReset, 0);
+    assert.equal(r.tokensSinceReset.total, 250); // honest raw count regardless of calibration
+  });
+});
+
+describe("detectCalibrationDrift (pure fail-loud detector, issue #2188)", () => {
+  // Capture console.warn so we can assert it fires exactly once (or not at all).
+  function withWarnCapture(fn: () => void): string[] {
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.map(String).join(" "));
+    };
+    try {
+      fn();
+    } finally {
+      console.warn = orig;
+    }
+    return warns;
+  }
+
+  const base = {
+    driftFactor: 2,
+    calibrated: true,
+    anchorEnvMs: 1_700_000_000_000,
+    cacheReadWeight: 1,
+    weeklyQuota: 1000,
+  };
+
+  test("inert when the reference is unset (null) — no warn", () => {
+    const warns = withWarnCapture(() =>
+      detectCalibrationDrift({ ...base, driftReference: null, percentSinceReset: 999 }),
+    );
+    assert.equal(warns.length, 0);
+  });
+
+  test("inert when uncalibrated — no warn even on wild divergence", () => {
+    const warns = withWarnCapture(() =>
+      detectCalibrationDrift({ ...base, calibrated: false, driftReference: 10, percentSinceReset: 999 }),
+    );
+    assert.equal(warns.length, 0);
+  });
+
+  test("inert when the Anchor is unset (null) — no warn", () => {
+    const warns = withWarnCapture(() =>
+      detectCalibrationDrift({ ...base, anchorEnvMs: null, driftReference: 10, percentSinceReset: 999 }),
+    );
+    assert.equal(warns.length, 0);
+  });
+
+  test("warns exactly once when percentSinceReset is more than driftFactor ABOVE reference", () => {
+    const warns = withWarnCapture(() =>
+      detectCalibrationDrift({ ...base, driftReference: 10, percentSinceReset: 21 }), // > 10*2
+    );
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /calibration drift/);
+  });
+
+  test("warns exactly once when percentSinceReset is more than driftFactor BELOW reference", () => {
+    const warns = withWarnCapture(() =>
+      detectCalibrationDrift({ ...base, driftReference: 10, percentSinceReset: 4 }), // < 10/2
+    );
+    assert.equal(warns.length, 1);
+  });
+
+  test("silent inside the band (no divergence beyond driftFactor)", () => {
+    const warns = withWarnCapture(() =>
+      detectCalibrationDrift({ ...base, driftReference: 10, percentSinceReset: 15 }), // within [5, 20]
+    );
+    assert.equal(warns.length, 0);
   });
 });

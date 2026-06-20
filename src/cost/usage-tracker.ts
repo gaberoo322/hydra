@@ -445,6 +445,14 @@ function familyWeight(
  * identity-weights object `{opus:1,sonnet:1,haiku:1}` (what the caller does
  * when quota weights are uncalibrated) keeps the percentage path honest
  * regardless of the #691 calibration state.
+ *
+ * The proof-of-pattern for the issue #2188 snapshot-assembly deepening: the
+ * other inline math concerns ({@link rebaseOnOAuth}, {@link deriveSinceReset},
+ * {@link detectCalibrationDrift}, {@link derivePacingState}) follow this same
+ * pure-scalar-helper shape — each takes already-computed scalars/sub-accumulators
+ * and returns its slice of the snapshot, never a {@link UsageSnapshot} (which
+ * does not exist yet during assembly), mirroring eligibility.ts's
+ * {@link deriveHardStop}.
  */
 function weightedQuotaBurn(
   byModel: Record<ModelFamily, TokenBreakdown>,
@@ -455,6 +463,233 @@ function weightedQuotaBurn(
     (sum, f) => sum + familyWeight(f, weights) * weightedTokens(byModel[f], wCache),
     0,
   );
+}
+
+/**
+ * Pacing-state fold (issue #2188; extracted from `assembleSnapshot`).
+ *
+ * The `pacingState` keys off the transcript-derived 24h projection (NOT the
+ * OAuth headline) — it is part of the ADR-0021 projection family the #1971 seam
+ * leaves intact. Pure scalar fold: `"over"` when projecting past quota, `"on"`
+ * in the 80–100% informational band, `"under"` otherwise (including every
+ * uncalibrated run, where `projectedWeeklyPercent` is 0). Byte-for-byte the
+ * inline three-way branch it replaces. Exported from this module for direct
+ * unit test, NOT added to the `index.ts` public barrel.
+ */
+export function derivePacingState(
+  calibrated: boolean,
+  projectedWeeklyPercent: number,
+): "under" | "on" | "over" {
+  if (!calibrated) return "under";
+  if (projectedWeeklyPercent > 100) return "over";
+  if (projectedWeeklyPercent >= 80) return "on";
+  return "under";
+}
+
+/**
+ * The resolved OAuth-rebase slice of the snapshot headline (issue #2188).
+ * Mirrors the inline `let` block in `assembleSnapshot` field-for-field — the
+ * headline percentages plus the OAuth observability fields.
+ */
+interface OAuthRebase {
+  percentLast5h: number;
+  percentLast7d: number;
+  usageSource: "oauth" | "estimate";
+  oauthError: string | null;
+  oauthStale: boolean;
+  oauthAgeMs: number | null;
+  oauthFiveHourResetsAt: string | null;
+  oauthSevenDayResetsAt: string | null;
+}
+
+/**
+ * OAuth rebase (issue #1083, extracted to a named pure helper in #2188). When
+ * the authoritative meter read succeeds, the headline `percentLast5h`/
+ * `percentLast7d` are rebased onto the real OAuth utilization — the meter IS the
+ * ground-truth 5h/7d utilization, strictly better than a calibration guess.
+ *
+ * HARD INVARIANT (#1083/#1124): on ANY failed/expired/garbage read the estimate
+ * stands; the headline NEVER silently reads 0 (which would unblock dispatch
+ * during an outage). The `console.error` fail-loud on fallback is retained here
+ * — it is intrinsic to the rebase decision, not assembly orchestration. A
+ * served-stale last-good value (issue #1090) stays `usageSource:"oauth"` with
+ * `oauthError:"oauth-usage-stale"` + `oauthStale:true`, so stale-but-real still
+ * trips the downstream {@link deriveHardStop} (the meter is still the source).
+ *
+ * Takes the already-resolved {@link ScanResult.oauth} (the I/O fired + awaited
+ * inside the #1971 transcript-scan seam) plus the two pre-computed estimate
+ * scalars — no I/O of its own, exactly the #2041 `deriveHardStop` scalar-input
+ * shape. Behaviour-neutral with the inline block it replaces. Exported for
+ * direct unit test, NOT added to the `index.ts` public barrel.
+ */
+export function rebaseOnOAuth(
+  cachedOAuth: ScanResult["oauth"],
+  estimatePercentLast5h: number,
+  estimatePercentLast7d: number,
+): OAuthRebase {
+  const oauth = cachedOAuth.result;
+  // `isOAuthUsageOk` is the type guard the seam exports for narrowing under the
+  // orchestrator's `strict:false` tsconfig (a bare `if (oauth.ok)` does not
+  // narrow a discriminated union without strictNullChecks).
+  if (isOAuthUsageOk(oauth)) {
+    return {
+      percentLast5h: oauth.data.fiveHour.utilization,
+      percentLast7d: oauth.data.sevenDay.utilization,
+      usageSource: "oauth",
+      // A served-stale last-good still backs the headline with a stale sentinel
+      // (so the operator sees WHY it's stale); a fresh read clears it to null.
+      oauthError: cachedOAuth.stale ? "oauth-usage-stale" : null,
+      oauthStale: cachedOAuth.stale,
+      oauthAgeMs: cachedOAuth.ageMs,
+      oauthFiveHourResetsAt: oauth.data.fiveHour.resetsAt,
+      oauthSevenDayResetsAt: oauth.data.sevenDay.resetsAt,
+    };
+  }
+  // Graceful degradation: fall back to the transcript+calibration estimate.
+  // Reached only when there is NO recent-enough OAuth value to serve (a fresh
+  // failure with no last-good, or a last-good aged past TTL+maxStale). Logged
+  // (fail-loud) so a persistent OAuth outage is visible, but the gate stays
+  // conservative on the estimate rather than reading 0.
+  console.error(
+    `[usage-tracker] OAuth usage meter unavailable (${oauth.code}); falling back to transcript estimate for percentLast5h/percentLast7d`,
+  );
+  return {
+    percentLast5h: estimatePercentLast5h,
+    percentLast7d: estimatePercentLast7d,
+    usageSource: "estimate",
+    oauthError: oauth.code,
+    oauthStale: false,
+    oauthAgeMs: null,
+    oauthFiveHourResetsAt: null,
+    oauthSevenDayResetsAt: null,
+  };
+}
+
+/** The since-reset slice of the snapshot (issue #2188). */
+interface SinceReset {
+  tokensSinceReset: TokenBreakdown;
+  percentSinceReset: number;
+  weeklyResetAnchor: string | null;
+}
+
+/**
+ * Weekly Reset Anchor / since-reset fixed-window derivation (issue #856,
+ * ADR-0021; extracted to a named pure helper in #2188).
+ *
+ * Pure read-side projection: the effective boundary is derived ON READ from the
+ * env projection, overridden by a more recent observed rate-limit reset (gated
+ * `> envBoundary && <= now`). Nothing is persisted. Returns neutral
+ * (all-zero/0/null) when the Anchor env var is unset (`anchorEnvMs === null`),
+ * mirroring the uncalibrated-returns-neutral discipline. The auto-correct
+ * `console.warn` is retained here — it announces the boundary override, an
+ * effect intrinsic to this derivation, not assembly orchestration.
+ *
+ * Takes the already-computed scalars/sub-accumulators (anchor env ms, the
+ * observed-reset ms, the buffered since-reset entries, the two weighting axes,
+ * the calibrated flag, and the weekly quota) — no I/O, the #2041 scalar-input
+ * shape. The weighted `percentSinceReset` numerator composes both quota-weight
+ * axes exactly like `percentLast7d` (#873). Behaviour-neutral with the inline
+ * block it replaces. Exported for direct unit test, NOT added to the `index.ts`
+ * public barrel.
+ */
+export function deriveSinceReset(input: {
+  anchorEnvMs: number | null;
+  mostRecentObservedResetMs: number | null;
+  nowMs: number;
+  sinceResetEntries: ScanResult["sinceResetEntries"];
+  cacheReadWeight: number;
+  burnWeights: { opus: number; sonnet: number; haiku: number };
+  calibrated: boolean;
+  weeklyQuota: number;
+}): SinceReset {
+  const {
+    anchorEnvMs,
+    mostRecentObservedResetMs,
+    nowMs,
+    sinceResetEntries,
+    cacheReadWeight,
+    burnWeights,
+    calibrated,
+    weeklyQuota,
+  } = input;
+
+  const tokensSinceReset: TokenBreakdown = { ...EMPTY_BREAKDOWN };
+  if (anchorEnvMs === null) {
+    return { tokensSinceReset, percentSinceReset: 0, weeklyResetAnchor: null };
+  }
+
+  const envWindow = projectResetWindow(anchorEnvMs, nowMs);
+  let effectiveBoundaryMs = envWindow.currentMs;
+  // Auto-correct: an observed reset that is more recent than the env
+  // projection (but not in the future relative to now) is the real boundary.
+  if (
+    mostRecentObservedResetMs !== null &&
+    mostRecentObservedResetMs > effectiveBoundaryMs &&
+    mostRecentObservedResetMs <= nowMs
+  ) {
+    console.warn(
+      `[usage-tracker] Weekly Reset Anchor auto-corrected: observed reset ` +
+        `${new Date(mostRecentObservedResetMs).toISOString()} overrides env projection ` +
+        `${new Date(effectiveBoundaryMs).toISOString()} (env anchor ` +
+        `${new Date(anchorEnvMs).toISOString()})`,
+    );
+    effectiveBoundaryMs = mostRecentObservedResetMs;
+  }
+  // Accumulate the since-reset window both as a flat breakdown (the unchanged
+  // `tokensSinceReset` snapshot field, honest raw counts) AND per-family (for
+  // the WEIGHTED `percentSinceReset` numerator, which composes both weighting
+  // axes exactly like `percentLast7d`). (issue #873)
+  const byModelSinceReset = emptyByModel();
+  for (const e of sinceResetEntries) {
+    if (e.tsMs >= effectiveBoundaryMs) {
+      addBreakdown(tokensSinceReset, e.tokens);
+      addBreakdown(byModelSinceReset[e.family], e.tokens);
+    }
+  }
+  const weightedBurnSinceReset = weightedQuotaBurn(byModelSinceReset, cacheReadWeight, burnWeights);
+  const percentSinceReset = calibrated ? (weightedBurnSinceReset / weeklyQuota) * 100 : 0;
+  const weeklyResetAnchor = new Date(effectiveBoundaryMs).toISOString();
+  return { tokensSinceReset, percentSinceReset, weeklyResetAnchor };
+}
+
+/**
+ * Calibration-drift detector (issue #873; extracted to a named pure helper in
+ * #2188). Fail-loud, ONCE per scan: when an operator has seeded a reference
+ * `percentSinceReset` reading AND the quota is calibrated AND the Weekly Reset
+ * Anchor is set, warn if the tracker's `percentSinceReset` has diverged from the
+ * reference by more than `driftFactor` in either direction — a coarse
+ * "calibration has rotted" signal so it is visible, not silent.
+ *
+ * Read-time detection only: nothing is persisted, nothing self-recalibrates
+ * (the tracker stays a pure read-side projection, ADR-0021). Inert when the
+ * reference env var is unset (`driftReference === null`). A pure side-effecting
+ * detector — returns nothing, exactly the inline block it replaces — over
+ * already-computed scalars; no I/O. Exported for direct unit test, NOT added to
+ * the `index.ts` public barrel.
+ */
+export function detectCalibrationDrift(input: {
+  driftReference: number | null;
+  driftFactor: number;
+  percentSinceReset: number;
+  calibrated: boolean;
+  anchorEnvMs: number | null;
+  cacheReadWeight: number;
+  weeklyQuota: number;
+}): void {
+  const { driftReference, driftFactor, percentSinceReset, calibrated, anchorEnvMs } = input;
+  if (driftReference === null || !calibrated || anchorEnvMs === null) return;
+  const tooHigh = percentSinceReset > driftReference * driftFactor;
+  const tooLow = percentSinceReset < driftReference / driftFactor;
+  if (tooHigh || tooLow) {
+    console.warn(
+      `[usage-tracker] calibration drift: percentSinceReset ` +
+        `${percentSinceReset.toFixed(2)}% diverges from reference ` +
+        `${driftReference.toFixed(2)}% by more than ${driftFactor}x ` +
+        `(cacheReadWeight=${input.cacheReadWeight}, weeklyQuota=${input.weeklyQuota}); ` +
+        `re-derive HYDRA_USAGE_WEEKLY_QUOTA_TOKENS / HYDRA_USAGE_CACHE_READ_WEIGHT ` +
+        `against a fresh /usage reading`,
+    );
+  }
 }
 
 // `emptyByModel` + the OAuth-cache machinery (`CachedOAuthRead`,
@@ -644,12 +879,8 @@ function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
 
   // `pacingState` keys off the transcript-derived 24h projection (NOT the OAuth
   // headline) — it is part of the ADR-0021 projection family this seam leaves
-  // intact. Unchanged.
-  let pacingState: "under" | "on" | "over" = "under";
-  if (calibrated) {
-    if (projectedWeeklyPercent > 100) pacingState = "over";
-    else if (projectedWeeklyPercent >= 80) pacingState = "on";
-  }
+  // intact. Pure fold extracted to {@link derivePacingState} (issue #2188).
+  const pacingState = derivePacingState(calibrated, projectedWeeklyPercent);
 
   // OAuth rebase (issue #1083). When the authoritative meter read succeeds, the
   // headline `percentLast5h`/`percentLast7d` and the 5h `emergencyStop` are
@@ -665,53 +896,18 @@ function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
   // byte-for-byte untouched — only the two hard-stops + rolling headline move.
   // The OAuth read was fired + awaited inside the TranscriptScan seam (issue
   // #1971) and arrives here already resolved on `scan.oauth` — same
-  // fire-then-await-after-walk ordering, just owned by the I/O module now.
-  const cachedOAuth = scan.oauth;
-  const oauth = cachedOAuth.result;
-  let percentLast5h: number;
-  let percentLast7d: number;
-  let usageSource: "oauth" | "estimate";
-  let oauthError: string | null;
-  let oauthFiveHourResetsAt: string | null = null;
-  let oauthSevenDayResetsAt: string | null = null;
-  // Staleness markers (issue #1090). When a served-stale last-good value backs
-  // the headline (a transient 429/timeout kept us on OAuth ground truth rather
-  // than flipping to the estimate), `oauthStale` is true and `oauthAgeMs` is its
-  // age. On a fresh read both are observability-neutral (false / 0); on the
-  // estimate fallback `oauthAgeMs` is null (no OAuth value backs the headline).
-  let oauthStale = false;
-  let oauthAgeMs: number | null = null;
-  // `isOAuthUsageOk` is the type guard the seam exports for narrowing under the
-  // orchestrator's `strict:false` tsconfig (a bare `if (oauth.ok)` does not
-  // narrow a discriminated union without strictNullChecks — same reason
-  // ov-request ships isOvOk/isOvFailure).
-  if (isOAuthUsageOk(oauth)) {
-    percentLast5h = oauth.data.fiveHour.utilization;
-    percentLast7d = oauth.data.sevenDay.utilization;
-    usageSource = "oauth";
-    // A served-stale last-good still backs the headline with the prior error
-    // code (so the operator sees WHY it's stale, e.g. oauth-usage-non-2xx for a
-    // 429); a fresh read clears it to null. Distinguished by `oauthStale`.
-    oauthError = cachedOAuth.stale ? "oauth-usage-stale" : null;
-    oauthStale = cachedOAuth.stale;
-    oauthAgeMs = cachedOAuth.ageMs;
-    oauthFiveHourResetsAt = oauth.data.fiveHour.resetsAt;
-    oauthSevenDayResetsAt = oauth.data.sevenDay.resetsAt;
-  } else {
-    // Graceful degradation: fall back to the transcript+calibration estimate.
-    // Reached only when there is NO recent-enough OAuth value to serve (a fresh
-    // failure with no last-good, or a last-good aged past TTL+maxStale). Logged
-    // (fail-loud) so a persistent OAuth outage is visible, but the gate stays
-    // conservative on the estimate rather than reading 0.
-    console.error(
-      `[usage-tracker] OAuth usage meter unavailable (${oauth.code}); falling back to transcript estimate for percentLast5h/percentLast7d`,
-    );
-    percentLast5h = estimatePercentLast5h;
-    percentLast7d = estimatePercentLast7d;
-    usageSource = "estimate";
-    oauthError = oauth.code;
-    oauthAgeMs = null;
-  }
+  // fire-then-await-after-walk ordering, just owned by the I/O module now. The
+  // rebase + fail-loud fallback is the pure {@link rebaseOnOAuth} helper (#2188).
+  const {
+    percentLast5h,
+    percentLast7d,
+    usageSource,
+    oauthError,
+    oauthStale,
+    oauthAgeMs,
+    oauthFiveHourResetsAt,
+    oauthSevenDayResetsAt,
+  } = rebaseOnOAuth(scan.oauth, estimatePercentLast5h, estimatePercentLast7d);
 
   // Both hard-stops (the 5h `emergencyStop` and the weekly `weeklyEmergencyStop`)
   // are derived by the pure `deriveHardStop` threshold predicate (issue #2041),
@@ -742,69 +938,36 @@ function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
   const quotaWeightLast7d = quotaWeightCalibrated ? weightedTotal(byModel7d) : 0;
 
   // Weekly Reset Anchor / since-reset fixed window (issue #856, ADR-0021).
-  // Pure read-side projection: the effective boundary is derived ON READ from
-  // the env projection, overridden by a more recent observed reset. Nothing
-  // is persisted. Neutral (null/0/all-zero) when the env Anchor is unset.
-  let tokensSinceReset: TokenBreakdown = { ...EMPTY_BREAKDOWN };
-  let percentSinceReset = 0;
-  let weeklyResetAnchor: string | null = null;
-  if (anchorEnvMs !== null) {
-    const envWindow = projectResetWindow(anchorEnvMs, nowMs);
-    let effectiveBoundaryMs = envWindow.currentMs;
-    // Auto-correct: an observed reset that is more recent than the env
-    // projection (but not in the future relative to now) is the real boundary.
-    if (
-      mostRecentObservedResetMs !== null &&
-      mostRecentObservedResetMs > effectiveBoundaryMs &&
-      mostRecentObservedResetMs <= nowMs
-    ) {
-      console.warn(
-        `[usage-tracker] Weekly Reset Anchor auto-corrected: observed reset ` +
-          `${new Date(mostRecentObservedResetMs).toISOString()} overrides env projection ` +
-          `${new Date(effectiveBoundaryMs).toISOString()} (env anchor ` +
-          `${new Date(anchorEnvMs).toISOString()})`,
-      );
-      effectiveBoundaryMs = mostRecentObservedResetMs;
-    }
-    // Accumulate the since-reset window both as a flat breakdown (the unchanged
-    // `tokensSinceReset` snapshot field, honest raw counts) AND per-family (for
-    // the WEIGHTED `percentSinceReset` numerator, which composes both weighting
-    // axes exactly like `percentLast7d`). (issue #873)
-    const byModelSinceReset = emptyByModel();
-    for (const e of sinceResetEntries) {
-      if (e.tsMs >= effectiveBoundaryMs) {
-        addBreakdown(tokensSinceReset, e.tokens);
-        addBreakdown(byModelSinceReset[e.family], e.tokens);
-      }
-    }
-    const weightedBurnSinceReset = weightedQuotaBurn(byModelSinceReset, cacheReadWeight, burnWeights);
-    percentSinceReset = calibrated ? (weightedBurnSinceReset / weeklyQuota) * 100 : 0;
-    weeklyResetAnchor = new Date(effectiveBoundaryMs).toISOString();
-  }
+  // Pure read-side projection extracted to {@link deriveSinceReset} (issue
+  // #2188): the effective boundary is derived ON READ from the env projection,
+  // overridden by a more recent observed reset. Nothing is persisted. Neutral
+  // (null/0/all-zero) when the env Anchor is unset.
+  const { tokensSinceReset, percentSinceReset, weeklyResetAnchor } = deriveSinceReset({
+    anchorEnvMs,
+    mostRecentObservedResetMs,
+    nowMs,
+    sinceResetEntries,
+    cacheReadWeight,
+    burnWeights,
+    calibrated,
+    weeklyQuota,
+  });
 
-  // Drift detector (issue #873). Fail-loud, ONCE per scan: when an operator has
-  // seeded a reference `percentSinceReset` reading AND the quota is calibrated,
-  // warn if the tracker's `percentSinceReset` has diverged from the reference
-  // by more than `driftFactor` in either direction — a coarse "calibration has
-  // rotted" signal so it is visible, not silent. Read-time detection only:
-  // nothing is persisted and nothing self-recalibrates (the tracker stays a
-  // pure read-side projection). Inert when the reference env var is unset.
-  const driftReference = getDriftReferencePercent();
-  if (driftReference !== null && calibrated && anchorEnvMs !== null) {
-    const driftFactor = getDriftFactor();
-    const tooHigh = percentSinceReset > driftReference * driftFactor;
-    const tooLow = percentSinceReset < driftReference / driftFactor;
-    if (tooHigh || tooLow) {
-      console.warn(
-        `[usage-tracker] calibration drift: percentSinceReset ` +
-          `${percentSinceReset.toFixed(2)}% diverges from reference ` +
-          `${driftReference.toFixed(2)}% by more than ${driftFactor}x ` +
-          `(cacheReadWeight=${cacheReadWeight}, weeklyQuota=${weeklyQuota}); ` +
-          `re-derive HYDRA_USAGE_WEEKLY_QUOTA_TOKENS / HYDRA_USAGE_CACHE_READ_WEIGHT ` +
-          `against a fresh /usage reading`,
-      );
-    }
-  }
+  // Drift detector (issue #873; pure side-effecting detector extracted to
+  // {@link detectCalibrationDrift} in #2188). Fail-loud, ONCE per scan: when an
+  // operator has seeded a reference `percentSinceReset` reading AND the quota is
+  // calibrated AND the Anchor is set, warn if the tracker's `percentSinceReset`
+  // diverges from the reference by more than `driftFactor`. Read-time detection
+  // only — nothing is persisted, nothing self-recalibrates. Inert when unset.
+  detectCalibrationDrift({
+    driftReference: getDriftReferencePercent(),
+    driftFactor: getDriftFactor(),
+    percentSinceReset,
+    calibrated,
+    anchorEnvMs,
+    cacheReadWeight,
+    weeklyQuota,
+  });
 
   // (weeklyEmergencyStop was computed alongside emergencyStop above via the
   // shared `deriveHardStop` predicate — issue #2041.)
