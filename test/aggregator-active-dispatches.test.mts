@@ -176,48 +176,36 @@ describe("getActiveDispatches — autopilot-only", () => {
   });
 });
 
-describe("getActiveDispatches — autopilot liveness (#888)", () => {
-  // A no-op sweep that mirrors the live pid probe: a running row whose pid
-  // is alive comes back unchanged; a dead pid gets promoted to killed/crash.
-  // Tests stub this directly so we never touch a real process.
-  const sweepByPidAlive =
-    (alivePids: Set<number>) =>
-    async (id: string, row: Record<string, string>) => {
-      if (row.status !== "running") return { row, swept: false };
-      const pid = Number(row.pid || "0");
-      if (alivePids.has(pid)) return { row, swept: false };
-      return {
-        row: { ...row, status: "killed", term_reason: "crash", ended_epoch: "1779836400" },
-        swept: true,
-      };
-    };
+describe("getActiveDispatches — autopilot liveness (#888, post-#2189)", () => {
+  // After #2189 the aggregator is a PURE read: the dead-pid sweep lives
+  // behind the injected `getAutopilotRunRow` reader (the production default
+  // is `readAndSweepAutopilotRun`, which returns the already-swept row). So
+  // these tests control liveness purely by what `getAutopilotRunRow`
+  // returns — a row that comes back already-`killed` simulates a swept-dead
+  // run; a still-`running` row simulates a live one. No separate sweep/write
+  // stub is needed — that IS the "pure aggregator needs only stub readers"
+  // benefit this refactor delivers. The dead-pid policy itself stays tested
+  // at its own seam (sweepRunIfDead in test/autopilot-runs-*.test.mts).
 
-  test("dead-pid running row is swept and never counted as in-flight", async () => {
-    let sweptId: string | null = null;
+  test("dead-pid running row arrives already-swept and is never counted as in-flight", async () => {
+    // The reader returns the SWEPT row (killed/crash), as the production
+    // default `readAndSweepAutopilotRun` would for a dead-pid running run.
     const items = await getActiveDispatches({
       listAutopilotRunIds: async () => ["ap-zombie"],
       getAutopilotRunRow: async () => ({
         run_id: "ap-zombie",
         started: "2026-05-26T11:00:00Z",
         trigger: "scheduled",
-        status: "running",
+        status: "killed",
+        term_reason: "crash",
         pid: "424242",
       }),
-      sweepAutopilotRun: async (id, row) => {
-        sweptId = id;
-        // dead pid → promoted to killed/crash
-        return {
-          row: { ...row, status: "killed", term_reason: "crash" },
-          swept: true,
-        };
-      },
       listOperatorDispatches: async () => [],
     });
-    assert.deepEqual(items, [], "a dead-pid run must not appear as in-flight");
-    assert.equal(sweptId, "ap-zombie", "the running row must be passed through the sweeper");
+    assert.deepEqual(items, [], "a swept dead-pid run must not appear as in-flight");
   });
 
-  test("live-pid running row survives the sweep and is counted", async () => {
+  test("live-pid running row arrives still running and is counted", async () => {
     const items = await getActiveDispatches({
       listAutopilotRunIds: async () => ["ap-live"],
       getAutopilotRunRow: async () => ({
@@ -227,7 +215,6 @@ describe("getActiveDispatches — autopilot liveness (#888)", () => {
         status: "running",
         pid: "1000",
       }),
-      sweepAutopilotRun: sweepByPidAlive(new Set([1000])),
       listOperatorDispatches: async () => [],
     });
     assert.equal(items.length, 1);
@@ -235,7 +222,7 @@ describe("getActiveDispatches — autopilot liveness (#888)", () => {
     assert.equal(items[0].source, "autopilot");
   });
 
-  test("phantom zombies do not accumulate: many dead-pid rows collapse to the one live run", async () => {
+  test("phantom zombies do not accumulate: many swept dead-pid rows collapse to the one live run", async () => {
     const rows: Record<string, Record<string, string>> = {
       "ap-live": {
         run_id: "ap-live",
@@ -245,30 +232,31 @@ describe("getActiveDispatches — autopilot liveness (#888)", () => {
         pid: "1000",
       },
     };
-    // 12 zombie runs — the observed accumulation in #888 — each a stale
-    // running row whose pid is dead.
+    // 12 zombie runs — the observed accumulation in #888 — each already
+    // swept to killed/crash by the read-and-sweep reader.
     for (let i = 0; i < 12; i++) {
       rows[`ap-zombie-${i}`] = {
         run_id: `ap-zombie-${i}`,
         started: `2026-05-26T0${i % 10}:00:00Z`,
         trigger: "scheduled",
-        status: "running",
+        status: "killed",
+        term_reason: "crash",
         pid: String(900000 + i),
       };
     }
     const items = await getActiveDispatches({
       listAutopilotRunIds: async () => Object.keys(rows),
       getAutopilotRunRow: async (id) => rows[id],
-      sweepAutopilotRun: sweepByPidAlive(new Set([1000])),
       listOperatorDispatches: async () => [],
     });
     assert.equal(items.length, 1, "only the live run counts; 12 zombies are swept out");
     assert.equal(items[0].id, "ap-live");
   });
 
-  test("default sweep treats a pid-less running row as live (older writers)", async () => {
-    // No `sweepAutopilotRun` stub → the real sweepRunIfDead runs. A running
-    // row with no pid (pid <= 0) is treated as alive, so it is still counted.
+  test("a pid-less running row survives (older writers, pid<=0 treated as live)", async () => {
+    // A running row with no pid is treated as alive by the real sweeper, so
+    // `readAndSweepAutopilotRun` would return it still `running`. The reader
+    // stub mirrors that by returning the unchanged running row.
     const items = await getActiveDispatches({
       listAutopilotRunIds: async () => ["ap-no-pid"],
       getAutopilotRunRow: async () => ({

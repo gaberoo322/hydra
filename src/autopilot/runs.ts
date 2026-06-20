@@ -442,6 +442,40 @@ export async function sweepRunIfDead(
   return { row: mutated, swept: true };
 }
 
+/**
+ * Composed read-and-sweep reader (issue #2189): load a run hash via the
+ * leaf Redis accessor (`getAutopilotRun`) and then apply the canonical
+ * dead-pid sweeper (`sweepRunIfDead`), returning the SWEPT row.
+ *
+ * This names the read→sweep idiom the high-level readers above already do
+ * inline (`getCurrentLifecycle`/`getCurrentRun`/`getRun`/`listRuns`), so a
+ * caller that only wants "a run row that already had the stale-pid rule
+ * applied" can inject this single reader instead of orchestrating the
+ * two-step itself.
+ *
+ * Its first consumer is the active-dispatches aggregator's autopilot
+ * sub-source: by defaulting `getAutopilotRunRow` to THIS function, the
+ * aggregator drops its separate `sweepAutopilotRun` dep and its explicit
+ * sweep call, restoring the "pure aggregator — no Redis writes in the
+ * aggregation layer" family contract. The write side-effect (the dead-pid
+ * `running`→`killed`/`crash` promotion) now lives behind the injected
+ * reader, not in the aggregator body.
+ *
+ * Both `getAutopilotRun` and `sweepRunIfDead` are already imported in this
+ * module, so this introduces NO new dependency edge — in particular the leaf
+ * adapter `src/redis/autopilot-runs.ts` is untouched and gains no import of
+ * `src/autopilot/`, so no cycle is created. `getAutopilotRun` keeps its
+ * pure-read semantics (this composes it; it does not change it), so the
+ * other `getAutopilotRun` callers (`digest-format.ts`, `api/agents.ts`) are
+ * unaffected and no row is double-swept.
+ */
+export async function readAndSweepAutopilotRun(
+  runId: string,
+): Promise<{ row: Record<string, string>; swept: boolean }> {
+  const row = await getAutopilotRun(runId);
+  return sweepRunIfDead(runId, row);
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle: cycle-record
 // ---------------------------------------------------------------------------
