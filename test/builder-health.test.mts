@@ -297,10 +297,12 @@ describe("formatBuilderHealthLines — digest section", () => {
 
   test("empty-but-present scorecard => 'no data' degradation", () => {
     const lines = formatBuilderHealthLines({
+      generatedAt: "2026-06-20T00:00:00.000Z",
       autonomyRate: { rate: 0, autonomous: 0, total: 0, window: 50, breakdown: [] },
       timeToMerge: { medianMinutes: null, p90Minutes: null, samples: 0, window: 50 },
       reworkRate: { regressionRate: 0, noOpMergeRate: 0, window: 0 },
       selfImprovementShare: { share: 0, floor: 0.25, floorMet: true, orchestratorCount: 0, window: 0 },
+      mutationKillRateTrend: null,
       scopeViolations: { series: [], total: 0, windowDays: 7 },
       learningThroughput: { promotionRate: [], metaFrictionOpened: 0, designConceptsProducedToday: 0, windowDays: 7 },
     });
@@ -309,10 +311,12 @@ describe("formatBuilderHealthLines — digest section", () => {
 
   test("populated scorecard renders autonomy + share + rework lines", () => {
     const lines = formatBuilderHealthLines({
+      generatedAt: "2026-06-20T00:00:00.000Z",
       autonomyRate: { rate: 0.5, autonomous: 1, total: 2, window: 50, breakdown: [] },
       timeToMerge: { medianMinutes: 60, p90Minutes: 84, samples: 2, window: 50 },
       reworkRate: { regressionRate: 5, noOpMergeRate: 10, window: 20 },
       selfImprovementShare: { share: 0.4, floor: 0.25, floorMet: true, orchestratorCount: 4, window: 10 },
+      mutationKillRateTrend: null,
       scopeViolations: { series: [], total: 1, windowDays: 7 },
       learningThroughput: { promotionRate: [], metaFrictionOpened: 1, designConceptsProducedToday: 3, windowDays: 7 },
     });
