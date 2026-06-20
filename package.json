@@ -23,6 +23,7 @@
     "telegram-seam-check": "npx tsx scripts/ci/telegram-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts",
     "dep-boundary-check": "npx tsx scripts/ci/dep-boundary-check.ts",
+    "biome-check": "npx tsx scripts/ci/biome-check.ts",
     "ast-search": "npx tsx scripts/ast-search.ts",
     "probe-search": "npx tsx scripts/probe-search.ts",
     "ast-grep-scan": "npx --yes -p @ast-grep/cli@0.43.0 ast-grep scan",
