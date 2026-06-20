@@ -28,11 +28,8 @@ import {
   type OperatorDispatch,
   type SubagentDispatch,
 } from "../redis/dispatches.ts";
-import {
-  listRecentAutopilotRunIds,
-  getAutopilotRun,
-} from "../redis/autopilot-runs.ts";
-import { sweepRunIfDead } from "../autopilot/runs.ts";
+import { listRecentAutopilotRunIds } from "../redis/autopilot-runs.ts";
+import { readAndSweepAutopilotRun } from "../autopilot/runs.ts";
 import { settledOrEmpty } from "./settle.ts";
 
 // ---------------------------------------------------------------------------
@@ -69,23 +66,21 @@ export interface ActiveDispatchesDeps {
   listAutopilotRunIds?: (limit: number) => Promise<string[]>;
   /**
    * Reader for an individual autopilot run hash. Defaults to
-   * `getAutopilotRun(id)`. Tests provide an in-memory map.
+   * `readAndSweepAutopilotRun(id)` (issue #2189) — a composed reader that
+   * loads the run hash AND applies the canonical dead-pid sweeper
+   * (`sweepRunIfDead`), returning the already-SWEPT row. The aggregator
+   * therefore never issues the sweep itself: the dead-pid `running`→
+   * `killed`/`crash` write side-effect lives behind this injected reader,
+   * keeping the aggregation layer a pure read (no Redis writes here),
+   * while still applying the canonical liveness rule (issue #888) instead
+   * of trusting `status: running` verbatim — a `running` row whose
+   * recorded pid is dead comes back as `killed`/`crash` and is dropped, so
+   * a crashed run that never POSTed its run-end stops accumulating as a
+   * phantom zombie. Tests provide an in-memory map: returning an
+   * already-`killed` row simulates a swept-dead run; a `running` row
+   * simulates a live one — no separate write/sweep stub is needed.
    */
   getAutopilotRunRow?: (id: string) => Promise<Record<string, string>>;
-  /**
-   * Liveness sweeper for a `running` autopilot run row. Defaults to
-   * `sweepRunIfDead` — the same read-time sweeper the run readers use, so
-   * the autopilot sub-source applies the canonical dead-pid rule instead
-   * of trusting `status: running` verbatim (issue #888). A `running` row
-   * whose recorded pid is dead is promoted to `killed`/`crash` (and never
-   * counted as in-flight), so a crashed run that never POSTed its run-end
-   * stops accumulating as a phantom zombie while idle. Tests stub this to
-   * exercise the liveness gate without a real pid probe.
-   */
-  sweepAutopilotRun?: (
-    id: string,
-    row: Record<string, string>,
-  ) => Promise<{ row: Record<string, string>; swept: boolean }>;
   /**
    * Cap on autopilot run-IDs fetched. Defaults to 50 — well above the
    * realistic ceiling of concurrent autopilot runs (autopilot is a single
@@ -194,18 +189,27 @@ export function projectAutopilotRow(row: Record<string, string>): Dispatch | nul
  * running` verbatim: a crashed run that never POSTed its run-end leaves a
  * stale `running` row with a dead pid, which would otherwise count as a
  * phantom in-flight dispatch until the 7-day TTL (observed: ~12 zombie
- * runs accumulating while idle). For every `running` row we apply the
- * canonical read-time sweeper (`sweepRunIfDead`), which promotes a
- * dead-pid row to `killed`/`crash` in Redis; the row only survives as a
- * dispatch if it is STILL `running` after the sweep (i.e. pid alive).
+ * runs accumulating while idle).
+ *
+ * The canonical dead-pid sweep (issue #888) is applied behind the injected
+ * reader: `getAutopilotRunRow` defaults to `readAndSweepAutopilotRun`
+ * (issue #2189), which loads the run hash AND runs `sweepRunIfDead`,
+ * returning the already-swept row. So this aggregator does a PURE read —
+ * `getRow` returns a row that has already had the stale-pid rule applied —
+ * and the running-status filter below evaluates against that SWEPT row: a
+ * dead-pid `running` run comes back as `killed`/`crash` and is dropped,
+ * exactly as before. No Redis write happens in the aggregation layer.
  */
 async function fetchAutopilotDispatches(
   deps: ActiveDispatchesDeps,
 ): Promise<Dispatch[]> {
   const limit = deps.autopilotLimit ?? 50;
   const listIds = deps.listAutopilotRunIds ?? listRecentAutopilotRunIds;
-  const getRow = deps.getAutopilotRunRow ?? getAutopilotRun;
-  const sweep = deps.sweepAutopilotRun ?? sweepRunIfDead;
+  // Default reader applies the dead-pid sweep behind the read (#2189): it
+  // returns the already-swept run row, so the aggregator stays a pure read.
+  const getRow =
+    deps.getAutopilotRunRow ??
+    (async (id: string) => (await readAndSweepAutopilotRun(id)).row);
 
   const ids = await listIds(limit);
   if (!Array.isArray(ids) || ids.length === 0) return [];
@@ -214,12 +218,11 @@ async function fetchAutopilotDispatches(
   for (const id of ids) {
     const row = await getRow(id);
     if (!row || !row.status) continue;
+    // Liveness gate (#888): `getRow` already applied the dead-pid sweep, so
+    // a row whose pid was dead arrives as killed/crash and is dropped here;
+    // a live (or live-pid) row arrives still `running` and survives.
     if (row.status !== "running") continue;
-    // Liveness gate: sweep dead-pid running rows. A row whose pid is dead
-    // comes back as killed/crash and is dropped here; a live row survives.
-    const { row: swept } = await sweep(id, row);
-    if (swept.status !== "running") continue;
-    const projected = projectAutopilotRow(swept);
+    const projected = projectAutopilotRow(row);
     if (projected) out.push(projected);
   }
   return out;
