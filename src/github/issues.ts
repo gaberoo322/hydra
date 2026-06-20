@@ -58,6 +58,8 @@
 
 import { ghJson } from "./gh.ts";
 import { isGhFailure, type GhErrorCode } from "./exec.ts";
+import { viewPr as viewPrModule } from "./view-pr.ts";
+import type { ViewPrTransport, ViewPrCache } from "./view-pr.ts";
 
 // ---------------------------------------------------------------------------
 // 1. The repo handle — one place, env-overridable
@@ -378,232 +380,44 @@ export async function listOpenPrs(
 }
 
 // ---------------------------------------------------------------------------
-// 3a. Per-PR view — transport, REST normalization, cache, rate-limit guard
-//      (issue #968: GraphQL pool drains while REST sits idle)
+// 3a. Per-PR view — re-exported from the focused view-pr Module (#2224)
 // ---------------------------------------------------------------------------
 
 /**
- * Transport for the single-PR read ({@link viewPr}):
- *   - `"rest"`    — `gh api repos/<repo>/pulls/<n>` (+ `/reviews`, `/commits`
- *     sub-calls only when those fields are requested). Draws on the GitHub
- *     **REST** rate-limit pool (`core`, 5,000/hr), which under autopilot sits
- *     ~99% idle. This is the default, and the fix for issue #968.
- *   - `"graphql"` — the legacy `gh pr view <n> --json` path, which rides the
- *     **GraphQL** pool the running autopilot exhausts. Kept as an opt-out for
- *     callers that need a field REST doesn't expose.
- *
- * The seam exposes the choice (rather than re-deciding per call site) so the
- * per-PR read stays in exactly one home while each consumer picks the cheapest
- * correct path (CONTEXT.md "GitHub Issue/PR Read").
+ * The per-PR view transport / cache / normalization cluster lives in its own
+ * Module (`./view-pr.ts`, issue #2224) — it is an *implementation* concern
+ * (REST↔GraphQL transport switching, REST-to-`--json` normalization, the
+ * in-process cache) at a different abstraction level than the domain-read list
+ * queries above. It is re-exported here so the public read-seam surface
+ * (`from "../github/issues.ts"`) is unchanged for the 15 existing `viewPr`
+ * consumers and the test surface.
  */
-export type ViewPrTransport = "rest" | "graphql";
-
-/** Default TTL for the in-process per-PR cache. Merged-PR metadata is immutable. */
-const VIEW_PR_CACHE_TTL_MS = 5 * 60 * 1000;
-
-interface ViewPrCacheEntry {
-  expiresAt: number;
-  value: unknown;
-}
+export {
+  ViewPrCache,
+  defaultViewPrCache,
+  _clearViewPrCache,
+  normalizePrViewFromRest,
+} from "./view-pr.ts";
+export type { ViewPrTransport } from "./view-pr.ts";
 
 /**
- * Short-TTL in-process cache for {@link viewPr}. Keyed by `repo|number|fields`
- * so two consumers requesting different field sets don't collide. Merged-PR
- * metadata is immutable, so a stale entry self-heals on TTL expiry and an
- * open-PR read (which a fresh fetch may still mutate) is bounded by the TTL.
- * Only successful (`!= null`) reads are cached — a transient failure must not
- * pin a `null` for the whole TTL.
+ * View a single PR's fields. Thin re-export wrapper over {@link viewPrModule}
+ * that injects this seam's {@link resolveGithubRepo} (avoiding an import cycle
+ * back into `issues.ts`) so the public signature — `viewPr(prNumber, fields,
+ * opts?)` — is unchanged for existing callers. See `./view-pr.ts` for the full
+ * transport/cache/normalization contract. Returns the raw parsed object or
+ * `null` on any failure. Never throws.
  */
-const viewPrCache = new Map<string, ViewPrCacheEntry>();
-
-function viewPrCacheKey(repo: string, prNumber: number, fields: string): string {
-  return `${repo}|${prNumber}|${fields}`;
-}
-
-/** Test/maintenance hook: drop all cached per-PR views. */
-export function _clearViewPrCache(): void {
-  viewPrCache.clear();
-}
-
-/**
- * Map a `gh pr view --json` camelCase field name onto the GitHub REST
- * `/pulls/<n>` JSON key (snake_case), or `null` when the field is NOT inline on
- * the `/pulls/<n>` resource and needs a sub-call (`reviews`, `commits`).
- */
-const REST_INLINE_FIELD_MAP: Record<string, string> = {
-  number: "number",
-  title: "title",
-  url: "html_url",
-  mergedAt: "merged_at",
-  state: "state",
-  body: "body",
-};
-
-function normalizeRestActor(
-  actor: unknown,
-): { login?: string; is_bot?: boolean } | null {
-  if (!actor || typeof actor !== "object") return null;
-  const a = actor as { login?: unknown; type?: unknown };
-  const login = typeof a.login === "string" ? a.login : undefined;
-  // REST marks bot accounts with `type: "Bot"`; classifyAutonomy also keys off
-  // the `[bot]` login suffix, so a missing `type` still classifies correctly.
-  const is_bot = a.type === "Bot" ? true : undefined;
-  const out: { login?: string; is_bot?: boolean } = {};
-  if (login !== undefined) out.login = login;
-  if (is_bot !== undefined) out.is_bot = is_bot;
-  return out;
-}
-
-/**
- * Normalize a REST `/pulls/<n>` object (+ optional reviews/commits sub-results)
- * into the `gh pr view --json <fields>`-shaped object the consumers expect.
- * Only the requested `fields` are populated, mirroring `--json`'s projection.
- * Exported for tests.
- */
-export function normalizePrViewFromRest(
-  pull: Record<string, unknown>,
-  fields: string,
-  subResults: { reviews?: unknown; commits?: unknown } = {},
-): Record<string, unknown> {
-  const requested = fields
-    .split(",")
-    .map((f) => f.trim())
-    .filter((f) => f.length > 0);
-  const out: Record<string, unknown> = {};
-  for (const field of requested) {
-    if (field === "labels") {
-      const raw = Array.isArray(pull.labels) ? pull.labels : [];
-      out.labels = raw
-        .map((l) =>
-          l && typeof l === "object" && typeof (l as { name?: unknown }).name === "string"
-            ? { name: (l as { name: string }).name }
-            : null,
-        )
-        .filter((l): l is { name: string } => l !== null);
-      continue;
-    }
-    if (field === "mergedBy") {
-      out.mergedBy = normalizeRestActor(pull.merged_by);
-      continue;
-    }
-    if (field === "reviews") {
-      const raw = Array.isArray(subResults.reviews) ? subResults.reviews : [];
-      out.reviews = raw.map((r) => ({
-        author: normalizeRestActor((r as { user?: unknown })?.user),
-      }));
-      continue;
-    }
-    if (field === "commits") {
-      const raw = Array.isArray(subResults.commits) ? subResults.commits : [];
-      out.commits = raw.map((c) => {
-        const obj = (c ?? {}) as { author?: unknown };
-        return { author: normalizeRestActor(obj.author) };
-      });
-      continue;
-    }
-    const restKey = REST_INLINE_FIELD_MAP[field];
-    if (restKey !== undefined && restKey in pull) {
-      out[field] = pull[restKey];
-    }
-  }
-  return out;
-}
-
-/** Does this `--json` field set require a REST sub-call beyond `/pulls/<n>`? */
-function restSubCallsFor(fields: string): { reviews: boolean; commits: boolean } {
-  const set = new Set(fields.split(",").map((f) => f.trim()));
-  return { reviews: set.has("reviews"), commits: set.has("commits") };
-}
-
-async function viewPrViaRest<T>(
-  repo: string,
+export function viewPr<T = unknown>(
   prNumber: number,
   fields: string,
-  opts: IssueQueryOptions,
+  opts: IssueQueryOptions & {
+    transport?: ViewPrTransport;
+    cacheTtlMs?: number;
+    cache?: ViewPrCache;
+  } = {},
 ): Promise<T | null> {
-  const eo = execOpts(opts);
-  const pullRes = await ghJson<Record<string, unknown>>(
-    ["api", `repos/${repo}/pulls/${prNumber}`],
-    eo,
-  );
-  if (isGhFailure(pullRes)) return null;
-
-  const need = restSubCallsFor(fields);
-  const sub: { reviews?: unknown; commits?: unknown } = {};
-  if (need.reviews) {
-    const r = await ghJson<unknown>(
-      ["api", `repos/${repo}/pulls/${prNumber}/reviews`, "--paginate"],
-      eo,
-    );
-    // A sub-call failure degrades that field to empty rather than nulling the
-    // whole view — the same partial-degrade posture the consumers already have.
-    sub.reviews = isGhFailure(r) ? [] : r.data;
-  }
-  if (need.commits) {
-    const c = await ghJson<unknown>(
-      ["api", `repos/${repo}/pulls/${prNumber}/commits`, "--paginate"],
-      eo,
-    );
-    sub.commits = isGhFailure(c) ? [] : c.data;
-  }
-  return normalizePrViewFromRest(pullRes.data, fields, sub) as T;
-}
-
-async function viewPrViaGraphql<T>(
-  repo: string,
-  prNumber: number,
-  fields: string,
-  opts: IssueQueryOptions,
-): Promise<T | null> {
-  const res = await ghJson<T>(
-    ["pr", "view", String(prNumber), "--repo", repo, "--json", fields],
-    execOpts(opts),
-  );
-  if (isGhFailure(res)) return null;
-  return res.data;
-}
-
-/**
- * View a single PR's fields. Returns the raw parsed object (typed `T` is the
- * caller's responsibility, as with `ghJson`) or `null` on any failure — the
- * historical `gh pr view` consumers (recent-merges, builder-health) treat a
- * failed view as "no labels known" rather than aborting. Never throws.
- *
- * Transport (issue #968): defaults to the **REST** pool (`gh api`), which the
- * autopilot leaves ~99% idle, instead of the GraphQL pool `gh pr view --json`
- * drains to zero. REST returns a snake_case shape; this seam normalizes it back
- * into the `--json`-shaped object its consumers already map, so the
- * consumer-facing contract is unchanged. `reviews`/`commits` (not inline on the
- * REST `/pulls/<n>` resource) are fetched via REST sub-calls only when those
- * fields are requested. Pass `transport: "graphql"` to opt back into the legacy
- * path. Results are cached in-process under a short TTL keyed by repo+number+fields.
- */
-export async function viewPr<T = unknown>(
-  prNumber: number,
-  fields: string,
-  opts: IssueQueryOptions & { transport?: ViewPrTransport; cacheTtlMs?: number } = {},
-): Promise<T | null> {
-  const repo = resolveGithubRepo(opts.repo);
-  if (!repo) return null;
-
-  const ttl = typeof opts.cacheTtlMs === "number" ? opts.cacheTtlMs : VIEW_PR_CACHE_TTL_MS;
-  const key = viewPrCacheKey(repo, prNumber, fields);
-  if (ttl > 0) {
-    const hit = viewPrCache.get(key);
-    if (hit && hit.expiresAt > Date.now()) return hit.value as T;
-  }
-
-  const transport: ViewPrTransport = opts.transport ?? "rest";
-  const value =
-    transport === "graphql"
-      ? await viewPrViaGraphql<T>(repo, prNumber, fields, opts)
-      : await viewPrViaRest<T>(repo, prNumber, fields, opts);
-
-  // Cache only successful reads — a transient failure must not pin a null.
-  if (ttl > 0 && value !== null) {
-    viewPrCache.set(key, { expiresAt: Date.now() + ttl, value });
-  }
-  return value;
+  return viewPrModule<T>(prNumber, fields, { ...opts, resolveRepo: resolveGithubRepo });
 }
 
 // ---------------------------------------------------------------------------

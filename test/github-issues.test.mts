@@ -31,6 +31,7 @@ import {
   listIssuesByLabelOrEmpty,
   normalizePrViewFromRest,
   _clearViewPrCache,
+  ViewPrCache,
 } from "../src/github/issues.ts";
 
 // ---------------------------------------------------------------------------
@@ -392,6 +393,23 @@ esac
     assert.ok(hit, "a later success must not be shadowed by a cached null");
   });
 
+  test("viewPr accepts an injected ViewPrCache — no global scrub needed (issue #2224)", async () => {
+    // Private cache per case: this test never calls _clearViewPrCache(), proving
+    // the encapsulation lets callers/tests own cache lifetime locally.
+    const cache = new ViewPrCache();
+    const first = await viewPr<{ number: number }>(33, "number,title", { cache });
+    assert.ok(first);
+    await writeFile(invocationsPath, "", "utf-8"); // reset the spawn log
+    const second = await viewPr<{ number: number }>(33, "number,title", { cache });
+    assert.ok(second);
+    const inv = await readInvocations();
+    assert.equal(inv.length, 0, "second call should be served from the injected cache");
+    // A different (fresh) injected cache is a miss → re-spawns gh.
+    await viewPr<{ number: number }>(33, "number,title", { cache: new ViewPrCache() });
+    const inv2 = await readInvocations();
+    assert.ok(inv2.length > 0, "a fresh injected cache must not see the other's entry");
+  });
+
   test("a gh failure maps to the never-throw failure arm with a code", async () => {
     process.env.FAKE_SCENARIO = "fail";
     const res = await listIssuesByLabel("blocked");
@@ -417,5 +435,65 @@ esac
     if (res.ok) assert.deepEqual(res.rows, []);
     const inv = await readInvocations();
     assert.equal(inv.length, 0, "should not have shelled out");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PURE — the injectable ViewPrCache class (issue #2224)
+//
+// A fresh instance per case proves the encapsulation benefit: no shared global,
+// so no `_clearViewPrCache()` scrub is needed between cases (mirrors
+// OvSearchMetricsCounter #1926 / DigestAccumulator #1487).
+// ---------------------------------------------------------------------------
+
+describe("ViewPrCache (injectable per-PR view cache)", () => {
+  test("key is repo|number|fields — distinct field sets do not collide", () => {
+    const a = ViewPrCache.key("acme/widgets", 33, "number,title");
+    const b = ViewPrCache.key("acme/widgets", 33, "number,labels");
+    assert.equal(a, "acme/widgets|33|number,title");
+    assert.notEqual(a, b);
+  });
+
+  test("get returns a live value within TTL and a miss after expiry", () => {
+    let nowMs = 1_000;
+    const cache = new ViewPrCache({ now: () => nowMs });
+    const key = ViewPrCache.key("acme/widgets", 33, "number");
+    cache.set(key, { number: 33 }, 5_000);
+    assert.deepEqual(cache.get(key, 5_000), { number: 33 });
+    nowMs = 6_001; // past expiresAt (1_000 + 5_000)
+    assert.equal(cache.get(key, 5_000), undefined);
+  });
+
+  test("ttl <= 0 disables both read and write (no caching)", () => {
+    const cache = new ViewPrCache();
+    const key = ViewPrCache.key("acme/widgets", 33, "number");
+    cache.set(key, { number: 33 }, 0);
+    assert.equal(cache.get(key, 5_000), undefined, "a ttl<=0 set must not store");
+    cache.set(key, { number: 33 }, 5_000);
+    assert.equal(cache.get(key, 0), undefined, "a ttl<=0 get is always a miss");
+  });
+
+  test("set ignores a null value (a transient failure must not pin)", () => {
+    const cache = new ViewPrCache();
+    const key = ViewPrCache.key("acme/widgets", 33, "number");
+    cache.set(key, null, 5_000);
+    assert.equal(cache.get(key, 5_000), undefined);
+  });
+
+  test("clear drops all entries", () => {
+    const cache = new ViewPrCache();
+    const key = ViewPrCache.key("acme/widgets", 33, "number");
+    cache.set(key, { number: 33 }, 5_000);
+    cache.clear();
+    assert.equal(cache.get(key, 5_000), undefined);
+  });
+
+  test("two instances are isolated — one's entries are invisible to the other", () => {
+    const a = new ViewPrCache();
+    const b = new ViewPrCache();
+    const key = ViewPrCache.key("acme/widgets", 33, "number");
+    a.set(key, { number: 33 }, 5_000);
+    assert.deepEqual(a.get(key, 5_000), { number: 33 });
+    assert.equal(b.get(key, 5_000), undefined, "instances must not share state");
   });
 });
