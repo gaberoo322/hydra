@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripAnsi, truncate, runCmd } from "../src/grounding/cmd.ts";
 import { parseTestCounts, parseFailingTests } from "../src/grounding/parser.ts";
+import { groundProject, type GroundProjectDeps } from "../src/grounding/index.ts";
 
 /** Existence check for a list of PIDs — true if every PID is gone. */
 async function pidsDead(pids: number[]): Promise<boolean> {
@@ -327,3 +328,264 @@ describe("runCmd (wired through execWithGroupCleanup, issue #844)", () => {
 // (issue #609). The in-process cycle loop that consumed the workspace-prep
 // helpers was removed in PR #383 (codex cut-over, ADR-0006); the module
 // had no production importers post-cutover and was deleted as dead code.
+
+// -------------------------------------------------------------------------
+// groundProject — assembly logic via injected deps (issue #2182)
+//
+// groundProject is the fan-out coordinator: it spawns 11 subprocess calls and
+// reads two files, then assembles a GroundingReport. Before #2182 it had no
+// injectable deps surface, so its ASSEMBLY logic (the appDir probe, the
+// testParseStatus classification, the failingTests join, the todoMarkers
+// cap-at-20, the testReport.ran 127-guard) was only exercisable by spawning
+// real processes against a real git repo. These tests inject stubs through the
+// new optional `deps` bag so the composition is testable without spawning
+// anything — mirroring the src/health/fan-out.ts CollectProbeDeps approach
+// (issue #2089).
+// -------------------------------------------------------------------------
+
+type CmdResult = { exitCode: number; stdout: string; stderr: string; durationMs: number };
+
+/** A `runCmd`-shaped stub that returns canned results keyed by the command. */
+function stubRunCmd(
+  byCmd: Record<string, Partial<CmdResult>>,
+  fallback: Partial<CmdResult> = {},
+): NonNullable<GroundProjectDeps["runCmd"]> {
+  const defaults: CmdResult = { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+  return (async (cmd: string, args: string[]) => {
+    // Key on a coarse "<cmd> <first-arg>" so `git log` vs `git status` differ.
+    const key = `${cmd} ${args[0] ?? ""}`.trim();
+    const hit = byCmd[key] ?? byCmd[cmd];
+    return { ...defaults, ...(hit ?? fallback) };
+  }) as NonNullable<GroundProjectDeps["runCmd"]>;
+}
+
+/** A `readFile`-shaped stub: returns content for known paths, rejects otherwise. */
+function stubReadFile(
+  byPathSubstring: Array<{ match: string; content: string }>,
+): NonNullable<GroundProjectDeps["readFile"]> {
+  return (async (path: unknown) => {
+    const p = String(path);
+    for (const { match, content } of byPathSubstring) {
+      if (p.includes(match)) return content;
+    }
+    const err = new Error(`ENOENT (stub): ${p}`);
+    (err as NodeJS.ErrnoException).code = "ENOENT";
+    throw err;
+  }) as NonNullable<GroundProjectDeps["readFile"]>;
+}
+
+describe("groundProject (assembly via injected deps, issue #2182)", () => {
+  test("byte-identical default: omitting deps does not change the call shape", async () => {
+    // A no-deps call must still type-check and run; we drive it with stubs only
+    // to assert the optional param is genuinely optional (3rd arg defaults to {}).
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({ "git branch": { stdout: "main\n" } }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.equal(report.branch, "main");
+  });
+
+  test("appDir subdirectory probe: root has no package.json → probes web/", async () => {
+    // package.json absent at root, present under web/. The test command must run
+    // from web/ — we assert by having the web/ package.json read succeed.
+    const reads: string[] = [];
+    const readFile = (async (path: unknown) => {
+      const p = String(path);
+      reads.push(p);
+      if (p.includes("web/package.json")) return '{"name":"web-app"}';
+      const err = new Error("ENOENT");
+      (err as NodeJS.ErrnoException).code = "ENOENT";
+      throw err;
+    }) as NonNullable<GroundProjectDeps["readFile"]>;
+
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      { runCmd: stubRunCmd({}), readFile },
+    );
+
+    // The root probe failed, the web/ probe succeeded, so package.json read from web/.
+    assert.equal(report.packageJson, '{"name":"web-app"}');
+    assert.ok(
+      reads.some((p) => p.endsWith("/fake/project/package.json")),
+      "must probe the root package.json first",
+    );
+    assert.ok(
+      reads.some((p) => p.includes("web/package.json")),
+      "must fall back to probing web/package.json",
+    );
+  });
+
+  test('testParseStatus "ok": exit 0 with a recognised vitest summary', async () => {
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({
+          "npm test": {
+            exitCode: 0,
+            stdout: "\n Test Files  2 passed (2)\n      Tests  10 passed (10)\n",
+          },
+        }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.equal(report.testReport.parseStatus, "ok");
+    assert.equal(report.testReport.recognised, true);
+    assert.equal(report.testReport.passed, 10);
+    assert.equal(report.testReport.ran, true);
+  });
+
+  test('testParseStatus "unrecognised": exit 0 but no summary line', async () => {
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({
+          "npm test": { exitCode: 0, stdout: "ran some stuff but no summary" },
+        }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.equal(report.testReport.parseStatus, "unrecognised");
+    assert.equal(report.testReport.recognised, false);
+  });
+
+  test('testParseStatus "errored": non-zero exit', async () => {
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({
+          "npm test": {
+            exitCode: 1,
+            stdout: "FAIL  src/a.test.ts > suite > broken\n Tests  1 failed (1)\n",
+          },
+        }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.equal(report.testReport.parseStatus, "errored");
+    assert.equal(report.testReport.ran, true, "non-127 exit still counts as ran");
+  });
+
+  test('testParseStatus "not-run" + testReport.ran=false: exit 127 (command not found)', async () => {
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({ "npm test": { exitCode: 127, stderr: "command not found" } }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.equal(report.testReport.parseStatus, "not-run");
+    assert.equal(report.testReport.ran, false, "127 means the command was never run");
+  });
+
+  test("failingTests: derived from the test command's output", async () => {
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({
+          "npm test": {
+            exitCode: 1,
+            stdout:
+              "FAIL  src/foo.test.ts > suite > test A\n" +
+              "FAIL  src/bar.test.ts > suite > test B\n",
+          },
+        }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.equal(report.failingTests.length, 2);
+    assert.ok(report.failingTests[0].includes("foo.test.ts"));
+    assert.ok(report.failingTests[1].includes("bar.test.ts"));
+  });
+
+  test("todoMarkers: caps at 20 even when grep returns more", async () => {
+    const lines = Array.from({ length: 30 }, (_, i) => `src/f${i}.ts:1:TODO item ${i}`).join("\n");
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({ grep: { exitCode: 0, stdout: lines } }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.equal(report.todoMarkers.length, 20, "todoMarkers must be capped at 20");
+  });
+
+  test("todoMarkers: empty when grep exits non-zero (no matches)", async () => {
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        // grep exits 1 when it finds nothing.
+        runCmd: stubRunCmd({ grep: { exitCode: 1, stdout: "" } }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.deepEqual(report.todoMarkers, []);
+  });
+
+  test("git fields assembled from per-command stdout", async () => {
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({
+          "git branch": { stdout: "feature/x\n" },
+          "git log": { stdout: "abc123 first\ndef456 second\n" },
+          "git status": { stdout: " M src/a.ts\n M src/b.ts\n" },
+          "git ls-files": { stdout: "src/a.ts\nsrc/b.ts\nsrc/c.ts\n" },
+        }),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.equal(report.branch, "feature/x");
+    // git log appears twice (head + recent); the stub keys both to the same stdout.
+    assert.equal(report.headCommit, "abc123 first\ndef456 second");
+    assert.deepEqual(report.recentCommits, ["abc123 first", "def456 second"]);
+    // The assembly does `stdout.trim().split("\n")`, so the leading whitespace
+    // of the FIRST line is stripped by the outer trim (subsequent lines keep it).
+    assert.deepEqual(report.dirtyFiles, ["M src/a.ts", " M src/b.ts"]);
+    assert.equal(report.fileCount, 3);
+  });
+
+  test("readme: truncated to 2000 chars; falls back to appDir README", async () => {
+    const longReadme = "R".repeat(5000);
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({}),
+        readFile: stubReadFile([
+          { match: "package.json", content: "{}" },
+          { match: "README.md", content: longReadme },
+        ]),
+      },
+    );
+    assert.equal(report.readme.length, 2000, "README must be capped at 2000 chars");
+  });
+
+  test("no real subprocess: a stubbed run completes fast and never spawns", async () => {
+    // Sanity guard for the leverage claim — the whole fan-out resolves from
+    // stubs with no real `git`/`npm`/`grep` ever invoked.
+    const start = Date.now();
+    const report = await groundProject(
+      "/fake/project",
+      {},
+      {
+        runCmd: stubRunCmd({}),
+        readFile: stubReadFile([{ match: "package.json", content: "{}" }]),
+      },
+    );
+    assert.ok(typeof report.groundingDurationMs === "number");
+    assert.ok(Date.now() - start < 1000, "stubbed grounding must be sub-second");
+  });
+});
