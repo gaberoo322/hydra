@@ -9,8 +9,10 @@
  *     never throws.
  *  3. The pure cooldown + max-attempt timing policy (WakeGate) is asserted with
  *     a passed-in clock — no fake timers, no sockets.
- *  Plus the fan-out integration (maybeWakeEmbedBackend) re-probes before the
- *  existing #2131 alert and resets the gate when the backend recovers.
+ *  Plus the fan-out integration (maybeWakeEmbedBackend) fires the wake
+ *  best-effort and returns the current probe result WITHOUT blocking the
+ *  /health/deep path on a re-probe (#2228 QA fix), resetting the gate when the
+ *  backend reads healthy.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -242,10 +244,17 @@ describe("maybeWakeEmbedBackend — fan-out integration (criterion 2)", () => {
   const failed = { status: "failed" as const, latencyMs: null };
   const running = { status: "running" as const, latencyMs: 7 };
 
+  // #2228 QA fix: maybeWakeEmbedBackend is now FIRE-AND-RETURN. On a failed
+  // probe it fires the WoL wake (best-effort) and returns the CURRENT probe
+  // result immediately — it never sleeps + re-probes on the request path (that
+  // inline 45s reprobe wedged GET /health/deep). Recovery is observed by the
+  // next scheduled health tick, so these tests assert the wake fires and the
+  // ORIGINAL result is returned synchronously, with no re-probe call.
+
   test("healthy probe → returns it unchanged and resets the gate", async () => {
     const gate = new WakeGate(1000, 3);
     gate.recordSend(0); // pretend a prior attempt happened
-    const out = await maybeWakeEmbedBackend(running, async () => running, {
+    const out = await maybeWakeEmbedBackend(running, {
       config: enabledConfig(),
       gate,
     });
@@ -253,77 +262,50 @@ describe("maybeWakeEmbedBackend — fan-out integration (criterion 2)", () => {
     assert.equal(gate.attemptCount, 0, "healthy read re-arms the budget");
   });
 
-  test("failed probe + enabled → wakes, re-probes, reports recovered (no alert)", async () => {
+  test("failed probe + enabled → fires the wake and returns the failure (next tick re-probes)", async () => {
     const gate = new WakeGate(0, 3);
     let woke = false;
-    let reprobes = 0;
-    const out = await maybeWakeEmbedBackend(
-      failed,
-      // re-probe now reports healthy after the wake
-      (async () => {
-        reprobes++;
-        return running;
-      }) as any,
-      {
-        config: enabledConfig(),
-        gate,
-        wake: async () => {
-          woke = true;
-          return { attempted: true, sent: { ok: true, bytesPerPort: 102, ports: [...WOL_PORTS] } };
-        },
-        sleep: async () => {},
+    const out = await maybeWakeEmbedBackend(failed, {
+      config: enabledConfig(),
+      gate,
+      wake: async () => {
+        woke = true;
+        return { attempted: true, sent: { ok: true, bytesPerPort: 102, ports: [...WOL_PORTS] } };
       },
-    );
-    assert.equal(woke, true);
-    assert.equal(reprobes, 1, "re-probes exactly once after the wake");
-    assert.equal(out.status, "running", "recovered → reported running, no #2131 alert");
+    });
+    assert.equal(woke, true, "wake fired best-effort");
+    assert.equal(out.status, "failed", "returns the current failure — no inline re-probe blocks the path");
   });
 
-  test("failed probe + wake sent but still down → original failure stands (alert fires)", async () => {
-    const out = await maybeWakeEmbedBackend(failed, (async () => failed) as any, {
+  test("failed probe + wake sent → original failure stands this tick (alert fires; recovery is next-tick)", async () => {
+    const out = await maybeWakeEmbedBackend(failed, {
       config: enabledConfig(),
       gate: new WakeGate(0, 3),
       wake: async () => ({ attempted: true, sent: { ok: true, bytesPerPort: 102, ports: [...WOL_PORTS] } }),
-      sleep: async () => {},
     });
-    assert.equal(out.status, "failed", "still down → failure surfaces for the alert");
+    assert.equal(out.status, "failed", "still down at probe time → failure surfaces for the alert");
   });
 
-  test("disabled → returns the original failure, does not re-probe", async () => {
-    let reprobed = false;
-    const out = await maybeWakeEmbedBackend(
-      failed,
-      (async () => {
-        reprobed = true;
-        return running;
-      }) as any,
-      {
-        config: enabledConfig({ enabled: false }),
-        gate: new WakeGate(0, 3),
-        wake: async () => ({ attempted: false, reason: "disabled" }),
-        sleep: async () => {},
+  test("disabled → fires the no-op wake and returns the original failure", async () => {
+    let woke = false;
+    const out = await maybeWakeEmbedBackend(failed, {
+      config: enabledConfig({ enabled: false }),
+      gate: new WakeGate(0, 3),
+      wake: async () => {
+        woke = true;
+        return { attempted: false, reason: "disabled" };
       },
-    );
+    });
     assert.equal(out.status, "failed");
-    assert.equal(reprobed, false, "no re-probe when wake didn't happen");
+    assert.equal(woke, true, "wake is still consulted (it self-noops when disabled)");
   });
 
-  test("send-error (cross-subnet) → original failure, no re-probe", async () => {
-    let reprobed = false;
-    const out = await maybeWakeEmbedBackend(
-      failed,
-      (async () => {
-        reprobed = true;
-        return running;
-      }) as any,
-      {
-        config: enabledConfig(),
-        gate: new WakeGate(0, 3),
-        wake: async () => ({ attempted: true, sent: { ok: false, reason: "send-error", error: "ENETUNREACH" } }),
-        sleep: async () => {},
-      },
-    );
+  test("send-error (cross-subnet) → original failure returned synchronously", async () => {
+    const out = await maybeWakeEmbedBackend(failed, {
+      config: enabledConfig(),
+      gate: new WakeGate(0, 3),
+      wake: async () => ({ attempted: true, sent: { ok: false, reason: "send-error", error: "ENETUNREACH" } }),
+    });
     assert.equal(out.status, "failed");
-    assert.equal(reprobed, false);
   });
 });

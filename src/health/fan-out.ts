@@ -57,7 +57,6 @@ import {
   attemptEmbedBackendWake,
   WakeGate,
   type WolConfig,
-  type WakeOutcome,
 } from "./wol.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
@@ -77,34 +76,37 @@ const embedWakeGate = new WakeGate(
 );
 
 /**
- * If the embed-backend probe reported `failed`, attempt a best-effort WoL wake
- * (respecting the module-level cooldown + max-attempt gate), then re-probe once
- * after a short delay so the existing #2131 alert only fires if the backend is
- * STILL down after the wake. Returns the (possibly re-probed) ServiceProbeResult.
+ * If the embed-backend probe reported `failed`, fire a best-effort WoL wake
+ * (respecting the module-level cooldown + max-attempt gate) and return the
+ * ORIGINAL probe result immediately. The wake is a fire-and-return side-effect:
+ * we never `sleep` + re-probe on the request path, so `GET /health/deep` is
+ * never blocked waiting for the box to POST (#2228 QA blocker — the old inline
+ * 45s reprobe wedged the fan-out for ~45s on every wake attempt). Recovery is
+ * observed by the NEXT scheduled health tick, which is sufficient: the magic
+ * packet has already been broadcast, and a powered-on box answers the next probe.
+ *
+ * Returning `initial` on a failed read means the existing #2131 alert still
+ * fires for THIS tick (the backend is, after all, still down at probe time) —
+ * that's the correct behavior; the wake is a recovery attempt for the NEXT tick,
+ * not a same-request heal. A healthy read resets the gate so the next outage
+ * starts fresh.
  *
  * NEVER throws — every failure path inside `attemptEmbedBackendWake` /
- * `sendMagicPacket` already folds to a result object + fail-loud console.error,
- * and the re-probe reuses the never-throwing `probeEmbedBackendImpl`. A healthy
- * read resets the gate so the next outage starts fresh.
+ * `sendMagicPacket` already folds to a result object + fail-loud console.error.
  *
- * Injectable `config`, `wake`, `reprobe`, and `sleep` keep this unit-testable
- * without a real socket, clock, or network.
+ * Injectable `config`, `gate`, and `wake` keep this unit-testable without a real
+ * socket, clock, or network — and there is no clock/sleep to inject anymore.
  */
 export async function maybeWakeEmbedBackend(
   initial: ServiceProbeResult,
-  probeEmbedBackendImpl: typeof probeEmbedBackend,
   {
     config = readWolConfig(),
     gate = embedWakeGate,
     wake = attemptEmbedBackendWake,
-    sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
-    reprobeDelayMs = WOL_REPROBE_DELAY_MS,
   }: {
     config?: WolConfig;
     gate?: WakeGate;
     wake?: typeof attemptEmbedBackendWake;
-    sleep?: (ms: number) => Promise<void>;
-    reprobeDelayMs?: number;
   } = {},
 ): Promise<ServiceProbeResult> {
   if (initial.status !== "failed") {
@@ -112,34 +114,13 @@ export async function maybeWakeEmbedBackend(
     gate.reset();
     return initial;
   }
-  const outcome: WakeOutcome = await wake(config, gate);
-  if (!outcome.attempted) {
-    // Disabled, cooled-down, or attempt budget exhausted — surface the original
-    // failure so the #2131 alert fires unchanged.
-    return initial;
-  }
-  if (!outcome.sent.ok) {
-    // The wake couldn't be broadcast (different subnet / send error) — already
-    // logged loud inside sendMagicPacket; leave the failure to the alert path.
-    return initial;
-  }
-  // Give the box time to POST + the Ollama backend to self-recover (~40s in
-  // #1794), then re-probe ONCE. If it came back, reset the gate and report it
-  // healthy so no alert fires; if still down, the original failure stands.
-  await sleep(reprobeDelayMs);
-  const reprobed = await probeEmbedBackendImpl();
-  if (reprobed.status !== "failed") gate.reset();
-  return reprobed;
+  // Fire the wake (best-effort, never-throwing) and return immediately. We do
+  // NOT wait for the box to come up — the next scheduled health tick re-probes
+  // and observes recovery. `outcome` is consumed only for the fail-loud logging
+  // already done inside attemptEmbedBackendWake; nothing here blocks on it.
+  await wake(config, gate);
+  return initial;
 }
-
-/**
- * Delay between sending the wake packet and re-probing the embed backend.
- * #1794 measured ~40s for a cold gaming PC to POST and the Ollama backend to
- * answer; this is intentionally generous but still bounded so it never wedges
- * the deep-health fan-out. Overridable in the test (and effectively skipped via
- * the injectable `sleep`).
- */
-export const WOL_REPROBE_DELAY_MS = 45_000;
 
 // ---- assembleProbeInputs — maps the positional settled array to named ProbeInputs --
 //
@@ -277,11 +258,13 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
         probeOvImpl(),
         probeEmbedBackendImpl(),
       ]);
-      // Issue #2228: if the embed-backend probe failed, attempt a best-effort
-      // Wake-on-LAN of the gaming PC and re-probe before reporting — so a
-      // powered-off box self-heals (the #1794 stretch goal) and the #2131 alert
-      // only fires if it's STILL down after the wake. NEVER throws.
-      const embedFinal = await maybeWakeEmbedBackend(embedBackend, probeEmbedBackendImpl);
+      // Issue #2228: if the embed-backend probe failed, FIRE a best-effort
+      // Wake-on-LAN of the gaming PC and return the current probe result
+      // immediately — never block the /health/deep fan-out waiting for the box
+      // to POST. The powered-off box self-heals (the #1794 stretch goal) by the
+      // NEXT scheduled health tick; this tick still surfaces the failure (so the
+      // #2131 alert fires correctly while it's down). NEVER throws.
+      const embedFinal = await maybeWakeEmbedBackend(embedBackend);
       return { vikingdb, openviking: ov, "embed-backend": embedFinal };
     })(),
     /* 2 */ schedulerStatus(),
