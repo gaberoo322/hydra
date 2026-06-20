@@ -28,7 +28,10 @@ import assert from "node:assert/strict";
 
 import {
   scanArchitecture,
+  computeGroupLayout,
+  LAYOUT_DEFAULTS,
   GROUP_META,
+  type ArchitectureNode,
 } from "../src/aggregators/architecture-graph.ts";
 
 const NOW = new Date("2026-06-08T12:00:00.000Z");
@@ -321,5 +324,186 @@ describe("architecture-graph aggregator", () => {
       sortEdges(b.edges),
       "interleaved scans must produce identical edge sets",
     );
+  });
+});
+
+/**
+ * Direct unit tests for the extracted pure layout algorithm (issue #2246).
+ *
+ * `computeGroupLayout` was carved out of `scanArchitecture` so the grid-packing
+ * concern is testable without a filesystem: feed it a synthetic `byGroup` map
+ * and assert node coordinates + group bounding boxes. The interface IS the test
+ * surface — no `readdir`/`readFile` stub required.
+ *
+ * Separate top-level `describe` with no shared lifecycle (these tests touch no
+ * Redis seam and no shared mutable module state — each builds its own nodes).
+ */
+describe("computeGroupLayout (pure layout algorithm)", () => {
+  let nodeSeq = 0;
+  /** Synthetic node factory — only the fields layout reads/writes matter. */
+  function node(group: string): ArchitectureNode {
+    return {
+      id: `${group}/n${nodeSeq++}`,
+      label: "N",
+      group,
+      inDegree: 0,
+      outDegree: 0,
+      x: -1,
+      y: -1,
+    };
+  }
+  function byGroup(spec: Record<string, number>): Record<string, ArchitectureNode[]> {
+    const out: Record<string, ArchitectureNode[]> = {};
+    for (const [g, count] of Object.entries(spec)) {
+      out[g] = Array.from({ length: count }, () => node(g));
+    }
+    return out;
+  }
+
+  test("single group: first node sits at the pad+label origin", () => {
+    const groups = byGroup({ alpha: 1 });
+    const { groupBounds } = computeGroupLayout(groups);
+    const L = LAYOUT_DEFAULTS;
+
+    const n = groups.alpha[0];
+    assert.equal(n.x, L.GROUP_PAD, "first node x is one GROUP_PAD in");
+    assert.equal(n.y, L.GROUP_PAD + L.GROUP_LABEL_H, "first node y clears the label band");
+
+    // One node → one column, one row.
+    const b = groupBounds.alpha;
+    assert.equal(b.x, 0);
+    assert.equal(b.y, 0);
+    assert.equal(b.w, L.GROUP_PAD * 2 + L.NODE_W);
+    assert.equal(b.h, L.GROUP_PAD * 2 + L.GROUP_LABEL_H + L.NODE_H);
+  });
+
+  test("a group larger than COLS_PER_GROUP wraps onto a second internal row", () => {
+    // 4 members with COLS_PER_GROUP=3 → 3 in row 0, 1 in row 1.
+    const groups = byGroup({ alpha: 4 });
+    const L = LAYOUT_DEFAULTS;
+    const { groupBounds } = computeGroupLayout(groups);
+
+    const [n0, n1, n2, n3] = groups.alpha;
+    // Row 0, columns 0..2.
+    assert.equal(n0.x, L.GROUP_PAD + 0 * (L.NODE_W + L.NODE_GAP_X));
+    assert.equal(n2.x, L.GROUP_PAD + 2 * (L.NODE_W + L.NODE_GAP_X));
+    assert.equal(n0.y, n2.y, "row-0 members share a y");
+    // 4th member drops to internal row 1, column 0.
+    assert.equal(n3.x, L.GROUP_PAD, "wrapped member returns to column 0");
+    assert.equal(n3.y, n0.y + (L.NODE_H + L.NODE_GAP_Y), "wrapped member is one row down");
+    void n1;
+
+    // Bounds height reflects 2 rows.
+    assert.equal(
+      groupBounds.alpha.h,
+      L.GROUP_PAD * 2 + L.GROUP_LABEL_H + 2 * L.NODE_H + 1 * L.NODE_GAP_Y,
+    );
+  });
+
+  test("groups are placed in sorted-id order, packed left to right", () => {
+    // Insertion order bravo, alpha — layout must sort to alpha, bravo.
+    const groups: Record<string, ArchitectureNode[]> = {
+      bravo: [node("bravo")],
+      alpha: [node("alpha")],
+    };
+    const L = LAYOUT_DEFAULTS;
+    const { groupBounds } = computeGroupLayout(groups);
+
+    assert.equal(groupBounds.alpha.x, 0, "alpha sorts first → x=0");
+    assert.equal(
+      groupBounds.bravo.x,
+      groupBounds.alpha.w + L.GROUP_GAP,
+      "bravo follows alpha by its width + GROUP_GAP",
+    );
+    assert.equal(groupBounds.alpha.y, groupBounds.bravo.y, "same row");
+  });
+
+  test("groups wrap to a new row when the next would overflow CANVAS_W", () => {
+    const L = LAYOUT_DEFAULTS;
+    // A full COLS_PER_GROUP-wide group is GROUP_PAD*2 + 3*NODE_W + 2*NODE_GAP_X
+    // = 40 + 450 + 32 = 522 wide; stride = 522 + GROUP_GAP(40) = 562. On the
+    // 1400px canvas: a@0, b@562; placing c at 1124 → 1124+522=1646 > 1400, so
+    // the 3rd group wraps to row 1. Five such groups guarantees a wrap.
+    const spec: Record<string, number> = {};
+    for (const g of ["a", "b", "c", "d", "e"]) spec[g] = L.COLS_PER_GROUP;
+    const groups = byGroup(spec);
+    const { groupBounds } = computeGroupLayout(groups);
+
+    // Row 0 holds the groups that fit; at least one later group must wrap.
+    assert.equal(groupBounds.a.y, 0, "first group is on row 0");
+    assert.equal(groupBounds.a.x, 0, "first group starts at x=0");
+    const wrapped = ["a", "b", "c", "d", "e"].filter((g) => groupBounds[g].y > 0);
+    assert.ok(wrapped.length > 0, "at least one group wraps to a new row");
+
+    const firstWrapped = wrapped[0];
+    assert.equal(groupBounds[firstWrapped].x, 0, "wrapped group restarts at x=0");
+    assert.equal(
+      groupBounds[firstWrapped].y,
+      groupBounds.a.h + L.GROUP_GAP,
+      "row-1 y clears the tallest row-0 group + GROUP_GAP",
+    );
+  });
+
+  test("returns the same node objects it mutated, flattened in sorted-group order", () => {
+    const groups: Record<string, ArchitectureNode[]> = {
+      bravo: [node("bravo")],
+      alpha: [node("alpha"), node("alpha")],
+    };
+    const { nodes } = computeGroupLayout(groups);
+    assert.deepEqual(
+      nodes.map((n) => n.group),
+      ["alpha", "alpha", "bravo"],
+      "flattened in sorted-group-id order",
+    );
+    // Same identities (mutated in place), not copies.
+    assert.ok(nodes.includes(groups.alpha[0]));
+    assert.ok(nodes.includes(groups.bravo[0]));
+    for (const n of nodes) {
+      assert.ok(n.x >= 0 && n.y >= 0, "every node got real coordinates");
+    }
+  });
+
+  test("empty group map yields empty bounds and no nodes", () => {
+    const { nodes, groupBounds } = computeGroupLayout({});
+    assert.deepEqual(nodes, []);
+    assert.deepEqual(groupBounds, {});
+  });
+
+  test("override layout constants are honoured", () => {
+    const groups = byGroup({ alpha: 1 });
+    const wide = { ...LAYOUT_DEFAULTS, GROUP_PAD: 100 };
+    const { groupBounds } = computeGroupLayout(groups, wide);
+    assert.equal(groupBounds.alpha.w, 100 * 2 + LAYOUT_DEFAULTS.NODE_W);
+    assert.equal(groups.alpha[0].x, 100);
+  });
+
+  test("matches scanArchitecture's coordinates for the same bucketed nodes (no behaviour change)", async () => {
+    // End-to-end equivalence: the coordinates the full scanner emits must equal
+    // what computeGroupLayout produces when fed the same group buckets.
+    const files: Record<string, string> = {};
+    for (const dir of ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]) {
+      for (let i = 0; i < 4; i++) files[`${dir}/mod-${i}.ts`] = `export const x = ${i};`;
+    }
+    files["index.ts"] = `export const root = 1;`;
+    const graph = await scanArchitecture(fsStub(files));
+
+    // Rebuild the byGroup map from the scanner's emitted nodes (coords zeroed),
+    // run the pure layout, and assert the coordinates + bounds match.
+    const reGroup: Record<string, ArchitectureNode[]> = {};
+    for (const n of graph.nodes) {
+      (reGroup[n.group] ??= []).push({ ...n, x: 0, y: 0 });
+    }
+    const { groupBounds } = computeGroupLayout(reGroup);
+
+    for (const g of graph.groups) {
+      assert.deepEqual(groupBounds[g.id], g.bounds, `bounds match for group ${g.id}`);
+    }
+    for (const [gid, members] of Object.entries(reGroup)) {
+      for (const m of members) {
+        const orig = graph.nodes.find((n) => n.id === m.id)!;
+        assert.equal(m.x, orig.x, `x matches for ${m.id} in ${gid}`);
+        assert.equal(m.y, orig.y, `y matches for ${m.id} in ${gid}`);
+      }
+    }
   });
 });
