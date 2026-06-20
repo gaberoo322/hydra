@@ -282,7 +282,7 @@ export function formatBuilderHealthLines(
   return lines;
 }
 
-function formatMinutes(mins: number | string | null | undefined): string {
+function formatMinutes(mins: number): string {
   const m = Number(mins);
   if (!Number.isFinite(m)) return "—";
   if (m < 60) return `${Math.round(m)}m`;
@@ -293,27 +293,29 @@ function formatMinutes(mins: number | string | null | undefined): string {
 /**
  * The payload shape the critical-alert switch narrows on (issue #2229).
  *
- * Each field is the subset a `case` below reads off `event.payload`; all are
- * optional because the bus carries the full notification vocabulary and any
- * given alert type populates only its own slice. The trailing index signature
- * keeps the type a structural supertype of the bus's loosely-typed
- * `Record<string, unknown>` payloads (so the `DigestEvent` call site in
- * `digest.ts` stays assignable) and lets the `default` case `JSON.stringify`
- * an arbitrary unknown payload. Typing the read fields means a renamed payload
- * key (e.g. `cyclesRun` → `cycleCount`) becomes a compile error here rather
- * than a silent `undefined` in the rendered alert.
+ * `Pick`ed from the shared `NotificationEventPayload` vocabulary
+ * (`event-bus-vocabulary.ts`) — exactly the fields a `case` below reads off
+ * `event.payload`. Deriving the slice rather than re-declaring it is the
+ * correctness property: a renamed payload key (e.g. `cyclesRun` → `cycleCount`)
+ * in the shared vocabulary becomes a compile error *here* (the `Pick` member no
+ * longer exists) rather than a silent `undefined` in the rendered alert. The
+ * `Record<string, unknown> &` half keeps the type a structural supertype of the
+ * bus's loosely-typed payloads (so the `DigestEvent` call site in `digest.ts`
+ * stays assignable) and lets the `default` case `JSON.stringify` an arbitrary
+ * unknown payload.
  */
-export interface CriticalAlertPayload {
-  title?: string;
-  commitSha?: string;
-  error?: string;
-  reason?: string;
-  cyclesRun?: number;
-  recentTitles?: string[];
-  suggestion?: string;
-  message?: string;
-  [key: string]: unknown;
-}
+export type CriticalAlertPayload = Record<string, unknown> &
+  Pick<
+    NotificationEventPayload,
+    | "title"
+    | "commitSha"
+    | "error"
+    | "reason"
+    | "cyclesRun"
+    | "recentTitles"
+    | "suggestion"
+    | "message"
+  >;
 
 export interface CriticalAlertEvent {
   type?: string;
