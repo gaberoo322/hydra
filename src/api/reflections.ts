@@ -1,9 +1,5 @@
 import { Router } from "express";
-import { loadAnchorReflections } from "../reflections/per-anchor.ts";
-import {
-  loadAnchorReflectionsByFile,
-  extractFilesFromAnchor,
-} from "../reflections/by-file.ts";
+import { loadReflectionsForAnchor } from "../reflections/index.ts";
 import { getTargetName } from "../target-config.ts";
 import { ReflectionsQuerySchema } from "../schemas/reflections.ts";
 import { aggregatorRoute } from "./route-helpers.ts";
@@ -23,9 +19,9 @@ export function createReflectionsRouter() {
   // GET /reflections?anchor=&files= — per-anchor episodic reflections.
   //
   // Composes the SAME per-anchor + by-file reflection narrative that
-  // `getContext()` assembles for a planner/dispatch prompt, by calling the
-  // existing reflections-module reads (`loadAnchorReflections` +
-  // `loadAnchorReflectionsByFile`). This is the LIVE injection path (issue
+  // `getContext()` assembles for a planner/dispatch prompt, by delegating the
+  // two-axis composition to the reflections-domain coordinator
+  // (`loadReflectionsForAnchor`, issue #2232). This is the LIVE injection path (issue
   // #841): the dispatch skills (`hydra-dev`, `hydra-target-build`) fetch this
   // at planning time — where they already call `GET /api/tier` — and weave
   // `formatted` into the implementation prompt, so a RETRY of a prior-failure
@@ -67,21 +63,18 @@ export function createReflectionsRouter() {
         ? filesParam.split(",").map((s) => s.trim()).filter(Boolean)
         : undefined;
 
-      const perAnchor = await loadAnchorReflections(anchor);
-
-      const files = extractFilesFromAnchor(anchor, scopeFiles);
-      const byFile = files.length > 0
-        ? await loadAnchorReflectionsByFile(files, anchor)
-        : { content: "", count: 0 };
-
-      const sections = [perAnchor.content, byFile.content].filter(Boolean);
-      const formatted = sections.join("\n\n");
-      const count = perAnchor.count + byFile.count;
+      // The coordinator owns the two-axis composition (file extraction,
+      // parallel per-anchor + by-file reads, content `\n\n`-join, count sum).
+      // The per-axis blocks it surfaces feed the attributed `blocks` list.
+      const { combined, perAnchor, byFile } = await loadReflectionsForAnchor(
+        anchor,
+        { scopeFiles },
+      );
 
       return {
         anchor,
-        formatted,
-        count,
+        formatted: combined.content,
+        count: combined.count,
         blocks: [
           { source: "per-anchor-reflections", count: perAnchor.count },
           { source: "by-file-reflections", count: byFile.count },
