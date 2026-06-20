@@ -249,6 +249,7 @@ function isCliEntrypoint(metaUrl: string): boolean {
   try {
     return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1);
   } catch {
+    /* intentional: best-effort CLI-entrypoint probe — if realpath/URL resolution fails, the module is being imported rather than run as the entrypoint, so degrading to false is the correct answer and must not throw into module-load. */
     return false;
   }
 }
