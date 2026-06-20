@@ -4,6 +4,9 @@ import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { sendDigestNow, sendDailyHeartbeatNow } from "../digest.ts";
 import { classifyChange } from "../tier-classifier.ts";
+// Pattern Memory write routes (POST /memory/:agent/pattern, GET /memory/:agent,
+// POST /memory/subagent-lesson, POST /memory/subagent-friction) have been
+// migrated to src/api/learning.ts with schema validation (issue #2181).
 
 /**
  * Query schema for `GET /tier?files=a,b,c` (ADR-0022).
@@ -25,9 +28,10 @@ const TierQuerySchema = z.object({
  *
  * Issue #268 split this file — see api/openviking.ts, api/goals.ts,
  * api/events.ts, api/config.ts, api/alerts.ts,
- * api/reflections.ts, api/merge-lock.ts. What remains here are operational
- * routes without a natural domain home: kill switch, digest
- * trigger, tier classifier, and agent-memory CRUD.
+ * api/reflections.ts, api/merge-lock.ts. Issue #2181 migrated the
+ * Pattern Memory write routes to api/learning.ts. What remains here are
+ * operational routes without a natural domain home: kill switch, digest
+ * trigger, and tier classifier.
  *
  * New routes should prefer a domain-specific sub-router. Only land here if
  * the route is genuinely orphan-operational.
@@ -81,126 +85,6 @@ export function createMiscRouter() {
       await sendDailyHeartbeatNow();
       res.json({ sent: true });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // -----------------------------------------------------------------------
-  // Agent memory
-  // -----------------------------------------------------------------------
-
-  router.post("/memory/:agent/pattern", async (req, res) => {
-    try {
-      const agentName = req.params.agent;
-      const { category, action, example, cycleId, severity } = req.body || {};
-      if (!category || !action) {
-        return res.status(400).json({ error: "Missing category or action" });
-      }
-      // Issue #823 — recordPattern dispatches the escalation internally
-      // (record-then-escalate, best-effort). No separate escalateIfNeeded call
-      // or escalation.ts import needed here.
-      const { recordPattern } = await import("../pattern-memory/agent-memory.ts");
-      // Issue #843 — surface the Escalation Outcome so a systematic gh/auth
-      // outage is observable on the caller side instead of a silent { ok: true }.
-      const result = await recordPattern(agentName, category, {
-        severity: severity || "prevent",
-        action,
-        example: example || "",
-        cycleId: cycleId || `claude-${Date.now()}`,
-      });
-      res.json({ ok: true, escalation: result.escalationResult ?? null });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  router.get("/memory/:agent", async (req, res) => {
-    try {
-      const { loadAgentMemory } = await import("../pattern-memory/agent-memory.ts");
-      const memory = await loadAgentMemory(req.params.agent);
-      res.type("text/plain").send(memory);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // POST /memory/subagent-lesson (issue #392) — lesson-capture hook for
-  // autopilot-dispatched subagents (hydra-dev / hydra-qa / hydra-target-build).
-  // After codex-runner is deleted by issue #383, this is the *only*
-  // post-cycle writer to hydra:memory:{agent}:patterns. The endpoint is
-  // intentionally a thin wrapper around captureSubagentLesson() so the
-  // existing 3-hit auto-promotion pipeline continues to apply unchanged.
-  router.post("/memory/subagent-lesson", async (req, res) => {
-    try {
-      const { skill, outcome, cue, context, action, severity, cycleId } = req.body || {};
-      const { captureSubagentLesson, isValidSkill, isValidOutcome } =
-        await import("../pattern-memory/subagent-capture.ts");
-
-      if (!isValidSkill(skill)) {
-        return res.status(400).json({
-          error: `Invalid or missing 'skill' — expected a skill whose dispatch class carries a learningAgent in the Dispatch-Class Taxonomy (scripts/autopilot/classes.json)`,
-        });
-      }
-      if (!isValidOutcome(outcome)) {
-        return res.status(400).json({
-          error: `Invalid or missing 'outcome' — expected qa-fail | verification-failure | no-diff | rollback`,
-        });
-      }
-      if (typeof cue !== "string" || cue.trim().length === 0) {
-        return res.status(400).json({ error: "Missing 'cue' (non-empty string)" });
-      }
-
-      const result = await captureSubagentLesson({
-        skill,
-        outcome,
-        cue,
-        context: typeof context === "string" ? context : "",
-        action: typeof action === "string" ? action : undefined,
-        severity: severity === "reinforce" ? "reinforce" : "prevent",
-        cycleId: typeof cycleId === "string" ? cycleId : undefined,
-      });
-      res.json({ ok: true, ...result });
-    } catch (err: any) {
-      console.error(`[api/memory/subagent-lesson] failed:`, err.message);
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // POST /memory/subagent-friction (issue #512) — soft-friction capture for
-  // autopilot-dispatched subagents. Distinct from /memory/subagent-lesson
-  // (which captures hard failures). Friction items land in
-  // hydra:friction:{skill}:patterns and don't promote to to-{agent}.md, but
-  // they do fire the GitHub-issue escalation hook on threshold-cross so
-  // chronic friction becomes tracked work.
-  router.post("/memory/subagent-friction", async (req, res) => {
-    try {
-      const { skill, cue, workaround, context, cycleId } = req.body || {};
-      const { captureSubagentFriction, isValidSkill } = await import(
-        "../pattern-memory/subagent-capture.ts"
-      );
-
-      if (!isValidSkill(skill)) {
-        return res.status(400).json({
-          error: `Invalid or missing 'skill' — expected a skill whose dispatch class carries a learningAgent in the Dispatch-Class Taxonomy (scripts/autopilot/classes.json)`,
-        });
-      }
-      if (typeof cue !== "string" || cue.trim().length === 0) {
-        return res.status(400).json({ error: "Missing 'cue' (non-empty string)" });
-      }
-      if (typeof workaround !== "string" || workaround.trim().length === 0) {
-        return res.status(400).json({ error: "Missing 'workaround' (non-empty string)" });
-      }
-
-      const result = await captureSubagentFriction({
-        skill,
-        cue,
-        workaround,
-        context: typeof context === "string" ? context : "",
-        cycleId: typeof cycleId === "string" ? cycleId : undefined,
-      });
-      res.json({ ok: true, ...result });
-    } catch (err: any) {
-      console.error(`[api/memory/subagent-friction] failed:`, err.message);
       res.status(500).json({ error: err.message });
     }
   });
