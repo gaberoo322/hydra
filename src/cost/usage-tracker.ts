@@ -465,6 +465,106 @@ function weightedQuotaBurn(
   );
 }
 
+/** The weighted-burn numerator triple over the three rolling windows (issue #2247). */
+interface WeightedBurns {
+  weightedBurn5h: number;
+  weightedBurn7d: number;
+  weightedBurn24h: number;
+}
+
+/**
+ * Weighted quota-burn numerators over the 5h / 7d / 24h windows (issue #873;
+ * extracted to a named pure helper in #2247). Composes the {@link weightedQuotaBurn}
+ * two-axis fold (Axis A cache-read weight INSIDE each family, Axis B per-model-family
+ * Quota Weight OUTSIDE) over each window's per-family accumulator. These are the
+ * NUMERATORS the estimate percentages divide by their quotas — raw `.total` fields
+ * are untouched; only these weighted numerators change with the env weights.
+ *
+ * Pure: takes the three already-accumulated per-family breakdowns plus the two
+ * weighting scalars/objects, returns the triple — the #2041 scalar-input shape, no
+ * I/O. Behaviour-neutral with the three inline `weightedQuotaBurn(...)` calls it
+ * replaces. Exported for direct unit test, NOT added to the `index.ts` public barrel.
+ */
+export function deriveWeightedBurns(
+  byModel5h: Record<ModelFamily, TokenBreakdown>,
+  byModel7d: Record<ModelFamily, TokenBreakdown>,
+  byModel24h: Record<ModelFamily, TokenBreakdown>,
+  cacheReadWeight: number,
+  burnWeights: { opus: number; sonnet: number; haiku: number },
+): WeightedBurns {
+  return {
+    weightedBurn5h: weightedQuotaBurn(byModel5h, cacheReadWeight, burnWeights),
+    weightedBurn7d: weightedQuotaBurn(byModel7d, cacheReadWeight, burnWeights),
+    weightedBurn24h: weightedQuotaBurn(byModel24h, cacheReadWeight, burnWeights),
+  };
+}
+
+/** The three transcript+calibration estimate percentages (issue #2247). */
+interface EstimatePercents {
+  estimatePercentLast5h: number;
+  estimatePercentLast7d: number;
+  projectedWeeklyPercent: number;
+}
+
+/**
+ * Transcript+calibration estimate percentages (the historical headline + fallback
+ * path; extracted to a named pure helper in #2247). Each percent divides its
+ * weighted burn numerator by the relevant quota; `projectedWeeklyPercent` extends
+ * the 24h burn to a full 7 days (`* 7`). All three short-circuit to 0 when the quota
+ * is uncalibrated — byte-for-byte the inline ternaries they replace, mirroring the
+ * all-or-nothing calibration discipline the rest of the tracker follows.
+ *
+ * Pure: takes the {@link WeightedBurns} triple plus the two quota scalars and the
+ * `calibrated` flag, returns the three percentages — the #2041 scalar-input shape, no
+ * I/O. Exported for direct unit test, NOT added to the `index.ts` public barrel.
+ */
+export function deriveEstimatePercents(
+  burns: WeightedBurns,
+  weeklyQuota: number,
+  fiveHourQuota: number,
+  calibrated: boolean,
+): EstimatePercents {
+  return {
+    estimatePercentLast5h: calibrated ? (burns.weightedBurn5h / fiveHourQuota) * 100 : 0,
+    estimatePercentLast7d: calibrated ? (burns.weightedBurn7d / weeklyQuota) * 100 : 0,
+    projectedWeeklyPercent: calibrated ? ((burns.weightedBurn24h * 7) / weeklyQuota) * 100 : 0,
+  };
+}
+
+/** The Quota-Weight burn totals over the 5h / 7d windows (issue #2247). */
+interface QuotaWeightTotals {
+  quotaWeightLast5h: number;
+  quotaWeightLast7d: number;
+}
+
+/**
+ * Quota-Weight burn totals over the 5h / 7d windows (issue #691; extracted to a
+ * named pure helper in #2247). DISTINCT from the burn NUMERATORS above: this is the
+ * raw `.total` per family scaled ONLY by the per-model-family Quota Weight (Axis B) —
+ * NO cache-read weight (Axis A), and it sums the honest `.total` (input + output +
+ * cacheCreation + cacheRead) rather than the cache-weighted token mix. Exactly 0
+ * unless ALL THREE HYDRA_QUOTA_WEIGHT_* env vars are set to positive values
+ * (`quotaWeightCalibrated`), mirroring the all-or-nothing percentage gate.
+ *
+ * Pure: takes the two per-family accumulators, the three family weights, and the
+ * `quotaWeightCalibrated` flag, returns the pair — the #2041 scalar-input shape, no
+ * I/O. Behaviour-neutral with the inline locally-captured `weightedTotal` arrow it
+ * replaces. Exported for direct unit test, NOT added to the `index.ts` public barrel.
+ */
+export function deriveQuotaWeightTotals(
+  byModel5h: Record<ModelFamily, TokenBreakdown>,
+  byModel7d: Record<ModelFamily, TokenBreakdown>,
+  weights: { opus: number; sonnet: number; haiku: number },
+  quotaWeightCalibrated: boolean,
+): QuotaWeightTotals {
+  const weightedTotal = (acc: Record<ModelFamily, TokenBreakdown>): number =>
+    MODEL_FAMILIES.reduce((sum, f) => sum + acc[f].total * familyWeight(f, weights), 0);
+  return {
+    quotaWeightLast5h: quotaWeightCalibrated ? weightedTotal(byModel5h) : 0,
+    quotaWeightLast7d: quotaWeightCalibrated ? weightedTotal(byModel7d) : 0,
+  };
+}
+
 /**
  * Pacing-state fold (issue #2188; extracted from `assembleSnapshot`).
  *
@@ -868,14 +968,20 @@ function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
   // untouched; only these numerators change.
   const cacheReadWeight = getCacheReadWeight();
   const burnWeights = quotaWeightCalibrated ? weights : { opus: 1, sonnet: 1, haiku: 1 };
-  const weightedBurn5h = weightedQuotaBurn(byModel5h, cacheReadWeight, burnWeights);
-  const weightedBurn7d = weightedQuotaBurn(byModel7d, cacheReadWeight, burnWeights);
-  const weightedBurn24h = weightedQuotaBurn(byModel24h, cacheReadWeight, burnWeights);
+  // The weighted-burn NUMERATOR triple — composed pure fold extracted to
+  // {@link deriveWeightedBurns} (issue #2247).
+  const weightedBurns = deriveWeightedBurns(
+    byModel5h,
+    byModel7d,
+    byModel24h,
+    cacheReadWeight,
+    burnWeights,
+  );
 
   // Transcript+calibration ESTIMATE (the historical headline + fallback path).
-  const estimatePercentLast5h = calibrated ? (weightedBurn5h / fiveHourQuota) * 100 : 0;
-  const estimatePercentLast7d = calibrated ? (weightedBurn7d / weeklyQuota) * 100 : 0;
-  const projectedWeeklyPercent = calibrated ? ((weightedBurn24h * 7) / weeklyQuota) * 100 : 0;
+  // Pure derivation extracted to {@link deriveEstimatePercents} (issue #2247).
+  const { estimatePercentLast5h, estimatePercentLast7d, projectedWeeklyPercent } =
+    deriveEstimatePercents(weightedBurns, weeklyQuota, fiveHourQuota, calibrated);
 
   // `pacingState` keys off the transcript-derived 24h projection (NOT the OAuth
   // headline) — it is part of the ADR-0021 projection family this seam leaves
@@ -932,10 +1038,16 @@ function assembleSnapshot(scan: ScanResult, now: Date): UsageSnapshot {
     usageSource,
   });
 
-  const weightedTotal = (acc: Record<ModelFamily, TokenBreakdown>): number =>
-    MODEL_FAMILIES.reduce((sum, f) => sum + acc[f].total * familyWeight(f, weights), 0);
-  const quotaWeightLast5h = quotaWeightCalibrated ? weightedTotal(byModel5h) : 0;
-  const quotaWeightLast7d = quotaWeightCalibrated ? weightedTotal(byModel7d) : 0;
+  // Quota-Weight burn totals (issue #691). Raw `.total` per family scaled ONLY by
+  // the per-model-family Quota Weight (no cache-read weight); 0 unless all three
+  // weights are positive. Pure derivation extracted to {@link deriveQuotaWeightTotals}
+  // (issue #2247).
+  const { quotaWeightLast5h, quotaWeightLast7d } = deriveQuotaWeightTotals(
+    byModel5h,
+    byModel7d,
+    weights,
+    quotaWeightCalibrated,
+  );
 
   // Weekly Reset Anchor / since-reset fixed window (issue #856, ADR-0021).
   // Pure read-side projection extracted to {@link deriveSinceReset} (issue

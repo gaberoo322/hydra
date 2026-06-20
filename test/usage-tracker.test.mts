@@ -71,6 +71,9 @@ import {
   rebaseOnOAuth,
   deriveSinceReset,
   detectCalibrationDrift,
+  deriveWeightedBurns,
+  deriveEstimatePercents,
+  deriveQuotaWeightTotals,
 } from "../src/cost/usage-tracker.ts";
 // `rebaseOnOAuth` consumes the already-resolved OAuth read (`ScanResult["oauth"]`,
 // = CachedOAuthRead). Alias it here so the fixtures below name the shape the
@@ -3123,5 +3126,125 @@ describe("detectCalibrationDrift (pure fail-loud detector, issue #2188)", () => 
       detectCalibrationDrift({ ...base, driftReference: 10, percentSinceReset: 15 }), // within [5, 20]
     );
     assert.equal(warns.length, 0);
+  });
+});
+
+// Small fixture helpers for the scalar-math suites below (issue #2247): a flat
+// breakdown and a per-family accumulator with one family pre-filled.
+function bd(over: Partial<TokenBreakdown> = {}): TokenBreakdown {
+  return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0, ...over };
+}
+function byModelWith(over: Partial<Record<ModelFamily, TokenBreakdown>> = {}): Record<ModelFamily, TokenBreakdown> {
+  return { opus: bd(), sonnet: bd(), haiku: bd(), unknown: bd(), ...over };
+}
+
+describe("deriveWeightedBurns (pure burn-numerator triple, issue #2247)", () => {
+  const IDENTITY = { opus: 1, sonnet: 1, haiku: 1 };
+
+  test("identity weights (w_cache=1, all families 1.0) reduce to raw .total sums", () => {
+    // weightedTokens at w_cache=1 == input+output+cacheCreation+cacheRead == .total.
+    const m5 = byModelWith({ opus: bd({ total: 100, input: 100 }) });
+    const m7 = byModelWith({ sonnet: bd({ total: 250, output: 250 }) });
+    const m24 = byModelWith({ haiku: bd({ total: 40, input: 40 }) });
+    const r = deriveWeightedBurns(m5, m7, m24, 1, IDENTITY);
+    assert.equal(r.weightedBurn5h, 100);
+    assert.equal(r.weightedBurn7d, 250);
+    assert.equal(r.weightedBurn24h, 40);
+  });
+
+  test("per-family Quota Weight (Axis B) scales OUTSIDE each family", () => {
+    const m = byModelWith({
+      opus: bd({ total: 10, input: 10 }),
+      sonnet: bd({ total: 10, input: 10 }),
+      haiku: bd({ total: 10, input: 10 }),
+    });
+    const r = deriveWeightedBurns(m, m, m, 1, { opus: 5, sonnet: 2, haiku: 1 });
+    // 10*5 + 10*2 + 10*1 + unknown(0)*1 = 80 for every window.
+    assert.equal(r.weightedBurn5h, 80);
+    assert.equal(r.weightedBurn7d, 80);
+    assert.equal(r.weightedBurn24h, 80);
+  });
+
+  test("cache-read weight (Axis A) reshapes the mix INSIDE the family", () => {
+    // 100 input + 100 cacheRead; at w_cache=0.1 the burn is 100 + 0.1*100 = 110.
+    const m = byModelWith({ opus: bd({ input: 100, cacheRead: 100, total: 200 }) });
+    const r = deriveWeightedBurns(m, m, m, 0.1, IDENTITY);
+    assert.equal(r.weightedBurn5h, 110);
+  });
+
+  test("composes both axes (familyWeight * weightedTokens) without double-counting", () => {
+    // opus: input 100 + cacheRead 100 -> weightedTokens(0.1)=110; *w_opus=5 => 550.
+    const m = byModelWith({ opus: bd({ input: 100, cacheRead: 100, total: 200 }) });
+    const r = deriveWeightedBurns(m, m, m, 0.1, { opus: 5, sonnet: 2, haiku: 3 });
+    assert.equal(r.weightedBurn7d, 550);
+  });
+});
+
+describe("deriveEstimatePercents (pure estimate %, issue #2247)", () => {
+  const burns = { weightedBurn5h: 50, weightedBurn7d: 200, weightedBurn24h: 100 };
+
+  test("uncalibrated short-circuits all three to 0", () => {
+    const r = deriveEstimatePercents(burns, 1000, 500, false);
+    assert.equal(r.estimatePercentLast5h, 0);
+    assert.equal(r.estimatePercentLast7d, 0);
+    assert.equal(r.projectedWeeklyPercent, 0);
+  });
+
+  test("calibrated: 5h and 7d divide by their quotas; projection extends 24h * 7", () => {
+    const r = deriveEstimatePercents(burns, 1000, 500, true);
+    assert.equal(r.estimatePercentLast5h, (50 / 500) * 100); // 10
+    assert.equal(r.estimatePercentLast7d, (200 / 1000) * 100); // 20
+    assert.equal(r.projectedWeeklyPercent, ((100 * 7) / 1000) * 100); // 70
+  });
+
+  test("projectedWeeklyPercent crosses 100 when the 24h rate would overrun the week", () => {
+    // 24h burn 200 -> *7 = 1400 over a 1000 quota -> 140%.
+    const r = deriveEstimatePercents(
+      { weightedBurn5h: 0, weightedBurn7d: 0, weightedBurn24h: 200 },
+      1000,
+      500,
+      true,
+    );
+    assert.ok(r.projectedWeeklyPercent > 100);
+    assert.equal(r.projectedWeeklyPercent, 140);
+    // and that feeds derivePacingState 'over'
+    assert.equal(derivePacingState(true, r.projectedWeeklyPercent), "over");
+  });
+});
+
+describe("deriveQuotaWeightTotals (pure Quota-Weight totals, issue #2247)", () => {
+  const weights = { opus: 5, sonnet: 2, haiku: 1 };
+
+  test("uncalibrated (gate false) returns both totals as exactly 0", () => {
+    const m = byModelWith({ opus: bd({ total: 1000 }) });
+    const r = deriveQuotaWeightTotals(m, m, weights, false);
+    assert.equal(r.quotaWeightLast5h, 0);
+    assert.equal(r.quotaWeightLast7d, 0);
+  });
+
+  test("calibrated: sums raw .total per family scaled by familyWeight (no cache axis)", () => {
+    const m5 = byModelWith({
+      opus: bd({ total: 10 }),
+      sonnet: bd({ total: 10 }),
+      haiku: bd({ total: 10 }),
+      unknown: bd({ total: 10 }), // unknown is implicit 1.0
+    });
+    const m7 = byModelWith({ opus: bd({ total: 100 }) });
+    const r = deriveQuotaWeightTotals(m5, m7, weights, true);
+    // 10*5 + 10*2 + 10*1 + 10*1(unknown implicit) = 90
+    assert.equal(r.quotaWeightLast5h, 90);
+    // 100*5 = 500
+    assert.equal(r.quotaWeightLast7d, 500);
+  });
+
+  test("ignores the cache-read axis — uses .total verbatim, not a cache-weighted mix", () => {
+    // A family with a heavy cacheRead share but the SAME .total as a plain one
+    // produces the same Quota-Weight total (Axis A does not apply here).
+    const heavy = byModelWith({ opus: bd({ cacheRead: 90, input: 10, total: 100 }) });
+    const plain = byModelWith({ opus: bd({ input: 100, total: 100 }) });
+    const rHeavy = deriveQuotaWeightTotals(heavy, heavy, weights, true);
+    const rPlain = deriveQuotaWeightTotals(plain, plain, weights, true);
+    assert.equal(rHeavy.quotaWeightLast5h, rPlain.quotaWeightLast5h);
+    assert.equal(rHeavy.quotaWeightLast5h, 500); // 100 * 5
   });
 });
