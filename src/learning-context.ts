@@ -1,11 +1,20 @@
 import { loadAgentMemory } from "./pattern-memory/agent-memory.ts";
 import { formatMemoryForPrompt } from "./pattern-memory/prompt-format.ts";
-import { loadAnchorReflections, type ReflectionBlock } from "./reflections/per-anchor.ts";
+// Issue #2232: reach the reflections domain through its single entry point
+// (`./reflections/index.ts`) instead of the two axis modules directly, so this
+// composer no longer hard-codes knowledge of the per-anchor/by-file split. The
+// composer keeps its own backfill-then-read ORDERING and per-source trace
+// envelope (so it does NOT delegate to the parallel `loadReflectionsForAnchor`
+// coordinator — that would lose the backfill side effect's sequencing and
+// collapse two trace blocks into one); it consumes the same single-axis reads
+// the coordinator re-exports.
 import {
+  loadAnchorReflections,
   loadAnchorReflectionsByFile,
   backfillByFileIndex,
   extractFilesFromAnchor,
-} from "./reflections/by-file.ts";
+  type ReflectionBlock,
+} from "./reflections/index.ts";
 // Issue #1440: per-cycle knowledge-context-availability tracking. The
 // knowledge-base block below records whether the OV search produced non-empty
 // context, so the health surface can trend it. Behind a best-effort wrapper so
