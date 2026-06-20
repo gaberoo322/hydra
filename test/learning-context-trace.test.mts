@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
-const learning = await import("../src/learning.ts");
+const learning = await import("../src/api/learning.ts");
 const { closeRedisConnections } = await import("../src/redis/connection.ts");
 
 describe("getContext returns a structured LearningContext", () => {

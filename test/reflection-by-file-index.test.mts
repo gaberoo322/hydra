@@ -59,7 +59,7 @@ describe("issue #326: reflection by-file index", () => {
         ...(await import("../src/reflections/per-anchor.ts")),
         ...(await import("../src/reflections/by-file.ts")),
       };
-      learning = await import("../src/learning.ts");
+      learning = await import("../src/api/learning.ts");
       metrics = await import("../src/metrics/trend.ts");
     }
     if (!redisAvailable) return;
