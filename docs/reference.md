@@ -538,8 +538,9 @@ power-off, and the Ollama embedding/VLM backend self-recovers in ~40s. The
 deep-health embed-backend probe (`probeEmbedBackend`, #2013) already folds an
 unreachable backend to `status:"failed"`; when it does, the IO/heartbeat fan-out
 (`maybeWakeEmbedBackend` in `src/health/fan-out.ts`) now broadcasts a magic
-packet (`src/health/wol.ts`), waits, and **re-probes once** before the bespoke
-#2131 alert fires — so a powered-off box self-heals with no operator in the loop.
+packet (`src/health/wol.ts`) and **returns immediately** — the current health tick
+completes normally; recovery is observed on the next scheduled health tick, at
+which point the #2131 alert clears automatically if the backend came back up.
 
 The send is a best-effort recovery side-effect: it **never throws** (a bad MAC,
 a cross-subnet deployment where the L2 broadcast can't reach the NIC, or any
