@@ -531,6 +531,32 @@ The classifier (`classifyOvSearchProbe` in `src/health/diagnostics.ts`) is a pur
 unit-tested function; the `backend-unreachable` warning is additive — no existing
 status was renamed or removed.
 
+**Automatic Wake-on-LAN recovery of the gaming PC (issue #2228).** #1794 verified
+that a Wake-on-LAN magic packet from the orchestrator host wakes the gaming PC
+(`gabes-desktop-1`, Intel I225-V NIC, MAC `d8:bb:c1:70:62:76`) from a full
+power-off, and the Ollama embedding/VLM backend self-recovers in ~40s. The
+deep-health embed-backend probe (`probeEmbedBackend`, #2013) already folds an
+unreachable backend to `status:"failed"`; when it does, the IO/heartbeat fan-out
+(`maybeWakeEmbedBackend` in `src/health/fan-out.ts`) now broadcasts a magic
+packet (`src/health/wol.ts`), waits, and **re-probes once** before the bespoke
+#2131 alert fires — so a powered-off box self-heals with no operator in the loop.
+
+The send is a best-effort recovery side-effect: it **never throws** (a bad MAC,
+a cross-subnet deployment where the L2 broadcast can't reach the NIC, or any
+socket error is a fail-loud `console.error` + no-op; the heartbeat keeps
+running). A cooldown caps the send rate (no packet-per-heartbeat spam) and a
+max-attempt cap stops trying after K wakes so a genuinely-dead box still pages
+the operator via the existing #2131 warning. It is **opt-in** and only works when
+the orchestrator runs on the gaming PC's LAN (`10.0.0.0/24`).
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `HYDRA_WOL_ENABLED` | `false` (off) | Master switch — auto-wake only fires when set to `true`/`1`. Conservative default so a cross-subnet host never broadcasts. |
+| `HYDRA_WOL_MAC` | `d8:bb:c1:70:62:76` | Target NIC MAC (the #1794-verified gaming-PC I225-V). Accepts `:` or `-` separators, case-insensitive. |
+| `HYDRA_WOL_BROADCAST` | `10.0.0.255` | LAN broadcast address the magic packet is sent to (UDP ports 9 and 7). |
+| `HYDRA_WOL_COOLDOWN_MS` | `300000` (5 min) | Minimum interval between wake sends. |
+| `HYDRA_WOL_MAX_ATTEMPTS` | `3` | Consecutive wake attempts before giving up and letting the #2131 alert surface. The attempt budget resets the moment the embed-backend probe reads `running` again. |
+
 ## Config (`~/hydra/config/`) — git-tracked
 
 Operator edits these (or uses the dashboard):

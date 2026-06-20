@@ -49,12 +49,97 @@ import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 import { getTargetServiceName } from "../target-config.ts";
 import { ovPostJson } from "../knowledge-base/ov-request.ts";
-import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./probe.ts";
+import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult } from "./probe.ts";
 import { parseRedisInfoSnapshot, type ProbeInputs } from "./diagnostics.ts";
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
+import {
+  readWolConfig,
+  attemptEmbedBackendWake,
+  WakeGate,
+  type WolConfig,
+  type WakeOutcome,
+} from "./wol.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
+
+// ---- embed-backend Wake-on-LAN auto-recovery (issue #2228) -----------------
+//
+// The cooldown + max-attempt state must persist ACROSS heartbeats/health-deep
+// requests (the fan-out runs once per request), so the WakeGate is a single
+// module-level instance — not a per-call object. `embedWakeGate` is reset the
+// moment the embed-backend probe reads `running` again, so a future outage gets
+// a fresh budget of wakes. The WoL config is resolved once at module load from
+// the environment (conservative defaults; auto-wake OFF unless HYDRA_WOL_ENABLED).
+const embedWakeGate = new WakeGate(
+  readWolConfig().cooldownMs,
+  readWolConfig().maxAttempts,
+);
+
+/**
+ * If the embed-backend probe reported `failed`, attempt a best-effort WoL wake
+ * (respecting the module-level cooldown + max-attempt gate), then re-probe once
+ * after a short delay so the existing #2131 alert only fires if the backend is
+ * STILL down after the wake. Returns the (possibly re-probed) ServiceProbeResult.
+ *
+ * NEVER throws — every failure path inside `attemptEmbedBackendWake` /
+ * `sendMagicPacket` already folds to a result object + fail-loud console.error,
+ * and the re-probe reuses the never-throwing `probeEmbedBackendImpl`. A healthy
+ * read resets the gate so the next outage starts fresh.
+ *
+ * Injectable `config`, `wake`, `reprobe`, and `sleep` keep this unit-testable
+ * without a real socket, clock, or network.
+ */
+export async function maybeWakeEmbedBackend(
+  initial: ServiceProbeResult,
+  probeEmbedBackendImpl: typeof probeEmbedBackend,
+  {
+    config = readWolConfig(),
+    gate = embedWakeGate,
+    wake = attemptEmbedBackendWake,
+    sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+    reprobeDelayMs = WOL_REPROBE_DELAY_MS,
+  }: {
+    config?: WolConfig;
+    gate?: WakeGate;
+    wake?: typeof attemptEmbedBackendWake;
+    sleep?: (ms: number) => Promise<void>;
+    reprobeDelayMs?: number;
+  } = {},
+): Promise<ServiceProbeResult> {
+  if (initial.status !== "failed") {
+    // Backend healthy → clear the attempt budget so a later outage re-arms.
+    gate.reset();
+    return initial;
+  }
+  const outcome: WakeOutcome = await wake(config, gate);
+  if (!outcome.attempted) {
+    // Disabled, cooled-down, or attempt budget exhausted — surface the original
+    // failure so the #2131 alert fires unchanged.
+    return initial;
+  }
+  if (!outcome.sent.ok) {
+    // The wake couldn't be broadcast (different subnet / send error) — already
+    // logged loud inside sendMagicPacket; leave the failure to the alert path.
+    return initial;
+  }
+  // Give the box time to POST + the Ollama backend to self-recover (~40s in
+  // #1794), then re-probe ONCE. If it came back, reset the gate and report it
+  // healthy so no alert fires; if still down, the original failure stands.
+  await sleep(reprobeDelayMs);
+  const reprobed = await probeEmbedBackendImpl();
+  if (reprobed.status !== "failed") gate.reset();
+  return reprobed;
+}
+
+/**
+ * Delay between sending the wake packet and re-probing the embed backend.
+ * #1794 measured ~40s for a cold gaming PC to POST and the Ollama backend to
+ * answer; this is intentionally generous but still bounded so it never wedges
+ * the deep-health fan-out. Overridable in the test (and effectively skipped via
+ * the injectable `sleep`).
+ */
+export const WOL_REPROBE_DELAY_MS = 45_000;
 
 // ---- assembleProbeInputs — maps the positional settled array to named ProbeInputs --
 //
@@ -192,7 +277,12 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
         probeOvImpl(),
         probeEmbedBackendImpl(),
       ]);
-      return { vikingdb, openviking: ov, "embed-backend": embedBackend };
+      // Issue #2228: if the embed-backend probe failed, attempt a best-effort
+      // Wake-on-LAN of the gaming PC and re-probe before reporting — so a
+      // powered-off box self-heals (the #1794 stretch goal) and the #2131 alert
+      // only fires if it's STILL down after the wake. NEVER throws.
+      const embedFinal = await maybeWakeEmbedBackend(embedBackend, probeEmbedBackendImpl);
+      return { vikingdb, openviking: ov, "embed-backend": embedFinal };
     })(),
     /* 2 */ schedulerStatus(),
     /* 3 */ Promise.resolve({ status: "idle" }),
