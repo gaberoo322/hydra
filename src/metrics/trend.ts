@@ -35,6 +35,15 @@ const NUMERIC_FIELDS = NUMERIC_FIELD_NAMES;
  */
 export function deriveReflectionMatchSource(rawSources: unknown): string {
   if (typeof rawSources !== "string" || rawSources.length === 0) return "none";
+  // Issue #2209: historical cycle-metrics hashes have the literal string
+  // "none" persisted in `reflectionSources` (written before #1136's
+  // empty-omit guards landed, or by a since-retired writer). Without this
+  // guard the split below yields `["none"]` — length > 0, matches no bucket
+  // token — and falls through to "mixed", mis-bucketing ~40% of recent
+  // cycles. Treat the literal sentinel as empty so it truthfully buckets to
+  // "none". The modern write path (reap.py / dispatch.sh / runs.ts) never
+  // emits "none"; this only repairs the read of stale records.
+  if (rawSources.trim() === "none") return "none";
   const sources = rawSources.split(",").map((s) => s.trim()).filter(Boolean);
   if (sources.length === 0) return "none";
   const hasPerAnchor = sources.includes("per-anchor");

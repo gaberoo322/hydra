@@ -134,6 +134,24 @@ describe("reflectionMatchSource telemetry stamp (issue #1136)", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Issue #2209: the literal string "none" (persisted in historical
+  // cycle-metrics hashes before #1136's empty-omit guards, or by a
+  // since-retired writer) must bucket to "none", NOT the catch-all "mixed".
+  // Without the sentinel guard, split(",") yields ["none"] — length > 0,
+  // matches no bucket token — and falls through to "mixed", silently
+  // mislabeling ~40% of recent cycles. Surrounding whitespace is tolerated.
+  // ---------------------------------------------------------------------------
+  test('deriveReflectionMatchSource treats literal "none" sentinel as "none" (#2209)', () => {
+    assert.equal(deriveReflectionMatchSource("none"), "none");
+    assert.equal(deriveReflectionMatchSource("  none  "), "none");
+    assert.notEqual(deriveReflectionMatchSource("none"), "mixed");
+    // null/undefined already short-circuit to "none"; pin them alongside so
+    // the full "no reflections served" surface is one assertion block.
+    assert.equal(deriveReflectionMatchSource(null), "none");
+    assert.equal(deriveReflectionMatchSource(undefined), "none");
+  });
+
+  // ---------------------------------------------------------------------------
   // The block→token mapping trap: the API's blocks[].source strings are
   // 'per-anchor-reflections' / 'by-file-reflections', NOT the bare tokens
   // the derivation matches. The deposit recipe MUST map.
