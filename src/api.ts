@@ -13,7 +13,9 @@ import { createDesignConceptsRouter } from "./api/design-concepts.ts";
 import { createSchedulerRouter } from "./api/scheduler.ts";
 import { createMaintenanceRouter } from "./api/maintenance.ts";
 import { createMetricsRouter } from "./api/metrics.ts";
-import { createMiscRouter } from "./api/misc.ts";
+import { createTierRouter } from "./api/tier.ts";
+import { createDigestRouter } from "./api/digest.ts";
+import { createOperationalRouter } from "./api/operational.ts";
 import { createArchitectureRouter } from "./api/architecture.ts";
 import { createOutcomesRouter } from "./api/outcomes.ts";
 import { createHoldbackRouter } from "./api/holdback.ts";
@@ -51,8 +53,9 @@ const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 // `eventBus` is the concrete in-process bus (src/event-bus.ts), constructed in
 // src/index.ts. It structurally satisfies every router seam in
 // src/api/event-bus-types.ts (PingableBus / PublishableBus / EventReaderBus),
-// so the typed mount points below need no cast. The four routers that never
-// touch the bus (research, cycles, misc, alerts) no longer take the parameter.
+// so the typed mount points below need no cast. The routers that never touch
+// the bus (research, cycles, alerts, tier, digest, operational, …) take no
+// parameter.
 function createApi(eventBus: EventBus) {
   const app = express();
   app.use(express.json());
@@ -135,7 +138,14 @@ function createApi(eventBus: EventBus) {
   api.use(createOutcomesPageRouter());
   // Explore tabbed hub — slice 5 (issue #620).
   api.use(createExplorePageRouter());
-  api.use(createMiscRouter());
+  // Domain homes for the last three orphan-operational routes that lived in
+  // the retired src/api/misc.ts (issue #2183). Each owns one concern: tier
+  // classification next to src/tier-classifier.ts, digest triggers next to
+  // src/digest.ts, and the emergency-stop kill switch in its own minimal
+  // operational Module. The HTTP paths (/tier, /digest/*, /kill) are unchanged.
+  api.use(createTierRouter());
+  api.use(createDigestRouter());
+  api.use(createOperationalRouter());
   // /api/checklist sub-router retired in slice 6 of the dashboard
   // simplification (issue #621). Only the deleted Checklist page consumed it.
   api.use(createOutcomesRouter());

@@ -78,7 +78,10 @@ Routes are split into domain sub-routers in `src/api/`. Each file exports a `cre
 **Proposals** (`api/proposals.ts`): GET /proposals, POST /proposals/:id/approve, POST /proposals/:id/reject
 **Metrics** (`api/metrics.ts`): GET /metrics, GET /summary, POST /metrics/record
 **Health** (`api/health.ts`): GET /health, GET /health/services, GET /health/deep, GET /recommendations
-**Misc** (`api/misc.ts`): Meta, goals, config, alerts, events, memory, merge locks, plan cache, digest, grounding, OpenViking, calibration, env, OpenAI proxy, webhooks, kill
+**Tier** (`api/tier.ts`): GET /tier?files=a,b,c — modification-tier classification (wraps `classifyChange()` from `src/tier-classifier.ts`; query validated by `src/schemas/tier.ts`)
+**Digest** (`api/digest.ts`): POST /digest/send, POST /digest/heartbeat — on-demand triggers for the DigestAccumulator domain (`src/digest.ts`)
+**Operational** (`api/operational.ts`): POST /kill — emergency-stop; writes the `~/hydra/.kill` file that health.ts/service-strip.ts poll
+> The former `api/misc.ts` catch-all is retired (issue #2183) — its earlier residents were split to domain routers across #268 / #2181 / #2183.
 **Outcomes** (`api/outcomes.ts`): GET /outcomes — declared Target Outcomes + current readings (issue #241)
 
 ## Target Outcomes (issue #241, ADR-0003 + ADR-0004)
