@@ -13,10 +13,14 @@
  *
  * # Pure core vs. orchestration (issue #1181)
  *
- * The pure assembly grammar (`buildDigestMessage`, `buildDailyHeartbeat`,
- * `buildWeeklySummary`, `formatCriticalAlert`, `formatBuilderHealthLines`)
- * lives in `./digest-format.ts` — no timers, no Telegram calls, no module
- * state, and fully testable.
+ * The pure assembly grammar (`buildDigestMessage`, `formatCriticalAlert`,
+ * `formatBuilderHealthLines`) lives in `./digest-format.ts` — no timers, no
+ * Telegram calls, no dynamic imports, no module state, and fully testable. The
+ * two async fan-out assemblers that fetch their own data (`buildDailyHeartbeat`,
+ * `buildWeeklySummary`) live in the sibling `./digest-fanout.ts` (issue #2215);
+ * this module imports them from there and re-exports `buildWeeklySummary` so
+ * downstream callers (e.g. `scheduler/chores/weekly-digest.ts`,
+ * `scheduler/housekeeping.ts`) need no import changes.
  *
  * # Injectable accumulator seam (issue #1487)
  *
@@ -43,11 +47,10 @@ import { getCapacitySnapshot, DEFAULT_WINDOW_CYCLES } from "./capacity-floor.ts"
 import { getBuilderHealthScorecard } from "./aggregators/builder-health.ts";
 import {
   buildDigestMessage,
-  buildDailyHeartbeat,
-  buildWeeklySummary,
   formatCriticalAlert,
   formatBuilderHealthLines,
 } from "./digest-format.ts";
+import { buildDailyHeartbeat, buildWeeklySummary } from "./digest-fanout.ts";
 
 // Re-export the pure-core formatters so existing importers of ./digest.ts that
 // reach for these (e.g. formatBuilderHealthLines, previously exported here;
