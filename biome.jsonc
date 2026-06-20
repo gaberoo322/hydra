@@ -1,0 +1,53 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.0/schema.json",
+  // ADVISORY biome linter config for the orchestrator src/ tree (issue #2204,
+  // tool-scout: lsp-language-tooling). This is a DIAGNOSTICS-ONLY adopter:
+  //   - NOT a formatter (formatter + assist disabled below — biome never rewrites a byte).
+  //   - NOT a hard gate (the wrapper scripts/ci/biome-check.ts exits 0; the
+  //     .github/workflows/biome-check.yml sibling is advisory, NOT in ci.yml).
+  //   - NOT a type-checker (tsc --noEmit stays; biome does no type analysis).
+  // The dashboard/ tree keeps its OWN eslint (dashboard/package.json) — this
+  // config is scoped to src/ and never touches it. biome config is JSONC, so
+  // these `//` comments are valid (a `"//"` KEY is rejected by biome's schema).
+  // NOTE on scope: the orchestrator src/ tree is the ONLY target. Rather than a
+  // `files.includes` glob (whose biome-v2 union semantics fight an explicit path
+  // arg), the scope is enforced at the call site: scripts/ci/biome-check.ts AND
+  // .github/workflows/biome-check.yml both invoke `biome lint … src/`. dashboard/
+  // (its own eslint) and node_modules / dist are never passed in, so they are
+  // never linted. Running a bare `biome lint .` would over-scan — always go
+  // through `npm run biome-check`.
+  // DISABLED on purpose: this repo has no formatter (no prettier, no .editorconfig)
+  // and biome must NOT reformat the tree. Formatter off => biome can never rewrite
+  // source. Enabling formatting is a separate, conscious operator decision.
+  "formatter": { "enabled": false },
+  // DISABLED: assist actions (e.g. import sorting) are source rewrites — same
+  // no-reformat rationale as the formatter.
+  "assist": { "enabled": false },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      // recommended=false on purpose. The recommended set emits ~671 findings on
+      // this tree — 478 of them noExplicitAny (intentional in this codebase) plus
+      // a long stylistic tail. That volume is noise, not signal. Instead we ship a
+      // TIGHT, high-confidence correctness + suspicious subset (all `warn`), so
+      // every surfaced diagnostic is a genuine code-quality flag an agent can act
+      // on in-loop. Promote a rule to a hard gate later by running the wrapper with
+      // --error in the workflow (a conscious, reviewable change) — never by editing
+      // ci.yml.
+      "recommended": false,
+      "correctness": {
+        "noUnusedImports": "warn",
+        "noUnusedVariables": "warn",
+        "noUnusedPrivateClassMembers": "warn",
+        "noUnusedFunctionParameters": "warn"
+      },
+      "suspicious": {
+        "noControlCharactersInRegex": "warn",
+        "noDoubleEquals": "warn",
+        "noDuplicateCase": "warn",
+        "noFallthroughSwitchClause": "warn",
+        "noSelfCompare": "warn"
+      }
+    }
+  }
+}
