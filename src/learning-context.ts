@@ -1,18 +1,23 @@
 import { loadAgentMemory } from "./pattern-memory/agent-memory.ts";
 import { formatMemoryForPrompt } from "./pattern-memory/prompt-format.ts";
-// Issue #2232: reach the reflections domain through its single entry point
-// (`./reflections/index.ts`) instead of the two axis modules directly, so this
-// composer no longer hard-codes knowledge of the per-anchor/by-file split. The
-// composer keeps its own backfill-then-read ORDERING and per-source trace
-// envelope (so it does NOT delegate to the parallel `loadReflectionsForAnchor`
-// coordinator — that would lose the backfill side effect's sequencing and
-// collapse two trace blocks into one); it consumes the same single-axis reads
-// the coordinator re-exports.
+// Issue #2232 / #2238: reach the reflections domain through its single entry
+// point (`./reflections/index.ts`) and delegate the two-axis composition to the
+// `loadReflectionsForAnchor` coordinator. The composer used to keep its own
+// inline per-anchor + by-file reads with a backfill-then-read ORDERING — that
+// ordering existed only to commit a read-time `backfillByFileIndex` SADD before
+// the by-file read. Issue #2238 deleted that read-time backfill (it was a dead
+// idempotent no-op: `recordAnchorReflection` already backfills at WRITE time
+// since #326, and reflections age out at a 7-day TTL, so no un-indexed legacy
+// reflection survives). With the side effect gone there is no sequencing
+// constraint, so getContext now consumes the coordinator's parallel read and
+// projects its `perAnchor` / `byFile` sub-blocks onto the two distinct trace
+// blocks — keeping the trace wire shape byte-identical while removing dead code.
+// The coordinator stays a PURE read (no Redis write); by-file index correctness
+// is preserved by the write-time backfill in `recordAnchorReflection`.
 import {
   loadAnchorReflections,
   loadAnchorReflectionsByFile,
-  backfillByFileIndex,
-  extractFilesFromAnchor,
+  loadReflectionsForAnchor,
   type ReflectionBlock,
 } from "./reflections/index.ts";
 // Issue #1440: per-cycle knowledge-context-availability tracking. The
@@ -198,9 +203,10 @@ async function recordContextAvailability(hadContext: boolean): Promise<void> {
  * Issue #2141 — the injectable dependency surface for `getContext`. The four
  * fields are the PRIMITIVE source-loaders the per-source thunks call, NOT the
  * thunks themselves: injecting the primitives keeps the production composition
- * logic (formatMemoryForPrompt adaptation, the per-anchor backfill-then-read
- * ordering, the extractFilesFromAnchor gate, the #1440 availability record)
- * under test while the Redis / OpenViking boundary drops out behind a stub.
+ * logic (formatMemoryForPrompt adaptation, the two-axis reflection composition
+ * via loadReflectionsForAnchor, the #1440 availability record) under test while
+ * the Redis / OpenViking boundary drops out behind a stub. The two reflection
+ * loaders are forwarded into the coordinator's own deps bag (issue #2238).
  *
  * Every field is OPTIONAL; each defaults to the real implementation at the top
  * of `getContext` via `deps?.field ?? realImpl` — the same optional-deps-bag
@@ -250,12 +256,15 @@ export interface GetContextDeps {
  *                                 agent-memory block so OV is honestly
  *                                 attributed in the trace); the thunk also
  *                                 records #1440 context availability.
- *   3. per-anchor-reflections   — legacy verbatim-key match on `reference`; the
- *                                 thunk keeps the opportunistic by-file backfill
- *                                 side effect on a hit.
+ *   3. per-anchor-reflections   — legacy verbatim-key match on `reference`,
+ *                                 projected from the coordinator's `perAnchor`
+ *                                 sub-block (a pure read; issue #2238 deleted
+ *                                 the old read-time by-file backfill side
+ *                                 effect).
  *   4. by-file-reflections      — reflections from *other* anchors that touched
- *                                 the same files (issue #326); the thunk keeps
- *                                 the extractFilesFromAnchor gate.
+ *                                 the same files (issue #326), projected from
+ *                                 the coordinator's `byFile` sub-block (the
+ *                                 extractFilesFromAnchor gate lives inside it).
  */
 export async function getContext(
   agent: string,
@@ -281,9 +290,6 @@ export async function getContext(
       return loadKnowledgeBaseForPrompt(a);
     });
 
-  // Sequential, in trace order: the per-anchor thunk's by-file backfill side
-  // effect must commit BEFORE the by-file thunk reads the index. Running them
-  // concurrently would let by-file miss a freshly-backfilled entry.
   const blocks: LearningContextBlock[] = [];
 
   blocks.push(await runSource("agent-memory", async () => {
@@ -303,24 +309,34 @@ export async function getContext(
     return read;
   }));
 
+  // Issue #2238: delegate the two reflection axes to the coordinator. It reads
+  // per-anchor + by-file IN PARALLEL (a pure read — no Redis write, no
+  // sequencing constraint, the read-time backfill it used to require is gone),
+  // then we project its `perAnchor` / `byFile` sub-blocks onto the two distinct
+  // trace blocks below so the wire shape stays byte-identical. The injected
+  // GetContextDeps reflection loaders forward straight into the coordinator's
+  // own deps bag, so the test stub path is unchanged.
+  //
+  // The coordinator runs ONCE; both thunks `await` the same memoized promise
+  // INSIDE their own runSource envelope, so a coordinator throw degrades BOTH
+  // reflection blocks to `error` (invariant #4: getContext never throws) — the
+  // same per-block error degradation the prior inline reads produced on a Redis
+  // fault, without firing the read twice.
+  const reflectionsPromise = loadReflectionsForAnchor(anchor.reference, {
+    scopeFiles: anchor.files,
+    deps: {
+      loadAnchorReflections: loadAnchorReflectionsFn,
+      loadAnchorReflectionsByFile: loadAnchorReflectionsByFileFn,
+    },
+  });
+
   blocks.push(await runSource("per-anchor-reflections", async () => {
-    const reflections = await loadAnchorReflectionsFn(anchor.reference);
-    if (reflections.count === 0) return { content: "", itemCount: 0 };
-    // Backfill on read: when an old reflection is hit by the legacy path,
-    // opportunistically index it under by-file:. Side effect is intentional
-    // and bounded — pre-#326 reflections age out at TTL.
-    try {
-      await backfillByFileIndex(anchor.reference, anchor.files);
-    } catch (err: any) {
-      console.error(`[Learning] getContext: by-file backfill failed for "${anchor.reference}": ${err.message}`);
-    }
-    return { content: reflections.content, itemCount: reflections.count };
+    const { perAnchor } = await reflectionsPromise;
+    return { content: perAnchor.content, itemCount: perAnchor.count };
   }));
 
   blocks.push(await runSource("by-file-reflections", async () => {
-    const files = extractFilesFromAnchor(anchor.reference, anchor.files);
-    if (files.length === 0) return { content: "", itemCount: 0 };
-    const byFile = await loadAnchorReflectionsByFileFn(files, anchor.reference);
+    const { byFile } = await reflectionsPromise;
     return { content: byFile.content, itemCount: byFile.count };
   }));
 
