@@ -12,13 +12,18 @@ import Redis from "ioredis";
 
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/2";
 
+// Pure snapshot grammar — its canonical home is the sibling module (#2239).
 const {
   extractTaskId,
   diffPrSnapshots,
   sanitizeField,
+  prRowToSnapshot,
+} = await import("../src/autopilot/pr-lifecycle-snapshot.ts");
+
+// I/O + lifecycle surface stays in the bridge module.
+const {
   emitPrLifecycleEvent,
   startPrLifecycleBridge,
-  prRowToSnapshot,
   SLOT_EVENTS_STREAM,
 } = await import("../src/autopilot/pr-lifecycle-bridge.ts");
 
