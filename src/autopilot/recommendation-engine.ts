@@ -35,6 +35,12 @@ import {
   createCapEnforcer,
   type CapEnforcer,
 } from "./recommendation-cap.ts";
+import {
+  buildPrompt,
+  parseLlmResponse,
+  PROMPT_SIZE_BUDGET_BYTES,
+  MAX_RECS_PER_CALL,
+} from "./recommendation-prompt.ts";
 
 // Back-compat re-export (issue #1986): the materiality gate moved to its own
 // Module, but existing import paths (tests + any caller) keep resolving these
@@ -44,6 +50,18 @@ export {
   computeMaterialChangeSignature,
   summariseSlotStatus,
   shouldFire,
+};
+
+// Back-compat re-export (issue #2240): the pure prompt grammar — the prompt
+// builder, the response parser, and their size/count constants — moved to
+// `./recommendation-prompt.ts`. The engine imports them above (the factory and
+// `defaultLlmClient` call them) and re-exports here so existing import paths
+// (tests + any caller) keep resolving these symbols from the engine.
+export {
+  buildPrompt,
+  parseLlmResponse,
+  PROMPT_SIZE_BUDGET_BYTES,
+  MAX_RECS_PER_CALL,
 };
 
 // ---------------------------------------------------------------------------
@@ -139,9 +157,8 @@ export interface LlmResult {
   prompt: string;
 }
 
-/** Constants */
-export const PROMPT_SIZE_BUDGET_BYTES = 4 * 1024;
-const MAX_RECS_PER_CALL = 3;
+// Prompt-size budget and per-call rec ceiling now live in
+// `./recommendation-prompt.ts` (issue #2240); imported + re-exported above.
 
 // ---------------------------------------------------------------------------
 // Engine state — small Redis facade pulled from defaultRedis but overridable
@@ -188,136 +205,17 @@ export interface EngineDeps {
 }
 
 // ---------------------------------------------------------------------------
-// Pure helpers — exported for tests
+// Pure helpers
 //
-// Note: the materiality gate (computeMaterialChangeSignature,
-// summariseSlotStatus, shouldFire, ShouldFireDecision, MIN_CALL_INTERVAL_SECONDS)
-// now lives in ./recommendation-materiality.ts and is imported + re-exported
-// at the top of this file for back-compat (issue #1986).
+// Note: the prompt grammar (buildPrompt, parseLlmResponse,
+// PROMPT_SIZE_BUDGET_BYTES, MAX_RECS_PER_CALL) now lives in
+// ./recommendation-prompt.ts and is imported + re-exported at the top of this
+// file for back-compat (issue #2240). The materiality gate
+// (computeMaterialChangeSignature, summariseSlotStatus, shouldFire,
+// MIN_CALL_INTERVAL_SECONDS) likewise lives in ./recommendation-materiality.ts
+// (issue #1986). The engine factory below composes these pure functions with
+// the Redis/LLM/cap deps.
 // ---------------------------------------------------------------------------
-
-/**
- * Build the prompt text that the LLM receives. The whole point of the
- * "small prompt" AC is that the engine never has to truncate at the
- * call site — the prompt is bounded by construction. We:
- *
- *   - keep at most 3 recent turns (older context is in past recs)
- *   - keep at most 5 recent permission-waits (older waits resolved or are stale)
- *   - keep the slot snapshot to one line per slot
- *   - emit signals as `key=value` lines with values clipped to 80 chars
- *
- * Tests assert that any reasonable input produces a prompt ≤ 4KB.
- */
-export function buildPrompt(input: EnginePromptInput): string {
-  const lines: string[] = [];
-  lines.push(
-    "You are Oak, the autopilot observability assistant. Given the latest" +
-      " autopilot turn-end snapshot, emit 1-3 short recommendations for the" +
-      " operator. Each recommendation MUST be a single English sentence.",
-  );
-  lines.push("");
-  lines.push(`# Turn ${input.turn_end.turn_n} (run ${input.turn_end.run_id})`);
-  lines.push(
-    `dispatches=${input.turn_end.dispatches} skipped=${input.turn_end.skipped}` +
-      ` idle=${input.turn_end.idle} tokens=${input.turn_end.tokens_after}` +
-      ` daily_spend_usd=${input.daily_spend_usd.toFixed(4)}`,
-  );
-
-  lines.push("");
-  lines.push("# Recent turns (newest first)");
-  for (const t of input.recent_turns.slice(0, 3)) {
-    lines.push(
-      `- turn_n=${t.turn_n} dispatches=${t.dispatches} skipped=${t.skipped}` +
-        ` idle=${t.idle} ts_epoch=${t.ts_epoch}`,
-    );
-  }
-
-  lines.push("");
-  lines.push("# Slot snapshot");
-  const slotEntries = Object.entries(input.slot_snapshot).slice(0, 12);
-  for (const [slot, info] of slotEntries) {
-    const since = info?.since_epoch ? ` since=${info.since_epoch}` : "";
-    lines.push(`- ${slot}: ${info?.status ?? "?"}${since}`);
-  }
-
-  lines.push("");
-  lines.push("# Signals");
-  const signalEntries = Object.entries(input.signals_snapshot).slice(0, 12);
-  for (const [k, v] of signalEntries) {
-    const valStr = typeof v === "string" ? v : JSON.stringify(v);
-    const clipped = valStr.length > 80 ? `${valStr.slice(0, 77)}...` : valStr;
-    lines.push(`- ${k}=${clipped}`);
-  }
-
-  lines.push("");
-  lines.push("# Recent permission-waits");
-  for (const e of input.recent_permission_waits.slice(0, 5)) {
-    const tool = e.tool ? ` tool=${e.tool}` : "";
-    lines.push(`- ${e.slot} at ${e.ts_epoch}${tool}`);
-  }
-
-  lines.push("");
-  lines.push(
-    "Respond with a single JSON object: {\"recommendations\":[{\"severity\":" +
-      "\"info|warn|critical\", \"message\":\"...\"} ...]}." +
-      " Emit 1-3 recommendations. Keep each message under 140 characters.",
-  );
-
-  return lines.join("\n");
-}
-
-/**
- * Parse the LLM's JSON response into typed Recommendations. The LLM is
- * told to return `{recommendations: [...]}`; we extract that array, take
- * the first 3, and stamp ids/timestamps/evidence_id from the engine's
- * authoritative context. A malformed response yields an empty array (the
- * engine still charges the spend for the call — that's a defect on the
- * model side, not ours).
- *
- * `evidenceId` is the engine-derived evidence handle — typically the
- * turn_n of the triggering turn so the UI can link back to the journal row.
- */
-export function parseLlmResponse(input: {
-  rawJsonText: string;
-  runId: string;
-  evidenceId: string;
-  nowIso: string;
-  turnN: number;
-}): Recommendation[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(input.rawJsonText);
-  } catch {
-    /* intentional: malformed JSON returns empty recommendations */
-    return [];
-  }
-  if (!parsed || typeof parsed !== "object") return [];
-  const recs = (parsed as any).recommendations;
-  if (!Array.isArray(recs)) return [];
-
-  const out: Recommendation[] = [];
-  for (let i = 0; i < recs.length && out.length < MAX_RECS_PER_CALL; i++) {
-    const raw = recs[i];
-    if (!raw || typeof raw !== "object") continue;
-    const severity = String(raw.severity ?? "info");
-    if (severity !== "info" && severity !== "warn" && severity !== "critical") {
-      continue;
-    }
-    const message = typeof raw.message === "string" ? raw.message.trim() : "";
-    if (!message) continue;
-    // Stable id: run + turn + index — retries collapse cleanly.
-    const id = `${input.runId}:${input.turnN}:${i}`;
-    out.push({
-      id,
-      severity,
-      message: message.slice(0, 200),
-      evidence_id: input.evidenceId,
-      run_id: input.runId,
-      created_at: input.nowIso,
-    });
-  }
-  return out;
-}
 
 // ---------------------------------------------------------------------------
 // Engine API — invoked from the turn_end stream consumer
