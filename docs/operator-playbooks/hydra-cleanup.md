@@ -122,6 +122,8 @@ grep -rnE "export .*\b<name>\b" "<path>"
 grep -rn "<name>" src/redis test/redis-keys.test.mts
 ```
 
+**The grep probe is a HINT; the compiler is the PROOF — a multi-line import defeats line-scoped grep (run 9bb60005, friction `dead-export-premise-missed-multiline-import`, cross-run recurrence 3).** `grep -rnw "<name>"` matches one line at a time, so a live consumer whose `import { … }` list spans **several lines** (e.g. `test/tier-classifier.test.mts` imports `VERIFIER_CORE_PATHS` across lines 30-33 from the `tier-classifier.ts` re-export) only matches on the line the bare symbol sits on — which may not contain `<name>` at all. An empty probe-1 result is therefore **necessary but not sufficient** for case (a) "truly dead": it can be a false-empty that mis-stamps a still-live symbol as dead, inviting a build-breaking delete. **Before stamping case (a), confirm the removal compiles** — `npm run typecheck:test` (NOT just src-only `tsc`, which misses test-file consumers) is the authoritative liveness check; if it goes red the symbol was live, so re-triage as case (b)/(c) and abort the deletion. Treat grep as the cheap first filter and the compiler as the verdict.
+
 | Case | knip says | What's actually true | Safe fix | Evidence anchor |
 |---|---|---|---|---|
 | **(a) Truly dead** | unused export | No references anywhere in `src/` or `test/` (probe 1 empty), not a re-export, no coupled keys. | **Delete** the symbol/file and any imports/re-exports that only existed to reference it. This is the only case where deletion is correct. | the default knip happy-path |
