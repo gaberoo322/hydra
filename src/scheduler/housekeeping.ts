@@ -75,12 +75,11 @@ import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts"
 // `./chores/<name>.ts` source (stale re-exports removed, issue #2105).
 // ---------------------------------------------------------------------------
 export { runBlockedItemEscalation } from "./chores/blocked-escalation.ts";
-export { runReviewPickupNotify, checkReviewPickupNotify } from "./chores/review-pickup-notify.ts";
+export { checkReviewPickupNotify } from "./chores/review-pickup-notify.ts";
 export { runDoneLanePrune } from "./chores/done-lane-prune.ts";
 export { runWeeklyDigest } from "./chores/weekly-digest.ts";
 export { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
 export { runDesignConceptSnapshot } from "./chores/design-concept-snapshot.ts";
-export { runWorkQueueHygiene } from "./chores/work-queue-hygiene.ts";
 export { runForecastCalibrationBrier } from "./chores/forecast-calibration-brier.ts";
 export { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 export { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
