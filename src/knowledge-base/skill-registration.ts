@@ -29,15 +29,62 @@ const SKILL_REGISTER_MAX_ATTEMPTS = 3;
 const SKILL_REGISTER_BACKOFF_BASE_MS = 1_000;
 
 /**
- * Only the transient transport/timeout codes are worth retrying. A `ov-non-2xx`
- * (OV rejected the payload) or `ov-malformed-json` (OV answered garbage) will not
- * heal on a retry — those are surfaced immediately so a real bug isn't masked by
- * three identical failures.
+ * Only the transient transport/timeout codes are worth retrying on `code` alone.
+ * A `ov-non-2xx` (OV reached but `!res.ok`) or `ov-malformed-json` (OV answered
+ * garbage) will not heal on a retry by default — those are surfaced immediately
+ * so a real payload/parse bug isn't masked by three identical failures (#1828).
+ *
+ * EXCEPTION (#2250): an `ov-non-2xx` whose BODY is OV's own server-side-timeout
+ * shape (`{error:{code:"INTERNAL", message:"Request timed out."}}`) is a transient
+ * load condition, NOT a payload rejection — it IS worth retrying. See
+ * {@link isOvServerTimeout}, which inspects the failure-arm `body` the adapter
+ * returns on `ov-non-2xx`. The retryable-set check stays `code`-only; the body
+ * classifier is layered on top in {@link registerOneSkill}.
  */
 const RETRYABLE_OV_CODES: ReadonlySet<OvErrorCode> = new Set<OvErrorCode>([
   "ov-timeout",
   "ov-service-down",
 ]);
+
+/**
+ * Classify an `ov-non-2xx` failure-arm `body` as OpenViking's own SERVER-SIDE
+ * timeout (issue #2250). OV surfaces an internal request timeout as a 500 whose
+ * body is `{"status":"error","error":{"code":"INTERNAL","message":"Request timed
+ * out.",...}}` — structurally an `ov-non-2xx` (the adapter keys on `!res.ok`,
+ * not the body), so it falls OUTSIDE `RETRYABLE_OV_CODES` and `registerOneSkill`
+ * abandons it on the first attempt. That is the dominant skill-registration
+ * failure under load: the 3-attempt/120s budget never engages because the
+ * failure looks non-retryable.
+ *
+ * This predicate returns true ONLY when the body matches OV's timeout shape —
+ * `error.code === "INTERNAL"` AND the message mentions a timeout. Parsed
+ * defensively (try `JSON.parse`, fall back to a substring scan of the raw text)
+ * so a malformed or truncated body never throws. Pure and total: any other body
+ * (a genuine 4xx/5xx payload rejection, UNAUTHENTICATED, malformed JSON) returns
+ * false and stays non-retryable, preserving the #1828 do-not-mask-real-bugs
+ * guard — only OV's explicit "timed out" body widens the retry set.
+ */
+export function isOvServerTimeout(body: string | undefined | null): boolean {
+  if (!body) return false;
+  // Primary path: parse the structured OV error envelope.
+  try {
+    const parsed = JSON.parse(body);
+    const errCode = parsed?.error?.code;
+    const errMsg = parsed?.error?.message;
+    if (errCode === "INTERNAL" && typeof errMsg === "string" && /tim(e|ed)\s*out/i.test(errMsg)) {
+      return true;
+    }
+    // Parsed cleanly but did NOT match the timeout shape → a genuine non-timeout
+    // rejection. Do NOT fall through to the substring scan (a non-timeout body
+    // that merely contains the word "timeout" in prose must not be retried).
+    return false;
+  } catch {
+    /* intentional: body wasn't valid JSON — fall back to a substring scan below. */
+  }
+  // Fallback: a non-JSON / truncated body. Require BOTH the INTERNAL marker and a
+  // timeout phrase so an arbitrary error body can't masquerade as a timeout.
+  return /INTERNAL/.test(body) && /tim(e|ed)\s*out/i.test(body);
+}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -175,7 +222,17 @@ async function registerOneSkill(
     lastCode = result.code;
 
     const lastAttempt = attempt === SKILL_REGISTER_MAX_ATTEMPTS;
-    const retryable = RETRYABLE_OV_CODES.has(result.code);
+    // Retry the transient transport/timeout codes (#1828), PLUS an `ov-non-2xx`
+    // whose body is OV's own server-side-timeout shape (#2250) — that 500 is a
+    // transient load condition, not a payload rejection. Every other non-2xx
+    // (a real 4xx/5xx, UNAUTHENTICATED, malformed JSON) stays non-retryable and
+    // surfaces on the first attempt, preserving the #1828 do-not-mask guard.
+    const retryable =
+      RETRYABLE_OV_CODES.has(result.code) ||
+      // `isOvFailure` narrows away the optional `body` field, so read it off the
+      // failure arm explicitly (present only on ov-non-2xx; undefined otherwise).
+      (result.code === "ov-non-2xx" &&
+        isOvServerTimeout((result as { ok: false; code: OvErrorCode; body?: string }).body));
     if (!retryable || lastAttempt) {
       console.error(
         `[Learning] Failed to register skill ${skill.name}: ${result.code}` +

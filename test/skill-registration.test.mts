@@ -15,9 +15,8 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-const { registerSkills, getSkillCatalogState, reRegisterMissingSkills } = await import(
-  "../src/knowledge-base/skill-registration.ts"
-);
+const { registerSkills, getSkillCatalogState, reRegisterMissingSkills, isOvServerTimeout } =
+  await import("../src/knowledge-base/skill-registration.ts");
 
 const realFetch = globalThis.fetch;
 const realErr = console.error;
@@ -43,6 +42,17 @@ function timeoutThrow(): never {
   const err: any = new Error("The operation was aborted due to timeout");
   err.name = "TimeoutError";
   throw err;
+}
+
+/**
+ * OV's own SERVER-SIDE timeout: a 500 whose body is the INTERNAL/"Request timed
+ * out." envelope from the issue #2250 evidence. The adapter classifies this as
+ * `ov-non-2xx` (it keys on `!res.ok`), carrying the body on the failure arm.
+ */
+const OV_SERVER_TIMEOUT_BODY =
+  '{"status":"error","result":null,"error":{"code":"INTERNAL","message":"Request timed out.","details":null}}';
+function ovServerTimeoutResponse(): any {
+  return { ok: false, status: 500, json: async () => ({}), text: async () => OV_SERVER_TIMEOUT_BODY };
 }
 
 describe("registerSkills: transient-failure retry (#1828)", () => {
@@ -333,6 +343,119 @@ describe("reRegisterMissingSkills: always logs an executed pass (#2163, INV3)", 
     const recoveryLines = lines.filter((l) => l.includes("OV skill catalog recovery"));
     assert.equal(recoveryLines.length, 1, "a recovering pass also logs exactly one recovery line");
     assert.ok(recoveryLines[0].includes("re-registered 4 skill(s)"));
+  });
+});
+
+describe("isOvServerTimeout: body classifier (#2250)", () => {
+  test("classifies OV's INTERNAL/'Request timed out.' 500 body as a server timeout", () => {
+    assert.equal(isOvServerTimeout(OV_SERVER_TIMEOUT_BODY), true);
+  });
+
+  test("accepts the 'timed out' message variant too", () => {
+    assert.equal(
+      isOvServerTimeout('{"error":{"code":"INTERNAL","message":"The request timed out after 47s"}}'),
+      true,
+    );
+  });
+
+  test("does NOT classify a genuine 4xx payload rejection as a timeout", () => {
+    assert.equal(
+      isOvServerTimeout('{"error":{"code":"INVALID_ARGUMENT","message":"missing field: content"}}'),
+      false,
+    );
+  });
+
+  test("does NOT classify an UNAUTHENTICATED rejection as a timeout", () => {
+    assert.equal(
+      isOvServerTimeout('{"error":{"code":"UNAUTHENTICATED","message":"missing X-Api-Key"}}'),
+      false,
+    );
+  });
+
+  test("does NOT classify an INTERNAL error that is not a timeout", () => {
+    assert.equal(
+      isOvServerTimeout('{"error":{"code":"INTERNAL","message":"index corruption detected"}}'),
+      false,
+    );
+  });
+
+  test("a non-timeout body that merely contains the word 'timeout' in prose is not retried", () => {
+    // Parses cleanly but error.code !== INTERNAL → must NOT fall through to a
+    // substring scan and false-positive on the prose mention.
+    assert.equal(
+      isOvServerTimeout('{"error":{"code":"INVALID_ARGUMENT","message":"timeout field must be a number"}}'),
+      false,
+    );
+  });
+
+  test("empty / null / undefined body is not a timeout (pure, total, never throws)", () => {
+    assert.equal(isOvServerTimeout(""), false);
+    assert.equal(isOvServerTimeout(null), false);
+    assert.equal(isOvServerTimeout(undefined), false);
+  });
+
+  test("a malformed / truncated body falls back to a substring scan requiring BOTH markers", () => {
+    // Non-JSON garbage that still carries both the INTERNAL marker and a timeout
+    // phrase → retryable; garbage with only one marker → not.
+    assert.equal(isOvServerTimeout("502 Bad Gateway INTERNAL: request timed out"), true);
+    assert.equal(isOvServerTimeout("502 Bad Gateway: upstream unavailable"), false);
+    assert.equal(isOvServerTimeout("connection timed out"), false); // no INTERNAL marker
+  });
+});
+
+describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
+  test("an ov-non-2xx server-timeout body engages the 3-attempt retry budget", async () => {
+    muteConsole();
+    // The dominant failure mode: every POST returns OV's INTERNAL/"Request timed
+    // out." 500. Pre-#2250 this abandoned on the FIRST attempt (4 calls total).
+    // Now it must burn the full 3-attempt budget per skill = 12 calls.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return ovServerTimeoutResponse();
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0 });
+
+    assert.equal(calls, 12, "4 skills × 3 attempts — the server-timeout body must be retried");
+    assert.equal(getSkillCatalogState().registered, 0, "all four still fail when OV never clears");
+  });
+
+  test("a transient server-timeout that clears on retry recovers the registration", async () => {
+    muteConsole();
+    // First POST is a server-timeout 500, every subsequent POST succeeds —
+    // proves the retry path heals the registration instead of losing it.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return ovServerTimeoutResponse();
+      return okResponse();
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0 });
+
+    assert.equal(calls, 5, "the timed-out first skill is retried exactly once, then all succeed");
+    assert.equal(getSkillCatalogState().registered, 4, "all four skills register after the retry");
+  });
+
+  test("a genuine non-timeout ov-non-2xx (4xx) is STILL not retried (#1828 guard preserved)", async () => {
+    muteConsole();
+    // A real payload rejection must surface on the first attempt — the #2250
+    // widening is body-specific and must NOT regress the do-not-mask guard.
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return {
+        ok: false,
+        status: 400,
+        json: async () => ({}),
+        text: async () => '{"error":{"code":"INVALID_ARGUMENT","message":"bad payload"}}',
+      };
+    }) as any;
+
+    await registerSkills({ backoffBaseMs: 0 });
+
+    assert.equal(calls, 4, "4 skills, one attempt each — a genuine 4xx is not retried");
   });
 });
 
