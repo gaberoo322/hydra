@@ -7,7 +7,7 @@
  * time, so the Python and TS views can never drift: there is exactly one
  * alphabet. This module re-exports that alphabet as typed rows + per-class
  * lookups so every hand-maintained TS projection (slice #1671 folds
- * `skillToCostClass` in `src/metrics/aggregate.ts`,
+ * `skillToCostClass` in `src/cost/cost-attribution.ts`,
  * `agentForSkill`/`VALID_SKILLS` in `src/pattern-memory/subagent-capture.ts`,
  * and the hand-mirrored scout cooldown in `src/scout/calendar-walk.ts`;
  * slice #1672 replaces the fictional hand-listed class-label plane that
@@ -56,7 +56,7 @@ export interface DispatchClassRow {
   readonly kind: DispatchClassKind;
   /** The Claude Code skill the class dispatches, e.g. `hydra-dev`. */
   readonly skill: string;
-  /** Cost-attribution bucket (`src/metrics/aggregate.ts` CostClass). */
+  /** Cost-attribution bucket (`src/cost/cost-attribution.ts` CostClass). */
   readonly costClass: string;
   readonly learningAgent: LearningAgent | null;
   /** Signal classes: seconds (≥0). Pipeline slots: null (no class cooldown). */

@@ -3,7 +3,6 @@ import { getMetricsTrend, projectGroundingDuration } from "../metrics/trend.ts";
 import {
   getAggregateStats,
   getCumulativeAccomplishments,
-  getCostByClass,
   projectAnchorDistribution,
 } from "../metrics/aggregate.ts";
 import { recordCycleMetrics } from "../metrics/record.ts";
@@ -11,6 +10,7 @@ import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
 import {
+  getCostByClass,
   getDailyTokenCounter,
   recordSubagentTokens,
   todayDateString,

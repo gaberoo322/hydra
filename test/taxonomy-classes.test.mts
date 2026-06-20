@@ -349,7 +349,7 @@ describe("taxonomy: TS parser hard-fails with InvariantViolationError", () => {
 
 describe("TS projections read the taxonomy (slice #1671)", () => {
   test("skillToCostClass returns each row's costClass column verbatim", async () => {
-    const { skillToCostClass } = await import("../src/metrics/aggregate.ts");
+    const { skillToCostClass } = await import("../src/cost/index.ts");
     for (const row of DISPATCH_CLASSES) {
       assert.equal(
         skillToCostClass(row.skill),
@@ -360,7 +360,7 @@ describe("TS projections read the taxonomy (slice #1671)", () => {
   });
 
   test("every taxonomy costClass is a declared CostClass bucket", async () => {
-    const { COST_CLASS_ORDER } = await import("../src/metrics/aggregate.ts");
+    const { COST_CLASS_ORDER } = await import("../src/cost/index.ts");
     const buckets: readonly string[] = COST_CLASS_ORDER;
     for (const row of DISPATCH_CLASSES) {
       assert.ok(
