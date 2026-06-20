@@ -6,13 +6,43 @@ import { getBacklogLaneCount } from "../redis/backlog.ts";
 import { LANES, getLaneItems, sortByQueuePriority } from "./internal.ts";
 
 /**
+ * The full set of Kanban lanes loadBacklog() returns, keyed by lane name.
+ *
+ * The shape is fully determined by the `LANES` const in ./internal.ts; naming
+ * each lane explicitly lets callers (e.g. api/queue.ts) reach `backlog.triage`
+ * without an `as any` cast, and turns a renamed lane into a compile error
+ * instead of a silent `undefined`. The trailing `[lane: string]: Item[]` index
+ * signature preserves the historical string-indexed access pattern
+ * (`lanes[lane]` while iterating `LANES`) used by addToBacklog/getItemsByParent.
+ *
+ * Items themselves stay `Item` (an alias for the module's untyped item shape) —
+ * narrowing the item record is out of scope here; this issue only tightens the
+ * lane-key layer that forced the casts.
+ */
+export type Item = any;
+
+export type Backlog = {
+  triage: Item[];
+  backlog: Item[];
+  queued: Item[];
+  blocked: Item[];
+  inProgress: Item[];
+  done: Item[];
+  [lane: string]: Item[];
+};
+
+/**
  * Load all lanes — same return shape as the historical markdown parser.
  */
-export async function loadBacklog(): Promise<Record<string, any[]>> {
-  const lanes: Record<string, any[]> = {};
-  for (const lane of LANES) {
-    lanes[lane] = await getLaneItems(lane);
-  }
+export async function loadBacklog(): Promise<Backlog> {
+  const lanes: Backlog = {
+    triage: await getLaneItems("triage"),
+    backlog: await getLaneItems("backlog"),
+    queued: await getLaneItems("queued"),
+    blocked: await getLaneItems("blocked"),
+    inProgress: await getLaneItems("inProgress"),
+    done: await getLaneItems("done"),
+  };
   return lanes;
 }
 
