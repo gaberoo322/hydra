@@ -425,7 +425,7 @@ Then `gh pr create` MUST include `$TIER_LINE` as its own line in the PR body
 pass `$TIER_LABEL_FLAG` so an unreachable classifier results in a
 `needs-triage` label rather than a silently-wrong tier claim.
 
-**Why GET, not POST `-d @<file>`:** the endpoint at `src/api/misc.ts` is a
+**Why GET, not POST `-d @<file>`:** the endpoint at `src/api/tier.ts` is a
 GET route that reads `req.query.files`. An earlier draft of this skill
 described `curl -d @<json>`; the live endpoint will return 400 (POST not
 allowed) for that shape. The recipe above is the format the running
