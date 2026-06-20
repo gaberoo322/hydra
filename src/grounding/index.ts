@@ -24,6 +24,40 @@ export interface GroundingOpts {
   focusPaths?: string[];
 }
 
+/**
+ * Injectable dependency surface for {@link groundProject} (issue #2182).
+ *
+ * `groundProject` is the fan-out coordinator that spawns 11 subprocess calls
+ * (`git`, `npm`, `grep`, `typecheck`) and reads two files (`package.json`,
+ * `README.md`) to assemble a {@link GroundingReport}. Production callers pass
+ * no `deps` and observe byte-identical behaviour — every field defaults to its
+ * real implementation via the same `deps?.x ?? x` pattern the health fan-out
+ * (`src/health/fan-out.ts`, issue #2089) uses.
+ *
+ * Tests inject stubs so the ASSEMBLY logic (the `appDir` subdirectory probe,
+ * the `testParseStatus` classification, the `failingTests` join, the
+ * `todoMarkers` cap-at-20, the `testReport.ran` 127-guard) is exercisable
+ * without spawning a real process or needing a real git repo on disk.
+ *
+ * NOTE: grounding is READ-ONLY by contract — the injected primitives are the
+ * inspection reads the function already makes; injecting them does NOT change
+ * what (if anything) the function writes (it writes nothing).
+ */
+export interface GroundProjectDeps {
+  /**
+   * Command runner. Default: the real {@link runCmd} (spawns via
+   * `execWithGroupCleanup`). Same `{ exitCode, stdout, stderr, durationMs }`
+   * contract; never throws.
+   */
+  runCmd?: typeof runCmd;
+  /**
+   * Filesystem read for `package.json` / `README.md`. Default: the real
+   * `node:fs/promises` `readFile`. The function only ever calls it with
+   * `(path, "utf-8")` and relies on a rejected promise to signal "absent".
+   */
+  readFile?: typeof readFile;
+}
+
 /** Classification of how the test output was parsed. See issue #456. */
 type TestParseStatus = "ok" | "unrecognised" | "errored" | "not-run";
 
@@ -80,12 +114,19 @@ export interface GroundingReport {
  *
  * @param projectDir - Path to the target project
  * @param opts - See {@link GroundingOpts}
+ * @param deps - Injectable subprocess/filesystem primitives (see
+ *   {@link GroundProjectDeps}). Production callers omit this and get the real
+ *   `runCmd` / `readFile`; tests inject stubs to exercise the assembly logic
+ *   without spawning processes (issue #2182).
  * @returns A {@link GroundingReport}
  */
 export async function groundProject(
   projectDir: string,
   opts: GroundingOpts = {},
+  deps: GroundProjectDeps = {},
 ): Promise<GroundingReport> {
+  const runCmdImpl = deps.runCmd ?? runCmd;
+  const readFileImpl = deps.readFile ?? readFile;
   const timestamp = Date.now();
   const testCmd = opts.testCmd || "npm";
   const testArgs = opts.testArgs || ["test"];
@@ -98,11 +139,11 @@ export async function groundProject(
   // Detect app directory — some projects have code in a subdirectory (e.g., web/)
   let appDir = projectDir;
   try {
-    await readFile(join(projectDir, "package.json"), "utf-8");
+    await readFileImpl(join(projectDir, "package.json"), "utf-8");
   } catch { /* intentional: no package.json at root — probe subdirs */
     for (const sub of ["web", "app", "packages/app"]) {
       try {
-        await readFile(join(projectDir, sub, "package.json"), "utf-8");
+        await readFileImpl(join(projectDir, sub, "package.json"), "utf-8");
         appDir = join(projectDir, sub);
         break;
       } catch { /* intentional: sub-dir does not have package.json, try next */ }
@@ -124,25 +165,25 @@ export async function groundProject(
     readmeContent,
   ] = await Promise.all([
     // Git state (always from project root)
-    runCmd("git", ["branch", "--show-current"], { cwd: projectDir, timeout: 5000 }),
-    runCmd("git", ["log", "--oneline", "-1"], { cwd: projectDir, timeout: 5000 }),
-    runCmd("git", ["log", "--oneline", "-20"], { cwd: projectDir, timeout: 5000 }),
-    runCmd("git", ["status", "--short"], { cwd: projectDir, timeout: 5000 }),
-    runCmd("git", ["ls-files"], { cwd: projectDir, timeout: 10000 }),
-    runCmd("git", ["diff", "--stat", "HEAD~3"], { cwd: projectDir, timeout: 10000 }).catch(() => ({
+    runCmdImpl("git", ["branch", "--show-current"], { cwd: projectDir, timeout: 5000 }),
+    runCmdImpl("git", ["log", "--oneline", "-1"], { cwd: projectDir, timeout: 5000 }),
+    runCmdImpl("git", ["log", "--oneline", "-20"], { cwd: projectDir, timeout: 5000 }),
+    runCmdImpl("git", ["status", "--short"], { cwd: projectDir, timeout: 5000 }),
+    runCmdImpl("git", ["ls-files"], { cwd: projectDir, timeout: 10000 }),
+    runCmdImpl("git", ["diff", "--stat", "HEAD~3"], { cwd: projectDir, timeout: 10000 }).catch(() => ({
       exitCode: 1, stdout: "", stderr: "not enough history", durationMs: 0,
     })),
     // Tests (from app directory where package.json lives)
-    runCmd(testCmd, testArgs, { cwd: appDir, timeout: CMD_TIMEOUT }),
+    runCmdImpl(testCmd, testArgs, { cwd: appDir, timeout: CMD_TIMEOUT }),
     // Typecheck (from app directory — use project's own script if available)
-    runCmd("npm", ["run", "typecheck"], { cwd: appDir, timeout: 60_000 }),
+    runCmdImpl("npm", ["run", "typecheck"], { cwd: appDir, timeout: 60_000 }),
     // Package.json
-    readFile(join(appDir, "package.json"), "utf-8").catch(() => "{}"),
+    readFileImpl(join(appDir, "package.json"), "utf-8").catch(() => "{}"),
     // TODO/FIXME markers — cheap signal for known gaps (exclude build artifacts)
-    runCmd("grep", ["-rn", "--include=*.ts", "--include=*.tsx", "--exclude-dir=node_modules", "--exclude-dir=.next", "--exclude-dir=dist", "--exclude-dir=.turbo", "-E", "TODO|FIXME|HACK|XXX", "."], { cwd: projectDir, timeout: 10000 }),
+    runCmdImpl("grep", ["-rn", "--include=*.ts", "--include=*.tsx", "--exclude-dir=node_modules", "--exclude-dir=.next", "--exclude-dir=dist", "--exclude-dir=.turbo", "-E", "TODO|FIXME|HACK|XXX", "."], { cwd: projectDir, timeout: 10000 }),
     // README for project context
-    readFile(join(projectDir, "README.md"), "utf-8").catch(() =>
-      readFile(join(appDir, "README.md"), "utf-8").catch(() => "")
+    readFileImpl(join(projectDir, "README.md"), "utf-8").catch(() =>
+      readFileImpl(join(appDir, "README.md"), "utf-8").catch(() => "")
     ),
   ]);
 
