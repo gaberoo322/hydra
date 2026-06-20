@@ -96,24 +96,10 @@ function deriveGroupId(moduleId: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Layout constants — deterministic row-packing on a ~1400px-wide canvas.
-// ---------------------------------------------------------------------------
-
-const NODE_W = 150;
-const NODE_H = 36;
-const NODE_GAP_X = 16;
-const NODE_GAP_Y = 12;
-const GROUP_PAD = 20;
-const GROUP_LABEL_H = 28;
-const COLS_PER_GROUP = 3;
-const CANVAS_W = 1400;
-const GROUP_GAP = 40;
-
-// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-interface ArchitectureNode {
+export interface ArchitectureNode {
   id: string;
   label: string;
   group: string;
@@ -258,12 +244,105 @@ export async function scanArchitecture(
     (byGroup[n.group] ??= []).push(n);
   }
 
-  // Deterministic dynamic layout: groups sorted by id, row-packed left to
-  // right; a group that would overflow the canvas wraps to a new row whose
-  // y-offset clears the tallest group of the previous row. Non-overlap holds
-  // for ANY derived group count by construction.
+  // Layout is now a pure, separately-testable step (issue #2246): the bucketed
+  // group map → node coordinates + group bounding boxes, with no filesystem,
+  // clock, or I/O. `scanArchitecture` is a two-step composition: graph
+  // extraction (above) → layout (below).
+  const { groupBounds } = computeGroupLayout(byGroup);
   const sortedGroupIds = Object.keys(byGroup).sort();
-  const groupBounds: Record<string, { x: number; y: number; w: number; h: number }> = {};
+
+  const groupsOut: ArchitectureGroup[] = sortedGroupIds.map((gid) => ({
+    id: gid,
+    ...groupMetaFor(gid),
+    modules: byGroup[gid].map((n) => n.id),
+    bounds: groupBounds[gid],
+  }));
+
+  return {
+    nodes,
+    edges,
+    groups: groupsOut,
+    moduleCount: moduleNames.length,
+    edgeCount: edges.length,
+    scannedAt: now.toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pure layout algorithm (issue #2246; extracted from `scanArchitecture`).
+//
+// Takes the already-bucketed group map and packs the groups onto a bounded 2D
+// canvas — no filesystem, no clock, no I/O. The layout constants live here, in
+// the only scope that gives them meaning. `scanArchitecture` composes graph
+// extraction (parse imports + derive group membership) with this layout step.
+//
+// SIDE EFFECT, by design and unchanged from the inline original: this MUTATES
+// each node's `x`/`y` in place (the nodes are the same objects the caller put
+// into `byGroup`). The returned `groupBounds` is the per-group bounding box,
+// keyed by group id. Exported for direct unit test — NOT added to a public
+// barrel; the on-wire `ArchitectureGraph` shape is unchanged.
+// ---------------------------------------------------------------------------
+
+/** Tunable layout geometry — deterministic row-packing on a ~1400px canvas. */
+export interface LayoutConstants {
+  NODE_W: number;
+  NODE_H: number;
+  NODE_GAP_X: number;
+  NODE_GAP_Y: number;
+  GROUP_PAD: number;
+  GROUP_LABEL_H: number;
+  COLS_PER_GROUP: number;
+  CANVAS_W: number;
+  GROUP_GAP: number;
+}
+
+/** Default layout geometry. Callers may pass an override into the layout fn. */
+export const LAYOUT_DEFAULTS: LayoutConstants = {
+  NODE_W: 150,
+  NODE_H: 36,
+  NODE_GAP_X: 16,
+  NODE_GAP_Y: 12,
+  GROUP_PAD: 20,
+  GROUP_LABEL_H: 28,
+  COLS_PER_GROUP: 3,
+  CANVAS_W: 1400,
+  GROUP_GAP: 40,
+};
+
+export type GroupBounds = { x: number; y: number; w: number; h: number };
+
+/**
+ * Pack the bucketed group map onto a bounded 2D canvas (issue #2246).
+ *
+ * Deterministic dynamic layout: groups sorted by id, row-packed left to right;
+ * a group that would overflow the canvas wraps to a new row whose y-offset
+ * clears the tallest group of the previous row. Non-overlap holds for ANY
+ * derived group count by construction.
+ *
+ * Pure w.r.t. I/O — no filesystem, clock, or network. It DOES mutate each
+ * node's `x`/`y` in place (the nodes are shared with the caller's `byGroup`),
+ * exactly as the inline original did, and returns the per-group bounding boxes
+ * plus the same mutated node list. Byte-for-byte the coordinates the inline
+ * code produced.
+ */
+export function computeGroupLayout(
+  byGroup: Record<string, ArchitectureNode[]>,
+  layout: LayoutConstants = LAYOUT_DEFAULTS,
+): { nodes: ArchitectureNode[]; groupBounds: Record<string, GroupBounds> } {
+  const {
+    NODE_W,
+    NODE_H,
+    NODE_GAP_X,
+    NODE_GAP_Y,
+    GROUP_PAD,
+    GROUP_LABEL_H,
+    COLS_PER_GROUP,
+    CANVAS_W,
+    GROUP_GAP,
+  } = layout;
+
+  const sortedGroupIds = Object.keys(byGroup).sort();
+  const groupBounds: Record<string, GroupBounds> = {};
   let cursorX = 0;
   let cursorY = 0;
   let rowMaxH = 0;
@@ -293,21 +372,8 @@ export async function scanArchitecture(
     rowMaxH = Math.max(rowMaxH, h);
   }
 
-  const groupsOut: ArchitectureGroup[] = sortedGroupIds.map((gid) => ({
-    id: gid,
-    ...groupMetaFor(gid),
-    modules: byGroup[gid].map((n) => n.id),
-    bounds: groupBounds[gid],
-  }));
-
-  return {
-    nodes,
-    edges,
-    groups: groupsOut,
-    moduleCount: moduleNames.length,
-    edgeCount: edges.length,
-    scannedAt: now.toISOString(),
-  };
+  const nodes = sortedGroupIds.flatMap((gid) => byGroup[gid]);
+  return { nodes, groupBounds };
 }
 
 // ---------------------------------------------------------------------------
