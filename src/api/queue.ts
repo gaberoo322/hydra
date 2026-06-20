@@ -117,7 +117,7 @@ export function createQueueRouter() {
       lines.push("");
 
       // In-progress items
-      const inProgress = (backlog as any).inProgress || [];
+      const inProgress = backlog.inProgress;
       if (inProgress.length > 0) {
         lines.push(`## In Progress`);
         for (const item of inProgress) {
@@ -139,7 +139,7 @@ export function createQueueRouter() {
       lines.push("");
 
       // Triage items needing review
-      const triage = (backlog as any).triage || [];
+      const triage = backlog.triage;
       if (triage.length > 0) {
         lines.push(`## Triage (${triage.length} awaiting review)`);
         for (const item of triage.slice(0, 10)) {
@@ -150,7 +150,7 @@ export function createQueueRouter() {
       }
 
       // Blocked items
-      const blocked = (backlog as any).blocked || [];
+      const blocked = backlog.blocked;
       if (blocked.length > 0) {
         lines.push(`## Blocked (${blocked.length})`);
         for (const item of blocked) {

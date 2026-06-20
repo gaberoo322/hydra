@@ -840,3 +840,47 @@ describe("backlog state machine", () => {
     assert.equal(item, undefined, "item completed 30 days before now must be pruned");
   });
 });
+
+// Pure type-narrowing tests for the loadBacklog() `Backlog` return type
+// (issue #2230). These touch NO Redis — they exercise the compiler-enforced
+// lane-key shape that replaced the old `Promise<Record<string, any[]>>`. Kept
+// as a separate top-level describe with no before/after lifecycle so it cannot
+// race the shared-Redis teardown of the suite above.
+describe("loadBacklog Backlog return type (issue #2230)", () => {
+  test("named lanes are accessible without an `as any` cast", () => {
+    // The whole point of the type: each lane is reachable by name and is an
+    // array — no cast, no `|| []` defensive fallback. If a lane were renamed
+    // in the `Backlog` type, this destructure would be a compile error.
+    const backlog: reads.Backlog = {
+      triage: [],
+      backlog: [{ id: 1, title: "t" }],
+      queued: [],
+      blocked: [],
+      inProgress: [{ id: 2, title: "p" }],
+      done: [],
+    };
+
+    const { inProgress, triage, blocked } = backlog;
+    assert.ok(Array.isArray(inProgress));
+    assert.ok(Array.isArray(triage));
+    assert.ok(Array.isArray(blocked));
+    assert.equal(backlog.backlog[0].title, "t");
+    assert.equal(backlog.inProgress[0].id, 2);
+  });
+
+  test("the historical string-indexed access pattern still type-checks", () => {
+    // addToBacklog/getItemsByParent iterate `LANES` and index `lanes[lane]`
+    // with a `string`. The index signature on `Backlog` preserves that.
+    const backlog: reads.Backlog = {
+      triage: [{ id: 1 }],
+      backlog: [],
+      queued: [],
+      blocked: [],
+      inProgress: [],
+      done: [],
+    };
+    const laneName: string = "triage";
+    const got = backlog[laneName];
+    assert.equal(got.length, 1);
+  });
+});
