@@ -114,7 +114,7 @@ Issue body schema (one per candidate):
 > Surfaced by `/hydra-architecture-scan` on <ISO date> against the Orchestrator (~/hydra).
 > Explore + Present-candidates phases of `improve-codebase-architecture` (steps 1–2), headless.
 
-## Files
+## Files in scope
 
 <concrete paths under ~/hydra that this deepening touches>
 
