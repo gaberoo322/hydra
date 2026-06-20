@@ -105,6 +105,128 @@ describe("issue #2232: loadReflectionsForAnchor coordinator (deps-injected, no R
   });
 });
 
+describe("issue #2238: backfillOnHit sequencing (deps-injected, no Redis)", () => {
+  test("default path runs NO backfill and fans both reads out in parallel", async () => {
+    let backfillCalls = 0;
+    const order: string[] = [];
+
+    await loadReflectionsForAnchor("src/x/y.ts", {
+      scopeFiles: ["src/x/y.ts"],
+      // backfillOnHit omitted → parallel path, backfill never consulted.
+      deps: {
+        loadAnchorReflections: async () => {
+          order.push("per-anchor");
+          return { content: "PA", count: 1 };
+        },
+        loadAnchorReflectionsByFile: async () => {
+          order.push("by-file");
+          return { content: "BF", count: 1 };
+        },
+        backfillByFileIndex: async () => {
+          backfillCalls++;
+          return ["src/x/y.ts"];
+        },
+      },
+    });
+
+    assert.equal(backfillCalls, 0, "no backfill on the default (parallel) path");
+    assert.ok(order.includes("per-anchor") && order.includes("by-file"), "both axes read");
+  });
+
+  test("backfillOnHit + per-anchor HIT: backfill runs and commits BEFORE the by-file read", async () => {
+    const order: string[] = [];
+    let backfillArgs: { ref: string; files?: string[] | null } | null = null;
+
+    const result = await loadReflectionsForAnchor("src/x/y.ts", {
+      scopeFiles: ["src/x/y.ts"],
+      backfillOnHit: true,
+      deps: {
+        loadAnchorReflections: async () => {
+          order.push("per-anchor");
+          return { content: "PA", count: 2 };
+        },
+        backfillByFileIndex: async (ref, files) => {
+          order.push("backfill");
+          backfillArgs = { ref, files };
+          return ["src/x/y.ts"];
+        },
+        loadAnchorReflectionsByFile: async () => {
+          order.push("by-file");
+          return { content: "BF", count: 1 };
+        },
+      },
+    });
+
+    // The ordering constraint expressed structurally: per-anchor read, then the
+    // backfill write, then the by-file read — never by-file before backfill.
+    assert.deepEqual(order, ["per-anchor", "backfill", "by-file"]);
+    assert.ok(backfillArgs, "backfill was called");
+    assert.equal(backfillArgs!.ref, "src/x/y.ts", "backfill keyed on the anchor ref");
+    assert.deepEqual(backfillArgs!.files, ["src/x/y.ts"], "backfill receives the scope files");
+
+    // The combined result is still the two axes merged.
+    assert.equal(result.combined.content, "PA\n\nBF");
+    assert.equal(result.combined.count, 3);
+  });
+
+  test("backfillOnHit + per-anchor MISS: backfill is skipped (no write on a miss)", async () => {
+    let backfillCalls = 0;
+    const order: string[] = [];
+
+    const result = await loadReflectionsForAnchor("src/x/y.ts", {
+      scopeFiles: ["src/x/y.ts"],
+      backfillOnHit: true,
+      deps: {
+        // per-anchor MISS (count 0) → backfill must NOT fire.
+        loadAnchorReflections: async () => {
+          order.push("per-anchor");
+          return { content: "", count: 0 };
+        },
+        backfillByFileIndex: async () => {
+          backfillCalls++;
+          return [];
+        },
+        loadAnchorReflectionsByFile: async () => {
+          order.push("by-file");
+          return { content: "BF", count: 1 };
+        },
+      },
+    });
+
+    assert.equal(backfillCalls, 0, "no backfill on a per-anchor miss");
+    assert.deepEqual(order, ["per-anchor", "by-file"], "by-file still reads, backfill skipped");
+    assert.equal(result.combined.content, "BF", "only the by-file axis contributes");
+    assert.equal(result.combined.count, 1);
+  });
+
+  test("backfillOnHit with no derivable files: backfill runs on a hit but by-file is skipped", async () => {
+    let backfillCalls = 0;
+    let byFileCalls = 0;
+
+    // "issue-841" yields no path-shaped tokens and no scopeFiles → no by-file
+    // read — but a per-anchor hit still triggers the opportunistic backfill.
+    const result = await loadReflectionsForAnchor("issue-841", {
+      backfillOnHit: true,
+      deps: {
+        loadAnchorReflections: async () => ({ content: "PA", count: 1 }),
+        backfillByFileIndex: async () => {
+          backfillCalls++;
+          return [];
+        },
+        loadAnchorReflectionsByFile: async () => {
+          byFileCalls++;
+          return { content: "should-not-appear", count: 9 };
+        },
+      },
+    });
+
+    assert.equal(backfillCalls, 1, "backfill fires on the per-anchor hit");
+    assert.equal(byFileCalls, 0, "by-file read skipped when no files derived");
+    assert.equal(result.combined.content, "PA");
+    assert.equal(result.byFile.count, 0);
+  });
+});
+
 describe("issue #2232: loadReflectionsForAnchor default path (Redis-backed)", () => {
   let redis: any;
   let redisAvailable = false;
