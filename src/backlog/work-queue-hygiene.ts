@@ -19,12 +19,25 @@
 // at work-queue tier (0.70) and dev_target burned a full dispatch on no-op
 // verify+LREM (highest-recurrence unfixed retro cue, recurrence 14).
 // `reconcileWorkQueue` is the shared engine: it REMOVES entries that are
-// (a) merged work per the #882 token scan, or (b) reference orchestrator issues
-// that are ALL closed. It is fail-open — any uncertainty (no issue refs, an
-// open issue, an unreachable `gh`) keeps the entry.
+// (a) merged work per the #882 token scan, (b) reference orchestrator issues
+// that are ALL closed, or (c) terminal-state markers (COMPLETED:/CLOSED:
+// completion notes that are never actionable as work, issue #1853). It is
+// fail-open — any uncertainty (no issue refs, an open issue, an unreachable
+// `gh`) keeps the entry.
+//
+// The terminal-marker reap (cause "terminal-marker") MOVED here from the
+// Candidate Feed (issue #2187): the Feed still SUPPRESSES terminal markers on
+// every poll (skipping them as candidates), but the Redis GC of the stale entry
+// is owned by this hourly reconciler so the Feed stays a pure read-and-score
+// path with zero writes. `isTerminalMarker` lives in the `redis/work-queue.ts`
+// module this file already imports — no new import edge.
 
 import { execFileViaSeam } from "../github/exec-file-compat.ts";
-import { getWorkQueueItems, removeWorkQueueItem } from "../redis/work-queue.ts";
+import {
+  getWorkQueueItems,
+  removeWorkQueueItem,
+  isTerminalMarker,
+} from "../redis/work-queue.ts";
 import { isMergedWork, loadMergedAnchorRefsImpl } from "./merged-refs.ts";
 
 // ---------------------------------------------------------------------------
@@ -107,14 +120,19 @@ export interface WorkQueueReconcileResult {
   /** Queue entries removed (LREM count — duplicates of one raw all count). */
   removed: number;
   /** One row per distinct removed raw, with the cause. */
-  details: Array<{ reference: string; cause: "merged-work" | "closed-issue" }>;
+  details: Array<{
+    reference: string;
+    cause: "merged-work" | "closed-issue" | "terminal-marker";
+  }>;
 }
 
 /**
  * Reconcile the work queue against resolved state. Removes entries that are
- * (a) merged work (the #882 token set) or (b) reference orch issues that are
- * ALL closed (at least one ref required). Fail-open on every uncertainty;
- * never throws — a failing read degrades to a no-op result.
+ * (a) merged work (the #882 token set), (b) reference orch issues that are
+ * ALL closed (at least one ref required), or (c) terminal-state markers
+ * (COMPLETED:/CLOSED: completion notes, issue #1853 — reap moved here from the
+ * Candidate Feed in #2187). Fail-open on every uncertainty; never throws — a
+ * failing read degrades to a no-op result.
  */
 export async function reconcileWorkQueue(
   deps: Partial<WorkQueueReconcileDeps> = {},
@@ -163,8 +181,14 @@ export async function reconcileWorkQueue(
     const ref: string = item.reference || item.description || "";
     if (!ref) continue;
 
-    let cause: "merged-work" | "closed-issue" | null = null;
-    if (isMergedWork({ issue: ref, title: ref, anchorRef: ref }, mergedRefs)) {
+    let cause: "merged-work" | "closed-issue" | "terminal-marker" | null = null;
+    // Terminal-state markers (COMPLETED:/CLOSED:) are completion notes, never
+    // actionable as work (issue #1853). Independent of merged/closed-issue —
+    // checked first and cheaply (no `gh` lookup). The Candidate Feed suppresses
+    // them on every poll; this reconciler GCs the stale Redis entry (#2187).
+    if (isTerminalMarker(ref)) {
+      cause = "terminal-marker";
+    } else if (isMergedWork({ issue: ref, title: ref, anchorRef: ref }, mergedRefs)) {
       cause = "merged-work";
     } else {
       const issueRefs = harvestOrchIssueRefs(item);

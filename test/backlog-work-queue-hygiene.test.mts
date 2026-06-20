@@ -155,3 +155,58 @@ describe("reconcileWorkQueue — resolved-state reaper (#1690)", () => {
     assert.deepEqual(removed, [closedRaw]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Terminal-marker reap (issue #2187): the COMPLETED:/CLOSED: GC moved here from
+// the Candidate Feed so the feed stays a pure read path. The feed still
+// SUPPRESSES terminal markers on every poll; this reconciler removes the stale
+// Redis entry on its hourly tick (cause "terminal-marker").
+// ---------------------------------------------------------------------------
+
+describe("reconcileWorkQueue — terminal-marker reap (#2187)", () => {
+  const completedRaw = JSON.stringify({ reference: "COMPLETED: issue-1700 shipped", queuedAt: isoAgo(0) });
+  const closedMarkerRaw = JSON.stringify({ reference: "closed: item-99 done", queuedAt: isoAgo(0) });
+  const liveRaw = JSON.stringify({ reference: "live anchor (#1700)", queuedAt: isoAgo(0) });
+
+  function makeDeps(over: any = {}) {
+    const removed: string[] = [];
+    const deps = {
+      getWorkQueueItems: async () => [completedRaw, liveRaw],
+      removeWorkQueueItem: async (raw: string) => { removed.push(raw); return 1; },
+      loadMergedAnchorRefs: async () => new Set<string>(),
+      // Live (#1700) is open → kept; no terminal-marker entry needs a gh call.
+      getIssueState: async () => "open" as const,
+      ...over,
+    };
+    return { deps, removed };
+  }
+
+  test("a COMPLETED:-prefixed entry is reaped with cause terminal-marker", async () => {
+    const { deps, removed } = makeDeps();
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 1);
+    assert.deepEqual(removed, [completedRaw]);
+    assert.deepEqual(result.details.map((d) => d.cause), ["terminal-marker"]);
+  });
+
+  test("a CLOSED:-prefixed entry is reaped too (case-insensitive)", async () => {
+    const { deps, removed } = makeDeps({
+      getWorkQueueItems: async () => [closedMarkerRaw],
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 1);
+    assert.deepEqual(removed, [closedMarkerRaw]);
+    assert.deepEqual(result.details.map((d) => d.cause), ["terminal-marker"]);
+  });
+
+  test("terminal-marker check needs no gh lookup (checked before issue-state)", async () => {
+    let ghCalls = 0;
+    const { deps } = makeDeps({
+      getWorkQueueItems: async () => [completedRaw],
+      getIssueState: async () => { ghCalls++; return "open" as const; },
+    });
+    const result = await reconcileWorkQueue(deps);
+    assert.equal(result.removed, 1);
+    assert.equal(ghCalls, 0, "a terminal marker is reaped without an issue-state lookup");
+  });
+});
