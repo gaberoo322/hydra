@@ -47,9 +47,6 @@ function makeDeps(over: Partial<CandidateFeedDeps> = {}): CandidateFeedDeps {
     loadLastReflectionAt: async () => null,
     loadDesignConcept: async () => ABSENT_DC,
     loadMergedAnchorRefs: async () => new Set<string>(),
-    // Issue #1690: stub the work-queue reap so suppression tests never touch
-    // a real Redis. Individual tests override to assert on the calls.
-    removeWorkQueueItem: async () => 0,
     ...over,
   };
 }
@@ -350,21 +347,17 @@ describe("getCandidateFeed — inline-buildability gate (#2075)", () => {
   });
 
   test("inlineMode suppresses a work-queue entry flagged dispatch-spawn-capable (top-level flag)", async () => {
-    const removed: string[] = [];
     const deps = makeDeps({
       getWorkQueueItems: async () => [
         JSON.stringify({ reference: "openAiCredentialReadiness rename remainder", queuedAt: isoAgo(0), source: "hydra-retro", dispatchSpawnCapable: true }),
         JSON.stringify({ reference: "small standard task", queuedAt: isoAgo(0), source: "operator" }),
       ],
-      removeWorkQueueItem: async (raw: string) => { removed.push(raw); return 1; },
     });
     const feed = await getCandidateFeed({ now: NOW, inlineMode: true }, deps);
     const refs = feed.candidates.map((c) => c.anchorRef);
     assert.ok(!refs.some((r) => r.includes("openAiCredentialReadiness")), "spawn-capable work-queue entry hidden from inline caller");
     assert.ok(refs.some((r) => r.includes("small standard task")), "standard work-queue entry still surfaces");
     assert.equal(feed.spawn_suppressed, 1);
-    // The entry stays valid for a spawn-capable dispatch — it must NOT be reaped.
-    assert.equal(removed.length, 0, "spawn-capable suppression does not delete the work-queue entry");
   });
 
   test("inlineMode honours the dispatch-spawn-capable label form on a work-queue entry", async () => {
@@ -475,25 +468,26 @@ describe("getCandidateFeed — merged-by-cycle suppression (#882)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Terminal-state marker skip + GC (issue #1853).
+// Terminal-state marker suppression (issue #1853 / #2187).
+//
+// The Candidate Feed SUPPRESSES terminal markers on every poll (skips them as
+// candidates) but performs ZERO Redis writes — the reap of the stale entry
+// moved to the hourly Work-Queue Hygiene reconciler (#2187, cause
+// "terminal-marker"), covered by test/backlog-work-queue-hygiene.test.mts.
 // ---------------------------------------------------------------------------
 
-describe("getCandidateFeed — terminal-marker skip + GC (#1853)", () => {
-  test("a COMPLETED:-prefixed work-queue entry is skipped and reaped", async () => {
-    const completedRaw = JSON.stringify({ reference: "COMPLETED: issue-1700 shipped", queuedAt: isoAgo(0) });
-    const reaped: string[] = [];
+describe("getCandidateFeed — terminal-marker suppression (#1853 / #2187)", () => {
+  test("a COMPLETED:-prefixed work-queue entry is skipped (never surfaces)", async () => {
     const deps = makeDeps({
       getWorkQueueItems: async () => [
-        completedRaw,
+        JSON.stringify({ reference: "COMPLETED: issue-1700 shipped", queuedAt: isoAgo(0) }),
         JSON.stringify({ reference: "Real work", queuedAt: isoAgo(0) }),
       ],
-      removeWorkQueueItem: async (raw) => { reaped.push(raw); return 1; },
     });
     const feed = await getCandidateFeed({ now: NOW }, deps);
     const refs = feed.candidates.map((c) => c.anchorRef);
     assert.ok(!refs.some((r) => r.startsWith("COMPLETED:")), "COMPLETED marker must not surface as a candidate");
     assert.ok(refs.includes("Real work"), "real work still surfaces");
-    assert.deepEqual(reaped, [completedRaw], "the terminal marker is LREM-reaped");
   });
 
   test("a CLOSED:-prefixed entry is skipped too (case-insensitive)", async () => {
@@ -501,7 +495,6 @@ describe("getCandidateFeed — terminal-marker skip + GC (#1853)", () => {
       getWorkQueueItems: async () => [
         JSON.stringify({ reference: "closed: item-99 done", queuedAt: isoAgo(0) }),
       ],
-      removeWorkQueueItem: async () => 1,
     });
     const feed = await getCandidateFeed({ now: NOW }, deps);
     assert.equal(feed.candidates.length, 0, "CLOSED marker is not a candidate");
@@ -514,23 +507,9 @@ describe("getCandidateFeed — terminal-marker skip + GC (#1853)", () => {
       getWorkQueueItems: async () => [
         JSON.stringify({ reference: "COMPLETED: issue-1 shipped", queuedAt: isoAgo(0) }),
       ],
-      removeWorkQueueItem: async () => 1,
     });
     const feed = await getCandidateFeed({ now: NOW, excludeMerged: false }, deps);
     assert.equal(feed.candidates.length, 0);
-  });
-
-  test("a failing reap degrades to skip-only (never throws)", async () => {
-    const deps = makeDeps({
-      getWorkQueueItems: async () => [
-        JSON.stringify({ reference: "COMPLETED: issue-1 shipped", queuedAt: isoAgo(0) }),
-      ],
-      removeWorkQueueItem: async () => { throw new Error("redis down"); },
-    });
-    await assert.doesNotReject(async () => {
-      const feed = await getCandidateFeed({ now: NOW }, deps);
-      assert.equal(feed.candidates.length, 0, "still skipped even when the reap fails");
-    });
   });
 });
 
@@ -538,7 +517,8 @@ describe("getCandidateFeed — terminal-marker skip + GC (#1853)", () => {
 // TTL-cache loader factory (`makeMergedAnchorRefsLoader`) — moved to
 // `src/backlog/merged-refs.ts` (issue #1880) and is tested in isolation by
 // `test/backlog-merged-refs.test.mts`. This file keeps the Candidate Feed's USE
-// of merged-refs (suppression + work-queue reap) below.
+// of merged-refs (suppression only — the reap moved to Work-Queue Hygiene in
+// #2187) below.
 
 describe("getCandidateFeed — design-concept annotation (#628)", () => {
   test("every candidate carries a designConcept block; absent → present:false", async () => {
@@ -676,27 +656,27 @@ describe("GET /anchor/candidates — thin route", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Work-queue hygiene (issue #1690): self-healing reap + reconcile engine.
+// Merged-work suppression is a pure READ (issue #2187): the feed hides a
+// merged-suppressed work-queue entry but performs ZERO Redis writes — the reap
+// of the stale entry moved to the hourly Work-Queue Hygiene reconciler
+// (cause "merged-work"), covered by test/backlog-work-queue-hygiene.test.mts.
 // ---------------------------------------------------------------------------
 
-describe("getCandidateFeed — merged work-queue entries are reaped, not just hidden (#1690)", () => {
-  test("a merged-suppressed work-queue entry is LREM'd via the injected reap", async () => {
-    const reaped: string[] = [];
+describe("getCandidateFeed — merged work-queue entries are suppressed (#882 / #2187)", () => {
+  test("a merged-suppressed work-queue entry is hidden; live work still surfaces", async () => {
     const staleRaw = JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) });
     const liveRaw = JSON.stringify({ reference: "item-999 unbuilt", queuedAt: isoAgo(0) });
     const deps = makeDeps({
       getWorkQueueItems: async () => [staleRaw, liveRaw],
       loadMergedAnchorRefs: async () => new Set(["item-322"]),
-      removeWorkQueueItem: async (raw) => { reaped.push(raw); return 1; },
     });
     const feed = await getCandidateFeed({ now: NOW }, deps);
     assert.equal(feed.merged_suppressed, 1);
-    assert.deepEqual(reaped, [staleRaw], "exactly the stale raw entry is removed");
-    assert.ok(feed.candidates.some((c) => c.anchorRef.includes("item-999")));
+    assert.ok(!feed.candidates.some((c) => c.anchorRef.includes("item-322")), "merged entry is suppressed");
+    assert.ok(feed.candidates.some((c) => c.anchorRef.includes("item-999")), "live entry still surfaces");
   });
 
-  test("kanban merged suppression does NOT trigger the work-queue reap", async () => {
-    const reaped: string[] = [];
+  test("kanban merged suppression counts but never touches the work queue", async () => {
     const deps = makeDeps({
       loadBacklog: async () => ({
         inProgress: [],
@@ -704,29 +684,13 @@ describe("getCandidateFeed — merged work-queue entries are reaped, not just hi
         backlog: [],
       }),
       loadMergedAnchorRefs: async () => new Set(["882"]),
-      removeWorkQueueItem: async (raw) => { reaped.push(raw); return 1; },
     });
     const feed = await getCandidateFeed({ now: NOW }, deps);
     assert.equal(feed.merged_suppressed, 1);
-    assert.deepEqual(reaped, [], "kanban lane never touches the work queue");
-  });
-
-  test("a failing reap degrades to suppress-only (never throws, still suppressed)", async () => {
-    const deps = makeDeps({
-      getWorkQueueItems: async () => [
-        JSON.stringify({ reference: "item-322 maker order", queuedAt: isoAgo(0) }),
-      ],
-      loadMergedAnchorRefs: async () => new Set(["item-322"]),
-      removeWorkQueueItem: async () => { throw new Error("redis down"); },
-    });
-    await assert.doesNotReject(async () => {
-      const feed = await getCandidateFeed({ now: NOW }, deps);
-      assert.equal(feed.merged_suppressed, 1);
-      assert.equal(feed.candidates.length, 0);
-    });
+    assert.equal(feed.candidates.length, 0);
   });
 });
 
-// Work-Queue Hygiene tests (harvestOrchIssueRefs / reconcileWorkQueue) moved to
-// test/backlog-work-queue-hygiene.test.mts alongside the extracted module
-// (issue #1844).
+// Work-Queue Hygiene tests (harvestOrchIssueRefs / reconcileWorkQueue), including
+// the merged-work + terminal-marker reap moved here in issue #2187, live in
+// test/backlog-work-queue-hygiene.test.mts alongside the module (issue #1844).

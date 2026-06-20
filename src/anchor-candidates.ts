@@ -32,6 +32,12 @@
 //      suppression (issue #882), blocker-just-cleared detection,
 //      design-concept annotation, and the research_recommended threshold.
 //
+// This is a PURE read-and-score path: it performs ZERO Redis writes (issue
+// #2187). Stale work-queue entries (merged-work + terminal-markers) are
+// SUPPRESSED here on every poll, but their Redis GC is owned by the hourly
+// Work-Queue Hygiene reconciler (`src/backlog/work-queue-hygiene.ts`), never by
+// this feed — so a read-heavy caller never inherits a write side-effect.
+//
 // The route over this module (`src/api/anchor.ts`) is thin: parse query →
 // `getCandidateFeed` → add `generated_at` → `res.json`.
 //
@@ -40,7 +46,7 @@
 // clock to exercise enumeration + scoring + eligibility end-to-end without a
 // Redis fixture.
 
-import { getWorkQueueItems, removeWorkQueueItem, isTerminalMarker } from "./redis/work-queue.ts";
+import { getWorkQueueItems, isTerminalMarker } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/per-anchor.ts";
 // Persistence reader lives in the focused persistence Module; the
@@ -210,15 +216,6 @@ export interface CandidateFeedDeps {
    * set (suppress nothing) so the feed keeps serving.
    */
   loadMergedAnchorRefs: () => Promise<Set<string>>;
-  /**
-   * Remove a work-queue entry by its exact raw value (issue #1690). Called by
-   * the feed when a work-queue candidate is suppressed as merged work, so a
-   * stale entry is REMOVED rather than merely hidden — pre-#1690 the entry
-   * lingered in `hydra:anchors:work-queue` and burned dev_target dispatches on
-   * no-op verify+LREM. A failing remove degrades to the old suppress-only
-   * behaviour (logged, never dropped from the suppression count).
-   */
-  removeWorkQueueItem: (raw: string) => Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +294,6 @@ function resolveDeps(deps?: Partial<CandidateFeedDeps>): CandidateFeedDeps {
     loadLastReflectionAt: deps?.loadLastReflectionAt ?? loadLastReflectionAtImpl,
     loadDesignConcept: deps?.loadDesignConcept ?? loadDesignConceptImpl,
     loadMergedAnchorRefs: deps?.loadMergedAnchorRefs ?? (() => loadMergedAnchorRefsImpl()),
-    removeWorkQueueItem: deps?.removeWorkQueueItem ?? removeWorkQueueItem,
   };
 }
 
@@ -408,15 +404,11 @@ export async function getCandidateFeed(
       // Terminal-state markers (COMPLETED:/CLOSED:) are completion notes, not
       // work (issue #1853). The write-side `pushToWorkQueue` now refuses them,
       // but an entry written before that fix (or via another path) still
-      // lingers — skip it as a candidate AND reap it so it stops resurfacing.
-      // Independent of `excludeMerged`: a terminal marker is never actionable.
+      // lingers — skip it as a candidate so it never surfaces. Independent of
+      // `excludeMerged`: a terminal marker is never actionable. The stale Redis
+      // entry is REAPED out-of-band by the hourly Work-Queue Hygiene reconciler
+      // (issue #2187 moved the reap there so this read path performs zero writes).
       if (isTerminalMarker(ref)) {
-        try {
-          await d.removeWorkQueueItem(r);
-          console.log(`[CandidateFeed] Reaped terminal-marker work-queue entry: "${ref.slice(0, 80)}"`);
-        } catch (err: any) {
-          console.error(`[CandidateFeed] terminal-marker reap failed for "${ref.slice(0, 60)}": ${err.message}`);
-        }
         continue;
       }
       // Inline-buildability gate (issue #2075): a `dispatch-spawn-capable`
@@ -434,16 +426,11 @@ export async function getCandidateFeed(
         isMergedWork({ issue: ref, title: ref, anchorRef: ref }, mergedRefs)
       ) {
         mergedSuppressed++;
-        // Self-heal (issue #1690): a merged-suppressed work-queue entry is
-        // permanently stale — REMOVE it so it stops resurfacing (and burning
-        // dev_target dispatches) instead of being re-suppressed every poll.
-        // A failing remove degrades to the pre-#1690 suppress-only behaviour.
-        try {
-          await d.removeWorkQueueItem(r);
-          console.log(`[CandidateFeed] Reaped merged work-queue entry: "${ref.slice(0, 80)}"`);
-        } catch (err: any) {
-          console.error(`[CandidateFeed] work-queue reap failed for "${ref.slice(0, 60)}": ${err.message}`);
-        }
+        // The stale Redis entry is REAPED out-of-band by the hourly Work-Queue
+        // Hygiene reconciler (`reconcileWorkQueue`, cause: "merged-work"), which
+        // already scans the whole queue on its tick (issue #2187 moved the reap
+        // there so this read path performs zero writes). Suppression keeps the
+        // entry off every served poll regardless of when that GC catches up.
         continue;
       }
       candidates.push({
