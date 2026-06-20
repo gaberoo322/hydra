@@ -68,8 +68,7 @@
 
 import { EventBus } from "../event-bus.ts";
 import { getTargetGithubRepo } from "../target-config.ts";
-import { ghJson } from "../github/gh.ts";
-import { isGhFailure } from "../github/exec.ts";
+import { listOpenPrs, isIssueReadFailure, type PrRow } from "../github/issues.ts";
 
 /** The orchestrator's own repo — the one constant across target swaps. */
 const ORCHESTRATOR_REPO = "gaberoo322/hydra";
@@ -115,6 +114,34 @@ export interface PullRequestSnapshot {
   headRefName: string;
   /** ISO timestamp — used as a tie-breaker for "just opened" detection. */
   createdAt: string;
+}
+
+/**
+ * Narrow a raw {@link PrRow} `state` (a plain `string` from the read seam) to
+ * the bridge's three-state union. Anything unrecognized (or empty) falls back
+ * to `OPEN`, preserving the pre-migration inline parser's behaviour.
+ */
+function normalizePrState(raw: string): "OPEN" | "MERGED" | "CLOSED" {
+  const s = (raw || "").toUpperCase();
+  if (s === "OPEN" || s === "MERGED" || s === "CLOSED") return s;
+  return "OPEN";
+}
+
+/**
+ * Project a read-seam {@link PrRow} onto the bridge's {@link PullRequestSnapshot}
+ * view. The seam already did the defensive field-by-field parse; this only
+ * narrows `state` to the bridge's union. Exported for the test surface so the
+ * mapping is pinned independently of the live `gh` round-trip.
+ */
+export function prRowToSnapshot(row: PrRow): PullRequestSnapshot {
+  return {
+    number: row.number,
+    state: normalizePrState(row.state),
+    title: row.title,
+    url: row.url,
+    headRefName: row.headRefName,
+    createdAt: row.createdAt,
+  };
 }
 
 type PrTransition = "opened" | "merged" | "closed";
@@ -240,52 +267,37 @@ interface GhFetcher {
 }
 
 /**
- * Default fetcher — shells out to `gh pr list --repo <repo> --state all
- * --limit 50 --json ...`. The `--state all` flag ensures we see MERGED /
- * CLOSED transitions; `--limit 50` is a sane cap given the orchestrator's
- * realistic in-flight PR count is <10.
+ * Default fetcher — reads through the GitHub Issue/PR Read seam
+ * ({@link listOpenPrs}, `src/github/issues.ts`, issue #908) with
+ * `{state:"all", limit:50, fields}` so MERGED / CLOSED transitions are visible
+ * and the head-branch + created-at attribution fields are populated. `--state
+ * all` ensures we see merged/closed PRs; `--limit 50` is a sane cap given the
+ * orchestrator's realistic in-flight PR count is <10.
  *
- * Returns [] on any failure (missing `gh`, auth error, network blip) so
- * the bridge can continue against its existing snapshot.
+ * The seam owns the repo handle, the `gh` argv, the JSON parse, and the
+ * four external-process error modes (it never throws). On its failure arm we
+ * degrade to [] so the bridge continues against its existing snapshot —
+ * preserving the pre-migration "returns [] on any failure" contract. The
+ * `state,headRefName,createdAt` fields are requested explicitly so the seam's
+ * defensive parser populates them (they are part of the canonical
+ * PR_LIST_JSON_FIELDS, but naming them here documents the bridge's needs).
  */
 async function defaultGhFetcher(repo: string): Promise<PullRequestSnapshot[]> {
-  // Routes through the GitHub CLI Adapter seam (issue #899). The seam never
-  // throws and owns the JSON parse + the four external-process error modes; a
-  // failure arm (missing `gh`, auth error, network blip, empty/malformed JSON)
-  // degrades to [] so the bridge continues against its existing snapshot —
-  // preserving the pre-seam "returns [] on any failure" contract.
-  const result = await ghJson<unknown>(
-    [
-      "pr", "list",
-      "--repo", repo,
-      "--state", "all",
-      "--limit", "50",
-      "--json", "number,state,title,url,headRefName,createdAt",
-    ],
-    { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 },
-  );
-  if (isGhFailure(result)) {
-    console.error(
-      `[pr-lifecycle-bridge] gh pr list ${repo} failed (${result.code}): ${result.stderr.slice(0, 200)}`,
-    );
+  const res = await listOpenPrs({
+    repo,
+    state: "all",
+    limit: 50,
+    fields: "number,state,title,url,headRefName,createdAt",
+    timeout: 15_000,
+  });
+  // `strict:false` (no strictNullChecks) means a plain `if (!res.ok)` does NOT
+  // narrow the union — use the seam's type guard, mirroring its own *OrEmpty
+  // wrappers (see github/issues.ts docstring on isIssueReadFailure).
+  if (isIssueReadFailure(res)) {
+    console.error(`[pr-lifecycle-bridge] gh pr list ${repo} failed (${res.code})`);
     return [];
   }
-  const parsed = result.data;
-  if (!Array.isArray(parsed)) return [];
-  return parsed
-      .filter((row) => row && typeof row === "object" && Number.isFinite(row.number))
-      .map((row): PullRequestSnapshot => ({
-        number: Number(row.number),
-        state: ((): "OPEN" | "MERGED" | "CLOSED" => {
-          const s = String(row.state || "").toUpperCase();
-          if (s === "OPEN" || s === "MERGED" || s === "CLOSED") return s;
-          return "OPEN";
-        })(),
-        title: String(row.title || ""),
-        url: String(row.url || ""),
-        headRefName: String(row.headRefName || ""),
-        createdAt: String(row.createdAt || ""),
-      }));
+  return res.rows.map(prRowToSnapshot);
 }
 
 export interface PrLifecycleBridgeOpts {
