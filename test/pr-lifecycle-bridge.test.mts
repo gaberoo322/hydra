@@ -18,6 +18,7 @@ const {
   sanitizeField,
   emitPrLifecycleEvent,
   startPrLifecycleBridge,
+  prRowToSnapshot,
   SLOT_EVENTS_STREAM,
 } = await import("../src/autopilot/pr-lifecycle-bridge.ts");
 
@@ -95,6 +96,43 @@ describe("pr-lifecycle-bridge: sanitizeField", () => {
   test("tolerates empty / null", () => {
     assert.equal(sanitizeField(""), "");
     assert.equal(sanitizeField(null as any), "");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prRowToSnapshot — view over the read-seam PrRow (issue #2231)
+// ---------------------------------------------------------------------------
+
+describe("pr-lifecycle-bridge: prRowToSnapshot", () => {
+  const baseRow = {
+    number: 673,
+    title: "PR title",
+    url: "https://github.com/gaberoo322/hydra/pull/673",
+    headRefName: "agent-deadbeef",
+    createdAt: "2026-06-20T10:00:00Z",
+    updatedAt: "",
+    statusCheckRollup: [],
+  };
+
+  test("maps a PrRow onto the bridge snapshot, narrowing state", () => {
+    const snap = prRowToSnapshot({ ...baseRow, state: "MERGED" });
+    assert.deepEqual(snap, {
+      number: 673,
+      state: "MERGED",
+      title: "PR title",
+      url: "https://github.com/gaberoo322/hydra/pull/673",
+      headRefName: "agent-deadbeef",
+      createdAt: "2026-06-20T10:00:00Z",
+    });
+  });
+
+  test("lower-cased seam state is upper-cased into the union", () => {
+    assert.equal(prRowToSnapshot({ ...baseRow, state: "closed" }).state, "CLOSED");
+  });
+
+  test("unrecognized / empty state falls back to OPEN (preserves pre-migration parser)", () => {
+    assert.equal(prRowToSnapshot({ ...baseRow, state: "" }).state, "OPEN");
+    assert.equal(prRowToSnapshot({ ...baseRow, state: "DRAFT" }).state, "OPEN");
   });
 });
 

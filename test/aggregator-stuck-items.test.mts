@@ -40,6 +40,9 @@ function prRow(over: Partial<PrRow> & { number: number }): PrRow {
     number: over.number,
     title: over.title ?? `PR #${over.number}`,
     url: over.url ?? `https://github.com/gaberoo322/hydra/pull/${over.number}`,
+    state: over.state ?? "OPEN",
+    headRefName: over.headRefName ?? "",
+    createdAt: over.createdAt ?? "",
     updatedAt: over.updatedAt ?? "",
     statusCheckRollup: over.statusCheckRollup ?? [],
   };

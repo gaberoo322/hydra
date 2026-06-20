@@ -142,6 +142,36 @@ describe("parsePrRows", () => {
     assert.equal(rows[0].statusCheckRollup[0].conclusion, "FAILURE");
     assert.equal(rows[0].statusCheckRollup[1].context, "legacy-status");
   });
+
+  test("extracts state/headRefName/createdAt for the lifecycle-bridge view (issue #2231)", () => {
+    const rows = parsePrRows(
+      [
+        {
+          number: 9,
+          title: "P",
+          state: "merged",
+          headRefName: "agent-deadbeef",
+          createdAt: "2026-06-20T10:00:00Z",
+        },
+      ],
+      "acme/widgets",
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].state, "MERGED");
+    assert.equal(rows[0].headRefName, "agent-deadbeef");
+    assert.equal(rows[0].createdAt, "2026-06-20T10:00:00Z");
+  });
+
+  test("missing lifecycle fields default to '' (not requested → absent, never throws)", () => {
+    const rows = parsePrRows(
+      [{ number: 9, title: "P", statusCheckRollup: [] }],
+      "acme/widgets",
+    );
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].state, "");
+    assert.equal(rows[0].headRefName, "");
+    assert.equal(rows[0].createdAt, "");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -95,8 +95,18 @@ export function resolveGithubRepo(override?: string): string {
  */
 export const ISSUE_JSON_FIELDS = "number,title,url,createdAt,labels,body,state";
 
-/** The canonical open-PR list `--json` field set (CI-rollup view). */
-const PR_LIST_JSON_FIELDS = "number,title,url,updatedAt,statusCheckRollup";
+/**
+ * The canonical open-PR list `--json` field set. Covers BOTH consumer shapes:
+ *   - the CI-rollup view (`updatedAt`, `statusCheckRollup`) the merge-queue
+ *     readers need, and
+ *   - the lifecycle view (`state`, `headRefName`, `createdAt`) the PR Lifecycle
+ *     Bridge (`src/autopilot/pr-lifecycle-bridge.ts`, issue #673) needs to diff
+ *     OPEN→MERGED/CLOSED transitions and attribute an event to a head branch.
+ * Over-fetching a handful of small fields is cheaper than maintaining two
+ * divergent field lists — the same posture {@link ISSUE_JSON_FIELDS} takes.
+ */
+const PR_LIST_JSON_FIELDS =
+  "number,state,title,url,headRefName,createdAt,updatedAt,statusCheckRollup";
 
 /**
  * One GitHub issue as the read seam returns it. A defensively-parsed superset
@@ -129,6 +139,23 @@ export interface PrRow {
   title: string;
   url: string;
   updatedAt: string;
+  /**
+   * Upper-cased PR state (`OPEN` / `MERGED` / `CLOSED`), populated when the
+   * caller requested `state` in its `--json` field set. Defaults to `OPEN` when
+   * the field is present-but-unrecognized, and `""` when not requested at all.
+   * Consumed by the PR Lifecycle Bridge (issue #673) to diff state transitions.
+   */
+  state: string;
+  /**
+   * Head-branch name, populated only when the caller requested `headRefName`.
+   * The lifecycle bridge extracts the dispatch task_id from it; `""` otherwise.
+   */
+  headRefName: string;
+  /**
+   * ISO-8601 created timestamp, populated only when the caller requested
+   * `createdAt`; `""` otherwise.
+   */
+  createdAt: string;
   /** Raw status-check rollup entries; the caller decides which conclusions count as failing. */
   statusCheckRollup: Array<{
     conclusion?: string;
@@ -218,8 +245,11 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
     if (!candidate || typeof candidate !== "object") continue;
     const c = candidate as {
       number?: unknown;
+      state?: unknown;
       title?: unknown;
       url?: unknown;
+      headRefName?: unknown;
+      createdAt?: unknown;
       updatedAt?: unknown;
       statusCheckRollup?: unknown;
     };
@@ -235,11 +265,16 @@ export function parsePrRows(parsed: unknown, repo: string): PrRow[] {
       }));
     out.push({
       number,
+      // State requested → upper-cased; absent → "" (the lifecycle bridge maps
+      // an unrecognized-but-present value to OPEN at its own layer).
+      state: typeof c.state === "string" ? c.state.toUpperCase() : "",
       title: typeof c.title === "string" ? c.title : `PR #${number}`,
       url:
         typeof c.url === "string"
           ? c.url
           : `https://github.com/${repo}/pull/${number}`,
+      headRefName: typeof c.headRefName === "string" ? c.headRefName : "",
+      createdAt: typeof c.createdAt === "string" ? c.createdAt : "",
       updatedAt: typeof c.updatedAt === "string" ? c.updatedAt : "",
       statusCheckRollup,
     });
