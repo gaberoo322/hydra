@@ -104,3 +104,24 @@ export {
 // OAuth Usage Adapter — authoritative server-side meter (issue #1083)
 // ---------------------------------------------------------------------------
 export type { OAuthUsageResult } from "./oauth-usage.ts";
+
+// ---------------------------------------------------------------------------
+// Cost attribution — per-class token rollup (issue #1439, relocated #2219)
+// ---------------------------------------------------------------------------
+// The dispatch-class → cost-bucket mapping (`skillToCostClass`) and per-class
+// token rollup (`projectCostByClass` / `getCostByClass`), relocated out of
+// `src/metrics/aggregate.ts` into `./cost-attribution.ts` (issue #2219) so the
+// Cost domain's knowledge lives in one module. Re-exported here so the public
+// Interface contract stays single-surface.
+export {
+  COST_CLASS_ORDER,
+  skillToCostClass,
+  projectCostByClass,
+  getCostByClass,
+} from "./cost-attribution.ts";
+
+export type {
+  CostClass,
+  CostByClassEntry,
+  CostByClassResult,
+} from "./cost-attribution.ts";

@@ -32,7 +32,7 @@ const {
   projectCostByClass,
   getCostByClass,
   COST_CLASS_ORDER,
-} = await import("../src/metrics/aggregate.ts");
+} = await import("../src/cost/index.ts");
 
 const { recordSubagentTokens } = await import("../src/cost/surrogate.ts");
 const { tokensAutopilotDailyKey, tokensBySkillDailyKey } = await import("../src/redis/cost.ts");
