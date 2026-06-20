@@ -49,12 +49,78 @@ import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 import { getTargetServiceName } from "../target-config.ts";
 import { ovPostJson } from "../knowledge-base/ov-request.ts";
-import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS } from "./probe.ts";
+import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult } from "./probe.ts";
 import { parseRedisInfoSnapshot, type ProbeInputs } from "./diagnostics.ts";
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
+import {
+  readWolConfig,
+  attemptEmbedBackendWake,
+  WakeGate,
+  type WolConfig,
+} from "./wol.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
+
+// ---- embed-backend Wake-on-LAN auto-recovery (issue #2228) -----------------
+//
+// The cooldown + max-attempt state must persist ACROSS heartbeats/health-deep
+// requests (the fan-out runs once per request), so the WakeGate is a single
+// module-level instance — not a per-call object. `embedWakeGate` is reset the
+// moment the embed-backend probe reads `running` again, so a future outage gets
+// a fresh budget of wakes. The WoL config is resolved once at module load from
+// the environment (conservative defaults; auto-wake OFF unless HYDRA_WOL_ENABLED).
+const embedWakeGate = new WakeGate(
+  readWolConfig().cooldownMs,
+  readWolConfig().maxAttempts,
+);
+
+/**
+ * If the embed-backend probe reported `failed`, fire a best-effort WoL wake
+ * (respecting the module-level cooldown + max-attempt gate) and return the
+ * ORIGINAL probe result immediately. The wake is a fire-and-return side-effect:
+ * we never `sleep` + re-probe on the request path, so `GET /health/deep` is
+ * never blocked waiting for the box to POST (#2228 QA blocker — the old inline
+ * 45s reprobe wedged the fan-out for ~45s on every wake attempt). Recovery is
+ * observed by the NEXT scheduled health tick, which is sufficient: the magic
+ * packet has already been broadcast, and a powered-on box answers the next probe.
+ *
+ * Returning `initial` on a failed read means the existing #2131 alert still
+ * fires for THIS tick (the backend is, after all, still down at probe time) —
+ * that's the correct behavior; the wake is a recovery attempt for the NEXT tick,
+ * not a same-request heal. A healthy read resets the gate so the next outage
+ * starts fresh.
+ *
+ * NEVER throws — every failure path inside `attemptEmbedBackendWake` /
+ * `sendMagicPacket` already folds to a result object + fail-loud console.error.
+ *
+ * Injectable `config`, `gate`, and `wake` keep this unit-testable without a real
+ * socket, clock, or network — and there is no clock/sleep to inject anymore.
+ */
+export async function maybeWakeEmbedBackend(
+  initial: ServiceProbeResult,
+  {
+    config = readWolConfig(),
+    gate = embedWakeGate,
+    wake = attemptEmbedBackendWake,
+  }: {
+    config?: WolConfig;
+    gate?: WakeGate;
+    wake?: typeof attemptEmbedBackendWake;
+  } = {},
+): Promise<ServiceProbeResult> {
+  if (initial.status !== "failed") {
+    // Backend healthy → clear the attempt budget so a later outage re-arms.
+    gate.reset();
+    return initial;
+  }
+  // Fire the wake (best-effort, never-throwing) and return immediately. We do
+  // NOT wait for the box to come up — the next scheduled health tick re-probes
+  // and observes recovery. `outcome` is consumed only for the fail-loud logging
+  // already done inside attemptEmbedBackendWake; nothing here blocks on it.
+  await wake(config, gate);
+  return initial;
+}
 
 // ---- assembleProbeInputs — maps the positional settled array to named ProbeInputs --
 //
@@ -192,7 +258,14 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
         probeOvImpl(),
         probeEmbedBackendImpl(),
       ]);
-      return { vikingdb, openviking: ov, "embed-backend": embedBackend };
+      // Issue #2228: if the embed-backend probe failed, FIRE a best-effort
+      // Wake-on-LAN of the gaming PC and return the current probe result
+      // immediately — never block the /health/deep fan-out waiting for the box
+      // to POST. The powered-off box self-heals (the #1794 stretch goal) by the
+      // NEXT scheduled health tick; this tick still surfaces the failure (so the
+      // #2131 alert fires correctly while it's down). NEVER throws.
+      const embedFinal = await maybeWakeEmbedBackend(embedBackend);
+      return { vikingdb, openviking: ov, "embed-backend": embedFinal };
     })(),
     /* 2 */ schedulerStatus(),
     /* 3 */ Promise.resolve({ status: "idle" }),
