@@ -51,12 +51,11 @@ describe("getContext returns a structured LearningContext", () => {
       ],
       "block order is the prompt order — agent-memory first, by-file-reflections last",
     );
-    // Issue #804 PR-B: per-anchor carries the highest dropPriority of all five
-    // blocks (dropped last under budget pressure — #193 retry correctness).
-    const bySource = new Map(ctx.blocks.map((b: any) => [b.source, b.dropPriority]));
-    const maxDrop = Math.max(...ctx.blocks.map((b: any) => b.dropPriority));
-    assert.equal(bySource.get("per-anchor-reflections"), maxDrop,
-      "per-anchor reflections must be the last learning block dropped");
+    // Issue #2198: the within-bundle drop-priority machinery (the
+    // LEARNING_DROP_PRIORITY table that fed the retired in-process budgeter)
+    // was removed when learning.ts collapsed to a diagnostic-only composer.
+    // Blocks no longer carry a `dropPriority`, and the trace's HTTP response
+    // never put it on the wire, so nothing observable changed.
     for (const block of ctx.blocks) {
       assert.ok(
         ["hit", "miss", "error"].includes(block.status),
@@ -64,8 +63,6 @@ describe("getContext returns a structured LearningContext", () => {
       );
       // Issue #804: every block carries a numeric itemCount; 0 for miss/error.
       assert.equal(typeof block.itemCount, "number", `block ${block.source} carries a numeric itemCount`);
-      // Issue #804 PR-B: every block declares its within-bundle drop priority.
-      assert.equal(typeof block.dropPriority, "number", `block ${block.source} carries a numeric dropPriority`);
       if (block.status === "miss") {
         assert.equal(block.content, "", "miss blocks carry no content");
         assert.equal(block.itemCount, 0, "miss blocks carry itemCount 0");
@@ -180,11 +177,6 @@ describe("getContext returns a structured LearningContext", () => {
       `${agentMemory.content}\n\nPRIOR ATTEMPT: stubbed reflection`,
       "toPrompt() concatenates only the two hit blocks with \\n\\n",
     );
-
-    // The frozen drop-order contract is unchanged: per-anchor stays last-dropped.
-    const maxDrop = Math.max(...ctx.blocks.map((b: any) => b.dropPriority));
-    assert.equal(perAnchor.dropPriority, maxDrop,
-      "per-anchor reflections remain the highest dropPriority (last dropped)");
   });
 
   // Issue #2141: a partial deps bag overrides only the named field; the rest
@@ -214,51 +206,13 @@ describe("getContext returns a structured LearningContext", () => {
     assert.ok(agentMemory.content.includes("only this loader is injected"));
   });
 
+  // Issue #2198: the hit/miss/error envelope mapping (previously exercised via
+  // the now-removed generic `loadBlock`) is covered through getContext's stub
+  // path above — the injected-stubs test drives a real hit + two misses, and an
+  // error block is produced whenever a defaulted Redis-backed source throws.
+  // The standalone `loadBlock` describe was dropped with the abstraction.
+
   test("after() — close Redis connections", () => {
     closeRedisConnections();
-  });
-});
-
-/**
- * Issue #1455: the four bespoke block loaders collapsed into ONE generic
- * loader (`loadBlock`) over per-source descriptors. The hit/miss/error envelope
- * mapping is therefore covered by a SINGLE test exercising the loader directly
- * with stub thunks — no Redis, no four near-identical per-source variants.
- */
-describe("loadBlock maps a source read into the hit/miss/error envelope", () => {
-  test("hit / miss / error from one loader, dropPriority stamped from the table", async () => {
-    // hit: non-empty content → status "hit", itemCount carried from the read.
-    const hit = await learning.loadBlock({
-      source: "agent-memory",
-      load: async () => ({ content: "rendered patterns", itemCount: 3 }),
-    });
-    assert.equal(hit.status, "hit");
-    assert.equal(hit.content, "rendered patterns");
-    assert.equal(hit.itemCount, 3);
-    assert.equal(hit.dropPriority, learning.LEARNING_DROP_PRIORITY["agent-memory"]);
-    assert.equal(hit.error, undefined);
-
-    // miss: empty content → status "miss", itemCount forced to 0 regardless of
-    // what the read reported (the seam never emits a count for an empty block).
-    const miss = await learning.loadBlock({
-      source: "knowledge-base",
-      load: async () => ({ content: "", itemCount: 7 }),
-    });
-    assert.equal(miss.status, "miss");
-    assert.equal(miss.content, "");
-    assert.equal(miss.itemCount, 0);
-    assert.equal(miss.dropPriority, learning.LEARNING_DROP_PRIORITY["knowledge-base"]);
-    assert.equal(miss.error, undefined);
-
-    // error: thunk throws → status "error", content "", itemCount 0, error msg.
-    const err = await learning.loadBlock({
-      source: "by-file-reflections",
-      load: async () => { throw new Error("redis down"); },
-    });
-    assert.equal(err.status, "error");
-    assert.equal(err.content, "");
-    assert.equal(err.itemCount, 0);
-    assert.equal(err.dropPriority, learning.LEARNING_DROP_PRIORITY["by-file-reflections"]);
-    assert.equal(err.error, "redis down");
   });
 });
