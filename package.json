@@ -20,6 +20,7 @@
     "journal-seam-check": "npx tsx scripts/ci/journal-seam-check.ts",
     "openviking-seam-check": "npx tsx scripts/ci/openviking-seam-check.ts",
     "anthropic-seam-check": "npx tsx scripts/ci/anthropic-seam-check.ts",
+    "telegram-seam-check": "npx tsx scripts/ci/telegram-seam-check.ts",
     "coupling-check": "npx tsx scripts/ci/target-coupling-check.ts",
     "ast-search": "npx tsx scripts/ast-search.ts",
     "probe-search": "npx tsx scripts/probe-search.ts",

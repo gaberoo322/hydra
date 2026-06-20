@@ -43,6 +43,9 @@ name: seam-checks
 #   anthropic-seam  — #1959: the Anthropic Request Adapter
 #                     (src/anthropic/request.ts) owns the Anthropic Messages
 #                     API fetch() boundary.
+#   telegram-seam   — #2201: the Telegram Notification Adapter
+#                     (src/notify.ts) owns the Telegram Bot API fetch()
+#                     boundary.
 
 on:
   pull_request:
@@ -83,3 +86,6 @@ jobs:
 
       - name: Anthropic-seam check (Anthropic Request Adapter closure ratchet, #1959)
         run: npx tsx scripts/ci/anthropic-seam-check.ts
+
+      - name: Telegram-seam check (Telegram Notification Adapter closure ratchet, #2201)
+        run: npx tsx scripts/ci/telegram-seam-check.ts
