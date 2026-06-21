@@ -57,12 +57,7 @@ export {
 // `./recommendation-prompt.ts`. The engine imports them above (the factory and
 // `defaultLlmClient` call them) and re-exports here so existing import paths
 // (tests + any caller) keep resolving these symbols from the engine.
-export {
-  buildPrompt,
-  parseLlmResponse,
-  PROMPT_SIZE_BUDGET_BYTES,
-  MAX_RECS_PER_CALL,
-};
+export { buildPrompt, parseLlmResponse, PROMPT_SIZE_BUDGET_BYTES };
 
 // ---------------------------------------------------------------------------
 // Public types
