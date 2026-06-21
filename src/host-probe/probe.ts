@@ -43,6 +43,23 @@ export interface MemUsage {
   usedPercent: number;
 }
 
+/**
+ * One `--user` systemd timer record, as emitted by
+ * `systemctl --user list-timers --output=json` (issue #2287).
+ *
+ * `last`/`next` are epoch MICROSECONDS (systemd's native unit). A timer that has
+ * never fired reports `last: 0` — the not-yet-fired sentinel the wiring-liveness
+ * chore must distinguish from a stale timer.
+ */
+export interface TimerRecord {
+  /** Timer unit name, e.g. `"hydra-betting-nba-injuries.timer"`. */
+  unit: string;
+  /** Last-fire time in epoch microseconds; `0` means never fired. */
+  last: number;
+  /** Next-fire time in epoch microseconds; `0` when none scheduled. */
+  next: number;
+}
+
 const BYTES_PER_GIB = 1073741824;
 const roundGb = (bytes: number) => Math.round((bytes / BYTES_PER_GIB) * 10) / 10;
 
@@ -161,4 +178,73 @@ export async function readServiceStatus(
     return { ok: false, code: "host-probe-failed" };
   }
   return { ok: false, code: "host-probe-empty" };
+}
+
+/**
+ * Pure parse of `systemctl --user list-timers --output=json` stdout into a
+ * `TimerRecord[]`. The JSON is an array of `{unit,last,next,...}` objects where
+ * `last`/`next` are epoch microseconds (`0` = never fired). Returns null when
+ * stdout is not a JSON array of timer objects. Exported for unit tests so the
+ * shape is pinned without spawning `systemctl` (issue #2287).
+ *
+ * Defensive: coerces `last`/`next` to finite numbers (defaulting to 0) and skips
+ * entries with no usable `unit` string, so a future systemd JSON field addition
+ * or a partial record can never make the parse throw.
+ */
+export function parseListTimersOutput(stdout: string): TimerRecord[] | null {
+  const trimmed = stdout.trim();
+  if (!trimmed) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const records: TimerRecord[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const unit = (entry as any).unit;
+    if (typeof unit !== "string" || unit === "") continue;
+    const last = Number((entry as any).last);
+    const next = Number((entry as any).next);
+    records.push({
+      unit,
+      last: Number.isFinite(last) ? last : 0,
+      next: Number.isFinite(next) ? next : 0,
+    });
+  }
+  return records;
+}
+
+/**
+ * Probe the `--user` systemd timer set via
+ * `systemctl --user list-timers --all --output=json`. On success the `data` is a
+ * parsed `TimerRecord[]`; on a spawn/timeout/non-zero failure OR unparseable
+ * output the failure arm carries a `host-probe-*` code. `--all` is passed so a
+ * declared-but-inactive timer still appears in the live set (otherwise it would
+ * be indistinguishable from a missing timer). Never throws.
+ *
+ * The wiring-liveness chore (issue #2287) injects a fake reader of this shape in
+ * tests, so no real `systemctl` is spawned under `npm test`.
+ */
+export async function readUserTimers(
+  opts: ProbeExecOptions = {},
+): Promise<ProbeResult<TimerRecord[]>> {
+  const raw = await runProbe(
+    systemctlBin(),
+    ["--user", "list-timers", "--all", "--output=json"],
+    opts,
+  );
+  if (raw.exitCode !== 0 || raw.timedOut || raw.spawnErrorCode) {
+    const code = classifyProbeFailure(raw);
+    console.error(`[host-probe] systemctl list-timers failed (${code}): ${raw.stderr.slice(0, 200)}`);
+    return { ok: false, code };
+  }
+  const parsed = parseListTimersOutput(raw.stdout);
+  if (!parsed) {
+    console.error("[host-probe] systemctl list-timers produced no parseable JSON array");
+    return { ok: false, code: "host-probe-empty" };
+  }
+  return { ok: true, data: parsed };
 }
