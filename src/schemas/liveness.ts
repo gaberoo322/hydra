@@ -98,6 +98,6 @@ export const LivenessManifestSchema = z.object({
 });
 
 export type LivenessEntry = z.infer<typeof LivenessEntrySchema>;
-export type TimerEntry = z.infer<typeof TimerEntrySchema>;
+type TimerEntry = z.infer<typeof TimerEntrySchema>;
 export type OutputEntry = z.infer<typeof OutputEntrySchema>;
 export type LivenessManifest = z.infer<typeof LivenessManifestSchema>;
