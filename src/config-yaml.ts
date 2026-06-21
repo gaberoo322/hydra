@@ -46,7 +46,7 @@ export type YamlScalar = string | number | boolean;
 export type YamlValue = YamlScalar | Record<string, YamlScalar>;
 
 /** The parsed document shape: an optional list (under `topKey`) of record maps. */
-export interface ParsedConfigYaml {
+interface ParsedConfigYaml {
   entries?: Array<Record<string, YamlValue>>;
 }
 
