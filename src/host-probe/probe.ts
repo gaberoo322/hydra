@@ -184,14 +184,13 @@ export async function readServiceStatus(
  * Pure parse of `systemctl --user list-timers --output=json` stdout into a
  * `TimerRecord[]`. The JSON is an array of `{unit,last,next,...}` objects where
  * `last`/`next` are epoch microseconds (`0` = never fired). Returns null when
- * stdout is not a JSON array of timer objects. Exported for unit tests so the
- * shape is pinned without spawning `systemctl` (issue #2287).
+ * stdout is not a JSON array of timer objects (issue #2287).
  *
  * Defensive: coerces `last`/`next` to finite numbers (defaulting to 0) and skips
  * entries with no usable `unit` string, so a future systemd JSON field addition
  * or a partial record can never make the parse throw.
  */
-export function parseListTimersOutput(stdout: string): TimerRecord[] | null {
+function parseListTimersOutput(stdout: string): TimerRecord[] | null {
   const trimmed = stdout.trim();
   if (!trimmed) return null;
   let parsed: unknown;
