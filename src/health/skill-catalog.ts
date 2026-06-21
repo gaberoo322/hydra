@@ -138,7 +138,7 @@ export function assessSkillCatalog(snap: SkillCatalogSnapshot): SkillCatalogAsse
  * failed skill out of four (25%) trips it but a fully-registered catalog (0%)
  * never does.
  */
-export const REGISTRATION_FAILURE_RATE_THRESHOLD = 0.1;
+const REGISTRATION_FAILURE_RATE_THRESHOLD = 0.1;
 
 /** The VLM-liveness facet the failure-rate alert reads, mirroring `OllamaVlmProbeResult`. */
 export interface VlmLiveness {
