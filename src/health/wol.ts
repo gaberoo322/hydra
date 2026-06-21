@@ -42,9 +42,9 @@ export const WOL_PORTS = [9, 7] as const;
 export const WOL_DEFAULT_MAC = "d8:bb:c1:70:62:76";
 export const WOL_DEFAULT_BROADCAST = "10.0.0.255";
 /** Conservative default: at most one wake every 5 minutes. */
-export const WOL_DEFAULT_COOLDOWN_MS = 5 * 60_000;
+const WOL_DEFAULT_COOLDOWN_MS = 5 * 60_000;
 /** After this many consecutive failed wakes, stop and fall through to the alert. */
-export const WOL_DEFAULT_MAX_ATTEMPTS = 3;
+const WOL_DEFAULT_MAX_ATTEMPTS = 3;
 
 /**
  * Parse a MAC address into its 6 raw octets.
