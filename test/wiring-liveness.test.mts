@@ -20,11 +20,14 @@ import {
   parseLivenessYaml,
   loadLivenessManifest,
   diffTimers,
+  evaluateOutputs,
   runWiringLiveness,
   type WiringLivenessResult,
+  type OutputSourceReader,
+  type OutputSeriesResult,
 } from "../src/scheduler/chores/wiring-liveness.ts";
 import type { TimerRecord, ProbeResult } from "../src/host-probe/probe.ts";
-import type { LivenessEntry } from "../src/schemas/liveness.ts";
+import type { LivenessEntry, OutputEntry } from "../src/schemas/liveness.ts";
 
 /** Build a TimerRecord; `lastMs` is epoch-MS, converted to the micros the seam emits. */
 function liveTimer(unit: string, lastMs: number | null): TimerRecord {
@@ -33,6 +36,20 @@ function liveTimer(unit: string, lastMs: number | null): TimerRecord {
 
 function timerEntry(unit: string, maxStaleMinutes: number): LivenessEntry {
   return { unit, type: "timer", maxStaleMinutes };
+}
+
+function outputEntry(
+  source: string,
+  jsonPath: string,
+  value: number,
+  runs: number,
+): OutputEntry {
+  return { type: "output", source, jsonPath, minOverRuns: { value, runs } };
+}
+
+/** A deterministic source reader returning a fixed series (most-recent-LAST). */
+function fakeReader(values: number[]): OutputSourceReader {
+  return async (): Promise<OutputSeriesResult> => ({ ok: true, values });
 }
 
 describe("wiring-liveness: YAML-subset parser", () => {
@@ -84,7 +101,9 @@ describe("wiring-liveness: manifest load + schema validation", () => {
     assert.equal(res.ok, true);
     if (res.ok) {
       assert.equal(res.manifest.entries.length, 1);
-      assert.equal(res.manifest.entries[0].unit, "a.timer");
+      const entry = res.manifest.entries[0];
+      assert.equal(entry.type, "timer");
+      if (entry.type === "timer") assert.equal(entry.unit, "a.timer");
     }
   });
 
@@ -232,5 +251,256 @@ describe("wiring-liveness: runWiringLiveness (never-throws)", () => {
     });
     assert.equal(res.evaluated, false);
     assert.match(res.reason ?? "", /boom/);
+  });
+});
+
+// ===========================================================================
+// Slice 2 (#2288): output check — semantic live-but-inert detection.
+// ===========================================================================
+
+describe("wiring-liveness: YAML-subset parser (output + nested minOverRuns)", () => {
+  test("parses an output entry with a nested minOverRuns mapping", () => {
+    const raw = [
+      "entries:",
+      "  - type: output",
+      "    source: /api/scanner/latest",
+      "    jsonPath: funnelBreakdown.registryPairs",
+      "    minOverRuns:",
+      "      value: 0",
+      "      runs: 3",
+      '    description: "scanner funnel gate"',
+    ].join("\n");
+    const res = parseLivenessYaml(raw);
+    assert.equal(res.ok, true, JSON.stringify(res.errors));
+    assert.equal(res.value.entries?.length, 1);
+    const e = res.value.entries?.[0] as Record<string, unknown>;
+    assert.equal(e.type, "output");
+    assert.equal(e.source, "/api/scanner/latest");
+    assert.equal(e.jsonPath, "funnelBreakdown.registryPairs");
+    assert.deepEqual(e.minOverRuns, { value: 0, runs: 3 });
+    assert.equal(e.description, "scanner funnel gate");
+  });
+
+  test("parses a mixed manifest of timer and output entries", () => {
+    const raw = [
+      "entries:",
+      "  - unit: a.timer",
+      "    type: timer",
+      "    maxStaleMinutes: 60",
+      "  - type: output",
+      "    source: /api/x",
+      "    jsonPath: a.b",
+      "    minOverRuns:",
+      "      value: 5",
+      "      runs: 2",
+    ].join("\n");
+    const res = parseLivenessYaml(raw);
+    assert.equal(res.ok, true, JSON.stringify(res.errors));
+    assert.equal(res.value.entries?.length, 2);
+    assert.equal(res.value.entries?.[0].type, "timer");
+    assert.equal(res.value.entries?.[1].type, "output");
+    assert.deepEqual(res.value.entries?.[1].minOverRuns, { value: 5, runs: 2 });
+  });
+});
+
+describe("wiring-liveness: output manifest load + schema validation", () => {
+  let dir: string;
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), "wiring-liveness-output-"));
+  });
+  after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test("loads a valid output entry into the discriminated union", async () => {
+    const p = join(dir, "output.yaml");
+    await writeFile(
+      p,
+      [
+        "entries:",
+        "  - type: output",
+        "    source: /api/scanner/latest",
+        "    jsonPath: funnelBreakdown.registryPairs",
+        "    minOverRuns:",
+        "      value: 0",
+        "      runs: 3",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+    const res = await loadLivenessManifest(p);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      const entry = res.manifest.entries[0];
+      assert.equal(entry.type, "output");
+      if (entry.type === "output") {
+        assert.equal(entry.source, "/api/scanner/latest");
+        assert.equal(entry.jsonPath, "funnelBreakdown.registryPairs");
+        assert.equal(entry.minOverRuns.value, 0);
+        assert.equal(entry.minOverRuns.runs, 3);
+      }
+    }
+  });
+
+  test("output entry missing minOverRuns yields a typed reason, not a throw", async () => {
+    const p = join(dir, "bad-output.yaml");
+    await writeFile(
+      p,
+      [
+        "entries:",
+        "  - type: output",
+        "    source: /api/x",
+        "    jsonPath: a.b",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+    const res = await loadLivenessManifest(p);
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.match(res.reason, /schema validation failed/);
+  });
+
+  test("output entry with non-integer runs is rejected", async () => {
+    const p = join(dir, "bad-runs.yaml");
+    await writeFile(
+      p,
+      [
+        "entries:",
+        "  - type: output",
+        "    source: /api/x",
+        "    jsonPath: a.b",
+        "    minOverRuns:",
+        "      value: 0",
+        "      runs: 2.5",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+    const res = await loadLivenessManifest(p);
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.match(res.reason, /schema validation failed/);
+  });
+});
+
+describe("wiring-liveness: evaluateOutputs verdicts", () => {
+  test("BELOW-FLOOR: every value in the window at the floor => flagged", async () => {
+    // The seed regression: registryPairs pinned at 0 across the last 3 runs.
+    const entries = [outputEntry("/api/scanner/latest", "funnelBreakdown.registryPairs", 0, 3)];
+    const res = await evaluateOutputs(entries, fakeReader([0, 0, 0]));
+    assert.deepEqual(res.belowFloor, ["/api/scanner/latest"]);
+    assert.deepEqual(res.unreadable, []);
+    assert.equal(res.outputVerdicts[0].status, "below-floor");
+  });
+
+  test("AT-FLOOR (non-zero floor): values equal to the floor count as a hit", async () => {
+    const entries = [outputEntry("/api/x", "a.b", 5, 3)];
+    const res = await evaluateOutputs(entries, fakeReader([5, 4, 5]));
+    assert.deepEqual(res.belowFloor, ["/api/x"]);
+    assert.equal(res.outputVerdicts[0].status, "below-floor");
+  });
+
+  test("RECOVERED: one value above the floor in the window clears the alert", async () => {
+    // Most-recent value is above the floor => OK, no sticky false-positive.
+    const entries = [outputEntry("/api/scanner/latest", "funnelBreakdown.registryPairs", 0, 3)];
+    const res = await evaluateOutputs(entries, fakeReader([0, 0, 7]));
+    assert.deepEqual(res.belowFloor, []);
+    assert.equal(res.outputVerdicts[0].status, "ok");
+    if (res.outputVerdicts[0].status === "ok") {
+      assert.equal(res.outputVerdicts[0].latest, 7);
+    }
+  });
+
+  test("only the trailing `runs` values matter: an old zero outside the window is ignored", async () => {
+    // window=3, series=[0, 9, 9, 9] => last 3 are all above floor => OK.
+    const entries = [outputEntry("/api/x", "a.b", 0, 3)];
+    const res = await evaluateOutputs(entries, fakeReader([0, 9, 9, 9]));
+    assert.deepEqual(res.belowFloor, []);
+    assert.equal(res.outputVerdicts[0].status, "ok");
+  });
+
+  test("not enough history (series shorter than runs) => OK, never flagged", async () => {
+    const entries = [outputEntry("/api/x", "a.b", 0, 3)];
+    const res = await evaluateOutputs(entries, fakeReader([0, 0]));
+    assert.deepEqual(res.belowFloor, []);
+    assert.equal(res.outputVerdicts[0].status, "ok");
+  });
+
+  test("reader failure => UNREADABLE, distinct from a floor hit", async () => {
+    const entries = [outputEntry("/api/x", "a.b", 0, 3)];
+    const read: OutputSourceReader = async () => ({ ok: false, reason: "source 503" });
+    const res = await evaluateOutputs(entries, read);
+    assert.deepEqual(res.belowFloor, []);
+    assert.deepEqual(res.unreadable, ["/api/x"]);
+    assert.equal(res.outputVerdicts[0].status, "unreadable");
+  });
+
+  test("timer entries are ignored by the output evaluator", async () => {
+    const res = await evaluateOutputs([timerEntry("a.timer", 60)], fakeReader([0, 0, 0]));
+    assert.deepEqual(res.belowFloor, []);
+    assert.deepEqual(res.unreadable, []);
+    assert.deepEqual(res.outputVerdicts, []);
+  });
+});
+
+describe("wiring-liveness: runWiringLiveness (output integration)", () => {
+  const NOW = 1_700_000_000_000;
+  const freshTimers = async (): Promise<ProbeResult<TimerRecord[]>> => ({
+    ok: true,
+    data: [liveTimer("a.timer", NOW - 10 * 60_000)],
+  });
+
+  test("flags a below-floor output source alongside healthy timers", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => ({
+        ok: true,
+        manifest: {
+          entries: [
+            timerEntry("a.timer", 60),
+            outputEntry("/api/scanner/latest", "funnelBreakdown.registryPairs", 0, 3),
+          ],
+        },
+      }),
+      readTimers: freshTimers,
+      readOutput: fakeReader([0, 0, 0]),
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.missing, []);
+    assert.deepEqual(res.stale, []);
+    assert.deepEqual(res.belowFloor, ["/api/scanner/latest"]);
+  });
+
+  test("recovered output source clears the alert (no sticky false-positive)", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => ({
+        ok: true,
+        manifest: {
+          entries: [outputEntry("/api/scanner/latest", "funnelBreakdown.registryPairs", 0, 3)],
+        },
+      }),
+      readTimers: freshTimers,
+      readOutput: fakeReader([0, 0, 12]),
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.belowFloor, []);
+    assert.equal(res.outputVerdicts[0].status, "ok");
+  });
+
+  test("default reader (no injection) marks output UNREADABLE, never below-floor", async () => {
+    const res = await runWiringLiveness({
+      loadManifest: async () => ({
+        ok: true,
+        manifest: {
+          entries: [outputEntry("/api/scanner/latest", "funnelBreakdown.registryPairs", 0, 3)],
+        },
+      }),
+      readTimers: freshTimers,
+      now: () => NOW,
+    });
+    assert.equal(res.evaluated, true);
+    assert.deepEqual(res.belowFloor, []);
+    assert.deepEqual(res.unreadable, ["/api/scanner/latest"]);
+    assert.equal(res.outputVerdicts[0].status, "unreadable");
   });
 });

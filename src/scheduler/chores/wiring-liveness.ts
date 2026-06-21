@@ -1,31 +1,34 @@
 /**
- * Wiring-liveness chore (issue #2287, parent epic #2286).
+ * Wiring-liveness chore (issue #2287 slice 1, #2288 slice 2; parent epic #2286).
  *
  * One of the Housekeeping chore family (`src/scheduler/chores/`). It answers a
  * question the Outcome Holdback (`src/holdback.ts`) cannot: did a declared
- * critical entrypoint ever go live at all? The holdback watches a change that IS
- * live for regressions; this chore catches a change that NEVER went live — a
- * declared timer missing from the running systemd set, or one that has gone
- * stale past its freshness window.
+ * critical entrypoint ever go live at all — and once live, is it actually
+ * producing output? The holdback watches a change that IS live for regressions;
+ * this chore catches a change that NEVER went live (a declared timer missing from
+ * the running systemd set, or stale past its window) AND the live-but-inert
+ * failure mode (a source that runs on schedule but produces zero / floor-pinned
+ * output).
  *
- * This slice implements the `timer` check type only. The chore:
- *   1. Loads + validates `config/direction/liveness.yaml` (hand-rolled YAML
- *      subset → zod `safeParse`; no YAML runtime dependency, ADR-0005).
- *   2. Reads the live `--user` timer set through the Host-Probe Adapter accessor
- *      `readUserTimers` (`systemctl --user list-timers --output=json`).
- *   3. Diffs declared vs live into three distinct verdicts — MISSING, STALE,
- *      NOT-YET-FIRED — and surfaces the actionable ones (missing/stale) as a
- *      diagnostic log line. An all-present / all-fresh run is silent.
+ * Two check types:
+ *   - `timer`  (slice 1, #2287): diff declared systemd timers against the live
+ *     `--user` timer set → MISSING, STALE, NOT-YET-FIRED, OK.
+ *   - `output` (slice 2, #2288): read the trailing run-series for a declared
+ *     source (an Orchestrator API path / metric) at a JSON path and flag
+ *     BELOW-FLOOR when every value in the `minOverRuns.runs` window is at or
+ *     below `minOverRuns.value`. A single value above the floor clears the alert
+ *     — the check is stateless, so a recovered source never sticks a
+ *     false-positive.
  *
  * NEVER THROWS (CLAUDE.md fail-loud + host-probe never-throw conventions): every
  * failure mode — manifest read error, parse error, schema-validation error,
- * host-probe spawn/timeout/empty — is routed to a result object, never an
- * exception. Combined with `runChore`'s try/catch in the registry, there is no
- * path by which this chore can abort the housekeeping run.
+ * host-probe spawn/timeout/empty, output-source read error — is routed to a
+ * result object, never an exception. Combined with `runChore`'s try/catch in the
+ * registry, there is no path by which this chore can abort the housekeeping run.
  *
- * NOT-YET-FIRED is the false-positive guard: a timer that exists in the live set
- * but has never fired (`last: 0`, e.g. hydra-betting-nba-injuries before its
- * first 07:00 run) is classified NOT-YET-FIRED and is NEVER flagged STALE.
+ * NOT-YET-FIRED is the timer false-positive guard: a timer that exists in the
+ * live set but has never fired (`last: 0`, e.g. hydra-betting-nba-injuries before
+ * its first 07:00 run) is classified NOT-YET-FIRED and is NEVER flagged STALE.
  */
 
 import { readFile } from "node:fs/promises";
@@ -34,6 +37,7 @@ import { join, resolve } from "node:path";
 import {
   LivenessManifestSchema,
   type LivenessEntry,
+  type OutputEntry,
   type LivenessManifest,
 } from "../../schemas/liveness.ts";
 import {
@@ -56,7 +60,7 @@ const DEFAULT_LIVENESS_FILE = join(CONFIG_PATH, "direction", "liveness.yaml");
 const MICROS_PER_MS = 1000;
 
 // ---------------------------------------------------------------------------
-// YAML-subset parser (issue #2287)
+// YAML-subset parser (issue #2287 slice 1, extended for #2288 slice 2)
 //
 // Follows the PATTERN of `src/outcomes-yaml.ts` (tiny no-dependency tokenizer +
 // zod safeParse downstream) but is NOT a reuse of it — that parser's shape is
@@ -67,15 +71,20 @@ const MICROS_PER_MS = 1000;
 //   - top-level `entries:` introducing a list
 //   - `- key: value` list-item-as-mapping
 //   - subsequent `  key: value` lines belonging to the most recent list item
+//   - a `key:` line with no value opens a ONE-LEVEL nested mapping on the item
+//     (slice 2: `minOverRuns:` → indented `value:` / `runs:` children)
 //   - scalar values: number, boolean, quoted string, bare string
 // ---------------------------------------------------------------------------
 
 /** A single scalar a manifest field can hold in this subset. */
 type YamlScalar = string | number | boolean;
 
+/** A field value: a scalar, or a one-level nested mapping of scalars (slice 2). */
+type YamlValue = YamlScalar | Record<string, YamlScalar>;
+
 /** The parsed document shape before schema validation: a `entries:` list of maps. */
 interface ParsedLivenessYaml {
-  entries?: Array<Record<string, YamlScalar>>;
+  entries?: Array<Record<string, YamlValue>>;
 }
 
 export interface LivenessParseResult {
@@ -129,8 +138,12 @@ export function parseLivenessYaml(raw: string): LivenessParseResult {
   const lines = raw.split("\n");
 
   let currentTopKey: string | null = null;
-  let currentList: Array<Record<string, YamlScalar>> | null = null;
-  let currentItem: Record<string, YamlScalar> | null = null;
+  let currentList: Array<Record<string, YamlValue>> | null = null;
+  let currentItem: Record<string, YamlValue> | null = null;
+  // Slice 2: the open one-level nested mapping (e.g. `minOverRuns:`), and the
+  // indent of the item's own fields (a nested child must sit deeper than that).
+  let currentNested: Record<string, YamlScalar> | null = null;
+  let fieldIndent = -1;
 
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i];
@@ -141,6 +154,8 @@ export function parseLivenessYaml(raw: string): LivenessParseResult {
     const content = stripped.slice(indent);
 
     if (indent === 0) {
+      currentNested = null;
+      fieldIndent = -1;
       const m = content.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
       if (!m) {
         errors.push(`line ${i + 1}: unrecognized top-level syntax: "${rawLine}"`);
@@ -169,6 +184,9 @@ export function parseLivenessYaml(raw: string): LivenessParseResult {
       if (itemMatch) {
         currentItem = {};
         currentList.push(currentItem);
+        currentNested = null;
+        // The item's own fields sit at the indent of the chars after `- `.
+        fieldIndent = indent + content.indexOf(itemMatch[1]);
         currentItem[itemMatch[1]] = parseScalar(itemMatch[2]);
         continue;
       }
@@ -179,7 +197,25 @@ export function parseLivenessYaml(raw: string): LivenessParseResult {
           errors.push(`line ${i + 1}: field '${fieldMatch[1]}' has no enclosing list item`);
           continue;
         }
-        currentItem[fieldMatch[1]] = parseScalar(fieldMatch[2]);
+        const fieldKey = fieldMatch[1];
+        const fieldVal = fieldMatch[2];
+
+        // A line deeper than the item's own fields belongs to the open nested map.
+        if (currentNested && indent > fieldIndent) {
+          currentNested[fieldKey] = parseScalar(fieldVal);
+          continue;
+        }
+
+        // Back at the item-field indent: this is an item field.
+        if (fieldVal.trim() === "") {
+          // `key:` with no value opens a one-level nested mapping (slice 2).
+          const nested: Record<string, YamlScalar> = {};
+          currentItem[fieldKey] = nested;
+          currentNested = nested;
+          continue;
+        }
+        currentNested = null;
+        currentItem[fieldKey] = parseScalar(fieldVal);
         continue;
       }
 
@@ -246,7 +282,7 @@ export async function loadLivenessManifest(
 }
 
 // ---------------------------------------------------------------------------
-// Diff: declared vs live
+// Diff: declared vs live (timer check, slice 1)
 // ---------------------------------------------------------------------------
 
 /** Per-entry verdict from diffing a declared timer against the live set. */
@@ -255,6 +291,19 @@ type TimerVerdict =
   | { unit: string; status: "missing" }
   | { unit: string; status: "not-yet-fired" }
   | { unit: string; status: "stale"; lastFiredMsAgo: number; maxStaleMinutes: number };
+
+/** Per-entry verdict from evaluating a declared output source (slice 2). */
+type OutputVerdict =
+  | { source: string; jsonPath: string; status: "ok"; latest: number }
+  | {
+      source: string;
+      jsonPath: string;
+      status: "below-floor";
+      window: number[];
+      floor: number;
+      runs: number;
+    }
+  | { source: string; jsonPath: string; status: "unreadable"; reason: string };
 
 /** The chore's never-throwing result object. */
 export interface WiringLivenessResult {
@@ -268,8 +317,14 @@ export interface WiringLivenessResult {
   stale: string[];
   /** Declared timers present but never-fired-yet (false-positive guard). */
   notYetFired: string[];
-  /** Every per-entry verdict, for diagnostics/tests. */
+  /** Declared output sources pinned at/below their floor across the run window. */
+  belowFloor: string[];
+  /** Declared output sources whose live value could not be read this run. */
+  unreadable: string[];
+  /** Every per-entry timer verdict, for diagnostics/tests. */
   verdicts: TimerVerdict[];
+  /** Every per-entry output verdict, for diagnostics/tests. */
+  outputVerdicts: OutputVerdict[];
 }
 
 /**
@@ -284,8 +339,8 @@ export interface WiringLivenessResult {
  *   - STALE          — present, has fired, and `now - last > maxStaleMinutes`.
  *   - OK             — present and fresh.
  *
- * Only `type: "timer"` entries are evaluated in this slice; any other type is
- * skipped (forward-compatible with future check types).
+ * Only `type: "timer"` entries are evaluated here; other types are skipped (the
+ * `output` type is evaluated separately by {@link evaluateOutputs}).
  */
 export function diffTimers(
   entries: LivenessEntry[],
@@ -328,7 +383,120 @@ export function diffTimers(
     verdicts.push({ unit: entry.unit, status: "ok", lastFiredMsAgo });
   }
 
-  return { evaluated: true, missing, stale, notYetFired, verdicts };
+  return {
+    evaluated: true,
+    missing,
+    stale,
+    notYetFired,
+    belowFloor: [],
+    unreadable: [],
+    verdicts,
+    outputVerdicts: [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Evaluate: declared output sources (slice 2, #2288)
+// ---------------------------------------------------------------------------
+
+/**
+ * The trailing run-series for one output source, most-recent-LAST. The chore asks
+ * the injected reader for observations of `source`@`jsonPath`; the reader returns
+ * the numeric values it observed across recent runs (it MAY return fewer than the
+ * window — a young source). A failed read returns an error result so the chore
+ * surfaces UNREADABLE rather than mistaking an absent series for a floor hit.
+ */
+export type OutputSeriesResult =
+  | { ok: true; values: number[] }
+  | { ok: false; reason: string };
+
+/**
+ * Type guard narrowing an {@link OutputSeriesResult} to its failure arm. As with
+ * {@link isLoadFailure} and the host-probe `isProbeFailure`, the orchestrator's
+ * `strict: false` tsconfig cannot discriminate this union on `ok` via a plain
+ * `if (!series.ok)`, so callers narrow through this guard instead.
+ */
+function isSeriesFailure(
+  result: OutputSeriesResult,
+): result is { ok: false; reason: string } {
+  return result.ok === false;
+}
+
+/**
+ * Injectable reader for an output source's trailing run-series. Real callers wire
+ * this to whatever queries the live source (an Orchestrator API path / metric
+ * history); tests inject a deterministic fake so below-floor / at-floor /
+ * recovered cases are reproducible without network or time. Never throws — a read
+ * failure is an `{ ok: false, reason }` result.
+ */
+export type OutputSourceReader = (entry: OutputEntry) => Promise<OutputSeriesResult>;
+
+/**
+ * Pure evaluation of declared `output` entries against their trailing run-series.
+ * Exported so the verdict logic is unit-tested without I/O.
+ *
+ * For each `output` entry the reader is asked for the source's recent values; the
+ * verdict is:
+ *   - UNREADABLE  — the reader failed. Surfaced distinctly from a floor hit (an
+ *                   unreadable source is NOT a zero-output source).
+ *   - BELOW-FLOOR — the trailing window (the last `runs` observations) is full
+ *                   AND every value in it is `<= minOverRuns.value`. This is the
+ *                   live-but-inert signal: the source ran but stayed pinned at or
+ *                   under the floor across the whole window.
+ *   - OK          — at least one value in the window is ABOVE the floor (a
+ *                   recovered source clears immediately — no sticky
+ *                   false-positive), or the series is shorter than `runs` (not
+ *                   yet enough history to conclude inert).
+ */
+export async function evaluateOutputs(
+  entries: LivenessEntry[],
+  read: OutputSourceReader,
+): Promise<{
+  belowFloor: string[];
+  unreadable: string[];
+  outputVerdicts: OutputVerdict[];
+}> {
+  const belowFloor: string[] = [];
+  const unreadable: string[] = [];
+  const outputVerdicts: OutputVerdict[] = [];
+
+  for (const entry of entries) {
+    if (entry.type !== "output") continue;
+    const source = entry.source;
+    const jsonPath = entry.jsonPath;
+    const floor = entry.minOverRuns.value;
+    const runs = entry.minOverRuns.runs;
+
+    const series = await read(entry);
+    if (isSeriesFailure(series)) {
+      outputVerdicts.push({ source, jsonPath, status: "unreadable", reason: series.reason });
+      unreadable.push(source);
+      continue;
+    }
+
+    // Take the trailing `runs` observations (most-recent-last).
+    const window = series.values.slice(-runs);
+
+    // Not enough history yet to conclude the source is inert → OK (no alarm).
+    if (window.length < runs) {
+      const latest = window.length > 0 ? window[window.length - 1] : floor;
+      outputVerdicts.push({ source, jsonPath, status: "ok", latest });
+      continue;
+    }
+
+    // BELOW-FLOOR only when EVERY value in the full window is at or below the
+    // floor. A single value above the floor → OK (recovered, no sticky alert).
+    const allAtOrBelow = window.every((v) => v <= floor);
+    if (allAtOrBelow) {
+      outputVerdicts.push({ source, jsonPath, status: "below-floor", window, floor, runs });
+      belowFloor.push(source);
+      continue;
+    }
+
+    outputVerdicts.push({ source, jsonPath, status: "ok", latest: window[window.length - 1] });
+  }
+
+  return { belowFloor, unreadable, outputVerdicts };
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +511,15 @@ export interface WiringLivenessDeps {
    * `readUserTimers` from the host-probe seam.
    */
   readTimers?: () => Promise<ProbeResult<TimerRecord[]>>;
+  /**
+   * Injectable output-source reader (slice 2). Tests pass a deterministic fake so
+   * below-floor / at-floor / recovered cases are reproducible. When omitted, the
+   * chore uses {@link defaultOutputReader} — a no-op that marks every output
+   * source UNREADABLE (no live network reader is wired yet; a follow-up supplies
+   * it). UNREADABLE is informational, not an alert, so the scheduled chore stays
+   * silent for outputs until a real reader is injected.
+   */
+  readOutput?: OutputSourceReader;
   /** Injectable manifest loader so tests can point at a fixture. */
   loadManifest?: (filePath?: string) => Promise<LoadManifestResult>;
   /** Path to the manifest; defaults to {@link DEFAULT_LIVENESS_FILE}. */
@@ -352,11 +529,24 @@ export interface WiringLivenessDeps {
 }
 
 /**
+ * The default output reader: a no-op that reports every output source UNREADABLE
+ * with a "no live reader wired" reason. The live source reader (an Orchestrator
+ * API / metric-history query) is a follow-up; until then output entries are
+ * declared in the manifest and exercised by tests via an injected reader, but the
+ * scheduled chore does not yet hit a real source — it stays silent because an
+ * UNREADABLE verdict is informational, not an alert (see {@link runWiringLiveness}).
+ */
+const defaultOutputReader: OutputSourceReader = async (entry) => ({
+  ok: false,
+  reason: `no live output reader wired for source '${entry.source}'`,
+});
+
+/**
  * Run the wiring-liveness chore. Loads the manifest, reads the live timers, diffs
- * them, and logs a single diagnostic line when there is something actionable
- * (missing or stale). A clean run (manifest valid, timers read, nothing
- * missing/stale) is SILENT — mirroring work-queue-hygiene, which only logs when
- * there is something to report.
+ * them, evaluates declared output sources, and logs a single diagnostic line when
+ * there is something actionable (missing/stale timers or below-floor outputs). A
+ * clean run (manifest valid, timers read, nothing flagged) is SILENT — mirroring
+ * work-queue-hygiene, which only logs when there is something to report.
  *
  * Never throws — a load failure, an empty/failed host-probe, or any other error
  * is caught and routed to a `{ evaluated: false, reason }` result with a logged
@@ -369,43 +559,40 @@ export async function runWiringLiveness(
 ): Promise<WiringLivenessResult> {
   const loadManifest = deps.loadManifest ?? loadLivenessManifest;
   const readTimers = deps.readTimers ?? readUserTimers;
+  const readOutput = deps.readOutput ?? defaultOutputReader;
   const now = deps.now ?? Date.now;
 
   try {
     const loaded = await loadManifest(deps.manifestPath);
     if (isLoadFailure(loaded)) {
       console.error(`[Housekeeping] wiring-liveness: ${loaded.reason}`);
-      return {
-        evaluated: false,
-        reason: loaded.reason,
-        missing: [],
-        stale: [],
-        notYetFired: [],
-        verdicts: [],
-      };
+      return emptyResult({ evaluated: false, reason: loaded.reason });
     }
 
     const probe = await readTimers();
     if (isProbeFailure(probe)) {
       const reason = `host-probe failed (${probe.code})`;
       console.error(`[Housekeeping] wiring-liveness: ${reason}`);
-      return {
-        evaluated: false,
-        reason,
-        missing: [],
-        stale: [],
-        notYetFired: [],
-        verdicts: [],
-      };
+      return emptyResult({ evaluated: false, reason });
     }
 
     const result = diffTimers(loaded.manifest.entries, probe.data, now());
 
-    if (result.missing.length > 0 || result.stale.length > 0) {
+    const outputs = await evaluateOutputs(loaded.manifest.entries, readOutput);
+    result.belowFloor = outputs.belowFloor;
+    result.unreadable = outputs.unreadable;
+    result.outputVerdicts = outputs.outputVerdicts;
+
+    if (result.missing.length > 0 || result.stale.length > 0 || result.belowFloor.length > 0) {
       const parts: string[] = [];
-      if (result.missing.length > 0) parts.push(`missing: ${result.missing.join(", ")}`);
-      if (result.stale.length > 0) parts.push(`stale: ${result.stale.join(", ")}`);
-      console.warn(`[Housekeeping] wiring-liveness flagged declared timers — ${parts.join("; ")}`);
+      if (result.missing.length > 0) parts.push(`missing timers: ${result.missing.join(", ")}`);
+      if (result.stale.length > 0) parts.push(`stale timers: ${result.stale.join(", ")}`);
+      if (result.belowFloor.length > 0) {
+        parts.push(`below-floor outputs: ${result.belowFloor.join(", ")}`);
+      }
+      console.warn(
+        `[Housekeeping] wiring-liveness flagged declared entrypoints — ${parts.join("; ")}`,
+      );
     }
 
     return result;
@@ -414,13 +601,24 @@ export async function runWiringLiveness(
     // never leak an exception even if a dep does. Fail loud, return a result.
     const reason = `unexpected error: ${err?.message || err}`;
     console.error(`[Housekeeping] wiring-liveness: ${reason}`);
-    return {
-      evaluated: false,
-      reason,
-      missing: [],
-      stale: [],
-      notYetFired: [],
-      verdicts: [],
-    };
+    return emptyResult({ evaluated: false, reason });
   }
+}
+
+/** Build a zeroed result with the given header fields (avoids repeating empties). */
+function emptyResult(header: {
+  evaluated: boolean;
+  reason?: string;
+}): WiringLivenessResult {
+  return {
+    evaluated: header.evaluated,
+    reason: header.reason,
+    missing: [],
+    stale: [],
+    notYetFired: [],
+    belowFloor: [],
+    unreadable: [],
+    verdicts: [],
+    outputVerdicts: [],
+  };
 }

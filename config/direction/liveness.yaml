@@ -13,16 +13,32 @@
 # contract surface — mirroring how src/outcomes.ts reads outcomes.yaml.
 #
 # Schema (src/schemas/liveness.ts; parsed by a hand-rolled YAML subset, no
-# runtime YAML dependency per ADR-0005):
-#   unit             systemd --user timer unit name, including the .timer suffix
-#   type             check type; only `timer` is implemented in this slice
-#   maxStaleMinutes  freshness window — a timer present in the live set whose
-#                    last fire is older than this is flagged STALE. A timer that
-#                    has never fired yet (last: 0) is NOT-YET-FIRED, never STALE.
-#   description      (optional) why this entrypoint is critical
+# runtime YAML dependency per ADR-0005). Each entry is one of two check types,
+# discriminated on `type`:
 #
-# This slice (#2287) hand-curates the known-critical Target timers verified live
-# via `systemctl --user list-timers`. maxStaleMinutes is set generously above
+# type: timer  (slice 1, #2287) — a declared systemd --user timer that should be
+#   present-and-fresh in the running set:
+#     unit             systemd --user timer unit name, including the .timer suffix
+#     maxStaleMinutes  freshness window — a timer present in the live set whose
+#                      last fire is older than this is flagged STALE. A timer that
+#                      has never fired yet (last: 0) is NOT-YET-FIRED, never STALE.
+#     description      (optional) why this entrypoint is critical
+#
+# type: output  (slice 2, #2288) — the live-but-inert failure mode: code runs on
+#   schedule but produces zero / floor-pinned output:
+#     source           a live source identifier — an Orchestrator API path (e.g.
+#                      /api/scanner/latest) or a metric name
+#     jsonPath         dotted path into the source's response (e.g.
+#                      funnelBreakdown.registryPairs)
+#     minOverRuns      the floor: { value, runs }. The chore reads the source's
+#                      trailing run-series and flags BELOW-FLOOR only when every
+#                      value across the last `runs` observations is <= `value`. A
+#                      single value above the floor clears the alert — the check
+#                      is stateless, so a recovered source never sticks.
+#     description      (optional) why this output is critical
+#
+# The timer entries (#2287) hand-curate the known-critical Target timers verified
+# live via `systemctl --user list-timers`. maxStaleMinutes is set generously above
 # each timer's nominal cadence so normal jitter never false-alarms.
 
 entries:
@@ -58,3 +74,18 @@ entries:
     type: timer
     maxStaleMinutes: 1560
     description: Forecast-outcome settlement loop (calibration/brier feed).
+
+  # Output checks (slice 2, #2288) — live-but-inert detection.
+  #
+  # Seed: the scanner funnel registry gate. The registry-seed bug zeroed
+  # funnelBreakdown.registryPairs while the scan loop kept running on schedule
+  # (the exact live-but-inert mode this check exists for). A floor of value:0
+  # over runs:3 flags only a source pinned at zero registry pairs across three
+  # consecutive scans; the first non-zero scan clears it.
+  - type: output
+    source: /api/scanner/latest
+    jsonPath: funnelBreakdown.registryPairs
+    minOverRuns:
+      value: 0
+      runs: 3
+    description: Scanner funnel registry gate — must produce >0 registry pairs (registry-seed regression guard).
