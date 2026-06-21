@@ -24,6 +24,17 @@
 //                                        only completable by a spawn-capable
 //                                        dispatch, so the feed must hide it from
 //                                        inline (non-spawn) sessions.
+//   - `requiresNonPrDispatch(item)`    — the PR-deliverability gate (issue
+//                                        #2282): an anchor whose artifact lives
+//                                        in host-local systemd config, behind an
+//                                        operator-gated secret/approval, or
+//                                        requires live-data / prod-DB verification
+//                                        is NOT deliverable by ANY code-writing
+//                                        PR — every pickup is a guaranteed wasted
+//                                        cycle (ground → analyse → release). The
+//                                        feed (and the atomic-claim path) must
+//                                        skip it for every caller, routing it to
+//                                        the operator/deploy path instead.
 //
 // Both are PURE and deterministic given an injected `now` — no Redis, no I/O.
 // They read fields off the candidate item and compare against `now`, exactly as
@@ -131,6 +142,75 @@ export function requiresSpawnCapableDispatch(item: any): boolean {
   }
   const labels = item.labels;
   if (Array.isArray(labels) && labels.some((l: any) => l === "dispatch-spawn-capable")) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The canonical label set marking an anchor as **not deliverable by any PR**
+ * (issue #2282). Each names a class of artifact a code-writing worktree
+ * structurally cannot produce:
+ *   - `non-pr-deliverable`   — the generic catch-all class.
+ *   - `host-systemd`         — the artifact is a host-local systemd unit edit
+ *                              (`~/.config/systemd/user/*.service`) not tracked
+ *                              in the repo (item-559, item-509).
+ *   - `operator-gated`       — gated on an operator-supplied secret / money-
+ *                              critical approval no PR can satisfy (item-555:
+ *                              `BALLDONTLIE_API_KEY` + host `systemctl`).
+ *   - `live-data`            — completion requires live fixtures / prod-DB
+ *                              assertions no worktree can run (item-523).
+ * A producer (retro, planner) stamps ANY of these to route the anchor away from
+ * the code-writing feed. Membership is exact-string; an unknown label never
+ * trips the gate (it only ever subtracts the known-undeliverable population).
+ */
+export const NON_PR_DELIVERABLE_LABELS: readonly string[] = [
+  "non-pr-deliverable",
+  "host-systemd",
+  "operator-gated",
+  "live-data",
+];
+
+/**
+ * Detect that an anchor is **not deliverable by any code-writing PR** (issue
+ * #2282) and therefore must be skipped by the Target candidate feed AND the
+ * atomic-claim path — not merely re-routed to a different dispatch class.
+ *
+ * This is the Target-side sibling of `requiresSpawnCapableDispatch` (#2075), but
+ * with a stronger consequence: a spawn-capable anchor IS buildable (by a
+ * spawn-capable dispatch), so #2075 only hides it from INLINE callers; a
+ * non-PR-deliverable anchor is buildable by NO dispatch at all — its artifact
+ * lives in host-local systemd config, behind an operator-gated secret/approval,
+ * or requires live-data / prod-DB verification. Serving it to a code-writing
+ * dispatch burns a guaranteed grounding+analysis+release cycle every time, so
+ * the gate suppresses it for EVERY caller (the sessions already perform this
+ * release-and-rescan by hand — this makes it declarative). The operator/deploy
+ * path remains the correct home for the work; this only keeps it off the
+ * code-writing feed.
+ *
+ * Pure and side-effect-free. The flag is accepted in the same three carrier
+ * shapes as `requiresSpawnCapableDispatch` so producers across both live lanes
+ * (free-form work-queue JSON, kanban-item meta, GitHub-issue labels) can stamp
+ * it without a schema change:
+ *   - a top-level `nonPrDeliverable: true` (work-queue JSON entries)
+ *   - a `meta.nonPrDeliverable: true` (kanban backlog items carry `meta`)
+ *   - any `NON_PR_DELIVERABLE_LABELS` entry in a `labels` array (the GitHub-issue
+ *     label form, mirrored onto the candidate)
+ * Any non-true / absent value degrades to `false` (deliverable) so an un-flagged
+ * anchor is never hidden — this gate only ever SUBTRACTS the known-undeliverable
+ * anchors, never the default population.
+ */
+export function requiresNonPrDispatch(item: any): boolean {
+  if (!item || typeof item !== "object") return false;
+  if (item.nonPrDeliverable === true) return true;
+  if (item.meta && typeof item.meta === "object" && item.meta.nonPrDeliverable === true) {
+    return true;
+  }
+  const labels = item.labels;
+  if (
+    Array.isArray(labels) &&
+    labels.some((l: any) => typeof l === "string" && NON_PR_DELIVERABLE_LABELS.includes(l))
+  ) {
     return true;
   }
   return false;

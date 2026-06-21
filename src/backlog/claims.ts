@@ -10,6 +10,13 @@ import {
   loadMergedAnchorRefsImpl,
   type MergedAnchorRefsLoader,
 } from "./merged-refs.ts";
+// PR-deliverability gate (issue #2282) — pure predicate, no I/O. The atomic
+// claim mirrors the candidate feed: an anchor that is host-systemd-only /
+// operator-gated / live-data is deliverable by no code-writing dispatch, so a
+// pop-head claim skips it (reconciling it OUT of the queue) and a targeted claim
+// returns `not-pr-deliverable` rather than handing the session a guaranteed
+// no-op.
+import { requiresNonPrDispatch } from "./candidate-eligibility.ts";
 
 /**
  * Injectable dependencies for `claimNextQueuedItem`.
@@ -110,6 +117,22 @@ return raw
  * the pop-head variant retries; targeted claims (`itemId` present) return
  * `{claimed:false, reason:"already-shipped"}` immediately so callers can
  * give clear feedback rather than silently redirecting to another item.
+ *
+ * Issue #2282 — PR-deliverability filter: a claimed item flagged
+ * host-systemd-only / operator-gated / live-data (`requiresNonPrDispatch`) is
+ * deliverable by no code-writing dispatch, so it is routed OUT of the claim
+ * hot-path — but the work is real (it belongs to the operator/deploy path), so
+ * per the `issue-2282` design-concept invariant[1] it is RE-QUEUED to the
+ * `queued` lane at a TAIL score rather than reconciled to `done` or moved to
+ * `blocked`. A tail score sorts the item last, so it won't immediately re-pop
+ * on the next claim, yet it stays claimable by the operator/deploy path that
+ * CAN deliver it. (rejectedAlternatives[4] explicitly declined the blocked
+ * lane: blocked moves carry operator semantics + a required reason; a
+ * skip-and-requeue is lighter and reversible — no `blockedReason` is set.)
+ * Pop-head retries the next queued item (sharing the `maxShippedSkips`
+ * budget); a targeted claim returns `{claimed:false, reason:"not-pr-deliverable"}`.
+ * This filter runs BEFORE the shipped-item check (a stale undeliverable anchor
+ * never even reaches the `gh`-backed merged scan).
  */
 export async function claimNextQueuedItem(
   claimedBy: string,
@@ -164,6 +187,61 @@ export async function claimNextQueuedItem(
 
     if (parsed.blocked) {
       return { claimed: false, reason: parsed.blocked, count: parsed.count };
+    }
+
+    // Issue #2282 — PR-deliverability filter. An anchor that is host-systemd-
+    // only / operator-gated / live-data is deliverable by NO code-writing
+    // dispatch; serving it burns a guaranteed ground+analyse+release cycle. The
+    // pure `requiresNonPrDispatch` predicate reads declarative flags off the
+    // item (no I/O). Unlike the shipped-item filter below, the work is NOT done
+    // — it belongs to the operator/deploy path — so per the design-concept
+    // invariant[1] the item is RE-QUEUED to the `queued` lane at a TAIL score
+    // (sorts last, won't re-pop on the very next claim) rather than reconciled
+    // to `done` or moved to `blocked`. It stays claimable by the operator/
+    // deploy path that CAN deliver it, with no `blockedReason` stamped
+    // (rejectedAlternatives[4]: skip-and-requeue is lighter + reversible than a
+    // blocked move, which carries operator semantics and a required reason).
+    //   - Targeted claim: return `not-pr-deliverable` (no silent redirect).
+    //   - Pop-head: re-queue at tail + retry the next queued item (capped by the
+    //     same maxShippedSkips budget so a fully-undeliverable queue terminates).
+    if (requiresNonPrDispatch(parsed)) {
+      try {
+        await removeFromBacklogLane("inProgress", parsed.id);
+        applyLaneTransition(parsed, "queued", { claimedBy: null });
+        await saveItem(parsed);
+        // Tail score: the queued lane sorts ASCENDING (the Lua pop-head reads
+        // `ZRANGE 0 0` = lowest score), and normal queued items score at
+        // `Date.now()`. Doubling guarantees this re-queued item outranks every
+        // normal timestamp so it sorts LAST, while still ordering successive
+        // skips relative to each other (a later skip lands after an earlier one).
+        const tailScore = Date.now() * 2;
+        await addToBacklogLane("queued", tailScore, parsed.id);
+        console.error(
+          `[backlog/claim] not-pr-deliverable-skip: item ${parsed.id} ("${truncate(parsed.title ?? "", 60)}") ` +
+            `is host-systemd / operator-gated / live-data — re-queued at tail for the operator/deploy path ` +
+            `(claimedBy=${claimedBy}, skip=${shippedSkipped + 1}/${maxSkips})`,
+        );
+      } catch (err) {
+        console.error(
+          `[backlog/claim] not-pr-deliverable-skip: failed to re-queue item ${parsed.id} to queued — leaving in inProgress`,
+          err,
+        );
+      }
+
+      // Targeted claim: don't silently redirect to a different item.
+      if (itemId !== undefined) {
+        return { claimed: false, reason: "not-pr-deliverable" };
+      }
+
+      // Pop-head: retry, but only up to maxSkips times to avoid infinite loops.
+      shippedSkipped++;
+      if (shippedSkipped >= maxSkips) {
+        console.error(
+          `[backlog/claim] not-pr-deliverable-skip: hit maxShippedSkips (${maxSkips}) — returning empty (claimedBy=${claimedBy})`,
+        );
+        return { claimed: false, reason: "empty" };
+      }
+      continue;
     }
 
     // Issue #1969 — shipped-item filter. Check whether the item's identity

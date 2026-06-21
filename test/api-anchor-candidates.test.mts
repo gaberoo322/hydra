@@ -373,6 +373,102 @@ describe("getCandidateFeed — inline-buildability gate (#2075)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// PR-deliverability gate (issue #2282) — an anchor that is host-systemd-only /
+// operator-gated / live-data is deliverable by NO code-writing dispatch, so the
+// feed hides it from EVERY caller by default (not just inline ones, unlike
+// #2075). The release-and-rescan the sessions did by hand is now declarative.
+// ---------------------------------------------------------------------------
+
+describe("getCandidateFeed — PR-deliverability gate (#2282)", () => {
+  test("suppresses a kanban anchor flagged nonPrDeliverable for every caller (default)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [
+          { id: 559, title: "Install hydra-betting-ingest.service systemd unit", movedAt: isoAgo(0), meta: { nonPrDeliverable: true } },
+          { id: 560, title: "Repo-buildable scanner fix", movedAt: isoAgo(0) },
+        ],
+        backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const titles = feed.candidates.map((c) => c.title);
+    assert.ok(!titles.includes("Install hydra-betting-ingest.service systemd unit"), "host-systemd anchor hidden");
+    assert.ok(titles.includes("Repo-buildable scanner fix"), "buildable anchor still surfaces");
+    assert.equal(feed.non_pr_deliverable_suppressed, 1);
+  });
+
+  test("suppresses a work-queue entry by canonical class label (host-systemd)", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-559 scan-after-ingest ExecStartPost", queuedAt: isoAgo(0), labels: ["host-systemd"] }),
+        JSON.stringify({ reference: "item-529 code-buildable", queuedAt: isoAgo(0) }),
+      ],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const refs = feed.candidates.map((c) => c.anchorRef);
+    assert.ok(!refs.some((r) => r.includes("item-559")), "host-systemd work-queue entry hidden");
+    assert.ok(refs.some((r) => r.includes("item-529")), "buildable work-queue entry still surfaces");
+    assert.equal(feed.non_pr_deliverable_suppressed, 1);
+  });
+
+  test("operator-gated and live-data work-queue entries are both suppressed", async () => {
+    const deps = makeDeps({
+      getWorkQueueItems: async () => [
+        JSON.stringify({ reference: "item-555 arbitrage timer (BALLDONTLIE_API_KEY)", queuedAt: isoAgo(0), labels: ["operator-gated"] }),
+        JSON.stringify({ reference: "item-523 scanner-live-pairs (prod-DB assertions)", queuedAt: isoAgo(0), nonPrDeliverable: true }),
+        JSON.stringify({ reference: "item-529 buildable", queuedAt: isoAgo(0) }),
+      ],
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    const refs = feed.candidates.map((c) => c.anchorRef);
+    assert.equal(feed.non_pr_deliverable_suppressed, 2);
+    assert.deepEqual(refs, ["item-529 buildable"]);
+  });
+
+  test("excludeNonPrDeliverable=false surfaces the anchor (raw operator view)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: 559, title: "Host systemd install", movedAt: isoAgo(0), meta: { nonPrDeliverable: true } }],
+        backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW, excludeNonPrDeliverable: false }, deps);
+    assert.ok(feed.candidates.map((c) => c.title).includes("Host systemd install"));
+    assert.equal(feed.non_pr_deliverable_suppressed, 0);
+  });
+
+  test("gate fires regardless of inlineMode (buildable by no dispatch, unlike #2075)", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: 559, title: "Host systemd install", movedAt: isoAgo(0), labels: ["host-systemd"] }],
+        backlog: [],
+      }),
+    });
+    // Even a spawn-capable (non-inline) caller must not be served it.
+    const feed = await getCandidateFeed({ now: NOW, inlineMode: false }, deps);
+    assert.equal(feed.candidates.length, 0);
+    assert.equal(feed.non_pr_deliverable_suppressed, 1);
+    assert.equal(feed.spawn_suppressed, 0);
+  });
+
+  test("an un-flagged anchor is never hidden by this gate", async () => {
+    const deps = makeDeps({
+      loadBacklog: async () => ({
+        inProgress: [],
+        queued: [{ id: 1, title: "Ordinary repo work", movedAt: isoAgo(0), labels: ["ready-for-agent", "enhancement"] }],
+        backlog: [],
+      }),
+    });
+    const feed = await getCandidateFeed({ now: NOW }, deps);
+    assert.equal(feed.candidates.length, 1);
+    assert.equal(feed.non_pr_deliverable_suppressed, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Merged-by-cycle suppression (issue #882) — the core fix: shipped work whose
 // PR already MERGED (no lingering OPEN PR) must NOT resurface in the feed.
 // ---------------------------------------------------------------------------
@@ -651,6 +747,7 @@ describe("GET /anchor/candidates — thin route", () => {
     assert.ok("total_evaluated" in res._body);
     assert.ok("in_flight_suppressed" in res._body);
     assert.ok("merged_suppressed" in res._body);
+    assert.ok("non_pr_deliverable_suppressed" in res._body);
     assert.equal(typeof res._body.generated_at, "string");
   });
 });

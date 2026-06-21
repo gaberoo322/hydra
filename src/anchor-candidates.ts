@@ -92,6 +92,7 @@ import {
   isInFlightPR,
   isBlockerJustCleared,
   requiresSpawnCapableDispatch,
+  requiresNonPrDispatch,
 } from "./backlog/candidate-eligibility.ts";
 
 // ---------------------------------------------------------------------------
@@ -171,6 +172,14 @@ export interface CandidateFeed {
    * dispatch sees every candidate.
    */
   spawn_suppressed: number;
+  /**
+   * Count of candidates suppressed because the anchor is not deliverable by ANY
+   * code-writing PR — host-systemd-only, operator-gated, or live-data/prod-DB
+   * verification (issue #2282). Unlike `spawn_suppressed` this fires for EVERY
+   * caller by default (the work is buildable by no dispatch at all); pass
+   * `excludeNonPrDeliverable=false` for the raw operator view.
+   */
+  non_pr_deliverable_suppressed: number;
 }
 
 export interface GetCandidateFeedOpts {
@@ -193,6 +202,18 @@ export interface GetCandidateFeedOpts {
    * sees every candidate, so this gate only ever subtracts for inline callers.
    */
   inlineMode?: boolean;
+  /**
+   * Suppress anchors that are not deliverable by ANY code-writing PR —
+   * host-systemd-only, operator-gated, or live-data/prod-DB verification (issue
+   * #2282). Defaults to TRUE: such an anchor burns a guaranteed grounding +
+   * analysis + release cycle every time it is served to a code-writing
+   * dispatch, so it is hidden from the candidate feed for every caller (NOT just
+   * inline ones — unlike #2075's `inlineMode` gate, this work is buildable by no
+   * dispatch at all). Callers that need the raw view pass
+   * `excludeNonPrDeliverable=false`. The operator/deploy path remains the
+   * correct home for the work; this only keeps it off the code-writing feed.
+   */
+  excludeNonPrDeliverable?: boolean;
   /** Override of "now" for deterministic tests. Defaults to Date.now(). */
   now?: number;
 }
@@ -321,6 +342,7 @@ export async function getCandidateFeed(
   const excludeInFlight = opts.excludeInFlight !== false; // defaults to true
   const excludeMerged = opts.excludeMerged !== false; // defaults to true
   const inlineMode = opts.inlineMode === true; // defaults to false (spawn-capable view)
+  const excludeNonPrDeliverable = opts.excludeNonPrDeliverable !== false; // defaults to true
 
   // Load the merged-work token set once up front (issue #882). A failing /
   // unreachable reader degrades to an empty set — suppress nothing, exactly the
@@ -339,6 +361,7 @@ export async function getCandidateFeed(
   let inFlightSuppressed = 0;
   let mergedSuppressed = 0;
   let spawnSuppressed = 0;
+  let nonPrDeliverableSuppressed = 0;
 
   // -------------------------------------------------------------------------
   // Lane 1: Kanban backlog/queued/inProgress lanes.
@@ -364,6 +387,16 @@ export async function getCandidateFeed(
         // + requeue. No-op for spawn-capable callers (inlineMode false default).
         if (inlineMode && requiresSpawnCapableDispatch(item)) {
           spawnSuppressed++;
+          continue;
+        }
+        // PR-deliverability gate (issue #2282): an anchor whose artifact is
+        // host-systemd-only / operator-gated / live-data is deliverable by NO
+        // code-writing dispatch, so hide it for EVERY caller (not just inline)
+        // rather than burn a guaranteed ground+analyse+release cycle. It belongs
+        // on the operator/deploy path; the raw operator view opts out with
+        // excludeNonPrDeliverable=false.
+        if (excludeNonPrDeliverable && requiresNonPrDispatch(item)) {
+          nonPrDeliverableSuppressed++;
           continue;
         }
         if (
@@ -419,6 +452,17 @@ export async function getCandidateFeed(
       // dispatch; it is only filtered from THIS inline caller's view.
       if (inlineMode && requiresSpawnCapableDispatch(item)) {
         spawnSuppressed++;
+        continue;
+      }
+      // PR-deliverability gate (issue #2282): a host-systemd-only / operator-
+      // gated / live-data work-queue entry is deliverable by no code-writing
+      // dispatch — hide it for every caller so the work-queue stops re-serving
+      // it (the friction this fixes: item-559 host-systemd, item-555 operator-
+      // gated secret, item-523 live-data). It is NOT reaped here (this read path
+      // performs zero writes, issue #2187); it stays visible to the raw operator
+      // view (excludeNonPrDeliverable=false) and to the operator/deploy path.
+      if (excludeNonPrDeliverable && requiresNonPrDispatch(item)) {
+        nonPrDeliverableSuppressed++;
         continue;
       }
       if (
@@ -515,5 +559,6 @@ export async function getCandidateFeed(
     in_flight_suppressed: inFlightSuppressed,
     merged_suppressed: mergedSuppressed,
     spawn_suppressed: spawnSuppressed,
+    non_pr_deliverable_suppressed: nonPrDeliverableSuppressed,
   };
 }
