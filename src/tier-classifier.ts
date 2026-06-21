@@ -37,7 +37,11 @@
 
 import { matchVerifierCore } from "./untouchable.ts";
 
-export type Tier = 1 | 2 | 3 | 4;
+// `Tier` is the local 1|2|3|4 union the classifier operates on. It is
+// intentionally NOT exported — callers import `classifyChange` /
+// `ClassifyResult` instead, and the canonical tier-policy type lives in
+// `tier-policy.ts`. (Cleanup #2252: the prior `export` was unused.)
+type Tier = 1 | 2 | 3 | 4;
 
 export interface ClassifyResult {
   tier: Tier;
@@ -155,5 +159,10 @@ export function classifyChange(filesChanged: string[]): ClassifyResult {
   };
 }
 
-/** Re-exports for convenience — callers usually need both. */
-export { isVerifierCore, VERIFIER_CORE_PATHS } from "./untouchable.ts";
+/**
+ * Re-export of the Verifier Core path list. `test/tier-classifier.test.mts`
+ * imports it from here to assert the classifier and the path list agree.
+ * (`isVerifierCore` was also re-exported here but every caller imports it
+ * directly from `./untouchable.ts`, so it was dropped as dead — cleanup #2252.)
+ */
+export { VERIFIER_CORE_PATHS } from "./untouchable.ts";
