@@ -34,25 +34,19 @@ import {
   extractFilesFromAnchor,
 } from "./by-file.ts";
 
-// Re-export the two axes + their pure helpers so callers can reach either the
-// coordinator or a single axis through one domain entry point.
+// Re-export only the single-axis reads that callers actually reach through
+// this domain entry point (`learning-context.ts` consumes both as its default
+// axis readers) plus the shared `ReflectionBlock` shape. The narrower per-axis
+// helpers (`loadAnchorReflectionsRaw`, `recordAnchorReflection`, `reflectionKey`,
+// `extractFilesFromAnchor`, the TTL/cap constants, the `AnchorReflection`
+// record type, …) stay exported from their own modules — callers that need
+// them import directly from `./per-anchor.ts` / `./by-file.ts`, so re-exporting
+// them here only added dead surface (issue #2302).
 export {
   loadAnchorReflections,
-  loadAnchorReflectionsRaw,
-  recordAnchorReflection,
-  reflectionKey,
-  closeReflectionsRedis,
-  REFLECTION_TTL,
-  MAX_REFLECTIONS_PER_ANCHOR,
-  type AnchorReflection,
   type ReflectionBlock,
 } from "./per-anchor.ts";
-export {
-  loadAnchorReflectionsByFile,
-  backfillByFileIndex,
-  extractFilesFromAnchor,
-  MAX_BY_FILE_REFLECTIONS,
-} from "./by-file.ts";
+export { loadAnchorReflectionsByFile } from "./by-file.ts";
 
 /**
  * The combined result of `loadReflectionsForAnchor`: the merged narrative
