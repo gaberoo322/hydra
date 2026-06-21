@@ -61,7 +61,6 @@ describe("redisKeys naming convention", () => {
     ["metrics", redisKeys.metrics("cycle-1")],
     ["summaryReport", redisKeys.summaryReport("manual-planner-abc")],
     ["memoryPatterns", redisKeys.memoryPatterns("planner")],
-    ["memoryRules", redisKeys.memoryRules("executor")],
     ["reflection", redisKeys.reflection("some-anchor-ref")],
     ["backlogLane", redisKeys.backlogLane("queued")],
     ["stream", redisKeys.stream("notifications")],
@@ -119,7 +118,7 @@ describe("redisKeys uniqueness", () => {
     // Verify that different generators with the same input produce different keys
     assert.notEqual(redisKeys.cycle("x"), redisKeys.task("x"));
     assert.notEqual(redisKeys.cycle("x"), redisKeys.metrics("x"));
-    assert.notEqual(redisKeys.memoryPatterns("x"), redisKeys.memoryRules("x"));
+    assert.notEqual(redisKeys.memoryPatterns("x"), redisKeys.task("x"));
   });
 });
 
@@ -152,7 +151,6 @@ describe("redisKeys snapshot", () => {
     assert.equal(redisKeys.metrics("c1"), "hydra:metrics:c1");
     assert.equal(redisKeys.summaryReport("manual-planner-abc"), "hydra:reports:summary:manual-planner-abc");
     assert.equal(redisKeys.memoryPatterns("planner"), "hydra:memory:planner:patterns");
-    assert.equal(redisKeys.memoryRules("executor"), "hydra:memory:executor:rules");
     assert.equal(redisKeys.reflection("test-ref"), "hydra:reflections:test-ref");
     assert.equal(redisKeys.backlogLane("queued"), "hydra:backlog:lane:queued");
     assert.equal(redisKeys.anchorAbandonmentCount("ref"), "hydra:anchors:abandonment-count:ref");

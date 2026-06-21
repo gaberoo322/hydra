@@ -132,7 +132,6 @@ export const redisKeys = {
   // Memory
   // ---------------------------------------------------------------------------
   memoryPatterns: (agent: string) => `hydra:memory:${agent}:patterns`,
-  memoryRules: (agent: string) => `hydra:memory:${agent}:rules`,
   memoryLastConsolidation: () => "hydra:memory:last-consolidation",
   // Issue #1876 — daily idempotency stamp for the stale-Redis-key sweep chore
   // folded out of the cleanup.ts in-process timer into housekeeping. Mirrors

@@ -18,14 +18,12 @@
  *
  * Public API:
  *   consolidate()     — prune stale patterns + auto-promoted rules (daily)
- *   initLearning()    — start knowledge indexer, register OV skills, migrate rules
+ *   initLearning()    — start knowledge indexer, register OV skills
  */
 
 import {
   consolidateAgentPatterns,
   consolidateStalePromotedRules,
-  migrateRulesToPatterns,
-  backfillPromotionMetadata,
 } from "./pattern-memory/agent-memory.ts";
 import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
@@ -147,39 +145,23 @@ export async function detectAndClearStaleSourceIndex(
 
 /**
  * Initialize the learning system on startup:
- *   1. Migrate old rules to patterns (one-time)
- *   2. Register OV skills (non-blocking)
- *   3. Start knowledge indexer background process
+ *   1. Register OV skills (non-blocking)
+ *   2. Start knowledge indexer background process
  */
 export async function initLearning(): Promise<void> {
-  // 1. Migrate old rules → patterns
-  try {
-    await migrateRulesToPatterns();
-  } catch (err: any) {
-    console.error(`[Learning] Memory migration failed: ${err.message}`);
-  }
-
-  // 1b. Backfill promotion metadata for patterns promoted before issue #289
-  //     instrumentation (idempotent, guarded by Redis flag — issue #302).
-  try {
-    await backfillPromotionMetadata();
-  } catch (err: any) {
-    console.error(`[Learning] Promotion-metadata backfill failed: ${err.message}`);
-  }
-
-  // 2. Register OV skills (non-blocking). registerSkills() records the outcome
+  // 1. Register OV skills (non-blocking). registerSkills() records the outcome
   //    in a queryable in-process skill-catalog state (issue #1968) — query it
   //    via getSkillCatalogState() / GET /api/health/skills to detect the silent
   //    empty-catalog failure (all skills lost to OpenViking timeouts under load)
   //    that this fire-and-forget call used to hide behind a lone console.error.
   registerSkills().catch((err: any) => console.error(`[Learning] Skill registration failed: ${err.message}`));
 
-  // 2b. Detect + repair a stale source-index cache (issue #2267). Runs BEFORE
+  // 1b. Detect + repair a stale source-index cache (issue #2267). Runs BEFORE
   //     startKnowledgeIndexer so a cleared cache is honoured by this boot's
   //     initial pass. Best-effort/never-throws — a healthy OV or a cold cache is
   //     a no-op; only a populated-cache-but-empty-OV (OV reset) triggers a clear.
   await detectAndClearStaleSourceIndex();
 
-  // 3. Start knowledge indexer
+  // 2. Start knowledge indexer
   startKnowledgeIndexer();
 }
