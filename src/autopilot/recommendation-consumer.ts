@@ -14,10 +14,11 @@
  * readers that wire the engine to live autopilot state.
  *
  * Cost-gate boundary (CONTEXT.md L203 / ADR-0005): no USD accounting lives
- * here. The consumer only constructs the cap enforcer
- * (recommendation-cap.ts, issue #2119) and WIRES its `oak_resting` fan-out to
- * the WS registry; the daily cap, the spend read/charge, and the once-per-day
- * latch all live behind the enforcer. The split moves wiring, not policy.
+ * here. The consumer only constructs the cap enforcer (the daily-cap ledger
+ * section of recommendation-engine.ts, issue #2119, folded back in #2317) and
+ * WIRES its `oak_resting` fan-out to the WS registry; the daily cap, the spend
+ * read/charge, and the once-per-day latch all live behind the enforcer. The
+ * split moves wiring, not policy.
  *
  * Stream invariants preserved 1:1 from the pre-split engine:
  *   - consumer-group name `recs-engine` on stream `hydra:autopilot:slot-events`
@@ -33,6 +34,7 @@
 
 import {
   createRecommendationEngine,
+  createCapEnforcer,
   defaultLlmClient,
   type TurnEndPayload,
   type RecentTurn,
@@ -40,7 +42,6 @@ import {
   type SignalsSnapshot,
   type PermissionWaitEvent,
 } from "./recommendation-engine.ts";
-import { createCapEnforcer } from "./recommendation-cap.ts";
 
 // ---------------------------------------------------------------------------
 // Stream consumer wiring — bound to the `hydra:autopilot:slot-events`
@@ -204,10 +205,11 @@ export async function startRecommendationConsumer(eventBus: {
   await eventBus.ensureConsumerGroup(SLOT_EVENTS_STREAM, RECS_CONSUMER_GROUP, "$");
 
   // The billing ledger (issue #2119) — the cap amount, spend read/charge, and
-  // the oak_resting latch now live in the recommendation-cap Module. The
-  // consumer's only job is to wire its `oak_resting` fan-out to the WS
-  // registry; the daily cap, the per-Mtok rates, and `incrDailySpendUsd` all
-  // stay behind the enforcer. The split moves wiring, not policy.
+  // the oak_resting latch live in the daily-cap ledger section of
+  // recommendation-engine.ts (folded back in #2317). The consumer's only job is
+  // to wire its `oak_resting` fan-out to the WS registry; the daily cap, the
+  // per-Mtok rates, and `incrDailySpendUsd` all stay behind the enforcer. The
+  // split moves wiring, not policy.
   const capEnforcer = createCapEnforcer({
     broadcastResting: (runId, spend, cap) => {
       try {
