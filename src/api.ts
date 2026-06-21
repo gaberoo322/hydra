@@ -29,6 +29,7 @@ import { createMergeLockRouter } from "./api/merge-lock.ts";
 import { createCapacityRouter } from "./api/capacity.ts";
 import { createObservabilityRouter } from "./api/observability.ts";
 import { createLearningRouter } from "./api/learning.ts";
+import { createPatternMemoryRouter } from "./api/pattern-memory.ts";
 import { createAnchorRouter } from "./api/anchor.ts";
 import { createAutopilotLifecycleRouter } from "./api/autopilot-lifecycle.ts";
 import { createAutopilotRunsRouter } from "./api/autopilot-runs.ts";
@@ -101,6 +102,7 @@ function createApi(eventBus: EventBus) {
   api.use(createCapacityRouter());
   api.use(createObservabilityRouter());
   api.use(createLearningRouter());
+  api.use(createPatternMemoryRouter());
   api.use(createAnchorRouter());
   // Autopilot HTTP surface — split by domain concern (#2034) into four focused
   // sub-routers, each a thin adapter over its own domain Module: lifecycle
