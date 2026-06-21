@@ -27,6 +27,9 @@ import {
   isOvFailure,
   type OvResult,
 } from "../knowledge-base/ov-request.ts";
+// Issue #2269: reuse the #2250 server-side-timeout body classifier so the skills
+// liveness probe treats OV's "Request timed out." 500 as down, NOT responsive.
+import { isOvServerTimeout } from "../knowledge-base/skill-registration.ts";
 
 /** The wire shape every service probe folds to: `{status, latencyMs}`. */
 export type ServiceProbeResult = {
@@ -344,6 +347,22 @@ export async function probeEmbedBackend(
  * on prose. Same `{status, latencyMs}` ServiceProbe shape every other probe
  * emits.
  *
+ * SERVER-SIDE-TIMEOUT EXCEPTION (issue #2269) — the resilience gap this fixes:
+ * under sustained indexing load OpenViking surfaces its OWN request timeout as a
+ * `500` whose body is `{error:{code:"INTERNAL", message:"Request timed out."}}`
+ * — structurally an `ov-non-2xx` (the adapter keys on `!res.ok`, not the body).
+ * That 500 is NOT a fast validation reject; it is the load-gated handler failing
+ * to answer in time — the EXACT doomed-pass condition #2163 built this probe to
+ * suppress. Folding it to `running` defeats the gate: the chore green-lights an
+ * hourly registration pass that then hits the same overloaded handler, every
+ * skill 500s with the same "Request timed out." body, all 3 retries exhaust, and
+ * the catalog stays empty (the #2269 evidence: `ov-non-2xx: 500` on every skill,
+ * `contextAvailabilityRate: 0`). So an `ov-non-2xx` whose body matches OV's
+ * server-side-timeout shape ({@link isOvServerTimeout} — the same #2250 predicate
+ * the registration retry uses) folds to `failed`. A genuine validation `ov-non-2xx`
+ * (any OTHER body) still proves the handler answered fast → stays `running`,
+ * preserving the #2163 "an app-level reject means live" signal.
+ *
  * NEVER throws — the OV Request Adapter is contractually never-throwing and both
  * arms map exhaustively. `ovRequestImpl` is injectable for the test.
  */
@@ -357,11 +376,21 @@ export async function probeSkillsEndpoint(
     { timeout: SKILLS_PROBE_TIMEOUT_MS },
   );
   // The handler is responsive UNLESS the request never reached it (transport
-  // down) or it could not answer inside the short window (timeout). An app-level
-  // non-2xx / malformed-json means the handler DID answer (it rejected our
-  // deliberately-invalid payload) → the resource is live → running.
+  // down), it could not answer inside the short window (timeout), OR it answered
+  // with OV's own server-side-timeout 500 (an `ov-non-2xx` carrying the "Request
+  // timed out." body — issue #2269). That last case looks like an answer but is
+  // really the load-gated handler failing under indexing load; treating it as
+  // live green-lit a doomed recovery pass every hour. An app-level non-2xx /
+  // malformed-json with any OTHER body means the handler DID answer fast (it
+  // rejected our deliberately-invalid payload) → the resource is live → running.
   const unreachable =
-    isOvFailure(result) && (result.code === "ov-service-down" || result.code === "ov-timeout");
+    isOvFailure(result) &&
+    (result.code === "ov-service-down" ||
+      result.code === "ov-timeout" ||
+      // `isOvFailure` narrows away the optional `body`, so read it off the
+      // failure arm explicitly (present only on ov-non-2xx; undefined otherwise).
+      (result.code === "ov-non-2xx" &&
+        isOvServerTimeout((result as { ok: false; code: typeof result.code; body?: string }).body)));
   return {
     status: unreachable ? "failed" : "running",
     latencyMs: unreachable ? null : Date.now() - start,

@@ -227,6 +227,39 @@ describe("probeSkillsEndpoint", () => {
     assert.equal(r.status, "running", "a 2xx that failed to parse still proves the handler answered");
   });
 
+  test("ov-non-2xx carrying OV's server-side-timeout 500 body → {failed, latencyMs:null} (issue #2269)", async () => {
+    // THE #2269 resilience gap: under sustained indexing load OV surfaces its own
+    // request timeout as a 500 whose body is the INTERNAL/"Request timed out."
+    // envelope — structurally an ov-non-2xx. Before this fix the probe read that
+    // as "the handler answered → running" and green-lit a doomed hourly recovery
+    // pass that 500'd on every skill. It must fold to failed so the chore does NOT
+    // launch a pass against a handler that is timing out server-side.
+    const ovRequestImpl = (async () =>
+      ({
+        ok: false,
+        code: "ov-non-2xx",
+        body: '{"status":"error","error":{"code":"INTERNAL","message":"Request timed out."}}',
+      }) as OvResult<any>) as any;
+    const r = await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(r.status, "failed", "OV's server-side-timeout 500 is the load-gated doomed-pass signal, not a live handler");
+    assert.equal(r.latencyMs, null);
+  });
+
+  test("ov-non-2xx with a genuine non-timeout error body → running (validation reject still proves liveness)", async () => {
+    // Guard the #2163 happy path: only OV's INTERNAL/timeout body folds to failed.
+    // Any OTHER ov-non-2xx body (a real validation reject, a 4xx, a 5xx that is
+    // not a server-side timeout) still proves the handler answered fast → running.
+    const ovRequestImpl = (async () =>
+      ({
+        ok: false,
+        code: "ov-non-2xx",
+        body: '{"status":"error","error":{"code":"VALIDATION","message":"Skill data cannot be None"}}',
+      }) as OvResult<any>) as any;
+    const r = await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(r.status, "running", "a non-timeout ov-non-2xx body means the handler answered → running");
+    assert.equal(typeof r.latencyMs, "number");
+  });
+
   test("ov-timeout (handler did not answer in the short window — load-gated) → {failed, latencyMs:null}", async () => {
     // THE bug this issue fixes: under indexing load (#1831) the POST handler
     // does not answer inside the short probe window, so the gate must fold to
