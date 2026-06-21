@@ -23,21 +23,17 @@ import { Router } from "express";
 import { z } from "zod";
 
 import { countQuerySchema } from "../schemas/common.ts";
+// All design-concept domain symbols live in the single deep module (issue #2316).
 import {
   saveDesignConcept,
   getDesignConcept,
   listDesignConcepts,
   approveDesignConcept,
   resolveDesignConceptForQa,
-} from "../design-concept.ts";
-// Pure identity/policy symbols (`computeGreenLight`, `DesignConceptScope`) live
-// in the identity Module (issue #2124 retired the persistence Module's relay
-// re-export). Gate predicate lives in its domain home (issue #1908).
-import {
   computeGreenLight,
+  gateCheck,
   type DesignConceptScope,
-} from "../design-concept-identity.ts";
-import { gateCheck } from "../design-concept-gate.ts";
+} from "../design-concept.ts";
 import {
   appendExemptLogEntry,
   readRecentExemptLogEntries,

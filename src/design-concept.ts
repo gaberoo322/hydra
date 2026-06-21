@@ -1,5 +1,6 @@
 /**
- * Design Concept — Redis-backed alignment artifact (Phase A of #437).
+ * Design Concept — the single deep module that owns the design-concept domain
+ * (closes #2316, consolidating three shallow modules into one).
  *
  * A design-concept artifact is a structured record produced by the (future)
  * `hydra-grill` skill before any code-writing dispatch (`dev_orch` /
@@ -17,10 +18,26 @@
  * (`gateCheck()` here) and by PR-time review (the future two-axis
  * `hydra-qa` rewrite — sub-issue #440). See ADR-0008.
  *
- * Phase A scope: persistence + HTTP surface + gate semantics only. No
- * autopilot wiring (Phase B), no CI hook (Phase C). The `dev_orch` gate
- * is NOT wired here — `src/gate.ts` and the autopilot decide.py are out
- * of scope for this sub-issue.
+ * ## Module organisation (four concern sections)
+ *
+ * 1. **Domain value types** — the TypeScript types that describe the artifact
+ *    shape (`DesignConcept`, `DesignConceptScope`, etc.). Pure — no imports
+ *    from Redis or the tier-classifier.
+ *
+ * 2. **Artifact identity** — `computeArtifactHash` (+ `canonicalJson`),
+ *    `designConceptHandle`, and the green-light criterion (`computeGreenLight`
+ *    + `GREEN_LIGHT_WINDOW_DAYS` / `GREEN_LIGHT_REQUIRED_DAYS`). Pure — no
+ *    Redis IO.
+ *
+ * 3. **Gate predicates** — `isFresh`, `gateCheck`, and
+ *    `DESIGN_CONCEPT_MAX_AGE_MS`. Pure — no Redis IO, but imports the
+ *    tier-classifier (`classifyChange`, `permitsBreakingChange`) for the
+ *    breaking-impact rule.
+ *
+ * 4. **Persistence** — `saveDesignConcept`, `getDesignConcept`,
+ *    `listDesignConcepts`, `approveDesignConcept`, `resolveDesignConceptForQa`,
+ *    and `DesignConceptResolution`. Redis-backed; owns the Redis seam calls
+ *    and the QA-time retrieval path.
  *
  * Redis schema:
  *   hydra:design-concept:{anchorRef}  → Hash (full body, JSON-encoded fields)
@@ -28,21 +45,15 @@
  *
  * TTL: 7 days from createdAt. The index is opportunistically pruned of
  * stale entries on every read.
+ *
+ * Phase A scope: persistence + HTTP surface + gate semantics only. No
+ * autopilot wiring (Phase B), no CI hook (Phase C). The `dev_orch` gate
+ * is NOT wired here — `src/gate.ts` and the autopilot decide.py are out
+ * of scope for this sub-issue.
  */
 
-// This Module owns ONE concern: Redis persistence for design-concept
-// artifacts — `saveDesignConcept`, `getDesignConcept`, `listDesignConcepts`,
-// `approveDesignConcept`, and the QA-time `resolveDesignConceptForQa` resolver.
-// It imports — but no longer RE-EXPORTS — the symbols its body needs from the
-// three sibling Modules that each own a focused concern (issue #2124, which
-// retired the back-compat re-export relay this header used to carry):
-//
-//   - identity/policy  → `./design-concept-identity.ts` (pure, no Redis)
-//   - gate predicates  → `./design-concept-gate.ts`     (freshness + gateCheck)
-//   - keying + storage → `./redis/design-concept.ts`    (the storage seam)
-//   - Zod input schema → `./schemas/design-concept.ts`  (ADR-0011 type home)
-//
-// Callers import each symbol from the Module that owns it; there is no relay.
+import { createHash } from "node:crypto";
+
 import {
   getDesignConceptHash,
   listAllDesignConceptRefs,
@@ -53,47 +64,327 @@ import {
   normalizeAnchorRef,
 } from "./redis/design-concept.ts";
 import {
-  type DesignConcept,
-  type DesignConceptScope,
-  type DesignConceptHandle,
-  type ModuleTouched,
-  type RejectedAlternative,
-  type QaTurn,
-  type Prototype,
-  type DesignConceptStatus,
-  computeArtifactHash,
-  designConceptHandle,
-} from "./design-concept-identity.ts";
-import {
   type DesignConceptInput as DesignConceptInputType,
 } from "./schemas/design-concept.ts";
-// The freshness constant is imported for internal index pruning only; the gate
-// predicates (`gateCheck`/`isFresh`) live in `./design-concept-gate.ts` and
-// callers import them from there directly.
-import { DESIGN_CONCEPT_MAX_AGE_MS } from "./design-concept-gate.ts";
+import { classifyChange } from "./tier-classifier.ts";
+import { permitsBreakingChange } from "./tier-policy.ts";
 
 // ---------------------------------------------------------------------------
-// Constants
+// 1. Domain value types (no Redis dependency, no tier-classifier dependency)
+// ---------------------------------------------------------------------------
+
+export type DesignConceptScope = "orch" | "target";
+
+export type DesignConceptStatus = "draft" | "approved" | "stale";
+
+// File-private — used only by `ModuleTouched` below. Not exported (no external
+// consumer; knip flagged the prior `export` as dead surface, issue #2051).
+type InterfaceImpact = "none" | "extend" | "breaking";
+
+type DepthClassification = "deep" | "shallow" | "unknown";
+
+export type ModuleTouched = {
+  path: string;
+  interfaceImpact: InterfaceImpact;
+  depthClassification: DepthClassification;
+};
+
+export type RejectedAlternative = { alt: string; why: string };
+
+export type QaTurn = { q: string; a: string };
+
+export type Prototype = {
+  question: string;
+  branch: "logic" | "ui";
+  snippet: string;
+  answer: string;
+  workTreePath: string;
+};
+
+export type DesignConcept = {
+  anchorRef: string;
+  scope: DesignConceptScope;
+  createdAt: number;
+  artifactHash: string;
+  glossaryTerms: string[];
+  glossaryGaps: string[];
+  modulesTouched: ModuleTouched[];
+  invariants: string[];
+  rejectedAlternatives: RejectedAlternative[];
+  qaTrace: QaTurn[];
+  prototypes: Prototype[];
+  status: DesignConceptStatus;
+  approvedBy: "auto-gate" | `operator:${string}` | "";
+};
+
+// ---------------------------------------------------------------------------
+// 2. Artifact identity (pure — no Redis IO)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical-JSON encode an arbitrary value: object keys are emitted in
+ * sorted order, no whitespace, primitives encoded as `JSON.stringify`
+ * does. Used as the input to `sha256` for `artifactHash`, so two
+ * artifacts with the same body always produce the same hash.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalJson).join(",") + "]";
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  const parts: string[] = [];
+  for (const k of keys) {
+    const v = obj[k];
+    if (v === undefined) continue;
+    parts.push(JSON.stringify(k) + ":" + canonicalJson(v));
+  }
+  return "{" + parts.join(",") + "}";
+}
+
+/**
+ * Compute the `artifactHash` for a design concept. Hashes all body fields
+ * EXCLUDING `artifactHash`, `createdAt`, `status`, and `approvedBy` — so
+ * approving an artifact (or persisting it at a different timestamp) does
+ * not change its content identity.
+ */
+export function computeArtifactHash(d: Omit<DesignConcept, "artifactHash">): string {
+  const body = {
+    anchorRef: d.anchorRef,
+    scope: d.scope,
+    glossaryTerms: d.glossaryTerms,
+    glossaryGaps: d.glossaryGaps,
+    modulesTouched: d.modulesTouched,
+    invariants: d.invariants,
+    rejectedAlternatives: d.rejectedAlternatives,
+    qaTrace: d.qaTrace,
+    prototypes: d.prototypes,
+  };
+  return createHash("sha256").update(canonicalJson(body)).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// QA-time retrievability handle (issue #1450)
+// ---------------------------------------------------------------------------
+
+/**
+ * The stable retrieval handle for a design-concept artifact.
+ *
+ * `redisKey` is the canonical Redis hash key the artifact lives under for the
+ * lifetime of the anchor (7-day TTL); `apiPath` is the HTTP route QA fetches
+ * it through. Both are derived from the SAME canonical `anchorRef`
+ * (`normalizeAnchorRef`), so the handle a producer (grill) persists under and
+ * the handle a consumer (QA) reads from can never disagree — the wedge that
+ * orphaned artifacts in #736.
+ *
+ * The handle is meaningful even when the artifact is absent: it tells QA
+ * (and the operator) EXACTLY where the artifact was looked for, so a miss is
+ * loud and diagnosable rather than a silent "not reachable".
+ */
+export type DesignConceptHandle = {
+  /** The canonical anchorRef the handle resolves to (e.g. `issue-1450`). */
+  anchorRef: string;
+  /** Canonical Redis hash key — `hydra:design-concept:<canonical-anchorRef>`. */
+  redisKey: string;
+  /** HTTP route QA reads the artifact through. */
+  apiPath: string;
+};
+
+/**
+ * Compute the stable retrieval handle for `anchorRef` without touching Redis.
+ * Pure — used both by the resolver in the persistence section below and
+ * exposed so callers can render the handle in logs/comments even before (or
+ * after) the artifact exists.
+ */
+export function designConceptHandle(anchorRef: string): DesignConceptHandle {
+  const canonical = normalizeAnchorRef(anchorRef);
+  return {
+    anchorRef: canonical,
+    redisKey: `hydra:design-concept:${canonical}`,
+    apiPath: `/api/design-concepts/${canonical}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Green-light criterion (issue #736)
+// ---------------------------------------------------------------------------
+
+/**
+ * The promotion clock is idle-tolerant (issue #736): Phase C of #437 may
+ * flip when at least `GREEN_LIGHT_REQUIRED_DAYS` of the most-recent
+ * `GREEN_LIGHT_WINDOW_DAYS` snapshot days produced ≥1 design concept.
+ *
+ * Chosen form: "N of last M days" rather than a pure consecutive run.
+ * Rationale (the open design choice the design-concept artifact deferred
+ * to implementation): a strict `consecutiveGreenDays >= 7` punishes
+ * legitimately-quiet orch days (no `ready-for-agent` issue lacking a fresh
+ * artifact ⇒ nothing to grill), which is exactly the failure the issue
+ * reports. "7 of last 10" tolerates up to 3 quiet days inside the window
+ * while still demanding sustained production. Both the threshold and the
+ * window stay well inside MAX_SNAPSHOT_DAYS (14) so the HASH always holds
+ * enough history to evaluate.
+ *
+ * (Extracted from `src/api/design-concepts.ts` to its domain home so the
+ * pure function is directly unit-testable and the policy constants are
+ * importable without HTTP overhead — issue #1875.)
+ */
+export const GREEN_LIGHT_WINDOW_DAYS = 10;
+export const GREEN_LIGHT_REQUIRED_DAYS = 7;
+
+export type GreenLightMetrics = {
+  /** Legacy field: green days counted consecutively from the newest. */
+  consecutiveGreenDays: number;
+  /** Green (production > 0) days within the trailing window. */
+  greenDaysInWindow: number;
+  windowDays: number;
+  requiredGreenDays: number;
+  greenLightReady: boolean;
+};
+
+/**
+ * Compute the green-light metrics from a newest-first snapshot list. Pure
+ * — no Redis IO — so it is unit-testable. A "green" day is one whose
+ * production count is > 0.
+ */
+export function computeGreenLight(
+  snapshots: Array<{ date: string; count: number }>,
+  windowDays: number = GREEN_LIGHT_WINDOW_DAYS,
+  requiredGreenDays: number = GREEN_LIGHT_REQUIRED_DAYS,
+): GreenLightMetrics {
+  // `consecutiveGreenDays`: walk from newest until the first zero day.
+  let consecutiveGreenDays = 0;
+  for (const s of snapshots) {
+    if (s.count > 0) consecutiveGreenDays += 1;
+    else break;
+  }
+  // `greenDaysInWindow`: count green days among the newest `windowDays`.
+  const window = snapshots.slice(0, windowDays);
+  const greenDaysInWindow = window.reduce(
+    (n, s) => (s.count > 0 ? n + 1 : n),
+    0,
+  );
+  return {
+    consecutiveGreenDays,
+    greenDaysInWindow,
+    windowDays,
+    requiredGreenDays,
+    greenLightReady: greenDaysInWindow >= requiredGreenDays,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 3. Gate predicates (pure — no Redis IO; imports tier-classifier)
+// ---------------------------------------------------------------------------
+
+/** 7 days, in milliseconds. */
+export const DESIGN_CONCEPT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Minimum Q&A trace depth for the gate. From the ADR-0008 schema. */
+const MIN_QA_TRACE_LENGTH = 6;
+
+/**
+ * Return true iff the artifact was created within the freshness window
+ * (7 days by default). Pure function — no Redis IO.
+ */
+export function isFresh(
+  d: DesignConcept,
+  now: number,
+  maxAgeMs: number = DESIGN_CONCEPT_MAX_AGE_MS,
+): boolean {
+  if (!d || typeof d.createdAt !== "number" || d.createdAt <= 0) return false;
+  return now - d.createdAt <= maxAgeMs;
+}
+
+/**
+ * Gate check — the 7 deterministic failure modes from ADR-0008 §"Gate
+ * check". Returns `{ ok: true, reasons: [] }` only when EVERY rule
+ * passes. Pure function — no Redis IO. The autopilot consumes this
+ * verbatim in Phase B.
+ *
+ * For Phase A: `glossaryGaps` fails closed (any non-empty list is a
+ * reject). The whitelist-via-Redis escape hatch lands later.
+ *
+ * For Phase A: `interfaceImpact: 'breaking'` cross-checks against the
+ * existing tier classifier in `src/tier-classifier.ts` — every breaking
+ * module path must classify to tier >= 2. Under the monotonic T1–T4
+ * ladder (ADR-0015) a "breaking" declaration on a T1 (prompt-shaped,
+ * auto-merge-trivial) path is the only gate failure here: T1 is the
+ * shallowest, lowest-blast-radius tier and a breaking change there is a
+ * contradiction. T2 (outcome-holdback), T3 (operator-review), and T4
+ * (Verifier Core — the deepest tier, carrying the most verification) all
+ * clear this check. NOTE (issue #737): under the old non-monotonic
+ * numbering a breaking change on a Tier-0 path FAILED this rule
+ * (0 < 2); under the monotonic ladder Verifier Core is T4 (deepest) and
+ * now PASSES — this corrects a latent inversion (the deepest tier should
+ * carry the most verification, not be rejected). Intended behavior delta,
+ * not a regression.
+ */
+export function gateCheck(
+  d: DesignConcept,
+  now: number,
+): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  // 1. No glossary gaps allowed in Phase A.
+  if (Array.isArray(d.glossaryGaps) && d.glossaryGaps.length > 0) {
+    reasons.push(
+      `glossaryGaps non-empty (${d.glossaryGaps.length}): ${d.glossaryGaps.join(", ")}`,
+    );
+  }
+
+  // 2. At least one invariant.
+  if (!Array.isArray(d.invariants) || d.invariants.length < 1) {
+    reasons.push("invariants must list at least 1 entry");
+  }
+
+  // 3. At least one modulesTouched.
+  if (!Array.isArray(d.modulesTouched) || d.modulesTouched.length < 1) {
+    reasons.push("modulesTouched must list at least 1 entry");
+  }
+
+  // 4. Breaking impact → tier ≥ 2.
+  const breakingPaths = (d.modulesTouched ?? [])
+    .filter((m) => m && m.interfaceImpact === "breaking")
+    .map((m) => m.path);
+  if (breakingPaths.length > 0) {
+    const cls = classifyChange(breakingPaths);
+    if (!permitsBreakingChange(cls.tier)) {
+      reasons.push(
+        `interfaceImpact: 'breaking' on tier-${cls.tier} path(s) — breaking change must classify to tier >= 2 ` +
+          `(got: ${cls.reason})`,
+      );
+    }
+  }
+
+  // 5. Q&A trace depth.
+  if (!Array.isArray(d.qaTrace) || d.qaTrace.length < MIN_QA_TRACE_LENGTH) {
+    reasons.push(
+      `qaTrace must have at least ${MIN_QA_TRACE_LENGTH} turns (got ${d.qaTrace?.length ?? 0})`,
+    );
+  }
+
+  // 6. Freshness.
+  if (!isFresh(d, now)) {
+    reasons.push("artifact is stale (older than 7 days)");
+  }
+
+  // 7. Status must be approved.
+  if (d.status !== "approved") {
+    reasons.push(`status must be 'approved' (got '${d.status}')`);
+  }
+
+  return { ok: reasons.length === 0, reasons };
+}
+
+// ---------------------------------------------------------------------------
+// 4. Persistence (Redis-backed)
 // ---------------------------------------------------------------------------
 
 /** 7 days, in seconds — for Redis EXPIRE. */
 const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/* The domain value types (`DesignConcept`, `DesignConceptScope`,
- * `ModuleTouched`, etc.) and the pure artifact-identity functions
- * (`computeArtifactHash` + its `canonicalJson` helper) live in
- * `./design-concept-identity.ts` (issue #2033) and are imported above for
- * internal use. `DesignConceptInput` is owned by
- * `src/schemas/design-concept.ts` — see ADR-0011. Callers import these
- * symbols from their owning Module directly (issue #2124 retired the relay). */
-
-// ---------------------------------------------------------------------------
-// Persistence
-// ---------------------------------------------------------------------------
 
 /**
  * Save (or overwrite) a design concept. Computes `createdAt` and
@@ -214,11 +505,6 @@ export async function getDesignConcept(
 // ---------------------------------------------------------------------------
 // QA-time retrievability (issue #1450)
 // ---------------------------------------------------------------------------
-
-/* The `DesignConceptHandle` type and the pure `designConceptHandle` derivation
- * live in `./design-concept-identity.ts` (issue #2033) — imported above for
- * internal use. The QA-time resolver below stays here because it performs Redis
- * IO (`getDesignConcept`). */
 
 /**
  * Result of resolving an artifact at QA time.
@@ -373,11 +659,3 @@ export async function approveDesignConcept(
   await setDesignConceptField(existing.anchorRef, "approvedBy", approvedBy);
   return { ...existing, status: "approved", approvedBy };
 }
-
-/* The green-light criterion (`computeGreenLight` +
- * `GREEN_LIGHT_WINDOW_DAYS`/`GREEN_LIGHT_REQUIRED_DAYS`) lives in
- * `./design-concept-identity.ts` (issue #2033) — it is pure (no Redis IO) and
- * this persistence Module does not use it; callers import it from the identity
- * Module directly (issue #2124 retired the relay re-export). The
- * `GreenLightMetrics` type lives at its domain home too (issue #2052 dropped
- * the unused barrel re-export). */

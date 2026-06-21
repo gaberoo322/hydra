@@ -26,11 +26,9 @@ import assert from "node:assert/strict";
 import express from "express";
 import type { AddressInfo } from "node:net";
 import Redis from "ioredis";
-// `designConceptHandle` is pure identity derivation; it lives in the identity
-// Module (issue #2033). Issue #2124 retired the persistence Module's back-compat
-// re-export, so import it from its canonical home rather than via the `dc`
-// namespace.
-import { designConceptHandle } from "../src/design-concept-identity.ts";
+// `designConceptHandle` is part of the design-concept module (issue #2316
+// consolidated all domain symbols into the single deep module).
+import { designConceptHandle } from "../src/design-concept.ts";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
