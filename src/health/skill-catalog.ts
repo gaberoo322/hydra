@@ -101,3 +101,105 @@ export function assessSkillCatalog(snap: SkillCatalogSnapshot): SkillCatalogAsse
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Registration-failure-rate alert (issue #2277)
+//
+// `assessSkillCatalog` above gates on the catalog POPULATION (ok / degraded /
+// empty). The residual #2277 deliverable is a distinct concern: the registration
+// FAILURE RATE of the last completed pass, correlated with the root cause the
+// recurring outage points at — the Tailnet Ollama VLM backend being offline.
+//
+// The issue asked for "timeout monitoring on OV skill registration failures
+// (alert if >10% in 5min window)". The orchestrator does not keep a rolling
+// 5-minute window of per-attempt outcomes; the queryable signal it DOES carry is
+// the per-pass `registered/total` rollup (skill-registration.ts, #1968). So the
+// alert reads that completed-pass failure rate — `(total - registered) / total`
+// — and fires when it crosses `REGISTRATION_FAILURE_RATE_THRESHOLD`. When the
+// liveness probe (#2284) shows the VLM host `down`, the alert names that as the
+// likely root cause and points at the Wake-on-LAN recovery path + the
+// ollama-recovery operator playbook; otherwise it points at OpenViking load.
+//
+// This is ADDITIVE and strictly read-only: it consumes the existing
+// `SkillCatalogSnapshot` plus the already-shipped `ollamaVlm` probe result, owns
+// no new export on skill-registration.ts, and never mutates the catalog state.
+// It is distinct from `assessSkillCatalog`'s empty/partial verdict — an `empty`
+// catalog (rate 100%) ALSO trips this alert, but with the VLM-root-cause framing
+// the population gate deliberately omits, so an operator sees both "catalog is
+// empty" and "and here is why + how to recover". It fires `warning` (not
+// `error`) so it never escalates the deep-health fold above the population gate's
+// own severity — it annotates, it does not outrank.
+// ---------------------------------------------------------------------------
+
+/**
+ * Failure-rate threshold above which the registration-failure-rate alert fires
+ * (issue #2277: "alert if >10% in 5min window" — here applied to the last
+ * completed pass's `(total - registered) / total`). A strict `>` so a single
+ * failed skill out of four (25%) trips it but a fully-registered catalog (0%)
+ * never does.
+ */
+export const REGISTRATION_FAILURE_RATE_THRESHOLD = 0.1;
+
+/** The VLM-liveness facet the failure-rate alert reads, mirroring `OllamaVlmProbeResult`. */
+export interface VlmLiveness {
+  /** `down` when the Tailnet Ollama VLM host did not answer its liveness probe (#2284). */
+  status: "ok" | "down";
+}
+
+/**
+ * Read-only registration-failure-rate alert (issue #2277). Returns a
+ * `HealthDiagnostic` when the last completed registration pass left a failure
+ * rate above {@link REGISTRATION_FAILURE_RATE_THRESHOLD}, else `null`.
+ *
+ * Reads ONLY its two arguments — the catalog snapshot and the VLM liveness facet
+ * — and never throws (src/health convention). It does NOT mutate skill
+ * registration state and adds no new export to skill-registration.ts; it is a
+ * pure consumer of `getSkillCatalogState()` and the #2284 `ollamaVlm` probe.
+ *
+ * No alarm before a pass completes (`completed:false`) — registration is still
+ * in flight, a slow startup is not a failure. A `total` of 0 (mis-seeded /
+ * pre-pass) cannot have a meaningful rate, so it is treated as no-op.
+ *
+ * When the VLM host is `down`, the diagnostic names it as the likely root cause
+ * (the #2277/#2269/#1831 cascade) and points at the Wake-on-LAN recovery path +
+ * the ollama-recovery operator playbook. When the VLM host is reachable, it
+ * points at OpenViking load instead — the failures are happening for a different
+ * reason and the operator should not chase a red herring.
+ */
+export function assessRegistrationFailureRate(
+  snap: SkillCatalogSnapshot,
+  vlm: VlmLiveness,
+): HealthDiagnostic | null {
+  // No completed pass / no skills expected → no meaningful rate to alert on.
+  if (!snap.completed || snap.total <= 0) return null;
+
+  const failed = snap.total - snap.registered;
+  const rate = failed / snap.total;
+  if (rate <= REGISTRATION_FAILURE_RATE_THRESHOLD) return null;
+
+  const pct = Math.round(rate * 100);
+  const vlmDown = vlm.status === "down";
+
+  // `warning`, deliberately NOT `error`: this alert ANNOTATES the population
+  // verdict (assessSkillCatalog, which already folds empty→error / partial→
+  // warning) with the failure-rate framing + the VLM root cause. It must not
+  // ESCALATE the top-level deep-health status above what the population gate
+  // decided — a partial catalog stays `degraded`, an empty one stays `unhealthy`
+  // from the population rule's own `error`. So this rule contributes a
+  // same-or-lower severity finding that adds the "why + how to recover" detail
+  // without changing the fold.
+  return {
+    severity: "warning",
+    component: "intelligence",
+    what: `OV skill registration failure rate ${pct}% (${failed}/${snap.total} failed)`,
+    why: vlmDown
+      ? "The last skill-registration pass failed above the 10% alert threshold AND the Tailnet Ollama VLM backend (gabes-desktop-1:11434) is down — the recurring root-cause cascade (#2277/#2269/#1831): OpenViking blocks on VLM summarization, the /api/v1/skills endpoint times out, and registration burns its retries."
+      : "The last skill-registration pass failed above the 10% alert threshold while the Ollama VLM backend is reachable — so the failures are NOT the usual VLM-offline cascade. OpenViking is likely overloaded/5xx-ing under indexing load (#1924/#1831).",
+    impact:
+      "Planners run without the missing skill context — degraded forecast quality and contributes to the no-task rate (#1832).",
+    action: vlmDown
+      ? "Recover the Ollama VLM host (Wake-on-LAN: #1794) — see docs/operator-playbooks/ollama-recovery.md. Once it answers, the hourly Housekeeping chore re-registers the missing skills (no restart needed)."
+      : "Check OpenViking load (curl http://localhost:1933/health) and back off concurrent indexing; the failures will clear once OV stops 5xx-ing. See docs/operator-playbooks/ollama-recovery.md.",
+    autoRecovery: vlmDown,
+  };
+}

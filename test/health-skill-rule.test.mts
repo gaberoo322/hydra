@@ -21,6 +21,7 @@ import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { assessHealth, type HealthSnapshot } from "../src/health/diagnostics.ts";
+import { assessRegistrationFailureRate } from "../src/health/skill-catalog.ts";
 import { registerSkills } from "../src/knowledge-base/skill-registration.ts";
 
 const realFetch = globalThis.fetch;
@@ -159,5 +160,104 @@ describe("skill-catalog Health-Assessment rule (#1968)", () => {
     assert.equal(d!.what, "OV skill catalog empty");
     // An error is the worst severity on an otherwise-healthy snapshot → unhealthy.
     assert.equal(assessHealth(healthySnapshot()).status, "unhealthy");
+  });
+});
+
+// Issue #2277: the registration-FAILURE-RATE alert. Driven through the SAME
+// module-singleton lever (registerSkills with a stubbed fetch) as the population
+// rule above, but asserted via the pure assessRegistrationFailureRate() function
+// so the VLM-down vs VLM-ok branch is exercised deterministically without
+// depending on a particular probe field on the deep-health snapshot.
+//
+// This is a NEW top-level describe with its own afterEach restore (it does not
+// piggyback the population suite's lifecycle). Ordering note: it mutates the
+// SAME singleton as the suite above, so it asserts only via getSkillCatalogState
+// reads it performs itself — it never relies on the singleton's pre-state.
+
+function failRateDiag(s: HealthSnapshot) {
+  return assessHealth(s).diagnostics.find((d) =>
+    d.what.startsWith("OV skill registration failure rate"),
+  );
+}
+
+describe("skill-registration failure-rate alert (#2277)", () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    console.error = realErr;
+    console.log = realLog;
+  });
+
+  test("pure: fully-registered catalog (0% failed) → no alert", () => {
+    const ok = assessRegistrationFailureRate(
+      { registered: 4, total: 4, completed: true, skills: [] },
+      { status: "ok" },
+    );
+    assert.equal(ok, null, "0% failure rate must not alert");
+  });
+
+  test("pure: no completed pass → no alert (registration still in flight)", () => {
+    assert.equal(
+      assessRegistrationFailureRate(
+        { registered: 0, total: 4, completed: false, skills: [] },
+        { status: "down" },
+      ),
+      null,
+    );
+  });
+
+  test("pure: total 0 → no alert (no meaningful rate)", () => {
+    assert.equal(
+      assessRegistrationFailureRate(
+        { registered: 0, total: 0, completed: true, skills: [] },
+        { status: "down" },
+      ),
+      null,
+    );
+  });
+
+  test("pure: failure rate above threshold + VLM down → warning naming the VLM root cause", () => {
+    const d = assessRegistrationFailureRate(
+      { registered: 0, total: 4, completed: true, skills: [] },
+      { status: "down" },
+    );
+    assert.ok(d, "100% failed must alert");
+    // `warning` so it annotates the population verdict without escalating the fold.
+    assert.equal(d!.severity, "warning");
+    assert.equal(d!.component, "intelligence");
+    assert.match(d!.what, /failure rate 100% \(4\/4 failed\)/);
+    assert.match(d!.why, /Ollama VLM backend/);
+    assert.match(d!.action, /ollama-recovery\.md/);
+    assert.equal(d!.autoRecovery, true, "VLM-down path recovers via the hourly chore");
+  });
+
+  test("pure: failure rate above threshold + VLM ok → error pointing at OpenViking load, NOT the VLM", () => {
+    const d = assessRegistrationFailureRate(
+      { registered: 3, total: 4, completed: true, skills: [] },
+      { status: "ok" },
+    );
+    assert.ok(d, "25% failed must alert");
+    assert.match(d!.what, /failure rate 25% \(1\/4 failed\)/);
+    assert.match(d!.why, /NOT the usual VLM-offline cascade/);
+    assert.match(d!.action, /OpenViking load/);
+    assert.equal(d!.autoRecovery, false);
+  });
+
+  test("wired: an all-failure pass + VLM-down snapshot → failure-rate alert folds into status", async () => {
+    muteConsole();
+    globalThis.fetch = (async () => {
+      timeoutThrow();
+    }) as any;
+    await registerSkills({ backoffBaseMs: 0 });
+
+    const snap = healthySnapshot();
+    snap.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
+    const d = failRateDiag(snap);
+    assert.ok(d, "a wired all-failure pass with VLM down must fire the failure-rate alert");
+    assert.equal(d!.severity, "warning");
+    assert.match(d!.why, /Ollama VLM backend/);
+    // The population rule fires `error` (empty catalog) on this same pass → the
+    // fold stays unhealthy from THAT error; the failure-rate `warning` annotates
+    // it without escalating further.
+    assert.equal(assessHealth(snap).status, "unhealthy");
   });
 });

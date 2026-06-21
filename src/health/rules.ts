@@ -14,7 +14,7 @@
 // order. Thresholds stay inline in each rule — co-located = locality.
 
 import type { HealthSnapshot, HealthDiagnostic } from "./diagnostics.ts";
-import { assessSkillCatalog } from "./skill-catalog.ts";
+import { assessSkillCatalog, assessRegistrationFailureRate } from "./skill-catalog.ts";
 // Issue #1968: the OV skill-catalog state is in-process module state populated by
 // startup `registerSkills` (resets on restart), NOT a deep-health probe — so it
 // is read directly here rather than carried on the HealthSnapshot. The skill-rule
@@ -408,6 +408,16 @@ export const RULES: Array<(s: HealthSnapshot) => HealthDiagnostic | null> = [
   // partial → severity:"warning", and ok/in-flight → diagnostic:null, so this
   // rule is a thin pass-through of that gate's diagnostic.
   (_s) => assessSkillCatalog(getSkillCatalogState()).diagnostic,
+  // Issue #2277: the registration-FAILURE-RATE alert. Distinct from the
+  // population gate above (empty/partial): this reads the last completed pass's
+  // failure rate via getSkillCatalogState() (the same pure, never-throw in-memory
+  // read) and correlates it with the #2284 Ollama VLM liveness probe carried on
+  // the snapshot (`s.ollamaVlm`). It fires a `warning` when the failure rate
+  // exceeds 10% and, when the VLM host is down, names that root cause + the
+  // ollama-recovery playbook. `warning` (not `error`) so it ANNOTATES the
+  // population verdict without escalating the deep-health fold above it.
+  // Read-only: it adds no export to skill-registration and never mutates state.
+  (s) => assessRegistrationFailureRate(getSkillCatalogState(), s.ollamaVlm),
 ];
 
 // ---- fmtUp — uptime humanizer shared by assessHealth + the wire projection -
