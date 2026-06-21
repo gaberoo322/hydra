@@ -2,8 +2,7 @@
  * learning/agent-memory.ts — Per-agent pattern memory + auto-promotion
  *
  * Extracted from learning.ts (issue #219). Owns the Redis-backed pattern
- * tier, promotion to feedback files, stale-rule detection, and the legacy
- * `hydra:rules:*` migration.
+ * tier, promotion to feedback files, and stale-rule detection.
  *
  * Issue #900 — the promoted-rule effectiveness / auto-demotion lifecycle that
  * used to live here (effectiveness math, thresholds, cooldown, the
@@ -19,18 +18,11 @@
  *   consolidateAgentPatterns       — daily prune driven by consolidate()
  *   detectStalePromotedRules       — pure helper (tests)
  *   processStaleRules              — pure helper (tests)
- *   migrateRulesToPatterns         — one-time startup migration
  */
 
 import {
-  backfillPromotionMetaDone,
-  deleteOldRules,
-  getOldRules,
-  getOldRulesCount,
   loadPatternsRaw,
-  patternsExist,
   savePatternsRaw,
-  setBackfillPromotionMetaDone,
 } from "../redis/agent-memory.ts";
 import {
   escalateIfNeeded,
@@ -661,49 +653,6 @@ export function backfillPatternPromotionMetadata(
   return mutated;
 }
 
-/**
- * One-time startup migration: scan planner/executor/skeptic patterns and
- * backfill missing promotion metadata. Idempotent — guarded by the
- * `hydra:learning:backfill:promotion-meta:done` Redis flag.
- *
- * Safe to call on every boot. Once the flag is set, this is a single Redis
- * lookup; the underlying Redis writes only happen on the first invocation
- * after the issue #289 instrumentation landed.
- */
-export async function backfillPromotionMetadata(): Promise<void> {
-  try {
-    if (await backfillPromotionMetaDone()) return;
-  } catch (err: any) {
-    console.error(`[Learning] backfillPromotionMetadata: flag lookup failed: ${err.message}`);
-    return;
-  }
-
-  let totalMutated = 0;
-  for (const agent of ["planner", "executor", "skeptic"]) {
-    try {
-      const patterns = await loadPatterns(agent);
-      if (patterns.length === 0) continue;
-      const mutated = backfillPatternPromotionMetadata(patterns);
-      if (mutated > 0) {
-        await savePatterns(agent, patterns);
-        totalMutated += mutated;
-        console.log(`[Learning] Backfilled promotion metadata for ${mutated} ${agent} pattern(s)`);
-      }
-    } catch (err: any) {
-      console.error(`[Learning] backfillPromotionMetadata: ${agent} pass failed: ${err.message}`);
-    }
-  }
-
-  try {
-    await setBackfillPromotionMetaDone(new Date().toISOString());
-    if (totalMutated > 0) {
-      console.log(`[Learning] Promotion-metadata backfill complete (${totalMutated} pattern(s) updated)`);
-    }
-  } catch (err: any) {
-    console.error(`[Learning] backfillPromotionMetadata: flag write failed (will retry next boot): ${err.message}`);
-  }
-}
-
 // ===========================================================================
 // Daily consolidation
 // ===========================================================================
@@ -728,65 +677,6 @@ export async function consolidateAgentPatterns(): Promise<void> {
     if (kept.length < before) {
       await savePatterns(agent, kept);
       console.log(`[Learning] Consolidated ${agent}: ${before} → ${kept.length} patterns (${before - kept.length} stale pruned)`);
-    }
-  }
-}
-
-// ===========================================================================
-// One-time legacy migration (hydra:rules:* → patterns)
-// ===========================================================================
-
-function categorizeRule(rule: any): string {
-  const text = `${rule.when || ""} ${rule.check || ""} ${rule.because || ""}`.toLowerCase();
-  if (text.includes("scope") && (text.includes("creep") || text.includes("outside") || text.includes("boundary"))) return "scope-creep";
-  if (text.includes("verification") || text.includes("npm test") || text.includes("typecheck")) return "verification-failure";
-  if (text.includes("no code") || text.includes("zero changes") || text.includes("no diff")) return "no-diff";
-  if (text.includes("rollback") || text.includes("reverted") || text.includes("regress")) return "rollback";
-  if (text.includes("drift") || text.includes("duplicate")) return "drift";
-  if (text.includes("rejected") || text.includes("skeptic")) return "skeptic-rejection";
-  return "other";
-}
-
-export async function migrateRulesToPatterns() {
-  for (const agent of ["planner", "executor", "skeptic"]) {
-    const oldExists = await getOldRulesCount(agent);
-    const newExists = await patternsExist(agent);
-
-    if (oldExists > 0 && !newExists) {
-      console.log(`[Learning] Migrating ${agent}: ${oldExists} rules → patterns`);
-      const rawRules = await getOldRules(agent);
-      const patterns: MemoryPattern[] = [];
-
-      for (const raw of rawRules) {
-        try {
-          const rule = JSON.parse(raw);
-          const category = categorizeRule(rule);
-          const existing = patterns.find(p => p.category === category);
-
-          if (existing) {
-            existing.hitCount++;
-            existing.lastSeen = rule.date || existing.lastSeen;
-            existing.lastCycleId = rule.cycleId || existing.lastCycleId;
-            existing.examples = [rule.because?.slice(0, 200) || "", ...existing.examples].slice(0, MAX_EXAMPLES);
-          } else {
-            patterns.push({
-              category,
-              severity: rule.severity || "prevent",
-              hitCount: 1,
-              firstSeen: rule.date || new Date().toISOString().split("T")[0],
-              lastSeen: rule.date || new Date().toISOString().split("T")[0],
-              lastCycleId: rule.cycleId || "migrated",
-              action: rule.check || rule.when || "Review this pattern",
-              examples: [rule.because?.slice(0, 200) || ""],
-              promoted: false,
-            });
-          }
-        } catch { /* intentional: skip unparseable rules */ }
-      }
-
-      await savePatterns(agent, patterns);
-      await deleteOldRules(agent);
-      console.log(`[Learning] Migrated ${agent}: ${oldExists} rules → ${patterns.length} patterns`);
     }
   }
 }

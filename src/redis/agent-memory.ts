@@ -103,14 +103,6 @@ export async function scanPatternGroupsRaw(
 }
 
 /**
- * Get the length of old rules list for an agent.
- */
-export async function getOldRulesCount(agent: string): Promise<number> {
-  const r = getRedisConnection();
-  return r.llen(redisKeys.memoryRules(agent));
-}
-
-/**
  * Check if patterns key exists for an agent.
  */
 export async function patternsExist(agent: string): Promise<boolean> {
@@ -119,28 +111,11 @@ export async function patternsExist(agent: string): Promise<boolean> {
   return val === 1;
 }
 
-/**
- * Get all old rules for an agent.
- */
-export async function getOldRules(agent: string): Promise<string[]> {
-  const r = getRedisConnection();
-  return r.lrange(redisKeys.memoryRules(agent), 0, -1);
-}
-
-/**
- * Delete old rules key for an agent.
- */
-export async function deleteOldRules(agent: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.del(redisKeys.memoryRules(agent));
-}
-
 // ---------------------------------------------------------------------------
-// Rule-action audit log + backfill marker (pattern-memory housekeeping)
+// Rule-action audit log (pattern-memory housekeeping)
 // ---------------------------------------------------------------------------
 
 const RULE_ACTION_LOG_KEY = "hydra:learning:rule-actions";
-const BACKFILL_PROMOTION_META_KEY = "hydra:learning:backfill:promotion-meta:done";
 
 /** Append a serialized rule-action entry to the audit log and trim to `cap`. */
 export async function appendRuleAction(entryJson: string, cap: number): Promise<void> {
@@ -154,16 +129,4 @@ export async function readRecentRuleActions(limit: number): Promise<string[]> {
   if (limit <= 0) return [];
   const r = getRedisConnection();
   return r.lrange(RULE_ACTION_LOG_KEY, 0, limit - 1);
-}
-
-/** Has the one-time backfill of promotion-meta run yet? */
-export async function backfillPromotionMetaDone(): Promise<boolean> {
-  const r = getRedisConnection();
-  return (await r.exists(BACKFILL_PROMOTION_META_KEY)) === 1;
-}
-
-/** Stamp the backfill marker so future startups skip the work. */
-export async function setBackfillPromotionMetaDone(iso: string): Promise<void> {
-  const r = getRedisConnection();
-  await r.set(BACKFILL_PROMOTION_META_KEY, iso);
 }
