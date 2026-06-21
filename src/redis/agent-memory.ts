@@ -105,7 +105,7 @@ export async function scanPatternGroupsRaw(
 /**
  * Check if patterns key exists for an agent.
  */
-export async function patternsExist(agent: string): Promise<boolean> {
+async function patternsExist(agent: string): Promise<boolean> {
   const r = getRedisConnection();
   const val = await r.exists(redisKeys.memoryPatterns(agent));
   return val === 1;
