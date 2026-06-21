@@ -49,7 +49,7 @@ export const OV_RESOURCE_URI_PREFIX = "viking://resources/";
  * healthy OV returns a `viking://resources/` hit. Generic enough that a fully
  * indexed tree always matches at least one resource.
  */
-export const SOURCE_FRESHNESS_PROBE_QUERY = "hydra source architecture implementation";
+const SOURCE_FRESHNESS_PROBE_QUERY = "hydra source architecture implementation";
 
 /**
  * Injectable search seam: returns the raw result arrays from OpenViking. Defaults
