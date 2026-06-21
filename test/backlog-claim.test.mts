@@ -373,12 +373,15 @@ describe("claimNextQueuedItem — shipped-item filter (issue #1969)", () => {
 // ---------------------------------------------------------------------------
 //
 // An anchor flagged host-systemd / operator-gated / live-data is deliverable by
-// no code-writing dispatch. The claim path routes it OUT of the hot-path to the
-// `blocked` lane (NOT `done` — the work is real, just not PR-shaped) and a
-// pop-head claim retries the next queued item; a targeted claim returns
-// `not-pr-deliverable`. These tests require Redis — same skip semantics as the
-// suites above. The non-PR flag must be seeded onto the item's `meta` so it
-// survives the addToBacklog round-trip.
+// no code-writing dispatch. Per the `issue-2282` design-concept invariant[1] the
+// claim path RE-QUEUES it to the `queued` lane at a TAIL score (NOT `done` — the
+// work is real; NOT `blocked` — rejectedAlternatives[4] declined the operator-
+// semantics of a blocked move) so it sorts last and won't re-pop on the very
+// next claim yet stays claimable by the operator/deploy path. A pop-head claim
+// retries the next queued item; a targeted claim returns `not-pr-deliverable`.
+// These tests require Redis — same skip semantics as the suites above. The
+// non-PR flag must be seeded onto the item's `meta` so it survives the
+// addToBacklog round-trip.
 // ---------------------------------------------------------------------------
 
 describe("claimNextQueuedItem — PR-deliverability filter (issue #2282)", () => {
@@ -420,7 +423,7 @@ describe("claimNextQueuedItem — PR-deliverability filter (issue #2282)", () =>
     return id;
   }
 
-  test("pop-head: non-PR-deliverable item is routed to blocked, next deliverable item is claimed", async (t) => {
+  test("pop-head: non-PR-deliverable item is re-queued at tail, next deliverable item is claimed", async (t) => {
     requireRedis(t);
     const hostId = await seedNonPr("Install host systemd ingest unit alpha 2282");
     const freshId = await seed("Repo-buildable scanner fix bravo 2282", "queued");
@@ -430,21 +433,29 @@ describe("claimNextQueuedItem — PR-deliverability filter (issue #2282)", () =>
       maxShippedSkips: 5,
     });
 
-    assert.equal(result.claimed, true, "must claim the deliverable item after routing the host-systemd one");
+    assert.equal(result.claimed, true, "must claim the deliverable item after re-queueing the host-systemd one");
     assert.equal(result.item.id, freshId);
 
-    // The non-PR item must be in `blocked`, NOT inProgress, queued, or done.
+    // The non-PR item must be re-queued to `queued`, NOT inProgress, blocked, or done.
+    const queuedIds = await redis.zrange("hydra:backlog:lane:queued", 0, -1);
+    assert.ok(queuedIds.includes(hostId), "non-PR item must be re-queued to queued for the operator/deploy path");
     const blockedIds = await redis.zrange("hydra:backlog:lane:blocked", 0, -1);
-    assert.ok(blockedIds.includes(hostId), "non-PR item must be routed to blocked for the operator/deploy path");
+    assert.ok(!blockedIds.includes(hostId), "non-PR item must NOT be moved to blocked (rejectedAlternatives[4])");
     const inProgressIds = await redis.zrange("hydra:backlog:lane:inProgress", 0, -1);
     assert.ok(!inProgressIds.includes(hostId), "non-PR item must NOT linger in inProgress");
     const doneIds = await redis.zrange("hydra:backlog:lane:done", 0, -1);
     assert.ok(!doneIds.includes(hostId), "non-PR item must NOT be marked done — the work is real");
 
-    // The routed item carries a blockedReason explaining the routing.
+    // Tail-score invariant: the re-queued item must sort AFTER the freshly-seeded
+    // deliverable item so it never re-pops on the next claim while it stays queued.
+    assert.deepEqual(queuedIds, [hostId], "freshId was claimed; only the tail-re-queued hostId remains in queued");
+    const hostScore = await redis.zscore("hydra:backlog:lane:queued", hostId);
+    assert.ok(Number(hostScore) > Date.now(), "re-queued item must carry a tail score above a normal now-timestamp");
+
+    // No blockedReason is stamped — a re-queue is reversible and carries no operator semantics.
     const raw = await redis.hget("hydra:backlog:items", hostId);
     const item = JSON.parse(raw);
-    assert.ok(/not deliverable by a code-writing PR/i.test(item.meta?.blockedReason ?? ""), "blockedReason must explain the #2282 routing");
+    assert.ok(!item.meta?.blockedReason, "re-queue must NOT set a blockedReason (rejectedAlternatives[4])");
   });
 
   test("targeted claim of a non-PR-deliverable item → {claimed:false, reason:'not-pr-deliverable'}", async (t) => {
@@ -459,8 +470,10 @@ describe("claimNextQueuedItem — PR-deliverability filter (issue #2282)", () =>
     assert.equal(result.claimed, false);
     assert.equal(result.reason, "not-pr-deliverable", "targeted claim of a non-PR item must report not-pr-deliverable");
 
+    const queuedIds = await redis.zrange("hydra:backlog:lane:queued", 0, -1);
+    assert.ok(queuedIds.includes(hostId), "targeted non-PR item must be re-queued to queued");
     const blockedIds = await redis.zrange("hydra:backlog:lane:blocked", 0, -1);
-    assert.ok(blockedIds.includes(hostId), "targeted non-PR item must be routed to blocked");
+    assert.ok(!blockedIds.includes(hostId), "targeted non-PR item must NOT be moved to blocked");
     const inProgressIds = await redis.zrange("hydra:backlog:lane:inProgress", 0, -1);
     assert.deepEqual(inProgressIds, [], "targeted non-PR item must NOT be left in inProgress");
   });
@@ -478,8 +491,12 @@ describe("claimNextQueuedItem — PR-deliverability filter (issue #2282)", () =>
     assert.equal(result.claimed, false);
     assert.equal(result.reason, "empty", "exhausted queue of non-PR items must return reason:empty");
 
+    // Both re-queued at tail (never blocked). The bounded skip loop terminates
+    // via maxShippedSkips even though the items stay in the queued lane.
+    const queuedIds = await redis.zrange("hydra:backlog:lane:queued", 0, -1);
+    assert.ok(queuedIds.includes(idA) && queuedIds.includes(idB), "both non-PR items must be re-queued to queued");
     const blockedIds = await redis.zrange("hydra:backlog:lane:blocked", 0, -1);
-    assert.ok(blockedIds.includes(idA) && blockedIds.includes(idB), "both non-PR items must be routed to blocked");
+    assert.deepEqual(blockedIds, [], "no non-PR item may be moved to blocked");
   });
 
   test("an un-flagged item claims normally (the gate only subtracts the flagged population)", async (t) => {
