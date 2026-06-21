@@ -64,6 +64,7 @@ import { pruneStaleRedisKeys } from "./chores/stale-key-prune.ts";
 import { returnStaleInProgressItems } from "./chores/stale-inprogress-return.ts";
 import { runLaneIndexReconcile } from "./chores/lane-index-reconcile.ts";
 import { runSkillCatalogReregister } from "./chores/skill-catalog-reregister.ts";
+import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 
 // ---------------------------------------------------------------------------
 // Re-exports (issue #2090): keep the pre-split public surface stable so
@@ -300,6 +301,18 @@ async function runHousekeeping(
       // an hourly tick against a healthy catalog is a guaranteed no-op.
       name: "skill-catalog-reregister",
       work: () => runSkillCatalogReregister(),
+    },
+
+    {
+      // Issue #2287: wiring-liveness. No Redis time-guard — the chore is
+      // intrinsically idempotent (it reads the manifest + live timer set and
+      // only logs when a declared timer is missing or stale), so an hourly tick
+      // against an all-present/all-fresh set is a guaranteed silent no-op. Never
+      // throws — load/probe failures route to a logged result object.
+      name: "wiring-liveness",
+      work: async () => {
+        await runWiringLiveness();
+      },
     },
   ];
 

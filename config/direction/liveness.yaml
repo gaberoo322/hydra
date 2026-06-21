@@ -1,0 +1,60 @@
+# Wiring-liveness manifest — the declared contract for what SHOULD be live.
+#
+# Issue #2287 (parent epic #2286). This is the source-of-truth git-tracked list
+# of critical production entrypoints, each with a check `type`. It is the
+# complement to the Outcome Holdback (src/holdback.ts): the holdback watches a
+# change that IS live for regressions; wiring-liveness catches a change that
+# never went live at all — a declared timer missing from the running systemd
+# set, or one that has gone stale past its freshness window.
+#
+# Target-scoped CONTENT (it enumerates the hydra-betting-* production timers),
+# orchestrator-scoped CODE (the chore in src/scheduler/chores/wiring-liveness.ts
+# reads it). It lands here beside outcomes.yaml — the Target<->orchestrator
+# contract surface — mirroring how src/outcomes.ts reads outcomes.yaml.
+#
+# Schema (src/schemas/liveness.ts; parsed by a hand-rolled YAML subset, no
+# runtime YAML dependency per ADR-0005):
+#   unit             systemd --user timer unit name, including the .timer suffix
+#   type             check type; only `timer` is implemented in this slice
+#   maxStaleMinutes  freshness window — a timer present in the live set whose
+#                    last fire is older than this is flagged STALE. A timer that
+#                    has never fired yet (last: 0) is NOT-YET-FIRED, never STALE.
+#   description      (optional) why this entrypoint is critical
+#
+# This slice (#2287) hand-curates the known-critical Target timers verified live
+# via `systemctl --user list-timers`. maxStaleMinutes is set generously above
+# each timer's nominal cadence so normal jitter never false-alarms.
+
+entries:
+  - unit: hydra-betting-scan.timer
+    type: timer
+    maxStaleMinutes: 120
+    description: Core market-scan loop — the primary betting ingest/scan entrypoint.
+  - unit: hydra-betting-alerts.timer
+    type: timer
+    maxStaleMinutes: 120
+    description: Alerting loop for surfaced betting opportunities.
+  - unit: hydra-betting-ingest.timer
+    type: timer
+    maxStaleMinutes: 360
+    description: Upstream data ingest for the betting pipeline.
+  - unit: hydra-betting-arbitrage-auto-approval.timer
+    type: timer
+    maxStaleMinutes: 60
+    description: Arbitrage auto-approval loop.
+  - unit: hydra-betting-arbitrage-recovery.timer
+    type: timer
+    maxStaleMinutes: 60
+    description: Arbitrage recovery loop.
+  - unit: hydra-betting-automated-pair-review.timer
+    type: timer
+    maxStaleMinutes: 120
+    description: Automated pair-review loop.
+  - unit: hydra-betting-nba-injuries.timer
+    type: timer
+    maxStaleMinutes: 1560
+    description: BallDontLie NBA injury sync — daily; first fire may be NOT-YET-FIRED.
+  - unit: hydra-betting-forecast-outcomes.timer
+    type: timer
+    maxStaleMinutes: 1560
+    description: Forecast-outcome settlement loop (calibration/brier feed).
