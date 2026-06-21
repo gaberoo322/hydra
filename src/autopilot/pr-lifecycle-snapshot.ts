@@ -67,7 +67,7 @@ export function prRowToSnapshot(row: PrRow): PullRequestSnapshot {
   };
 }
 
-export type PrTransition = "opened" | "merged" | "closed";
+type PrTransition = "opened" | "merged" | "closed";
 
 export interface PrLifecycleEvent {
   repo: string;
