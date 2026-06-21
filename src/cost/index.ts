@@ -119,9 +119,3 @@ export {
   projectCostByClass,
   getCostByClass,
 } from "./cost-attribution.ts";
-
-export type {
-  CostClass,
-  CostByClassEntry,
-  CostByClassResult,
-} from "./cost-attribution.ts";

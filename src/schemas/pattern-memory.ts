@@ -35,7 +35,6 @@ export const PatternBodySchema = z.object({
   cycleId: z.string().optional(),
   severity: z.enum(["prevent", "reinforce"]).optional(),
 });
-export type PatternBody = z.infer<typeof PatternBodySchema>;
 
 /**
  * POST /memory/subagent-lesson
@@ -57,7 +56,6 @@ export const SubagentLessonBodySchema = z.object({
   severity: z.enum(["prevent", "reinforce"]).optional(),
   cycleId: z.string().optional(),
 });
-export type SubagentLessonBody = z.infer<typeof SubagentLessonBodySchema>;
 
 /**
  * POST /memory/subagent-friction
@@ -75,4 +73,3 @@ export const SubagentFrictionBodySchema = z.object({
   context: z.string().optional(),
   cycleId: z.string().optional(),
 });
-export type SubagentFrictionBody = z.infer<typeof SubagentFrictionBodySchema>;

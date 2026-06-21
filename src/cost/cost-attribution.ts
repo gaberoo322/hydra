@@ -98,7 +98,7 @@ export function skillToCostClass(skill: string | undefined | null): CostClass {
   return NON_CLASS_SKILL_COST[s] ?? "other";
 }
 
-export interface CostByClassEntry {
+interface CostByClassEntry {
   /** Total tokens attributed to this class for the window. */
   tokens: number;
   /** Fraction of the window's total tokens (0..1, rounded to 2 dp). */

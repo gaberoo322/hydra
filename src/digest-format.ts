@@ -304,7 +304,7 @@ function formatMinutes(mins: number): string {
  * stays assignable) and lets the `default` case `JSON.stringify` an arbitrary
  * unknown payload.
  */
-export type CriticalAlertPayload = Record<string, unknown> &
+type CriticalAlertPayload = Record<string, unknown> &
   Pick<
     NotificationEventPayload,
     | "title"
