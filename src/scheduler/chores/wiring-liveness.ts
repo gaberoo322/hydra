@@ -29,7 +29,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   LivenessManifestSchema,
@@ -47,10 +47,10 @@ const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hy
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
 
 /**
- * Default path to `config/direction/liveness.yaml`. Exported so a test can point
- * the loader at a fixture without an env var.
+ * Default path to `config/direction/liveness.yaml`. Module-private — tests point
+ * the loader at a fixture via the injected `loadManifest`/`manifestPath` deps.
  */
-export const DEFAULT_LIVENESS_FILE = join(CONFIG_PATH, "direction", "liveness.yaml");
+const DEFAULT_LIVENESS_FILE = join(CONFIG_PATH, "direction", "liveness.yaml");
 
 /** Epoch-microseconds → milliseconds (systemd reports timer times in micros). */
 const MICROS_PER_MS = 1000;
@@ -89,7 +89,7 @@ export interface LivenessParseResult {
  * scalar. A small state machine tracks single/double quotes (so a `#` inside a
  * quoted description survives). Mirrors `outcomes-yaml.stripComment`.
  */
-export function stripComment(line: string): string {
+function stripComment(line: string): string {
   let inSingle = false;
   let inDouble = false;
   for (let i = 0; i < line.length; i++) {
@@ -106,7 +106,7 @@ export function stripComment(line: string): string {
  * `outcomes-yaml.parseScalar`: empty → "", true/false → boolean, quoted →
  * unquoted contents, integer/decimal → number, else the bare trimmed string.
  */
-export function parseScalar(raw: string): YamlScalar {
+function parseScalar(raw: string): YamlScalar {
   const v = raw.trim();
   if (v === "") return "";
   if (v === "true") return true;
@@ -207,7 +207,7 @@ export type LoadManifestResult =
  * plain `if (!result.ok)`. This guard gives callers reliable narrowing — mirroring
  * `isProbeFailure` in the Host-Probe Adapter.
  */
-export function isLoadFailure(
+function isLoadFailure(
   result: LoadManifestResult,
 ): result is { ok: false; reason: string } {
   return result.ok === false;
@@ -250,7 +250,7 @@ export async function loadLivenessManifest(
 // ---------------------------------------------------------------------------
 
 /** Per-entry verdict from diffing a declared timer against the live set. */
-export type TimerVerdict =
+type TimerVerdict =
   | { unit: string; status: "ok"; lastFiredMsAgo: number }
   | { unit: string; status: "missing" }
   | { unit: string; status: "not-yet-fired" }
@@ -423,9 +423,4 @@ export async function runWiringLiveness(
       verdicts: [],
     };
   }
-}
-
-/** Resolve a manifest path against HYDRA_ROOT (exported for completeness/tests). */
-export function resolveManifestPath(p: string): string {
-  return isAbsolute(p) ? p : resolve(HYDRA_ROOT, p);
 }
