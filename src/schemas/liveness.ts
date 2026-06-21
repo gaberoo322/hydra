@@ -30,7 +30,7 @@ import { z } from "zod";
  * STALE. A timer that has never fired yet (`last: 0`) is NOT-YET-FIRED, never
  * STALE — that guard lives in the chore, not the schema.
  */
-export const LivenessEntrySchema = z.object({
+const LivenessEntrySchema = z.object({
   /** The systemd `--user` timer unit name, including the `.timer` suffix. */
   unit: z.string().min(1),
   /** Check type. Only `timer` is implemented in this slice (#2287). */
