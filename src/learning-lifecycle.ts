@@ -30,6 +30,11 @@ import {
 import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
 import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
+import {
+  countSourceHashes,
+  clearSourceHashes,
+} from "./redis/source-index.ts";
+import { probeOvSourceResourcesPresent } from "./knowledge-base/source-freshness.ts";
 
 // ===========================================================================
 // Public API — consolidate
@@ -60,6 +65,79 @@ export async function consolidate(): Promise<void> {
     await consolidatePromotedRuleEffectiveness();
   } catch (err: any) {
     console.error(`[Learning] Promoted-rule effectiveness consolidation failed: ${err.message}`);
+  }
+}
+
+// ===========================================================================
+// Source-index staleness detection (issue #2267)
+// ===========================================================================
+
+/**
+ * Detect and repair a stale source-index cache (issue #2267).
+ *
+ * The durable source-hash cache (`hydra:knowledge:source-hashes`, issue #1123)
+ * lets the indexer skip re-embedding unchanged files across restarts. But if
+ * OpenViking is reset out from under that cache (container reset, deployment,
+ * volume wipe), the cache still claims full coverage so the indexer skips every
+ * file — leaving the knowledge base empty while the cache says otherwise (the
+ * exact failure this issue reports: 2599 cached hashes, 0 OV resources).
+ *
+ * The repair: if the cache is NON-EMPTY but a targeted OpenViking probe finds NO
+ * indexed source resource (no `viking://resources/` hit), OV was reset — so
+ * clear the cache. The next `runSourceInitialPass` (started immediately after by
+ * `startKnowledgeIndexer`) then sees an empty cache and re-uploads the
+ * modified-window tree, repopulating OV.
+ *
+ * INVARIANT — never re-index a healthy restart. The probe uses OV-truth (a
+ * `viking://resources/` search hit), NOT `coverageStats.resourceCount` (which is
+ * 0 on every healthy cache-hit restart and would re-embed the whole tree every
+ * bounce, undoing #1123). On a healthy OV the probe returns present and this is
+ * a no-op. An empty cache (cold start) is also a no-op — there is nothing stale
+ * to clear; the indexer simply populates it.
+ *
+ * Best-effort: every step degrades to "do not clear" on error (count failure ->
+ * 0, probe failure -> present), so a Redis or OV hiccup never wrongly wipes the
+ * cache and never blocks startup. Runs once in `initLearning`, BEFORE
+ * `startKnowledgeIndexer`, so the cleared cache is honoured by the same boot's
+ * initial pass.
+ */
+export async function detectAndClearStaleSourceIndex(
+  // Injectable OV probe (issue #2267) so tests drive the present/absent branches
+  // deterministically without a live OpenViking; production passes nothing and
+  // gets the real `trackedOvSearch`-backed probe.
+  probe: () => Promise<boolean> = probeOvSourceResourcesPresent,
+): Promise<void> {
+  try {
+    const cached = await countSourceHashes();
+    if (cached <= 0) {
+      // Cold/empty cache — nothing stale; the indexer will populate it normally.
+      return;
+    }
+    const present = await probe();
+    if (present) {
+      // Healthy: cache claims coverage AND OV holds indexed source resources.
+      return;
+    }
+    // Stale: cache is populated but OV holds no indexed source resources — OV was
+    // reset out from under the cache. Clear so the upcoming initial pass
+    // re-uploads the tree.
+    const cleared = await clearSourceHashes();
+    if (cleared) {
+      console.warn(
+        `[Learning] Stale source-index detected (issue #2267): ${cached} cached hashes but OpenViking holds no indexed source resources — cleared cache to force re-index on this boot.`,
+      );
+    } else {
+      console.error(
+        `[Learning] Stale source-index detected (${cached} cached hashes, OV empty) but cache clear failed — will retry on next restart.`,
+      );
+    }
+  } catch (err: any) {
+    /* intentional: staleness repair is best-effort. Any failure degrades to a
+       logged no-op (the indexer keeps the old cache and re-uploads only on a
+       genuine content change) — never a crash, never a blocked startup. */
+    console.error(
+      `[Learning] Source-index staleness detection failed: ${err?.message || String(err)}`,
+    );
   }
 }
 
@@ -95,6 +173,12 @@ export async function initLearning(): Promise<void> {
   //    empty-catalog failure (all skills lost to OpenViking timeouts under load)
   //    that this fire-and-forget call used to hide behind a lone console.error.
   registerSkills().catch((err: any) => console.error(`[Learning] Skill registration failed: ${err.message}`));
+
+  // 2b. Detect + repair a stale source-index cache (issue #2267). Runs BEFORE
+  //     startKnowledgeIndexer so a cleared cache is honoured by this boot's
+  //     initial pass. Best-effort/never-throws — a healthy OV or a cold cache is
+  //     a no-op; only a populated-cache-but-empty-OV (OV reset) triggers a clear.
+  await detectAndClearStaleSourceIndex();
 
   // 3. Start knowledge indexer
   startKnowledgeIndexer();

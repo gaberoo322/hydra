@@ -41,6 +41,13 @@ import {
 // surface the silent empty-catalog failure (startup skill registration losing
 // all four skills to OpenViking timeouts) that no health surface reflected.
 import { getSkillCatalogState } from "../knowledge-base/skill-registration.ts";
+// Issue #2267: read-only source-index freshness diagnostic. countSourceHashes()
+// reads the durable dedup-cache size; probeOvSourceResourcesPresent() runs a
+// search probe to see whether OpenViking still holds indexed source resources.
+// Both are best-effort/never-throw. This route MUTATES NOTHING — the auto-clear
+// repair lives in the lifecycle path (learning-lifecycle.ts), not the probe.
+import { countSourceHashes } from "../redis/source-index.ts";
+import { probeOvSourceResourcesPresent } from "../knowledge-base/source-freshness.ts";
 import type { PingableBus } from "./event-bus-types.ts";
 
 import { gitExec } from "../github/git.ts";
@@ -191,6 +198,36 @@ export function createHealthRouter(eventBus: PingableBus) {
       lastAttemptAt: state.lastAttemptAt,
       skills: state.skills,
       diagnostic: assessment.diagnostic,
+    });
+  });
+
+  // GET /health/source-index — source-index freshness diagnostic (issue #2267)
+  //
+  // Surfaces the stale-cache failure where the durable source-hash dedup cache
+  // (`hydra:knowledge:source-hashes`) claims full coverage but OpenViking was
+  // reset out from under it, so agents search an empty knowledge base. READ-ONLY:
+  // reports the cache size and an OV-truth probe (is any indexed source resource
+  // present?), and folds them into a `stale` boolean — it performs ZERO mutation
+  // (the auto-clear repair lives in the lifecycle path, not this probe). Operators
+  // and watchdogs read this to confirm freshness after a deploy/OV bounce.
+  //
+  // stale := cachedSourceHashes > 0 AND ovSourceResourcesPresent == false.
+  // Note the probe fails SAFE (errors report present), so `stale` is only ever
+  // true on a conclusive empty-OV probe — never on a transient OV hiccup.
+  router.get("/health/source-index", async (_req, res) => {
+    const cachedSourceHashes = await countSourceHashes();
+    const ovSourceResourcesPresent = await probeOvSourceResourcesPresent();
+    const stale = cachedSourceHashes > 0 && !ovSourceResourcesPresent;
+    res.json({
+      status: stale ? "stale" : "ok",
+      cachedSourceHashes,
+      ovSourceResourcesPresent,
+      stale,
+      diagnostic: stale
+        ? "Source-hash cache is populated but OpenViking holds no indexed source resources — OV was likely reset out from under the cache. The lifecycle detector clears the cache on the next restart to force a re-index (issue #2267)."
+        : cachedSourceHashes === 0
+          ? "Source-hash cache is empty (cold start); the indexer will populate it on the initial pass."
+          : "Source index is fresh: cache claims coverage and OpenViking holds indexed source resources.",
     });
   });
 
