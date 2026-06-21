@@ -49,17 +49,13 @@
 import { getWorkQueueItems, isTerminalMarker } from "./redis/work-queue.ts";
 import { loadBacklog } from "./backlog/reads.ts";
 import { loadAnchorReflectionsRaw } from "./reflections/per-anchor.ts";
-// Persistence reader lives in the focused persistence Module; the
-// `DesignConcept` value type lives in the identity Module (issue #2124 retired
-// the persistence Module's back-compat type re-export).
-import { getDesignConcept } from "./design-concept.ts";
-import { type DesignConcept } from "./design-concept-identity.ts";
-// Gate predicate + freshness helper now live in their domain home (issue #1908);
-// the persistence module above no longer owns them.
+// All design-concept domain symbols live in the single deep module (issue #2316).
 import {
+  getDesignConcept,
+  type DesignConcept,
   gateCheck,
   isFresh as isDesignConceptFresh,
-} from "./design-concept-gate.ts";
+} from "./design-concept.ts";
 // MergedAnchorRefs — shared merged-by-cycle suppression Seam (issue #1880,
 // extracted from this module). The Candidate Feed below imports the suppression
 // predicate (`isMergedWork`) + production loader (`loadMergedAnchorRefsImpl`);

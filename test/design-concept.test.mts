@@ -11,26 +11,27 @@ import assert from "node:assert/strict";
 import Redis from "ioredis";
 // `dc` is a runtime value namespace (dynamic import below); it cannot be used in
 // type position. Pull the type aliases in directly via `import type` so the
-// test type-checks under tsconfig.test.json (issue #750). Each type comes from
-// its owning Module: the `DesignConcept` value type from the identity Module,
-// the `DesignConceptInput` schema type from the schema Module (issue #2124
-// retired the persistence Module's back-compat re-export relay).
-import type { DesignConcept } from "../src/design-concept-identity.ts";
+// test type-checks under tsconfig.test.json (issue #750). The `DesignConcept`
+// value type and the `DesignConceptInput` schema type come from their owning
+// modules; all other design-concept domain symbols are accessed via the `dc`
+// namespace (dynamic import below).
+import type { DesignConcept } from "../src/design-concept.ts";
 import type { DesignConceptInput } from "../src/schemas/design-concept.ts";
-// The pure identity helpers the persistence Module used to re-export
-// (`normalizeAnchorRef`, `computeArtifactHash`) are now imported from their
-// canonical homes — the storage seam and the identity Module respectively.
+// `normalizeAnchorRef` lives in the storage seam (ADR-0018 / #797).
 import { normalizeAnchorRef } from "../src/redis/design-concept.ts";
-import { computeArtifactHash } from "../src/design-concept-identity.ts";
+// `computeArtifactHash` is part of the design-concept module (issue #2316
+// consolidated it into the single deep module).
+import { computeArtifactHash } from "../src/design-concept.ts";
 
 // Force test DB before any module that reads REDIS_URL is loaded.
 process.env.REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
+// All design-concept domain symbols live in the single deep module (issue #2316).
+// `dc` is the main namespace; `gate` is an alias to the same module so the
+// test bodies can reference `gate.gateCheck`, `gate.isFresh`, and
+// `gate.DESIGN_CONCEPT_MAX_AGE_MS` without rewriting every call site.
 const dc = await import("../src/design-concept.ts");
-// The gate predicate (`gateCheck`/`isFresh`) and its freshness window
-// (`DESIGN_CONCEPT_MAX_AGE_MS`) were extracted to their domain home (issue
-// #1908); import gate-predicate symbols from there directly.
-const gate = await import("../src/design-concept-gate.ts");
+const gate = dc;
 const dcSeam = await import("../src/redis/design-concept.ts");
 
 const TEST_NS = "hydra:design-concept:";
