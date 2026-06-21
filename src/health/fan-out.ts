@@ -49,7 +49,7 @@ import { getEmergencyBrake } from "../redis/emergency-brake.ts";
 import { getOvSearchWindow, getKnowledgeContextAvailability } from "../redis/ov-search-metrics.ts";
 import { getTargetServiceName } from "../target-config.ts";
 import { ovPostJson } from "../knowledge-base/ov-request.ts";
-import { probeService, probeOv, probeEmbedBackend, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult } from "./probe.ts";
+import { probeService, probeOv, probeEmbedBackend, probeOllamaVlm, classifyOvSearchProbe, OV_SEARCH_PROBE_TIMEOUT_MS, type ServiceProbeResult } from "./probe.ts";
 import { parseRedisInfoSnapshot, type ProbeInputs } from "./diagnostics.ts";
 import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-probe/probe.ts";
 import {
@@ -139,6 +139,7 @@ export async function maybeWakeEmbedBackend(
 //   12 patterns, 13 reflections, 14 ovSearch, 15 redisInfo, 16 emergencyBrake.
 //   17/18 are ovSearchWindow/ovContextAvailability — consumed only by
 //   projectHealthDeepResponse, not part of ProbeInputs.
+//   19 ollamaVlm (issue #2278) — the Tailnet VLM-host liveness probe.
 type SettledLike = Array<{ status: "fulfilled" | "rejected"; value?: any; reason?: any }>;
 export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
   // Issue #1833: `val<T>(i)` coalesces a rejected settle to null and brands the
@@ -170,6 +171,8 @@ export function assembleProbeInputs(settled: SettledLike): ProbeInputs {
     emergencyBrake: val<ProbeInputs["emergencyBrake"]>(16),
     ovSearchWindow: val<ProbeInputs["ovSearchWindow"]>(17),
     knowledgeContext: val<ProbeInputs["knowledgeContext"]>(18),
+    // Issue #2278: the Tailnet Ollama VLM-host liveness probe (index 19).
+    ollamaVlm: val<ProbeInputs["ollamaVlm"]>(19),
   };
 }
 
@@ -207,6 +210,8 @@ export interface CollectProbeDeps {
   probeServiceImpl?: typeof probeService;
   probeOvImpl?: typeof probeOv;
   probeEmbedBackendImpl?: typeof probeEmbedBackend;
+  /** Issue #2278: the Tailnet Ollama VLM-host liveness probe (default: real fetch). */
+  probeOllamaVlmImpl?: typeof probeOllamaVlm;
   targetServiceName?: () => string;
 }
 
@@ -232,6 +237,7 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     probeServiceImpl = probeService,
     probeOvImpl = probeOv,
     probeEmbedBackendImpl = probeEmbedBackend,
+    probeOllamaVlmImpl = probeOllamaVlm,
     targetServiceName = getTargetServiceName,
   } = deps;
 
@@ -315,6 +321,13 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     // coalesces a rejected settle to null.
     /* 17 */ ovSearchWindow(24),
     /* 18 */ knowledgeContextAvailability(7),
+    // Issue #2278: DIRECT liveness probe of the Tailnet Ollama VLM host
+    // (gabes-desktop-1:11434) — the host OpenViking uses for its vision/indexing
+    // model. Distinct from the index-1 embed-backend probe (OV-internal
+    // ollama-embed). A `down` result is surfaced as `ollamaVlm` on the wire and
+    // flips the deep-health envelope to `degraded: true` (a visibility signal,
+    // never a 5xx). The probe is contractually never-throwing.
+    /* 19 */ probeOllamaVlmImpl(),
   ]);
 
   return assembleProbeInputs(settled);

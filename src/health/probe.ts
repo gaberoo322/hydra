@@ -179,6 +179,100 @@ export function classifyOvSearchProbe(
 /** The probe timeout for the plain-HTTP service probe (preserved 1:1 across both former call sites). */
 const SERVICE_PROBE_TIMEOUT_MS = 3000;
 
+// ---- Ollama VLM liveness probe (issue #2278) ------------------------------
+//
+// Why a DISTINCT probe (not probeEmbedBackend, not probeOv):
+//  - probeEmbedBackend() exercises the OpenViking dense-embedding backend
+//    (ollama-embed:11434) via the OV search/find transport — that backend lives
+//    INSIDE the OV container and is reached over `extra_hosts`, NOT the Tailnet
+//    gaming-PC host. A healthy embed backend says nothing about whether the
+//    Tailnet VLM host (gabes-desktop-1:11434) — the one OpenViking uses for the
+//    vision/indexing model (gemma) — is reachable. That VLM host being offline is
+//    the recurring silent-failure pattern (#2277/#2269/#2250/#2148/#2103/#2064/
+//    #1968): the skill catalog quietly empties for hours with no /api/health
+//    signal because nothing probes the Tailnet host DIRECTLY.
+//  - probeOv() only hits OV's app-liveness GET /health (OV-the-app is up). It is
+//    blind to the Tailnet VLM host the same way #2013 motivated the embed-backend
+//    split.
+//
+// This is the orchestrator's DIRECT reachability probe of the Tailnet VLM host,
+// reachable from the orchestrator itself (unlike ollama-embed, which is only
+// OV-internal). It is a VISIBILITY probe, not a hard gate: a `down` result makes
+// /health/deep report `degraded: true` but never 5xx (per #2278 acceptance).
+
+/**
+ * The Ollama VLM host base URL — the Tailnet gaming-PC endpoint
+ * (`gabes-desktop-1:11434`) OpenViking uses for its vision/indexing model
+ * (#980/#1795). Env-overridable (`HYDRA_OLLAMA_VLM_URL`) so a relocated host or a
+ * test does not require a code edit; defaults to the documented Tailnet host.
+ */
+const OLLAMA_VLM_URL = process.env.HYDRA_OLLAMA_VLM_URL || "http://gabes-desktop-1:11434";
+
+/**
+ * The Ollama VLM liveness probe `AbortSignal` ceiling (ms) — issue #2278.
+ * 5s per the acceptance criteria: long enough to absorb Tailnet RTT + a cold
+ * host's first answer, short enough to bound the /health/deep fan-out.
+ */
+const OLLAMA_VLM_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * The wire shape the Ollama VLM liveness probe folds to (issue #2278).
+ * Deliberately `ok`/`down` (NOT the running/failed ServiceProbeResult vocabulary)
+ * and carries an optional `error` string — the acceptance criteria name this
+ * exact shape so the operator sees WHY the VLM host is unreachable, not just that
+ * it is. `latencyMs` is always a number (0 on a transport failure that never
+ * round-tripped) so the wire field is uniformly numeric.
+ */
+export type OllamaVlmProbeResult = {
+  status: "ok" | "down";
+  latencyMs: number;
+  error?: string;
+};
+
+/**
+ * Probe the Tailnet Ollama VLM host (`gabes-desktop-1:11434`) for liveness —
+ * issue #2278. Fires a GET to `${OLLAMA_VLM_URL}/api/health` with a 5s
+ * AbortSignal timeout and folds the outcome to `{status, latencyMs, error?}`.
+ *
+ * Reachability semantics: this is a LIVENESS probe — any HTTP response (even a
+ * non-2xx, e.g. Ollama's 404 on an unmapped path) proves the host's HTTP server
+ * answered, so it is `ok`. Only a transport failure (DNS/ECONNREFUSED — the box
+ * is off/unreachable) or a timeout (the box did not answer inside the window)
+ * folds to `down`, carrying the error message so the operator can tell an offline
+ * box from a slow one.
+ *
+ * NEVER throws — a transport failure or timeout is caught and folded to
+ * `{status:"down", latencyMs, error}`, mirroring the fail-loud I/O-boundary fold
+ * the other probes use. `fetchImpl` is injectable (default `globalThis.fetch`) so
+ * the test can stub reachable / non-2xx / throw / timeout without a real network.
+ */
+export async function probeOllamaVlm(
+  {
+    url = OLLAMA_VLM_URL,
+    fetchImpl = globalThis.fetch,
+  }: { url?: string; fetchImpl?: typeof globalThis.fetch } = {},
+): Promise<OllamaVlmProbeResult> {
+  const start = Date.now();
+  try {
+    // Any answer (ok or non-2xx) proves the HTTP server is reachable → ok. We do
+    // NOT gate on r.ok: the path is a liveness target, not a contract endpoint.
+    await fetchImpl(`${url}/api/health`, {
+      signal: AbortSignal.timeout(OLLAMA_VLM_PROBE_TIMEOUT_MS),
+    });
+    return { status: "ok", latencyMs: Date.now() - start };
+  } catch (err) {
+    // Fail-loud I/O-boundary fold: a transport failure (host off / DNS /
+    // ECONNREFUSED) or an AbortSignal timeout means the VLM host did not answer.
+    // Surface the reason so the operator can distinguish "box is off" from
+    // "Tailnet/slow". A TimeoutError carries the documented abort message.
+    return {
+      status: "down",
+      latencyMs: Date.now() - start,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 /**
  * The skills-endpoint liveness probe `AbortSignal` ceiling (ms) — issue #2163.
  *
