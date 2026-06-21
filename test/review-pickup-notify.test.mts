@@ -1,6 +1,6 @@
 /**
  * Regression tests for the /hydra-review pickup-set phone-notify hook
- * (issue #745) — the edge-trigger logic in `checkReviewPickupNotify`. Moved
+ * (issue #745) — the edge-trigger logic in `runReviewPickupNotify`. Moved
  * from `src/scheduler/heartbeat.ts` into the Housekeeping Module
  * (`src/scheduler/housekeeping.ts`) in issue #938.
  *
@@ -18,7 +18,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { checkReviewPickupNotify } from "../src/scheduler/housekeeping.ts";
+import { runReviewPickupNotify } from "../src/scheduler/housekeeping.ts";
 import { formatMessage } from "../src/notify.ts";
 
 interface PublishedEvent {
@@ -61,13 +61,13 @@ function pickupItems(...numbers: number[]) {
   }));
 }
 
-describe("checkReviewPickupNotify — edge trigger", () => {
+describe("runReviewPickupNotify — edge trigger", () => {
   test("empty -> non-empty fires exactly one notification with count + first item", async () => {
     const captured: PublishedEvent[] = [];
     const bus = makeFakeBus(captured);
     const armed = makeArmedState(false);
 
-    const result = await checkReviewPickupNotify(bus, {
+    const result = await runReviewPickupNotify(bus, {
       getPickupSet: async () => pickupItems(42, 43),
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
@@ -91,7 +91,7 @@ describe("checkReviewPickupNotify — edge trigger", () => {
     const bus = makeFakeBus(captured);
     const armed = makeArmedState(true); // a prior notification already fired
 
-    const result = await checkReviewPickupNotify(bus, {
+    const result = await runReviewPickupNotify(bus, {
       getPickupSet: async () => pickupItems(42),
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
@@ -108,7 +108,7 @@ describe("checkReviewPickupNotify — edge trigger", () => {
     const bus = makeFakeBus(captured);
     const armed = makeArmedState(true); // was non-empty, now draining
 
-    const result = await checkReviewPickupNotify(bus, {
+    const result = await runReviewPickupNotify(bus, {
       getPickupSet: async () => [],
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
@@ -127,7 +127,7 @@ describe("checkReviewPickupNotify — edge trigger", () => {
     const bus = makeFakeBus(captured);
     const armed = makeArmedState(false);
 
-    const result = await checkReviewPickupNotify(bus, {
+    const result = await runReviewPickupNotify(bus, {
       getPickupSet: async () => [],
       getNotified: armed.getNotified,
       setNotified: armed.setNotified,
@@ -150,13 +150,13 @@ describe("checkReviewPickupNotify — edge trigger", () => {
     };
 
     // 1. empty -> non-empty: fires
-    await checkReviewPickupNotify(bus, { ...deps, getPickupSet: async () => pickupItems(1) });
+    await runReviewPickupNotify(bus, { ...deps, getPickupSet: async () => pickupItems(1) });
     // 2. still non-empty: suppressed
-    await checkReviewPickupNotify(bus, { ...deps, getPickupSet: async () => pickupItems(1, 2) });
+    await runReviewPickupNotify(bus, { ...deps, getPickupSet: async () => pickupItems(1, 2) });
     // 3. drains to empty: re-arms
-    await checkReviewPickupNotify(bus, { ...deps, getPickupSet: async () => [] });
+    await runReviewPickupNotify(bus, { ...deps, getPickupSet: async () => [] });
     // 4. non-empty again: fires
-    await checkReviewPickupNotify(bus, { ...deps, getPickupSet: async () => pickupItems(3) });
+    await runReviewPickupNotify(bus, { ...deps, getPickupSet: async () => pickupItems(3) });
 
     assert.equal(captured.length, 2);
     assert.deepEqual(captured.map((e) => e.payload.firstNumber), [1, 3]);

@@ -91,8 +91,3 @@ export async function runReviewPickupNotify(
   console.log(`[Housekeeping] Review pickup set non-empty (${count}) — sent notify`);
   return { fired: true, count, transitioned: true };
 }
-
-// Issue #745 / #938: legacy name kept as an alias so any out-of-tree caller or
-// older test that imported `checkReviewPickupNotify` keeps working. #2067
-// renamed it `runReviewPickupNotify` for naming symmetry across the chore set.
-export const checkReviewPickupNotify = runReviewPickupNotify;
