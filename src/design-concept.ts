@@ -75,7 +75,10 @@ import { permitsBreakingChange } from "./tier-policy.ts";
 
 export type DesignConceptScope = "orch" | "target";
 
-export type DesignConceptStatus = "draft" | "approved" | "stale";
+// File-private — used only within this module (DesignConcept, saveDesignConcept,
+// hydrate). Not exported (no external consumer; knip flagged the prior `export`
+// as dead surface, issue #2320).
+type DesignConceptStatus = "draft" | "approved" | "stale";
 
 // File-private — used only by `ModuleTouched` below. Not exported (no external
 // consumer; knip flagged the prior `export` as dead surface, issue #2051).
@@ -83,17 +86,20 @@ type InterfaceImpact = "none" | "extend" | "breaking";
 
 type DepthClassification = "deep" | "shallow" | "unknown";
 
-export type ModuleTouched = {
+// File-private — used only within this module (the `DesignConcept` shape and
+// `hydrate`). Not exported (no external consumer; knip flagged the prior
+// `export` as dead surface, issue #2320).
+type ModuleTouched = {
   path: string;
   interfaceImpact: InterfaceImpact;
   depthClassification: DepthClassification;
 };
 
-export type RejectedAlternative = { alt: string; why: string };
+type RejectedAlternative = { alt: string; why: string };
 
-export type QaTurn = { q: string; a: string };
+type QaTurn = { q: string; a: string };
 
-export type Prototype = {
+type Prototype = {
   question: string;
   branch: "logic" | "ui";
   snippet: string;
