@@ -45,6 +45,9 @@ function happyDeps(overrides: Partial<CollectProbeDeps> = {}): CollectProbeDeps 
     probeServiceImpl: (async () => ({ status: "running", latencyMs: 5 })) as any,
     probeOvImpl: (async () => ({ status: "running", latencyMs: 6 })) as any,
     probeEmbedBackendImpl: (async () => ({ status: "running", latencyMs: 7 })) as any,
+    // Issue #2278: stub the Tailnet VLM-host probe so the fan-out never hits the
+    // real gabes-desktop-1:11434 host from a test/CI environment.
+    probeOllamaVlmImpl: (async () => ({ status: "ok", latencyMs: 9 })) as any,
     targetServiceName: () => "hydra-betting-web.service",
     ...overrides,
   };
@@ -91,6 +94,18 @@ describe("collectProbeInputs — full fan-out pipeline (issue #2089)", () => {
     // index 15 — redis INFO snapshot parse.
     assert.equal((probes.redisInfo as any)?.memoryHuman, "512M");
     assert.equal((probes.redisInfo as any)?.connectedClients, 3);
+
+    // index 19 — the Tailnet Ollama VLM-host liveness probe (issue #2278).
+    assert.equal((probes.ollamaVlm as any)?.status, "ok");
+    assert.equal((probes.ollamaVlm as any)?.latencyMs, 9);
+  });
+
+  test("a down VLM host flows into ollamaVlm (issue #2278)", async () => {
+    const probes = await collectProbeInputs(happyDeps({
+      probeOllamaVlmImpl: (async () => ({ status: "down", latencyMs: 5000, error: "timeout" })) as any,
+    }));
+    assert.equal((probes.ollamaVlm as any)?.status, "down");
+    assert.equal((probes.ollamaVlm as any)?.error, "timeout");
   });
 
   test("pingRedis=false flows into basicHealth.redis", async () => {

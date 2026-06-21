@@ -73,6 +73,7 @@ function healthySnapshot(): HealthSnapshot {
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
+    ollamaVlm: { status: "ok", latencyMs: 12 },
     redisInfo: { memoryHuman: "12M", connectedClients: 4, uptimeSeconds: 9999 },
     emergencyBrake: { engaged: false },
     disk: { availableGb: 120, totalGb: 500, usedPercent: 60 },

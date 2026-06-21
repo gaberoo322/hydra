@@ -37,7 +37,7 @@ import { RULES, fmtUp } from "./rules.ts";
 // OV-search probe's result vocabulary, owned by the ServiceProbe Adapter Seam.
 // `import type` is erased at compile time, so this is zero runtime coupling and
 // does NOT re-create the value-import inversion the move removed.
-import type { OvSearchProbeStatus } from "./probe.ts";
+import type { OvSearchProbeStatus, OllamaVlmProbeResult } from "./probe.ts";
 
 // Skill-catalog health gate moved to src/health/skill-catalog.ts (issue #1992).
 // It described a separate concern — the Knowledge Base's in-process skill
@@ -110,6 +110,11 @@ export interface HealthSnapshot {
   patterns: { planner: number; executor: number; skeptic: number };
   reflCount: number;
   ovSearch: { status: OvSearchProbeStatus; latencyMs: number | null; resultCount: number };
+  // Issue #2278: the Tailnet Ollama VLM host (gabes-desktop-1:11434) liveness
+  // probe. A DIRECT reachability check of the host OpenViking uses for its
+  // vision/indexing model — distinct from the OV-internal embed-backend probe.
+  // `down` surfaces the recurring silent skill-catalog failure (#2277/#2269/…).
+  ollamaVlm: OllamaVlmProbeResult;
   redisInfo: {
     memoryHuman: string;
     connectedClients: number;
@@ -255,6 +260,10 @@ export interface ProbeInputs {
   patterns: HealthSnapshot["patterns"] | null;
   reflections: number | null;
   ovSearch: HealthSnapshot["ovSearch"] | null;
+  // Issue #2278: the Tailnet Ollama VLM host liveness probe result. `| null` on a
+  // rejected settle (the never-throwing probe folds its own failures to a `down`
+  // result, so null only ever means the whole settle rejected upstream).
+  ollamaVlm: HealthSnapshot["ollamaVlm"] | null;
   redisInfo: HealthSnapshot["redisInfo"];
   emergencyBrake: HealthSnapshot["emergencyBrake"] | null;
   // Indices 17/18: consumed by projectHealthDeepResponse for OV quality trends.
@@ -353,6 +362,15 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
   const patterns = probes.patterns || { planner: 0, executor: 0, skeptic: 0 };
   const reflCount = probes.reflections || 0;
   const ovSearch = probes.ovSearch || { status: "failed", latencyMs: null, resultCount: 0 };
+  // Issue #2278: a rejected settle (probes.ollamaVlm === null) defaults to a
+  // `down` result — honest-none (the whole probe settle failed), never a phantom
+  // `ok`. carries a synthetic error so the operator can tell it apart from a real
+  // transport failure surfaced by the probe itself.
+  const ollamaVlm = probes.ollamaVlm || {
+    status: "down" as const,
+    latencyMs: 0,
+    error: "probe settle rejected",
+  };
   const redisInfo = probes.redisInfo ?? null;
   // Issue #744: emergency-brake state. Fail-safe to disengaged if the read
   // rejected (probes.emergencyBrake === null) so a Redis blip never reports a phantom brake.
@@ -380,6 +398,7 @@ export function parseProbes(probes: ProbeInputs): HealthSnapshot {
     patterns,
     reflCount,
     ovSearch,
+    ollamaVlm,
     redisInfo,
     emergencyBrake,
     disk,
