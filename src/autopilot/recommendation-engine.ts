@@ -20,47 +20,41 @@
  * Designed for testability: every external touchpoint is in a `deps`
  * record so the unit tests can inject a fake clock, a fake LLM, a fake
  * Redis seam, and a fake event broadcaster.
+ *
+ * ## Module shape (issue #2317)
+ *
+ * This module is the single, deep composition point for the recs engine. It
+ * was decomposed into five sibling files via successive extraction PRs (#1986
+ * materiality, #2240 prompt, #2119 cap, #2024 consumer), which produced a
+ * shallow pass-through: the engine re-exported its own materiality and prompt
+ * grammar, so a reader scanning the engine body saw imports + re-exports
+ * rather than the firing logic. #2317 folded the four PURE concerns back into
+ * one module organised by concern SECTION rather than by file — the
+ * materiality gate, the prompt grammar, the daily-cap ledger, and the engine's
+ * own firing decision now live side by side here, so editing the firing chain
+ * (threshold, cap, prompt-size budget) is a single-file change.
+ *
+ * The one sibling that stays a separate file is `recommendation-consumer.ts`:
+ * it owns the process-level stream lifecycle (the XREADGROUP polling loop, the
+ * consumer-group registration, the SIGTERM ACK/DELCONSUMER path, the
+ * Redis-backed prompt readers) — the real Seam between the bus and this
+ * engine's call surface. It imports the engine's interface from here.
+ *
+ * Section map (top → bottom):
+ *   1. Public types — the prompt input, the recommendation shape, the deps record
+ *   2. Materiality gate — the pure fire-decision logic (was recommendation-materiality.ts)
+ *   3. Prompt grammar — the pure prompt builder + response parser (was recommendation-prompt.ts)
+ *   4. Daily-cap ledger — the billing concern + oak_resting latch (was recommendation-cap.ts)
+ *   5. Engine factory — `createRecommendationEngine` composing 2-4 with the Redis/LLM deps
+ *   6. Production LLM client — the thin Anthropic Request Adapter wrapper
  */
 
 import { RUN_TTL_SECONDS } from "./runs.ts";
 import * as defaultRedis from "../redis/recommendations.ts";
 import { anthropicMessages, isAnthropicFailure } from "../anthropic/request.ts";
-import {
-  MIN_CALL_INTERVAL_SECONDS,
-  computeMaterialChangeSignature,
-  summariseSlotStatus,
-  shouldFire,
-} from "./recommendation-materiality.ts";
-import {
-  createCapEnforcer,
-  type CapEnforcer,
-} from "./recommendation-cap.ts";
-import {
-  buildPrompt,
-  parseLlmResponse,
-  PROMPT_SIZE_BUDGET_BYTES,
-  MAX_RECS_PER_CALL,
-} from "./recommendation-prompt.ts";
-
-// Back-compat re-export (issue #1986): the materiality gate moved to its own
-// Module, but existing import paths (tests + any caller) keep resolving these
-// symbols from the engine. The engine itself imports them above and delegates.
-export {
-  MIN_CALL_INTERVAL_SECONDS,
-  computeMaterialChangeSignature,
-  summariseSlotStatus,
-  shouldFire,
-};
-
-// Back-compat re-export (issue #2240): the pure prompt grammar — the prompt
-// builder, the response parser, and their size/count constants — moved to
-// `./recommendation-prompt.ts`. The engine imports them above (the factory and
-// `defaultLlmClient` call them) and re-exports here so existing import paths
-// (tests + any caller) keep resolving these symbols from the engine.
-export { buildPrompt, parseLlmResponse, PROMPT_SIZE_BUDGET_BYTES };
 
 // ---------------------------------------------------------------------------
-// Public types
+// SECTION 1 — Public types
 // ---------------------------------------------------------------------------
 
 type RecSeverity = "info" | "warn" | "critical";
@@ -152,14 +146,10 @@ export interface LlmResult {
   prompt: string;
 }
 
-// Prompt-size budget and per-call rec ceiling now live in
-// `./recommendation-prompt.ts` (issue #2240); imported + re-exported above.
-
-// ---------------------------------------------------------------------------
-// Engine state — small Redis facade pulled from defaultRedis but overridable
-// for tests.
-// ---------------------------------------------------------------------------
-
+/**
+ * The small Redis facade the engine state needs — pulled from defaultRedis but
+ * overridable for tests.
+ */
 export interface RecsRedisFacade {
   getLastCallEpoch(runId: string): Promise<number | null>;
   setLastCallEpoch(runId: string, epoch: number, ttlSeconds: number): Promise<void>;
@@ -187,12 +177,13 @@ export interface EngineDeps {
   /** Reader for recent permission-wait events. */
   readRecentPermissionWaits: (runId: string, limit: number) => Promise<PermissionWaitEvent[]>;
   /**
-   * The billing ledger (issue #2119) — owns the daily cost cap, the spend
-   * read/charge, and the once-per-UTC-day `oak_resting` broadcast latch.
-   * Defaulted (like `redis`) so the engine builds a production enforcer from
-   * its env/clock when none is injected; the consumer wires the WS broadcaster
-   * in. The cap-vs-interval ordering stays in `shouldFire`, NOT here — this
-   * enforcer only FEEDS daily_spend_usd + daily_cap_usd into that decision.
+   * The billing ledger (issue #2119, folded back here in #2317) — owns the
+   * daily cost cap, the spend read/charge, and the once-per-UTC-day
+   * `oak_resting` broadcast latch. Defaulted (like `redis`) so the engine
+   * builds a production enforcer from its env/clock when none is injected; the
+   * consumer wires the WS broadcaster in. The cap-vs-interval ordering stays in
+   * `shouldFire`, NOT here — this enforcer only FEEDS daily_spend_usd +
+   * daily_cap_usd into that decision.
    */
   capEnforcer?: CapEnforcer;
   /** Clock — defaults to `() => Math.floor(Date.now() / 1000)`. */
@@ -200,20 +191,426 @@ export interface EngineDeps {
 }
 
 // ---------------------------------------------------------------------------
-// Pure helpers
+// SECTION 2 — Materiality gate (was recommendation-materiality.ts, issue #1986)
 //
-// Note: the prompt grammar (buildPrompt, parseLlmResponse,
-// PROMPT_SIZE_BUDGET_BYTES, MAX_RECS_PER_CALL) now lives in
-// ./recommendation-prompt.ts and is imported + re-exported at the top of this
-// file for back-compat (issue #2240). The materiality gate
-// (computeMaterialChangeSignature, summariseSlotStatus, shouldFire,
-// MIN_CALL_INTERVAL_SECONDS) likewise lives in ./recommendation-materiality.ts
-// (issue #1986). The engine factory below composes these pure functions with
-// the Redis/LLM/cap deps.
+// The pure, deterministic decision logic that gates whether the recs engine
+// fires a (daily-capped) LLM call this turn. This is the deepest concern: a
+// false negative here ("nothing changed") silently skips a call that should
+// have fired, and the daily-spend cap it short-circuits on is the sole
+// sanctioned real-USD surface (CONTEXT.md L203 / ADR-0005).
+//
+// Everything in this section is pure: no I/O, no state mutation, no
+// import-time side effects. Identical input yields byte-identical output,
+// independent of slot key order.
+//
+// The gate has two halves:
+//   1. A material-change *signature* — `computeMaterialChangeSignature` +
+//      `summariseSlotStatus` — a stable string over the state that changes
+//      between material-change triggers (new dispatch, new permission-wait,
+//      new outcome, autopilot status flip).
+//   2. The *fire decision* — `shouldFire` — which orders cap > interval >
+//      no-change > proceed so the cap always short-circuits first.
 // ---------------------------------------------------------------------------
 
+/** Minimum seconds between LLM calls for a given run. */
+export const MIN_CALL_INTERVAL_SECONDS = 30;
+
+/**
+ * Derive a deterministic material-change signature from the engine inputs.
+ * The signature MUST be a function only of state that changes between
+ * material-change triggers (new dispatch, new permission-wait, new outcome,
+ * autopilot status flip). When the signature matches the last-call
+ * signature, the engine skips this turn even if the 30s window has passed.
+ *
+ * Format: a short delimited string. We avoid JSON.stringify to keep the
+ * comparison cheap and stable under key-order drift.
+ */
+export function computeMaterialChangeSignature(input: {
+  dispatches: number;
+  permission_waits: PermissionWaitEvent[];
+  slot_status_summary: string;
+  autopilot_running: boolean;
+}): string {
+  const permParts = input.permission_waits
+    .slice(0, 5)
+    .map((e) => `${e.slot}@${e.ts_epoch}`)
+    .join(",");
+  return [
+    `d=${input.dispatches}`,
+    `r=${input.autopilot_running ? "1" : "0"}`,
+    `s=${input.slot_status_summary}`,
+    `p=${permParts}`,
+  ].join("|");
+}
+
+/**
+ * Reduce a slot snapshot to a compact stable string for the signature
+ * computation. Slots are sorted by name so the output is deterministic
+ * regardless of iteration order.
+ */
+export function summariseSlotStatus(snapshot: SlotSnapshot): string {
+  const entries = Object.entries(snapshot).sort(([a], [b]) => a.localeCompare(b));
+  return entries.map(([slot, info]) => `${slot}:${info?.status ?? "?"}`).join(",");
+}
+
+/**
+ * Decision: should the engine fire this turn? Pure function — exported for
+ * tests. Returns one of:
+ *
+ *   { proceed: true }                                                — fire
+ *   { proceed: false, skip_reason: "cap" }                          — daily cap reached
+ *   { proceed: false, skip_reason: "interval" }                     — too soon
+ *   { proceed: false, skip_reason: "no-change" }                    — no material change
+ *
+ * The order matters: "cap" beats "interval" beats "no-change" so the
+ * caller can surface the most specific reason. The cap MUST short-circuit
+ * first so a capped day never fires an LLM call.
+ */
+export type ShouldFireDecision =
+  | { proceed: true }
+  | { proceed: false; skip_reason: "cap" | "interval" | "no-change" };
+
+export function shouldFire(input: {
+  now_epoch: number;
+  last_call_epoch: number | null;
+  current_signature: string;
+  last_signature: string | null;
+  daily_spend_usd: number;
+  daily_cap_usd: number;
+}): ShouldFireDecision {
+  if (input.daily_spend_usd >= input.daily_cap_usd) {
+    return { proceed: false, skip_reason: "cap" };
+  }
+  if (input.last_call_epoch !== null) {
+    const since = input.now_epoch - input.last_call_epoch;
+    if (since < MIN_CALL_INTERVAL_SECONDS) {
+      return { proceed: false, skip_reason: "interval" };
+    }
+  }
+  if (input.last_signature !== null && input.last_signature === input.current_signature) {
+    return { proceed: false, skip_reason: "no-change" };
+  }
+  return { proceed: true };
+}
+
 // ---------------------------------------------------------------------------
-// Engine API — invoked from the turn_end stream consumer
+// SECTION 3 — Prompt grammar (was recommendation-prompt.ts, issue #2240)
+//
+// The two pure, side-effect-free halves of the recs engine's grammar: the
+// prompt builder (`buildPrompt`) and the response parser (`parseLlmResponse`).
+//
+// Everything in this section is pure: no Redis, no network, no clock, no
+// import-time side effects. `buildPrompt` is a total function of an
+// `EnginePromptInput` literal; `parseLlmResponse` is a total function of a raw
+// completion string plus the engine-derived stamping context. That lets a
+// future promptfoo A/B eval (CONTEXT.md / `evals/`) import `buildPrompt`
+// directly.
+// ---------------------------------------------------------------------------
+
+/**
+ * Prompt-size budget in bytes. The "small prompt" AC is that the engine
+ * never has to truncate at the call site — `buildPrompt` is bounded by
+ * construction (turn/wait/slot/signal clipping), so any reasonable input
+ * produces a prompt at or under this budget. Tests assert it.
+ */
+export const PROMPT_SIZE_BUDGET_BYTES = 4 * 1024;
+
+/** Hard ceiling on recommendations stamped per LLM call. */
+export const MAX_RECS_PER_CALL = 3;
+
+/**
+ * Build the prompt text that the LLM receives. The whole point of the
+ * "small prompt" AC is that the engine never has to truncate at the
+ * call site — the prompt is bounded by construction. We:
+ *
+ *   - keep at most 3 recent turns (older context is in past recs)
+ *   - keep at most 5 recent permission-waits (older waits resolved or are stale)
+ *   - keep the slot snapshot to one line per slot
+ *   - emit signals as `key=value` lines with values clipped to 80 chars
+ *
+ * Tests assert that any reasonable input produces a prompt ≤ 4KB.
+ */
+export function buildPrompt(input: EnginePromptInput): string {
+  const lines: string[] = [];
+  lines.push(
+    "You are Oak, the autopilot observability assistant. Given the latest" +
+      " autopilot turn-end snapshot, emit 1-3 short recommendations for the" +
+      " operator. Each recommendation MUST be a single English sentence.",
+  );
+  lines.push("");
+  lines.push(`# Turn ${input.turn_end.turn_n} (run ${input.turn_end.run_id})`);
+  lines.push(
+    `dispatches=${input.turn_end.dispatches} skipped=${input.turn_end.skipped}` +
+      ` idle=${input.turn_end.idle} tokens=${input.turn_end.tokens_after}` +
+      ` daily_spend_usd=${input.daily_spend_usd.toFixed(4)}`,
+  );
+
+  lines.push("");
+  lines.push("# Recent turns (newest first)");
+  for (const t of input.recent_turns.slice(0, 3)) {
+    lines.push(
+      `- turn_n=${t.turn_n} dispatches=${t.dispatches} skipped=${t.skipped}` +
+        ` idle=${t.idle} ts_epoch=${t.ts_epoch}`,
+    );
+  }
+
+  lines.push("");
+  lines.push("# Slot snapshot");
+  const slotEntries = Object.entries(input.slot_snapshot).slice(0, 12);
+  for (const [slot, info] of slotEntries) {
+    const since = info?.since_epoch ? ` since=${info.since_epoch}` : "";
+    lines.push(`- ${slot}: ${info?.status ?? "?"}${since}`);
+  }
+
+  lines.push("");
+  lines.push("# Signals");
+  const signalEntries = Object.entries(input.signals_snapshot).slice(0, 12);
+  for (const [k, v] of signalEntries) {
+    const valStr = typeof v === "string" ? v : JSON.stringify(v);
+    const clipped = valStr.length > 80 ? `${valStr.slice(0, 77)}...` : valStr;
+    lines.push(`- ${k}=${clipped}`);
+  }
+
+  lines.push("");
+  lines.push("# Recent permission-waits");
+  for (const e of input.recent_permission_waits.slice(0, 5)) {
+    const tool = e.tool ? ` tool=${e.tool}` : "";
+    lines.push(`- ${e.slot} at ${e.ts_epoch}${tool}`);
+  }
+
+  lines.push("");
+  lines.push(
+    "Respond with a single JSON object: {\"recommendations\":[{\"severity\":" +
+      "\"info|warn|critical\", \"message\":\"...\"} ...]}." +
+      " Emit 1-3 recommendations. Keep each message under 140 characters.",
+  );
+
+  return lines.join("\n");
+}
+
+/**
+ * Parse the LLM's JSON response into typed Recommendations. The LLM is
+ * told to return `{recommendations: [...]}`; we extract that array, take
+ * the first 3, and stamp ids/timestamps/evidence_id from the engine's
+ * authoritative context. A malformed response yields an empty array (the
+ * engine still charges the spend for the call — that's a defect on the
+ * model side, not ours).
+ *
+ * `evidenceId` is the engine-derived evidence handle — typically the
+ * turn_n of the triggering turn so the UI can link back to the journal row.
+ */
+export function parseLlmResponse(input: {
+  rawJsonText: string;
+  runId: string;
+  evidenceId: string;
+  nowIso: string;
+  turnN: number;
+}): Recommendation[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input.rawJsonText);
+  } catch {
+    /* intentional: malformed JSON returns empty recommendations */
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const recs = (parsed as any).recommendations;
+  if (!Array.isArray(recs)) return [];
+
+  const out: Recommendation[] = [];
+  for (let i = 0; i < recs.length && out.length < MAX_RECS_PER_CALL; i++) {
+    const raw = recs[i];
+    if (!raw || typeof raw !== "object") continue;
+    const severity = String(raw.severity ?? "info");
+    if (severity !== "info" && severity !== "warn" && severity !== "critical") {
+      continue;
+    }
+    const message = typeof raw.message === "string" ? raw.message.trim() : "";
+    if (!message) continue;
+    // Stable id: run + turn + index — retries collapse cleanly.
+    const id = `${input.runId}:${input.turnN}:${i}`;
+    out.push({
+      id,
+      severity,
+      message: message.slice(0, 200),
+      evidence_id: input.evidenceId,
+      run_id: input.runId,
+      created_at: input.nowIso,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 4 — Daily-cap ledger (was recommendation-cap.ts, issue #2119)
+//
+// The recs-engine's **billing concern** — the single sanctioned real-USD
+// surface on the orchestrator (CONTEXT.md L203 / ADR-0005:
+// `recommendation-engine.ts` bills outside the subscription via the direct
+// Anthropic API, so `HYDRA_RECS_DAILY_CAP_USD` is a live cost gate).
+//
+// What lives here:
+//   - DEFAULT_DAILY_CAP_USD + envDailyCap() — the ONE home for
+//     HYDRA_RECS_DAILY_CAP_USD resolution.
+//   - the UTC date stamper (utcDateStamp / today()).
+//   - the spend READ (getDailySpendUsd) + post-success CHARGE
+//     (incrDailySpendUsd) calls.
+//   - the once-per-UTC-day `oak_resting` broadcast latch (maybeEmitResting),
+//     with date-rollover reset.
+//   - getDailyCapUsd().
+//
+// What deliberately does NOT live here (load-bearing money-safety boundary):
+//   - the cap > interval > no-change ordering. That stays the SINGLE authority
+//     of `shouldFire()` in SECTION 2. This ledger FEEDS `daily_spend_usd` +
+//     `daily_cap_usd` into that decision; it never re-implements the `>=`
+//     comparison or reorders the skip reasons. One short-circuit point means a
+//     capped day can never fire a paid LLM call.
+//   - the micro-USD INT rounding (USD*1e6 + INCRBY integer-safety) stays
+//     entirely inside the Redis accessor (`src/redis/recommendations.ts`); no
+//     float math crosses this seam.
+//
+// The four cost invariants are preserved 1:1:
+//   1. READ-BEFORE-FIRE — daily spend is read before shouldFire, which
+//      short-circuits on cap before any paid call.
+//   2. CHARGE-AFTER-SUCCESS-ONLY — chargeIfPositive() fires only when
+//      cost_usd > 0, after a successful LLM call.
+//   3. MICRO-USD INT confined to the Redis accessor (this ledger only passes a
+//      USD float through to it).
+//   4. BROADCAST-ONCE-PER-UTC-DAY — the pauseDayState latch + rollover reset.
+// ---------------------------------------------------------------------------
+
+/** Default daily cost cap in USD when HYDRA_RECS_DAILY_CAP_USD is unset/invalid. */
+export const DEFAULT_DAILY_CAP_USD = 1.0;
+
+/**
+ * Resolve the recs-engine daily cap from `HYDRA_RECS_DAILY_CAP_USD`. This is
+ * the ONLY home for that env resolution — the engine delegates to it so the
+ * cap amount has a single source of truth (CONTEXT.md L203 / ADR-0005).
+ */
+export function envDailyCap(): number {
+  const raw = process.env.HYDRA_RECS_DAILY_CAP_USD;
+  if (!raw) return DEFAULT_DAILY_CAP_USD;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_DAILY_CAP_USD;
+  return n;
+}
+
+/** UTC `YYYY-MM-DD` stamp — the per-day bucket key for the spend ledger. */
+export function utcDateStamp(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * The narrow Redis surface the cap ledger needs — the micro-USD INT spend
+ * accessors. The integer-safety (USD*1e6 rounding + INCRBY) stays inside
+ * `src/redis/recommendations.ts`; this ledger only passes USD floats through.
+ */
+export interface CapRedisFacade {
+  getDailySpendUsd(date: string): Promise<number>;
+  incrDailySpendUsd(date: string, usd: number): Promise<number>;
+}
+
+export interface CapEnforcerDeps {
+  /** Spend ledger accessor — defaults to the production Redis seam. */
+  redis?: CapRedisFacade;
+  /** Broadcaster for the one-shot `oak_resting` WS event. */
+  broadcastResting?: (runId: string, daily_spend_usd: number, cap_usd: number) => void;
+  /** Clock — defaults to `() => Math.floor(Date.now() / 1000)`. */
+  now?: () => number;
+  /** Date stamper — defaults to UTC YYYY-MM-DD. */
+  today?: () => string;
+  /** Daily cap in USD — defaults to env or DEFAULT_DAILY_CAP_USD. */
+  dailyCapUsd?: number;
+}
+
+/**
+ * The constructed cap-enforcer. It owns the billing ledger but NOT the fire
+ * decision — `readDailySpend()` + `getDailyCapUsd()` feed the engine's
+ * `shouldFire()` call; the enforcer never decides whether to proceed.
+ */
+export interface CapEnforcer {
+  /** The resolved daily cap in USD. */
+  getDailyCapUsd(): number;
+  /** Current UTC date stamp — the spend-ledger bucket key. */
+  today(): string;
+  /** Read the recs-engine daily spend in USD for the given date. */
+  readDailySpend(date: string): Promise<number>;
+  /**
+   * Charge a successful call's USD cost into the daily tally — a no-op when
+   * `costUsd <= 0` (CHARGE-AFTER-SUCCESS-ONLY invariant: only paid calls
+   * charge). The caller invokes this only after a successful LLM call.
+   */
+  chargeIfPositive(date: string, costUsd: number): Promise<void>;
+  /**
+   * Emit the one-shot `oak_resting` WS broadcast for the current UTC day.
+   * Returns `true` if it broadcast this call, `false` if already emitted
+   * today. Resets on date rollover (BROADCAST-ONCE-PER-UTC-DAY invariant).
+   */
+  maybeEmitResting(spendUsd: number): boolean;
+}
+
+/**
+ * Construct the cap enforcer. Mirrors `createRecommendationEngine`'s deps
+ * defaulting (redis/now/today/cap all overridable for tests).
+ */
+export function createCapEnforcer(deps: CapEnforcerDeps = {}): CapEnforcer {
+  const redis = deps.redis ?? (defaultRedis as CapRedisFacade);
+  const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
+  const today = deps.today ?? (() => utcDateStamp(new Date(now() * 1000)));
+  const dailyCapUsd = Number.isFinite(deps.dailyCapUsd as number)
+    ? (deps.dailyCapUsd as number)
+    : envDailyCap();
+
+  // Tracks whether we've already broadcast the `oak_resting` pause event
+  // for this UTC day. Reset on date rollover.
+  const pauseDayState = { date: "", emitted: false };
+
+  return {
+    getDailyCapUsd: () => dailyCapUsd,
+
+    today,
+
+    async readDailySpend(date: string): Promise<number> {
+      return redis.getDailySpendUsd(date);
+    },
+
+    async chargeIfPositive(date: string, costUsd: number): Promise<void> {
+      if (costUsd > 0) {
+        await redis.incrDailySpendUsd(date, costUsd);
+      }
+    },
+
+    maybeEmitResting(spendUsd: number): boolean {
+      const date = today();
+      if (pauseDayState.date !== date) {
+        pauseDayState.date = date;
+        pauseDayState.emitted = false;
+      }
+      if (pauseDayState.emitted) return false;
+      pauseDayState.emitted = true;
+      try {
+        deps.broadcastResting?.("__system__", spendUsd, dailyCapUsd);
+      } catch (err: any) {
+        console.error(
+          `[recs-engine] oak_resting broadcaster threw: ${err?.message || err}`,
+        );
+      }
+      return true;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SECTION 5 — Engine factory
+//
+// `createRecommendationEngine` composes the materiality gate (SECTION 2), the
+// prompt grammar (SECTION 3) and the cap ledger (SECTION 4) with the
+// injected Redis/LLM deps. The returned object has a single hot path,
+// `onTurnEnd`, which `recommendation-consumer.ts` wires to the
+// `hydra:autopilot:slot-events` stream.
 // ---------------------------------------------------------------------------
 
 type OnTurnEndResult =
@@ -228,13 +625,13 @@ export interface RecommendationEngine {
 
 /**
  * Construct the engine. The returned object has a single hot path,
- * `onTurnEnd`, which is wired up by the consumer in `src/index.ts` to the
- * `hydra:autopilot:slot-events` stream.
+ * `onTurnEnd`, which is wired up by the consumer in
+ * `recommendation-consumer.ts` to the `hydra:autopilot:slot-events` stream.
  */
 export function createRecommendationEngine(deps: EngineDeps): RecommendationEngine {
   const redis = deps.redis ?? (defaultRedis as RecsRedisFacade);
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
-  // The billing ledger (issue #2119). Default-construct a production enforcer
+  // The billing ledger (SECTION 4). Default-construct a production enforcer
   // from the engine's clock when none is injected — mirrors the `redis`
   // default. The enforcer owns the cap amount, the spend read/charge, and the
   // oak_resting latch; the engine just feeds its outputs into `shouldFire`.
@@ -340,7 +737,7 @@ export function createRecommendationEngine(deps: EngineDeps): RecommendationEngi
 }
 
 // ---------------------------------------------------------------------------
-// Production LLM client — thin wrapper over the Anthropic Request Adapter
+// SECTION 6 — Production LLM client (thin Anthropic Request Adapter wrapper)
 // ---------------------------------------------------------------------------
 
 const HAIKU_MODEL = "claude-haiku-4-5";
@@ -350,7 +747,7 @@ const HAIKU_INPUT_PER_MTOK_USD = 1.0;
 const HAIKU_OUTPUT_PER_MTOK_USD = 5.0;
 
 /**
- * Build the production LLM client. This is now a THIN wrapper over the
+ * Build the production LLM client. This is a THIN wrapper over the
  * **Anthropic Request Adapter** (`src/anthropic/request.ts`, issue #1959): the
  * URL, `anthropic-version` header, `ANTHROPIC_API_KEY` resolution, the
  * `AbortSignal.timeout()` discipline, non-2xx / malformed-JSON / network
@@ -368,10 +765,10 @@ const HAIKU_OUTPUT_PER_MTOK_USD = 5.0;
  * Staying off `@anthropic-ai/sdk` (ADR-0005) is now the adapter's invariant; the
  * engine no longer constructs a raw `fetch` at all.
  *
- * Exported (issue #2024) so the recommendation-consumer Module — which now owns
- * the stream lifecycle — can wire this production client into the engine it
- * constructs. The cost-gate accounting stays engine-side; this client only
- * derives a per-call USD figure the engine then charges.
+ * Exported so the recommendation-consumer Module — which owns the stream
+ * lifecycle — can wire this production client into the engine it constructs.
+ * The cost-gate accounting stays engine-side; this client only derives a
+ * per-call USD figure the engine then charges.
  */
 export function defaultLlmClient(opts: {
   fetchImpl?: typeof fetch;
@@ -418,24 +815,3 @@ export function defaultLlmClient(opts: {
     },
   };
 }
-
-// ---------------------------------------------------------------------------
-// Stream consumer lifecycle — extracted to its own Seam (issue #2024).
-//
-// The XREADGROUP polling loop, consumer-group registration, ACK path, the
-// pid-scoped consumer descriptor, the raw-stream-event parser, and the
-// Redis-backed prompt readers now live in `./recommendation-consumer.ts`,
-// mirroring the notification-consumer (#1376) / slot-events-bridge siblings.
-// This file stays a pure function of injected `EngineDeps` — it owns the LLM
-// policy, the prompt schema, and the material-change gate, and DELEGATES the
-// cost-gate accounting (HYDRA_RECS_DAILY_CAP_USD) to the injected
-// `capEnforcer` (recommendation-cap.ts, issue #2119) — with NO Redis-stream
-// imports.
-//
-// `recsEngineConsumer` / `parseTurnEndStreamEvent` / `startRecommendationConsumer`
-// are imported directly from `./recommendation-consumer.ts` at every call site
-// (src/index.ts, src/notification-consumer.ts, the consumer's own test), so the
-// back-compat re-export they once had here is dead and was removed (issue #2048).
-// `defaultLlmClient` is exported above so the consumer can wire it into the
-// engine it constructs.
-// ---------------------------------------------------------------------------
