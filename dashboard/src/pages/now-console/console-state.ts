@@ -28,8 +28,17 @@ export const VIEW_HABITAT = "habitat" as const;
 
 export type NowViewMode = typeof VIEW_CONSOLE | typeof VIEW_HABITAT;
 
-/** The Console is the default surface (acceptance criterion #1). */
-export const DEFAULT_NOW_VIEW: NowViewMode = VIEW_CONSOLE;
+/**
+ * The Console is the default surface (acceptance criterion #1).
+ *
+ * Re-exported as an alias of {@link VIEW_CONSOLE} rather than a second
+ * `const` initialiser: the default *is* the Console view today, but the two
+ * are semantically distinct names (one is the view id, the other is the
+ * chosen default) that consumers and the test suite import separately. The
+ * aliased re-export keeps both public names while collapsing the duplicate
+ * value into a single source of truth (knip "Duplicate exports", issue #2259).
+ */
+export { VIEW_CONSOLE as DEFAULT_NOW_VIEW };
 
 export const NOW_VIEW_STORAGE_KEY = "hydra:now:view-mode";
 
@@ -63,7 +72,7 @@ export function resolveNowView(
     stored = null;
   }
   if (isNowViewMode(stored)) return stored;
-  return DEFAULT_NOW_VIEW;
+  return VIEW_CONSOLE; // === DEFAULT_NOW_VIEW (re-exported alias)
 }
 
 /** Persist the chosen view; swallow storage failures (best-effort UX). */

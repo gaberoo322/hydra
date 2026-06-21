@@ -44,8 +44,18 @@ export const OAK_TAB_IDS: readonly OakTabId[] = [TAB_LIVE, TAB_JOURNAL, TAB_RECS
  *  tab-state evolve independently. */
 export const OAK_TAB_STORAGE_KEY = "hydra:now-pixel:oak-tab";
 
-/** Default tab when nothing is stored (or stored value is invalid). */
-export const DEFAULT_OAK_TAB: OakTabId = TAB_LIVE;
+/**
+ * Default tab when nothing is stored (or stored value is invalid).
+ *
+ * Re-exported as an alias of {@link TAB_LIVE} rather than a second `const`
+ * initialiser: the default *is* the Live feed today, but the two are
+ * semantically distinct names (one is the tab id, the other is the chosen
+ * default) that `OakTownCrier.jsx` and the test suite import separately.
+ * The aliased re-export keeps both public names while collapsing the
+ * duplicate value into a single source of truth (knip "Duplicate exports",
+ * issue #2259).
+ */
+export { TAB_LIVE as DEFAULT_OAK_TAB };
 
 /**
  * Read a previously persisted tab id. Returns the default if storage is
@@ -55,14 +65,14 @@ export const DEFAULT_OAK_TAB: OakTabId = TAB_LIVE;
 export function readStoredOakTab(storage: {
   getItem: (k: string) => string | null;
 } | null | undefined): OakTabId {
-  if (!storage) return DEFAULT_OAK_TAB;
+  if (!storage) return TAB_LIVE; // === DEFAULT_OAK_TAB (re-exported alias)
   let raw: string | null = null;
   try {
     raw = storage.getItem(OAK_TAB_STORAGE_KEY);
   } catch {
-    return DEFAULT_OAK_TAB;
+    return TAB_LIVE; // === DEFAULT_OAK_TAB
   }
-  return isOakTabId(raw) ? raw : DEFAULT_OAK_TAB;
+  return isOakTabId(raw) ? raw : TAB_LIVE; // === DEFAULT_OAK_TAB
 }
 
 /**
