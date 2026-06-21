@@ -76,7 +76,7 @@ import { runWiringLiveness } from "./chores/wiring-liveness.ts";
 // `./chores/<name>.ts` source (stale re-exports removed, issue #2105).
 // ---------------------------------------------------------------------------
 export { runBlockedItemEscalation } from "./chores/blocked-escalation.ts";
-export { checkReviewPickupNotify } from "./chores/review-pickup-notify.ts";
+export { runReviewPickupNotify } from "./chores/review-pickup-notify.ts";
 export { runDoneLanePrune } from "./chores/done-lane-prune.ts";
 export { runWeeklyDigest } from "./chores/weekly-digest.ts";
 export { runMemoryConsolidation } from "./chores/memory-consolidation.ts";
