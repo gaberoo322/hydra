@@ -803,11 +803,17 @@ branch the cycle on it.
 
 ### 8.5. Worktree cleanup (issue #542)
 
-On success, remove the hydra-betting worktree we created in Step 0.6, THEN delete the merged feature branch — in that order. `git branch -d` fails with "branch ... used by worktree" while the worktree still holds the branch checked out, which is why the delete lives here and not in Step 7 (friction cue: `worktree-held-branch-blocks-local-delete`). On failure, `scripts/branch-prune.sh` will GC both on the next daily sweep — leaking is acceptable on crash but not on the happy path.
+On success, remove the hydra-betting worktree we created in Step 0.6, **prune stale worktree metadata**, THEN delete the merged feature branch — in that order. `git branch -d` fails with "branch ... used by worktree" while the worktree still holds the branch checked out, which is why the delete lives here and not in Step 7 (friction cue: `worktree-held-branch-blocks-local-delete`). The `git worktree prune` between the two is load-bearing (issue #2272): `$TARGET_WT` lives on `/dev/shm` (tmpfs), so its directory can vanish underneath `git worktree remove` — leaving a *stale* `.git/worktrees/<id>` entry that still claims the branch is "used by worktree at '/dev/shm/...'". Without the prune, the very next `git branch -d` (and every retry) fails against that orphaned metadata even though the dir is long gone (9 such failures for one cycle in 24h). `git worktree prune` is git's own sanctioned metadata reconcile — it only drops entries git itself agrees are no longer in use, so it never touches a live worktree. On failure, `scripts/branch-prune.sh` will GC both on the next daily sweep — leaking is acceptable on crash but not on the happy path.
 
 ```bash
 git -C ~/hydra-betting worktree remove --force "$TARGET_WT" 2>&1 || \
   echo "warn: worktree remove failed for $TARGET_WT — branch-prune.sh will GC it later"
+# Reconcile stale worktree metadata before the branch delete (issue #2272):
+# $TARGET_WT is on /dev/shm (tmpfs) and may have vanished underneath the
+# remove above, leaving an orphaned .git/worktrees/<id> entry that makes the
+# next `git branch -d` fail with "branch ... used by worktree at '/dev/shm/...'".
+git -C ~/hydra-betting worktree prune 2>&1 || \
+  echo "warn: worktree prune failed in ~/hydra-betting — branch-prune.sh will reconcile later"
 git -C ~/hydra-betting branch -d "feature/$CYCLE_ID" 2>&1 || \
   echo "warn: branch delete failed for feature/$CYCLE_ID — branch-prune.sh will GC it later"
 ```
