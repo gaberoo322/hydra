@@ -46,6 +46,7 @@ import {
   type TimerRecord,
   type ProbeResult,
 } from "../../host-probe/probe.ts";
+import { parseConfigYaml, type YamlValue } from "../../config-yaml.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME || "", "hydra");
 const CONFIG_PATH = process.env.HYDRA_CONFIG_PATH || resolve(HYDRA_ROOT, "config");
@@ -62,27 +63,19 @@ const MICROS_PER_MS = 1000;
 // ---------------------------------------------------------------------------
 // YAML-subset parser (issue #2287 slice 1, extended for #2288 slice 2)
 //
-// Follows the PATTERN of `src/outcomes-yaml.ts` (tiny no-dependency tokenizer +
-// zod safeParse downstream) but is NOT a reuse of it — that parser's shape is
-// hardcoded to a top-level `outcomes:` list, whereas the liveness manifest has a
-// top-level `entries:` list with different item fields. The grammar supported is
-// deliberately the minimum `liveness.yaml` documents:
-//   - `#` comments (full-line and trailing) and blank lines
-//   - top-level `entries:` introducing a list
-//   - `- key: value` list-item-as-mapping
-//   - subsequent `  key: value` lines belonging to the most recent list item
-//   - a `key:` line with no value opens a ONE-LEVEL nested mapping on the item
-//     (slice 2: `minOverRuns:` → indented `value:` / `runs:` children)
-//   - scalar values: number, boolean, quoted string, bare string
+// The grammar (the quote-aware comment-stripping state machine, scalar coercion,
+// and the parse loop) lives in the shared, domain-agnostic `src/config-yaml.ts`
+// (consolidated by issue #2314 — it was previously a byte-identical private copy
+// of the `src/outcomes-yaml.ts` primitives). `parseLivenessYaml` is now a thin
+// typed wrapper that supplies the liveness top-level key (`entries`) and opts
+// into the one-level nested-mapping extension (`nestedMappings:true`, for the
+// slice-2 `minOverRuns:` block) the outcomes config does not use. The grammar
+// edge cases (`#` inside quotes, scalar coercion) are exercised by
+// `test/config-yaml.test.mts`; this file keeps wrapper-level round-trip coverage
+// (incl. the nested `minOverRuns` case) in `test/wiring-liveness.test.mts`.
 // ---------------------------------------------------------------------------
 
-/** A single scalar a manifest field can hold in this subset. */
-type YamlScalar = string | number | boolean;
-
-/** A field value: a scalar, or a one-level nested mapping of scalars (slice 2). */
-type YamlValue = YamlScalar | Record<string, YamlScalar>;
-
-/** The parsed document shape before schema validation: a `entries:` list of maps. */
+/** The parsed document shape before schema validation: an `entries:` list of maps. */
 interface ParsedLivenessYaml {
   entries?: Array<Record<string, YamlValue>>;
 }
@@ -94,136 +87,18 @@ export interface LivenessParseResult {
 }
 
 /**
- * Strip a trailing `# ...` comment, but only when the `#` is not inside a quoted
- * scalar. A small state machine tracks single/double quotes (so a `#` inside a
- * quoted description survives). Mirrors `outcomes-yaml.stripComment`.
- */
-function stripComment(line: string): string {
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === "'" && !inDouble) inSingle = !inSingle;
-    else if (ch === '"' && !inSingle) inDouble = !inDouble;
-    else if (ch === "#" && !inSingle && !inDouble) return line.slice(0, i);
-  }
-  return line;
-}
-
-/**
- * Coerce a raw scalar token into its typed value. Mirrors
- * `outcomes-yaml.parseScalar`: empty → "", true/false → boolean, quoted →
- * unquoted contents, integer/decimal → number, else the bare trimmed string.
- */
-function parseScalar(raw: string): YamlScalar {
-  const v = raw.trim();
-  if (v === "") return "";
-  if (v === "true") return true;
-  if (v === "false") return false;
-  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
-    return v.slice(1, -1);
-  }
-  if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
-  return v;
-}
-
-/**
- * Parse the raw text of `liveness.yaml` into `{ ok, value, errors }`. Never
+ * Parse the raw text of `liveness.yaml` into `{ ok, value, errors }`. A thin
+ * wrapper over {@link parseConfigYaml} with the liveness top-level key
+ * (`entries`) and the one-level nested-mapping extension enabled (so the
+ * slice-2 `minOverRuns:` block parses to a nested `{ value, runs }` map). Never
  * throws — malformed lines accumulate in `errors` so the caller can report every
- * problem at once, exactly like the outcomes-yaml parser.
+ * problem at once.
  */
 export function parseLivenessYaml(raw: string): LivenessParseResult {
-  const errors: string[] = [];
-  const result: ParsedLivenessYaml = {};
-  const lines = raw.split("\n");
-
-  let currentTopKey: string | null = null;
-  let currentList: Array<Record<string, YamlValue>> | null = null;
-  let currentItem: Record<string, YamlValue> | null = null;
-  // Slice 2: the open one-level nested mapping (e.g. `minOverRuns:`), and the
-  // indent of the item's own fields (a nested child must sit deeper than that).
-  let currentNested: Record<string, YamlScalar> | null = null;
-  let fieldIndent = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    const rawLine = lines[i];
-    const stripped = stripComment(rawLine);
-    if (stripped.trim() === "") continue;
-
-    const indent = stripped.length - stripped.replace(/^ */, "").length;
-    const content = stripped.slice(indent);
-
-    if (indent === 0) {
-      currentNested = null;
-      fieldIndent = -1;
-      const m = content.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
-      if (!m) {
-        errors.push(`line ${i + 1}: unrecognized top-level syntax: "${rawLine}"`);
-        continue;
-      }
-      const key = m[1];
-      const inline = m[2];
-      currentTopKey = key;
-      if (key === "entries") {
-        currentList = [];
-        result.entries = currentList;
-        currentItem = null;
-      } else {
-        errors.push(`line ${i + 1}: unknown top-level key '${key}' (expected 'entries')`);
-      }
-      if (inline.trim() !== "") {
-        errors.push(`line ${i + 1}: inline value not supported for top-level key '${key}'`);
-      }
-    } else {
-      if (currentTopKey !== "entries" || !currentList) {
-        errors.push(`line ${i + 1}: indented content without enclosing 'entries:' list`);
-        continue;
-      }
-
-      const itemMatch = content.match(/^-\s+([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
-      if (itemMatch) {
-        currentItem = {};
-        currentList.push(currentItem);
-        currentNested = null;
-        // The item's own fields sit at the indent of the chars after `- `.
-        fieldIndent = indent + content.indexOf(itemMatch[1]);
-        currentItem[itemMatch[1]] = parseScalar(itemMatch[2]);
-        continue;
-      }
-
-      const fieldMatch = content.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
-      if (fieldMatch) {
-        if (!currentItem) {
-          errors.push(`line ${i + 1}: field '${fieldMatch[1]}' has no enclosing list item`);
-          continue;
-        }
-        const fieldKey = fieldMatch[1];
-        const fieldVal = fieldMatch[2];
-
-        // A line deeper than the item's own fields belongs to the open nested map.
-        if (currentNested && indent > fieldIndent) {
-          currentNested[fieldKey] = parseScalar(fieldVal);
-          continue;
-        }
-
-        // Back at the item-field indent: this is an item field.
-        if (fieldVal.trim() === "") {
-          // `key:` with no value opens a one-level nested mapping (slice 2).
-          const nested: Record<string, YamlScalar> = {};
-          currentItem[fieldKey] = nested;
-          currentNested = nested;
-          continue;
-        }
-        currentNested = null;
-        currentItem[fieldKey] = parseScalar(fieldVal);
-        continue;
-      }
-
-      errors.push(`line ${i + 1}: unrecognized indented syntax: "${rawLine}"`);
-    }
-  }
-
-  return { ok: errors.length === 0, value: result, errors };
+  const parsed = parseConfigYaml(raw, { topKey: "entries", nestedMappings: true });
+  const value: ParsedLivenessYaml = {};
+  if (parsed.value.entries !== undefined) value.entries = parsed.value.entries;
+  return { ok: parsed.ok, value, errors: parsed.errors };
 }
 
 // ---------------------------------------------------------------------------

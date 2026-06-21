@@ -1,98 +1,20 @@
 /**
- * Edge-case tests for the extracted Target Outcomes YAML parser
- * (`src/outcomes-yaml.ts`, issue #933).
+ * Wrapper round-trip tests for the Target Outcomes YAML loader
+ * (`src/outcomes-yaml.ts`, issue #933; thin wrapper over `src/config-yaml.ts`
+ * since #2314).
  *
- * Before #933 these cases were exercised only indirectly through the full
- * `loadOutcomes` path. With the parser lifted into its own Module, the parse
- * rules — comment stripping, scalar coercion, indentation handling — get a
- * direct test surface here, separate from the outcome-specific schema
- * validation in `src/outcomes.ts`.
+ * The grammar primitives (`stripComment`, `parseScalar`) and the parse-loop
+ * edge-cases moved to `test/config-yaml.test.mts` with the shared module. This
+ * file keeps `parseOutcomesYaml` document-walk coverage — proving the wrapper maps
+ * the shared `entries` list onto the outcomes-specific `outcomes` result shape and
+ * preserves the flat (`nestedMappings:false`) behavior the outcomes config relies
+ * on.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  parseOutcomesYaml,
-  stripComment,
-  parseScalar,
-} from "../src/outcomes-yaml.ts";
-
-// ---------------------------------------------------------------------------
-// stripComment — comment stripping with quote awareness
-// ---------------------------------------------------------------------------
-
-describe("stripComment — quote-aware trailing-comment removal", () => {
-  test("strips a trailing comment", () => {
-    assert.equal(stripComment("name: x  # trailing"), "name: x  ");
-  });
-
-  test("strips a full-line comment to empty", () => {
-    assert.equal(stripComment("# header").trim(), "");
-  });
-
-  test("preserves a '#' inside a double-quoted value", () => {
-    assert.equal(stripComment('query: "/api/foo#frag"'), 'query: "/api/foo#frag"');
-  });
-
-  test("preserves a '#' inside a single-quoted value", () => {
-    assert.equal(stripComment("query: '/a#b'"), "query: '/a#b'");
-  });
-
-  test("strips a comment that follows a closed quote", () => {
-    assert.equal(stripComment('query: "/api"  # note'), 'query: "/api"  ');
-  });
-
-  test("leaves a line with no comment untouched", () => {
-    assert.equal(stripComment("baseline: 0"), "baseline: 0");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// parseScalar — type coercion
-// ---------------------------------------------------------------------------
-
-describe("parseScalar — scalar coercion", () => {
-  test("coerces an integer", () => {
-    assert.equal(parseScalar("42"), 42);
-  });
-
-  test("coerces a negative decimal", () => {
-    assert.equal(parseScalar("-0.5"), -0.5);
-  });
-
-  test("coerces booleans", () => {
-    assert.equal(parseScalar("true"), true);
-    assert.equal(parseScalar("false"), false);
-  });
-
-  test("unwraps a double-quoted string", () => {
-    assert.equal(parseScalar('"hello world"'), "hello world");
-  });
-
-  test("unwraps a single-quoted string", () => {
-    assert.equal(parseScalar("'a b'"), "a b");
-  });
-
-  test("keeps a numeric-looking quoted value as a string", () => {
-    // A quoted "0" must stay a string, not coerce to a number.
-    assert.equal(parseScalar('"0"'), "0");
-    assert.equal(typeof parseScalar('"0"'), "string");
-  });
-
-  test("leaves a bare non-numeric string as a string", () => {
-    assert.equal(parseScalar("metrics/clv.txt"), "metrics/clv.txt");
-  });
-
-  test("empty token becomes empty string", () => {
-    assert.equal(parseScalar(""), "");
-    assert.equal(parseScalar("   "), "");
-  });
-
-  test("a numeric-with-trailing-text token stays a string", () => {
-    assert.equal(parseScalar("12abc"), "12abc");
-  });
-});
+import { parseOutcomesYaml } from "../src/outcomes-yaml.ts";
 
 // ---------------------------------------------------------------------------
 // parseOutcomesYaml — document walk
