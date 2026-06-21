@@ -31,12 +31,28 @@ import { resolve } from "node:path";
 // OV URL it passes is no longer a hardcoded literal.
 import { ovBaseUrl } from "../knowledge-base/ov-request.ts";
 import { pingRedis } from "../redis/utility.ts";
+// Issue #2281: the probe-status DISPLAY vocabulary ("ok"|"degraded"|"down"), the
+// degraded latency threshold, and the pure classify logic are owned by the
+// ServiceProbe Adapter Seam (src/health/probe.ts), next to the probe producers
+// whose results they classify. service-strip composes those canonical
+// classifiers instead of re-implementing them inline, so the status vocabulary
+// has a single definition rather than two that silently diverge. ServiceRow
+// stays a DISTINCT display record (it layers service/lastChecked/lastError onto
+// the shared status) — #2281 converged the vocabulary, NOT the record types.
+import {
+  classifyServiceBoolean,
+  classifyServiceProbe,
+  type ProbeStatus,
+} from "../health/probe.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-type ServiceStatus = "ok" | "degraded" | "down";
+// The Now-page display status. Aliases the canonical ProbeStatus union from the
+// ServiceProbe Adapter Seam (#2281) so there is one definition of the
+// "ok"|"degraded"|"down" vocabulary, not a parallel copy here.
+type ServiceStatus = ProbeStatus;
 
 export interface ServiceRow {
   service: string;
@@ -125,6 +141,10 @@ export async function getServiceStrip(deps: ServiceStripDeps = {}): Promise<Serv
  * meaningful "degraded" middle state for these two — they're up or they're
  * not — but the `degradedMessage` knob lets the caller stamp a more
  * specific reason when relevant (e.g. orchestrator kill-switch).
+ *
+ * Issue #2281: the status/lastError classification is delegated to the shared
+ * `classifyServiceBoolean` in the ServiceProbe Adapter Seam; this function only
+ * layers the display fields (`service`, `lastChecked`) onto the result.
  */
 export function classifyBoolean(input: {
   service: string;
@@ -132,22 +152,15 @@ export function classifyBoolean(input: {
   lastChecked: string;
   degradedMessage?: string;
 }): ServiceRow {
-  if (input.result.status === "rejected") {
-    return {
-      service: input.service,
-      status: "down",
-      lastChecked: input.lastChecked,
-      lastError: input.result.reason?.message || String(input.result.reason),
-    };
-  }
-  if (input.result.value === true) {
-    return { service: input.service, status: "ok", lastChecked: input.lastChecked };
-  }
+  const c = classifyServiceBoolean(input.result, {
+    service: input.service,
+    degradedMessage: input.degradedMessage,
+  });
   return {
     service: input.service,
-    status: "down",
+    status: c.status,
     lastChecked: input.lastChecked,
-    lastError: input.degradedMessage ?? `${input.service} is not responding`,
+    ...(c.lastError !== undefined ? { lastError: c.lastError } : {}),
   };
 }
 
@@ -157,44 +170,24 @@ export function classifyBoolean(input: {
  *   - `ok`        — probe returned 2xx, latency < 1000ms
  *   - `degraded`  — probe returned 2xx but latency >= 1000ms (slow but alive)
  *   - `down`      — probe failed or threw
+ *
+ * Issue #2281: the three-way classification + the 1000ms degraded threshold are
+ * delegated to the shared `classifyServiceProbe` in the ServiceProbe Adapter
+ * Seam; this function only layers the display fields (`service`, `lastChecked`)
+ * onto the result.
  */
 export function classifyProbe(input: {
   service: string;
   result: PromiseSettledResult<ProbeResult>;
   lastChecked: string;
 }): ServiceRow {
-  if (input.result.status === "rejected") {
-    return {
-      service: input.service,
-      status: "down",
-      lastChecked: input.lastChecked,
-      lastError: input.result.reason?.message || String(input.result.reason),
-    };
-  }
-  const probe = input.result.value;
-  if (!probe.ok) {
-    return {
-      service: input.service,
-      status: "down",
-      lastChecked: input.lastChecked,
-      lastError: probe.error || "probe failed",
-      latencyMs: probe.latencyMs,
-    };
-  }
-  if (probe.latencyMs >= 1000) {
-    return {
-      service: input.service,
-      status: "degraded",
-      lastChecked: input.lastChecked,
-      lastError: `slow probe (${probe.latencyMs}ms)`,
-      latencyMs: probe.latencyMs,
-    };
-  }
+  const c = classifyServiceProbe(input.result);
   return {
     service: input.service,
-    status: "ok",
+    status: c.status,
     lastChecked: input.lastChecked,
-    latencyMs: probe.latencyMs,
+    ...(c.lastError !== undefined ? { lastError: c.lastError } : {}),
+    ...(c.latencyMs !== undefined ? { latencyMs: c.latencyMs } : {}),
   };
 }
 

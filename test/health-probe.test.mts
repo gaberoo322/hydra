@@ -24,9 +24,13 @@ import {
   probeSkillsEndpoint,
   probeOllamaVlm,
   classifyOvSearchProbe,
+  classifyServiceProbe,
+  classifyServiceBoolean,
+  DEGRADED_LATENCY_THRESHOLD_MS,
   OV_SEARCH_PROBE_TIMEOUT_MS,
   type ServiceProbeResult,
   type OllamaVlmProbeResult,
+  type ProbeOutcome,
 } from "../src/health/probe.ts";
 import type { OvResult } from "../src/knowledge-base/ov-request.ts";
 
@@ -425,5 +429,90 @@ describe("classifyOvSearchProbe", () => {
       OV_SEARCH_PROBE_TIMEOUT_MS >= 10_000,
       "OV search probe timeout must accommodate the Tailnet+Ollama embedding latency",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared service display-status classifiers (issue #2281) — the converged
+// "ok"|"degraded"|"down" vocabulary + degraded latency threshold that
+// service-strip now composes instead of re-implementing inline. These are the
+// shared fixture vocabulary INV7 names: service-strip's classifyProbe/
+// classifyBoolean delegate here, so this is the single source of truth for the
+// three-way display classification.
+// ---------------------------------------------------------------------------
+
+function fulfilled<T>(value: T): PromiseSettledResult<T> {
+  return { status: "fulfilled", value };
+}
+function rejectedSettle<T>(reason: unknown): PromiseSettledResult<T> {
+  return { status: "rejected", reason };
+}
+
+describe("classifyServiceProbe — shared display classifier", () => {
+  test("ok probe under the degraded threshold → ok, latency kept", () => {
+    const c = classifyServiceProbe(fulfilled<ProbeOutcome>({ ok: true, latencyMs: 150 }));
+    assert.equal(c.status, "ok");
+    assert.equal(c.latencyMs, 150);
+    assert.equal(c.lastError, undefined);
+  });
+
+  test("ok probe at/above the degraded threshold → degraded with slow-probe note", () => {
+    const c = classifyServiceProbe(
+      fulfilled<ProbeOutcome>({ ok: true, latencyMs: DEGRADED_LATENCY_THRESHOLD_MS }),
+    );
+    assert.equal(c.status, "degraded");
+    assert.equal(c.latencyMs, DEGRADED_LATENCY_THRESHOLD_MS);
+    assert.match(c.lastError ?? "", /slow probe/i);
+  });
+
+  test("failed probe → down with captured error + latency", () => {
+    const c = classifyServiceProbe(
+      fulfilled<ProbeOutcome>({ ok: false, latencyMs: 99, error: "HTTP 503" }),
+    );
+    assert.equal(c.status, "down");
+    assert.equal(c.lastError, "HTTP 503");
+    assert.equal(c.latencyMs, 99);
+  });
+
+  test("rejected settle → down with the rejection reason, never throws", () => {
+    const c = classifyServiceProbe(rejectedSettle<ProbeOutcome>(new Error("DNS lookup failed")));
+    assert.equal(c.status, "down");
+    assert.equal(c.lastError, "DNS lookup failed");
+    assert.equal(c.latencyMs, undefined);
+  });
+
+  test("the degraded threshold is 1000ms (preserved 1:1 from the inline service-strip value)", () => {
+    assert.equal(DEGRADED_LATENCY_THRESHOLD_MS, 1000);
+  });
+});
+
+describe("classifyServiceBoolean — shared display classifier", () => {
+  test("true → ok with no error", () => {
+    const c = classifyServiceBoolean(fulfilled(true), { service: "orchestrator" });
+    assert.equal(c.status, "ok");
+    assert.equal(c.lastError, undefined);
+  });
+
+  test("false → down with a service-named default message", () => {
+    const c = classifyServiceBoolean(fulfilled(false), { service: "redis" });
+    assert.equal(c.status, "down");
+    assert.match(c.lastError ?? "", /redis is not responding/i);
+  });
+
+  test("false → down with the supplied degradedMessage knob", () => {
+    const c = classifyServiceBoolean(fulfilled(false), {
+      service: "orchestrator",
+      degradedMessage: "kill-switch active",
+    });
+    assert.equal(c.status, "down");
+    assert.equal(c.lastError, "kill-switch active");
+  });
+
+  test("rejected settle → down with the rejection reason, never throws", () => {
+    const c = classifyServiceBoolean(rejectedSettle(new Error("connection refused")), {
+      service: "redis",
+    });
+    assert.equal(c.status, "down");
+    assert.equal(c.lastError, "connection refused");
   });
 });

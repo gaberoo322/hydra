@@ -37,6 +37,126 @@ export type ServiceProbeResult = {
   latencyMs: number | null;
 };
 
+// ---- Service display-status classification (issue #2281) ------------------
+//
+// The Now-page health strip (src/aggregators/service-strip.ts) and the
+// /health/deep view classify the SAME domain concept — "the liveness status of
+// an external dependency the orchestrator probes" — into a DISPLAY status. That
+// display vocabulary is a THREE-WAY union ("ok"|"degraded"|"down") with a
+// latency-based "degraded" threshold, deliberately DISTINCT from the binary
+// "running"|"failed" ServiceProbeResult producer vocabulary above (which the
+// fan-out / rules.ts / wire.ts read and which this slice leaves untouched).
+//
+// Before #2281 service-strip re-implemented this classification inline as its
+// own classifyProbe/classifyBoolean, so the status vocabulary + the latency
+// threshold lived in two places and could silently diverge as probes were
+// added/renamed (#1869/#1980/#2023). #2281 converges the VOCABULARY + classify
+// LOGIC here in the ServiceProbe Adapter Seam — next to the probe producers
+// whose results it classifies — so "what does 'degraded'/'down' mean for a
+// probed service?" has one answer in one file. It does NOT collapse the
+// ServiceRow display record into ServiceProbe: those stay separate types with
+// different consumers (#2281 rejected-alternative). The classifiers are PURE
+// and NEVER throw (a rejected settle folds to "down"), matching the seam's
+// fail-loud I/O-boundary fold convention.
+
+/**
+ * The three-way DISPLAY status a probed external service can report.
+ *  - `ok`       — probe answered, latency under the degraded threshold.
+ *  - `degraded` — probe answered but latency >= {@link DEGRADED_LATENCY_THRESHOLD_MS}
+ *                 (slow but alive), OR a bool-check's caller-supplied degraded knob.
+ *  - `down`     — probe failed, returned non-2xx, or its settle rejected.
+ *
+ * Distinct from the binary `ServiceProbeResult` ("running"|"failed") producer
+ * vocabulary: that is transport classification; this is the operator-facing
+ * three-way the Now-page strip glances at for "is anything red/yellow?".
+ */
+export type ProbeStatus = "ok" | "degraded" | "down";
+
+/**
+ * The latency ceiling (ms) above which a successful probe is `degraded` rather
+ * than `ok`. A probe that answers but takes >= this is "slow but alive" — a
+ * yellow on the strip, not a green. Preserved 1:1 from the former inline
+ * service-strip threshold (#2281).
+ */
+export const DEGRADED_LATENCY_THRESHOLD_MS = 1000;
+
+/**
+ * The generic settled-probe outcome the display classifier maps to a
+ * {@link ProbeStatus}. This is the `{ok, latencyMs, error?}` shape an HTTP probe
+ * already folds to (service-strip's `ProbeResult`), NOT the binary
+ * `ServiceProbeResult` the producers emit — the display classifier is one level
+ * up, mapping a settled probe outcome onto the three-way display vocabulary.
+ */
+export interface ProbeOutcome {
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+}
+
+/** A probe-status classification carrying the display status + the fields a row renders. */
+export interface ProbeStatusClassification {
+  status: ProbeStatus;
+  lastError?: string;
+  latencyMs?: number;
+}
+
+/**
+ * Classify a settled probe outcome into the three-way DISPLAY status. Pure;
+ * NEVER throws — a rejected settle folds to `down` with the rejection reason in
+ * `lastError`, so the caller's row always renders.
+ *
+ *   - rejected settle      → `down` (rejection reason captured)
+ *   - `ok: false`          → `down` (probe error captured, latency kept)
+ *   - latency >= threshold → `degraded` (slow but alive, latency kept)
+ *   - otherwise            → `ok` (latency kept)
+ */
+export function classifyServiceProbe(
+  result: PromiseSettledResult<ProbeOutcome>,
+): ProbeStatusClassification {
+  if (result.status === "rejected") {
+    return { status: "down", lastError: result.reason?.message || String(result.reason) };
+  }
+  const probe = result.value;
+  if (!probe.ok) {
+    return { status: "down", lastError: probe.error || "probe failed", latencyMs: probe.latencyMs };
+  }
+  if (probe.latencyMs >= DEGRADED_LATENCY_THRESHOLD_MS) {
+    return {
+      status: "degraded",
+      lastError: `slow probe (${probe.latencyMs}ms)`,
+      latencyMs: probe.latencyMs,
+    };
+  }
+  return { status: "ok", latencyMs: probe.latencyMs };
+}
+
+/**
+ * Classify a settled bool-returning health check into the DISPLAY status. Pure;
+ * NEVER throws. There is no meaningful "degraded" middle for a boolean check —
+ * it is up or it is not — but `degradedMessage` lets the caller stamp a more
+ * specific `down` reason (e.g. the orchestrator kill-switch). `false`/rejected
+ * → `down`.
+ *
+ *   - rejected settle → `down` (rejection reason captured)
+ *   - `value === true`→ `ok`
+ *   - `value !== true`→ `down` (`degradedMessage` if supplied, else a default)
+ */
+export function classifyServiceBoolean(
+  result: PromiseSettledResult<boolean>,
+  opts: { service: string; degradedMessage?: string },
+): ProbeStatusClassification {
+  if (result.status === "rejected") {
+    return { status: "down", lastError: result.reason?.message || String(result.reason) };
+  }
+  if (result.value === true) {
+    return { status: "ok" };
+  }
+  return {
+    status: "down",
+    lastError: opts.degradedMessage ?? `${opts.service} is not responding`,
+  };
+}
+
 // ---- OV-search deep-health probe — timeout + failure classification ------
 //
 // Issue #2023: the OV-search probe's classification policy (the status union,
