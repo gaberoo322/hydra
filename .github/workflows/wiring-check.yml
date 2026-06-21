@@ -1,0 +1,49 @@
+name: wiring-check
+
+# Wiring caller-reachability advisory check (issue #2289, parent epic #2286).
+#
+# Runs scripts/ci/wiring-caller-check.ts, which reads the `type: caller` entries
+# from config/direction/liveness.yaml and flags any declared symbol with zero
+# references outside its own definition — the no-caller failure class that
+# shipped an orphaned `seedVerifiedPairRegistry` (wired into nothing, yet
+# type-checking and passing tests in isolation). It is the STATIC complement to
+# the RUNTIME wiring-liveness chore (src/scheduler/chores/wiring-liveness.ts,
+# #2287): the chore catches a declared timer that never went live; this catches
+# a declared caller wired into nothing, at review time, before merge.
+#
+# This lives in its OWN workflow file — deliberately NOT inside ci.yml — because
+# ci.yml is part of the Verifier Core (ADR-0001/ADR-0015: "the gate that gates
+# the gate", operator-only / Tier-4 exact-match). A new verification is a new
+# check, NOT a change to the merge gate, so it lands as a normal Tier-3 sibling —
+# the same pattern ast-grep-lint.yml, comby-check.yml, and eval-gate.yml follow
+# (operator memory feedback_ci_gate_separate_workflow_avoids_tier0). It is
+# therefore NOT a required branch-protection check and cannot block a merge.
+#
+# ADVISORY by design: the job runs the checker and surfaces its diagnostics to
+# reviewers, then exits 0 regardless of findings so it never blocks merge. To
+# promote it to a hard gate later, drop the `|| true` (a conscious, reviewable
+# change) — mirroring how ast-grep-lint promotes a rule by adding `--error`.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: wiring-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  wiring-caller-check:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: caller-reachability scan (advisory; reads config/direction/liveness.yaml)
+        run: |
+          node --no-warnings --experimental-strip-types \
+            scripts/ci/wiring-caller-check.ts || true
