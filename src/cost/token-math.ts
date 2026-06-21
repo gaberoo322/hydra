@@ -54,6 +54,44 @@ export interface TokenBreakdown {
  */
 export type ModelFamily = "opus" | "sonnet" | "haiku" | "unknown";
 
+/**
+ * The canonical ordered family list the per-family rollups + Quota-Weight folds
+ * iterate. Relocated DOWN into this pure leaf (issue #2279) from
+ * `usage-tracker.ts` so both `usage-tracker.ts` (the I/O coordinator) and the
+ * extracted `snapshot-assembly.ts` leaf import it one-way from here — the same
+ * downward-only import direction this leaf already enforces. `transcript-scan.ts`
+ * keeps its own private copy for the scan-side rollup; this is the canonical
+ * copy the snapshot-assembly math shares.
+ */
+export const MODEL_FAMILIES: readonly ModelFamily[] = ["opus", "sonnet", "haiku", "unknown"];
+
+/**
+ * Quota-Weight for a family. opus/sonnet/haiku from env-derived weights; unknown
+ * is the implicit 1.0 (the CONTEXT.md Quota-Weight formula is three-family —
+ * there is deliberately no `HYDRA_QUOTA_WEIGHT_UNKNOWN`). Relocated DOWN into
+ * this pure leaf (issue #2279) so the snapshot-assembly fold can import it
+ * one-way without a back-import into the coordinator. Pure + total: the weights
+ * object is passed in, no env read here.
+ */
+export function familyWeight(
+  family: ModelFamily,
+  weights: { opus: number; sonnet: number; haiku: number },
+): number {
+  switch (family) {
+    case "opus":
+      return weights.opus;
+    case "sonnet":
+      return weights.sonnet;
+    case "haiku":
+      return weights.haiku;
+    case "unknown":
+      // Implicit 1.0 — no HYDRA_QUOTA_WEIGHT_UNKNOWN env var exists; the
+      // formula is three-family. Drift here is surfaced by the
+      // once-per-scan console.warn, not absorbed by a tunable.
+      return 1;
+  }
+}
+
 export interface ResetWindow {
   /**
    * Epoch-ms of the most recent anchor + 7d*k that is <= now — the start of

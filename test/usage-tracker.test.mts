@@ -61,11 +61,12 @@ import {
   overlaySessionBlockEligibility,
   type UsageEligibility,
 } from "../src/cost/eligibility.ts";
-// The pure snapshot-assembly helpers extracted in issue #2188. They are exported
-// from cost/usage-tracker.ts (for direct unit test) but deliberately NOT added
-// to the cost/index.ts public barrel — same module-internal visibility as
-// eligibility.ts's deriveHardStop. Import them straight from the source module
-// so the scalar-input seam is asserted without driving the full snapshot build.
+// The pure snapshot-assembly helpers (extracted in issue #2188, relocated to
+// their own pure leaf cost/snapshot-assembly.ts in issue #2279). They are
+// exported from cost/snapshot-assembly.ts (for direct unit test) but deliberately
+// NOT added to the cost/index.ts public barrel — same module-internal visibility
+// as eligibility.ts's deriveHardStop. Import them straight from the leaf so the
+// scalar-input seam is asserted without pulling in the JSONL-scan coordinator.
 import {
   derivePacingState,
   rebaseOnOAuth,
@@ -74,7 +75,7 @@ import {
   deriveWeightedBurns,
   deriveEstimatePercents,
   deriveQuotaWeightTotals,
-} from "../src/cost/usage-tracker.ts";
+} from "../src/cost/snapshot-assembly.ts";
 // `rebaseOnOAuth` consumes the already-resolved OAuth read (`ScanResult["oauth"]`,
 // = CachedOAuthRead). Alias it here so the fixtures below name the shape the
 // helper expects without importing the whole ScanResult boundary type.
