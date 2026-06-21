@@ -48,14 +48,12 @@ import {
 // callers should import from `capacity-floor-classifier.ts` directly.
 export {
   classifySide,
-  computeShare,
   DEFAULT_WINDOW_CYCLES,
   ORCHESTRATOR_FLOOR,
 } from "./capacity-floor-classifier.ts";
 export type {
   CapacitySnapshot,
   CycleSide,
-  CycleSideEntry,
   ShareResult,
 } from "./capacity-floor-classifier.ts";
 
