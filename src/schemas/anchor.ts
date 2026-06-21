@@ -41,4 +41,11 @@ export const AnchorCandidatesQuerySchema = z.object({
   // canonical opt-in value `"true"` → true, the mirror of the two exclusion
   // flags' default-true opt-out shape.
   inlineMode: booleanFlag(false),
+  // `excludeNonPrDeliverable` (issue #2282) defaults TRUE: an anchor that is
+  // host-systemd-only / operator-gated / live-data is deliverable by no
+  // code-writing dispatch, so the feed hides it for every caller. The raw
+  // operator view opts out with `?excludeNonPrDeliverable=false`. Uses
+  // `booleanFlag(true)` — the same default-true opt-out shape as the two
+  // exclusion flags above.
+  excludeNonPrDeliverable: booleanFlag(true),
 });

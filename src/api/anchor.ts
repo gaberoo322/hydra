@@ -18,7 +18,7 @@ import { AnchorCandidatesQuerySchema } from "../schemas/anchor.ts";
 export function createAnchorRouter() {
   const router = Router();
 
-  // GET /api/anchor/candidates?limit=N&excludeInFlight=true|false&excludeMerged=true|false&inlineMode=true|false
+  // GET /api/anchor/candidates?limit=N&excludeInFlight=true|false&excludeMerged=true|false&inlineMode=true|false&excludeNonPrDeliverable=true|false
   router.get("/anchor/candidates", async (req, res) => {
     try {
       // ADR-0022: read query params through the Schemas seam. `limit` collapses
@@ -28,10 +28,13 @@ export function createAnchorRouter() {
       // callers pass `=false` for the raw view). `inlineMode` defaults FALSE
       // (issue #2075): an inline-mode caller passes `=true` to hide anchors
       // flagged dispatch-spawn-capable (not inline-buildable).
-      const { count: limit, excludeInFlight, excludeMerged, inlineMode } =
+      // `excludeNonPrDeliverable` defaults TRUE (issue #2282): an anchor that is
+      // host-systemd-only / operator-gated / live-data is hidden from every
+      // caller; the raw operator view passes `=false`.
+      const { count: limit, excludeInFlight, excludeMerged, inlineMode, excludeNonPrDeliverable } =
         AnchorCandidatesQuerySchema.parse(req.query);
 
-      const feed = await getCandidateFeed({ limit, excludeInFlight, excludeMerged, inlineMode });
+      const feed = await getCandidateFeed({ limit, excludeInFlight, excludeMerged, inlineMode, excludeNonPrDeliverable });
 
       res.json({
         ...feed,

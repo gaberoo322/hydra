@@ -10,6 +10,13 @@ import {
   loadMergedAnchorRefsImpl,
   type MergedAnchorRefsLoader,
 } from "./merged-refs.ts";
+// PR-deliverability gate (issue #2282) — pure predicate, no I/O. The atomic
+// claim mirrors the candidate feed: an anchor that is host-systemd-only /
+// operator-gated / live-data is deliverable by no code-writing dispatch, so a
+// pop-head claim skips it (reconciling it OUT of the queue) and a targeted claim
+// returns `not-pr-deliverable` rather than handing the session a guaranteed
+// no-op.
+import { requiresNonPrDispatch } from "./candidate-eligibility.ts";
 
 /**
  * Injectable dependencies for `claimNextQueuedItem`.
@@ -110,6 +117,16 @@ return raw
  * the pop-head variant retries; targeted claims (`itemId` present) return
  * `{claimed:false, reason:"already-shipped"}` immediately so callers can
  * give clear feedback rather than silently redirecting to another item.
+ *
+ * Issue #2282 — PR-deliverability filter: a claimed item flagged
+ * host-systemd-only / operator-gated / live-data (`requiresNonPrDispatch`) is
+ * deliverable by no code-writing dispatch, so it is routed OUT of the claim
+ * hot-path to the `blocked` lane (with a routing reason for the operator/deploy
+ * path) rather than `done` — the work is real, just not PR-shaped. Pop-head
+ * retries the next queued item (sharing the `maxShippedSkips` budget); a
+ * targeted claim returns `{claimed:false, reason:"not-pr-deliverable"}`. This
+ * filter runs BEFORE the shipped-item check (a stale undeliverable anchor never
+ * even reaches the `gh`-backed merged scan).
  */
 export async function claimNextQueuedItem(
   claimedBy: string,
@@ -164,6 +181,57 @@ export async function claimNextQueuedItem(
 
     if (parsed.blocked) {
       return { claimed: false, reason: parsed.blocked, count: parsed.count };
+    }
+
+    // Issue #2282 — PR-deliverability filter. An anchor that is host-systemd-
+    // only / operator-gated / live-data is deliverable by NO code-writing
+    // dispatch; serving it burns a guaranteed ground+analyse+release cycle. The
+    // pure `requiresNonPrDispatch` predicate reads declarative flags off the
+    // item (no I/O). Unlike the shipped-item filter below, the work is NOT done
+    // — it belongs to the operator/deploy path — so the item is reconciled to
+    // the `blocked` lane (with a routing reason) rather than `done`, keeping it
+    // visible for operator action while removing it from the claim hot-path.
+    //   - Targeted claim: return `not-pr-deliverable` (no silent redirect).
+    //   - Pop-head: route to blocked + retry the next queued item (capped by the
+    //     same maxShippedSkips budget so a fully-undeliverable queue terminates).
+    if (requiresNonPrDispatch(parsed)) {
+      try {
+        await removeFromBacklogLane("inProgress", parsed.id);
+        applyLaneTransition(parsed, "blocked", { claimedBy: null });
+        parsed.meta = {
+          ...parsed.meta,
+          blockedReason:
+            "not deliverable by a code-writing PR (host-systemd / operator-gated / live-data) — routed to operator/deploy path (#2282)",
+        };
+        await saveItem(parsed);
+        const blockedScore = -Date.now();
+        await addToBacklogLane("blocked", blockedScore, parsed.id);
+        console.error(
+          `[backlog/claim] not-pr-deliverable-skip: item ${parsed.id} ("${truncate(parsed.title ?? "", 60)}") ` +
+            `is host-systemd / operator-gated / live-data — routed to blocked for the operator/deploy path ` +
+            `(claimedBy=${claimedBy}, skip=${shippedSkipped + 1}/${maxSkips})`,
+        );
+      } catch (err) {
+        console.error(
+          `[backlog/claim] not-pr-deliverable-skip: failed to route item ${parsed.id} to blocked — leaving in inProgress`,
+          err,
+        );
+      }
+
+      // Targeted claim: don't silently redirect to a different item.
+      if (itemId !== undefined) {
+        return { claimed: false, reason: "not-pr-deliverable" };
+      }
+
+      // Pop-head: retry, but only up to maxSkips times to avoid infinite loops.
+      shippedSkipped++;
+      if (shippedSkipped >= maxSkips) {
+        console.error(
+          `[backlog/claim] not-pr-deliverable-skip: hit maxShippedSkips (${maxSkips}) — returning empty (claimedBy=${claimedBy})`,
+        );
+        return { claimed: false, reason: "empty" };
+      }
+      continue;
     }
 
     // Issue #1969 — shipped-item filter. Check whether the item's identity
