@@ -61,6 +61,18 @@ export interface HealthDeepResponse {
   status: HealthAssessment["status"];
   summary: string;
   checkedAt: string;
+  // Issue #2278: a top-level visibility flag — `true` when a soft-failing probe
+  // (today: the Tailnet Ollama VLM host) is down. It does NOT change the HTTP
+  // status code (the route always answers 200; `degraded` is the operator's
+  // at-a-glance "something is soft-down" signal). Distinct from `status`, which
+  // is the rule-derived severity fold (healthy/degraded/unhealthy/critical).
+  degraded: boolean;
+  // Issue #2278: the Tailnet Ollama VLM host (gabes-desktop-1:11434) liveness
+  // probe — the host OpenViking uses for its vision/indexing model. A DIRECT
+  // reachability check distinct from the embed-backend (OV-internal) probe. When
+  // `down`, the recurring silent skill-catalog failure (#2277/#2269/…) is finally
+  // visible. `{status:'ok'|'down', latencyMs, error?}`.
+  ollamaVlm: HealthSnapshot["ollamaVlm"];
   services: {
     orchestrator: { status: string; uptime: number; uptimeHuman: string; cycle: string };
     redis: {
@@ -133,7 +145,7 @@ export function projectHealthDeepResponse(
   checkedAt: string,
   probes: ProbeInputs,
 ): HealthDeepResponse {
-  const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, ovSearch, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
+  const { health, svcProbes, sched, queueDepth, blCounts, patterns, reflCount, ovSearch, ollamaVlm, redisInfo, emergencyBrake, disk, mem, recent } = snapshot;
   const { orchestrator: sysdOrch, watchdog: sysdWatch, targetWeb: sysdWeb } = snapshot.sysd;
 
   // Issue #1440: coalesce the two persisted OV-quality reads.
@@ -145,6 +157,10 @@ export function projectHealthDeepResponse(
 
   return {
     status, summary, checkedAt,
+    // Issue #2278: a `down` Ollama VLM host flips the visibility flag. Never a
+    // 5xx — the route still answers 200; `degraded` is the soft-down signal.
+    degraded: ollamaVlm.status === "down",
+    ollamaVlm,
     services: {
       orchestrator: { status: health.status === "ok" ? "running" : health.status, uptime: health.uptime, uptimeHuman: fmtUp(health.uptime), cycle: health.cycle },
       redis: { status: health.redis ? "running" : "failed", memoryHuman: redisInfo?.memoryHuman || null, connectedClients: redisInfo?.connectedClients || null, uptimeSeconds: redisInfo?.uptimeSeconds || null },

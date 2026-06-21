@@ -59,6 +59,8 @@ function healthySnapshot(): HealthSnapshot {
     patterns: { planner: 4, executor: 6, skeptic: 2 },
     reflCount: 12,
     ovSearch: { status: "running", latencyMs: 40, resultCount: 3 },
+    // Issue #2278: the Tailnet Ollama VLM-host liveness probe — healthy by default.
+    ollamaVlm: { status: "ok", latencyMs: 12 },
     redisInfo: { memoryHuman: "12M", connectedClients: 4, uptimeSeconds: 9999 },
     emergencyBrake: { engaged: false },
     disk: { availableGb: 120, totalGb: 500, usedPercent: 60 },
@@ -742,6 +744,9 @@ describe("parseProbes", () => {
       patterns: null, reflections: null, ovSearch: null,
       redisInfo: null, emergencyBrake: null,
       ovSearchWindow: null, knowledgeContext: null,
+      // Issue #2278: null = the VLM probe settle rejected; parseProbes defaults it
+      // to a `down` result (honest-none, never a phantom `ok`).
+      ollamaVlm: null,
     };
   }
 
@@ -832,6 +837,7 @@ describe("parseProbes", () => {
       emergencyBrake: { engaged: false },
       ovSearchWindow: null,
       knowledgeContext: null,
+      ollamaVlm: { status: "ok", latencyMs: 8 },
     });
     const a = assessHealth(snap);
     assert.equal(a.status, "degraded"); // only warnings
@@ -1029,14 +1035,33 @@ describe("projectHealthDeepResponse", () => {
     assert.deepEqual(Object.keys(r).sort(), [
       "activeCycle",
       "checkedAt",
+      // Issue #2278: the top-level VLM-host visibility flag + probe result.
+      "degraded",
       "diagnostics",
       "infrastructure",
       "intelligence",
+      "ollamaVlm",
       "pipeline",
       "services",
       "status",
       "summary",
     ]);
+    // Issue #2278: a healthy snapshot's VLM probe is `ok` → not degraded.
+    assert.equal(r.degraded, false);
+    assert.deepEqual(r.ollamaVlm, { status: "ok", latencyMs: 12 });
+  });
+
+  test("a down Ollama VLM host flips degraded:true but keeps the 200 envelope (issue #2278)", () => {
+    const r = project(
+      clone((s) => {
+        s.ollamaVlm = { status: "down", latencyMs: 5000, error: "TimeoutError" };
+      }),
+    );
+    assert.equal(r.degraded, true, "a down VLM host is a visibility-degraded signal");
+    assert.deepEqual(r.ollamaVlm, { status: "down", latencyMs: 5000, error: "TimeoutError" });
+    // It is a VISIBILITY probe, not a hard gate: the rule-derived `status` is
+    // unaffected (no VLM rule fires) and the route still answers 200.
+    assert.equal(r.status, "healthy");
   });
 
   test("intelligence carries the EXACT field names (ovSearchTrend, knowledgeContext — typo regression guard)", () => {
