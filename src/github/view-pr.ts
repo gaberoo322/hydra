@@ -124,7 +124,7 @@ export class ViewPrCache {
 }
 
 /** Production singleton — the in-process cache shared by all {@link viewPr} callers. */
-export const defaultViewPrCache = new ViewPrCache();
+const defaultViewPrCache = new ViewPrCache();
 
 /** Test/maintenance hook: drop all cached per-PR views from the default singleton. */
 export function _clearViewPrCache(): void {

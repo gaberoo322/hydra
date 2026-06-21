@@ -429,7 +429,6 @@ export async function listOpenPrs(
  */
 export {
   ViewPrCache,
-  defaultViewPrCache,
   _clearViewPrCache,
   normalizePrViewFromRest,
 } from "./view-pr.ts";
