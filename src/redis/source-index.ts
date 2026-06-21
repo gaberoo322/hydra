@@ -87,3 +87,53 @@ export async function persistSourceHash(path: string, hash: string): Promise<voi
     );
   }
 }
+
+/**
+ * Count the persisted `path -> sha1` entries (issue #2267). A non-zero count
+ * means a previous process believed it had indexed that many source files and
+ * a fresh start will skip re-uploading them. The staleness detector in
+ * `learning-lifecycle.ts` uses this as the cache-side half of "the cache claims
+ * coverage but OpenViking is empty" — a count of 0 means a cold cache that the
+ * indexer will populate normally, so there is nothing stale to clear.
+ *
+ * Best-effort: returns 0 on any Redis error (degrading to "no cache to clear",
+ * which is the safe direction — the indexer simply re-uploads on a miss).
+ */
+export async function countSourceHashes(): Promise<number> {
+  try {
+    const r = getRedisConnection();
+    const n = await r.hlen(sourceHashesKey());
+    return typeof n === "number" ? n : 0;
+  } catch (err: any) {
+    console.error(
+      `[source-index] countSourceHashes failed: ${err?.message || String(err)}`,
+    );
+    return 0;
+  }
+}
+
+/**
+ * Drop the entire persisted `path -> sha1` dedup map (issue #2267). Called ONLY
+ * by the lifecycle staleness detector when it has confirmed OpenViking was reset
+ * out from under the cache (a populated cache but OV holds no indexed source
+ * resources). Deleting the single hash is atomic — there is no half-deleted
+ * intermediate state that could double-index — so the next `runSourceInitialPass`
+ * sees an empty cache and re-uploads the whole modified-window tree, repopulating
+ * OpenViking.
+ *
+ * Best-effort: a delete failure is logged and reported as `false` so the caller
+ * can leave the in-memory cache untouched and try again on the next restart,
+ * never a crash and never a blocked startup. Returns whether the clear succeeded.
+ */
+export async function clearSourceHashes(): Promise<boolean> {
+  try {
+    const r = getRedisConnection();
+    await r.del(sourceHashesKey());
+    return true;
+  } catch (err: any) {
+    console.error(
+      `[source-index] clearSourceHashes failed: ${err?.message || String(err)}`,
+    );
+    return false;
+  }
+}
