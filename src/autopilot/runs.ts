@@ -197,7 +197,7 @@ function errRedis(err: any): Err {
 // ---------------------------------------------------------------------------
 
 /** Run-hash + index + turn accessors the run/turn writers touch. */
-export interface AutopilotRunsRunFacade {
+interface AutopilotRunsRunFacade {
   getAutopilotRun(runId: string): Promise<Record<string, string>>;
   initAutopilotRun(
     runId: string,
@@ -227,7 +227,7 @@ export interface AutopilotRunsRunFacade {
 }
 
 /** Cycle-hash + index accessors `recordCycle` touches. */
-export interface AutopilotRunsCycleFacade {
+interface AutopilotRunsCycleFacade {
   getCycleHash(cycleId: string): Promise<Record<string, string>>;
   initCycleHash(
     cycleId: string,
@@ -238,7 +238,7 @@ export interface AutopilotRunsCycleFacade {
 }
 
 /** Lifetime scheduler counters `recordCycle` bumps (the #1919 buckets). */
-export interface AutopilotRunsSchedulerFacade {
+interface AutopilotRunsSchedulerFacade {
   incrSchedulerCyclesRun(): Promise<number>;
   incrSchedulerCyclesMerged(): Promise<number>;
   incrSchedulerCyclesFailed(): Promise<number>;
@@ -246,7 +246,7 @@ export interface AutopilotRunsSchedulerFacade {
 }
 
 /** The per-cycle metrics writer `recordCycle` feeds. */
-export interface AutopilotRunsMetricsFacade {
+interface AutopilotRunsMetricsFacade {
   recordCycleMetrics(cycleId: string, metrics: CycleMetricsInput): Promise<void>;
 }
 
@@ -271,7 +271,7 @@ export interface AutopilotRunsDeps {
   now: () => number;
 }
 
-export const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
+const defaultAutopilotRunsDeps: AutopilotRunsDeps = {
   runs: {
     getAutopilotRun,
     initAutopilotRun,
