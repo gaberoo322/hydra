@@ -33,8 +33,6 @@ import {
   isOutcomeRegressed,
   detectRegressions,
   snapshotLeadingOutcomes,
-} from "../src/outcomes-regression.ts";
-import {
   enrollHoldback,
   checkHoldback,
   decideHoldback,
