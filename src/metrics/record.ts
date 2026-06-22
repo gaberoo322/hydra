@@ -18,10 +18,36 @@
  * control loop was retired, leaving the metric write-dead (pinned at 0%).
  */
 
-import { setCycleMetrics } from "../redis/cycle-metrics.ts";
+import { getCycleMetrics, setCycleMetrics } from "../redis/cycle-metrics.ts";
 
 /** TTL for cycle metrics Redis keys: 7 days in seconds (matches redis/cycle-tracking.ts). */
 const CYCLE_KEY_TTL = 7 * 24 * 60 * 60; // 604800
+
+/**
+ * Duration fields that are MONOTONIC across the double-write a single cycleId
+ * receives (issue #2364). A cycle is written twice: the reap-time `completed`
+ * write (which computes a wall-clock span from the slot's `started_epoch`) and
+ * the post-merge `merged`/auto-merge follow-up write (which the model fires with
+ * its own duration). Because `recordCycleMetrics` is an additive HSET, the later
+ * write blindly overwrites the earlier — so a follow-up that carries `0` (the
+ * truthful "unknown" sentinel when no start stamp was available, or a qa_orch
+ * relay cycle whose reap never wrote a duration) would CLOBBER a real non-zero
+ * span the first write recorded, and a non-zero follow-up could never UPGRADE a
+ * 0 first write through the dedup/enrichment path. Both directions surfaced as
+ * `totalDurationMs=0` on merged cycles despite the instrumentation path working
+ * end-to-end. Treating these fields as monotonic-max — never let a 0 overwrite a
+ * stored non-zero, and let any non-zero upgrade a stored 0/absent — makes the
+ * recorded span order-independent: whichever write ever carries a real duration
+ * wins, regardless of which writer lands first. 0 stays the truthful sentinel
+ * only when NO write ever supplied a real span.
+ */
+const MONOTONIC_DURATION_FIELDS = [
+  "totalDurationMs",
+  "groundingDurationMs",
+  "verificationDurationMs",
+  "planningDurationMs",
+  "executionDurationMs",
+] as const;
 
 /**
  * The numeric (int-shaped) fields of the cycle-metrics hash. This tuple is the
@@ -139,6 +165,32 @@ export async function recordCycleMetrics(
     if (v === undefined) continue;
     flat[k] = typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
   }
+
+  // Issue #2364: enforce monotonic-max on duration fields so the second write a
+  // cycleId receives (the post-merge follow-up) can neither clobber a real span
+  // recorded by the first write with a 0 nor be blocked from upgrading a 0 first
+  // write with a real span. Only read the existing hash when this write actually
+  // carries a duration field — the common single-field-enrichment / first-write
+  // path skips the extra Redis round-trip entirely.
+  const writesDuration = MONOTONIC_DURATION_FIELDS.some((f) => f in flat);
+  if (writesDuration) {
+    const existing = await getCycleMetrics(cycleId);
+    for (const field of MONOTONIC_DURATION_FIELDS) {
+      if (!(field in flat)) continue;
+      const incoming = Number(flat[field]);
+      const stored = Number(existing?.[field]);
+      const storedValid = Number.isFinite(stored) && stored > 0;
+      const incomingValid = Number.isFinite(incoming) && incoming > 0;
+      // Keep the larger meaningful value. A non-positive / non-finite incoming
+      // never overwrites a stored positive span; an incoming positive upgrades a
+      // stored 0/absent. When both are positive the max wins (the longer of two
+      // measured spans is the safest non-regressing choice).
+      if (storedValid && (!incomingValid || stored >= incoming)) {
+        flat[field] = String(stored);
+      }
+    }
+  }
+
   flat.cycleId = cycleId;
   flat.recordedAt = new Date().toISOString();
   if (!flat.source) flat.source = "codex"; // default source for Codex orchestrator cycles

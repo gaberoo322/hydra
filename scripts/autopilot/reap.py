@@ -308,6 +308,14 @@ def _compute_duration_ms(slot: dict | None) -> int:
     """
     started_epoch = _slot_started_epoch(slot)
     if started_epoch is None:
+        # Issue #2364: a missing start stamp records a truthful 0, but on a
+        # code-writing completion that 0 is the false-zero the issue tracks
+        # (the slot was occupied but its `started_epoch` was lost), so surface
+        # it on the run log rather than swallowing it silently. The downstream
+        # cycle-record write is monotonic on duration (src/metrics/record.ts), so
+        # a later non-zero follow-up still upgrades this — but the log makes a
+        # persistent 0 attributable to "no start stamp" vs "clobbered".
+        _append_log("compute_duration_missing_start_stamp")
         return 0
     import time
 
