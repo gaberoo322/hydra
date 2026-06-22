@@ -388,7 +388,13 @@ export function createDesignConceptsRouter() {
       res.json({ ...dc, gate });
     } catch (err: any) {
       const msg = err?.message ?? "approve failed";
-      if (msg.startsWith("approveDesignConcept: no artifact")) {
+      // Discriminate on the typed `err.code` (NotFoundError →
+      // "not-found"), not a message-prefix match (#756 / #2350). Falls
+      // back to the legacy prefix only for an untyped throw.
+      if (
+        err?.code === "not-found" ||
+        msg.startsWith("approveDesignConcept: no artifact")
+      ) {
         res.status(404).json({ error: msg });
         return;
       }
