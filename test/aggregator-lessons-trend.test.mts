@@ -19,7 +19,7 @@ import {
   promotionsByDay,
   pickTopFriction,
 } from "../src/aggregators/lessons-trend.ts";
-import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
+import { PROMOTION_THRESHOLD } from "../src/pattern-memory/constants.ts";
 import type { FrictionPattern } from "../src/aggregators/lessons-overnight.ts";
 import type { IssueRow } from "../src/github/issues.ts";
 

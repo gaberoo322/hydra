@@ -7,7 +7,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { detectStalePromotedRules, processStaleRules } from "../src/pattern-memory/agent-memory.ts";
+import { detectStalePromotedRules, processStaleRules } from "../src/pattern-memory/feedback-file.ts";
 
 // Reference date for all tests: 2026-05-07
 const NOW = new Date("2026-05-07T12:00:00Z");

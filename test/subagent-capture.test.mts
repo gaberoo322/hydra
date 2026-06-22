@@ -395,7 +395,8 @@ describe("subagent lesson capture (issue #392)", () => {
   // -------------------------------------------------------------------------
 
   test("recordPattern returns escalation: null below threshold, populated at threshold", async () => {
-    const { recordPattern, PROMOTION_THRESHOLD } = await import("../src/pattern-memory/agent-memory.ts");
+    const { recordPattern } = await import("../src/pattern-memory/agent-memory.ts");
+    const { PROMOTION_THRESHOLD } = await import("../src/pattern-memory/constants.ts");
 
     const args = (i: number) => ["planner", "scope-creep", {
       action: "Narrow scope.",

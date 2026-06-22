@@ -10,7 +10,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { PROMOTION_THRESHOLD } from "../src/pattern-memory/agent-memory.ts";
+import { PROMOTION_THRESHOLD } from "../src/pattern-memory/constants.ts";
 
 describe("learning promotion threshold (issue #172)", () => {
   test("PROMOTION_THRESHOLD is 3", () => {
