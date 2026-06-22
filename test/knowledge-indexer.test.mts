@@ -402,3 +402,88 @@ describe("source-index persistence across restarts (issue #1123)", () => {
     assert.ok(liveHash, "sanity: a live hash existed");
   });
 });
+
+// Issue #2335: the startup source-index pass paces its embed-triggering uploads
+// so it does not burst OV's Ollama embedding backend and starve the load-gated
+// /api/v1/skills handler (#1831). The pace delay is inserted only AFTER a file
+// that actually uploaded (a skip costs no embed → never paced) and defaults to 0
+// (no behaviour change unless INDEXER_EMBED_PACE_MS is set / paceMs is passed).
+describe("runSourceInitialPass embed pacing (issue #2335)", () => {
+  let tempRoot: string;
+  let src: string;
+  let originalFetch: typeof fetch;
+
+  before(async () => {
+    const t = await makeTempProject();
+    tempRoot = t.root;
+    src = t.src;
+
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url);
+      if (u.endsWith("/api/v1/resources/temp_upload")) {
+        return {
+          ok: true,
+          json: async () => ({ temp_path: "/tmp/fake-temp-path" }),
+          text: async () => "",
+        } as any;
+      }
+      return { ok: true, json: async () => ({}), text: async () => "" } as any;
+    }) as any;
+  });
+
+  after(async () => {
+    globalThis.fetch = originalFetch;
+    await rm(tempRoot, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    resetCoverageStats(); // fresh dedup cache so both files upload again
+  });
+
+  test("paceMs:0 inserts no delay (default behaviour preserved)", async () => {
+    const start = Date.now();
+    const result = await runSourceInitialPass({
+      paths: [{ root: src, ext: ".ts" }],
+      paceMs: 0,
+    });
+    const elapsed = Date.now() - start;
+    // makeTempProject creates control-loop.ts + nested/thing.ts under src.
+    assert.equal(result.indexed, 2, "both files index with no pacing");
+    assert.ok(elapsed < 200, `paceMs:0 should not stall (took ${elapsed}ms)`);
+  });
+
+  test("a positive paceMs delays AFTER each uploaded file", async () => {
+    const PACE = 60;
+    const start = Date.now();
+    const result = await runSourceInitialPass({
+      paths: [{ root: src, ext: ".ts" }],
+      paceMs: PACE,
+    });
+    const elapsed = Date.now() - start;
+    // 2 uploads → 2 pace delays (one after each upload). Lower-bound the total
+    // wall time at a single pace to keep the assertion robust against fast CI
+    // while still proving the delay is applied to an upload.
+    assert.equal(result.indexed, 2, "both files index");
+    assert.ok(
+      elapsed >= PACE,
+      `expected at least one ${PACE}ms pace delay, took ${elapsed}ms`,
+    );
+  });
+
+  test("skips are not paced — a fully-deduped pass returns promptly", async () => {
+    // Pass 1: index both files (warms the in-memory dedup cache).
+    await runSourceInitialPass({ paths: [{ root: src, ext: ".ts" }], paceMs: 0 });
+    // Pass 2: nothing changed → both files are skipped. Even a large paceMs must
+    // NOT stall, because a skip triggers no embed and so is never paced.
+    const start = Date.now();
+    const result = await runSourceInitialPass({
+      paths: [{ root: src, ext: ".ts" }],
+      paceMs: 10_000,
+    });
+    const elapsed = Date.now() - start;
+    assert.equal(result.indexed, 0, "no new uploads on the deduped pass");
+    assert.equal(result.skipped, 2, "both files skipped");
+    assert.ok(elapsed < 1000, `skips must not be paced (took ${elapsed}ms)`);
+  });
+});

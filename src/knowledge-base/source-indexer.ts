@@ -71,6 +71,31 @@ const SOURCE_INITIAL_WINDOW_MS =
     ? parseInt(process.env.HYDRA_INDEX_INITIAL_DAYS as any) * 86400_000
     : 7 * 86400_000;
 
+// Issue #2335: pace the startup source-index pass so it does not burst its
+// embed-triggering uploads at OpenViking. Each `indexSourceFile` upload that
+// actually lands (a NEW/changed file, not a hash-dedup skip) makes OV embed the
+// payload via its Ollama backend (#980/#1795). `runSourceInitialPass` walks the
+// whole recently-modified tree in a tight serial loop, so a cold cache (every
+// orchestrator restart) fires a burst of embed requests back-to-back. That
+// burst is the indexing-load window that starves OV's `/api/v1/skills` POST
+// handler (#1831), which is what leaves the skill catalog empty for hours
+// (#2148/#2269/#2335) — the chore/probe/registration paths are all correct;
+// the orchestrator's own indexer is a load contributor.
+//
+// SOURCE_EMBED_PACE_MS inserts a delay AFTER each upload that actually
+// happened, BEFORE the next file's upload, so the embed queue drains between
+// resources instead of being flooded. Defaults to 0 (no behaviour change —
+// preserves the existing test timings and the pre-#2335 burst on hosts that
+// don't set it); production sets a small positive value (e.g. 250) to smooth
+// the embed load. A skip (hash dedup / out-of-window) costs no embed, so it is
+// never paced.
+const SOURCE_EMBED_PACE_MS = Math.max(
+  0,
+  parseInt(process.env.INDEXER_EMBED_PACE_MS as any) || 0,
+);
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 // Path-based dedup: tracks indexed source paths + content hash so we skip
 // re-uploading unchanged files. This in-memory Map is a hot read cache for the
 // per-file index path; the durable copy lives in Redis (issue #1123) and is
@@ -280,11 +305,19 @@ export async function runSourceInitialPass(
     paths?: SourcePath[];
     windowMs?: number;
     now?: number;
+    /**
+     * Inter-upload pacing (ms) applied AFTER each file that actually uploads,
+     * before the next file's upload (issue #2335). Defaults to
+     * {@link SOURCE_EMBED_PACE_MS} (env `INDEXER_EMBED_PACE_MS`, 0 if unset).
+     * Tests pass 0 to keep timings instant; a skip (no embed) is never paced.
+     */
+    paceMs?: number;
   } = {}
 ): Promise<{ scanned: number; indexed: number; skipped: number }> {
   const paths = opts.paths ?? SOURCE_PATHS;
   const windowMs = opts.windowMs ?? SOURCE_INITIAL_WINDOW_MS;
   const now = opts.now ?? Date.now();
+  const paceMs = Math.max(0, opts.paceMs ?? SOURCE_EMBED_PACE_MS);
   let scanned = 0;
   let indexed = 0;
   let skipped = 0;
@@ -304,8 +337,16 @@ export async function runSourceInitialPass(
         continue;
       }
       const result = await indexSourceFile(file, source);
-      if (result === "indexed") indexed++;
-      else if (result === "skipped") skipped++;
+      if (result === "indexed") {
+        indexed++;
+        // Only an actual upload triggers an OV embed, so only pace after one —
+        // skips (hash-dedup / out-of-window) cost no embed. This keeps the
+        // orchestrator's startup pass from bursting embed requests at OV and
+        // starving the load-gated /api/v1/skills handler (#1831/#2335).
+        if (paceMs > 0) await sleep(paceMs);
+      } else if (result === "skipped") {
+        skipped++;
+      }
     }
   }
   return { scanned, indexed, skipped };
