@@ -11,24 +11,19 @@
  * (`validateOutcome` in `src/outcomes.ts`).
  *
  * The grammar primitives (`stripComment`, `parseScalar`) and the parse loop live
- * in `src/config-yaml.ts` and are exercised by `test/config-yaml.test.mts`. They
- * are re-exported here for back-compat (existing importers + `test/outcomes-yaml.test.mts`).
+ * in `src/config-yaml.ts` and are exercised by `test/config-yaml.test.mts`;
+ * callers import them directly from there.
  *
  * Outcomes uses the FLAT grammar (`nestedMappings:false`): a `key:` line with no
  * value coerces to the empty string, the historic behavior. Never throws — all
  * malformed input surfaces as `errors`, matching the loader's never-throw contract.
  */
 
-import {
-  parseConfigYaml,
-  stripComment,
-  parseScalar,
-  type YamlScalar,
-} from "./config-yaml.ts";
+import { parseConfigYaml, type YamlScalar } from "./config-yaml.ts";
 
-// Re-export the moved primitives for back-compat (existing importers and the
-// edge-case test `test/outcomes-yaml.test.mts` import them from here).
-export { stripComment, parseScalar, type YamlScalar };
+// Re-export the YamlScalar type — the parsed-record value type surfaces in this
+// module's public `ParsedYaml` / `ParseResult` shapes.
+export { type YamlScalar };
 
 /** The parsed document shape: an optional `outcomes:` list of record maps. */
 interface ParsedYaml {
