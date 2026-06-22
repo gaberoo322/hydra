@@ -45,15 +45,11 @@ export type YamlScalar = string | number | boolean;
  */
 export type YamlValue = YamlScalar | Record<string, YamlScalar>;
 
-/** The parsed document shape: an optional list (under `topKey`) of record maps. */
-interface ParsedConfigYaml {
-  entries?: Array<Record<string, YamlValue>>;
-}
-
 /** The shared parse result. `entries` is the list parsed under the caller's `topKey`. */
 export interface ConfigParseResult {
   ok: boolean;
-  value: ParsedConfigYaml;
+  /** The parsed document shape: an optional list (under `topKey`) of record maps. */
+  value: { entries?: Array<Record<string, YamlValue>> };
   errors: string[];
 }
 
@@ -131,7 +127,7 @@ export function parseConfigYaml(
 ): ConfigParseResult {
   const { topKey, nestedMappings = false } = options;
   const errors: string[] = [];
-  const result: ParsedConfigYaml = {};
+  const result: ConfigParseResult["value"] = {};
   const lines = raw.split("\n");
 
   let currentTopKey: string | null = null;
