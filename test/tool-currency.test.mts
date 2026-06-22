@@ -31,7 +31,7 @@ import {
   formatReportTable,
   buildReport,
   buildAlertMessage,
-} from "../src/tool-currency.ts";
+} from "../scripts/tool-currency-logic.ts";
 
 test("parseSemver: clean semver", () => {
   assert.deepEqual(parseSemver("1.2.3"), { major: 1, minor: 2, patch: 3 });
