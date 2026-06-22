@@ -54,6 +54,7 @@
 
 import { createHash } from "node:crypto";
 
+import { InvalidArgumentError, NotFoundError } from "./errors.ts";
 import {
   getDesignConceptHash,
   listAllDesignConceptRefs,
@@ -398,16 +399,23 @@ const DESIGN_CONCEPT_TTL_SECONDS = 7 * 24 * 60 * 60;
  * hash key; both share the same 7-day TTL via Redis EXPIRE.
  *
  * Idempotent on `anchorRef`: a second call replaces the prior artifact.
+ *
+ * Throws `InvalidArgumentError` (`code: "invalid-argument"`, from
+ * `src/errors.ts`) when `anchorRef` is missing/non-string or `scope` is
+ * neither `"orch"` nor `"target"`, so callers discriminate on `err.code`
+ * rather than `err.message` (CLAUDE.md typed-error convention, #756).
  */
 export async function saveDesignConcept(
   input: DesignConceptInputType,
   now: number = Date.now(),
 ): Promise<DesignConcept> {
   if (!input.anchorRef || typeof input.anchorRef !== "string") {
-    throw new Error("saveDesignConcept: anchorRef is required");
+    throw new InvalidArgumentError("saveDesignConcept: anchorRef is required");
   }
   if (input.scope !== "orch" && input.scope !== "target") {
-    throw new Error("saveDesignConcept: scope must be 'orch' or 'target'");
+    throw new InvalidArgumentError(
+      "saveDesignConcept: scope must be 'orch' or 'target'",
+    );
   }
 
   const status: DesignConceptStatus = input.status ?? "draft";
@@ -640,8 +648,13 @@ export async function listDesignConcepts(opts: {
 /**
  * Mark a design concept as `approved` and record the approver. The
  * approver must be either the literal string `"auto-gate"` or
- * `"operator:<name>"`. Throws on unknown anchorRef so callers can return
- * 404 rather than silently no-op.
+ * `"operator:<name>"`.
+ *
+ * Throws typed errors from `src/errors.ts` so callers discriminate on
+ * `err.code`, not `err.message` (CLAUDE.md typed-error convention, #756):
+ *   - `NotFoundError` (`code: "not-found"`) — no artifact for `anchorRef`,
+ *     so the API caller can return 404 rather than silently no-op.
+ *   - `InvalidArgumentError` (`code: "invalid-argument"`) — malformed `by`.
  */
 export async function approveDesignConcept(
   anchorRef: string,
@@ -649,10 +662,12 @@ export async function approveDesignConcept(
 ): Promise<DesignConcept> {
   const existing = await getDesignConcept(anchorRef);
   if (!existing) {
-    throw new Error(`approveDesignConcept: no artifact for anchorRef "${anchorRef}"`);
+    throw new NotFoundError(
+      `approveDesignConcept: no artifact for anchorRef "${anchorRef}"`,
+    );
   }
   if (!by || (by !== "auto-gate" && !by.startsWith("operator:"))) {
-    throw new Error(
+    throw new InvalidArgumentError(
       `approveDesignConcept: 'by' must be "auto-gate" or "operator:<name>", got "${by}"`,
     );
   }
