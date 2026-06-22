@@ -8,6 +8,7 @@ import {
 import { recordCycleMetrics } from "../metrics/record.ts";
 import { getAbandonmentBreakdown } from "../metrics/abandonment.ts";
 import { getQualityGateTrend } from "../metrics/quality-gates.ts";
+import { getInstrumentationSnapshot } from "../metrics/instrumentation.ts";
 import { getWorkQueueLen } from "../redis/work-queue.ts";
 import {
   getCostByClass,
@@ -209,6 +210,24 @@ export function createMetricsRouter() {
       const parsedDate = CostQuerySchema.safeParse(req.query).data?.date;
       const date = parsedDate || todayDateString();
       return getCostByClass(date);
+    }),
+  );
+
+  // GET /metrics/instrumentation — Per-label hot-path latency percentiles (issue #2353).
+  //
+  // Surfaces the in-process timing ring buffers populated by `time(label, fn)`
+  // (src/metrics/instrumentation.ts) on the orchestrator's decision-loop hot
+  // paths (candidate-feed selection, lane transitions, …). Observability-only
+  // (ADR-0012): it reports p50/p95/p99 latency; it never alerts or branches
+  // behaviour on a threshold. When HYDRA_PERF_INSTRUMENT is unset/falsy the
+  // hot paths record nothing, so `enabled:false` with an empty `labels` array
+  // is the expected default-production response.
+  //
+  // Issue #1863: never-throw-500 isolation via aggregatorRouteNoQuery (#909).
+  router.get(
+    "/metrics/instrumentation",
+    aggregatorRouteNoQuery("api/metrics/instrumentation", async () => {
+      return getInstrumentationSnapshot();
     }),
   );
 

@@ -23,6 +23,7 @@ import {
   LANES, DONE_RETENTION_DAYS, WIP_LIMIT,
   applyLaneTransition, getItem, removeItem, sortByQueuePriority,
 } from "./internal.ts";
+import { time } from "../metrics/instrumentation.ts";
 
 /** Score for a to-lane ZADD: done is negated (-now) so ascending ZRANGE lists most-recently-done first. */
 function laneScore(lane: string, now: number): number {
@@ -195,6 +196,20 @@ export async function returnToBacklog(title: string, reason: string, now: number
  * throws. Non-blocked transitions are entirely unaffected.
  */
 export async function moveItemToLane(
+  itemId: any,
+  targetLane: string,
+  opts: { claimedBy?: string | null; reason?: string | null } = {},
+  now: number = Date.now(),
+) {
+  // Issue #2353: time the lane-transition hot path. `time()` is a transparent
+  // no-op unless HYDRA_PERF_INSTRUMENT is set, so this never alters behaviour
+  // or the returned result object.
+  return time("backlog.moveItemToLane", () =>
+    moveItemToLaneImpl(itemId, targetLane, opts, now),
+  );
+}
+
+async function moveItemToLaneImpl(
   itemId: any,
   targetLane: string,
   opts: { claimedBy?: string | null; reason?: string | null } = {},
