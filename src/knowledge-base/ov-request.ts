@@ -111,6 +111,22 @@ export interface OvRequestOptions {
   headers?: Record<string, string>;
   /** How to unwrap the success body. Defaults to `"json"`. */
   parse?: ParseMode;
+  /**
+   * Mark a non-2xx response as EXPECTED for this request, so the `ov-non-2xx`
+   * arm logs at an informational level instead of the alarming `console.error`
+   * (issue #2365). The result is UNCHANGED — a non-2xx still returns
+   * `{ok:false, code:"ov-non-2xx", body}` and the caller still classifies it.
+   *
+   * The ONLY intended caller is the skills-endpoint liveness probe
+   * (`probeSkillsEndpoint`, src/health/probe.ts), which deliberately POSTs an
+   * invalid `{data:null}` payload so OpenViking fast-rejects it with a 500
+   * (`"Skill data cannot be None"`) to prove the POST handler is responsive. That
+   * deliberate reject fires hourly and, logged as a red `ov-non-2xx: 500`,
+   * masqueraded as a real skill-registration failure in the orchestrator logs —
+   * the exact confusion that generated #2365. Real callers leave this unset and
+   * keep the fail-loud `console.error` so a genuine 4xx/5xx is never hushed.
+   */
+  expectNon2xx?: boolean;
 }
 
 /**
@@ -181,12 +197,23 @@ export async function ovRequest<T = any>(
   }
 
   if (!res.ok) {
-    // Fail loud: capture a snippet of the body so a 4xx/5xx is debuggable from
-    // logs alone, exactly as the inline `!res.ok` arms used to. The full text is
-    // also returned on the failure arm (`body`) for the rare reader whose domain
-    // logic classifies OV's error prose (ov-upload's transient-conflict path).
+    // Capture a snippet of the body so a 4xx/5xx is debuggable from logs alone,
+    // exactly as the inline `!res.ok` arms used to. The full text is also
+    // returned on the failure arm (`body`) for the rare reader whose domain logic
+    // classifies OV's error prose (ov-upload's transient-conflict path).
     const text = await res.text().catch(() => "");
-    console.error(`[ov-request] ${path} ov-non-2xx: ${res.status} ${text.slice(0, 200)}`);
+    if (opts.expectNon2xx) {
+      // Issue #2365: this caller (the skills-endpoint liveness probe) EXPECTS a
+      // non-2xx — it POSTs an invalid payload on purpose to prove the handler is
+      // responsive. Log it at info level so the deliberate hourly "Skill data
+      // cannot be None" 500 stops masquerading as a real failure in the logs.
+      // NOT fail-loud-bypassing: the event is still logged (with context), just
+      // at the level its expectedness warrants.
+      console.log(`[ov-request] ${path} expected non-2xx (liveness probe): ${res.status} ${text.slice(0, 200)}`);
+    } else {
+      // Fail loud: a non-2xx no caller anticipated must stay an error in the logs.
+      console.error(`[ov-request] ${path} ov-non-2xx: ${res.status} ${text.slice(0, 200)}`);
+    }
     return { ok: false, code: "ov-non-2xx", body: text };
   }
 

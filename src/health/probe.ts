@@ -425,6 +425,13 @@ const SKILLS_PROBE_TIMEOUT_MS = 3000;
  * read-only in effect (INV2: it mutates NO catalog entry) yet it still routes
  * through the SAME load-gated handler the chore depends on. Under load that
  * handler cannot answer in 3s and the probe folds to `failed`.
+ *
+ * Issue #2365: because this reject is DELIBERATE and fires hourly, the probe POSTs
+ * it with `expectNon2xx:true` (see `probeSkillsEndpoint`) so the OV Request Adapter
+ * logs the "Skill data cannot be None" 500 at info level rather than the alarming
+ * `console.error` ov-non-2xx line — which had been mistaken for a real
+ * skill-registration failure in the orchestrator logs (the confusion that
+ * generated #2365). The classification below is unaffected.
  */
 const SKILLS_PROBE_INVALID_BODY = { data: null } as const;
 
@@ -587,7 +594,12 @@ export async function probeSkillsEndpoint(
   const result: OvResult<any> = await ovRequestImpl(
     "/api/v1/skills",
     { method: "POST", body: JSON.stringify(SKILLS_PROBE_INVALID_BODY) },
-    { timeout: SKILLS_PROBE_TIMEOUT_MS },
+    // Issue #2365: `expectNon2xx` quiets the adapter's `console.error` for the
+    // validation reject this probe DELIBERATELY provokes ({data:null} →
+    // "Skill data cannot be None" 500). The reject IS the liveness signal, so it
+    // must not be logged as an alarming registration failure every hour. The
+    // returned OvResult is unchanged — the classification below is unaffected.
+    { timeout: SKILLS_PROBE_TIMEOUT_MS, expectNon2xx: true },
   );
   // The handler is responsive UNLESS the request never reached it (transport
   // down), it could not answer inside the short window (timeout), OR it answered
