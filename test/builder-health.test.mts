@@ -19,9 +19,9 @@ import assert from "node:assert/strict";
 
 import {
   getBuilderHealthScorecard,
-  percentile,
   type BuilderHealthDeps,
 } from "../src/aggregators/builder-health.ts";
+import { percentile } from "../src/aggregators/autonomy-rate.ts";
 import {
   classifyAutonomy,
   type GhPrView,
