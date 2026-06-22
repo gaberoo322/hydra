@@ -7,7 +7,9 @@
  */
 
 // Issue #954: OV HTTP requests route through the OpenViking Request Adapter.
-import { ovPostJson, isOvFailure } from "./ov-request.ts";
+// Issue #2373: `isOvServerTimeout` (OV server-side-timeout body classifier) now
+// lives in the Request Adapter seam next to `OvResult`, the type it classifies.
+import { ovPostJson, isOvFailure, isOvServerTimeout } from "./ov-request.ts";
 import type { OvErrorCode } from "./ov-request.ts";
 // Issue #2277: the VLM-liveness probe gates the graceful-degradation path below.
 import { probeOllamaVlm } from "../health/probe.ts";
@@ -47,46 +49,6 @@ const RETRYABLE_OV_CODES: ReadonlySet<OvErrorCode> = new Set<OvErrorCode>([
   "ov-timeout",
   "ov-service-down",
 ]);
-
-/**
- * Classify an `ov-non-2xx` failure-arm `body` as OpenViking's own SERVER-SIDE
- * timeout (issue #2250). OV surfaces an internal request timeout as a 500 whose
- * body is `{"status":"error","error":{"code":"INTERNAL","message":"Request timed
- * out.",...}}` — structurally an `ov-non-2xx` (the adapter keys on `!res.ok`,
- * not the body), so it falls OUTSIDE `RETRYABLE_OV_CODES` and `registerOneSkill`
- * abandons it on the first attempt. That is the dominant skill-registration
- * failure under load: the 3-attempt/120s budget never engages because the
- * failure looks non-retryable.
- *
- * This predicate returns true ONLY when the body matches OV's timeout shape —
- * `error.code === "INTERNAL"` AND the message mentions a timeout. Parsed
- * defensively (try `JSON.parse`, fall back to a substring scan of the raw text)
- * so a malformed or truncated body never throws. Pure and total: any other body
- * (a genuine 4xx/5xx payload rejection, UNAUTHENTICATED, malformed JSON) returns
- * false and stays non-retryable, preserving the #1828 do-not-mask-real-bugs
- * guard — only OV's explicit "timed out" body widens the retry set.
- */
-export function isOvServerTimeout(body: string | undefined | null): boolean {
-  if (!body) return false;
-  // Primary path: parse the structured OV error envelope.
-  try {
-    const parsed = JSON.parse(body);
-    const errCode = parsed?.error?.code;
-    const errMsg = parsed?.error?.message;
-    if (errCode === "INTERNAL" && typeof errMsg === "string" && /tim(e|ed)\s*out/i.test(errMsg)) {
-      return true;
-    }
-    // Parsed cleanly but did NOT match the timeout shape → a genuine non-timeout
-    // rejection. Do NOT fall through to the substring scan (a non-timeout body
-    // that merely contains the word "timeout" in prose must not be retried).
-    return false;
-  } catch {
-    /* intentional: body wasn't valid JSON — fall back to a substring scan below. */
-  }
-  // Fallback: a non-JSON / truncated body. Require BOTH the INTERNAL marker and a
-  // timeout phrase so an arbitrary error body can't masquerade as a timeout.
-  return /INTERNAL/.test(body) && /tim(e|ed)\s*out/i.test(body);
-}
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 

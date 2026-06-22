@@ -25,11 +25,12 @@ import {
   ovPostJson,
   ovRequest,
   isOvFailure,
+  // Issue #2269: reuse the #2250 server-side-timeout body classifier so the skills
+  // liveness probe treats OV's "Request timed out." 500 as down, NOT responsive.
+  // Issue #2373: it now lives in the Request Adapter seam (was skill-registration.ts).
+  isOvServerTimeout,
   type OvResult,
 } from "../knowledge-base/ov-request.ts";
-// Issue #2269: reuse the #2250 server-side-timeout body classifier so the skills
-// liveness probe treats OV's "Request timed out." 500 as down, NOT responsive.
-import { isOvServerTimeout } from "../knowledge-base/skill-registration.ts";
 
 /** The wire shape every service probe folds to: `{status, latencyMs}`. */
 export type ServiceProbeResult = {
