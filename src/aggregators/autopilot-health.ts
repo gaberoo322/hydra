@@ -144,9 +144,15 @@ export async function getAutopilotHealth(
   // unproductive loop we count master merges over the same wall-clock span the
   // run window covers. The window start is the oldest run's `started_epoch`.
   // Read failures fail open to 0 (legacy per-run behaviour) — never throw.
-  const windowStartEpochS = oldestRunStartEpochS(history);
+  //
+  // Issue #2369: extend the window backward by `mergeWindowLookbackS` so that
+  // merges which landed BEFORE the run cluster began are still counted. The
+  // incident: all 14 runs burst in one afternoon; every master merge had landed
+  // ~38 min earlier, putting them outside the raw `oldestRunStart` window.
+  const rawWindowStartEpochS = oldestRunStartEpochS(history);
   let realMergesInWindow = 0;
-  if (windowStartEpochS !== null) {
+  if (rawWindowStartEpochS !== null) {
+    const windowStartEpochS = Math.max(0, rawWindowStartEpochS - thresholds.mergeWindowLookbackS);
     const [mergeResult] = await Promise.allSettled([
       readWindowMergeCount(windowStartEpochS),
     ]);
