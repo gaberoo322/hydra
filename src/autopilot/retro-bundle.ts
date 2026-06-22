@@ -35,13 +35,13 @@
  *
  * The pure projection surface ({@link projectDispatches},
  * {@link dedupByCanonicalCycleId}, {@link flagDispatchesForDrill}, the
- * {@link RetroDispatch} type, and the supporting pure helpers) was split into
- * the sibling `retro-projections.ts` (issue #1952), mirroring the
- * `runs.ts` / `run-projections.ts` split (issue #1183). This file re-exports
- * every moved symbol, so existing import paths (`from
- * "../autopilot/retro-bundle.ts"`) keep resolving unchanged; the side-effectful
- * assembler {@link assembleRetroBundle} (the only thing that touches Redis)
- * stays here.
+ * {@link RetroDispatch} type, and the supporting pure helpers) lives in the
+ * sibling `retro-projections.ts` (issue #1952), mirroring the
+ * `runs.ts` / `run-projections.ts` split (issue #1183) — import those symbols
+ * from there. This file's only public surface is the side-effectful assembler
+ * {@link assembleRetroBundle} (the only thing that touches Redis); issue #2341
+ * retired the back-compat re-export that once relayed the projections through
+ * here once the migration window closed.
  */
 
 import {
@@ -56,7 +56,9 @@ import { getAutopilotHealth } from "../aggregators/autopilot-health.ts";
 import type { StuckSignal } from "../schemas/now-page.ts";
 import type { MemoryPattern } from "../pattern-memory/agent-memory.ts";
 // Pure projection surface — moved to `retro-projections.ts` (issue #1952). The
-// assembler below uses these; the re-export keeps old import paths resolving.
+// assembler below uses these directly from their canonical home; callers that
+// want the projections import them from `retro-projections.ts` too (issue
+// #2341 retired the back-compat re-export that once relayed them through here).
 import {
   bucketOf,
   projectDispatches,
@@ -64,12 +66,6 @@ import {
   flagDispatchesForDrill,
 } from "./retro-projections.ts";
 import type { RetroDispatch } from "./retro-projections.ts";
-export {
-  projectDispatches,
-  dedupByCanonicalCycleId,
-  flagDispatchesForDrill,
-} from "./retro-projections.ts";
-export type { RetroDispatch } from "./retro-projections.ts";
 
 // ---------------------------------------------------------------------------
 // Bundle shape

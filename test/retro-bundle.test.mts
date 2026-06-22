@@ -25,12 +25,14 @@ import assert from "node:assert/strict";
 
 import {
   assembleRetroBundle,
+  type RetroBundleDeps,
+} from "../src/autopilot/retro-bundle.ts";
+import {
   dedupByCanonicalCycleId,
   flagDispatchesForDrill,
   projectDispatches,
-  type RetroBundleDeps,
   type RetroDispatch,
-} from "../src/autopilot/retro-bundle.ts";
+} from "../src/autopilot/retro-projections.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures

@@ -17,10 +17,11 @@
  *     `slotEpoch` / `enrichFromSlot`)
  *
  * Everything here is pure: zero Redis imports, zero `await`, no clock beyond
- * caller-supplied input. `retro-bundle.ts` re-exports every symbol moved here,
- * so existing import paths (`from "../autopilot/retro-bundle.ts"`) keep
- * resolving unchanged — the structural win is that purity is now enforced by
- * the import boundary, not merely documented.
+ * caller-supplied input. This module is the canonical home for every projection
+ * symbol: callers (including `retro-bundle.ts`'s assembler and the tests) import
+ * them directly from here. Issue #2341 retired the back-compat re-export that
+ * once relayed these symbols through `retro-bundle.ts` — the structural win is
+ * that purity is now enforced by the import boundary, not merely documented.
  */
 
 import { MERGED_STATUSES, FAILED_STATUSES } from "./run-projections.ts";
