@@ -210,6 +210,20 @@ describe("probeSkillsEndpoint", () => {
     assert.equal(r.status, "running", "an app-level reject means the handler answered → running");
   });
 
+  test("passes expectNon2xx:true so the deliberate reject is not logged as a failure (issue #2365)", async () => {
+    // The probe's {data:null} payload provokes OV's "Skill data cannot be None"
+    // 500 BY DESIGN — that reject IS the liveness signal. It must mark the request
+    // expectNon2xx so the OV Request Adapter logs it at info level, not the alarming
+    // console.error that masqueraded as a real registration failure every hour.
+    let calledOpts: any;
+    const ovRequestImpl = (async (_path: string, _init: any, opts: any) => {
+      calledOpts = opts;
+      return { ok: false, code: "ov-non-2xx", body: "Skill data cannot be None" } as OvResult<any>;
+    }) as any;
+    await probeSkillsEndpoint({ ovRequestImpl });
+    assert.equal(calledOpts?.expectNon2xx, true, "the liveness probe must mark its reject as expected");
+  });
+
   test("2xx (handler answered) → running with a numeric latency", async () => {
     const ovRequestImpl = (async () => ({ ok: true, data: {} }) as OvResult<any>) as any;
     const r = await probeSkillsEndpoint({ ovRequestImpl });
