@@ -275,6 +275,43 @@ export async function attemptEmbedBackendWake(
   now: number = Date.now(),
   { send = sendMagicPacket }: { send?: typeof sendMagicPacket } = {},
 ): Promise<WakeOutcome> {
+  return attemptHostWake(config, gate, now, "embed-backend", { send });
+}
+
+/**
+ * Generic WoL wake orchestrator shared by every "this gaming-PC-hosted backend
+ * is down → wake the box" trigger (issue #2335). `attemptEmbedBackendWake`
+ * (probeEmbedBackend → `failed`) and `attemptVlmHostWake` (probeOllamaVlm →
+ * `status:down`) both wake the SAME physical host (`gabes-desktop-1`,
+ * MAC d8:bb:c1:70:62:76), so they differ only in the `reason` label they log.
+ *
+ * WHY this matters for #2335: skill registration depends on OpenViking's VLM
+ * query, which targets the Tailnet VLM HOST — not the OV-internal embed
+ * backend. The pre-#2335 wiring only fired the wake when `probeEmbedBackend`
+ * read `failed`; when the VLM host was the thing that was down (the verified
+ * #2335 root cause: `gabes-desktop-1:11434` unreachable) but the embed backend
+ * answered, NO wake fired and the empty-skill-catalog window persisted for
+ * hours. Wiring this generic wake into the index-19 VLM-host probe step closes
+ * that gap. The registration/probe/chore code stays untouched — they self-heal
+ * on the NEXT hourly chore tick once the host is back (the FROZEN-registration
+ * invariant from the #2335 design concept).
+ *
+ * NEVER throws — every failure path inside `send` / `sendMagicPacket` already
+ * folds to a result object + fail-loud console.error. `reason` is a short label
+ * (`"embed-backend"` / `"vlm-host"`) folded into the success log so the operator
+ * can tell which down-signal triggered the wake.
+ *
+ * Each caller passes its OWN `gate` so the embed-backend and VLM-host triggers
+ * keep independent cooldown + attempt budgets (a down embed backend must not
+ * exhaust the VLM-host wake budget or vice versa) even though they wake one box.
+ */
+export async function attemptHostWake(
+  config: WolConfig,
+  gate: WakeGate,
+  now: number = Date.now(),
+  reason = "host",
+  { send = sendMagicPacket }: { send?: typeof sendMagicPacket } = {},
+): Promise<WakeOutcome> {
   if (!config.enabled) return { attempted: false, reason: "disabled" };
   if (gate.exhausted) return { attempted: false, reason: "exhausted" };
   if (!gate.shouldSend(now)) return { attempted: false, reason: "cooldown" };
@@ -282,9 +319,26 @@ export async function attemptEmbedBackendWake(
   const sent = await send(config.mac, config.broadcast);
   if (sent.ok) {
     console.error(
-      `[wol] embed-backend down — broadcast magic packet to ${config.broadcast} (MAC ${config.mac}); ` +
+      `[wol] ${reason} down — broadcast magic packet to ${config.broadcast} (MAC ${config.mac}); ` +
         `attempt ${gate.attemptCount}/${config.maxAttempts}`,
     );
   }
   return { attempted: true, sent };
+}
+
+/**
+ * Fire a best-effort WoL wake when the Tailnet Ollama VLM HOST is observed down
+ * (issue #2335). A thin alias over {@link attemptHostWake} with the
+ * `"vlm-host"` reason label. Same never-throwing, gate-respecting contract as
+ * {@link attemptEmbedBackendWake}; the caller (`maybeWakeVlmHost` in
+ * fan-out.ts) passes a DISTINCT gate so the VLM-host wake budget is independent
+ * of the embed-backend one.
+ */
+export async function attemptVlmHostWake(
+  config: WolConfig,
+  gate: WakeGate,
+  now: number = Date.now(),
+  { send = sendMagicPacket }: { send?: typeof sendMagicPacket } = {},
+): Promise<WakeOutcome> {
+  return attemptHostWake(config, gate, now, "vlm-host", { send });
 }

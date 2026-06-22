@@ -55,9 +55,11 @@ import { readDisk, readMem, readServiceStatus, isProbeFailure } from "../host-pr
 import {
   readWolConfig,
   attemptEmbedBackendWake,
+  attemptVlmHostWake,
   WakeGate,
   type WolConfig,
 } from "./wol.ts";
+import type { OllamaVlmProbeResult } from "./probe.ts";
 
 const HYDRA_ROOT = process.env.HYDRA_ROOT || resolve(process.env.HOME, "hydra");
 const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
@@ -71,6 +73,27 @@ const KILL_FILE = resolve(HYDRA_ROOT, ".kill");
 // a fresh budget of wakes. The WoL config is resolved once at module load from
 // the environment (conservative defaults; auto-wake OFF unless HYDRA_WOL_ENABLED).
 const embedWakeGate = new WakeGate(
+  readWolConfig().cooldownMs,
+  readWolConfig().maxAttempts,
+);
+
+// ---- VLM-host Wake-on-LAN auto-recovery (issue #2335) ----------------------
+//
+// The Tailnet Ollama VLM HOST (`gabes-desktop-1:11434`) is what OpenViking's
+// skill-registration handler blocks on (its vision/indexing model). When that
+// host is hard-down, `/api/v1/skills` times out and 500s, so the hourly
+// recovery chore correctly SKIPS a doomed pass and the skill catalog stays
+// empty (0/4) for hours — the recurring #2148→#2269→#2311→#2335 failure. The
+// #2228 WoL recovery already wakes this SAME physical box, but it was wired ONLY
+// into the embed-backend probe (index-1 ollama-embed, OV-internal), not the
+// index-19 VLM-host probe (`probeOllamaVlm`) that registration actually depends
+// on. This gate gives the VLM-host wake its OWN cooldown + attempt budget,
+// independent of the embed-backend gate, so a down embed backend can't exhaust
+// the VLM-host wake budget (or vice versa) even though both wake one host. Like
+// `embedWakeGate` it is a single module-level instance (the fan-out runs once
+// per request, so the cooldown/attempt state must persist across heartbeats) and
+// is reset the moment the VLM-host probe reads `ok` again.
+const vlmWakeGate = new WakeGate(
   readWolConfig().cooldownMs,
   readWolConfig().maxAttempts,
 );
@@ -118,6 +141,57 @@ export async function maybeWakeEmbedBackend(
   // NOT wait for the box to come up — the next scheduled health tick re-probes
   // and observes recovery. `outcome` is consumed only for the fail-loud logging
   // already done inside attemptEmbedBackendWake; nothing here blocks on it.
+  await wake(config, gate);
+  return initial;
+}
+
+/**
+ * If the Tailnet Ollama VLM-host probe reported `status:down`, fire a
+ * best-effort WoL wake of the gaming PC (respecting the module-level VLM-host
+ * cooldown + max-attempt gate) and return the ORIGINAL probe result
+ * immediately (issue #2335). This is the fan-out wiring half of the #2335 fix:
+ * the existing #2228 WoL recovery wakes the same physical host but was only
+ * triggered by the embed-backend probe — never by `probeOllamaVlm`, the VLM
+ * HOST that OpenViking's skill-registration handler actually blocks on. Wiring
+ * the wake here means a powered-off-but-LAN-present VLM host self-heals (the
+ * #1794-verified ~40s wake) and the FROZEN registration path re-registers the
+ * skill catalog on the NEXT hourly chore tick once the host answers again.
+ *
+ * Fire-and-return, exactly like {@link maybeWakeEmbedBackend}: we never `sleep`
+ * + re-probe on the request path, so `GET /health/deep` is never blocked
+ * waiting for the box to boot. THIS tick still surfaces `status:down` (so the
+ * existing #2278 `degraded` visibility signal + #2131 alert are preserved — the
+ * Visibility invariant from the #2335 design concept); the wake is a recovery
+ * attempt for the NEXT tick. A healthy (`status:ok`) read resets the gate so a
+ * future outage gets a fresh budget of wakes.
+ *
+ * NEVER throws — every failure path inside `attemptVlmHostWake` /
+ * `sendMagicPacket` folds to a result object + fail-loud console.error. When
+ * `config.enabled` is false the wake self-noops, so the default-off #2228 safety
+ * posture is preserved (enabling in prod is an operator/config action, never a
+ * code default flip). Injectable `config`, `gate`, and `wake` keep this
+ * unit-testable without a real socket, clock, or network.
+ */
+export async function maybeWakeVlmHost(
+  initial: OllamaVlmProbeResult,
+  {
+    config = readWolConfig(),
+    gate = vlmWakeGate,
+    wake = attemptVlmHostWake,
+  }: {
+    config?: WolConfig;
+    gate?: WakeGate;
+    wake?: typeof attemptVlmHostWake;
+  } = {},
+): Promise<OllamaVlmProbeResult> {
+  if (initial.status !== "down") {
+    // VLM host healthy → clear the attempt budget so a later outage re-arms.
+    gate.reset();
+    return initial;
+  }
+  // Fire the wake (best-effort, never-throwing) and return immediately. The next
+  // scheduled health tick re-probes and observes recovery; the chore then
+  // re-registers the skill catalog. Nothing here blocks on the wake outcome.
   await wake(config, gate);
   return initial;
 }
@@ -327,7 +401,14 @@ export async function collectProbeInputs(deps: CollectProbeDeps): Promise<ProbeI
     // ollama-embed). A `down` result is surfaced as `ollamaVlm` on the wire and
     // flips the deep-health envelope to `degraded: true` (a visibility signal,
     // never a 5xx). The probe is contractually never-throwing.
-    /* 19 */ probeOllamaVlmImpl(),
+    // Issue #2335: if the VLM host reads `status:down`, FIRE a best-effort
+    // Wake-on-LAN of the gaming PC and return the current probe result
+    // immediately (never block the fan-out on a re-probe). This is the host that
+    // OpenViking's skill-registration handler blocks on, so waking it lets the
+    // FROZEN registration chore self-heal the empty skill catalog on the next
+    // hourly tick once the box answers. THIS tick still surfaces `down` so the
+    // #2278 degraded signal + #2131 alert stay correct. NEVER throws.
+    /* 19 */ (async () => maybeWakeVlmHost(await probeOllamaVlmImpl()))(),
   ]);
 
   return assembleProbeInputs(settled);
