@@ -7,14 +7,15 @@ import {
   reapStaleConsumers,
   delConsumer,
   initConsumerGroups,
-} from "../src/event-bus-lifecycle.ts";
+} from "../src/event-bus.ts";
 
 // ---------------------------------------------------------------------------
-// event-bus-lifecycle — consumer-group setup/teardown + zombie reaping,
-// extracted out of EventBus (mirrors the #1965 WS-registry split). These tests
-// exercise the lifecycle functions DIRECTLY against a fake Redis client — the
-// leverage the extraction unlocks: no full bus instance, no stream-transport
-// state, no _parseFields stubbing beyond what each function takes as a param.
+// Consumer-group lifecycle — setup/teardown + zombie reaping, now module-level
+// functions in event-bus.ts (folded back in from the former
+// event-bus-lifecycle.ts by issue #2340). These tests exercise the lifecycle
+// functions DIRECTLY against a fake Redis client — no full bus instance, no
+// stream-transport state, no _parseFields stubbing beyond what each function
+// takes as a param.
 // ---------------------------------------------------------------------------
 
 /** Real EventBus `_parseFields` shape — folds a flat field list into an object. */
