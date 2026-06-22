@@ -25,12 +25,12 @@ import { consolidateAgentPatterns } from "./pattern-memory/agent-memory.ts";
 import { consolidateStalePromotedRules } from "./pattern-memory/feedback-file.ts";
 import { consolidatePromotedRuleEffectiveness } from "./pattern-memory/rule-effectiveness.ts";
 import { registerSkills } from "./knowledge-base/skill-registration.ts";
-import { startKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
+import { startKnowledgeIndexer } from "./knowledge-base/indexer.ts";
 import {
   countSourceHashes,
   clearSourceHashes,
 } from "./redis/source-index.ts";
-import { probeOvSourceResourcesPresent } from "./knowledge-base/source-freshness.ts";
+import { probeOvSourceResourcesPresent } from "./knowledge-base/indexer.ts";
 
 // ===========================================================================
 // Public API — consolidate

@@ -3,7 +3,7 @@ import { Sentry } from "./instrument.ts";
 
 import { EventBus } from "./event-bus.ts";
 import { createApi } from "./api.ts";
-import { stopKnowledgeIndexer } from "./knowledge-base/knowledge-indexer.ts";
+import { stopKnowledgeIndexer } from "./knowledge-base/indexer.ts";
 import { autoStart as autoStartScheduler, stop as stopScheduler } from "./scheduler/heartbeat.ts";
 import { startDigest, stopDigest } from "./digest.ts";
 import { initLearning } from "./learning-lifecycle.ts";

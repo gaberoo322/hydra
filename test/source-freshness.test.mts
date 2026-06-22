@@ -14,7 +14,7 @@ import {
   hasIndexedResourceUri,
   probeOvSourceResourcesPresent,
   OV_RESOURCE_URI_PREFIX,
-} from "../src/knowledge-base/source-freshness.ts";
+} from "../src/knowledge-base/indexer.ts";
 
 describe("hasIndexedResourceUri", () => {
   test("true when any URI is under viking://resources/", () => {

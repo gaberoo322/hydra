@@ -2,7 +2,7 @@
  * source-index.ts — durable content-hash dedup map for the OpenViking
  * source-indexer (issue #1123).
  *
- * The source-indexer (`src/knowledge-base/source-indexer.ts`) hashes every
+ * The source indexer (`src/knowledge-base/indexer.ts`) hashes every
  * source/docs/test file it uploads to OpenViking and tracks `path -> sha1` so
  * it can skip re-embedding unchanged content. Before #1123 that map lived ONLY
  * in an in-memory `Map` that reset on every process restart. The orchestrator
