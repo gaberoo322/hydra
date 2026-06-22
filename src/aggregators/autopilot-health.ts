@@ -52,20 +52,6 @@ import {
   type RunDigest,
 } from "../autopilot/run-health.ts";
 
-// Re-export the pure run-health surface so existing importers
-// (`api/now-page.ts`, tests) keep a single import site through the aggregator
-// while the analysis core lives in `autopilot/run-health.ts` (issue #1378).
-export {
-  DEFAULT_HEALTH_THRESHOLDS,
-  detectStalledDispatch,
-  detectUnproductiveLoops,
-  detectIdleStreak,
-  detectIssuePrChurn,
-  oldestRunStartEpochS,
-  rankSignals,
-};
-export type { LiveRunView, RunDigest };
-
 // ---------------------------------------------------------------------------
 // I/O-facing dependency bag
 // ---------------------------------------------------------------------------

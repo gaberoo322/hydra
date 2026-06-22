@@ -18,8 +18,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
+import { getAutopilotHealth } from "../src/aggregators/autopilot-health.ts";
 import {
-  getAutopilotHealth,
   detectStalledDispatch,
   detectUnproductiveLoops,
   detectIdleStreak,
@@ -29,7 +29,7 @@ import {
   DEFAULT_HEALTH_THRESHOLDS,
   type LiveRunView,
   type RunDigest,
-} from "../src/aggregators/autopilot-health.ts";
+} from "../src/autopilot/run-health.ts";
 import { createNowPageRouter } from "../src/api/now-page.ts";
 import {
   AutopilotHealthResponseSchema,
