@@ -196,6 +196,9 @@ export function createHealthRouter(eventBus: PingableBus) {
       total: state.total,
       completed: state.completed,
       lastAttemptAt: state.lastAttemptAt,
+      // Issue #2277: surface the deferred (VLM-down) state so the operator can
+      // tell a deliberate graceful degradation from the #1968 under-load empty.
+      vlmDeferred: state.vlmDeferred,
       skills: state.skills,
       diagnostic: assessment.diagnostic,
     });

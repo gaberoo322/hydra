@@ -36,6 +36,14 @@ export interface SkillCatalogSnapshot {
   completed: boolean;
   /** Last failure code per un-registered skill, for the diagnostic detail. */
   skills: Array<{ name: string; registered: boolean; lastError: string | null }>;
+  /**
+   * true when the last pass was DEFERRED because the Tailnet Ollama VLM backend
+   * was down (issue #2277) — the empty catalog is a deliberate graceful
+   * degradation (registrations skipped to avoid the timeout cascade), NOT the
+   * #1968 "every POST failed under load" empty. Optional so callers that pre-date
+   * the field default to the non-deferred (#1968) framing.
+   */
+  vlmDeferred?: boolean;
 }
 
 /** Folded verdict on the skill catalog: a status plus an optional diagnostic. */
@@ -72,6 +80,30 @@ export function assessSkillCatalog(snap: SkillCatalogSnapshot): SkillCatalogAsse
   const missingDetail = missing
     .map((s) => `${s.name}${s.lastError ? ` (${s.lastError})` : ""}`)
     .join(", ");
+
+  // Issue #2277 — graceful-degradation path. The last pass was DEFERRED because
+  // the Tailnet Ollama VLM backend was down: the orchestrator deliberately
+  // SKIPPED the registrations (rather than burning the 4×3×120s timeout budget
+  // against a handler that cannot answer while the VLM is offline). Report this
+  // as `degraded` (warning, auto-recovering) — NOT the #1968 `empty` (error). It
+  // is a known, self-healing condition: the hourly Housekeeping chore
+  // re-registers once OV/VLM recovers, no restart needed. Surfacing it as `empty`
+  // would mis-frame a deliberate degradation as a hard registration failure and
+  // mis-route the operator to OpenViking load / a restart.
+  if (snap.vlmDeferred) {
+    return {
+      status: "degraded",
+      diagnostic: {
+        severity: "warning",
+        component: "intelligence",
+        what: "OV skill catalog deferred (VLM backend down)",
+        why: "The Tailnet Ollama VLM backend (gabes-desktop-1:11434) was down at registration time, so all skill registrations were SKIPPED to avoid the timeout cascade (#2277/#2269/#1831) — the catalog is empty by deliberate graceful degradation, not failed POSTs.",
+        impact: "Planners run without skill context until the VLM recovers — degraded forecast quality; contributes to the no-task rate (#1832).",
+        action: "Recover the Ollama VLM host (Wake-on-LAN: #1794) — see docs/operator-playbooks/ollama-recovery.md. Once it answers, the hourly Housekeeping chore re-registers the skills automatically (no restart needed).",
+        autoRecovery: true,
+      },
+    };
+  }
 
   if (snap.registered === 0) {
     return {
@@ -172,6 +204,14 @@ export function assessRegistrationFailureRate(
 ): HealthDiagnostic | null {
   // No completed pass / no skills expected → no meaningful rate to alert on.
   if (!snap.completed || snap.total <= 0) return null;
+
+  // Issue #2277 — when the last pass was DEFERRED (the orchestrator deliberately
+  // skipped registration because the VLM was down), the population gate
+  // `assessSkillCatalog` already emits the single degraded/VLM-down diagnostic.
+  // Suppress the failure-rate alert here so the operator does not see TWO findings
+  // for one deliberate degradation — there was no failed *registration* to rate
+  // (nothing was POSTed), so a "100% failure rate" framing would be misleading.
+  if (snap.vlmDeferred) return null;
 
   const failed = snap.total - snap.registered;
   const rate = failed / snap.total;

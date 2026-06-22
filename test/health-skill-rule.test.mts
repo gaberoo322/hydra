@@ -38,6 +38,13 @@ function muteConsole() {
   console.log = () => {};
 }
 
+// Issue #2277: registerSkills now pre-flights the Ollama VLM liveness probe and
+// DEFERS (POSTs nothing) when it is down. These tests drive the OV-reachable
+// failure/success paths through the stubbed fetch, so they inject a VLM-up probe
+// to bypass the deferral short-circuit; the deferral path has its own coverage in
+// test/skill-registration.test.mts.
+const vlmUp = async () => ({ status: "ok" as const, latencyMs: 5 });
+
 function okResponse(): any {
   return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
 }
@@ -117,7 +124,7 @@ describe("skill-catalog Health-Assessment rule (#1968)", () => {
   test("an all-success pass → no diagnostic (catalog populated)", async () => {
     muteConsole();
     globalThis.fetch = (async () => okResponse()) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const a = assessHealth(healthySnapshot());
     assert.equal(skillDiag(healthySnapshot()), undefined);
@@ -135,7 +142,7 @@ describe("skill-catalog Health-Assessment rule (#1968)", () => {
       }
       return okResponse();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const d = skillDiag(healthySnapshot());
     assert.ok(d, "a partial catalog must fire a diagnostic");
@@ -151,7 +158,7 @@ describe("skill-catalog Health-Assessment rule (#1968)", () => {
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const d = skillDiag(healthySnapshot());
     assert.ok(d, "an empty catalog must fire a diagnostic");
@@ -247,7 +254,7 @@ describe("skill-registration failure-rate alert (#2277)", () => {
     globalThis.fetch = (async () => {
       timeoutThrow();
     }) as any;
-    await registerSkills({ backoffBaseMs: 0 });
+    await registerSkills({ backoffBaseMs: 0, probeVlm: vlmUp });
 
     const snap = healthySnapshot();
     snap.ollamaVlm = { status: "down", latencyMs: 5000, error: "timeout" };
