@@ -15,7 +15,7 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-const { registerSkills, getSkillCatalogState, reRegisterMissingSkills, isOvServerTimeout, VLM_DEFERRED_MARKER } =
+const { registerSkills, getSkillCatalogState, reRegisterMissingSkills, VLM_DEFERRED_MARKER } =
   await import("../src/knowledge-base/skill-registration.ts");
 
 /** Injectable VLM probe stubs (issue #2277). Default real probe is bypassed in tests. */
@@ -350,62 +350,11 @@ describe("reRegisterMissingSkills: always logs an executed pass (#2163, INV3)", 
   });
 });
 
-describe("isOvServerTimeout: body classifier (#2250)", () => {
-  test("classifies OV's INTERNAL/'Request timed out.' 500 body as a server timeout", () => {
-    assert.equal(isOvServerTimeout(OV_SERVER_TIMEOUT_BODY), true);
-  });
-
-  test("accepts the 'timed out' message variant too", () => {
-    assert.equal(
-      isOvServerTimeout('{"error":{"code":"INTERNAL","message":"The request timed out after 47s"}}'),
-      true,
-    );
-  });
-
-  test("does NOT classify a genuine 4xx payload rejection as a timeout", () => {
-    assert.equal(
-      isOvServerTimeout('{"error":{"code":"INVALID_ARGUMENT","message":"missing field: content"}}'),
-      false,
-    );
-  });
-
-  test("does NOT classify an UNAUTHENTICATED rejection as a timeout", () => {
-    assert.equal(
-      isOvServerTimeout('{"error":{"code":"UNAUTHENTICATED","message":"missing X-Api-Key"}}'),
-      false,
-    );
-  });
-
-  test("does NOT classify an INTERNAL error that is not a timeout", () => {
-    assert.equal(
-      isOvServerTimeout('{"error":{"code":"INTERNAL","message":"index corruption detected"}}'),
-      false,
-    );
-  });
-
-  test("a non-timeout body that merely contains the word 'timeout' in prose is not retried", () => {
-    // Parses cleanly but error.code !== INTERNAL → must NOT fall through to a
-    // substring scan and false-positive on the prose mention.
-    assert.equal(
-      isOvServerTimeout('{"error":{"code":"INVALID_ARGUMENT","message":"timeout field must be a number"}}'),
-      false,
-    );
-  });
-
-  test("empty / null / undefined body is not a timeout (pure, total, never throws)", () => {
-    assert.equal(isOvServerTimeout(""), false);
-    assert.equal(isOvServerTimeout(null), false);
-    assert.equal(isOvServerTimeout(undefined), false);
-  });
-
-  test("a malformed / truncated body falls back to a substring scan requiring BOTH markers", () => {
-    // Non-JSON garbage that still carries both the INTERNAL marker and a timeout
-    // phrase → retryable; garbage with only one marker → not.
-    assert.equal(isOvServerTimeout("502 Bad Gateway INTERNAL: request timed out"), true);
-    assert.equal(isOvServerTimeout("502 Bad Gateway: upstream unavailable"), false);
-    assert.equal(isOvServerTimeout("connection timed out"), false); // no INTERNAL marker
-  });
-});
+// The `isOvServerTimeout` body-classifier unit tests moved to
+// test/ov-request.test.mts alongside the function (issue #2373 — it now lives in
+// the Request Adapter seam). The retry-POLICY tests above (which assert
+// registerSkills retries on an OV server-timeout body) stay here because they
+// exercise skill-registration behaviour, not the classifier in isolation.
 
 describe("registerSkills: OV server-timeout 500 IS retried (#2250)", () => {
   test("an ov-non-2xx server-timeout body engages the 3-attempt retry budget", async () => {

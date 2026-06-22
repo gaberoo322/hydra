@@ -84,6 +84,52 @@ export function isOvOk<T>(result: OvResult<T>): result is { ok: true; data: T } 
 }
 
 /**
+ * Classify an `ov-non-2xx` failure-arm `body` as OpenViking's own SERVER-SIDE
+ * timeout (issue #2250). OV surfaces an internal request timeout as a 500 whose
+ * body is `{"status":"error","error":{"code":"INTERNAL","message":"Request timed
+ * out.",...}}` — structurally an `ov-non-2xx` (the adapter keys on `!res.ok`,
+ * not the body), so it falls OUTSIDE the transient-retry codes and the
+ * skill-registration retry loop would abandon it on the first attempt. That is
+ * the dominant skill-registration failure under load: the 3-attempt/120s budget
+ * never engages because the failure looks non-retryable.
+ *
+ * This predicate returns true ONLY when the body matches OV's timeout shape —
+ * `error.code === "INTERNAL"` AND the message mentions a timeout. Parsed
+ * defensively (try `JSON.parse`, fall back to a substring scan of the raw text)
+ * so a malformed or truncated body never throws. Pure and total: any other body
+ * (a genuine 4xx/5xx payload rejection, UNAUTHENTICATED, malformed JSON) returns
+ * false and stays non-retryable, preserving the #1828 do-not-mask-real-bugs
+ * guard — only OV's explicit "timed out" body widens the retry set.
+ *
+ * Lives next to {@link OvResult} (whose failure-arm `body` it classifies) and
+ * the sibling guards above: this is OV transport-response classification, the
+ * Request Adapter seam's concern, not a skill-registration lifecycle concern
+ * (issue #2373). Both retry-policy (`skill-registration.ts`) and liveness-probe
+ * (`health/probe.ts`) callers import it from here.
+ */
+export function isOvServerTimeout(body: string | undefined | null): boolean {
+  if (!body) return false;
+  // Primary path: parse the structured OV error envelope.
+  try {
+    const parsed = JSON.parse(body);
+    const errCode = parsed?.error?.code;
+    const errMsg = parsed?.error?.message;
+    if (errCode === "INTERNAL" && typeof errMsg === "string" && /tim(e|ed)\s*out/i.test(errMsg)) {
+      return true;
+    }
+    // Parsed cleanly but did NOT match the timeout shape → a genuine non-timeout
+    // rejection. Do NOT fall through to the substring scan (a non-timeout body
+    // that merely contains the word "timeout" in prose must not be retried).
+    return false;
+  } catch {
+    /* intentional: body wasn't valid JSON — fall back to a substring scan below. */
+  }
+  // Fallback: a non-JSON / truncated body. Require BOTH the INTERNAL marker and a
+  // timeout phrase so an arbitrary error body can't masquerade as a timeout.
+  return /INTERNAL/.test(body) && /tim(e|ed)\s*out/i.test(body);
+}
+
+/**
  * Resolve the OpenViking base URL — the single owner of base-URL resolution.
  * ALWAYS flows from `OPENVIKING_URL` (via `ov-config.ts`); a hardcoded
  * `localhost:1933` literal must never appear at a call site again (the
