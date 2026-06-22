@@ -48,9 +48,10 @@
  * - **Per-metric native windows.** Each metric echoes its own `window` +
  *   provenance; there is no false-precision single global window.
  * - **Pure classifier.** `classifyAutonomy` (autonomy-classifier.ts) and
- *   `percentile` (autonomy-rate.ts, re-exported here for back-compat) are pure
- *   functions exported for tests; the GitHub and Redis readers are overridable
- *   via `deps`.
+ *   `percentile` (autonomy-rate.ts) are pure functions exported for tests; the
+ *   GitHub and Redis readers are overridable via `deps`. Both live in their own
+ *   canonical modules — this file imports `percentile`'s output via
+ *   `computeAutonomyRate` and no longer re-exports it.
  * - **Autonomy Rate fan-out lives in its own module.** `computeAutonomyRate`
  *   (autonomy-rate.ts, issue #2068) owns the dispatch->PR link + GitHub fan-out
  *   that produces the autonomy-rate + time-to-merge slices; this file composes
@@ -60,7 +61,6 @@
 import { type GhPrView } from "./autonomy-classifier.ts";
 import {
   computeAutonomyRate,
-  percentile,
   type AutonomyRateMetric,
   type TimeToMergeMetric,
 } from "./autonomy-rate.ts";
@@ -71,14 +71,6 @@ import { getLessonsTrend, type LessonsTrendDeps } from "./lessons-trend.ts";
 import { getScopeViolationsByDay } from "../redis/scope-violations.ts";
 import { settledOrNull } from "./settle.ts";
 import { dayKey, type TrendPoint } from "./trend-series.ts";
-
-// Re-exported for back-compat: `percentile` historically lived here. The
-// fan-out moved to autonomy-rate.ts (issue #2068); this re-export keeps the
-// builder-health public surface and existing test imports unchanged. The
-// `AutonomyRateMetric` / `TimeToMergeMetric` type re-exports were dropped
-// (issue #2101) — no module imported them from here; consumers import the
-// types from autonomy-rate.ts directly.
-export { percentile };
 
 // Heartbeat merge-rate window (env-overridable, matches the rolling merge
 // rate's native window). Used for the rework metric's "of N cycles" framing.
