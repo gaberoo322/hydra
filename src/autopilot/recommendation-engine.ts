@@ -316,7 +316,7 @@ export function shouldFire(input: {
 export const PROMPT_SIZE_BUDGET_BYTES = 4 * 1024;
 
 /** Hard ceiling on recommendations stamped per LLM call. */
-export const MAX_RECS_PER_CALL = 3;
+const MAX_RECS_PER_CALL = 3;
 
 /**
  * Build the prompt text that the LLM receives. The whole point of the

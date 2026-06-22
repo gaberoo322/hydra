@@ -305,7 +305,7 @@ export async function attemptEmbedBackendWake(
  * keep independent cooldown + attempt budgets (a down embed backend must not
  * exhaust the VLM-host wake budget or vice versa) even though they wake one box.
  */
-export async function attemptHostWake(
+async function attemptHostWake(
   config: WolConfig,
   gate: WakeGate,
   now: number = Date.now(),
